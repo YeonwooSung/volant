@@ -344,12 +344,28 @@ Binding: **[docs/PHASE7_SPEC.md](./docs/PHASE7_SPEC.md)**. Ops runbook: **[docs/
 - [x] Auth required / wrong token / metrics smoke integration tests
 - [ ] Multi-language clients (Rust first; Go / Python FFI or REST gateway) — **deferred**
 - [ ] Kafka protocol compatibility shim — **deferred**
-- [ ] Full Helm chart / operators — **deferred** (Docker + systemd cover common deploys)
 - [ ] Full chaos mesh (partition loss, disk full, slow disk) — **deferred** (protocol chaos only)
 - [ ] SCRAM / full SASL / mTLS identity mapping — **deferred**
 - [ ] Security audit with `cargo fuzz` corpus CI — **deferred** (deterministic chaos tests ship now)
 
 **Honest limitations (Phase 7):** inter-broker RPC remains **plaintext** even when client TLS is enabled (private VPC assumed). Metrics endpoint has no auth (bind localhost).
+
+---
+
+### Phase 8 — Client polish & ops packaging ✅
+
+**Goal:** Close post-Phase-7 gaps for multi-node clients and deploys.
+
+Binding: **[docs/PHASE8_SPEC.md](./docs/PHASE8_SPEC.md)**.
+
+- [x] Client **leader redirect** — reconnect to partition leader on `NotLeaderForPartition`
+- [x] Optional **client TLS** (`volant-client` feature `tls`, `tls_insecure` for lab certs)
+- [x] CLI global `--auth-token` / `VOLANT_AUTH_TOKEN`
+- [x] Minimal **Helm chart** (`deploy/helm/volant`)
+- [x] Rolling restart integration test (follower down → produce continues)
+- [x] Leader-redirect integration test
+
+**Still deferred:** Kafka shim, multi-lang clients, inter-broker TLS, SCRAM, cargo-fuzz CI.
 
 ---
 

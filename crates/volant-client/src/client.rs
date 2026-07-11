@@ -4,8 +4,8 @@ use std::sync::atomic::{AtomicU32, Ordering};
 
 use bytes::{Bytes, BytesMut};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
-use tokio::net::TcpStream;
 use tokio::sync::Mutex;
+use tracing::debug;
 use volant_core::{Error, Message, Offset, Result, TopicId};
 use volant_protocol::codec::{decode_frame, encode_frame};
 use volant_protocol::{
@@ -14,6 +14,7 @@ use volant_protocol::{
 };
 
 use crate::config::ClientConfig;
+use crate::conn::ClientConn;
 
 /// Result of a successful produce call.
 #[derive(Debug, Clone)]
@@ -77,12 +78,15 @@ impl HeartbeatResult {
     }
 }
 
-/// Async TCP client (sequential request/response over one connection).
+/// Async client (sequential request/response over one connection).
+///
+/// Supports optional shared-token auth, optional TLS (`tls` feature), and
+/// automatic reconnect to the partition leader on `NotLeaderForPartition`.
 #[derive(Debug)]
 pub struct Client {
-    stream: Mutex<TcpStream>,
+    stream: Mutex<ClientConn>,
+    current_addr: Mutex<String>,
     next_corr: AtomicU32,
-    #[allow(dead_code)]
     config: ClientConfig,
 }
 
@@ -95,10 +99,12 @@ impl Client {
         let addr = config
             .brokers
             .first()
-            .ok_or_else(|| Error::InvalidArgument("no brokers configured".into()))?;
-        let stream = TcpStream::connect(addr).await?;
+            .ok_or_else(|| Error::InvalidArgument("no brokers configured".into()))?
+            .clone();
+        let stream = ClientConn::connect(&addr, &config).await?;
         let client = Self {
             stream: Mutex::new(stream),
+            current_addr: Mutex::new(addr),
             next_corr: AtomicU32::new(1),
             config,
         };
@@ -128,6 +134,29 @@ impl Client {
             ..ClientConfig::default()
         })
         .await
+    }
+
+    /// Address currently connected to (`host:port`).
+    pub async fn current_addr(&self) -> String {
+        self.current_addr.lock().await.clone()
+    }
+
+    /// Reconnect to `addr`, re-authenticating when a token is configured.
+    pub async fn reconnect(&self, addr: impl AsRef<str>) -> Result<()> {
+        let addr = addr.as_ref().to_owned();
+        let stream = ClientConn::connect(&addr, &self.config).await?;
+        {
+            let mut guard = self.stream.lock().await;
+            *guard = stream;
+        }
+        {
+            let mut a = self.current_addr.lock().await;
+            *a = addr;
+        }
+        if let Some(token) = self.config.auth_token.clone() {
+            self.authenticate(token).await?;
+        }
+        Ok(())
     }
 
     async fn authenticate(&self, token: String) -> Result<()> {
@@ -210,7 +239,7 @@ impl Client {
     /// Produce messages to a topic (default acks from config, usually `1`).
     ///
     /// `partition = None` asks the broker to assign (key-hash / round-robin).
-    /// On `NotLeaderForPartition`, refreshes metadata once and retries.
+    /// On `NotLeaderForPartition`, reconnects to the leader and retries.
     pub async fn produce(
         &self,
         topic: &str,
@@ -243,8 +272,9 @@ impl Client {
             })
             .collect();
 
-        let part = partition.map(|p| p as i32).unwrap_or(-1);
-        let mut attempt = 0;
+        let mut part = partition.map(|p| p as i32).unwrap_or(-1);
+        let max_attempts = 1 + self.config.max_redirects;
+        let mut attempt = 0u32;
         loop {
             attempt += 1;
             let resp = self
@@ -258,32 +288,35 @@ impl Client {
 
             match resp {
                 Response::Produce {
-                    topic,
-                    partition,
+                    topic: t,
+                    partition: p,
                     base_offset,
                     count,
                     error_code,
                 } => {
-                    if error_code == ErrorCode::NotLeaderForPartition as u16 && attempt < 2 {
-                        // Refresh metadata and retry once against the same connection
-                        // (caller should reconnect to the leader if multi-broker).
-                        let _ = self.metadata().await;
-                        if part < 0 {
-                            // keep broker-side assignment
-                        }
+                    if error_code == ErrorCode::NotLeaderForPartition as u16
+                        && attempt < max_attempts
+                    {
+                        // Response includes the resolved partition even on NotLeader.
+                        part = p as i32;
+                        self.redirect_to_leader(&t, p).await?;
                         continue;
                     }
                     check_ok(error_code, "produce")?;
                     return Ok(ProduceResult {
-                        topic,
-                        partition,
+                        topic: t,
+                        partition: p,
                         base_offset,
                         count,
                     });
                 }
                 Response::Error { code, message } => {
-                    if code == ErrorCode::NotLeaderForPartition as u16 && attempt < 2 {
-                        let _ = self.metadata().await;
+                    if code == ErrorCode::NotLeaderForPartition as u16 && attempt < max_attempts {
+                        if part >= 0 {
+                            self.redirect_to_leader(topic, part as u32).await?;
+                        } else {
+                            let _ = self.metadata().await;
+                        }
                         continue;
                     }
                     return Err(error_from_code(code, message));
@@ -298,6 +331,8 @@ impl Client {
     }
 
     /// Fetch records from a partition.
+    ///
+    /// On `NotLeaderForPartition`, reconnects to the leader and retries.
     pub async fn fetch(
         &self,
         topic: &str,
@@ -306,38 +341,88 @@ impl Client {
         max_messages: u32,
         max_wait_ms: u32,
     ) -> Result<FetchResult> {
-        let resp = self
-            .round_trip(Request::Fetch {
-                topic: topic.to_owned(),
-                partition,
-                from_offset: from.raw(),
-                max_messages,
-                max_bytes: 4 * 1024 * 1024,
-                max_wait_ms,
-            })
-            .await?;
-
-        match resp {
-            Response::Fetch {
-                topic,
-                partition,
-                high_watermark,
-                error_code,
-                records,
-            } => {
-                check_ok(error_code, "fetch")?;
-                Ok(FetchResult {
-                    topic,
+        let max_attempts = 1 + self.config.max_redirects;
+        let mut attempt = 0u32;
+        loop {
+            attempt += 1;
+            let resp = self
+                .round_trip(Request::Fetch {
+                    topic: topic.to_owned(),
                     partition,
-                    high_watermark,
-                    records,
+                    from_offset: from.raw(),
+                    max_messages,
+                    max_bytes: 4 * 1024 * 1024,
+                    max_wait_ms,
                 })
+                .await?;
+
+            match resp {
+                Response::Fetch {
+                    topic: t,
+                    partition: p,
+                    high_watermark,
+                    error_code,
+                    records,
+                } => {
+                    if error_code == ErrorCode::NotLeaderForPartition as u16
+                        && attempt < max_attempts
+                    {
+                        self.redirect_to_leader(&t, p).await?;
+                        continue;
+                    }
+                    check_ok(error_code, "fetch")?;
+                    return Ok(FetchResult {
+                        topic: t,
+                        partition: p,
+                        high_watermark,
+                        records,
+                    });
+                }
+                Response::Error { code, message } => {
+                    if code == ErrorCode::NotLeaderForPartition as u16 && attempt < max_attempts {
+                        self.redirect_to_leader(topic, partition).await?;
+                        continue;
+                    }
+                    return Err(error_from_code(code, message));
+                }
+                other => {
+                    return Err(Error::Protocol(format!(
+                        "unexpected response for fetch: {other:?}"
+                    )))
+                }
             }
-            Response::Error { code, message } => Err(error_from_code(code, message)),
-            other => Err(Error::Protocol(format!(
-                "unexpected response for fetch: {other:?}"
-            ))),
         }
+    }
+
+    /// Resolve leader for `topic`/`partition` via Metadata and reconnect.
+    async fn redirect_to_leader(&self, topic: &str, partition: u32) -> Result<()> {
+        let meta = self.metadata().await?;
+        let leader_id = meta
+            .topics
+            .iter()
+            .find(|t| t.name == topic)
+            .and_then(|t| t.partitions.iter().find(|p| p.partition_id == partition))
+            .map(|p| p.leader)
+            .ok_or_else(|| {
+                Error::NotFound(format!(
+                    "metadata missing topic={topic} partition={partition} for redirect"
+                ))
+            })?;
+        let broker = meta
+            .brokers
+            .iter()
+            .find(|b| b.node_id == leader_id)
+            .ok_or_else(|| {
+                Error::NotFound(format!("metadata missing broker node_id={leader_id}"))
+            })?;
+        let addr = format!("{}:{}", broker.host, broker.port);
+        let current = self.current_addr.lock().await.clone();
+        if current == addr {
+            debug!(%addr, "already on leader; skipping reconnect");
+            return Ok(());
+        }
+        debug!(from = %current, to = %addr, leader_id, "redirecting to partition leader");
+        self.reconnect(&addr).await
     }
 
     /// Join a consumer group; returns generation, member id, and assignment.

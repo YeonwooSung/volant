@@ -9,13 +9,12 @@ Volant is a resource-efficient alternative to Apache Kafka, built for:
 - **Streaming processing** — first-class operators (`map`, `filter`, windows) without a heavy runtime
 - **Small footprint** — native binary, predictable memory, simple operations
 
-> Status: **Phase 7 MVP** — observability (Prometheus + JSON logs + tracing),
-> shared-token auth, optional TLS (`--features tls`), Docker/systemd packaging.
-> Phase 6 clustering remains available. Single-node mode (no `--cluster-config`)
+> Status: **Phase 8 complete** — client leader redirect, optional client TLS,
+> CLI auth token, Helm chart, rolling-restart tests; builds on Phase 6–7
+> clustering and production readiness. Single-node mode (no `--cluster-config`)
 > preserves Phase 1–5 behavior. See [ROADMAP.md](./ROADMAP.md),
-> [Phase 7 spec](./docs/PHASE7_SPEC.md), [ops runbook](./docs/ops.md),
-> [deploy/](./deploy/), [consistency model](./docs/consistency.md), and
-> [Phase 1](./docs/PHASE1_SPEC.md)–[Phase 6](./docs/PHASE6_SPEC.md) specs.
+> [ops runbook](./docs/ops.md), [deploy/](./deploy/),
+> [consistency model](./docs/consistency.md), and Phase 1–8 specs under `docs/`.
 
 ---
 
@@ -41,10 +40,11 @@ volant/
 │   ├── PHASE5_SPEC.md    # DMA / high-performance I/O
 │   ├── PHASE6_SPEC.md    # Clustering & ISR replication
 │   ├── PHASE7_SPEC.md    # Metrics, auth, TLS, packaging
+│   ├── PHASE8_SPEC.md    # Client redirect, client TLS, Helm
 │   ├── ops.md            # Operator runbook (metrics / auth / TLS)
 │   ├── consistency.md    # What “committed” means (HWM / acks)
 │   └── tuning.md         # Ops tuning guide (ulimit, I/O, affinity)
-├── deploy/               # Dockerfile, compose, systemd unit
+├── deploy/               # Dockerfile, compose, systemd, Helm chart
 ├── ROADMAP.md
 └── Cargo.toml            # Workspace root
 ```
@@ -112,22 +112,28 @@ cargo run -p volant-server -- \
 
 curl -s http://127.0.0.1:9102/metrics | grep volant_
 
-# Shared-token auth
+# Shared-token auth (server + CLI)
 export VOLANT_AUTH_TOKEN=s3cret
 cargo run -p volant-server -- --data-dir /tmp/vdata --listen 127.0.0.1:9092
+cargo run -p volant-cli -- --auth-token s3cret topic list --broker 127.0.0.1:9092
 # Rust client: ClientConfig { auth_token: Some("s3cret".into()), .. }
 
 # Optional TLS (feature-gated; default build is plaintext)
 cargo run -p volant-server --features tls -- \
   --data-dir /tmp/vdata --listen 127.0.0.1:9092 \
   --tls-cert ./server.crt --tls-key ./server.key
+# Client TLS (lab / self-signed): ClientConfig { tls: true, tls_insecure: true, .. }
+# requires `volant-client` built with `--features tls`
 ```
 
-Packaging: [deploy/README.md](./deploy/README.md). Ops details: [docs/ops.md](./docs/ops.md).
+Packaging: [deploy/README.md](./deploy/README.md) (Docker, systemd, **Helm**).  
+Ops details: [docs/ops.md](./docs/ops.md).
 
-**Deferred (not in Phase 7):** Kafka wire shim, multi-language clients, full Helm,
-SCRAM, mTLS identity, chaos-mesh. Inter-broker traffic stays plaintext when TLS is
-enabled for clients (private network assumed).
+**Phase 8 client behavior:** on `NotLeaderForPartition`, the Rust client refreshes
+metadata and **reconnects to the partition leader** (see `max_redirects`).
+
+**Still deferred:** Kafka wire shim, multi-language clients, inter-broker TLS,
+SCRAM, mTLS identity, chaos-mesh / cargo-fuzz CI.
 
 ### Networked client (library)
 
@@ -389,8 +395,6 @@ VOLANT_CPU_LIST=2,3,4,5 cargo run -p volant-server --release --features thread-p
 Unset/empty `VOLANT_CPU_LIST` → feature is a no-op (unpinned). Pin failures log a
 warning and do **not** abort (important for macOS dev builds).
 
-**Next:** Phase 6 — clustering & replication.
-
 ---
 
 ## Roadmap (summary)
@@ -403,11 +407,12 @@ warning and do **not** abort (important for macOS dev builds).
 | 3 | Consumer groups & offsets | **Done** |
 | 4 | Stream processing operators | **Done** |
 | 5 | io_uring / DMA-oriented I/O + tuning | **Done** |
-| 6 | Clustering & replication | **Next** |
-| 7 | Metrics, TLS, packaging, optional Kafka shim | Planned |
+| 6 | Clustering & ISR replication | **Done** |
+| 7 | Metrics, auth, TLS, packaging | **Done** (MVP) |
+| 8 | Client redirect, client TLS, Helm | **Done** |
 
-Details, exit criteria, and open design questions: **[ROADMAP.md](./ROADMAP.md)**.  
-Ops tuning: **[docs/tuning.md](./docs/tuning.md)**.
+Details and deferred items: **[ROADMAP.md](./ROADMAP.md)**.  
+Ops: **[docs/ops.md](./docs/ops.md)** · Tuning: **[docs/tuning.md](./docs/tuning.md)**.
 
 ---
 

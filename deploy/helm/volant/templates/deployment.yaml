@@ -1,0 +1,71 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ include "volant.fullname" . }}
+  labels:
+    {{- include "volant.labels" . | nindent 4 }}
+spec:
+  replicas: {{ .Values.replicaCount }}
+  selector:
+    matchLabels:
+      {{- include "volant.selectorLabels" . | nindent 6 }}
+  template:
+    metadata:
+      labels:
+        {{- include "volant.selectorLabels" . | nindent 8 }}
+    spec:
+      containers:
+        - name: volant
+          image: "{{ .Values.image.repository }}:{{ .Values.image.tag }}"
+          imagePullPolicy: {{ .Values.image.pullPolicy }}
+          args:
+            - --data-dir=/var/lib/volant
+            - --listen=0.0.0.0:9092
+            - --log-format={{ .Values.logFormat }}
+            {{- if .Values.metrics.enabled }}
+            - --metrics-addr=0.0.0.0:9102
+            {{- end }}
+            {{- if .Values.authToken }}
+            - --auth-token=$(VOLANT_AUTH_TOKEN)
+            {{- end }}
+            {{- range .Values.extraArgs }}
+            - {{ . | quote }}
+            {{- end }}
+          env:
+            {{- if .Values.authToken }}
+            - name: VOLANT_AUTH_TOKEN
+              valueFrom:
+                secretKeyRef:
+                  name: {{ include "volant.fullname" . }}-auth
+                  key: token
+            {{- end }}
+          ports:
+            - name: broker
+              containerPort: 9092
+            {{- if .Values.metrics.enabled }}
+            - name: metrics
+              containerPort: 9102
+            {{- end }}
+          volumeMounts:
+            - name: data
+              mountPath: /var/lib/volant
+          resources:
+            {{- toYaml .Values.resources | nindent 12 }}
+          readinessProbe:
+            tcpSocket:
+              port: broker
+            initialDelaySeconds: 3
+            periodSeconds: 5
+          livenessProbe:
+            tcpSocket:
+              port: broker
+            initialDelaySeconds: 10
+            periodSeconds: 10
+      volumes:
+        - name: data
+          {{- if .Values.persistence.enabled }}
+          persistentVolumeClaim:
+            claimName: {{ include "volant.fullname" . }}-data
+          {{- else }}
+          emptyDir: {}
+          {{- end }}

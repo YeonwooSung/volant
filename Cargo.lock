@@ -932,9 +932,12 @@ name = "volant-client"
 version = "0.1.0"
 dependencies = [
  "bytes",
+ "rustls",
  "thiserror",
  "tokio",
+ "tokio-rustls",
  "tracing",
+ "uuid",
  "volant-broker",
  "volant-core",
  "volant-protocol",

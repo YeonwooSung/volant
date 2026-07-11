@@ -1,4 +1,4 @@
-# Volant operations runbook (Phase 7)
+# Volant operations runbook (Phase 7–8)
 
 ## Process flags
 
@@ -48,6 +48,7 @@ JSON fields include timestamp, level, target, message, and active span fields
 
 1. Start server with `VOLANT_AUTH_TOKEN=s3cret` (or `--auth-token s3cret`).
 2. Clients set `ClientConfig.auth_token = Some("s3cret".into())` — Auth is sent on connect.
+   CLI: `volant --auth-token s3cret …` or `VOLANT_AUTH_TOKEN`.
 3. Wrong token → error **17** `AuthenticationFailed`.
 4. Other opcodes before Auth → error **18** `AuthenticationRequired`.
 5. When the token is **unset**, auth is disabled (Auth is a no-op success).
@@ -76,7 +77,21 @@ volant-server --features ... # binary already built with tls
 - Default builds **without** the `tls` feature stay green on macOS/CI.
 - Passing `--tls-cert` without the feature errors at startup.
 - TLS listen is **TLS-only** (no plaintext dual-bind).
-- **Inter-broker remains plaintext** in Phase 7 — place brokers on a private network.
+- **Inter-broker remains plaintext** — place brokers on a private network.
+- Client TLS: build `volant-client` with `--features tls` and set
+  `ClientConfig { tls: true, tls_insecure: true, .. }` for lab/self-signed certs.
+  Production cert verification against a custom CA is a follow-up.
+
+## Client leader redirect (Phase 8)
+
+On `NotLeaderForPartition`, the Rust client:
+
+1. Refreshes Metadata
+2. Resolves the partition leader host:port
+3. Reconnects (re-Auth if token set; re-TLS if enabled)
+4. Retries (`ClientConfig.max_redirects`, default 1 extra attempt)
+
+Set `max_redirects: 0` to disable (useful in tests that assert broker-level rejection).
 
 Generate self-signed material for lab use only (see `examples/tls/`).
 

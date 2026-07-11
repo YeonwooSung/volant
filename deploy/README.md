@@ -1,6 +1,6 @@
 # Deploying Volant
 
-Phase 7 packaging: Docker image, docker-compose, and a systemd unit.
+Phase 7–8 packaging: Docker image, docker-compose, systemd unit, and a minimal Helm chart.
 
 ## Docker
 
@@ -38,6 +38,21 @@ curl -s localhost:9102/metrics | head
 2. Create user/group `volant` and data dir `/var/lib/volant/data`
 3. Install `volant.service` to `/etc/systemd/system/`
 4. `systemctl daemon-reload && systemctl enable --now volant`
+
+## Helm (minimal single-node)
+
+```bash
+# Build/push image first
+docker build -f deploy/Dockerfile -t volant:0.1.0 .
+
+helm install volant ./deploy/helm/volant \
+  --set image.repository=volant \
+  --set image.tag=0.1.0 \
+  --set authToken=s3cret
+```
+
+See [helm/volant/README.md](./helm/volant/README.md). Multi-node StatefulSet
+clustering is **not** automated by this chart yet.
 
 ## Auth
 

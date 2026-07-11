@@ -1,0 +1,35 @@
+replicaCount: 1
+
+image:
+  repository: volant
+  tag: "0.1.0"
+  pullPolicy: IfNotPresent
+
+service:
+  type: ClusterIP
+  port: 9092
+  metricsPort: 9102
+
+# Shared-token auth (leave empty to disable). Prefer a Secret in production.
+authToken: ""
+
+resources:
+  requests:
+    cpu: 100m
+    memory: 128Mi
+  limits:
+    cpu: "1"
+    memory: 512Mi
+
+persistence:
+  enabled: true
+  size: 10Gi
+  storageClass: ""
+
+metrics:
+  enabled: true
+
+logFormat: json
+
+# Extra args appended to the server command.
+extraArgs: []

@@ -11,6 +11,12 @@ pub struct ClientConfig {
     pub acks: u8,
     /// Shared auth token. When set, the client sends Auth on connect.
     pub auth_token: Option<String>,
+    /// Enable TLS for broker connections (requires the `tls` feature).
+    pub tls: bool,
+    /// When TLS is enabled, skip certificate verification (dev/test only).
+    pub tls_insecure: bool,
+    /// Max leader-redirect retries after `NotLeaderForPartition` (default 2 total attempts).
+    pub max_redirects: u32,
 }
 
 impl Default for ClientConfig {
@@ -20,6 +26,9 @@ impl Default for ClientConfig {
             client_id: "volant-client".into(),
             acks: 1,
             auth_token: None,
+            tls: false,
+            tls_insecure: false,
+            max_redirects: 1,
         }
     }
 }

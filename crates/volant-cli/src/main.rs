@@ -13,6 +13,10 @@ use volant_protocol::{OffsetCommitEntry, OffsetEntry};
 #[derive(Debug, Parser)]
 #[command(name = "volant", version, about)]
 struct Cli {
+    /// Shared auth token (matches server `--auth-token` / `VOLANT_AUTH_TOKEN`).
+    #[arg(long, global = true, env = "VOLANT_AUTH_TOKEN")]
+    auth_token: Option<String>,
+
     #[command(subcommand)]
     command: Commands,
 }
@@ -145,14 +149,15 @@ enum GroupCmd {
 #[tokio::main]
 async fn main() -> Result<()> {
     let cli = Cli::parse();
+    let auth = cli.auth_token.clone();
     match cli.command {
         Commands::Version => {
             println!("volant {}", env!("CARGO_PKG_VERSION"));
-            println!("status: Phase 3 — consumer groups & offsets");
+            println!("status: Phase 8 — client redirect, TLS, ops packaging");
         }
         Commands::Topic { action } => match action {
             TopicCmd::List { broker } => {
-                let client = connect(&broker).await?;
+                let client = connect(&broker, auth).await?;
                 let meta = client.metadata().await.context("metadata")?;
                 if meta.topics.is_empty() {
                     println!("(no topics)");
@@ -172,7 +177,7 @@ async fn main() -> Result<()> {
                 partitions,
                 broker,
             } => {
-                let client = connect(&broker).await?;
+                let client = connect(&broker, auth).await?;
                 let id = client
                     .create_topic(&name, partitions)
                     .await
@@ -183,7 +188,7 @@ async fn main() -> Result<()> {
                 );
             }
             TopicCmd::Delete { name, broker } => {
-                let client = connect(&broker).await?;
+                let client = connect(&broker, auth).await?;
                 client
                     .delete_topic(&name)
                     .await
@@ -201,7 +206,7 @@ async fn main() -> Result<()> {
                 if partition.is_some() && topic.is_none() {
                     bail!("--partition requires --topic");
                 }
-                let client = connect(&broker).await?;
+                let client = connect(&broker, auth).await?;
                 let entries = match (topic.as_deref(), partition) {
                     (Some(t), Some(p)) => vec![OffsetEntry {
                         topic: t.to_owned(),
@@ -237,7 +242,7 @@ async fn main() -> Result<()> {
                 metadata,
                 broker,
             } => {
-                let client = connect(&broker).await?;
+                let client = connect(&broker, auth).await?;
                 client
                     .commit_offsets(
                         &group,
@@ -264,7 +269,7 @@ async fn main() -> Result<()> {
             partition,
             broker,
         } => {
-            let client = connect(&broker).await?;
+            let client = connect(&broker, auth).await?;
             let mut msg = Message::from_value(Bytes::from(value.clone()));
             if let Some(k) = key {
                 msg.key = Some(Bytes::from(k));
@@ -289,7 +294,7 @@ async fn main() -> Result<()> {
         } => {
             if let Some(group_id) = group {
                 // Group path: join → poll (until max msgs or empty) → commit → leave.
-                let client = Arc::new(connect(&broker).await?);
+                let client = Arc::new(connect(&broker, auth.clone()).await?);
                 let mut consumer = GroupConsumer::join(
                     client,
                     group_id.clone(),
@@ -340,7 +345,7 @@ async fn main() -> Result<()> {
                 let partition = partition.ok_or_else(|| {
                     anyhow::anyhow!("--partition is required unless --group is set")
                 })?;
-                let client = connect(&broker).await?;
+                let client = connect(&broker, auth).await?;
                 let result = client
                     .fetch(&topic, partition, Offset::new(from), max, 0)
                     .await
@@ -398,13 +403,14 @@ fn print_offsets(group: &str, entries: &[volant_protocol::OffsetFetchEntry]) {
     }
 }
 
-async fn connect(broker: &str) -> Result<Client> {
+async fn connect(broker: &str, auth_token: Option<String>) -> Result<Client> {
     if broker.is_empty() {
         bail!("broker address must not be empty");
     }
     Client::connect(ClientConfig {
         brokers: vec![broker.to_owned()],
         client_id: "volant-cli".into(),
+        auth_token,
         ..ClientConfig::default()
     })
     .await

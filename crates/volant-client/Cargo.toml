@@ -6,6 +6,11 @@ license.workspace = true
 rust-version.workspace = true
 description = "Async client SDK for producing and consuming Volant topics"
 
+[features]
+default = []
+# Optional TLS (rustls). Pair with volant-server `--features tls`.
+tls = ["dep:tokio-rustls", "dep:rustls"]
+
 [dependencies]
 volant-core = { workspace = true }
 volant-protocol = { workspace = true }
@@ -13,7 +18,10 @@ bytes = { workspace = true }
 thiserror = { workspace = true }
 tokio = { workspace = true }
 tracing = { workspace = true }
+tokio-rustls = { version = "0.26", optional = true, default-features = false, features = ["ring", "tls12"] }
+rustls = { version = "0.23", optional = true, default-features = false, features = ["ring", "std"] }
 
 [dev-dependencies]
 volant-broker = { workspace = true }
 volant-storage = { workspace = true }
+uuid = { workspace = true }

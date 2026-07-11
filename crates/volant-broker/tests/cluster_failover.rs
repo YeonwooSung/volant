@@ -373,11 +373,16 @@ async fn follower_rejects_produce() {
         _ => unreachable!(),
     };
 
-    let fc = Client::connect_addr(format!("127.0.0.1:{fport}"))
-        .await
-        .unwrap();
+    // Disable client redirect so we observe broker-level NotLeader rejection.
+    let fc = Client::connect(ClientConfig {
+        brokers: vec![format!("127.0.0.1:{fport}")],
+        max_redirects: 0,
+        ..ClientConfig::default()
+    })
+    .await
+    .unwrap();
     let err = fc
         .produce_with_acks("t", Some(0), vec![Message::from_value("x")], 1)
         .await;
-    assert!(err.is_err(), "follower must reject produce");
+    assert!(err.is_err(), "follower must reject produce without redirect");
 }
