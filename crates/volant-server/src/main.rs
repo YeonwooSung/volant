@@ -7,7 +7,7 @@ use std::sync::Arc;
 use anyhow::{bail, Context, Result};
 use clap::Parser;
 use tracing::info;
-use volant_broker::{run_server, Broker, ClusterConfig};
+use volant_broker::{run_metrics_server, run_server, Broker, ClusterConfig};
 use volant_storage::StorageConfig;
 
 /// Volant — lightweight, high-performance streaming message broker.
@@ -41,17 +41,31 @@ struct Args {
     /// Optional advertised port override.
     #[arg(long)]
     advertised_port: Option<u16>,
+
+    /// Prometheus metrics listen address (disabled if unset). Example: `127.0.0.1:9102`.
+    #[arg(long)]
+    metrics_addr: Option<String>,
+
+    /// Log format: `text` (default) or `json`.
+    #[arg(long, default_value = "text")]
+    log_format: String,
+
+    /// Shared auth token. Prefer env `VOLANT_AUTH_TOKEN` in production.
+    #[arg(long, env = "VOLANT_AUTH_TOKEN")]
+    auth_token: Option<String>,
+
+    /// TLS certificate PEM path (requires `--features tls`).
+    #[arg(long)]
+    tls_cert: Option<PathBuf>,
+
+    /// TLS private key PEM path (requires `--features tls`).
+    #[arg(long)]
+    tls_key: Option<PathBuf>,
 }
 
 fn main() -> Result<()> {
-    tracing_subscriber::fmt()
-        .with_env_filter(
-            tracing_subscriber::EnvFilter::try_from_default_env()
-                .unwrap_or_else(|_| "volant=info".into()),
-        )
-        .init();
-
     let args = Args::parse();
+    init_tracing(&args.log_format)?;
 
     #[cfg(feature = "thread-per-core")]
     let runtime = affinity::build_runtime()?;
@@ -64,7 +78,46 @@ fn main() -> Result<()> {
     runtime.block_on(async_main(args))
 }
 
+fn init_tracing(log_format: &str) -> Result<()> {
+    let filter = tracing_subscriber::EnvFilter::try_from_default_env()
+        .unwrap_or_else(|_| "volant=info".into());
+
+    match log_format {
+        "text" => {
+            tracing_subscriber::fmt().with_env_filter(filter).init();
+        }
+        "json" => {
+            tracing_subscriber::fmt()
+                .json()
+                .with_env_filter(filter)
+                .with_current_span(true)
+                .with_span_list(true)
+                .init();
+        }
+        other => bail!("invalid --log-format '{other}'; expected text|json"),
+    }
+    Ok(())
+}
+
 async fn async_main(args: Args) -> Result<()> {
+    // TLS flag validation without the feature.
+    #[cfg(not(feature = "tls"))]
+    {
+        if args.tls_cert.is_some() || args.tls_key.is_some() {
+            bail!(
+                "--tls-cert/--tls-key require building with `--features tls` \
+                 (default build is plaintext-only for broad platform support)"
+            );
+        }
+    }
+
+    #[cfg(feature = "tls")]
+    let tls_acceptor = match (&args.tls_cert, &args.tls_key) {
+        (Some(cert), Some(key)) => Some(tls::build_acceptor(cert, key)?),
+        (None, None) => None,
+        _ => bail!("both --tls-cert and --tls-key are required for TLS"),
+    };
+
     let storage = StorageConfig {
         data_dir: args.data_dir.clone(),
         ..StorageConfig::default()
@@ -96,6 +149,14 @@ async fn async_main(args: Args) -> Result<()> {
         Arc::new(Broker::new(storage))
     };
 
+    if let Some(token) = args.auth_token.clone() {
+        if token.is_empty() {
+            bail!("--auth-token / VOLANT_AUTH_TOKEN must not be empty when set");
+        }
+        info!("shared-token auth enabled");
+        broker.set_auth_token(Some(token));
+    }
+
     let _ = args.default_partitions;
 
     let addr: SocketAddr = args
@@ -111,6 +172,19 @@ async fn async_main(args: Args) -> Result<()> {
         broker.set_advertised(host, port);
     }
 
+    if let Some(metrics_addr) = &args.metrics_addr {
+        let maddr: SocketAddr = metrics_addr
+            .parse()
+            .with_context(|| format!("invalid --metrics-addr: {metrics_addr}"))?;
+        let b = Arc::clone(&broker);
+        tokio::spawn(async move {
+            if let Err(e) = run_metrics_server(maddr, b).await {
+                tracing::error!(error = %e, "metrics server exited");
+            }
+        });
+        info!(%maddr, "metrics endpoint enabled");
+    }
+
     info!(
         data_dir = %args.data_dir.display(),
         listen = %addr,
@@ -118,7 +192,227 @@ async fn async_main(args: Args) -> Result<()> {
         "starting volant broker"
     );
 
+    #[cfg(feature = "tls")]
+    if let Some(acceptor) = tls_acceptor {
+        return tls::run_tls_server(addr, broker, acceptor).await;
+    }
+
     run_server(addr, broker).await.map_err(Into::into)
+}
+
+/// Optional TLS accept path (feature `tls`).
+#[cfg(feature = "tls")]
+mod tls {
+    use std::fs::File;
+    use std::io::BufReader;
+    use std::net::SocketAddr;
+    use std::path::Path;
+    use std::sync::Arc;
+
+    use anyhow::{bail, Context, Result};
+    use rustls::pki_types::{CertificateDer, PrivateKeyDer};
+    use tokio::net::TcpListener;
+    use tokio_rustls::TlsAcceptor;
+    use tracing::{debug, error, info};
+    use volant_broker::{start_background_tasks, Broker};
+    use volant_core::Error;
+    use volant_protocol::{Frame, Response};
+
+    pub fn build_acceptor(cert_path: &Path, key_path: &Path) -> Result<TlsAcceptor> {
+        let certs = load_certs(cert_path)?;
+        let key = load_key(key_path)?;
+        let config = rustls::ServerConfig::builder()
+            .with_no_client_auth()
+            .with_single_cert(certs, key)
+            .context("build rustls ServerConfig")?;
+        Ok(TlsAcceptor::from(Arc::new(config)))
+    }
+
+    fn load_certs(path: &Path) -> Result<Vec<CertificateDer<'static>>> {
+        let file = File::open(path)
+            .with_context(|| format!("open TLS cert {}", path.display()))?;
+        let mut reader = BufReader::new(file);
+        let certs: Vec<CertificateDer<'static>> = rustls_pemfile::certs(&mut reader)
+            .collect::<std::result::Result<Vec<_>, _>>()
+            .context("parse TLS cert PEM")?;
+        if certs.is_empty() {
+            bail!("no certificates found in {}", path.display());
+        }
+        Ok(certs)
+    }
+
+    fn load_key(path: &Path) -> Result<PrivateKeyDer<'static>> {
+        let file = File::open(path)
+            .with_context(|| format!("open TLS key {}", path.display()))?;
+        let mut reader = BufReader::new(file);
+        let key = rustls_pemfile::private_key(&mut reader)
+            .context("parse TLS key PEM")?
+            .ok_or_else(|| anyhow::anyhow!("no private key found in {}", path.display()))?;
+        Ok(key)
+    }
+
+    /// TLS-only listen when certs are provided (no dual plain/TLS).
+    pub async fn run_tls_server(
+        addr: SocketAddr,
+        broker: Arc<Broker>,
+        acceptor: TlsAcceptor,
+    ) -> Result<()> {
+        let listener = TcpListener::bind(addr).await?;
+        let local = listener.local_addr()?;
+        broker.set_advertised(local.ip().to_string(), local.port());
+        info!(%local, "volant broker listening (TLS)");
+        start_background_tasks(Arc::clone(&broker));
+
+        // Reuse framed dispatch by accepting TLS streams and handling via a
+        // thin adapter that mirrors plaintext handle_connection logic.
+        loop {
+            match listener.accept().await {
+                Ok((stream, peer)) => {
+                    broker.metrics().record_connection();
+                    debug!(%peer, "accepted TLS connection");
+                    let b = Arc::clone(&broker);
+                    let acc = acceptor.clone();
+                    tokio::spawn(async move {
+                        match acc.accept(stream).await {
+                            Ok(tls_stream) => {
+                                if let Err(e) = handle_tls_connection(tls_stream, b).await {
+                                    debug!(%peer, error = %e, "TLS connection closed");
+                                }
+                            }
+                            Err(e) => {
+                                debug!(%peer, error = %e, "TLS handshake failed");
+                            }
+                        }
+                    });
+                }
+                Err(e) => {
+                    error!(error = %e, "TLS accept failed");
+                    return Err(Error::Io(e).into());
+                }
+            }
+        }
+    }
+
+    async fn handle_tls_connection<S>(
+        mut stream: S,
+        broker: Arc<Broker>,
+    ) -> volant_core::Result<()>
+    where
+        S: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin,
+    {
+        use bytes::BytesMut;
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        use tracing::info_span;
+        use tracing::Instrument;
+        use volant_protocol::codec::{decode_frame, encode_frame};
+        use volant_protocol::pack_response;
+
+        let mut buf = BytesMut::with_capacity(8 * 1024);
+        let auth_required = broker.auth_token().is_some();
+        let mut authenticated = !auth_required;
+
+        loop {
+            loop {
+                match decode_frame(&mut buf)? {
+                    Some(frame) => {
+                        let corr = frame.header.correlation_id;
+                        let opcode = frame.header.opcode;
+                        let span = info_span!("rpc", opcode, correlation_id = corr, authenticated);
+                        let response = async {
+                            dispatch_tls(&broker, frame, &mut authenticated, auth_required).await
+                        }
+                        .instrument(span)
+                        .await;
+                        let packed = pack_response(corr, &response)?;
+                        let mut out = BytesMut::new();
+                        encode_frame(&packed, &mut out)?;
+                        stream.write_all(&out).await?;
+                    }
+                    None => break,
+                }
+            }
+            let n = stream.read_buf(&mut buf).await?;
+            if n == 0 {
+                return Ok(());
+            }
+        }
+    }
+
+    // Minimal TLS-path dispatch mirroring net.rs auth gate. Full produce/fetch
+    // handling is shared via a private approach: for Phase 7 we accept that TLS
+    // path re-implements the gate and forwards to broker methods through the
+    // same request decode + broker API. To avoid large duplication, we call into
+    // plaintext-equivalent logic by decoding and matching Auth only here, then
+    // using a shared internal path.
+    //
+    // Practical Phase 7: TLS connections use the same Auth rules; other opcodes
+    // go through a compact re-export. For maintainability we invoke the broker
+    // produce/fetch via cloning net behaviour — keep Auth + Metadata + Produce +
+    // Fetch + rest by packing through volant_broker's public Broker methods.
+
+    async fn dispatch_tls(
+        broker: &Broker,
+        frame: Frame,
+        authenticated: &mut bool,
+        auth_required: bool,
+    ) -> Response {
+        use volant_protocol::{decode_request, ErrorCode, Request};
+
+        let req = match decode_request(frame.header.opcode, &frame.payload) {
+            Ok(r) => r,
+            Err(e) => {
+                broker.metrics().record_error(ErrorCode::Protocol as u16);
+                return Response::Error {
+                    code: ErrorCode::Protocol as u16,
+                    message: e.to_string(),
+                };
+            }
+        };
+
+        if let Request::Auth { token } = &req {
+            return match broker.auth_token() {
+                None => {
+                    *authenticated = true;
+                    Response::Auth { error_code: 0 }
+                }
+                Some(expected) if expected == *token => {
+                    *authenticated = true;
+                    Response::Auth { error_code: 0 }
+                }
+                Some(_) => {
+                    *authenticated = false;
+                    broker
+                        .metrics()
+                        .record_error(ErrorCode::AuthenticationFailed as u16);
+                    Response::Auth {
+                        error_code: ErrorCode::AuthenticationFailed as u16,
+                    }
+                }
+            };
+        }
+
+        if auth_required && !*authenticated {
+            broker
+                .metrics()
+                .record_error(ErrorCode::AuthenticationRequired as u16);
+            return Response::Error {
+                code: ErrorCode::AuthenticationRequired as u16,
+                message: "authentication required; send Auth first".into(),
+            };
+        }
+
+        // Delegate full request handling by briefly bridging through a one-shot
+        // internal TCP is not available. Instead re-use produce/fetch via Broker
+        // public API for the common path; remaining opcodes return Unsupported
+        // if we cannot share net.rs dispatch privately.
+        //
+        // To keep TLS fully functional, we spawn a localhost plaintext is too
+        // heavy. Prefer extracting dispatch — for Phase 7, call the same match
+        // tree by making handle_request pub(crate). See net.rs.
+
+        // Call into shared dispatch helper exposed for TLS.
+        volant_broker::net::dispatch_request(broker, req).await
+    }
 }
 
 /// Optional CPU affinity / thread-per-core helpers (feature `thread-per-core`).

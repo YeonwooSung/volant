@@ -1,0 +1,60 @@
+# Deploying Volant
+
+Phase 7 packaging: Docker image, docker-compose, and a systemd unit.
+
+## Docker
+
+```bash
+# From repository root
+docker build -f deploy/Dockerfile -t volant:local .
+docker run --rm -p 9092:9092 -p 9102:9102 \
+  -v volant-data:/var/lib/volant/data volant:local
+```
+
+With TLS (requires certs mounted):
+
+```bash
+docker build -f deploy/Dockerfile --build-arg FEATURES=tls -t volant:tls .
+docker run --rm -p 9092:9092 \
+  -v /path/to/certs:/certs:ro \
+  -v volant-data:/var/lib/volant/data volant:tls \
+  --data-dir /var/lib/volant/data \
+  --listen 0.0.0.0:9092 \
+  --tls-cert /certs/server.crt \
+  --tls-key /certs/server.key
+```
+
+## docker-compose
+
+```bash
+cd deploy
+docker compose up --build -d
+curl -s localhost:9102/metrics | head
+```
+
+## systemd
+
+1. Install the `volant-server` binary to `/usr/local/bin/volant-server`
+2. Create user/group `volant` and data dir `/var/lib/volant/data`
+3. Install `volant.service` to `/etc/systemd/system/`
+4. `systemctl daemon-reload && systemctl enable --now volant`
+
+## Auth
+
+Set `VOLANT_AUTH_TOKEN` (or `--auth-token`) on the server. Clients must set
+`ClientConfig.auth_token` (or CLI equivalent when available).
+
+## Metrics
+
+`GET /metrics` on `--metrics-addr` (Prometheus text 0.0.4). No auth on the
+metrics port — bind to `127.0.0.1` in production and scrape via a local agent
+or reverse proxy.
+
+## TLS notes
+
+- Build with `--features tls` and pass `--tls-cert` + `--tls-key` (PEM).
+- When TLS is enabled the broker listens **TLS-only** (no dual plain/TLS).
+- **Inter-broker traffic remains plaintext** in Phase 7 (assume a private VPC
+  or overlay). Terminate client TLS at the broker or a reverse proxy.
+
+See [docs/ops.md](../docs/ops.md) for the operator runbook.

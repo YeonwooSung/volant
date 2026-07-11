@@ -284,11 +284,19 @@ mod tests {
     use std::time::{SystemTime, UNIX_EPOCH};
 
     fn tmp_file() -> (std::path::PathBuf, File) {
+        use std::sync::atomic::{AtomicU64, Ordering};
+        static N: AtomicU64 = AtomicU64::new(0);
         let nanos = SystemTime::now()
             .duration_since(UNIX_EPOCH)
             .unwrap()
             .as_nanos();
-        let path = std::env::temp_dir().join(format!("volant-io-{nanos}"));
+        let n = N.fetch_add(1, Ordering::Relaxed);
+        let path = std::env::temp_dir().join(format!(
+            "volant-io-{}-{}-{}",
+            std::process::id(),
+            n,
+            nanos
+        ));
         let f = File::create(&path).unwrap();
         (path, f)
     }

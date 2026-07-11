@@ -9,3 +9,8 @@
 data/
 *.profraw
 *.profdata
+
+# TLS lab secrets
+examples/tls/*.key
+examples/tls/*.crt
+examples/tls/*.pem

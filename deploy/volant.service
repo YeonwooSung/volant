@@ -1,0 +1,29 @@
+[Unit]
+Description=Volant message broker
+Documentation=https://github.com/volant-mq/volant
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=volant
+Group=volant
+Environment=RUST_LOG=volant=info
+# Optional: Environment=VOLANT_AUTH_TOKEN=change-me
+ExecStart=/usr/local/bin/volant-server \
+  --data-dir /var/lib/volant/data \
+  --listen 0.0.0.0:9092 \
+  --metrics-addr 127.0.0.1:9102 \
+  --log-format json
+Restart=on-failure
+RestartSec=2
+LimitNOFILE=1048576
+# Hardening
+NoNewPrivileges=true
+ProtectSystem=strict
+ProtectHome=true
+ReadWritePaths=/var/lib/volant
+PrivateTmp=true
+
+[Install]
+WantedBy=multi-user.target

@@ -190,11 +190,19 @@ mod tests {
 
     #[test]
     fn load_write_roundtrip() {
+        use std::sync::atomic::{AtomicU64, Ordering};
+        static N: AtomicU64 = AtomicU64::new(0);
         let nanos = SystemTime::now()
             .duration_since(UNIX_EPOCH)
             .unwrap()
             .as_nanos();
-        let path = temp_dir().join(format!("volant-idx-{nanos}"));
+        let n = N.fetch_add(1, Ordering::Relaxed);
+        let path = temp_dir().join(format!(
+            "volant-idx-{}-{}-{}",
+            std::process::id(),
+            n,
+            nanos
+        ));
         let mut idx = SparseIndex::new();
         idx.push(IndexEntry {
             offset_delta: 1,

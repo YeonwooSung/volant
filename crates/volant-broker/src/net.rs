@@ -7,7 +7,7 @@ use std::time::Duration;
 use bytes::BytesMut;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::{TcpListener, TcpStream};
-use tracing::{debug, error, info};
+use tracing::{debug, error, info, info_span, Instrument};
 use volant_core::{Error, Message, MessageBatch, Offset, PartitionId, Result, TopicName};
 use volant_protocol::codec::{decode_frame, encode_frame};
 use volant_protocol::{
@@ -16,6 +16,7 @@ use volant_protocol::{
 };
 
 use crate::broker::Broker;
+use crate::metrics::Metrics;
 use crate::replica::run_follower_loops;
 
 /// Bind and serve until the accept loop fails fatally.
@@ -39,6 +40,7 @@ pub async fn serve_listener(listener: TcpListener, broker: Arc<Broker>) -> Resul
     loop {
         match listener.accept().await {
             Ok((stream, peer)) => {
+                broker.metrics().record_connection();
                 debug!(%peer, "accepted connection");
                 let b = Arc::clone(&broker);
                 tokio::spawn(async move {
@@ -53,6 +55,66 @@ pub async fn serve_listener(listener: TcpListener, broker: Arc<Broker>) -> Resul
             }
         }
     }
+}
+
+/// Serve Prometheus metrics over plain HTTP `GET /metrics`.
+///
+/// Binds `addr` and serves until the accept loop fails. Intended to run as a
+/// background task alongside the broker accept loop.
+pub async fn run_metrics_server(addr: SocketAddr, broker: Arc<Broker>) -> Result<()> {
+    let listener = TcpListener::bind(addr).await?;
+    let local = listener.local_addr()?;
+    info!(%local, "volant metrics listening");
+    loop {
+        let (mut stream, peer) = match listener.accept().await {
+            Ok(c) => c,
+            Err(e) => {
+                error!(error = %e, "metrics accept failed");
+                return Err(Error::Io(e));
+            }
+        };
+        let b = Arc::clone(&broker);
+        tokio::spawn(async move {
+            if let Err(e) = serve_metrics_connection(&mut stream, &b).await {
+                debug!(%peer, error = %e, "metrics connection closed");
+            }
+        });
+    }
+}
+
+async fn serve_metrics_connection(stream: &mut TcpStream, broker: &Broker) -> Result<()> {
+    let mut buf = [0u8; 1024];
+    let n = stream.read(&mut buf).await?;
+    if n == 0 {
+        return Ok(());
+    }
+    // Minimal HTTP/1.1: any request path is treated as GET /metrics for MVP.
+    // Reject non-GET for slightly better hygiene.
+    let req = String::from_utf8_lossy(&buf[..n]);
+    let first_line = req.lines().next().unwrap_or("");
+    let (status, body): (&str, String) = if first_line.starts_with("GET ") {
+        ("200 OK", broker_metrics_text(broker))
+    } else {
+        ("405 Method Not Allowed", "method not allowed\n".into())
+    };
+
+    let response = format!(
+        "HTTP/1.1 {status}\r\nContent-Type: text/plain; version=0.0.4; charset=utf-8\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+        body.len()
+    );
+    stream.write_all(response.as_bytes()).await?;
+    let _ = stream.shutdown().await;
+    Ok(())
+}
+
+fn broker_metrics_text(broker: &Broker) -> String {
+    let metrics: Arc<Metrics> = broker.metrics();
+    metrics.render_prometheus(
+        broker.topic_count(),
+        broker.partition_count_total(),
+        broker.messages_coalesced(),
+        env!("CARGO_PKG_VERSION"),
+    )
 }
 
 /// Start group expiry, cluster heartbeat, and follower replication tasks.
@@ -122,7 +184,7 @@ async fn heartbeat_to_controller(broker: &Broker) -> Result<()> {
         controller_id_known: controller,
         generation: broker.generation(),
     };
-    let resp = inter_broker_rpc(&addr, &req).await?;
+    let resp = inter_broker_rpc(broker, &addr, &req).await?;
     match resp {
         Response::HeartbeatBroker {
             controller_id,
@@ -139,7 +201,7 @@ async fn heartbeat_to_controller(broker: &Broker) -> Result<()> {
                 let cs_req = Request::ClusterState {
                     known_generation: broker.generation(),
                 };
-                if let Ok(cs_resp) = inter_broker_rpc(&addr, &cs_req).await {
+                if let Ok(cs_resp) = inter_broker_rpc(broker, &addr, &cs_req).await {
                     if let Response::ClusterState {
                         generation: g,
                         controller_id: c,
@@ -159,13 +221,46 @@ async fn heartbeat_to_controller(broker: &Broker) -> Result<()> {
     }
 }
 
-async fn inter_broker_rpc(addr: &str, req: &Request) -> Result<Response> {
+/// Inter-broker RPC over a short-lived TCP connection.
+///
+/// When the local broker has an auth token configured, sends Auth first.
+pub async fn inter_broker_rpc(broker: &Broker, addr: &str, req: &Request) -> Result<Response> {
     let mut stream = TcpStream::connect(addr).await?;
+    if let Some(token) = broker.auth_token() {
+        let auth = Request::Auth { token };
+        let frame = pack_request(0, &auth)?;
+        let mut out = BytesMut::new();
+        encode_frame(&frame, &mut out)?;
+        stream.write_all(&out).await?;
+        let auth_resp = read_one_response(&mut stream).await?;
+        match auth_resp {
+            Response::Auth { error_code } if error_code == 0 => {}
+            Response::Auth { error_code } => {
+                return Err(Error::Protocol(format!(
+                    "inter-broker auth failed: error_code={error_code}"
+                )));
+            }
+            Response::Error { code, message } => {
+                return Err(Error::Protocol(format!(
+                    "inter-broker auth error {code}: {message}"
+                )));
+            }
+            other => {
+                return Err(Error::Protocol(format!(
+                    "unexpected inter-broker auth response: {other:?}"
+                )));
+            }
+        }
+    }
+
     let frame = pack_request(1, req)?;
     let mut out = BytesMut::new();
     encode_frame(&frame, &mut out)?;
     stream.write_all(&out).await?;
+    read_one_response(&mut stream).await
+}
 
+async fn read_one_response(stream: &mut TcpStream) -> Result<Response> {
     let mut buf = BytesMut::with_capacity(64 * 1024);
     loop {
         let n = stream.read_buf(&mut buf).await?;
@@ -180,12 +275,27 @@ async fn inter_broker_rpc(addr: &str, req: &Request) -> Result<Response> {
 
 async fn handle_connection(mut stream: TcpStream, broker: Arc<Broker>) -> Result<()> {
     let mut buf = BytesMut::with_capacity(8 * 1024);
+    // When auth is disabled, treat the connection as already authenticated.
+    let auth_required = broker.auth_token().is_some();
+    let mut authenticated = !auth_required;
+
     loop {
         loop {
             match decode_frame(&mut buf)? {
                 Some(frame) => {
                     let corr = frame.header.correlation_id;
-                    let response = dispatch(&broker, frame).await;
+                    let opcode = frame.header.opcode;
+                    let span = info_span!(
+                        "rpc",
+                        opcode,
+                        correlation_id = corr,
+                        authenticated
+                    );
+                    let response = async {
+                        dispatch_with_auth(&broker, frame, &mut authenticated, auth_required).await
+                    }
+                    .instrument(span)
+                    .await;
                     write_response(&mut stream, corr, response).await?;
                 }
                 None => break,
@@ -207,10 +317,16 @@ async fn write_response(stream: &mut TcpStream, corr: u32, response: Response) -
     Ok(())
 }
 
-async fn dispatch(broker: &Broker, frame: Frame) -> Response {
+async fn dispatch_with_auth(
+    broker: &Broker,
+    frame: Frame,
+    authenticated: &mut bool,
+    auth_required: bool,
+) -> Response {
     let req = match decode_request(frame.header.opcode, &frame.payload) {
         Ok(r) => r,
         Err(e) => {
+            broker.metrics().record_error(ErrorCode::Protocol as u16);
             return Response::Error {
                 code: ErrorCode::Protocol as u16,
                 message: e.to_string(),
@@ -218,14 +334,115 @@ async fn dispatch(broker: &Broker, frame: Frame) -> Response {
         }
     };
 
+    // Auth handling.
+    if let Request::Auth { token } = &req {
+        let response = match broker.auth_token() {
+            None => {
+                // Auth disabled: accept any token as a no-op success.
+                *authenticated = true;
+                Response::Auth { error_code: 0 }
+            }
+            Some(expected) if expected == *token => {
+                *authenticated = true;
+                Response::Auth { error_code: 0 }
+            }
+            Some(_) => {
+                *authenticated = false;
+                broker
+                    .metrics()
+                    .record_error(ErrorCode::AuthenticationFailed as u16);
+                Response::Auth {
+                    error_code: ErrorCode::AuthenticationFailed as u16,
+                }
+            }
+        };
+        return response;
+    }
+
+    if auth_required && !*authenticated {
+        broker
+            .metrics()
+            .record_error(ErrorCode::AuthenticationRequired as u16);
+        return Response::Error {
+            code: ErrorCode::AuthenticationRequired as u16,
+            message: "authentication required; send Auth first".into(),
+        };
+    }
+
+    dispatch_request(broker, req).await
+}
+
+/// Handle a decoded request (shared by plaintext and TLS accept paths).
+pub async fn dispatch_request(broker: &Broker, req: Request) -> Response {
     match handle_request(broker, req).await {
-        Ok(resp) => resp,
-        Err(e) => map_error(e),
+        Ok(resp) => {
+            record_response_metrics(broker, &resp);
+            resp
+        }
+        Err(e) => {
+            let resp = map_error(e);
+            record_response_metrics(broker, &resp);
+            resp
+        }
+    }
+}
+
+fn record_response_metrics(broker: &Broker, resp: &Response) {
+    let m = broker.metrics();
+    match resp {
+        Response::Produce {
+            count,
+            error_code,
+            ..
+        } => {
+            let ok = *error_code == 0;
+            // Approximate bytes not available here; count messages only.
+            m.record_produce(ok, u64::from(*count), 0);
+            if !ok {
+                m.record_error(*error_code);
+            }
+        }
+        Response::Fetch {
+            records,
+            error_code,
+            ..
+        } => {
+            let ok = *error_code == 0;
+            let messages = records.len() as u64;
+            let bytes: u64 = records.iter().map(|r| r.value.len() as u64).sum();
+            m.record_fetch(ok, messages, bytes);
+            if !ok {
+                m.record_error(*error_code);
+            }
+        }
+        Response::Error { code, .. } => {
+            m.record_error(*code);
+        }
+        Response::CreateTopic { error_code, .. }
+        | Response::DeleteTopic { error_code, .. }
+        | Response::OffsetCommit { error_code }
+        | Response::OffsetFetch { error_code, .. }
+        | Response::JoinGroup { error_code, .. }
+        | Response::Heartbeat { error_code }
+        | Response::LeaveGroup { error_code }
+        | Response::ReplicaFetch { error_code, .. }
+        | Response::HeartbeatBroker { error_code, .. }
+        | Response::ClusterState { error_code, .. }
+        | Response::Auth { error_code } => {
+            if *error_code != 0 {
+                m.record_error(*error_code);
+            }
+        }
+        Response::Metadata { .. } => {}
     }
 }
 
 async fn handle_request(broker: &Broker, req: Request) -> Result<Response> {
     match req {
+        Request::Auth { .. } => {
+            // Handled in dispatch_with_auth; should not reach here.
+            Ok(Response::Auth { error_code: 0 })
+        }
         Request::CreateTopic { name, partitions } => {
             if broker.cluster_config().is_some() && !broker.is_controller() {
                 return Ok(Response::Error {
@@ -311,93 +528,105 @@ async fn handle_request(broker: &Broker, req: Request) -> Result<Response> {
             acks,
             messages,
         } => {
-            let topic_name = TopicName::new(topic.clone());
-            if messages.is_empty() {
-                return Err(Error::InvalidArgument("empty produce batch".into()));
-            }
-
-            let pid = if partition < 0 {
-                let key = messages[0].key.as_deref();
-                broker.select_partition(&topic_name, key)?
-            } else {
-                PartitionId(partition as u32)
-            };
-
-            // Leadership check early for clearer response.
-            if broker.cluster_config().is_some()
-                && broker.topics_has_partition(&topic_name, pid)
-                && !broker.is_partition_leader(&topic_name, pid)
-            {
-                return Ok(Response::Produce {
-                    topic,
-                    partition: pid.0,
-                    base_offset: 0,
-                    count: 0,
-                    error_code: ErrorCode::NotLeaderForPartition as u16,
-                });
-            }
-
-            let mut batch = MessageBatch::default();
-            for m in messages {
-                let timestamp_ms = if m.timestamp_ms < 0 {
-                    None
-                } else {
-                    Some(m.timestamp_ms)
-                };
-                batch.messages.push(Message {
-                    key: m.key,
-                    value: m.value,
-                    timestamp_ms,
-                    headers: m.headers,
-                });
-            }
-
-            // Append; for acks=all enforce min_isr and wait for HWM asynchronously.
-            let (records, error_code) =
-                broker.produce_with_acks(&topic_name, pid, batch, acks, None)?;
-
-            if error_code == ErrorCode::NotLeaderForPartition as u16
-                || error_code == ErrorCode::NotEnoughReplicas as u16
-            {
-                return Ok(Response::Produce {
-                    topic,
-                    partition: pid.0,
-                    base_offset: 0,
-                    count: 0,
-                    error_code,
-                });
-            }
-
-            let base_offset = records.first().map(|r| r.offset.raw()).unwrap_or(0);
-            let count = records.len() as u32;
-
-            let mut final_error = error_code;
-            if acks == 255 && broker.cluster_config().is_some() && count > 0 {
-                let target = base_offset + u64::from(count);
-                let deadline = tokio::time::Instant::now() + Duration::from_secs(10);
-                loop {
-                    let hwm = broker.committed_hwm(&topic_name, pid).unwrap_or(0);
-                    if hwm >= target {
-                        break;
-                    }
-                    if tokio::time::Instant::now() >= deadline {
-                        final_error = ErrorCode::Timeout as u16;
-                        break;
-                    }
-                    tokio::time::sleep(Duration::from_millis(10)).await;
+            let span = info_span!("produce", topic = %topic, partition, msg_count = messages.len());
+            async {
+                let topic_name = TopicName::new(topic.clone());
+                if messages.is_empty() {
+                    return Err(Error::InvalidArgument("empty produce batch".into()));
                 }
-            }
 
-            if acks != 0 {
-                broker.flush(&topic_name, pid)?;
+                let approx_bytes: u64 = messages.iter().map(|m| m.value.len() as u64).sum();
+
+                let pid = if partition < 0 {
+                    let key = messages[0].key.as_deref();
+                    broker.select_partition(&topic_name, key)?
+                } else {
+                    PartitionId(partition as u32)
+                };
+
+                // Leadership check early for clearer response.
+                if broker.cluster_config().is_some()
+                    && broker.topics_has_partition(&topic_name, pid)
+                    && !broker.is_partition_leader(&topic_name, pid)
+                {
+                    return Ok(Response::Produce {
+                        topic,
+                        partition: pid.0,
+                        base_offset: 0,
+                        count: 0,
+                        error_code: ErrorCode::NotLeaderForPartition as u16,
+                    });
+                }
+
+                let mut batch = MessageBatch::default();
+                for m in messages {
+                    let timestamp_ms = if m.timestamp_ms < 0 {
+                        None
+                    } else {
+                        Some(m.timestamp_ms)
+                    };
+                    batch.messages.push(Message {
+                        key: m.key,
+                        value: m.value,
+                        timestamp_ms,
+                        headers: m.headers,
+                    });
+                }
+
+                // Append; for acks=all enforce min_isr and wait for HWM asynchronously.
+                let (records, error_code) =
+                    broker.produce_with_acks(&topic_name, pid, batch, acks, None)?;
+
+                if error_code == ErrorCode::NotLeaderForPartition as u16
+                    || error_code == ErrorCode::NotEnoughReplicas as u16
+                {
+                    return Ok(Response::Produce {
+                        topic,
+                        partition: pid.0,
+                        base_offset: 0,
+                        count: 0,
+                        error_code,
+                    });
+                }
+
+                let base_offset = records.first().map(|r| r.offset.raw()).unwrap_or(0);
+                let count = records.len() as u32;
+
+                let mut final_error = error_code;
+                if acks == 255 && broker.cluster_config().is_some() && count > 0 {
+                    let target = base_offset + u64::from(count);
+                    let deadline = tokio::time::Instant::now() + Duration::from_secs(10);
+                    loop {
+                        let hwm = broker.committed_hwm(&topic_name, pid).unwrap_or(0);
+                        if hwm >= target {
+                            break;
+                        }
+                        if tokio::time::Instant::now() >= deadline {
+                            final_error = ErrorCode::Timeout as u16;
+                            break;
+                        }
+                        tokio::time::sleep(Duration::from_millis(10)).await;
+                    }
+                }
+
+                if acks != 0 {
+                    broker.flush(&topic_name, pid)?;
+                }
+
+                if final_error == 0 {
+                    broker.metrics().add_produce_bytes(approx_bytes);
+                }
+
+                Ok(Response::Produce {
+                    topic,
+                    partition: pid.0,
+                    base_offset,
+                    count,
+                    error_code: final_error,
+                })
             }
-            Ok(Response::Produce {
-                topic,
-                partition: pid.0,
-                base_offset,
-                count,
-                error_code: final_error,
-            })
+            .instrument(span)
+            .await
         }
 
         Request::Fetch {
@@ -408,43 +637,48 @@ async fn handle_request(broker: &Broker, req: Request) -> Result<Response> {
             max_bytes: _,
             max_wait_ms,
         } => {
-            let topic_name = TopicName::new(topic.clone());
-            let pid = PartitionId(partition);
-            let from = Offset::new(from_offset);
-            let max = max_messages as usize;
+            let span = info_span!("fetch", topic = %topic, partition, from_offset);
+            async {
+                let topic_name = TopicName::new(topic.clone());
+                let pid = PartitionId(partition);
+                let from = Offset::new(from_offset);
+                let max = max_messages as usize;
 
-            // In multi-node, prefer leader for client fetch (followers may have data
-            // but HWM is authoritative on leader). Still allow fetch on any replica
-            // capped at local committed_hwm.
-            let mut records = broker.fetch(&topic_name, pid, from, max)?;
-            if records.is_empty() && max_wait_ms > 0 {
-                let deadline =
-                    tokio::time::Instant::now() + Duration::from_millis(u64::from(max_wait_ms));
-                while records.is_empty() && tokio::time::Instant::now() < deadline {
-                    tokio::time::sleep(Duration::from_millis(10)).await;
-                    records = broker.fetch(&topic_name, pid, from, max)?;
+                // In multi-node, prefer leader for client fetch (followers may have data
+                // but HWM is authoritative on leader). Still allow fetch on any replica
+                // capped at local committed_hwm.
+                let mut records = broker.fetch(&topic_name, pid, from, max)?;
+                if records.is_empty() && max_wait_ms > 0 {
+                    let deadline =
+                        tokio::time::Instant::now() + Duration::from_millis(u64::from(max_wait_ms));
+                    while records.is_empty() && tokio::time::Instant::now() < deadline {
+                        tokio::time::sleep(Duration::from_millis(10)).await;
+                        records = broker.fetch(&topic_name, pid, from, max)?;
+                    }
                 }
-            }
 
-            let hwm = broker.high_watermark(&topic_name, pid).unwrap_or(0);
-            let wire_records = records
-                .into_iter()
-                .map(|r| FetchRecord {
-                    offset: r.offset.raw(),
-                    timestamp_ms: r.timestamp_ms,
-                    key: r.key,
-                    value: r.value,
-                    headers: r.headers,
+                let hwm = broker.high_watermark(&topic_name, pid).unwrap_or(0);
+                let wire_records = records
+                    .into_iter()
+                    .map(|r| FetchRecord {
+                        offset: r.offset.raw(),
+                        timestamp_ms: r.timestamp_ms,
+                        key: r.key,
+                        value: r.value,
+                        headers: r.headers,
+                    })
+                    .collect();
+
+                Ok(Response::Fetch {
+                    topic,
+                    partition,
+                    high_watermark: hwm,
+                    error_code: 0,
+                    records: wire_records,
                 })
-                .collect();
-
-            Ok(Response::Fetch {
-                topic,
-                partition,
-                high_watermark: hwm,
-                error_code: 0,
-                records: wire_records,
-            })
+            }
+            .instrument(span)
+            .await
         }
         Request::JoinGroup {
             group_id,

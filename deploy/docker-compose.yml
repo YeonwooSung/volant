@@ -1,0 +1,26 @@
+# Single-node Volant for local / small deployments.
+# Metrics bound on all interfaces inside the compose network; scrape via localhost:9102.
+services:
+  volant:
+    build:
+      context: ..
+      dockerfile: deploy/Dockerfile
+    image: volant:local
+    ports:
+      - "9092:9092"
+      - "9102:9102"
+    volumes:
+      - volant-data:/var/lib/volant/data
+    environment:
+      # Uncomment to enable shared-token auth:
+      # VOLANT_AUTH_TOKEN: "change-me"
+      RUST_LOG: volant=info
+    command:
+      - --data-dir=/var/lib/volant/data
+      - --listen=0.0.0.0:9092
+      - --metrics-addr=0.0.0.0:9102
+      - --log-format=json
+    restart: unless-stopped
+
+volumes:
+  volant-data:

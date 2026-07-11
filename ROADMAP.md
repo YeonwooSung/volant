@@ -329,18 +329,27 @@ Consistency model: **[docs/consistency.md](./docs/consistency.md)**.
 
 ---
 
-### Phase 7 — Ecosystem & production readiness
+### Phase 7 — Ecosystem & production readiness ✅ (MVP)
 
 **Goal:** Something operators can run with confidence.
 
-- [ ] Prometheus metrics + tracing spans on hot paths
-- [ ] Structured JSON logging
-- [ ] TLS + SASL-style auth
-- [ ] Multi-language clients (Rust first; Go / Python FFI or REST gateway)
-- [ ] Kafka protocol compatibility shim (optional — migrate without rewrite)
-- [ ] Helm chart / systemd unit / Docker image
-- [ ] Chaos tests (partition loss, disk full, slow disk)
-- [ ] Security audit of protocol parser (fuzzing with `cargo fuzz`)
+Binding: **[docs/PHASE7_SPEC.md](./docs/PHASE7_SPEC.md)**. Ops runbook: **[docs/ops.md](./docs/ops.md)**. Packaging: **[deploy/](./deploy/)**.
+
+- [x] Prometheus metrics (`GET /metrics` on `--metrics-addr`) + tracing spans on produce/fetch RPC
+- [x] Structured JSON logging (`--log-format text|json`)
+- [x] Shared-token auth (opcodes 30/31, error codes 17/18; `--auth-token` / `VOLANT_AUTH_TOKEN`)
+- [x] Optional TLS via feature `tls` (`--tls-cert` / `--tls-key`, rustls) — default build stays plaintext
+- [x] Docker image + docker-compose + systemd unit (`deploy/`)
+- [x] Protocol chaos tests (random/truncated decode must not panic)
+- [x] Auth required / wrong token / metrics smoke integration tests
+- [ ] Multi-language clients (Rust first; Go / Python FFI or REST gateway) — **deferred**
+- [ ] Kafka protocol compatibility shim — **deferred**
+- [ ] Full Helm chart / operators — **deferred** (Docker + systemd cover common deploys)
+- [ ] Full chaos mesh (partition loss, disk full, slow disk) — **deferred** (protocol chaos only)
+- [ ] SCRAM / full SASL / mTLS identity mapping — **deferred**
+- [ ] Security audit with `cargo fuzz` corpus CI — **deferred** (deterministic chaos tests ship now)
+
+**Honest limitations (Phase 7):** inter-broker RPC remains **plaintext** even when client TLS is enabled (private VPC assumed). Metrics endpoint has no auth (bind localhost).
 
 ---
 
@@ -386,7 +395,7 @@ core over protocol compatibility; a compatibility layer is Phase 7 optional work
 7. Phase 4 stream operators + example  
 8. Phase 5 io_uring feature flag + benches  
 9. Phase 6 replication prototype (2–3 nodes) ✅  
-10. Phase 7 metrics, TLS, packaging  
+10. Phase 7 metrics, TLS, packaging ✅ (MVP; deferred items listed above)  
 
 ---
 
@@ -423,4 +432,4 @@ cargo test --workspace
 
 Phase 5 complete (`BufferPool`, `IoBackend`, `io-uring` / `direct-io` features,
 batch produce coalescing, multi-mode `volant-bench`, `docs/tuning.md`,
-`thread-per-core`). **Phase 6 clustering prototype complete; next: Phase 7 ops.**
+`thread-per-core`). **Phase 7 MVP complete** (metrics, auth, optional TLS, packaging); deferred: Kafka shim, multi-lang, Helm, SCRAM.

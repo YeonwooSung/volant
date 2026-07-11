@@ -249,6 +249,9 @@ pub fn encode_request(req: &Request) -> Result<Bytes> {
         Request::ClusterState { known_generation } => {
             dst.put_u32_le(*known_generation);
         }
+        Request::Auth { token } => {
+            put_string(&mut dst, token)?;
+        }
     }
     finish_payload(dst)
 }
@@ -454,6 +457,9 @@ pub fn decode_request(opcode: u16, payload: &[u8]) -> Result<Request> {
                 known_generation: src.get_u32_le(),
             })
         }
+        RequestOpcode::Auth => Ok(Request::Auth {
+            token: get_string(&mut src)?,
+        }),
     }
 }
 
@@ -639,6 +645,9 @@ pub fn encode_response(resp: &Response) -> Result<Bytes> {
                     }
                 }
             }
+        }
+        Response::Auth { error_code } => {
+            dst.put_u16_le(*error_code);
         }
         Response::Error { code, message } => {
             dst.put_u16_le(*code);
@@ -1024,6 +1033,14 @@ pub fn decode_response(opcode: u16, payload: &[u8]) -> Result<Response> {
                 topics,
             })
         }
+        ResponseOpcode::Auth => {
+            if src.remaining() < 2 {
+                return Err(Error::Protocol("truncated auth error".into()));
+            }
+            Ok(Response::Auth {
+                error_code: src.get_u16_le(),
+            })
+        }
         ResponseOpcode::Error => {
             if src.remaining() < 2 {
                 return Err(Error::Protocol("truncated error code".into()));
@@ -1393,5 +1410,99 @@ mod tests {
         assert_eq!(ErrorCode::from_u16(14), ErrorCode::NotController);
         assert_eq!(ErrorCode::from_u16(15), ErrorCode::NotEnoughReplicas);
         assert_eq!(ErrorCode::from_u16(16), ErrorCode::BrokerNotAvailable);
+    }
+
+    #[test]
+    fn phase7_auth_roundtrip() {
+        let req = Request::Auth {
+            token: "s3cret".into(),
+        };
+        let b = encode_request(&req).unwrap();
+        assert_eq!(
+            decode_request(RequestOpcode::Auth as u16, &b).unwrap(),
+            req
+        );
+
+        let resp = Response::Auth { error_code: 0 };
+        let b = encode_response(&resp).unwrap();
+        assert_eq!(
+            decode_response(ResponseOpcode::Auth as u16, &b).unwrap(),
+            resp
+        );
+
+        let fail = Response::Auth {
+            error_code: ErrorCode::AuthenticationFailed as u16,
+        };
+        let b = encode_response(&fail).unwrap();
+        assert_eq!(
+            decode_response(ResponseOpcode::Auth as u16, &b).unwrap(),
+            fail
+        );
+    }
+
+    #[test]
+    fn phase7_auth_error_codes() {
+        assert_eq!(
+            ErrorCode::from_u16(17),
+            ErrorCode::AuthenticationFailed
+        );
+        assert_eq!(
+            ErrorCode::from_u16(18),
+            ErrorCode::AuthenticationRequired
+        );
+    }
+
+    /// Random / truncated / oversized inputs must not panic.
+    #[test]
+    fn chaos_decode_does_not_panic() {
+        // Deterministic pseudo-random (xorshift) — no external deps.
+        let mut state: u64 = 0xDEAD_BEEF_CAFE_BABE;
+        let mut next = || -> u64 {
+            state ^= state << 13;
+            state ^= state >> 7;
+            state ^= state << 17;
+            state
+        };
+
+        // Empty / truncated payloads for every known opcode.
+        let req_ops: &[u16] = &[1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 20, 22, 24, 30, 99, 0xFFFF];
+        let resp_ops: &[u16] = &[1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 21, 23, 25, 31, 0xFFFF, 42];
+
+        for op in req_ops {
+            let _ = decode_request(*op, &[]);
+            let _ = decode_request(*op, &[0u8; 1]);
+            let _ = decode_request(*op, &[0u8; 3]);
+            let _ = decode_request(*op, &[0xff; 16]);
+        }
+        for op in resp_ops {
+            let _ = decode_response(*op, &[]);
+            let _ = decode_response(*op, &[0u8; 1]);
+            let _ = decode_response(*op, &[0u8; 3]);
+            let _ = decode_response(*op, &[0xff; 16]);
+        }
+
+        // Random blobs.
+        for _ in 0..200 {
+            let len = (next() as usize % 512) + 1;
+            let mut buf = vec![0u8; len];
+            for b in &mut buf {
+                *b = (next() & 0xff) as u8;
+            }
+            let op = (next() & 0xffff) as u16;
+            let _ = decode_request(op, &buf);
+            let _ = decode_response(op, &buf);
+
+            // Truncated frames into decode_frame.
+            let mut frame_buf = BytesMut::from(buf.as_slice());
+            let _ = crate::codec::decode_frame(&mut frame_buf);
+        }
+
+        // Oversized payload length claim (still must not panic).
+        let oversized = vec![0u8; 64];
+        let _ = decode_request(1, &oversized);
+        // Explicit oversize rejection path.
+        let huge = vec![0u8; MAX_PAYLOAD + 1];
+        assert!(decode_request(1, &huge).is_err());
+        assert!(decode_response(1, &huge).is_err());
     }
 }

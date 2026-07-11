@@ -32,6 +32,8 @@ pub enum RequestOpcode {
     HeartbeatBroker = 22,
     /// Pull / apply cluster assignment state (Phase 6).
     ClusterState = 24,
+    /// Shared-token authentication (Phase 7).
+    Auth = 30,
 }
 
 impl RequestOpcode {
@@ -51,6 +53,7 @@ impl RequestOpcode {
             20 => Self::ReplicaFetch,
             22 => Self::HeartbeatBroker,
             24 => Self::ClusterState,
+            30 => Self::Auth,
             _ => return None,
         })
     }
@@ -209,6 +212,11 @@ pub enum Request {
         /// Last applied generation on the requester (`0` if none).
         known_generation: u32,
     },
+    /// Authenticate this connection with a shared token.
+    Auth {
+        /// Shared secret token.
+        token: String,
+    },
 }
 
 impl Request {
@@ -228,6 +236,7 @@ impl Request {
             Self::ReplicaFetch { .. } => RequestOpcode::ReplicaFetch as u16,
             Self::HeartbeatBroker { .. } => RequestOpcode::HeartbeatBroker as u16,
             Self::ClusterState { .. } => RequestOpcode::ClusterState as u16,
+            Self::Auth { .. } => RequestOpcode::Auth as u16,
         }
     }
 }

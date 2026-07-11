@@ -24,6 +24,7 @@ use crate::cluster::{
     ClusterConfig, Membership, PartitionAssignment, TopicAssignment,
 };
 use crate::group::GroupCoordinator;
+use crate::metrics::Metrics;
 use crate::topic::Topic;
 
 /// Snapshot of cluster metadata for a Metadata response.
@@ -107,6 +108,10 @@ pub struct Broker {
     /// Notify waiters when committed HWM advances (acks=all).
     hwm_lock: Mutex<()>,
     hwm_cvar: Condvar,
+    /// Prometheus metrics registry.
+    metrics: Arc<Metrics>,
+    /// Optional shared auth token (Phase 7). `None` = auth disabled.
+    auth_token: RwLock<Option<String>>,
 }
 
 impl Broker {
@@ -127,6 +132,8 @@ impl Broker {
             cluster: None,
             hwm_lock: Mutex::new(()),
             hwm_cvar: Condvar::new(),
+            metrics: Arc::new(Metrics::new()),
+            auth_token: RwLock::new(None),
         }
     }
 
@@ -173,10 +180,57 @@ impl Broker {
             cluster: Some(cluster),
             hwm_lock: Mutex::new(()),
             hwm_cvar: Condvar::new(),
+            metrics: Arc::new(Metrics::new()),
+            auth_token: RwLock::new(None),
         };
         // Open local partitions from persisted assignment.
         broker.apply_local_assignment()?;
         Ok(broker)
+    }
+
+    /// Shared metrics registry.
+    pub fn metrics(&self) -> Arc<Metrics> {
+        Arc::clone(&self.metrics)
+    }
+
+    /// Configure shared-token auth. `None` disables the auth gate.
+    pub fn set_auth_token(&self, token: Option<String>) {
+        *self.auth_token.write() = token;
+    }
+
+    /// Current auth token if configured.
+    pub fn auth_token(&self) -> Option<String> {
+        self.auth_token.read().clone()
+    }
+
+    /// Number of topics known to this broker.
+    pub fn topic_count(&self) -> u64 {
+        if let Some(cluster) = &self.cluster {
+            let n = cluster.assignment.read().topics.len();
+            if n > 0 {
+                return n as u64;
+            }
+        }
+        self.topics.read().len() as u64
+    }
+
+    /// Total partition count across all topics.
+    pub fn partition_count_total(&self) -> u64 {
+        if let Some(cluster) = &self.cluster {
+            let asg = cluster.assignment.read();
+            if !asg.topics.is_empty() {
+                return asg
+                    .topics
+                    .values()
+                    .map(|t| t.partitions.len() as u64)
+                    .sum();
+            }
+        }
+        self.topics
+            .read()
+            .values()
+            .map(|t| t.partitions.len() as u64)
+            .sum()
     }
 
     /// This broker's node id.

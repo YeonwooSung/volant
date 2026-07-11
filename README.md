@@ -9,14 +9,13 @@ Volant is a resource-efficient alternative to Apache Kafka, built for:
 - **Streaming processing** — first-class operators (`map`, `filter`, windows) without a heavy runtime
 - **Small footprint** — native binary, predictable memory, simple operations
 
-> Status: **Phase 6 clustering prototype** — static multi-node membership,
-> controller + ISR replication, `acks=all`, leader failover. Single-node mode
-> (no `--cluster-config`) preserves Phase 1–5 behavior. APIs and on-disk formats
-> may still change. See [ROADMAP.md](./ROADMAP.md),
-> [Phase 6 spec](./docs/PHASE6_SPEC.md),
-> [consistency model](./docs/consistency.md),
-> [Phase 1](./docs/PHASE1_SPEC.md)–[Phase 5](./docs/PHASE5_SPEC.md) specs, and
-> the [tuning guide](./docs/tuning.md).
+> Status: **Phase 7 MVP** — observability (Prometheus + JSON logs + tracing),
+> shared-token auth, optional TLS (`--features tls`), Docker/systemd packaging.
+> Phase 6 clustering remains available. Single-node mode (no `--cluster-config`)
+> preserves Phase 1–5 behavior. See [ROADMAP.md](./ROADMAP.md),
+> [Phase 7 spec](./docs/PHASE7_SPEC.md), [ops runbook](./docs/ops.md),
+> [deploy/](./deploy/), [consistency model](./docs/consistency.md), and
+> [Phase 1](./docs/PHASE1_SPEC.md)–[Phase 6](./docs/PHASE6_SPEC.md) specs.
 
 ---
 
@@ -41,8 +40,11 @@ volant/
 │   ├── PHASE4_SPEC.md    # Stream operators & topology API
 │   ├── PHASE5_SPEC.md    # DMA / high-performance I/O
 │   ├── PHASE6_SPEC.md    # Clustering & ISR replication
+│   ├── PHASE7_SPEC.md    # Metrics, auth, TLS, packaging
+│   ├── ops.md            # Operator runbook (metrics / auth / TLS)
 │   ├── consistency.md    # What “committed” means (HWM / acks)
 │   └── tuning.md         # Ops tuning guide (ulimit, I/O, affinity)
+├── deploy/               # Dockerfile, compose, systemd unit
 ├── ROADMAP.md
 └── Cargo.toml            # Workspace root
 ```
@@ -97,6 +99,35 @@ cargo run -p volant-cli -- topic create events --partitions 3 --broker 127.0.0.1
 
 Omit `--cluster-config` for single-node mode (Phase 1–5 behavior).  
 Consistency guarantees: [docs/consistency.md](./docs/consistency.md).
+
+### Observability, auth, TLS (Phase 7)
+
+```bash
+# Metrics + JSON logs
+cargo run -p volant-server -- \
+  --data-dir /tmp/vdata \
+  --listen 127.0.0.1:9092 \
+  --metrics-addr 127.0.0.1:9102 \
+  --log-format json
+
+curl -s http://127.0.0.1:9102/metrics | grep volant_
+
+# Shared-token auth
+export VOLANT_AUTH_TOKEN=s3cret
+cargo run -p volant-server -- --data-dir /tmp/vdata --listen 127.0.0.1:9092
+# Rust client: ClientConfig { auth_token: Some("s3cret".into()), .. }
+
+# Optional TLS (feature-gated; default build is plaintext)
+cargo run -p volant-server --features tls -- \
+  --data-dir /tmp/vdata --listen 127.0.0.1:9092 \
+  --tls-cert ./server.crt --tls-key ./server.key
+```
+
+Packaging: [deploy/README.md](./deploy/README.md). Ops details: [docs/ops.md](./docs/ops.md).
+
+**Deferred (not in Phase 7):** Kafka wire shim, multi-language clients, full Helm,
+SCRAM, mTLS identity, chaos-mesh. Inter-broker traffic stays plaintext when TLS is
+enabled for clients (private network assumed).
 
 ### Networked client (library)
 

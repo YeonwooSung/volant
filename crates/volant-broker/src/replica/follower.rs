@@ -3,17 +3,12 @@
 use std::sync::Arc;
 use std::time::Duration;
 
-use bytes::BytesMut;
-use tokio::io::{AsyncReadExt, AsyncWriteExt};
-use tokio::net::TcpStream;
 use tracing::{debug, warn};
 use volant_core::{Message, Offset, PartitionId, Record, TopicName};
-use volant_protocol::codec::{decode_frame, encode_frame};
-use volant_protocol::{
-    decode_response, pack_request, ErrorCode, FetchRecord, Request, Response,
-};
+use volant_protocol::{ErrorCode, FetchRecord, Request, Response};
 
 use crate::broker::Broker;
+use crate::net::inter_broker_rpc;
 
 /// Spawn a task that periodically ReplicaFetches for all local follower partitions.
 pub fn run_follower_loops(broker: Arc<Broker>) {
@@ -63,7 +58,6 @@ async fn fetch_once(
         .unwrap_or(1_048_576);
     let replica_id = broker.node_id();
 
-    let mut stream = TcpStream::connect(&addr).await?;
     let req = Request::ReplicaFetch {
         topic: topic.to_owned(),
         partition,
@@ -71,23 +65,7 @@ async fn fetch_once(
         max_bytes,
         replica_id,
     };
-    let frame = pack_request(1, &req)?;
-    let mut out = BytesMut::new();
-    encode_frame(&frame, &mut out)?;
-    stream.write_all(&out).await?;
-
-    let mut buf = BytesMut::with_capacity(64 * 1024);
-    let resp = loop {
-        let n = stream.read_buf(&mut buf).await?;
-        if n == 0 {
-            return Err(volant_core::Error::Protocol(
-                "replica fetch connection closed".into(),
-            ));
-        }
-        if let Some(frame) = decode_frame(&mut buf)? {
-            break decode_response(frame.header.opcode, &frame.payload)?;
-        }
-    };
+    let resp = inter_broker_rpc(broker, &addr, &req).await?;
 
     match resp {
         Response::ReplicaFetch {

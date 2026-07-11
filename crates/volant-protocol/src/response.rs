@@ -32,6 +32,8 @@ pub enum ResponseOpcode {
     HeartbeatBroker = 23,
     /// Cluster state snapshot (Phase 6).
     ClusterState = 25,
+    /// Auth result (Phase 7).
+    Auth = 31,
     /// Error response.
     Error = 0xFFFF,
 }
@@ -53,6 +55,7 @@ impl ResponseOpcode {
             21 => Self::ReplicaFetch,
             23 => Self::HeartbeatBroker,
             25 => Self::ClusterState,
+            31 => Self::Auth,
             0xFFFF => Self::Error,
             _ => return None,
         })
@@ -97,6 +100,10 @@ pub enum ErrorCode {
     NotEnoughReplicas = 15,
     /// Target broker is not available.
     BrokerNotAvailable = 16,
+    /// Shared-token authentication failed (wrong token).
+    AuthenticationFailed = 17,
+    /// Auth required before other opcodes on this connection.
+    AuthenticationRequired = 18,
 }
 
 impl ErrorCode {
@@ -119,6 +126,8 @@ impl ErrorCode {
             14 => Self::NotController,
             15 => Self::NotEnoughReplicas,
             16 => Self::BrokerNotAvailable,
+            17 => Self::AuthenticationFailed,
+            18 => Self::AuthenticationRequired,
             _ => Self::Unknown,
         }
     }
@@ -352,6 +361,11 @@ pub enum Response {
         /// Topics and partition replica state.
         topics: Vec<ClusterTopicState>,
     },
+    /// Auth result.
+    Auth {
+        /// 0 = ok; 17 = AuthenticationFailed.
+        error_code: u16,
+    },
     /// Error response.
     Error {
         /// Error code.
@@ -378,6 +392,7 @@ impl Response {
             Self::ReplicaFetch { .. } => ResponseOpcode::ReplicaFetch as u16,
             Self::HeartbeatBroker { .. } => ResponseOpcode::HeartbeatBroker as u16,
             Self::ClusterState { .. } => ResponseOpcode::ClusterState as u16,
+            Self::Auth { .. } => ResponseOpcode::Auth as u16,
             Self::Error { .. } => ResponseOpcode::Error as u16,
         }
     }

@@ -18,6 +18,8 @@ pub mod assignor;
 pub mod broker;
 pub mod cluster;
 pub mod group;
+pub mod metrics;
+/// Framed TCP server and inter-broker RPC (public for TLS accept path).
 pub mod net;
 pub mod offset_store;
 pub mod partition;
@@ -31,5 +33,6 @@ pub use broker::{
 };
 pub use cluster::{BrokerEndpoint, ClusterConfig};
 pub use group::GroupCoordinator;
-pub use net::{run_server, serve_listener, start_background_tasks};
+pub use metrics::Metrics;
+pub use net::{run_metrics_server, run_server, serve_listener, start_background_tasks};
 pub use offset_store::{OffsetStore, StoredOffset, OFFSET_UNKNOWN};

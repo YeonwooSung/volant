@@ -88,17 +88,24 @@ pub struct Client {
 
 impl Client {
     /// Connect to the first configured broker address.
+    ///
+    /// When [`ClientConfig::auth_token`] is set, sends an Auth request before
+    /// returning the connected client.
     pub async fn connect(config: ClientConfig) -> Result<Self> {
         let addr = config
             .brokers
             .first()
             .ok_or_else(|| Error::InvalidArgument("no brokers configured".into()))?;
         let stream = TcpStream::connect(addr).await?;
-        Ok(Self {
+        let client = Self {
             stream: Mutex::new(stream),
             next_corr: AtomicU32::new(1),
             config,
-        })
+        };
+        if let Some(token) = client.config.auth_token.clone() {
+            client.authenticate(token).await?;
+        }
+        Ok(client)
     }
 
     /// Connect to a single `host:port`.
@@ -108,6 +115,39 @@ impl Client {
             ..ClientConfig::default()
         })
         .await
+    }
+
+    /// Connect with an explicit shared auth token.
+    pub async fn connect_with_auth(
+        addr: impl AsRef<str>,
+        auth_token: impl Into<String>,
+    ) -> Result<Self> {
+        Self::connect(ClientConfig {
+            brokers: vec![addr.as_ref().to_owned()],
+            auth_token: Some(auth_token.into()),
+            ..ClientConfig::default()
+        })
+        .await
+    }
+
+    async fn authenticate(&self, token: String) -> Result<()> {
+        let resp = self.round_trip(Request::Auth { token }).await?;
+        match resp {
+            Response::Auth { error_code } => {
+                if error_code == 0 {
+                    Ok(())
+                } else {
+                    Err(error_from_code(
+                        error_code,
+                        format!("auth failed with error_code={error_code}"),
+                    ))
+                }
+            }
+            Response::Error { code, message } => Err(error_from_code(code, message)),
+            other => Err(Error::Protocol(format!(
+                "unexpected response for auth: {other:?}"
+            ))),
+        }
     }
 
     /// Create a topic; returns assigned topic id.
@@ -496,7 +536,9 @@ fn error_from_code(code: u16, message: impl Into<String>) -> Error {
         ErrorCode::NotLeaderForPartition
         | ErrorCode::NotController
         | ErrorCode::NotEnoughReplicas
-        | ErrorCode::BrokerNotAvailable => Error::Protocol(message),
+        | ErrorCode::BrokerNotAvailable
+        | ErrorCode::AuthenticationFailed
+        | ErrorCode::AuthenticationRequired => Error::Protocol(message),
         ErrorCode::Ok | ErrorCode::Unknown => Error::Protocol(message),
     }
 }

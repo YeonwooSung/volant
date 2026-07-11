@@ -9,6 +9,8 @@ pub struct ClientConfig {
     pub client_id: String,
     /// Default produce acks (`1` = leader only; `255` = all ISR).
     pub acks: u8,
+    /// Shared auth token. When set, the client sends Auth on connect.
+    pub auth_token: Option<String>,
 }
 
 impl Default for ClientConfig {
@@ -17,6 +19,7 @@ impl Default for ClientConfig {
             brokers: vec!["127.0.0.1:9092".into()],
             client_id: "volant-client".into(),
             acks: 1,
+            auth_token: None,
         }
     }
 }
