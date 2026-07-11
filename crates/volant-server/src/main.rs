@@ -1,11 +1,13 @@
 //! Volant broker server entrypoint.
 
+use std::net::SocketAddr;
 use std::path::PathBuf;
+use std::sync::Arc;
 
-use anyhow::Result;
+use anyhow::{Context, Result};
 use clap::Parser;
 use tracing::info;
-use volant_broker::Broker;
+use volant_broker::{run_server, Broker};
 use volant_storage::StorageConfig;
 
 /// Volant — lightweight, high-performance streaming message broker.
@@ -16,11 +18,11 @@ struct Args {
     #[arg(long, default_value = "./data")]
     data_dir: PathBuf,
 
-    /// Listen address (network server lands in Phase 2).
+    /// Listen address (`host:port`).
     #[arg(long, default_value = "0.0.0.0:9092")]
     listen: String,
 
-    /// Default number of partitions for auto-created topics.
+    /// Default number of partitions for auto-created topics (reserved).
     #[arg(long, default_value_t = 1)]
     default_partitions: u32,
 }
@@ -40,20 +42,19 @@ async fn main() -> Result<()> {
         ..StorageConfig::default()
     };
 
-    let broker = Broker::new(storage);
-    info!(
-        data_dir = %args.data_dir.display(),
-        listen = %args.listen,
-        "volant broker started (in-process; network listener Phase 2)"
-    );
-
-    // Smoke-path: ensure broker is usable in-process until TCP lands.
-    let _ = broker.list_topics();
+    let broker = Arc::new(Broker::new(storage));
     let _ = args.default_partitions;
 
-    // Keep process alive as a placeholder for the future accept loop.
-    info!("press Ctrl-C to exit");
-    tokio::signal::ctrl_c().await?;
-    info!("shutting down");
-    Ok(())
+    let addr: SocketAddr = args
+        .listen
+        .parse()
+        .with_context(|| format!("invalid listen address: {}", args.listen))?;
+
+    info!(
+        data_dir = %args.data_dir.display(),
+        listen = %addr,
+        "starting volant broker"
+    );
+
+    run_server(addr, broker).await.map_err(Into::into)
 }

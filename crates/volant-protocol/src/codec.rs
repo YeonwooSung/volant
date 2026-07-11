@@ -46,12 +46,28 @@ pub fn decode_frame(src: &mut BytesMut) -> Result<Option<Frame>> {
     let opcode = buf.get_u16();
     let correlation_id = buf.get_u32();
     let payload_len_u32 = buf.get_u32();
-    let checksum = buf.get_u32();
+    let checksum_wire = buf.get_u32();
     let payload = Bytes::from(buf.to_vec());
 
     if version != PROTOCOL_VERSION {
         return Err(Error::Protocol(format!(
             "unsupported protocol version: {version}"
+        )));
+    }
+
+    // Reject oversized payloads (16 MiB cap).
+    if payload.len() > crate::payload::MAX_PAYLOAD {
+        return Err(Error::Protocol(format!(
+            "payload too large: {} > {}",
+            payload.len(),
+            crate::payload::MAX_PAYLOAD
+        )));
+    }
+
+    let expected = checksum(&payload);
+    if checksum_wire != expected {
+        return Err(Error::Protocol(format!(
+            "checksum mismatch: got {checksum_wire:#x}, expected {expected:#x}"
         )));
     }
 
@@ -61,7 +77,7 @@ pub fn decode_frame(src: &mut BytesMut) -> Result<Option<Frame>> {
             opcode,
             correlation_id,
             payload_len: payload_len_u32,
-            checksum,
+            checksum: checksum_wire,
         },
         payload,
     }))

@@ -675,6 +675,7 @@ name = "volant-cli"
 version = "0.1.0"
 dependencies = [
  "anyhow",
+ "bytes",
  "clap",
  "serde_json",
  "tokio",
@@ -693,8 +694,10 @@ dependencies = [
  "thiserror",
  "tokio",
  "tracing",
+ "volant-broker",
  "volant-core",
  "volant-protocol",
+ "volant-storage",
 ]
 
 [[package]]

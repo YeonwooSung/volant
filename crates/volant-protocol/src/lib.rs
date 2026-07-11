@@ -7,9 +7,16 @@
 
 pub mod codec;
 pub mod frame;
+pub mod payload;
 pub mod request;
 pub mod response;
 
-pub use frame::{Frame, FrameHeader};
-pub use request::Request;
-pub use response::Response;
+pub use frame::{Frame, FrameHeader, FRAME_MAGIC, PROTOCOL_VERSION};
+pub use payload::{
+    decode_request, decode_response, encode_request, encode_response, pack_request, pack_response,
+    MAX_PAYLOAD,
+};
+pub use request::{ProduceMessage, Request, RequestOpcode};
+pub use response::{
+    BrokerInfo, ErrorCode, FetchRecord, PartitionInfo, Response, ResponseOpcode, TopicInfo,
+};

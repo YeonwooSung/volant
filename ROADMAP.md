@@ -120,46 +120,51 @@ Binding format and API: **[docs/PHASE1_SPEC.md](./docs/PHASE1_SPEC.md)**.
 
 ---
 
-### Phase 2 — Network protocol & multi-partition broker *(next)*
+### Phase 2 — Network protocol & multi-partition broker ✅
 
 **Goal:** Real clients talk to a running broker over TCP.
+
+Binding wire format and APIs: **[docs/PHASE2_SPEC.md](./docs/PHASE2_SPEC.md)**.
 
 **Milestones**
 
 1. **Framed TCP server** (Tokio)
-   - Length-prefixed Volant frames (already sketched in `volant-protocol`)
-   - Correlation IDs, request timeouts
-   - Connection-level backpressure
+   - [x] Length-prefixed Volant frames (`volant-protocol` + CRC verify)
+   - [x] Correlation IDs (sequential request/response per connection)
+   - [x] Sequential per-connection I/O (explicit backpressure deferred)
+   - [x] `volant_broker::net::{run_server, serve_listener}` accept loop
 
 2. **APIs**
-   - `CreateTopic` / `DeleteTopic` / `Metadata`
-   - `Produce` (acks=0/1 for single node)
-   - `Fetch` (long-poll / max wait)
-   - Basic auth hook (optional token; pluggable later)
+   - [x] `CreateTopic` / `DeleteTopic` / `Metadata`
+   - [x] `Produce` (acks=1 flush on single node; response always returned)
+   - [x] `Fetch` (long-poll / max wait)
+   - [ ] Basic auth hook (optional token; pluggable later) — deferred
 
 3. **Partitioning**
-   - Key hash → partition (murmur2 or xxhash)
-   - Sticky / round-robin for null keys
-   - Multiple partitions per topic on one node
+   - [x] Key hash → partition (Kafka-compatible murmur2)
+   - [x] Round-robin for null keys
+   - [x] Multiple partitions per topic on one node
 
 4. **Client SDK**
-   - Async `Producer` / `Consumer` over Tokio
-   - Retry + idempotent produce (PID + sequence) — stretch
-   - In-process client for tests
+   - [x] Async `Client` / `Producer` / `Consumer` over Tokio
+   - [ ] Retry + idempotent produce (PID + sequence) — stretch, deferred
+   - [x] E2E tests boot server on `127.0.0.1:0` via public net APIs
 
 5. **CLI**
-   - `volant topic create|list|delete`
-   - `volant produce` / `volant consume` for debugging
+   - [x] `volant topic create|list|delete`
+   - [x] `volant produce` / `volant consume` for debugging
 
 **Exit criteria**
 
-- External process produces and consumes end-to-end
-- Bench: multi-partition produce with bounded p99 latency
-- Integration tests over localhost TCP
+- [x] External process produces and consumes end-to-end (`volant-cli` + `volant-server`)
+- [ ] Bench: multi-partition produce with bounded p99 latency (stretch / Phase 2 polish)
+- [x] Integration tests over localhost TCP (`crates/volant-client/tests/e2e_tcp.rs`)
+
+**Non-goals for Phase 2:** auth, TLS, consumer groups, Kafka wire compatibility.
 
 ---
 
-### Phase 3 — Consumer groups & offsets
+### Phase 3 — Consumer groups & offsets *(next)*
 
 **Goal:** Coordinated multi-consumer reading with committed offsets.
 
@@ -336,4 +341,4 @@ cargo run -p volant-bench --release
 cargo test --workspace
 ```
 
-Phase 1 complete. Next: **Phase 2 — TCP protocol, multi-partition networking, client SDK**.
+Phase 2 complete. Next: **Phase 3 — consumer groups and committed offsets**.
