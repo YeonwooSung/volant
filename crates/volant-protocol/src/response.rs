@@ -2,7 +2,7 @@
 
 use bytes::Bytes;
 
-/// Response opcodes (Phase 2 wire values).
+/// Response opcodes (Phase 2 + Phase 3 wire values).
 #[repr(u16)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ResponseOpcode {
@@ -16,10 +16,16 @@ pub enum ResponseOpcode {
     Metadata = 4,
     /// Delete topic result.
     DeleteTopic = 5,
-    /// Offset commit result (Phase 3).
+    /// Offset commit result.
     OffsetCommit = 6,
-    /// Offset fetch result (Phase 3).
+    /// Offset fetch result.
     OffsetFetch = 7,
+    /// Join group result.
+    JoinGroup = 8,
+    /// Heartbeat result.
+    Heartbeat = 9,
+    /// Leave group result.
+    LeaveGroup = 10,
     /// Error response.
     Error = 0xFFFF,
 }
@@ -35,13 +41,16 @@ impl ResponseOpcode {
             5 => Self::DeleteTopic,
             6 => Self::OffsetCommit,
             7 => Self::OffsetFetch,
+            8 => Self::JoinGroup,
+            9 => Self::Heartbeat,
+            10 => Self::LeaveGroup,
             0xFFFF => Self::Error,
             _ => return None,
         })
     }
 }
 
-/// Protocol error codes (Error response payload).
+/// Protocol error codes (Error response payload + embedded group codes).
 #[repr(u16)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ErrorCode {
@@ -63,6 +72,14 @@ pub enum ErrorCode {
     Timeout = 7,
     /// Unsupported operation.
     Unsupported = 8,
+    /// Group rebalance in progress / generation mismatch.
+    RebalanceInProgress = 9,
+    /// Unknown group member id.
+    UnknownMemberId = 10,
+    /// Illegal generation for the group.
+    IllegalGeneration = 11,
+    /// Inconsistent group protocol (reserved).
+    InconsistentGroupProtocol = 12,
 }
 
 impl ErrorCode {
@@ -77,6 +94,10 @@ impl ErrorCode {
             6 => Self::Io,
             7 => Self::Timeout,
             8 => Self::Unsupported,
+            9 => Self::RebalanceInProgress,
+            10 => Self::UnknownMemberId,
+            11 => Self::IllegalGeneration,
+            12 => Self::InconsistentGroupProtocol,
             _ => Self::Unknown,
         }
     }
@@ -130,6 +151,28 @@ pub struct TopicInfo {
     pub error_code: u16,
     /// Partitions.
     pub partitions: Vec<PartitionInfo>,
+}
+
+/// Partition assignment returned by JoinGroup.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Assignment {
+    /// Topic name.
+    pub topic: String,
+    /// Partition id.
+    pub partition: u32,
+}
+
+/// Offset fetch response entry.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct OffsetFetchEntry {
+    /// Topic name.
+    pub topic: String,
+    /// Partition id.
+    pub partition: u32,
+    /// Committed offset; `u64::MAX` means unknown / not committed.
+    pub offset: u64,
+    /// Optional metadata.
+    pub metadata: String,
 }
 
 /// High-level response enum with real payload fields.
@@ -186,10 +229,39 @@ pub enum Response {
         /// Topic metadata.
         topics: Vec<TopicInfo>,
     },
-    /// Offset commit (Phase 3 placeholder).
-    OffsetCommit,
-    /// Offset fetch (Phase 3 placeholder).
-    OffsetFetch,
+    /// Offset commit result.
+    OffsetCommit {
+        /// 0 = ok.
+        error_code: u16,
+    },
+    /// Offset fetch result.
+    OffsetFetch {
+        /// 0 = ok.
+        error_code: u16,
+        /// Committed offsets.
+        entries: Vec<OffsetFetchEntry>,
+    },
+    /// Join group result.
+    JoinGroup {
+        /// 0 = ok.
+        error_code: u16,
+        /// Group generation.
+        generation: u32,
+        /// Broker-assigned member id.
+        member_id: String,
+        /// This member's partition assignment.
+        assignment: Vec<Assignment>,
+    },
+    /// Heartbeat result.
+    Heartbeat {
+        /// 0 = ok; 9 = rebalance (client should re-JoinGroup).
+        error_code: u16,
+    },
+    /// Leave group result.
+    LeaveGroup {
+        /// 0 = ok.
+        error_code: u16,
+    },
     /// Error response.
     Error {
         /// Error code.
@@ -208,8 +280,11 @@ impl Response {
             Self::CreateTopic { .. } => ResponseOpcode::CreateTopic as u16,
             Self::DeleteTopic { .. } => ResponseOpcode::DeleteTopic as u16,
             Self::Metadata { .. } => ResponseOpcode::Metadata as u16,
-            Self::OffsetCommit => ResponseOpcode::OffsetCommit as u16,
-            Self::OffsetFetch => ResponseOpcode::OffsetFetch as u16,
+            Self::OffsetCommit { .. } => ResponseOpcode::OffsetCommit as u16,
+            Self::OffsetFetch { .. } => ResponseOpcode::OffsetFetch as u16,
+            Self::JoinGroup { .. } => ResponseOpcode::JoinGroup as u16,
+            Self::Heartbeat { .. } => ResponseOpcode::Heartbeat as u16,
+            Self::LeaveGroup { .. } => ResponseOpcode::LeaveGroup as u16,
             Self::Error { .. } => ResponseOpcode::Error as u16,
         }
     }

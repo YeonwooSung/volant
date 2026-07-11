@@ -164,27 +164,42 @@ Binding wire format and APIs: **[docs/PHASE2_SPEC.md](./docs/PHASE2_SPEC.md)**.
 
 ---
 
-### Phase 3 — Consumer groups & offsets *(next)*
+### Phase 3 — Consumer groups & offsets ✅
 
 **Goal:** Coordinated multi-consumer reading with committed offsets.
 
+Binding wire format and APIs: **[docs/PHASE3_SPEC.md](./docs/PHASE3_SPEC.md)**.
+
 **Milestones**
 
-1. Internal `__consumer_offsets` topic (or dedicated offset store)
-2. Group membership + heartbeat + rebalance (eager rebalance first)
-3. `OffsetCommit` / `OffsetFetch`
-4. Assignor: range + sticky (cooperative later)
-5. Lag metrics per group / partition
+1. File-backed offset store (`{data_dir}/__consumer_offsets/...`)
+   - [x] Durable `OffsetCommit` / `OffsetFetch` with fsync
+2. Group membership + heartbeat + rebalance (eager rebalance)
+   - [x] Server-side `GroupCoordinator` (Join / Heartbeat / Leave)
+   - [x] Session expiry background task
+3. Protocol opcodes 6–10 + error codes 9–12
+   - [x] LE payload encode/decode roundtrips
+4. Assignor
+   - [x] Range assignor (uneven partitions covered by unit tests)
+   - [ ] Sticky / cooperative assignor — deferred to Phase 3.1
+5. Client + CLI
+   - [x] `GroupConsumer` (join / poll / commit / leave)
+   - [x] `volant group fetch-offsets` / `volant group commit`
+   - [x] `volant consume --group G`
+6. Lag metrics per group / partition
+   - [ ] Stretch / Phase 3 polish
 
 **Exit criteria**
 
-- Two consumers in one group split partitions
-- Restart resumes from committed offsets
-- Rebalance completes without stuck partitions
+- [x] Two consumers in one group split partitions (`e2e_group.rs`)
+- [x] Restart resumes from committed offsets
+- [x] Rebalance completes without stuck partitions (leave → remaining gets all)
+
+**Non-goals for Phase 3:** cooperative sticky assignor, static membership, cross-node coordinator, transactional offsets.
 
 ---
 
-### Phase 4 — Stream processing (lightweight)
+### Phase 4 — Stream processing (lightweight) *(next)*
 
 **Goal:** Kafka Streams–like operators without a heavy runtime.
 
@@ -341,4 +356,4 @@ cargo run -p volant-bench --release
 cargo test --workspace
 ```
 
-Phase 2 complete. Next: **Phase 3 — consumer groups and committed offsets**.
+Phase 3 complete. Next: **Phase 4 — lightweight stream processing operators**.

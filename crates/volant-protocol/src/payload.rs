@@ -1,11 +1,14 @@
-//! Little-endian payload encode/decode for Phase 2 request/response bodies.
+//! Little-endian payload encode/decode for Phase 2/3 request/response bodies.
 
 use bytes::{Buf, BufMut, Bytes, BytesMut};
 use volant_core::{Error, Result};
 
-use crate::request::{ProduceMessage, Request, RequestOpcode};
+use crate::request::{
+    OffsetCommitEntry, OffsetEntry, ProduceMessage, Request, RequestOpcode,
+};
 use crate::response::{
-    BrokerInfo, ErrorCode, FetchRecord, PartitionInfo, Response, ResponseOpcode, TopicInfo,
+    Assignment, BrokerInfo, ErrorCode, FetchRecord, OffsetFetchEntry, PartitionInfo, Response,
+    ResponseOpcode, TopicInfo,
 };
 use crate::frame::{Frame, FrameHeader, PROTOCOL_VERSION};
 use crate::codec::checksum;
@@ -107,6 +110,16 @@ fn get_headers(src: &mut impl Buf) -> Result<Vec<(String, Bytes)>> {
     Ok(headers)
 }
 
+fn finish_payload(dst: BytesMut) -> Result<Bytes> {
+    if dst.len() > MAX_PAYLOAD {
+        return Err(Error::Protocol(format!(
+            "payload too large: {} > {MAX_PAYLOAD}",
+            dst.len()
+        )));
+    }
+    Ok(dst.freeze())
+}
+
 /// Encode a request body to little-endian payload bytes.
 pub fn encode_request(req: &Request) -> Result<Bytes> {
     let mut dst = BytesMut::new();
@@ -156,17 +169,63 @@ pub fn encode_request(req: &Request) -> Result<Bytes> {
         Request::DeleteTopic { name } => {
             put_string(&mut dst, name)?;
         }
-        Request::OffsetCommit | Request::OffsetFetch => {
-            return Err(Error::Protocol("offset APIs reserved for Phase 3".into()));
+        Request::OffsetCommit {
+            group_id,
+            member_id,
+            generation,
+            entries,
+        } => {
+            put_string(&mut dst, group_id)?;
+            put_string(&mut dst, member_id)?;
+            dst.put_u32_le(*generation);
+            dst.put_u32_le(entries.len() as u32);
+            for e in entries {
+                put_string(&mut dst, &e.topic)?;
+                dst.put_u32_le(e.partition);
+                dst.put_u64_le(e.offset);
+                put_string(&mut dst, &e.metadata)?;
+            }
+        }
+        Request::OffsetFetch { group_id, entries } => {
+            put_string(&mut dst, group_id)?;
+            dst.put_u32_le(entries.len() as u32);
+            for e in entries {
+                put_string(&mut dst, &e.topic)?;
+                dst.put_u32_le(e.partition);
+            }
+        }
+        Request::JoinGroup {
+            group_id,
+            member_id,
+            session_timeout_ms,
+            topics,
+        } => {
+            put_string(&mut dst, group_id)?;
+            put_string(&mut dst, member_id)?;
+            dst.put_u32_le(*session_timeout_ms);
+            dst.put_u32_le(topics.len() as u32);
+            for t in topics {
+                put_string(&mut dst, t)?;
+            }
+        }
+        Request::Heartbeat {
+            group_id,
+            member_id,
+            generation,
+        } => {
+            put_string(&mut dst, group_id)?;
+            put_string(&mut dst, member_id)?;
+            dst.put_u32_le(*generation);
+        }
+        Request::LeaveGroup {
+            group_id,
+            member_id,
+        } => {
+            put_string(&mut dst, group_id)?;
+            put_string(&mut dst, member_id)?;
         }
     }
-    if dst.len() > MAX_PAYLOAD {
-        return Err(Error::Protocol(format!(
-            "payload too large: {} > {MAX_PAYLOAD}",
-            dst.len()
-        )));
-    }
-    Ok(dst.freeze())
+    finish_payload(dst)
 }
 
 /// Decode a request body given its opcode.
@@ -250,8 +309,95 @@ pub fn decode_request(opcode: u16, payload: &[u8]) -> Result<Request> {
         RequestOpcode::DeleteTopic => Ok(Request::DeleteTopic {
             name: get_string(&mut src)?,
         }),
-        RequestOpcode::OffsetCommit => Ok(Request::OffsetCommit),
-        RequestOpcode::OffsetFetch => Ok(Request::OffsetFetch),
+        RequestOpcode::OffsetCommit => {
+            let group_id = get_string(&mut src)?;
+            let member_id = get_string(&mut src)?;
+            if src.remaining() < 4 + 4 {
+                return Err(Error::Protocol("truncated offset commit header".into()));
+            }
+            let generation = src.get_u32_le();
+            let entry_count = src.get_u32_le() as usize;
+            let mut entries = Vec::with_capacity(entry_count);
+            for _ in 0..entry_count {
+                let topic = get_string(&mut src)?;
+                if src.remaining() < 4 + 8 {
+                    return Err(Error::Protocol("truncated offset commit entry".into()));
+                }
+                let partition = src.get_u32_le();
+                let offset = src.get_u64_le();
+                let metadata = get_string(&mut src)?;
+                entries.push(OffsetCommitEntry {
+                    topic,
+                    partition,
+                    offset,
+                    metadata,
+                });
+            }
+            Ok(Request::OffsetCommit {
+                group_id,
+                member_id,
+                generation,
+                entries,
+            })
+        }
+        RequestOpcode::OffsetFetch => {
+            let group_id = get_string(&mut src)?;
+            if src.remaining() < 4 {
+                return Err(Error::Protocol("truncated offset fetch entry count".into()));
+            }
+            let entry_count = src.get_u32_le() as usize;
+            let mut entries = Vec::with_capacity(entry_count);
+            for _ in 0..entry_count {
+                let topic = get_string(&mut src)?;
+                if src.remaining() < 4 {
+                    return Err(Error::Protocol("truncated offset fetch partition".into()));
+                }
+                entries.push(OffsetEntry {
+                    topic,
+                    partition: src.get_u32_le(),
+                });
+            }
+            Ok(Request::OffsetFetch { group_id, entries })
+        }
+        RequestOpcode::JoinGroup => {
+            let group_id = get_string(&mut src)?;
+            let member_id = get_string(&mut src)?;
+            if src.remaining() < 4 + 4 {
+                return Err(Error::Protocol("truncated join group header".into()));
+            }
+            let session_timeout_ms = src.get_u32_le();
+            let topic_count = src.get_u32_le() as usize;
+            let mut topics = Vec::with_capacity(topic_count);
+            for _ in 0..topic_count {
+                topics.push(get_string(&mut src)?);
+            }
+            Ok(Request::JoinGroup {
+                group_id,
+                member_id,
+                session_timeout_ms,
+                topics,
+            })
+        }
+        RequestOpcode::Heartbeat => {
+            let group_id = get_string(&mut src)?;
+            let member_id = get_string(&mut src)?;
+            if src.remaining() < 4 {
+                return Err(Error::Protocol("truncated heartbeat generation".into()));
+            }
+            Ok(Request::Heartbeat {
+                group_id,
+                member_id,
+                generation: src.get_u32_le(),
+            })
+        }
+        RequestOpcode::LeaveGroup => {
+            let group_id = get_string(&mut src)?;
+            let member_id = get_string(&mut src)?;
+            Ok(Request::LeaveGroup {
+                group_id,
+                member_id,
+            })
+        }
     }
 }
 
@@ -327,21 +473,49 @@ pub fn encode_response(resp: &Response) -> Result<Bytes> {
                 }
             }
         }
-        Response::OffsetCommit | Response::OffsetFetch => {
-            return Err(Error::Protocol("offset APIs reserved for Phase 3".into()));
+        Response::OffsetCommit { error_code } => {
+            dst.put_u16_le(*error_code);
+        }
+        Response::OffsetFetch {
+            error_code,
+            entries,
+        } => {
+            dst.put_u16_le(*error_code);
+            dst.put_u32_le(entries.len() as u32);
+            for e in entries {
+                put_string(&mut dst, &e.topic)?;
+                dst.put_u32_le(e.partition);
+                dst.put_u64_le(e.offset);
+                put_string(&mut dst, &e.metadata)?;
+            }
+        }
+        Response::JoinGroup {
+            error_code,
+            generation,
+            member_id,
+            assignment,
+        } => {
+            dst.put_u16_le(*error_code);
+            dst.put_u32_le(*generation);
+            put_string(&mut dst, member_id)?;
+            dst.put_u32_le(assignment.len() as u32);
+            for a in assignment {
+                put_string(&mut dst, &a.topic)?;
+                dst.put_u32_le(a.partition);
+            }
+        }
+        Response::Heartbeat { error_code } => {
+            dst.put_u16_le(*error_code);
+        }
+        Response::LeaveGroup { error_code } => {
+            dst.put_u16_le(*error_code);
         }
         Response::Error { code, message } => {
             dst.put_u16_le(*code);
             put_string(&mut dst, message)?;
         }
     }
-    if dst.len() > MAX_PAYLOAD {
-        return Err(Error::Protocol(format!(
-            "payload too large: {} > {MAX_PAYLOAD}",
-            dst.len()
-        )));
-    }
-    Ok(dst.freeze())
+    finish_payload(dst)
 }
 
 /// Decode a response body given its opcode.
@@ -485,15 +659,92 @@ pub fn decode_response(opcode: u16, payload: &[u8]) -> Result<Response> {
             }
             Ok(Response::Metadata { brokers, topics })
         }
-        ResponseOpcode::OffsetCommit => Ok(Response::OffsetCommit),
-        ResponseOpcode::OffsetFetch => Ok(Response::OffsetFetch),
+        ResponseOpcode::OffsetCommit => {
+            if src.remaining() < 2 {
+                return Err(Error::Protocol("truncated offset commit error".into()));
+            }
+            Ok(Response::OffsetCommit {
+                error_code: src.get_u16_le(),
+            })
+        }
+        ResponseOpcode::OffsetFetch => {
+            if src.remaining() < 2 + 4 {
+                return Err(Error::Protocol("truncated offset fetch header".into()));
+            }
+            let error_code = src.get_u16_le();
+            let entry_count = src.get_u32_le() as usize;
+            let mut entries = Vec::with_capacity(entry_count);
+            for _ in 0..entry_count {
+                let topic = get_string(&mut src)?;
+                if src.remaining() < 4 + 8 {
+                    return Err(Error::Protocol("truncated offset fetch entry".into()));
+                }
+                let partition = src.get_u32_le();
+                let offset = src.get_u64_le();
+                let metadata = get_string(&mut src)?;
+                entries.push(OffsetFetchEntry {
+                    topic,
+                    partition,
+                    offset,
+                    metadata,
+                });
+            }
+            Ok(Response::OffsetFetch {
+                error_code,
+                entries,
+            })
+        }
+        ResponseOpcode::JoinGroup => {
+            if src.remaining() < 2 + 4 {
+                return Err(Error::Protocol("truncated join group header".into()));
+            }
+            let error_code = src.get_u16_le();
+            let generation = src.get_u32_le();
+            let member_id = get_string(&mut src)?;
+            if src.remaining() < 4 {
+                return Err(Error::Protocol("truncated join group assignment count".into()));
+            }
+            let assignment_count = src.get_u32_le() as usize;
+            let mut assignment = Vec::with_capacity(assignment_count);
+            for _ in 0..assignment_count {
+                let topic = get_string(&mut src)?;
+                if src.remaining() < 4 {
+                    return Err(Error::Protocol("truncated join group partition".into()));
+                }
+                assignment.push(Assignment {
+                    topic,
+                    partition: src.get_u32_le(),
+                });
+            }
+            Ok(Response::JoinGroup {
+                error_code,
+                generation,
+                member_id,
+                assignment,
+            })
+        }
+        ResponseOpcode::Heartbeat => {
+            if src.remaining() < 2 {
+                return Err(Error::Protocol("truncated heartbeat error".into()));
+            }
+            Ok(Response::Heartbeat {
+                error_code: src.get_u16_le(),
+            })
+        }
+        ResponseOpcode::LeaveGroup => {
+            if src.remaining() < 2 {
+                return Err(Error::Protocol("truncated leave group error".into()));
+            }
+            Ok(Response::LeaveGroup {
+                error_code: src.get_u16_le(),
+            })
+        }
         ResponseOpcode::Error => {
             if src.remaining() < 2 {
                 return Err(Error::Protocol("truncated error code".into()));
             }
             let code = src.get_u16_le();
             let message = get_string(&mut src)?;
-            // Validate known mapping without failing on unknown codes.
             let _ = ErrorCode::from_u16(code);
             Ok(Response::Error { code, message })
         }
@@ -535,7 +786,7 @@ pub fn pack_response(corr: u32, resp: &Response) -> Result<Frame> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::request::ProduceMessage;
+    use crate::request::{OffsetCommitEntry, OffsetEntry, ProduceMessage};
 
     #[test]
     fn produce_roundtrip() {
@@ -616,5 +867,139 @@ mod tests {
         let frame = pack_request(99, &req).unwrap();
         assert_eq!(frame.header.correlation_id, 99);
         assert_eq!(frame.header.checksum, checksum(&frame.payload));
+    }
+
+    #[test]
+    fn group_request_roundtrips() {
+        let join = Request::JoinGroup {
+            group_id: "g1".into(),
+            member_id: "".into(),
+            session_timeout_ms: 10_000,
+            topics: vec!["events".into(), "logs".into()],
+        };
+        let b = encode_request(&join).unwrap();
+        assert_eq!(
+            decode_request(RequestOpcode::JoinGroup as u16, &b).unwrap(),
+            join
+        );
+
+        let hb = Request::Heartbeat {
+            group_id: "g1".into(),
+            member_id: "m1".into(),
+            generation: 3,
+        };
+        let b = encode_request(&hb).unwrap();
+        assert_eq!(
+            decode_request(RequestOpcode::Heartbeat as u16, &b).unwrap(),
+            hb
+        );
+
+        let leave = Request::LeaveGroup {
+            group_id: "g1".into(),
+            member_id: "m1".into(),
+        };
+        let b = encode_request(&leave).unwrap();
+        assert_eq!(
+            decode_request(RequestOpcode::LeaveGroup as u16, &b).unwrap(),
+            leave
+        );
+
+        let commit = Request::OffsetCommit {
+            group_id: "g1".into(),
+            member_id: "m1".into(),
+            generation: 2,
+            entries: vec![OffsetCommitEntry {
+                topic: "events".into(),
+                partition: 1,
+                offset: 42,
+                metadata: "cli".into(),
+            }],
+        };
+        let b = encode_request(&commit).unwrap();
+        assert_eq!(
+            decode_request(RequestOpcode::OffsetCommit as u16, &b).unwrap(),
+            commit
+        );
+
+        let fetch = Request::OffsetFetch {
+            group_id: "g1".into(),
+            entries: vec![OffsetEntry {
+                topic: "events".into(),
+                partition: 1,
+            }],
+        };
+        let b = encode_request(&fetch).unwrap();
+        assert_eq!(
+            decode_request(RequestOpcode::OffsetFetch as u16, &b).unwrap(),
+            fetch
+        );
+
+        // Empty entry_count = all offsets.
+        let fetch_all = Request::OffsetFetch {
+            group_id: "g1".into(),
+            entries: vec![],
+        };
+        let b = encode_request(&fetch_all).unwrap();
+        assert_eq!(
+            decode_request(RequestOpcode::OffsetFetch as u16, &b).unwrap(),
+            fetch_all
+        );
+    }
+
+    #[test]
+    fn group_response_roundtrips() {
+        let join = Response::JoinGroup {
+            error_code: 0,
+            generation: 1,
+            member_id: "uuid-1".into(),
+            assignment: vec![
+                Assignment {
+                    topic: "events".into(),
+                    partition: 0,
+                },
+                Assignment {
+                    topic: "events".into(),
+                    partition: 1,
+                },
+            ],
+        };
+        let b = encode_response(&join).unwrap();
+        assert_eq!(
+            decode_response(ResponseOpcode::JoinGroup as u16, &b).unwrap(),
+            join
+        );
+
+        let of = Response::OffsetFetch {
+            error_code: 0,
+            entries: vec![OffsetFetchEntry {
+                topic: "events".into(),
+                partition: 0,
+                offset: u64::MAX,
+                metadata: "".into(),
+            }],
+        };
+        let b = encode_response(&of).unwrap();
+        assert_eq!(
+            decode_response(ResponseOpcode::OffsetFetch as u16, &b).unwrap(),
+            of
+        );
+
+        for (resp, op) in [
+            (
+                Response::OffsetCommit { error_code: 0 },
+                ResponseOpcode::OffsetCommit as u16,
+            ),
+            (
+                Response::Heartbeat { error_code: 9 },
+                ResponseOpcode::Heartbeat as u16,
+            ),
+            (
+                Response::LeaveGroup { error_code: 0 },
+                ResponseOpcode::LeaveGroup as u16,
+            ),
+        ] {
+            let b = encode_response(&resp).unwrap();
+            assert_eq!(decode_response(op, &b).unwrap(), resp);
+        }
     }
 }

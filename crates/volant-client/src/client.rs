@@ -9,8 +9,8 @@ use tokio::sync::Mutex;
 use volant_core::{Error, Message, Offset, Result, TopicId};
 use volant_protocol::codec::{decode_frame, encode_frame};
 use volant_protocol::{
-    decode_response, pack_request, BrokerInfo, ErrorCode, FetchRecord, ProduceMessage, Request,
-    Response, TopicInfo,
+    decode_response, pack_request, Assignment, BrokerInfo, ErrorCode, FetchRecord,
+    OffsetCommitEntry, OffsetEntry, OffsetFetchEntry, ProduceMessage, Request, Response, TopicInfo,
 };
 
 use crate::config::ClientConfig;
@@ -48,6 +48,33 @@ pub struct Metadata {
     pub brokers: Vec<BrokerInfo>,
     /// Topics.
     pub topics: Vec<TopicInfo>,
+}
+
+/// Result of a successful JoinGroup.
+#[derive(Debug, Clone)]
+pub struct JoinGroupResult {
+    /// Group generation.
+    pub generation: u32,
+    /// Broker-assigned member id.
+    pub member_id: String,
+    /// Partition assignment for this member.
+    pub assignment: Vec<Assignment>,
+}
+
+/// Result of a Heartbeat call.
+#[derive(Debug, Clone)]
+pub struct HeartbeatResult {
+    /// Embedded error code (`0` ok; `9` rebalance in progress).
+    pub error_code: u16,
+}
+
+impl HeartbeatResult {
+    /// Whether the client should re-join the group.
+    pub fn needs_rebalance(&self) -> bool {
+        self.error_code == ErrorCode::RebalanceInProgress as u16
+            || self.error_code == ErrorCode::IllegalGeneration as u16
+            || self.error_code == ErrorCode::UnknownMemberId as u16
+    }
 }
 
 /// Async TCP client (sequential request/response over one connection).
@@ -237,6 +264,143 @@ impl Client {
         }
     }
 
+    /// Join a consumer group; returns generation, member id, and assignment.
+    pub async fn join_group(
+        &self,
+        group_id: &str,
+        member_id: &str,
+        session_timeout_ms: u32,
+        topics: Vec<String>,
+    ) -> Result<JoinGroupResult> {
+        let resp = self
+            .round_trip(Request::JoinGroup {
+                group_id: group_id.to_owned(),
+                member_id: member_id.to_owned(),
+                session_timeout_ms,
+                topics,
+            })
+            .await?;
+        match resp {
+            Response::JoinGroup {
+                error_code,
+                generation,
+                member_id,
+                assignment,
+            } => {
+                check_ok(error_code, "join_group")?;
+                Ok(JoinGroupResult {
+                    generation,
+                    member_id,
+                    assignment,
+                })
+            }
+            Response::Error { code, message } => Err(error_from_code(code, message)),
+            other => Err(Error::Protocol(format!(
+                "unexpected response for join_group: {other:?}"
+            ))),
+        }
+    }
+
+    /// Heartbeat for group membership. Returns `true` if rebalance is required.
+    pub async fn heartbeat(
+        &self,
+        group_id: &str,
+        member_id: &str,
+        generation: u32,
+    ) -> Result<HeartbeatResult> {
+        let resp = self
+            .round_trip(Request::Heartbeat {
+                group_id: group_id.to_owned(),
+                member_id: member_id.to_owned(),
+                generation,
+            })
+            .await?;
+        match resp {
+            Response::Heartbeat { error_code } => Ok(HeartbeatResult { error_code }),
+            Response::Error { code, message } => Err(error_from_code(code, message)),
+            other => Err(Error::Protocol(format!(
+                "unexpected response for heartbeat: {other:?}"
+            ))),
+        }
+    }
+
+    /// Leave a consumer group.
+    pub async fn leave_group(&self, group_id: &str, member_id: &str) -> Result<()> {
+        let resp = self
+            .round_trip(Request::LeaveGroup {
+                group_id: group_id.to_owned(),
+                member_id: member_id.to_owned(),
+            })
+            .await?;
+        match resp {
+            Response::LeaveGroup { error_code } => {
+                check_ok(error_code, "leave_group")?;
+                Ok(())
+            }
+            Response::Error { code, message } => Err(error_from_code(code, message)),
+            other => Err(Error::Protocol(format!(
+                "unexpected response for leave_group: {other:?}"
+            ))),
+        }
+    }
+
+    /// Commit offsets for a consumer group.
+    ///
+    /// Pass `generation = 0` for admin/CLI commits that skip generation checks.
+    pub async fn commit_offsets(
+        &self,
+        group_id: &str,
+        member_id: &str,
+        generation: u32,
+        entries: Vec<OffsetCommitEntry>,
+    ) -> Result<()> {
+        let resp = self
+            .round_trip(Request::OffsetCommit {
+                group_id: group_id.to_owned(),
+                member_id: member_id.to_owned(),
+                generation,
+                entries,
+            })
+            .await?;
+        match resp {
+            Response::OffsetCommit { error_code } => {
+                check_ok(error_code, "commit_offsets")?;
+                Ok(())
+            }
+            Response::Error { code, message } => Err(error_from_code(code, message)),
+            other => Err(Error::Protocol(format!(
+                "unexpected response for commit_offsets: {other:?}"
+            ))),
+        }
+    }
+
+    /// Fetch committed offsets. Empty `entries` returns all offsets for the group.
+    pub async fn fetch_offsets(
+        &self,
+        group_id: &str,
+        entries: Vec<OffsetEntry>,
+    ) -> Result<Vec<OffsetFetchEntry>> {
+        let resp = self
+            .round_trip(Request::OffsetFetch {
+                group_id: group_id.to_owned(),
+                entries,
+            })
+            .await?;
+        match resp {
+            Response::OffsetFetch {
+                error_code,
+                entries,
+            } => {
+                check_ok(error_code, "fetch_offsets")?;
+                Ok(entries)
+            }
+            Response::Error { code, message } => Err(error_from_code(code, message)),
+            other => Err(Error::Protocol(format!(
+                "unexpected response for fetch_offsets: {other:?}"
+            ))),
+        }
+    }
+
     async fn round_trip(&self, req: Request) -> Result<Response> {
         let corr = self.next_corr.fetch_add(1, Ordering::Relaxed);
         let frame = pack_request(corr, &req)?;
@@ -289,6 +453,10 @@ fn error_from_code(code: u16, message: impl Into<String>) -> Error {
         ErrorCode::Io => Error::Io(std::io::Error::new(std::io::ErrorKind::Other, message)),
         ErrorCode::Unsupported => Error::NotImplemented("unsupported operation"),
         ErrorCode::Timeout => Error::Io(std::io::Error::new(std::io::ErrorKind::TimedOut, message)),
+        ErrorCode::RebalanceInProgress
+        | ErrorCode::UnknownMemberId
+        | ErrorCode::IllegalGeneration
+        | ErrorCode::InconsistentGroupProtocol => Error::Protocol(message),
         ErrorCode::Ok | ErrorCode::Unknown => Error::Protocol(message),
     }
 }

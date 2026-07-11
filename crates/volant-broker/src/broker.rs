@@ -10,6 +10,7 @@ use volant_core::{
 };
 use volant_storage::StorageConfig;
 
+use crate::group::GroupCoordinator;
 use crate::topic::Topic;
 
 /// Snapshot of cluster metadata for a Metadata response.
@@ -59,11 +60,15 @@ pub struct Broker {
     advertised_host: RwLock<String>,
     /// Advertised listen port for metadata.
     advertised_port: AtomicU32,
+    /// Consumer group coordinator + durable offsets.
+    groups: GroupCoordinator,
 }
 
 impl Broker {
     /// Create a broker with the given storage configuration.
     pub fn new(storage: StorageConfig) -> Self {
+        let groups = GroupCoordinator::new(&storage.data_dir)
+            .expect("failed to initialize group coordinator / offset store");
         Self {
             storage,
             topics: RwLock::new(HashMap::new()),
@@ -71,6 +76,7 @@ impl Broker {
             rr_counters: RwLock::new(HashMap::new()),
             advertised_host: RwLock::new("127.0.0.1".into()),
             advertised_port: AtomicU32::new(9092),
+            groups,
         }
     }
 
@@ -298,6 +304,17 @@ impl Broker {
             port,
             topics: topic_meta,
         }
+    }
+
+    /// Access the group coordinator.
+    pub fn groups(&self) -> &GroupCoordinator {
+        &self.groups
+    }
+
+    /// Partition count lookup for group assignment (`None` if topic missing).
+    pub fn partition_count_opt(&self, topic: &str) -> Option<u32> {
+        let name = TopicName::new(topic);
+        self.partition_count(&name).ok()
     }
 }
 

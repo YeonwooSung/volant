@@ -1,10 +1,13 @@
 //! Volant command-line interface.
 
+use std::sync::Arc;
+
 use anyhow::{bail, Context, Result};
 use bytes::Bytes;
 use clap::{Parser, Subcommand};
-use volant_client::{Client, ClientConfig};
+use volant_client::{Client, ClientConfig, GroupConsumer};
 use volant_core::{Message, Offset};
+use volant_protocol::{OffsetCommitEntry, OffsetEntry};
 
 /// Volant CLI — manage topics and produce/consume messages.
 #[derive(Debug, Parser)]
@@ -23,6 +26,11 @@ enum Commands {
         #[command(subcommand)]
         action: TopicCmd,
     },
+    /// Consumer group administration.
+    Group {
+        #[command(subcommand)]
+        action: GroupCmd,
+    },
     /// Produce a message to a topic.
     Produce {
         /// Topic name.
@@ -40,19 +48,25 @@ enum Commands {
         #[arg(long, default_value = "127.0.0.1:9092")]
         broker: String,
     },
-    /// Consume (fetch) messages from a topic partition.
+    /// Consume (fetch) messages from a topic partition, or via a consumer group.
     Consume {
         /// Topic name.
         topic: String,
-        /// Partition to read.
+        /// Partition to read (required unless `--group` is set).
         #[arg(long)]
-        partition: u32,
-        /// Start offset.
+        partition: Option<u32>,
+        /// Start offset (standalone mode only).
         #[arg(long, default_value_t = 0)]
         from: u64,
         /// Maximum messages to fetch.
         #[arg(long, default_value_t = 100)]
         max: u32,
+        /// Consumer group id. When set, joins the group, polls, commits, and leaves.
+        #[arg(long)]
+        group: Option<String>,
+        /// Session timeout ms for group mode.
+        #[arg(long, default_value_t = 10_000)]
+        session_timeout_ms: u32,
         /// Broker address (`host:port`).
         #[arg(long, default_value = "127.0.0.1:9092")]
         broker: String,
@@ -88,13 +102,53 @@ enum TopicCmd {
     },
 }
 
+#[derive(Debug, Subcommand)]
+enum GroupCmd {
+    /// Fetch committed offsets for a consumer group.
+    FetchOffsets {
+        /// Consumer group id.
+        #[arg(long)]
+        group: String,
+        /// Optional topic filter.
+        #[arg(long)]
+        topic: Option<String>,
+        /// Optional partition filter (requires `--topic`).
+        #[arg(long)]
+        partition: Option<u32>,
+        /// Broker address.
+        #[arg(long, default_value = "127.0.0.1:9092")]
+        broker: String,
+    },
+    /// Commit an offset for a consumer group (admin; generation=0).
+    Commit {
+        /// Consumer group id.
+        #[arg(long)]
+        group: String,
+        /// Topic name.
+        #[arg(long)]
+        topic: String,
+        /// Partition id.
+        #[arg(long)]
+        partition: u32,
+        /// Offset to commit (next offset to read).
+        #[arg(long)]
+        offset: u64,
+        /// Optional metadata string.
+        #[arg(long, default_value = "")]
+        metadata: String,
+        /// Broker address.
+        #[arg(long, default_value = "127.0.0.1:9092")]
+        broker: String,
+    },
+}
+
 #[tokio::main]
 async fn main() -> Result<()> {
     let cli = Cli::parse();
     match cli.command {
         Commands::Version => {
             println!("volant {}", env!("CARGO_PKG_VERSION"));
-            println!("status: Phase 2 — networked produce/consume");
+            println!("status: Phase 3 — consumer groups & offsets");
         }
         Commands::Topic { action } => match action {
             TopicCmd::List { broker } => {
@@ -137,6 +191,72 @@ async fn main() -> Result<()> {
                 println!("deleted topic '{name}'");
             }
         },
+        Commands::Group { action } => match action {
+            GroupCmd::FetchOffsets {
+                group,
+                topic,
+                partition,
+                broker,
+            } => {
+                if partition.is_some() && topic.is_none() {
+                    bail!("--partition requires --topic");
+                }
+                let client = connect(&broker).await?;
+                let entries = match (topic.as_deref(), partition) {
+                    (Some(t), Some(p)) => vec![OffsetEntry {
+                        topic: t.to_owned(),
+                        partition: p,
+                    }],
+                    (Some(t), None) => {
+                        // Fetch all then filter by topic.
+                        let all = client
+                            .fetch_offsets(&group, vec![])
+                            .await
+                            .context("fetch_offsets")?;
+                        let filtered: Vec<_> = all
+                            .into_iter()
+                            .filter(|e| e.topic == t)
+                            .collect();
+                        print_offsets(&group, &filtered);
+                        return Ok(());
+                    }
+                    (None, None) => vec![],
+                    (None, Some(_)) => unreachable!(),
+                };
+                let fetched = client
+                    .fetch_offsets(&group, entries)
+                    .await
+                    .context("fetch_offsets")?;
+                print_offsets(&group, &fetched);
+            }
+            GroupCmd::Commit {
+                group,
+                topic,
+                partition,
+                offset,
+                metadata,
+                broker,
+            } => {
+                let client = connect(&broker).await?;
+                client
+                    .commit_offsets(
+                        &group,
+                        "",
+                        0, // admin commit: skip generation check
+                        vec![OffsetCommitEntry {
+                            topic: topic.clone(),
+                            partition,
+                            offset,
+                            metadata,
+                        }],
+                    )
+                    .await
+                    .context("commit_offsets")?;
+                println!(
+                    "committed group={group} topic={topic} partition={partition} offset={offset}"
+                );
+            }
+        },
         Commands::Produce {
             topic,
             value,
@@ -163,40 +283,119 @@ async fn main() -> Result<()> {
             partition,
             from,
             max,
+            group,
+            session_timeout_ms,
             broker,
         } => {
-            let client = connect(&broker).await?;
-            let result = client
-                .fetch(&topic, partition, Offset::new(from), max, 0)
+            if let Some(group_id) = group {
+                // Group path: join → poll (until max msgs or empty) → commit → leave.
+                let client = Arc::new(connect(&broker).await?);
+                let mut consumer = GroupConsumer::join(
+                    client,
+                    group_id.clone(),
+                    vec![topic.clone()],
+                    session_timeout_ms,
+                )
                 .await
-                .with_context(|| format!("consume from '{topic}' p{partition}"))?;
-            if result.records.is_empty() {
+                .with_context(|| format!("join group '{group_id}'"))?;
+
                 println!(
-                    "(no records) topic={} partition={} hwm={}",
-                    result.topic, result.partition, result.high_watermark
+                    "joined group={group_id} member={} generation={} assignment={:?}",
+                    consumer.member_id(),
+                    consumer.generation(),
+                    consumer.assignment()
                 );
+
+                let mut total = 0u32;
+                loop {
+                    let records = consumer.poll().await.context("group poll")?;
+                    if records.is_empty() {
+                        break;
+                    }
+                    for r in &records {
+                        let key = r
+                            .record
+                            .key
+                            .as_ref()
+                            .map(|k| String::from_utf8_lossy(k).into_owned())
+                            .unwrap_or_else(|| "-".into());
+                        let val = String::from_utf8_lossy(&r.record.value);
+                        println!(
+                            "topic={} partition={} offset={} key={} value={} ts={}",
+                            r.topic, r.partition, r.record.offset, key, val, r.record.timestamp_ms
+                        );
+                        total += 1;
+                        if total >= max {
+                            break;
+                        }
+                    }
+                    if total >= max {
+                        break;
+                    }
+                }
+                consumer.commit().await.context("group commit")?;
+                println!("committed offsets for group={group_id} ({total} record(s))");
+                consumer.leave().await.context("group leave")?;
             } else {
-                for r in &result.records {
-                    let key = r
-                        .key
-                        .as_ref()
-                        .map(|k| String::from_utf8_lossy(k).into_owned())
-                        .unwrap_or_else(|| "-".into());
-                    let val = String::from_utf8_lossy(&r.value);
+                let partition = partition.ok_or_else(|| {
+                    anyhow::anyhow!("--partition is required unless --group is set")
+                })?;
+                let client = connect(&broker).await?;
+                let result = client
+                    .fetch(&topic, partition, Offset::new(from), max, 0)
+                    .await
+                    .with_context(|| format!("consume from '{topic}' p{partition}"))?;
+                if result.records.is_empty() {
                     println!(
-                        "offset={} key={} value={} ts={}",
-                        r.offset, key, val, r.timestamp_ms
+                        "(no records) topic={} partition={} hwm={}",
+                        result.topic, result.partition, result.high_watermark
+                    );
+                } else {
+                    for r in &result.records {
+                        let key = r
+                            .key
+                            .as_ref()
+                            .map(|k| String::from_utf8_lossy(k).into_owned())
+                            .unwrap_or_else(|| "-".into());
+                        let val = String::from_utf8_lossy(&r.value);
+                        println!(
+                            "offset={} key={} value={} ts={}",
+                            r.offset, key, val, r.timestamp_ms
+                        );
+                    }
+                    println!(
+                        "fetched {} record(s) hwm={}",
+                        result.records.len(),
+                        result.high_watermark
                     );
                 }
-                println!(
-                    "fetched {} record(s) hwm={}",
-                    result.records.len(),
-                    result.high_watermark
-                );
             }
         }
     }
     Ok(())
+}
+
+fn print_offsets(group: &str, entries: &[volant_protocol::OffsetFetchEntry]) {
+    if entries.is_empty() {
+        println!("(no committed offsets) group={group}");
+        return;
+    }
+    for e in entries {
+        let off = if e.offset == u64::MAX {
+            "unknown".to_string()
+        } else {
+            e.offset.to_string()
+        };
+        let meta = if e.metadata.is_empty() {
+            "-".to_string()
+        } else {
+            e.metadata.clone()
+        };
+        println!(
+            "group={} topic={} partition={} offset={} metadata={}",
+            group, e.topic, e.partition, off, meta
+        );
+    }
 }
 
 async fn connect(broker: &str) -> Result<Client> {

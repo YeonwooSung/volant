@@ -11,8 +11,8 @@ use tracing::{debug, error, info};
 use volant_core::{Error, Message, MessageBatch, Offset, PartitionId, Result, TopicName};
 use volant_protocol::codec::{decode_frame, encode_frame};
 use volant_protocol::{
-    decode_request, pack_response, BrokerInfo, ErrorCode, FetchRecord, Frame, PartitionInfo,
-    Request, Response, TopicInfo,
+    decode_request, pack_response, Assignment, BrokerInfo, ErrorCode, FetchRecord, Frame,
+    OffsetFetchEntry, PartitionInfo, Request, Response, TopicInfo,
 };
 
 use crate::broker::Broker;
@@ -32,6 +32,19 @@ pub async fn serve_listener(listener: TcpListener, broker: Arc<Broker>) -> Resul
         broker.set_advertised(local.ip().to_string(), local.port());
         info!(%local, "volant broker accept loop started");
     }
+
+    // Periodic session expiry for consumer groups.
+    {
+        let b = Arc::clone(&broker);
+        tokio::spawn(async move {
+            let mut interval = tokio::time::interval(Duration::from_millis(500));
+            loop {
+                interval.tick().await;
+                b.groups().expire_sessions(|topic| b.partition_count_opt(topic));
+            }
+        });
+    }
+
     loop {
         match listener.accept().await {
             Ok((stream, peer)) => {
@@ -242,9 +255,90 @@ async fn handle_request(broker: &Broker, req: Request) -> Result<Response> {
                 records: wire_records,
             })
         }
-        Request::OffsetCommit | Request::OffsetFetch => Err(Error::NotImplemented(
-            "offset commit/fetch reserved for Phase 3",
-        )),
+        Request::JoinGroup {
+            group_id,
+            member_id,
+            session_timeout_ms,
+            topics,
+        } => {
+            let result = broker.groups().join(
+                &group_id,
+                &member_id,
+                session_timeout_ms,
+                topics,
+                |t| broker.partition_count_opt(t),
+            )?;
+            Ok(Response::JoinGroup {
+                error_code: result.error_code,
+                generation: result.generation,
+                member_id: result.member_id,
+                assignment: result
+                    .assignment
+                    .into_iter()
+                    .map(|(topic, partition)| Assignment { topic, partition })
+                    .collect(),
+            })
+        }
+        Request::Heartbeat {
+            group_id,
+            member_id,
+            generation,
+        } => {
+            let result = broker
+                .groups()
+                .heartbeat(&group_id, &member_id, generation);
+            Ok(Response::Heartbeat {
+                error_code: result.error_code,
+            })
+        }
+        Request::LeaveGroup {
+            group_id,
+            member_id,
+        } => {
+            let result = broker.groups().leave(&group_id, &member_id, |t| {
+                broker.partition_count_opt(t)
+            });
+            Ok(Response::LeaveGroup {
+                error_code: result.error_code,
+            })
+        }
+        Request::OffsetCommit {
+            group_id,
+            member_id,
+            generation,
+            entries,
+        } => {
+            let wire: Vec<(String, u32, u64, String)> = entries
+                .into_iter()
+                .map(|e| (e.topic, e.partition, e.offset, e.metadata))
+                .collect();
+            let result = broker
+                .groups()
+                .commit_offsets(&group_id, &member_id, generation, &wire)?;
+            Ok(Response::OffsetCommit {
+                error_code: result.error_code,
+            })
+        }
+        Request::OffsetFetch { group_id, entries } => {
+            let wire: Vec<(String, u32)> = entries
+                .into_iter()
+                .map(|e| (e.topic, e.partition))
+                .collect();
+            let result = broker.groups().fetch_offsets(&group_id, &wire)?;
+            Ok(Response::OffsetFetch {
+                error_code: result.error_code,
+                entries: result
+                    .entries
+                    .into_iter()
+                    .map(|e| OffsetFetchEntry {
+                        topic: e.topic,
+                        partition: e.partition,
+                        offset: e.offset,
+                        metadata: e.metadata,
+                    })
+                    .collect(),
+            })
+        }
     }
 }
 

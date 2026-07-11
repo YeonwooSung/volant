@@ -9,9 +9,9 @@ Volant is a resource-efficient alternative to Apache Kafka, built for:
 - **Streaming processing** — first-class operators (`map`, `filter`, windows) without a heavy runtime
 - **Small footprint** — native binary, predictable memory, simple operations
 
-> Status: **Phase 2 complete** — TCP protocol, multi-partition broker, client SDK, and CLI.  
+> Status: **Phase 3 complete** — consumer groups, durable offsets, group CLI, multi-consumer e2e.  
 > APIs and on-disk formats may still change. See [ROADMAP.md](./ROADMAP.md),  
-> [Phase 1 durable log spec](./docs/PHASE1_SPEC.md), and [Phase 2 network protocol spec](./docs/PHASE2_SPEC.md).
+> [Phase 1](./docs/PHASE1_SPEC.md), [Phase 2](./docs/PHASE2_SPEC.md), and [Phase 3](./docs/PHASE3_SPEC.md) specs.
 
 ---
 
@@ -31,7 +31,8 @@ volant/
 │   └── volant-bench      # Storage micro-benchmarks
 ├── docs/
 │   ├── PHASE1_SPEC.md    # Binding durable-log format & API
-│   └── PHASE2_SPEC.md    # Binding TCP protocol & client/server API
+│   ├── PHASE2_SPEC.md    # Binding TCP protocol & client/server API
+│   └── PHASE3_SPEC.md    # Consumer groups & offsets
 ├── ROADMAP.md
 └── Cargo.toml            # Workspace root
 ```
@@ -54,6 +55,11 @@ cargo run -p volant-cli -- topic create events --partitions 3 --broker 127.0.0.1
 cargo run -p volant-cli -- produce events --value hello --broker 127.0.0.1:9092
 cargo run -p volant-cli -- consume events --partition 0 --from 0 --max 10 --broker 127.0.0.1:9092
 cargo run -p volant-cli -- topic list --broker 127.0.0.1:9092
+
+# Consumer groups (Phase 3)
+cargo run -p volant-cli -- group commit --group my-cg --topic events --partition 0 --offset 10 --broker 127.0.0.1:9092
+cargo run -p volant-cli -- group fetch-offsets --group my-cg --broker 127.0.0.1:9092
+cargo run -p volant-cli -- consume events --group my-cg --max 10 --broker 127.0.0.1:9092
 
 # Phase 1 append throughput micro-bench
 cargo run -p volant-bench --release
@@ -133,7 +139,47 @@ Binding details: **[docs/PHASE2_SPEC.md](./docs/PHASE2_SPEC.md)**.
 
 Still deferred: auth, TLS, idempotent producer PID, multi-partition latency bench.
 
-**Next:** Phase 3 — consumer groups & committed offsets.
+---
+
+## Phase 3 — Consumer groups & offsets
+
+Phase 3 is **complete** for the core path:
+
+- Server-side group coordinator (JoinGroup / Heartbeat / LeaveGroup)
+- File-backed durable offsets under `{data_dir}/__consumer_offsets/`
+- Range partition assignor (eager rebalance on join/leave/session timeout)
+- `GroupConsumer` in `volant-client` (join → poll → commit → leave)
+- CLI: `volant group fetch-offsets`, `volant group commit`, `volant consume --group`
+- Multi-consumer e2e (`crates/volant-client/tests/e2e_group.rs`)
+
+Binding details: **[docs/PHASE3_SPEC.md](./docs/PHASE3_SPEC.md)**.
+
+### GroupConsumer (library)
+
+```rust
+use std::sync::Arc;
+use volant_client::{Client, ClientConfig, GroupConsumer};
+
+let client = Arc::new(Client::connect(ClientConfig {
+    brokers: vec!["127.0.0.1:9092".into()],
+    ..ClientConfig::default()
+}).await?);
+
+let mut consumer = GroupConsumer::join(
+    client,
+    "my-cg",
+    vec!["events".into()],
+    10_000,
+).await?;
+
+let records = consumer.poll().await?;
+consumer.commit().await?;
+consumer.leave().await?;
+```
+
+Still deferred: sticky/cooperative assignor (Phase 3.1), lag metrics.
+
+**Next:** Phase 4 — lightweight stream processing operators.
 
 ---
 
@@ -144,8 +190,8 @@ Still deferred: auth, TLS, idempotent producer PID, multi-partition latency benc
 | 0 | Workspace scaffold | **Done** |
 | 1 | Durable segment log + recovery | **Done** |
 | 2 | TCP protocol, multi-partition, client SDK | **Done** |
-| 3 | Consumer groups & offsets | **Next** |
-| 4 | Stream processing operators | Planned |
+| 3 | Consumer groups & offsets | **Done** |
+| 4 | Stream processing operators | **Next** |
 | 5 | io_uring / DMA-oriented I/O | Planned |
 | 6 | Clustering & replication | Planned |
 | 7 | Metrics, TLS, packaging, optional Kafka shim | Planned |

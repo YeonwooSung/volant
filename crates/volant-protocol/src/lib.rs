@@ -16,7 +16,10 @@ pub use payload::{
     decode_request, decode_response, encode_request, encode_response, pack_request, pack_response,
     MAX_PAYLOAD,
 };
-pub use request::{ProduceMessage, Request, RequestOpcode};
+pub use request::{
+    OffsetCommitEntry, OffsetEntry, ProduceMessage, Request, RequestOpcode,
+};
 pub use response::{
-    BrokerInfo, ErrorCode, FetchRecord, PartitionInfo, Response, ResponseOpcode, TopicInfo,
+    Assignment, BrokerInfo, ErrorCode, FetchRecord, OffsetFetchEntry, PartitionInfo, Response,
+    ResponseOpcode, TopicInfo,
 };

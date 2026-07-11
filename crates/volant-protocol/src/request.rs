@@ -2,7 +2,7 @@
 
 use bytes::Bytes;
 
-/// Request opcodes (Phase 2 wire values).
+/// Request opcodes (Phase 2 + Phase 3 wire values).
 #[repr(u16)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum RequestOpcode {
@@ -16,10 +16,16 @@ pub enum RequestOpcode {
     Metadata = 4,
     /// Delete a topic.
     DeleteTopic = 5,
-    /// Commit consumer offsets (Phase 3).
+    /// Commit consumer offsets.
     OffsetCommit = 6,
-    /// Fetch committed offsets (Phase 3).
+    /// Fetch committed offsets.
     OffsetFetch = 7,
+    /// Join a consumer group.
+    JoinGroup = 8,
+    /// Heartbeat for a consumer group member.
+    Heartbeat = 9,
+    /// Leave a consumer group.
+    LeaveGroup = 10,
 }
 
 impl RequestOpcode {
@@ -33,6 +39,9 @@ impl RequestOpcode {
             5 => Self::DeleteTopic,
             6 => Self::OffsetCommit,
             7 => Self::OffsetFetch,
+            8 => Self::JoinGroup,
+            9 => Self::Heartbeat,
+            10 => Self::LeaveGroup,
             _ => return None,
         })
     }
@@ -49,6 +58,28 @@ pub struct ProduceMessage {
     pub timestamp_ms: i64,
     /// Optional headers.
     pub headers: Vec<(String, Bytes)>,
+}
+
+/// One offset commit/fetch entry (topic + partition).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct OffsetEntry {
+    /// Topic name.
+    pub topic: String,
+    /// Partition id.
+    pub partition: u32,
+}
+
+/// Offset commit payload entry including committed position.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct OffsetCommitEntry {
+    /// Topic name.
+    pub topic: String,
+    /// Partition id.
+    pub partition: u32,
+    /// Next offset to read (committed position).
+    pub offset: u64,
+    /// Optional metadata string (may be empty).
+    pub metadata: String,
 }
 
 /// High-level request enum with real payload fields.
@@ -97,10 +128,51 @@ pub enum Request {
         /// Topic name.
         name: String,
     },
-    /// Offset commit (Phase 3 placeholder).
-    OffsetCommit,
-    /// Offset fetch (Phase 3 placeholder).
-    OffsetFetch,
+    /// Commit consumer group offsets.
+    OffsetCommit {
+        /// Consumer group id.
+        group_id: String,
+        /// Member id (may be empty for admin commits).
+        member_id: String,
+        /// Generation; `0` skips generation check (admin/CLI).
+        generation: u32,
+        /// Offsets to commit.
+        entries: Vec<OffsetCommitEntry>,
+    },
+    /// Fetch committed offsets.
+    OffsetFetch {
+        /// Consumer group id.
+        group_id: String,
+        /// Empty means all committed offsets for the group.
+        entries: Vec<OffsetEntry>,
+    },
+    /// Join a consumer group.
+    JoinGroup {
+        /// Consumer group id.
+        group_id: String,
+        /// Member id; empty = new member.
+        member_id: String,
+        /// Session timeout in milliseconds.
+        session_timeout_ms: u32,
+        /// Subscribed topic names.
+        topics: Vec<String>,
+    },
+    /// Heartbeat for group membership.
+    Heartbeat {
+        /// Consumer group id.
+        group_id: String,
+        /// Member id.
+        member_id: String,
+        /// Current generation.
+        generation: u32,
+    },
+    /// Leave a consumer group.
+    LeaveGroup {
+        /// Consumer group id.
+        group_id: String,
+        /// Member id.
+        member_id: String,
+    },
 }
 
 impl Request {
@@ -112,8 +184,11 @@ impl Request {
             Self::CreateTopic { .. } => RequestOpcode::CreateTopic as u16,
             Self::Metadata { .. } => RequestOpcode::Metadata as u16,
             Self::DeleteTopic { .. } => RequestOpcode::DeleteTopic as u16,
-            Self::OffsetCommit => RequestOpcode::OffsetCommit as u16,
-            Self::OffsetFetch => RequestOpcode::OffsetFetch as u16,
+            Self::OffsetCommit { .. } => RequestOpcode::OffsetCommit as u16,
+            Self::OffsetFetch { .. } => RequestOpcode::OffsetFetch as u16,
+            Self::JoinGroup { .. } => RequestOpcode::JoinGroup as u16,
+            Self::Heartbeat { .. } => RequestOpcode::Heartbeat as u16,
+            Self::LeaveGroup { .. } => RequestOpcode::LeaveGroup as u16,
         }
     }
 }
