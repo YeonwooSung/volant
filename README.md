@@ -9,10 +9,12 @@ Volant is a resource-efficient alternative to Apache Kafka, built for:
 - **Streaming processing** — first-class operators (`map`, `filter`, windows) without a heavy runtime
 - **Small footprint** — native binary, predictable memory, simple operations
 
-> Status: **Phase 5 complete** — buffer pool, pluggable `IoBackend`, Linux
-> `io_uring` / `O_DIRECT` features, batch produce coalescing, multi-mode benches,
-> tuning guide, and optional CPU affinity. APIs and on-disk formats may still
-> change. See [ROADMAP.md](./ROADMAP.md),
+> Status: **Phase 6 clustering prototype** — static multi-node membership,
+> controller + ISR replication, `acks=all`, leader failover. Single-node mode
+> (no `--cluster-config`) preserves Phase 1–5 behavior. APIs and on-disk formats
+> may still change. See [ROADMAP.md](./ROADMAP.md),
+> [Phase 6 spec](./docs/PHASE6_SPEC.md),
+> [consistency model](./docs/consistency.md),
 > [Phase 1](./docs/PHASE1_SPEC.md)–[Phase 5](./docs/PHASE5_SPEC.md) specs, and
 > the [tuning guide](./docs/tuning.md).
 
@@ -38,6 +40,8 @@ volant/
 │   ├── PHASE3_SPEC.md    # Consumer groups & offsets
 │   ├── PHASE4_SPEC.md    # Stream operators & topology API
 │   ├── PHASE5_SPEC.md    # DMA / high-performance I/O
+│   ├── PHASE6_SPEC.md    # Clustering & ISR replication
+│   ├── consistency.md    # What “committed” means (HWM / acks)
 │   └── tuning.md         # Ops tuning guide (ulimit, I/O, affinity)
 ├── ROADMAP.md
 └── Cargo.toml            # Workspace root
@@ -71,7 +75,31 @@ cargo run -p volant-cli -- consume events --group my-cg --max 10 --broker 127.0.
 cargo run -p volant-bench --release
 ```
 
+### Multi-node cluster (Phase 6)
+
+```bash
+# terminals 1–3 (see examples/cluster.toml)
+cargo run -p volant-server -- \
+  --node-id 1 --cluster-config ./examples/cluster.toml \
+  --data-dir ./data1 --listen 127.0.0.1:9092
+
+cargo run -p volant-server -- \
+  --node-id 2 --cluster-config ./examples/cluster.toml \
+  --data-dir ./data2 --listen 127.0.0.1:9093
+
+cargo run -p volant-server -- \
+  --node-id 3 --cluster-config ./examples/cluster.toml \
+  --data-dir ./data3 --listen 127.0.0.1:9094
+
+# Create topics on the controller (lowest live broker id, usually node 1)
+cargo run -p volant-cli -- topic create events --partitions 3 --broker 127.0.0.1:9092
+```
+
+Omit `--cluster-config` for single-node mode (Phase 1–5 behavior).  
+Consistency guarantees: [docs/consistency.md](./docs/consistency.md).
+
 ### Networked client (library)
+
 
 ```rust
 use volant_client::{Client, ClientConfig};

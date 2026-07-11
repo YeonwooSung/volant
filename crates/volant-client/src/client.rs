@@ -167,14 +167,28 @@ impl Client {
         }
     }
 
-    /// Produce messages to a topic.
+    /// Produce messages to a topic (default acks from config, usually `1`).
     ///
     /// `partition = None` asks the broker to assign (key-hash / round-robin).
+    /// On `NotLeaderForPartition`, refreshes metadata once and retries.
     pub async fn produce(
         &self,
         topic: &str,
         partition: Option<u32>,
         messages: Vec<Message>,
+    ) -> Result<ProduceResult> {
+        let acks = self.config.acks;
+        self.produce_with_acks(topic, partition, messages, acks)
+            .await
+    }
+
+    /// Produce with explicit acks (`1` leader, `255` all ISR).
+    pub async fn produce_with_acks(
+        &self,
+        topic: &str,
+        partition: Option<u32>,
+        messages: Vec<Message>,
+        acks: u8,
     ) -> Result<ProduceResult> {
         if messages.is_empty() {
             return Err(Error::InvalidArgument("empty produce batch".into()));
@@ -189,35 +203,57 @@ impl Client {
             })
             .collect();
 
-        let resp = self
-            .round_trip(Request::Produce {
-                topic: topic.to_owned(),
-                partition: partition.map(|p| p as i32).unwrap_or(-1),
-                acks: 1,
-                messages: wire,
-            })
-            .await?;
+        let part = partition.map(|p| p as i32).unwrap_or(-1);
+        let mut attempt = 0;
+        loop {
+            attempt += 1;
+            let resp = self
+                .round_trip(Request::Produce {
+                    topic: topic.to_owned(),
+                    partition: part,
+                    acks,
+                    messages: wire.clone(),
+                })
+                .await?;
 
-        match resp {
-            Response::Produce {
-                topic,
-                partition,
-                base_offset,
-                count,
-                error_code,
-            } => {
-                check_ok(error_code, "produce")?;
-                Ok(ProduceResult {
+            match resp {
+                Response::Produce {
                     topic,
                     partition,
                     base_offset,
                     count,
-                })
+                    error_code,
+                } => {
+                    if error_code == ErrorCode::NotLeaderForPartition as u16 && attempt < 2 {
+                        // Refresh metadata and retry once against the same connection
+                        // (caller should reconnect to the leader if multi-broker).
+                        let _ = self.metadata().await;
+                        if part < 0 {
+                            // keep broker-side assignment
+                        }
+                        continue;
+                    }
+                    check_ok(error_code, "produce")?;
+                    return Ok(ProduceResult {
+                        topic,
+                        partition,
+                        base_offset,
+                        count,
+                    });
+                }
+                Response::Error { code, message } => {
+                    if code == ErrorCode::NotLeaderForPartition as u16 && attempt < 2 {
+                        let _ = self.metadata().await;
+                        continue;
+                    }
+                    return Err(error_from_code(code, message));
+                }
+                other => {
+                    return Err(Error::Protocol(format!(
+                        "unexpected response for produce: {other:?}"
+                    )))
+                }
             }
-            Response::Error { code, message } => Err(error_from_code(code, message)),
-            other => Err(Error::Protocol(format!(
-                "unexpected response for produce: {other:?}"
-            ))),
         }
     }
 
@@ -457,6 +493,10 @@ fn error_from_code(code: u16, message: impl Into<String>) -> Error {
         | ErrorCode::UnknownMemberId
         | ErrorCode::IllegalGeneration
         | ErrorCode::InconsistentGroupProtocol => Error::Protocol(message),
+        ErrorCode::NotLeaderForPartition
+        | ErrorCode::NotController
+        | ErrorCode::NotEnoughReplicas
+        | ErrorCode::BrokerNotAvailable => Error::Protocol(message),
         ErrorCode::Ok | ErrorCode::Unknown => Error::Protocol(message),
     }
 }

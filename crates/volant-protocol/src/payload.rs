@@ -7,8 +7,8 @@ use crate::request::{
     OffsetCommitEntry, OffsetEntry, ProduceMessage, Request, RequestOpcode,
 };
 use crate::response::{
-    Assignment, BrokerInfo, ErrorCode, FetchRecord, OffsetFetchEntry, PartitionInfo, Response,
-    ResponseOpcode, TopicInfo,
+    Assignment, BrokerInfo, ClusterPartitionState, ClusterTopicState, ErrorCode, FetchRecord,
+    OffsetFetchEntry, PartitionInfo, Response, ResponseOpcode, TopicInfo,
 };
 use crate::frame::{Frame, FrameHeader, PROTOCOL_VERSION};
 use crate::codec::checksum;
@@ -224,6 +224,31 @@ pub fn encode_request(req: &Request) -> Result<Bytes> {
             put_string(&mut dst, group_id)?;
             put_string(&mut dst, member_id)?;
         }
+        Request::ReplicaFetch {
+            topic,
+            partition,
+            from_offset,
+            max_bytes,
+            replica_id,
+        } => {
+            put_string(&mut dst, topic)?;
+            dst.put_u32_le(*partition);
+            dst.put_u64_le(*from_offset);
+            dst.put_u32_le(*max_bytes);
+            dst.put_u32_le(*replica_id);
+        }
+        Request::HeartbeatBroker {
+            broker_id,
+            controller_id_known,
+            generation,
+        } => {
+            dst.put_u32_le(*broker_id);
+            dst.put_u32_le(*controller_id_known);
+            dst.put_u32_le(*generation);
+        }
+        Request::ClusterState { known_generation } => {
+            dst.put_u32_le(*known_generation);
+        }
     }
     finish_payload(dst)
 }
@@ -398,6 +423,37 @@ pub fn decode_request(opcode: u16, payload: &[u8]) -> Result<Request> {
                 member_id,
             })
         }
+        RequestOpcode::ReplicaFetch => {
+            let topic = get_string(&mut src)?;
+            if src.remaining() < 4 + 8 + 4 + 4 {
+                return Err(Error::Protocol("truncated replica fetch".into()));
+            }
+            Ok(Request::ReplicaFetch {
+                topic,
+                partition: src.get_u32_le(),
+                from_offset: src.get_u64_le(),
+                max_bytes: src.get_u32_le(),
+                replica_id: src.get_u32_le(),
+            })
+        }
+        RequestOpcode::HeartbeatBroker => {
+            if src.remaining() < 4 + 4 + 4 {
+                return Err(Error::Protocol("truncated heartbeat broker".into()));
+            }
+            Ok(Request::HeartbeatBroker {
+                broker_id: src.get_u32_le(),
+                controller_id_known: src.get_u32_le(),
+                generation: src.get_u32_le(),
+            })
+        }
+        RequestOpcode::ClusterState => {
+            if src.remaining() < 4 {
+                return Err(Error::Protocol("truncated cluster state request".into()));
+            }
+            Ok(Request::ClusterState {
+                known_generation: src.get_u32_le(),
+            })
+        }
     }
 }
 
@@ -470,6 +526,15 @@ pub fn encode_response(resp: &Response) -> Result<Bytes> {
                     dst.put_u32_le(p.partition_id);
                     dst.put_u32_le(p.leader);
                     dst.put_u64_le(p.hwm);
+                    dst.put_u32_le(p.replicas.len() as u32);
+                    for r in &p.replicas {
+                        dst.put_u32_le(*r);
+                    }
+                    dst.put_u32_le(p.isr.len() as u32);
+                    for r in &p.isr {
+                        dst.put_u32_le(*r);
+                    }
+                    dst.put_u32_le(p.leader_epoch);
                 }
             }
         }
@@ -509,6 +574,71 @@ pub fn encode_response(resp: &Response) -> Result<Bytes> {
         }
         Response::LeaveGroup { error_code } => {
             dst.put_u16_le(*error_code);
+        }
+        Response::ReplicaFetch {
+            error_code,
+            topic,
+            partition,
+            high_watermark,
+            leader_epoch,
+            records,
+        } => {
+            dst.put_u16_le(*error_code);
+            put_string(&mut dst, topic)?;
+            dst.put_u32_le(*partition);
+            dst.put_u64_le(*high_watermark);
+            dst.put_u32_le(*leader_epoch);
+            dst.put_u32_le(records.len() as u32);
+            for r in records {
+                dst.put_u64_le(r.offset);
+                dst.put_i64_le(r.timestamp_ms);
+                put_optional_bytes(&mut dst, r.key.as_deref());
+                put_bytes(&mut dst, &r.value);
+                put_headers(&mut dst, &r.headers)?;
+            }
+        }
+        Response::HeartbeatBroker {
+            error_code,
+            controller_id,
+            generation,
+            alive_brokers,
+        } => {
+            dst.put_u16_le(*error_code);
+            dst.put_u32_le(*controller_id);
+            dst.put_u32_le(*generation);
+            dst.put_u32_le(alive_brokers.len() as u32);
+            for id in alive_brokers {
+                dst.put_u32_le(*id);
+            }
+        }
+        Response::ClusterState {
+            error_code,
+            generation,
+            controller_id,
+            topics,
+        } => {
+            dst.put_u16_le(*error_code);
+            dst.put_u32_le(*generation);
+            dst.put_u32_le(*controller_id);
+            dst.put_u32_le(topics.len() as u32);
+            for t in topics {
+                put_string(&mut dst, &t.name)?;
+                dst.put_u32_le(t.topic_id);
+                dst.put_u32_le(t.partitions.len() as u32);
+                for p in &t.partitions {
+                    dst.put_u32_le(p.partition_id);
+                    dst.put_u32_le(p.leader);
+                    dst.put_u32_le(p.leader_epoch);
+                    dst.put_u32_le(p.replicas.len() as u32);
+                    for r in &p.replicas {
+                        dst.put_u32_le(*r);
+                    }
+                    dst.put_u32_le(p.isr.len() as u32);
+                    for r in &p.isr {
+                        dst.put_u32_le(*r);
+                    }
+                }
+            }
         }
         Response::Error { code, message } => {
             dst.put_u16_le(*code);
@@ -641,13 +771,42 @@ pub fn decode_response(opcode: u16, payload: &[u8]) -> Result<Response> {
                 let partition_count = src.get_u32_le() as usize;
                 let mut partitions = Vec::with_capacity(partition_count);
                 for _ in 0..partition_count {
-                    if src.remaining() < 4 + 4 + 8 {
+                    if src.remaining() < 4 + 4 + 8 + 4 {
                         return Err(Error::Protocol("truncated partition info".into()));
                     }
+                    let partition_id = src.get_u32_le();
+                    let leader = src.get_u32_le();
+                    let hwm = src.get_u64_le();
+                    let replica_count = src.get_u32_le() as usize;
+                    let mut replicas = Vec::with_capacity(replica_count);
+                    for _ in 0..replica_count {
+                        if src.remaining() < 4 {
+                            return Err(Error::Protocol("truncated replica id".into()));
+                        }
+                        replicas.push(src.get_u32_le());
+                    }
+                    if src.remaining() < 4 {
+                        return Err(Error::Protocol("truncated isr count".into()));
+                    }
+                    let isr_count = src.get_u32_le() as usize;
+                    let mut isr = Vec::with_capacity(isr_count);
+                    for _ in 0..isr_count {
+                        if src.remaining() < 4 {
+                            return Err(Error::Protocol("truncated isr id".into()));
+                        }
+                        isr.push(src.get_u32_le());
+                    }
+                    if src.remaining() < 4 {
+                        return Err(Error::Protocol("truncated leader_epoch".into()));
+                    }
+                    let leader_epoch = src.get_u32_le();
                     partitions.push(PartitionInfo {
-                        partition_id: src.get_u32_le(),
-                        leader: src.get_u32_le(),
-                        hwm: src.get_u64_le(),
+                        partition_id,
+                        leader,
+                        hwm,
+                        replicas,
+                        isr,
+                        leader_epoch,
                     });
                 }
                 topics.push(TopicInfo {
@@ -737,6 +896,132 @@ pub fn decode_response(opcode: u16, payload: &[u8]) -> Result<Response> {
             }
             Ok(Response::LeaveGroup {
                 error_code: src.get_u16_le(),
+            })
+        }
+        ResponseOpcode::ReplicaFetch => {
+            if src.remaining() < 2 {
+                return Err(Error::Protocol("truncated replica fetch error".into()));
+            }
+            let error_code = src.get_u16_le();
+            let topic = get_string(&mut src)?;
+            if src.remaining() < 4 + 8 + 4 + 4 {
+                return Err(Error::Protocol("truncated replica fetch header".into()));
+            }
+            let partition = src.get_u32_le();
+            let high_watermark = src.get_u64_le();
+            let leader_epoch = src.get_u32_le();
+            let record_count = src.get_u32_le() as usize;
+            let mut records = Vec::with_capacity(record_count);
+            for _ in 0..record_count {
+                if src.remaining() < 8 + 8 {
+                    return Err(Error::Protocol("truncated replica fetch record".into()));
+                }
+                let offset = src.get_u64_le();
+                let timestamp_ms = src.get_i64_le();
+                let key = get_optional_bytes(&mut src)?;
+                let value = get_bytes(&mut src)?;
+                let headers = get_headers(&mut src)?;
+                records.push(FetchRecord {
+                    offset,
+                    timestamp_ms,
+                    key,
+                    value,
+                    headers,
+                });
+            }
+            Ok(Response::ReplicaFetch {
+                error_code,
+                topic,
+                partition,
+                high_watermark,
+                leader_epoch,
+                records,
+            })
+        }
+        ResponseOpcode::HeartbeatBroker => {
+            if src.remaining() < 2 + 4 + 4 + 4 {
+                return Err(Error::Protocol("truncated heartbeat broker response".into()));
+            }
+            let error_code = src.get_u16_le();
+            let controller_id = src.get_u32_le();
+            let generation = src.get_u32_le();
+            let alive_count = src.get_u32_le() as usize;
+            let mut alive_brokers = Vec::with_capacity(alive_count);
+            for _ in 0..alive_count {
+                if src.remaining() < 4 {
+                    return Err(Error::Protocol("truncated alive broker id".into()));
+                }
+                alive_brokers.push(src.get_u32_le());
+            }
+            Ok(Response::HeartbeatBroker {
+                error_code,
+                controller_id,
+                generation,
+                alive_brokers,
+            })
+        }
+        ResponseOpcode::ClusterState => {
+            if src.remaining() < 2 + 4 + 4 + 4 {
+                return Err(Error::Protocol("truncated cluster state response".into()));
+            }
+            let error_code = src.get_u16_le();
+            let generation = src.get_u32_le();
+            let controller_id = src.get_u32_le();
+            let topic_count = src.get_u32_le() as usize;
+            let mut topics = Vec::with_capacity(topic_count);
+            for _ in 0..topic_count {
+                let name = get_string(&mut src)?;
+                if src.remaining() < 4 + 4 {
+                    return Err(Error::Protocol("truncated cluster topic header".into()));
+                }
+                let topic_id = src.get_u32_le();
+                let partition_count = src.get_u32_le() as usize;
+                let mut partitions = Vec::with_capacity(partition_count);
+                for _ in 0..partition_count {
+                    if src.remaining() < 4 + 4 + 4 + 4 {
+                        return Err(Error::Protocol("truncated cluster partition".into()));
+                    }
+                    let partition_id = src.get_u32_le();
+                    let leader = src.get_u32_le();
+                    let leader_epoch = src.get_u32_le();
+                    let replica_count = src.get_u32_le() as usize;
+                    let mut replicas = Vec::with_capacity(replica_count);
+                    for _ in 0..replica_count {
+                        if src.remaining() < 4 {
+                            return Err(Error::Protocol("truncated cluster replica".into()));
+                        }
+                        replicas.push(src.get_u32_le());
+                    }
+                    if src.remaining() < 4 {
+                        return Err(Error::Protocol("truncated cluster isr count".into()));
+                    }
+                    let isr_count = src.get_u32_le() as usize;
+                    let mut isr = Vec::with_capacity(isr_count);
+                    for _ in 0..isr_count {
+                        if src.remaining() < 4 {
+                            return Err(Error::Protocol("truncated cluster isr".into()));
+                        }
+                        isr.push(src.get_u32_le());
+                    }
+                    partitions.push(ClusterPartitionState {
+                        partition_id,
+                        leader,
+                        leader_epoch,
+                        replicas,
+                        isr,
+                    });
+                }
+                topics.push(ClusterTopicState {
+                    name,
+                    topic_id,
+                    partitions,
+                });
+            }
+            Ok(Response::ClusterState {
+                error_code,
+                generation,
+                controller_id,
+                topics,
             })
         }
         ResponseOpcode::Error => {
@@ -849,6 +1134,9 @@ mod tests {
                     partition_id: 0,
                     leader: 1,
                     hwm: 42,
+                    replicas: vec![1, 2, 3],
+                    isr: vec![1, 2],
+                    leader_epoch: 1,
                 }],
             }],
         };
@@ -1001,5 +1289,109 @@ mod tests {
             let b = encode_response(&resp).unwrap();
             assert_eq!(decode_response(op, &b).unwrap(), resp);
         }
+    }
+
+    #[test]
+    fn phase6_replica_fetch_roundtrip() {
+        let req = Request::ReplicaFetch {
+            topic: "events".into(),
+            partition: 1,
+            from_offset: 10,
+            max_bytes: 1024,
+            replica_id: 2,
+        };
+        let b = encode_request(&req).unwrap();
+        assert_eq!(
+            decode_request(RequestOpcode::ReplicaFetch as u16, &b).unwrap(),
+            req
+        );
+
+        let resp = Response::ReplicaFetch {
+            error_code: 0,
+            topic: "events".into(),
+            partition: 1,
+            high_watermark: 10,
+            leader_epoch: 3,
+            records: vec![FetchRecord {
+                offset: 10,
+                timestamp_ms: 100,
+                key: None,
+                value: Bytes::from_static(b"v"),
+                headers: vec![],
+            }],
+        };
+        let b = encode_response(&resp).unwrap();
+        assert_eq!(
+            decode_response(ResponseOpcode::ReplicaFetch as u16, &b).unwrap(),
+            resp
+        );
+    }
+
+    #[test]
+    fn phase6_heartbeat_and_cluster_state_roundtrip() {
+        let req = Request::HeartbeatBroker {
+            broker_id: 2,
+            controller_id_known: 1,
+            generation: 5,
+        };
+        let b = encode_request(&req).unwrap();
+        assert_eq!(
+            decode_request(RequestOpcode::HeartbeatBroker as u16, &b).unwrap(),
+            req
+        );
+
+        let resp = Response::HeartbeatBroker {
+            error_code: 0,
+            controller_id: 1,
+            generation: 6,
+            alive_brokers: vec![1, 2, 3],
+        };
+        let b = encode_response(&resp).unwrap();
+        assert_eq!(
+            decode_response(ResponseOpcode::HeartbeatBroker as u16, &b).unwrap(),
+            resp
+        );
+
+        let cs_req = Request::ClusterState {
+            known_generation: 5,
+        };
+        let b = encode_request(&cs_req).unwrap();
+        assert_eq!(
+            decode_request(RequestOpcode::ClusterState as u16, &b).unwrap(),
+            cs_req
+        );
+
+        let cs = Response::ClusterState {
+            error_code: 0,
+            generation: 6,
+            controller_id: 1,
+            topics: vec![ClusterTopicState {
+                name: "events".into(),
+                topic_id: 1,
+                partitions: vec![ClusterPartitionState {
+                    partition_id: 0,
+                    leader: 1,
+                    leader_epoch: 2,
+                    replicas: vec![1, 2, 3],
+                    isr: vec![1, 2, 3],
+                }],
+            }],
+        };
+        let b = encode_response(&cs).unwrap();
+        assert_eq!(
+            decode_response(ResponseOpcode::ClusterState as u16, &b).unwrap(),
+            cs
+        );
+    }
+
+    #[test]
+    fn phase6_error_codes() {
+        assert_eq!(
+            ErrorCode::from_u16(13),
+            ErrorCode::NotLeaderForPartition
+        );
+        assert_eq!(ErrorCode::from_u16(14), ErrorCode::NotController);
+        assert_eq!(ErrorCode::from_u16(15), ErrorCode::NotEnoughReplicas);
+        assert_eq!(ErrorCode::from_u16(16), ErrorCode::BrokerNotAvailable);
     }
 }

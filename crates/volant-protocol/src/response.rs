@@ -2,7 +2,7 @@
 
 use bytes::Bytes;
 
-/// Response opcodes (Phase 2 + Phase 3 wire values).
+/// Response opcodes (Phase 2–6 wire values).
 #[repr(u16)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ResponseOpcode {
@@ -26,6 +26,12 @@ pub enum ResponseOpcode {
     Heartbeat = 9,
     /// Leave group result.
     LeaveGroup = 10,
+    /// Replica fetch result (Phase 6).
+    ReplicaFetch = 21,
+    /// Broker heartbeat result (Phase 6).
+    HeartbeatBroker = 23,
+    /// Cluster state snapshot (Phase 6).
+    ClusterState = 25,
     /// Error response.
     Error = 0xFFFF,
 }
@@ -44,13 +50,16 @@ impl ResponseOpcode {
             8 => Self::JoinGroup,
             9 => Self::Heartbeat,
             10 => Self::LeaveGroup,
+            21 => Self::ReplicaFetch,
+            23 => Self::HeartbeatBroker,
+            25 => Self::ClusterState,
             0xFFFF => Self::Error,
             _ => return None,
         })
     }
 }
 
-/// Protocol error codes (Error response payload + embedded group codes).
+/// Protocol error codes (Error response payload + embedded codes).
 #[repr(u16)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ErrorCode {
@@ -80,6 +89,14 @@ pub enum ErrorCode {
     IllegalGeneration = 11,
     /// Inconsistent group protocol (reserved).
     InconsistentGroupProtocol = 12,
+    /// Requested broker is not the partition leader.
+    NotLeaderForPartition = 13,
+    /// Requested broker is not the cluster controller.
+    NotController = 14,
+    /// ISR smaller than min_insync_replicas for acks=all.
+    NotEnoughReplicas = 15,
+    /// Target broker is not available.
+    BrokerNotAvailable = 16,
 }
 
 impl ErrorCode {
@@ -98,6 +115,10 @@ impl ErrorCode {
             10 => Self::UnknownMemberId,
             11 => Self::IllegalGeneration,
             12 => Self::InconsistentGroupProtocol,
+            13 => Self::NotLeaderForPartition,
+            14 => Self::NotController,
+            15 => Self::NotEnoughReplicas,
+            16 => Self::BrokerNotAvailable,
             _ => Self::Unknown,
         }
     }
@@ -136,8 +157,14 @@ pub struct PartitionInfo {
     pub partition_id: u32,
     /// Leader node id.
     pub leader: u32,
-    /// High watermark.
+    /// High watermark (committed).
     pub hwm: u64,
+    /// Replica broker ids (Phase 6; single-node: `[self]`).
+    pub replicas: Vec<u32>,
+    /// In-sync replica broker ids (Phase 6; single-node: `[self]`).
+    pub isr: Vec<u32>,
+    /// Leader epoch (Phase 6; single-node: `0`).
+    pub leader_epoch: u32,
 }
 
 /// Topic metadata entry.
@@ -173,6 +200,32 @@ pub struct OffsetFetchEntry {
     pub offset: u64,
     /// Optional metadata.
     pub metadata: String,
+}
+
+/// One partition in a cluster-state snapshot.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ClusterPartitionState {
+    /// Partition id.
+    pub partition_id: u32,
+    /// Leader broker id.
+    pub leader: u32,
+    /// Leader epoch.
+    pub leader_epoch: u32,
+    /// Replica set.
+    pub replicas: Vec<u32>,
+    /// In-sync replicas.
+    pub isr: Vec<u32>,
+}
+
+/// One topic in a cluster-state snapshot.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ClusterTopicState {
+    /// Topic name.
+    pub name: String,
+    /// Topic id.
+    pub topic_id: u32,
+    /// Partitions.
+    pub partitions: Vec<ClusterPartitionState>,
 }
 
 /// High-level response enum with real payload fields.
@@ -262,6 +315,43 @@ pub enum Response {
         /// 0 = ok.
         error_code: u16,
     },
+    /// Replica fetch result.
+    ReplicaFetch {
+        /// 0 = ok; 13 = not leader.
+        error_code: u16,
+        /// Topic name.
+        topic: String,
+        /// Partition.
+        partition: u32,
+        /// Leader high watermark (committed).
+        high_watermark: u64,
+        /// Leader epoch.
+        leader_epoch: u32,
+        /// Records with exact offsets for the follower to append.
+        records: Vec<FetchRecord>,
+    },
+    /// Broker heartbeat result.
+    HeartbeatBroker {
+        /// 0 = ok.
+        error_code: u16,
+        /// Current controller id.
+        controller_id: u32,
+        /// Cluster generation.
+        generation: u32,
+        /// Live broker ids.
+        alive_brokers: Vec<u32>,
+    },
+    /// Cluster assignment snapshot.
+    ClusterState {
+        /// 0 = ok.
+        error_code: u16,
+        /// Cluster generation.
+        generation: u32,
+        /// Controller id.
+        controller_id: u32,
+        /// Topics and partition replica state.
+        topics: Vec<ClusterTopicState>,
+    },
     /// Error response.
     Error {
         /// Error code.
@@ -285,6 +375,9 @@ impl Response {
             Self::JoinGroup { .. } => ResponseOpcode::JoinGroup as u16,
             Self::Heartbeat { .. } => ResponseOpcode::Heartbeat as u16,
             Self::LeaveGroup { .. } => ResponseOpcode::LeaveGroup as u16,
+            Self::ReplicaFetch { .. } => ResponseOpcode::ReplicaFetch as u16,
+            Self::HeartbeatBroker { .. } => ResponseOpcode::HeartbeatBroker as u16,
+            Self::ClusterState { .. } => ResponseOpcode::ClusterState as u16,
             Self::Error { .. } => ResponseOpcode::Error as u16,
         }
     }

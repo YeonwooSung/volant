@@ -1,0 +1,24 @@
+# Example 3-node Volant cluster (Phase 6).
+# Start each node with matching --node-id, --listen, and --data-dir.
+
+default_replication_factor = 3
+min_insync_replicas = 2
+session_timeout_ms = 3000
+replica_fetch_max_wait_ms = 500
+replica_fetch_max_bytes = 1048576
+replica_lag_max_messages = 10000
+
+[[brokers]]
+id = 1
+host = "127.0.0.1"
+port = 9092
+
+[[brokers]]
+id = 2
+host = "127.0.0.1"
+port = 9093
+
+[[brokers]]
+id = 3
+host = "127.0.0.1"
+port = 9094

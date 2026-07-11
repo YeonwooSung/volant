@@ -4,10 +4,10 @@ use std::net::SocketAddr;
 use std::path::PathBuf;
 use std::sync::Arc;
 
-use anyhow::{Context, Result};
+use anyhow::{bail, Context, Result};
 use clap::Parser;
 use tracing::info;
-use volant_broker::{run_server, Broker};
+use volant_broker::{run_server, Broker, ClusterConfig};
 use volant_storage::StorageConfig;
 
 /// Volant — lightweight, high-performance streaming message broker.
@@ -25,6 +25,22 @@ struct Args {
     /// Default number of partitions for auto-created topics (reserved).
     #[arg(long, default_value_t = 1)]
     default_partitions: u32,
+
+    /// Static node id (required when `--cluster-config` is set).
+    #[arg(long)]
+    node_id: Option<u32>,
+
+    /// Path to static `cluster.toml`. Omit for single-node mode.
+    #[arg(long)]
+    cluster_config: Option<PathBuf>,
+
+    /// Optional advertised host override (defaults to listen host / cluster.toml).
+    #[arg(long)]
+    advertised_host: Option<String>,
+
+    /// Optional advertised port override.
+    #[arg(long)]
+    advertised_port: Option<u16>,
 }
 
 fn main() -> Result<()> {
@@ -54,7 +70,32 @@ async fn async_main(args: Args) -> Result<()> {
         ..StorageConfig::default()
     };
 
-    let broker = Arc::new(Broker::new(storage));
+    let broker = if let Some(cfg_path) = &args.cluster_config {
+        let node_id = args.node_id.ok_or_else(|| {
+            anyhow::anyhow!("--node-id is required when --cluster-config is set")
+        })?;
+        let config = ClusterConfig::load(cfg_path)
+            .with_context(|| format!("load cluster config {}", cfg_path.display()))?;
+        if config.broker(node_id).is_none() {
+            bail!("node-id {node_id} not found in cluster config");
+        }
+        info!(
+            node_id,
+            brokers = config.brokers.len(),
+            rf = config.default_replication_factor,
+            "starting multi-node broker"
+        );
+        Arc::new(
+            Broker::with_cluster(storage, node_id, config)
+                .context("initialize clustered broker")?,
+        )
+    } else {
+        if args.node_id.is_some() {
+            info!("--node-id ignored without --cluster-config (single-node mode)");
+        }
+        Arc::new(Broker::new(storage))
+    };
+
     let _ = args.default_partitions;
 
     let addr: SocketAddr = args
@@ -62,9 +103,18 @@ async fn async_main(args: Args) -> Result<()> {
         .parse()
         .with_context(|| format!("invalid listen address: {}", args.listen))?;
 
+    if let Some(host) = args.advertised_host {
+        let port = args.advertised_port.unwrap_or(addr.port());
+        broker.set_advertised(host, port);
+    } else if let Some(port) = args.advertised_port {
+        let host = broker.metadata(None).host;
+        broker.set_advertised(host, port);
+    }
+
     info!(
         data_dir = %args.data_dir.display(),
         listen = %addr,
+        node_id = broker.node_id(),
         "starting volant broker"
     );
 
@@ -72,9 +122,6 @@ async fn async_main(args: Args) -> Result<()> {
 }
 
 /// Optional CPU affinity / thread-per-core helpers (feature `thread-per-core`).
-///
-/// Controlled by env `VOLANT_CPU_LIST` (e.g. `0,1,2`). On unsupported platforms
-/// or pin failure, logs a warning and continues without aborting.
 #[cfg(feature = "thread-per-core")]
 mod affinity {
     use std::sync::atomic::{AtomicUsize, Ordering};
@@ -82,8 +129,6 @@ mod affinity {
     use anyhow::{Context, Result};
     use tracing::{info, warn};
 
-    /// Build a multi-thread Tokio runtime, optionally pinning workers to CPUs
-    /// listed in `VOLANT_CPU_LIST`.
     pub fn build_runtime() -> Result<tokio::runtime::Runtime> {
         let cpus = parse_cpu_list(std::env::var_os("VOLANT_CPU_LIST"));
 
@@ -100,7 +145,6 @@ mod affinity {
                 );
                 builder.worker_threads(n);
 
-                // Shared round-robin index for on_thread_start callbacks.
                 let counter = AtomicUsize::new(0);
                 let cpus_for_pin = cpus.clone();
                 builder.on_thread_start(move || {
@@ -122,8 +166,6 @@ mod affinity {
             .context("failed to build Tokio runtime (thread-per-core)")
     }
 
-    /// Parse `VOLANT_CPU_LIST` (`"0,1,2"`). Returns `None` if unset/empty.
-    /// Invalid tokens are skipped with a warning.
     fn parse_cpu_list(raw: Option<std::ffi::OsString>) -> Option<Vec<usize>> {
         let raw = raw?;
         let s = match raw.to_str() {
@@ -160,7 +202,6 @@ mod affinity {
         if core_affinity::set_for_current(core) {
             info!(core_id, "pinned worker thread to CPU");
         } else {
-            // macOS and some environments may refuse pin; never abort startup.
             warn!(
                 core_id,
                 "failed to pin worker thread to CPU (unsupported platform or permission); continuing"

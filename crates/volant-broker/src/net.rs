@@ -11,11 +11,12 @@ use tracing::{debug, error, info};
 use volant_core::{Error, Message, MessageBatch, Offset, PartitionId, Result, TopicName};
 use volant_protocol::codec::{decode_frame, encode_frame};
 use volant_protocol::{
-    decode_request, pack_response, Assignment, BrokerInfo, ErrorCode, FetchRecord, Frame,
-    OffsetFetchEntry, PartitionInfo, Request, Response, TopicInfo,
+    decode_request, pack_request, pack_response, Assignment, BrokerInfo, ErrorCode, FetchRecord,
+    Frame, OffsetFetchEntry, PartitionInfo, Request, Response, TopicInfo,
 };
 
 use crate::broker::Broker;
+use crate::replica::run_follower_loops;
 
 /// Bind and serve until the accept loop fails fatally.
 pub async fn run_server(addr: SocketAddr, broker: Arc<Broker>) -> Result<()> {
@@ -33,17 +34,7 @@ pub async fn serve_listener(listener: TcpListener, broker: Arc<Broker>) -> Resul
         info!(%local, "volant broker accept loop started");
     }
 
-    // Periodic session expiry for consumer groups.
-    {
-        let b = Arc::clone(&broker);
-        tokio::spawn(async move {
-            let mut interval = tokio::time::interval(Duration::from_millis(500));
-            loop {
-                interval.tick().await;
-                b.groups().expire_sessions(|topic| b.partition_count_opt(topic));
-            }
-        });
-    }
+    start_background_tasks(Arc::clone(&broker));
 
     loop {
         match listener.accept().await {
@@ -64,10 +55,132 @@ pub async fn serve_listener(listener: TcpListener, broker: Arc<Broker>) -> Resul
     }
 }
 
+/// Start group expiry, cluster heartbeat, and follower replication tasks.
+pub fn start_background_tasks(broker: Arc<Broker>) {
+    // Periodic session expiry for consumer groups.
+    {
+        let b = Arc::clone(&broker);
+        tokio::spawn(async move {
+            let mut interval = tokio::time::interval(Duration::from_millis(500));
+            loop {
+                interval.tick().await;
+                b.groups()
+                    .expire_sessions(|topic| b.partition_count_opt(topic));
+            }
+        });
+    }
+
+    if broker.cluster_config().is_some() {
+        // Membership tick + controller expiry.
+        {
+            let b = Arc::clone(&broker);
+            tokio::spawn(async move {
+                let mut interval = tokio::time::interval(Duration::from_millis(500));
+                loop {
+                    interval.tick().await;
+                    b.tick_cluster();
+                }
+            });
+        }
+
+        // Heartbeat to controller (non-controller brokers).
+        {
+            let b = Arc::clone(&broker);
+            tokio::spawn(async move {
+                let session = b
+                    .cluster_config()
+                    .map(|c| c.session_timeout_ms)
+                    .unwrap_or(3000);
+                let period = Duration::from_millis(u64::from(session / 3).max(100));
+                let mut interval = tokio::time::interval(period);
+                loop {
+                    interval.tick().await;
+                    if let Err(e) = heartbeat_to_controller(&b).await {
+                        debug!(error = %e, "controller heartbeat failed");
+                    }
+                }
+            });
+        }
+
+        // Follower ReplicaFetch loops.
+        run_follower_loops(broker);
+    }
+}
+
+async fn heartbeat_to_controller(broker: &Broker) -> Result<()> {
+    let controller = broker.controller_id();
+    // Even the controller heartbeats to itself locally.
+    if controller == broker.node_id() {
+        let _ = broker.handle_heartbeat_broker(broker.node_id(), controller, broker.generation());
+        return Ok(());
+    }
+    let Some(addr) = broker.broker_addr(controller) else {
+        return Ok(());
+    };
+    let req = Request::HeartbeatBroker {
+        broker_id: broker.node_id(),
+        controller_id_known: controller,
+        generation: broker.generation(),
+    };
+    let resp = inter_broker_rpc(&addr, &req).await?;
+    match resp {
+        Response::HeartbeatBroker {
+            controller_id,
+            generation,
+            alive_brokers,
+            ..
+        } => {
+            broker.note_peer_live(controller_id);
+            for id in &alive_brokers {
+                broker.note_peer_live(*id);
+            }
+            // Pull ClusterState if generation advanced.
+            if generation > broker.generation() {
+                let cs_req = Request::ClusterState {
+                    known_generation: broker.generation(),
+                };
+                if let Ok(cs_resp) = inter_broker_rpc(&addr, &cs_req).await {
+                    if let Response::ClusterState {
+                        generation: g,
+                        controller_id: c,
+                        topics,
+                        ..
+                    } = cs_resp
+                    {
+                        broker.apply_cluster_state(g, c, &topics)?;
+                    }
+                }
+            }
+            Ok(())
+        }
+        other => Err(Error::Protocol(format!(
+            "unexpected heartbeat response: {other:?}"
+        ))),
+    }
+}
+
+async fn inter_broker_rpc(addr: &str, req: &Request) -> Result<Response> {
+    let mut stream = TcpStream::connect(addr).await?;
+    let frame = pack_request(1, req)?;
+    let mut out = BytesMut::new();
+    encode_frame(&frame, &mut out)?;
+    stream.write_all(&out).await?;
+
+    let mut buf = BytesMut::with_capacity(64 * 1024);
+    loop {
+        let n = stream.read_buf(&mut buf).await?;
+        if n == 0 {
+            return Err(Error::Protocol("peer closed during rpc".into()));
+        }
+        if let Some(frame) = decode_frame(&mut buf)? {
+            return volant_protocol::decode_response(frame.header.opcode, &frame.payload);
+        }
+    }
+}
+
 async fn handle_connection(mut stream: TcpStream, broker: Arc<Broker>) -> Result<()> {
     let mut buf = BytesMut::with_capacity(8 * 1024);
     loop {
-        // Drain any complete frames already buffered.
         loop {
             match decode_frame(&mut buf)? {
                 Some(frame) => {
@@ -114,14 +227,35 @@ async fn dispatch(broker: &Broker, frame: Frame) -> Response {
 async fn handle_request(broker: &Broker, req: Request) -> Result<Response> {
     match req {
         Request::CreateTopic { name, partitions } => {
+            if broker.cluster_config().is_some() && !broker.is_controller() {
+                return Ok(Response::Error {
+                    code: ErrorCode::NotController as u16,
+                    message: format!(
+                        "not controller; controller_id={}",
+                        broker.controller_id()
+                    ),
+                });
+            }
             let topic = TopicName::new(name.clone());
-            let id = broker.create_topic(topic, partitions)?;
-            Ok(Response::CreateTopic {
-                topic_id: id.0,
-                name,
-                partitions,
-                error_code: 0,
-            })
+            match broker.create_topic(topic, partitions) {
+                Ok(id) => Ok(Response::CreateTopic {
+                    topic_id: id.0,
+                    name,
+                    partitions,
+                    error_code: 0,
+                }),
+                Err(e) => {
+                    // Surface NotController-style messages.
+                    if e.to_string().contains("not controller") {
+                        Ok(Response::Error {
+                            code: ErrorCode::NotController as u16,
+                            message: e.to_string(),
+                        })
+                    } else {
+                        Err(e)
+                    }
+                }
+            }
         }
         Request::DeleteTopic { name } => {
             let topic = TopicName::new(name.clone());
@@ -139,11 +273,15 @@ async fn handle_request(broker: &Broker, req: Request) -> Result<Response> {
             };
             let snap = broker.metadata(filter.as_deref());
             Ok(Response::Metadata {
-                brokers: vec![BrokerInfo {
-                    node_id: snap.node_id,
-                    host: snap.host,
-                    port: snap.port,
-                }],
+                brokers: snap
+                    .brokers
+                    .into_iter()
+                    .map(|(node_id, host, port)| BrokerInfo {
+                        node_id,
+                        host,
+                        port,
+                    })
+                    .collect(),
                 topics: snap
                     .topics
                     .into_iter()
@@ -158,6 +296,9 @@ async fn handle_request(broker: &Broker, req: Request) -> Result<Response> {
                                 partition_id: p.partition_id.0,
                                 leader: p.leader,
                                 hwm: p.hwm,
+                                replicas: p.replicas,
+                                isr: p.isr,
+                                leader_epoch: p.leader_epoch,
                             })
                             .collect(),
                     })
@@ -167,7 +308,7 @@ async fn handle_request(broker: &Broker, req: Request) -> Result<Response> {
         Request::Produce {
             topic,
             partition,
-            acks: _,
+            acks,
             messages,
         } => {
             let topic_name = TopicName::new(topic.clone());
@@ -175,13 +316,26 @@ async fn handle_request(broker: &Broker, req: Request) -> Result<Response> {
                 return Err(Error::InvalidArgument("empty produce batch".into()));
             }
 
-            // Resolve partition: -1 → key of first message or round-robin.
             let pid = if partition < 0 {
                 let key = messages[0].key.as_deref();
                 broker.select_partition(&topic_name, key)?
             } else {
                 PartitionId(partition as u32)
             };
+
+            // Leadership check early for clearer response.
+            if broker.cluster_config().is_some()
+                && broker.topics_has_partition(&topic_name, pid)
+                && !broker.is_partition_leader(&topic_name, pid)
+            {
+                return Ok(Response::Produce {
+                    topic,
+                    partition: pid.0,
+                    base_offset: 0,
+                    count: 0,
+                    error_code: ErrorCode::NotLeaderForPartition as u16,
+                });
+            }
 
             let mut batch = MessageBatch::default();
             for m in messages {
@@ -198,19 +352,54 @@ async fn handle_request(broker: &Broker, req: Request) -> Result<Response> {
                 });
             }
 
-            let records = broker.produce(&topic_name, pid, batch)?;
+            // Append; for acks=all enforce min_isr and wait for HWM asynchronously.
+            let (records, error_code) =
+                broker.produce_with_acks(&topic_name, pid, batch, acks, None)?;
+
+            if error_code == ErrorCode::NotLeaderForPartition as u16
+                || error_code == ErrorCode::NotEnoughReplicas as u16
+            {
+                return Ok(Response::Produce {
+                    topic,
+                    partition: pid.0,
+                    base_offset: 0,
+                    count: 0,
+                    error_code,
+                });
+            }
+
             let base_offset = records.first().map(|r| r.offset.raw()).unwrap_or(0);
             let count = records.len() as u32;
-            // Flush for acks=1 durability on single node.
-            broker.flush(&topic_name, pid)?;
+
+            let mut final_error = error_code;
+            if acks == 255 && broker.cluster_config().is_some() && count > 0 {
+                let target = base_offset + u64::from(count);
+                let deadline = tokio::time::Instant::now() + Duration::from_secs(10);
+                loop {
+                    let hwm = broker.committed_hwm(&topic_name, pid).unwrap_or(0);
+                    if hwm >= target {
+                        break;
+                    }
+                    if tokio::time::Instant::now() >= deadline {
+                        final_error = ErrorCode::Timeout as u16;
+                        break;
+                    }
+                    tokio::time::sleep(Duration::from_millis(10)).await;
+                }
+            }
+
+            if acks != 0 {
+                broker.flush(&topic_name, pid)?;
+            }
             Ok(Response::Produce {
                 topic,
                 partition: pid.0,
                 base_offset,
                 count,
-                error_code: 0,
+                error_code: final_error,
             })
         }
+
         Request::Fetch {
             topic,
             partition,
@@ -224,9 +413,11 @@ async fn handle_request(broker: &Broker, req: Request) -> Result<Response> {
             let from = Offset::new(from_offset);
             let max = max_messages as usize;
 
+            // In multi-node, prefer leader for client fetch (followers may have data
+            // but HWM is authoritative on leader). Still allow fetch on any replica
+            // capped at local committed_hwm.
             let mut records = broker.fetch(&topic_name, pid, from, max)?;
             if records.is_empty() && max_wait_ms > 0 {
-                // Simple long-poll: poll every 10ms until data or timeout.
                 let deadline =
                     tokio::time::Instant::now() + Duration::from_millis(u64::from(max_wait_ms));
                 while records.is_empty() && tokio::time::Instant::now() < deadline {
@@ -235,7 +426,7 @@ async fn handle_request(broker: &Broker, req: Request) -> Result<Response> {
                 }
             }
 
-            let hwm = broker.high_watermark(&topic_name, pid)?;
+            let hwm = broker.high_watermark(&topic_name, pid).unwrap_or(0);
             let wire_records = records
                 .into_iter()
                 .map(|r| FetchRecord {
@@ -337,6 +528,48 @@ async fn handle_request(broker: &Broker, req: Request) -> Result<Response> {
                         metadata: e.metadata,
                     })
                     .collect(),
+            })
+        }
+        Request::ReplicaFetch {
+            topic,
+            partition,
+            from_offset,
+            max_bytes,
+            replica_id,
+        } => {
+            let (error_code, high_watermark, leader_epoch, records) = broker
+                .handle_replica_fetch(&topic, partition, from_offset, max_bytes, replica_id)?;
+            Ok(Response::ReplicaFetch {
+                error_code,
+                topic,
+                partition,
+                high_watermark,
+                leader_epoch,
+                records,
+            })
+        }
+        Request::HeartbeatBroker {
+            broker_id,
+            controller_id_known,
+            generation,
+        } => {
+            let (error_code, controller_id, generation, alive_brokers) =
+                broker.handle_heartbeat_broker(broker_id, controller_id_known, generation);
+            Ok(Response::HeartbeatBroker {
+                error_code,
+                controller_id,
+                generation,
+                alive_brokers,
+            })
+        }
+        Request::ClusterState { known_generation: _ } => {
+            let (error_code, generation, controller_id, topics) =
+                broker.cluster_state_snapshot();
+            Ok(Response::ClusterState {
+                error_code,
+                generation,
+                controller_id,
+                topics,
             })
         }
     }

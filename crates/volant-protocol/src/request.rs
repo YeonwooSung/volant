@@ -2,7 +2,7 @@
 
 use bytes::Bytes;
 
-/// Request opcodes (Phase 2 + Phase 3 wire values).
+/// Request opcodes (Phase 2–6 wire values).
 #[repr(u16)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum RequestOpcode {
@@ -26,6 +26,12 @@ pub enum RequestOpcode {
     Heartbeat = 9,
     /// Leave a consumer group.
     LeaveGroup = 10,
+    /// Follower → leader replica fetch (Phase 6).
+    ReplicaFetch = 20,
+    /// Broker → controller heartbeat (Phase 6).
+    HeartbeatBroker = 22,
+    /// Pull / apply cluster assignment state (Phase 6).
+    ClusterState = 24,
 }
 
 impl RequestOpcode {
@@ -42,6 +48,9 @@ impl RequestOpcode {
             8 => Self::JoinGroup,
             9 => Self::Heartbeat,
             10 => Self::LeaveGroup,
+            20 => Self::ReplicaFetch,
+            22 => Self::HeartbeatBroker,
+            24 => Self::ClusterState,
             _ => return None,
         })
     }
@@ -91,7 +100,7 @@ pub enum Request {
         topic: String,
         /// Partition; `-1` = broker assigns.
         partition: i32,
-        /// Acks mode (0/1); response always sent for simplicity.
+        /// Acks mode: `0`, `1`, or `255` (all).
         acks: u8,
         /// Messages to append.
         messages: Vec<ProduceMessage>,
@@ -173,6 +182,33 @@ pub enum Request {
         /// Member id.
         member_id: String,
     },
+    /// Follower replica fetch from the partition leader.
+    ReplicaFetch {
+        /// Topic name.
+        topic: String,
+        /// Partition id.
+        partition: u32,
+        /// Follower log-end offset (next offset to write).
+        from_offset: u64,
+        /// Soft max bytes.
+        max_bytes: u32,
+        /// Follower broker id.
+        replica_id: u32,
+    },
+    /// Inter-broker liveness heartbeat to the controller.
+    HeartbeatBroker {
+        /// Sender broker id.
+        broker_id: u32,
+        /// Last known controller id (`0` if unknown).
+        controller_id_known: u32,
+        /// Last known cluster generation.
+        generation: u32,
+    },
+    /// Request full cluster assignment snapshot.
+    ClusterState {
+        /// Last applied generation on the requester (`0` if none).
+        known_generation: u32,
+    },
 }
 
 impl Request {
@@ -189,6 +225,9 @@ impl Request {
             Self::JoinGroup { .. } => RequestOpcode::JoinGroup as u16,
             Self::Heartbeat { .. } => RequestOpcode::Heartbeat as u16,
             Self::LeaveGroup { .. } => RequestOpcode::LeaveGroup as u16,
+            Self::ReplicaFetch { .. } => RequestOpcode::ReplicaFetch as u16,
+            Self::HeartbeatBroker { .. } => RequestOpcode::HeartbeatBroker as u16,
+            Self::ClusterState { .. } => RequestOpcode::ClusterState as u16,
         }
     }
 }

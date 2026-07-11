@@ -7,6 +7,8 @@ pub struct ClientConfig {
     pub brokers: Vec<String>,
     /// Client identifier for logging / metrics.
     pub client_id: String,
+    /// Default produce acks (`1` = leader only; `255` = all ISR).
+    pub acks: u8,
 }
 
 impl Default for ClientConfig {
@@ -14,6 +16,7 @@ impl Default for ClientConfig {
         Self {
             brokers: vec!["127.0.0.1:9092".into()],
             client_id: "volant-client".into(),
+            acks: 1,
         }
     }
 }

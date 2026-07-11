@@ -141,7 +141,44 @@ impl PartitionLog {
         Ok(records)
     }
 
+    /// Append a message at an exact offset (follower replication path).
+    ///
+    /// Requires `offset == next_offset` (contiguous LEO). Returns an error on gap
+    /// or if the offset is already present.
+    pub fn append_with_offset(&mut self, offset: Offset, message: Message) -> Result<Record> {
+        if offset.raw() != self.next_offset.raw() {
+            return Err(Error::Storage(format!(
+                "append_with_offset gap: expected offset {}, got {}",
+                self.next_offset.raw(),
+                offset.raw()
+            )));
+        }
+        let record = self.append_one(message)?;
+        self.appends_since_flush = self.appends_since_flush.saturating_add(1);
+        if self.config.flush_every_n > 0 && self.appends_since_flush >= self.config.flush_every_n {
+            self.flush()?;
+        }
+        Ok(record)
+    }
+
+    /// Append multiple records at their exact offsets (must be contiguous from LEO).
+    pub fn append_records_with_offsets(&mut self, records: &[Record]) -> Result<Vec<Record>> {
+        let mut out = Vec::with_capacity(records.len());
+        for r in records {
+            let msg = Message {
+                key: r.key.clone(),
+                value: r.value.clone(),
+                timestamp_ms: Some(r.timestamp_ms),
+                headers: r.headers.clone(),
+            };
+            out.push(self.append_with_offset(r.offset, msg)?);
+        }
+        Ok(out)
+    }
+
     /// Encode and write one message without updating the flush counter.
+    ///
+    /// Uses `self.next_offset` as the assigned offset.
     fn append_one(&mut self, message: Message) -> Result<Record> {
         let timestamp_ms = message.timestamp_ms.unwrap_or_else(now_ms);
         let record_size = encoded_record_size(&message);
@@ -158,6 +195,11 @@ impl PartitionLog {
         let record = active.append(offset, &message, timestamp_ms)?;
         self.next_offset = offset.next();
         Ok(record)
+    }
+
+    /// Log-end offset (next offset to be written); alias of [`Self::high_watermark`].
+    pub fn log_end_offset(&self) -> Offset {
+        self.next_offset
     }
 
     /// Read up to `max_messages` records starting at `from`.
@@ -434,6 +476,47 @@ mod tests {
         log.flush().unwrap();
         let got = log.read(Offset::ZERO, 100).unwrap();
         assert_eq!(got.len(), 50);
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn append_with_offset_contiguous() {
+        let dir = tmp();
+        let mut log = PartitionLog::open(cfg(&dir)).unwrap();
+        let r0 = log
+            .append_with_offset(Offset::ZERO, Message::from_value("a"))
+            .unwrap();
+        assert_eq!(r0.offset.raw(), 0);
+        let r1 = log
+            .append_with_offset(Offset::new(1), Message::from_value("b"))
+            .unwrap();
+        assert_eq!(r1.offset.raw(), 1);
+        assert_eq!(log.log_end_offset().raw(), 2);
+        // gap rejected
+        assert!(log
+            .append_with_offset(Offset::new(5), Message::from_value("x"))
+            .is_err());
+        let got = log.read(Offset::ZERO, 10).unwrap();
+        assert_eq!(got.len(), 2);
+        assert_eq!(got[1].value.as_ref(), b"b");
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn append_records_with_offsets_batch() {
+        let dir = tmp();
+        let mut leader = PartitionLog::open(cfg(&dir.join("leader"))).unwrap();
+        leader.append(Message::from_value("a")).unwrap();
+        leader.append(Message::from_value("b")).unwrap();
+        leader.append(Message::from_value("c")).unwrap();
+        let recs = leader.read(Offset::ZERO, 10).unwrap();
+
+        let mut follower = PartitionLog::open(cfg(&dir.join("follower"))).unwrap();
+        follower.append_records_with_offsets(&recs).unwrap();
+        assert_eq!(follower.log_end_offset().raw(), 3);
+        let got = follower.read(Offset::ZERO, 10).unwrap();
+        assert_eq!(got.len(), 3);
+        assert_eq!(got[2].value.as_ref(), b"c");
         let _ = fs::remove_dir_all(&dir);
     }
 }

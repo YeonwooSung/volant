@@ -405,6 +405,7 @@ async fn connect(broker: &str) -> Result<Client> {
     Client::connect(ClientConfig {
         brokers: vec![broker.to_owned()],
         client_id: "volant-cli".into(),
+        ..ClientConfig::default()
     })
     .await
     .with_context(|| format!("connect to broker {broker}"))

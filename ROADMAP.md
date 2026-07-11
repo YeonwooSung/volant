@@ -279,28 +279,53 @@ Ops guide: **[docs/tuning.md](./docs/tuning.md)**.
 transfers where the OS allows — not a custom hardware driver.
 
 **Status:** Phase 5 complete. Stretch items (write-behind queue, full async uring,
-sendfile-style fetch) deferred. **Next: Phase 6 — Clustering & replication.**
+sendfile-style fetch) deferred. **Phase 6 clustering prototype complete.**
 
 ---
 
-### Phase 6 — Clustering & replication *(next)*
+### Phase 6 — Clustering & replication ✅ *(prototype)*
 
 **Goal:** Scale beyond one node with durable multi-replica partitions.
 
+Binding design: **[docs/PHASE6_SPEC.md](./docs/PHASE6_SPEC.md)**.  
+Consistency model: **[docs/consistency.md](./docs/consistency.md)**.
+
+**Design (locked):** Kafka-style static membership + controller (lowest live broker id)
++ leader/follower ISR replication. Not Raft-per-partition.
+
 **Milestones**
 
-1. Cluster membership (static config → gossip / Raft later)
-2. Partition leader + followers (ISR-style or Raft log replication)
-3. Controller / metadata quorum (dedicated Raft group)
-4. Producer `acks=all`, min ISR
-5. Automatic leader election on failure
+1. Cluster membership
+   - [x] Static `cluster.toml` membership (`--cluster-config`, `--node-id`)
+   - [x] Controller = lowest live broker id (HeartbeatBroker)
+   - [ ] Dynamic membership / gossip (deferred)
+2. Partition leader + followers
+   - [x] Replica assignment on CreateTopic (RF, round-robin)
+   - [x] Leaders accept produce; followers reject `NotLeaderForPartition`
+   - [x] Followers `ReplicaFetch` + `append_with_offset`
+   - [x] HWM = min LEO of ISR; client fetch capped at HWM
+3. Controller / metadata
+   - [x] Single controller (lowest live id); `NotController` on CreateTopic
+   - [x] `ClusterState` snapshot + `assignment.json` persistence
+   - [ ] Raft metadata quorum (deferred)
+4. Producer acks
+   - [x] `acks=1` (default) and `acks=all` (wire 255)
+   - [x] `min_insync_replicas` → `NotEnoughReplicas`
+5. Automatic leader election
+   - [x] On broker death, elect new leader from ISR
+   - [x] Integration test: 3-node acks=all, kill leader, fetch committed data
 6. Rack-aware replica placement
+   - [ ] Stub `rack` field only (placement ignored in Phase 6)
 
 **Exit criteria**
 
-- 3-node cluster survives leader kill with no acknowledged data loss
-- Rolling restart without full cluster downtime
-- Clear consistency model doc (what “committed” means)
+- [x] 3-node cluster survives leader kill with no acknowledged `acks=all` data loss
+  (`volant-broker` test `cluster_failover`)
+- [ ] Rolling restart without full cluster downtime (manual / partial — automated deferred)
+- [x] Clear consistency model doc ([docs/consistency.md](./docs/consistency.md))
+- [x] Single-node mode (no cluster config) keeps Phase 1–5 tests green
+
+**Non-goals remaining:** dynamic membership, rack-aware placement, exactly-once, Kafka wire compat.
 
 ---
 
@@ -360,7 +385,7 @@ core over protocol compatibility; a compatibility layer is Phase 7 optional work
 6. Phase 3 consumer groups  
 7. Phase 4 stream operators + example  
 8. Phase 5 io_uring feature flag + benches  
-9. Phase 6 replication prototype (2–3 nodes)  
+9. Phase 6 replication prototype (2–3 nodes) ✅  
 10. Phase 7 metrics, TLS, packaging  
 
 ---
@@ -369,7 +394,7 @@ core over protocol compatibility; a compatibility layer is Phase 7 optional work
 
 Track these before locking APIs:
 
-1. **Replication:** Raft-per-partition vs leader/follower + controller (Kafka-like)?
+1. **Replication:** ~~Raft-per-partition vs leader/follower + controller (Kafka-like)?~~ → **Kafka-style ISR (Phase 6)**
 2. **Kafka wire compatibility:** first-class or optional adapter?
 3. **State store for streams:** embed RocksDB, redb, or custom mmap store?
 4. **Default durability:** fsync every batch vs group commit window?
@@ -398,4 +423,4 @@ cargo test --workspace
 
 Phase 5 complete (`BufferPool`, `IoBackend`, `io-uring` / `direct-io` features,
 batch produce coalescing, multi-mode `volant-bench`, `docs/tuning.md`,
-`thread-per-core`). **Next major phase: Phase 6 — Clustering & replication.**
+`thread-per-core`). **Phase 6 clustering prototype complete; next: Phase 7 ops.**

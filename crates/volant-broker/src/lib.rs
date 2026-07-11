@@ -5,21 +5,31 @@
 //! [`Broker::produce`] coalesces a full [`volant_core::MessageBatch`] under a
 //! single topics lock and a single flush-policy evaluation (see module docs on
 //! [`broker`]). Prefer batching client-side for sequential append throughput.
+//!
+//! # Clustering (Phase 6)
+//!
+//! With [`Broker::with_cluster`], the broker participates in a static multi-node
+//! cluster: controller election (lowest live id), ISR replication via
+//! ReplicaFetch, and `acks=all` produce waiting on the high watermark.
 
 #![deny(missing_docs)]
 
 pub mod assignor;
 pub mod broker;
+pub mod cluster;
 pub mod group;
 pub mod net;
 pub mod offset_store;
 pub mod partition;
+pub mod replica;
 pub mod topic;
 
 pub use assignor::{range_assign, range_assign_multi};
 pub use broker::{
-    murmur2, partition_for_key, Broker, MetadataSnapshot, PartitionMetadata, TopicMetadata,
+    murmur2, partition_for_key, Broker, ClusterState, MetadataSnapshot, PartitionMetadata,
+    TopicMetadata,
 };
+pub use cluster::{BrokerEndpoint, ClusterConfig};
 pub use group::GroupCoordinator;
-pub use net::{run_server, serve_listener};
+pub use net::{run_server, serve_listener, start_background_tasks};
 pub use offset_store::{OffsetStore, StoredOffset, OFFSET_UNKNOWN};

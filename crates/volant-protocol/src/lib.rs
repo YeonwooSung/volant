@@ -20,6 +20,6 @@ pub use request::{
     OffsetCommitEntry, OffsetEntry, ProduceMessage, Request, RequestOpcode,
 };
 pub use response::{
-    Assignment, BrokerInfo, ErrorCode, FetchRecord, OffsetFetchEntry, PartitionInfo, Response,
-    ResponseOpcode, TopicInfo,
+    Assignment, BrokerInfo, ClusterPartitionState, ClusterTopicState, ErrorCode, FetchRecord,
+    OffsetFetchEntry, PartitionInfo, Response, ResponseOpcode, TopicInfo,
 };

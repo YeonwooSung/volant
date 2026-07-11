@@ -45,6 +45,7 @@ crossbeam = "0.8"
 memmap2 = "0.9"
 crc32fast = "1"
 uuid = { version = "1", features = ["v4", "serde"] }
+toml = "0.8"
 
 [profile.release]
 lto = "thin"
