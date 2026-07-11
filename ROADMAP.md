@@ -199,27 +199,44 @@ Binding wire format and APIs: **[docs/PHASE3_SPEC.md](./docs/PHASE3_SPEC.md)**.
 
 ---
 
-### Phase 4 — Stream processing (lightweight) *(next)*
+### Phase 4 — Stream processing (lightweight) ✅
 
 **Goal:** Kafka Streams–like operators without a heavy runtime.
 
+Binding API: **[docs/PHASE4_SPEC.md](./docs/PHASE4_SPEC.md)**.
+
 **Milestones**
 
-1. Operator trait + pipeline (scaffold exists)
-2. Stateless: `map`, `filter`, `flat_map`, `foreach`
-3. Stateful: `reduce`, tumbling / hopping windows (RocksDB or custom store)
-4. Source / sink adapters to Volant topics
-5. At-least-once processing; exactly-once via transactional produce (stretch)
-6. Optional WASM or plugin operators later
+1. Operator trait + pipeline
+   - [x] `Operator` with `process` + `punctuate`
+   - [x] Composable `Pipeline`
+2. Stateless operators
+   - [x] `map`, `filter`, `flat_map`, `foreach`
+3. Stateful operators
+   - [x] Keyed `reduce` / `count_reduce` with in-memory `MemoryStore`
+   - [x] Tumbling windows (event-time)
+   - [ ] Hopping windows — deferred
+   - [ ] RocksDB / durable state — deferred (in-memory only)
+4. Source / sink adapters
+   - [x] `TopicSource` (`GroupConsumer`) + `TopicSink` (produce)
+   - [x] `StreamBuilder` / `Topology` / `StreamApp` runtime
+5. Processing guarantees
+   - [x] At-least-once (commit offsets after successful sink produce)
+   - [ ] Exactly-once / transactional produce — stretch, deferred
+6. Optional WASM or plugin operators later — deferred
 
 **Exit criteria**
 
-- Word-count style topology on live topics
-- Documented programming model + example crate
+- [x] Offline word-count pipeline test (`crates/volant-stream/tests/e2e_word_count.rs`)
+- [x] Live broker e2e: source → operators → sink → fetch counts
+- [x] Documented programming model + `word_count` example
+  (`cargo run -p volant-stream --example word_count`)
+
+**Non-goals for Phase 4:** exactly-once, WASM plugins, RocksDB, distributed stream workers.
 
 ---
 
-### Phase 5 — DMA & high-performance I/O
+### Phase 5 — DMA & high-performance I/O *(next)*
 
 **Goal:** Push the storage/network path to hardware-friendly limits.
 
@@ -356,4 +373,4 @@ cargo run -p volant-bench --release
 cargo test --workspace
 ```
 
-Phase 3 complete. Next: **Phase 4 — lightweight stream processing operators**.
+Phase 4 complete. Next: **Phase 5 — DMA & high-performance I/O**.

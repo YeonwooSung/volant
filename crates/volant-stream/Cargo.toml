@@ -13,3 +13,8 @@ bytes = { workspace = true }
 thiserror = { workspace = true }
 tokio = { workspace = true }
 tracing = { workspace = true }
+
+[dev-dependencies]
+volant-broker = { workspace = true }
+volant-storage = { workspace = true }
+tokio = { workspace = true }

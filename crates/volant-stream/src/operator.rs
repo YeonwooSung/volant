@@ -11,4 +11,11 @@ pub trait Operator: Send {
     fn name(&self) -> &str {
         "operator"
     }
+
+    /// Flush window/state timers; default no-op.
+    ///
+    /// Runtime calls this each poll with wall-clock or event time `now_ms`.
+    fn punctuate(&mut self, _now_ms: i64) -> Result<Vec<Record>> {
+        Ok(vec![])
+    }
 }

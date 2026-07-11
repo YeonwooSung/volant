@@ -1,5 +1,9 @@
 # Phase 4 — Lightweight Stream Processing (binding)
 
+**Status:** Implemented in `crates/volant-stream` (operators, topology, runtime,
+offline + live word-count e2e, `examples/word_count.rs`). See
+`docs/phase4/docs-e2e-review.md`.
+
 ## Goals
 
 Kafka Streams–like operators **in-process**, no separate cluster:

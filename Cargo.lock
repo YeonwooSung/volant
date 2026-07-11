@@ -712,6 +712,22 @@ dependencies = [
 ]
 
 [[package]]
+name = "volant-examples"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "bytes",
+ "clap",
+ "tokio",
+ "tracing",
+ "tracing-subscriber",
+ "volant-client",
+ "volant-core",
+ "volant-protocol",
+ "volant-stream",
+]
+
+[[package]]
 name = "volant-protocol"
 version = "0.1.0"
 dependencies = [
@@ -758,8 +774,10 @@ dependencies = [
  "thiserror",
  "tokio",
  "tracing",
+ "volant-broker",
  "volant-client",
  "volant-core",
+ "volant-storage",
 ]
 
 [[package]]

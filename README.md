@@ -9,9 +9,10 @@ Volant is a resource-efficient alternative to Apache Kafka, built for:
 - **Streaming processing** — first-class operators (`map`, `filter`, windows) without a heavy runtime
 - **Small footprint** — native binary, predictable memory, simple operations
 
-> Status: **Phase 3 complete** — consumer groups, durable offsets, group CLI, multi-consumer e2e.  
+> Status: **Phase 4 complete** — in-process stream operators, word-count example, offline + live e2e.  
 > APIs and on-disk formats may still change. See [ROADMAP.md](./ROADMAP.md),  
-> [Phase 1](./docs/PHASE1_SPEC.md), [Phase 2](./docs/PHASE2_SPEC.md), and [Phase 3](./docs/PHASE3_SPEC.md) specs.
+> [Phase 1](./docs/PHASE1_SPEC.md), [Phase 2](./docs/PHASE2_SPEC.md),  
+> [Phase 3](./docs/PHASE3_SPEC.md), and [Phase 4](./docs/PHASE4_SPEC.md) specs.
 
 ---
 
@@ -32,7 +33,8 @@ volant/
 ├── docs/
 │   ├── PHASE1_SPEC.md    # Binding durable-log format & API
 │   ├── PHASE2_SPEC.md    # Binding TCP protocol & client/server API
-│   └── PHASE3_SPEC.md    # Consumer groups & offsets
+│   ├── PHASE3_SPEC.md    # Consumer groups & offsets
+│   └── PHASE4_SPEC.md    # Stream operators & topology API
 ├── ROADMAP.md
 └── Cargo.toml            # Workspace root
 ```
@@ -179,7 +181,74 @@ consumer.leave().await?;
 
 Still deferred: sticky/cooperative assignor (Phase 3.1), lag metrics.
 
-**Next:** Phase 4 — lightweight stream processing operators.
+---
+
+## Phase 4 — Stream processing
+
+Phase 4 is **complete** for the lightweight in-process path:
+
+- Stateless operators: `map`, `filter`, `flat_map`, `foreach`
+- Stateful: keyed `reduce` / `count_reduce`, tumbling windows
+- In-memory `MemoryStore` (no RocksDB)
+- `StreamBuilder` → `StreamApp` runtime with topic source/sink
+- **At-least-once:** commit consumer offsets after successful sink produce
+- Offline word-count + live broker e2e (`crates/volant-stream/tests/e2e_word_count.rs`)
+- Example: `cargo run -p volant-stream --example word_count`
+
+Binding details: **[docs/PHASE4_SPEC.md](./docs/PHASE4_SPEC.md)**.
+
+### Programming model
+
+```rust
+use std::sync::Arc;
+use volant_client::Client;
+use volant_stream::{SourceConfig, StreamApp, StreamBuilder};
+
+// Build a topology: lines → split words → count → counts topic
+let topology = StreamBuilder::new("word-count")
+    .source_topic("lines", SourceConfig::new("wc-app"))
+    .flat_map(|record| { /* emit one record per word */ Ok(vec![/* ... */]) })
+    .reduce_count()
+    .sink_topic("counts")
+    .build()?;
+
+let client = Arc::new(Client::connect_addr("127.0.0.1:9092").await?);
+let mut app = StreamApp::start(client, topology).await?;
+app.run(None).await?; // until error; or app.step() in a loop
+```
+
+Offline (no broker) for tests:
+
+```rust
+use volant_stream::{flat_map, count_reduce, process_pipeline, Pipeline};
+
+let mut pipeline = Pipeline::new()
+    .then(flat_map(split_words))
+    .then(count_reduce());
+let out = process_pipeline(&mut pipeline, input_records, None)?;
+```
+
+### Word-count example
+
+```bash
+# terminal 1 — broker
+cargo run -p volant-server -- --data-dir /tmp/vdata --listen 127.0.0.1:9092
+
+# terminal 2 — topics
+cargo run -p volant-cli -- topic create lines --partitions 1 --broker 127.0.0.1:9092
+cargo run -p volant-cli -- topic create counts --partitions 1 --broker 127.0.0.1:9092
+
+# terminal 3 — stream app
+cargo run -p volant-stream --example word_count -- --broker 127.0.0.1:9092
+
+# terminal 4 — produce lines, inspect counts
+cargo run -p volant-cli -- produce lines --value "the quick brown fox" --broker 127.0.0.1:9092
+cargo run -p volant-cli -- consume counts --partition 0 --from 0 --max 50 --broker 127.0.0.1:9092
+```
+
+Still deferred: exactly-once / transactions, RocksDB state, WASM operators, hopping windows.
+
+**Next:** Phase 5 — DMA & high-performance I/O (`io_uring`, O_DIRECT).
 
 ---
 
@@ -191,8 +260,8 @@ Still deferred: sticky/cooperative assignor (Phase 3.1), lag metrics.
 | 1 | Durable segment log + recovery | **Done** |
 | 2 | TCP protocol, multi-partition, client SDK | **Done** |
 | 3 | Consumer groups & offsets | **Done** |
-| 4 | Stream processing operators | **Next** |
-| 5 | io_uring / DMA-oriented I/O | Planned |
+| 4 | Stream processing operators | **Done** |
+| 5 | io_uring / DMA-oriented I/O | **Next** |
 | 6 | Clustering & replication | Planned |
 | 7 | Metrics, TLS, packaging, optional Kafka shim | Planned |
 
