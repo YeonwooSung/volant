@@ -1,4 +1,16 @@
 //! Single-node broker state machine.
+//!
+//! # Batch produce coalescing
+//!
+//! [`Broker::produce`] accepts a [`MessageBatch`] and treats the whole batch as
+//! one critical section:
+//!
+//! 1. Acquires the topics write lock **once** (exclusive access to the partition log)
+//! 2. Appends every message via [`volant_storage::PartitionLog::append_batch`]
+//!    so offsets are contiguous and no mid-batch `fsync` occurs
+//! 3. Honors `StorageConfig::flush_every_n` **once** after the batch
+//!
+//! Multi-message batches also increment [`Broker::messages_coalesced`].
 
 use std::collections::HashMap;
 use std::fs;
@@ -62,6 +74,8 @@ pub struct Broker {
     advertised_port: AtomicU32,
     /// Consumer group coordinator + durable offsets.
     groups: GroupCoordinator,
+    /// Messages produced via multi-message (`N > 1`) coalesced batches.
+    messages_coalesced: AtomicU64,
 }
 
 impl Broker {
@@ -77,7 +91,15 @@ impl Broker {
             advertised_host: RwLock::new("127.0.0.1".into()),
             advertised_port: AtomicU32::new(9092),
             groups,
+            messages_coalesced: AtomicU64::new(0),
         }
+    }
+
+    /// Total messages that went through a multi-message coalesced produce.
+    ///
+    /// Incremented by `N` when `produce` is called with a batch of size `N > 1`.
+    pub fn messages_coalesced(&self) -> u64 {
+        self.messages_coalesced.load(Ordering::Relaxed)
     }
 
     /// Set the advertised address returned by metadata.
@@ -177,13 +199,20 @@ impl Broker {
         Ok(PartitionId(idx))
     }
 
-    /// Produce a batch to a topic partition.
+    /// Produce a batch to a topic partition (coalesced).
+    ///
+    /// Holds the topics write lock for the entire batch, appends all messages
+    /// with contiguous offsets, and applies the partition flush policy once
+    /// after the batch (no mid-batch `fsync`). Empty batches are a no-op and
+    /// return an empty `Vec`.
     pub fn produce(
         &self,
         topic: &TopicName,
         partition: PartitionId,
         batch: MessageBatch,
     ) -> Result<Vec<Record>> {
+        let n = batch.messages.len();
+        // Topics map write lock is the exclusive gate for partition logs.
         let mut topics = self.topics.write();
         let topic = topics
             .get_mut(topic)
@@ -193,9 +222,11 @@ impl Broker {
             .get_mut(&partition)
             .ok_or_else(|| Error::NotFound(format!("partition {partition}")))?;
 
-        let mut records = Vec::with_capacity(batch.messages.len());
-        for msg in batch.messages {
-            records.push(part.log.append(msg)?);
+        let records = part.log.append_batch(batch.messages)?;
+        // Metric after successful append so failures do not inflate the counter.
+        if n > 1 {
+            self.messages_coalesced
+                .fetch_add(n as u64, Ordering::Relaxed);
         }
         Ok(records)
     }

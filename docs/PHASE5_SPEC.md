@@ -79,7 +79,7 @@ Use pool for record encode scratch buffers when available; fallback to alloc.
 - Provide `IoBackend` trait:
 
 ```rust
-pub trait IoBackend: Send {
+pub trait IoBackend: Send + Sync {
   fn write_all_at(&mut self, file: &File, offset: u64, buf: &[u8]) -> Result<()>;
   fn fsync(&mut self, file: &File) -> Result<()>;
 }

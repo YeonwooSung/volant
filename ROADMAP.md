@@ -49,7 +49,7 @@ It aims to be a resource-efficient Kafka alternative with:
 | `volant-stream` | Lightweight stream processing operators |
 | `volant-server` | Broker process entrypoint |
 | `volant-cli` | Admin CLI (`volant topic create`, …) |
-| `volant-bench` | Storage / broker micro-benchmarks |
+| `volant-bench` | Storage / broker micro-benchmarks (Phase 5 multi-mode) |
 
 ---
 
@@ -236,31 +236,54 @@ Binding API: **[docs/PHASE4_SPEC.md](./docs/PHASE4_SPEC.md)**.
 
 ---
 
-### Phase 5 — DMA & high-performance I/O *(next)*
+### Phase 5 — DMA & high-performance I/O ✅
 
 **Goal:** Push the storage/network path to hardware-friendly limits.
 
+Binding design: **[docs/PHASE5_SPEC.md](./docs/PHASE5_SPEC.md)**.  
+Ops guide: **[docs/tuning.md](./docs/tuning.md)**.
+
 **Milestones**
 
-1. **Linux `io_uring`** for append + sendfile-style fetch (feature-gated)
+1. **Linux `io_uring`** for append (feature-gated)
+   - [x] `io-uring` feature + `IoBackend` / `UringIoBackend` (Linux; `compile_error!` elsewhere)
+   - [x] Sync submit+wait path (acceptable Phase 5); sealed segments keep mmap reads
 2. **O_DIRECT** optional path for predictable latency (aligned buffers)
+   - [x] `direct-io` feature + aligned `BufferPool` path + open-flag hooks
 3. **Batch produce coalescing** in the broker
+   - [x] `PartitionLog::append_batch` + single-flush policy after multi-message produce
+   - [x] `batches_coalesced` metric; single-lock multi-message `Broker::produce`
+   - [ ] Optional write-behind queue (stretch — deferred)
 4. **Kernel bypass experiments** (DPDK / AF_XDP) — research only
+   - [x] Documented as research-only in `docs/tuning.md` (no production code)
 5. **CPU affinity / thread-per-core** optional runtime mode
-6. Memory pool + slab for record headers to cut allocator pressure
+   - [x] `volant-server` feature `thread-per-core` + env `VOLANT_CPU_LIST`
+   - [x] Unsupported pin → warn, do not abort (macOS best-effort)
+6. Memory pool + slab for encode scratch buffers
+   - [x] `BufferPool` / `PooledBuf` in `volant-storage` (return-on-drop)
+7. **Docs & benches**
+   - [x] Tuning guide (`docs/tuning.md`: ulimit, dirty ratios, O_DIRECT, io_uring, huge pages, affinity, DPDK/AF_XDP)
+   - [x] README feature flags + bench how-to + tuning link
+   - [x] Expanded `volant-bench` multi-mode CLI (`append` / `fetch` / `produce-batch`)
+   - [x] Published release bench numbers in README
 
 **Exit criteria**
 
-- Benchmark suite (`volant-bench`) with published numbers
-- Feature flags: `io-uring`, `direct-io`, `thread-per-core`
-- Documented tuning guide (ulimit, disk, NIC, huge pages)
+- [x] Documented tuning guide (ulimit, disk, NIC, huge pages, affinity)
+- [x] Optional `thread-per-core` feature; default macOS build green without it
+- [x] Feature flags wired: storage `io-uring` + `direct-io`; server `thread-per-core`
+- [x] Benchmark suite multi-mode with published numbers
+- [x] Default `cargo build --workspace` remains green on macOS (no forced Linux features)
 
 **Note:** DMA here means minimizing user↔kernel copies and enabling device-level
 transfers where the OS allows — not a custom hardware driver.
 
+**Status:** Phase 5 complete. Stretch items (write-behind queue, full async uring,
+sendfile-style fetch) deferred. **Next: Phase 6 — Clustering & replication.**
+
 ---
 
-### Phase 6 — Clustering & replication
+### Phase 6 — Clustering & replication *(next)*
 
 **Goal:** Scale beyond one node with durable multi-replica partitions.
 
@@ -373,4 +396,6 @@ cargo run -p volant-bench --release
 cargo test --workspace
 ```
 
-Phase 4 complete. Next: **Phase 5 — DMA & high-performance I/O**.
+Phase 5 complete (`BufferPool`, `IoBackend`, `io-uring` / `direct-io` features,
+batch produce coalescing, multi-mode `volant-bench`, `docs/tuning.md`,
+`thread-per-core`). **Next major phase: Phase 6 — Clustering & replication.**

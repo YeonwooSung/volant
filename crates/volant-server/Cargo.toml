@@ -10,6 +10,11 @@ description = "Volant broker server binary"
 name = "volant-server"
 path = "src/main.rs"
 
+[features]
+default = []
+# Optional thread-per-core / CPU affinity mode (see VOLANT_CPU_LIST, docs/tuning.md).
+thread-per-core = ["dep:core_affinity"]
+
 [dependencies]
 volant-core = { workspace = true }
 volant-broker = { workspace = true }
@@ -20,3 +25,4 @@ clap = { workspace = true }
 tracing = { workspace = true }
 tracing-subscriber = { workspace = true }
 anyhow = { workspace = true }
+core_affinity = { version = "0.8", optional = true }

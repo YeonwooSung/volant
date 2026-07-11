@@ -6,6 +6,14 @@ license.workspace = true
 rust-version.workspace = true
 description = "DMA-friendly log storage engine for Volant"
 
+[features]
+default = []
+# Linux-only io_uring append path. On non-Linux, enabling this feature hits
+# `compile_error!` in `io.rs` (the `io-uring` crate is not linked outside Linux).
+io-uring = ["dep:io-uring"]
+# O_DIRECT open flags + aligned write path (effective on Linux; safe fallback elsewhere).
+direct-io = []
+
 [dependencies]
 volant-core = { workspace = true }
 bytes = { workspace = true }
@@ -14,3 +22,10 @@ memmap2 = { workspace = true }
 parking_lot = { workspace = true }
 crc32fast = { workspace = true }
 tracing = { workspace = true }
+
+[target.'cfg(unix)'.dependencies]
+libc = "0.2"
+
+# Only resolve/link io-uring on Linux so macOS never compiles the crate.
+[target.'cfg(target_os = "linux")'.dependencies]
+io-uring = { version = "0.7", optional = true }

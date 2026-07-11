@@ -1,4 +1,10 @@
 //! Broker logic: topics, partitions, produce/fetch, and coordination hooks.
+//!
+//! # High-performance produce
+//!
+//! [`Broker::produce`] coalesces a full [`volant_core::MessageBatch`] under a
+//! single topics lock and a single flush-policy evaluation (see module docs on
+//! [`broker`]). Prefer batching client-side for sequential append throughput.
 
 #![deny(missing_docs)]
 

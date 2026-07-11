@@ -27,6 +27,7 @@ fn config(dir: &std::path::Path) -> StorageConfig {
         index_interval_bytes: 4096,
         retention_ms: None,
         retention_bytes: None,
+        ..StorageConfig::default()
     }
 }
 

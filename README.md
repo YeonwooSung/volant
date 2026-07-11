@@ -5,14 +5,16 @@
 Volant is a resource-efficient alternative to Apache Kafka, built for:
 
 - **Fast messaging** — append-only logs, batch-oriented protocol, zero-copy reads
-- **DMA-friendly I/O** — memory-mapped segments, with `io_uring` / O_DIRECT on the roadmap
+- **DMA-friendly I/O** — memory-mapped segments; optional `io_uring` / O_DIRECT (Phase 5, feature-gated)
 - **Streaming processing** — first-class operators (`map`, `filter`, windows) without a heavy runtime
 - **Small footprint** — native binary, predictable memory, simple operations
 
-> Status: **Phase 4 complete** — in-process stream operators, word-count example, offline + live e2e.  
-> APIs and on-disk formats may still change. See [ROADMAP.md](./ROADMAP.md),  
-> [Phase 1](./docs/PHASE1_SPEC.md), [Phase 2](./docs/PHASE2_SPEC.md),  
-> [Phase 3](./docs/PHASE3_SPEC.md), and [Phase 4](./docs/PHASE4_SPEC.md) specs.
+> Status: **Phase 5 complete** — buffer pool, pluggable `IoBackend`, Linux
+> `io_uring` / `O_DIRECT` features, batch produce coalescing, multi-mode benches,
+> tuning guide, and optional CPU affinity. APIs and on-disk formats may still
+> change. See [ROADMAP.md](./ROADMAP.md),
+> [Phase 1](./docs/PHASE1_SPEC.md)–[Phase 5](./docs/PHASE5_SPEC.md) specs, and
+> the [tuning guide](./docs/tuning.md).
 
 ---
 
@@ -34,7 +36,9 @@ volant/
 │   ├── PHASE1_SPEC.md    # Binding durable-log format & API
 │   ├── PHASE2_SPEC.md    # Binding TCP protocol & client/server API
 │   ├── PHASE3_SPEC.md    # Consumer groups & offsets
-│   └── PHASE4_SPEC.md    # Stream operators & topology API
+│   ├── PHASE4_SPEC.md    # Stream operators & topology API
+│   ├── PHASE5_SPEC.md    # DMA / high-performance I/O
+│   └── tuning.md         # Ops tuning guide (ulimit, I/O, affinity)
 ├── ROADMAP.md
 └── Cargo.toml            # Workspace root
 ```
@@ -63,7 +67,7 @@ cargo run -p volant-cli -- group commit --group my-cg --topic events --partition
 cargo run -p volant-cli -- group fetch-offsets --group my-cg --broker 127.0.0.1:9092
 cargo run -p volant-cli -- consume events --group my-cg --max 10 --broker 127.0.0.1:9092
 
-# Phase 1 append throughput micro-bench
+# Storage append throughput micro-bench (always use --release)
 cargo run -p volant-bench --release
 ```
 
@@ -248,7 +252,85 @@ cargo run -p volant-cli -- consume counts --partition 0 --from 0 --max 50 --brok
 
 Still deferred: exactly-once / transactions, RocksDB state, WASM operators, hopping windows.
 
-**Next:** Phase 5 — DMA & high-performance I/O (`io_uring`, O_DIRECT).
+---
+
+## Phase 5 — DMA & high-performance I/O ✅
+
+Phase 5 pushes the storage and runtime path toward hardware-friendly limits.
+Binding design: **[docs/PHASE5_SPEC.md](./docs/PHASE5_SPEC.md)**.  
+Ops guide: **[docs/tuning.md](./docs/tuning.md)**.
+
+**Landed**
+
+- `BufferPool` + `PooledBuf` (return-on-drop) for encode scratch buffers
+- Pluggable `IoBackend` (`StdIoBackend`; Linux `UringIoBackend` behind `io-uring`)
+- Optional `direct-io` (aligned buffers + `O_DIRECT` open hooks on Linux)
+- Broker batch produce via `PartitionLog::append_batch` (single flush policy)
+- Tuning guide (ulimit, `vm.dirty_*`, disk, O_DIRECT / io_uring when-to, huge pages, affinity)
+- Optional server **CPU affinity / thread-per-core** (`thread-per-core` + `VOLANT_CPU_LIST`)
+- Multi-mode `volant-bench` (`append` / `fetch` / `produce-batch`)
+
+### Feature flags
+
+| Crate | Feature | Default | Platforms | Effect |
+|-------|---------|---------|-----------|--------|
+| `volant-storage` | *(mmap path)* | on | all | Default buffered append + mmap reads |
+| `volant-storage` | `io-uring` | off | **Linux only** | `io_uring` append/fsync backend (`compile_error!` elsewhere) |
+| `volant-storage` | `direct-io` | off | Linux/Unix | `O_DIRECT` active-segment writes |
+| `volant-server` | `thread-per-core` | off | all (best-effort) | Pin Tokio workers via `VOLANT_CPU_LIST` |
+
+```bash
+# Default (macOS / Linux) — no optional features
+cargo build -p volant-server
+
+# Optional CPU pinning (warns and continues if pin unsupported)
+cargo build -p volant-server --features thread-per-core
+VOLANT_CPU_LIST=0,1,2 cargo run -p volant-server --features thread-per-core -- \
+  --data-dir /tmp/vdata --listen 127.0.0.1:9092
+
+# Linux storage experiments
+cargo build -p volant-storage --features io-uring
+cargo build -p volant-storage --features direct-io
+cargo build -p volant-storage --features "io-uring,direct-io"
+```
+
+### Benchmarks
+
+Always measure with a **release** build on a quiet machine:
+
+```bash
+cargo run -p volant-bench --release -- append --count 100000 --value-size 100
+cargo run -p volant-bench --release -- fetch --count 100000 --value-size 100
+cargo run -p volant-bench --release -- produce-batch --count 100000 --value-size 100 --batch-size 100
+```
+
+**Sample laptop numbers** (Apple M3 Pro, macOS, default std/mmap path, 100-byte values,
+no intermediate flush, temp dir on local SSD — not a competitive claim, just a
+regression baseline):
+
+| Mode | Throughput | Bandwidth |
+|------|------------|-----------|
+| `append` | ~562k msgs/s | ~54 MB/s |
+| `fetch` | ~640k msgs/s | ~61 MB/s |
+| `produce-batch` (batch=100) | ~616k msgs/s | ~59 MB/s |
+
+Re-measure on your hardware before tuning. Feature-flag comparisons (`direct-io`,
+`io-uring`) and ops guidance: **[docs/tuning.md](./docs/tuning.md)**.
+
+### CPU affinity
+
+```bash
+cargo run -p volant-server --release --features thread-per-core -- \
+  --data-dir /tmp/vdata --listen 127.0.0.1:9092
+# with pinning:
+VOLANT_CPU_LIST=2,3,4,5 cargo run -p volant-server --release --features thread-per-core -- \
+  --data-dir /tmp/vdata --listen 127.0.0.1:9092
+```
+
+Unset/empty `VOLANT_CPU_LIST` → feature is a no-op (unpinned). Pin failures log a
+warning and do **not** abort (important for macOS dev builds).
+
+**Next:** Phase 6 — clustering & replication.
 
 ---
 
@@ -261,11 +343,12 @@ Still deferred: exactly-once / transactions, RocksDB state, WASM operators, hopp
 | 2 | TCP protocol, multi-partition, client SDK | **Done** |
 | 3 | Consumer groups & offsets | **Done** |
 | 4 | Stream processing operators | **Done** |
-| 5 | io_uring / DMA-oriented I/O | **Next** |
-| 6 | Clustering & replication | Planned |
+| 5 | io_uring / DMA-oriented I/O + tuning | **Done** |
+| 6 | Clustering & replication | **Next** |
 | 7 | Metrics, TLS, packaging, optional Kafka shim | Planned |
 
-Details, exit criteria, and open design questions: **[ROADMAP.md](./ROADMAP.md)**.
+Details, exit criteria, and open design questions: **[ROADMAP.md](./ROADMAP.md)**.  
+Ops tuning: **[docs/tuning.md](./docs/tuning.md)**.
 
 ---
 
@@ -281,7 +364,7 @@ Producer / Consumer / Stream app
     volant-broker (topics · partitions · groups)
             │
             ▼
-    volant-storage (mmap segments · future io_uring)
+    volant-storage (mmap · optional io_uring / O_DIRECT)
 ```
 
 ---
