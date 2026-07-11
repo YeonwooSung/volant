@@ -1,0 +1,54 @@
+[workspace]
+resolver = "2"
+members = [
+    "crates/volant-core",
+    "crates/volant-protocol",
+    "crates/volant-storage",
+    "crates/volant-broker",
+    "crates/volant-client",
+    "crates/volant-stream",
+    "crates/volant-server",
+    "crates/volant-cli",
+    "crates/volant-bench",
+]
+default-members = ["crates/volant-server", "crates/volant-cli"]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2021"
+license = "Apache-2.0"
+repository = "https://github.com/volant-mq/volant"
+rust-version = "1.75"
+
+[workspace.dependencies]
+# Internal crates
+volant-core = { path = "crates/volant-core" }
+volant-protocol = { path = "crates/volant-protocol" }
+volant-storage = { path = "crates/volant-storage" }
+volant-broker = { path = "crates/volant-broker" }
+volant-client = { path = "crates/volant-client" }
+volant-stream = { path = "crates/volant-stream" }
+
+# Async runtime
+tokio = { version = "1", features = ["full"] }
+bytes = { version = "1", features = ["serde"] }
+thiserror = "2"
+anyhow = "1"
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+clap = { version = "4", features = ["derive"] }
+parking_lot = "0.12"
+crossbeam = "0.8"
+memmap2 = "0.9"
+crc32fast = "1"
+uuid = { version = "1", features = ["v4", "serde"] }
+
+[profile.release]
+lto = "thin"
+codegen-units = 1
+opt-level = 3
+
+[profile.bench]
+inherits = "release"

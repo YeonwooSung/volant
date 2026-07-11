@@ -1,0 +1,22 @@
+[package]
+name = "volant-server"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+description = "Volant broker server binary"
+
+[[bin]]
+name = "volant-server"
+path = "src/main.rs"
+
+[dependencies]
+volant-core = { workspace = true }
+volant-broker = { workspace = true }
+volant-protocol = { workspace = true }
+volant-storage = { workspace = true }
+tokio = { workspace = true }
+clap = { workspace = true }
+tracing = { workspace = true }
+tracing-subscriber = { workspace = true }
+anyhow = { workspace = true }

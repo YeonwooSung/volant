@@ -1,0 +1,17 @@
+[package]
+name = "volant-bench"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+description = "Micro-benchmarks for Volant storage and broker paths"
+publish = false
+
+[[bin]]
+name = "volant-bench"
+path = "src/main.rs"
+
+[dependencies]
+volant-core = { workspace = true }
+volant-storage = { workspace = true }
+anyhow = { workspace = true }

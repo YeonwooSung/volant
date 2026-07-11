@@ -1,0 +1,14 @@
+[package]
+name = "volant-protocol"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+description = "Wire protocol codec and RPC framing for Volant"
+
+[dependencies]
+volant-core = { workspace = true }
+bytes = { workspace = true }
+thiserror = { workspace = true }
+serde = { workspace = true }
+crc32fast = { workspace = true }

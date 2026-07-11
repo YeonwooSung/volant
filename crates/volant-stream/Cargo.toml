@@ -1,0 +1,15 @@
+[package]
+name = "volant-stream"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+description = "Lightweight stream processing operators for Volant"
+
+[dependencies]
+volant-core = { workspace = true }
+volant-client = { workspace = true }
+bytes = { workspace = true }
+thiserror = { workspace = true }
+tokio = { workspace = true }
+tracing = { workspace = true }

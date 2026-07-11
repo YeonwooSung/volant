@@ -1,0 +1,20 @@
+[package]
+name = "volant-broker"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+description = "Broker logic: topics, partitions, producers, consumers"
+
+[dependencies]
+volant-core = { workspace = true }
+volant-protocol = { workspace = true }
+volant-storage = { workspace = true }
+bytes = { workspace = true }
+thiserror = { workspace = true }
+tokio = { workspace = true }
+parking_lot = { workspace = true }
+tracing = { workspace = true }
+
+[dev-dependencies]
+uuid = { workspace = true }

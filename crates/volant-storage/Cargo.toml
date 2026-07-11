@@ -1,0 +1,16 @@
+[package]
+name = "volant-storage"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+description = "DMA-friendly log storage engine for Volant"
+
+[dependencies]
+volant-core = { workspace = true }
+bytes = { workspace = true }
+thiserror = { workspace = true }
+memmap2 = { workspace = true }
+parking_lot = { workspace = true }
+crc32fast = { workspace = true }
+tracing = { workspace = true }
