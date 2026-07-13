@@ -268,6 +268,22 @@ impl GroupCoordinator {
         Ok(CommitResult { error_code: 0 })
     }
 
+    /// List known group ids (active membership + durable offset directories).
+    pub fn list_group_ids(&self) -> Vec<String> {
+        let mut set: HashMap<String, ()> = HashMap::new();
+        for gid in self.groups.lock().keys() {
+            set.insert(gid.clone(), ());
+        }
+        if let Ok(disk) = self.offsets.list_group_ids() {
+            for gid in disk {
+                set.insert(gid, ());
+            }
+        }
+        let mut out: Vec<_> = set.into_keys().collect();
+        out.sort();
+        out
+    }
+
     /// Fetch offsets. Empty `entries` → all committed for group.
     pub fn fetch_offsets(
         &self,

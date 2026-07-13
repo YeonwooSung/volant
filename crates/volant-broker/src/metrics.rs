@@ -77,12 +77,14 @@ impl Metrics {
     ///
     /// `topics` / `partitions` are live gauges computed by the caller.
     /// `messages_coalesced` is the broker's existing coalesce counter.
+    /// `lag` is `(group, topic, partition, committed, hwm, lag)` from the broker.
     pub fn render_prometheus(
         &self,
         topics: u64,
         partitions: u64,
         messages_coalesced: u64,
         version: &str,
+        lag: &[(String, String, u32, u64, u64, u64)],
     ) -> String {
         let mut out = String::with_capacity(2048);
         let p = |s: &mut String, line: &str| {
@@ -210,6 +212,19 @@ impl Metrics {
             "volant_build_info{{version=\"{ver}\"}} 1\n"
         ));
 
+        p(
+            &mut out,
+            "# HELP volant_consumer_group_lag Consumer group lag (hwm - committed)",
+        );
+        p(&mut out, "# TYPE volant_consumer_group_lag gauge");
+        for (group, topic, partition, _committed, _hwm, lag_v) in lag {
+            let g = sanitize_label(group);
+            let t = sanitize_label(topic);
+            out.push_str(&format!(
+                "volant_consumer_group_lag{{group=\"{g}\",topic=\"{t}\",partition=\"{partition}\"}} {lag_v}\n"
+            ));
+        }
+
         out
     }
 }
@@ -237,7 +252,8 @@ mod tests {
         m.record_fetch(true, 2, 50);
         m.record_connection();
         m.record_error(17);
-        let text = m.render_prometheus(1, 4, 3, "0.1.0");
+        let lag = vec![("g1".into(), "events".into(), 0u32, 5u64, 10u64, 5u64)];
+        let text = m.render_prometheus(1, 4, 3, "0.1.0", &lag);
         assert!(text.contains("volant_produce_requests_total"));
         assert!(text.contains("volant_fetch_messages_total"));
         assert!(text.contains("volant_connections_accepted_total"));
@@ -245,5 +261,7 @@ mod tests {
         assert!(text.contains("volant_rpc_errors_total{code=\"17\"}"));
         assert!(text.contains("volant_topics 1"));
         assert!(text.contains("volant_partitions 4"));
+        assert!(text.contains("volant_consumer_group_lag"));
+        assert!(text.contains("group=\"g1\""));
     }
 }

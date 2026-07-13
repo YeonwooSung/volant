@@ -28,8 +28,8 @@ pub mod topic;
 
 pub use assignor::{range_assign, range_assign_multi};
 pub use broker::{
-    murmur2, partition_for_key, Broker, ClusterState, InterBrokerTls, MetadataSnapshot,
-    PartitionMetadata, TopicMetadata,
+    murmur2, partition_for_key, Broker, ClusterState, IdempotentCheck, InterBrokerTls,
+    MetadataSnapshot, PartitionMetadata, TopicMetadata,
 };
 pub use cluster::{BrokerEndpoint, ClusterConfig};
 pub use group::GroupCoordinator;

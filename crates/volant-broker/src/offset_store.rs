@@ -131,6 +131,24 @@ impl OffsetStore {
         Ok((offset, metadata))
     }
 
+    /// List group ids that have at least one offset directory on disk.
+    pub fn list_group_ids(&self) -> Result<Vec<String>> {
+        if !self.root.exists() {
+            return Ok(Vec::new());
+        }
+        let mut out = Vec::new();
+        for ent in fs::read_dir(&self.root)
+            .map_err(|e| Error::Storage(format!("list offset groups: {e}")))?
+        {
+            let ent = ent.map_err(|e| Error::Storage(e.to_string()))?;
+            if ent.file_type().map(|t| t.is_dir()).unwrap_or(false) {
+                out.push(ent.file_name().to_string_lossy().into_owned());
+            }
+        }
+        out.sort();
+        Ok(out)
+    }
+
     /// List all committed offsets for a group.
     pub fn fetch_all(&self, group_id: &str) -> Result<Vec<StoredOffset>> {
         let group_dir = self.root.join(sanitize(group_id));

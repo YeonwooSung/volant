@@ -129,6 +129,9 @@ pub fn encode_request(req: &Request) -> Result<Bytes> {
             partition,
             acks,
             messages,
+            producer_id,
+            producer_epoch,
+            base_sequence,
         } => {
             put_string(&mut dst, topic)?;
             dst.put_i32_le(*partition);
@@ -140,6 +143,10 @@ pub fn encode_request(req: &Request) -> Result<Bytes> {
                 dst.put_i64_le(m.timestamp_ms);
                 put_headers(&mut dst, &m.headers)?;
             }
+            // Phase 10 idempotent trailer (always written by current encoders).
+            dst.put_u64_le(*producer_id);
+            dst.put_u16_le(*producer_epoch);
+            dst.put_i32_le(*base_sequence);
         }
         Request::Fetch {
             topic,
@@ -252,6 +259,9 @@ pub fn encode_request(req: &Request) -> Result<Bytes> {
         Request::Auth { token } => {
             put_string(&mut dst, token)?;
         }
+        Request::InitProducerId => {
+            // Empty payload; transactional id reserved for a later phase.
+        }
     }
     finish_payload(dst)
 }
@@ -292,11 +302,20 @@ pub fn decode_request(opcode: u16, payload: &[u8]) -> Result<Request> {
                     headers,
                 });
             }
+            // Optional Phase 10 trailer: producer_id(u64) + epoch(u16) + base_sequence(i32).
+            let (producer_id, producer_epoch, base_sequence) = if src.remaining() >= 8 + 2 + 4 {
+                (src.get_u64_le(), src.get_u16_le(), src.get_i32_le())
+            } else {
+                (0, 0, -1)
+            };
             Ok(Request::Produce {
                 topic,
                 partition,
                 acks,
                 messages,
+                producer_id,
+                producer_epoch,
+                base_sequence,
             })
         }
         RequestOpcode::Fetch => {
@@ -460,6 +479,7 @@ pub fn decode_request(opcode: u16, payload: &[u8]) -> Result<Request> {
         RequestOpcode::Auth => Ok(Request::Auth {
             token: get_string(&mut src)?,
         }),
+        RequestOpcode::InitProducerId => Ok(Request::InitProducerId),
     }
 }
 
@@ -647,6 +667,15 @@ pub fn encode_response(resp: &Response) -> Result<Bytes> {
             }
         }
         Response::Auth { error_code } => {
+            dst.put_u16_le(*error_code);
+        }
+        Response::InitProducerId {
+            producer_id,
+            epoch,
+            error_code,
+        } => {
+            dst.put_u64_le(*producer_id);
+            dst.put_u16_le(*epoch);
             dst.put_u16_le(*error_code);
         }
         Response::Error { code, message } => {
@@ -1041,6 +1070,16 @@ pub fn decode_response(opcode: u16, payload: &[u8]) -> Result<Response> {
                 error_code: src.get_u16_le(),
             })
         }
+        ResponseOpcode::InitProducerId => {
+            if src.remaining() < 8 + 2 + 2 {
+                return Err(Error::Protocol("truncated init producer id response".into()));
+            }
+            Ok(Response::InitProducerId {
+                producer_id: src.get_u64_le(),
+                epoch: src.get_u16_le(),
+                error_code: src.get_u16_le(),
+            })
+        }
         ResponseOpcode::Error => {
             if src.remaining() < 2 {
                 return Err(Error::Protocol("truncated error code".into()));
@@ -1089,6 +1128,7 @@ pub fn pack_response(corr: u32, resp: &Response) -> Result<Frame> {
 mod tests {
     use super::*;
     use crate::request::{OffsetCommitEntry, OffsetEntry, ProduceMessage};
+    use crate::response::ResponseOpcode;
 
     #[test]
     fn produce_roundtrip() {
@@ -1102,10 +1142,68 @@ mod tests {
                 timestamp_ms: -1,
                 headers: vec![("h".into(), Bytes::from_static(b"hv"))],
             }],
+            producer_id: 0,
+            producer_epoch: 0,
+            base_sequence: -1,
         };
         let bytes = encode_request(&req).unwrap();
         let decoded = decode_request(RequestOpcode::Produce as u16, &bytes).unwrap();
         assert_eq!(decoded, req);
+    }
+
+    #[test]
+    fn produce_legacy_without_trailer_decodes() {
+        // Manually craft pre-Phase-10 produce payload (no trailer).
+        let mut dst = BytesMut::new();
+        put_string(&mut dst, "t").unwrap();
+        dst.put_i32_le(0);
+        dst.put_u8(1);
+        dst.put_u32_le(1);
+        put_optional_bytes(&mut dst, None);
+        put_bytes(&mut dst, b"v");
+        dst.put_i64_le(-1);
+        put_headers(&mut dst, &[]).unwrap();
+        let decoded = decode_request(RequestOpcode::Produce as u16, &dst).unwrap();
+        match decoded {
+            Request::Produce {
+                producer_id,
+                producer_epoch,
+                base_sequence,
+                ..
+            } => {
+                assert_eq!(producer_id, 0);
+                assert_eq!(producer_epoch, 0);
+                assert_eq!(base_sequence, -1);
+            }
+            other => panic!("unexpected {other:?}"),
+        }
+    }
+
+    #[test]
+    fn init_producer_id_roundtrip() {
+        let req = Request::InitProducerId;
+        let bytes = encode_request(&req).unwrap();
+        assert_eq!(
+            decode_request(RequestOpcode::InitProducerId as u16, &bytes).unwrap(),
+            req
+        );
+        let resp = Response::InitProducerId {
+            producer_id: 42,
+            epoch: 1,
+            error_code: 0,
+        };
+        let rb = encode_response(&resp).unwrap();
+        assert_eq!(
+            decode_response(ResponseOpcode::InitProducerId as u16, &rb).unwrap(),
+            resp
+        );
+    }
+
+    #[test]
+    fn phase10_idempotent_error_codes() {
+        assert_eq!(ErrorCode::from_u16(19), ErrorCode::InvalidProducerEpoch);
+        assert_eq!(ErrorCode::from_u16(20), ErrorCode::OutOfOrderSequence);
+        assert_eq!(ErrorCode::from_u16(21), ErrorCode::UnknownProducerId);
     }
 
     #[test]
@@ -1465,8 +1563,8 @@ mod tests {
         };
 
         // Empty / truncated payloads for every known opcode.
-        let req_ops: &[u16] = &[1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 20, 22, 24, 30, 99, 0xFFFF];
-        let resp_ops: &[u16] = &[1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 21, 23, 25, 31, 0xFFFF, 42];
+        let req_ops: &[u16] = &[1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 20, 22, 24, 30, 32, 99, 0xFFFF];
+        let resp_ops: &[u16] = &[1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 21, 23, 25, 31, 33, 0xFFFF, 42];
 
         for op in req_ops {
             let _ = decode_request(*op, &[]);

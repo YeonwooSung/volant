@@ -34,6 +34,8 @@ pub enum RequestOpcode {
     ClusterState = 24,
     /// Shared-token authentication (Phase 7).
     Auth = 30,
+    /// Allocate a producer id + epoch for idempotent produce (Phase 10).
+    InitProducerId = 32,
 }
 
 impl RequestOpcode {
@@ -54,6 +56,7 @@ impl RequestOpcode {
             22 => Self::HeartbeatBroker,
             24 => Self::ClusterState,
             30 => Self::Auth,
+            32 => Self::InitProducerId,
             _ => return None,
         })
     }
@@ -107,6 +110,12 @@ pub enum Request {
         acks: u8,
         /// Messages to append.
         messages: Vec<ProduceMessage>,
+        /// Idempotent producer id (`0` = disabled).
+        producer_id: u64,
+        /// Producer epoch from [`Request::InitProducerId`].
+        producer_epoch: u16,
+        /// Base sequence for this batch (`-1` = non-idempotent).
+        base_sequence: i32,
     },
     /// Fetch records.
     Fetch {
@@ -217,6 +226,8 @@ pub enum Request {
         /// Shared secret token.
         token: String,
     },
+    /// Allocate a producer id for idempotent produce (Phase 10).
+    InitProducerId,
 }
 
 impl Request {
@@ -237,6 +248,7 @@ impl Request {
             Self::HeartbeatBroker { .. } => RequestOpcode::HeartbeatBroker as u16,
             Self::ClusterState { .. } => RequestOpcode::ClusterState as u16,
             Self::Auth { .. } => RequestOpcode::Auth as u16,
+            Self::InitProducerId => RequestOpcode::InitProducerId as u16,
         }
     }
 }

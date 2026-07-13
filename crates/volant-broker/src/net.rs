@@ -109,11 +109,13 @@ async fn serve_metrics_connection(stream: &mut TcpStream, broker: &Broker) -> Re
 
 fn broker_metrics_text(broker: &Broker) -> String {
     let metrics: Arc<Metrics> = broker.metrics();
+    let lag = broker.consumer_lag_snapshots();
     metrics.render_prometheus(
         broker.topic_count(),
         broker.partition_count_total(),
         broker.messages_coalesced(),
         env!("CARGO_PKG_VERSION"),
+        &lag,
     )
 }
 
@@ -555,7 +557,8 @@ fn record_response_metrics(broker: &Broker, resp: &Response) {
         | Response::ReplicaFetch { error_code, .. }
         | Response::HeartbeatBroker { error_code, .. }
         | Response::ClusterState { error_code, .. }
-        | Response::Auth { error_code } => {
+        | Response::Auth { error_code }
+        | Response::InitProducerId { error_code, .. } => {
             if *error_code != 0 {
                 m.record_error(*error_code);
             }
@@ -654,6 +657,9 @@ async fn handle_request(broker: &Broker, req: Request) -> Result<Response> {
             partition,
             acks,
             messages,
+            producer_id,
+            producer_epoch,
+            base_sequence,
         } => {
             let span = info_span!("produce", topic = %topic, partition, msg_count = messages.len());
             async {
@@ -663,6 +669,7 @@ async fn handle_request(broker: &Broker, req: Request) -> Result<Response> {
                 }
 
                 let approx_bytes: u64 = messages.iter().map(|m| m.value.len() as u64).sum();
+                let msg_count = messages.len() as u32;
 
                 let pid = if partition < 0 {
                     let key = messages[0].key.as_deref();
@@ -683,6 +690,39 @@ async fn handle_request(broker: &Broker, req: Request) -> Result<Response> {
                         count: 0,
                         error_code: ErrorCode::NotLeaderForPartition as u16,
                     });
+                }
+
+                // Idempotent de-dupe / sequence gate (Phase 10).
+                match broker.check_idempotent_produce(
+                    producer_id,
+                    producer_epoch,
+                    &topic,
+                    pid.0,
+                    base_sequence,
+                    msg_count,
+                ) {
+                    crate::broker::IdempotentCheck::Reject { error_code } => {
+                        return Ok(Response::Produce {
+                            topic,
+                            partition: pid.0,
+                            base_offset: 0,
+                            count: 0,
+                            error_code,
+                        });
+                    }
+                    crate::broker::IdempotentCheck::Duplicate {
+                        base_offset,
+                        count,
+                    } => {
+                        return Ok(Response::Produce {
+                            topic,
+                            partition: pid.0,
+                            base_offset,
+                            count,
+                            error_code: 0,
+                        });
+                    }
+                    crate::broker::IdempotentCheck::Accept => {}
                 }
 
                 let mut batch = MessageBatch::default();
@@ -742,6 +782,15 @@ async fn handle_request(broker: &Broker, req: Request) -> Result<Response> {
 
                 if final_error == 0 {
                     broker.metrics().add_produce_bytes(approx_bytes);
+                    broker.record_idempotent_produce(
+                        producer_id,
+                        producer_epoch,
+                        &topic,
+                        pid.0,
+                        base_sequence,
+                        count,
+                        base_offset,
+                    );
                 }
 
                 Ok(Response::Produce {
@@ -931,6 +980,14 @@ async fn handle_request(broker: &Broker, req: Request) -> Result<Response> {
                 generation,
                 controller_id,
                 topics,
+            })
+        }
+        Request::InitProducerId => {
+            let (producer_id, epoch) = broker.init_producer_id();
+            Ok(Response::InitProducerId {
+                producer_id,
+                epoch,
+                error_code: 0,
             })
         }
     }

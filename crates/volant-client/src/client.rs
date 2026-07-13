@@ -1,6 +1,8 @@
 //! Networked async client for Volant brokers.
 
+use std::collections::HashMap;
 use std::sync::atomic::{AtomicU32, Ordering};
+use std::time::Duration;
 
 use bytes::{Bytes, BytesMut};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
@@ -15,6 +17,16 @@ use volant_protocol::{
 
 use crate::config::ClientConfig;
 use crate::conn::ClientConn;
+
+/// In-memory idempotent producer state (Phase 10).
+#[derive(Debug, Default)]
+struct IdempotentState {
+    producer_id: u64,
+    epoch: u16,
+    initialized: bool,
+    /// Next base_sequence per (topic, partition).
+    next_seq: HashMap<(String, u32), i32>,
+}
 
 /// Result of a successful produce call.
 #[derive(Debug, Clone)]
@@ -80,14 +92,16 @@ impl HeartbeatResult {
 
 /// Async client (sequential request/response over one connection).
 ///
-/// Supports optional shared-token auth, optional TLS (`tls` feature), and
-/// automatic reconnect to the partition leader on `NotLeaderForPartition`.
+/// Supports optional shared-token auth, optional TLS (`tls` feature),
+/// automatic reconnect to the partition leader on `NotLeaderForPartition`,
+/// and optional idempotent produce with retries (Phase 10).
 #[derive(Debug)]
 pub struct Client {
     stream: Mutex<ClientConn>,
     current_addr: Mutex<String>,
     next_corr: AtomicU32,
     config: ClientConfig,
+    idempotent: Mutex<IdempotentState>,
 }
 
 impl Client {
@@ -107,6 +121,7 @@ impl Client {
             current_addr: Mutex::new(addr),
             next_corr: AtomicU32::new(1),
             config,
+            idempotent: Mutex::new(IdempotentState::default()),
         };
         if let Some(token) = client.config.auth_token.clone() {
             client.authenticate(token).await?;
@@ -252,6 +267,10 @@ impl Client {
     }
 
     /// Produce with explicit acks (`1` leader, `255` all ISR).
+    ///
+    /// When [`ClientConfig::enable_idempotence`] is set, resolves the partition
+    /// client-side, attaches producer id/sequence, and de-dupes retries safely.
+    /// Transient errors are retried up to [`ClientConfig::max_retries`] times.
     pub async fn produce_with_acks(
         &self,
         topic: &str,
@@ -272,19 +291,56 @@ impl Client {
             })
             .collect();
 
-        let mut part = partition.map(|p| p as i32).unwrap_or(-1);
-        let max_attempts = 1 + self.config.max_redirects;
-        let mut attempt = 0u32;
+        // For idempotence, pin partition before sequencing.
+        let mut part = if self.config.enable_idempotence {
+            let p = match partition {
+                Some(p) => p,
+                None => self.resolve_partition(topic, wire[0].key.as_deref()).await?,
+            };
+            p as i32
+        } else {
+            partition.map(|p| p as i32).unwrap_or(-1)
+        };
+
+        let (producer_id, producer_epoch, base_sequence) = if self.config.enable_idempotence {
+            self.ensure_producer_id().await?;
+            let state = self.idempotent.lock().await;
+            let key = (topic.to_owned(), part as u32);
+            let seq = *state.next_seq.get(&key).unwrap_or(&0);
+            (state.producer_id, state.epoch, seq)
+        } else {
+            (0, 0, -1)
+        };
+
+        // Redirect attempts: 1 initial + max_redirects extras (max_redirects=0 → no redirect).
+        let max_redirect_attempts = 1 + self.config.max_redirects;
+        let max_retries = self.config.max_retries;
+        let mut redirect_attempt = 0u32;
+        let mut retry_attempt = 0u32;
+
         loop {
-            attempt += 1;
-            let resp = self
+            redirect_attempt += 1;
+            let resp = match self
                 .round_trip(Request::Produce {
                     topic: topic.to_owned(),
                     partition: part,
                     acks,
                     messages: wire.clone(),
+                    producer_id,
+                    producer_epoch,
+                    base_sequence,
                 })
-                .await?;
+                .await
+            {
+                Ok(r) => r,
+                Err(e) if is_transient_transport(&e) && retry_attempt < max_retries => {
+                    retry_attempt += 1;
+                    redirect_attempt = redirect_attempt.saturating_sub(1);
+                    tokio::time::sleep(Duration::from_millis(self.config.retry_backoff_ms)).await;
+                    continue;
+                }
+                Err(e) => return Err(e),
+            };
 
             match resp {
                 Response::Produce {
@@ -295,14 +351,26 @@ impl Client {
                     error_code,
                 } => {
                     if error_code == ErrorCode::NotLeaderForPartition as u16
-                        && attempt < max_attempts
+                        && redirect_attempt < max_redirect_attempts
                     {
-                        // Response includes the resolved partition even on NotLeader.
                         part = p as i32;
                         self.redirect_to_leader(&t, p).await?;
                         continue;
                     }
+                    if is_transient_error_code(error_code) && retry_attempt < max_retries {
+                        retry_attempt += 1;
+                        redirect_attempt = redirect_attempt.saturating_sub(1);
+                        tokio::time::sleep(Duration::from_millis(self.config.retry_backoff_ms))
+                            .await;
+                        continue;
+                    }
                     check_ok(error_code, "produce")?;
+                    if self.config.enable_idempotence && base_sequence >= 0 {
+                        let mut state = self.idempotent.lock().await;
+                        let key = (t.clone(), p);
+                        let next = base_sequence.saturating_add(count as i32);
+                        state.next_seq.insert(key, next);
+                    }
                     return Ok(ProduceResult {
                         topic: t,
                         partition: p,
@@ -311,12 +379,21 @@ impl Client {
                     });
                 }
                 Response::Error { code, message } => {
-                    if code == ErrorCode::NotLeaderForPartition as u16 && attempt < max_attempts {
+                    if code == ErrorCode::NotLeaderForPartition as u16
+                        && redirect_attempt < max_redirect_attempts
+                    {
                         if part >= 0 {
                             self.redirect_to_leader(topic, part as u32).await?;
                         } else {
                             let _ = self.metadata().await;
                         }
+                        continue;
+                    }
+                    if is_transient_error_code(code) && retry_attempt < max_retries {
+                        retry_attempt += 1;
+                        redirect_attempt = redirect_attempt.saturating_sub(1);
+                        tokio::time::sleep(Duration::from_millis(self.config.retry_backoff_ms))
+                            .await;
                         continue;
                     }
                     return Err(error_from_code(code, message));
@@ -328,6 +405,58 @@ impl Client {
                 }
             }
         }
+    }
+
+    /// Ensure InitProducerId has been called when idempotence is enabled.
+    async fn ensure_producer_id(&self) -> Result<()> {
+        {
+            let state = self.idempotent.lock().await;
+            if state.initialized {
+                return Ok(());
+            }
+        }
+        let resp = self.round_trip(Request::InitProducerId).await?;
+        match resp {
+            Response::InitProducerId {
+                producer_id,
+                epoch,
+                error_code,
+            } => {
+                check_ok(error_code, "init_producer_id")?;
+                let mut state = self.idempotent.lock().await;
+                state.producer_id = producer_id;
+                state.epoch = epoch;
+                state.initialized = true;
+                state.next_seq.clear();
+                Ok(())
+            }
+            Response::Error { code, message } => Err(error_from_code(code, message)),
+            other => Err(Error::Protocol(format!(
+                "unexpected response for init_producer_id: {other:?}"
+            ))),
+        }
+    }
+
+    /// Resolve partition via metadata (key murmur2 or round-robin using partition 0).
+    async fn resolve_partition(&self, topic: &str, key: Option<&[u8]>) -> Result<u32> {
+        let meta = self.metadata().await?;
+        let tinfo = meta
+            .topics
+            .iter()
+            .find(|t| t.name == topic)
+            .ok_or_else(|| Error::NotFound(format!("topic '{topic}' not found in metadata")))?;
+        let n = tinfo.partitions.len() as u32;
+        if n == 0 {
+            return Err(Error::NotFound(format!("topic '{topic}' has no partitions")));
+        }
+        let p = match key {
+            Some(k) => volant_broker_partition_for_key(k, n),
+            None => {
+                // Stable default: partition 0 when RR state is not shared client-side.
+                0
+            }
+        };
+        Ok(p)
     }
 
     /// Fetch records from a partition.
@@ -623,9 +752,75 @@ fn error_from_code(code: u16, message: impl Into<String>) -> Error {
         | ErrorCode::NotEnoughReplicas
         | ErrorCode::BrokerNotAvailable
         | ErrorCode::AuthenticationFailed
-        | ErrorCode::AuthenticationRequired => Error::Protocol(message),
+        | ErrorCode::AuthenticationRequired
+        | ErrorCode::InvalidProducerEpoch
+        | ErrorCode::OutOfOrderSequence
+        | ErrorCode::UnknownProducerId => Error::Protocol(message),
         ErrorCode::Ok | ErrorCode::Unknown => Error::Protocol(message),
     }
+}
+
+fn is_transient_error_code(code: u16) -> bool {
+    matches!(
+        ErrorCode::from_u16(code),
+        ErrorCode::Timeout
+            | ErrorCode::NotEnoughReplicas
+            | ErrorCode::BrokerNotAvailable
+            | ErrorCode::Io
+    )
+}
+
+fn is_transient_transport(err: &Error) -> bool {
+    matches!(err, Error::Io(_))
+}
+
+/// Kafka-compatible murmur2 partition (same algorithm as `volant_broker::partition_for_key`).
+fn volant_broker_partition_for_key(key: &[u8], num_partitions: u32) -> u32 {
+    if num_partitions == 0 {
+        return 0;
+    }
+    (client_murmur2(key) & 0x7fff_ffff) % num_partitions
+}
+
+fn client_murmur2(data: &[u8]) -> u32 {
+    const SEED: u32 = 0x9747_b28c;
+    const M: u32 = 0x5bd1_e995;
+    const R: u32 = 24;
+
+    let length = data.len() as u32;
+    let mut h: u32 = SEED ^ length;
+    let length4 = data.len() / 4;
+
+    for i in 0..length4 {
+        let i4 = i * 4;
+        let mut k = u32::from(data[i4])
+            | (u32::from(data[i4 + 1]) << 8)
+            | (u32::from(data[i4 + 2]) << 16)
+            | (u32::from(data[i4 + 3]) << 24);
+        k = k.wrapping_mul(M);
+        k ^= k >> R;
+        k = k.wrapping_mul(M);
+        h = h.wrapping_mul(M);
+        h ^= k;
+    }
+
+    let rem = data.len() % 4;
+    let offset = data.len() & !3;
+    if rem == 3 {
+        h ^= u32::from(data[offset + 2]) << 16;
+    }
+    if rem >= 2 {
+        h ^= u32::from(data[offset + 1]) << 8;
+    }
+    if rem >= 1 {
+        h ^= u32::from(data[offset]);
+        h = h.wrapping_mul(M);
+    }
+
+    h ^= h >> 13;
+    h = h.wrapping_mul(M);
+    h ^= h >> 15;
+    h
 }
 
 /// Convenience: produce a single raw value.

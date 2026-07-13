@@ -184,7 +184,7 @@ async fn metrics_unit_render() {
     m.record_produce(true, 2, 40);
     m.record_fetch(true, 1, 10);
     m.record_connection();
-    let text = m.render_prometheus(3, 6, 2, "0.1.0-test");
+    let text = m.render_prometheus(3, 6, 2, "0.1.0-test", &[]);
     assert!(text.starts_with("# HELP") || text.contains("volant_"));
     assert!(text.contains("volant_topics 3"));
     assert!(text.contains("volant_partitions 6"));

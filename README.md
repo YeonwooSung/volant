@@ -137,8 +137,11 @@ metadata and **reconnects to the partition leader** (see `max_redirects`).
 **Phase 9:** multi-node Helm (`cluster.enabled`), inter-broker TLS, client CA roots,
 optional [fuzz/](./fuzz/) harness.
 
+**Phase 10:** idempotent produce (`enable_idempotence`), produce retries, consumer
+lag metrics + `volant group lag`.
+
 **Still deferred:** Kafka wire shim, multi-language clients, SCRAM, mTLS identity,
-chaos-mesh / cargo-fuzz corpus CI.
+chaos-mesh / cargo-fuzz corpus CI, transactions.
 
 ### Networked client (library)
 

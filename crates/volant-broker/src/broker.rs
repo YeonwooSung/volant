@@ -97,6 +97,41 @@ pub struct InterBrokerTls {
     pub ca_path: Option<PathBuf>,
 }
 
+/// Cached result of the last idempotent produce batch for a partition.
+#[derive(Debug, Clone)]
+struct IdempotentBatchState {
+    base_sequence: i32,
+    count: u32,
+    base_offset: u64,
+}
+
+/// In-memory state for one producer id (Phase 10).
+#[derive(Debug)]
+struct ProducerEpochState {
+    epoch: u16,
+    /// Per (topic, partition) last accepted batch.
+    partitions: HashMap<(String, u32), IdempotentBatchState>,
+}
+
+/// Outcome of an idempotent sequence check before append.
+#[derive(Debug, Clone)]
+pub enum IdempotentCheck {
+    /// Proceed with append; record state after success.
+    Accept,
+    /// Exact duplicate of last batch — return cached offsets without append.
+    Duplicate {
+        /// Cached base offset.
+        base_offset: u64,
+        /// Cached message count.
+        count: u32,
+    },
+    /// Reject with protocol error code.
+    Reject {
+        /// Error code (19/20/21).
+        error_code: u16,
+    },
+}
+
 /// In-process broker managing topics and partitions.
 #[derive(Debug)]
 pub struct Broker {
@@ -126,6 +161,10 @@ pub struct Broker {
     auth_token: RwLock<Option<String>>,
     /// Optional inter-broker TLS client config (Phase 9).
     inter_broker_tls: RwLock<Option<InterBrokerTls>>,
+    /// Next producer id for [`Broker::init_producer_id`] (Phase 10).
+    next_producer_id: AtomicU64,
+    /// In-memory idempotent producer state (not durable across restart).
+    producer_state: RwLock<HashMap<u64, ProducerEpochState>>,
 }
 
 impl Broker {
@@ -149,6 +188,8 @@ impl Broker {
             metrics: Arc::new(Metrics::new()),
             auth_token: RwLock::new(None),
             inter_broker_tls: RwLock::new(None),
+            next_producer_id: AtomicU64::new(1),
+            producer_state: RwLock::new(HashMap::new()),
         }
     }
 
@@ -198,6 +239,8 @@ impl Broker {
             metrics: Arc::new(Metrics::new()),
             auth_token: RwLock::new(None),
             inter_broker_tls: RwLock::new(None),
+            next_producer_id: AtomicU64::new(1),
+            producer_state: RwLock::new(HashMap::new()),
         };
         // Open local partitions from persisted assignment.
         broker.apply_local_assignment()?;
@@ -227,6 +270,145 @@ impl Broker {
     /// Current inter-broker TLS settings, if enabled.
     pub fn inter_broker_tls(&self) -> Option<InterBrokerTls> {
         self.inter_broker_tls.read().clone()
+    }
+
+    /// Allocate a producer id + epoch for idempotent produce (Phase 10).
+    ///
+    /// State is **in-memory only** — lost on broker restart (clients re-init).
+    pub fn init_producer_id(&self) -> (u64, u16) {
+        let id = self.next_producer_id.fetch_add(1, Ordering::Relaxed);
+        let epoch = 0u16;
+        self.producer_state.write().insert(
+            id,
+            ProducerEpochState {
+                epoch,
+                partitions: HashMap::new(),
+            },
+        );
+        (id, epoch)
+    }
+
+    /// Check idempotent produce sequence before appending.
+    ///
+    /// Non-idempotent produces (`producer_id == 0` or `base_sequence < 0`) always
+    /// return [`IdempotentCheck::Accept`] without consulting producer state.
+    pub fn check_idempotent_produce(
+        &self,
+        producer_id: u64,
+        producer_epoch: u16,
+        topic: &str,
+        partition: u32,
+        base_sequence: i32,
+        message_count: u32,
+    ) -> IdempotentCheck {
+        if producer_id == 0 || base_sequence < 0 {
+            return IdempotentCheck::Accept;
+        }
+        if message_count == 0 {
+            return IdempotentCheck::Reject {
+                error_code: ErrorCode::InvalidArg as u16,
+            };
+        }
+
+        let state = self.producer_state.read();
+        let Some(prod) = state.get(&producer_id) else {
+            return IdempotentCheck::Reject {
+                error_code: ErrorCode::UnknownProducerId as u16,
+            };
+        };
+        if prod.epoch != producer_epoch {
+            return IdempotentCheck::Reject {
+                error_code: ErrorCode::InvalidProducerEpoch as u16,
+            };
+        }
+
+        let key = (topic.to_owned(), partition);
+        match prod.partitions.get(&key) {
+            None => IdempotentCheck::Accept,
+            Some(last) => {
+                if base_sequence == last.base_sequence && message_count == last.count {
+                    IdempotentCheck::Duplicate {
+                        base_offset: last.base_offset,
+                        count: last.count,
+                    }
+                } else {
+                    let expected = last
+                        .base_sequence
+                        .saturating_add(last.count as i32);
+                    if base_sequence == expected {
+                        IdempotentCheck::Accept
+                    } else {
+                        IdempotentCheck::Reject {
+                            error_code: ErrorCode::OutOfOrderSequence as u16,
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    /// Record a successful idempotent produce batch.
+    pub fn record_idempotent_produce(
+        &self,
+        producer_id: u64,
+        producer_epoch: u16,
+        topic: &str,
+        partition: u32,
+        base_sequence: i32,
+        count: u32,
+        base_offset: u64,
+    ) {
+        if producer_id == 0 || base_sequence < 0 {
+            return;
+        }
+        let mut state = self.producer_state.write();
+        let Some(prod) = state.get_mut(&producer_id) else {
+            return;
+        };
+        if prod.epoch != producer_epoch {
+            return;
+        }
+        prod.partitions.insert(
+            (topic.to_owned(), partition),
+            IdempotentBatchState {
+                base_sequence,
+                count,
+                base_offset,
+            },
+        );
+    }
+
+    /// Consumer lag snapshots: `(group, topic, partition, committed, hwm, lag)`.
+    ///
+    /// Lag is `max(0, hwm.saturating_sub(committed))` when committed is known
+    /// (`!= u64::MAX`); unknown commits report lag equal to HWM (from 0).
+    pub fn consumer_lag_snapshots(&self) -> Vec<(String, String, u32, u64, u64, u64)> {
+        use crate::offset_store::OFFSET_UNKNOWN;
+
+        let mut out = Vec::new();
+        // Groups are not enumerated publicly; scan via offset store internals
+        // through group coordinator by collecting known groups from metadata topics
+        // is incomplete. Use offset store group listing if available.
+        let groups = self.groups().list_group_ids();
+        for gid in groups {
+            let fetched = match self.groups().fetch_offsets(&gid, &[]) {
+                Ok(r) => r.entries,
+                Err(_) => continue,
+            };
+            for e in fetched {
+                let topic = TopicName::new(e.topic.clone());
+                let pid = PartitionId(e.partition);
+                let hwm = self.high_watermark(&topic, pid).unwrap_or(0);
+                let committed = e.offset;
+                let lag = if committed == OFFSET_UNKNOWN {
+                    hwm
+                } else {
+                    hwm.saturating_sub(committed)
+                };
+                out.push((gid.clone(), e.topic, e.partition, committed, hwm, lag));
+            }
+        }
+        out
     }
 
     /// Number of topics known to this broker.

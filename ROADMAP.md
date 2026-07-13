@@ -147,7 +147,7 @@ Binding wire format and APIs: **[docs/PHASE2_SPEC.md](./docs/PHASE2_SPEC.md)**.
 
 4. **Client SDK**
    - [x] Async `Client` / `Producer` / `Consumer` over Tokio
-   - [ ] Retry + idempotent produce (PID + sequence) — stretch, deferred
+   - [x] Retry + idempotent produce (PID + sequence) — **Phase 10**
    - [x] E2E tests boot server on `127.0.0.1:0` via public net APIs
 
 5. **CLI**
@@ -187,7 +187,7 @@ Binding wire format and APIs: **[docs/PHASE3_SPEC.md](./docs/PHASE3_SPEC.md)**.
    - [x] `volant group fetch-offsets` / `volant group commit`
    - [x] `volant consume --group G`
 6. Lag metrics per group / partition
-   - [ ] Stretch / Phase 3 polish
+   - [x] Prometheus + CLI lag — **Phase 10**
 
 **Exit criteria**
 
@@ -382,6 +382,25 @@ Binding: **[docs/PHASE9_SPEC.md](./docs/PHASE9_SPEC.md)**.
 - [x] Docs: ops.md, deploy README, ROADMAP honesty
 
 **Still deferred:** Kafka shim, multi-lang clients, SCRAM, mTLS identity, full cargo-fuzz corpus CI.
+
+---
+
+### Phase 10 — Idempotent produce, retries, consumer lag ✅
+
+**Goal:** Safe produce retries and group lag visibility.
+
+Binding: **[docs/PHASE10_SPEC.md](./docs/PHASE10_SPEC.md)**.
+
+- [x] `InitProducerId` (opcode 32/33) + produce PID/epoch/sequence trailer
+- [x] Broker in-memory de-dupe (duplicate batch → same offsets; OOO/epoch/unknown PID errors 19–21)
+- [x] Client `enable_idempotence`, `max_retries`, `retry_backoff_ms`
+- [x] Prometheus `volant_consumer_group_lag{group,topic,partition}`
+- [x] CLI `volant group lag --group G`
+- [x] Integration tests (`phase10_idempotent_lag`)
+
+**Honest limitations:** producer state is **not durable** across broker restart (clients re-init). No multi-partition transactions / EOS.
+
+**Still deferred:** Kafka shim, multi-lang clients, SCRAM, mTLS, sticky assignor, transactions.
 
 ---
 

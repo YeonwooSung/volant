@@ -42,7 +42,7 @@ When `acks=all`, if `|ISR| < min_insync_replicas`, the leader rejects the produc
 |--------------|-------------------------------|
 | `acks=all` (response received) | **Yes** — every ISR member has the data; new leader is elected from ISR |
 | `acks=1` (response received) | **Maybe not** — data may exist only on the dead leader |
-| In-flight produce (no response) | Client must retry; may see duplicates without idempotent producer (not in Phase 6) |
+| In-flight produce (no response) | Client should retry; with Phase 10 `enable_idempotence` duplicates are de-duped per PID/seq (in-memory; lost on broker restart) |
 
 ### What Volant does **not** guarantee (Phase 6)
 

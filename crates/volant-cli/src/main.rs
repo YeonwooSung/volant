@@ -144,6 +144,18 @@ enum GroupCmd {
         #[arg(long, default_value = "127.0.0.1:9092")]
         broker: String,
     },
+    /// Show consumer group lag (hwm − committed) per partition.
+    Lag {
+        /// Consumer group id.
+        #[arg(long)]
+        group: String,
+        /// Optional topic filter.
+        #[arg(long)]
+        topic: Option<String>,
+        /// Broker address.
+        #[arg(long, default_value = "127.0.0.1:9092")]
+        broker: String,
+    },
 }
 
 #[tokio::main]
@@ -153,7 +165,7 @@ async fn main() -> Result<()> {
     match cli.command {
         Commands::Version => {
             println!("volant {}", env!("CARGO_PKG_VERSION"));
-            println!("status: Phase 8 — client redirect, TLS, ops packaging");
+            println!("status: Phase 10 — idempotent produce, retries, consumer lag");
         }
         Commands::Topic { action } => match action {
             TopicCmd::List { broker } => {
@@ -260,6 +272,64 @@ async fn main() -> Result<()> {
                 println!(
                     "committed group={group} topic={topic} partition={partition} offset={offset}"
                 );
+            }
+            GroupCmd::Lag {
+                group,
+                topic,
+                broker,
+            } => {
+                let client = connect(&broker, auth).await?;
+                let meta = client.metadata().await.context("metadata")?;
+                let offsets = client
+                    .fetch_offsets(&group, vec![])
+                    .await
+                    .context("fetch_offsets")?;
+                let mut rows = Vec::new();
+                for e in &offsets {
+                    if let Some(ref t) = topic {
+                        if e.topic != *t {
+                            continue;
+                        }
+                    }
+                    let hwm = meta
+                        .topics
+                        .iter()
+                        .find(|t| t.name == e.topic)
+                        .and_then(|t| t.partitions.iter().find(|p| p.partition_id == e.partition))
+                        .map(|p| p.hwm)
+                        .unwrap_or(0);
+                    let committed = e.offset;
+                    let lag = if committed == u64::MAX {
+                        hwm
+                    } else {
+                        hwm.saturating_sub(committed)
+                    };
+                    rows.push((e.topic.clone(), e.partition, committed, hwm, lag));
+                }
+                // Also show partitions with no commit yet when topic filter set.
+                if let Some(ref t) = topic {
+                    if let Some(ti) = meta.topics.iter().find(|x| x.name == *t) {
+                        for p in &ti.partitions {
+                            if !rows.iter().any(|r| r.0 == *t && r.1 == p.partition_id) {
+                                rows.push((t.clone(), p.partition_id, u64::MAX, p.hwm, p.hwm));
+                            }
+                        }
+                    }
+                }
+                rows.sort_by(|a, b| a.0.cmp(&b.0).then(a.1.cmp(&b.1)));
+                if rows.is_empty() {
+                    println!("(no lag data for group={group})");
+                } else {
+                    println!("group\ttopic\tpartition\tcommitted\thwm\tlag");
+                    for (t, p, c, h, l) in rows {
+                        let c_disp = if c == u64::MAX {
+                            "-".to_string()
+                        } else {
+                            c.to_string()
+                        };
+                        println!("{group}\t{t}\t{p}\t{c_disp}\t{h}\t{l}");
+                    }
+                }
             }
         },
         Commands::Produce {

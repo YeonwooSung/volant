@@ -21,6 +21,12 @@ pub struct ClientConfig {
     pub tls_ca: Option<PathBuf>,
     /// Max leader-redirect retries after `NotLeaderForPartition` (default 1 extra attempt).
     pub max_redirects: u32,
+    /// Enable idempotent produce (InitProducerId + per-partition sequences). Phase 10.
+    pub enable_idempotence: bool,
+    /// Extra produce attempts after the first on transient broker/transport errors.
+    pub max_retries: u32,
+    /// Sleep between produce retries (milliseconds).
+    pub retry_backoff_ms: u64,
 }
 
 impl Default for ClientConfig {
@@ -34,6 +40,9 @@ impl Default for ClientConfig {
             tls_insecure: false,
             tls_ca: None,
             max_redirects: 1,
+            enable_idempotence: false,
+            max_retries: 0,
+            retry_backoff_ms: 50,
         }
     }
 }

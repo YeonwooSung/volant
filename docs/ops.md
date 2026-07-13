@@ -127,7 +127,38 @@ Deploys a StatefulSet, headless Service, and ConfigMap `cluster.toml`
 Deterministic chaos tests always run with `cargo test -p volant-protocol`.
 Optional nightly: see [fuzz/README.md](../fuzz/README.md).
 
+## Idempotent produce & retries (Phase 10)
+
+Rust client:
+
+```rust
+ClientConfig {
+    enable_idempotence: true,
+    max_retries: 3,
+    retry_backoff_ms: 50,
+    ..Default::default()
+}
+```
+
+- On first produce, the client calls `InitProducerId` and tracks per-partition sequences.
+- Exact retries of the same batch return the same offsets (no double-append).
+- Producer state is **in-memory on the broker** — restart invalidates PIDs (re-init).
+
+## Consumer lag (Phase 10)
+
+```bash
+volant group lag --group my-group --broker 127.0.0.1:9092
+# optional: --topic events
+```
+
+Metrics (when `--metrics-addr` is set):
+
+```
+volant_consumer_group_lag{group="my-group",topic="events",partition="0"} 12
+```
+
 ## Deferred
 
 Kafka wire shim, multi-language clients, SCRAM, mTLS identity, full chaos-mesh
-suites, cargo-fuzz corpus CI. See [ROADMAP.md](../ROADMAP.md).
+suites, cargo-fuzz corpus CI, durable producer state, transactions.
+See [ROADMAP.md](../ROADMAP.md).

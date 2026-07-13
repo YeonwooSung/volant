@@ -34,6 +34,8 @@ pub enum ResponseOpcode {
     ClusterState = 25,
     /// Auth result (Phase 7).
     Auth = 31,
+    /// Init producer id result (Phase 10).
+    InitProducerId = 33,
     /// Error response.
     Error = 0xFFFF,
 }
@@ -56,6 +58,7 @@ impl ResponseOpcode {
             23 => Self::HeartbeatBroker,
             25 => Self::ClusterState,
             31 => Self::Auth,
+            33 => Self::InitProducerId,
             0xFFFF => Self::Error,
             _ => return None,
         })
@@ -104,6 +107,12 @@ pub enum ErrorCode {
     AuthenticationFailed = 17,
     /// Auth required before other opcodes on this connection.
     AuthenticationRequired = 18,
+    /// Idempotent produce epoch does not match broker state (Phase 10).
+    InvalidProducerEpoch = 19,
+    /// Idempotent produce sequence is not the next expected (Phase 10).
+    OutOfOrderSequence = 20,
+    /// Producer id was not allocated via InitProducerId (Phase 10).
+    UnknownProducerId = 21,
 }
 
 impl ErrorCode {
@@ -128,6 +137,9 @@ impl ErrorCode {
             16 => Self::BrokerNotAvailable,
             17 => Self::AuthenticationFailed,
             18 => Self::AuthenticationRequired,
+            19 => Self::InvalidProducerEpoch,
+            20 => Self::OutOfOrderSequence,
+            21 => Self::UnknownProducerId,
             _ => Self::Unknown,
         }
     }
@@ -366,6 +378,15 @@ pub enum Response {
         /// 0 = ok; 17 = AuthenticationFailed.
         error_code: u16,
     },
+    /// Init producer id result (Phase 10).
+    InitProducerId {
+        /// Allocated producer id.
+        producer_id: u64,
+        /// Producer epoch.
+        epoch: u16,
+        /// 0 = ok.
+        error_code: u16,
+    },
     /// Error response.
     Error {
         /// Error code.
@@ -393,6 +414,7 @@ impl Response {
             Self::HeartbeatBroker { .. } => ResponseOpcode::HeartbeatBroker as u16,
             Self::ClusterState { .. } => ResponseOpcode::ClusterState as u16,
             Self::Auth { .. } => ResponseOpcode::Auth as u16,
+            Self::InitProducerId { .. } => ResponseOpcode::InitProducerId as u16,
             Self::Error { .. } => ResponseOpcode::Error as u16,
         }
     }
