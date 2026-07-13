@@ -19,6 +19,8 @@ pub struct GroupConsumer {
     topics: Vec<String>,
     session_timeout_ms: u32,
     member_id: String,
+    /// Static membership instance id (Phase 12); empty = dynamic.
+    group_instance_id: String,
     generation: u32,
     assignment: Vec<(String, u32)>,
     /// Next fetch offset per (topic, partition).
@@ -33,7 +35,21 @@ impl GroupConsumer {
         topics: Vec<String>,
         session_timeout_ms: u32,
     ) -> Result<Self> {
+        Self::join_static(client, group_id, topics, session_timeout_ms, "").await
+    }
+
+    /// Join with static membership (`group_instance_id`, Phase 12).
+    ///
+    /// Empty `group_instance_id` is dynamic membership.
+    pub async fn join_static(
+        client: Arc<Client>,
+        group_id: impl Into<String>,
+        topics: Vec<String>,
+        session_timeout_ms: u32,
+        group_instance_id: impl Into<String>,
+    ) -> Result<Self> {
         let group_id = group_id.into();
+        let group_instance_id = group_instance_id.into();
         let timeout = if session_timeout_ms == 0 {
             10_000
         } else {
@@ -45,6 +61,7 @@ impl GroupConsumer {
             topics,
             session_timeout_ms: timeout,
             member_id: String::new(),
+            group_instance_id,
             generation: 0,
             assignment: Vec::new(),
             positions: HashMap::new(),
@@ -56,11 +73,12 @@ impl GroupConsumer {
     async fn do_join(&mut self) -> Result<()> {
         let result = self
             .client
-            .join_group(
+            .join_group_with_instance(
                 &self.group_id,
                 &self.member_id,
                 self.session_timeout_ms,
                 self.topics.clone(),
+                &self.group_instance_id,
             )
             .await?;
         self.member_id = result.member_id;

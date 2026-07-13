@@ -143,6 +143,9 @@ lag metrics + `volant group lag`.
 **Phase 11:** sticky partition assignor, durable producer PID state under
 `data_dir`, `volant group describe`.
 
+**Phase 12:** `volant group list` / `delete-offsets`, static membership via
+`group_instance_id`.
+
 **Still deferred:** Kafka wire shim, multi-language clients, SCRAM, mTLS identity,
 chaos-mesh / cargo-fuzz corpus CI, cooperative rebalance, transactions.
 

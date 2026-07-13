@@ -33,7 +33,10 @@ pub use broker::{
     MetadataSnapshot, PartitionMetadata, TopicMetadata,
 };
 pub use cluster::{BrokerEndpoint, ClusterConfig};
-pub use group::{GroupCoordinator, GroupDescription, GroupMemberDescription};
+pub use group::{
+    static_member_id, GroupCoordinator, GroupDescription, GroupListEntry, GroupMemberDescription,
+    STATIC_MEMBER_PREFIX,
+};
 pub use metrics::Metrics;
 pub use net::{run_metrics_server, run_server, serve_listener, start_background_tasks};
 pub use offset_store::{OffsetStore, StoredOffset, OFFSET_UNKNOWN};

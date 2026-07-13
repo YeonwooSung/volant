@@ -38,6 +38,10 @@ pub enum ResponseOpcode {
     InitProducerId = 33,
     /// Describe group result (Phase 11).
     DescribeGroup = 35,
+    /// List groups result (Phase 12).
+    ListGroups = 37,
+    /// Delete offsets result (Phase 12).
+    DeleteOffsets = 39,
     /// Error response.
     Error = 0xFFFF,
 }
@@ -62,6 +66,8 @@ impl ResponseOpcode {
             31 => Self::Auth,
             33 => Self::InitProducerId,
             35 => Self::DescribeGroup,
+            37 => Self::ListGroups,
+            39 => Self::DeleteOffsets,
             0xFFFF => Self::Error,
             _ => return None,
         })
@@ -222,6 +228,39 @@ pub struct GroupMemberInfo {
     pub topics: Vec<String>,
     /// Current partition assignment.
     pub assignment: Vec<Assignment>,
+}
+
+/// Group state for ListGroups (Phase 12).
+#[repr(u8)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum GroupState {
+    /// Offsets on disk only; no live members.
+    Empty = 0,
+    /// At least one live member.
+    Stable = 1,
+}
+
+impl GroupState {
+    /// Parse wire value.
+    pub fn from_u8(v: u8) -> Self {
+        match v {
+            1 => Self::Stable,
+            _ => Self::Empty,
+        }
+    }
+}
+
+/// One group in a ListGroups response (Phase 12).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct GroupListing {
+    /// Group id.
+    pub group_id: String,
+    /// Live vs empty (offset-only).
+    pub state: GroupState,
+    /// Live member count.
+    pub member_count: u32,
+    /// Current generation (`0` if empty).
+    pub generation: u32,
 }
 
 /// Offset fetch response entry.
@@ -412,6 +451,20 @@ pub enum Response {
         /// Live members.
         members: Vec<GroupMemberInfo>,
     },
+    /// List groups result (Phase 12).
+    ListGroups {
+        /// 0 = ok.
+        error_code: u16,
+        /// Known groups (live + offset-only).
+        groups: Vec<GroupListing>,
+    },
+    /// Delete offsets result (Phase 12).
+    DeleteOffsets {
+        /// 0 = ok.
+        error_code: u16,
+        /// Number of offset files removed.
+        deleted_count: u32,
+    },
     /// Error response.
     Error {
         /// Error code.
@@ -441,6 +494,8 @@ impl Response {
             Self::Auth { .. } => ResponseOpcode::Auth as u16,
             Self::InitProducerId { .. } => ResponseOpcode::InitProducerId as u16,
             Self::DescribeGroup { .. } => ResponseOpcode::DescribeGroup as u16,
+            Self::ListGroups { .. } => ResponseOpcode::ListGroups as u16,
+            Self::DeleteOffsets { .. } => ResponseOpcode::DeleteOffsets as u16,
             Self::Error { .. } => ResponseOpcode::Error as u16,
         }
     }

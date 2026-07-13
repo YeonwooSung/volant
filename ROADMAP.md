@@ -421,6 +421,23 @@ Binding: **[docs/PHASE11_SPEC.md](./docs/PHASE11_SPEC.md)**.
 
 ---
 
+### Phase 12 — Group admin: ListGroups, DeleteOffsets, static membership ✅
+
+**Goal:** Ops visibility and offset management for consumer groups; stable member ids for redeploys.
+
+Binding: **[docs/PHASE12_SPEC.md](./docs/PHASE12_SPEC.md)**.
+
+- [x] `ListGroups` (opcode 36/37) + `Client::list_groups` + `volant group list`
+- [x] `DeleteOffsets` (opcode 38/39) + `Client::delete_offsets` + `volant group delete-offsets`
+- [x] Static membership via JoinGroup `group_instance_id` → `static:{id}` member ids
+- [x] Integration tests (`phase12_group_admin`)
+
+**Honest limitations:** eager rebalance only; static membership is Volant-local (not Kafka `group.instance.id` wire parity).
+
+**Still deferred:** Kafka shim, multi-lang clients, SCRAM, mTLS, cooperative rebalance, transactions.
+
+---
+
 ## Performance targets (aspirational)
 
 | Metric | Single node target | Notes |

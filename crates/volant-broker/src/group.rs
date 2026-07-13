@@ -12,6 +12,9 @@ use volant_protocol::ErrorCode;
 use crate::assignor::sticky_assign_multi;
 use crate::offset_store::{OffsetStore, StoredOffset, OFFSET_UNKNOWN};
 
+/// Prefix for static membership member ids (Phase 12).
+pub const STATIC_MEMBER_PREFIX: &str = "static:";
+
 /// Result of a JoinGroup call.
 #[derive(Debug, Clone)]
 pub struct JoinResult {
@@ -77,6 +80,24 @@ pub struct GroupDescription {
     pub members: Vec<GroupMemberDescription>,
 }
 
+/// One group listing entry (Phase 12).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct GroupListEntry {
+    /// Group id.
+    pub group_id: String,
+    /// True when at least one live member.
+    pub stable: bool,
+    /// Live member count.
+    pub member_count: u32,
+    /// Current generation (`0` if empty).
+    pub generation: u32,
+}
+
+/// Derive a stable member id from a group instance id.
+pub fn static_member_id(instance_id: &str) -> String {
+    format!("{STATIC_MEMBER_PREFIX}{instance_id}")
+}
+
 #[derive(Debug)]
 struct Member {
     member_id: String,
@@ -113,12 +134,16 @@ impl GroupCoordinator {
     /// Join (or re-join) a group. Eager rebalance of all members.
     ///
     /// `partition_counts` is a callback: topic name → partition count.
+    ///
+    /// When `group_instance_id` is non-empty and `member_id` is empty, the member
+    /// id is derived as `static:{instance_id}` (Phase 12 static membership).
     pub fn join<F>(
         &self,
         group_id: &str,
         member_id: &str,
         session_timeout_ms: u32,
         topics: Vec<String>,
+        group_instance_id: &str,
         partition_counts: F,
     ) -> Result<JoinResult>
     where
@@ -140,11 +165,20 @@ impl GroupCoordinator {
             session_timeout_ms
         };
 
+        // Resolve member id: explicit → static instance → new UUID.
+        let resolved_id = if !member_id.is_empty() {
+            member_id.to_owned()
+        } else if !group_instance_id.is_empty() {
+            static_member_id(group_instance_id)
+        } else {
+            String::new()
+        };
+
         // Existing member re-joining after rebalance detection: refresh state and
         // return current assignment without bumping generation (avoids thrashing
         // when multiple members re-sync after one join/leave).
-        if !member_id.is_empty() {
-            if let Some(existing) = group.members.get_mut(member_id) {
+        if !resolved_id.is_empty() {
+            if let Some(existing) = group.members.get_mut(&resolved_id) {
                 let topics_changed = existing.topics != topics;
                 existing.session_timeout_ms = timeout;
                 existing.last_heartbeat = Instant::now();
@@ -155,23 +189,23 @@ impl GroupCoordinator {
                 }
                 let assignment = group
                     .members
-                    .get(member_id)
+                    .get(&resolved_id)
                     .map(|m| m.assignment.clone())
                     .unwrap_or_default();
                 return Ok(JoinResult {
                     error_code: 0,
                     generation: group.generation,
-                    member_id: member_id.to_owned(),
+                    member_id: resolved_id,
                     assignment,
                 });
             }
         }
 
-        let mid = if member_id.is_empty() {
+        let mid = if resolved_id.is_empty() {
             Uuid::new_v4().to_string()
         } else {
-            // Unknown member_id: accept provided id (e.g. restart with sticky id).
-            member_id.to_owned()
+            // Unknown member_id / static instance: accept provided id.
+            resolved_id
         };
 
         group.members.insert(
@@ -327,6 +361,51 @@ impl GroupCoordinator {
         let mut out: Vec<_> = set.into_keys().collect();
         out.sort();
         out
+    }
+
+    /// List groups with state for ListGroups (Phase 12).
+    pub fn list_groups(&self) -> Vec<GroupListEntry> {
+        let mut set: HashMap<String, ()> = HashMap::new();
+        let groups = self.groups.lock();
+        for gid in groups.keys() {
+            set.insert(gid.clone(), ());
+        }
+        if let Ok(disk) = self.offsets.list_group_ids() {
+            for gid in disk {
+                set.insert(gid, ());
+            }
+        }
+        let mut out: Vec<GroupListEntry> = set
+            .into_keys()
+            .map(|group_id| {
+                if let Some(g) = groups.get(&group_id) {
+                    GroupListEntry {
+                        group_id,
+                        stable: !g.members.is_empty(),
+                        member_count: g.members.len() as u32,
+                        generation: g.generation,
+                    }
+                } else {
+                    GroupListEntry {
+                        group_id,
+                        stable: false,
+                        member_count: 0,
+                        generation: 0,
+                    }
+                }
+            })
+            .collect();
+        out.sort_by(|a, b| a.group_id.cmp(&b.group_id));
+        out
+    }
+
+    /// Delete committed offsets (Phase 12). Empty `entries` deletes all for the group.
+    pub fn delete_offsets(
+        &self,
+        group_id: &str,
+        entries: &[(String, u32)],
+    ) -> Result<u32> {
+        self.offsets.delete_many(group_id, entries)
     }
 
     /// Fetch offsets. Empty `entries` → all committed for group.
@@ -492,10 +571,10 @@ mod tests {
         let dir = temp_dir();
         let coord = GroupCoordinator::new(&dir).unwrap();
         let j1 = coord
-            .join("g", "", 10_000, vec!["t".into()], counts)
+            .join("g", "", 10_000, vec!["t".into()], "", counts)
             .unwrap();
         let j2 = coord
-            .join("g", "", 10_000, vec!["t".into()], counts)
+            .join("g", "", 10_000, vec!["t".into()], "", counts)
             .unwrap();
         assert_eq!(j1.error_code, 0);
         assert_eq!(j2.error_code, 0);
@@ -521,10 +600,10 @@ mod tests {
         let dir = temp_dir();
         let coord = GroupCoordinator::new(&dir).unwrap();
         let j1 = coord
-            .join("g", "", 10_000, vec!["t".into()], counts)
+            .join("g", "", 10_000, vec!["t".into()], "", counts)
             .unwrap();
         let j2 = coord
-            .join("g", "", 10_000, vec!["t".into()], counts)
+            .join("g", "", 10_000, vec!["t".into()], "", counts)
             .unwrap();
         let leave = coord.leave("g", &j2.member_id, counts);
         assert_eq!(leave.error_code, 0);
@@ -566,7 +645,7 @@ mod tests {
         let dir = temp_dir();
         let coord = GroupCoordinator::new(&dir).unwrap();
         let j = coord
-            .join("g", "", 10_000, vec!["t".into()], counts)
+            .join("g", "", 10_000, vec!["t".into()], "", counts)
             .unwrap();
         let ok = coord.heartbeat("g", &j.member_id, j.generation);
         assert_eq!(ok.error_code, 0);

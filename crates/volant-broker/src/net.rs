@@ -559,7 +559,9 @@ fn record_response_metrics(broker: &Broker, resp: &Response) {
         | Response::ClusterState { error_code, .. }
         | Response::Auth { error_code }
         | Response::InitProducerId { error_code, .. }
-        | Response::DescribeGroup { error_code, .. } => {
+        | Response::DescribeGroup { error_code, .. }
+        | Response::ListGroups { error_code, .. }
+        | Response::DeleteOffsets { error_code, .. } => {
             if *error_code != 0 {
                 m.record_error(*error_code);
             }
@@ -862,12 +864,14 @@ async fn handle_request(broker: &Broker, req: Request) -> Result<Response> {
             member_id,
             session_timeout_ms,
             topics,
+            group_instance_id,
         } => {
             let result = broker.groups().join(
                 &group_id,
                 &member_id,
                 session_timeout_ms,
                 topics,
+                &group_instance_id,
                 |t| broker.partition_count_opt(t),
             )?;
             Ok(Response::JoinGroup {
@@ -1024,6 +1028,38 @@ async fn handle_request(broker: &Broker, req: Request) -> Result<Response> {
                     members: vec![],
                 }),
             }
+        }
+        Request::ListGroups => {
+            let groups = broker
+                .groups()
+                .list_groups()
+                .into_iter()
+                .map(|g| volant_protocol::GroupListing {
+                    group_id: g.group_id,
+                    state: if g.stable {
+                        volant_protocol::GroupState::Stable
+                    } else {
+                        volant_protocol::GroupState::Empty
+                    },
+                    member_count: g.member_count,
+                    generation: g.generation,
+                })
+                .collect();
+            Ok(Response::ListGroups {
+                error_code: 0,
+                groups,
+            })
+        }
+        Request::DeleteOffsets { group_id, entries } => {
+            let pairs: Vec<(String, u32)> = entries
+                .into_iter()
+                .map(|e| (e.topic, e.partition))
+                .collect();
+            let deleted_count = broker.groups().delete_offsets(&group_id, &pairs)?;
+            Ok(Response::DeleteOffsets {
+                error_code: 0,
+                deleted_count,
+            })
         }
     }
 }

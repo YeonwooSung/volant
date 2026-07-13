@@ -169,6 +169,24 @@ unknown groups return NotFound.
 
 Rebalance uses a **sticky** assignor by default (minimize ownership churn).
 
+## Group list & delete offsets (Phase 12)
+
+```bash
+volant group list --broker 127.0.0.1:9092
+volant group delete-offsets --group my-group --broker 127.0.0.1:9092
+# optional single partition:
+volant group delete-offsets --group my-group --topic events --partition 0
+```
+
+`list` shows live (**Stable**) and offset-only (**Empty**) groups.
+
+## Static membership (Phase 12)
+
+Pass a stable `group_instance_id` on join (Rust: `join_group_with_instance` /
+`GroupConsumer::join_static`). The broker assigns `member_id = static:{id}` so
+redeploys rejoin the same member without an extra generation bump when still
+in-session.
+
 ## Deferred
 
 Kafka wire shim, multi-language clients, SCRAM, mTLS identity, full chaos-mesh

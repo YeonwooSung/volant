@@ -38,6 +38,10 @@ pub enum RequestOpcode {
     InitProducerId = 32,
     /// Describe a consumer group (Phase 11).
     DescribeGroup = 34,
+    /// List known consumer groups (Phase 12).
+    ListGroups = 36,
+    /// Delete committed consumer offsets (Phase 12).
+    DeleteOffsets = 38,
 }
 
 impl RequestOpcode {
@@ -60,6 +64,8 @@ impl RequestOpcode {
             30 => Self::Auth,
             32 => Self::InitProducerId,
             34 => Self::DescribeGroup,
+            36 => Self::ListGroups,
+            38 => Self::DeleteOffsets,
             _ => return None,
         })
     }
@@ -174,12 +180,14 @@ pub enum Request {
     JoinGroup {
         /// Consumer group id.
         group_id: String,
-        /// Member id; empty = new member.
+        /// Member id; empty = new member (or derived from `group_instance_id`).
         member_id: String,
         /// Session timeout in milliseconds.
         session_timeout_ms: u32,
         /// Subscribed topic names.
         topics: Vec<String>,
+        /// Optional static membership id (Phase 12). Empty = dynamic.
+        group_instance_id: String,
     },
     /// Heartbeat for group membership.
     Heartbeat {
@@ -236,6 +244,15 @@ pub enum Request {
         /// Consumer group id.
         group_id: String,
     },
+    /// List known consumer groups (Phase 12).
+    ListGroups,
+    /// Delete committed offsets for a group (Phase 12).
+    DeleteOffsets {
+        /// Consumer group id.
+        group_id: String,
+        /// Partitions to clear; empty = all offsets for the group.
+        entries: Vec<OffsetEntry>,
+    },
 }
 
 impl Request {
@@ -258,6 +275,8 @@ impl Request {
             Self::Auth { .. } => RequestOpcode::Auth as u16,
             Self::InitProducerId => RequestOpcode::InitProducerId as u16,
             Self::DescribeGroup { .. } => RequestOpcode::DescribeGroup as u16,
+            Self::ListGroups => RequestOpcode::ListGroups as u16,
+            Self::DeleteOffsets { .. } => RequestOpcode::DeleteOffsets as u16,
         }
     }
 }

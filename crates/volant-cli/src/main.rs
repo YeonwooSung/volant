@@ -165,6 +165,27 @@ enum GroupCmd {
         #[arg(long, default_value = "127.0.0.1:9092")]
         broker: String,
     },
+    /// List known consumer groups (Phase 12).
+    List {
+        /// Broker address.
+        #[arg(long, default_value = "127.0.0.1:9092")]
+        broker: String,
+    },
+    /// Delete committed offsets (Phase 12). Empty filters delete all for the group.
+    DeleteOffsets {
+        /// Consumer group id.
+        #[arg(long)]
+        group: String,
+        /// Optional topic filter.
+        #[arg(long)]
+        topic: Option<String>,
+        /// Optional partition filter (requires `--topic`).
+        #[arg(long)]
+        partition: Option<u32>,
+        /// Broker address.
+        #[arg(long, default_value = "127.0.0.1:9092")]
+        broker: String,
+    },
 }
 
 #[tokio::main]
@@ -175,7 +196,7 @@ async fn main() -> Result<()> {
         Commands::Version => {
             println!("volant {}", env!("CARGO_PKG_VERSION"));
             println!(
-                "status: Phase 11 — sticky assignor, durable producer state, group describe"
+                "status: Phase 12 — ListGroups, DeleteOffsets, static membership"
             );
         }
         Commands::Topic { action } => match action {
@@ -368,6 +389,54 @@ async fn main() -> Result<()> {
                         assigns.join(",")
                     );
                 }
+            }
+            GroupCmd::List { broker } => {
+                let client = connect(&broker, auth).await?;
+                let groups = client.list_groups().await.context("list_groups")?;
+                if groups.is_empty() {
+                    println!("(no groups)");
+                } else {
+                    println!("group\tstate\tmembers\tgeneration");
+                    for g in groups {
+                        let state = match g.state {
+                            volant_protocol::GroupState::Stable => "Stable",
+                            volant_protocol::GroupState::Empty => "Empty",
+                        };
+                        println!(
+                            "{}\t{}\t{}\t{}",
+                            g.group_id, state, g.member_count, g.generation
+                        );
+                    }
+                }
+            }
+            GroupCmd::DeleteOffsets {
+                group,
+                topic,
+                partition,
+                broker,
+            } => {
+                let client = connect(&broker, auth).await?;
+                let entries = match (topic.as_deref(), partition) {
+                    (Some(t), Some(p)) => vec![OffsetEntry {
+                        topic: t.to_owned(),
+                        partition: p,
+                    }],
+                    (Some(_), None) => {
+                        bail!("--partition is required when --topic is set for delete-offsets")
+                    }
+                    (None, Some(_)) => {
+                        bail!("--topic is required when --partition is set for delete-offsets")
+                    }
+                    (None, None) => vec![],
+                };
+                let result = client
+                    .delete_offsets(&group, entries)
+                    .await
+                    .context("delete_offsets")?;
+                println!(
+                    "deleted_offsets group={group} count={}",
+                    result.deleted_count
+                );
             }
         },
         Commands::Produce {

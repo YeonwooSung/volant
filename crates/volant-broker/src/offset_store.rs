@@ -149,6 +149,51 @@ impl OffsetStore {
         Ok(out)
     }
 
+    /// Delete a single offset entry if present. Returns whether a file was removed.
+    pub fn delete(&self, group_id: &str, topic: &str, partition: u32) -> Result<bool> {
+        let _guard = self.lock.lock();
+        let path = self.entry_path(group_id, topic, partition);
+        if !path.exists() {
+            return Ok(false);
+        }
+        fs::remove_file(&path)
+            .map_err(|e| Error::Storage(format!("delete offset {}: {e}", path.display())))?;
+        // Best-effort prune empty topic / group dirs.
+        if let Some(topic_dir) = path.parent() {
+            let _ = fs::remove_dir(topic_dir);
+            if let Some(group_dir) = topic_dir.parent() {
+                let _ = fs::remove_dir(group_dir);
+            }
+        }
+        Ok(true)
+    }
+
+    /// Delete specific offsets, or all offsets for the group when `entries` is empty.
+    /// Returns the number of files removed.
+    pub fn delete_many(
+        &self,
+        group_id: &str,
+        entries: &[(String, u32)],
+    ) -> Result<u32> {
+        if entries.is_empty() {
+            let all = self.fetch_all(group_id)?;
+            let mut n = 0u32;
+            for e in all {
+                if self.delete(group_id, &e.topic, e.partition)? {
+                    n += 1;
+                }
+            }
+            return Ok(n);
+        }
+        let mut n = 0u32;
+        for (topic, partition) in entries {
+            if self.delete(group_id, topic, *partition)? {
+                n += 1;
+            }
+        }
+        Ok(n)
+    }
+
     /// List all committed offsets for a group.
     pub fn fetch_all(&self, group_id: &str) -> Result<Vec<StoredOffset>> {
         let group_dir = self.root.join(sanitize(group_id));
@@ -229,6 +274,24 @@ mod tests {
         let _ = fs::remove_dir_all(&dir);
         fs::create_dir_all(&dir).unwrap();
         dir
+    }
+
+    #[test]
+    fn delete_offsets_removes_files() {
+        let dir = temp_dir();
+        let store = OffsetStore::new(&dir).unwrap();
+        store
+            .commit("g1", "events", 0, 5, "")
+            .unwrap();
+        store
+            .commit("g1", "events", 1, 6, "")
+            .unwrap();
+        assert_eq!(store.delete_many("g1", &[("events".into(), 0)]).unwrap(), 1);
+        assert_eq!(store.fetch("g1", "events", 0).unwrap().0, OFFSET_UNKNOWN);
+        assert_eq!(store.fetch("g1", "events", 1).unwrap().0, 6);
+        assert_eq!(store.delete_many("g1", &[]).unwrap(), 1);
+        assert_eq!(store.fetch("g1", "events", 1).unwrap().0, OFFSET_UNKNOWN);
+        let _ = fs::remove_dir_all(&dir);
     }
 
     #[test]

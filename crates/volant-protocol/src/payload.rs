@@ -8,7 +8,8 @@ use crate::request::{
 };
 use crate::response::{
     Assignment, BrokerInfo, ClusterPartitionState, ClusterTopicState, ErrorCode, FetchRecord,
-    GroupMemberInfo, OffsetFetchEntry, PartitionInfo, Response, ResponseOpcode, TopicInfo,
+    GroupListing, GroupMemberInfo, GroupState, OffsetFetchEntry, PartitionInfo, Response,
+    ResponseOpcode, TopicInfo,
 };
 use crate::frame::{Frame, FrameHeader, PROTOCOL_VERSION};
 use crate::codec::checksum;
@@ -206,6 +207,7 @@ pub fn encode_request(req: &Request) -> Result<Bytes> {
             member_id,
             session_timeout_ms,
             topics,
+            group_instance_id,
         } => {
             put_string(&mut dst, group_id)?;
             put_string(&mut dst, member_id)?;
@@ -214,6 +216,8 @@ pub fn encode_request(req: &Request) -> Result<Bytes> {
             for t in topics {
                 put_string(&mut dst, t)?;
             }
+            // Phase 12 trailing field (always written by current encoders).
+            put_string(&mut dst, group_instance_id)?;
         }
         Request::Heartbeat {
             group_id,
@@ -264,6 +268,17 @@ pub fn encode_request(req: &Request) -> Result<Bytes> {
         }
         Request::DescribeGroup { group_id } => {
             put_string(&mut dst, group_id)?;
+        }
+        Request::ListGroups => {
+            // Empty payload.
+        }
+        Request::DeleteOffsets { group_id, entries } => {
+            put_string(&mut dst, group_id)?;
+            dst.put_u32_le(entries.len() as u32);
+            for e in entries {
+                put_string(&mut dst, &e.topic)?;
+                dst.put_u32_le(e.partition);
+            }
         }
     }
     finish_payload(dst)
@@ -421,11 +436,18 @@ pub fn decode_request(opcode: u16, payload: &[u8]) -> Result<Request> {
             for _ in 0..topic_count {
                 topics.push(get_string(&mut src)?);
             }
+            // Phase 12 trailing field; legacy payloads omit it.
+            let group_instance_id = if src.remaining() > 0 {
+                get_string(&mut src)?
+            } else {
+                String::new()
+            };
             Ok(Request::JoinGroup {
                 group_id,
                 member_id,
                 session_timeout_ms,
                 topics,
+                group_instance_id,
             })
         }
         RequestOpcode::Heartbeat => {
@@ -486,6 +508,26 @@ pub fn decode_request(opcode: u16, payload: &[u8]) -> Result<Request> {
         RequestOpcode::DescribeGroup => Ok(Request::DescribeGroup {
             group_id: get_string(&mut src)?,
         }),
+        RequestOpcode::ListGroups => Ok(Request::ListGroups),
+        RequestOpcode::DeleteOffsets => {
+            let group_id = get_string(&mut src)?;
+            if src.remaining() < 4 {
+                return Err(Error::Protocol("truncated delete offsets count".into()));
+            }
+            let entry_count = src.get_u32_le() as usize;
+            let mut entries = Vec::with_capacity(entry_count);
+            for _ in 0..entry_count {
+                let topic = get_string(&mut src)?;
+                if src.remaining() < 4 {
+                    return Err(Error::Protocol("truncated delete offsets partition".into()));
+                }
+                entries.push(OffsetEntry {
+                    topic,
+                    partition: src.get_u32_le(),
+                });
+            }
+            Ok(Request::DeleteOffsets { group_id, entries })
+        }
     }
 }
 
@@ -706,6 +748,23 @@ pub fn encode_response(resp: &Response) -> Result<Bytes> {
                     dst.put_u32_le(a.partition);
                 }
             }
+        }
+        Response::ListGroups { error_code, groups } => {
+            dst.put_u16_le(*error_code);
+            dst.put_u32_le(groups.len() as u32);
+            for g in groups {
+                put_string(&mut dst, &g.group_id)?;
+                dst.put_u8(g.state as u8);
+                dst.put_u32_le(g.member_count);
+                dst.put_u32_le(g.generation);
+            }
+        }
+        Response::DeleteOffsets {
+            error_code,
+            deleted_count,
+        } => {
+            dst.put_u16_le(*error_code);
+            dst.put_u32_le(*deleted_count);
         }
         Response::Error { code, message } => {
             dst.put_u16_le(*code);
@@ -1163,6 +1222,42 @@ pub fn decode_response(opcode: u16, payload: &[u8]) -> Result<Response> {
                 members,
             })
         }
+        ResponseOpcode::ListGroups => {
+            if src.remaining() < 2 + 4 {
+                return Err(Error::Protocol("truncated list groups header".into()));
+            }
+            let error_code = src.get_u16_le();
+            let group_count = src.get_u32_le() as usize;
+            let mut groups = Vec::with_capacity(group_count);
+            for _ in 0..group_count {
+                let group_id = get_string(&mut src)?;
+                if src.remaining() < 1 + 4 + 4 {
+                    return Err(Error::Protocol("truncated list groups entry".into()));
+                }
+                let state = GroupState::from_u8(src.get_u8());
+                let member_count = src.get_u32_le();
+                let generation = src.get_u32_le();
+                groups.push(GroupListing {
+                    group_id,
+                    state,
+                    member_count,
+                    generation,
+                });
+            }
+            Ok(Response::ListGroups {
+                error_code,
+                groups,
+            })
+        }
+        ResponseOpcode::DeleteOffsets => {
+            if src.remaining() < 2 + 4 {
+                return Err(Error::Protocol("truncated delete offsets response".into()));
+            }
+            Ok(Response::DeleteOffsets {
+                error_code: src.get_u16_le(),
+                deleted_count: src.get_u32_le(),
+            })
+        }
         ResponseOpcode::Error => {
             if src.remaining() < 2 {
                 return Err(Error::Protocol("truncated error code".into()));
@@ -1212,6 +1307,7 @@ mod tests {
     use super::*;
     use crate::request::{OffsetCommitEntry, OffsetEntry, ProduceMessage};
     use crate::response::ResponseOpcode;
+    use bytes::BufMut;
 
     #[test]
     fn produce_roundtrip() {
@@ -1320,6 +1416,90 @@ mod tests {
     }
 
     #[test]
+    fn phase12_list_delete_static_roundtrip() {
+        let list_req = Request::ListGroups;
+        let b = encode_request(&list_req).unwrap();
+        assert_eq!(
+            decode_request(RequestOpcode::ListGroups as u16, &b).unwrap(),
+            list_req
+        );
+
+        let list_resp = Response::ListGroups {
+            error_code: 0,
+            groups: vec![
+                GroupListing {
+                    group_id: "g1".into(),
+                    state: GroupState::Stable,
+                    member_count: 2,
+                    generation: 5,
+                },
+                GroupListing {
+                    group_id: "g2".into(),
+                    state: GroupState::Empty,
+                    member_count: 0,
+                    generation: 0,
+                },
+            ],
+        };
+        let b = encode_response(&list_resp).unwrap();
+        assert_eq!(
+            decode_response(ResponseOpcode::ListGroups as u16, &b).unwrap(),
+            list_resp
+        );
+
+        let del = Request::DeleteOffsets {
+            group_id: "g1".into(),
+            entries: vec![OffsetEntry {
+                topic: "events".into(),
+                partition: 0,
+            }],
+        };
+        let b = encode_request(&del).unwrap();
+        assert_eq!(
+            decode_request(RequestOpcode::DeleteOffsets as u16, &b).unwrap(),
+            del
+        );
+        let del_resp = Response::DeleteOffsets {
+            error_code: 0,
+            deleted_count: 1,
+        };
+        let b = encode_response(&del_resp).unwrap();
+        assert_eq!(
+            decode_response(ResponseOpcode::DeleteOffsets as u16, &b).unwrap(),
+            del_resp
+        );
+
+        let join = Request::JoinGroup {
+            group_id: "g1".into(),
+            member_id: String::new(),
+            session_timeout_ms: 10_000,
+            topics: vec!["events".into()],
+            group_instance_id: "pod-1".into(),
+        };
+        let b = encode_request(&join).unwrap();
+        assert_eq!(
+            decode_request(RequestOpcode::JoinGroup as u16, &b).unwrap(),
+            join
+        );
+
+        // Legacy JoinGroup without instance trailer still decodes.
+        let mut legacy = BytesMut::new();
+        put_string(&mut legacy, "g1").unwrap();
+        put_string(&mut legacy, "m1").unwrap();
+        legacy.put_u32_le(5000);
+        legacy.put_u32_le(1);
+        put_string(&mut legacy, "t").unwrap();
+        let decoded =
+            decode_request(RequestOpcode::JoinGroup as u16, &legacy.freeze()).unwrap();
+        match decoded {
+            Request::JoinGroup {
+                group_instance_id, ..
+            } => assert!(group_instance_id.is_empty()),
+            other => panic!("unexpected {other:?}"),
+        }
+    }
+
+    #[test]
     fn phase10_idempotent_error_codes() {
         assert_eq!(ErrorCode::from_u16(19), ErrorCode::InvalidProducerEpoch);
         assert_eq!(ErrorCode::from_u16(20), ErrorCode::OutOfOrderSequence);
@@ -1399,6 +1579,7 @@ mod tests {
             member_id: "".into(),
             session_timeout_ms: 10_000,
             topics: vec!["events".into(), "logs".into()],
+            group_instance_id: String::new(),
         };
         let b = encode_request(&join).unwrap();
         assert_eq!(
@@ -1684,10 +1865,10 @@ mod tests {
 
         // Empty / truncated payloads for every known opcode.
         let req_ops: &[u16] = &[
-            1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 20, 22, 24, 30, 32, 34, 99, 0xFFFF,
+            1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 20, 22, 24, 30, 32, 34, 36, 38, 99, 0xFFFF,
         ];
         let resp_ops: &[u16] = &[
-            1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 21, 23, 25, 31, 33, 35, 0xFFFF, 42,
+            1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 21, 23, 25, 31, 33, 35, 37, 39, 0xFFFF, 42,
         ];
 
         for op in req_ops {

@@ -11,8 +11,9 @@ use tracing::debug;
 use volant_core::{Error, Message, Offset, Result, TopicId};
 use volant_protocol::codec::{decode_frame, encode_frame};
 use volant_protocol::{
-    decode_response, pack_request, Assignment, BrokerInfo, ErrorCode, FetchRecord, GroupMemberInfo,
-    OffsetCommitEntry, OffsetEntry, OffsetFetchEntry, ProduceMessage, Request, Response, TopicInfo,
+    decode_response, pack_request, Assignment, BrokerInfo, ErrorCode, FetchRecord, GroupListing,
+    GroupMemberInfo, OffsetCommitEntry, OffsetEntry, OffsetFetchEntry, ProduceMessage, Request,
+    Response, TopicInfo,
 };
 
 use crate::config::ClientConfig;
@@ -90,6 +91,13 @@ pub struct DescribeGroupResult {
     pub generation: u32,
     /// Live members and assignments.
     pub members: Vec<GroupMemberInfo>,
+}
+
+/// Result of DeleteOffsets (Phase 12).
+#[derive(Debug, Clone)]
+pub struct DeleteOffsetsResult {
+    /// Number of offset files removed.
+    pub deleted_count: u32,
 }
 
 impl HeartbeatResult {
@@ -573,12 +581,26 @@ impl Client {
         session_timeout_ms: u32,
         topics: Vec<String>,
     ) -> Result<JoinGroupResult> {
+        self.join_group_with_instance(group_id, member_id, session_timeout_ms, topics, "")
+            .await
+    }
+
+    /// Join with optional static membership (`group_instance_id`, Phase 12).
+    pub async fn join_group_with_instance(
+        &self,
+        group_id: &str,
+        member_id: &str,
+        session_timeout_ms: u32,
+        topics: Vec<String>,
+        group_instance_id: &str,
+    ) -> Result<JoinGroupResult> {
         let resp = self
             .round_trip(Request::JoinGroup {
                 group_id: group_id.to_owned(),
                 member_id: member_id.to_owned(),
                 session_timeout_ms,
                 topics,
+                group_instance_id: group_instance_id.to_owned(),
             })
             .await?;
         match resp {
@@ -669,6 +691,53 @@ impl Client {
             Response::Error { code, message } => Err(error_from_code(code, message)),
             other => Err(Error::Protocol(format!(
                 "unexpected response for describe_group: {other:?}"
+            ))),
+        }
+    }
+
+    /// List known consumer groups (Phase 12).
+    pub async fn list_groups(&self) -> Result<Vec<GroupListing>> {
+        let resp = self.round_trip(Request::ListGroups).await?;
+        match resp {
+            Response::ListGroups {
+                error_code,
+                groups,
+            } => {
+                check_ok(error_code, "list_groups")?;
+                Ok(groups)
+            }
+            Response::Error { code, message } => Err(error_from_code(code, message)),
+            other => Err(Error::Protocol(format!(
+                "unexpected response for list_groups: {other:?}"
+            ))),
+        }
+    }
+
+    /// Delete committed offsets for a group (Phase 12).
+    ///
+    /// Empty `entries` deletes all offsets for the group.
+    pub async fn delete_offsets(
+        &self,
+        group_id: &str,
+        entries: Vec<OffsetEntry>,
+    ) -> Result<DeleteOffsetsResult> {
+        let resp = self
+            .round_trip(Request::DeleteOffsets {
+                group_id: group_id.to_owned(),
+                entries,
+            })
+            .await?;
+        match resp {
+            Response::DeleteOffsets {
+                error_code,
+                deleted_count,
+            } => {
+                check_ok(error_code, "delete_offsets")?;
+                Ok(DeleteOffsetsResult { deleted_count })
+            }
+            Response::Error { code, message } => Err(error_from_code(code, message)),
+            other => Err(Error::Protocol(format!(
+                "unexpected response for delete_offsets: {other:?}"
             ))),
         }
     }
