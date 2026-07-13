@@ -398,9 +398,26 @@ Binding: **[docs/PHASE10_SPEC.md](./docs/PHASE10_SPEC.md)**.
 - [x] CLI `volant group lag --group G`
 - [x] Integration tests (`phase10_idempotent_lag`)
 
-**Honest limitations:** producer state is **not durable** across broker restart (clients re-init). No multi-partition transactions / EOS.
+**Honest limitations (Phase 10):** producer state was in-memory only — closed by **Phase 11**.
 
-**Still deferred:** Kafka shim, multi-lang clients, SCRAM, mTLS, sticky assignor, transactions.
+**Still deferred:** Kafka shim, multi-lang clients, SCRAM, mTLS, transactions.
+
+---
+
+### Phase 11 — Sticky assignor, durable producer state, group describe ✅
+
+**Goal:** Lower rebalance churn, survive broker restart for idempotent PIDs, ops visibility into groups.
+
+Binding: **[docs/PHASE11_SPEC.md](./docs/PHASE11_SPEC.md)**.
+
+- [x] Sticky partition assignor as default group rebalance (`sticky_assign` / `sticky_assign_multi`)
+- [x] Durable producer state under `{data_dir}/__producer_state/state.json`
+- [x] `DescribeGroup` (opcode 34/35) + `Client::describe_group` + `volant group describe`
+- [x] Integration tests (`phase11_sticky_durable`)
+
+**Honest limitations:** eager rebalance only (no cooperative revoke); sticky is Volant-local (not Kafka sticky wire protocol); no multi-partition transactions.
+
+**Still deferred:** Kafka shim, multi-lang clients, SCRAM, mTLS, cooperative rebalance, transactions.
 
 ---
 

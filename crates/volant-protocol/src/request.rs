@@ -36,6 +36,8 @@ pub enum RequestOpcode {
     Auth = 30,
     /// Allocate a producer id + epoch for idempotent produce (Phase 10).
     InitProducerId = 32,
+    /// Describe a consumer group (Phase 11).
+    DescribeGroup = 34,
 }
 
 impl RequestOpcode {
@@ -57,6 +59,7 @@ impl RequestOpcode {
             24 => Self::ClusterState,
             30 => Self::Auth,
             32 => Self::InitProducerId,
+            34 => Self::DescribeGroup,
             _ => return None,
         })
     }
@@ -228,6 +231,11 @@ pub enum Request {
     },
     /// Allocate a producer id for idempotent produce (Phase 10).
     InitProducerId,
+    /// Describe a consumer group (Phase 11).
+    DescribeGroup {
+        /// Consumer group id.
+        group_id: String,
+    },
 }
 
 impl Request {
@@ -249,6 +257,7 @@ impl Request {
             Self::ClusterState { .. } => RequestOpcode::ClusterState as u16,
             Self::Auth { .. } => RequestOpcode::Auth as u16,
             Self::InitProducerId => RequestOpcode::InitProducerId as u16,
+            Self::DescribeGroup { .. } => RequestOpcode::DescribeGroup as u16,
         }
     }
 }

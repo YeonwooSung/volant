@@ -36,6 +36,8 @@ pub enum ResponseOpcode {
     Auth = 31,
     /// Init producer id result (Phase 10).
     InitProducerId = 33,
+    /// Describe group result (Phase 11).
+    DescribeGroup = 35,
     /// Error response.
     Error = 0xFFFF,
 }
@@ -59,6 +61,7 @@ impl ResponseOpcode {
             25 => Self::ClusterState,
             31 => Self::Auth,
             33 => Self::InitProducerId,
+            35 => Self::DescribeGroup,
             0xFFFF => Self::Error,
             _ => return None,
         })
@@ -208,6 +211,17 @@ pub struct Assignment {
     pub topic: String,
     /// Partition id.
     pub partition: u32,
+}
+
+/// One member in a DescribeGroup response (Phase 11).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct GroupMemberInfo {
+    /// Member id.
+    pub member_id: String,
+    /// Subscribed topics.
+    pub topics: Vec<String>,
+    /// Current partition assignment.
+    pub assignment: Vec<Assignment>,
 }
 
 /// Offset fetch response entry.
@@ -387,6 +401,17 @@ pub enum Response {
         /// 0 = ok.
         error_code: u16,
     },
+    /// Describe group result (Phase 11).
+    DescribeGroup {
+        /// 0 = ok; 2 = not found (no live members).
+        error_code: u16,
+        /// Group id.
+        group_id: String,
+        /// Current generation (`0` if unknown).
+        generation: u32,
+        /// Live members.
+        members: Vec<GroupMemberInfo>,
+    },
     /// Error response.
     Error {
         /// Error code.
@@ -415,6 +440,7 @@ impl Response {
             Self::ClusterState { .. } => ResponseOpcode::ClusterState as u16,
             Self::Auth { .. } => ResponseOpcode::Auth as u16,
             Self::InitProducerId { .. } => ResponseOpcode::InitProducerId as u16,
+            Self::DescribeGroup { .. } => ResponseOpcode::DescribeGroup as u16,
             Self::Error { .. } => ResponseOpcode::Error as u16,
         }
     }

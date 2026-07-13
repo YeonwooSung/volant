@@ -8,7 +8,7 @@ use crate::request::{
 };
 use crate::response::{
     Assignment, BrokerInfo, ClusterPartitionState, ClusterTopicState, ErrorCode, FetchRecord,
-    OffsetFetchEntry, PartitionInfo, Response, ResponseOpcode, TopicInfo,
+    GroupMemberInfo, OffsetFetchEntry, PartitionInfo, Response, ResponseOpcode, TopicInfo,
 };
 use crate::frame::{Frame, FrameHeader, PROTOCOL_VERSION};
 use crate::codec::checksum;
@@ -262,6 +262,9 @@ pub fn encode_request(req: &Request) -> Result<Bytes> {
         Request::InitProducerId => {
             // Empty payload; transactional id reserved for a later phase.
         }
+        Request::DescribeGroup { group_id } => {
+            put_string(&mut dst, group_id)?;
+        }
     }
     finish_payload(dst)
 }
@@ -480,6 +483,9 @@ pub fn decode_request(opcode: u16, payload: &[u8]) -> Result<Request> {
             token: get_string(&mut src)?,
         }),
         RequestOpcode::InitProducerId => Ok(Request::InitProducerId),
+        RequestOpcode::DescribeGroup => Ok(Request::DescribeGroup {
+            group_id: get_string(&mut src)?,
+        }),
     }
 }
 
@@ -677,6 +683,29 @@ pub fn encode_response(resp: &Response) -> Result<Bytes> {
             dst.put_u64_le(*producer_id);
             dst.put_u16_le(*epoch);
             dst.put_u16_le(*error_code);
+        }
+        Response::DescribeGroup {
+            error_code,
+            group_id,
+            generation,
+            members,
+        } => {
+            dst.put_u16_le(*error_code);
+            put_string(&mut dst, group_id)?;
+            dst.put_u32_le(*generation);
+            dst.put_u32_le(members.len() as u32);
+            for m in members {
+                put_string(&mut dst, &m.member_id)?;
+                dst.put_u32_le(m.topics.len() as u32);
+                for t in &m.topics {
+                    put_string(&mut dst, t)?;
+                }
+                dst.put_u32_le(m.assignment.len() as u32);
+                for a in &m.assignment {
+                    put_string(&mut dst, &a.topic)?;
+                    dst.put_u32_le(a.partition);
+                }
+            }
         }
         Response::Error { code, message } => {
             dst.put_u16_le(*code);
@@ -1080,6 +1109,60 @@ pub fn decode_response(opcode: u16, payload: &[u8]) -> Result<Response> {
                 error_code: src.get_u16_le(),
             })
         }
+        ResponseOpcode::DescribeGroup => {
+            if src.remaining() < 2 {
+                return Err(Error::Protocol("truncated describe group error".into()));
+            }
+            let error_code = src.get_u16_le();
+            let group_id = get_string(&mut src)?;
+            if src.remaining() < 4 + 4 {
+                return Err(Error::Protocol("truncated describe group header".into()));
+            }
+            let generation = src.get_u32_le();
+            let member_count = src.get_u32_le() as usize;
+            let mut members = Vec::with_capacity(member_count);
+            for _ in 0..member_count {
+                let member_id = get_string(&mut src)?;
+                if src.remaining() < 4 {
+                    return Err(Error::Protocol("truncated describe group topic count".into()));
+                }
+                let topic_count = src.get_u32_le() as usize;
+                let mut topics = Vec::with_capacity(topic_count);
+                for _ in 0..topic_count {
+                    topics.push(get_string(&mut src)?);
+                }
+                if src.remaining() < 4 {
+                    return Err(Error::Protocol(
+                        "truncated describe group assignment count".into(),
+                    ));
+                }
+                let assignment_count = src.get_u32_le() as usize;
+                let mut assignment = Vec::with_capacity(assignment_count);
+                for _ in 0..assignment_count {
+                    let topic = get_string(&mut src)?;
+                    if src.remaining() < 4 {
+                        return Err(Error::Protocol(
+                            "truncated describe group assignment partition".into(),
+                        ));
+                    }
+                    assignment.push(Assignment {
+                        topic,
+                        partition: src.get_u32_le(),
+                    });
+                }
+                members.push(GroupMemberInfo {
+                    member_id,
+                    topics,
+                    assignment,
+                });
+            }
+            Ok(Response::DescribeGroup {
+                error_code,
+                group_id,
+                generation,
+                members,
+            })
+        }
         ResponseOpcode::Error => {
             if src.remaining() < 2 {
                 return Err(Error::Protocol("truncated error code".into()));
@@ -1195,6 +1278,43 @@ mod tests {
         let rb = encode_response(&resp).unwrap();
         assert_eq!(
             decode_response(ResponseOpcode::InitProducerId as u16, &rb).unwrap(),
+            resp
+        );
+    }
+
+    #[test]
+    fn phase11_describe_group_roundtrip() {
+        let req = Request::DescribeGroup {
+            group_id: "cg-1".into(),
+        };
+        let bytes = encode_request(&req).unwrap();
+        assert_eq!(
+            decode_request(RequestOpcode::DescribeGroup as u16, &bytes).unwrap(),
+            req
+        );
+
+        let resp = Response::DescribeGroup {
+            error_code: 0,
+            group_id: "cg-1".into(),
+            generation: 3,
+            members: vec![GroupMemberInfo {
+                member_id: "m-a".into(),
+                topics: vec!["events".into()],
+                assignment: vec![
+                    Assignment {
+                        topic: "events".into(),
+                        partition: 0,
+                    },
+                    Assignment {
+                        topic: "events".into(),
+                        partition: 2,
+                    },
+                ],
+            }],
+        };
+        let rb = encode_response(&resp).unwrap();
+        assert_eq!(
+            decode_response(ResponseOpcode::DescribeGroup as u16, &rb).unwrap(),
             resp
         );
     }
@@ -1563,8 +1683,12 @@ mod tests {
         };
 
         // Empty / truncated payloads for every known opcode.
-        let req_ops: &[u16] = &[1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 20, 22, 24, 30, 32, 99, 0xFFFF];
-        let resp_ops: &[u16] = &[1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 21, 23, 25, 31, 33, 0xFFFF, 42];
+        let req_ops: &[u16] = &[
+            1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 20, 22, 24, 30, 32, 34, 99, 0xFFFF,
+        ];
+        let resp_ops: &[u16] = &[
+            1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 21, 23, 25, 31, 33, 35, 0xFFFF, 42,
+        ];
 
         for op in req_ops {
             let _ = decode_request(*op, &[]);

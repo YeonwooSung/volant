@@ -156,6 +156,15 @@ enum GroupCmd {
         #[arg(long, default_value = "127.0.0.1:9092")]
         broker: String,
     },
+    /// Describe live group membership and assignments (Phase 11).
+    Describe {
+        /// Consumer group id.
+        #[arg(long)]
+        group: String,
+        /// Broker address.
+        #[arg(long, default_value = "127.0.0.1:9092")]
+        broker: String,
+    },
 }
 
 #[tokio::main]
@@ -165,7 +174,9 @@ async fn main() -> Result<()> {
     match cli.command {
         Commands::Version => {
             println!("volant {}", env!("CARGO_PKG_VERSION"));
-            println!("status: Phase 10 — idempotent produce, retries, consumer lag");
+            println!(
+                "status: Phase 11 — sticky assignor, durable producer state, group describe"
+            );
         }
         Commands::Topic { action } => match action {
             TopicCmd::List { broker } => {
@@ -329,6 +340,33 @@ async fn main() -> Result<()> {
                         };
                         println!("{group}\t{t}\t{p}\t{c_disp}\t{h}\t{l}");
                     }
+                }
+            }
+            GroupCmd::Describe { group, broker } => {
+                let client = connect(&broker, auth).await?;
+                let desc = client
+                    .describe_group(&group)
+                    .await
+                    .context("describe_group")?;
+                println!(
+                    "group={}\tgeneration={}\tmembers={}",
+                    desc.group_id,
+                    desc.generation,
+                    desc.members.len()
+                );
+                for m in &desc.members {
+                    let topics = m.topics.join(",");
+                    let assigns: Vec<String> = m
+                        .assignment
+                        .iter()
+                        .map(|a| format!("{}:{}", a.topic, a.partition))
+                        .collect();
+                    println!(
+                        "  member={}\ttopics=[{}]\tassignment=[{}]",
+                        m.member_id,
+                        topics,
+                        assigns.join(",")
+                    );
                 }
             }
         },

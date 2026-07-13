@@ -558,7 +558,8 @@ fn record_response_metrics(broker: &Broker, resp: &Response) {
         | Response::HeartbeatBroker { error_code, .. }
         | Response::ClusterState { error_code, .. }
         | Response::Auth { error_code }
-        | Response::InitProducerId { error_code, .. } => {
+        | Response::InitProducerId { error_code, .. }
+        | Response::DescribeGroup { error_code, .. } => {
             if *error_code != 0 {
                 m.record_error(*error_code);
             }
@@ -989,6 +990,40 @@ async fn handle_request(broker: &Broker, req: Request) -> Result<Response> {
                 epoch,
                 error_code: 0,
             })
+        }
+        Request::DescribeGroup { group_id } => {
+            match broker.groups().describe_group(&group_id) {
+                Some(desc) => {
+                    let members = desc
+                        .members
+                        .into_iter()
+                        .map(|m| volant_protocol::GroupMemberInfo {
+                            member_id: m.member_id,
+                            topics: m.topics,
+                            assignment: m
+                                .assignment
+                                .into_iter()
+                                .map(|(topic, partition)| volant_protocol::Assignment {
+                                    topic,
+                                    partition,
+                                })
+                                .collect(),
+                        })
+                        .collect();
+                    Ok(Response::DescribeGroup {
+                        error_code: 0,
+                        group_id: desc.group_id,
+                        generation: desc.generation,
+                        members,
+                    })
+                }
+                None => Ok(Response::DescribeGroup {
+                    error_code: ErrorCode::NotFound as u16,
+                    group_id,
+                    generation: 0,
+                    members: vec![],
+                }),
+            }
         }
     }
 }

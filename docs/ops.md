@@ -142,7 +142,8 @@ ClientConfig {
 
 - On first produce, the client calls `InitProducerId` and tracks per-partition sequences.
 - Exact retries of the same batch return the same offsets (no double-append).
-- Producer state is **in-memory on the broker** — restart invalidates PIDs (re-init).
+- Producer state is **durable** under `{data_dir}/__producer_state/state.json` (Phase 11).
+  Broker restart reloads PIDs so duplicate sequences still de-dupe.
 
 ## Consumer lag (Phase 10)
 
@@ -157,8 +158,19 @@ Metrics (when `--metrics-addr` is set):
 volant_consumer_group_lag{group="my-group",topic="events",partition="0"} 12
 ```
 
+## Group describe (Phase 11)
+
+```bash
+volant group describe --group my-group --broker 127.0.0.1:9092
+```
+
+Shows live members, subscribed topics, and partition assignments. Empty /
+unknown groups return NotFound.
+
+Rebalance uses a **sticky** assignor by default (minimize ownership churn).
+
 ## Deferred
 
 Kafka wire shim, multi-language clients, SCRAM, mTLS identity, full chaos-mesh
-suites, cargo-fuzz corpus CI, durable producer state, transactions.
+suites, cargo-fuzz corpus CI, cooperative rebalance, transactions.
 See [ROADMAP.md](../ROADMAP.md).

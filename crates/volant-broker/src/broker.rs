@@ -25,6 +25,10 @@ use crate::cluster::{
 };
 use crate::group::GroupCoordinator;
 use crate::metrics::Metrics;
+use crate::producer_state::{
+    partition_key, parse_partition_key, ProducerStateFile, ProducerStateStore, StoredBatch,
+    StoredProducer,
+};
 use crate::topic::Topic;
 
 /// Snapshot of cluster metadata for a Metadata response.
@@ -161,10 +165,12 @@ pub struct Broker {
     auth_token: RwLock<Option<String>>,
     /// Optional inter-broker TLS client config (Phase 9).
     inter_broker_tls: RwLock<Option<InterBrokerTls>>,
-    /// Next producer id for [`Broker::init_producer_id`] (Phase 10).
+    /// Next producer id for [`Broker::init_producer_id`] (Phase 10/11).
     next_producer_id: AtomicU64,
-    /// In-memory idempotent producer state (not durable across restart).
+    /// Idempotent producer state (loaded/persisted via [`ProducerStateStore`]).
     producer_state: RwLock<HashMap<u64, ProducerEpochState>>,
+    /// Durable producer state store under `data_dir/__producer_state` (Phase 11).
+    producer_store: ProducerStateStore,
 }
 
 impl Broker {
@@ -172,6 +178,9 @@ impl Broker {
     pub fn new(storage: StorageConfig) -> Self {
         let groups = GroupCoordinator::new(&storage.data_dir)
             .expect("failed to initialize group coordinator / offset store");
+        let producer_store = ProducerStateStore::open(&storage.data_dir)
+            .expect("failed to open producer state store");
+        let (next_pid, producers) = load_producer_maps(&producer_store);
         Self {
             storage,
             topics: RwLock::new(HashMap::new()),
@@ -188,8 +197,9 @@ impl Broker {
             metrics: Arc::new(Metrics::new()),
             auth_token: RwLock::new(None),
             inter_broker_tls: RwLock::new(None),
-            next_producer_id: AtomicU64::new(1),
-            producer_state: RwLock::new(HashMap::new()),
+            next_producer_id: AtomicU64::new(next_pid),
+            producer_state: RwLock::new(producers),
+            producer_store,
         }
     }
 
@@ -223,6 +233,9 @@ impl Broker {
 
         let groups = GroupCoordinator::new(&storage.data_dir)
             .expect("failed to initialize group coordinator / offset store");
+        let producer_store = ProducerStateStore::open(&storage.data_dir)
+            .expect("failed to open producer state store");
+        let (next_pid, producers) = load_producer_maps(&producer_store);
         let broker = Self {
             storage,
             topics: RwLock::new(HashMap::new()),
@@ -239,8 +252,9 @@ impl Broker {
             metrics: Arc::new(Metrics::new()),
             auth_token: RwLock::new(None),
             inter_broker_tls: RwLock::new(None),
-            next_producer_id: AtomicU64::new(1),
-            producer_state: RwLock::new(HashMap::new()),
+            next_producer_id: AtomicU64::new(next_pid),
+            producer_state: RwLock::new(producers),
+            producer_store,
         };
         // Open local partitions from persisted assignment.
         broker.apply_local_assignment()?;
@@ -272,9 +286,9 @@ impl Broker {
         self.inter_broker_tls.read().clone()
     }
 
-    /// Allocate a producer id + epoch for idempotent produce (Phase 10).
+    /// Allocate a producer id + epoch for idempotent produce (Phase 10/11).
     ///
-    /// State is **in-memory only** — lost on broker restart (clients re-init).
+    /// State is persisted under `data_dir/__producer_state` (Phase 11).
     pub fn init_producer_id(&self) -> (u64, u16) {
         let id = self.next_producer_id.fetch_add(1, Ordering::Relaxed);
         let epoch = 0u16;
@@ -285,6 +299,7 @@ impl Broker {
                 partitions: HashMap::new(),
             },
         );
+        let _ = self.persist_producer_state();
         (id, epoch)
     }
 
@@ -361,21 +376,55 @@ impl Broker {
         if producer_id == 0 || base_sequence < 0 {
             return;
         }
-        let mut state = self.producer_state.write();
-        let Some(prod) = state.get_mut(&producer_id) else {
-            return;
-        };
-        if prod.epoch != producer_epoch {
-            return;
+        {
+            let mut state = self.producer_state.write();
+            let Some(prod) = state.get_mut(&producer_id) else {
+                return;
+            };
+            if prod.epoch != producer_epoch {
+                return;
+            }
+            prod.partitions.insert(
+                (topic.to_owned(), partition),
+                IdempotentBatchState {
+                    base_sequence,
+                    count,
+                    base_offset,
+                },
+            );
         }
-        prod.partitions.insert(
-            (topic.to_owned(), partition),
-            IdempotentBatchState {
-                base_sequence,
-                count,
-                base_offset,
-            },
-        );
+        let _ = self.persist_producer_state();
+    }
+
+    /// Persist current producer map to disk.
+    fn persist_producer_state(&self) -> Result<()> {
+        let next_id = self.next_producer_id.load(Ordering::Relaxed);
+        let state = self.producer_state.read();
+        let mut file = ProducerStateFile {
+            next_id,
+            producers: HashMap::new(),
+        };
+        for (pid, prod) in state.iter() {
+            let mut partitions = HashMap::new();
+            for ((topic, part), batch) in &prod.partitions {
+                partitions.insert(
+                    partition_key(topic, *part),
+                    StoredBatch {
+                        base_sequence: batch.base_sequence,
+                        count: batch.count,
+                        base_offset: batch.base_offset,
+                    },
+                );
+            }
+            file.producers.insert(
+                pid.to_string(),
+                StoredProducer {
+                    epoch: prod.epoch,
+                    partitions,
+                },
+            );
+        }
+        self.producer_store.save(&file)
     }
 
     /// Consumer lag snapshots: `(group, topic, partition, committed, hwm, lag)`.
@@ -1473,6 +1522,41 @@ impl Broker {
     pub fn cluster_state(&self) -> Option<Arc<ClusterState>> {
         self.cluster.clone()
     }
+}
+
+/// Load durable producer maps from disk (defaults if missing).
+fn load_producer_maps(
+    store: &ProducerStateStore,
+) -> (u64, HashMap<u64, ProducerEpochState>) {
+    let file = store.load().unwrap_or_default();
+    let next = if file.next_id == 0 { 1 } else { file.next_id };
+    let mut map = HashMap::new();
+    for (pid_s, prod) in file.producers {
+        let Ok(pid) = pid_s.parse::<u64>() else {
+            continue;
+        };
+        let mut partitions = HashMap::new();
+        for (k, batch) in prod.partitions {
+            if let Some((topic, part)) = parse_partition_key(&k) {
+                partitions.insert(
+                    (topic, part),
+                    IdempotentBatchState {
+                        base_sequence: batch.base_sequence,
+                        count: batch.count,
+                        base_offset: batch.base_offset,
+                    },
+                );
+            }
+        }
+        map.insert(
+            pid,
+            ProducerEpochState {
+                epoch: prod.epoch,
+                partitions,
+            },
+        );
+    }
+    (next, map)
 }
 
 /// Kafka-compatible murmur2 hash (seed `0x9747b28c`).

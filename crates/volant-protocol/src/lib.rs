@@ -21,5 +21,5 @@ pub use request::{
 };
 pub use response::{
     Assignment, BrokerInfo, ClusterPartitionState, ClusterTopicState, ErrorCode, FetchRecord,
-    OffsetFetchEntry, PartitionInfo, Response, ResponseOpcode, TopicInfo,
+    GroupMemberInfo, OffsetFetchEntry, PartitionInfo, Response, ResponseOpcode, TopicInfo,
 };

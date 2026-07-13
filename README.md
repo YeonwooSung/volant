@@ -140,8 +140,11 @@ optional [fuzz/](./fuzz/) harness.
 **Phase 10:** idempotent produce (`enable_idempotence`), produce retries, consumer
 lag metrics + `volant group lag`.
 
+**Phase 11:** sticky partition assignor, durable producer PID state under
+`data_dir`, `volant group describe`.
+
 **Still deferred:** Kafka wire shim, multi-language clients, SCRAM, mTLS identity,
-chaos-mesh / cargo-fuzz corpus CI, transactions.
+chaos-mesh / cargo-fuzz corpus CI, cooperative rebalance, transactions.
 
 ### Networked client (library)
 

@@ -11,7 +11,7 @@ use tracing::debug;
 use volant_core::{Error, Message, Offset, Result, TopicId};
 use volant_protocol::codec::{decode_frame, encode_frame};
 use volant_protocol::{
-    decode_response, pack_request, Assignment, BrokerInfo, ErrorCode, FetchRecord,
+    decode_response, pack_request, Assignment, BrokerInfo, ErrorCode, FetchRecord, GroupMemberInfo,
     OffsetCommitEntry, OffsetEntry, OffsetFetchEntry, ProduceMessage, Request, Response, TopicInfo,
 };
 
@@ -79,6 +79,17 @@ pub struct JoinGroupResult {
 pub struct HeartbeatResult {
     /// Embedded error code (`0` ok; `9` rebalance in progress).
     pub error_code: u16,
+}
+
+/// Result of a successful DescribeGroup (Phase 11).
+#[derive(Debug, Clone)]
+pub struct DescribeGroupResult {
+    /// Group id.
+    pub group_id: String,
+    /// Current generation.
+    pub generation: u32,
+    /// Live members and assignments.
+    pub members: Vec<GroupMemberInfo>,
 }
 
 impl HeartbeatResult {
@@ -630,6 +641,34 @@ impl Client {
             Response::Error { code, message } => Err(error_from_code(code, message)),
             other => Err(Error::Protocol(format!(
                 "unexpected response for leave_group: {other:?}"
+            ))),
+        }
+    }
+
+    /// Describe a live consumer group (Phase 11).
+    pub async fn describe_group(&self, group_id: &str) -> Result<DescribeGroupResult> {
+        let resp = self
+            .round_trip(Request::DescribeGroup {
+                group_id: group_id.to_owned(),
+            })
+            .await?;
+        match resp {
+            Response::DescribeGroup {
+                error_code,
+                group_id,
+                generation,
+                members,
+            } => {
+                check_ok(error_code, "describe_group")?;
+                Ok(DescribeGroupResult {
+                    group_id,
+                    generation,
+                    members,
+                })
+            }
+            Response::Error { code, message } => Err(error_from_code(code, message)),
+            other => Err(Error::Protocol(format!(
+                "unexpected response for describe_group: {other:?}"
             ))),
         }
     }

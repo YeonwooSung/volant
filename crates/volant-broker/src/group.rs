@@ -9,7 +9,7 @@ use uuid::Uuid;
 use volant_core::Result;
 use volant_protocol::ErrorCode;
 
-use crate::assignor::range_assign_multi;
+use crate::assignor::sticky_assign_multi;
 use crate::offset_store::{OffsetStore, StoredOffset, OFFSET_UNKNOWN};
 
 /// Result of a JoinGroup call.
@@ -53,6 +53,28 @@ pub struct FetchOffsetsResult {
     pub error_code: u16,
     /// Entries (offset = u64::MAX if unknown).
     pub entries: Vec<StoredOffset>,
+}
+
+/// One member in a group describe snapshot (Phase 11).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct GroupMemberDescription {
+    /// Member id.
+    pub member_id: String,
+    /// Subscribed topics.
+    pub topics: Vec<String>,
+    /// Current assignment (topic, partition).
+    pub assignment: Vec<(String, u32)>,
+}
+
+/// Live group membership snapshot (Phase 11).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct GroupDescription {
+    /// Group id.
+    pub group_id: String,
+    /// Current generation.
+    pub generation: u32,
+    /// Members (sorted by member id).
+    pub members: Vec<GroupMemberDescription>,
 }
 
 #[derive(Debug)]
@@ -268,6 +290,29 @@ impl GroupCoordinator {
         Ok(CommitResult { error_code: 0 })
     }
 
+    /// Snapshot of a live consumer group (Phase 11 DescribeGroup).
+    ///
+    /// Does not expire sessions (use the background expiry task for that).
+    pub fn describe_group(&self, group_id: &str) -> Option<GroupDescription> {
+        let groups = self.groups.lock();
+        let group = groups.get(group_id)?;
+        let mut members: Vec<GroupMemberDescription> = group
+            .members
+            .values()
+            .map(|m| GroupMemberDescription {
+                member_id: m.member_id.clone(),
+                topics: m.topics.clone(),
+                assignment: m.assignment.clone(),
+            })
+            .collect();
+        members.sort_by(|a, b| a.member_id.cmp(&b.member_id));
+        Some(GroupDescription {
+            group_id: group_id.to_owned(),
+            generation: group.generation,
+            members,
+        })
+    }
+
     /// List known group ids (active membership + durable offset directories).
     pub fn list_group_ids(&self) -> Vec<String> {
         let mut set: HashMap<String, ()> = HashMap::new();
@@ -386,9 +431,11 @@ where
     }
     let mut member_ids = Vec::new();
     let mut member_topics = Vec::new();
+    let mut previous = Vec::new();
     for m in group.members.values() {
         member_ids.push(m.member_id.clone());
         member_topics.push(m.topics.clone());
+        previous.push(m.assignment.clone());
     }
     let mut counts = HashMap::new();
     for topics in &member_topics {
@@ -400,7 +447,8 @@ where
             }
         }
     }
-    let assigns = range_assign_multi(&member_ids, &member_topics, &counts);
+    // Phase 11: sticky by default (minimizes churn vs range).
+    let assigns = sticky_assign_multi(&member_ids, &member_topics, &counts, &previous);
     for (i, mid) in member_ids.iter().enumerate() {
         if let Some(m) = group.members.get_mut(mid) {
             m.assignment = assigns[i].clone();
