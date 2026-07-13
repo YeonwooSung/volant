@@ -1,0 +1,25 @@
+{{- if .Values.cluster.enabled }}
+{{- $fullname := include "volant.fullname" . -}}
+{{- $replicas := int .Values.cluster.replicas -}}
+{{- $port := int .Values.service.port -}}
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: {{ $fullname }}-cluster
+  labels:
+    {{- include "volant.labels" . | nindent 4 }}
+data:
+  cluster.toml: |
+    default_replication_factor = {{ .Values.cluster.defaultReplicationFactor }}
+    min_insync_replicas = {{ .Values.cluster.minInsyncReplicas }}
+    session_timeout_ms = {{ .Values.cluster.sessionTimeoutMs }}
+    replica_fetch_max_wait_ms = {{ .Values.cluster.replicaFetchMaxWaitMs }}
+    replica_fetch_max_bytes = {{ .Values.cluster.replicaFetchMaxBytes }}
+    replica_lag_max_messages = {{ .Values.cluster.replicaLagMaxMessages }}
+    {{- range $i := until $replicas }}
+    [[brokers]]
+    id = {{ add $i 1 }}
+    host = "{{ $fullname }}-{{ $i }}.{{ $fullname }}-headless"
+    port = {{ $port }}
+    {{- end }}
+{{- end }}

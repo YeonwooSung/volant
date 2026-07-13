@@ -1,4 +1,4 @@
-# Volant operations runbook (Phase 7–8)
+# Volant operations runbook (Phase 7–9)
 
 ## Process flags
 
@@ -10,6 +10,9 @@
 | `--log-format` | | `text` | `text` or `json` |
 | `--auth-token` | `VOLANT_AUTH_TOKEN` | *unset* | Shared-token auth |
 | `--tls-cert` / `--tls-key` | | *unset* | Server TLS (feature `tls`) |
+| `--tls-peer-insecure` | | `true` | Skip inter-broker cert verify (lab) |
+| `--tls-ca` | | *unset* | CA PEM for inter-broker peer verify |
+| `--no-tls-inter-broker` | | off | Keep inter-broker plaintext when server TLS on |
 | `--cluster-config` / `--node-id` | | *unset* | Multi-node (Phase 6) |
 
 Logging filter: `RUST_LOG` (e.g. `volant=info,volant_broker=debug`).
@@ -64,11 +67,11 @@ Phase 7 has no dual-token window; schedule a brief reconnect storm.
 Inter-broker RPCs (ReplicaFetch, HeartbeatBroker, ClusterState) send Auth first
 when the token is configured.
 
-## TLS
+## TLS (Phase 7 listen + Phase 9 verification / inter-broker)
 
 ```bash
 cargo build -p volant-server --release --features tls
-volant-server --features ... # binary already built with tls
+volant-server \
   --tls-cert /etc/volant/server.crt \
   --tls-key  /etc/volant/server.key \
   --listen 0.0.0.0:9092
@@ -77,10 +80,14 @@ volant-server --features ... # binary already built with tls
 - Default builds **without** the `tls` feature stay green on macOS/CI.
 - Passing `--tls-cert` without the feature errors at startup.
 - TLS listen is **TLS-only** (no plaintext dual-bind).
-- **Inter-broker remains plaintext** — place brokers on a private network.
-- Client TLS: build `volant-client` with `--features tls` and set
-  `ClientConfig { tls: true, tls_insecure: true, .. }` for lab/self-signed certs.
-  Production cert verification against a custom CA is a follow-up.
+- **Inter-broker TLS** (Phase 9): when server TLS is enabled, peers also use TLS
+  by default. Lab clusters keep `--tls-peer-insecure` (default `true`). For
+  verified peers: `--tls-peer-insecure=false --tls-ca /etc/volant/ca.pem`.
+  Escape hatch: `--no-tls-inter-broker` forces plaintext inter-broker.
+- Client TLS: build `volant-client` with `--features tls`:
+  - Lab: `ClientConfig { tls: true, tls_insecure: true, .. }`
+  - Production: `tls: true`, `tls_insecure: false`, optional `tls_ca` PEM;
+    public CAs via Mozilla roots (`webpki-roots`).
 
 ## Client leader redirect (Phase 8)
 
@@ -101,7 +108,26 @@ Generate self-signed material for lab use only (see `examples/tls/`).
 - Optional: `GET /metrics` returns `200` with `volant_build_info`
 - Produce/fetch smoke via `volant` CLI
 
-## Deferred (not in Phase 7)
+## Multi-node Helm (Phase 9)
 
-Kafka wire shim, multi-language clients, full Helm chart, SCRAM, mTLS identity,
-chaos-mesh suites. See [PHASE7_SPEC.md](./PHASE7_SPEC.md) and [ROADMAP.md](../ROADMAP.md).
+```bash
+helm install volant ./deploy/helm/volant \
+  --set cluster.enabled=true \
+  --set cluster.replicas=3 \
+  --set image.repository=volant \
+  --set image.tag=0.1.0
+```
+
+Deploys a StatefulSet, headless Service, and ConfigMap `cluster.toml`
+(`node-id = ordinal + 1`). Single-node Deployment remains the default
+(`cluster.enabled=false`).
+
+## Protocol fuzz (optional)
+
+Deterministic chaos tests always run with `cargo test -p volant-protocol`.
+Optional nightly: see [fuzz/README.md](../fuzz/README.md).
+
+## Deferred
+
+Kafka wire shim, multi-language clients, SCRAM, mTLS identity, full chaos-mesh
+suites, cargo-fuzz corpus CI. See [ROADMAP.md](../ROADMAP.md).

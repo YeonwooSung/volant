@@ -348,7 +348,7 @@ Binding: **[docs/PHASE7_SPEC.md](./docs/PHASE7_SPEC.md)**. Ops runbook: **[docs/
 - [ ] SCRAM / full SASL / mTLS identity mapping — **deferred**
 - [ ] Security audit with `cargo fuzz` corpus CI — **deferred** (deterministic chaos tests ship now)
 
-**Honest limitations (Phase 7):** inter-broker RPC remains **plaintext** even when client TLS is enabled (private VPC assumed). Metrics endpoint has no auth (bind localhost).
+**Honest limitations (Phase 7):** Metrics endpoint has no auth (bind localhost). Inter-broker TLS was deferred to Phase 9 (now available when server TLS is enabled).
 
 ---
 
@@ -365,7 +365,23 @@ Binding: **[docs/PHASE8_SPEC.md](./docs/PHASE8_SPEC.md)**.
 - [x] Rolling restart integration test (follower down → produce continues)
 - [x] Leader-redirect integration test
 
-**Still deferred:** Kafka shim, multi-lang clients, inter-broker TLS, SCRAM, cargo-fuzz CI.
+**Still deferred (Phase 8):** Kafka shim, multi-lang clients, inter-broker TLS, SCRAM, cargo-fuzz CI.
+
+---
+
+### Phase 9 — TLS hardening, multi-node deploy, fuzz ✅
+
+**Goal:** Production-leaning TLS verification, encrypted inter-broker traffic, multi-node Helm, and a fuzz scaffold.
+
+Binding: **[docs/PHASE9_SPEC.md](./docs/PHASE9_SPEC.md)**.
+
+- [x] Client TLS via **webpki-roots** + optional `ClientConfig.tls_ca` PEM
+- [x] **Inter-broker TLS** when server TLS is on (`--tls-peer-insecure` default true; `--tls-ca`; `--no-tls-inter-broker` escape hatch)
+- [x] Multi-node **Helm StatefulSet** (`cluster.enabled`, headless Service, ConfigMap `cluster.toml`)
+- [x] `fuzz/` cargo-fuzz targets (`decode_frame`, `decode_request`) + expanded deterministic chaos tests
+- [x] Docs: ops.md, deploy README, ROADMAP honesty
+
+**Still deferred:** Kafka shim, multi-lang clients, SCRAM, mTLS identity, full cargo-fuzz corpus CI.
 
 ---
 

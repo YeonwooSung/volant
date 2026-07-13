@@ -8,8 +8,8 @@ description = "Async client SDK for producing and consuming Volant topics"
 
 [features]
 default = []
-# Optional TLS (rustls). Pair with volant-server `--features tls`.
-tls = ["dep:tokio-rustls", "dep:rustls"]
+# Optional TLS (rustls + webpki-roots). Pair with volant-server `--features tls`.
+tls = ["dep:tokio-rustls", "dep:rustls", "dep:webpki-roots", "dep:rustls-pemfile"]
 
 [dependencies]
 volant-core = { workspace = true }
@@ -20,6 +20,8 @@ tokio = { workspace = true }
 tracing = { workspace = true }
 tokio-rustls = { version = "0.26", optional = true, default-features = false, features = ["ring", "tls12"] }
 rustls = { version = "0.23", optional = true, default-features = false, features = ["ring", "std"] }
+webpki-roots = { version = "0.26", optional = true }
+rustls-pemfile = { version = "2", optional = true }
 
 [dev-dependencies]
 volant-broker = { workspace = true }

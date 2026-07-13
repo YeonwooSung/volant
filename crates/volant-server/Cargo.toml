@@ -15,7 +15,13 @@ default = []
 # Optional thread-per-core / CPU affinity mode (see VOLANT_CPU_LIST, docs/tuning.md).
 thread-per-core = ["dep:core_affinity"]
 # Optional TLS (rustls). Default build stays free of rustls for broad macOS/CI green.
-tls = ["dep:tokio-rustls", "dep:rustls", "dep:rustls-pemfile"]
+# Also enables inter-broker TLS in volant-broker when client TLS is active.
+tls = [
+    "dep:tokio-rustls",
+    "dep:rustls",
+    "dep:rustls-pemfile",
+    "volant-broker/tls",
+]
 
 [dependencies]
 volant-core = { workspace = true }

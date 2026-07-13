@@ -1,0 +1,22 @@
+{{- if .Values.cluster.enabled }}
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ include "volant.fullname" . }}-headless
+  labels:
+    {{- include "volant.labels" . | nindent 4 }}
+spec:
+  clusterIP: None
+  publishNotReadyAddresses: true
+  selector:
+    {{- include "volant.selectorLabels" . | nindent 4 }}
+  ports:
+    - name: broker
+      port: {{ .Values.service.port }}
+      targetPort: broker
+    {{- if .Values.metrics.enabled }}
+    - name: metrics
+      port: {{ .Values.service.metricsPort }}
+      targetPort: metrics
+    {{- end }}
+{{- end }}

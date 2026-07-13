@@ -61,6 +61,22 @@ struct Args {
     /// TLS private key PEM path (requires `--features tls`).
     #[arg(long)]
     tls_key: Option<PathBuf>,
+
+    /// When server TLS is enabled, also use TLS for inter-broker RPC (default).
+    /// Pass `--no-tls-inter-broker` to keep inter-broker plaintext.
+    #[arg(long, default_value_t = false)]
+    no_tls_inter_broker: bool,
+
+    /// Skip inter-broker TLS peer certificate verification (default true for
+    /// self-signed lab clusters). Set `--tls-peer-insecure=false` with
+    /// `--tls-ca` for verified peers.
+    #[arg(long, default_value_t = true)]
+    tls_peer_insecure: bool,
+
+    /// PEM CA file trusted for inter-broker (and documented for clients) when
+    /// peer verification is enabled.
+    #[arg(long)]
+    tls_ca: Option<PathBuf>,
 }
 
 fn main() -> Result<()> {
@@ -103,10 +119,14 @@ async fn async_main(args: Args) -> Result<()> {
     // TLS flag validation without the feature.
     #[cfg(not(feature = "tls"))]
     {
-        if args.tls_cert.is_some() || args.tls_key.is_some() {
+        if args.tls_cert.is_some()
+            || args.tls_key.is_some()
+            || args.tls_ca.is_some()
+            || args.no_tls_inter_broker
+        {
             bail!(
-                "--tls-cert/--tls-key require building with `--features tls` \
-                 (default build is plaintext-only for broad platform support)"
+                "--tls-cert/--tls-key/--tls-ca/--no-tls-inter-broker require building with \
+                 `--features tls` (default build is plaintext-only for broad platform support)"
             );
         }
     }
@@ -155,6 +175,40 @@ async fn async_main(args: Args) -> Result<()> {
         }
         info!("shared-token auth enabled");
         broker.set_auth_token(Some(token));
+    }
+
+    // Inter-broker TLS: on when server TLS is active unless opted out.
+    #[cfg(feature = "tls")]
+    {
+        let server_tls = tls_acceptor.is_some();
+        if server_tls && !args.no_tls_inter_broker {
+            if !args.tls_peer_insecure && args.tls_ca.is_none() {
+                info!(
+                    "inter-broker TLS peer verification enabled without --tls-ca; \
+                     using webpki roots only"
+                );
+            }
+            broker.set_inter_broker_tls(Some(volant_broker::InterBrokerTls {
+                insecure: args.tls_peer_insecure,
+                ca_path: args.tls_ca.clone(),
+            }));
+            info!(
+                peer_insecure = args.tls_peer_insecure,
+                "inter-broker TLS enabled"
+            );
+        } else if server_tls && args.no_tls_inter_broker {
+            info!("inter-broker TLS disabled (--no-tls-inter-broker); peers use plaintext");
+        }
+    }
+
+    // Silence unused when tls feature is off (fields exist for clap).
+    #[cfg(not(feature = "tls"))]
+    {
+        let _ = (
+            &args.no_tls_inter_broker,
+            &args.tls_peer_insecure,
+            &args.tls_ca,
+        );
     }
 
     let _ = args.default_partitions;

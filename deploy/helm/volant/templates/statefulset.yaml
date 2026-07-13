@@ -1,0 +1,102 @@
+{{- if .Values.cluster.enabled }}
+apiVersion: apps/v1
+kind: StatefulSet
+metadata:
+  name: {{ include "volant.fullname" . }}
+  labels:
+    {{- include "volant.labels" . | nindent 4 }}
+spec:
+  serviceName: {{ include "volant.fullname" . }}-headless
+  replicas: {{ .Values.cluster.replicas }}
+  selector:
+    matchLabels:
+      {{- include "volant.selectorLabels" . | nindent 6 }}
+  template:
+    metadata:
+      labels:
+        {{- include "volant.selectorLabels" . | nindent 8 }}
+    spec:
+      containers:
+        - name: volant
+          image: "{{ .Values.image.repository }}:{{ .Values.image.tag }}"
+          imagePullPolicy: {{ .Values.image.pullPolicy }}
+          # Derive node-id from StatefulSet ordinal (pod-0 → node 1).
+          command: ["/bin/sh", "-c"]
+          args:
+            - |
+              set -eu
+              ORDINAL="${HOSTNAME##*-}"
+              NODE_ID=$((ORDINAL + 1))
+              set -- \
+                --data-dir=/var/lib/volant \
+                --listen=0.0.0.0:9092 \
+                --log-format={{ .Values.logFormat }} \
+                --cluster-config=/etc/volant/cluster.toml \
+                --node-id="${NODE_ID}" \
+                --advertised-host="${HOSTNAME}.{{ include "volant.fullname" . }}-headless" \
+                --advertised-port=9092
+              {{- if .Values.metrics.enabled }}
+              set -- "$@" --metrics-addr=0.0.0.0:9102
+              {{- end }}
+              {{- if .Values.authToken }}
+              set -- "$@" --auth-token="${VOLANT_AUTH_TOKEN}"
+              {{- end }}
+              {{- range .Values.extraArgs }}
+              set -- "$@" {{ . | quote }}
+              {{- end }}
+              exec volant-server "$@"
+          env:
+            {{- if .Values.authToken }}
+            - name: VOLANT_AUTH_TOKEN
+              valueFrom:
+                secretKeyRef:
+                  name: {{ include "volant.fullname" . }}-auth
+                  key: token
+            {{- end }}
+          ports:
+            - name: broker
+              containerPort: 9092
+            {{- if .Values.metrics.enabled }}
+            - name: metrics
+              containerPort: 9102
+            {{- end }}
+          volumeMounts:
+            - name: data
+              mountPath: /var/lib/volant
+            - name: cluster-config
+              mountPath: /etc/volant
+              readOnly: true
+          resources:
+            {{- toYaml .Values.resources | nindent 12 }}
+          readinessProbe:
+            tcpSocket:
+              port: broker
+            initialDelaySeconds: 5
+            periodSeconds: 5
+          livenessProbe:
+            tcpSocket:
+              port: broker
+            initialDelaySeconds: 15
+            periodSeconds: 10
+      volumes:
+        - name: cluster-config
+          configMap:
+            name: {{ include "volant.fullname" . }}-cluster
+        {{- if not .Values.persistence.enabled }}
+        - name: data
+          emptyDir: {}
+        {{- end }}
+  {{- if .Values.persistence.enabled }}
+  volumeClaimTemplates:
+    - metadata:
+        name: data
+      spec:
+        accessModes: ["ReadWriteOnce"]
+        {{- if .Values.persistence.storageClass }}
+        storageClassName: {{ .Values.persistence.storageClass | quote }}
+        {{- end }}
+        resources:
+          requests:
+            storage: {{ .Values.persistence.size }}
+  {{- end }}
+{{- end }}

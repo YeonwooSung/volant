@@ -1,3 +1,4 @@
+# Single-node Deployment replicas (ignored when cluster.enabled).
 replicaCount: 1
 
 image:
@@ -33,3 +34,16 @@ logFormat: json
 
 # Extra args appended to the server command.
 extraArgs: []
+
+# Multi-node static cluster (Phase 9). When enabled, deploys a StatefulSet
+# with a headless Service and ConfigMap-mounted cluster.toml.
+# node-id = StatefulSet ordinal + 1.
+cluster:
+  enabled: false
+  replicas: 3
+  defaultReplicationFactor: 3
+  minInsyncReplicas: 2
+  sessionTimeoutMs: 3000
+  replicaFetchMaxWaitMs: 500
+  replicaFetchMaxBytes: 1048576
+  replicaLagMaxMessages: 10000

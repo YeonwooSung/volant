@@ -35,7 +35,7 @@ impl ClientConn {
         if config.tls {
             #[cfg(feature = "tls")]
             {
-                return connect_tls(addr, config.tls_insecure).await;
+                return connect_tls(addr, config).await;
             }
             #[cfg(not(feature = "tls"))]
             {
@@ -51,34 +51,49 @@ impl ClientConn {
 }
 
 #[cfg(feature = "tls")]
-async fn connect_tls(addr: &str, insecure: bool) -> Result<ClientConn> {
+async fn connect_tls(addr: &str, config: &ClientConfig) -> Result<ClientConn> {
+    use std::fs::File;
+    use std::io::BufReader;
     use std::sync::Arc;
 
     use rustls::ClientConfig as RustlsClientConfig;
     use rustls::pki_types::ServerName;
+    use rustls::RootCertStore;
     use tokio_rustls::TlsConnector;
 
-    // rustls 0.23 requires an explicit crypto provider.
     let _ = rustls::crypto::ring::default_provider().install_default();
 
     let tcp = TcpStream::connect(addr).await?;
-    let host = addr
-        .rsplit_once(':')
-        .map(|(h, _)| h)
-        .unwrap_or(addr);
+    let host = addr.rsplit_once(':').map(|(h, _)| h).unwrap_or(addr);
 
-    let builder = RustlsClientConfig::builder();
-    let rustls_config = if insecure {
-        builder
+    let rustls_config = if config.tls_insecure {
+        RustlsClientConfig::builder()
             .dangerous()
             .with_custom_certificate_verifier(Arc::new(NoCertVerifier))
             .with_no_client_auth()
     } else {
-        return Err(Error::InvalidArgument(
-            "TLS with certificate verification requires `tls_insecure=true` in Phase 8 \
-             (lab/self-signed); set ClientConfig.tls_insecure for development"
-                .into(),
-        ));
+        let mut roots = RootCertStore::empty();
+        roots.extend(webpki_roots::TLS_SERVER_ROOTS.iter().cloned());
+        if let Some(ca_path) = &config.tls_ca {
+            let file = File::open(ca_path).map_err(|e| {
+                Error::InvalidArgument(format!(
+                    "open tls_ca {}: {e}",
+                    ca_path.display()
+                ))
+            })?;
+            let mut reader = BufReader::new(file);
+            let certs: Vec<_> = rustls_pemfile::certs(&mut reader)
+                .collect::<std::result::Result<Vec<_>, _>>()
+                .map_err(|e| Error::InvalidArgument(format!("parse tls_ca PEM: {e}")))?;
+            for cert in certs {
+                roots
+                    .add(cert)
+                    .map_err(|e| Error::InvalidArgument(format!("add tls_ca cert: {e}")))?;
+            }
+        }
+        RustlsClientConfig::builder()
+            .with_root_certificates(roots)
+            .with_no_client_auth()
     };
 
     let connector = TlsConnector::from(Arc::new(rustls_config));

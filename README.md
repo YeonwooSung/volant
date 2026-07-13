@@ -123,17 +123,22 @@ cargo run -p volant-server --features tls -- \
   --data-dir /tmp/vdata --listen 127.0.0.1:9092 \
   --tls-cert ./server.crt --tls-key ./server.key
 # Client TLS (lab / self-signed): ClientConfig { tls: true, tls_insecure: true, .. }
+# Production: tls=true, tls_insecure=false, optional tls_ca (webpki-roots for public CAs)
 # requires `volant-client` built with `--features tls`
+# Inter-broker TLS is on by default when server TLS is enabled (Phase 9)
 ```
 
-Packaging: [deploy/README.md](./deploy/README.md) (Docker, systemd, **Helm**).  
+Packaging: [deploy/README.md](./deploy/README.md) (Docker, systemd, **Helm** multi-node).  
 Ops details: [docs/ops.md](./docs/ops.md).
 
 **Phase 8 client behavior:** on `NotLeaderForPartition`, the Rust client refreshes
 metadata and **reconnects to the partition leader** (see `max_redirects`).
 
-**Still deferred:** Kafka wire shim, multi-language clients, inter-broker TLS,
-SCRAM, mTLS identity, chaos-mesh / cargo-fuzz CI.
+**Phase 9:** multi-node Helm (`cluster.enabled`), inter-broker TLS, client CA roots,
+optional [fuzz/](./fuzz/) harness.
+
+**Still deferred:** Kafka wire shim, multi-language clients, SCRAM, mTLS identity,
+chaos-mesh / cargo-fuzz corpus CI.
 
 ### Networked client (library)
 

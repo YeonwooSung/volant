@@ -85,6 +85,18 @@ pub struct ClusterState {
     pub data_dir: PathBuf,
 }
 
+/// Inter-broker TLS client settings (Phase 9).
+///
+/// When set, [`crate::net::inter_broker_rpc`] opens TLS connections to peers.
+/// Requires building with the broker `tls` feature (enabled by `volant-server --features tls`).
+#[derive(Debug, Clone)]
+pub struct InterBrokerTls {
+    /// Skip peer certificate verification (lab / self-signed clusters).
+    pub insecure: bool,
+    /// Optional PEM CA file trusted in addition to webpki roots (when not insecure).
+    pub ca_path: Option<PathBuf>,
+}
+
 /// In-process broker managing topics and partitions.
 #[derive(Debug)]
 pub struct Broker {
@@ -112,6 +124,8 @@ pub struct Broker {
     metrics: Arc<Metrics>,
     /// Optional shared auth token (Phase 7). `None` = auth disabled.
     auth_token: RwLock<Option<String>>,
+    /// Optional inter-broker TLS client config (Phase 9).
+    inter_broker_tls: RwLock<Option<InterBrokerTls>>,
 }
 
 impl Broker {
@@ -134,6 +148,7 @@ impl Broker {
             hwm_cvar: Condvar::new(),
             metrics: Arc::new(Metrics::new()),
             auth_token: RwLock::new(None),
+            inter_broker_tls: RwLock::new(None),
         }
     }
 
@@ -182,6 +197,7 @@ impl Broker {
             hwm_cvar: Condvar::new(),
             metrics: Arc::new(Metrics::new()),
             auth_token: RwLock::new(None),
+            inter_broker_tls: RwLock::new(None),
         };
         // Open local partitions from persisted assignment.
         broker.apply_local_assignment()?;
@@ -201,6 +217,16 @@ impl Broker {
     /// Current auth token if configured.
     pub fn auth_token(&self) -> Option<String> {
         self.auth_token.read().clone()
+    }
+
+    /// Configure inter-broker TLS. `None` keeps inter-broker plaintext.
+    pub fn set_inter_broker_tls(&self, config: Option<InterBrokerTls>) {
+        *self.inter_broker_tls.write() = config;
+    }
+
+    /// Current inter-broker TLS settings, if enabled.
+    pub fn inter_broker_tls(&self) -> Option<InterBrokerTls> {
+        self.inter_broker_tls.read().clone()
     }
 
     /// Number of topics known to this broker.

@@ -221,18 +221,43 @@ async fn heartbeat_to_controller(broker: &Broker) -> Result<()> {
     }
 }
 
-/// Inter-broker RPC over a short-lived TCP connection.
+/// Inter-broker RPC over a short-lived connection (plain TCP or optional TLS).
 ///
 /// When the local broker has an auth token configured, sends Auth first.
+/// When [`Broker::inter_broker_tls`] is set (and the `tls` feature is enabled),
+/// the connection is upgraded to TLS before the RPC.
 pub async fn inter_broker_rpc(broker: &Broker, addr: &str, req: &Request) -> Result<Response> {
-    let mut stream = TcpStream::connect(addr).await?;
+    let tcp = TcpStream::connect(addr).await?;
+
+    #[cfg(feature = "tls")]
+    if let Some(tls_cfg) = broker.inter_broker_tls() {
+        let mut stream = connect_inter_broker_tls(tcp, addr, &tls_cfg).await?;
+        return inter_broker_rpc_on(broker, &mut stream, req).await;
+    }
+
+    #[cfg(not(feature = "tls"))]
+    if broker.inter_broker_tls().is_some() {
+        return Err(Error::InvalidArgument(
+            "inter-broker TLS configured but volant-broker was built without `--features tls`"
+                .into(),
+        ));
+    }
+
+    let mut stream = tcp;
+    inter_broker_rpc_on(broker, &mut stream, req).await
+}
+
+async fn inter_broker_rpc_on<S>(broker: &Broker, stream: &mut S, req: &Request) -> Result<Response>
+where
+    S: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin,
+{
     if let Some(token) = broker.auth_token() {
         let auth = Request::Auth { token };
         let frame = pack_request(0, &auth)?;
         let mut out = BytesMut::new();
         encode_frame(&frame, &mut out)?;
         stream.write_all(&out).await?;
-        let auth_resp = read_one_response(&mut stream).await?;
+        let auth_resp = read_one_response(stream).await?;
         match auth_resp {
             Response::Auth { error_code } if error_code == 0 => {}
             Response::Auth { error_code } => {
@@ -257,10 +282,13 @@ pub async fn inter_broker_rpc(broker: &Broker, addr: &str, req: &Request) -> Res
     let mut out = BytesMut::new();
     encode_frame(&frame, &mut out)?;
     stream.write_all(&out).await?;
-    read_one_response(&mut stream).await
+    read_one_response(stream).await
 }
 
-async fn read_one_response(stream: &mut TcpStream) -> Result<Response> {
+async fn read_one_response<S>(stream: &mut S) -> Result<Response>
+where
+    S: tokio::io::AsyncRead + Unpin,
+{
     let mut buf = BytesMut::with_capacity(64 * 1024);
     loop {
         let n = stream.read_buf(&mut buf).await?;
@@ -270,6 +298,105 @@ async fn read_one_response(stream: &mut TcpStream) -> Result<Response> {
         if let Some(frame) = decode_frame(&mut buf)? {
             return volant_protocol::decode_response(frame.header.opcode, &frame.payload);
         }
+    }
+}
+
+/// Build a TLS client stream for inter-broker RPC.
+#[cfg(feature = "tls")]
+async fn connect_inter_broker_tls(
+    tcp: TcpStream,
+    addr: &str,
+    cfg: &crate::broker::InterBrokerTls,
+) -> Result<tokio_rustls::client::TlsStream<TcpStream>> {
+    use std::fs::File;
+    use std::io::BufReader;
+    use std::sync::Arc;
+
+    use rustls::ClientConfig as RustlsClientConfig;
+    use rustls::RootCertStore;
+    use rustls::pki_types::ServerName;
+    use tokio_rustls::TlsConnector;
+
+    let _ = rustls::crypto::ring::default_provider().install_default();
+
+    let host = addr.rsplit_once(':').map(|(h, _)| h).unwrap_or(addr);
+
+    let rustls_config = if cfg.insecure {
+        RustlsClientConfig::builder()
+            .dangerous()
+            .with_custom_certificate_verifier(Arc::new(NoCertVerifier))
+            .with_no_client_auth()
+    } else {
+        let mut roots = RootCertStore::empty();
+        roots.extend(webpki_roots::TLS_SERVER_ROOTS.iter().cloned());
+        if let Some(ca_path) = &cfg.ca_path {
+            let file = File::open(ca_path).map_err(|e| {
+                Error::InvalidArgument(format!("open inter-broker tls_ca {}: {e}", ca_path.display()))
+            })?;
+            let mut reader = BufReader::new(file);
+            let certs: Vec<_> = rustls_pemfile::certs(&mut reader)
+                .collect::<std::result::Result<Vec<_>, _>>()
+                .map_err(|e| Error::InvalidArgument(format!("parse inter-broker tls_ca PEM: {e}")))?;
+            for cert in certs {
+                roots
+                    .add(cert)
+                    .map_err(|e| Error::InvalidArgument(format!("add inter-broker tls_ca cert: {e}")))?;
+            }
+        }
+        RustlsClientConfig::builder()
+            .with_root_certificates(roots)
+            .with_no_client_auth()
+    };
+
+    let connector = TlsConnector::from(Arc::new(rustls_config));
+    let server_name = ServerName::try_from(host.to_owned()).map_err(|e| {
+        Error::InvalidArgument(format!("invalid inter-broker TLS server name '{host}': {e}"))
+    })?;
+    connector
+        .connect(server_name, tcp)
+        .await
+        .map_err(|e| Error::Io(std::io::Error::new(std::io::ErrorKind::Other, e)))
+}
+
+#[cfg(feature = "tls")]
+#[derive(Debug)]
+struct NoCertVerifier;
+
+#[cfg(feature = "tls")]
+impl rustls::client::danger::ServerCertVerifier for NoCertVerifier {
+    fn verify_server_cert(
+        &self,
+        _end_entity: &rustls::pki_types::CertificateDer<'_>,
+        _intermediates: &[rustls::pki_types::CertificateDer<'_>],
+        _server_name: &rustls::pki_types::ServerName<'_>,
+        _ocsp_response: &[u8],
+        _now: rustls::pki_types::UnixTime,
+    ) -> std::result::Result<rustls::client::danger::ServerCertVerified, rustls::Error> {
+        Ok(rustls::client::danger::ServerCertVerified::assertion())
+    }
+
+    fn verify_tls12_signature(
+        &self,
+        _message: &[u8],
+        _cert: &rustls::pki_types::CertificateDer<'_>,
+        _dss: &rustls::DigitallySignedStruct,
+    ) -> std::result::Result<rustls::client::danger::HandshakeSignatureValid, rustls::Error> {
+        Ok(rustls::client::danger::HandshakeSignatureValid::assertion())
+    }
+
+    fn verify_tls13_signature(
+        &self,
+        _message: &[u8],
+        _cert: &rustls::pki_types::CertificateDer<'_>,
+        _dss: &rustls::DigitallySignedStruct,
+    ) -> std::result::Result<rustls::client::danger::HandshakeSignatureValid, rustls::Error> {
+        Ok(rustls::client::danger::HandshakeSignatureValid::assertion())
+    }
+
+    fn supported_verify_schemes(&self) -> Vec<rustls::SignatureScheme> {
+        rustls::crypto::ring::default_provider()
+            .signature_verification_algorithms
+            .supported_schemes()
     }
 }
 

@@ -39,20 +39,27 @@ curl -s localhost:9102/metrics | head
 3. Install `volant.service` to `/etc/systemd/system/`
 4. `systemctl daemon-reload && systemctl enable --now volant`
 
-## Helm (minimal single-node)
+## Helm
 
 ```bash
 # Build/push image first
 docker build -f deploy/Dockerfile -t volant:0.1.0 .
 
+# Single-node (default)
 helm install volant ./deploy/helm/volant \
   --set image.repository=volant \
   --set image.tag=0.1.0 \
   --set authToken=s3cret
+
+# Multi-node StatefulSet (Phase 9)
+helm install volant ./deploy/helm/volant \
+  --set cluster.enabled=true \
+  --set cluster.replicas=3 \
+  --set image.repository=volant \
+  --set image.tag=0.1.0
 ```
 
-See [helm/volant/README.md](./helm/volant/README.md). Multi-node StatefulSet
-clustering is **not** automated by this chart yet.
+See [helm/volant/README.md](./helm/volant/README.md).
 
 ## Auth
 
@@ -69,7 +76,9 @@ or reverse proxy.
 
 - Build with `--features tls` and pass `--tls-cert` + `--tls-key` (PEM).
 - When TLS is enabled the broker listens **TLS-only** (no dual plain/TLS).
-- **Inter-broker traffic remains plaintext** in Phase 7 (assume a private VPC
-  or overlay). Terminate client TLS at the broker or a reverse proxy.
+- **Inter-broker TLS** (Phase 9) is enabled by default with server TLS
+  (`--tls-peer-insecure` for lab; `--tls-ca` + `--tls-peer-insecure=false` for
+  verified peers; `--no-tls-inter-broker` to force plaintext peers).
+- Client: `webpki-roots` + optional `tls_ca` / `tls_insecure` on `ClientConfig`.
 
 See [docs/ops.md](../docs/ops.md) for the operator runbook.

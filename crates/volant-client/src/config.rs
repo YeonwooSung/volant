@@ -1,5 +1,7 @@
 //! Client configuration.
 
+use std::path::PathBuf;
+
 /// Connection and client behaviour settings.
 #[derive(Debug, Clone)]
 pub struct ClientConfig {
@@ -15,7 +17,9 @@ pub struct ClientConfig {
     pub tls: bool,
     /// When TLS is enabled, skip certificate verification (dev/test only).
     pub tls_insecure: bool,
-    /// Max leader-redirect retries after `NotLeaderForPartition` (default 2 total attempts).
+    /// Optional path to a PEM CA file trusted in addition to webpki roots.
+    pub tls_ca: Option<PathBuf>,
+    /// Max leader-redirect retries after `NotLeaderForPartition` (default 1 extra attempt).
     pub max_redirects: u32,
 }
 
@@ -28,6 +32,7 @@ impl Default for ClientConfig {
             auth_token: None,
             tls: false,
             tls_insecure: false,
+            tls_ca: None,
             max_redirects: 1,
         }
     }

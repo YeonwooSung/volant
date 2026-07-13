@@ -1473,17 +1473,19 @@ mod tests {
             let _ = decode_request(*op, &[0u8; 1]);
             let _ = decode_request(*op, &[0u8; 3]);
             let _ = decode_request(*op, &[0xff; 16]);
+            let _ = decode_request(*op, &[0xff; 256]);
         }
         for op in resp_ops {
             let _ = decode_response(*op, &[]);
             let _ = decode_response(*op, &[0u8; 1]);
             let _ = decode_response(*op, &[0u8; 3]);
             let _ = decode_response(*op, &[0xff; 16]);
+            let _ = decode_response(*op, &[0xff; 256]);
         }
 
-        // Random blobs.
-        for _ in 0..200 {
-            let len = (next() as usize % 512) + 1;
+        // Random blobs (expanded Phase 9).
+        for _ in 0..1000 {
+            let len = (next() as usize % 2048) + 1;
             let mut buf = vec![0u8; len];
             for b in &mut buf {
                 *b = (next() & 0xff) as u8;
@@ -1504,5 +1506,112 @@ mod tests {
         let huge = vec![0u8; MAX_PAYLOAD + 1];
         assert!(decode_request(1, &huge).is_err());
         assert!(decode_response(1, &huge).is_err());
+    }
+
+    /// Extended frame-level chaos (Phase 9): crafted headers + streaming partials.
+    #[test]
+    fn chaos_frame_decode_extended() {
+        use crate::codec::{checksum, encode_frame, HEADER_LEN};
+        use crate::frame::{Frame, FrameHeader, FRAME_MAGIC, PROTOCOL_VERSION};
+
+        let mut state: u64 = 0x0123_4567_89AB_CDEF;
+        let mut next = || -> u64 {
+            state ^= state << 13;
+            state ^= state >> 7;
+            state ^= state << 17;
+            state
+        };
+
+        // Invalid magic.
+        {
+            let mut bad = BytesMut::from(&[0x00u8; HEADER_LEN][..]);
+            assert!(crate::codec::decode_frame(&mut bad).is_err());
+        }
+
+        // Valid magic, wrong version.
+        {
+            let mut buf = BytesMut::new();
+            buf.extend_from_slice(&[
+                FRAME_MAGIC,
+                0xFF, // version
+                0,
+                1, // opcode
+                0,
+                0,
+                0,
+                1, // corr
+                0,
+                0,
+                0,
+                0, // payload_len
+                0,
+                0,
+                0,
+                0, // checksum
+            ]);
+            assert!(crate::codec::decode_frame(&mut buf).is_err());
+        }
+
+        // Valid frame with correct checksum, then garbage trailing bytes.
+        {
+            let payload = bytes::Bytes::from_static(b"ok");
+            let frame = Frame {
+                header: FrameHeader {
+                    version: PROTOCOL_VERSION,
+                    opcode: 4,
+                    correlation_id: 7,
+                    payload_len: payload.len() as u32,
+                    checksum: checksum(&payload),
+                },
+                payload,
+            };
+            let mut buf = BytesMut::new();
+            encode_frame(&frame, &mut buf).unwrap();
+            buf.extend_from_slice(&[0xDE, 0xAD, 0xBE, 0xEF]);
+            let decoded = crate::codec::decode_frame(&mut buf).unwrap();
+            assert!(decoded.is_some());
+            // Remaining garbage must not panic.
+            let _ = crate::codec::decode_frame(&mut buf);
+        }
+
+        // Partial header then complete.
+        {
+            let payload = bytes::Bytes::from_static(b"partial");
+            let frame = Frame {
+                header: FrameHeader {
+                    version: PROTOCOL_VERSION,
+                    opcode: 1,
+                    correlation_id: 1,
+                    payload_len: payload.len() as u32,
+                    checksum: checksum(&payload),
+                },
+                payload,
+            };
+            let mut full = BytesMut::new();
+            encode_frame(&frame, &mut full).unwrap();
+            let full_bytes = full.to_vec();
+            let mut buf = BytesMut::new();
+            // Feed one byte at a time.
+            for b in &full_bytes {
+                buf.extend_from_slice(&[*b]);
+                let r = crate::codec::decode_frame(&mut buf);
+                assert!(r.is_ok());
+            }
+        }
+
+        // Random header-shaped blobs.
+        for _ in 0..500 {
+            let len = (next() as usize % 128) + 1;
+            let mut raw = vec![0u8; len];
+            for b in &mut raw {
+                *b = (next() & 0xff) as u8;
+            }
+            // Occasionally force magic byte for deeper path coverage.
+            if next() % 3 == 0 && !raw.is_empty() {
+                raw[0] = FRAME_MAGIC;
+            }
+            let mut buf = BytesMut::from(raw.as_slice());
+            let _ = crate::codec::decode_frame(&mut buf);
+        }
     }
 }
