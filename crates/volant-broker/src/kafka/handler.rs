@@ -14,10 +14,11 @@ use crate::broker::{Broker, IdempotentCheck};
 
 use super::codec::{
     decode_consumer_subscription, decode_produce_batches, decode_request_header,
-    encode_consumer_assignment, encode_message_set, encode_record_batch, encode_response_frame,
-    get_bytes, get_nullable_string, get_string, put_bytes, put_nullable_string, put_response_header,
-    put_string, try_decode_request,
+    encode_consumer_assignment, encode_message_set, encode_record_batch,
+    encode_record_batch_compressed, encode_response_frame, get_bytes, get_nullable_string,
+    get_string, put_bytes, put_nullable_string, put_response_header, put_string, try_decode_request,
 };
+use super::compress::{fetch_compression_codec, CompressionCodec};
 use super::sasl::{self, SaslMechanism, SaslState, MECHANISMS};
 use super::{
     map_group_error, map_idempotent_error, ApiKey, KafkaErrorCode, KAFKA_ANONYMOUS_PRINCIPAL,
@@ -846,15 +847,12 @@ fn encode_fetch(broker: &Broker, src: &mut impl Buf, out: &mut BytesMut, version
                         })
                         .unwrap_or(hwm);
 
-                    let set = if version >= 4 {
-                        encode_record_batch(&selected)
-                    } else {
-                        encode_message_set(&selected)
-                    };
+                    // Phase 32: Fetch v4 RecordBatches may be compressed.
+                    let set = encode_fetch_record_set(&selected, version);
                     out.put_i16(KafkaErrorCode::None.as_i16());
                     out.put_i64(hwm);
                     if version >= 4 {
-                        out.put_i64(hwm); // last_stable_offset ≈ hwm (no txns)
+                        out.put_i64(hwm); // last_stable_offset ≈ hwm (no control markers)
                         out.put_i32(0); // aborted_transactions empty
                     }
                     put_bytes(out, Some(&set));
@@ -878,6 +876,27 @@ fn encode_fetch(broker: &Broker, src: &mut impl Buf, out: &mut BytesMut, version
                     put_bytes(out, Some(&[]));
                 }
             }
+        }
+    }
+}
+
+/// Encode partition records for a Fetch response (Phase 32 compression on v4).
+fn encode_fetch_record_set(records: &[volant_core::Record], version: i16) -> BytesMut {
+    if version < 4 {
+        return encode_message_set(records);
+    }
+    if records.is_empty() {
+        return BytesMut::new();
+    }
+    let codec = fetch_compression_codec();
+    if codec == CompressionCodec::None {
+        return encode_record_batch(records);
+    }
+    match encode_record_batch_compressed(records, codec) {
+        Ok(batch) => batch,
+        Err(e) => {
+            debug!(error = %e, ?codec, "fetch compression failed; falling back to plain");
+            encode_record_batch(records)
         }
     }
 }

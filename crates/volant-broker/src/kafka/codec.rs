@@ -462,16 +462,15 @@ fn decode_default_record(src: &mut impl Buf, first_timestamp: i64) -> Result<Mes
 
 /// Encode records as a single Kafka RecordBatch (magic 2, no compression).
 ///
-/// Fetch responses use this path for broad client compatibility.
+/// Used when Fetch compression is disabled or as a fallback.
 pub fn encode_record_batch(records: &[Record]) -> BytesMut {
     encode_record_batch_with_options(records, CompressionCodec::None, RecordBatchProducer::NONE)
         .expect("uncompressed encode cannot fail")
 }
 
-/// Encode records as a RecordBatch with the given compression codec (Phase 28).
+/// Encode records as a RecordBatch with the given compression codec (Phases 28/32).
 ///
-/// Used by tests and clients that want compressed produce payloads. Fetch still
-/// returns uncompressed batches via [`encode_record_batch`].
+/// Used for compressed Produce test payloads and Fetch v4 responses.
 pub fn encode_record_batch_compressed(
     records: &[Record],
     codec: CompressionCodec,

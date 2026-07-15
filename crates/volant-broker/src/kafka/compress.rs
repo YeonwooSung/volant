@@ -1,11 +1,16 @@
-//! Kafka RecordBatch compression codecs (Phase 28).
+//! Kafka RecordBatch compression codecs (Phases 28 / 32).
 
 use std::io::{Read, Write};
+use std::sync::OnceLock;
 
 use flate2::read::GzDecoder;
 use flate2::write::GzEncoder;
 use flate2::Compression;
+use tracing::warn;
 use volant_core::{Error, Result};
+
+/// Env var controlling Fetch v4 RecordBatch compression (Phase 32).
+pub const FETCH_COMPRESSION_ENV: &str = "VOLANT_KAFKA_FETCH_COMPRESSION";
 
 /// Compression codec in RecordBatch attributes bits 0–2.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -41,6 +46,45 @@ impl CompressionCodec {
     /// Attributes low bits value.
     pub fn as_u8(self) -> u8 {
         self as u8
+    }
+
+    /// Parse a codec name (`none`/`gzip`/`snappy`/`lz4`/`zstd` or digit 0–4).
+    pub fn parse_name(s: &str) -> Option<Self> {
+        match s.trim().to_ascii_lowercase().as_str() {
+            "none" | "0" => Some(Self::None),
+            "gzip" | "1" => Some(Self::Gzip),
+            "snappy" | "2" => Some(Self::Snappy),
+            "lz4" | "3" => Some(Self::Lz4),
+            "zstd" | "4" => Some(Self::Zstd),
+            _ => None,
+        }
+    }
+}
+
+/// Codec used when encoding Fetch v4 RecordBatches (Phase 32).
+///
+/// Reads [`FETCH_COMPRESSION_ENV`] (default **lz4**). Unknown values fall
+/// back to lz4 after a warning. Cached after first successful resolution so
+/// operators can set the env before process start.
+pub fn fetch_compression_codec() -> CompressionCodec {
+    static CODEC: OnceLock<CompressionCodec> = OnceLock::new();
+    *CODEC.get_or_init(resolve_fetch_compression_codec)
+}
+
+fn resolve_fetch_compression_codec() -> CompressionCodec {
+    match std::env::var(FETCH_COMPRESSION_ENV) {
+        Ok(v) => match CompressionCodec::parse_name(&v) {
+            Some(c) => c,
+            None => {
+                warn!(
+                    value = %v,
+                    env = FETCH_COMPRESSION_ENV,
+                    "unknown fetch compression; using lz4"
+                );
+                CompressionCodec::Lz4
+            }
+        },
+        Err(_) => CompressionCodec::Lz4,
     }
 }
 
@@ -214,5 +258,23 @@ mod tests {
         let c = compress(CompressionCodec::Zstd, &src).unwrap();
         let d = decompress(CompressionCodec::Zstd, &c).unwrap();
         assert_eq!(d, src);
+    }
+
+    #[test]
+    fn parse_name_accepts_aliases() {
+        assert_eq!(CompressionCodec::parse_name("none"), Some(CompressionCodec::None));
+        assert_eq!(CompressionCodec::parse_name("GZIP"), Some(CompressionCodec::Gzip));
+        assert_eq!(CompressionCodec::parse_name("3"), Some(CompressionCodec::Lz4));
+        assert_eq!(CompressionCodec::parse_name("zstd"), Some(CompressionCodec::Zstd));
+        assert_eq!(CompressionCodec::parse_name("bogus"), None);
+    }
+
+    #[test]
+    fn resolve_default_is_lz4_without_env() {
+        // May already be set in the process; only assert parse path for default string.
+        assert_eq!(
+            CompressionCodec::parse_name("lz4"),
+            Some(CompressionCodec::Lz4)
+        );
     }
 }

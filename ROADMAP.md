@@ -810,8 +810,25 @@ Binding: **[docs/PHASE31_SPEC.md](./docs/PHASE31_SPEC.md)**.
 crash ≡ abort; `transaction_timeout_ms` ignored; no flexible versions;
 partition membership not strictly enforced after AddPartitions.
 
+---
+
+### Phase 32 — Kafka compressed Fetch (RecordBatch) ✅
+
+**Goal:** Fetch v4 responses on `--kafka-listen` can return compressed
+RecordBatches (same codecs as Produce), cutting wire size for large reads.
+
+Binding: **[docs/PHASE32_SPEC.md](./docs/PHASE32_SPEC.md)**.
+
+- [x] Fetch v4 uses `encode_record_batch_compressed` (default **lz4**)
+- [x] `VOLANT_KAFKA_FETCH_COMPRESSION` = none|gzip|snappy|lz4|zstd
+- [x] Fetch v0–3 MessageSet remains uncompressed
+- [x] Integration tests (`phase32_fetch_compression`)
+
+**Honest limitations:** MessageSet Fetch never compressed; codec is process-global
+env (not per-topic); log storage still plain (re-encode on Fetch); no level knobs.
+
 **Still deferred:** multi-lang clients, SCRAM-SHA-512, cargo-fuzz corpus CI,
-MessageSet compression, compressed Fetch, Kafka control batches / markers.
+MessageSet compression, Kafka control batches / `READ_COMMITTED` markers.
 
 ---
 

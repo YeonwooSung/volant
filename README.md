@@ -206,9 +206,12 @@ PLAIN and SCRAM-SHA-256 against the Volant SCRAM store; principal feeds ACLs.
 TxnOffsetCommit mapped to Volant Phase 18 buffer-until-commit; FindCoordinator
 v1 for transaction coordinators.
 
+**Phase 32:** Kafka compressed Fetch — Fetch v4 RecordBatches compressed by
+default (lz4); override with `VOLANT_KAFKA_FETCH_COMPRESSION`.
+
 **Still deferred:** multi-language clients, SCRAM-SHA-512, chaos-mesh /
-cargo-fuzz corpus CI, MessageSet compression, compressed Fetch, Kafka control
-batches / `READ_COMMITTED` isolation.
+cargo-fuzz corpus CI, MessageSet compression, Kafka control batches /
+`READ_COMMITTED` isolation.
 
 ### Networked client (library)
 

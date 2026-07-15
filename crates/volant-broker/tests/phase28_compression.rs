@@ -128,7 +128,7 @@ async fn produce_compressed_and_verify(codec: CompressionCodec, topic: &str) {
     assert_eq!(native[0].headers[0].0, "codec");
     assert_eq!(native[1].value.as_ref(), b"second-compressed");
 
-    // Kafka Fetch v4 returns uncompressed RecordBatch of the same data.
+    // Kafka Fetch v4 returns a RecordBatch (may be compressed — Phase 32).
     let mut fbody = BytesMut::new();
     fbody.put_i32(-1);
     fbody.put_i32(0);
@@ -157,9 +157,7 @@ async fn produce_compressed_and_verify(codec: CompressionCodec, topic: &str) {
     assert_eq!(fsrc.get_i32(), 0);
     let record_set = get_bytes(&mut fsrc).unwrap().unwrap_or_default();
     assert_eq!(record_set[16] as i8, 2);
-    // Fetch remains uncompressed.
-    let attrs = i16::from_be_bytes([record_set[21], record_set[22]]);
-    assert_eq!(attrs & 0x07, 0, "fetch should be uncompressed");
+    // Decode handles compressed or plain Fetch (Phase 32 default: lz4).
     let msgs = decode_records(&record_set).unwrap();
     assert_eq!(msgs.len(), 2);
     assert_eq!(
