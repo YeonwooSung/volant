@@ -20,6 +20,7 @@ tls = [
     "dep:tokio-rustls",
     "dep:rustls",
     "dep:rustls-pemfile",
+    "dep:x509-parser",
     "volant-broker/tls",
 ]
 
@@ -38,3 +39,4 @@ core_affinity = { version = "0.8", optional = true }
 tokio-rustls = { version = "0.26", optional = true, default-features = false, features = ["ring", "tls12"] }
 rustls = { version = "0.23", optional = true, default-features = false, features = ["ring", "std"] }
 rustls-pemfile = { version = "2", optional = true }
+x509-parser = { version = "0.16", optional = true }

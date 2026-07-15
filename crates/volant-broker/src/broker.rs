@@ -91,7 +91,7 @@ pub struct ClusterState {
     pub data_dir: PathBuf,
 }
 
-/// Inter-broker TLS client settings (Phase 9).
+/// Inter-broker TLS client settings (Phase 9/19).
 ///
 /// When set, [`crate::net::inter_broker_rpc`] opens TLS connections to peers.
 /// Requires building with the broker `tls` feature (enabled by `volant-server --features tls`).
@@ -101,6 +101,10 @@ pub struct InterBrokerTls {
     pub insecure: bool,
     /// Optional PEM CA file trusted in addition to webpki roots (when not insecure).
     pub ca_path: Option<PathBuf>,
+    /// Optional client certificate PEM (Phase 19 mTLS to peers).
+    pub client_cert: Option<PathBuf>,
+    /// Optional client private key PEM (Phase 19).
+    pub client_key: Option<PathBuf>,
 }
 
 /// Cached result of the last idempotent produce batch for a partition.

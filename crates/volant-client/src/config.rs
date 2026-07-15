@@ -19,6 +19,10 @@ pub struct ClientConfig {
     pub tls_insecure: bool,
     /// Optional path to a PEM CA file trusted in addition to webpki roots.
     pub tls_ca: Option<PathBuf>,
+    /// Client certificate PEM for mTLS (Phase 19). Requires `tls_key` and feature `tls`.
+    pub tls_cert: Option<PathBuf>,
+    /// Client private key PEM for mTLS (Phase 19). Requires `tls_cert` and feature `tls`.
+    pub tls_key: Option<PathBuf>,
     /// Max leader-redirect retries after `NotLeaderForPartition` (default 1 extra attempt).
     pub max_redirects: u32,
     /// Enable idempotent produce (InitProducerId + per-partition sequences). Phase 10.
@@ -42,6 +46,8 @@ impl Default for ClientConfig {
             tls: false,
             tls_insecure: false,
             tls_ca: None,
+            tls_cert: None,
+            tls_key: None,
             max_redirects: 1,
             enable_idempotence: false,
             transactional_id: None,

@@ -164,7 +164,10 @@ keeps fetch positions on sticky-retained partitions.
 **Phase 18:** transactions MVP — `BeginTxn`/`EndTxn`, transactional id fencing,
 multi-partition atomic commit, deferred offsets; `volant txn produce`.
 
-**Still deferred:** Kafka wire shim, multi-language clients, SCRAM, mTLS identity,
+**Phase 19:** mTLS identity — `--tls-client-ca` / `--tls-client-allow`; client
+`tls_cert`/`tls_key`; verified CN authenticates without shared token.
+
+**Still deferred:** Kafka wire shim, multi-language clients, SCRAM / full SASL,
 chaos-mesh / cargo-fuzz corpus CI.
 
 ### Networked client (library)

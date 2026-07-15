@@ -345,7 +345,7 @@ Binding: **[docs/PHASE7_SPEC.md](./docs/PHASE7_SPEC.md)**. Ops runbook: **[docs/
 - [ ] Multi-language clients (Rust first; Go / Python FFI or REST gateway) — **deferred**
 - [ ] Kafka protocol compatibility shim — **deferred**
 - [ ] Full chaos mesh (partition loss, disk full, slow disk) — **deferred** (protocol chaos only)
-- [ ] SCRAM / full SASL / mTLS identity mapping — **deferred**
+- [ ] SCRAM / full SASL — **deferred** (mTLS identity mapping: **Phase 19**)
 - [ ] Security audit with `cargo fuzz` corpus CI — **deferred** (deterministic chaos tests ship now)
 
 **Honest limitations (Phase 7):** Metrics endpoint has no auth (bind localhost). Inter-broker TLS was deferred to Phase 9 (now available when server TLS is enabled).
@@ -545,7 +545,26 @@ Binding: **[docs/PHASE18_SPEC.md](./docs/PHASE18_SPEC.md)**.
 
 **Honest limitations:** in-flight txn is memory-only (crash ≡ abort); no Kafka control markers / `READ_COMMITTED` fetch filter; produce-in-txn responses do not carry final log offsets (see EndTxn results); single-node coordinator only.
 
-**Still deferred:** Kafka shim, multi-lang clients, SCRAM, mTLS.
+**Still deferred:** Kafka shim, multi-lang clients, SCRAM / full SASL.
+
+---
+
+### Phase 19 — mTLS identity mapping ✅
+
+**Goal:** Mutual TLS with client cert verification; map verified CN → connection principal; cert auth without shared token.
+
+Binding: **[docs/PHASE19_SPEC.md](./docs/PHASE19_SPEC.md)**.
+
+- [x] `--tls-client-ca` enables mTLS (`WebPkiClientVerifier`)
+- [x] `--tls-client-allow` optional CN allowlist
+- [x] Principal from leaf CN (fallback DNS SAN); authenticates without Auth token
+- [x] Client `tls_cert` / `tls_key` presentation (`ClientConfig`, feature `tls`)
+- [x] Inter-broker presents server cert as client identity when mTLS is on
+- [x] Integration tests (`phase19_mtls`) + principal unit test
+
+**Honest limitations:** CN/SAN principal only (no SPIFFE); no per-topic ACL from principal yet; metrics still unauthenticated; inter-broker reuses server cert (no separate peer identity file).
+
+**Still deferred:** Kafka shim, multi-lang clients, SCRAM / full SASL.
 
 ---
 

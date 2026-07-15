@@ -337,11 +337,10 @@ async fn connect_inter_broker_tls(
 
     let host = addr.rsplit_once(':').map(|(h, _)| h).unwrap_or(addr);
 
-    let rustls_config = if cfg.insecure {
+    let builder = if cfg.insecure {
         RustlsClientConfig::builder()
             .dangerous()
             .with_custom_certificate_verifier(Arc::new(NoCertVerifier))
-            .with_no_client_auth()
     } else {
         let mut roots = RootCertStore::empty();
         roots.extend(webpki_roots::TLS_SERVER_ROOTS.iter().cloned());
@@ -359,9 +358,25 @@ async fn connect_inter_broker_tls(
                     .map_err(|e| Error::InvalidArgument(format!("add inter-broker tls_ca cert: {e}")))?;
             }
         }
-        RustlsClientConfig::builder()
-            .with_root_certificates(roots)
-            .with_no_client_auth()
+        RustlsClientConfig::builder().with_root_certificates(roots)
+    };
+
+    // Phase 19: optional client cert for mTLS to peers.
+    let rustls_config = match (&cfg.client_cert, &cfg.client_key) {
+        (Some(cert_path), Some(key_path)) => {
+            let certs = load_pem_certs(cert_path)?;
+            let key = load_pem_key(key_path)?;
+            builder
+                .with_client_auth_cert(certs, key)
+                .map_err(|e| Error::InvalidArgument(format!("inter-broker client cert: {e}")))?
+        }
+        (None, None) => builder.with_no_client_auth(),
+        _ => {
+            return Err(Error::InvalidArgument(
+                "inter-broker TLS client_cert and client_key must both be set or both unset"
+                    .into(),
+            ));
+        }
     };
 
     let connector = TlsConnector::from(Arc::new(rustls_config));
@@ -372,6 +387,32 @@ async fn connect_inter_broker_tls(
         .connect(server_name, tcp)
         .await
         .map_err(|e| Error::Io(std::io::Error::new(std::io::ErrorKind::Other, e)))
+}
+
+#[cfg(feature = "tls")]
+fn load_pem_certs(path: &std::path::Path) -> Result<Vec<rustls::pki_types::CertificateDer<'static>>> {
+    use std::fs::File;
+    use std::io::BufReader;
+    let file = File::open(path).map_err(|e| {
+        Error::InvalidArgument(format!("open cert {}: {e}", path.display()))
+    })?;
+    let mut reader = BufReader::new(file);
+    rustls_pemfile::certs(&mut reader)
+        .collect::<std::result::Result<Vec<_>, _>>()
+        .map_err(|e| Error::InvalidArgument(format!("parse cert PEM {}: {e}", path.display())))
+}
+
+#[cfg(feature = "tls")]
+fn load_pem_key(path: &std::path::Path) -> Result<rustls::pki_types::PrivateKeyDer<'static>> {
+    use std::fs::File;
+    use std::io::BufReader;
+    let file = File::open(path).map_err(|e| {
+        Error::InvalidArgument(format!("open key {}: {e}", path.display()))
+    })?;
+    let mut reader = BufReader::new(file);
+    rustls_pemfile::private_key(&mut reader)
+        .map_err(|e| Error::InvalidArgument(format!("parse key PEM {}: {e}", path.display())))?
+        .ok_or_else(|| Error::InvalidArgument(format!("no private key in {}", path.display())))
 }
 
 #[cfg(feature = "tls")]

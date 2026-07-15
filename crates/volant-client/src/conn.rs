@@ -66,11 +66,10 @@ async fn connect_tls(addr: &str, config: &ClientConfig) -> Result<ClientConn> {
     let tcp = TcpStream::connect(addr).await?;
     let host = addr.rsplit_once(':').map(|(h, _)| h).unwrap_or(addr);
 
-    let rustls_config = if config.tls_insecure {
+    let builder = if config.tls_insecure {
         RustlsClientConfig::builder()
             .dangerous()
             .with_custom_certificate_verifier(Arc::new(NoCertVerifier))
-            .with_no_client_auth()
     } else {
         let mut roots = RootCertStore::empty();
         roots.extend(webpki_roots::TLS_SERVER_ROOTS.iter().cloned());
@@ -91,9 +90,24 @@ async fn connect_tls(addr: &str, config: &ClientConfig) -> Result<ClientConn> {
                     .map_err(|e| Error::InvalidArgument(format!("add tls_ca cert: {e}")))?;
             }
         }
-        RustlsClientConfig::builder()
-            .with_root_certificates(roots)
-            .with_no_client_auth()
+        RustlsClientConfig::builder().with_root_certificates(roots)
+    };
+
+    // Phase 19: optional client certificate for mTLS.
+    let rustls_config = match (&config.tls_cert, &config.tls_key) {
+        (Some(cert_path), Some(key_path)) => {
+            let certs = load_client_certs(cert_path)?;
+            let key = load_client_key(key_path)?;
+            builder
+                .with_client_auth_cert(certs, key)
+                .map_err(|e| Error::InvalidArgument(format!("client TLS cert: {e}")))?
+        }
+        (None, None) => builder.with_no_client_auth(),
+        _ => {
+            return Err(Error::InvalidArgument(
+                "tls_cert and tls_key must both be set or both unset".into(),
+            ));
+        }
     };
 
     let connector = TlsConnector::from(Arc::new(rustls_config));
@@ -105,6 +119,41 @@ async fn connect_tls(addr: &str, config: &ClientConfig) -> Result<ClientConn> {
         .await
         .map_err(|e| Error::Io(io::Error::new(io::ErrorKind::Other, e)))?;
     Ok(ClientConn::Tls(Box::new(tls)))
+}
+
+#[cfg(feature = "tls")]
+fn load_client_certs(
+    path: &std::path::Path,
+) -> Result<Vec<rustls::pki_types::CertificateDer<'static>>> {
+    use std::fs::File;
+    use std::io::BufReader;
+    let file = File::open(path).map_err(|e| {
+        Error::InvalidArgument(format!("open tls_cert {}: {e}", path.display()))
+    })?;
+    let mut reader = BufReader::new(file);
+    let certs = rustls_pemfile::certs(&mut reader)
+        .collect::<std::result::Result<Vec<_>, _>>()
+        .map_err(|e| Error::InvalidArgument(format!("parse tls_cert PEM: {e}")))?;
+    if certs.is_empty() {
+        return Err(Error::InvalidArgument(format!(
+            "no certificates in {}",
+            path.display()
+        )));
+    }
+    Ok(certs)
+}
+
+#[cfg(feature = "tls")]
+fn load_client_key(path: &std::path::Path) -> Result<rustls::pki_types::PrivateKeyDer<'static>> {
+    use std::fs::File;
+    use std::io::BufReader;
+    let file = File::open(path).map_err(|e| {
+        Error::InvalidArgument(format!("open tls_key {}: {e}", path.display()))
+    })?;
+    let mut reader = BufReader::new(file);
+    rustls_pemfile::private_key(&mut reader)
+        .map_err(|e| Error::InvalidArgument(format!("parse tls_key PEM: {e}")))?
+        .ok_or_else(|| Error::InvalidArgument(format!("no private key in {}", path.display())))
 }
 
 #[cfg(feature = "tls")]

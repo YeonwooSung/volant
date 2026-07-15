@@ -77,6 +77,16 @@ struct Args {
     /// peer verification is enabled.
     #[arg(long)]
     tls_ca: Option<PathBuf>,
+
+    /// PEM CA that must sign client certificates (Phase 19 mTLS). When set,
+    /// clients must present a cert; verified CN authenticates the connection.
+    #[arg(long)]
+    tls_client_ca: Option<PathBuf>,
+
+    /// Optional comma-separated client cert CN allowlist (Phase 19).
+    /// Empty / omitted = any client cert signed by `--tls-client-ca`.
+    #[arg(long)]
+    tls_client_allow: Option<String>,
 }
 
 fn main() -> Result<()> {
@@ -122,19 +132,39 @@ async fn async_main(args: Args) -> Result<()> {
         if args.tls_cert.is_some()
             || args.tls_key.is_some()
             || args.tls_ca.is_some()
+            || args.tls_client_ca.is_some()
+            || args.tls_client_allow.is_some()
             || args.no_tls_inter_broker
         {
             bail!(
-                "--tls-cert/--tls-key/--tls-ca/--no-tls-inter-broker require building with \
-                 `--features tls` (default build is plaintext-only for broad platform support)"
+                "--tls-cert/--tls-key/--tls-ca/--tls-client-ca/--tls-client-allow/\
+                 --no-tls-inter-broker require building with `--features tls` \
+                 (default build is plaintext-only for broad platform support)"
             );
         }
     }
 
     #[cfg(feature = "tls")]
-    let tls_acceptor = match (&args.tls_cert, &args.tls_key) {
-        (Some(cert), Some(key)) => Some(tls::build_acceptor(cert, key)?),
-        (None, None) => None,
+    let tls_setup = match (&args.tls_cert, &args.tls_key) {
+        (Some(cert), Some(key)) => {
+            let allowlist = args.tls_client_allow.as_ref().map(|s| {
+                s.split(',')
+                    .map(|p| p.trim().to_owned())
+                    .filter(|p| !p.is_empty())
+                    .collect::<std::collections::HashSet<_>>()
+            });
+            Some(tls::TlsSetup {
+                acceptor: tls::build_acceptor(cert, key, args.tls_client_ca.as_deref())?,
+                mtls: args.tls_client_ca.is_some(),
+                allowlist,
+            })
+        }
+        (None, None) => {
+            if args.tls_client_ca.is_some() || args.tls_client_allow.is_some() {
+                bail!("--tls-client-ca/--tls-client-allow require --tls-cert and --tls-key");
+            }
+            None
+        }
         _ => bail!("both --tls-cert and --tls-key are required for TLS"),
     };
 
@@ -180,7 +210,8 @@ async fn async_main(args: Args) -> Result<()> {
     // Inter-broker TLS: on when server TLS is active unless opted out.
     #[cfg(feature = "tls")]
     {
-        let server_tls = tls_acceptor.is_some();
+        let server_tls = tls_setup.is_some();
+        let mtls = args.tls_client_ca.is_some();
         if server_tls && !args.no_tls_inter_broker {
             if !args.tls_peer_insecure && args.tls_ca.is_none() {
                 info!(
@@ -188,16 +219,29 @@ async fn async_main(args: Args) -> Result<()> {
                      using webpki roots only"
                 );
             }
+            // Phase 19: when mTLS is on, peers must present a client cert — use
+            // the server identity cert (must be signed by --tls-client-ca in lab).
+            let (client_cert, client_key) = if mtls {
+                (args.tls_cert.clone(), args.tls_key.clone())
+            } else {
+                (None, None)
+            };
             broker.set_inter_broker_tls(Some(volant_broker::InterBrokerTls {
                 insecure: args.tls_peer_insecure,
                 ca_path: args.tls_ca.clone(),
+                client_cert,
+                client_key,
             }));
             info!(
                 peer_insecure = args.tls_peer_insecure,
+                mtls,
                 "inter-broker TLS enabled"
             );
         } else if server_tls && args.no_tls_inter_broker {
             info!("inter-broker TLS disabled (--no-tls-inter-broker); peers use plaintext");
+        }
+        if mtls {
+            info!("mTLS client certificate auth enabled (--tls-client-ca)");
         }
     }
 
@@ -208,6 +252,8 @@ async fn async_main(args: Args) -> Result<()> {
             &args.no_tls_inter_broker,
             &args.tls_peer_insecure,
             &args.tls_ca,
+            &args.tls_client_ca,
+            &args.tls_client_allow,
         );
     }
 
@@ -247,8 +293,8 @@ async fn async_main(args: Args) -> Result<()> {
     );
 
     #[cfg(feature = "tls")]
-    if let Some(acceptor) = tls_acceptor {
-        return tls::run_tls_server(addr, broker, acceptor).await;
+    if let Some(setup) = tls_setup {
+        return tls::run_tls_server(addr, broker, setup).await;
     }
 
     run_server(addr, broker).await.map_err(Into::into)
@@ -257,6 +303,7 @@ async fn async_main(args: Args) -> Result<()> {
 /// Optional TLS accept path (feature `tls`).
 #[cfg(feature = "tls")]
 mod tls {
+    use std::collections::HashSet;
     use std::fs::File;
     use std::io::BufReader;
     use std::net::SocketAddr;
@@ -265,6 +312,8 @@ mod tls {
 
     use anyhow::{bail, Context, Result};
     use rustls::pki_types::{CertificateDer, PrivateKeyDer};
+    use rustls::server::WebPkiClientVerifier;
+    use rustls::RootCertStore;
     use tokio::net::TcpListener;
     use tokio_rustls::TlsAcceptor;
     use tracing::{debug, error, info};
@@ -272,13 +321,45 @@ mod tls {
     use volant_core::Error;
     use volant_protocol::{Frame, Response};
 
-    pub fn build_acceptor(cert_path: &Path, key_path: &Path) -> Result<TlsAcceptor> {
+    /// TLS listener configuration (Phase 7/19).
+    pub struct TlsSetup {
+        pub acceptor: TlsAcceptor,
+        /// True when `--tls-client-ca` was set (mTLS required).
+        pub mtls: bool,
+        /// Optional CN allowlist; `None` or empty = allow any verified client.
+        pub allowlist: Option<HashSet<String>>,
+    }
+
+    pub fn build_acceptor(
+        cert_path: &Path,
+        key_path: &Path,
+        client_ca: Option<&Path>,
+    ) -> Result<TlsAcceptor> {
+        let _ = rustls::crypto::ring::default_provider().install_default();
         let certs = load_certs(cert_path)?;
         let key = load_key(key_path)?;
-        let config = rustls::ServerConfig::builder()
-            .with_no_client_auth()
-            .with_single_cert(certs, key)
-            .context("build rustls ServerConfig")?;
+
+        let config = if let Some(ca_path) = client_ca {
+            let mut roots = RootCertStore::empty();
+            let ca_certs = load_certs(ca_path)?;
+            for c in ca_certs {
+                roots
+                    .add(c)
+                    .map_err(|e| anyhow::anyhow!("add client CA cert: {e}"))?;
+            }
+            let verifier = WebPkiClientVerifier::builder(Arc::new(roots))
+                .build()
+                .context("build client cert verifier")?;
+            rustls::ServerConfig::builder()
+                .with_client_cert_verifier(verifier)
+                .with_single_cert(certs, key)
+                .context("build rustls ServerConfig (mTLS)")?
+        } else {
+            rustls::ServerConfig::builder()
+                .with_no_client_auth()
+                .with_single_cert(certs, key)
+                .context("build rustls ServerConfig")?
+        };
         Ok(TlsAcceptor::from(Arc::new(config)))
     }
 
@@ -305,31 +386,54 @@ mod tls {
         Ok(key)
     }
 
+    /// Extract principal from a client leaf certificate (CN, else first DNS SAN).
+    pub fn principal_from_cert(der: &[u8]) -> Option<String> {
+        use x509_parser::prelude::*;
+        let (_, cert) = X509Certificate::from_der(der).ok()?;
+        if let Ok(cn) = cert.subject().iter_common_name().next()?.as_str() {
+            if !cn.is_empty() {
+                return Some(cn.to_owned());
+            }
+        }
+        // Fallback: first DNS SAN.
+        if let Ok(Some(sans)) = cert.subject_alternative_name() {
+            for name in &sans.value.general_names {
+                if let GeneralName::DNSName(dns) = name {
+                    if !dns.is_empty() {
+                        return Some((*dns).to_owned());
+                    }
+                }
+            }
+        }
+        None
+    }
+
     /// TLS-only listen when certs are provided (no dual plain/TLS).
     pub async fn run_tls_server(
         addr: SocketAddr,
         broker: Arc<Broker>,
-        acceptor: TlsAcceptor,
+        setup: TlsSetup,
     ) -> Result<()> {
         let listener = TcpListener::bind(addr).await?;
         let local = listener.local_addr()?;
         broker.set_advertised(local.ip().to_string(), local.port());
-        info!(%local, "volant broker listening (TLS)");
+        info!(%local, mtls = setup.mtls, "volant broker listening (TLS)");
         start_background_tasks(Arc::clone(&broker));
 
-        // Reuse framed dispatch by accepting TLS streams and handling via a
-        // thin adapter that mirrors plaintext handle_connection logic.
+        let setup = Arc::new(setup);
         loop {
             match listener.accept().await {
                 Ok((stream, peer)) => {
                     broker.metrics().record_connection();
                     debug!(%peer, "accepted TLS connection");
                     let b = Arc::clone(&broker);
-                    let acc = acceptor.clone();
+                    let setup = Arc::clone(&setup);
                     tokio::spawn(async move {
-                        match acc.accept(stream).await {
+                        match setup.acceptor.accept(stream).await {
                             Ok(tls_stream) => {
-                                if let Err(e) = handle_tls_connection(tls_stream, b).await {
+                                if let Err(e) =
+                                    handle_tls_connection(tls_stream, b, &setup).await
+                                {
                                     debug!(%peer, error = %e, "TLS connection closed");
                                 }
                             }
@@ -347,13 +451,11 @@ mod tls {
         }
     }
 
-    async fn handle_tls_connection<S>(
-        mut stream: S,
+    async fn handle_tls_connection(
+        mut stream: tokio_rustls::server::TlsStream<tokio::net::TcpStream>,
         broker: Arc<Broker>,
-    ) -> volant_core::Result<()>
-    where
-        S: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin,
-    {
+        setup: &TlsSetup,
+    ) -> volant_core::Result<()> {
         use bytes::BytesMut;
         use tokio::io::{AsyncReadExt, AsyncWriteExt};
         use tracing::info_span;
@@ -361,9 +463,42 @@ mod tls {
         use volant_protocol::codec::{decode_frame, encode_frame};
         use volant_protocol::pack_response;
 
+        // Phase 19: map verified client cert → principal / auth.
+        let mut principal: Option<String> = None;
+        let mut mtls_authenticated = false;
+        if setup.mtls {
+            let peer_certs = {
+                let (_, conn) = stream.get_ref();
+                conn.peer_certificates()
+                    .map(|c| c.to_vec())
+                    .unwrap_or_default()
+            };
+            if let Some(leaf) = peer_certs.first() {
+                principal = principal_from_cert(leaf.as_ref());
+                let allowed = match (&setup.allowlist, &principal) {
+                    (None, _) => true,
+                    (Some(list), _) if list.is_empty() => true,
+                    (Some(list), Some(cn)) => list.contains(cn),
+                    (Some(_), None) => false,
+                };
+                mtls_authenticated = allowed && principal.is_some();
+                debug!(
+                    principal = ?principal,
+                    mtls_authenticated,
+                    "mTLS client identity"
+                );
+            }
+        }
+
         let mut buf = BytesMut::with_capacity(8 * 1024);
-        let auth_required = broker.auth_token().is_some();
-        let mut authenticated = !auth_required;
+        let token_required = broker.auth_token().is_some();
+        // Authenticated if mTLS identity ok, or if neither token nor mTLS auth is required.
+        let auth_required = token_required || setup.mtls;
+        let mut authenticated = if setup.mtls {
+            mtls_authenticated
+        } else {
+            !token_required
+        };
 
         loop {
             loop {
@@ -371,9 +506,21 @@ mod tls {
                     Some(frame) => {
                         let corr = frame.header.correlation_id;
                         let opcode = frame.header.opcode;
-                        let span = info_span!("rpc", opcode, correlation_id = corr, authenticated);
+                        let span = info_span!(
+                            "rpc",
+                            opcode,
+                            correlation_id = corr,
+                            authenticated,
+                            principal = principal.as_deref().unwrap_or("")
+                        );
                         let response = async {
-                            dispatch_tls(&broker, frame, &mut authenticated, auth_required).await
+                            dispatch_tls(
+                                &broker,
+                                frame,
+                                &mut authenticated,
+                                auth_required,
+                            )
+                            .await
                         }
                         .instrument(span)
                         .await;
@@ -391,18 +538,6 @@ mod tls {
             }
         }
     }
-
-    // Minimal TLS-path dispatch mirroring net.rs auth gate. Full produce/fetch
-    // handling is shared via a private approach: for Phase 7 we accept that TLS
-    // path re-implements the gate and forwards to broker methods through the
-    // same request decode + broker API. To avoid large duplication, we call into
-    // plaintext-equivalent logic by decoding and matching Auth only here, then
-    // using a shared internal path.
-    //
-    // Practical Phase 7: TLS connections use the same Auth rules; other opcodes
-    // go through a compact re-export. For maintainability we invoke the broker
-    // produce/fetch via cloning net behaviour — keep Auth + Metadata + Produce +
-    // Fetch + rest by packing through volant_broker's public Broker methods.
 
     async fn dispatch_tls(
         broker: &Broker,
@@ -451,21 +586,61 @@ mod tls {
                 .record_error(ErrorCode::AuthenticationRequired as u16);
             return Response::Error {
                 code: ErrorCode::AuthenticationRequired as u16,
-                message: "authentication required; send Auth first".into(),
+                message: "authentication required; send Auth first or present mTLS client cert"
+                    .into(),
             };
         }
 
-        // Delegate full request handling by briefly bridging through a one-shot
-        // internal TCP is not available. Instead re-use produce/fetch via Broker
-        // public API for the common path; remaining opcodes return Unsupported
-        // if we cannot share net.rs dispatch privately.
-        //
-        // To keep TLS fully functional, we spawn a localhost plaintext is too
-        // heavy. Prefer extracting dispatch — for Phase 7, call the same match
-        // tree by making handle_request pub(crate). See net.rs.
-
-        // Call into shared dispatch helper exposed for TLS.
         volant_broker::net::dispatch_request(broker, req).await
+    }
+
+    #[cfg(test)]
+    mod tests {
+        use super::*;
+
+        #[test]
+        fn principal_from_openssl_self_signed() {
+            // Generate a throwaway cert with openssl if available.
+            let dir = std::env::temp_dir().join(format!(
+                "volant-mtls-unit-{}-{}",
+                std::process::id(),
+                std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .unwrap()
+                    .as_nanos()
+            ));
+            let _ = std::fs::create_dir_all(&dir);
+            let key = dir.join("t.key");
+            let crt = dir.join("t.crt");
+            let status = std::process::Command::new("openssl")
+                .args([
+                    "req",
+                    "-x509",
+                    "-newkey",
+                    "rsa:2048",
+                    "-nodes",
+                    "-keyout",
+                ])
+                .arg(&key)
+                .arg("-out")
+                .arg(&crt)
+                .args(["-days", "1", "-subj", "/CN=alice-mtls"])
+                .status();
+            let Ok(status) = status else {
+                eprintln!("openssl not available; skip principal parse test");
+                let _ = std::fs::remove_dir_all(&dir);
+                return;
+            };
+            if !status.success() {
+                eprintln!("openssl failed; skip");
+                let _ = std::fs::remove_dir_all(&dir);
+                return;
+            }
+            let certs = load_certs(&crt).expect("load cert");
+            let p = principal_from_cert(certs[0].as_ref());
+            assert_eq!(p.as_deref(), Some("alice-mtls"));
+            let _ = std::fs::remove_dir_all(&dir);
+        }
     }
 }
 

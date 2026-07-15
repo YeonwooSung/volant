@@ -268,6 +268,43 @@ let results = tp.commit().await?; // or tp.abort().await?
 Produces inside a txn are **buffered off-log** until commit (abort leaves no
 records). Broker crash aborts open txns. Not Kafka control-marker EOS.
 
+## mTLS identity (Phase 19)
+
+Build with TLS and require client certificates signed by a CA:
+
+```bash
+cargo run -p volant-server --features tls -- \
+  --listen 0.0.0.0:9092 \
+  --tls-cert server.crt --tls-key server.key \
+  --tls-client-ca client-ca.crt \
+  --tls-client-allow alice,bob   # optional CN allowlist
+```
+
+- Verified client cert **CN** (else first DNS SAN) becomes the connection principal
+  and authenticates the connection (no shared Auth token required).
+- Empty / omitted `--tls-client-allow` accepts any client cert signed by the CA.
+- Auth opcode / shared token still work when configured (either path may authenticate).
+- Inter-broker TLS automatically presents the server cert as the client identity
+  when mTLS is on — sign server certs with the same client CA in lab clusters
+  (or use a dual-purpose CA).
+
+Rust client:
+
+```rust
+let client = Client::connect(ClientConfig {
+    brokers: vec!["127.0.0.1:9092".into()],
+    tls: true,
+    tls_ca: Some("ca.crt".into()),
+    tls_cert: Some("client.crt".into()),
+    tls_key: Some("client.key".into()),
+    ..ClientConfig::default()
+})
+.await?;
+```
+
+Principal is logged for ops correlation; it is **not** yet enforced on per-topic
+ACLs. Metrics remain unauthenticated.
+
 ## Log compaction (Phase 16)
 
 ```bash
@@ -286,6 +323,6 @@ is only compacted after it rolls.
 
 ## Deferred
 
-Kafka wire shim, multi-language clients, SCRAM, mTLS identity, full chaos-mesh
+Kafka wire shim, multi-language clients, SCRAM / full SASL, full chaos-mesh
 suites, cargo-fuzz corpus CI.
 See [ROADMAP.md](../ROADMAP.md).
