@@ -42,6 +42,10 @@ pub enum ResponseOpcode {
     ListGroups = 37,
     /// Delete offsets result (Phase 12).
     DeleteOffsets = 39,
+    /// Describe configs result (Phase 13).
+    DescribeConfigs = 41,
+    /// Alter configs result (Phase 13).
+    AlterConfigs = 43,
     /// Error response.
     Error = 0xFFFF,
 }
@@ -68,6 +72,8 @@ impl ResponseOpcode {
             35 => Self::DescribeGroup,
             37 => Self::ListGroups,
             39 => Self::DeleteOffsets,
+            41 => Self::DescribeConfigs,
+            43 => Self::AlterConfigs,
             0xFFFF => Self::Error,
             _ => return None,
         })
@@ -465,6 +471,26 @@ pub enum Response {
         /// Number of offset files removed.
         deleted_count: u32,
     },
+    /// Describe topic configs result (Phase 13).
+    DescribeConfigs {
+        /// 0 = ok; 2 = not found.
+        error_code: u16,
+        /// Topic name.
+        topic: String,
+        /// Topic id (`0` if unknown).
+        topic_id: u32,
+        /// Partition count.
+        partition_count: u32,
+        /// Config key/value pairs (empty value = unset).
+        configs: Vec<(String, String)>,
+    },
+    /// Alter topic configs result (Phase 13).
+    AlterConfigs {
+        /// 0 = ok; 2 = not found.
+        error_code: u16,
+        /// Topic name.
+        topic: String,
+    },
     /// Error response.
     Error {
         /// Error code.
@@ -496,6 +522,8 @@ impl Response {
             Self::DescribeGroup { .. } => ResponseOpcode::DescribeGroup as u16,
             Self::ListGroups { .. } => ResponseOpcode::ListGroups as u16,
             Self::DeleteOffsets { .. } => ResponseOpcode::DeleteOffsets as u16,
+            Self::DescribeConfigs { .. } => ResponseOpcode::DescribeConfigs as u16,
+            Self::AlterConfigs { .. } => ResponseOpcode::AlterConfigs as u16,
             Self::Error { .. } => ResponseOpcode::Error as u16,
         }
     }

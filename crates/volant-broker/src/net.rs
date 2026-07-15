@@ -119,7 +119,7 @@ fn broker_metrics_text(broker: &Broker) -> String {
     )
 }
 
-/// Start group expiry, cluster heartbeat, and follower replication tasks.
+/// Start group expiry, retention, cluster heartbeat, and follower replication tasks.
 pub fn start_background_tasks(broker: Arc<Broker>) {
     // Periodic session expiry for consumer groups.
     {
@@ -130,6 +130,20 @@ pub fn start_background_tasks(broker: Arc<Broker>) {
                 interval.tick().await;
                 b.groups()
                     .expire_sessions(|topic| b.partition_count_opt(topic));
+            }
+        });
+    }
+
+    // Periodic retention (Phase 13).
+    {
+        let b = Arc::clone(&broker);
+        tokio::spawn(async move {
+            let mut interval = tokio::time::interval(Duration::from_secs(5));
+            loop {
+                interval.tick().await;
+                if let Err(e) = b.apply_retention_all() {
+                    debug!(error = %e, "apply_retention_all failed");
+                }
             }
         });
     }
@@ -561,7 +575,9 @@ fn record_response_metrics(broker: &Broker, resp: &Response) {
         | Response::InitProducerId { error_code, .. }
         | Response::DescribeGroup { error_code, .. }
         | Response::ListGroups { error_code, .. }
-        | Response::DeleteOffsets { error_code, .. } => {
+        | Response::DeleteOffsets { error_code, .. }
+        | Response::DescribeConfigs { error_code, .. }
+        | Response::AlterConfigs { error_code, .. } => {
             if *error_code != 0 {
                 m.record_error(*error_code);
             }
@@ -576,7 +592,11 @@ async fn handle_request(broker: &Broker, req: Request) -> Result<Response> {
             // Handled in dispatch_with_auth; should not reach here.
             Ok(Response::Auth { error_code: 0 })
         }
-        Request::CreateTopic { name, partitions } => {
+        Request::CreateTopic {
+            name,
+            partitions,
+            configs,
+        } => {
             if broker.cluster_config().is_some() && !broker.is_controller() {
                 return Ok(Response::Error {
                     code: ErrorCode::NotController as u16,
@@ -587,7 +607,7 @@ async fn handle_request(broker: &Broker, req: Request) -> Result<Response> {
                 });
             }
             let topic = TopicName::new(name.clone());
-            match broker.create_topic(topic, partitions) {
+            match broker.create_topic_with_configs(topic, partitions, &configs) {
                 Ok(id) => Ok(Response::CreateTopic {
                     topic_id: id.0,
                     name,
@@ -1061,6 +1081,34 @@ async fn handle_request(broker: &Broker, req: Request) -> Result<Response> {
                 deleted_count,
             })
         }
+        Request::DescribeConfigs { topic } => match broker.describe_configs(&topic) {
+            Ok((topic_id, partition_count, cfg)) => Ok(Response::DescribeConfigs {
+                error_code: 0,
+                topic,
+                topic_id,
+                partition_count,
+                configs: cfg.to_entries(),
+            }),
+            Err(Error::NotFound(_)) => Ok(Response::DescribeConfigs {
+                error_code: ErrorCode::NotFound as u16,
+                topic,
+                topic_id: 0,
+                partition_count: 0,
+                configs: vec![],
+            }),
+            Err(e) => Err(e),
+        },
+        Request::AlterConfigs { topic, configs } => match broker.alter_configs(&topic, &configs) {
+            Ok(_) => Ok(Response::AlterConfigs {
+                error_code: 0,
+                topic,
+            }),
+            Err(Error::NotFound(_)) => Ok(Response::AlterConfigs {
+                error_code: ErrorCode::NotFound as u16,
+                topic,
+            }),
+            Err(e) => Err(e),
+        },
     }
 }
 

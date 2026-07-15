@@ -438,6 +438,25 @@ Binding: **[docs/PHASE12_SPEC.md](./docs/PHASE12_SPEC.md)**.
 
 ---
 
+### Phase 13 — Topic configs & retention ops ✅
+
+**Goal:** Per-topic retention/segment settings with durable store, protocol, CLI, and background apply.
+
+Binding: **[docs/PHASE13_SPEC.md](./docs/PHASE13_SPEC.md)**.
+
+- [x] Config keys: `retention.ms`, `retention.bytes`, `segment.bytes`
+- [x] Durable store `{data_dir}/__topic_configs/`
+- [x] CreateTopic config trailer; `DescribeConfigs` (40/41); `AlterConfigs` (42/43)
+- [x] Client + CLI (`topic create` flags, `topic describe`, `topic config get|set`)
+- [x] Background retention task (5s)
+- [x] Integration tests (`phase13_topic_configs`)
+
+**Honest limitations:** single-node still does not auto-reload topic partitions on restart (configs durable); no compact cleanup policy.
+
+**Still deferred:** Kafka shim, multi-lang clients, SCRAM, mTLS, cooperative rebalance, transactions.
+
+---
+
 ## Performance targets (aspirational)
 
 | Metric | Single node target | Notes |

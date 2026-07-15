@@ -337,6 +337,34 @@ impl PartitionLog {
         Ok(self.log_start_offset())
     }
 
+    /// Current storage config (segment size, retention, etc.).
+    pub fn config(&self) -> &StorageConfig {
+        &self.config
+    }
+
+    /// Update retention policy fields (Phase 13). Does not run retention immediately.
+    pub fn set_retention(&mut self, retention_ms: Option<u64>, retention_bytes: Option<u64>) {
+        self.config.retention_ms = retention_ms;
+        self.config.retention_bytes = retention_bytes;
+    }
+
+    /// Update target segment roll size (Phase 13). `0` is ignored.
+    pub fn set_segment_size(&mut self, segment_size: u64) {
+        if segment_size > 0 {
+            self.config.segment_size = segment_size;
+        }
+    }
+
+    /// Number of on-disk segments.
+    pub fn segment_count(&self) -> usize {
+        self.segments.len()
+    }
+
+    /// Total size of all segment files in bytes.
+    pub fn total_size(&self) -> u64 {
+        self.segments.iter().map(|s| s.size()).sum()
+    }
+
     /// Apply configured size and/or time retention policies.
     pub fn apply_retention(&mut self) -> Result<()> {
         // Time-based: drop oldest segments whose last timestamp is older than cutoff.

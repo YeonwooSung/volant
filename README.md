@@ -146,6 +146,9 @@ lag metrics + `volant group lag`.
 **Phase 12:** `volant group list` / `delete-offsets`, static membership via
 `group_instance_id`.
 
+**Phase 13:** per-topic configs (`retention.ms` / `retention.bytes` /
+`segment.bytes`), `volant topic describe` / `config`, background retention.
+
 **Still deferred:** Kafka wire shim, multi-language clients, SCRAM, mTLS identity,
 chaos-mesh / cargo-fuzz corpus CI, cooperative rebalance, transactions.
 

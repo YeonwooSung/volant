@@ -30,6 +30,7 @@ use crate::producer_state::{
     StoredProducer,
 };
 use crate::topic::Topic;
+use crate::topic_config::{TopicConfig, TopicConfigStore};
 
 /// Snapshot of cluster metadata for a Metadata response.
 #[derive(Debug, Clone)]
@@ -171,6 +172,8 @@ pub struct Broker {
     producer_state: RwLock<HashMap<u64, ProducerEpochState>>,
     /// Durable producer state store under `data_dir/__producer_state` (Phase 11).
     producer_store: ProducerStateStore,
+    /// Durable per-topic configs under `data_dir/__topic_configs` (Phase 13).
+    topic_configs: TopicConfigStore,
 }
 
 impl Broker {
@@ -181,6 +184,8 @@ impl Broker {
         let producer_store = ProducerStateStore::open(&storage.data_dir)
             .expect("failed to open producer state store");
         let (next_pid, producers) = load_producer_maps(&producer_store);
+        let topic_configs = TopicConfigStore::open(&storage.data_dir)
+            .expect("failed to open topic config store");
         Self {
             storage,
             topics: RwLock::new(HashMap::new()),
@@ -200,6 +205,7 @@ impl Broker {
             next_producer_id: AtomicU64::new(next_pid),
             producer_state: RwLock::new(producers),
             producer_store,
+            topic_configs,
         }
     }
 
@@ -236,6 +242,8 @@ impl Broker {
         let producer_store = ProducerStateStore::open(&storage.data_dir)
             .expect("failed to open producer state store");
         let (next_pid, producers) = load_producer_maps(&producer_store);
+        let topic_configs = TopicConfigStore::open(&storage.data_dir)
+            .expect("failed to open topic config store");
         let broker = Self {
             storage,
             topics: RwLock::new(HashMap::new()),
@@ -255,6 +263,7 @@ impl Broker {
             next_producer_id: AtomicU64::new(next_pid),
             producer_state: RwLock::new(producers),
             producer_store,
+            topic_configs,
         };
         // Open local partitions from persisted assignment.
         broker.apply_local_assignment()?;
@@ -546,12 +555,23 @@ impl Broker {
     ///
     /// In multi-node mode only the controller may create topics.
     pub fn create_topic(&self, name: impl Into<TopicName>, partitions: u32) -> Result<TopicId> {
+        self.create_topic_with_configs(name, partitions, &[])
+    }
+
+    /// Create a topic with optional config key/value pairs (Phase 13).
+    pub fn create_topic_with_configs(
+        &self,
+        name: impl Into<TopicName>,
+        partitions: u32,
+        config_entries: &[(String, String)],
+    ) -> Result<TopicId> {
         let name = name.into();
         if partitions == 0 {
             return Err(Error::InvalidArgument(
                 "topic must have at least one partition".into(),
             ));
         }
+        let topic_cfg = TopicConfig::from_entries(config_entries)?;
 
         if let Some(cluster) = &self.cluster {
             if !cluster.membership.read().is_controller() {
@@ -560,7 +580,7 @@ impl Broker {
                     cluster.membership.read().controller_id()
                 )));
             }
-            return self.create_topic_cluster(name, partitions);
+            return self.create_topic_cluster(name, partitions, &topic_cfg);
         }
 
         // Single-node path.
@@ -572,15 +592,27 @@ impl Broker {
             )));
         }
         let id = TopicId(self.next_topic_id.fetch_add(1, Ordering::SeqCst));
-        let topic = Topic::create(id, name.clone(), partitions, &self.storage)?;
+        let topic = Topic::create_with_config(
+            id,
+            name.clone(),
+            partitions,
+            &self.storage,
+            &topic_cfg,
+        )?;
         topics.insert(name.clone(), topic);
         self.rr_counters
             .write()
-            .insert(name, AtomicU64::new(0));
+            .insert(name.clone(), AtomicU64::new(0));
+        self.topic_configs.save(name.as_str(), &topic_cfg)?;
         Ok(id)
     }
 
-    fn create_topic_cluster(&self, name: TopicName, partitions: u32) -> Result<TopicId> {
+    fn create_topic_cluster(
+        &self,
+        name: TopicName,
+        partitions: u32,
+        topic_cfg: &TopicConfig,
+    ) -> Result<TopicId> {
         let cluster = self.cluster.as_ref().expect("cluster");
         {
             let topics = self.topics.read();
@@ -646,12 +678,14 @@ impl Broker {
                 &self.storage,
                 self.node_id,
                 Some(&replica_sets),
+                topic_cfg,
             )?;
             topics.insert(name.clone(), topic);
         }
         self.rr_counters
             .write()
-            .insert(name, AtomicU64::new(0));
+            .insert(name.clone(), AtomicU64::new(0));
+        self.topic_configs.save(name.as_str(), topic_cfg)?;
         Ok(id)
     }
 
@@ -677,6 +711,71 @@ impl Broker {
                     dir.display()
                 ))
             })?;
+        }
+        let _ = self.topic_configs.delete(name.as_str());
+        Ok(())
+    }
+
+    /// Describe topic configs (Phase 13).
+    pub fn describe_configs(
+        &self,
+        topic: &str,
+    ) -> Result<(u32, u32, TopicConfig)> {
+        let name = TopicName::new(topic);
+        let (topic_id, partition_count) = {
+            if let Some(cluster) = &self.cluster {
+                let asg = cluster.assignment.read();
+                if let Some(t) = asg.topics.get(topic) {
+                    (t.topic_id, t.partitions.len() as u32)
+                } else {
+                    return Err(Error::NotFound(format!("topic {topic}")));
+                }
+            } else {
+                let topics = self.topics.read();
+                let t = topics
+                    .get(&name)
+                    .ok_or_else(|| Error::NotFound(format!("topic {topic}")))?;
+                (t.id.0, t.partitions.len() as u32)
+            }
+        };
+        let cfg = self.topic_configs.load(topic)?;
+        Ok((topic_id, partition_count, cfg))
+    }
+
+    /// Alter topic configs and apply to live partitions (Phase 13).
+    pub fn alter_configs(
+        &self,
+        topic: &str,
+        entries: &[(String, String)],
+    ) -> Result<TopicConfig> {
+        let name = TopicName::new(topic);
+        // Ensure topic exists.
+        {
+            if let Some(cluster) = &self.cluster {
+                if !cluster.assignment.read().topics.contains_key(topic) {
+                    return Err(Error::NotFound(format!("topic {topic}")));
+                }
+            } else if !self.topics.read().contains_key(&name) {
+                return Err(Error::NotFound(format!("topic {topic}")));
+            }
+        }
+        let mut cfg = self.topic_configs.load(topic)?;
+        cfg.apply_entries(entries)?;
+        self.topic_configs.save(topic, &cfg)?;
+        {
+            let mut topics = self.topics.write();
+            if let Some(t) = topics.get_mut(&name) {
+                t.apply_topic_config(&cfg);
+            }
+        }
+        Ok(cfg)
+    }
+
+    /// Run retention on all local partition logs (Phase 13 background task).
+    pub fn apply_retention_all(&self) -> Result<()> {
+        let mut topics = self.topics.write();
+        for t in topics.values_mut() {
+            t.apply_retention_all()?;
         }
         Ok(())
     }
@@ -1353,6 +1452,10 @@ impl Broker {
                     pa.isr.clone(),
                     pa.leader_epoch,
                 )?;
+            }
+            // Overlay durable topic config onto local partition logs.
+            if let Ok(cfg) = self.topic_configs.load(name) {
+                topic.apply_topic_config(&cfg);
             }
             self.rr_counters
                 .write()

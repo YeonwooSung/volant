@@ -42,6 +42,10 @@ pub enum RequestOpcode {
     ListGroups = 36,
     /// Delete committed consumer offsets (Phase 12).
     DeleteOffsets = 38,
+    /// Describe topic configs (Phase 13).
+    DescribeConfigs = 40,
+    /// Alter topic configs (Phase 13).
+    AlterConfigs = 42,
 }
 
 impl RequestOpcode {
@@ -66,6 +70,8 @@ impl RequestOpcode {
             34 => Self::DescribeGroup,
             36 => Self::ListGroups,
             38 => Self::DeleteOffsets,
+            40 => Self::DescribeConfigs,
+            42 => Self::AlterConfigs,
             _ => return None,
         })
     }
@@ -147,6 +153,9 @@ pub enum Request {
         name: String,
         /// Partition count.
         partitions: u32,
+        /// Optional configs (Phase 13); empty = broker defaults.
+        /// Keys: `retention.ms`, `retention.bytes`, `segment.bytes`.
+        configs: Vec<(String, String)>,
     },
     /// Cluster / topic metadata.
     Metadata {
@@ -253,6 +262,18 @@ pub enum Request {
         /// Partitions to clear; empty = all offsets for the group.
         entries: Vec<OffsetEntry>,
     },
+    /// Describe topic configuration (Phase 13).
+    DescribeConfigs {
+        /// Topic name.
+        topic: String,
+    },
+    /// Alter topic configuration (Phase 13).
+    AlterConfigs {
+        /// Topic name.
+        topic: String,
+        /// Config entries; empty value clears that key.
+        configs: Vec<(String, String)>,
+    },
 }
 
 impl Request {
@@ -277,6 +298,8 @@ impl Request {
             Self::DescribeGroup { .. } => RequestOpcode::DescribeGroup as u16,
             Self::ListGroups => RequestOpcode::ListGroups as u16,
             Self::DeleteOffsets { .. } => RequestOpcode::DeleteOffsets as u16,
+            Self::DescribeConfigs { .. } => RequestOpcode::DescribeConfigs as u16,
+            Self::AlterConfigs { .. } => RequestOpcode::AlterConfigs as u16,
         }
     }
 }

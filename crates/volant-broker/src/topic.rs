@@ -6,6 +6,7 @@ use volant_core::{PartitionId, TopicId, TopicName};
 use volant_storage::{PartitionLog, StorageConfig};
 
 use crate::partition::Partition;
+use crate::topic_config::TopicConfig;
 
 /// In-memory topic metadata and live partitions.
 #[derive(Debug)]
@@ -26,7 +27,18 @@ impl Topic {
         num_partitions: u32,
         storage: &StorageConfig,
     ) -> volant_core::Result<Self> {
-        Self::create_with_replicas(id, name, num_partitions, storage, 0, None)
+        Self::create_with_config(id, name, num_partitions, storage, &TopicConfig::default())
+    }
+
+    /// Create a topic applying per-topic config (Phase 13).
+    pub fn create_with_config(
+        id: TopicId,
+        name: TopicName,
+        num_partitions: u32,
+        storage: &StorageConfig,
+        topic_cfg: &TopicConfig,
+    ) -> volant_core::Result<Self> {
+        Self::create_with_replicas(id, name, num_partitions, storage, 0, None, topic_cfg)
     }
 
     /// Create a topic; when `replica_sets` is `Some`, each partition gets that replica list.
@@ -40,6 +52,7 @@ impl Topic {
         storage: &StorageConfig,
         node_id: u32,
         replica_sets: Option<&[Vec<u32>]>,
+        topic_cfg: &TopicConfig,
     ) -> volant_core::Result<Self> {
         let mut partitions = HashMap::new();
         for i in 0..num_partitions {
@@ -60,6 +73,7 @@ impl Topic {
                 .data_dir
                 .join(name.as_str())
                 .join(format!("{i}"));
+            apply_topic_config_to_storage(&mut cfg, topic_cfg);
             let log = PartitionLog::open(cfg)?;
             let leader = replicas.first().copied().unwrap_or(node_id);
             let mut part = Partition::new_single(pid, log, node_id);
@@ -105,6 +119,7 @@ impl Topic {
             .data_dir
             .join(self.name.as_str())
             .join(format!("{}", pid.0));
+        // Topic config applied by caller via storage overrides when needed.
         let log = PartitionLog::open(cfg)?;
         let mut part = Partition::new_single(pid, log, node_id);
         part.leader = leader;
@@ -114,5 +129,39 @@ impl Topic {
         part.committed_hwm = part.leo();
         self.partitions.insert(pid, part);
         Ok(())
+    }
+
+    /// Apply retention/segment settings to all local partitions (Phase 13).
+    pub fn apply_topic_config(&mut self, topic_cfg: &TopicConfig) {
+        for part in self.partitions.values_mut() {
+            part.log
+                .set_retention(topic_cfg.retention_ms, topic_cfg.retention_bytes);
+            if let Some(seg) = topic_cfg.segment_bytes {
+                part.log.set_segment_size(seg);
+            }
+        }
+    }
+
+    /// Run retention on all local partitions.
+    pub fn apply_retention_all(&mut self) -> volant_core::Result<()> {
+        for part in self.partitions.values_mut() {
+            part.log.apply_retention()?;
+        }
+        Ok(())
+    }
+}
+
+/// Overlay topic config onto a storage config used to open a partition log.
+pub fn apply_topic_config_to_storage(cfg: &mut StorageConfig, topic_cfg: &TopicConfig) {
+    if let Some(ms) = topic_cfg.retention_ms {
+        cfg.retention_ms = Some(ms);
+    }
+    if let Some(bytes) = topic_cfg.retention_bytes {
+        cfg.retention_bytes = Some(bytes);
+    }
+    if let Some(seg) = topic_cfg.segment_bytes {
+        if seg > 0 {
+            cfg.segment_size = seg;
+        }
     }
 }

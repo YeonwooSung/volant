@@ -100,6 +100,19 @@ pub struct DeleteOffsetsResult {
     pub deleted_count: u32,
 }
 
+/// Result of DescribeConfigs (Phase 13).
+#[derive(Debug, Clone)]
+pub struct DescribeConfigsResult {
+    /// Topic name.
+    pub topic: String,
+    /// Topic id.
+    pub topic_id: u32,
+    /// Partition count.
+    pub partition_count: u32,
+    /// Config key/value pairs (empty value = unset).
+    pub configs: Vec<(String, String)>,
+}
+
 impl HeartbeatResult {
     /// Whether the client should re-join the group.
     pub fn needs_rebalance(&self) -> bool {
@@ -215,10 +228,21 @@ impl Client {
 
     /// Create a topic; returns assigned topic id.
     pub async fn create_topic(&self, name: &str, partitions: u32) -> Result<TopicId> {
+        self.create_topic_with_configs(name, partitions, vec![]).await
+    }
+
+    /// Create a topic with optional configs (Phase 13).
+    pub async fn create_topic_with_configs(
+        &self,
+        name: &str,
+        partitions: u32,
+        configs: Vec<(String, String)>,
+    ) -> Result<TopicId> {
         let resp = self
             .round_trip(Request::CreateTopic {
                 name: name.to_owned(),
                 partitions,
+                configs,
             })
             .await?;
         match resp {
@@ -233,6 +257,60 @@ impl Client {
             Response::Error { code, message } => Err(error_from_code(code, message)),
             other => Err(Error::Protocol(format!(
                 "unexpected response for create_topic: {other:?}"
+            ))),
+        }
+    }
+
+    /// Describe topic configuration (Phase 13).
+    pub async fn describe_configs(&self, topic: &str) -> Result<DescribeConfigsResult> {
+        let resp = self
+            .round_trip(Request::DescribeConfigs {
+                topic: topic.to_owned(),
+            })
+            .await?;
+        match resp {
+            Response::DescribeConfigs {
+                error_code,
+                topic,
+                topic_id,
+                partition_count,
+                configs,
+            } => {
+                check_ok(error_code, "describe_configs")?;
+                Ok(DescribeConfigsResult {
+                    topic,
+                    topic_id,
+                    partition_count,
+                    configs,
+                })
+            }
+            Response::Error { code, message } => Err(error_from_code(code, message)),
+            other => Err(Error::Protocol(format!(
+                "unexpected response for describe_configs: {other:?}"
+            ))),
+        }
+    }
+
+    /// Alter topic configuration (Phase 13). Empty value clears a key.
+    pub async fn alter_configs(
+        &self,
+        topic: &str,
+        configs: Vec<(String, String)>,
+    ) -> Result<()> {
+        let resp = self
+            .round_trip(Request::AlterConfigs {
+                topic: topic.to_owned(),
+                configs,
+            })
+            .await?;
+        match resp {
+            Response::AlterConfigs { error_code, .. } => {
+                check_ok(error_code, "alter_configs")?;
+                Ok(())
+            }
+            Response::Error { code, message } => Err(error_from_code(code, message)),
+            other => Err(Error::Protocol(format!(
+                "unexpected response for alter_configs: {other:?}"
             ))),
         }
     }

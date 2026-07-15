@@ -164,9 +164,19 @@ pub fn encode_request(req: &Request) -> Result<Bytes> {
             dst.put_u32_le(*max_bytes);
             dst.put_u32_le(*max_wait_ms);
         }
-        Request::CreateTopic { name, partitions } => {
+        Request::CreateTopic {
+            name,
+            partitions,
+            configs,
+        } => {
             put_string(&mut dst, name)?;
             dst.put_u32_le(*partitions);
+            // Phase 13 config trailer (always written by current encoders).
+            dst.put_u32_le(configs.len() as u32);
+            for (k, v) in configs {
+                put_string(&mut dst, k)?;
+                put_string(&mut dst, v)?;
+            }
         }
         Request::Metadata { topics } => {
             dst.put_u32_le(topics.len() as u32);
@@ -280,6 +290,17 @@ pub fn encode_request(req: &Request) -> Result<Bytes> {
                 dst.put_u32_le(e.partition);
             }
         }
+        Request::DescribeConfigs { topic } => {
+            put_string(&mut dst, topic)?;
+        }
+        Request::AlterConfigs { topic, configs } => {
+            put_string(&mut dst, topic)?;
+            dst.put_u32_le(configs.len() as u32);
+            for (k, v) in configs {
+                put_string(&mut dst, k)?;
+                put_string(&mut dst, v)?;
+            }
+        }
     }
     finish_payload(dst)
 }
@@ -355,9 +376,24 @@ pub fn decode_request(opcode: u16, payload: &[u8]) -> Result<Request> {
             if src.remaining() < 4 {
                 return Err(Error::Protocol("truncated create topic partitions".into()));
             }
+            let partitions = src.get_u32_le();
+            // Phase 13 trailer; legacy payloads omit configs.
+            let configs = if src.remaining() >= 4 {
+                let n = src.get_u32_le() as usize;
+                let mut configs = Vec::with_capacity(n);
+                for _ in 0..n {
+                    let k = get_string(&mut src)?;
+                    let v = get_string(&mut src)?;
+                    configs.push((k, v));
+                }
+                configs
+            } else {
+                Vec::new()
+            };
             Ok(Request::CreateTopic {
                 name,
-                partitions: src.get_u32_le(),
+                partitions,
+                configs,
             })
         }
         RequestOpcode::Metadata => {
@@ -527,6 +563,23 @@ pub fn decode_request(opcode: u16, payload: &[u8]) -> Result<Request> {
                 });
             }
             Ok(Request::DeleteOffsets { group_id, entries })
+        }
+        RequestOpcode::DescribeConfigs => Ok(Request::DescribeConfigs {
+            topic: get_string(&mut src)?,
+        }),
+        RequestOpcode::AlterConfigs => {
+            let topic = get_string(&mut src)?;
+            if src.remaining() < 4 {
+                return Err(Error::Protocol("truncated alter configs count".into()));
+            }
+            let n = src.get_u32_le() as usize;
+            let mut configs = Vec::with_capacity(n);
+            for _ in 0..n {
+                let k = get_string(&mut src)?;
+                let v = get_string(&mut src)?;
+                configs.push((k, v));
+            }
+            Ok(Request::AlterConfigs { topic, configs })
         }
     }
 }
@@ -765,6 +818,27 @@ pub fn encode_response(resp: &Response) -> Result<Bytes> {
         } => {
             dst.put_u16_le(*error_code);
             dst.put_u32_le(*deleted_count);
+        }
+        Response::DescribeConfigs {
+            error_code,
+            topic,
+            topic_id,
+            partition_count,
+            configs,
+        } => {
+            dst.put_u16_le(*error_code);
+            put_string(&mut dst, topic)?;
+            dst.put_u32_le(*topic_id);
+            dst.put_u32_le(*partition_count);
+            dst.put_u32_le(configs.len() as u32);
+            for (k, v) in configs {
+                put_string(&mut dst, k)?;
+                put_string(&mut dst, v)?;
+            }
+        }
+        Response::AlterConfigs { error_code, topic } => {
+            dst.put_u16_le(*error_code);
+            put_string(&mut dst, topic)?;
         }
         Response::Error { code, message } => {
             dst.put_u16_le(*code);
@@ -1258,6 +1332,40 @@ pub fn decode_response(opcode: u16, payload: &[u8]) -> Result<Response> {
                 deleted_count: src.get_u32_le(),
             })
         }
+        ResponseOpcode::DescribeConfigs => {
+            if src.remaining() < 2 {
+                return Err(Error::Protocol("truncated describe configs error".into()));
+            }
+            let error_code = src.get_u16_le();
+            let topic = get_string(&mut src)?;
+            if src.remaining() < 4 + 4 + 4 {
+                return Err(Error::Protocol("truncated describe configs header".into()));
+            }
+            let topic_id = src.get_u32_le();
+            let partition_count = src.get_u32_le();
+            let n = src.get_u32_le() as usize;
+            let mut configs = Vec::with_capacity(n);
+            for _ in 0..n {
+                let k = get_string(&mut src)?;
+                let v = get_string(&mut src)?;
+                configs.push((k, v));
+            }
+            Ok(Response::DescribeConfigs {
+                error_code,
+                topic,
+                topic_id,
+                partition_count,
+                configs,
+            })
+        }
+        ResponseOpcode::AlterConfigs => {
+            if src.remaining() < 2 {
+                return Err(Error::Protocol("truncated alter configs error".into()));
+            }
+            let error_code = src.get_u16_le();
+            let topic = get_string(&mut src)?;
+            Ok(Response::AlterConfigs { error_code, topic })
+        }
         ResponseOpcode::Error => {
             if src.remaining() < 2 {
                 return Err(Error::Protocol("truncated error code".into()));
@@ -1416,6 +1524,74 @@ mod tests {
     }
 
     #[test]
+    fn phase13_configs_roundtrip() {
+        let create = Request::CreateTopic {
+            name: "events".into(),
+            partitions: 3,
+            configs: vec![
+                ("retention.ms".into(), "1000".into()),
+                ("segment.bytes".into(), "4096".into()),
+            ],
+        };
+        let b = encode_request(&create).unwrap();
+        assert_eq!(
+            decode_request(RequestOpcode::CreateTopic as u16, &b).unwrap(),
+            create
+        );
+
+        // Legacy CreateTopic without config trailer.
+        let mut legacy = BytesMut::new();
+        put_string(&mut legacy, "t").unwrap();
+        legacy.put_u32_le(2);
+        let decoded =
+            decode_request(RequestOpcode::CreateTopic as u16, &legacy.freeze()).unwrap();
+        match decoded {
+            Request::CreateTopic { configs, .. } => assert!(configs.is_empty()),
+            other => panic!("unexpected {other:?}"),
+        }
+
+        let desc = Request::DescribeConfigs {
+            topic: "events".into(),
+        };
+        let b = encode_request(&desc).unwrap();
+        assert_eq!(
+            decode_request(RequestOpcode::DescribeConfigs as u16, &b).unwrap(),
+            desc
+        );
+        let desc_resp = Response::DescribeConfigs {
+            error_code: 0,
+            topic: "events".into(),
+            topic_id: 1,
+            partition_count: 3,
+            configs: vec![("retention.ms".into(), "1000".into())],
+        };
+        let b = encode_response(&desc_resp).unwrap();
+        assert_eq!(
+            decode_response(ResponseOpcode::DescribeConfigs as u16, &b).unwrap(),
+            desc_resp
+        );
+
+        let alt = Request::AlterConfigs {
+            topic: "events".into(),
+            configs: vec![("retention.bytes".into(), "1024".into())],
+        };
+        let b = encode_request(&alt).unwrap();
+        assert_eq!(
+            decode_request(RequestOpcode::AlterConfigs as u16, &b).unwrap(),
+            alt
+        );
+        let alt_resp = Response::AlterConfigs {
+            error_code: 0,
+            topic: "events".into(),
+        };
+        let b = encode_response(&alt_resp).unwrap();
+        assert_eq!(
+            decode_response(ResponseOpcode::AlterConfigs as u16, &b).unwrap(),
+            alt_resp
+        );
+    }
+
+    #[test]
     fn phase12_list_delete_static_roundtrip() {
         let list_req = Request::ListGroups;
         let b = encode_request(&list_req).unwrap();
@@ -1525,6 +1701,7 @@ mod tests {
         let create = Request::CreateTopic {
             name: "t".into(),
             partitions: 3,
+         configs: vec![],
         };
         let b = encode_request(&create).unwrap();
         assert_eq!(
@@ -1865,10 +2042,12 @@ mod tests {
 
         // Empty / truncated payloads for every known opcode.
         let req_ops: &[u16] = &[
-            1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 20, 22, 24, 30, 32, 34, 36, 38, 99, 0xFFFF,
+            1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 20, 22, 24, 30, 32, 34, 36, 38, 40, 42, 99,
+            0xFFFF,
         ];
         let resp_ops: &[u16] = &[
-            1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 21, 23, 25, 31, 33, 35, 37, 39, 0xFFFF, 42,
+            1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 21, 23, 25, 31, 33, 35, 37, 39, 41, 43, 0xFFFF,
+            42,
         ];
 
         for op in req_ops {

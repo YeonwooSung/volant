@@ -92,6 +92,15 @@ enum TopicCmd {
         /// Partition count.
         #[arg(long, default_value_t = 1)]
         partitions: u32,
+        /// Retention window in milliseconds (Phase 13).
+        #[arg(long)]
+        retention_ms: Option<u64>,
+        /// Retention size limit in bytes (Phase 13).
+        #[arg(long)]
+        retention_bytes: Option<u64>,
+        /// Segment roll size in bytes (Phase 13).
+        #[arg(long)]
+        segment_bytes: Option<u64>,
         /// Broker address.
         #[arg(long, default_value = "127.0.0.1:9092")]
         broker: String,
@@ -100,6 +109,45 @@ enum TopicCmd {
     Delete {
         /// Topic name.
         name: String,
+        /// Broker address.
+        #[arg(long, default_value = "127.0.0.1:9092")]
+        broker: String,
+    },
+    /// Describe a topic (metadata + configs, Phase 13).
+    Describe {
+        /// Topic name.
+        name: String,
+        /// Broker address.
+        #[arg(long, default_value = "127.0.0.1:9092")]
+        broker: String,
+    },
+    /// Topic configuration (Phase 13).
+    Config {
+        #[command(subcommand)]
+        action: TopicConfigCmd,
+    },
+}
+
+#[derive(Debug, Subcommand)]
+enum TopicConfigCmd {
+    /// Show topic configs.
+    Get {
+        /// Topic name.
+        name: String,
+        /// Broker address.
+        #[arg(long, default_value = "127.0.0.1:9092")]
+        broker: String,
+    },
+    /// Set a topic config key. Empty `--value` clears the key.
+    Set {
+        /// Topic name.
+        name: String,
+        /// Config key (`retention.ms`, `retention.bytes`, `segment.bytes`).
+        #[arg(long)]
+        key: String,
+        /// Config value (empty string clears).
+        #[arg(long, default_value = "")]
+        value: String,
         /// Broker address.
         #[arg(long, default_value = "127.0.0.1:9092")]
         broker: String,
@@ -195,9 +243,7 @@ async fn main() -> Result<()> {
     match cli.command {
         Commands::Version => {
             println!("volant {}", env!("CARGO_PKG_VERSION"));
-            println!(
-                "status: Phase 12 — ListGroups, DeleteOffsets, static membership"
-            );
+            println!("status: Phase 13 — topic configs and retention ops");
         }
         Commands::Topic { action } => match action {
             TopicCmd::List { broker } => {
@@ -219,11 +265,24 @@ async fn main() -> Result<()> {
             TopicCmd::Create {
                 name,
                 partitions,
+                retention_ms,
+                retention_bytes,
+                segment_bytes,
                 broker,
             } => {
                 let client = connect(&broker, auth).await?;
+                let mut configs = Vec::new();
+                if let Some(ms) = retention_ms {
+                    configs.push(("retention.ms".into(), ms.to_string()));
+                }
+                if let Some(b) = retention_bytes {
+                    configs.push(("retention.bytes".into(), b.to_string()));
+                }
+                if let Some(s) = segment_bytes {
+                    configs.push(("segment.bytes".into(), s.to_string()));
+                }
                 let id = client
-                    .create_topic(&name, partitions)
+                    .create_topic_with_configs(&name, partitions, configs)
                     .await
                     .with_context(|| format!("create topic '{name}'"))?;
                 println!(
@@ -239,6 +298,51 @@ async fn main() -> Result<()> {
                     .with_context(|| format!("delete topic '{name}'"))?;
                 println!("deleted topic '{name}'");
             }
+            TopicCmd::Describe { name, broker } => {
+                let client = connect(&broker, auth).await?;
+                let desc = client
+                    .describe_configs(&name)
+                    .await
+                    .with_context(|| format!("describe topic '{name}'"))?;
+                println!(
+                    "topic={}\tid={}\tpartitions={}",
+                    desc.topic, desc.topic_id, desc.partition_count
+                );
+                for (k, v) in &desc.configs {
+                    let disp = if v.is_empty() { "(unset)" } else { v.as_str() };
+                    println!("  {k}={disp}");
+                }
+            }
+            TopicCmd::Config { action } => match action {
+                TopicConfigCmd::Get { name, broker } => {
+                    let client = connect(&broker, auth).await?;
+                    let desc = client
+                        .describe_configs(&name)
+                        .await
+                        .with_context(|| format!("config get '{name}'"))?;
+                    for (k, v) in &desc.configs {
+                        let disp = if v.is_empty() { "(unset)" } else { v.as_str() };
+                        println!("{k}={disp}");
+                    }
+                }
+                TopicConfigCmd::Set {
+                    name,
+                    key,
+                    value,
+                    broker,
+                } => {
+                    let client = connect(&broker, auth).await?;
+                    client
+                        .alter_configs(&name, vec![(key.clone(), value.clone())])
+                        .await
+                        .with_context(|| format!("config set '{name}'"))?;
+                    if value.is_empty() {
+                        println!("cleared {key} on topic '{name}'");
+                    } else {
+                        println!("set {key}={value} on topic '{name}'");
+                    }
+                }
+            },
         },
         Commands::Group { action } => match action {
             GroupCmd::FetchOffsets {

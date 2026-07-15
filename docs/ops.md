@@ -187,6 +187,23 @@ Pass a stable `group_instance_id` on join (Rust: `join_group_with_instance` /
 redeploys rejoin the same member without an extra generation bump when still
 in-session.
 
+## Topic configs & retention (Phase 13)
+
+```bash
+volant topic create events --partitions 4 \
+  --retention-ms 86400000 \
+  --retention-bytes 1073741824 \
+  --segment-bytes 268435456
+
+volant topic describe events
+volant topic config get events
+volant topic config set events --key retention.ms --value 3600000
+volant topic config set events --key retention.ms --value ''   # clear
+```
+
+Keys: `retention.ms`, `retention.bytes`, `segment.bytes`. Stored under
+`{data_dir}/__topic_configs/`. Broker applies retention about every 5 seconds.
+
 ## Deferred
 
 Kafka wire shim, multi-language clients, SCRAM, mTLS identity, full chaos-mesh
