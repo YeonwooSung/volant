@@ -83,7 +83,7 @@ pub async fn run_metrics_server(addr: SocketAddr, broker: Arc<Broker>) -> Result
 }
 
 async fn serve_metrics_connection(stream: &mut TcpStream, broker: &Broker) -> Result<()> {
-    let mut buf = [0u8; 1024];
+    let mut buf = [0u8; 4096];
     let n = stream.read(&mut buf).await?;
     if n == 0 {
         return Ok(());
@@ -92,19 +92,83 @@ async fn serve_metrics_connection(stream: &mut TcpStream, broker: &Broker) -> Re
     // Reject non-GET for slightly better hygiene.
     let req = String::from_utf8_lossy(&buf[..n]);
     let first_line = req.lines().next().unwrap_or("");
-    let (status, body): (&str, String) = if first_line.starts_with("GET ") {
-        ("200 OK", broker_metrics_text(broker))
+
+    let response = if !first_line.starts_with("GET ") {
+        http_response(
+            "405 Method Not Allowed",
+            "text/plain; charset=utf-8",
+            "method not allowed\n",
+            &[],
+        )
+    } else if let Some(expected) = broker.metrics_token() {
+        // Phase 21: require Authorization: Bearer|Token <token>.
+        if metrics_token_ok(&req, &expected) {
+            let body = broker_metrics_text(broker);
+            http_response(
+                "200 OK",
+                "text/plain; version=0.0.4; charset=utf-8",
+                &body,
+                &[],
+            )
+        } else {
+            http_response(
+                "401 Unauthorized",
+                "text/plain; charset=utf-8",
+                "unauthorized\n",
+                &[("WWW-Authenticate", "Bearer")],
+            )
+        }
     } else {
-        ("405 Method Not Allowed", "method not allowed\n".into())
+        let body = broker_metrics_text(broker);
+        http_response(
+            "200 OK",
+            "text/plain; version=0.0.4; charset=utf-8",
+            &body,
+            &[],
+        )
     };
 
-    let response = format!(
-        "HTTP/1.1 {status}\r\nContent-Type: text/plain; version=0.0.4; charset=utf-8\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
-        body.len()
-    );
     stream.write_all(response.as_bytes()).await?;
     let _ = stream.shutdown().await;
     Ok(())
+}
+
+fn http_response(status: &str, content_type: &str, body: &str, extra: &[(&str, &str)]) -> String {
+    let mut out = format!(
+        "HTTP/1.1 {status}\r\nContent-Type: {content_type}\r\nContent-Length: {}\r\nConnection: close\r\n",
+        body.len()
+    );
+    for (k, v) in extra {
+        out.push_str(k);
+        out.push_str(": ");
+        out.push_str(v);
+        out.push_str("\r\n");
+    }
+    out.push_str("\r\n");
+    out.push_str(body);
+    out
+}
+
+/// Validate metrics Authorization header against the configured token.
+fn metrics_token_ok(request: &str, expected: &str) -> bool {
+    for line in request.lines() {
+        let line = line.trim();
+        let lower = line.to_ascii_lowercase();
+        if !lower.starts_with("authorization:") {
+            continue;
+        }
+        let value = line.split_once(':').map(|(_, v)| v.trim()).unwrap_or("");
+        let value_lower = value.to_ascii_lowercase();
+        if let Some(rest) = value_lower
+            .strip_prefix("bearer ")
+            .or_else(|| value_lower.strip_prefix("token "))
+        {
+            // Compare using original casing for the token portion.
+            let token = value[value.len() - rest.len()..].trim();
+            return token == expected;
+        }
+    }
+    false
 }
 
 fn broker_metrics_text(broker: &Broker) -> String {
@@ -1464,10 +1528,12 @@ async fn handle_request(broker: &Broker, req: Request) -> Result<Response> {
         }
         Request::CreateAcls { entries } => {
             match wire_to_acl_entries(&entries) {
-                Ok(parsed) => {
-                    broker.acls().create(parsed);
-                    Ok(Response::CreateAcls { error_code: 0 })
-                }
+                Ok(parsed) => match broker.acls().create(parsed) {
+                    Ok(()) => Ok(Response::CreateAcls { error_code: 0 }),
+                    Err(_) => Ok(Response::CreateAcls {
+                        error_code: ErrorCode::Storage as u16,
+                    }),
+                },
                 Err(_) => Ok(Response::CreateAcls {
                     error_code: ErrorCode::InvalidArg as u16,
                 }),
@@ -1475,13 +1541,16 @@ async fn handle_request(broker: &Broker, req: Request) -> Result<Response> {
         }
         Request::DeleteAcls { entries } => {
             match wire_to_acl_entries(&entries) {
-                Ok(parsed) => {
-                    let removed = broker.acls().delete(&parsed) as u32;
-                    Ok(Response::DeleteAcls {
+                Ok(parsed) => match broker.acls().delete(&parsed) {
+                    Ok(removed) => Ok(Response::DeleteAcls {
                         error_code: 0,
-                        removed,
-                    })
-                }
+                        removed: removed as u32,
+                    }),
+                    Err(_) => Ok(Response::DeleteAcls {
+                        error_code: ErrorCode::Storage as u16,
+                        removed: 0,
+                    }),
+                },
                 Err(_msg) => Ok(Response::DeleteAcls {
                     error_code: ErrorCode::InvalidArg as u16,
                     removed: 0,

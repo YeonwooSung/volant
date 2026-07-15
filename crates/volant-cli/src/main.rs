@@ -382,7 +382,7 @@ async fn main() -> Result<()> {
     match cli.command {
         Commands::Version => {
             println!("volant {}", env!("CARGO_PKG_VERSION"));
-            println!("status: Phase 20 — principal ACLs");
+            println!("status: Phase 21 — durable ACLs + metrics auth");
         }
         Commands::Topic { action } => match action {
             TopicCmd::List { broker } => {

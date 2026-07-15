@@ -31,7 +31,8 @@ pub mod topic_catalog;
 pub mod topic_config;
 
 pub use acl::{
-    AclEntry, AclOperation, AclPermission, AclState, ResourceType, CLUSTER_RESOURCE,
+    AclEntry, AclOperation, AclPermission, AclSnapshot, AclState, AclStore, ResourceType,
+    CLUSTER_RESOURCE,
 };
 pub use assignor::{range_assign, range_assign_multi, sticky_assign, sticky_assign_multi};
 pub use broker::{

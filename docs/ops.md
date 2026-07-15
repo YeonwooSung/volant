@@ -354,11 +354,27 @@ volant --auth-token secret acl delete \
 ```
 
 - Matching **Deny** beats **Allow**; no match → deny when enabled.
-- Super-users bypass all checks.
+- Super-users bypass all checks (runtime flag; not stored in the ACL file).
 - Token Auth sets principal to `--auth-principal` (default `token`).
 - mTLS CN is the principal when using Phase 19 client certs.
-- CreateAcls is in-memory (not auto-written back to `--acl-file`).
+- ACLs are durable under `{data_dir}/__acls/acls.json` (Phase 21); CreateAcls /
+  DeleteAcls persist automatically. `--acl-file` imports then saves there.
 - Inter-broker opcodes are not ACL-gated.
+
+## Metrics auth (Phase 21)
+
+```bash
+cargo run -p volant-server -- \
+  --metrics-addr 127.0.0.1:9102 \
+  --metrics-token "$VOLANT_METRICS_TOKEN"
+
+curl -s -H "Authorization: Bearer $VOLANT_METRICS_TOKEN" \
+  http://127.0.0.1:9102/metrics | head
+```
+
+- When `--metrics-token` is unset, `/metrics` stays open (prefer bind localhost).
+- Wrong/missing token → `401` + `WWW-Authenticate: Bearer`.
+- Does not automatically reuse `--auth-token`; set both if they should match.
 
 ## Log compaction (Phase 16)
 

@@ -219,8 +219,10 @@ pub struct Broker {
     topic_configs: TopicConfigStore,
     /// Durable single-node topic catalog under `data_dir/__topics` (Phase 14).
     topic_catalog: TopicCatalogStore,
-    /// Principal ACL authorizer (Phase 20).
+    /// Principal ACL authorizer (Phase 20/21).
     acls: crate::acl::AclState,
+    /// Optional shared token protecting `GET /metrics` (Phase 21).
+    metrics_token: RwLock<Option<String>>,
 }
 
 impl Broker {
@@ -238,6 +240,8 @@ impl Broker {
             .expect("failed to open topic config store");
         let topic_catalog = TopicCatalogStore::open(&storage.data_dir)
             .expect("failed to open topic catalog store");
+        let acls = crate::acl::AclState::open(&storage.data_dir)
+            .expect("failed to open ACL store");
         let broker = Self {
             storage,
             topics: RwLock::new(HashMap::new()),
@@ -261,7 +265,8 @@ impl Broker {
             producer_store,
             topic_configs,
             topic_catalog,
-            acls: crate::acl::AclState::new(),
+            acls,
+            metrics_token: RwLock::new(None),
         };
         broker
             .reload_single_node_topics()
@@ -306,6 +311,8 @@ impl Broker {
             .expect("failed to open topic config store");
         let topic_catalog = TopicCatalogStore::open(&storage.data_dir)
             .expect("failed to open topic catalog store");
+        let acls = crate::acl::AclState::open(&storage.data_dir)
+            .expect("failed to open ACL store");
         let broker = Self {
             storage,
             topics: RwLock::new(HashMap::new()),
@@ -329,7 +336,8 @@ impl Broker {
             producer_store,
             topic_configs,
             topic_catalog,
-            acls: crate::acl::AclState::new(),
+            acls,
+            metrics_token: RwLock::new(None),
         };
         // Open local partitions from persisted assignment.
         broker.apply_local_assignment()?;
@@ -371,6 +379,16 @@ impl Broker {
     /// Principal name applied after successful shared-token Auth.
     pub fn auth_principal_name(&self) -> String {
         self.acls.auth_principal()
+    }
+
+    /// Configure metrics HTTP shared token (Phase 21). `None` = open scrape.
+    pub fn set_metrics_token(&self, token: Option<String>) {
+        *self.metrics_token.write() = token;
+    }
+
+    /// Current metrics token if configured.
+    pub fn metrics_token(&self) -> Option<String> {
+        self.metrics_token.read().clone()
     }
 
     /// Configure inter-broker TLS. `None` keeps inter-broker plaintext.

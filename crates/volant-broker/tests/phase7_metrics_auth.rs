@@ -29,6 +29,8 @@ fn temp_dir(label: &str) -> std::path::PathBuf {
 }
 
 async fn boot(auth: Option<&str>) -> (String, Arc<Broker>, tokio::task::JoinHandle<()>) {
+    // Keep data_dir path owned by the broker for the life of the test; do not
+    // delete it while the server task may still create topics.
     let dir = temp_dir("boot");
     let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
     let addr = listener.local_addr().unwrap();

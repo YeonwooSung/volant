@@ -46,6 +46,11 @@ struct Args {
     #[arg(long)]
     metrics_addr: Option<String>,
 
+    /// Shared token for `GET /metrics` (Phase 21). Prefer env `VOLANT_METRICS_TOKEN`.
+    /// When set, scrapers must send `Authorization: Bearer <token>`.
+    #[arg(long, env = "VOLANT_METRICS_TOKEN")]
+    metrics_token: Option<String>,
+
     /// Log format: `text` (default) or `json`.
     #[arg(long, default_value = "text")]
     log_format: String,
@@ -316,17 +321,28 @@ async fn async_main(args: Args) -> Result<()> {
         broker.set_advertised(host, port);
     }
 
+    if let Some(token) = args.metrics_token.clone() {
+        if token.is_empty() {
+            bail!("--metrics-token / VOLANT_METRICS_TOKEN must not be empty when set");
+        }
+        broker.set_metrics_token(Some(token));
+        info!("metrics endpoint authentication enabled");
+    }
+
     if let Some(metrics_addr) = &args.metrics_addr {
         let maddr: SocketAddr = metrics_addr
             .parse()
             .with_context(|| format!("invalid --metrics-addr: {metrics_addr}"))?;
         let b = Arc::clone(&broker);
+        let metrics_auth = broker.metrics_token().is_some();
         tokio::spawn(async move {
             if let Err(e) = run_metrics_server(maddr, b).await {
                 tracing::error!(error = %e, "metrics server exited");
             }
         });
-        info!(%maddr, "metrics endpoint enabled");
+        info!(%maddr, metrics_auth, "metrics endpoint enabled");
+    } else if args.metrics_token.is_some() {
+        info!("--metrics-token set but --metrics-addr unset; metrics auth unused");
     }
 
     info!(

@@ -115,25 +115,46 @@ async fn acl_allow_produce_and_deny_other_topic() {
         .configure_acls(true, None, vec![], "alice".into())
         .unwrap();
     // Super path: create topic before ACLs bite admin… use super-user for setup.
-    broker.acls().create(vec![
-        entry("alice", ResourceType::Topic, "events", AclOperation::Create, AclPermission::Allow),
-        entry("alice", ResourceType::Topic, "events", AclOperation::Write, AclPermission::Allow),
-        entry("alice", ResourceType::Topic, "events", AclOperation::Read, AclPermission::Allow),
-        entry(
-            "alice",
-            ResourceType::Cluster,
-            "volant",
-            AclOperation::Describe,
-            AclPermission::Allow,
-        ),
-        entry(
-            "alice",
-            ResourceType::Cluster,
-            "volant",
-            AclOperation::Write,
-            AclPermission::Allow,
-        ),
-    ]);
+    broker
+        .acls()
+        .create(vec![
+            entry(
+                "alice",
+                ResourceType::Topic,
+                "events",
+                AclOperation::Create,
+                AclPermission::Allow,
+            ),
+            entry(
+                "alice",
+                ResourceType::Topic,
+                "events",
+                AclOperation::Write,
+                AclPermission::Allow,
+            ),
+            entry(
+                "alice",
+                ResourceType::Topic,
+                "events",
+                AclOperation::Read,
+                AclPermission::Allow,
+            ),
+            entry(
+                "alice",
+                ResourceType::Cluster,
+                "volant",
+                AclOperation::Describe,
+                AclPermission::Allow,
+            ),
+            entry(
+                "alice",
+                ResourceType::Cluster,
+                "volant",
+                AclOperation::Write,
+                AclPermission::Allow,
+            ),
+        ])
+        .unwrap();
 
     let (addr, server) = boot(Arc::clone(&broker)).await;
     let client = Client::connect(ClientConfig {
@@ -172,25 +193,46 @@ async fn acl_deny_overrides_allow_and_super_user() {
     broker
         .configure_acls(true, None, vec!["root".into()], "alice".into())
         .unwrap();
-    broker.acls().create(vec![
-        entry("alice", ResourceType::Topic, "t", AclOperation::Create, AclPermission::Allow),
-        entry("alice", ResourceType::Topic, "t", AclOperation::Create, AclPermission::Deny),
-        entry("alice", ResourceType::Topic, "t", AclOperation::Write, AclPermission::Allow),
-        entry(
-            "root",
-            ResourceType::Topic,
-            "*",
-            AclOperation::All,
-            AclPermission::Allow,
-        ),
-        entry(
-            "root",
-            ResourceType::Cluster,
-            "volant",
-            AclOperation::All,
-            AclPermission::Allow,
-        ),
-    ]);
+    broker
+        .acls()
+        .create(vec![
+            entry(
+                "alice",
+                ResourceType::Topic,
+                "t",
+                AclOperation::Create,
+                AclPermission::Allow,
+            ),
+            entry(
+                "alice",
+                ResourceType::Topic,
+                "t",
+                AclOperation::Create,
+                AclPermission::Deny,
+            ),
+            entry(
+                "alice",
+                ResourceType::Topic,
+                "t",
+                AclOperation::Write,
+                AclPermission::Allow,
+            ),
+            entry(
+                "root",
+                ResourceType::Topic,
+                "*",
+                AclOperation::All,
+                AclPermission::Allow,
+            ),
+            entry(
+                "root",
+                ResourceType::Cluster,
+                "volant",
+                AclOperation::All,
+                AclPermission::Allow,
+            ),
+        ])
+        .unwrap();
 
     let (addr, server) = boot(Arc::clone(&broker)).await;
 

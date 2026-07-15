@@ -348,7 +348,7 @@ Binding: **[docs/PHASE7_SPEC.md](./docs/PHASE7_SPEC.md)**. Ops runbook: **[docs/
 - [ ] SCRAM / full SASL — **deferred** (mTLS identity mapping: **Phase 19**)
 - [ ] Security audit with `cargo fuzz` corpus CI — **deferred** (deterministic chaos tests ship now)
 
-**Honest limitations (Phase 7):** Metrics endpoint has no auth (bind localhost). Inter-broker TLS was deferred to Phase 9 (now available when server TLS is enabled).
+**Honest limitations (Phase 7):** Metrics endpoint auth deferred then closed by **Phase 21** (`--metrics-token`). Inter-broker TLS was deferred to Phase 9 (now available when server TLS is enabled).
 
 ---
 
@@ -562,7 +562,7 @@ Binding: **[docs/PHASE19_SPEC.md](./docs/PHASE19_SPEC.md)**.
 - [x] Inter-broker presents server cert as client identity when mTLS is on
 - [x] Integration tests (`phase19_mtls`) + principal unit test
 
-**Honest limitations:** CN/SAN principal only (no SPIFFE); per-topic ACLs closed by **Phase 20**; metrics still unauthenticated; inter-broker reuses server cert (no separate peer identity file).
+**Honest limitations:** CN/SAN principal only (no SPIFFE); per-topic ACLs closed by **Phase 20**; metrics auth closed by **Phase 21**; inter-broker reuses server cert (no separate peer identity file).
 
 **Still deferred:** Kafka shim, multi-lang clients, SCRAM / full SASL.
 
@@ -582,7 +582,24 @@ Binding: **[docs/PHASE20_SPEC.md](./docs/PHASE20_SPEC.md)**.
 - [x] Client + `volant acl create|list|delete` CLI
 - [x] Integration tests (`phase20_acls`)
 
-**Honest limitations:** in-memory store (optional JSON load; CreateAcls does not auto-persist); no cluster ACL consensus; no prefix patterns beyond `*`; Metadata-all uses Cluster Describe only; inter-broker not ACL-gated.
+**Honest limitations:** durable store closed by **Phase 21**; no cluster ACL consensus; no prefix patterns beyond `*`; Metadata-all uses Cluster Describe only; inter-broker not ACL-gated.
+
+**Still deferred:** Kafka shim, multi-lang clients, SCRAM / full SASL.
+
+---
+
+### Phase 21 — Durable ACLs + metrics auth ✅
+
+**Goal:** Persist ACLs under the broker data dir; protect Prometheus `/metrics` with a shared Bearer token.
+
+Binding: **[docs/PHASE21_SPEC.md](./docs/PHASE21_SPEC.md)**.
+
+- [x] `{data_dir}/__acls/acls.json` snapshot (`enabled` + `entries`); atomic write
+- [x] Load on `Broker::new`; CreateAcls / DeleteAcls / flag import auto-save
+- [x] `--metrics-token` / `VOLANT_METRICS_TOKEN` → `Authorization: Bearer` on `/metrics`
+- [x] Integration tests (`phase21_durable_acls_metrics`) + durable unit test
+
+**Honest limitations:** single-node file only (no ACL raft); super-users still runtime flags; metrics auth is shared-token only (no mTLS on metrics port).
 
 **Still deferred:** Kafka shim, multi-lang clients, SCRAM / full SASL.
 

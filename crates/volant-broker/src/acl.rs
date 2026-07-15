@@ -1,8 +1,9 @@
-//! Principal-based access control lists (Phase 20).
+//! Principal-based access control lists (Phase 20/21).
 
 use std::collections::HashSet;
-use std::fs;
-use std::path::Path;
+use std::fs::{self, File, OpenOptions};
+use std::io::{Read, Write};
+use std::path::{Path, PathBuf};
 
 use parking_lot::RwLock;
 use serde::{Deserialize, Serialize};
@@ -226,6 +227,95 @@ impl AclEntry {
 /// Canonical cluster resource name used in ACL checks.
 pub const CLUSTER_RESOURCE: &str = "volant";
 
+/// Durable ACL snapshot on disk (Phase 21).
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Default)]
+pub struct AclSnapshot {
+    /// Whether enforcement is on.
+    #[serde(default)]
+    pub enabled: bool,
+    /// ACL bindings.
+    #[serde(default)]
+    pub entries: Vec<AclEntry>,
+}
+
+/// File-backed ACL store under `{data_dir}/__acls/acls.json`.
+#[derive(Debug, Clone)]
+pub struct AclStore {
+    path: PathBuf,
+}
+
+impl AclStore {
+    /// Open (create dir) under `data_dir/__acls`.
+    pub fn open(data_dir: impl AsRef<Path>) -> Result<Self> {
+        let dir = data_dir.as_ref().join("__acls");
+        fs::create_dir_all(&dir).map_err(|e| {
+            Error::Storage(format!("create acl dir {}: {e}", dir.display()))
+        })?;
+        Ok(Self {
+            path: dir.join("acls.json"),
+        })
+    }
+
+    /// Path to the JSON file.
+    pub fn path(&self) -> &Path {
+        &self.path
+    }
+
+    /// Load snapshot; empty defaults if missing.
+    pub fn load(&self) -> Result<AclSnapshot> {
+        if !self.path.exists() {
+            return Ok(AclSnapshot::default());
+        }
+        let mut f = File::open(&self.path).map_err(|e| {
+            Error::Storage(format!("open acl store {}: {e}", self.path.display()))
+        })?;
+        let mut buf = String::new();
+        f.read_to_string(&mut buf)
+            .map_err(|e| Error::Storage(format!("read acl store: {e}")))?;
+        if buf.trim().is_empty() {
+            return Ok(AclSnapshot::default());
+        }
+        // Accept Phase 20 bare array or Phase 21 snapshot object.
+        if buf.trim_start().starts_with('[') {
+            let entries: Vec<AclEntry> = serde_json::from_str(&buf)
+                .map_err(|e| Error::Storage(format!("parse acl array: {e}")))?;
+            return Ok(AclSnapshot {
+                enabled: !entries.is_empty(),
+                entries,
+            });
+        }
+        serde_json::from_str(&buf).map_err(|e| Error::Storage(format!("parse acl store: {e}")))
+    }
+
+    /// Atomically persist snapshot.
+    pub fn save(&self, snap: &AclSnapshot) -> Result<()> {
+        let parent = self.path.parent().unwrap_or_else(|| Path::new("."));
+        let tmp = parent.join("acls.json.tmp");
+        let json = serde_json::to_string_pretty(snap)
+            .map_err(|e| Error::Storage(format!("encode acl store: {e}")))?;
+        {
+            let mut f = OpenOptions::new()
+                .create(true)
+                .write(true)
+                .truncate(true)
+                .open(&tmp)
+                .map_err(|e| Error::Storage(format!("open acl tmp: {e}")))?;
+            f.write_all(json.as_bytes())
+                .map_err(|e| Error::Storage(format!("write acl store: {e}")))?;
+            f.sync_all()
+                .map_err(|e| Error::Storage(format!("fsync acl store: {e}")))?;
+        }
+        fs::rename(&tmp, &self.path).map_err(|e| {
+            Error::Storage(format!(
+                "rename acl store {} -> {}: {e}",
+                tmp.display(),
+                self.path.display()
+            ))
+        })?;
+        Ok(())
+    }
+}
+
 /// In-memory ACL authorizer (Phase 20).
 #[derive(Debug, Default)]
 pub struct AclAuthorizer {
@@ -260,16 +350,40 @@ impl AclAuthorizer {
         self.entries.clone()
     }
 
+    /// Replace entries from a snapshot (does not touch super-users).
+    pub fn apply_snapshot(&mut self, snap: &AclSnapshot) {
+        self.enabled = snap.enabled;
+        self.entries = snap.entries.clone();
+    }
+
+    /// Snapshot for durability.
+    pub fn snapshot(&self) -> AclSnapshot {
+        AclSnapshot {
+            enabled: self.enabled,
+            entries: self.entries.clone(),
+        }
+    }
+
     /// Load entries from a JSON file and enable enforcement.
+    ///
+    /// Accepts a bare array (Phase 20) or [`AclSnapshot`] object.
     pub fn load_file(&mut self, path: &Path) -> Result<()> {
         let text = fs::read_to_string(path).map_err(|e| {
             Error::InvalidArgument(format!("read acl file {}: {e}", path.display()))
         })?;
-        let list: Vec<AclEntry> = serde_json::from_str(&text).map_err(|e| {
-            Error::InvalidArgument(format!("parse acl file {}: {e}", path.display()))
-        })?;
-        self.entries = list;
-        self.enabled = true;
+        if text.trim_start().starts_with('[') {
+            let list: Vec<AclEntry> = serde_json::from_str(&text).map_err(|e| {
+                Error::InvalidArgument(format!("parse acl file {}: {e}", path.display()))
+            })?;
+            self.entries = list;
+            self.enabled = true;
+        } else {
+            let snap: AclSnapshot = serde_json::from_str(&text).map_err(|e| {
+                Error::InvalidArgument(format!("parse acl file {}: {e}", path.display()))
+            })?;
+            self.apply_snapshot(&snap);
+            self.enabled = true;
+        }
         Ok(())
     }
 
@@ -353,20 +467,49 @@ impl AclAuthorizer {
 }
 
 /// Shared ACL state on the broker.
-#[derive(Debug, Default)]
+#[derive(Debug)]
 pub struct AclState {
     inner: RwLock<AclAuthorizer>,
     /// Principal assigned after successful shared-token Auth.
     auth_principal: RwLock<String>,
+    /// Optional durable store (Phase 21).
+    store: Option<AclStore>,
+}
+
+impl Default for AclState {
+    fn default() -> Self {
+        Self::new()
+    }
 }
 
 impl AclState {
-    /// Create with default auth principal `"token"`.
+    /// Create with default auth principal `"token"` and no durable store.
     pub fn new() -> Self {
         Self {
             inner: RwLock::new(AclAuthorizer::new()),
             auth_principal: RwLock::new("token".into()),
+            store: None,
         }
+    }
+
+    /// Open durable store under `data_dir` and load snapshot.
+    pub fn open(data_dir: impl AsRef<Path>) -> Result<Self> {
+        let store = AclStore::open(data_dir)?;
+        let snap = store.load()?;
+        let mut auth = AclAuthorizer::new();
+        auth.apply_snapshot(&snap);
+        Ok(Self {
+            inner: RwLock::new(auth),
+            auth_principal: RwLock::new("token".into()),
+            store: Some(store),
+        })
+    }
+
+    fn persist(&self, a: &AclAuthorizer) -> Result<()> {
+        if let Some(store) = &self.store {
+            store.save(&a.snapshot())?;
+        }
+        Ok(())
     }
 
     /// Configure authorizer from server flags.
@@ -381,8 +524,10 @@ impl AclState {
         a.set_super_users(super_users);
         if let Some(path) = file {
             a.load_file(path)?;
+            self.persist(&a)?;
         } else if enable {
             a.set_enabled(true);
+            self.persist(&a)?;
         }
         *self.auth_principal.write() = if auth_principal.is_empty() {
             "token".into()
@@ -415,14 +560,19 @@ impl AclState {
             .authorize(principal, resource_type, resource, operation)
     }
 
-    /// Create ACL entries.
-    pub fn create(&self, entries: Vec<AclEntry>) {
-        self.inner.write().create(entries);
+    /// Create ACL entries and persist.
+    pub fn create(&self, entries: Vec<AclEntry>) -> Result<()> {
+        let mut a = self.inner.write();
+        a.create(entries);
+        self.persist(&a)
     }
 
-    /// Delete exact entries.
-    pub fn delete(&self, entries: &[AclEntry]) -> usize {
-        self.inner.write().delete(entries)
+    /// Delete exact entries and persist. Returns how many were removed.
+    pub fn delete(&self, entries: &[AclEntry]) -> Result<usize> {
+        let mut a = self.inner.write();
+        let n = a.delete(entries);
+        self.persist(&a)?;
+        Ok(n)
     }
 
     /// List with optional filters.
@@ -433,6 +583,11 @@ impl AclState {
         resource: Option<&str>,
     ) -> Vec<AclEntry> {
         self.inner.read().list(principal, resource_type, resource)
+    }
+
+    /// Durable store path if configured.
+    pub fn store_path(&self) -> Option<PathBuf> {
+        self.store.as_ref().map(|s| s.path().to_path_buf())
     }
 }
 
@@ -473,8 +628,20 @@ mod tests {
     fn allow_and_deny_precedence() {
         let mut a = AclAuthorizer::new();
         a.create(vec![
-            entry("alice", ResourceType::Topic, "t", AclOperation::Write, AclPermission::Allow),
-            entry("alice", ResourceType::Topic, "t", AclOperation::Write, AclPermission::Deny),
+            entry(
+                "alice",
+                ResourceType::Topic,
+                "t",
+                AclOperation::Write,
+                AclPermission::Allow,
+            ),
+            entry(
+                "alice",
+                ResourceType::Topic,
+                "t",
+                AclOperation::Write,
+                AclPermission::Deny,
+            ),
         ]);
         assert!(!a.authorize(Some("alice"), ResourceType::Topic, "t", AclOperation::Write));
     }
@@ -498,10 +665,51 @@ mod tests {
     #[test]
     fn create_delete_list() {
         let mut a = AclAuthorizer::new();
-        let e = entry("a", ResourceType::Group, "g", AclOperation::Read, AclPermission::Allow);
+        let e = entry(
+            "a",
+            ResourceType::Group,
+            "g",
+            AclOperation::Read,
+            AclPermission::Allow,
+        );
         a.create(vec![e.clone()]);
         assert_eq!(a.list(Some("a"), None, None).len(), 1);
         assert_eq!(a.delete(&[e]), 1);
         assert!(a.list(None, None, None).is_empty());
+    }
+
+    #[test]
+    fn durable_roundtrip() {
+        let dir = std::env::temp_dir().join(format!(
+            "volant-acl-store-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        let _ = fs::remove_dir_all(&dir);
+        fs::create_dir_all(&dir).unwrap();
+        let state = AclState::open(&dir).unwrap();
+        state
+            .create(vec![entry(
+                "alice",
+                ResourceType::Topic,
+                "t",
+                AclOperation::Write,
+                AclPermission::Allow,
+            )])
+            .unwrap();
+        drop(state);
+        let reloaded = AclState::open(&dir).unwrap();
+        assert!(reloaded.is_enabled());
+        assert_eq!(reloaded.list(None, None, None).len(), 1);
+        assert!(reloaded.authorize(
+            Some("alice"),
+            ResourceType::Topic,
+            "t",
+            AclOperation::Write
+        ));
+        let _ = fs::remove_dir_all(&dir);
     }
 }
