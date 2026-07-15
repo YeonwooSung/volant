@@ -10,15 +10,17 @@ use tracing::{debug, error, info};
 use volant_core::{Error, MessageBatch, Offset, PartitionId, Result, TopicName};
 
 use crate::acl::{AclOperation, ResourceType, CLUSTER_RESOURCE};
-use crate::broker::Broker;
+use crate::broker::{Broker, IdempotentCheck};
 
 use super::codec::{
-    decode_consumer_subscription, decode_records, decode_request_header, encode_consumer_assignment,
-    encode_message_set, encode_record_batch, encode_response_frame, get_bytes, get_nullable_string,
-    get_string, put_bytes, put_nullable_string, put_response_header, put_string, try_decode_request,
+    decode_consumer_subscription, decode_produce_batches, decode_request_header,
+    encode_consumer_assignment, encode_message_set, encode_record_batch, encode_response_frame,
+    get_bytes, get_nullable_string, get_string, put_bytes, put_nullable_string, put_response_header,
+    put_string, try_decode_request,
 };
 use super::{
-    map_group_error, ApiKey, KafkaErrorCode, KAFKA_ANONYMOUS_PRINCIPAL, SUPPORTED_APIS,
+    map_group_error, map_idempotent_error, ApiKey, KafkaErrorCode, KAFKA_ANONYMOUS_PRINCIPAL,
+    SUPPORTED_APIS,
 };
 
 /// Accept Kafka-protocol connections until the listener fails fatally.
@@ -140,6 +142,9 @@ fn dispatch_kafka(broker: &Broker, body: bytes::Bytes) -> BytesMut {
         }
         Some(ApiKey::AlterConfigs) if hdr.api_version == 0 => {
             encode_alter_configs(broker, &mut src, &mut out);
+        }
+        Some(ApiKey::InitProducerId) if (0..=1).contains(&hdr.api_version) => {
+            encode_init_producer_id(broker, &mut src, &mut out);
         }
         Some(_) => {
             // Supported API but wrong version — use a generic error body when possible.
@@ -346,8 +351,8 @@ fn encode_produce(broker: &Broker, src: &mut impl Buf, out: &mut BytesMut, versi
                 continue;
             }
 
-            let messages = match decode_records(&record_set) {
-                Ok(m) => m,
+            let batches = match decode_produce_batches(&record_set) {
+                Ok(b) => b,
                 Err(e) => {
                     debug!(error = %e, "kafka produce records decode failed");
                     out.put_i16(KafkaErrorCode::CorruptMessage.as_i16());
@@ -358,7 +363,7 @@ fn encode_produce(broker: &Broker, src: &mut impl Buf, out: &mut BytesMut, versi
                     continue;
                 }
             };
-            if messages.is_empty() {
+            if batches.is_empty() || batches.iter().all(|b| b.messages.is_empty()) {
                 out.put_i16(KafkaErrorCode::None.as_i16());
                 out.put_i64(0);
                 if version >= 2 {
@@ -368,55 +373,29 @@ fn encode_produce(broker: &Broker, src: &mut impl Buf, out: &mut BytesMut, versi
             }
 
             let name = TopicName::new(topic.clone());
-            let batch = MessageBatch { messages };
             let wait = if volant_acks == 255 {
                 Some(Duration::from_secs(5))
             } else {
                 None
             };
-            match broker.produce_with_acks(
+
+            match produce_partition_batches(
+                broker,
                 &name,
-                PartitionId(partition as u32),
-                batch,
+                partition as u32,
+                &batches,
                 volant_acks,
                 wait,
             ) {
-                Ok((records, 0)) => {
-                    let base = records
-                        .first()
-                        .map(|r| r.offset.raw() as i64)
-                        .unwrap_or(0);
+                Ok(base) => {
                     out.put_i16(KafkaErrorCode::None.as_i16());
                     out.put_i64(base);
                     if version >= 2 {
                         out.put_i64(-1); // log_append_time unused
                     }
                 }
-                Ok((_, err))
-                    if err == volant_protocol::ErrorCode::NotLeaderForPartition as u16 =>
-                {
-                    out.put_i16(KafkaErrorCode::NotLeaderForPartition.as_i16());
-                    out.put_i64(-1);
-                    if version >= 2 {
-                        out.put_i64(-1);
-                    }
-                }
-                Ok((_, _)) => {
-                    out.put_i16(KafkaErrorCode::Unknown.as_i16());
-                    out.put_i64(-1);
-                    if version >= 2 {
-                        out.put_i64(-1);
-                    }
-                }
-                Err(Error::NotFound(_)) => {
-                    out.put_i16(KafkaErrorCode::UnknownTopicOrPartition.as_i16());
-                    out.put_i64(-1);
-                    if version >= 2 {
-                        out.put_i64(-1);
-                    }
-                }
-                Err(_) => {
-                    out.put_i16(KafkaErrorCode::Unknown.as_i16());
+                Err(code) => {
+                    out.put_i16(code);
                     out.put_i64(-1);
                     if version >= 2 {
                         out.put_i64(-1);
@@ -430,6 +409,151 @@ fn encode_produce(broker: &Broker, src: &mut impl Buf, out: &mut BytesMut, versi
     if version >= 1 {
         out.put_i32(0);
     }
+}
+
+/// Produce one or more decoded batches for a single partition (Phase 29 idempotent).
+///
+/// Returns the base offset of the first successful batch on success.
+fn produce_partition_batches(
+    broker: &Broker,
+    topic: &TopicName,
+    partition: u32,
+    batches: &[super::codec::DecodedRecordBatch],
+    volant_acks: u8,
+    wait: Option<Duration>,
+) -> std::result::Result<i64, i16> {
+    let mut first_base: Option<i64> = None;
+    for batch in batches {
+        if batch.messages.is_empty() {
+            continue;
+        }
+        let count = batch.messages.len() as u32;
+        let producer = batch.producer;
+
+        if producer.is_idempotent() {
+            // Volant uses u64 PID and treats 0 as non-idempotent; Kafka PIDs are ≥ 0.
+            let pid = producer.producer_id as u64;
+            let epoch = producer.producer_epoch as u16;
+            let base_seq = producer.base_sequence;
+            match broker.check_idempotent_produce(
+                pid,
+                epoch,
+                topic.as_str(),
+                partition,
+                base_seq,
+                count,
+            ) {
+                IdempotentCheck::Accept => {
+                    let mb = MessageBatch {
+                        messages: batch.messages.clone(),
+                    };
+                    let (records, err) = broker
+                        .produce_with_acks(topic, PartitionId(partition), mb, volant_acks, wait)
+                        .map_err(|e| match e {
+                            Error::NotFound(_) => {
+                                KafkaErrorCode::UnknownTopicOrPartition.as_i16()
+                            }
+                            _ => KafkaErrorCode::Unknown.as_i16(),
+                        })?;
+                    if err != 0 {
+                        return Err(map_produce_ack_error(err));
+                    }
+                    let base = records
+                        .first()
+                        .map(|r| r.offset.raw())
+                        .unwrap_or(0);
+                    broker.record_idempotent_produce(
+                        pid,
+                        epoch,
+                        topic.as_str(),
+                        partition,
+                        base_seq,
+                        count,
+                        base,
+                    );
+                    if first_base.is_none() {
+                        first_base = Some(base as i64);
+                    }
+                }
+                IdempotentCheck::Duplicate { base_offset, .. } => {
+                    if first_base.is_none() {
+                        first_base = Some(base_offset as i64);
+                    }
+                }
+                IdempotentCheck::Reject { error_code } => {
+                    return Err(map_idempotent_error(error_code));
+                }
+            }
+        } else {
+            let mb = MessageBatch {
+                messages: batch.messages.clone(),
+            };
+            let (records, err) = broker
+                .produce_with_acks(topic, PartitionId(partition), mb, volant_acks, wait)
+                .map_err(|e| match e {
+                    Error::NotFound(_) => KafkaErrorCode::UnknownTopicOrPartition.as_i16(),
+                    _ => KafkaErrorCode::Unknown.as_i16(),
+                })?;
+            if err != 0 {
+                return Err(map_produce_ack_error(err));
+            }
+            let base = records
+                .first()
+                .map(|r| r.offset.raw() as i64)
+                .unwrap_or(0);
+            if first_base.is_none() {
+                first_base = Some(base);
+            }
+        }
+    }
+    Ok(first_base.unwrap_or(0))
+}
+
+fn map_produce_ack_error(err: u16) -> i16 {
+    if err == volant_protocol::ErrorCode::NotLeaderForPartition as u16 {
+        KafkaErrorCode::NotLeaderForPartition.as_i16()
+    } else {
+        KafkaErrorCode::Unknown.as_i16()
+    }
+}
+
+/// InitProducerId (API key 22) — Phase 29.
+fn encode_init_producer_id(broker: &Broker, src: &mut impl Buf, out: &mut BytesMut) {
+    if broker.acls().is_enabled()
+        && !broker.acls().authorize(
+            Some(KAFKA_ANONYMOUS_PRINCIPAL),
+            ResourceType::Cluster,
+            CLUSTER_RESOURCE,
+            AclOperation::Write,
+        )
+    {
+        out.put_i32(0); // throttle
+        out.put_i16(KafkaErrorCode::ClusterAuthorizationFailed.as_i16());
+        out.put_i64(-1);
+        out.put_i16(-1);
+        return;
+    }
+
+    let txn_id = match get_nullable_string(src) {
+        Ok(v) => v.unwrap_or_default(),
+        Err(_) => {
+            out.put_i32(0);
+            out.put_i16(KafkaErrorCode::InvalidRequest.as_i16());
+            out.put_i64(-1);
+            out.put_i16(-1);
+            return;
+        }
+    };
+    // transaction_timeout_ms — ignored (no Kafka txn coordinator timeout).
+    if src.remaining() >= 4 {
+        let _timeout = src.get_i32();
+    }
+
+    let (pid, epoch) = broker.init_producer_id_with_txn(&txn_id);
+    out.put_i32(0); // throttle_time_ms
+    out.put_i16(KafkaErrorCode::None.as_i16());
+    out.put_i64(pid as i64);
+    out.put_i16(epoch as i16);
 }
 
 fn encode_fetch(broker: &Broker, src: &mut impl Buf, out: &mut BytesMut, version: i16) {

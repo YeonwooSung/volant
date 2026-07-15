@@ -196,8 +196,12 @@ DescribeConfigs / AlterConfigs (topic keys).
 **Phase 28:** Kafka RecordBatch compression on Produce — gzip, snappy (Xerial),
 lz4 frame, zstd. Fetch remains uncompressed.
 
+**Phase 29:** Kafka InitProducerId + idempotent Produce (PID/epoch/sequence
+de-dupe on RecordBatch). Maps onto Volant Phase 10/11 producer state.
+
 **Still deferred:** multi-language clients, Kafka SASL, SCRAM-SHA-512,
-chaos-mesh / cargo-fuzz corpus CI, MessageSet compression, compressed Fetch.
+Kafka transactions on the shim, chaos-mesh / cargo-fuzz corpus CI,
+MessageSet compression, compressed Fetch.
 
 ### Networked client (library)
 

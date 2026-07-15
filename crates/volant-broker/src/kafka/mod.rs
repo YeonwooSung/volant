@@ -1,9 +1,9 @@
-//! Kafka wire protocol shim (Phases 23–28).
+//! Kafka wire protocol shim (Phases 23–29).
 //!
 //! Classic (non-flexible) framing. Produce/Fetch, admin, consumer groups,
 //! List/Describe/DeleteGroups, CreatePartitions, Describe/AlterConfigs,
-//! RecordBatch compression (gzip/snappy/lz4/zstd).
-//! See `docs/PHASE23_SPEC.md` … `docs/PHASE28_SPEC.md`.
+//! RecordBatch compression, InitProducerId + idempotent Produce.
+//! See `docs/PHASE23_SPEC.md` … `docs/PHASE29_SPEC.md`.
 
 /// Kafka wire primitives, MessageSet (magic 0/1), and RecordBatch (magic 2).
 pub mod codec;
@@ -74,6 +74,14 @@ pub enum KafkaErrorCode {
     GroupIdNotFound = 69,
     /// Invalid config.
     InvalidConfig = 40,
+    /// Out of order sequence number (idempotent produce).
+    OutOfOrderSequenceNumber = 45,
+    /// Invalid producer epoch.
+    InvalidProducerEpoch = 47,
+    /// Invalid transaction state.
+    InvalidTxnState = 48,
+    /// Unknown producer id.
+    UnknownProducerId = 59,
 }
 
 /// Map Volant group error codes to Kafka wire error codes.
@@ -83,6 +91,18 @@ pub(crate) fn map_group_error(volant: u16) -> i16 {
         9 => KafkaErrorCode::RebalanceInProgress.as_i16(),
         10 => KafkaErrorCode::UnknownMemberId.as_i16(),
         11 => KafkaErrorCode::IllegalGeneration.as_i16(),
+        _ => KafkaErrorCode::Unknown.as_i16(),
+    }
+}
+
+/// Map Volant idempotent/txn error codes to Kafka wire codes (Phase 29).
+pub(crate) fn map_idempotent_error(volant: u16) -> i16 {
+    match volant {
+        // volant_protocol::ErrorCode values
+        19 => KafkaErrorCode::InvalidProducerEpoch.as_i16(),
+        20 => KafkaErrorCode::OutOfOrderSequenceNumber.as_i16(),
+        21 => KafkaErrorCode::UnknownProducerId.as_i16(),
+        22 => KafkaErrorCode::InvalidTxnState.as_i16(),
         _ => KafkaErrorCode::Unknown.as_i16(),
     }
 }
@@ -129,6 +149,8 @@ pub enum ApiKey {
     CreateTopics = 19,
     /// DeleteTopics.
     DeleteTopics = 20,
+    /// InitProducerId.
+    InitProducerId = 22,
     /// DescribeConfigs.
     DescribeConfigs = 32,
     /// AlterConfigs.
@@ -158,6 +180,7 @@ impl ApiKey {
             18 => Some(Self::ApiVersions),
             19 => Some(Self::CreateTopics),
             20 => Some(Self::DeleteTopics),
+            22 => Some(Self::InitProducerId),
             32 => Some(Self::DescribeConfigs),
             33 => Some(Self::AlterConfigs),
             37 => Some(Self::CreatePartitions),
@@ -185,6 +208,7 @@ pub const SUPPORTED_APIS: &[(ApiKey, i16, i16)] = &[
     (ApiKey::ApiVersions, 0, 0),
     (ApiKey::CreateTopics, 0, 1),
     (ApiKey::DeleteTopics, 0, 1),
+    (ApiKey::InitProducerId, 0, 1),
     (ApiKey::DescribeConfigs, 0, 0),
     (ApiKey::AlterConfigs, 0, 0),
     (ApiKey::CreatePartitions, 0, 0),

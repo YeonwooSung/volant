@@ -752,8 +752,28 @@ Binding: **[docs/PHASE28_SPEC.md](./docs/PHASE28_SPEC.md)**.
 compresses; snappy/lz4 framing is best-effort Kafka-compatible; no compression
 level knobs; no client-negotiated preferred codec.
 
-**Still deferred:** multi-lang clients, Kafka SASL, SCRAM-SHA-512, cargo-fuzz
-corpus CI, MessageSet compression, compressed Fetch responses.
+---
+
+### Phase 29 — Kafka InitProducerId & idempotent Produce ✅
+
+**Goal:** Modern Kafka producers with `enable.idempotence=true` can allocate a
+PID via InitProducerId and de-dupe RecordBatch produces on the shim.
+
+Binding: **[docs/PHASE29_SPEC.md](./docs/PHASE29_SPEC.md)**.
+
+- [x] InitProducerId (22) v0–1 → `Broker::init_producer_id_with_txn`
+- [x] RecordBatch producerId / epoch / baseSequence on Produce
+- [x] De-dupe via Phase 10/11 `check_idempotent_produce` + durable state
+- [x] Kafka error mapping (45 / 47 / 48 / 59)
+- [x] Integration tests (`phase29_idempotent`)
+
+**Honest limitations:** No Kafka transactions (Begin/End/AddPartitions) on the
+shim; MessageSet cannot carry sequences; `transaction_timeout_ms` ignored;
+Volant reserves PID `0` as non-idempotent.
+
+**Still deferred:** multi-lang clients, Kafka SASL, SCRAM-SHA-512, Kafka
+transactions on the shim, cargo-fuzz corpus CI, MessageSet compression,
+compressed Fetch responses.
 
 ---
 

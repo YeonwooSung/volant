@@ -155,10 +155,56 @@ pub fn put_bytes(dst: &mut BytesMut, b: Option<&[u8]>) {
     }
 }
 
+/// Producer identity fields from a RecordBatch header (Phase 29).
+///
+/// Kafka uses `-1` for all three when the batch is non-idempotent.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct RecordBatchProducer {
+    /// Kafka producer id (`-1` = none).
+    pub producer_id: i64,
+    /// Producer epoch (`-1` = none).
+    pub producer_epoch: i16,
+    /// Base sequence of the first record (`-1` = none).
+    pub base_sequence: i32,
+}
+
+impl RecordBatchProducer {
+    /// Non-idempotent marker (all fields `-1`).
+    pub const NONE: Self = Self {
+        producer_id: -1,
+        producer_epoch: -1,
+        base_sequence: -1,
+    };
+
+    /// Whether this batch carries idempotent produce fields.
+    pub fn is_idempotent(self) -> bool {
+        self.producer_id >= 0 && self.base_sequence >= 0
+    }
+}
+
+/// One decoded RecordBatch (messages + producer meta).
+#[derive(Debug, Clone)]
+pub struct DecodedRecordBatch {
+    /// Producer id / epoch / base sequence from the batch header.
+    pub producer: RecordBatchProducer,
+    /// Records in this batch.
+    pub messages: Vec<Message>,
+}
+
 /// Decode a produce record set, auto-detecting MessageSet vs RecordBatch.
 ///
 /// Magic byte lives at offset 16 in both formats.
 pub fn decode_records(data: &[u8]) -> Result<Vec<Message>> {
+    Ok(decode_produce_batches(data)?
+        .into_iter()
+        .flat_map(|b| b.messages)
+        .collect())
+}
+
+/// Decode a produce record set into per-batch units (Phase 29).
+///
+/// MessageSet payloads yield a single batch with [`RecordBatchProducer::NONE`].
+pub fn decode_produce_batches(data: &[u8]) -> Result<Vec<DecodedRecordBatch>> {
     if data.is_empty() {
         return Ok(Vec::new());
     }
@@ -167,8 +213,14 @@ pub fn decode_records(data: &[u8]) -> Result<Vec<Message>> {
     }
     let magic = data[16] as i8;
     match magic {
-        0 | 1 => decode_message_set(data),
-        2 => decode_record_batches(data),
+        0 | 1 => {
+            let messages = decode_message_set(data)?;
+            Ok(vec![DecodedRecordBatch {
+                producer: RecordBatchProducer::NONE,
+                messages,
+            }])
+        }
+        2 => decode_record_batches_detailed(data),
         other => Err(Error::Protocol(format!(
             "unsupported kafka records magic {other}"
         ))),
@@ -264,6 +316,14 @@ pub fn encode_message_set(records: &[Record]) -> BytesMut {
 
 /// Decode one or more contiguous RecordBatches (magic 2).
 pub fn decode_record_batches(data: &[u8]) -> Result<Vec<Message>> {
+    Ok(decode_record_batches_detailed(data)?
+        .into_iter()
+        .flat_map(|b| b.messages)
+        .collect())
+}
+
+/// Decode contiguous RecordBatches with producer metadata (Phase 29).
+pub fn decode_record_batches_detailed(data: &[u8]) -> Result<Vec<DecodedRecordBatch>> {
     let mut src = data;
     let mut out = Vec::new();
     // Minimum empty batch: baseOffset(8)+batchLength(4)+header(~49) ≈ 61.
@@ -280,12 +340,12 @@ pub fn decode_record_batches(data: &[u8]) -> Result<Vec<Message>> {
         }
         let batch_body = &src[..batch_length];
         src.advance(batch_length);
-        out.extend(decode_one_record_batch(batch_body)?);
+        out.push(decode_one_record_batch(batch_body)?);
     }
     Ok(out)
 }
 
-fn decode_one_record_batch(body: &[u8]) -> Result<Vec<Message>> {
+fn decode_one_record_batch(body: &[u8]) -> Result<DecodedRecordBatch> {
     // body starts at partitionLeaderEpoch
     if body.len() < 49 {
         return Err(Error::Protocol("truncated record batch header".into()));
@@ -313,9 +373,9 @@ fn decode_one_record_batch(body: &[u8]) -> Result<Vec<Message>> {
     let _last_offset_delta = src.get_i32();
     let first_timestamp = src.get_i64();
     let _max_timestamp = src.get_i64();
-    let _producer_id = src.get_i64();
-    let _producer_epoch = src.get_i16();
-    let _base_sequence = src.get_i32();
+    let producer_id = src.get_i64();
+    let producer_epoch = src.get_i16();
+    let base_sequence = src.get_i32();
     let records_count = src.get_i32();
     if records_count < 0 {
         return Err(Error::Protocol("negative records count".into()));
@@ -324,8 +384,7 @@ fn decode_one_record_batch(body: &[u8]) -> Result<Vec<Message>> {
     // When compressed, remaining bytes are one compressed blob of DefaultRecords.
     let records_bytes = if codec == CompressionCodec::None {
         let rem = src.remaining();
-        let b = src.copy_to_bytes(rem);
-        b
+        src.copy_to_bytes(rem)
     } else {
         let rem = src.remaining();
         let compressed = src.copy_to_bytes(rem);
@@ -334,11 +393,18 @@ fn decode_one_record_batch(body: &[u8]) -> Result<Vec<Message>> {
     };
 
     let mut rec_src = records_bytes;
-    let mut out = Vec::with_capacity(records_count as usize);
+    let mut messages = Vec::with_capacity(records_count as usize);
     for _ in 0..records_count {
-        out.push(decode_default_record(&mut rec_src, first_timestamp)?);
+        messages.push(decode_default_record(&mut rec_src, first_timestamp)?);
     }
-    Ok(out)
+    Ok(DecodedRecordBatch {
+        producer: RecordBatchProducer {
+            producer_id,
+            producer_epoch,
+            base_sequence,
+        },
+        messages,
+    })
 }
 
 fn decode_default_record(src: &mut impl Buf, first_timestamp: i64) -> Result<Message> {
@@ -398,7 +464,7 @@ fn decode_default_record(src: &mut impl Buf, first_timestamp: i64) -> Result<Mes
 ///
 /// Fetch responses use this path for broad client compatibility.
 pub fn encode_record_batch(records: &[Record]) -> BytesMut {
-    encode_record_batch_with_codec(records, CompressionCodec::None)
+    encode_record_batch_with_options(records, CompressionCodec::None, RecordBatchProducer::NONE)
         .expect("uncompressed encode cannot fail")
 }
 
@@ -410,12 +476,32 @@ pub fn encode_record_batch_compressed(
     records: &[Record],
     codec: CompressionCodec,
 ) -> Result<BytesMut> {
-    encode_record_batch_with_codec(records, codec)
+    encode_record_batch_with_options(records, codec, RecordBatchProducer::NONE)
 }
 
-fn encode_record_batch_with_codec(
+/// Encode an idempotent RecordBatch (Phase 29) for tests / tooling.
+pub fn encode_record_batch_idempotent(
+    records: &[Record],
+    producer_id: i64,
+    producer_epoch: i16,
+    base_sequence: i32,
+) -> BytesMut {
+    encode_record_batch_with_options(
+        records,
+        CompressionCodec::None,
+        RecordBatchProducer {
+            producer_id,
+            producer_epoch,
+            base_sequence,
+        },
+    )
+    .expect("uncompressed idempotent encode cannot fail")
+}
+
+fn encode_record_batch_with_options(
     records: &[Record],
     codec: CompressionCodec,
+    producer: RecordBatchProducer,
 ) -> Result<BytesMut> {
     if records.is_empty() {
         return Ok(BytesMut::new());
@@ -451,9 +537,9 @@ fn encode_record_batch_with_codec(
     crc_payload.put_i32(last_offset_delta);
     crc_payload.put_i64(first_timestamp);
     crc_payload.put_i64(max_timestamp);
-    crc_payload.put_i64(-1); // producerId
-    crc_payload.put_i16(-1); // producerEpoch
-    crc_payload.put_i32(-1); // baseSequence
+    crc_payload.put_i64(producer.producer_id);
+    crc_payload.put_i16(producer.producer_epoch);
+    crc_payload.put_i32(producer.base_sequence);
     crc_payload.put_i32(records.len() as i32);
     crc_payload.extend_from_slice(&records_payload);
 
@@ -818,6 +904,25 @@ mod tests {
             assert_eq!(decoded[0].headers.len(), 1);
             assert_eq!(decoded[1].value.as_ref(), b"second");
         }
+    }
+
+    #[test]
+    fn idempotent_record_batch_preserves_producer_fields() {
+        let records = vec![Record {
+            offset: Offset::new(0),
+            key: Some(Bytes::from_static(b"k")),
+            value: Bytes::from_static(b"v"),
+            timestamp_ms: 1_700_000_000_000,
+            headers: vec![],
+        }];
+        let batch = encode_record_batch_idempotent(&records, 7, 3, 11);
+        let detailed = decode_record_batches_detailed(&batch).unwrap();
+        assert_eq!(detailed.len(), 1);
+        assert_eq!(detailed[0].producer.producer_id, 7);
+        assert_eq!(detailed[0].producer.producer_epoch, 3);
+        assert_eq!(detailed[0].producer.base_sequence, 11);
+        assert!(detailed[0].producer.is_idempotent());
+        assert_eq!(detailed[0].messages[0].value.as_ref(), b"v");
     }
 
     #[test]
