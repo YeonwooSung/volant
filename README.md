@@ -228,6 +228,10 @@ configs (Phase 13); APPEND/SUBTRACT rejected.
 offline_replicas, leader_epoch=-1, authorized-ops bitfields; flexible v9+ still
 out of scope.
 
+**Phase 39:** Kafka OffsetForLeaderEpoch (key 23, classic v0–3) — end offset by
+leader epoch for consumer truncation checks; no durable epoch history (eligible
+epochs map to HWM).
+
 **Still deferred:** multi-language clients, chaos-mesh / cargo-fuzz corpus CI.
 
 ### Networked client (library)

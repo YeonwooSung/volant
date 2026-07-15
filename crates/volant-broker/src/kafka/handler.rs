@@ -230,6 +230,9 @@ fn dispatch_kafka(broker: &Broker, body: bytes::Bytes, conn: &mut KafkaConnState
         Some(ApiKey::InitProducerId) if (0..=1).contains(&hdr.api_version) => {
             encode_init_producer_id(broker, &mut src, &mut out, principal);
         }
+        Some(ApiKey::OffsetForLeaderEpoch) if (0..=3).contains(&hdr.api_version) => {
+            encode_offset_for_leader_epoch(broker, &mut src, &mut out, hdr.api_version, principal);
+        }
         Some(_) => {
             // Supported API but wrong version — use a generic error body when possible.
             // ApiVersions clients probe versions; return UnsupportedVersion-shaped empty.
@@ -1135,6 +1138,156 @@ fn encode_fetch_record_set(records: &[volant_core::Record], version: i16) -> Byt
         Err(e) => {
             debug!(error = %e, ?codec, "fetch compression failed; falling back to plain");
             encode_record_batch(records)
+        }
+    }
+}
+
+/// OffsetForLeaderEpoch (API key 23) classic v0–3.
+///
+/// Without epoch history, any requested epoch ≤ the current partition epoch
+/// (or -1 = latest) returns end_offset = HWM and the current leader epoch.
+fn encode_offset_for_leader_epoch(
+    broker: &Broker,
+    src: &mut impl Buf,
+    out: &mut BytesMut,
+    version: i16,
+    principal: &str,
+) {
+    // Request: replica_id (v3+), topics[{ name, partitions[{ partition,
+    //   current_leader_epoch (v2+), leader_epoch }] }]
+    if version >= 3 {
+        if src.remaining() < 4 {
+            if version >= 2 {
+                out.put_i32(0); // throttle
+            }
+            out.put_i32(0);
+            return;
+        }
+        let _replica_id = src.get_i32();
+    }
+
+    if version >= 2 {
+        out.put_i32(0); // throttle_time_ms
+    }
+
+    if src.remaining() < 4 {
+        out.put_i32(0);
+        return;
+    }
+    let topic_count = src.get_i32();
+    out.put_i32(topic_count.max(0));
+
+    for _ in 0..topic_count.max(0) {
+        let topic = match get_string(src) {
+            Ok(t) => t,
+            Err(_) => break,
+        };
+        put_string(out, &topic);
+
+        if src.remaining() < 4 {
+            out.put_i32(0);
+            break;
+        }
+        let part_count = src.get_i32();
+        out.put_i32(part_count.max(0));
+
+        for _ in 0..part_count.max(0) {
+            // partition + optional current_leader_epoch + leader_epoch
+            let need = if version >= 2 { 4 + 4 + 4 } else { 4 + 4 };
+            if src.remaining() < need {
+                break;
+            }
+            let partition = src.get_i32();
+            let current_leader_epoch = if version >= 2 {
+                src.get_i32()
+            } else {
+                -1
+            };
+            let leader_epoch = src.get_i32();
+
+            // Response partition entry: error, partition, leader_epoch (v1+), end_offset.
+            let write_part = |out: &mut BytesMut, err: i16, epoch: i32, end: i64| {
+                out.put_i16(err);
+                out.put_i32(partition);
+                if version >= 1 {
+                    out.put_i32(epoch);
+                }
+                out.put_i64(end);
+            };
+
+            if broker.acls().is_enabled()
+                && !broker.acls().authorize(
+                    Some(principal),
+                    ResourceType::Topic,
+                    &topic,
+                    AclOperation::Describe,
+                )
+            {
+                write_part(
+                    out,
+                    KafkaErrorCode::TopicAuthorizationFailed.as_i16(),
+                    -1,
+                    -1,
+                );
+                continue;
+            }
+
+            let name = TopicName::new(topic.clone());
+            let snap = broker.metadata(Some(&[name]));
+            let part_meta = snap.topics.first().and_then(|t| {
+                t.partitions
+                    .iter()
+                    .find(|p| p.partition_id.0 == partition as u32)
+            });
+
+            let Some(pm) = part_meta else {
+                write_part(
+                    out,
+                    KafkaErrorCode::UnknownTopicOrPartition.as_i16(),
+                    -1,
+                    -1,
+                );
+                continue;
+            };
+
+            let current_epoch = pm.leader_epoch as i32;
+            let hwm = pm.hwm as i64;
+
+            // Fence on current_leader_epoch (v2+).
+            if current_leader_epoch != -1 {
+                if current_leader_epoch > current_epoch {
+                    write_part(
+                        out,
+                        KafkaErrorCode::UnknownLeaderEpoch.as_i16(),
+                        current_epoch,
+                        -1,
+                    );
+                    continue;
+                }
+                if current_leader_epoch < current_epoch {
+                    write_part(
+                        out,
+                        KafkaErrorCode::FencedLeaderEpoch.as_i16(),
+                        current_epoch,
+                        -1,
+                    );
+                    continue;
+                }
+            }
+
+            // Lookup requested leader_epoch (-1 = latest / current).
+            if leader_epoch != -1 && leader_epoch > current_epoch {
+                write_part(
+                    out,
+                    KafkaErrorCode::UnknownLeaderEpoch.as_i16(),
+                    current_epoch,
+                    -1,
+                );
+                continue;
+            }
+
+            // No epoch history: any eligible epoch maps to current HWM.
+            write_part(out, KafkaErrorCode::None.as_i16(), current_epoch, hwm);
         }
     }
 }

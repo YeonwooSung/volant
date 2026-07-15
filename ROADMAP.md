@@ -949,6 +949,25 @@ replicas; no Metadata auto-create; authorized-ops best-effort.
 **Still deferred:** multi-lang clients, cargo-fuzz corpus CI, flexible modern
 admin APIs (DescribeCluster / ListTransactions).
 
+### Phase 39 — Kafka OffsetForLeaderEpoch ✅
+
+**Goal:** OffsetForLeaderEpoch (API key 23) classic **v0–3** so consumers can
+query end offsets by leader epoch (truncation checks) without flexible framing.
+
+Binding: **[docs/PHASE39_SPEC.md](./docs/PHASE39_SPEC.md)**.
+
+- [x] OffsetForLeaderEpoch 0–3 advertised
+- [x] Happy path → HWM + current leader epoch
+- [x] Fencing via `current_leader_epoch`; unknown epoch errors
+- [x] Unknown topic + Topic Describe ACL
+- [x] Integration tests (`phase39_offset_for_leader_epoch`)
+
+**Honest limitations:** no durable epoch→offset history (eligible epochs map to
+current HWM); no flexible v4+; Metadata still advertises leader_epoch=-1.
+
+**Still deferred:** multi-lang clients, cargo-fuzz corpus CI, flexible modern
+admin APIs (DescribeCluster / ListTransactions).
+
 ---
 
 ## Performance targets (aspirational)

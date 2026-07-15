@@ -1,11 +1,12 @@
-//! Kafka wire protocol shim (Phases 23–37).
+//! Kafka wire protocol shim (Phases 23–39).
 //!
 //! Classic (non-flexible) framing. Produce/Fetch, admin, consumer groups,
 //! List/Describe/DeleteGroups, CreatePartitions, Describe/AlterConfigs,
 //! IncrementalAlterConfigs, RecordBatch + MessageSet compression,
 //! InitProducerId + idempotent Produce, SASL, transactions, DeleteRecords,
-//! ACL admin, OffsetDelete, and Fetch isolation-level honesty.
-//! See `docs/PHASE23_SPEC.md` … `docs/PHASE37_SPEC.md`.
+//! ACL admin, OffsetDelete, Fetch isolation-level honesty, Metadata v0–8,
+//! and OffsetForLeaderEpoch.
+//! See `docs/PHASE23_SPEC.md` … `docs/PHASE39_SPEC.md`.
 
 /// Kafka wire primitives, MessageSet (magic 0/1), and RecordBatch (magic 2).
 pub mod codec;
@@ -90,6 +91,10 @@ pub enum KafkaErrorCode {
     SaslAuthenticationFailed = 58,
     /// Unknown producer id.
     UnknownProducerId = 59,
+    /// Fenced leader epoch (OffsetForLeaderEpoch / Fetch fencing).
+    FencedLeaderEpoch = 74,
+    /// Unknown leader epoch.
+    UnknownLeaderEpoch = 75,
 }
 
 /// Map Volant group error codes to Kafka wire error codes.
@@ -163,6 +168,8 @@ pub enum ApiKey {
     DeleteRecords = 21,
     /// InitProducerId.
     InitProducerId = 22,
+    /// OffsetForLeaderEpoch.
+    OffsetForLeaderEpoch = 23,
     /// AddPartitionsToTxn.
     AddPartitionsToTxn = 24,
     /// AddOffsetsToTxn.
@@ -215,6 +222,7 @@ impl ApiKey {
             20 => Some(Self::DeleteTopics),
             21 => Some(Self::DeleteRecords),
             22 => Some(Self::InitProducerId),
+            23 => Some(Self::OffsetForLeaderEpoch),
             24 => Some(Self::AddPartitionsToTxn),
             25 => Some(Self::AddOffsetsToTxn),
             26 => Some(Self::EndTxn),
@@ -255,6 +263,7 @@ pub const SUPPORTED_APIS: &[(ApiKey, i16, i16)] = &[
     (ApiKey::DeleteTopics, 0, 1),
     (ApiKey::DeleteRecords, 0, 1),
     (ApiKey::InitProducerId, 0, 1),
+    (ApiKey::OffsetForLeaderEpoch, 0, 3),
     (ApiKey::AddPartitionsToTxn, 0, 0),
     (ApiKey::AddOffsetsToTxn, 0, 0),
     (ApiKey::EndTxn, 0, 0),
