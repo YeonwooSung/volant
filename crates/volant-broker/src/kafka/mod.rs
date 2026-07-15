@@ -239,7 +239,7 @@ pub const SUPPORTED_APIS: &[(ApiKey, i16, i16)] = &[
     (ApiKey::Produce, 0, 3),
     (ApiKey::Fetch, 0, 4),
     (ApiKey::ListOffsets, 0, 1),
-    (ApiKey::Metadata, 0, 1),
+    (ApiKey::Metadata, 0, 8),
     (ApiKey::OffsetCommit, 0, 2),
     (ApiKey::OffsetFetch, 0, 1),
     (ApiKey::FindCoordinator, 0, 1),

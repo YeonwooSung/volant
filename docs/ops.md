@@ -10,7 +10,7 @@
 | `--log-format` | | `text` | `text` or `json` |
 | `--auth-token` | `VOLANT_AUTH_TOKEN` | *unset* | Shared-token auth |
 | `--scram-user USER:PASS` | | *unset* | Upsert SCRAM user at startup (repeatable; Phase 22) |
-| `--kafka-listen` | | *disabled* | Kafka wire protocol shim (Phase 23–37) |
+| `--kafka-listen` | | *disabled* | Kafka wire protocol shim (Phase 23–38) |
 | `--tls-cert` / `--tls-key` | | *unset* | Server TLS (feature `tls`) |
 | `--tls-peer-insecure` | | `true` | Skip inter-broker cert verify (lab) |
 | `--tls-ca` | | *unset* | CA PEM for inter-broker peer verify |
@@ -128,7 +128,7 @@ Supported APIs:
 | API | Versions | Notes |
 |-----|----------|-------|
 | ApiVersions | 0 | Advertises supported keys/versions |
-| Metadata | 0–1 | Brokers + topics from Volant catalog |
+| Metadata | 0–8 | Classic through v8: rack, cluster_id=`volant`, throttle 0, empty offline_replicas, leader_epoch=-1, optional authorized-ops (flexible v9+ unsupported) |
 | Produce | 0–3 | MessageSet magic 0/1 **or** RecordBatch magic 2 (auto-detect); compression + idempotent PID/seq |
 | Fetch | 0–4 | v0–3 MessageSet + v4 RecordBatch compressed (default lz4; see env) |
 | InitProducerId | 0–1 | plain + transactional_id fencing; timeout ignored |

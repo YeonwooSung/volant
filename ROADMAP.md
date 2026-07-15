@@ -633,7 +633,7 @@ broker storage.
 Binding: **[docs/PHASE23_SPEC.md](./docs/PHASE23_SPEC.md)**.
 
 - [x] `--kafka-listen host:port` (default disabled; native protocol on `--listen`)
-- [x] ApiVersions (0), Metadata (0–1), Produce (0), Fetch (0)
+- [x] ApiVersions (0), Metadata (0–1; raised to 0–8 in Phase 38), Produce (0), Fetch (0)
 - [x] Legacy MessageSet magic 0/1 encode/decode
 - [x] ACL checks as principal `kafka-anonymous` when ACLs enabled
 - [x] Integration tests (`phase23_kafka_shim`) + MessageSet unit tests
@@ -928,6 +928,26 @@ Binding: **[docs/PHASE37_SPEC.md](./docs/PHASE37_SPEC.md)**.
 **Honest limitations:** TOPIC only; no list-typed APPEND/SUBTRACT; no flexible v1.
 
 **Still deferred:** multi-lang clients, cargo-fuzz corpus CI.
+
+### Phase 38 — Kafka Metadata classic v0–8 ✅
+
+**Goal:** Raise Metadata (API key 3) from classic v0–1 to classic **v0–8** so
+modern clients negotiate a fuller catalog response without flexible encoding.
+
+Binding: **[docs/PHASE38_SPEC.md](./docs/PHASE38_SPEC.md)**.
+
+- [x] Metadata max version 8 in ApiVersions
+- [x] v1 broker rack (null); fix null-topics = all / empty = none
+- [x] v2 `cluster_id = "volant"`; v3+ throttle 0
+- [x] v5 empty offline_replicas; v7 leader_epoch = -1
+- [x] v8 authorized-ops bitfields (or `INT32_MIN` when not requested)
+- [x] Integration tests (`phase38_metadata_classic`); phase23 updated
+
+**Honest limitations:** no flexible Metadata v9+; no real leader epochs / offline
+replicas; no Metadata auto-create; authorized-ops best-effort.
+
+**Still deferred:** multi-lang clients, cargo-fuzz corpus CI, flexible modern
+admin APIs (DescribeCluster / ListTransactions).
 
 ---
 

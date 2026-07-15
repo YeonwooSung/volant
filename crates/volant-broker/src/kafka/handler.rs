@@ -140,7 +140,7 @@ fn dispatch_kafka(broker: &Broker, body: bytes::Bytes, conn: &mut KafkaConnState
         Some(ApiKey::SaslAuthenticate) if (0..=1).contains(&hdr.api_version) => {
             encode_sasl_authenticate(broker, &mut src, &mut out, hdr.api_version, conn);
         }
-        Some(ApiKey::Metadata) if (0..=1).contains(&hdr.api_version) => {
+        Some(ApiKey::Metadata) if (0..=8).contains(&hdr.api_version) => {
             encode_metadata(broker, &mut src, &mut out, hdr.api_version, principal);
         }
         Some(ApiKey::Produce) if (0..=3).contains(&hdr.api_version) => {
@@ -330,20 +330,44 @@ fn encode_api_versions(out: &mut BytesMut) {
     }
 }
 
-fn encode_metadata(broker: &Broker, src: &mut impl Buf, out: &mut BytesMut, version: i16, principal: &str) {
-    // Authorization: Cluster Describe when listing all; Topic Describe per topic.
-    if broker.acls().is_enabled() {
-        // We'll check per-topic below; for empty list need cluster describe.
-    }
+/// Stable cluster id advertised on Metadata v2+ (classic).
+const KAFKA_CLUSTER_ID: &str = "volant";
 
-    let topic_count = if src.remaining() >= 4 {
+/// Kafka `Integer.MIN_VALUE` — authorized operations not included in the response.
+const AUTH_OPS_OMITTED: i32 = i32::MIN;
+
+fn encode_metadata(broker: &Broker, src: &mut impl Buf, out: &mut BytesMut, version: i16, principal: &str) {
+    // Request:
+    //   topics: array (v0) / nullable array (v1+)
+    //     v0: empty = all topics
+    //     v1+: null (-1) = all topics; empty (0) = no topics
+    //   allow_auto_topic_creation: bool (v4+, ignored)
+    //   include_cluster_authorized_operations: bool (v8)
+    //   include_topic_authorized_operations: bool (v8)
+    let topic_len = if src.remaining() >= 4 {
         src.get_i32()
     } else {
         0
     };
+
+    let list_all: bool;
     let mut requested: Vec<String> = Vec::new();
-    if topic_count > 0 {
-        for _ in 0..topic_count {
+    if version == 0 {
+        list_all = topic_len <= 0;
+        if topic_len > 0 {
+            for _ in 0..topic_len {
+                match get_string(src) {
+                    Ok(t) => requested.push(t),
+                    Err(_) => break,
+                }
+            }
+        }
+    } else if topic_len < 0 {
+        // null array → all topics
+        list_all = true;
+    } else {
+        list_all = false;
+        for _ in 0..topic_len {
             match get_string(src) {
                 Ok(t) => requested.push(t),
                 Err(_) => break,
@@ -351,35 +375,63 @@ fn encode_metadata(broker: &Broker, src: &mut impl Buf, out: &mut BytesMut, vers
         }
     }
 
-    if broker.acls().is_enabled() {
-        if requested.is_empty() {
-            if !broker.acls().authorize(
-                Some(principal),
-                ResourceType::Cluster,
-                CLUSTER_RESOURCE,
-                AclOperation::Describe,
-            ) {
-                // Return empty with error on a synthetic topic — Metadata v0 has no top-level error.
-                // Emit empty brokers + empty topics.
-                out.put_i32(0); // brokers
-                if version >= 1 {
-                    out.put_i32(-1); // controller_id
-                }
-                out.put_i32(0); // topics
-                return;
-            }
+    // v4+: allow_auto_topic_creation (ignored — Volant does not auto-create on Metadata).
+    if version >= 4 && src.remaining() >= 1 {
+        let _allow_auto = src.get_u8();
+    }
+
+    let mut include_cluster_ops = false;
+    let mut include_topic_ops = false;
+    if version >= 8 {
+        if src.remaining() >= 1 {
+            include_cluster_ops = src.get_u8() != 0;
+        }
+        if src.remaining() >= 1 {
+            include_topic_ops = src.get_u8() != 0;
         }
     }
 
-    let filter: Option<Vec<TopicName>> = if requested.is_empty() {
+    let need_cluster_describe = list_all;
+    if broker.acls().is_enabled() && need_cluster_describe {
+        if !broker.acls().authorize(
+            Some(principal),
+            ResourceType::Cluster,
+            CLUSTER_RESOURCE,
+            AclOperation::Describe,
+        ) {
+            // Empty brokers + empty topics with versioned framing.
+            write_metadata_empty(out, version, include_cluster_ops, principal, broker);
+            return;
+        }
+    }
+
+    let filter: Option<Vec<TopicName>> = if list_all {
         None
+    } else if requested.is_empty() {
+        // Explicit empty list → no topics in the response.
+        write_metadata_brokers_header(broker, out, version);
+        out.put_i32(0); // topics
+        if version >= 8 {
+            out.put_i32(cluster_authorized_ops(
+                broker,
+                principal,
+                include_cluster_ops,
+            ));
+        }
+        return;
     } else {
         Some(requested.iter().map(|t| TopicName::new(t.clone())).collect())
     };
+
     let snap = match &filter {
         None => broker.metadata(None),
         Some(ts) => broker.metadata(Some(ts.as_slice())),
     };
+
+    // throttle_time_ms (v3+)
+    if version >= 3 {
+        out.put_i32(0);
+    }
 
     // Brokers
     out.put_i32(snap.brokers.len() as i32);
@@ -387,7 +439,17 @@ fn encode_metadata(broker: &Broker, src: &mut impl Buf, out: &mut BytesMut, vers
         out.put_i32(*id as i32);
         put_string(out, host);
         out.put_i32(i32::from(*port));
+        if version >= 1 {
+            put_nullable_string(out, None); // rack
+        }
     }
+
+    // cluster_id (v2+)
+    if version >= 2 {
+        put_nullable_string(out, Some(KAFKA_CLUSTER_ID));
+    }
+
+    // controller_id (v1+)
     if version >= 1 {
         out.put_i32(snap.controller_id as i32);
     }
@@ -420,6 +482,9 @@ fn encode_metadata(broker: &Broker, src: &mut impl Buf, out: &mut BytesMut, vers
             out.put_i16(KafkaErrorCode::None.as_i16());
             out.put_i32(p.partition_id.0 as i32);
             out.put_i32(p.leader as i32);
+            if version >= 7 {
+                out.put_i32(-1); // leader_epoch unknown
+            }
             out.put_i32(p.replicas.len() as i32);
             for r in &p.replicas {
                 out.put_i32(*r as i32);
@@ -428,8 +493,135 @@ fn encode_metadata(broker: &Broker, src: &mut impl Buf, out: &mut BytesMut, vers
             for r in &p.isr {
                 out.put_i32(*r as i32);
             }
+            if version >= 5 {
+                out.put_i32(0); // offline_replicas empty
+            }
+        }
+        if version >= 8 {
+            out.put_i32(topic_authorized_ops(
+                broker,
+                principal,
+                t.name.as_str(),
+                include_topic_ops,
+            ));
         }
     }
+
+    if version >= 8 {
+        out.put_i32(cluster_authorized_ops(
+            broker,
+            principal,
+            include_cluster_ops,
+        ));
+    }
+}
+
+/// Write brokers + cluster framing for Metadata when the topic list is empty.
+fn write_metadata_brokers_header(broker: &Broker, out: &mut BytesMut, version: i16) {
+    // Brokers/controller only; topic array is written by the caller.
+    let snap = broker.metadata(None);
+    if version >= 3 {
+        out.put_i32(0); // throttle
+    }
+    out.put_i32(snap.brokers.len() as i32);
+    for (id, host, port) in &snap.brokers {
+        out.put_i32(*id as i32);
+        put_string(out, host);
+        out.put_i32(i32::from(*port));
+        if version >= 1 {
+            put_nullable_string(out, None);
+        }
+    }
+    if version >= 2 {
+        put_nullable_string(out, Some(KAFKA_CLUSTER_ID));
+    }
+    if version >= 1 {
+        out.put_i32(snap.controller_id as i32);
+    }
+}
+
+/// ACL-denied Metadata: empty brokers and topics with correct versioned fields.
+fn write_metadata_empty(
+    out: &mut BytesMut,
+    version: i16,
+    include_cluster_ops: bool,
+    _principal: &str,
+    _broker: &Broker,
+) {
+    if version >= 3 {
+        out.put_i32(0);
+    }
+    out.put_i32(0); // brokers
+    if version >= 2 {
+        put_nullable_string(out, Some(KAFKA_CLUSTER_ID));
+    }
+    if version >= 1 {
+        out.put_i32(-1); // controller_id
+    }
+    out.put_i32(0); // topics
+    if version >= 8 {
+        // Denied cluster describe → omit ops (or empty bitfield). Use omitted when not requested.
+        out.put_i32(if include_cluster_ops { 0 } else { AUTH_OPS_OMITTED });
+    }
+}
+
+fn topic_authorized_ops(
+    broker: &Broker,
+    principal: &str,
+    topic: &str,
+    include: bool,
+) -> i32 {
+    if !include {
+        return AUTH_OPS_OMITTED;
+    }
+    let ops = [
+        AclOperation::Read,
+        AclOperation::Write,
+        AclOperation::Create,
+        AclOperation::Delete,
+        AclOperation::Alter,
+        AclOperation::Describe,
+    ];
+    let mut bits = 0i32;
+    for op in ops {
+        let allowed = if broker.acls().is_enabled() {
+            broker
+                .acls()
+                .authorize(Some(principal), ResourceType::Topic, topic, op)
+        } else {
+            true
+        };
+        if allowed {
+            bits |= 1i32 << (volant_op_to_kafka(op) as u32);
+        }
+    }
+    bits
+}
+
+fn cluster_authorized_ops(broker: &Broker, principal: &str, include: bool) -> i32 {
+    if !include {
+        return AUTH_OPS_OMITTED;
+    }
+    let ops = [
+        AclOperation::Create,
+        AclOperation::Alter,
+        AclOperation::Describe,
+        AclOperation::ClusterAction,
+    ];
+    let mut bits = 0i32;
+    for op in ops {
+        let allowed = if broker.acls().is_enabled() {
+            broker
+                .acls()
+                .authorize(Some(principal), ResourceType::Cluster, CLUSTER_RESOURCE, op)
+        } else {
+            true
+        };
+        if allowed {
+            bits |= 1i32 << (volant_op_to_kafka(op) as u32);
+        }
+    }
+    bits
 }
 
 fn encode_produce(broker: &Broker, src: &mut impl Buf, out: &mut BytesMut, version: i16, principal: &str) {

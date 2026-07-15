@@ -9,7 +9,8 @@ use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::{TcpListener, TcpStream};
 use volant_broker::kafka::codec::{
     decode_message_set, decode_request_header, encode_message_set, encode_request,
-    encode_response_frame, get_bytes, get_string, put_bytes, put_string, try_decode_request,
+    encode_response_frame, get_bytes, get_nullable_string, get_string, put_bytes, put_string,
+    try_decode_request,
 };
 use volant_broker::{serve_kafka_listener, Broker};
 use volant_core::{Message, MessageBatch, Offset, PartitionId, Record, TopicName};
@@ -106,9 +107,9 @@ async fn metadata_lists_topic() {
     broker.create_topic("events", 2).expect("create");
     let (addr, server) = boot_kafka(Arc::clone(&broker)).await;
 
-    // Metadata v1, all topics (topic_count = 0)
+    // Metadata v1, all topics (null topics array; empty means none for v1+)
     let mut body = BytesMut::new();
-    body.put_i32(0);
+    body.put_i32(-1);
     let req = encode_request(3, 1, 1, Some("meta"), &body);
     let resp = rpc(&addr, req).await;
     let mut src = resp.freeze();
@@ -121,6 +122,8 @@ async fn metadata_lists_topic() {
     assert!(!host.is_empty());
     assert!(port > 0);
     assert_eq!(node_id, 0);
+    let rack = get_nullable_string(&mut src).unwrap(); // v1 rack
+    assert!(rack.is_none());
     let _controller = src.get_i32(); // v1
     let topic_count = src.get_i32();
     assert_eq!(topic_count, 1);

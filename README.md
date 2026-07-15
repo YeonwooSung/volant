@@ -224,6 +224,10 @@ Phase 12 offset delete; `READ_COMMITTED` LSO equals HWM (buffer-until-commit).
 **Phase 37:** Kafka IncrementalAlterConfigs — key 44 SET/DELETE on topic
 configs (Phase 13); APPEND/SUBTRACT rejected.
 
+**Phase 38:** Kafka Metadata classic v0–8 — cluster_id, throttle, rack,
+offline_replicas, leader_epoch=-1, authorized-ops bitfields; flexible v9+ still
+out of scope.
+
 **Still deferred:** multi-language clients, chaos-mesh / cargo-fuzz corpus CI.
 
 ### Networked client (library)
