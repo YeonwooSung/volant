@@ -463,7 +463,46 @@ impl Segment {
                 offset, self.next_offset
             )));
         }
+        self.append_encoded(offset, message, timestamp_ms)
+    }
 
+    /// Append at `offset`, allowing gaps (`offset >= next_offset`). Used by compaction.
+    pub fn append_allow_gap(
+        &mut self,
+        offset: Offset,
+        message: &Message,
+        timestamp_ms: i64,
+    ) -> Result<Record> {
+        if self.sealed {
+            return Err(Error::Storage("cannot append to sealed segment".into()));
+        }
+        if offset.raw() < self.next_offset.raw() {
+            return Err(Error::Storage(format!(
+                "append_allow_gap offset {} before next {}",
+                offset, self.next_offset
+            )));
+        }
+        self.append_encoded(offset, message, timestamp_ms)
+    }
+
+    /// Force the segment's next offset (e.g. stretch to next segment base after compact).
+    pub fn set_next_offset(&mut self, next: Offset) -> Result<()> {
+        if next.raw() < self.next_offset.raw() {
+            return Err(Error::Storage(format!(
+                "set_next_offset {} before current {}",
+                next, self.next_offset
+            )));
+        }
+        self.next_offset = next;
+        Ok(())
+    }
+
+    fn append_encoded(
+        &mut self,
+        offset: Offset,
+        message: &Message,
+        timestamp_ms: i64,
+    ) -> Result<Record> {
         let need = encoded_record_size(message) as usize;
         let written = if let Some(pool) = self.pool.clone() {
             let mut pooled = pool.acquire();
@@ -981,8 +1020,11 @@ fn recover_and_index(
                 position,
                 ..
             } => {
-                if record.offset != next_offset {
-                    // Unexpected gap/mismatch — treat as corruption at this point.
+                // Contiguous or forward gap (compaction holes). Backward offset = tear.
+                if record.offset.raw() < next_offset.raw() {
+                    break;
+                }
+                if record.offset.raw() < base_offset.raw() {
                     break;
                 }
                 let should_index =

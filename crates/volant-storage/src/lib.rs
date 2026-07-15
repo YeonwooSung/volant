@@ -17,7 +17,7 @@ pub mod segment;
 
 pub use config::StorageConfig;
 pub use io::{create_io_backend, IoBackend, IoBackendKind, StdIoBackend};
-pub use log::PartitionLog;
+pub use log::{CompactStats, PartitionLog};
 pub use pool::{BufferPool, PooledBuf};
 pub use segment::Segment;
 

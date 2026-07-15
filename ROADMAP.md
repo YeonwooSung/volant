@@ -487,7 +487,26 @@ Binding: **[docs/PHASE15_SPEC.md](./docs/PHASE15_SPEC.md)**.
 - [x] Client + CLI (`topic add-partitions`, `topic offsets`)
 - [x] Integration tests (`phase15_partitions_offsets`)
 
-**Honest limitations:** cannot shrink partitions; new partitions start empty; cluster CreatePartitions does not wait for all brokers; ListOffsets latest is LEO not client HWM; no compact policy.
+**Honest limitations:** cannot shrink partitions; new partitions start empty; cluster CreatePartitions does not wait for all brokers; ListOffsets latest is LEO not client HWM; compact policy deferred to **Phase 16**.
+
+**Still deferred:** Kafka shim, multi-lang clients, SCRAM, mTLS, cooperative rebalance, transactions.
+
+---
+
+### Phase 16 — Log compaction (`cleanup.policy`) ✅
+
+**Goal:** Key-based compaction of sealed segments for changelog-style topics.
+
+Binding: **[docs/PHASE16_SPEC.md](./docs/PHASE16_SPEC.md)**.
+
+- [x] Config `cleanup.policy` = `delete` | `compact` (default delete)
+- [x] `PartitionLog::compact_sealed` — latest value per key; empty value = tombstone; null keys kept
+- [x] Sparse offsets in sealed segments (recovery + rewrite preserve original offsets)
+- [x] Applied on background retention loop when policy is compact
+- [x] CLI `--cleanup-policy` / `config set cleanup.policy`
+- [x] Integration tests (`phase16_compaction`)
+
+**Honest limitations:** no dirty-ratio gating; active segment not compacted until roll; tombstones dropped at compact time (no separate tombstone retention); cluster replicas compact independently.
 
 **Still deferred:** Kafka shim, multi-lang clients, SCRAM, mTLS, cooperative rebalance, transactions.
 

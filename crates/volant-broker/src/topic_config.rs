@@ -16,6 +16,8 @@ pub const KEY_RETENTION_MS: &str = "retention.ms";
 pub const KEY_RETENTION_BYTES: &str = "retention.bytes";
 /// Config key: target segment roll size in bytes.
 pub const KEY_SEGMENT_BYTES: &str = "segment.bytes";
+/// Config key: log cleanup policy (`delete` or `compact`).
+pub const KEY_CLEANUP_POLICY: &str = "cleanup.policy";
 
 /// Per-topic log/retention settings.
 #[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
@@ -29,6 +31,9 @@ pub struct TopicConfig {
     /// Target segment roll size in bytes (`None` = broker default).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub segment_bytes: Option<u64>,
+    /// When true, compact sealed segments by key (Phase 16). Default delete-only.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub compact: bool,
 }
 
 impl TopicConfig {
@@ -51,6 +56,9 @@ impl TopicConfig {
                 }
                 KEY_SEGMENT_BYTES => {
                     self.segment_bytes = parse_opt_u64(v, KEY_SEGMENT_BYTES)?;
+                }
+                KEY_CLEANUP_POLICY => {
+                    self.compact = parse_cleanup_policy(v)?;
                 }
                 other => {
                     return Err(Error::InvalidArgument(format!(
@@ -83,8 +91,29 @@ impl TopicConfig {
                 .map(|v| v.to_string())
                 .unwrap_or_default(),
         ));
+        out.push((
+            KEY_CLEANUP_POLICY.into(),
+            if self.compact {
+                "compact".into()
+            } else {
+                "delete".into()
+            },
+        ));
         out
     }
+}
+
+fn parse_cleanup_policy(v: &str) -> Result<bool> {
+    let t = v.trim().to_ascii_lowercase();
+    if t.is_empty() || t == "delete" {
+        return Ok(false);
+    }
+    if t == "compact" {
+        return Ok(true);
+    }
+    Err(Error::InvalidArgument(format!(
+        "invalid cleanup.policy value: {v} (want delete|compact)"
+    )))
 }
 
 fn parse_opt_u64(v: &str, key: &str) -> Result<Option<u64>> {

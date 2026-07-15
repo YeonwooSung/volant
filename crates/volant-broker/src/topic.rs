@@ -181,7 +181,7 @@ impl Topic {
         Ok(())
     }
 
-    /// Apply retention/segment settings to all local partitions (Phase 13).
+    /// Apply retention/segment/compact settings to all local partitions (Phase 13/16).
     pub fn apply_topic_config(&mut self, topic_cfg: &TopicConfig) {
         for part in self.partitions.values_mut() {
             part.log
@@ -189,13 +189,24 @@ impl Topic {
             if let Some(seg) = topic_cfg.segment_bytes {
                 part.log.set_segment_size(seg);
             }
+            part.log.set_compact(topic_cfg.compact);
         }
     }
 
-    /// Run retention on all local partitions.
+    /// Run retention (+ compaction when enabled) on all local partitions.
     pub fn apply_retention_all(&mut self) -> volant_core::Result<()> {
         for part in self.partitions.values_mut() {
             part.log.apply_retention()?;
+        }
+        Ok(())
+    }
+
+    /// Force compaction on all local partitions (Phase 16 tests/ops).
+    pub fn compact_all(&mut self) -> volant_core::Result<()> {
+        for part in self.partitions.values_mut() {
+            if part.log.compact_enabled() {
+                let _ = part.log.compact_sealed()?;
+            }
         }
         Ok(())
     }
@@ -214,4 +225,5 @@ pub fn apply_topic_config_to_storage(cfg: &mut StorageConfig, topic_cfg: &TopicC
             cfg.segment_size = seg;
         }
     }
+    cfg.compact = topic_cfg.compact;
 }

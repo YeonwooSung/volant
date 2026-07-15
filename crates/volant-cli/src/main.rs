@@ -101,6 +101,9 @@ enum TopicCmd {
         /// Segment roll size in bytes (Phase 13).
         #[arg(long)]
         segment_bytes: Option<u64>,
+        /// Cleanup policy: `delete` (default) or `compact` (Phase 16).
+        #[arg(long)]
+        cleanup_policy: Option<String>,
         /// Broker address.
         #[arg(long, default_value = "127.0.0.1:9092")]
         broker: String,
@@ -178,7 +181,7 @@ enum TopicConfigCmd {
     Set {
         /// Topic name.
         name: String,
-        /// Config key (`retention.ms`, `retention.bytes`, `segment.bytes`).
+        /// Config key (`retention.ms`, `retention.bytes`, `segment.bytes`, `cleanup.policy`).
         #[arg(long)]
         key: String,
         /// Config value (empty string clears).
@@ -279,7 +282,7 @@ async fn main() -> Result<()> {
     match cli.command {
         Commands::Version => {
             println!("volant {}", env!("CARGO_PKG_VERSION"));
-            println!("status: Phase 15 — create-partitions and list-offsets");
+            println!("status: Phase 16 — log compaction (cleanup.policy)");
         }
         Commands::Topic { action } => match action {
             TopicCmd::List { broker } => {
@@ -304,6 +307,7 @@ async fn main() -> Result<()> {
                 retention_ms,
                 retention_bytes,
                 segment_bytes,
+                cleanup_policy,
                 broker,
             } => {
                 let client = connect(&broker, auth).await?;
@@ -316,6 +320,9 @@ async fn main() -> Result<()> {
                 }
                 if let Some(s) = segment_bytes {
                     configs.push(("segment.bytes".into(), s.to_string()));
+                }
+                if let Some(p) = cleanup_policy {
+                    configs.push(("cleanup.policy".into(), p));
                 }
                 let id = client
                     .create_topic_with_configs(&name, partitions, configs)

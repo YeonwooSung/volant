@@ -155,6 +155,9 @@ delete-records` (truncate sealed segments before an offset).
 **Phase 15:** `volant topic add-partitions` / `topic offsets` (CreatePartitions +
 ListOffsets).
 
+**Phase 16:** `cleanup.policy=compact` — key compaction on sealed segments
+(tombstone = empty value).
+
 **Still deferred:** Kafka wire shim, multi-language clients, SCRAM, mTLS identity,
 chaos-mesh / cargo-fuzz corpus CI, cooperative rebalance, transactions.
 

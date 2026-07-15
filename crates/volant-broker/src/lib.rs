@@ -41,7 +41,8 @@ pub use group::{
 };
 pub use topic_catalog::{CatalogTopic, TopicCatalogFile, TopicCatalogStore};
 pub use topic_config::{
-    TopicConfig, TopicConfigStore, KEY_RETENTION_BYTES, KEY_RETENTION_MS, KEY_SEGMENT_BYTES,
+    TopicConfig, TopicConfigStore, KEY_CLEANUP_POLICY, KEY_RETENTION_BYTES, KEY_RETENTION_MS,
+    KEY_SEGMENT_BYTES,
 };
 pub use metrics::Metrics;
 pub use net::{run_metrics_server, run_server, serve_listener, start_background_tasks};

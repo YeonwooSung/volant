@@ -1,15 +1,28 @@
 //! Partition log: ordered collection of segments.
 
+use std::collections::HashMap;
 use std::fs;
 use std::sync::Arc;
 use std::time::{SystemTime, UNIX_EPOCH};
 
+use bytes::Bytes;
 use volant_core::{Error, Message, Offset, Record, Result};
 
 use crate::config::StorageConfig;
 use crate::pool::BufferPool;
 use crate::record::encoded_record_size;
 use crate::segment::{list_segment_bases, Segment, SegmentOptions};
+
+/// Stats from a compaction pass (Phase 16).
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct CompactStats {
+    /// Records read from sealed segments before compact.
+    pub input_records: u64,
+    /// Records written to the compacted segment.
+    pub output_records: u64,
+    /// Sealed segments removed.
+    pub segments_removed: u64,
+}
 
 /// Append-only partition log backed by durable segments on disk.
 #[derive(Debug)]
@@ -79,11 +92,12 @@ impl PartitionLog {
             segments.push(seg);
         }
 
-        // Validate continuity of segment ranges.
+        // Validate segment ranges. Compaction may leave holes so sealed
+        // next_offset can be strictly less than the next base; never greater.
         for w in segments.windows(2) {
-            if w[0].next_offset() != w[1].base_offset() {
+            if w[0].next_offset().raw() > w[1].base_offset().raw() {
                 return Err(Error::Storage(format!(
-                    "segment gap: segment ending at {} followed by base {}",
+                    "segment overlap: segment ending at {} followed by base {}",
                     w[0].next_offset(),
                     w[1].base_offset()
                 )));
@@ -348,6 +362,16 @@ impl PartitionLog {
         self.config.retention_bytes = retention_bytes;
     }
 
+    /// Enable or disable key compaction on sealed segments (Phase 16).
+    pub fn set_compact(&mut self, compact: bool) {
+        self.config.compact = compact;
+    }
+
+    /// Whether compaction is enabled.
+    pub fn compact_enabled(&self) -> bool {
+        self.config.compact
+    }
+
     /// Update target segment roll size (Phase 13). `0` is ignored.
     pub fn set_segment_size(&mut self, segment_size: u64) {
         if segment_size > 0 {
@@ -365,7 +389,7 @@ impl PartitionLog {
         self.segments.iter().map(|s| s.size()).sum()
     }
 
-    /// Apply configured size and/or time retention policies.
+    /// Apply configured size and/or time retention policies, then compaction.
     pub fn apply_retention(&mut self) -> Result<()> {
         // Time-based: drop oldest segments whose last timestamp is older than cutoff.
         if let Some(retention_ms) = self.config.retention_ms {
@@ -405,7 +429,129 @@ impl PartitionLog {
             }
         }
 
+        if self.config.compact {
+            let _ = self.compact_sealed()?;
+        }
+
         Ok(())
+    }
+
+    /// Compact sealed segments: keep latest value per key; empty value = tombstone.
+    ///
+    /// Null-key records are retained. Active segment is not modified. Preserves
+    /// original offsets of survivors (sparse holes allowed).
+    pub fn compact_sealed(&mut self) -> Result<CompactStats> {
+        if self.segments.len() < 2 {
+            return Ok(CompactStats::default());
+        }
+        let sealed_count = self.segments.len() - 1;
+        let active_base = self.segments[sealed_count].base_offset();
+        let compact_base = self.segments[0].base_offset();
+
+        // Collect all sealed records.
+        let mut input: Vec<Record> = Vec::new();
+        for seg in &self.segments[..sealed_count] {
+            let recs = seg.read_from(seg.base_offset(), usize::MAX, usize::MAX)?;
+            input.extend(recs);
+        }
+        let input_records = input.len() as u64;
+        if input_records == 0 {
+            return Ok(CompactStats::default());
+        }
+
+        // Latest keyed value; empty value removes key. Null keys all kept.
+        let mut latest: HashMap<Bytes, Record> = HashMap::new();
+        let mut null_keys: Vec<Record> = Vec::new();
+        for r in input {
+            match &r.key {
+                None => null_keys.push(r),
+                Some(k) => {
+                    if r.value.is_empty() {
+                        latest.remove(k);
+                    } else {
+                        latest.insert(k.clone(), r);
+                    }
+                }
+            }
+        }
+        let mut survivors: Vec<Record> = latest.into_values().collect();
+        survivors.extend(null_keys);
+        survivors.sort_by_key(|r| r.offset.raw());
+        let output_records = survivors.len() as u64;
+
+        // Skip rewrite if nothing removed (still OK to no-op).
+        if output_records == input_records && sealed_count == 1 {
+            // Single sealed segment, no drops — nothing to do.
+            return Ok(CompactStats {
+                input_records,
+                output_records,
+                segments_removed: 0,
+            });
+        }
+
+        let opts = SegmentOptions {
+            index_interval_bytes: self.config.index_interval_bytes,
+            use_mmap: self.config.use_mmap,
+            direct_io: false,
+            io_backend: self.config.io_backend,
+            pool: self.pool.clone(),
+        };
+        let dir = self.config.data_dir.clone();
+        let tmp_dir = dir.join(format!(".compact-{}", compact_base.raw()));
+        if tmp_dir.exists() {
+            fs::remove_dir_all(&tmp_dir).map_err(|e| {
+                Error::Storage(format!("remove compact tmp: {e}"))
+            })?;
+        }
+        fs::create_dir_all(&tmp_dir)
+            .map_err(|e| Error::Storage(format!("create compact tmp: {e}")))?;
+
+        let mut new_seg =
+            Segment::create_with_options(&tmp_dir, compact_base, now_ms(), opts.clone())?;
+        for r in &survivors {
+            let msg = Message {
+                key: r.key.clone(),
+                value: r.value.clone(),
+                timestamp_ms: Some(r.timestamp_ms),
+                headers: r.headers.clone(),
+            };
+            new_seg.append_allow_gap(r.offset, &msg, r.timestamp_ms)?;
+        }
+        // Stretch logical end to active base so open continuity holds.
+        new_seg.set_next_offset(active_base)?;
+        new_seg.seal()?;
+        // Drop handle before moving files.
+        drop(new_seg);
+
+        // Remove old sealed segments from memory and disk.
+        let old_sealed: Vec<Segment> = self.segments.drain(..sealed_count).collect();
+        let segments_removed = old_sealed.len() as u64;
+        for seg in &old_sealed {
+            seg.delete_files()?;
+        }
+
+        // Move compacted segment into place (same base offset name).
+        let src_log = tmp_dir.join(format!("{:020}.log", compact_base.raw()));
+        let src_idx = tmp_dir.join(format!("{:020}.index", compact_base.raw()));
+        let dst_log = dir.join(format!("{:020}.log", compact_base.raw()));
+        let dst_idx = dir.join(format!("{:020}.index", compact_base.raw()));
+        // Old files already deleted; rename into place.
+        fs::rename(&src_log, &dst_log)
+            .map_err(|e| Error::Storage(format!("rename compact log: {e}")))?;
+        fs::rename(&src_idx, &dst_idx)
+            .map_err(|e| Error::Storage(format!("rename compact index: {e}")))?;
+        let _ = fs::remove_dir_all(&tmp_dir);
+
+        let mut sealed = Segment::open_with_options(&dir, compact_base, opts, true)?;
+        // Recovery sets next from last record; stretch to active base.
+        sealed.set_next_offset(active_base)?;
+        self.segments.insert(0, sealed);
+
+        Ok(CompactStats {
+            input_records,
+            output_records,
+            segments_removed,
+        })
     }
 
     fn needs_roll(&self, record_size: u64) -> bool {

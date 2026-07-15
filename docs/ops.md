@@ -233,6 +233,22 @@ volant topic offsets events --partition 0
 Multi-node: `add-partitions` must hit the **controller**. New partitions start
 empty (no data redistribution).
 
+## Log compaction (Phase 16)
+
+```bash
+volant topic create kv --partitions 1 \
+  --cleanup-policy compact \
+  --segment-bytes 1048576
+
+volant topic config set kv --key cleanup.policy --value compact
+volant topic config set kv --key cleanup.policy --value delete
+```
+
+When `cleanup.policy=compact`, the broker periodically rewrites **sealed**
+segments keeping the latest value per key. An **empty value** is a tombstone
+(removes the key). Null-key records are not compacted away. The active segment
+is only compacted after it rolls.
+
 ## Deferred
 
 Kafka wire shim, multi-language clients, SCRAM, mTLS identity, full chaos-mesh

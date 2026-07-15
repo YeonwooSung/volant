@@ -1087,6 +1087,15 @@ impl Broker {
         Ok(())
     }
 
+    /// Force key-compaction on topics with `cleanup.policy=compact` (Phase 16).
+    pub fn compact_all(&self) -> Result<()> {
+        let mut topics = self.topics.write();
+        for t in topics.values_mut() {
+            t.compact_all()?;
+        }
+        Ok(())
+    }
+
     /// Number of partitions for a topic.
     pub fn partition_count(&self, topic: &TopicName) -> Result<u32> {
         // Prefer assignment in cluster mode (may not have all partitions local).

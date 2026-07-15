@@ -21,6 +21,8 @@ pub struct StorageConfig {
     pub retention_ms: Option<u64>,
     /// Drop oldest segments until total size is under this many bytes (`None` = disabled).
     pub retention_bytes: Option<u64>,
+    /// When true, sealed segments are key-compacted (Phase 16). Default delete-only.
+    pub compact: bool,
     /// I/O backend selection (`IoUring` falls back to Std when feature/platform unavailable).
     pub io_backend: IoBackendKind,
     /// Request `O_DIRECT` for active segment opens (requires `direct-io` feature; ignored otherwise).
@@ -41,6 +43,7 @@ impl Default for StorageConfig {
             index_interval_bytes: 4096,
             retention_ms: None,
             retention_bytes: None,
+            compact: false,
             io_backend: IoBackendKind::Std,
             direct_io: false,
             buffer_pool_blocks: 0,
