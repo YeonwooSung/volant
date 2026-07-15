@@ -1,8 +1,9 @@
-//! Kafka wire protocol shim (Phases 23–25).
+//! Kafka wire protocol shim (Phases 23–26).
 //!
 //! Classic (non-flexible) framing only. Supported APIs: Produce, Fetch,
-//! Metadata, ListOffsets, ApiVersions, CreateTopics, DeleteTopics.
-//! See `docs/PHASE23_SPEC.md`, `docs/PHASE24_SPEC.md`, `docs/PHASE25_SPEC.md`.
+//! Metadata, ListOffsets, OffsetCommit/Fetch, consumer groups (Join/Sync/
+//! Heartbeat/Leave), FindCoordinator, ApiVersions, CreateTopics, DeleteTopics.
+//! See `docs/PHASE23_SPEC.md` … `docs/PHASE26_SPEC.md`.
 
 /// Kafka wire primitives, MessageSet (magic 0/1), and RecordBatch (magic 2).
 pub mod codec;
@@ -55,6 +56,27 @@ pub enum KafkaErrorCode {
     InvalidPartitions = 37,
     /// Invalid timestamp in ListOffsets.
     InvalidTimestamp = 32,
+    /// Not coordinator for group.
+    NotCoordinator = 16,
+    /// Illegal generation.
+    IllegalGeneration = 22,
+    /// Unknown member id.
+    UnknownMemberId = 25,
+    /// Rebalance in progress.
+    RebalanceInProgress = 27,
+    /// Group authorization failed.
+    GroupAuthorizationFailed = 30,
+}
+
+/// Map Volant group error codes to Kafka wire error codes.
+pub(crate) fn map_group_error(volant: u16) -> i16 {
+    match volant {
+        0 => KafkaErrorCode::None.as_i16(),
+        9 => KafkaErrorCode::RebalanceInProgress.as_i16(),
+        10 => KafkaErrorCode::UnknownMemberId.as_i16(),
+        11 => KafkaErrorCode::IllegalGeneration.as_i16(),
+        _ => KafkaErrorCode::Unknown.as_i16(),
+    }
 }
 
 impl KafkaErrorCode {
@@ -75,6 +97,20 @@ pub enum ApiKey {
     ListOffsets = 2,
     /// Metadata.
     Metadata = 3,
+    /// OffsetCommit.
+    OffsetCommit = 8,
+    /// OffsetFetch.
+    OffsetFetch = 9,
+    /// FindCoordinator.
+    FindCoordinator = 10,
+    /// JoinGroup.
+    JoinGroup = 11,
+    /// Heartbeat.
+    Heartbeat = 12,
+    /// LeaveGroup.
+    LeaveGroup = 13,
+    /// SyncGroup.
+    SyncGroup = 14,
     /// ApiVersions.
     ApiVersions = 18,
     /// CreateTopics.
@@ -90,6 +126,13 @@ impl ApiKey {
             1 => Some(Self::Fetch),
             2 => Some(Self::ListOffsets),
             3 => Some(Self::Metadata),
+            8 => Some(Self::OffsetCommit),
+            9 => Some(Self::OffsetFetch),
+            10 => Some(Self::FindCoordinator),
+            11 => Some(Self::JoinGroup),
+            12 => Some(Self::Heartbeat),
+            13 => Some(Self::LeaveGroup),
+            14 => Some(Self::SyncGroup),
             18 => Some(Self::ApiVersions),
             19 => Some(Self::CreateTopics),
             20 => Some(Self::DeleteTopics),
@@ -104,6 +147,13 @@ pub const SUPPORTED_APIS: &[(ApiKey, i16, i16)] = &[
     (ApiKey::Fetch, 0, 4),
     (ApiKey::ListOffsets, 0, 1),
     (ApiKey::Metadata, 0, 1),
+    (ApiKey::OffsetCommit, 0, 2),
+    (ApiKey::OffsetFetch, 0, 1),
+    (ApiKey::FindCoordinator, 0, 0),
+    (ApiKey::JoinGroup, 0, 1),
+    (ApiKey::Heartbeat, 0, 0),
+    (ApiKey::LeaveGroup, 0, 0),
+    (ApiKey::SyncGroup, 0, 0),
     (ApiKey::ApiVersions, 0, 0),
     (ApiKey::CreateTopics, 0, 1),
     (ApiKey::DeleteTopics, 0, 1),

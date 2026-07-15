@@ -134,18 +134,25 @@ Supported APIs:
 | ListOffsets | 0–1 | timestamp -1 latest, -2 earliest |
 | CreateTopics | 0–1 | partition count; RF/assignment ignored |
 | DeleteTopics | 0–1 | by name |
+| FindCoordinator | 0 | returns advertised broker |
+| JoinGroup | 0–1 | consumer protocol subscription |
+| SyncGroup | 0 | coordinator assignment (leader payload ignored) |
+| Heartbeat / LeaveGroup | 0 | session liveness |
+| OffsetCommit | 0–2 | durable `__consumer_offsets` |
+| OffsetFetch | 0–1 | committed offsets (`-1` if unknown) |
 
 Limitations:
 
 - **No** compression on RecordBatch (attributes compression bits must be 0).
-- **No** Kafka consumer groups, SASL, or flexible versions.
+- **No** Kafka SASL or flexible versions.
+- Consumer assignment is **coordinator-driven** (not Kafka leader assignor).
 - CreateTopics does not honour Kafka replica assignment (Volant placement wins).
+- FindCoordinator host/port is the Volant advertised address (often `--listen`).
 - When ACLs are enabled, the shim principal is `kafka-anonymous`.
 - Prefer binding to localhost / private networks; leave disabled in production
   unless you need Kafka-protocol discovery.
 
-See [PHASE23_SPEC.md](./PHASE23_SPEC.md), [PHASE24_SPEC.md](./PHASE24_SPEC.md),
-and [PHASE25_SPEC.md](./PHASE25_SPEC.md).
+See [PHASE23_SPEC.md](./PHASE23_SPEC.md) … [PHASE26_SPEC.md](./PHASE26_SPEC.md).
 
 ## TLS (Phase 7 listen + Phase 9 verification / inter-broker)
 

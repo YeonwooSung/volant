@@ -13,11 +13,13 @@ use crate::acl::{AclOperation, ResourceType, CLUSTER_RESOURCE};
 use crate::broker::Broker;
 
 use super::codec::{
-    decode_records, decode_request_header, encode_message_set, encode_record_batch,
-    encode_response_frame, get_bytes, get_nullable_string, get_string, put_bytes,
-    put_response_header, put_string, try_decode_request,
+    decode_consumer_subscription, decode_records, decode_request_header, encode_consumer_assignment,
+    encode_message_set, encode_record_batch, encode_response_frame, get_bytes, get_nullable_string,
+    get_string, put_bytes, put_response_header, put_string, try_decode_request,
 };
-use super::{ApiKey, KafkaErrorCode, KAFKA_ANONYMOUS_PRINCIPAL, SUPPORTED_APIS};
+use super::{
+    map_group_error, ApiKey, KafkaErrorCode, KAFKA_ANONYMOUS_PRINCIPAL, SUPPORTED_APIS,
+};
 
 /// Accept Kafka-protocol connections until the listener fails fatally.
 pub async fn serve_kafka_listener(listener: TcpListener, broker: Arc<Broker>) -> Result<()> {
@@ -99,6 +101,27 @@ fn dispatch_kafka(broker: &Broker, body: bytes::Bytes) -> BytesMut {
         }
         Some(ApiKey::DeleteTopics) if (0..=1).contains(&hdr.api_version) => {
             encode_delete_topics(broker, &mut src, &mut out, hdr.api_version);
+        }
+        Some(ApiKey::FindCoordinator) if hdr.api_version == 0 => {
+            encode_find_coordinator(broker, &mut src, &mut out);
+        }
+        Some(ApiKey::JoinGroup) if (0..=1).contains(&hdr.api_version) => {
+            encode_join_group(broker, &mut src, &mut out, hdr.api_version);
+        }
+        Some(ApiKey::SyncGroup) if hdr.api_version == 0 => {
+            encode_sync_group(broker, &mut src, &mut out);
+        }
+        Some(ApiKey::Heartbeat) if hdr.api_version == 0 => {
+            encode_heartbeat(broker, &mut src, &mut out);
+        }
+        Some(ApiKey::LeaveGroup) if hdr.api_version == 0 => {
+            encode_leave_group(broker, &mut src, &mut out);
+        }
+        Some(ApiKey::OffsetCommit) if (0..=2).contains(&hdr.api_version) => {
+            encode_offset_commit(broker, &mut src, &mut out, hdr.api_version);
+        }
+        Some(ApiKey::OffsetFetch) if (0..=1).contains(&hdr.api_version) => {
+            encode_offset_fetch(broker, &mut src, &mut out);
         }
         Some(_) => {
             // Supported API but wrong version — use a generic error body when possible.
@@ -843,5 +866,523 @@ fn encode_delete_topics(broker: &Broker, src: &mut impl Buf, out: &mut BytesMut,
     }
     if version >= 1 {
         out.put_i32(0);
+    }
+}
+
+fn encode_find_coordinator(broker: &Broker, src: &mut impl Buf, out: &mut BytesMut) {
+    // FindCoordinator v0: group_id string
+    let _group_id = match get_string(src) {
+        Ok(g) => g,
+        Err(_) => {
+            out.put_i16(KafkaErrorCode::InvalidRequest.as_i16());
+            out.put_i32(-1);
+            put_string(out, "");
+            out.put_i32(-1);
+            return;
+        }
+    };
+    let snap = broker.metadata(None);
+    let (id, host, port) = snap
+        .brokers
+        .first()
+        .cloned()
+        .unwrap_or((snap.node_id, snap.host.clone(), snap.port));
+    out.put_i16(KafkaErrorCode::None.as_i16());
+    out.put_i32(id as i32);
+    put_string(out, &host);
+    out.put_i32(i32::from(port));
+}
+
+fn encode_join_group(broker: &Broker, src: &mut impl Buf, out: &mut BytesMut, version: i16) {
+    // JoinGroup v0: group_id, session_timeout, member_id, protocol_type, [protocols]
+    // JoinGroup v1: + rebalance_timeout after session_timeout
+    let group_id = match get_string(src) {
+        Ok(g) => g,
+        Err(_) => {
+            out.put_i16(KafkaErrorCode::InvalidRequest.as_i16());
+            return;
+        }
+    };
+    if src.remaining() < 4 {
+        out.put_i16(KafkaErrorCode::InvalidRequest.as_i16());
+        return;
+    }
+    let session_timeout = src.get_i32().max(0) as u32;
+    if version >= 1 {
+        if src.remaining() < 4 {
+            out.put_i16(KafkaErrorCode::InvalidRequest.as_i16());
+            return;
+        }
+        let _rebalance_timeout = src.get_i32();
+    }
+    let member_id = match get_string(src) {
+        Ok(m) => m,
+        Err(_) => {
+            out.put_i16(KafkaErrorCode::InvalidRequest.as_i16());
+            return;
+        }
+    };
+    let _protocol_type = match get_string(src) {
+        Ok(p) => p,
+        Err(_) => {
+            out.put_i16(KafkaErrorCode::InvalidRequest.as_i16());
+            return;
+        }
+    };
+
+    if broker.acls().is_enabled()
+        && !broker.acls().authorize(
+            Some(KAFKA_ANONYMOUS_PRINCIPAL),
+            ResourceType::Group,
+            &group_id,
+            AclOperation::Read,
+        )
+    {
+        out.put_i16(KafkaErrorCode::GroupAuthorizationFailed.as_i16());
+        out.put_i32(0);
+        put_string(out, "");
+        put_string(out, "");
+        put_string(out, "");
+        out.put_i32(0);
+        return;
+    }
+
+    if src.remaining() < 4 {
+        out.put_i16(KafkaErrorCode::InvalidRequest.as_i16());
+        return;
+    }
+    let protocol_count = src.get_i32();
+    let mut selected_protocol = String::from("range");
+    let mut topics: Vec<String> = Vec::new();
+    for i in 0..protocol_count.max(0) {
+        let name = match get_string(src) {
+            Ok(n) => n,
+            Err(_) => break,
+        };
+        let meta = match get_bytes(src) {
+            Ok(b) => b.unwrap_or_default(),
+            Err(_) => break,
+        };
+        if i == 0 {
+            selected_protocol = name;
+            if let Ok(t) = decode_consumer_subscription(&meta) {
+                topics = t;
+            }
+        }
+    }
+
+    let result = match broker.groups().join(
+        &group_id,
+        &member_id,
+        session_timeout,
+        topics,
+        "",
+        |t| broker.partition_count_opt(t),
+    ) {
+        Ok(r) => r,
+        Err(_) => {
+            out.put_i16(KafkaErrorCode::Unknown.as_i16());
+            out.put_i32(0);
+            put_string(out, &selected_protocol);
+            put_string(out, "");
+            put_string(out, "");
+            out.put_i32(0);
+            return;
+        }
+    };
+
+    if result.error_code != 0 {
+        out.put_i16(map_group_error(result.error_code));
+        out.put_i32(result.generation as i32);
+        put_string(out, &selected_protocol);
+        put_string(out, "");
+        put_string(out, &result.member_id);
+        out.put_i32(0);
+        return;
+    }
+
+    // Leader = lexicographically smallest live member id.
+    let members_snap = broker
+        .groups()
+        .describe_group(&group_id)
+        .map(|d| d.members)
+        .unwrap_or_default();
+    let leader = members_snap
+        .iter()
+        .map(|m| m.member_id.as_str())
+        .min()
+        .unwrap_or(result.member_id.as_str())
+        .to_owned();
+
+    out.put_i16(KafkaErrorCode::None.as_i16());
+    out.put_i32(result.generation as i32);
+    put_string(out, &selected_protocol);
+    put_string(out, &leader);
+    put_string(out, &result.member_id);
+    if result.member_id == leader {
+        out.put_i32(members_snap.len() as i32);
+        for m in &members_snap {
+            put_string(out, &m.member_id);
+            put_bytes(out, Some(&[]));
+        }
+    } else {
+        out.put_i32(0);
+    }
+}
+
+fn encode_sync_group(broker: &Broker, src: &mut impl Buf, out: &mut BytesMut) {
+    // SyncGroup v0: group_id, generation, member_id, [member_id assignment_bytes]
+    let group_id = match get_string(src) {
+        Ok(g) => g,
+        Err(_) => {
+            out.put_i16(KafkaErrorCode::InvalidRequest.as_i16());
+            put_bytes(out, Some(&[]));
+            return;
+        }
+    };
+    if src.remaining() < 4 {
+        out.put_i16(KafkaErrorCode::InvalidRequest.as_i16());
+        put_bytes(out, Some(&[]));
+        return;
+    }
+    let generation = src.get_i32() as u32;
+    let member_id = match get_string(src) {
+        Ok(m) => m,
+        Err(_) => {
+            out.put_i16(KafkaErrorCode::InvalidRequest.as_i16());
+            put_bytes(out, Some(&[]));
+            return;
+        }
+    };
+    // Consume leader assignments (ignored — coordinator already assigned).
+    if src.remaining() >= 4 {
+        let n = src.get_i32();
+        for _ in 0..n.max(0) {
+            let _ = get_string(src);
+            let _ = get_bytes(src);
+        }
+    }
+
+    if broker.acls().is_enabled()
+        && !broker.acls().authorize(
+            Some(KAFKA_ANONYMOUS_PRINCIPAL),
+            ResourceType::Group,
+            &group_id,
+            AclOperation::Read,
+        )
+    {
+        out.put_i16(KafkaErrorCode::GroupAuthorizationFailed.as_i16());
+        put_bytes(out, Some(&[]));
+        return;
+    }
+
+    // Generation check via heartbeat (updates last_heartbeat too).
+    let hb = broker.groups().heartbeat(&group_id, &member_id, generation);
+    if hb.error_code != 0 {
+        out.put_i16(map_group_error(hb.error_code));
+        put_bytes(out, Some(&[]));
+        return;
+    }
+
+    let assignment = broker
+        .groups()
+        .assignment(&group_id, &member_id)
+        .unwrap_or_default();
+    let bytes = encode_consumer_assignment(&assignment);
+    out.put_i16(KafkaErrorCode::None.as_i16());
+    put_bytes(out, Some(&bytes));
+}
+
+fn encode_heartbeat(broker: &Broker, src: &mut impl Buf, out: &mut BytesMut) {
+    let group_id = match get_string(src) {
+        Ok(g) => g,
+        Err(_) => {
+            out.put_i16(KafkaErrorCode::InvalidRequest.as_i16());
+            return;
+        }
+    };
+    if src.remaining() < 4 {
+        out.put_i16(KafkaErrorCode::InvalidRequest.as_i16());
+        return;
+    }
+    let generation = src.get_i32() as u32;
+    let member_id = match get_string(src) {
+        Ok(m) => m,
+        Err(_) => {
+            out.put_i16(KafkaErrorCode::InvalidRequest.as_i16());
+            return;
+        }
+    };
+
+    if broker.acls().is_enabled()
+        && !broker.acls().authorize(
+            Some(KAFKA_ANONYMOUS_PRINCIPAL),
+            ResourceType::Group,
+            &group_id,
+            AclOperation::Read,
+        )
+    {
+        out.put_i16(KafkaErrorCode::GroupAuthorizationFailed.as_i16());
+        return;
+    }
+
+    let result = broker.groups().heartbeat(&group_id, &member_id, generation);
+    out.put_i16(map_group_error(result.error_code));
+}
+
+fn encode_leave_group(broker: &Broker, src: &mut impl Buf, out: &mut BytesMut) {
+    let group_id = match get_string(src) {
+        Ok(g) => g,
+        Err(_) => {
+            out.put_i16(KafkaErrorCode::InvalidRequest.as_i16());
+            return;
+        }
+    };
+    let member_id = match get_string(src) {
+        Ok(m) => m,
+        Err(_) => {
+            out.put_i16(KafkaErrorCode::InvalidRequest.as_i16());
+            return;
+        }
+    };
+
+    if broker.acls().is_enabled()
+        && !broker.acls().authorize(
+            Some(KAFKA_ANONYMOUS_PRINCIPAL),
+            ResourceType::Group,
+            &group_id,
+            AclOperation::Read,
+        )
+    {
+        out.put_i16(KafkaErrorCode::GroupAuthorizationFailed.as_i16());
+        return;
+    }
+
+    let result = broker
+        .groups()
+        .leave(&group_id, &member_id, |t| broker.partition_count_opt(t));
+    out.put_i16(map_group_error(result.error_code));
+}
+
+fn encode_offset_commit(broker: &Broker, src: &mut impl Buf, out: &mut BytesMut, version: i16) {
+    // v0: group_id, [topic [partition, offset, metadata]]
+    // v1: group_id, generation, member_id, [topic [partition, offset, timestamp, metadata]]
+    // v2: group_id, generation, member_id, retention_time, [topic [partition, offset, metadata]]
+    let group_id = match get_string(src) {
+        Ok(g) => g,
+        Err(_) => {
+            out.put_i32(0);
+            return;
+        }
+    };
+
+    let mut generation: u32 = 0;
+    let mut member_id = String::new();
+    if version >= 1 {
+        if src.remaining() < 4 {
+            out.put_i32(0);
+            return;
+        }
+        generation = src.get_i32() as u32;
+        member_id = match get_string(src) {
+            Ok(m) => m,
+            Err(_) => {
+                out.put_i32(0);
+                return;
+            }
+        };
+    }
+    if version >= 2 {
+        if src.remaining() < 8 {
+            out.put_i32(0);
+            return;
+        }
+        let _retention = src.get_i64();
+    }
+
+    let auth_denied = broker.acls().is_enabled()
+        && !broker.acls().authorize(
+            Some(KAFKA_ANONYMOUS_PRINCIPAL),
+            ResourceType::Group,
+            &group_id,
+            AclOperation::Read,
+        );
+
+    if src.remaining() < 4 {
+        out.put_i32(0);
+        return;
+    }
+    let topic_count = src.get_i32();
+
+    struct TopicReq {
+        topic: String,
+        partitions: Vec<i32>,
+    }
+    let mut parsed: Vec<TopicReq> = Vec::new();
+    let mut entries: Vec<(String, u32, u64, String)> = Vec::new();
+
+    for _ in 0..topic_count.max(0) {
+        let topic = match get_string(src) {
+            Ok(t) => t,
+            Err(_) => break,
+        };
+        if src.remaining() < 4 {
+            break;
+        }
+        let part_count = src.get_i32();
+        let mut partitions = Vec::new();
+        for _ in 0..part_count.max(0) {
+            if src.remaining() < 4 + 8 {
+                break;
+            }
+            let partition = src.get_i32();
+            let offset = src.get_i64().max(0) as u64;
+            if version == 1 {
+                if src.remaining() < 8 {
+                    break;
+                }
+                let _ts = src.get_i64();
+            }
+            let metadata = match get_string(src) {
+                Ok(m) => m,
+                Err(_) => String::new(),
+            };
+            entries.push((topic.clone(), partition as u32, offset, metadata));
+            partitions.push(partition);
+        }
+        parsed.push(TopicReq { topic, partitions });
+    }
+
+    let kerr = if auth_denied {
+        KafkaErrorCode::GroupAuthorizationFailed.as_i16()
+    } else {
+        match broker
+            .groups()
+            .commit_offsets(&group_id, &member_id, generation, &entries)
+        {
+            Ok(r) => map_group_error(r.error_code),
+            Err(_) => KafkaErrorCode::Unknown.as_i16(),
+        }
+    };
+
+    out.put_i32(parsed.len() as i32);
+    for t in parsed {
+        put_string(out, &t.topic);
+        out.put_i32(t.partitions.len() as i32);
+        for p in t.partitions {
+            out.put_i32(p);
+            out.put_i16(kerr);
+        }
+    }
+}
+
+fn encode_offset_fetch(broker: &Broker, src: &mut impl Buf, out: &mut BytesMut) {
+    // OffsetFetch v0–1: group_id, [topic [partitions]]
+    // Empty topics array means all committed offsets for the group (Kafka v0–1
+    // actually uses null topics for all; we treat count 0 as all).
+    let group_id = match get_string(src) {
+        Ok(g) => g,
+        Err(_) => {
+            out.put_i32(0);
+            return;
+        }
+    };
+
+    if broker.acls().is_enabled()
+        && !broker.acls().authorize(
+            Some(KAFKA_ANONYMOUS_PRINCIPAL),
+            ResourceType::Group,
+            &group_id,
+            AclOperation::Read,
+        )
+    {
+        out.put_i32(0);
+        return;
+    }
+
+    if src.remaining() < 4 {
+        out.put_i32(0);
+        return;
+    }
+    let topic_count = src.get_i32();
+
+    // Build query list.
+    let mut query: Vec<(String, u32)> = Vec::new();
+    let mut requested: Vec<(String, Vec<i32>)> = Vec::new();
+    if topic_count > 0 {
+        for _ in 0..topic_count {
+            let topic = match get_string(src) {
+                Ok(t) => t,
+                Err(_) => break,
+            };
+            if src.remaining() < 4 {
+                break;
+            }
+            let pc = src.get_i32();
+            let mut parts = Vec::new();
+            for _ in 0..pc.max(0) {
+                if src.remaining() < 4 {
+                    break;
+                }
+                let p = src.get_i32();
+                parts.push(p);
+                query.push((topic.clone(), p as u32));
+            }
+            requested.push((topic, parts));
+        }
+    }
+
+    let fetched = match broker.groups().fetch_offsets(&group_id, &query) {
+        Ok(r) => r.entries,
+        Err(_) => Vec::new(),
+    };
+
+    if topic_count <= 0 {
+        // All offsets: group by topic.
+        use std::collections::BTreeMap;
+        let mut by_topic: BTreeMap<String, Vec<(u32, i64, String)>> = BTreeMap::new();
+        for e in fetched {
+            let off = if e.offset == u64::MAX {
+                -1i64
+            } else {
+                e.offset as i64
+            };
+            by_topic
+                .entry(e.topic)
+                .or_default()
+                .push((e.partition, off, e.metadata));
+        }
+        out.put_i32(by_topic.len() as i32);
+        for (topic, parts) in by_topic {
+            put_string(out, &topic);
+            out.put_i32(parts.len() as i32);
+            for (p, off, meta) in parts {
+                out.put_i32(p as i32);
+                out.put_i64(off);
+                put_string(out, &meta);
+                out.put_i16(KafkaErrorCode::None.as_i16());
+            }
+        }
+        return;
+    }
+
+    out.put_i32(requested.len() as i32);
+    for (topic, parts) in requested {
+        put_string(out, &topic);
+        out.put_i32(parts.len() as i32);
+        for p in parts {
+            let entry = fetched
+                .iter()
+                .find(|e| e.topic == topic && e.partition == p as u32);
+            let (off, meta) = match entry {
+                Some(e) if e.offset == u64::MAX => (-1i64, e.metadata.clone()),
+                Some(e) => (e.offset as i64, e.metadata.clone()),
+                None => (-1i64, String::new()),
+            };
+            out.put_i32(p);
+            out.put_i64(off);
+            put_string(out, &meta);
+            out.put_i16(KafkaErrorCode::None.as_i16());
+        }
     }
 }

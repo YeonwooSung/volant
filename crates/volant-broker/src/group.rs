@@ -511,8 +511,7 @@ impl GroupCoordinator {
         groups.retain(|_, g| !g.members.is_empty());
     }
 
-    /// Peek assignment for tests.
-    #[cfg(test)]
+    /// Peek assignment for a live member (Kafka SyncGroup + tests).
     pub fn assignment(&self, group_id: &str, member_id: &str) -> Option<Vec<(String, u32)>> {
         let groups = self.groups.lock();
         groups

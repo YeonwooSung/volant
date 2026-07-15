@@ -686,8 +686,32 @@ Binding: **[docs/PHASE25_SPEC.md](./docs/PHASE25_SPEC.md)**.
 Kafka wire; no timestamp-indexed ListOffsets; replica assignment from CreateTopics
 ignored; no Kafka consumer groups or SASL.
 
-**Still deferred:** multi-lang clients, Kafka consumer groups / offset commit,
-Kafka SASL, SCRAM-SHA-512, cargo-fuzz corpus CI.
+**Still deferred (at ship):** multi-lang clients, Kafka consumer groups / offset
+commit, Kafka SASL, SCRAM-SHA-512, cargo-fuzz corpus CI.
+
+---
+
+### Phase 26 — Kafka consumer groups on the shim ✅
+
+**Goal:** Map Kafka FindCoordinator / JoinGroup / SyncGroup / Heartbeat /
+LeaveGroup / OffsetCommit / OffsetFetch onto Volant's existing group coordinator
+so simple Kafka consumers can subscribe and commit offsets on `--kafka-listen`.
+
+Binding: **[docs/PHASE26_SPEC.md](./docs/PHASE26_SPEC.md)**.
+
+- [x] FindCoordinator (0) → advertised broker host/port
+- [x] JoinGroup (0–1) + SyncGroup (0) with consumer protocol subscription/assignment
+- [x] Heartbeat / LeaveGroup (0)
+- [x] OffsetCommit (0–2) / OffsetFetch (0–1) via durable `__consumer_offsets`
+- [x] Coordinator-driven assignment (leader SyncGroup payload ignored)
+- [x] Integration tests (`phase26_kafka_groups`)
+
+**Honest limitations:** not a full Kafka assignor (eager coordinator assignment);
+no Describe/List/DeleteGroups on Kafka wire; FindCoordinator may return native
+`--listen` port; no Kafka SASL / static `group.instance.id` wire fields.
+
+**Still deferred:** multi-lang clients, Kafka SASL, SCRAM-SHA-512, cargo-fuzz
+corpus CI, full Kafka admin (DescribeConfigs / CreatePartitions on wire).
 
 ---
 

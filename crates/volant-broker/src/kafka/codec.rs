@@ -509,6 +509,101 @@ fn write_varint(dst: &mut BytesMut, n: i32) {
     }
 }
 
+/// Decode Kafka consumer protocol subscription metadata → topic names.
+///
+/// Layout: `version:i16 | topics:[string] | user_data:bytes`.
+pub fn decode_consumer_subscription(data: &[u8]) -> Result<Vec<String>> {
+    if data.is_empty() {
+        return Ok(Vec::new());
+    }
+    let mut src = data;
+    if src.remaining() < 2 {
+        return Err(Error::Protocol("truncated consumer subscription".into()));
+    }
+    let _version = src.get_i16();
+    if src.remaining() < 4 {
+        return Err(Error::Protocol("truncated subscription topics".into()));
+    }
+    let n = src.get_i32();
+    if n < 0 {
+        return Err(Error::Protocol("negative subscription topic count".into()));
+    }
+    let mut topics = Vec::with_capacity(n as usize);
+    for _ in 0..n {
+        topics.push(get_string(&mut src)?);
+    }
+    // user_data optional / ignored
+    let _ = get_bytes(&mut src);
+    Ok(topics)
+}
+
+/// Encode Kafka consumer protocol member assignment bytes.
+///
+/// Layout: `version:i16 | [topic [partition:i32]] | user_data:bytes`.
+pub fn encode_consumer_assignment(assignment: &[(String, u32)]) -> BytesMut {
+    use std::collections::BTreeMap;
+    let mut by_topic: BTreeMap<&str, Vec<i32>> = BTreeMap::new();
+    for (topic, part) in assignment {
+        by_topic.entry(topic.as_str()).or_default().push(*part as i32);
+    }
+    let mut out = BytesMut::new();
+    out.put_i16(0); // version
+    out.put_i32(by_topic.len() as i32);
+    for (topic, parts) in by_topic {
+        put_string(&mut out, topic);
+        out.put_i32(parts.len() as i32);
+        for p in parts {
+            out.put_i32(p);
+        }
+    }
+    put_bytes(&mut out, Some(&[])); // empty user_data
+    out
+}
+
+/// Decode Kafka consumer protocol member assignment (tests / tooling).
+pub fn decode_consumer_assignment(data: &[u8]) -> Result<Vec<(String, u32)>> {
+    if data.is_empty() {
+        return Ok(Vec::new());
+    }
+    let mut src = data;
+    if src.remaining() < 2 + 4 {
+        return Err(Error::Protocol("truncated member assignment".into()));
+    }
+    let _version = src.get_i16();
+    let n = src.get_i32();
+    if n < 0 {
+        return Err(Error::Protocol("negative assignment topic count".into()));
+    }
+    let mut out = Vec::new();
+    for _ in 0..n {
+        let topic = get_string(&mut src)?;
+        if src.remaining() < 4 {
+            return Err(Error::Protocol("truncated assignment partitions".into()));
+        }
+        let pc = src.get_i32();
+        for _ in 0..pc.max(0) {
+            if src.remaining() < 4 {
+                return Err(Error::Protocol("truncated assignment partition id".into()));
+            }
+            let p = src.get_i32();
+            out.push((topic.clone(), p as u32));
+        }
+    }
+    Ok(out)
+}
+
+/// Encode Kafka consumer subscription metadata (tests / tooling).
+pub fn encode_consumer_subscription(topics: &[&str]) -> BytesMut {
+    let mut out = BytesMut::new();
+    out.put_i16(0); // version
+    out.put_i32(topics.len() as i32);
+    for t in topics {
+        put_string(&mut out, t);
+    }
+    put_bytes(&mut out, Some(&[]));
+    out
+}
+
 /// Build a size-prefixed Kafka request for tests / tooling.
 pub fn encode_request(
     api_key: i16,
@@ -628,6 +723,23 @@ mod tests {
         assert!(matches!(set[16] as i8, 0 | 1));
         let decoded = decode_records(&set).unwrap();
         assert_eq!(decoded[0].value.as_ref(), b"b");
+    }
+
+    #[test]
+    fn consumer_subscription_assignment_roundtrip() {
+        let sub = encode_consumer_subscription(&["orders", "payments"]);
+        let topics = decode_consumer_subscription(&sub).unwrap();
+        assert_eq!(topics, vec!["orders".to_string(), "payments".to_string()]);
+
+        let asg = encode_consumer_assignment(&[
+            ("orders".into(), 0),
+            ("orders".into(), 1),
+            ("payments".into(), 0),
+        ]);
+        let decoded = decode_consumer_assignment(&asg).unwrap();
+        assert_eq!(decoded.len(), 3);
+        assert!(decoded.contains(&("orders".into(), 0)));
+        assert!(decoded.contains(&("payments".into(), 0)));
     }
 
     #[test]
