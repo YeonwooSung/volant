@@ -1,9 +1,8 @@
-//! Kafka wire protocol shim (Phases 23–26).
+//! Kafka wire protocol shim (Phases 23–27).
 //!
-//! Classic (non-flexible) framing only. Supported APIs: Produce, Fetch,
-//! Metadata, ListOffsets, OffsetCommit/Fetch, consumer groups (Join/Sync/
-//! Heartbeat/Leave), FindCoordinator, ApiVersions, CreateTopics, DeleteTopics.
-//! See `docs/PHASE23_SPEC.md` … `docs/PHASE26_SPEC.md`.
+//! Classic (non-flexible) framing. Produce/Fetch, admin, consumer groups,
+//! List/Describe/DeleteGroups, CreatePartitions, Describe/AlterConfigs.
+//! See `docs/PHASE23_SPEC.md` … `docs/PHASE27_SPEC.md`.
 
 /// Kafka wire primitives, MessageSet (magic 0/1), and RecordBatch (magic 2).
 pub mod codec;
@@ -66,6 +65,12 @@ pub enum KafkaErrorCode {
     RebalanceInProgress = 27,
     /// Group authorization failed.
     GroupAuthorizationFailed = 30,
+    /// Group still has active members (DeleteGroups).
+    NonEmptyGroup = 68,
+    /// Group id not found (DeleteGroups).
+    GroupIdNotFound = 69,
+    /// Invalid config.
+    InvalidConfig = 40,
 }
 
 /// Map Volant group error codes to Kafka wire error codes.
@@ -111,12 +116,24 @@ pub enum ApiKey {
     LeaveGroup = 13,
     /// SyncGroup.
     SyncGroup = 14,
+    /// DescribeGroups.
+    DescribeGroups = 15,
+    /// ListGroups.
+    ListGroups = 16,
     /// ApiVersions.
     ApiVersions = 18,
     /// CreateTopics.
     CreateTopics = 19,
     /// DeleteTopics.
     DeleteTopics = 20,
+    /// DescribeConfigs.
+    DescribeConfigs = 32,
+    /// AlterConfigs.
+    AlterConfigs = 33,
+    /// CreatePartitions.
+    CreatePartitions = 37,
+    /// DeleteGroups.
+    DeleteGroups = 42,
 }
 
 impl ApiKey {
@@ -133,9 +150,15 @@ impl ApiKey {
             12 => Some(Self::Heartbeat),
             13 => Some(Self::LeaveGroup),
             14 => Some(Self::SyncGroup),
+            15 => Some(Self::DescribeGroups),
+            16 => Some(Self::ListGroups),
             18 => Some(Self::ApiVersions),
             19 => Some(Self::CreateTopics),
             20 => Some(Self::DeleteTopics),
+            32 => Some(Self::DescribeConfigs),
+            33 => Some(Self::AlterConfigs),
+            37 => Some(Self::CreatePartitions),
+            42 => Some(Self::DeleteGroups),
             _ => None,
         }
     }
@@ -154,7 +177,13 @@ pub const SUPPORTED_APIS: &[(ApiKey, i16, i16)] = &[
     (ApiKey::Heartbeat, 0, 0),
     (ApiKey::LeaveGroup, 0, 0),
     (ApiKey::SyncGroup, 0, 0),
+    (ApiKey::DescribeGroups, 0, 0),
+    (ApiKey::ListGroups, 0, 0),
     (ApiKey::ApiVersions, 0, 0),
     (ApiKey::CreateTopics, 0, 1),
     (ApiKey::DeleteTopics, 0, 1),
+    (ApiKey::DescribeConfigs, 0, 0),
+    (ApiKey::AlterConfigs, 0, 0),
+    (ApiKey::CreatePartitions, 0, 0),
+    (ApiKey::DeleteGroups, 0, 0),
 ];

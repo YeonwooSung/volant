@@ -140,19 +140,29 @@ Supported APIs:
 | Heartbeat / LeaveGroup | 0 | session liveness |
 | OffsetCommit | 0–2 | durable `__consumer_offsets` |
 | OffsetFetch | 0–1 | committed offsets (`-1` if unknown) |
+| ListGroups | 0 | active + offset-backed groups |
+| DescribeGroups | 0 | state + members |
+| DeleteGroups | 0 | empty groups only (`NON_EMPTY_GROUP` if live) |
+| CreatePartitions | 0 | total partition count |
+| DescribeConfigs | 0 | TOPIC resources; Volant keys |
+| AlterConfigs | 0 | TOPIC resources; Volant keys |
+
+Topic config keys: `retention.ms`, `retention.bytes`, `segment.bytes`,
+`cleanup.policy` (`delete`|`compact`).
 
 Limitations:
 
 - **No** compression on RecordBatch (attributes compression bits must be 0).
 - **No** Kafka SASL or flexible versions.
 - Consumer assignment is **coordinator-driven** (not Kafka leader assignor).
-- CreateTopics does not honour Kafka replica assignment (Volant placement wins).
+- CreateTopics / CreatePartitions ignore Kafka replica assignment arrays.
+- DescribeConfigs is TOPIC-only (no broker configs).
 - FindCoordinator host/port is the Volant advertised address (often `--listen`).
 - When ACLs are enabled, the shim principal is `kafka-anonymous`.
 - Prefer binding to localhost / private networks; leave disabled in production
   unless you need Kafka-protocol discovery.
 
-See [PHASE23_SPEC.md](./PHASE23_SPEC.md) … [PHASE26_SPEC.md](./PHASE26_SPEC.md).
+See [PHASE23_SPEC.md](./PHASE23_SPEC.md) … [PHASE27_SPEC.md](./PHASE27_SPEC.md).
 
 ## TLS (Phase 7 listen + Phase 9 verification / inter-broker)
 

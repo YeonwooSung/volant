@@ -190,8 +190,11 @@ format; Fetch v4 returns RecordBatch; Produce 0–3 / Fetch 0–4 advertised.
 **Phase 26:** Kafka consumer groups on the shim — FindCoordinator, Join/Sync/
 Heartbeat/Leave, OffsetCommit/Fetch mapped to Volant's group coordinator.
 
+**Phase 27:** Kafka ops surface — List/Describe/DeleteGroups, CreatePartitions,
+DescribeConfigs / AlterConfigs (topic keys).
+
 **Still deferred:** multi-language clients, Kafka SASL, SCRAM-SHA-512,
-chaos-mesh / cargo-fuzz corpus CI.
+chaos-mesh / cargo-fuzz corpus CI, RecordBatch compression.
 
 ### Networked client (library)
 

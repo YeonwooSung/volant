@@ -710,8 +710,31 @@ Binding: **[docs/PHASE26_SPEC.md](./docs/PHASE26_SPEC.md)**.
 no Describe/List/DeleteGroups on Kafka wire; FindCoordinator may return native
 `--listen` port; no Kafka SASL / static `group.instance.id` wire fields.
 
+**Still deferred (at ship):** multi-lang clients, Kafka ops admin APIs,
+Kafka SASL, SCRAM-SHA-512, cargo-fuzz corpus CI.
+
+---
+
+### Phase 27 — Kafka ops surface (groups + configs + partitions) ✅
+
+**Goal:** Admin/ops APIs on `--kafka-listen` for group visibility and topic
+lifecycle beyond create/delete: list/describe/delete groups, grow partitions,
+read/write topic configs.
+
+Binding: **[docs/PHASE27_SPEC.md](./docs/PHASE27_SPEC.md)**.
+
+- [x] ListGroups (16) / DescribeGroups (15) / DeleteGroups (42)
+- [x] CreatePartitions (37) → `Broker::create_partitions` (total count)
+- [x] DescribeConfigs (32) / AlterConfigs (33) for TOPIC resources
+- [x] Volant keys: `retention.ms`, `retention.bytes`, `segment.bytes`, `cleanup.policy`
+- [x] Integration tests (`phase27_kafka_ops`)
+
+**Honest limitations:** TOPIC configs only (no broker resources); no config
+synonyms/docs; DescribeGroups member metadata is best-effort; CreatePartitions
+ignores replica assignment; no IncrementalAlterConfigs; no Kafka SASL.
+
 **Still deferred:** multi-lang clients, Kafka SASL, SCRAM-SHA-512, cargo-fuzz
-corpus CI, full Kafka admin (DescribeConfigs / CreatePartitions on wire).
+corpus CI, RecordBatch compression.
 
 ---
 

@@ -15,7 +15,7 @@ use crate::broker::Broker;
 use super::codec::{
     decode_consumer_subscription, decode_records, decode_request_header, encode_consumer_assignment,
     encode_message_set, encode_record_batch, encode_response_frame, get_bytes, get_nullable_string,
-    get_string, put_bytes, put_response_header, put_string, try_decode_request,
+    get_string, put_bytes, put_nullable_string, put_response_header, put_string, try_decode_request,
 };
 use super::{
     map_group_error, ApiKey, KafkaErrorCode, KAFKA_ANONYMOUS_PRINCIPAL, SUPPORTED_APIS,
@@ -122,6 +122,24 @@ fn dispatch_kafka(broker: &Broker, body: bytes::Bytes) -> BytesMut {
         }
         Some(ApiKey::OffsetFetch) if (0..=1).contains(&hdr.api_version) => {
             encode_offset_fetch(broker, &mut src, &mut out);
+        }
+        Some(ApiKey::DescribeGroups) if hdr.api_version == 0 => {
+            encode_describe_groups(broker, &mut src, &mut out);
+        }
+        Some(ApiKey::ListGroups) if hdr.api_version == 0 => {
+            encode_list_groups(broker, &mut out);
+        }
+        Some(ApiKey::DeleteGroups) if hdr.api_version == 0 => {
+            encode_delete_groups(broker, &mut src, &mut out);
+        }
+        Some(ApiKey::CreatePartitions) if hdr.api_version == 0 => {
+            encode_create_partitions(broker, &mut src, &mut out);
+        }
+        Some(ApiKey::DescribeConfigs) if hdr.api_version == 0 => {
+            encode_describe_configs(broker, &mut src, &mut out);
+        }
+        Some(ApiKey::AlterConfigs) if hdr.api_version == 0 => {
+            encode_alter_configs(broker, &mut src, &mut out);
         }
         Some(_) => {
             // Supported API but wrong version — use a generic error body when possible.
@@ -1385,4 +1403,460 @@ fn encode_offset_fetch(broker: &Broker, src: &mut impl Buf, out: &mut BytesMut) 
             out.put_i16(KafkaErrorCode::None.as_i16());
         }
     }
+}
+
+fn encode_list_groups(broker: &Broker, out: &mut BytesMut) {
+    if broker.acls().is_enabled()
+        && !broker.acls().authorize(
+            Some(KAFKA_ANONYMOUS_PRINCIPAL),
+            ResourceType::Cluster,
+            CLUSTER_RESOURCE,
+            AclOperation::Describe,
+        )
+    {
+        out.put_i16(KafkaErrorCode::ClusterAuthorizationFailed.as_i16());
+        out.put_i32(0);
+        return;
+    }
+    let groups = broker.groups().list_groups();
+    out.put_i16(KafkaErrorCode::None.as_i16());
+    out.put_i32(groups.len() as i32);
+    for g in groups {
+        put_string(out, &g.group_id);
+        put_string(out, "consumer"); // protocol_type
+    }
+}
+
+fn encode_describe_groups(broker: &Broker, src: &mut impl Buf, out: &mut BytesMut) {
+    // DescribeGroups v0: [group_id]
+    if src.remaining() < 4 {
+        out.put_i32(0);
+        return;
+    }
+    let n = src.get_i32();
+    let mut ids = Vec::new();
+    for _ in 0..n.max(0) {
+        match get_string(src) {
+            Ok(g) => ids.push(g),
+            Err(_) => break,
+        }
+    }
+    out.put_i32(ids.len() as i32);
+    for group_id in ids {
+        if broker.acls().is_enabled()
+            && !broker.acls().authorize(
+                Some(KAFKA_ANONYMOUS_PRINCIPAL),
+                ResourceType::Group,
+                &group_id,
+                AclOperation::Describe,
+            )
+        {
+            out.put_i16(KafkaErrorCode::GroupAuthorizationFailed.as_i16());
+            put_string(out, &group_id);
+            put_string(out, ""); // state
+            put_string(out, ""); // protocol_type
+            put_string(out, ""); // protocol
+            out.put_i32(0); // members
+            continue;
+        }
+
+        match broker.groups().describe_group(&group_id) {
+            Some(desc) => {
+                out.put_i16(KafkaErrorCode::None.as_i16());
+                put_string(out, &group_id);
+                put_string(out, "Stable");
+                put_string(out, "consumer");
+                put_string(out, "range");
+                out.put_i32(desc.members.len() as i32);
+                for m in &desc.members {
+                    put_string(out, &m.member_id);
+                    put_string(out, "volant-kafka"); // client_id
+                    put_string(out, "/"); // client_host
+                    // member metadata: consumer subscription of topics
+                    let topics: Vec<&str> = m.topics.iter().map(|s| s.as_str()).collect();
+                    let meta = super::codec::encode_consumer_subscription(&topics);
+                    put_bytes(out, Some(&meta));
+                    let asg = encode_consumer_assignment(&m.assignment);
+                    put_bytes(out, Some(&asg));
+                }
+            }
+            None => {
+                // Empty or unknown — check if offsets exist.
+                let known = broker
+                    .groups()
+                    .list_group_ids()
+                    .iter()
+                    .any(|g| g == &group_id);
+                if known {
+                    out.put_i16(KafkaErrorCode::None.as_i16());
+                    put_string(out, &group_id);
+                    put_string(out, "Empty");
+                    put_string(out, "consumer");
+                    put_string(out, "");
+                    out.put_i32(0);
+                } else {
+                    out.put_i16(KafkaErrorCode::GroupIdNotFound.as_i16());
+                    put_string(out, &group_id);
+                    put_string(out, "Dead");
+                    put_string(out, "");
+                    put_string(out, "");
+                    out.put_i32(0);
+                }
+            }
+        }
+    }
+}
+
+fn encode_delete_groups(broker: &Broker, src: &mut impl Buf, out: &mut BytesMut) {
+    if src.remaining() < 4 {
+        out.put_i32(0);
+        return;
+    }
+    let n = src.get_i32();
+    let mut ids = Vec::new();
+    for _ in 0..n.max(0) {
+        match get_string(src) {
+            Ok(g) => ids.push(g),
+            Err(_) => break,
+        }
+    }
+    out.put_i32(ids.len() as i32);
+    for group_id in ids {
+        put_string(out, &group_id);
+        if broker.acls().is_enabled()
+            && !broker.acls().authorize(
+                Some(KAFKA_ANONYMOUS_PRINCIPAL),
+                ResourceType::Group,
+                &group_id,
+                AclOperation::Delete,
+            )
+        {
+            out.put_i16(KafkaErrorCode::GroupAuthorizationFailed.as_i16());
+            continue;
+        }
+        match broker.groups().delete_group(&group_id) {
+            Ok(0) => out.put_i16(KafkaErrorCode::None.as_i16()),
+            Ok(68) => out.put_i16(KafkaErrorCode::NonEmptyGroup.as_i16()),
+            Ok(69) => out.put_i16(KafkaErrorCode::GroupIdNotFound.as_i16()),
+            Ok(_) => out.put_i16(KafkaErrorCode::Unknown.as_i16()),
+            Err(_) => out.put_i16(KafkaErrorCode::Unknown.as_i16()),
+        }
+    }
+}
+
+fn encode_create_partitions(broker: &Broker, src: &mut impl Buf, out: &mut BytesMut) {
+    // CreatePartitions v0: [topic, count, [assignment]] timeout
+    if src.remaining() < 4 {
+        out.put_i32(0);
+        return;
+    }
+    let topic_count = src.get_i32();
+    struct Req {
+        topic: String,
+        count: i32,
+    }
+    let mut reqs = Vec::new();
+    for _ in 0..topic_count.max(0) {
+        let topic = match get_string(src) {
+            Ok(t) => t,
+            Err(_) => break,
+        };
+        if src.remaining() < 4 {
+            break;
+        }
+        let count = src.get_i32();
+        // assignments: array of broker id arrays (nullable: -1 length)
+        if src.remaining() < 4 {
+            break;
+        }
+        let assign_len = src.get_i32();
+        if assign_len >= 0 {
+            for _ in 0..assign_len {
+                if src.remaining() < 4 {
+                    break;
+                }
+                let brokers = src.get_i32();
+                for _ in 0..brokers.max(0) {
+                    if src.remaining() < 4 {
+                        break;
+                    }
+                    let _ = src.get_i32();
+                }
+            }
+        }
+        reqs.push(Req { topic, count });
+    }
+    if src.remaining() >= 4 {
+        let _timeout = src.get_i32();
+    }
+
+    out.put_i32(reqs.len() as i32);
+    for r in reqs {
+        put_string(out, &r.topic);
+        if broker.acls().is_enabled()
+            && !broker.acls().authorize(
+                Some(KAFKA_ANONYMOUS_PRINCIPAL),
+                ResourceType::Topic,
+                &r.topic,
+                AclOperation::Alter,
+            )
+        {
+            out.put_i16(KafkaErrorCode::TopicAuthorizationFailed.as_i16());
+            put_nullable_string(out, Some("topic authorization failed"));
+            continue;
+        }
+        if r.count <= 0 {
+            out.put_i16(KafkaErrorCode::InvalidPartitions.as_i16());
+            put_nullable_string(out, Some("invalid partition count"));
+            continue;
+        }
+        match broker.create_partitions(&r.topic, r.count as u32) {
+            Ok(_) => {
+                out.put_i16(KafkaErrorCode::None.as_i16());
+                put_nullable_string(out, None);
+            }
+            Err(Error::NotFound(_)) => {
+                out.put_i16(KafkaErrorCode::UnknownTopicOrPartition.as_i16());
+                put_nullable_string(out, Some("topic not found"));
+            }
+            Err(Error::InvalidArgument(msg)) => {
+                out.put_i16(KafkaErrorCode::InvalidPartitions.as_i16());
+                put_nullable_string(out, Some(&msg));
+            }
+            Err(_) => {
+                out.put_i16(KafkaErrorCode::Unknown.as_i16());
+                put_nullable_string(out, None);
+            }
+        }
+    }
+}
+
+fn encode_describe_configs(broker: &Broker, src: &mut impl Buf, out: &mut BytesMut) {
+    // DescribeConfigs v0: [resource_type:i8, resource_name, [config_names] | null]
+    if src.remaining() < 4 {
+        out.put_i32(0);
+        return;
+    }
+    let n = src.get_i32();
+    struct Res {
+        rtype: i8,
+        name: String,
+        keys: Option<Vec<String>>,
+    }
+    let mut resources = Vec::new();
+    for _ in 0..n.max(0) {
+        if src.remaining() < 1 {
+            break;
+        }
+        let rtype = src.get_i8();
+        let name = match get_string(src) {
+            Ok(s) => s,
+            Err(_) => break,
+        };
+        if src.remaining() < 4 {
+            break;
+        }
+        let key_count = src.get_i32();
+        let keys = if key_count < 0 {
+            None
+        } else {
+            let mut ks = Vec::new();
+            for _ in 0..key_count {
+                match get_string(src) {
+                    Ok(k) => ks.push(k),
+                    Err(_) => break,
+                }
+            }
+            Some(ks)
+        };
+        resources.push(Res { rtype, name, keys });
+    }
+
+    out.put_i32(resources.len() as i32);
+    for r in resources {
+        // resource_type 2 = TOPIC
+        if r.rtype != 2 {
+            out.put_i16(KafkaErrorCode::InvalidRequest.as_i16());
+            out.put_i8(r.rtype);
+            put_string(out, &r.name);
+            put_nullable_string(out, Some("only TOPIC resources supported"));
+            out.put_i32(0);
+            continue;
+        }
+        if broker.acls().is_enabled()
+            && !broker.acls().authorize(
+                Some(KAFKA_ANONYMOUS_PRINCIPAL),
+                ResourceType::Topic,
+                &r.name,
+                AclOperation::Describe,
+            )
+        {
+            out.put_i16(KafkaErrorCode::TopicAuthorizationFailed.as_i16());
+            out.put_i8(r.rtype);
+            put_string(out, &r.name);
+            put_nullable_string(out, None);
+            out.put_i32(0);
+            continue;
+        }
+        match broker.describe_configs(&r.name) {
+            Ok((_id, _pc, cfg)) => {
+                let mut entries = cfg.to_entries();
+                if let Some(filter) = &r.keys {
+                    entries.retain(|(k, _)| filter.iter().any(|f| f == k));
+                }
+                out.put_i16(KafkaErrorCode::None.as_i16());
+                out.put_i8(r.rtype);
+                put_string(out, &r.name);
+                put_nullable_string(out, None); // error message
+                out.put_i32(entries.len() as i32);
+                for (k, v) in entries {
+                    put_string(out, &k);
+                    // config_value nullable
+                    if v.is_empty() {
+                        put_nullable_string(out, None);
+                    } else {
+                        put_nullable_string(out, Some(&v));
+                    }
+                    out.put_u8(0); // read_only
+                    out.put_u8(if v.is_empty() { 1 } else { 0 }); // is_default
+                    out.put_u8(0); // is_sensitive
+                }
+            }
+            Err(Error::NotFound(_)) => {
+                out.put_i16(KafkaErrorCode::UnknownTopicOrPartition.as_i16());
+                out.put_i8(r.rtype);
+                put_string(out, &r.name);
+                put_nullable_string(out, Some("topic not found"));
+                out.put_i32(0);
+            }
+            Err(_) => {
+                out.put_i16(KafkaErrorCode::Unknown.as_i16());
+                out.put_i8(r.rtype);
+                put_string(out, &r.name);
+                put_nullable_string(out, None);
+                out.put_i32(0);
+            }
+        }
+    }
+}
+
+fn encode_alter_configs(broker: &Broker, src: &mut impl Buf, out: &mut BytesMut) {
+    // AlterConfigs v0: [resource_type, resource_name, [name, value]] validate_only
+    if src.remaining() < 4 {
+        out.put_i32(0);
+        return;
+    }
+    let n = src.get_i32();
+    struct Res {
+        rtype: i8,
+        name: String,
+        entries: Vec<(String, String)>,
+    }
+    let mut resources = Vec::new();
+    for _ in 0..n.max(0) {
+        if src.remaining() < 1 {
+            break;
+        }
+        let rtype = src.get_i8();
+        let name = match get_string(src) {
+            Ok(s) => s,
+            Err(_) => break,
+        };
+        if src.remaining() < 4 {
+            break;
+        }
+        let ec = src.get_i32();
+        let mut entries = Vec::new();
+        for _ in 0..ec.max(0) {
+            let k = match get_string(src) {
+                Ok(s) => s,
+                Err(_) => break,
+            };
+            // value is nullable string in some versions; treat as string
+            let v = match get_nullable_string(src) {
+                Ok(Some(s)) => s,
+                Ok(None) => String::new(),
+                Err(_) => match get_string(src) {
+                    Ok(s) => s,
+                    Err(_) => String::new(),
+                },
+            };
+            entries.push((k, v));
+        }
+        resources.push(Res {
+            rtype,
+            name,
+            entries,
+        });
+    }
+    let validate_only = if src.remaining() >= 1 {
+        src.get_u8() != 0
+    } else {
+        false
+    };
+
+    // Response: [error_code, error_message, resource_type, resource_name]
+    out.put_i32(resources.len() as i32);
+    for r in resources {
+        if r.rtype != 2 {
+            out.put_i16(KafkaErrorCode::InvalidRequest.as_i16());
+            put_nullable_string(out, Some("only TOPIC resources supported"));
+            out.put_i8(r.rtype);
+            put_string(out, &r.name);
+            continue;
+        }
+        if broker.acls().is_enabled()
+            && !broker.acls().authorize(
+                Some(KAFKA_ANONYMOUS_PRINCIPAL),
+                ResourceType::Topic,
+                &r.name,
+                AclOperation::Alter,
+            )
+        {
+            out.put_i16(KafkaErrorCode::TopicAuthorizationFailed.as_i16());
+            put_nullable_string(out, None);
+            out.put_i8(r.rtype);
+            put_string(out, &r.name);
+            continue;
+        }
+        if validate_only {
+            match volant_broker_topic_config_validate(&r.entries) {
+                Ok(()) => {
+                    out.put_i16(KafkaErrorCode::None.as_i16());
+                    put_nullable_string(out, None);
+                }
+                Err(msg) => {
+                    out.put_i16(KafkaErrorCode::InvalidConfig.as_i16());
+                    put_nullable_string(out, Some(&msg));
+                }
+            }
+            out.put_i8(r.rtype);
+            put_string(out, &r.name);
+            continue;
+        }
+        match broker.alter_configs(&r.name, &r.entries) {
+            Ok(_) => {
+                out.put_i16(KafkaErrorCode::None.as_i16());
+                put_nullable_string(out, None);
+            }
+            Err(Error::NotFound(_)) => {
+                out.put_i16(KafkaErrorCode::UnknownTopicOrPartition.as_i16());
+                put_nullable_string(out, Some("topic not found"));
+            }
+            Err(Error::InvalidArgument(msg)) => {
+                out.put_i16(KafkaErrorCode::InvalidConfig.as_i16());
+                put_nullable_string(out, Some(&msg));
+            }
+            Err(_) => {
+                out.put_i16(KafkaErrorCode::Unknown.as_i16());
+                put_nullable_string(out, None);
+            }
+        }
+        out.put_i8(r.rtype);
+        put_string(out, &r.name);
+    }
+}
+
+fn volant_broker_topic_config_validate(entries: &[(String, String)]) -> std::result::Result<(), String> {
+    crate::topic_config::TopicConfig::from_entries(entries).map(|_| ()).map_err(|e| e.to_string())
 }

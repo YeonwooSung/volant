@@ -434,6 +434,33 @@ impl GroupCoordinator {
         self.offsets.delete_many(group_id, entries)
     }
 
+    /// Delete a consumer group (Phase 27 Kafka DeleteGroups).
+    ///
+    /// Fails with error code `68` (`NON_EMPTY_GROUP`) when live members remain.
+    /// Returns `69` (`GROUP_ID_NOT_FOUND`) when the group has neither members
+    /// nor durable offsets. On success removes membership and all offsets.
+    pub fn delete_group(&self, group_id: &str) -> Result<u16> {
+        {
+            let groups = self.groups.lock();
+            if let Some(g) = groups.get(group_id) {
+                if !g.members.is_empty() {
+                    return Ok(68); // NON_EMPTY_GROUP
+                }
+            }
+        }
+        let had_members = {
+            let mut groups = self.groups.lock();
+            groups.remove(group_id).is_some()
+        };
+        let had_offsets = self.offsets.list_group_ids()?.iter().any(|g| g == group_id);
+        if !had_members && !had_offsets {
+            return Ok(69); // GROUP_ID_NOT_FOUND
+        }
+        // Delete all offsets for the group.
+        let _ = self.offsets.delete_many(group_id, &[])?;
+        Ok(0)
+    }
+
     /// Fetch offsets. Empty `entries` → all committed for group.
     pub fn fetch_offsets(
         &self,

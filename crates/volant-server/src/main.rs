@@ -113,9 +113,9 @@ struct Args {
     #[arg(long = "scram-user", value_name = "USER:PASS")]
     scram_users: Vec<String>,
 
-    /// Optional Kafka wire protocol listen address (Phase 23–26). Example: `127.0.0.1:9093`.
+    /// Optional Kafka wire protocol listen address (Phase 23–27). Example: `127.0.0.1:9093`.
     /// Disabled when unset. Native Volant protocol remains on `--listen`.
-    /// MessageSet/RecordBatch produce-fetch, admin APIs, and consumer groups.
+    /// Produce/fetch, admin, consumer groups, configs, CreatePartitions.
     #[arg(long)]
     kafka_listen: Option<String>,
 }
@@ -388,7 +388,7 @@ async fn async_main(args: Args) -> Result<()> {
                 tracing::error!(error = %e, "kafka shim server exited");
             }
         });
-        info!(%kaddr, "kafka wire protocol shim enabled (Phase 23–26)");
+        info!(%kaddr, "kafka wire protocol shim enabled (Phase 23–27)");
     }
 
     info!(
