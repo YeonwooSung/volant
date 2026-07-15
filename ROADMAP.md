@@ -664,8 +664,30 @@ Binding: **[docs/PHASE24_SPEC.md](./docs/PHASE24_SPEC.md)**.
 idempotent producer semantics; no control batches; Fetch v4 has empty aborted
 txns only; no flexible versions / tagged fields; no Kafka consumer groups or SASL.
 
-**Still deferred:** multi-lang clients, full Kafka API surface (groups, CreateTopics,
-offsets, SASL), SCRAM-SHA-512, cargo-fuzz corpus CI.
+**Still deferred (at ship):** multi-lang clients, Kafka admin APIs (CreateTopics /
+ListOffsets), consumer groups, SASL, SCRAM-SHA-512, cargo-fuzz corpus CI.
+
+---
+
+### Phase 25 — Kafka admin APIs (Create/DeleteTopics, ListOffsets) ✅
+
+**Goal:** Enough Kafka admin surface on `--kafka-listen` that clients can create
+topics and discover offsets without speaking the native Volant protocol.
+
+Binding: **[docs/PHASE25_SPEC.md](./docs/PHASE25_SPEC.md)**.
+
+- [x] CreateTopics 0–1 → `Broker::create_topic` (RF/assignment ignored)
+- [x] DeleteTopics 0–1 → `Broker::delete_topic`
+- [x] ListOffsets 0–1 → earliest (-2) / latest (-1) via `Broker::list_offsets`
+- [x] ApiVersions advertises keys 2 / 19 / 20; ACL checks for create/delete/describe
+- [x] Integration tests (`phase25_kafka_admin`)
+
+**Honest limitations:** no CreatePartitions / DescribeConfigs / AlterConfigs on
+Kafka wire; no timestamp-indexed ListOffsets; replica assignment from CreateTopics
+ignored; no Kafka consumer groups or SASL.
+
+**Still deferred:** multi-lang clients, Kafka consumer groups / offset commit,
+Kafka SASL, SCRAM-SHA-512, cargo-fuzz corpus CI.
 
 ---
 

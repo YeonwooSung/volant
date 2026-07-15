@@ -1,7 +1,8 @@
-//! Kafka wire protocol shim (Phase 23 + Phase 24 RecordBatch).
+//! Kafka wire protocol shim (Phases 23–25).
 //!
 //! Classic (non-flexible) framing only. Supported APIs: Produce, Fetch,
-//! Metadata, ApiVersions. See `docs/PHASE23_SPEC.md` and `docs/PHASE24_SPEC.md`.
+//! Metadata, ListOffsets, ApiVersions, CreateTopics, DeleteTopics.
+//! See `docs/PHASE23_SPEC.md`, `docs/PHASE24_SPEC.md`, `docs/PHASE25_SPEC.md`.
 
 /// Kafka wire primitives, MessageSet (magic 0/1), and RecordBatch (magic 2).
 pub mod codec;
@@ -38,12 +39,22 @@ pub enum KafkaErrorCode {
     MessageTooLarge = 10,
     /// Network exception (unused).
     NetworkException = 13,
+    /// Invalid topic name / args.
+    InvalidTopicException = 17,
+    /// Invalid request.
+    InvalidRequest = 42,
     /// Unsupported version for this API.
     UnsupportedVersion = 35,
     /// Topic authorization failed.
     TopicAuthorizationFailed = 29,
     /// Cluster authorization failed.
     ClusterAuthorizationFailed = 31,
+    /// Topic already exists (CreateTopics).
+    TopicAlreadyExists = 36,
+    /// Invalid partition count.
+    InvalidPartitions = 37,
+    /// Invalid timestamp in ListOffsets.
+    InvalidTimestamp = 32,
 }
 
 impl KafkaErrorCode {
@@ -60,10 +71,16 @@ pub enum ApiKey {
     Produce = 0,
     /// Fetch.
     Fetch = 1,
+    /// ListOffsets.
+    ListOffsets = 2,
     /// Metadata.
     Metadata = 3,
     /// ApiVersions.
     ApiVersions = 18,
+    /// CreateTopics.
+    CreateTopics = 19,
+    /// DeleteTopics.
+    DeleteTopics = 20,
 }
 
 impl ApiKey {
@@ -71,8 +88,11 @@ impl ApiKey {
         match v {
             0 => Some(Self::Produce),
             1 => Some(Self::Fetch),
+            2 => Some(Self::ListOffsets),
             3 => Some(Self::Metadata),
             18 => Some(Self::ApiVersions),
+            19 => Some(Self::CreateTopics),
+            20 => Some(Self::DeleteTopics),
             _ => None,
         }
     }
@@ -82,6 +102,9 @@ impl ApiKey {
 pub const SUPPORTED_APIS: &[(ApiKey, i16, i16)] = &[
     (ApiKey::Produce, 0, 3),
     (ApiKey::Fetch, 0, 4),
+    (ApiKey::ListOffsets, 0, 1),
     (ApiKey::Metadata, 0, 1),
     (ApiKey::ApiVersions, 0, 0),
+    (ApiKey::CreateTopics, 0, 1),
+    (ApiKey::DeleteTopics, 0, 1),
 ];

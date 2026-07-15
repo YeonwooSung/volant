@@ -127,21 +127,25 @@ Supported APIs:
 
 | API | Versions | Notes |
 |-----|----------|-------|
-| ApiVersions | 0 | Advertises Produce/Fetch/Metadata/ApiVersions |
+| ApiVersions | 0 | Advertises supported keys/versions |
 | Metadata | 0–1 | Brokers + topics from Volant catalog |
 | Produce | 0–3 | MessageSet magic 0/1 **or** RecordBatch magic 2 (auto-detect) |
 | Fetch | 0–4 | v0–3 MessageSet; v4 RecordBatch (+ throttle, LSO) |
+| ListOffsets | 0–1 | timestamp -1 latest, -2 earliest |
+| CreateTopics | 0–1 | partition count; RF/assignment ignored |
+| DeleteTopics | 0–1 | by name |
 
 Limitations:
 
 - **No** compression on RecordBatch (attributes compression bits must be 0).
-- **No** Kafka consumer groups, SASL, CreateTopics, or flexible versions.
+- **No** Kafka consumer groups, SASL, or flexible versions.
+- CreateTopics does not honour Kafka replica assignment (Volant placement wins).
 - When ACLs are enabled, the shim principal is `kafka-anonymous`.
 - Prefer binding to localhost / private networks; leave disabled in production
   unless you need Kafka-protocol discovery.
 
-Create topics with the Volant CLI/protocol first, then produce/fetch via Kafka.
-See [PHASE23_SPEC.md](./PHASE23_SPEC.md) and [PHASE24_SPEC.md](./PHASE24_SPEC.md).
+See [PHASE23_SPEC.md](./PHASE23_SPEC.md), [PHASE24_SPEC.md](./PHASE24_SPEC.md),
+and [PHASE25_SPEC.md](./PHASE25_SPEC.md).
 
 ## TLS (Phase 7 listen + Phase 9 verification / inter-broker)
 

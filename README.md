@@ -184,8 +184,11 @@ Volant protocol stays on `--listen`.
 **Phase 24:** Kafka RecordBatch (magic 2) on the shim — auto-detect produce
 format; Fetch v4 returns RecordBatch; Produce 0–3 / Fetch 0–4 advertised.
 
-**Still deferred:** multi-language clients, full Kafka API (groups / CreateTopics
-/ SASL), SCRAM-SHA-512, chaos-mesh / cargo-fuzz corpus CI.
+**Phase 25:** Kafka admin on the shim — CreateTopics / DeleteTopics / ListOffsets
+(earliest & latest) so clients need less Volant-native setup.
+
+**Still deferred:** multi-language clients, Kafka consumer groups / SASL,
+SCRAM-SHA-512, chaos-mesh / cargo-fuzz corpus CI.
 
 ### Networked client (library)
 

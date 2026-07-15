@@ -91,6 +91,15 @@ fn dispatch_kafka(broker: &Broker, body: bytes::Bytes) -> BytesMut {
         Some(ApiKey::Fetch) if (0..=4).contains(&hdr.api_version) => {
             encode_fetch(broker, &mut src, &mut out, hdr.api_version);
         }
+        Some(ApiKey::ListOffsets) if (0..=1).contains(&hdr.api_version) => {
+            encode_list_offsets(broker, &mut src, &mut out, hdr.api_version);
+        }
+        Some(ApiKey::CreateTopics) if (0..=1).contains(&hdr.api_version) => {
+            encode_create_topics(broker, &mut src, &mut out, hdr.api_version);
+        }
+        Some(ApiKey::DeleteTopics) if (0..=1).contains(&hdr.api_version) => {
+            encode_delete_topics(broker, &mut src, &mut out, hdr.api_version);
+        }
         Some(_) => {
             // Supported API but wrong version — use a generic error body when possible.
             // ApiVersions clients probe versions; return UnsupportedVersion-shaped empty.
@@ -541,5 +550,298 @@ fn encode_fetch(broker: &Broker, src: &mut impl Buf, out: &mut BytesMut, version
                 }
             }
         }
+    }
+}
+
+fn encode_list_offsets(broker: &Broker, src: &mut impl Buf, out: &mut BytesMut, version: i16) {
+    // ListOffsets v0: replica_id, [topic [partition, timestamp, max_num_offsets]]
+    // ListOffsets v1: replica_id, [topic [partition, timestamp]]
+    if src.remaining() < 4 {
+        out.put_i32(0);
+        return;
+    }
+    let _replica_id = src.get_i32();
+    if src.remaining() < 4 {
+        out.put_i32(0);
+        return;
+    }
+    let topic_count = src.get_i32();
+    out.put_i32(topic_count.max(0));
+
+    for _ in 0..topic_count.max(0) {
+        let topic = match get_string(src) {
+            Ok(t) => t,
+            Err(_) => break,
+        };
+        put_string(out, &topic);
+
+        if src.remaining() < 4 {
+            out.put_i32(0);
+            break;
+        }
+        let part_count = src.get_i32();
+        out.put_i32(part_count.max(0));
+
+        for _ in 0..part_count.max(0) {
+            if src.remaining() < 4 + 8 {
+                break;
+            }
+            let partition = src.get_i32();
+            let timestamp = src.get_i64();
+            if version == 0 {
+                if src.remaining() < 4 {
+                    break;
+                }
+                let _max_num = src.get_i32();
+            }
+
+            out.put_i32(partition);
+
+            if broker.acls().is_enabled()
+                && !broker.acls().authorize(
+                    Some(KAFKA_ANONYMOUS_PRINCIPAL),
+                    ResourceType::Topic,
+                    &topic,
+                    AclOperation::Describe,
+                )
+            {
+                out.put_i16(KafkaErrorCode::TopicAuthorizationFailed.as_i16());
+                if version == 0 {
+                    out.put_i32(0); // empty offset array
+                } else {
+                    out.put_i64(timestamp);
+                    out.put_i64(-1);
+                }
+                continue;
+            }
+
+            // Kafka: -1 = latest, -2 = earliest.
+            let want_earliest = timestamp == -2;
+            let want_latest = timestamp == -1;
+            if !want_earliest && !want_latest {
+                out.put_i16(KafkaErrorCode::InvalidTimestamp.as_i16());
+                if version == 0 {
+                    out.put_i32(0);
+                } else {
+                    out.put_i64(timestamp);
+                    out.put_i64(-1);
+                }
+                continue;
+            }
+
+            match broker.list_offsets(&topic, &[partition as u32]) {
+                Ok(entries) => {
+                    let (earliest, latest) = entries
+                        .first()
+                        .map(|(_, e, l)| (*e as i64, *l as i64))
+                        .unwrap_or((0, 0));
+                    let offset = if want_earliest { earliest } else { latest };
+                    out.put_i16(KafkaErrorCode::None.as_i16());
+                    if version == 0 {
+                        out.put_i32(1);
+                        out.put_i64(timestamp);
+                        out.put_i64(offset);
+                    } else {
+                        out.put_i64(timestamp);
+                        out.put_i64(offset);
+                    }
+                }
+                Err(Error::NotFound(_)) => {
+                    out.put_i16(KafkaErrorCode::UnknownTopicOrPartition.as_i16());
+                    if version == 0 {
+                        out.put_i32(0);
+                    } else {
+                        out.put_i64(timestamp);
+                        out.put_i64(-1);
+                    }
+                }
+                Err(_) => {
+                    out.put_i16(KafkaErrorCode::Unknown.as_i16());
+                    if version == 0 {
+                        out.put_i32(0);
+                    } else {
+                        out.put_i64(timestamp);
+                        out.put_i64(-1);
+                    }
+                }
+            }
+        }
+    }
+}
+
+fn encode_create_topics(broker: &Broker, src: &mut impl Buf, out: &mut BytesMut, version: i16) {
+    // CreateTopics v0: [topic_data]
+    // CreateTopics v1: [topic_data] timeout_ms
+    // topic_data: name, num_partitions, replication_factor,
+    //   [assigned_partition → [broker]], [config_key → config_value]
+    if src.remaining() < 4 {
+        out.put_i32(0);
+        if version >= 1 {
+            out.put_i32(0);
+        }
+        return;
+    }
+    let topic_count = src.get_i32();
+    // Collect first so we can still parse timeout if present.
+    struct TopicReq {
+        name: String,
+        partitions: i32,
+        configs: Vec<(String, String)>,
+    }
+    let mut reqs = Vec::new();
+    for _ in 0..topic_count.max(0) {
+        let name = match get_string(src) {
+            Ok(n) => n,
+            Err(_) => break,
+        };
+        if src.remaining() < 4 + 2 {
+            break;
+        }
+        let partitions = src.get_i32();
+        let _rf = src.get_i16();
+        // replica assignments
+        if src.remaining() < 4 {
+            break;
+        }
+        let assign_count = src.get_i32();
+        for _ in 0..assign_count.max(0) {
+            if src.remaining() < 4 + 4 {
+                break;
+            }
+            let _part = src.get_i32();
+            let broker_count = src.get_i32();
+            for _ in 0..broker_count.max(0) {
+                if src.remaining() < 4 {
+                    break;
+                }
+                let _ = src.get_i32();
+            }
+        }
+        // configs
+        let mut configs = Vec::new();
+        if src.remaining() < 4 {
+            reqs.push(TopicReq {
+                name,
+                partitions,
+                configs,
+            });
+            break;
+        }
+        let cfg_count = src.get_i32();
+        for _ in 0..cfg_count.max(0) {
+            let k = match get_string(src) {
+                Ok(s) => s,
+                Err(_) => break,
+            };
+            let v = match get_string(src) {
+                Ok(s) => s,
+                Err(_) => break,
+            };
+            configs.push((k, v));
+        }
+        reqs.push(TopicReq {
+            name,
+            partitions,
+            configs,
+        });
+    }
+    if version >= 1 && src.remaining() >= 4 {
+        let _timeout = src.get_i32();
+    }
+
+    out.put_i32(reqs.len() as i32);
+    for t in reqs {
+        put_string(out, &t.name);
+
+        if broker.acls().is_enabled()
+            && !broker.acls().authorize(
+                Some(KAFKA_ANONYMOUS_PRINCIPAL),
+                ResourceType::Cluster,
+                CLUSTER_RESOURCE,
+                AclOperation::Create,
+            )
+            && !broker.acls().authorize(
+                Some(KAFKA_ANONYMOUS_PRINCIPAL),
+                ResourceType::Topic,
+                &t.name,
+                AclOperation::Create,
+            )
+        {
+            out.put_i16(KafkaErrorCode::TopicAuthorizationFailed.as_i16());
+            continue;
+        }
+
+        if t.partitions <= 0 {
+            out.put_i16(KafkaErrorCode::InvalidPartitions.as_i16());
+            continue;
+        }
+
+        let result = if t.configs.is_empty() {
+            broker.create_topic(t.name.as_str(), t.partitions as u32)
+        } else {
+            broker.create_topic_with_configs(t.name.as_str(), t.partitions as u32, &t.configs)
+        };
+
+        match result {
+            Ok(_) => out.put_i16(KafkaErrorCode::None.as_i16()),
+            Err(Error::InvalidArgument(msg)) if msg.contains("already exists") => {
+                out.put_i16(KafkaErrorCode::TopicAlreadyExists.as_i16());
+            }
+            Err(Error::InvalidArgument(_)) => {
+                out.put_i16(KafkaErrorCode::InvalidTopicException.as_i16());
+            }
+            Err(_) => out.put_i16(KafkaErrorCode::Unknown.as_i16()),
+        }
+    }
+    if version >= 1 {
+        out.put_i32(0); // throttle_time_ms
+    }
+}
+
+fn encode_delete_topics(broker: &Broker, src: &mut impl Buf, out: &mut BytesMut, version: i16) {
+    // DeleteTopics v0/v1: [topic names] timeout_ms
+    if src.remaining() < 4 {
+        out.put_i32(0);
+        if version >= 1 {
+            out.put_i32(0);
+        }
+        return;
+    }
+    let topic_count = src.get_i32();
+    let mut names = Vec::new();
+    for _ in 0..topic_count.max(0) {
+        match get_string(src) {
+            Ok(n) => names.push(n),
+            Err(_) => break,
+        }
+    }
+    if src.remaining() >= 4 {
+        let _timeout = src.get_i32();
+    }
+
+    out.put_i32(names.len() as i32);
+    for name in names {
+        put_string(out, &name);
+        if broker.acls().is_enabled()
+            && !broker.acls().authorize(
+                Some(KAFKA_ANONYMOUS_PRINCIPAL),
+                ResourceType::Topic,
+                &name,
+                AclOperation::Delete,
+            )
+        {
+            out.put_i16(KafkaErrorCode::TopicAuthorizationFailed.as_i16());
+            continue;
+        }
+        match broker.delete_topic(&TopicName::new(name.clone())) {
+            Ok(()) => out.put_i16(KafkaErrorCode::None.as_i16()),
+            Err(Error::NotFound(_)) => {
+                out.put_i16(KafkaErrorCode::UnknownTopicOrPartition.as_i16());
+            }
+            Err(_) => out.put_i16(KafkaErrorCode::Unknown.as_i16()),
+        }
+    }
+    if version >= 1 {
+        out.put_i32(0);
     }
 }
