@@ -52,6 +52,10 @@ pub enum ResponseOpcode {
     CreatePartitions = 47,
     /// List offsets result (Phase 15).
     ListOffsets = 49,
+    /// Begin transaction result (Phase 18).
+    BeginTxn = 51,
+    /// End transaction result (Phase 18).
+    EndTxn = 53,
     /// Error response.
     Error = 0xFFFF,
 }
@@ -83,6 +87,8 @@ impl ResponseOpcode {
             45 => Self::DeleteRecords,
             47 => Self::CreatePartitions,
             49 => Self::ListOffsets,
+            51 => Self::BeginTxn,
+            53 => Self::EndTxn,
             0xFFFF => Self::Error,
             _ => return None,
         })
@@ -137,6 +143,8 @@ pub enum ErrorCode {
     OutOfOrderSequence = 20,
     /// Producer id was not allocated via InitProducerId (Phase 10).
     UnknownProducerId = 21,
+    /// Invalid transaction state (Phase 18) — e.g. produce without BeginTxn.
+    InvalidTxnState = 22,
 }
 
 impl ErrorCode {
@@ -164,6 +172,7 @@ impl ErrorCode {
             19 => Self::InvalidProducerEpoch,
             20 => Self::OutOfOrderSequence,
             21 => Self::UnknownProducerId,
+            22 => Self::InvalidTxnState,
             _ => Self::Unknown,
         }
     }
@@ -532,6 +541,18 @@ pub enum Response {
         /// Per-partition earliest/latest.
         entries: Vec<OffsetListing>,
     },
+    /// Begin transaction result (Phase 18).
+    BeginTxn {
+        /// 0 = ok; 19 = bad epoch; 21 = unknown PID; 22 = invalid txn state.
+        error_code: u16,
+    },
+    /// End transaction result (Phase 18).
+    EndTxn {
+        /// 0 = ok; 19/21/22 on failure.
+        error_code: u16,
+        /// Per-batch results after commit (empty on abort).
+        results: Vec<TxnProduceResult>,
+    },
     /// Error response.
     Error {
         /// Error code.
@@ -550,6 +571,19 @@ pub struct OffsetListing {
     pub earliest: u64,
     /// Log end offset (next write).
     pub latest: u64,
+}
+
+/// One flushed produce batch from EndTxn commit (Phase 18).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TxnProduceResult {
+    /// Topic name.
+    pub topic: String,
+    /// Partition id.
+    pub partition: u32,
+    /// Log base offset assigned at commit.
+    pub base_offset: u64,
+    /// Message count.
+    pub count: u32,
 }
 
 impl Response {
@@ -571,6 +605,8 @@ impl Response {
             Self::ClusterState { .. } => ResponseOpcode::ClusterState as u16,
             Self::Auth { .. } => ResponseOpcode::Auth as u16,
             Self::InitProducerId { .. } => ResponseOpcode::InitProducerId as u16,
+            Self::BeginTxn { .. } => ResponseOpcode::BeginTxn as u16,
+            Self::EndTxn { .. } => ResponseOpcode::EndTxn as u16,
             Self::DescribeGroup { .. } => ResponseOpcode::DescribeGroup as u16,
             Self::ListGroups { .. } => ResponseOpcode::ListGroups as u16,
             Self::DeleteOffsets { .. } => ResponseOpcode::DeleteOffsets as u16,

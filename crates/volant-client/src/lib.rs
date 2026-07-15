@@ -12,6 +12,7 @@ mod conn;
 pub mod consumer;
 pub mod group;
 pub mod producer;
+pub mod txn;
 
 pub use client::{
     produce_value, Client, DeleteOffsetsResult, DeleteRecordsResult, DescribeConfigsResult,
@@ -22,3 +23,4 @@ pub use config::ClientConfig;
 pub use consumer::Consumer;
 pub use group::{FetchedRecord, GroupConsumer};
 pub use producer::Producer;
+pub use txn::TransactionalProducer;

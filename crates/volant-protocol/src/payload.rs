@@ -4,12 +4,12 @@ use bytes::{Buf, BufMut, Bytes, BytesMut};
 use volant_core::{Error, Result};
 
 use crate::request::{
-    OffsetCommitEntry, OffsetEntry, ProduceMessage, Request, RequestOpcode,
+    OffsetCommitEntry, OffsetEntry, ProduceMessage, Request, RequestOpcode, TxnOffsetCommit,
 };
 use crate::response::{
     Assignment, BrokerInfo, ClusterPartitionState, ClusterTopicState, ErrorCode, FetchRecord,
     GroupListing, GroupMemberInfo, GroupState, OffsetFetchEntry, OffsetListing, PartitionInfo,
-    Response, ResponseOpcode, TopicInfo,
+    Response, ResponseOpcode, TopicInfo, TxnProduceResult,
 };
 use crate::frame::{Frame, FrameHeader, PROTOCOL_VERSION};
 use crate::codec::checksum;
@@ -273,8 +273,34 @@ pub fn encode_request(req: &Request) -> Result<Bytes> {
         Request::Auth { token } => {
             put_string(&mut dst, token)?;
         }
-        Request::InitProducerId => {
-            // Empty payload; transactional id reserved for a later phase.
+        Request::InitProducerId { transactional_id } => {
+            // Phase 18 trailer (always written); legacy empty body still decodes.
+            put_string(&mut dst, transactional_id)?;
+        }
+        Request::BeginTxn {
+            producer_id,
+            producer_epoch,
+        } => {
+            dst.put_u64_le(*producer_id);
+            dst.put_u16_le(*producer_epoch);
+        }
+        Request::EndTxn {
+            producer_id,
+            producer_epoch,
+            committed,
+            offsets,
+        } => {
+            dst.put_u64_le(*producer_id);
+            dst.put_u16_le(*producer_epoch);
+            dst.put_u8(if *committed { 1 } else { 0 });
+            dst.put_u32_le(offsets.len() as u32);
+            for o in offsets {
+                put_string(&mut dst, &o.group_id)?;
+                put_string(&mut dst, &o.topic)?;
+                dst.put_u32_le(o.partition);
+                dst.put_u64_le(o.offset);
+                put_string(&mut dst, &o.metadata)?;
+            }
         }
         Request::DescribeGroup { group_id } => {
             put_string(&mut dst, group_id)?;
@@ -563,7 +589,57 @@ pub fn decode_request(opcode: u16, payload: &[u8]) -> Result<Request> {
         RequestOpcode::Auth => Ok(Request::Auth {
             token: get_string(&mut src)?,
         }),
-        RequestOpcode::InitProducerId => Ok(Request::InitProducerId),
+        RequestOpcode::InitProducerId => {
+            // Phase 18 trailing transactional_id; legacy empty body → empty id.
+            let transactional_id = if src.remaining() > 0 {
+                get_string(&mut src)?
+            } else {
+                String::new()
+            };
+            Ok(Request::InitProducerId { transactional_id })
+        }
+        RequestOpcode::BeginTxn => {
+            if src.remaining() < 8 + 2 {
+                return Err(Error::Protocol("truncated begin txn".into()));
+            }
+            Ok(Request::BeginTxn {
+                producer_id: src.get_u64_le(),
+                producer_epoch: src.get_u16_le(),
+            })
+        }
+        RequestOpcode::EndTxn => {
+            if src.remaining() < 8 + 2 + 1 + 4 {
+                return Err(Error::Protocol("truncated end txn".into()));
+            }
+            let producer_id = src.get_u64_le();
+            let producer_epoch = src.get_u16_le();
+            let committed = src.get_u8() != 0;
+            let offset_count = src.get_u32_le() as usize;
+            let mut offsets = Vec::with_capacity(offset_count);
+            for _ in 0..offset_count {
+                let group_id = get_string(&mut src)?;
+                let topic = get_string(&mut src)?;
+                if src.remaining() < 4 + 8 {
+                    return Err(Error::Protocol("truncated end txn offset entry".into()));
+                }
+                let partition = src.get_u32_le();
+                let offset = src.get_u64_le();
+                let metadata = get_string(&mut src)?;
+                offsets.push(TxnOffsetCommit {
+                    group_id,
+                    topic,
+                    partition,
+                    offset,
+                    metadata,
+                });
+            }
+            Ok(Request::EndTxn {
+                producer_id,
+                producer_epoch,
+                committed,
+                offsets,
+            })
+        }
         RequestOpcode::DescribeGroup => Ok(Request::DescribeGroup {
             group_id: get_string(&mut src)?,
         }),
@@ -847,6 +923,22 @@ pub fn encode_response(resp: &Response) -> Result<Bytes> {
             dst.put_u64_le(*producer_id);
             dst.put_u16_le(*epoch);
             dst.put_u16_le(*error_code);
+        }
+        Response::BeginTxn { error_code } => {
+            dst.put_u16_le(*error_code);
+        }
+        Response::EndTxn {
+            error_code,
+            results,
+        } => {
+            dst.put_u16_le(*error_code);
+            dst.put_u32_le(results.len() as u32);
+            for r in results {
+                put_string(&mut dst, &r.topic)?;
+                dst.put_u32_le(r.partition);
+                dst.put_u64_le(r.base_offset);
+                dst.put_u32_le(r.count);
+            }
         }
         Response::DescribeGroup {
             error_code,
@@ -1362,6 +1454,38 @@ pub fn decode_response(opcode: u16, payload: &[u8]) -> Result<Response> {
                 error_code: src.get_u16_le(),
             })
         }
+        ResponseOpcode::BeginTxn => {
+            if src.remaining() < 2 {
+                return Err(Error::Protocol("truncated begin txn error".into()));
+            }
+            Ok(Response::BeginTxn {
+                error_code: src.get_u16_le(),
+            })
+        }
+        ResponseOpcode::EndTxn => {
+            if src.remaining() < 2 + 4 {
+                return Err(Error::Protocol("truncated end txn header".into()));
+            }
+            let error_code = src.get_u16_le();
+            let result_count = src.get_u32_le() as usize;
+            let mut results = Vec::with_capacity(result_count);
+            for _ in 0..result_count {
+                let topic = get_string(&mut src)?;
+                if src.remaining() < 4 + 8 + 4 {
+                    return Err(Error::Protocol("truncated end txn result".into()));
+                }
+                results.push(TxnProduceResult {
+                    topic,
+                    partition: src.get_u32_le(),
+                    base_offset: src.get_u64_le(),
+                    count: src.get_u32_le(),
+                });
+            }
+            Ok(Response::EndTxn {
+                error_code,
+                results,
+            })
+        }
         ResponseOpcode::DescribeGroup => {
             if src.remaining() < 2 {
                 return Err(Error::Protocol("truncated describe group error".into()));
@@ -1649,11 +1773,22 @@ mod tests {
 
     #[test]
     fn init_producer_id_roundtrip() {
-        let req = Request::InitProducerId;
+        let req = Request::InitProducerId {
+            transactional_id: "app-1".into(),
+        };
         let bytes = encode_request(&req).unwrap();
         assert_eq!(
             decode_request(RequestOpcode::InitProducerId as u16, &bytes).unwrap(),
             req
+        );
+        // Legacy empty InitProducerId body.
+        let decoded =
+            decode_request(RequestOpcode::InitProducerId as u16, &Bytes::new()).unwrap();
+        assert_eq!(
+            decoded,
+            Request::InitProducerId {
+                transactional_id: String::new(),
+            }
         );
         let resp = Response::InitProducerId {
             producer_id: 42,
@@ -1665,6 +1800,57 @@ mod tests {
             decode_response(ResponseOpcode::InitProducerId as u16, &rb).unwrap(),
             resp
         );
+    }
+
+    #[test]
+    fn phase18_txn_roundtrip() {
+        let begin = Request::BeginTxn {
+            producer_id: 7,
+            producer_epoch: 1,
+        };
+        let b = encode_request(&begin).unwrap();
+        assert_eq!(
+            decode_request(RequestOpcode::BeginTxn as u16, &b).unwrap(),
+            begin
+        );
+        let end = Request::EndTxn {
+            producer_id: 7,
+            producer_epoch: 1,
+            committed: true,
+            offsets: vec![TxnOffsetCommit {
+                group_id: "g".into(),
+                topic: "t".into(),
+                partition: 0,
+                offset: 9,
+                metadata: "m".into(),
+            }],
+        };
+        let b = encode_request(&end).unwrap();
+        assert_eq!(
+            decode_request(RequestOpcode::EndTxn as u16, &b).unwrap(),
+            end
+        );
+        let br = Response::BeginTxn { error_code: 0 };
+        let b = encode_response(&br).unwrap();
+        assert_eq!(
+            decode_response(ResponseOpcode::BeginTxn as u16, &b).unwrap(),
+            br
+        );
+        let er = Response::EndTxn {
+            error_code: 0,
+            results: vec![TxnProduceResult {
+                topic: "t".into(),
+                partition: 1,
+                base_offset: 10,
+                count: 2,
+            }],
+        };
+        let b = encode_response(&er).unwrap();
+        assert_eq!(
+            decode_response(ResponseOpcode::EndTxn as u16, &b).unwrap(),
+            er
+        );
+        assert_eq!(ErrorCode::from_u16(22), ErrorCode::InvalidTxnState);
     }
 
     #[test]

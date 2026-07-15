@@ -32,7 +32,7 @@ pub mod topic_config;
 pub use assignor::{range_assign, range_assign_multi, sticky_assign, sticky_assign_multi};
 pub use broker::{
     murmur2, partition_for_key, Broker, ClusterState, IdempotentCheck, InterBrokerTls,
-    MetadataSnapshot, PartitionMetadata, TopicMetadata,
+    MetadataSnapshot, PartitionMetadata, TopicMetadata, TxnCommitResult,
 };
 pub use cluster::{BrokerEndpoint, ClusterConfig};
 pub use group::{

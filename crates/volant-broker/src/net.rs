@@ -580,7 +580,9 @@ fn record_response_metrics(broker: &Broker, resp: &Response) {
         | Response::AlterConfigs { error_code, .. }
         | Response::DeleteRecords { error_code, .. }
         | Response::CreatePartitions { error_code, .. }
-        | Response::ListOffsets { error_code, .. } => {
+        | Response::ListOffsets { error_code, .. }
+        | Response::BeginTxn { error_code }
+        | Response::EndTxn { error_code, .. } => {
             if *error_code != 0 {
                 m.record_error(*error_code);
             }
@@ -716,6 +718,63 @@ async fn handle_request(broker: &Broker, req: Request) -> Result<Response> {
                         count: 0,
                         error_code: ErrorCode::NotLeaderForPartition as u16,
                     });
+                }
+
+                // Phase 18: transactional produce buffers off-log until EndTxn.
+                if producer_id != 0
+                    && base_sequence >= 0
+                    && broker.is_transactional_producer(producer_id)
+                {
+                    let mut msgs = Vec::with_capacity(messages.len());
+                    for m in messages {
+                        let timestamp_ms = if m.timestamp_ms < 0 {
+                            None
+                        } else {
+                            Some(m.timestamp_ms)
+                        };
+                        msgs.push(Message {
+                            key: m.key,
+                            value: m.value,
+                            timestamp_ms,
+                            headers: m.headers,
+                        });
+                    }
+                    match broker.buffer_txn_produce(
+                        producer_id,
+                        producer_epoch,
+                        &topic,
+                        pid.0,
+                        base_sequence,
+                        msgs,
+                    ) {
+                        crate::broker::IdempotentCheck::Reject { error_code } => {
+                            return Ok(Response::Produce {
+                                topic,
+                                partition: pid.0,
+                                base_offset: 0,
+                                count: 0,
+                                error_code,
+                            });
+                        }
+                        crate::broker::IdempotentCheck::Duplicate { count, .. } => {
+                            return Ok(Response::Produce {
+                                topic,
+                                partition: pid.0,
+                                base_offset: 0,
+                                count,
+                                error_code: 0,
+                            });
+                        }
+                        crate::broker::IdempotentCheck::Accept => {
+                            return Ok(Response::Produce {
+                                topic,
+                                partition: pid.0,
+                                base_offset: 0,
+                                count: msg_count,
+                                error_code: 0,
+                            });
+                        }
+                    }
                 }
 
                 // Idempotent de-dupe / sequence gate (Phase 10).
@@ -1015,12 +1074,53 @@ async fn handle_request(broker: &Broker, req: Request) -> Result<Response> {
                 topics,
             })
         }
-        Request::InitProducerId => {
-            let (producer_id, epoch) = broker.init_producer_id();
+        Request::InitProducerId { transactional_id } => {
+            let (producer_id, epoch) =
+                broker.init_producer_id_with_txn(&transactional_id);
             Ok(Response::InitProducerId {
                 producer_id,
                 epoch,
                 error_code: 0,
+            })
+        }
+        Request::BeginTxn {
+            producer_id,
+            producer_epoch,
+        } => {
+            let error_code = broker.begin_txn(producer_id, producer_epoch);
+            Ok(Response::BeginTxn { error_code })
+        }
+        Request::EndTxn {
+            producer_id,
+            producer_epoch,
+            committed,
+            offsets,
+        } => {
+            let offset_tuples: Vec<_> = offsets
+                .into_iter()
+                .map(|o| {
+                    (
+                        o.group_id,
+                        o.topic,
+                        o.partition,
+                        o.offset,
+                        o.metadata,
+                    )
+                })
+                .collect();
+            let (error_code, results) =
+                broker.end_txn(producer_id, producer_epoch, committed, &offset_tuples)?;
+            Ok(Response::EndTxn {
+                error_code,
+                results: results
+                    .into_iter()
+                    .map(|r| volant_protocol::TxnProduceResult {
+                        topic: r.topic,
+                        partition: r.partition,
+                        base_offset: r.base_offset,
+                        count: r.count,
+                    })
+                    .collect(),
             })
         }
         Request::DescribeGroup { group_id } => {

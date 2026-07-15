@@ -5,7 +5,7 @@ use std::sync::Arc;
 use anyhow::{bail, Context, Result};
 use bytes::Bytes;
 use clap::{Parser, Subcommand};
-use volant_client::{Client, ClientConfig, GroupConsumer};
+use volant_client::{Client, ClientConfig, GroupConsumer, TransactionalProducer};
 use volant_core::{Message, Offset};
 use volant_protocol::{OffsetCommitEntry, OffsetEntry};
 
@@ -51,6 +51,11 @@ enum Commands {
         /// Broker address (`host:port`).
         #[arg(long, default_value = "127.0.0.1:9092")]
         broker: String,
+    },
+    /// Transactional produce (Phase 18): begin → produce → commit.
+    Txn {
+        #[command(subcommand)]
+        action: TxnCmd,
     },
     /// Consume (fetch) messages from a topic partition, or via a consumer group.
     Consume {
@@ -269,6 +274,35 @@ enum GroupCmd {
         /// Optional partition filter (requires `--topic`).
         #[arg(long)]
         partition: Option<u32>,
+        /// Broker address.
+        #[arg(long, default_value = "127.0.0.1:9092")]
+        broker: String,
+    },
+}
+
+#[derive(Debug, Subcommand)]
+enum TxnCmd {
+    /// Produce one or more messages in a single transaction then commit.
+    Produce {
+        /// Transactional id (fences prior owners).
+        #[arg(long)]
+        transactional_id: String,
+        /// Topic name.
+        #[arg(long)]
+        topic: String,
+        /// Partition id.
+        #[arg(long)]
+        partition: u32,
+        /// Message value (UTF-8). Repeat for multiple messages on the same partition.
+        #[arg(long = "value", required = true)]
+        values: Vec<String>,
+        /// Optional second topic/partition/value triple for multi-partition demo.
+        #[arg(long)]
+        topic2: Option<String>,
+        #[arg(long)]
+        partition2: Option<u32>,
+        #[arg(long)]
+        value2: Option<String>,
         /// Broker address.
         #[arg(long, default_value = "127.0.0.1:9092")]
         broker: String,
@@ -630,6 +664,52 @@ async fn main() -> Result<()> {
                     "deleted_offsets group={group} count={}",
                     result.deleted_count
                 );
+            }
+        },
+        Commands::Txn { action } => match action {
+            TxnCmd::Produce {
+                transactional_id,
+                topic,
+                partition,
+                values,
+                topic2,
+                partition2,
+                value2,
+                broker,
+            } => {
+                let mut tp = TransactionalProducer::connect(vec![broker], transactional_id)
+                    .await
+                    .context("connect transactional producer")?;
+                tp.begin().await.context("begin transaction")?;
+                let msgs: Vec<Message> = values
+                    .into_iter()
+                    .map(|v| Message::from_value(Bytes::from(v)))
+                    .collect();
+                let r1 = tp
+                    .produce(&topic, Some(partition), msgs)
+                    .await
+                    .context("txn produce")?;
+                println!(
+                    "buffered topic={} partition={} count={} (offset pending commit)",
+                    r1.topic, r1.partition, r1.count
+                );
+                if let (Some(t2), Some(p2), Some(v2)) = (topic2, partition2, value2) {
+                    let r2 = tp
+                        .produce(&t2, Some(p2), vec![Message::from_value(Bytes::from(v2))])
+                        .await
+                        .context("txn produce 2")?;
+                    println!(
+                        "buffered topic={} partition={} count={}",
+                        r2.topic, r2.partition, r2.count
+                    );
+                }
+                let results = tp.commit().await.context("commit transaction")?;
+                for r in results {
+                    println!(
+                        "committed topic={} partition={} base_offset={} count={}",
+                        r.topic, r.partition, r.base_offset, r.count
+                    );
+                }
             }
         },
         Commands::Produce {

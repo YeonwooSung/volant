@@ -400,7 +400,7 @@ Binding: **[docs/PHASE10_SPEC.md](./docs/PHASE10_SPEC.md)**.
 
 **Honest limitations (Phase 10):** producer state was in-memory only — closed by **Phase 11**.
 
-**Still deferred:** Kafka shim, multi-lang clients, SCRAM, mTLS, transactions.
+**Still deferred:** Kafka shim, multi-lang clients, SCRAM, mTLS.
 
 ---
 
@@ -417,7 +417,7 @@ Binding: **[docs/PHASE11_SPEC.md](./docs/PHASE11_SPEC.md)**.
 
 **Honest limitations (at ship):** eager rebalance only — closed by **Phase 17** for incremental handoff; sticky is Volant-local (not Kafka sticky wire protocol); no multi-partition transactions.
 
-**Still deferred:** Kafka shim, multi-lang clients, SCRAM, mTLS, transactions.
+**Still deferred:** Kafka shim, multi-lang clients, SCRAM, mTLS.
 
 ---
 
@@ -434,7 +434,7 @@ Binding: **[docs/PHASE12_SPEC.md](./docs/PHASE12_SPEC.md)**.
 
 **Honest limitations (at ship):** eager rebalance only — closed by **Phase 17**; static membership is Volant-local (not Kafka `group.instance.id` wire parity).
 
-**Still deferred:** Kafka shim, multi-lang clients, SCRAM, mTLS, transactions.
+**Still deferred:** Kafka shim, multi-lang clients, SCRAM, mTLS.
 
 ---
 
@@ -453,7 +453,7 @@ Binding: **[docs/PHASE13_SPEC.md](./docs/PHASE13_SPEC.md)**.
 
 **Honest limitations (at ship):** configs durable; topic partition auto-reload on restart deferred to **Phase 14**. No compact cleanup policy.
 
-**Still deferred:** Kafka shim, multi-lang clients, SCRAM, mTLS, transactions.
+**Still deferred:** Kafka shim, multi-lang clients, SCRAM, mTLS.
 
 ---
 
@@ -471,7 +471,7 @@ Binding: **[docs/PHASE14_SPEC.md](./docs/PHASE14_SPEC.md)**.
 
 **Honest limitations:** DeleteRecords does not fan out to cluster followers; no compact policy; dynamic partition count increase deferred to **Phase 15**.
 
-**Still deferred:** Kafka shim, multi-lang clients, SCRAM, mTLS, transactions.
+**Still deferred:** Kafka shim, multi-lang clients, SCRAM, mTLS.
 
 ---
 
@@ -489,7 +489,7 @@ Binding: **[docs/PHASE15_SPEC.md](./docs/PHASE15_SPEC.md)**.
 
 **Honest limitations:** cannot shrink partitions; new partitions start empty; cluster CreatePartitions does not wait for all brokers; ListOffsets latest is LEO not client HWM; compact policy deferred to **Phase 16**.
 
-**Still deferred:** Kafka shim, multi-lang clients, SCRAM, mTLS, transactions.
+**Still deferred:** Kafka shim, multi-lang clients, SCRAM, mTLS.
 
 ---
 
@@ -508,7 +508,7 @@ Binding: **[docs/PHASE16_SPEC.md](./docs/PHASE16_SPEC.md)**.
 
 **Honest limitations:** no dirty-ratio gating; active segment not compacted until roll; tombstones dropped at compact time (no separate tombstone retention); cluster replicas compact independently.
 
-**Still deferred:** Kafka shim, multi-lang clients, SCRAM, mTLS, transactions.
+**Still deferred:** Kafka shim, multi-lang clients, SCRAM, mTLS.
 
 ---
 
@@ -526,7 +526,26 @@ Binding: **[docs/PHASE17_SPEC.md](./docs/PHASE17_SPEC.md)**.
 
 **Honest limitations:** not Kafka cooperative-sticky (no two-phase revoke barrier / assignor epochs); revoke applied at re-join not mid-batch; sticky assignor still Volant-local.
 
-**Still deferred:** Kafka shim, multi-lang clients, SCRAM, mTLS, transactions.
+**Still deferred:** Kafka shim, multi-lang clients, SCRAM, mTLS.
+
+---
+
+### Phase 18 — Transactions MVP ✅
+
+**Goal:** Multi-partition atomic produce (and deferred offsets) with transactional id fencing.
+
+Binding: **[docs/PHASE18_SPEC.md](./docs/PHASE18_SPEC.md)**.
+
+- [x] `InitProducerId` optional `transactional_id` + epoch fencing
+- [x] `BeginTxn` / `EndTxn` (opcodes 50–53); error `InvalidTxnState` (22)
+- [x] Broker-side off-log buffer; commit flushes all batches; abort drops
+- [x] Deferred offset commits on EndTxn trailer
+- [x] `TransactionalProducer` client helper + `volant txn produce` CLI
+- [x] Integration tests (`phase18_transactions`)
+
+**Honest limitations:** in-flight txn is memory-only (crash ≡ abort); no Kafka control markers / `READ_COMMITTED` fetch filter; produce-in-txn responses do not carry final log offsets (see EndTxn results); single-node coordinator only.
+
+**Still deferred:** Kafka shim, multi-lang clients, SCRAM, mTLS.
 
 ---
 

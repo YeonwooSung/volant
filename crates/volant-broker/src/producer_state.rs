@@ -26,6 +26,9 @@ pub struct StoredBatch {
 pub struct StoredProducer {
     /// Producer epoch.
     pub epoch: u16,
+    /// Transactional id when non-empty (Phase 18); empty = plain idempotent.
+    #[serde(default)]
+    pub transactional_id: String,
     /// Keyed as `"{topic}:{partition}"`.
     pub partitions: HashMap<String, StoredBatch>,
 }
@@ -168,6 +171,7 @@ mod tests {
             "1".into(),
             StoredProducer {
                 epoch: 0,
+                transactional_id: String::new(),
                 partitions: parts,
             },
         );

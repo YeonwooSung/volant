@@ -23,6 +23,9 @@ pub struct ClientConfig {
     pub max_redirects: u32,
     /// Enable idempotent produce (InitProducerId + per-partition sequences). Phase 10.
     pub enable_idempotence: bool,
+    /// Transactional id (Phase 18). When set, enables idempotence and fences
+    /// prior owners of the same id. Use with [`crate::TransactionalProducer`].
+    pub transactional_id: Option<String>,
     /// Extra produce attempts after the first on transient broker/transport errors.
     pub max_retries: u32,
     /// Sleep between produce retries (milliseconds).
@@ -41,6 +44,7 @@ impl Default for ClientConfig {
             tls_ca: None,
             max_redirects: 1,
             enable_idempotence: false,
+            transactional_id: None,
             max_retries: 0,
             retry_backoff_ms: 50,
         }

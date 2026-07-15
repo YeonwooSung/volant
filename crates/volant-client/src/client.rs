@@ -13,18 +13,22 @@ use volant_protocol::codec::{decode_frame, encode_frame};
 use volant_protocol::{
     decode_response, pack_request, Assignment, BrokerInfo, ErrorCode, FetchRecord, GroupListing,
     GroupMemberInfo, OffsetCommitEntry, OffsetEntry, OffsetFetchEntry, ProduceMessage, Request,
-    Response, TopicInfo,
+    Response, TopicInfo, TxnOffsetCommit, TxnProduceResult,
 };
 
 use crate::config::ClientConfig;
 use crate::conn::ClientConn;
 
-/// In-memory idempotent producer state (Phase 10).
+/// In-memory idempotent producer state (Phase 10/18).
 #[derive(Debug, Default)]
 struct IdempotentState {
     producer_id: u64,
     epoch: u16,
     initialized: bool,
+    /// True after BeginTxn until EndTxn (Phase 18).
+    in_transaction: bool,
+    /// `next_seq` snapshot at BeginTxn (restored on abort).
+    seq_at_begin: HashMap<(String, u32), i32>,
     /// Next base_sequence per (topic, partition).
     next_seq: HashMap<(String, u32), i32>,
 }
@@ -524,8 +528,10 @@ impl Client {
             })
             .collect();
 
-        // For idempotence, pin partition before sequencing.
-        let mut part = if self.config.enable_idempotence {
+        let idempotent = self.config.enable_idempotence || self.config.transactional_id.is_some();
+
+        // For idempotence / transactions, pin partition before sequencing.
+        let mut part = if idempotent {
             let p = match partition {
                 Some(p) => p,
                 None => self.resolve_partition(topic, wire[0].key.as_deref()).await?,
@@ -535,7 +541,7 @@ impl Client {
             partition.map(|p| p as i32).unwrap_or(-1)
         };
 
-        let (producer_id, producer_epoch, base_sequence) = if self.config.enable_idempotence {
+        let (producer_id, producer_epoch, base_sequence) = if idempotent {
             self.ensure_producer_id().await?;
             let state = self.idempotent.lock().await;
             let key = (topic.to_owned(), part as u32);
@@ -598,7 +604,7 @@ impl Client {
                         continue;
                     }
                     check_ok(error_code, "produce")?;
-                    if self.config.enable_idempotence && base_sequence >= 0 {
+                    if idempotent && base_sequence >= 0 {
                         let mut state = self.idempotent.lock().await;
                         let key = (t.clone(), p);
                         let next = base_sequence.saturating_add(count as i32);
@@ -640,7 +646,7 @@ impl Client {
         }
     }
 
-    /// Ensure InitProducerId has been called when idempotence is enabled.
+    /// Ensure InitProducerId has been called when idempotence/transactions enabled.
     async fn ensure_producer_id(&self) -> Result<()> {
         {
             let state = self.idempotent.lock().await;
@@ -648,7 +654,14 @@ impl Client {
                 return Ok(());
             }
         }
-        let resp = self.round_trip(Request::InitProducerId).await?;
+        let transactional_id = self
+            .config
+            .transactional_id
+            .clone()
+            .unwrap_or_default();
+        let resp = self
+            .round_trip(Request::InitProducerId { transactional_id })
+            .await?;
         match resp {
             Response::InitProducerId {
                 producer_id,
@@ -660,12 +673,104 @@ impl Client {
                 state.producer_id = producer_id;
                 state.epoch = epoch;
                 state.initialized = true;
+                state.in_transaction = false;
                 state.next_seq.clear();
                 Ok(())
             }
             Response::Error { code, message } => Err(error_from_code(code, message)),
             other => Err(Error::Protocol(format!(
                 "unexpected response for init_producer_id: {other:?}"
+            ))),
+        }
+    }
+
+    /// Begin a transaction (Phase 18). Requires `transactional_id` in config.
+    pub async fn begin_transaction(&self) -> Result<()> {
+        if self.config.transactional_id.is_none() {
+            return Err(Error::InvalidArgument(
+                "transactional_id not configured".into(),
+            ));
+        }
+        self.ensure_producer_id().await?;
+        let (producer_id, producer_epoch) = {
+            let state = self.idempotent.lock().await;
+            (state.producer_id, state.epoch)
+        };
+        let resp = self
+            .round_trip(Request::BeginTxn {
+                producer_id,
+                producer_epoch,
+            })
+            .await?;
+        match resp {
+            Response::BeginTxn { error_code } => {
+                check_ok(error_code, "begin_txn")?;
+                let mut state = self.idempotent.lock().await;
+                state.seq_at_begin = state.next_seq.clone();
+                state.in_transaction = true;
+                Ok(())
+            }
+            Response::Error { code, message } => Err(error_from_code(code, message)),
+            other => Err(Error::Protocol(format!(
+                "unexpected response for begin_txn: {other:?}"
+            ))),
+        }
+    }
+
+    /// Commit the open transaction (Phase 18).
+    ///
+    /// Returns final log offsets for each buffered produce batch.
+    pub async fn commit_transaction(
+        &self,
+        offsets: Vec<TxnOffsetCommit>,
+    ) -> Result<Vec<TxnProduceResult>> {
+        self.end_transaction(true, offsets).await
+    }
+
+    /// Abort the open transaction (Phase 18).
+    pub async fn abort_transaction(&self) -> Result<()> {
+        let _ = self.end_transaction(false, Vec::new()).await?;
+        Ok(())
+    }
+
+    async fn end_transaction(
+        &self,
+        committed: bool,
+        offsets: Vec<TxnOffsetCommit>,
+    ) -> Result<Vec<TxnProduceResult>> {
+        let (producer_id, producer_epoch) = {
+            let state = self.idempotent.lock().await;
+            if !state.initialized {
+                return Err(Error::InvalidArgument("producer id not initialized".into()));
+            }
+            (state.producer_id, state.epoch)
+        };
+        let resp = self
+            .round_trip(Request::EndTxn {
+                producer_id,
+                producer_epoch,
+                committed,
+                offsets,
+            })
+            .await?;
+        match resp {
+            Response::EndTxn {
+                error_code,
+                results,
+            } => {
+                check_ok(error_code, "end_txn")?;
+                let mut state = self.idempotent.lock().await;
+                state.in_transaction = false;
+                if !committed {
+                    // Broker discarded pending sequences; rewind client counters.
+                    state.next_seq = state.seq_at_begin.clone();
+                }
+                state.seq_at_begin.clear();
+                Ok(results)
+            }
+            Response::Error { code, message } => Err(error_from_code(code, message)),
+            other => Err(Error::Protocol(format!(
+                "unexpected response for end_txn: {other:?}"
             ))),
         }
     }
@@ -1079,7 +1184,8 @@ fn error_from_code(code: u16, message: impl Into<String>) -> Error {
         | ErrorCode::AuthenticationRequired
         | ErrorCode::InvalidProducerEpoch
         | ErrorCode::OutOfOrderSequence
-        | ErrorCode::UnknownProducerId => Error::Protocol(message),
+        | ErrorCode::UnknownProducerId
+        | ErrorCode::InvalidTxnState => Error::Protocol(message),
         ErrorCode::Ok | ErrorCode::Unknown => Error::Protocol(message),
     }
 }

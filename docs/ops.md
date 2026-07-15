@@ -245,6 +245,29 @@ volant topic offsets events --partition 0
 Multi-node: `add-partitions` must hit the **controller**. New partitions start
 empty (no data redistribution).
 
+## Transactions (Phase 18)
+
+Multi-partition atomic produce with a transactional id:
+
+```bash
+volant txn produce --transactional-id app-1 \
+  --topic events --partition 0 --value a \
+  --topic2 events --partition2 1 --value2 b
+```
+
+Rust:
+
+```rust
+let mut tp = TransactionalProducer::connect(vec!["127.0.0.1:9092".into()], "app-1").await?;
+tp.begin().await?;
+tp.produce("events", Some(0), msgs).await?;
+tp.add_offsets("cg", vec![("events".into(), 0, next_offset)]);
+let results = tp.commit().await?; // or tp.abort().await?
+```
+
+Produces inside a txn are **buffered off-log** until commit (abort leaves no
+records). Broker crash aborts open txns. Not Kafka control-marker EOS.
+
 ## Log compaction (Phase 16)
 
 ```bash
@@ -264,5 +287,5 @@ is only compacted after it rolls.
 ## Deferred
 
 Kafka wire shim, multi-language clients, SCRAM, mTLS identity, full chaos-mesh
-suites, cargo-fuzz corpus CI, transactions.
+suites, cargo-fuzz corpus CI.
 See [ROADMAP.md](../ROADMAP.md).

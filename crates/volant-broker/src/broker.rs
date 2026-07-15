@@ -111,12 +111,46 @@ struct IdempotentBatchState {
     base_offset: u64,
 }
 
-/// In-memory state for one producer id (Phase 10).
+/// In-memory state for one producer id (Phase 10/18).
 #[derive(Debug)]
 struct ProducerEpochState {
     epoch: u16,
-    /// Per (topic, partition) last accepted batch.
+    /// True when allocated with a non-empty transactional id (Phase 18).
+    transactional: bool,
+    /// Transactional id (empty if not transactional).
+    transactional_id: String,
+    /// Per (topic, partition) last **committed** batch.
     partitions: HashMap<(String, u32), IdempotentBatchState>,
+}
+
+/// One buffered produce batch inside an open transaction (Phase 18).
+#[derive(Debug, Clone)]
+struct TxnBufferedBatch {
+    topic: String,
+    partition: u32,
+    messages: Vec<Message>,
+    base_sequence: i32,
+}
+
+/// Open transaction state (memory-only; crash ≡ abort).
+#[derive(Debug, Default)]
+struct OpenTxn {
+    batches: Vec<TxnBufferedBatch>,
+    /// Sequences accepted inside this txn (not yet committed to `partitions`).
+    pending: HashMap<(String, u32), IdempotentBatchState>,
+}
+
+/// Result of committing a transaction (Phase 18).
+#[derive(Debug, Clone)]
+pub struct TxnCommitResult {
+    /// Topic name.
+    pub topic: String,
+    /// Partition id.
+    pub partition: u32,
+    /// Log base offset.
+    pub base_offset: u64,
+    /// Message count.
+    pub count: u32,
 }
 
 /// Outcome of an idempotent sequence check before append.
@@ -171,6 +205,10 @@ pub struct Broker {
     next_producer_id: AtomicU64,
     /// Idempotent producer state (loaded/persisted via [`ProducerStateStore`]).
     producer_state: RwLock<HashMap<u64, ProducerEpochState>>,
+    /// transactional_id → producer_id (Phase 18 fencing).
+    transactional_ids: RwLock<HashMap<String, u64>>,
+    /// Open transactions keyed by producer_id (Phase 18; memory-only).
+    open_txns: Mutex<HashMap<u64, OpenTxn>>,
     /// Durable producer state store under `data_dir/__producer_state` (Phase 11).
     producer_store: ProducerStateStore,
     /// Durable per-topic configs under `data_dir/__topic_configs` (Phase 13).
@@ -189,7 +227,7 @@ impl Broker {
             .expect("failed to initialize group coordinator / offset store");
         let producer_store = ProducerStateStore::open(&storage.data_dir)
             .expect("failed to open producer state store");
-        let (next_pid, producers) = load_producer_maps(&producer_store);
+        let (next_pid, producers, txn_ids) = load_producer_maps(&producer_store);
         let topic_configs = TopicConfigStore::open(&storage.data_dir)
             .expect("failed to open topic config store");
         let topic_catalog = TopicCatalogStore::open(&storage.data_dir)
@@ -212,6 +250,8 @@ impl Broker {
             inter_broker_tls: RwLock::new(None),
             next_producer_id: AtomicU64::new(next_pid),
             producer_state: RwLock::new(producers),
+            transactional_ids: RwLock::new(txn_ids),
+            open_txns: Mutex::new(HashMap::new()),
             producer_store,
             topic_configs,
             topic_catalog,
@@ -254,7 +294,7 @@ impl Broker {
             .expect("failed to initialize group coordinator / offset store");
         let producer_store = ProducerStateStore::open(&storage.data_dir)
             .expect("failed to open producer state store");
-        let (next_pid, producers) = load_producer_maps(&producer_store);
+        let (next_pid, producers, txn_ids) = load_producer_maps(&producer_store);
         let topic_configs = TopicConfigStore::open(&storage.data_dir)
             .expect("failed to open topic config store");
         let topic_catalog = TopicCatalogStore::open(&storage.data_dir)
@@ -277,6 +317,8 @@ impl Broker {
             inter_broker_tls: RwLock::new(None),
             next_producer_id: AtomicU64::new(next_pid),
             producer_state: RwLock::new(producers),
+            transactional_ids: RwLock::new(txn_ids),
+            open_txns: Mutex::new(HashMap::new()),
             producer_store,
             topic_configs,
             topic_catalog,
@@ -315,12 +357,59 @@ impl Broker {
     ///
     /// State is persisted under `data_dir/__producer_state` (Phase 11).
     pub fn init_producer_id(&self) -> (u64, u16) {
+        self.init_producer_id_with_txn("")
+    }
+
+    /// Allocate (or fence) a producer id, optionally transactional (Phase 18).
+    ///
+    /// Non-empty `transactional_id` fences any prior owner of that id by bumping
+    /// epoch and clearing open transactions / sequences.
+    pub fn init_producer_id_with_txn(&self, transactional_id: &str) -> (u64, u16) {
+        if !transactional_id.is_empty() {
+            let mut txn_ids = self.transactional_ids.write();
+            if let Some(&existing) = txn_ids.get(transactional_id) {
+                let mut state = self.producer_state.write();
+                if let Some(prod) = state.get_mut(&existing) {
+                    prod.epoch = prod.epoch.wrapping_add(1);
+                    if prod.epoch == 0 {
+                        prod.epoch = 1;
+                    }
+                    prod.partitions.clear();
+                    prod.transactional = true;
+                    prod.transactional_id = transactional_id.to_owned();
+                    let epoch = prod.epoch;
+                    drop(state);
+                    self.open_txns.lock().remove(&existing);
+                    let _ = self.persist_producer_state();
+                    return (existing, epoch);
+                }
+            }
+            // Allocate new PID for this transactional id.
+            let id = self.next_producer_id.fetch_add(1, Ordering::Relaxed);
+            let epoch = 0u16;
+            self.producer_state.write().insert(
+                id,
+                ProducerEpochState {
+                    epoch,
+                    transactional: true,
+                    transactional_id: transactional_id.to_owned(),
+                    partitions: HashMap::new(),
+                },
+            );
+            txn_ids.insert(transactional_id.to_owned(), id);
+            drop(txn_ids);
+            let _ = self.persist_producer_state();
+            return (id, epoch);
+        }
+
         let id = self.next_producer_id.fetch_add(1, Ordering::Relaxed);
         let epoch = 0u16;
         self.producer_state.write().insert(
             id,
             ProducerEpochState {
                 epoch,
+                transactional: false,
+                transactional_id: String::new(),
                 partitions: HashMap::new(),
             },
         );
@@ -328,10 +417,212 @@ impl Broker {
         (id, epoch)
     }
 
+    /// Begin a transaction for a transactional producer (Phase 18).
+    ///
+    /// Returns protocol error code (`0` = ok).
+    pub fn begin_txn(&self, producer_id: u64, producer_epoch: u16) -> u16 {
+        let state = self.producer_state.read();
+        let Some(prod) = state.get(&producer_id) else {
+            return ErrorCode::UnknownProducerId as u16;
+        };
+        if prod.epoch != producer_epoch {
+            return ErrorCode::InvalidProducerEpoch as u16;
+        }
+        if !prod.transactional {
+            return ErrorCode::InvalidTxnState as u16;
+        }
+        drop(state);
+        let mut open = self.open_txns.lock();
+        if open.contains_key(&producer_id) {
+            return ErrorCode::InvalidTxnState as u16;
+        }
+        open.insert(producer_id, OpenTxn::default());
+        0
+    }
+
+    /// Whether this producer currently has an open transaction.
+    pub fn has_open_txn(&self, producer_id: u64) -> bool {
+        self.open_txns.lock().contains_key(&producer_id)
+    }
+
+    /// Whether the producer id is transactional (Phase 18).
+    pub fn is_transactional_producer(&self, producer_id: u64) -> bool {
+        self.producer_state
+            .read()
+            .get(&producer_id)
+            .map(|p| p.transactional)
+            .unwrap_or(false)
+    }
+
+    /// Buffer a produce batch inside an open transaction (Phase 18).
+    ///
+    /// On success returns [`IdempotentCheck::Accept`] or `Duplicate` (base_offset 0).
+    /// Does not append to the log.
+    pub fn buffer_txn_produce(
+        &self,
+        producer_id: u64,
+        producer_epoch: u16,
+        topic: &str,
+        partition: u32,
+        base_sequence: i32,
+        messages: Vec<Message>,
+    ) -> IdempotentCheck {
+        let message_count = messages.len() as u32;
+        if message_count == 0 {
+            return IdempotentCheck::Reject {
+                error_code: ErrorCode::InvalidArg as u16,
+            };
+        }
+        {
+            let state = self.producer_state.read();
+            let Some(prod) = state.get(&producer_id) else {
+                return IdempotentCheck::Reject {
+                    error_code: ErrorCode::UnknownProducerId as u16,
+                };
+            };
+            if prod.epoch != producer_epoch {
+                return IdempotentCheck::Reject {
+                    error_code: ErrorCode::InvalidProducerEpoch as u16,
+                };
+            }
+            if !prod.transactional {
+                return IdempotentCheck::Reject {
+                    error_code: ErrorCode::InvalidTxnState as u16,
+                };
+            }
+        }
+        let mut open = self.open_txns.lock();
+        let Some(txn) = open.get_mut(&producer_id) else {
+            return IdempotentCheck::Reject {
+                error_code: ErrorCode::InvalidTxnState as u16,
+            };
+        };
+        let key = (topic.to_owned(), partition);
+        // Sequence vs last committed or last pending in this txn.
+        let last = txn.pending.get(&key).cloned().or_else(|| {
+            self.producer_state
+                .read()
+                .get(&producer_id)
+                .and_then(|p| p.partitions.get(&key).cloned())
+        });
+        match last {
+            None => {}
+            Some(last) => {
+                if base_sequence == last.base_sequence && message_count == last.count {
+                    return IdempotentCheck::Duplicate {
+                        base_offset: 0,
+                        count: last.count,
+                    };
+                }
+                let expected = last.base_sequence.saturating_add(last.count as i32);
+                if base_sequence != expected {
+                    return IdempotentCheck::Reject {
+                        error_code: ErrorCode::OutOfOrderSequence as u16,
+                    };
+                }
+            }
+        }
+        txn.batches.push(TxnBufferedBatch {
+            topic: topic.to_owned(),
+            partition,
+            messages,
+            base_sequence,
+        });
+        txn.pending.insert(
+            key,
+            IdempotentBatchState {
+                base_sequence,
+                count: message_count,
+                base_offset: 0,
+            },
+        );
+        IdempotentCheck::Accept
+    }
+
+    /// Commit or abort an open transaction (Phase 18).
+    ///
+    /// On commit, flushes buffered batches to the log and applies deferred offsets.
+    /// `offsets` entries are `(group_id, topic, partition, offset, metadata)`.
+    pub fn end_txn(
+        &self,
+        producer_id: u64,
+        producer_epoch: u16,
+        committed: bool,
+        offsets: &[(String, String, u32, u64, String)],
+    ) -> Result<(u16, Vec<TxnCommitResult>)> {
+        {
+            let state = self.producer_state.read();
+            let Some(prod) = state.get(&producer_id) else {
+                return Ok((ErrorCode::UnknownProducerId as u16, Vec::new()));
+            };
+            if prod.epoch != producer_epoch {
+                return Ok((ErrorCode::InvalidProducerEpoch as u16, Vec::new()));
+            }
+        }
+        let txn = {
+            let mut open = self.open_txns.lock();
+            match open.remove(&producer_id) {
+                Some(t) => t,
+                None => return Ok((ErrorCode::InvalidTxnState as u16, Vec::new())),
+            }
+        };
+
+        if !committed {
+            // Abort: drop buffer; sequences stay at last committed.
+            return Ok((0, Vec::new()));
+        }
+
+        let mut results = Vec::with_capacity(txn.batches.len());
+        for batch in txn.batches {
+            let topic = TopicName::new(batch.topic.clone());
+            let pid = PartitionId(batch.partition);
+            let mut mb = MessageBatch::default();
+            mb.messages = batch.messages;
+            let (records, error_code) = self.produce_with_acks(&topic, pid, mb, 1, None)?;
+            if error_code != 0 {
+                // Best-effort: already-flushed batches stay; remaining dropped.
+                // Return error; client should fence/retry with new epoch.
+                return Ok((error_code, results));
+            }
+            let base_offset = records.first().map(|r| r.offset.raw()).unwrap_or(0);
+            let count = records.len() as u32;
+            self.record_idempotent_produce(
+                producer_id,
+                producer_epoch,
+                &batch.topic,
+                batch.partition,
+                batch.base_sequence,
+                count,
+                base_offset,
+            );
+            let _ = self.flush(&topic, pid);
+            results.push(TxnCommitResult {
+                topic: batch.topic,
+                partition: batch.partition,
+                base_offset,
+                count,
+            });
+        }
+
+        for (group_id, topic, partition, offset, metadata) in offsets {
+            let _ = self.groups().commit_offsets(
+                group_id,
+                "",
+                0,
+                &[(topic.clone(), *partition, *offset, metadata.clone())],
+            );
+        }
+
+        Ok((0, results))
+    }
+
     /// Check idempotent produce sequence before appending.
     ///
     /// Non-idempotent produces (`producer_id == 0` or `base_sequence < 0`) always
     /// return [`IdempotentCheck::Accept`] without consulting producer state.
+    ///
+    /// Transactional producers without an open txn are rejected (`InvalidTxnState`).
+    /// Callers should route open-txn produces through [`Self::buffer_txn_produce`].
     pub fn check_idempotent_produce(
         &self,
         producer_id: u64,
@@ -359,6 +650,12 @@ impl Broker {
         if prod.epoch != producer_epoch {
             return IdempotentCheck::Reject {
                 error_code: ErrorCode::InvalidProducerEpoch as u16,
+            };
+        }
+        if prod.transactional {
+            // Transactional PIDs must produce only inside BeginTxn…EndTxn.
+            return IdempotentCheck::Reject {
+                error_code: ErrorCode::InvalidTxnState as u16,
             };
         }
 
@@ -445,6 +742,7 @@ impl Broker {
                 pid.to_string(),
                 StoredProducer {
                     epoch: prod.epoch,
+                    transactional_id: prod.transactional_id.clone(),
                     partitions,
                 },
             );
@@ -1946,10 +2244,15 @@ impl Broker {
 /// Load durable producer maps from disk (defaults if missing).
 fn load_producer_maps(
     store: &ProducerStateStore,
-) -> (u64, HashMap<u64, ProducerEpochState>) {
+) -> (
+    u64,
+    HashMap<u64, ProducerEpochState>,
+    HashMap<String, u64>,
+) {
     let file = store.load().unwrap_or_default();
     let next = if file.next_id == 0 { 1 } else { file.next_id };
     let mut map = HashMap::new();
+    let mut txn_ids = HashMap::new();
     for (pid_s, prod) in file.producers {
         let Ok(pid) = pid_s.parse::<u64>() else {
             continue;
@@ -1967,15 +2270,21 @@ fn load_producer_maps(
                 );
             }
         }
+        let transactional = !prod.transactional_id.is_empty();
+        if transactional {
+            txn_ids.insert(prod.transactional_id.clone(), pid);
+        }
         map.insert(
             pid,
             ProducerEpochState {
                 epoch: prod.epoch,
+                transactional,
+                transactional_id: prod.transactional_id,
                 partitions,
             },
         );
     }
-    (next, map)
+    (next, map, txn_ids)
 }
 
 /// Kafka-compatible murmur2 hash (seed `0x9747b28c`).

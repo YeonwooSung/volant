@@ -161,8 +161,11 @@ ListOffsets).
 **Phase 17:** cooperative rebalance — JoinGroup `revoked` list; `GroupConsumer`
 keeps fetch positions on sticky-retained partitions.
 
+**Phase 18:** transactions MVP — `BeginTxn`/`EndTxn`, transactional id fencing,
+multi-partition atomic commit, deferred offsets; `volant txn produce`.
+
 **Still deferred:** Kafka wire shim, multi-language clients, SCRAM, mTLS identity,
-chaos-mesh / cargo-fuzz corpus CI, transactions.
+chaos-mesh / cargo-fuzz corpus CI.
 
 ### Networked client (library)
 

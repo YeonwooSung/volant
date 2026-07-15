@@ -52,6 +52,10 @@ pub enum RequestOpcode {
     CreatePartitions = 46,
     /// List earliest/latest offsets (Phase 15).
     ListOffsets = 48,
+    /// Begin a producer transaction (Phase 18).
+    BeginTxn = 50,
+    /// Commit or abort a producer transaction (Phase 18).
+    EndTxn = 52,
 }
 
 impl RequestOpcode {
@@ -81,9 +85,26 @@ impl RequestOpcode {
             44 => Self::DeleteRecords,
             46 => Self::CreatePartitions,
             48 => Self::ListOffsets,
+            50 => Self::BeginTxn,
+            52 => Self::EndTxn,
             _ => return None,
         })
     }
+}
+
+/// One deferred offset commit inside EndTxn (Phase 18).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TxnOffsetCommit {
+    /// Consumer group id.
+    pub group_id: String,
+    /// Topic name.
+    pub topic: String,
+    /// Partition id.
+    pub partition: u32,
+    /// Offset to commit.
+    pub offset: u64,
+    /// Optional metadata.
+    pub metadata: String,
 }
 
 /// A single produce message on the wire.
@@ -256,7 +277,30 @@ pub enum Request {
         token: String,
     },
     /// Allocate a producer id for idempotent produce (Phase 10).
-    InitProducerId,
+    ///
+    /// Optional `transactional_id` (Phase 18); empty = non-transactional PID.
+    InitProducerId {
+        /// Transactional id for fencing; empty = plain idempotent producer.
+        transactional_id: String,
+    },
+    /// Begin a producer transaction (Phase 18).
+    BeginTxn {
+        /// Producer id from InitProducerId.
+        producer_id: u64,
+        /// Producer epoch.
+        producer_epoch: u16,
+    },
+    /// Commit or abort a producer transaction (Phase 18).
+    EndTxn {
+        /// Producer id.
+        producer_id: u64,
+        /// Producer epoch.
+        producer_epoch: u16,
+        /// `true` = commit, `false` = abort.
+        committed: bool,
+        /// Deferred offset commits applied only on successful commit.
+        offsets: Vec<TxnOffsetCommit>,
+    },
     /// Describe a consumer group (Phase 11).
     DescribeGroup {
         /// Consumer group id.
@@ -326,7 +370,9 @@ impl Request {
             Self::HeartbeatBroker { .. } => RequestOpcode::HeartbeatBroker as u16,
             Self::ClusterState { .. } => RequestOpcode::ClusterState as u16,
             Self::Auth { .. } => RequestOpcode::Auth as u16,
-            Self::InitProducerId => RequestOpcode::InitProducerId as u16,
+            Self::InitProducerId { .. } => RequestOpcode::InitProducerId as u16,
+            Self::BeginTxn { .. } => RequestOpcode::BeginTxn as u16,
+            Self::EndTxn { .. } => RequestOpcode::EndTxn as u16,
             Self::DescribeGroup { .. } => RequestOpcode::DescribeGroup as u16,
             Self::ListGroups => RequestOpcode::ListGroups as u16,
             Self::DeleteOffsets { .. } => RequestOpcode::DeleteOffsets as u16,
