@@ -8,8 +8,8 @@ use crate::request::{
 };
 use crate::response::{
     Assignment, BrokerInfo, ClusterPartitionState, ClusterTopicState, ErrorCode, FetchRecord,
-    GroupListing, GroupMemberInfo, GroupState, OffsetFetchEntry, PartitionInfo, Response,
-    ResponseOpcode, TopicInfo,
+    GroupListing, GroupMemberInfo, GroupState, OffsetFetchEntry, OffsetListing, PartitionInfo,
+    Response, ResponseOpcode, TopicInfo,
 };
 use crate::frame::{Frame, FrameHeader, PROTOCOL_VERSION};
 use crate::codec::checksum;
@@ -310,6 +310,20 @@ pub fn encode_request(req: &Request) -> Result<Bytes> {
             dst.put_u32_le(*partition);
             dst.put_u64_le(*before_offset);
         }
+        Request::CreatePartitions {
+            topic,
+            total_count,
+        } => {
+            put_string(&mut dst, topic)?;
+            dst.put_u32_le(*total_count);
+        }
+        Request::ListOffsets { topic, partitions } => {
+            put_string(&mut dst, topic)?;
+            dst.put_u32_le(partitions.len() as u32);
+            for p in partitions {
+                dst.put_u32_le(*p);
+            }
+        }
     }
     finish_payload(dst)
 }
@@ -603,6 +617,32 @@ pub fn decode_request(opcode: u16, payload: &[u8]) -> Result<Request> {
                 before_offset,
             })
         }
+        RequestOpcode::CreatePartitions => {
+            let topic = get_string(&mut src)?;
+            if src.remaining() < 4 {
+                return Err(Error::Protocol("truncated create partitions".into()));
+            }
+            let total_count = src.get_u32_le();
+            Ok(Request::CreatePartitions {
+                topic,
+                total_count,
+            })
+        }
+        RequestOpcode::ListOffsets => {
+            let topic = get_string(&mut src)?;
+            if src.remaining() < 4 {
+                return Err(Error::Protocol("truncated list offsets count".into()));
+            }
+            let n = src.get_u32_le() as usize;
+            let mut partitions = Vec::with_capacity(n);
+            for _ in 0..n {
+                if src.remaining() < 4 {
+                    return Err(Error::Protocol("truncated list offsets partition".into()));
+                }
+                partitions.push(src.get_u32_le());
+            }
+            Ok(Request::ListOffsets { topic, partitions })
+        }
     }
 }
 
@@ -872,6 +912,29 @@ pub fn encode_response(resp: &Response) -> Result<Bytes> {
             put_string(&mut dst, topic)?;
             dst.put_u32_le(*partition);
             dst.put_u64_le(*low_watermark);
+        }
+        Response::CreatePartitions {
+            error_code,
+            topic,
+            partitions,
+        } => {
+            dst.put_u16_le(*error_code);
+            put_string(&mut dst, topic)?;
+            dst.put_u32_le(*partitions);
+        }
+        Response::ListOffsets {
+            error_code,
+            topic,
+            entries,
+        } => {
+            dst.put_u16_le(*error_code);
+            put_string(&mut dst, topic)?;
+            dst.put_u32_le(entries.len() as u32);
+            for e in entries {
+                dst.put_u32_le(e.partition);
+                dst.put_u64_le(e.earliest);
+                dst.put_u64_le(e.latest);
+            }
         }
         Response::Error { code, message } => {
             dst.put_u16_le(*code);
@@ -1417,6 +1480,49 @@ pub fn decode_response(opcode: u16, payload: &[u8]) -> Result<Response> {
                 low_watermark,
             })
         }
+        ResponseOpcode::CreatePartitions => {
+            if src.remaining() < 2 {
+                return Err(Error::Protocol("truncated create partitions error".into()));
+            }
+            let error_code = src.get_u16_le();
+            let topic = get_string(&mut src)?;
+            if src.remaining() < 4 {
+                return Err(Error::Protocol("truncated create partitions count".into()));
+            }
+            let partitions = src.get_u32_le();
+            Ok(Response::CreatePartitions {
+                error_code,
+                topic,
+                partitions,
+            })
+        }
+        ResponseOpcode::ListOffsets => {
+            if src.remaining() < 2 {
+                return Err(Error::Protocol("truncated list offsets error".into()));
+            }
+            let error_code = src.get_u16_le();
+            let topic = get_string(&mut src)?;
+            if src.remaining() < 4 {
+                return Err(Error::Protocol("truncated list offsets count".into()));
+            }
+            let n = src.get_u32_le() as usize;
+            let mut entries = Vec::with_capacity(n);
+            for _ in 0..n {
+                if src.remaining() < 4 + 8 + 8 {
+                    return Err(Error::Protocol("truncated list offsets entry".into()));
+                }
+                entries.push(OffsetListing {
+                    partition: src.get_u32_le(),
+                    earliest: src.get_u64_le(),
+                    latest: src.get_u64_le(),
+                });
+            }
+            Ok(Response::ListOffsets {
+                error_code,
+                topic,
+                entries,
+            })
+        }
         ResponseOpcode::Error => {
             if src.remaining() < 2 {
                 return Err(Error::Protocol("truncated error code".into()));
@@ -1664,6 +1770,60 @@ mod tests {
         assert_eq!(
             decode_response(ResponseOpcode::DeleteRecords as u16, &b).unwrap(),
             resp
+        );
+    }
+
+    #[test]
+    fn phase15_create_partitions_list_offsets_roundtrip() {
+        let req = Request::CreatePartitions {
+            topic: "events".into(),
+            total_count: 8,
+        };
+        let b = encode_request(&req).unwrap();
+        assert_eq!(
+            decode_request(RequestOpcode::CreatePartitions as u16, &b).unwrap(),
+            req
+        );
+        let resp = Response::CreatePartitions {
+            error_code: 0,
+            topic: "events".into(),
+            partitions: 8,
+        };
+        let b = encode_response(&resp).unwrap();
+        assert_eq!(
+            decode_response(ResponseOpcode::CreatePartitions as u16, &b).unwrap(),
+            resp
+        );
+
+        let lo = Request::ListOffsets {
+            topic: "events".into(),
+            partitions: vec![0, 1],
+        };
+        let b = encode_request(&lo).unwrap();
+        assert_eq!(
+            decode_request(RequestOpcode::ListOffsets as u16, &b).unwrap(),
+            lo
+        );
+        let lo_resp = Response::ListOffsets {
+            error_code: 0,
+            topic: "events".into(),
+            entries: vec![
+                OffsetListing {
+                    partition: 0,
+                    earliest: 0,
+                    latest: 10,
+                },
+                OffsetListing {
+                    partition: 1,
+                    earliest: 2,
+                    latest: 5,
+                },
+            ],
+        };
+        let b = encode_response(&lo_resp).unwrap();
+        assert_eq!(
+            decode_response(ResponseOpcode::ListOffsets as u16, &b).unwrap(),
+            lo_resp
         );
     }
 

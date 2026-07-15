@@ -469,7 +469,25 @@ Binding: **[docs/PHASE14_SPEC.md](./docs/PHASE14_SPEC.md)**.
 - [x] `DeleteRecords` (opcode 44/45) + `Client::delete_records` + `volant topic delete-records`
 - [x] Integration tests (`phase14_topic_catalog`)
 
-**Honest limitations:** DeleteRecords does not fan out to cluster followers; no compact policy; no dynamic partition count increase.
+**Honest limitations:** DeleteRecords does not fan out to cluster followers; no compact policy; dynamic partition count increase deferred to **Phase 15**.
+
+**Still deferred:** Kafka shim, multi-lang clients, SCRAM, mTLS, cooperative rebalance, transactions.
+
+---
+
+### Phase 15 — CreatePartitions & ListOffsets ✅
+
+**Goal:** Grow topic partition counts and inspect log offset ranges for ops.
+
+Binding: **[docs/PHASE15_SPEC.md](./docs/PHASE15_SPEC.md)**.
+
+- [x] `CreatePartitions` (opcode 46/47) — increase total partition count
+- [x] Single-node catalog update; multi-node controller + assignment.json
+- [x] `ListOffsets` (opcode 48/49) — earliest (log start) + latest (LEO) per partition
+- [x] Client + CLI (`topic add-partitions`, `topic offsets`)
+- [x] Integration tests (`phase15_partitions_offsets`)
+
+**Honest limitations:** cannot shrink partitions; new partitions start empty; cluster CreatePartitions does not wait for all brokers; ListOffsets latest is LEO not client HWM; no compact policy.
 
 **Still deferred:** Kafka shim, multi-lang clients, SCRAM, mTLS, cooperative rebalance, transactions.
 

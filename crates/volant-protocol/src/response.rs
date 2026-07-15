@@ -48,6 +48,10 @@ pub enum ResponseOpcode {
     AlterConfigs = 43,
     /// Delete records result (Phase 14).
     DeleteRecords = 45,
+    /// Create partitions result (Phase 15).
+    CreatePartitions = 47,
+    /// List offsets result (Phase 15).
+    ListOffsets = 49,
     /// Error response.
     Error = 0xFFFF,
 }
@@ -77,6 +81,8 @@ impl ResponseOpcode {
             41 => Self::DescribeConfigs,
             43 => Self::AlterConfigs,
             45 => Self::DeleteRecords,
+            47 => Self::CreatePartitions,
+            49 => Self::ListOffsets,
             0xFFFF => Self::Error,
             _ => return None,
         })
@@ -505,6 +511,24 @@ pub enum Response {
         /// New log start offset after deletion.
         low_watermark: u64,
     },
+    /// Create partitions result (Phase 15).
+    CreatePartitions {
+        /// 0 = ok; 2 = not found; 3 = invalid; 14 = not controller.
+        error_code: u16,
+        /// Topic name.
+        topic: String,
+        /// New total partition count (`0` on error).
+        partitions: u32,
+    },
+    /// List offsets result (Phase 15).
+    ListOffsets {
+        /// 0 = ok; 2 = not found.
+        error_code: u16,
+        /// Topic name.
+        topic: String,
+        /// Per-partition earliest/latest.
+        entries: Vec<OffsetListing>,
+    },
     /// Error response.
     Error {
         /// Error code.
@@ -512,6 +536,17 @@ pub enum Response {
         /// Human-readable error message.
         message: String,
     },
+}
+
+/// One partition in a ListOffsets response (Phase 15).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct OffsetListing {
+    /// Partition id.
+    pub partition: u32,
+    /// Log start offset.
+    pub earliest: u64,
+    /// Log end offset (next write).
+    pub latest: u64,
 }
 
 impl Response {
@@ -539,6 +574,8 @@ impl Response {
             Self::DescribeConfigs { .. } => ResponseOpcode::DescribeConfigs as u16,
             Self::AlterConfigs { .. } => ResponseOpcode::AlterConfigs as u16,
             Self::DeleteRecords { .. } => ResponseOpcode::DeleteRecords as u16,
+            Self::CreatePartitions { .. } => ResponseOpcode::CreatePartitions as u16,
+            Self::ListOffsets { .. } => ResponseOpcode::ListOffsets as u16,
             Self::Error { .. } => ResponseOpcode::Error as u16,
         }
     }

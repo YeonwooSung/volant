@@ -124,6 +124,26 @@ pub struct DeleteRecordsResult {
     pub low_watermark: u64,
 }
 
+/// One partition offset range from ListOffsets (Phase 15).
+#[derive(Debug, Clone)]
+pub struct PartitionOffsets {
+    /// Partition id.
+    pub partition: u32,
+    /// Log start offset.
+    pub earliest: u64,
+    /// Log end offset (next write).
+    pub latest: u64,
+}
+
+/// Result of ListOffsets (Phase 15).
+#[derive(Debug, Clone)]
+pub struct ListOffsetsResult {
+    /// Topic name.
+    pub topic: String,
+    /// Per-partition ranges.
+    pub entries: Vec<PartitionOffsets>,
+}
+
 impl HeartbeatResult {
     /// Whether the client should re-join the group.
     pub fn needs_rebalance(&self) -> bool {
@@ -359,6 +379,70 @@ impl Client {
             Response::Error { code, message } => Err(error_from_code(code, message)),
             other => Err(Error::Protocol(format!(
                 "unexpected response for delete_records: {other:?}"
+            ))),
+        }
+    }
+
+    /// Increase topic partition count to `total_count` (Phase 15).
+    pub async fn create_partitions(&self, topic: &str, total_count: u32) -> Result<u32> {
+        let resp = self
+            .round_trip(Request::CreatePartitions {
+                topic: topic.to_owned(),
+                total_count,
+            })
+            .await?;
+        match resp {
+            Response::CreatePartitions {
+                error_code,
+                partitions,
+                ..
+            } => {
+                check_ok(error_code, "create_partitions")?;
+                Ok(partitions)
+            }
+            Response::Error { code, message } => Err(error_from_code(code, message)),
+            other => Err(Error::Protocol(format!(
+                "unexpected response for create_partitions: {other:?}"
+            ))),
+        }
+    }
+
+    /// List earliest/latest offsets for a topic (Phase 15).
+    ///
+    /// Empty `partitions` means all partitions.
+    pub async fn list_offsets(
+        &self,
+        topic: &str,
+        partitions: Vec<u32>,
+    ) -> Result<ListOffsetsResult> {
+        let resp = self
+            .round_trip(Request::ListOffsets {
+                topic: topic.to_owned(),
+                partitions,
+            })
+            .await?;
+        match resp {
+            Response::ListOffsets {
+                error_code,
+                topic,
+                entries,
+            } => {
+                check_ok(error_code, "list_offsets")?;
+                Ok(ListOffsetsResult {
+                    topic,
+                    entries: entries
+                        .into_iter()
+                        .map(|e| PartitionOffsets {
+                            partition: e.partition,
+                            earliest: e.earliest,
+                            latest: e.latest,
+                        })
+                        .collect(),
+                })
+            }
+            Response::Error { code, message } => Err(error_from_code(code, message)),
+            other => Err(Error::Protocol(format!(
+                "unexpected response for list_offsets: {other:?}"
             ))),
         }
     }

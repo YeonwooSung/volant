@@ -152,6 +152,9 @@ lag metrics + `volant group lag`.
 **Phase 14:** single-node topic catalog survives restart; `volant topic
 delete-records` (truncate sealed segments before an offset).
 
+**Phase 15:** `volant topic add-partitions` / `topic offsets` (CreatePartitions +
+ListOffsets).
+
 **Still deferred:** Kafka wire shim, multi-language clients, SCRAM, mTLS identity,
 chaos-mesh / cargo-fuzz corpus CI, cooperative rebalance, transactions.
 

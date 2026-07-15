@@ -738,6 +738,202 @@ impl Broker {
         Ok(())
     }
 
+    /// Increase a topic's partition count to `total_count` (Phase 15).
+    ///
+    /// `total_count` must be strictly greater than the current count.
+    /// Single-node updates the durable catalog; multi-node requires controller.
+    pub fn create_partitions(&self, topic: &str, total_count: u32) -> Result<u32> {
+        if total_count == 0 {
+            return Err(Error::InvalidArgument(
+                "total partition count must be at least 1".into(),
+            ));
+        }
+        let name = TopicName::new(topic);
+
+        if let Some(cluster) = &self.cluster {
+            if !cluster.membership.read().is_controller() {
+                return Err(Error::InvalidArgument(format!(
+                    "not controller; controller_id={}",
+                    cluster.membership.read().controller_id()
+                )));
+            }
+            return self.create_partitions_cluster(name, total_count);
+        }
+
+        let topic_cfg = self.topic_configs.load(topic).unwrap_or_default();
+        let mut topics = self.topics.write();
+        let t = topics
+            .get_mut(&name)
+            .ok_or_else(|| Error::NotFound(format!("topic {topic}")))?;
+        let current = t.partitions.len() as u32;
+        if total_count <= current {
+            return Err(Error::InvalidArgument(format!(
+                "total_count {total_count} must be greater than current {current}"
+            )));
+        }
+        t.add_partitions_from(
+            current,
+            total_count,
+            &self.storage,
+            self.node_id,
+            None,
+            &topic_cfg,
+        )?;
+        drop(topics);
+        self.persist_topic_catalog()?;
+        Ok(total_count)
+    }
+
+    fn create_partitions_cluster(&self, name: TopicName, total_count: u32) -> Result<u32> {
+        let cluster = self.cluster.as_ref().expect("cluster");
+        let topic_cfg = self
+            .topic_configs
+            .load(name.as_str())
+            .unwrap_or_default();
+
+        let (current, topic_id, mut all_replica_sets) = {
+            let asg = cluster.assignment.read();
+            let ta = asg
+                .topics
+                .get(name.as_str())
+                .ok_or_else(|| Error::NotFound(format!("topic {}", name.as_str())))?;
+            let current = ta.partitions.len() as u32;
+            if total_count <= current {
+                return Err(Error::InvalidArgument(format!(
+                    "total_count {total_count} must be greater than current {current}"
+                )));
+            }
+            let mut sets: Vec<Vec<u32>> = Vec::with_capacity(total_count as usize);
+            for i in 0..current {
+                let pa = ta.partitions.get(&i).ok_or_else(|| {
+                    Error::Storage(format!("missing partition assignment {i}"))
+                })?;
+                sets.push(pa.replicas.clone());
+            }
+            (current, ta.topic_id, sets)
+        };
+
+        let broker_ids = cluster.config.broker_ids();
+        let rf = cluster
+            .config
+            .default_replication_factor
+            .min(broker_ids.len() as u32)
+            .max(1);
+
+        let mut new_part_map = HashMap::new();
+        for pid in current..total_count {
+            // Distinct placement seed per partition id.
+            let sets = assign_replicas(
+                &format!("{}#{pid}", name.as_str()),
+                1,
+                &broker_ids,
+                rf,
+            );
+            let replicas = sets.into_iter().next().unwrap_or_else(|| vec![self.node_id]);
+            let leader = replicas.first().copied().unwrap_or(self.node_id);
+            all_replica_sets.push(replicas.clone());
+            new_part_map.insert(
+                pid,
+                PartitionAssignment {
+                    isr: replicas.clone(),
+                    replicas,
+                    leader,
+                    leader_epoch: 0,
+                },
+            );
+        }
+
+        {
+            let mut asg = cluster.assignment.write();
+            let ta = asg
+                .topics
+                .get_mut(name.as_str())
+                .ok_or_else(|| Error::NotFound(format!("topic {}", name.as_str())))?;
+            for (pid, pa) in new_part_map {
+                ta.partitions.insert(pid, pa);
+            }
+            asg.generation = asg.generation.saturating_add(1);
+            save_assignment(&cluster.data_dir, &asg)?;
+        }
+
+        {
+            let mut topics = self.topics.write();
+            let t = topics.entry(name.clone()).or_insert_with(|| Topic {
+                id: TopicId(topic_id),
+                name: name.clone(),
+                partitions: HashMap::new(),
+            });
+            t.add_partitions_from(
+                current,
+                total_count,
+                &self.storage,
+                self.node_id,
+                Some(&all_replica_sets),
+                &topic_cfg,
+            )?;
+        }
+        Ok(total_count)
+    }
+
+    /// List earliest/latest offsets for topic partitions (Phase 15).
+    ///
+    /// Empty `partitions` means all known partitions. Returns
+    /// `(partition, earliest, latest)` triples.
+    pub fn list_offsets(
+        &self,
+        topic: &str,
+        partitions: &[u32],
+    ) -> Result<Vec<(u32, u64, u64)>> {
+        let name = TopicName::new(topic);
+        let topics = self.topics.read();
+
+        let partition_ids: Vec<u32> = if !partitions.is_empty() {
+            partitions.to_vec()
+        } else if let Some(cluster) = &self.cluster {
+            let asg = cluster.assignment.read();
+            let ta = asg
+                .topics
+                .get(topic)
+                .ok_or_else(|| Error::NotFound(format!("topic {topic}")))?;
+            let mut ids: Vec<u32> = ta.partitions.keys().copied().collect();
+            ids.sort_unstable();
+            ids
+        } else {
+            let t = topics
+                .get(&name)
+                .ok_or_else(|| Error::NotFound(format!("topic {topic}")))?;
+            let mut ids: Vec<u32> = t.partitions.keys().map(|p| p.0).collect();
+            ids.sort_unstable();
+            ids
+        };
+
+        // Ensure topic exists in single-node map when filters used.
+        if self.cluster.is_none() && !topics.contains_key(&name) {
+            return Err(Error::NotFound(format!("topic {topic}")));
+        }
+        if self.cluster.is_some() {
+            let asg = self.cluster.as_ref().unwrap().assignment.read();
+            if !asg.topics.contains_key(topic) {
+                return Err(Error::NotFound(format!("topic {topic}")));
+            }
+        }
+
+        let mut out = Vec::with_capacity(partition_ids.len());
+        for pid in partition_ids {
+            if let Some(t) = topics.get(&name) {
+                if let Some(part) = t.partitions.get(&PartitionId(pid)) {
+                    let earliest = part.log.log_start_offset().raw();
+                    let latest = part.log.log_end_offset().raw();
+                    out.push((pid, earliest, latest));
+                    continue;
+                }
+            }
+            // Known in assignment but no local log.
+            out.push((pid, 0, 0));
+        }
+        Ok(out)
+    }
+
     /// Delete records before `before_offset` on a partition (Phase 14).
     ///
     /// Drops whole sealed segments only. Returns `(low_watermark, error_code)`.

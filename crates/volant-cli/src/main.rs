@@ -140,6 +140,28 @@ enum TopicCmd {
         #[arg(long, default_value = "127.0.0.1:9092")]
         broker: String,
     },
+    /// Increase partition count (Phase 15).
+    AddPartitions {
+        /// Topic name.
+        name: String,
+        /// Desired total partition count (must exceed current).
+        #[arg(long)]
+        total: u32,
+        /// Broker address.
+        #[arg(long, default_value = "127.0.0.1:9092")]
+        broker: String,
+    },
+    /// Show earliest/latest offsets (Phase 15).
+    Offsets {
+        /// Topic name.
+        name: String,
+        /// Optional partition filter.
+        #[arg(long)]
+        partition: Option<u32>,
+        /// Broker address.
+        #[arg(long, default_value = "127.0.0.1:9092")]
+        broker: String,
+    },
 }
 
 #[derive(Debug, Subcommand)]
@@ -257,7 +279,7 @@ async fn main() -> Result<()> {
     match cli.command {
         Commands::Version => {
             println!("volant {}", env!("CARGO_PKG_VERSION"));
-            println!("status: Phase 14 — durable topics and delete-records");
+            println!("status: Phase 15 — create-partitions and list-offsets");
         }
         Commands::Topic { action } => match action {
             TopicCmd::List { broker } => {
@@ -372,6 +394,36 @@ async fn main() -> Result<()> {
                     "deleted records before {before_offset} on {name}/{partition}; low_watermark={}",
                     res.low_watermark
                 );
+            }
+            TopicCmd::AddPartitions {
+                name,
+                total,
+                broker,
+            } => {
+                let client = connect(&broker, auth).await?;
+                let n = client
+                    .create_partitions(&name, total)
+                    .await
+                    .with_context(|| format!("add-partitions '{name}' total={total}"))?;
+                println!("topic '{name}' now has {n} partitions");
+            }
+            TopicCmd::Offsets {
+                name,
+                partition,
+                broker,
+            } => {
+                let client = connect(&broker, auth).await?;
+                let parts = partition.map(|p| vec![p]).unwrap_or_default();
+                let res = client
+                    .list_offsets(&name, parts)
+                    .await
+                    .with_context(|| format!("offsets '{name}'"))?;
+                for e in res.entries {
+                    println!(
+                        "{}\tp{}\tearliest={}\tlatest={}",
+                        res.topic, e.partition, e.earliest, e.latest
+                    );
+                }
             }
         },
         Commands::Group { action } => match action {

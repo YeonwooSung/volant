@@ -219,6 +219,20 @@ DeleteRecords only truncates **whole sealed segments** (same as storage
 `delete_records`). On a multi-node cluster it runs on the leader only; followers
 are not notified (use retention for cluster-wide cleanup).
 
+## Create partitions & list offsets (Phase 15)
+
+```bash
+# Grow a topic to 8 partitions (must be greater than current)
+volant topic add-partitions events --total 8
+
+# Earliest (log start) and latest (LEO) per partition
+volant topic offsets events
+volant topic offsets events --partition 0
+```
+
+Multi-node: `add-partitions` must hit the **controller**. New partitions start
+empty (no data redistribution).
+
 ## Deferred
 
 Kafka wire shim, multi-language clients, SCRAM, mTLS identity, full chaos-mesh

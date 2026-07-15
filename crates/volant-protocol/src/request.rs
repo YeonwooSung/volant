@@ -48,6 +48,10 @@ pub enum RequestOpcode {
     AlterConfigs = 42,
     /// Delete records before an offset (Phase 14).
     DeleteRecords = 44,
+    /// Increase topic partition count (Phase 15).
+    CreatePartitions = 46,
+    /// List earliest/latest offsets (Phase 15).
+    ListOffsets = 48,
 }
 
 impl RequestOpcode {
@@ -75,6 +79,8 @@ impl RequestOpcode {
             40 => Self::DescribeConfigs,
             42 => Self::AlterConfigs,
             44 => Self::DeleteRecords,
+            46 => Self::CreatePartitions,
+            48 => Self::ListOffsets,
             _ => return None,
         })
     }
@@ -286,6 +292,20 @@ pub enum Request {
         /// Drop sealed segments entirely before this offset.
         before_offset: u64,
     },
+    /// Increase topic partition count (Phase 15).
+    CreatePartitions {
+        /// Topic name.
+        topic: String,
+        /// Desired total partition count (must exceed current).
+        total_count: u32,
+    },
+    /// List earliest/latest offsets (Phase 15).
+    ListOffsets {
+        /// Topic name.
+        topic: String,
+        /// Partitions to query; empty = all.
+        partitions: Vec<u32>,
+    },
 }
 
 impl Request {
@@ -313,6 +333,8 @@ impl Request {
             Self::DescribeConfigs { .. } => RequestOpcode::DescribeConfigs as u16,
             Self::AlterConfigs { .. } => RequestOpcode::AlterConfigs as u16,
             Self::DeleteRecords { .. } => RequestOpcode::DeleteRecords as u16,
+            Self::CreatePartitions { .. } => RequestOpcode::CreatePartitions as u16,
+            Self::ListOffsets { .. } => RequestOpcode::ListOffsets as u16,
         }
     }
 }

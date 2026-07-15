@@ -578,7 +578,9 @@ fn record_response_metrics(broker: &Broker, resp: &Response) {
         | Response::DeleteOffsets { error_code, .. }
         | Response::DescribeConfigs { error_code, .. }
         | Response::AlterConfigs { error_code, .. }
-        | Response::DeleteRecords { error_code, .. } => {
+        | Response::DeleteRecords { error_code, .. }
+        | Response::CreatePartitions { error_code, .. }
+        | Response::ListOffsets { error_code, .. } => {
             if *error_code != 0 {
                 m.record_error(*error_code);
             }
@@ -1129,6 +1131,58 @@ async fn handle_request(broker: &Broker, req: Request) -> Result<Response> {
             }),
             Err(e) => Err(e),
         },
+        Request::CreatePartitions {
+            topic,
+            total_count,
+        } => match broker.create_partitions(&topic, total_count) {
+            Ok(partitions) => Ok(Response::CreatePartitions {
+                error_code: 0,
+                topic,
+                partitions,
+            }),
+            Err(Error::NotFound(_)) => Ok(Response::CreatePartitions {
+                error_code: ErrorCode::NotFound as u16,
+                topic,
+                partitions: 0,
+            }),
+            Err(Error::InvalidArgument(m)) if m.starts_with("not controller") => {
+                Ok(Response::CreatePartitions {
+                    error_code: ErrorCode::NotController as u16,
+                    topic,
+                    partitions: 0,
+                })
+            }
+            Err(Error::InvalidArgument(_)) => Ok(Response::CreatePartitions {
+                error_code: ErrorCode::InvalidArg as u16,
+                topic,
+                partitions: 0,
+            }),
+            Err(e) => Err(e),
+        },
+        Request::ListOffsets { topic, partitions } => {
+            match broker.list_offsets(&topic, &partitions) {
+                Ok(entries) => Ok(Response::ListOffsets {
+                    error_code: 0,
+                    topic,
+                    entries: entries
+                        .into_iter()
+                        .map(|(partition, earliest, latest)| {
+                            volant_protocol::OffsetListing {
+                                partition,
+                                earliest,
+                                latest,
+                            }
+                        })
+                        .collect(),
+                }),
+                Err(Error::NotFound(_)) => Ok(Response::ListOffsets {
+                    error_code: ErrorCode::NotFound as u16,
+                    topic,
+                    entries: vec![],
+                }),
+                Err(e) => Err(e),
+            }
+        }
     }
 }
 

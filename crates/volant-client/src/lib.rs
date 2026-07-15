@@ -15,7 +15,8 @@ pub mod producer;
 
 pub use client::{
     produce_value, Client, DeleteOffsetsResult, DeleteRecordsResult, DescribeConfigsResult,
-    DescribeGroupResult, FetchResult, HeartbeatResult, JoinGroupResult, Metadata, ProduceResult,
+    DescribeGroupResult, FetchResult, HeartbeatResult, JoinGroupResult, ListOffsetsResult,
+    Metadata, PartitionOffsets, ProduceResult,
 };
 pub use config::ClientConfig;
 pub use consumer::Consumer;

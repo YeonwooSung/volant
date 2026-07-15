@@ -131,6 +131,56 @@ impl Topic {
         Ok(())
     }
 
+    /// Open partitions in `[from_id, new_total)` on this node (Phase 15).
+    ///
+    /// `replica_sets[i]` is the replica list for partition `i` (full topic set).
+    /// When `replica_sets` is `None` (single-node), every new partition is local.
+    pub fn add_partitions_from(
+        &mut self,
+        from_id: u32,
+        new_total: u32,
+        storage: &StorageConfig,
+        node_id: u32,
+        replica_sets: Option<&[Vec<u32>]>,
+        topic_cfg: &TopicConfig,
+    ) -> volant_core::Result<()> {
+        if new_total <= from_id {
+            return Ok(());
+        }
+        for i in from_id..new_total {
+            let pid = PartitionId(i);
+            if self.partitions.contains_key(&pid) {
+                continue;
+            }
+            let replicas = match replica_sets {
+                Some(sets) => sets
+                    .get(i as usize)
+                    .cloned()
+                    .unwrap_or_else(|| vec![node_id]),
+                None => vec![node_id],
+            };
+            if !replicas.contains(&node_id) {
+                continue;
+            }
+            let mut cfg = storage.clone();
+            cfg.data_dir = storage
+                .data_dir
+                .join(self.name.as_str())
+                .join(format!("{i}"));
+            apply_topic_config_to_storage(&mut cfg, topic_cfg);
+            let log = PartitionLog::open(cfg)?;
+            let leader = replicas.first().copied().unwrap_or(node_id);
+            let mut part = Partition::new_single(pid, log, node_id);
+            part.leader = leader;
+            part.replicas = replicas.clone();
+            part.isr = replicas;
+            part.leader_epoch = 0;
+            part.committed_hwm = part.leo();
+            self.partitions.insert(pid, part);
+        }
+        Ok(())
+    }
+
     /// Apply retention/segment settings to all local partitions (Phase 13).
     pub fn apply_topic_config(&mut self, topic_cfg: &TopicConfig) {
         for part in self.partitions.values_mut() {
