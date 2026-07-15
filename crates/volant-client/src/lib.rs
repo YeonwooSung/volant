@@ -12,6 +12,7 @@ mod conn;
 pub mod consumer;
 pub mod group;
 pub mod producer;
+mod scram;
 pub mod txn;
 
 pub use client::{

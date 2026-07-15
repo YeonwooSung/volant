@@ -605,6 +605,25 @@ Binding: **[docs/PHASE21_SPEC.md](./docs/PHASE21_SPEC.md)**.
 
 ---
 
+### Phase 22 — SCRAM-SHA-256 authentication ✅
+
+**Goal:** User/password auth via SCRAM-SHA-256 (RFC 5802 crypto, Volant binary wire); durable credentials; principal = username for ACLs.
+
+Binding: **[docs/PHASE22_SPEC.md](./docs/PHASE22_SPEC.md)**.
+
+- [x] Opcodes 60–69: ScramFirst/Final, Create/Delete/ListScramUser(s)
+- [x] Durable `{data_dir}/__scram/users.json` (salt + StoredKey + ServerKey)
+- [x] `auth_required` when token **or** SCRAM users **or** mTLS
+- [x] Bootstrap `CreateScramUser` when store empty; `--scram-user user:pass`
+- [x] Client `scram_username`/`scram_password`; CLI `--scram-user`/`--scram-password` + `user create|list|delete`
+- [x] Integration tests (`phase22_scram`) + unit crypto roundtrip
+
+**Honest limitations:** no channel binding; no SCRAM-SHA-512; not Kafka SASL handshake bytes; CreateScramUser sends password in clear (use TLS); challenge state is per-TCP-connection only; multi-node inter-broker still uses shared-token Auth (not SCRAM).
+
+**Still deferred:** Kafka shim, multi-lang clients, full SASL (PLAIN/GSSAPI), SCRAM-SHA-512.
+
+---
+
 ## Performance targets (aspirational)
 
 | Metric | Single node target | Notes |

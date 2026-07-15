@@ -163,9 +163,10 @@ impl HeartbeatResult {
 
 /// Async client (sequential request/response over one connection).
 ///
-/// Supports optional shared-token auth, optional TLS (`tls` feature),
-/// automatic reconnect to the partition leader on `NotLeaderForPartition`,
-/// and optional idempotent produce with retries (Phase 10).
+/// Supports optional shared-token auth, optional SCRAM-SHA-256 (Phase 22),
+/// optional TLS (`tls` feature), automatic reconnect to the partition leader
+/// on `NotLeaderForPartition`, and optional idempotent produce with retries
+/// (Phase 10).
 #[derive(Debug)]
 pub struct Client {
     stream: Mutex<ClientConn>,
@@ -178,8 +179,9 @@ pub struct Client {
 impl Client {
     /// Connect to the first configured broker address.
     ///
-    /// When [`ClientConfig::auth_token`] is set, sends an Auth request before
-    /// returning the connected client.
+    /// When [`ClientConfig::auth_token`] is set, sends Auth. When
+    /// [`ClientConfig::scram_username`] / [`ClientConfig::scram_password`] are
+    /// set, runs SCRAM-SHA-256. Token is preferred when both are set.
     pub async fn connect(config: ClientConfig) -> Result<Self> {
         let addr = config
             .brokers
@@ -194,9 +196,7 @@ impl Client {
             config,
             idempotent: Mutex::new(IdempotentState::default()),
         };
-        if let Some(token) = client.config.auth_token.clone() {
-            client.authenticate(token).await?;
-        }
+        client.maybe_authenticate().await?;
         Ok(client)
     }
 
@@ -227,7 +227,7 @@ impl Client {
         self.current_addr.lock().await.clone()
     }
 
-    /// Reconnect to `addr`, re-authenticating when a token is configured.
+    /// Reconnect to `addr`, re-authenticating when a token or SCRAM is configured.
     pub async fn reconnect(&self, addr: impl AsRef<str>) -> Result<()> {
         let addr = addr.as_ref().to_owned();
         let stream = ClientConn::connect(&addr, &self.config).await?;
@@ -239,10 +239,24 @@ impl Client {
             let mut a = self.current_addr.lock().await;
             *a = addr;
         }
-        if let Some(token) = self.config.auth_token.clone() {
-            self.authenticate(token).await?;
-        }
+        self.maybe_authenticate().await?;
         Ok(())
+    }
+
+    async fn maybe_authenticate(&self) -> Result<()> {
+        if let Some(token) = self.config.auth_token.clone() {
+            return self.authenticate(token).await;
+        }
+        match (
+            self.config.scram_username.clone(),
+            self.config.scram_password.clone(),
+        ) {
+            (Some(user), Some(pass)) => self.authenticate_scram(&user, &pass).await,
+            (None, None) => Ok(()),
+            _ => Err(Error::InvalidArgument(
+                "scram_username and scram_password must both be set".into(),
+            )),
+        }
     }
 
     async fn authenticate(&self, token: String) -> Result<()> {
@@ -261,6 +275,144 @@ impl Client {
             Response::Error { code, message } => Err(error_from_code(code, message)),
             other => Err(Error::Protocol(format!(
                 "unexpected response for auth: {other:?}"
+            ))),
+        }
+    }
+
+    async fn authenticate_scram(&self, username: &str, password: &str) -> Result<()> {
+        let client_nonce = crate::scram::generate_client_nonce();
+        let first = self
+            .round_trip(Request::ScramFirst {
+                username: username.to_owned(),
+                client_nonce: client_nonce.clone(),
+            })
+            .await?;
+        let (combined_nonce, salt, iterations) = match first {
+            Response::ScramFirst {
+                error_code,
+                combined_nonce,
+                salt,
+                iterations,
+            } => {
+                if error_code != 0 {
+                    return Err(error_from_code(
+                        error_code,
+                        format!("scram first failed error_code={error_code}"),
+                    ));
+                }
+                (combined_nonce, salt, iterations)
+            }
+            Response::Error { code, message } => return Err(error_from_code(code, message)),
+            other => {
+                return Err(Error::Protocol(format!(
+                    "unexpected response for scram first: {other:?}"
+                )))
+            }
+        };
+
+        let (proof, expected_sig) = crate::scram::client_proof_and_server_sig(
+            username,
+            password,
+            &client_nonce,
+            &combined_nonce,
+            &salt,
+            iterations,
+        )?;
+
+        let final_resp = self
+            .round_trip(Request::ScramFinal {
+                username: username.to_owned(),
+                combined_nonce,
+                client_proof: bytes::Bytes::from(proof),
+            })
+            .await?;
+        match final_resp {
+            Response::ScramFinal {
+                error_code,
+                server_signature,
+            } => {
+                if error_code != 0 {
+                    return Err(error_from_code(
+                        error_code,
+                        format!("scram final failed error_code={error_code}"),
+                    ));
+                }
+                if server_signature.as_ref() != expected_sig.as_slice() {
+                    return Err(Error::Protocol(
+                        "scram server signature mismatch".into(),
+                    ));
+                }
+                Ok(())
+            }
+            Response::Error { code, message } => Err(error_from_code(code, message)),
+            other => Err(Error::Protocol(format!(
+                "unexpected response for scram final: {other:?}"
+            ))),
+        }
+    }
+
+    /// Create or replace a SCRAM user (Phase 22). Bootstrap allowed when store empty.
+    pub async fn create_scram_user(
+        &self,
+        username: &str,
+        password: &str,
+        iterations: u32,
+    ) -> Result<()> {
+        let resp = self
+            .round_trip(Request::CreateScramUser {
+                username: username.to_owned(),
+                password: password.to_owned(),
+                iterations,
+            })
+            .await?;
+        match resp {
+            Response::CreateScramUser { error_code } if error_code == 0 => Ok(()),
+            Response::CreateScramUser { error_code } => Err(error_from_code(
+                error_code,
+                format!("create_scram_user failed error_code={error_code}"),
+            )),
+            Response::Error { code, message } => Err(error_from_code(code, message)),
+            other => Err(Error::Protocol(format!(
+                "unexpected response for create_scram_user: {other:?}"
+            ))),
+        }
+    }
+
+    /// Delete a SCRAM user (Phase 22).
+    pub async fn delete_scram_user(&self, username: &str) -> Result<()> {
+        let resp = self
+            .round_trip(Request::DeleteScramUser {
+                username: username.to_owned(),
+            })
+            .await?;
+        match resp {
+            Response::DeleteScramUser { error_code } if error_code == 0 => Ok(()),
+            Response::DeleteScramUser { error_code } => Err(error_from_code(
+                error_code,
+                format!("delete_scram_user failed error_code={error_code}"),
+            )),
+            Response::Error { code, message } => Err(error_from_code(code, message)),
+            other => Err(Error::Protocol(format!(
+                "unexpected response for delete_scram_user: {other:?}"
+            ))),
+        }
+    }
+
+    /// List SCRAM usernames (Phase 22).
+    pub async fn list_scram_users(&self) -> Result<Vec<String>> {
+        let resp = self.round_trip(Request::ListScramUsers).await?;
+        match resp {
+            Response::ListScramUsers {
+                error_code,
+                usernames,
+            } if error_code == 0 => Ok(usernames),
+            Response::ListScramUsers { error_code, .. } => Err(error_from_code(
+                error_code,
+                format!("list_scram_users failed error_code={error_code}"),
+            )),
+            Response::Error { code, message } => Err(error_from_code(code, message)),
+            other => Err(Error::Protocol(format!(
+                "unexpected response for list_scram_users: {other:?}"
             ))),
         }
     }

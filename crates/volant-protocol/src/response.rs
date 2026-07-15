@@ -62,6 +62,16 @@ pub enum ResponseOpcode {
     DeleteAcls = 57,
     /// List ACLs result (Phase 20).
     ListAcls = 59,
+    /// SCRAM-SHA-256 first response (Phase 22).
+    ScramFirst = 61,
+    /// SCRAM-SHA-256 final response (Phase 22).
+    ScramFinal = 63,
+    /// Create SCRAM user result (Phase 22).
+    CreateScramUser = 65,
+    /// Delete SCRAM user result (Phase 22).
+    DeleteScramUser = 67,
+    /// List SCRAM users result (Phase 22).
+    ListScramUsers = 69,
     /// Error response.
     Error = 0xFFFF,
 }
@@ -98,6 +108,11 @@ impl ResponseOpcode {
             55 => Self::CreateAcls,
             57 => Self::DeleteAcls,
             59 => Self::ListAcls,
+            61 => Self::ScramFirst,
+            63 => Self::ScramFinal,
+            65 => Self::CreateScramUser,
+            67 => Self::DeleteScramUser,
+            69 => Self::ListScramUsers,
             0xFFFF => Self::Error,
             _ => return None,
         })
@@ -584,6 +599,41 @@ pub enum Response {
         /// Matching bindings.
         entries: Vec<crate::request::AclBinding>,
     },
+    /// SCRAM-SHA-256 server-first (Phase 22).
+    ScramFirst {
+        /// 0 = ok; 3 = invalid nonce/username shape.
+        error_code: u16,
+        /// Client nonce + server nonce.
+        combined_nonce: String,
+        /// Salt bytes.
+        salt: Bytes,
+        /// PBKDF2 iterations.
+        iterations: u32,
+    },
+    /// SCRAM-SHA-256 server-final (Phase 22).
+    ScramFinal {
+        /// 0 = ok; 17 = AuthenticationFailed.
+        error_code: u16,
+        /// Server signature (empty on failure).
+        server_signature: Bytes,
+    },
+    /// Create SCRAM user result (Phase 22).
+    CreateScramUser {
+        /// 0 = ok; 3 = invalid; 23 = unauthorized.
+        error_code: u16,
+    },
+    /// Delete SCRAM user result (Phase 22).
+    DeleteScramUser {
+        /// 0 = ok; 2 = not found; 23 = unauthorized.
+        error_code: u16,
+    },
+    /// List SCRAM users result (Phase 22).
+    ListScramUsers {
+        /// 0 = ok; 23 = unauthorized.
+        error_code: u16,
+        /// Registered usernames.
+        usernames: Vec<String>,
+    },
     /// Error response.
     Error {
         /// Error code.
@@ -649,6 +699,11 @@ impl Response {
             Self::CreateAcls { .. } => ResponseOpcode::CreateAcls as u16,
             Self::DeleteAcls { .. } => ResponseOpcode::DeleteAcls as u16,
             Self::ListAcls { .. } => ResponseOpcode::ListAcls as u16,
+            Self::ScramFirst { .. } => ResponseOpcode::ScramFirst as u16,
+            Self::ScramFinal { .. } => ResponseOpcode::ScramFinal as u16,
+            Self::CreateScramUser { .. } => ResponseOpcode::CreateScramUser as u16,
+            Self::DeleteScramUser { .. } => ResponseOpcode::DeleteScramUser as u16,
+            Self::ListScramUsers { .. } => ResponseOpcode::ListScramUsers as u16,
             Self::Error { .. } => ResponseOpcode::Error as u16,
         }
     }

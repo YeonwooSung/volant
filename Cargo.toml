@@ -46,6 +46,13 @@ memmap2 = "0.9"
 crc32fast = "1"
 uuid = { version = "1", features = ["v4", "serde"] }
 toml = "0.8"
+# SCRAM-SHA-256 (Phase 22)
+sha2 = "0.10"
+hmac = "0.12"
+pbkdf2 = "0.12"
+rand = "0.8"
+subtle = "2"
+base64 = "0.22"
 
 [profile.release]
 lto = "thin"

@@ -223,6 +223,8 @@ pub struct Broker {
     acls: crate::acl::AclState,
     /// Optional shared token protecting `GET /metrics` (Phase 21).
     metrics_token: RwLock<Option<String>>,
+    /// Durable SCRAM-SHA-256 user store (Phase 22).
+    scram: crate::scram::ScramStore,
 }
 
 impl Broker {
@@ -242,6 +244,8 @@ impl Broker {
             .expect("failed to open topic catalog store");
         let acls = crate::acl::AclState::open(&storage.data_dir)
             .expect("failed to open ACL store");
+        let scram = crate::scram::ScramStore::open(&storage.data_dir)
+            .expect("failed to open SCRAM store");
         let broker = Self {
             storage,
             topics: RwLock::new(HashMap::new()),
@@ -267,6 +271,7 @@ impl Broker {
             topic_catalog,
             acls,
             metrics_token: RwLock::new(None),
+            scram,
         };
         broker
             .reload_single_node_topics()
@@ -313,6 +318,8 @@ impl Broker {
             .expect("failed to open topic catalog store");
         let acls = crate::acl::AclState::open(&storage.data_dir)
             .expect("failed to open ACL store");
+        let scram = crate::scram::ScramStore::open(&storage.data_dir)
+            .expect("failed to open SCRAM store");
         let broker = Self {
             storage,
             topics: RwLock::new(HashMap::new()),
@@ -338,6 +345,7 @@ impl Broker {
             topic_catalog,
             acls,
             metrics_token: RwLock::new(None),
+            scram,
         };
         // Open local partitions from persisted assignment.
         broker.apply_local_assignment()?;
@@ -379,6 +387,23 @@ impl Broker {
     /// Principal name applied after successful shared-token Auth.
     pub fn auth_principal_name(&self) -> String {
         self.acls.auth_principal()
+    }
+
+    /// SCRAM-SHA-256 user store (Phase 22).
+    pub fn scram(&self) -> &crate::scram::ScramStore {
+        &self.scram
+    }
+
+    /// Whether connections must authenticate (token, SCRAM users, or caller mTLS).
+    ///
+    /// Callers with mTLS should OR this with their mTLS-enabled flag.
+    pub fn auth_required(&self) -> bool {
+        self.auth_token().is_some() || self.scram.has_users()
+    }
+
+    /// Upsert a SCRAM user at startup (`--scram-user user:pass`).
+    pub fn upsert_scram_user(&self, username: &str, password: &str) -> Result<()> {
+        self.scram.upsert_user(username, password, 0)
     }
 
     /// Configure metrics HTTP shared token (Phase 21). `None` = open scrape.

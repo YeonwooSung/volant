@@ -9,6 +9,7 @@
 | `--metrics-addr` | | *disabled* | Prometheus `GET /metrics` |
 | `--log-format` | | `text` | `text` or `json` |
 | `--auth-token` | `VOLANT_AUTH_TOKEN` | *unset* | Shared-token auth |
+| `--scram-user USER:PASS` | | *unset* | Upsert SCRAM user at startup (repeatable; Phase 22) |
 | `--tls-cert` / `--tls-key` | | *unset* | Server TLS (feature `tls`) |
 | `--tls-peer-insecure` | | `true` | Skip inter-broker cert verify (lab) |
 | `--tls-ca` | | *unset* | CA PEM for inter-broker peer verify |
@@ -66,6 +67,48 @@ Phase 7 has no dual-token window; schedule a brief reconnect storm.
 
 Inter-broker RPCs (ReplicaFetch, HeartbeatBroker, ClusterState) send Auth first
 when the token is configured.
+
+## SCRAM-SHA-256 (Phase 22)
+
+User/password auth with durable credentials under `{data_dir}/__scram/users.json`.
+Crypto follows RFC 5802 / 7677; the wire format is Volant binary (opcodes 60–69),
+not Kafka SASL handshake bytes.
+
+```bash
+# Bootstrap users at process start (repeatable)
+volant-server --data-dir ./data --listen 127.0.0.1:9092 \
+  --scram-user alice:s3cret --scram-user bob:other
+
+# Or bootstrap over the wire when the store is empty (no auth required yet):
+volant user create --username alice --password s3cret --broker 127.0.0.1:9092
+
+# After users exist, clients must SCRAM (or token / mTLS):
+volant --scram-user alice --scram-password s3cret topic list --broker 127.0.0.1:9092
+# env: VOLANT_SCRAM_USER / VOLANT_SCRAM_PASSWORD
+
+volant --scram-user alice --scram-password s3cret user list
+volant --scram-user alice --scram-password s3cret user delete --username bob
+```
+
+Rust client:
+
+```rust
+ClientConfig {
+    brokers: vec!["127.0.0.1:9092".into()],
+    scram_username: Some("alice".into()),
+    scram_password: Some("s3cret".into()),
+    ..ClientConfig::default()
+}
+```
+
+Notes:
+
+- `auth_required` when shared token **or** any SCRAM user **or** mTLS is configured.
+- Successful SCRAM sets connection principal = username (feeds Phase 20 ACLs).
+- Create/Delete/ListScramUsers need Cluster Alter/Describe when ACLs are on
+  (except bootstrap Create when the store is empty).
+- Password is sent in clear on CreateScramUser — use TLS in production.
+- Inter-broker RPC still uses shared-token Auth, not SCRAM.
 
 ## TLS (Phase 7 listen + Phase 9 verification / inter-broker)
 
@@ -357,6 +400,7 @@ volant --auth-token secret acl delete \
 - Super-users bypass all checks (runtime flag; not stored in the ACL file).
 - Token Auth sets principal to `--auth-principal` (default `token`).
 - mTLS CN is the principal when using Phase 19 client certs.
+- SCRAM sets principal to the SCRAM username (Phase 22).
 - ACLs are durable under `{data_dir}/__acls/acls.json` (Phase 21); CreateAcls /
   DeleteAcls persist automatically. `--acl-file` imports then saves there.
 - Inter-broker opcodes are not ACL-gated.

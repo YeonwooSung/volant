@@ -173,8 +173,12 @@ multi-partition atomic commit, deferred offsets; `volant txn produce`.
 **Phase 21:** durable ACLs (`data_dir/__acls/acls.json`) + metrics Bearer auth
 (`--metrics-token` / `VOLANT_METRICS_TOKEN`).
 
-**Still deferred:** Kafka wire shim, multi-language clients, SCRAM / full SASL,
-chaos-mesh / cargo-fuzz corpus CI.
+**Phase 22:** SCRAM-SHA-256 — `--scram-user user:pass`, durable
+`data_dir/__scram/users.json`, client `scram_username`/`scram_password`,
+`volant user create|list|delete`. Coexists with shared-token Auth and mTLS.
+
+**Still deferred:** Kafka wire shim, multi-language clients, full SASL /
+SCRAM-SHA-512, chaos-mesh / cargo-fuzz corpus CI.
 
 ### Networked client (library)
 

@@ -15,6 +15,11 @@ tls = ["dep:tokio-rustls", "dep:rustls", "dep:webpki-roots", "dep:rustls-pemfile
 volant-core = { workspace = true }
 volant-protocol = { workspace = true }
 bytes = { workspace = true }
+sha2 = { workspace = true }
+hmac = { workspace = true }
+pbkdf2 = { workspace = true }
+rand = { workspace = true }
+base64 = { workspace = true }
 thiserror = { workspace = true }
 tokio = { workspace = true }
 tracing = { workspace = true }

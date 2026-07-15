@@ -108,6 +108,10 @@ struct Args {
     /// Principal name after successful shared-token Auth (default `token`).
     #[arg(long, default_value = "token")]
     auth_principal: String,
+
+    /// Upsert a SCRAM-SHA-256 user at startup (`user:password`). Repeatable (Phase 22).
+    #[arg(long = "scram-user", value_name = "USER:PASS")]
+    scram_users: Vec<String>,
 }
 
 fn main() -> Result<()> {
@@ -226,6 +230,26 @@ async fn async_main(args: Args) -> Result<()> {
         }
         info!("shared-token auth enabled");
         broker.set_auth_token(Some(token));
+    }
+
+    // Phase 22 SCRAM users from flags (and any already durable under data_dir).
+    for spec in &args.scram_users {
+        let (user, pass) = spec.split_once(':').ok_or_else(|| {
+            anyhow::anyhow!("--scram-user must be USER:PASS (got '{spec}')")
+        })?;
+        if user.is_empty() || pass.is_empty() {
+            bail!("--scram-user USER and PASS must be non-empty");
+        }
+        broker
+            .upsert_scram_user(user, pass)
+            .with_context(|| format!("upsert SCRAM user '{user}'"))?;
+        info!(username = %user, "SCRAM-SHA-256 user upserted");
+    }
+    if broker.scram().has_users() {
+        info!(
+            users = broker.scram().user_count(),
+            "SCRAM-SHA-256 authentication enabled"
+        );
     }
 
     // Phase 20 ACLs.
@@ -551,14 +575,14 @@ mod tls {
         }
 
         let mut buf = BytesMut::with_capacity(8 * 1024);
-        let token_required = broker.auth_token().is_some();
-        // Authenticated if mTLS identity ok, or if neither token nor mTLS auth is required.
-        let auth_required = token_required || setup.mtls;
+        // Authenticated if mTLS identity ok, or if neither token/SCRAM nor mTLS is required.
         let mut authenticated = if setup.mtls {
             mtls_authenticated
         } else {
-            !token_required
+            !broker.auth_required()
         };
+        let mut scram_challenge: Option<volant_broker::ScramChallenge> = None;
+        let mtls_enabled = setup.mtls;
 
         loop {
             loop {
@@ -578,8 +602,9 @@ mod tls {
                                 &broker,
                                 frame,
                                 &mut authenticated,
-                                auth_required,
                                 &mut principal,
+                                &mut scram_challenge,
+                                mtls_enabled,
                             )
                             .await
                         }
@@ -600,63 +625,49 @@ mod tls {
         }
     }
 
+    /// Shared Auth/SCRAM dispatch plus an mTLS-only gate when no token/SCRAM users exist.
     async fn dispatch_tls(
         broker: &Broker,
         frame: Frame,
         authenticated: &mut bool,
-        auth_required: bool,
         principal: &mut Option<String>,
+        scram_challenge: &mut Option<volant_broker::ScramChallenge>,
+        mtls_enabled: bool,
     ) -> Response {
         use volant_protocol::{decode_request, ErrorCode, Request};
 
-        let req = match decode_request(frame.header.opcode, &frame.payload) {
-            Ok(r) => r,
-            Err(e) => {
-                broker.metrics().record_error(ErrorCode::Protocol as u16);
-                return Response::Error {
-                    code: ErrorCode::Protocol as u16,
-                    message: e.to_string(),
-                };
-            }
-        };
-
-        if let Request::Auth { token } = &req {
-            return match broker.auth_token() {
-                None => {
-                    *authenticated = true;
-                    *principal = Some(broker.auth_principal_name());
-                    Response::Auth { error_code: 0 }
-                }
-                Some(expected) if expected == *token => {
-                    *authenticated = true;
-                    *principal = Some(broker.auth_principal_name());
-                    Response::Auth { error_code: 0 }
-                }
-                Some(_) => {
-                    *authenticated = false;
-                    *principal = None;
+        if mtls_enabled && !*authenticated && !broker.auth_required() {
+            if let Ok(req) = decode_request(frame.header.opcode, &frame.payload) {
+                let is_auth_op = matches!(
+                    req,
+                    Request::Auth { .. }
+                        | Request::ScramFirst { .. }
+                        | Request::ScramFinal { .. }
+                );
+                let is_bootstrap_create = matches!(req, Request::CreateScramUser { .. })
+                    && !broker.scram().has_users();
+                if !is_auth_op && !is_bootstrap_create {
                     broker
                         .metrics()
-                        .record_error(ErrorCode::AuthenticationFailed as u16);
-                    Response::Auth {
-                        error_code: ErrorCode::AuthenticationFailed as u16,
-                    }
+                        .record_error(ErrorCode::AuthenticationRequired as u16);
+                    return Response::Error {
+                        code: ErrorCode::AuthenticationRequired as u16,
+                        message:
+                            "authentication required; present mTLS client cert or send Auth/SCRAM"
+                                .into(),
+                    };
                 }
-            };
+            }
         }
 
-        if auth_required && !*authenticated {
-            broker
-                .metrics()
-                .record_error(ErrorCode::AuthenticationRequired as u16);
-            return Response::Error {
-                code: ErrorCode::AuthenticationRequired as u16,
-                message: "authentication required; send Auth first or present mTLS client cert"
-                    .into(),
-            };
-        }
-
-        volant_broker::net::dispatch_request_as(broker, req, principal.as_deref()).await
+        volant_broker::net::dispatch_with_auth(
+            broker,
+            frame,
+            authenticated,
+            principal,
+            scram_challenge,
+        )
+        .await
     }
 
     #[cfg(test)]

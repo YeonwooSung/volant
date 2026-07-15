@@ -62,6 +62,16 @@ pub enum RequestOpcode {
     DeleteAcls = 56,
     /// List ACL entries (Phase 20).
     ListAcls = 58,
+    /// SCRAM-SHA-256 first message (Phase 22).
+    ScramFirst = 60,
+    /// SCRAM-SHA-256 final message (Phase 22).
+    ScramFinal = 62,
+    /// Create/upsert SCRAM user (Phase 22).
+    CreateScramUser = 64,
+    /// Delete SCRAM user (Phase 22).
+    DeleteScramUser = 66,
+    /// List SCRAM usernames (Phase 22).
+    ListScramUsers = 68,
 }
 
 impl RequestOpcode {
@@ -96,6 +106,11 @@ impl RequestOpcode {
             54 => Self::CreateAcls,
             56 => Self::DeleteAcls,
             58 => Self::ListAcls,
+            60 => Self::ScramFirst,
+            62 => Self::ScramFinal,
+            64 => Self::CreateScramUser,
+            66 => Self::DeleteScramUser,
+            68 => Self::ListScramUsers,
             _ => return None,
         })
     }
@@ -393,6 +408,38 @@ pub enum Request {
         /// Resource name filter; empty = any.
         resource: String,
     },
+    /// SCRAM-SHA-256 client-first (Phase 22).
+    ScramFirst {
+        /// Claimed username.
+        username: String,
+        /// Client nonce (printable ASCII, no commas).
+        client_nonce: String,
+    },
+    /// SCRAM-SHA-256 client-final (Phase 22).
+    ScramFinal {
+        /// Username (must match ScramFirst).
+        username: String,
+        /// Combined nonce from ScramFirst response.
+        combined_nonce: String,
+        /// Client proof (32 bytes for SHA-256).
+        client_proof: Bytes,
+    },
+    /// Create or replace a SCRAM user (Phase 22).
+    CreateScramUser {
+        /// Username (principal after SCRAM auth).
+        username: String,
+        /// Plaintext password (sent once; never stored).
+        password: String,
+        /// PBKDF2 iterations; `0` = broker default (4096).
+        iterations: u32,
+    },
+    /// Delete a SCRAM user (Phase 22).
+    DeleteScramUser {
+        /// Username to remove.
+        username: String,
+    },
+    /// List SCRAM usernames (Phase 22).
+    ListScramUsers,
 }
 
 impl Request {
@@ -427,6 +474,11 @@ impl Request {
             Self::CreateAcls { .. } => RequestOpcode::CreateAcls as u16,
             Self::DeleteAcls { .. } => RequestOpcode::DeleteAcls as u16,
             Self::ListAcls { .. } => RequestOpcode::ListAcls as u16,
+            Self::ScramFirst { .. } => RequestOpcode::ScramFirst as u16,
+            Self::ScramFinal { .. } => RequestOpcode::ScramFinal as u16,
+            Self::CreateScramUser { .. } => RequestOpcode::CreateScramUser as u16,
+            Self::DeleteScramUser { .. } => RequestOpcode::DeleteScramUser as u16,
+            Self::ListScramUsers => RequestOpcode::ListScramUsers as u16,
         }
     }
 }

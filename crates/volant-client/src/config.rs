@@ -13,6 +13,10 @@ pub struct ClientConfig {
     pub acks: u8,
     /// Shared auth token. When set, the client sends Auth on connect.
     pub auth_token: Option<String>,
+    /// SCRAM-SHA-256 username (Phase 22). Requires [`Self::scram_password`].
+    pub scram_username: Option<String>,
+    /// SCRAM-SHA-256 password (Phase 22). Requires [`Self::scram_username`].
+    pub scram_password: Option<String>,
     /// Enable TLS for broker connections (requires the `tls` feature).
     pub tls: bool,
     /// When TLS is enabled, skip certificate verification (dev/test only).
@@ -43,6 +47,8 @@ impl Default for ClientConfig {
             client_id: "volant-client".into(),
             acks: 1,
             auth_token: None,
+            scram_username: None,
+            scram_password: None,
             tls: false,
             tls_insecure: false,
             tls_ca: None,

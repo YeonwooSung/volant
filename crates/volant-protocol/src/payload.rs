@@ -402,6 +402,37 @@ pub fn encode_request(req: &Request) -> Result<Bytes> {
             dst.put_u8(*resource_type);
             put_string(&mut dst, resource)?;
         }
+        Request::ScramFirst {
+            username,
+            client_nonce,
+        } => {
+            put_string(&mut dst, username)?;
+            put_string(&mut dst, client_nonce)?;
+        }
+        Request::ScramFinal {
+            username,
+            combined_nonce,
+            client_proof,
+        } => {
+            put_string(&mut dst, username)?;
+            put_string(&mut dst, combined_nonce)?;
+            put_bytes(&mut dst, client_proof);
+        }
+        Request::CreateScramUser {
+            username,
+            password,
+            iterations,
+        } => {
+            put_string(&mut dst, username)?;
+            put_string(&mut dst, password)?;
+            dst.put_u32_le(*iterations);
+        }
+        Request::DeleteScramUser { username } => {
+            put_string(&mut dst, username)?;
+        }
+        Request::ListScramUsers => {
+            // Empty payload.
+        }
     }
     finish_payload(dst)
 }
@@ -806,6 +837,41 @@ pub fn decode_request(opcode: u16, payload: &[u8]) -> Result<Request> {
                 resource,
             })
         }
+        RequestOpcode::ScramFirst => {
+            let username = get_string(&mut src)?;
+            let client_nonce = get_string(&mut src)?;
+            Ok(Request::ScramFirst {
+                username,
+                client_nonce,
+            })
+        }
+        RequestOpcode::ScramFinal => {
+            let username = get_string(&mut src)?;
+            let combined_nonce = get_string(&mut src)?;
+            let client_proof = get_bytes(&mut src)?;
+            Ok(Request::ScramFinal {
+                username,
+                combined_nonce,
+                client_proof,
+            })
+        }
+        RequestOpcode::CreateScramUser => {
+            let username = get_string(&mut src)?;
+            let password = get_string(&mut src)?;
+            if src.remaining() < 4 {
+                return Err(Error::Protocol("truncated create scram user iterations".into()));
+            }
+            let iterations = src.get_u32_le();
+            Ok(Request::CreateScramUser {
+                username,
+                password,
+                iterations,
+            })
+        }
+        RequestOpcode::DeleteScramUser => Ok(Request::DeleteScramUser {
+            username: get_string(&mut src)?,
+        }),
+        RequestOpcode::ListScramUsers => Ok(Request::ListScramUsers),
     }
 }
 
@@ -1140,6 +1206,40 @@ pub fn encode_response(resp: &Response) -> Result<Bytes> {
             dst.put_u32_le(entries.len() as u32);
             for e in entries {
                 put_acl_binding(&mut dst, e)?;
+            }
+        }
+        Response::ScramFirst {
+            error_code,
+            combined_nonce,
+            salt,
+            iterations,
+        } => {
+            dst.put_u16_le(*error_code);
+            put_string(&mut dst, combined_nonce)?;
+            put_bytes(&mut dst, salt);
+            dst.put_u32_le(*iterations);
+        }
+        Response::ScramFinal {
+            error_code,
+            server_signature,
+        } => {
+            dst.put_u16_le(*error_code);
+            put_bytes(&mut dst, server_signature);
+        }
+        Response::CreateScramUser { error_code } => {
+            dst.put_u16_le(*error_code);
+        }
+        Response::DeleteScramUser { error_code } => {
+            dst.put_u16_le(*error_code);
+        }
+        Response::ListScramUsers {
+            error_code,
+            usernames,
+        } => {
+            dst.put_u16_le(*error_code);
+            dst.put_u32_le(usernames.len() as u32);
+            for u in usernames {
+                put_string(&mut dst, u)?;
             }
         }
         Response::Error { code, message } => {
@@ -1810,6 +1910,66 @@ pub fn decode_response(opcode: u16, payload: &[u8]) -> Result<Response> {
                 entries,
             })
         }
+        ResponseOpcode::ScramFirst => {
+            if src.remaining() < 2 {
+                return Err(Error::Protocol("truncated scram first error".into()));
+            }
+            let error_code = src.get_u16_le();
+            let combined_nonce = get_string(&mut src)?;
+            let salt = get_bytes(&mut src)?;
+            if src.remaining() < 4 {
+                return Err(Error::Protocol("truncated scram first iterations".into()));
+            }
+            let iterations = src.get_u32_le();
+            Ok(Response::ScramFirst {
+                error_code,
+                combined_nonce,
+                salt,
+                iterations,
+            })
+        }
+        ResponseOpcode::ScramFinal => {
+            if src.remaining() < 2 {
+                return Err(Error::Protocol("truncated scram final error".into()));
+            }
+            let error_code = src.get_u16_le();
+            let server_signature = get_bytes(&mut src)?;
+            Ok(Response::ScramFinal {
+                error_code,
+                server_signature,
+            })
+        }
+        ResponseOpcode::CreateScramUser => {
+            if src.remaining() < 2 {
+                return Err(Error::Protocol("truncated create scram user error".into()));
+            }
+            Ok(Response::CreateScramUser {
+                error_code: src.get_u16_le(),
+            })
+        }
+        ResponseOpcode::DeleteScramUser => {
+            if src.remaining() < 2 {
+                return Err(Error::Protocol("truncated delete scram user error".into()));
+            }
+            Ok(Response::DeleteScramUser {
+                error_code: src.get_u16_le(),
+            })
+        }
+        ResponseOpcode::ListScramUsers => {
+            if src.remaining() < 2 + 4 {
+                return Err(Error::Protocol("truncated list scram users header".into()));
+            }
+            let error_code = src.get_u16_le();
+            let n = src.get_u32_le() as usize;
+            let mut usernames = Vec::with_capacity(n);
+            for _ in 0..n {
+                usernames.push(get_string(&mut src)?);
+            }
+            Ok(Response::ListScramUsers {
+                error_code,
+                usernames,
+            })
+        }
         ResponseOpcode::Error => {
             if src.remaining() < 2 {
                 return Err(Error::Protocol("truncated error code".into()));
@@ -2220,6 +2380,98 @@ mod tests {
         assert_eq!(
             decode_response(ResponseOpcode::DeleteAcls as u16, &b).unwrap(),
             dr
+        );
+    }
+
+    #[test]
+    fn phase22_scram_roundtrip() {
+        let first = Request::ScramFirst {
+            username: "alice".into(),
+            client_nonce: "n1".into(),
+        };
+        let b = encode_request(&first).unwrap();
+        assert_eq!(
+            decode_request(RequestOpcode::ScramFirst as u16, &b).unwrap(),
+            first
+        );
+        let first_resp = Response::ScramFirst {
+            error_code: 0,
+            combined_nonce: "n1s1".into(),
+            salt: Bytes::from(vec![1, 2, 3]),
+            iterations: 4096,
+        };
+        let b = encode_response(&first_resp).unwrap();
+        assert_eq!(
+            decode_response(ResponseOpcode::ScramFirst as u16, &b).unwrap(),
+            first_resp
+        );
+
+        let final_req = Request::ScramFinal {
+            username: "alice".into(),
+            combined_nonce: "n1s1".into(),
+            client_proof: Bytes::from(vec![0u8; 32]),
+        };
+        let b = encode_request(&final_req).unwrap();
+        assert_eq!(
+            decode_request(RequestOpcode::ScramFinal as u16, &b).unwrap(),
+            final_req
+        );
+        let final_resp = Response::ScramFinal {
+            error_code: 0,
+            server_signature: Bytes::from(vec![9u8; 32]),
+        };
+        let b = encode_response(&final_resp).unwrap();
+        assert_eq!(
+            decode_response(ResponseOpcode::ScramFinal as u16, &b).unwrap(),
+            final_resp
+        );
+
+        let create = Request::CreateScramUser {
+            username: "bob".into(),
+            password: "x".into(),
+            iterations: 0,
+        };
+        let b = encode_request(&create).unwrap();
+        assert_eq!(
+            decode_request(RequestOpcode::CreateScramUser as u16, &b).unwrap(),
+            create
+        );
+        let create_resp = Response::CreateScramUser { error_code: 0 };
+        let b = encode_response(&create_resp).unwrap();
+        assert_eq!(
+            decode_response(ResponseOpcode::CreateScramUser as u16, &b).unwrap(),
+            create_resp
+        );
+
+        let del = Request::DeleteScramUser {
+            username: "bob".into(),
+        };
+        let b = encode_request(&del).unwrap();
+        assert_eq!(
+            decode_request(RequestOpcode::DeleteScramUser as u16, &b).unwrap(),
+            del
+        );
+        let del_resp = Response::DeleteScramUser { error_code: 0 };
+        let b = encode_response(&del_resp).unwrap();
+        assert_eq!(
+            decode_response(ResponseOpcode::DeleteScramUser as u16, &b).unwrap(),
+            del_resp
+        );
+
+        let list = Request::ListScramUsers;
+        let b = encode_request(&list).unwrap();
+        assert_eq!(
+            decode_request(RequestOpcode::ListScramUsers as u16, &b).unwrap(),
+            list
+        );
+        let list_resp = Response::ListScramUsers {
+            error_code: 0,
+            usernames: vec!["alice".into(), "bob".into()],
+        };
+        let b = encode_response(&list_resp).unwrap();
+        assert_eq!(
+            decode_response(ResponseOpcode::ListScramUsers as u16, &b).unwrap(),
+            list_resp
         );
     }
 

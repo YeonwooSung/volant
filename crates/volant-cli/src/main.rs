@@ -17,6 +17,14 @@ struct Cli {
     #[arg(long, global = true, env = "VOLANT_AUTH_TOKEN")]
     auth_token: Option<String>,
 
+    /// SCRAM-SHA-256 username (Phase 22). Requires `--scram-password`.
+    #[arg(long, global = true, env = "VOLANT_SCRAM_USER")]
+    scram_user: Option<String>,
+
+    /// SCRAM-SHA-256 password (Phase 22). Requires `--scram-user`.
+    #[arg(long, global = true, env = "VOLANT_SCRAM_PASSWORD")]
+    scram_password: Option<String>,
+
     #[command(subcommand)]
     command: Commands,
 }
@@ -61,6 +69,11 @@ enum Commands {
     Acl {
         #[command(subcommand)]
         action: AclCmd,
+    },
+    /// SCRAM-SHA-256 user administration (Phase 22).
+    User {
+        #[command(subcommand)]
+        action: UserCmd,
     },
     /// Consume (fetch) messages from a topic partition, or via a consumer group.
     Consume {
@@ -347,6 +360,40 @@ enum AclCmd {
 }
 
 #[derive(Debug, Subcommand)]
+enum UserCmd {
+    /// Create or replace a SCRAM user.
+    Create {
+        /// Username (becomes the connection principal after SCRAM).
+        #[arg(long)]
+        username: String,
+        /// Plaintext password (sent once over the wire; use TLS in production).
+        #[arg(long)]
+        password: String,
+        /// PBKDF2 iterations (`0` = broker default 4096).
+        #[arg(long, default_value_t = 0)]
+        iterations: u32,
+        /// Broker address.
+        #[arg(long, default_value = "127.0.0.1:9092")]
+        broker: String,
+    },
+    /// List SCRAM usernames.
+    List {
+        /// Broker address.
+        #[arg(long, default_value = "127.0.0.1:9092")]
+        broker: String,
+    },
+    /// Delete a SCRAM user.
+    Delete {
+        /// Username to remove.
+        #[arg(long)]
+        username: String,
+        /// Broker address.
+        #[arg(long, default_value = "127.0.0.1:9092")]
+        broker: String,
+    },
+}
+
+#[derive(Debug, Subcommand)]
 enum TxnCmd {
     /// Produce one or more messages in a single transaction then commit.
     Produce {
@@ -378,11 +425,15 @@ enum TxnCmd {
 #[tokio::main]
 async fn main() -> Result<()> {
     let cli = Cli::parse();
-    let auth = cli.auth_token.clone();
+    let auth = AuthOpts {
+        token: cli.auth_token.clone(),
+        scram_user: cli.scram_user.clone(),
+        scram_password: cli.scram_password.clone(),
+    };
     match cli.command {
         Commands::Version => {
             println!("volant {}", env!("CARGO_PKG_VERSION"));
-            println!("status: Phase 21 — durable ACLs + metrics auth");
+            println!("status: Phase 22 — SCRAM-SHA-256 authentication");
         }
         Commands::Topic { action } => match action {
             TopicCmd::List { broker } => {
@@ -814,6 +865,40 @@ async fn main() -> Result<()> {
                 println!("removed {n} ACL(s)");
             }
         },
+        Commands::User { action } => match action {
+            UserCmd::Create {
+                username,
+                password,
+                iterations,
+                broker,
+            } => {
+                let client = connect(&broker, auth).await?;
+                client
+                    .create_scram_user(&username, &password, iterations)
+                    .await
+                    .context("create_scram_user")?;
+                println!("created SCRAM user {username}");
+            }
+            UserCmd::List { broker } => {
+                let client = connect(&broker, auth).await?;
+                let users = client.list_scram_users().await.context("list_scram_users")?;
+                if users.is_empty() {
+                    println!("(no scram users)");
+                } else {
+                    for u in users {
+                        println!("{u}");
+                    }
+                }
+            }
+            UserCmd::Delete { username, broker } => {
+                let client = connect(&broker, auth).await?;
+                client
+                    .delete_scram_user(&username)
+                    .await
+                    .context("delete_scram_user")?;
+                println!("deleted SCRAM user {username}");
+            }
+        },
         Commands::Txn { action } => match action {
             TxnCmd::Produce {
                 transactional_id,
@@ -1080,14 +1165,23 @@ fn print_offsets(group: &str, entries: &[volant_protocol::OffsetFetchEntry]) {
     }
 }
 
-async fn connect(broker: &str, auth_token: Option<String>) -> Result<Client> {
+#[derive(Clone, Default)]
+struct AuthOpts {
+    token: Option<String>,
+    scram_user: Option<String>,
+    scram_password: Option<String>,
+}
+
+async fn connect(broker: &str, auth: AuthOpts) -> Result<Client> {
     if broker.is_empty() {
         bail!("broker address must not be empty");
     }
     Client::connect(ClientConfig {
         brokers: vec![broker.to_owned()],
         client_id: "volant-cli".into(),
-        auth_token,
+        auth_token: auth.token,
+        scram_username: auth.scram_user,
+        scram_password: auth.scram_password,
         ..ClientConfig::default()
     })
     .await

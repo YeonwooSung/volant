@@ -524,9 +524,10 @@ impl rustls::client::danger::ServerCertVerifier for NoCertVerifier {
 async fn handle_connection(mut stream: TcpStream, broker: Arc<Broker>) -> Result<()> {
     let mut buf = BytesMut::with_capacity(8 * 1024);
     // When auth is disabled, treat the connection as already authenticated.
-    let auth_required = broker.auth_token().is_some();
-    let mut authenticated = !auth_required;
+    // Re-evaluated per request so bootstrap CreateScramUser can flip the gate.
+    let mut authenticated = !broker.auth_required();
     let mut principal: Option<String> = None;
+    let mut scram_challenge: Option<crate::scram::ScramChallenge> = None;
 
     loop {
         loop {
@@ -546,8 +547,8 @@ async fn handle_connection(mut stream: TcpStream, broker: Arc<Broker>) -> Result
                             &broker,
                             frame,
                             &mut authenticated,
-                            auth_required,
                             &mut principal,
+                            &mut scram_challenge,
                         )
                         .await
                     }
@@ -574,12 +575,13 @@ async fn write_response(stream: &mut TcpStream, corr: u32, response: Response) -
     Ok(())
 }
 
-async fn dispatch_with_auth(
+/// Dispatch one framed request with connection auth / SCRAM state (plaintext + TLS).
+pub async fn dispatch_with_auth(
     broker: &Broker,
     frame: Frame,
     authenticated: &mut bool,
-    auth_required: bool,
     principal: &mut Option<String>,
+    scram_challenge: &mut Option<crate::scram::ScramChallenge>,
 ) -> Response {
     let req = match decode_request(frame.header.opcode, &frame.payload) {
         Ok(r) => r,
@@ -592,7 +594,7 @@ async fn dispatch_with_auth(
         }
     };
 
-    // Auth handling.
+    // Shared-token Auth (Phase 7).
     if let Request::Auth { token } = &req {
         let response = match broker.auth_token() {
             None => {
@@ -620,17 +622,108 @@ async fn dispatch_with_auth(
         return response;
     }
 
+    // SCRAM-SHA-256 (Phase 22) — allowed before authentication.
+    if matches!(
+        &req,
+        Request::ScramFirst { .. } | Request::ScramFinal { .. }
+    ) {
+        return handle_scram(broker, req, authenticated, principal, scram_challenge);
+    }
+
+    // Bootstrap CreateScramUser when the store is empty (no auth yet).
+    if matches!(&req, Request::CreateScramUser { .. }) && !broker.scram().has_users() {
+        return dispatch_request_as(broker, req, principal.as_deref()).await;
+    }
+
+    let auth_required = broker.auth_required();
     if auth_required && !*authenticated {
         broker
             .metrics()
             .record_error(ErrorCode::AuthenticationRequired as u16);
         return Response::Error {
             code: ErrorCode::AuthenticationRequired as u16,
-            message: "authentication required; send Auth first".into(),
+            message: "authentication required; send Auth or ScramFirst/ScramFinal first".into(),
         };
     }
 
     dispatch_request_as(broker, req, principal.as_deref()).await
+}
+
+fn handle_scram(
+    broker: &Broker,
+    req: Request,
+    authenticated: &mut bool,
+    principal: &mut Option<String>,
+    scram_challenge: &mut Option<crate::scram::ScramChallenge>,
+) -> Response {
+    match req {
+        Request::ScramFirst {
+            username,
+            client_nonce,
+        } => match broker.scram().begin(&username, &client_nonce) {
+            Ok((chal, salt, iterations, combined_nonce)) => {
+                *scram_challenge = Some(chal);
+                Response::ScramFirst {
+                    error_code: 0,
+                    combined_nonce,
+                    salt: bytes::Bytes::from(salt),
+                    iterations,
+                }
+            }
+            Err(_) => {
+                *scram_challenge = None;
+                Response::ScramFirst {
+                    error_code: ErrorCode::InvalidArg as u16,
+                    combined_nonce: String::new(),
+                    salt: bytes::Bytes::new(),
+                    iterations: 0,
+                }
+            }
+        },
+        Request::ScramFinal {
+            username,
+            combined_nonce,
+            client_proof,
+        } => {
+            let Some(chal) = scram_challenge.take() else {
+                broker
+                    .metrics()
+                    .record_error(ErrorCode::AuthenticationFailed as u16);
+                return Response::ScramFinal {
+                    error_code: ErrorCode::AuthenticationFailed as u16,
+                    server_signature: bytes::Bytes::new(),
+                };
+            };
+            match broker
+                .scram()
+                .finish(&chal, &username, &combined_nonce, &client_proof)
+            {
+                Ok(server_sig) => {
+                    *authenticated = true;
+                    *principal = Some(username);
+                    Response::ScramFinal {
+                        error_code: 0,
+                        server_signature: bytes::Bytes::from(server_sig),
+                    }
+                }
+                Err(_) => {
+                    *authenticated = false;
+                    *principal = None;
+                    broker
+                        .metrics()
+                        .record_error(ErrorCode::AuthenticationFailed as u16);
+                    Response::ScramFinal {
+                        error_code: ErrorCode::AuthenticationFailed as u16,
+                        server_signature: bytes::Bytes::new(),
+                    }
+                }
+            }
+        }
+        _ => Response::Error {
+            code: ErrorCode::Protocol as u16,
+            message: "internal scram dispatch error".into(),
+        },
+    }
 }
 
 /// Handle a decoded request (shared by plaintext and TLS accept paths).
@@ -678,12 +771,14 @@ fn authorize_request(
 ) -> Option<Response> {
     use crate::acl::{AclOperation, ResourceType, CLUSTER_RESOURCE};
 
-    // Inter-broker traffic is not ACL-gated.
+    // Inter-broker traffic and auth handshakes are not ACL-gated.
     match req {
         Request::ReplicaFetch { .. }
         | Request::HeartbeatBroker { .. }
         | Request::ClusterState { .. }
-        | Request::Auth { .. } => return None,
+        | Request::Auth { .. }
+        | Request::ScramFirst { .. }
+        | Request::ScramFinal { .. } => return None,
         _ => {}
     }
 
@@ -749,10 +844,18 @@ fn authorize_request(
         Request::ListAcls { .. } => {
             check(ResourceType::Cluster, CLUSTER_RESOURCE, AclOperation::Describe)
         }
+        Request::CreateScramUser { .. } | Request::DeleteScramUser { .. } => {
+            check(ResourceType::Cluster, CLUSTER_RESOURCE, AclOperation::Alter)
+        }
+        Request::ListScramUsers => {
+            check(ResourceType::Cluster, CLUSTER_RESOURCE, AclOperation::Describe)
+        }
         Request::ReplicaFetch { .. }
         | Request::HeartbeatBroker { .. }
         | Request::ClusterState { .. }
-        | Request::Auth { .. } => true,
+        | Request::Auth { .. }
+        | Request::ScramFirst { .. }
+        | Request::ScramFinal { .. } => true,
     };
 
     if ok {
@@ -820,7 +923,12 @@ fn record_response_metrics(broker: &Broker, resp: &Response) {
         | Response::EndTxn { error_code, .. }
         | Response::CreateAcls { error_code }
         | Response::DeleteAcls { error_code, .. }
-        | Response::ListAcls { error_code, .. } => {
+        | Response::ListAcls { error_code, .. }
+        | Response::ScramFirst { error_code, .. }
+        | Response::ScramFinal { error_code, .. }
+        | Response::CreateScramUser { error_code }
+        | Response::DeleteScramUser { error_code }
+        | Response::ListScramUsers { error_code, .. } => {
             if *error_code != 0 {
                 m.record_error(*error_code);
             }
@@ -1594,6 +1702,39 @@ async fn handle_request(broker: &Broker, req: Request) -> Result<Response> {
                 entries,
             })
         }
+        Request::ScramFirst { .. } | Request::ScramFinal { .. } => {
+            // Handled in dispatch_with_auth before this path.
+            Ok(Response::Error {
+                code: ErrorCode::Protocol as u16,
+                message: "scram must be handled on the connection auth path".into(),
+            })
+        }
+        Request::CreateScramUser {
+            username,
+            password,
+            iterations,
+        } => match broker.scram().upsert_user(&username, &password, iterations) {
+            Ok(()) => Ok(Response::CreateScramUser { error_code: 0 }),
+            Err(Error::InvalidArgument(_)) => Ok(Response::CreateScramUser {
+                error_code: ErrorCode::InvalidArg as u16,
+            }),
+            Err(_) => Ok(Response::CreateScramUser {
+                error_code: ErrorCode::Storage as u16,
+            }),
+        },
+        Request::DeleteScramUser { username } => match broker.scram().delete_user(&username) {
+            Ok(true) => Ok(Response::DeleteScramUser { error_code: 0 }),
+            Ok(false) => Ok(Response::DeleteScramUser {
+                error_code: ErrorCode::NotFound as u16,
+            }),
+            Err(_) => Ok(Response::DeleteScramUser {
+                error_code: ErrorCode::Storage as u16,
+            }),
+        },
+        Request::ListScramUsers => Ok(Response::ListScramUsers {
+            error_code: 0,
+            usernames: broker.scram().list_usernames(),
+        }),
     }
 }
 

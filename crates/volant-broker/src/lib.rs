@@ -26,6 +26,8 @@ pub mod offset_store;
 pub mod partition;
 pub mod producer_state;
 pub mod replica;
+/// SCRAM-SHA-256 credentials and crypto (Phase 22).
+pub mod scram;
 pub mod topic;
 pub mod topic_catalog;
 pub mod topic_config;
@@ -33,6 +35,10 @@ pub mod topic_config;
 pub use acl::{
     AclEntry, AclOperation, AclPermission, AclSnapshot, AclState, AclStore, ResourceType,
     CLUSTER_RESOURCE,
+};
+pub use scram::{
+    client_proof_and_server_sig, generate_client_nonce, ScramChallenge, ScramCredential,
+    ScramStore, DEFAULT_ITERATIONS,
 };
 pub use assignor::{range_assign, range_assign_multi, sticky_assign, sticky_assign_multi};
 pub use broker::{
