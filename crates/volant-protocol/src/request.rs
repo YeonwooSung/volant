@@ -56,6 +56,12 @@ pub enum RequestOpcode {
     BeginTxn = 50,
     /// Commit or abort a producer transaction (Phase 18).
     EndTxn = 52,
+    /// Create ACL entries (Phase 20).
+    CreateAcls = 54,
+    /// Delete ACL entries (Phase 20).
+    DeleteAcls = 56,
+    /// List ACL entries (Phase 20).
+    ListAcls = 58,
 }
 
 impl RequestOpcode {
@@ -87,9 +93,27 @@ impl RequestOpcode {
             48 => Self::ListOffsets,
             50 => Self::BeginTxn,
             52 => Self::EndTxn,
+            54 => Self::CreateAcls,
+            56 => Self::DeleteAcls,
+            58 => Self::ListAcls,
             _ => return None,
         })
     }
+}
+
+/// One ACL binding on the wire (Phase 20).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AclBinding {
+    /// Principal name, or `*`.
+    pub principal: String,
+    /// 0=Topic, 1=Group, 2=Cluster.
+    pub resource_type: u8,
+    /// Resource name, or `*`.
+    pub resource: String,
+    /// 0=All … 7=ClusterAction.
+    pub operation: u8,
+    /// 0=Deny, 1=Allow.
+    pub permission: u8,
 }
 
 /// One deferred offset commit inside EndTxn (Phase 18).
@@ -350,6 +374,25 @@ pub enum Request {
         /// Partitions to query; empty = all.
         partitions: Vec<u32>,
     },
+    /// Create ACL entries (Phase 20).
+    CreateAcls {
+        /// Bindings to add.
+        entries: Vec<AclBinding>,
+    },
+    /// Delete exact-matching ACL entries (Phase 20).
+    DeleteAcls {
+        /// Bindings to remove.
+        entries: Vec<AclBinding>,
+    },
+    /// List ACL entries with optional filters (Phase 20).
+    ListAcls {
+        /// Principal filter; empty = any.
+        principal: String,
+        /// Resource type filter; `255` = any.
+        resource_type: u8,
+        /// Resource name filter; empty = any.
+        resource: String,
+    },
 }
 
 impl Request {
@@ -381,6 +424,9 @@ impl Request {
             Self::DeleteRecords { .. } => RequestOpcode::DeleteRecords as u16,
             Self::CreatePartitions { .. } => RequestOpcode::CreatePartitions as u16,
             Self::ListOffsets { .. } => RequestOpcode::ListOffsets as u16,
+            Self::CreateAcls { .. } => RequestOpcode::CreateAcls as u16,
+            Self::DeleteAcls { .. } => RequestOpcode::DeleteAcls as u16,
+            Self::ListAcls { .. } => RequestOpcode::ListAcls as u16,
         }
     }
 }

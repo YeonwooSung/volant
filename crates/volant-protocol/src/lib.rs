@@ -17,7 +17,8 @@ pub use payload::{
     MAX_PAYLOAD,
 };
 pub use request::{
-    OffsetCommitEntry, OffsetEntry, ProduceMessage, Request, RequestOpcode, TxnOffsetCommit,
+    AclBinding, OffsetCommitEntry, OffsetEntry, ProduceMessage, Request, RequestOpcode,
+    TxnOffsetCommit,
 };
 pub use response::{
     Assignment, BrokerInfo, ClusterPartitionState, ClusterTopicState, ErrorCode, FetchRecord,

@@ -562,7 +562,27 @@ Binding: **[docs/PHASE19_SPEC.md](./docs/PHASE19_SPEC.md)**.
 - [x] Inter-broker presents server cert as client identity when mTLS is on
 - [x] Integration tests (`phase19_mtls`) + principal unit test
 
-**Honest limitations:** CN/SAN principal only (no SPIFFE); no per-topic ACL from principal yet; metrics still unauthenticated; inter-broker reuses server cert (no separate peer identity file).
+**Honest limitations:** CN/SAN principal only (no SPIFFE); per-topic ACLs closed by **Phase 20**; metrics still unauthenticated; inter-broker reuses server cert (no separate peer identity file).
+
+**Still deferred:** Kafka shim, multi-lang clients, SCRAM / full SASL.
+
+---
+
+### Phase 20 — Principal-based ACLs ✅
+
+**Goal:** Authorize requests against the connection principal (mTLS CN or token principal).
+
+Binding: **[docs/PHASE20_SPEC.md](./docs/PHASE20_SPEC.md)**.
+
+- [x] ACL model: principal / resource_type / resource / operation / allow|deny; `*` wildcards
+- [x] Default deny when enabled; deny overrides allow; super-users bypass
+- [x] Enforce on produce/fetch/admin/group ops; skip inter-broker opcodes
+- [x] `CreateAcls` / `DeleteAcls` / `ListAcls` (opcodes 54–59); error `AuthorizationFailed` (23)
+- [x] Server: `--acl-enable`, `--acl-file`, `--acl-super-users`, `--auth-principal`
+- [x] Client + `volant acl create|list|delete` CLI
+- [x] Integration tests (`phase20_acls`)
+
+**Honest limitations:** in-memory store (optional JSON load; CreateAcls does not auto-persist); no cluster ACL consensus; no prefix patterns beyond `*`; Metadata-all uses Cluster Describe only; inter-broker not ACL-gated.
 
 **Still deferred:** Kafka shim, multi-lang clients, SCRAM / full SASL.
 

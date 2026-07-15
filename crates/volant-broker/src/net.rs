@@ -462,6 +462,7 @@ async fn handle_connection(mut stream: TcpStream, broker: Arc<Broker>) -> Result
     // When auth is disabled, treat the connection as already authenticated.
     let auth_required = broker.auth_token().is_some();
     let mut authenticated = !auth_required;
+    let mut principal: Option<String> = None;
 
     loop {
         loop {
@@ -473,10 +474,18 @@ async fn handle_connection(mut stream: TcpStream, broker: Arc<Broker>) -> Result
                         "rpc",
                         opcode,
                         correlation_id = corr,
-                        authenticated
+                        authenticated,
+                        principal = principal.as_deref().unwrap_or("")
                     );
                     let response = async {
-                        dispatch_with_auth(&broker, frame, &mut authenticated, auth_required).await
+                        dispatch_with_auth(
+                            &broker,
+                            frame,
+                            &mut authenticated,
+                            auth_required,
+                            &mut principal,
+                        )
+                        .await
                     }
                     .instrument(span)
                     .await;
@@ -506,6 +515,7 @@ async fn dispatch_with_auth(
     frame: Frame,
     authenticated: &mut bool,
     auth_required: bool,
+    principal: &mut Option<String>,
 ) -> Response {
     let req = match decode_request(frame.header.opcode, &frame.payload) {
         Ok(r) => r,
@@ -524,14 +534,17 @@ async fn dispatch_with_auth(
             None => {
                 // Auth disabled: accept any token as a no-op success.
                 *authenticated = true;
+                *principal = Some(broker.auth_principal_name());
                 Response::Auth { error_code: 0 }
             }
             Some(expected) if expected == *token => {
                 *authenticated = true;
+                *principal = Some(broker.auth_principal_name());
                 Response::Auth { error_code: 0 }
             }
             Some(_) => {
                 *authenticated = false;
+                *principal = None;
                 broker
                     .metrics()
                     .record_error(ErrorCode::AuthenticationFailed as u16);
@@ -553,11 +566,26 @@ async fn dispatch_with_auth(
         };
     }
 
-    dispatch_request(broker, req).await
+    dispatch_request_as(broker, req, principal.as_deref()).await
 }
 
 /// Handle a decoded request (shared by plaintext and TLS accept paths).
 pub async fn dispatch_request(broker: &Broker, req: Request) -> Response {
+    dispatch_request_as(broker, req, None).await
+}
+
+/// Dispatch with an optional connection principal for ACL checks (Phase 20).
+pub async fn dispatch_request_as(
+    broker: &Broker,
+    req: Request,
+    principal: Option<&str>,
+) -> Response {
+    if let Some(denied) = authorize_request(broker, &req, principal) {
+        broker
+            .metrics()
+            .record_error(ErrorCode::AuthorizationFailed as u16);
+        return denied;
+    }
     match handle_request(broker, req).await {
         Ok(resp) => {
             record_response_metrics(broker, &resp);
@@ -568,6 +596,108 @@ pub async fn dispatch_request(broker: &Broker, req: Request) -> Response {
             record_response_metrics(broker, &resp);
             resp
         }
+    }
+}
+
+fn deny(msg: impl Into<String>) -> Response {
+    Response::Error {
+        code: ErrorCode::AuthorizationFailed as u16,
+        message: msg.into(),
+    }
+}
+
+/// Return an AuthorizationFailed response if the principal may not run `req`.
+fn authorize_request(
+    broker: &Broker,
+    req: &Request,
+    principal: Option<&str>,
+) -> Option<Response> {
+    use crate::acl::{AclOperation, ResourceType, CLUSTER_RESOURCE};
+
+    // Inter-broker traffic is not ACL-gated.
+    match req {
+        Request::ReplicaFetch { .. }
+        | Request::HeartbeatBroker { .. }
+        | Request::ClusterState { .. }
+        | Request::Auth { .. } => return None,
+        _ => {}
+    }
+
+    if !broker.acls().is_enabled() {
+        return None;
+    }
+
+    let acls = broker.acls();
+    let check = |rt: ResourceType, resource: &str, op: AclOperation| -> bool {
+        acls.authorize(principal, rt, resource, op)
+    };
+
+    let ok = match req {
+        Request::Produce { topic, .. } => check(ResourceType::Topic, topic, AclOperation::Write),
+        Request::Fetch { topic, .. } | Request::ListOffsets { topic, .. } => {
+            check(ResourceType::Topic, topic, AclOperation::Read)
+        }
+        Request::CreateTopic { name, .. } => {
+            check(ResourceType::Topic, name, AclOperation::Create)
+        }
+        Request::DeleteTopic { name } | Request::DeleteRecords { topic: name, .. } => {
+            check(ResourceType::Topic, name, AclOperation::Delete)
+        }
+        Request::Metadata { topics } => {
+            if topics.is_empty() {
+                check(ResourceType::Cluster, CLUSTER_RESOURCE, AclOperation::Describe)
+            } else {
+                topics
+                    .iter()
+                    .all(|t| check(ResourceType::Topic, t, AclOperation::Describe))
+            }
+        }
+        Request::DescribeConfigs { topic } => {
+            check(ResourceType::Topic, topic, AclOperation::Describe)
+        }
+        Request::AlterConfigs { topic, .. } | Request::CreatePartitions { topic, .. } => {
+            check(ResourceType::Topic, topic, AclOperation::Alter)
+        }
+        Request::OffsetCommit { group_id, .. }
+        | Request::OffsetFetch { group_id, .. }
+        | Request::JoinGroup { group_id, .. }
+        | Request::Heartbeat { group_id, .. }
+        | Request::LeaveGroup { group_id, .. } => {
+            check(ResourceType::Group, group_id, AclOperation::Read)
+        }
+        Request::DescribeGroup { group_id } => {
+            check(ResourceType::Group, group_id, AclOperation::Describe)
+        }
+        Request::DeleteOffsets { group_id, .. } => {
+            check(ResourceType::Group, group_id, AclOperation::Delete)
+        }
+        Request::ListGroups => {
+            check(ResourceType::Cluster, CLUSTER_RESOURCE, AclOperation::Describe)
+        }
+        Request::InitProducerId { .. }
+        | Request::BeginTxn { .. }
+        | Request::EndTxn { .. } => {
+            check(ResourceType::Cluster, CLUSTER_RESOURCE, AclOperation::Write)
+        }
+        Request::CreateAcls { .. } | Request::DeleteAcls { .. } => {
+            check(ResourceType::Cluster, CLUSTER_RESOURCE, AclOperation::Alter)
+        }
+        Request::ListAcls { .. } => {
+            check(ResourceType::Cluster, CLUSTER_RESOURCE, AclOperation::Describe)
+        }
+        Request::ReplicaFetch { .. }
+        | Request::HeartbeatBroker { .. }
+        | Request::ClusterState { .. }
+        | Request::Auth { .. } => true,
+    };
+
+    if ok {
+        None
+    } else {
+        Some(deny(format!(
+            "principal '{}' not authorized",
+            principal.unwrap_or("")
+        )))
     }
 }
 
@@ -623,7 +753,10 @@ fn record_response_metrics(broker: &Broker, resp: &Response) {
         | Response::CreatePartitions { error_code, .. }
         | Response::ListOffsets { error_code, .. }
         | Response::BeginTxn { error_code }
-        | Response::EndTxn { error_code, .. } => {
+        | Response::EndTxn { error_code, .. }
+        | Response::CreateAcls { error_code }
+        | Response::DeleteAcls { error_code, .. }
+        | Response::ListAcls { error_code, .. } => {
             if *error_code != 0 {
                 m.record_error(*error_code);
             }
@@ -1329,6 +1462,107 @@ async fn handle_request(broker: &Broker, req: Request) -> Result<Response> {
                 Err(e) => Err(e),
             }
         }
+        Request::CreateAcls { entries } => {
+            match wire_to_acl_entries(&entries) {
+                Ok(parsed) => {
+                    broker.acls().create(parsed);
+                    Ok(Response::CreateAcls { error_code: 0 })
+                }
+                Err(_) => Ok(Response::CreateAcls {
+                    error_code: ErrorCode::InvalidArg as u16,
+                }),
+            }
+        }
+        Request::DeleteAcls { entries } => {
+            match wire_to_acl_entries(&entries) {
+                Ok(parsed) => {
+                    let removed = broker.acls().delete(&parsed) as u32;
+                    Ok(Response::DeleteAcls {
+                        error_code: 0,
+                        removed,
+                    })
+                }
+                Err(_msg) => Ok(Response::DeleteAcls {
+                    error_code: ErrorCode::InvalidArg as u16,
+                    removed: 0,
+                }),
+            }
+        }
+        Request::ListAcls {
+            principal,
+            resource_type,
+            resource,
+        } => {
+            let rt = if resource_type == 255 {
+                None
+            } else {
+                crate::acl::ResourceType::from_u8(resource_type)
+            };
+            if resource_type != 255 && rt.is_none() {
+                return Ok(Response::ListAcls {
+                    error_code: ErrorCode::InvalidArg as u16,
+                    entries: vec![],
+                });
+            }
+            let p = if principal.is_empty() {
+                None
+            } else {
+                Some(principal.as_str())
+            };
+            let r = if resource.is_empty() {
+                None
+            } else {
+                Some(resource.as_str())
+            };
+            let entries = broker
+                .acls()
+                .list(p, rt, r)
+                .into_iter()
+                .map(acl_entry_to_wire)
+                .collect();
+            Ok(Response::ListAcls {
+                error_code: 0,
+                entries,
+            })
+        }
+    }
+}
+
+fn wire_to_acl_entries(
+    entries: &[volant_protocol::AclBinding],
+) -> std::result::Result<Vec<crate::acl::AclEntry>, String> {
+    let mut out = Vec::with_capacity(entries.len());
+    for e in entries {
+        let resource_type = crate::acl::ResourceType::from_u8(e.resource_type)
+            .ok_or_else(|| format!("invalid resource_type {}", e.resource_type))?;
+        let operation = crate::acl::AclOperation::from_u8(e.operation)
+            .ok_or_else(|| format!("invalid operation {}", e.operation))?;
+        let permission = crate::acl::AclPermission::from_u8(e.permission)
+            .ok_or_else(|| format!("invalid permission {}", e.permission))?;
+        if e.principal.is_empty() {
+            return Err("empty principal".into());
+        }
+        if e.resource.is_empty() {
+            return Err("empty resource".into());
+        }
+        out.push(crate::acl::AclEntry {
+            principal: e.principal.clone(),
+            resource_type,
+            resource: e.resource.clone(),
+            operation,
+            permission,
+        });
+    }
+    Ok(out)
+}
+
+fn acl_entry_to_wire(e: crate::acl::AclEntry) -> volant_protocol::AclBinding {
+    volant_protocol::AclBinding {
+        principal: e.principal,
+        resource_type: e.resource_type.as_u8(),
+        resource: e.resource,
+        operation: e.operation.as_u8(),
+        permission: e.permission.as_u8(),
     }
 }
 

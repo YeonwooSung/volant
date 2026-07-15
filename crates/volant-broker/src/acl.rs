@@ -1,0 +1,507 @@
+//! Principal-based access control lists (Phase 20).
+
+use std::collections::HashSet;
+use std::fs;
+use std::path::Path;
+
+use parking_lot::RwLock;
+use serde::{Deserialize, Serialize};
+use volant_core::{Error, Result};
+
+/// Resource category for an ACL binding.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "PascalCase")]
+#[repr(u8)]
+pub enum ResourceType {
+    /// Topic resource.
+    Topic = 0,
+    /// Consumer group resource.
+    Group = 1,
+    /// Cluster-scoped resource (`volant`).
+    Cluster = 2,
+}
+
+impl ResourceType {
+    /// Parse wire `u8`.
+    pub fn from_u8(v: u8) -> Option<Self> {
+        match v {
+            0 => Some(Self::Topic),
+            1 => Some(Self::Group),
+            2 => Some(Self::Cluster),
+            _ => None,
+        }
+    }
+
+    /// Wire value.
+    pub fn as_u8(self) -> u8 {
+        self as u8
+    }
+
+    /// Parse JSON / CLI name.
+    pub fn parse(s: &str) -> Result<Self> {
+        match s.to_ascii_lowercase().as_str() {
+            "topic" => Ok(Self::Topic),
+            "group" => Ok(Self::Group),
+            "cluster" => Ok(Self::Cluster),
+            other => Err(Error::InvalidArgument(format!(
+                "unknown resource_type '{other}'"
+            ))),
+        }
+    }
+
+    /// Stable name for display / JSON.
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Topic => "Topic",
+            Self::Group => "Group",
+            Self::Cluster => "Cluster",
+        }
+    }
+}
+
+/// Operation gated by an ACL.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "PascalCase")]
+#[repr(u8)]
+pub enum AclOperation {
+    /// Matches any operation.
+    All = 0,
+    /// Read / fetch / consume.
+    Read = 1,
+    /// Write / produce.
+    Write = 2,
+    /// Create resource.
+    Create = 3,
+    /// Delete resource.
+    Delete = 4,
+    /// Describe / metadata.
+    Describe = 5,
+    /// Alter config / partitions.
+    Alter = 6,
+    /// Inter-broker / cluster action (reserved).
+    ClusterAction = 7,
+}
+
+impl AclOperation {
+    /// Parse wire `u8`.
+    pub fn from_u8(v: u8) -> Option<Self> {
+        match v {
+            0 => Some(Self::All),
+            1 => Some(Self::Read),
+            2 => Some(Self::Write),
+            3 => Some(Self::Create),
+            4 => Some(Self::Delete),
+            5 => Some(Self::Describe),
+            6 => Some(Self::Alter),
+            7 => Some(Self::ClusterAction),
+            _ => None,
+        }
+    }
+
+    /// Wire value.
+    pub fn as_u8(self) -> u8 {
+        self as u8
+    }
+
+    /// Parse JSON / CLI name.
+    pub fn parse(s: &str) -> Result<Self> {
+        match s.to_ascii_lowercase().as_str() {
+            "all" => Ok(Self::All),
+            "read" => Ok(Self::Read),
+            "write" => Ok(Self::Write),
+            "create" => Ok(Self::Create),
+            "delete" => Ok(Self::Delete),
+            "describe" => Ok(Self::Describe),
+            "alter" => Ok(Self::Alter),
+            "clusteraction" | "cluster_action" => Ok(Self::ClusterAction),
+            other => Err(Error::InvalidArgument(format!(
+                "unknown operation '{other}'"
+            ))),
+        }
+    }
+
+    /// Stable name.
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::All => "All",
+            Self::Read => "Read",
+            Self::Write => "Write",
+            Self::Create => "Create",
+            Self::Delete => "Delete",
+            Self::Describe => "Describe",
+            Self::Alter => "Alter",
+            Self::ClusterAction => "ClusterAction",
+        }
+    }
+
+    fn matches(self, required: AclOperation) -> bool {
+        self == AclOperation::All || self == required
+    }
+}
+
+/// Allow or deny.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "PascalCase")]
+#[repr(u8)]
+pub enum AclPermission {
+    /// Explicit deny (wins over allow).
+    Deny = 0,
+    /// Explicit allow.
+    Allow = 1,
+}
+
+impl AclPermission {
+    /// Parse wire `u8`.
+    pub fn from_u8(v: u8) -> Option<Self> {
+        match v {
+            0 => Some(Self::Deny),
+            1 => Some(Self::Allow),
+            _ => None,
+        }
+    }
+
+    /// Wire value.
+    pub fn as_u8(self) -> u8 {
+        self as u8
+    }
+
+    /// Parse name.
+    pub fn parse(s: &str) -> Result<Self> {
+        match s.to_ascii_lowercase().as_str() {
+            "deny" => Ok(Self::Deny),
+            "allow" => Ok(Self::Allow),
+            other => Err(Error::InvalidArgument(format!(
+                "unknown permission '{other}'"
+            ))),
+        }
+    }
+
+    /// Stable name.
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Deny => "Deny",
+            Self::Allow => "Allow",
+        }
+    }
+}
+
+/// One ACL binding.
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub struct AclEntry {
+    /// Principal name, or `*` for any.
+    pub principal: String,
+    /// Resource category.
+    pub resource_type: ResourceType,
+    /// Resource name, or `*` for any.
+    pub resource: String,
+    /// Gated operation.
+    pub operation: AclOperation,
+    /// Allow or deny.
+    pub permission: AclPermission,
+}
+
+impl AclEntry {
+    fn principal_matches(&self, principal: &str) -> bool {
+        self.principal == "*" || self.principal == principal
+    }
+
+    fn resource_matches(&self, name: &str) -> bool {
+        self.resource == "*" || self.resource == name
+    }
+
+    fn matches(
+        &self,
+        principal: &str,
+        resource_type: ResourceType,
+        resource: &str,
+        operation: AclOperation,
+    ) -> bool {
+        self.principal_matches(principal)
+            && self.resource_type == resource_type
+            && self.resource_matches(resource)
+            && self.operation.matches(operation)
+    }
+}
+
+/// Canonical cluster resource name used in ACL checks.
+pub const CLUSTER_RESOURCE: &str = "volant";
+
+/// In-memory ACL authorizer (Phase 20).
+#[derive(Debug, Default)]
+pub struct AclAuthorizer {
+    enabled: bool,
+    super_users: HashSet<String>,
+    entries: Vec<AclEntry>,
+}
+
+impl AclAuthorizer {
+    /// Empty authorizer (disabled).
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Whether enforcement is on.
+    pub fn is_enabled(&self) -> bool {
+        self.enabled
+    }
+
+    /// Enable or disable enforcement.
+    pub fn set_enabled(&mut self, enabled: bool) {
+        self.enabled = enabled;
+    }
+
+    /// Replace super-user set.
+    pub fn set_super_users(&mut self, users: impl IntoIterator<Item = String>) {
+        self.super_users = users.into_iter().filter(|s| !s.is_empty()).collect();
+    }
+
+    /// Current entries (clone).
+    pub fn entries(&self) -> Vec<AclEntry> {
+        self.entries.clone()
+    }
+
+    /// Load entries from a JSON file and enable enforcement.
+    pub fn load_file(&mut self, path: &Path) -> Result<()> {
+        let text = fs::read_to_string(path).map_err(|e| {
+            Error::InvalidArgument(format!("read acl file {}: {e}", path.display()))
+        })?;
+        let list: Vec<AclEntry> = serde_json::from_str(&text).map_err(|e| {
+            Error::InvalidArgument(format!("parse acl file {}: {e}", path.display()))
+        })?;
+        self.entries = list;
+        self.enabled = true;
+        Ok(())
+    }
+
+    /// Add entries (dedupe). Enables enforcement.
+    pub fn create(&mut self, new_entries: Vec<AclEntry>) {
+        for e in new_entries {
+            if !self.entries.contains(&e) {
+                self.entries.push(e);
+            }
+        }
+        self.enabled = true;
+    }
+
+    /// Remove exact-matching entries. Returns how many were removed.
+    pub fn delete(&mut self, victims: &[AclEntry]) -> usize {
+        let before = self.entries.len();
+        self.entries.retain(|e| !victims.contains(e));
+        before - self.entries.len()
+    }
+
+    /// Filter list (empty principal / resource = any; resource_type `None` = any).
+    pub fn list(
+        &self,
+        principal: Option<&str>,
+        resource_type: Option<ResourceType>,
+        resource: Option<&str>,
+    ) -> Vec<AclEntry> {
+        self.entries
+            .iter()
+            .filter(|e| {
+                if let Some(p) = principal {
+                    if !p.is_empty() && e.principal != p {
+                        return false;
+                    }
+                }
+                if let Some(rt) = resource_type {
+                    if e.resource_type != rt {
+                        return false;
+                    }
+                }
+                if let Some(r) = resource {
+                    if !r.is_empty() && e.resource != r {
+                        return false;
+                    }
+                }
+                true
+            })
+            .cloned()
+            .collect()
+    }
+
+    /// Authorize `principal` for `operation` on `resource_type`/`resource`.
+    ///
+    /// `principal == None` is treated as empty string (denied when enabled unless `*`).
+    pub fn authorize(
+        &self,
+        principal: Option<&str>,
+        resource_type: ResourceType,
+        resource: &str,
+        operation: AclOperation,
+    ) -> bool {
+        if !self.enabled {
+            return true;
+        }
+        let p = principal.unwrap_or("");
+        if self.super_users.contains(p) {
+            return true;
+        }
+        let mut allowed = false;
+        for e in &self.entries {
+            if !e.matches(p, resource_type, resource, operation) {
+                continue;
+            }
+            if e.permission == AclPermission::Deny {
+                return false;
+            }
+            allowed = true;
+        }
+        allowed
+    }
+}
+
+/// Shared ACL state on the broker.
+#[derive(Debug, Default)]
+pub struct AclState {
+    inner: RwLock<AclAuthorizer>,
+    /// Principal assigned after successful shared-token Auth.
+    auth_principal: RwLock<String>,
+}
+
+impl AclState {
+    /// Create with default auth principal `"token"`.
+    pub fn new() -> Self {
+        Self {
+            inner: RwLock::new(AclAuthorizer::new()),
+            auth_principal: RwLock::new("token".into()),
+        }
+    }
+
+    /// Configure authorizer from server flags.
+    pub fn configure(
+        &self,
+        enable: bool,
+        file: Option<&Path>,
+        super_users: Vec<String>,
+        auth_principal: String,
+    ) -> Result<()> {
+        let mut a = self.inner.write();
+        a.set_super_users(super_users);
+        if let Some(path) = file {
+            a.load_file(path)?;
+        } else if enable {
+            a.set_enabled(true);
+        }
+        *self.auth_principal.write() = if auth_principal.is_empty() {
+            "token".into()
+        } else {
+            auth_principal
+        };
+        Ok(())
+    }
+
+    /// Principal name used after token Auth.
+    pub fn auth_principal(&self) -> String {
+        self.auth_principal.read().clone()
+    }
+
+    /// Whether ACLs are enforced.
+    pub fn is_enabled(&self) -> bool {
+        self.inner.read().is_enabled()
+    }
+
+    /// Authorize a principal.
+    pub fn authorize(
+        &self,
+        principal: Option<&str>,
+        resource_type: ResourceType,
+        resource: &str,
+        operation: AclOperation,
+    ) -> bool {
+        self.inner
+            .read()
+            .authorize(principal, resource_type, resource, operation)
+    }
+
+    /// Create ACL entries.
+    pub fn create(&self, entries: Vec<AclEntry>) {
+        self.inner.write().create(entries);
+    }
+
+    /// Delete exact entries.
+    pub fn delete(&self, entries: &[AclEntry]) -> usize {
+        self.inner.write().delete(entries)
+    }
+
+    /// List with optional filters.
+    pub fn list(
+        &self,
+        principal: Option<&str>,
+        resource_type: Option<ResourceType>,
+        resource: Option<&str>,
+    ) -> Vec<AclEntry> {
+        self.inner.read().list(principal, resource_type, resource)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn entry(
+        principal: &str,
+        rt: ResourceType,
+        resource: &str,
+        op: AclOperation,
+        perm: AclPermission,
+    ) -> AclEntry {
+        AclEntry {
+            principal: principal.into(),
+            resource_type: rt,
+            resource: resource.into(),
+            operation: op,
+            permission: perm,
+        }
+    }
+
+    #[test]
+    fn disabled_allows_all() {
+        let a = AclAuthorizer::new();
+        assert!(a.authorize(None, ResourceType::Topic, "t", AclOperation::Write));
+    }
+
+    #[test]
+    fn default_deny_when_enabled() {
+        let mut a = AclAuthorizer::new();
+        a.set_enabled(true);
+        assert!(!a.authorize(Some("alice"), ResourceType::Topic, "t", AclOperation::Write));
+    }
+
+    #[test]
+    fn allow_and_deny_precedence() {
+        let mut a = AclAuthorizer::new();
+        a.create(vec![
+            entry("alice", ResourceType::Topic, "t", AclOperation::Write, AclPermission::Allow),
+            entry("alice", ResourceType::Topic, "t", AclOperation::Write, AclPermission::Deny),
+        ]);
+        assert!(!a.authorize(Some("alice"), ResourceType::Topic, "t", AclOperation::Write));
+    }
+
+    #[test]
+    fn wildcard_and_super_user() {
+        let mut a = AclAuthorizer::new();
+        a.set_super_users(vec!["root".into()]);
+        a.create(vec![entry(
+            "*",
+            ResourceType::Topic,
+            "*",
+            AclOperation::Read,
+            AclPermission::Allow,
+        )]);
+        assert!(a.authorize(Some("bob"), ResourceType::Topic, "x", AclOperation::Read));
+        assert!(!a.authorize(Some("bob"), ResourceType::Topic, "x", AclOperation::Write));
+        assert!(a.authorize(Some("root"), ResourceType::Topic, "x", AclOperation::Write));
+    }
+
+    #[test]
+    fn create_delete_list() {
+        let mut a = AclAuthorizer::new();
+        let e = entry("a", ResourceType::Group, "g", AclOperation::Read, AclPermission::Allow);
+        a.create(vec![e.clone()]);
+        assert_eq!(a.list(Some("a"), None, None).len(), 1);
+        assert_eq!(a.delete(&[e]), 1);
+        assert!(a.list(None, None, None).is_empty());
+    }
+}

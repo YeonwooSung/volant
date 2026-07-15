@@ -302,8 +302,63 @@ let client = Client::connect(ClientConfig {
 .await?;
 ```
 
-Principal is logged for ops correlation; it is **not** yet enforced on per-topic
-ACLs. Metrics remain unauthenticated.
+Principal is logged for ops correlation and used by **Phase 20 ACLs**.
+Metrics remain unauthenticated.
+
+## Principal ACLs (Phase 20)
+
+Enable authorization (default deny when on):
+
+```bash
+cargo run -p volant-server -- \
+  --listen 0.0.0.0:9092 \
+  --auth-token secret \
+  --auth-principal alice \
+  --acl-enable \
+  --acl-super-users admin \
+  --acl-file acls.json   # optional JSON array; implies enable
+```
+
+Example `acls.json`:
+
+```json
+[
+  {
+    "principal": "alice",
+    "resource_type": "Topic",
+    "resource": "events",
+    "operation": "Write",
+    "permission": "Allow"
+  },
+  {
+    "principal": "alice",
+    "resource_type": "Topic",
+    "resource": "events",
+    "operation": "Read",
+    "permission": "Allow"
+  }
+]
+```
+
+CLI:
+
+```bash
+volant --auth-token secret acl create \
+  --principal alice --resource-type Topic --resource events \
+  --operation Write --permission Allow
+
+volant --auth-token secret acl list
+volant --auth-token secret acl delete \
+  --principal alice --resource-type Topic --resource events \
+  --operation Write --permission Allow
+```
+
+- Matching **Deny** beats **Allow**; no match → deny when enabled.
+- Super-users bypass all checks.
+- Token Auth sets principal to `--auth-principal` (default `token`).
+- mTLS CN is the principal when using Phase 19 client certs.
+- CreateAcls is in-memory (not auto-written back to `--acl-file`).
+- Inter-broker opcodes are not ACL-gated.
 
 ## Log compaction (Phase 16)
 
@@ -324,5 +379,4 @@ is only compacted after it rolls.
 ## Deferred
 
 Kafka wire shim, multi-language clients, SCRAM / full SASL, full chaos-mesh
-suites, cargo-fuzz corpus CI.
-See [ROADMAP.md](../ROADMAP.md).
+suites, cargo-fuzz corpus CI. See [ROADMAP.md](../ROADMAP.md).

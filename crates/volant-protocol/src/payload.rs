@@ -4,7 +4,8 @@ use bytes::{Buf, BufMut, Bytes, BytesMut};
 use volant_core::{Error, Result};
 
 use crate::request::{
-    OffsetCommitEntry, OffsetEntry, ProduceMessage, Request, RequestOpcode, TxnOffsetCommit,
+    AclBinding, OffsetCommitEntry, OffsetEntry, ProduceMessage, Request, RequestOpcode,
+    TxnOffsetCommit,
 };
 use crate::response::{
     Assignment, BrokerInfo, ClusterPartitionState, ClusterTopicState, ErrorCode, FetchRecord,
@@ -28,6 +29,36 @@ fn put_string(dst: &mut BytesMut, s: &str) -> Result<()> {
     dst.put_u16_le(bytes.len() as u16);
     dst.extend_from_slice(bytes);
     Ok(())
+}
+
+fn put_acl_binding(dst: &mut BytesMut, e: &AclBinding) -> Result<()> {
+    put_string(dst, &e.principal)?;
+    dst.put_u8(e.resource_type);
+    put_string(dst, &e.resource)?;
+    dst.put_u8(e.operation);
+    dst.put_u8(e.permission);
+    Ok(())
+}
+
+fn get_acl_binding(src: &mut impl Buf) -> Result<AclBinding> {
+    let principal = get_string(src)?;
+    if src.remaining() < 1 {
+        return Err(Error::Protocol("truncated acl resource_type".into()));
+    }
+    let resource_type = src.get_u8();
+    let resource = get_string(src)?;
+    if src.remaining() < 2 {
+        return Err(Error::Protocol("truncated acl op/perm".into()));
+    }
+    let operation = src.get_u8();
+    let permission = src.get_u8();
+    Ok(AclBinding {
+        principal,
+        resource_type,
+        resource,
+        operation,
+        permission,
+    })
 }
 
 fn get_string(src: &mut impl Buf) -> Result<String> {
@@ -349,6 +380,27 @@ pub fn encode_request(req: &Request) -> Result<Bytes> {
             for p in partitions {
                 dst.put_u32_le(*p);
             }
+        }
+        Request::CreateAcls { entries } => {
+            dst.put_u32_le(entries.len() as u32);
+            for e in entries {
+                put_acl_binding(&mut dst, e)?;
+            }
+        }
+        Request::DeleteAcls { entries } => {
+            dst.put_u32_le(entries.len() as u32);
+            for e in entries {
+                put_acl_binding(&mut dst, e)?;
+            }
+        }
+        Request::ListAcls {
+            principal,
+            resource_type,
+            resource,
+        } => {
+            put_string(&mut dst, principal)?;
+            dst.put_u8(*resource_type);
+            put_string(&mut dst, resource)?;
         }
     }
     finish_payload(dst)
@@ -719,6 +771,41 @@ pub fn decode_request(opcode: u16, payload: &[u8]) -> Result<Request> {
             }
             Ok(Request::ListOffsets { topic, partitions })
         }
+        RequestOpcode::CreateAcls => {
+            if src.remaining() < 4 {
+                return Err(Error::Protocol("truncated create acls count".into()));
+            }
+            let n = src.get_u32_le() as usize;
+            let mut entries = Vec::with_capacity(n);
+            for _ in 0..n {
+                entries.push(get_acl_binding(&mut src)?);
+            }
+            Ok(Request::CreateAcls { entries })
+        }
+        RequestOpcode::DeleteAcls => {
+            if src.remaining() < 4 {
+                return Err(Error::Protocol("truncated delete acls count".into()));
+            }
+            let n = src.get_u32_le() as usize;
+            let mut entries = Vec::with_capacity(n);
+            for _ in 0..n {
+                entries.push(get_acl_binding(&mut src)?);
+            }
+            Ok(Request::DeleteAcls { entries })
+        }
+        RequestOpcode::ListAcls => {
+            let principal = get_string(&mut src)?;
+            if src.remaining() < 1 {
+                return Err(Error::Protocol("truncated list acls resource_type".into()));
+            }
+            let resource_type = src.get_u8();
+            let resource = get_string(&mut src)?;
+            Ok(Request::ListAcls {
+                principal,
+                resource_type,
+                resource,
+            })
+        }
     }
 }
 
@@ -1033,6 +1120,26 @@ pub fn encode_response(resp: &Response) -> Result<Bytes> {
                 dst.put_u32_le(e.partition);
                 dst.put_u64_le(e.earliest);
                 dst.put_u64_le(e.latest);
+            }
+        }
+        Response::CreateAcls { error_code } => {
+            dst.put_u16_le(*error_code);
+        }
+        Response::DeleteAcls {
+            error_code,
+            removed,
+        } => {
+            dst.put_u16_le(*error_code);
+            dst.put_u32_le(*removed);
+        }
+        Response::ListAcls {
+            error_code,
+            entries,
+        } => {
+            dst.put_u16_le(*error_code);
+            dst.put_u32_le(entries.len() as u32);
+            for e in entries {
+                put_acl_binding(&mut dst, e)?;
             }
         }
         Response::Error { code, message } => {
@@ -1671,6 +1778,38 @@ pub fn decode_response(opcode: u16, payload: &[u8]) -> Result<Response> {
                 entries,
             })
         }
+        ResponseOpcode::CreateAcls => {
+            if src.remaining() < 2 {
+                return Err(Error::Protocol("truncated create acls error".into()));
+            }
+            Ok(Response::CreateAcls {
+                error_code: src.get_u16_le(),
+            })
+        }
+        ResponseOpcode::DeleteAcls => {
+            if src.remaining() < 2 + 4 {
+                return Err(Error::Protocol("truncated delete acls".into()));
+            }
+            Ok(Response::DeleteAcls {
+                error_code: src.get_u16_le(),
+                removed: src.get_u32_le(),
+            })
+        }
+        ResponseOpcode::ListAcls => {
+            if src.remaining() < 2 + 4 {
+                return Err(Error::Protocol("truncated list acls header".into()));
+            }
+            let error_code = src.get_u16_le();
+            let n = src.get_u32_le() as usize;
+            let mut entries = Vec::with_capacity(n);
+            for _ in 0..n {
+                entries.push(get_acl_binding(&mut src)?);
+            }
+            Ok(Response::ListAcls {
+                error_code,
+                entries,
+            })
+        }
         ResponseOpcode::Error => {
             if src.remaining() < 2 {
                 return Err(Error::Protocol("truncated error code".into()));
@@ -2034,6 +2173,53 @@ mod tests {
         assert_eq!(
             decode_response(ResponseOpcode::ListOffsets as u16, &b).unwrap(),
             lo_resp
+        );
+    }
+
+    #[test]
+    fn phase20_acl_roundtrip() {
+        let entry = AclBinding {
+            principal: "alice".into(),
+            resource_type: 0,
+            resource: "events".into(),
+            operation: 2,
+            permission: 1,
+        };
+        let create = Request::CreateAcls {
+            entries: vec![entry.clone()],
+        };
+        let b = encode_request(&create).unwrap();
+        assert_eq!(
+            decode_request(RequestOpcode::CreateAcls as u16, &b).unwrap(),
+            create
+        );
+        let list = Request::ListAcls {
+            principal: "alice".into(),
+            resource_type: 255,
+            resource: String::new(),
+        };
+        let b = encode_request(&list).unwrap();
+        assert_eq!(
+            decode_request(RequestOpcode::ListAcls as u16, &b).unwrap(),
+            list
+        );
+        let lr = Response::ListAcls {
+            error_code: 0,
+            entries: vec![entry],
+        };
+        let b = encode_response(&lr).unwrap();
+        assert_eq!(
+            decode_response(ResponseOpcode::ListAcls as u16, &b).unwrap(),
+            lr
+        );
+        let dr = Response::DeleteAcls {
+            error_code: 0,
+            removed: 1,
+        };
+        let b = encode_response(&dr).unwrap();
+        assert_eq!(
+            decode_response(ResponseOpcode::DeleteAcls as u16, &b).unwrap(),
+            dr
         );
     }
 

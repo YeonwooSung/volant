@@ -87,6 +87,22 @@ struct Args {
     /// Empty / omitted = any client cert signed by `--tls-client-ca`.
     #[arg(long)]
     tls_client_allow: Option<String>,
+
+    /// Enable principal ACL enforcement (Phase 20). Default deny when on.
+    #[arg(long, default_value_t = false)]
+    acl_enable: bool,
+
+    /// JSON file of ACL entries loaded at startup (implies ACL enable).
+    #[arg(long)]
+    acl_file: Option<PathBuf>,
+
+    /// Comma-separated principals that bypass ACLs (Phase 20).
+    #[arg(long)]
+    acl_super_users: Option<String>,
+
+    /// Principal name after successful shared-token Auth (default `token`).
+    #[arg(long, default_value = "token")]
+    auth_principal: String,
 }
 
 fn main() -> Result<()> {
@@ -205,6 +221,34 @@ async fn async_main(args: Args) -> Result<()> {
         }
         info!("shared-token auth enabled");
         broker.set_auth_token(Some(token));
+    }
+
+    // Phase 20 ACLs.
+    {
+        let supers: Vec<String> = args
+            .acl_super_users
+            .as_ref()
+            .map(|s| {
+                s.split(',')
+                    .map(|p| p.trim().to_owned())
+                    .filter(|p| !p.is_empty())
+                    .collect()
+            })
+            .unwrap_or_default();
+        broker
+            .configure_acls(
+                args.acl_enable,
+                args.acl_file.as_deref(),
+                supers,
+                args.auth_principal.clone(),
+            )
+            .context("configure ACLs")?;
+        if broker.acls().is_enabled() {
+            info!(
+                auth_principal = %args.auth_principal,
+                "principal ACL enforcement enabled"
+            );
+        }
     }
 
     // Inter-broker TLS: on when server TLS is active unless opted out.
@@ -519,6 +563,7 @@ mod tls {
                                 frame,
                                 &mut authenticated,
                                 auth_required,
+                                &mut principal,
                             )
                             .await
                         }
@@ -544,6 +589,7 @@ mod tls {
         frame: Frame,
         authenticated: &mut bool,
         auth_required: bool,
+        principal: &mut Option<String>,
     ) -> Response {
         use volant_protocol::{decode_request, ErrorCode, Request};
 
@@ -562,14 +608,17 @@ mod tls {
             return match broker.auth_token() {
                 None => {
                     *authenticated = true;
+                    *principal = Some(broker.auth_principal_name());
                     Response::Auth { error_code: 0 }
                 }
                 Some(expected) if expected == *token => {
                     *authenticated = true;
+                    *principal = Some(broker.auth_principal_name());
                     Response::Auth { error_code: 0 }
                 }
                 Some(_) => {
                     *authenticated = false;
+                    *principal = None;
                     broker
                         .metrics()
                         .record_error(ErrorCode::AuthenticationFailed as u16);
@@ -591,7 +640,7 @@ mod tls {
             };
         }
 
-        volant_broker::net::dispatch_request(broker, req).await
+        volant_broker::net::dispatch_request_as(broker, req, principal.as_deref()).await
     }
 
     #[cfg(test)]

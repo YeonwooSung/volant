@@ -167,6 +167,9 @@ multi-partition atomic commit, deferred offsets; `volant txn produce`.
 **Phase 19:** mTLS identity — `--tls-client-ca` / `--tls-client-allow`; client
 `tls_cert`/`tls_key`; verified CN authenticates without shared token.
 
+**Phase 20:** principal ACLs — allow/deny on topic/group/cluster; `--acl-enable` /
+`--acl-file` / `--acl-super-users`; `volant acl create|list|delete`.
+
 **Still deferred:** Kafka wire shim, multi-language clients, SCRAM / full SASL,
 chaos-mesh / cargo-fuzz corpus CI.
 

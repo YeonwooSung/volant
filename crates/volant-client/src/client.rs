@@ -1063,6 +1063,71 @@ impl Client {
         }
     }
 
+    /// Create ACL bindings (Phase 20). Enables enforcement on the broker.
+    pub async fn create_acls(&self, entries: Vec<volant_protocol::AclBinding>) -> Result<()> {
+        let resp = self
+            .round_trip(Request::CreateAcls { entries })
+            .await?;
+        match resp {
+            Response::CreateAcls { error_code } => check_ok(error_code, "create_acls"),
+            Response::Error { code, message } => Err(error_from_code(code, message)),
+            other => Err(Error::Protocol(format!(
+                "unexpected response for create_acls: {other:?}"
+            ))),
+        }
+    }
+
+    /// Delete exact-matching ACL bindings (Phase 20).
+    pub async fn delete_acls(&self, entries: Vec<volant_protocol::AclBinding>) -> Result<u32> {
+        let resp = self
+            .round_trip(Request::DeleteAcls { entries })
+            .await?;
+        match resp {
+            Response::DeleteAcls {
+                error_code,
+                removed,
+            } => {
+                check_ok(error_code, "delete_acls")?;
+                Ok(removed)
+            }
+            Response::Error { code, message } => Err(error_from_code(code, message)),
+            other => Err(Error::Protocol(format!(
+                "unexpected response for delete_acls: {other:?}"
+            ))),
+        }
+    }
+
+    /// List ACL bindings with optional filters (Phase 20).
+    ///
+    /// Empty `principal` / `resource` = any. `resource_type = 255` = any type.
+    pub async fn list_acls(
+        &self,
+        principal: &str,
+        resource_type: u8,
+        resource: &str,
+    ) -> Result<Vec<volant_protocol::AclBinding>> {
+        let resp = self
+            .round_trip(Request::ListAcls {
+                principal: principal.to_owned(),
+                resource_type,
+                resource: resource.to_owned(),
+            })
+            .await?;
+        match resp {
+            Response::ListAcls {
+                error_code,
+                entries,
+            } => {
+                check_ok(error_code, "list_acls")?;
+                Ok(entries)
+            }
+            Response::Error { code, message } => Err(error_from_code(code, message)),
+            other => Err(Error::Protocol(format!(
+                "unexpected response for list_acls: {other:?}"
+            ))),
+        }
+    }
+
     /// Commit offsets for a consumer group.
     ///
     /// Pass `generation = 0` for admin/CLI commits that skip generation checks.
@@ -1185,7 +1250,8 @@ fn error_from_code(code: u16, message: impl Into<String>) -> Error {
         | ErrorCode::InvalidProducerEpoch
         | ErrorCode::OutOfOrderSequence
         | ErrorCode::UnknownProducerId
-        | ErrorCode::InvalidTxnState => Error::Protocol(message),
+        | ErrorCode::InvalidTxnState
+        | ErrorCode::AuthorizationFailed => Error::Protocol(message),
         ErrorCode::Ok | ErrorCode::Unknown => Error::Protocol(message),
     }
 }

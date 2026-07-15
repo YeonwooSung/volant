@@ -219,6 +219,8 @@ pub struct Broker {
     topic_configs: TopicConfigStore,
     /// Durable single-node topic catalog under `data_dir/__topics` (Phase 14).
     topic_catalog: TopicCatalogStore,
+    /// Principal ACL authorizer (Phase 20).
+    acls: crate::acl::AclState,
 }
 
 impl Broker {
@@ -259,6 +261,7 @@ impl Broker {
             producer_store,
             topic_configs,
             topic_catalog,
+            acls: crate::acl::AclState::new(),
         };
         broker
             .reload_single_node_topics()
@@ -326,6 +329,7 @@ impl Broker {
             producer_store,
             topic_configs,
             topic_catalog,
+            acls: crate::acl::AclState::new(),
         };
         // Open local partitions from persisted assignment.
         broker.apply_local_assignment()?;
@@ -345,6 +349,28 @@ impl Broker {
     /// Current auth token if configured.
     pub fn auth_token(&self) -> Option<String> {
         self.auth_token.read().clone()
+    }
+
+    /// Phase 20 ACL state.
+    pub fn acls(&self) -> &crate::acl::AclState {
+        &self.acls
+    }
+
+    /// Configure ACL enforcement (server startup).
+    pub fn configure_acls(
+        &self,
+        enable: bool,
+        file: Option<&std::path::Path>,
+        super_users: Vec<String>,
+        auth_principal: String,
+    ) -> Result<()> {
+        self.acls
+            .configure(enable, file, super_users, auth_principal)
+    }
+
+    /// Principal name applied after successful shared-token Auth.
+    pub fn auth_principal_name(&self) -> String {
+        self.acls.auth_principal()
     }
 
     /// Configure inter-broker TLS. `None` keeps inter-broker plaintext.

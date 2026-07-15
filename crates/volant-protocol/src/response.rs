@@ -56,6 +56,12 @@ pub enum ResponseOpcode {
     BeginTxn = 51,
     /// End transaction result (Phase 18).
     EndTxn = 53,
+    /// Create ACLs result (Phase 20).
+    CreateAcls = 55,
+    /// Delete ACLs result (Phase 20).
+    DeleteAcls = 57,
+    /// List ACLs result (Phase 20).
+    ListAcls = 59,
     /// Error response.
     Error = 0xFFFF,
 }
@@ -89,6 +95,9 @@ impl ResponseOpcode {
             49 => Self::ListOffsets,
             51 => Self::BeginTxn,
             53 => Self::EndTxn,
+            55 => Self::CreateAcls,
+            57 => Self::DeleteAcls,
+            59 => Self::ListAcls,
             0xFFFF => Self::Error,
             _ => return None,
         })
@@ -145,6 +154,8 @@ pub enum ErrorCode {
     UnknownProducerId = 21,
     /// Invalid transaction state (Phase 18) — e.g. produce without BeginTxn.
     InvalidTxnState = 22,
+    /// Principal not authorized for the operation (Phase 20).
+    AuthorizationFailed = 23,
 }
 
 impl ErrorCode {
@@ -173,6 +184,7 @@ impl ErrorCode {
             20 => Self::OutOfOrderSequence,
             21 => Self::UnknownProducerId,
             22 => Self::InvalidTxnState,
+            23 => Self::AuthorizationFailed,
             _ => Self::Unknown,
         }
     }
@@ -553,6 +565,25 @@ pub enum Response {
         /// Per-batch results after commit (empty on abort).
         results: Vec<TxnProduceResult>,
     },
+    /// Create ACLs result (Phase 20).
+    CreateAcls {
+        /// 0 = ok; 3 = invalid; 23 = unauthorized.
+        error_code: u16,
+    },
+    /// Delete ACLs result (Phase 20).
+    DeleteAcls {
+        /// 0 = ok; 23 = unauthorized.
+        error_code: u16,
+        /// Number of entries removed.
+        removed: u32,
+    },
+    /// List ACLs result (Phase 20).
+    ListAcls {
+        /// 0 = ok; 23 = unauthorized.
+        error_code: u16,
+        /// Matching bindings.
+        entries: Vec<crate::request::AclBinding>,
+    },
     /// Error response.
     Error {
         /// Error code.
@@ -615,6 +646,9 @@ impl Response {
             Self::DeleteRecords { .. } => ResponseOpcode::DeleteRecords as u16,
             Self::CreatePartitions { .. } => ResponseOpcode::CreatePartitions as u16,
             Self::ListOffsets { .. } => ResponseOpcode::ListOffsets as u16,
+            Self::CreateAcls { .. } => ResponseOpcode::CreateAcls as u16,
+            Self::DeleteAcls { .. } => ResponseOpcode::DeleteAcls as u16,
+            Self::ListAcls { .. } => ResponseOpcode::ListAcls as u16,
             Self::Error { .. } => ResponseOpcode::Error as u16,
         }
     }

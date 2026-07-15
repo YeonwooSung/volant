@@ -57,6 +57,11 @@ enum Commands {
         #[command(subcommand)]
         action: TxnCmd,
     },
+    /// Principal ACL administration (Phase 20).
+    Acl {
+        #[command(subcommand)]
+        action: AclCmd,
+    },
     /// Consume (fetch) messages from a topic partition, or via a consumer group.
     Consume {
         /// Topic name.
@@ -281,6 +286,67 @@ enum GroupCmd {
 }
 
 #[derive(Debug, Subcommand)]
+enum AclCmd {
+    /// Add an ACL binding.
+    Create {
+        /// Principal (CN / token principal / `*`).
+        #[arg(long)]
+        principal: String,
+        /// Resource type: Topic | Group | Cluster.
+        #[arg(long)]
+        resource_type: String,
+        /// Resource name or `*`.
+        #[arg(long)]
+        resource: String,
+        /// Operation: All|Read|Write|Create|Delete|Describe|Alter|ClusterAction.
+        #[arg(long)]
+        operation: String,
+        /// Permission: Allow | Deny.
+        #[arg(long, default_value = "Allow")]
+        permission: String,
+        /// Broker address.
+        #[arg(long, default_value = "127.0.0.1:9092")]
+        broker: String,
+    },
+    /// List ACL bindings.
+    List {
+        /// Optional principal filter.
+        #[arg(long)]
+        principal: Option<String>,
+        /// Optional resource type filter.
+        #[arg(long)]
+        resource_type: Option<String>,
+        /// Optional resource name filter.
+        #[arg(long)]
+        resource: Option<String>,
+        /// Broker address.
+        #[arg(long, default_value = "127.0.0.1:9092")]
+        broker: String,
+    },
+    /// Delete an exact ACL binding.
+    Delete {
+        /// Principal.
+        #[arg(long)]
+        principal: String,
+        /// Resource type.
+        #[arg(long)]
+        resource_type: String,
+        /// Resource name.
+        #[arg(long)]
+        resource: String,
+        /// Operation.
+        #[arg(long)]
+        operation: String,
+        /// Permission.
+        #[arg(long, default_value = "Allow")]
+        permission: String,
+        /// Broker address.
+        #[arg(long, default_value = "127.0.0.1:9092")]
+        broker: String,
+    },
+}
+
+#[derive(Debug, Subcommand)]
 enum TxnCmd {
     /// Produce one or more messages in a single transaction then commit.
     Produce {
@@ -316,7 +382,7 @@ async fn main() -> Result<()> {
     match cli.command {
         Commands::Version => {
             println!("volant {}", env!("CARGO_PKG_VERSION"));
-            println!("status: Phase 16 — log compaction (cleanup.policy)");
+            println!("status: Phase 20 — principal ACLs");
         }
         Commands::Topic { action } => match action {
             TopicCmd::List { broker } => {
@@ -666,6 +732,88 @@ async fn main() -> Result<()> {
                 );
             }
         },
+        Commands::Acl { action } => match action {
+            AclCmd::Create {
+                principal,
+                resource_type,
+                resource,
+                operation,
+                permission,
+                broker,
+            } => {
+                let client = connect(&broker, auth).await?;
+                let entry = parse_acl_binding(
+                    &principal,
+                    &resource_type,
+                    &resource,
+                    &operation,
+                    &permission,
+                )?;
+                client
+                    .create_acls(vec![entry])
+                    .await
+                    .context("create_acls")?;
+                println!(
+                    "created ACL principal={principal} {resource_type}/{resource} {operation} {permission}"
+                );
+            }
+            AclCmd::List {
+                principal,
+                resource_type,
+                resource,
+                broker,
+            } => {
+                let client = connect(&broker, auth).await?;
+                let rt = match resource_type.as_deref() {
+                    None => 255u8,
+                    Some(s) => parse_resource_type_u8(s)?,
+                };
+                let entries = client
+                    .list_acls(
+                        principal.as_deref().unwrap_or(""),
+                        rt,
+                        resource.as_deref().unwrap_or(""),
+                    )
+                    .await
+                    .context("list_acls")?;
+                if entries.is_empty() {
+                    println!("(no acls)");
+                } else {
+                    for e in entries {
+                        println!(
+                            "principal={}\tresource_type={}\tresource={}\toperation={}\tpermission={}",
+                            e.principal,
+                            resource_type_name(e.resource_type),
+                            e.resource,
+                            operation_name(e.operation),
+                            permission_name(e.permission),
+                        );
+                    }
+                }
+            }
+            AclCmd::Delete {
+                principal,
+                resource_type,
+                resource,
+                operation,
+                permission,
+                broker,
+            } => {
+                let client = connect(&broker, auth).await?;
+                let entry = parse_acl_binding(
+                    &principal,
+                    &resource_type,
+                    &resource,
+                    &operation,
+                    &permission,
+                )?;
+                let n = client
+                    .delete_acls(vec![entry])
+                    .await
+                    .context("delete_acls")?;
+                println!("removed {n} ACL(s)");
+            }
+        },
         Commands::Txn { action } => match action {
             TxnCmd::Produce {
                 transactional_id,
@@ -829,6 +977,84 @@ async fn main() -> Result<()> {
         }
     }
     Ok(())
+}
+
+fn parse_resource_type_u8(s: &str) -> Result<u8> {
+    match s.to_ascii_lowercase().as_str() {
+        "topic" => Ok(0),
+        "group" => Ok(1),
+        "cluster" => Ok(2),
+        other => bail!("unknown resource_type '{other}' (Topic|Group|Cluster)"),
+    }
+}
+
+fn parse_operation_u8(s: &str) -> Result<u8> {
+    match s.to_ascii_lowercase().as_str() {
+        "all" => Ok(0),
+        "read" => Ok(1),
+        "write" => Ok(2),
+        "create" => Ok(3),
+        "delete" => Ok(4),
+        "describe" => Ok(5),
+        "alter" => Ok(6),
+        "clusteraction" | "cluster_action" => Ok(7),
+        other => bail!("unknown operation '{other}'"),
+    }
+}
+
+fn parse_permission_u8(s: &str) -> Result<u8> {
+    match s.to_ascii_lowercase().as_str() {
+        "deny" => Ok(0),
+        "allow" => Ok(1),
+        other => bail!("unknown permission '{other}' (Allow|Deny)"),
+    }
+}
+
+fn parse_acl_binding(
+    principal: &str,
+    resource_type: &str,
+    resource: &str,
+    operation: &str,
+    permission: &str,
+) -> Result<volant_protocol::AclBinding> {
+    Ok(volant_protocol::AclBinding {
+        principal: principal.to_owned(),
+        resource_type: parse_resource_type_u8(resource_type)?,
+        resource: resource.to_owned(),
+        operation: parse_operation_u8(operation)?,
+        permission: parse_permission_u8(permission)?,
+    })
+}
+
+fn resource_type_name(v: u8) -> &'static str {
+    match v {
+        0 => "Topic",
+        1 => "Group",
+        2 => "Cluster",
+        _ => "?",
+    }
+}
+
+fn operation_name(v: u8) -> &'static str {
+    match v {
+        0 => "All",
+        1 => "Read",
+        2 => "Write",
+        3 => "Create",
+        4 => "Delete",
+        5 => "Describe",
+        6 => "Alter",
+        7 => "ClusterAction",
+        _ => "?",
+    }
+}
+
+fn permission_name(v: u8) -> &'static str {
+    match v {
+        0 => "Deny",
+        1 => "Allow",
+        _ => "?",
+    }
 }
 
 fn print_offsets(group: &str, entries: &[volant_protocol::OffsetFetchEntry]) {
