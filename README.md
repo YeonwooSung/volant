@@ -177,8 +177,12 @@ multi-partition atomic commit, deferred offsets; `volant txn produce`.
 `data_dir/__scram/users.json`, client `scram_username`/`scram_password`,
 `volant user create|list|delete`. Coexists with shared-token Auth and mTLS.
 
-**Still deferred:** Kafka wire shim, multi-language clients, full SASL /
-SCRAM-SHA-512, chaos-mesh / cargo-fuzz corpus CI.
+**Phase 23:** Kafka wire shim MVP — `--kafka-listen host:port` for
+ApiVersions / Metadata / Produce / Fetch (MessageSet magic 0/1). Native
+Volant protocol stays on `--listen`.
+
+**Still deferred:** multi-language clients, full Kafka API / RecordBatch /
+Kafka SASL, SCRAM-SHA-512, chaos-mesh / cargo-fuzz corpus CI.
 
 ### Networked client (library)
 

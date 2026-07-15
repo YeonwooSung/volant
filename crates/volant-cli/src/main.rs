@@ -433,7 +433,7 @@ async fn main() -> Result<()> {
     match cli.command {
         Commands::Version => {
             println!("volant {}", env!("CARGO_PKG_VERSION"));
-            println!("status: Phase 22 — SCRAM-SHA-256 authentication");
+            println!("status: Phase 23 — Kafka wire protocol shim MVP");
         }
         Commands::Topic { action } => match action {
             TopicCmd::List { broker } => {

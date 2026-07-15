@@ -624,6 +624,28 @@ Binding: **[docs/PHASE22_SPEC.md](./docs/PHASE22_SPEC.md)**.
 
 ---
 
+### Phase 23 — Kafka wire protocol shim (MVP) ✅
+
+**Goal:** Optional second listen port speaking classic Kafka framing so simple
+clients can discover metadata and produce/fetch MessageSets against the same
+broker storage.
+
+Binding: **[docs/PHASE23_SPEC.md](./docs/PHASE23_SPEC.md)**.
+
+- [x] `--kafka-listen host:port` (default disabled; native protocol on `--listen`)
+- [x] ApiVersions (0), Metadata (0–1), Produce (0), Fetch (0)
+- [x] Legacy MessageSet magic 0/1 encode/decode
+- [x] ACL checks as principal `kafka-anonymous` when ACLs enabled
+- [x] Integration tests (`phase23_kafka_shim`) + MessageSet unit tests
+
+**Honest limitations:** no magic=2 RecordBatch; no Kafka consumer groups / SASL /
+CreateTopics on the shim port; no flexible versions; sequential req/resp only.
+
+**Still deferred:** multi-lang clients, full Kafka API surface, RecordBatch,
+Kafka SASL, full SASL/SCRAM-SHA-512, cargo-fuzz corpus CI.
+
+---
+
 ## Performance targets (aspirational)
 
 | Metric | Single node target | Notes |
@@ -675,7 +697,7 @@ core over protocol compatibility; a compatibility layer is Phase 7 optional work
 Track these before locking APIs:
 
 1. **Replication:** ~~Raft-per-partition vs leader/follower + controller (Kafka-like)?~~ → **Kafka-style ISR (Phase 6)**
-2. **Kafka wire compatibility:** first-class or optional adapter?
+2. **Kafka wire compatibility:** ~~first-class or optional adapter?~~ → **optional adapter (`--kafka-listen`, Phase 23 MVP)**
 3. **State store for streams:** embed RocksDB, redb, or custom mmap store?
 4. **Default durability:** fsync every batch vs group commit window?
 5. **Multi-tenancy:** namespaces / quotas in v1 or later?

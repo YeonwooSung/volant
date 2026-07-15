@@ -10,6 +10,7 @@
 | `--log-format` | | `text` | `text` or `json` |
 | `--auth-token` | `VOLANT_AUTH_TOKEN` | *unset* | Shared-token auth |
 | `--scram-user USER:PASS` | | *unset* | Upsert SCRAM user at startup (repeatable; Phase 22) |
+| `--kafka-listen` | | *disabled* | Kafka wire protocol shim (Phase 23) |
 | `--tls-cert` / `--tls-key` | | *unset* | Server TLS (feature `tls`) |
 | `--tls-peer-insecure` | | `true` | Skip inter-broker cert verify (lab) |
 | `--tls-ca` | | *unset* | CA PEM for inter-broker peer verify |
@@ -109,6 +110,38 @@ Notes:
   (except bootstrap Create when the store is empty).
 - Password is sent in clear on CreateScramUser — use TLS in production.
 - Inter-broker RPC still uses shared-token Auth, not SCRAM.
+
+## Kafka wire shim (Phase 23)
+
+Optional second socket speaking classic Kafka framing (big-endian, non-flexible).
+Native Volant protocol remains on `--listen`.
+
+```bash
+cargo run -p volant-server -- \
+  --data-dir ./data \
+  --listen 127.0.0.1:9092 \
+  --kafka-listen 127.0.0.1:9093
+```
+
+Supported APIs (MVP):
+
+| API | Versions | Notes |
+|-----|----------|-------|
+| ApiVersions | 0 | Advertises Produce/Fetch/Metadata/ApiVersions |
+| Metadata | 0–1 | Brokers + topics from Volant catalog |
+| Produce | 0 | MessageSet magic 0/1 only |
+| Fetch | 0 | Returns MessageSet of committed records |
+
+Limitations:
+
+- **No** RecordBatch magic=2 (many modern producers default to it — use older
+  client config or a MessageSet client).
+- **No** Kafka consumer groups, SASL, CreateTopics, or flexible versions.
+- When ACLs are enabled, the shim principal is `kafka-anonymous`.
+- Prefer binding to localhost / private networks; leave disabled in production
+  unless you need Kafka-protocol discovery.
+
+Create topics with the Volant CLI/protocol first, then produce/fetch via Kafka.
 
 ## TLS (Phase 7 listen + Phase 9 verification / inter-broker)
 

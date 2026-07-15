@@ -19,6 +19,8 @@ pub mod assignor;
 pub mod broker;
 pub mod cluster;
 pub mod group;
+/// Kafka wire protocol shim (Phase 23 MVP).
+pub mod kafka;
 pub mod metrics;
 /// Framed TCP server and inter-broker RPC (public for TLS accept path).
 pub mod net;
@@ -55,6 +57,7 @@ pub use topic_config::{
     TopicConfig, TopicConfigStore, KEY_CLEANUP_POLICY, KEY_RETENTION_BYTES, KEY_RETENTION_MS,
     KEY_SEGMENT_BYTES,
 };
+pub use kafka::serve_kafka_listener;
 pub use metrics::Metrics;
 pub use net::{run_metrics_server, run_server, serve_listener, start_background_tasks};
 pub use offset_store::{OffsetStore, StoredOffset, OFFSET_UNKNOWN};

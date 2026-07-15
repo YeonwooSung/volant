@@ -7,7 +7,7 @@ use std::sync::Arc;
 use anyhow::{bail, Context, Result};
 use clap::Parser;
 use tracing::info;
-use volant_broker::{run_metrics_server, run_server, Broker, ClusterConfig};
+use volant_broker::{run_metrics_server, run_server, serve_kafka_listener, Broker, ClusterConfig};
 use volant_storage::StorageConfig;
 
 /// Volant — lightweight, high-performance streaming message broker.
@@ -112,6 +112,11 @@ struct Args {
     /// Upsert a SCRAM-SHA-256 user at startup (`user:password`). Repeatable (Phase 22).
     #[arg(long = "scram-user", value_name = "USER:PASS")]
     scram_users: Vec<String>,
+
+    /// Optional Kafka wire protocol listen address (Phase 23). Example: `127.0.0.1:9093`.
+    /// Disabled when unset. Native Volant protocol remains on `--listen`.
+    #[arg(long)]
+    kafka_listen: Option<String>,
 }
 
 fn main() -> Result<()> {
@@ -367,6 +372,22 @@ async fn async_main(args: Args) -> Result<()> {
         info!(%maddr, metrics_auth, "metrics endpoint enabled");
     } else if args.metrics_token.is_some() {
         info!("--metrics-token set but --metrics-addr unset; metrics auth unused");
+    }
+
+    if let Some(kafka_addr) = &args.kafka_listen {
+        let kaddr: SocketAddr = kafka_addr
+            .parse()
+            .with_context(|| format!("invalid --kafka-listen: {kafka_addr}"))?;
+        let listener = tokio::net::TcpListener::bind(kaddr)
+            .await
+            .with_context(|| format!("bind --kafka-listen {kaddr}"))?;
+        let b = Arc::clone(&broker);
+        tokio::spawn(async move {
+            if let Err(e) = serve_kafka_listener(listener, b).await {
+                tracing::error!(error = %e, "kafka shim server exited");
+            }
+        });
+        info!(%kaddr, "kafka wire protocol shim enabled (Phase 23)");
     }
 
     info!(
