@@ -885,8 +885,30 @@ Binding: **[docs/PHASE35_SPEC.md](./docs/PHASE35_SPEC.md)**.
 DescribeConfigs/AlterConfigs/IdempotentWrite ops collapse to Describe/Alter/Write;
 no flexible Kafka versions.
 
+**Still deferred (at ship):** multi-lang clients, cargo-fuzz corpus CI,
+OffsetDelete on Kafka wire, honest Fetch isolation docs / control markers.
+
+---
+
+### Phase 36 — Kafka OffsetDelete + Fetch isolation honesty ✅
+
+**Goal:** Kafka clients can delete consumer offsets (`OffsetDelete`) and use
+`isolation.level=read_committed` with correct LSO semantics under Volant's
+buffer-until-commit model.
+
+Binding: **[docs/PHASE36_SPEC.md](./docs/PHASE36_SPEC.md)**.
+
+- [x] OffsetDelete (47) v0 → Phase 12 `delete_offsets`
+- [x] Group Delete ACL on OffsetDelete
+- [x] Fetch v4 isolation 0/1 accepted; LSO = HWM; empty aborted list
+- [x] Txn abort + READ_COMMITTED fetch remains empty
+- [x] Integration tests (`phase36_offset_delete_isolation`)
+
+**Honest limitations:** No control markers / aborted-txn lists (nothing unstable
+on the log); empty OffsetDelete topic list is a no-op (not delete-all).
+
 **Still deferred:** multi-lang clients, cargo-fuzz corpus CI, Kafka control
-batches / `READ_COMMITTED` markers.
+batch records (unnecessary while buffer-until-commit holds).
 
 ---
 

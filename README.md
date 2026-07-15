@@ -218,8 +218,11 @@ per user; SaslHandshake advertises SCRAM-SHA-512.
 **Phase 35:** Kafka DeleteRecords + ACL admin on the shim — keys 21 / 29 / 30 /
 31 mapped to Phase 14 truncate and Phase 20/21 ACL store.
 
+**Phase 36:** Kafka OffsetDelete + Fetch isolation honesty — key 47 maps to
+Phase 12 offset delete; `READ_COMMITTED` LSO equals HWM (buffer-until-commit).
+
 **Still deferred:** multi-language clients, chaos-mesh / cargo-fuzz corpus CI,
-Kafka control batches / `READ_COMMITTED` isolation.
+Kafka control batch records (not required under buffer-until-commit).
 
 ### Networked client (library)
 

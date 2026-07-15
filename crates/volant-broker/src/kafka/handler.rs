@@ -212,6 +212,9 @@ fn dispatch_kafka(broker: &Broker, body: bytes::Bytes, conn: &mut KafkaConnState
         Some(ApiKey::DeleteGroups) if hdr.api_version == 0 => {
             encode_delete_groups(broker, &mut src, &mut out, principal);
         }
+        Some(ApiKey::OffsetDelete) if hdr.api_version == 0 => {
+            encode_offset_delete(broker, &mut src, &mut out, principal);
+        }
         Some(ApiKey::CreatePartitions) if hdr.api_version == 0 => {
             encode_create_partitions(broker, &mut src, &mut out, principal);
         }
@@ -760,14 +763,25 @@ fn encode_fetch(broker: &Broker, src: &mut impl Buf, out: &mut BytesMut, version
         }
         let _max_bytes = src.get_i32();
     }
+    // Phase 36: isolation_level (v4). 0 = READ_UNCOMMITTED, 1 = READ_COMMITTED.
+    // Volant buffer-until-commit means both levels see only committed log data;
+    // LSO always equals HWM and aborted_transactions is always empty.
+    let mut isolation = 0u8;
     if version >= 4 {
         if src.remaining() < 1 {
             out.put_i32(0); // throttle
             out.put_i32(0);
             return;
         }
-        let _isolation = src.get_u8();
+        isolation = src.get_u8();
+        if isolation > 1 {
+            // Invalid isolation — empty response with throttle.
+            out.put_i32(0);
+            out.put_i32(0);
+            return;
+        }
     }
+    let _ = isolation; // both levels share the same encode path (honest).
 
     // Fetch response v1+ starts with throttle_time_ms.
     if version >= 1 {
@@ -863,11 +877,12 @@ fn encode_fetch(broker: &Broker, src: &mut impl Buf, out: &mut BytesMut, version
                         .unwrap_or(hwm);
 
                     // Phase 32: Fetch v4 RecordBatches may be compressed.
+                    // Phase 36: LSO = HWM for both isolation levels (no unstable log data).
                     let set = encode_fetch_record_set(&selected, version);
                     out.put_i16(KafkaErrorCode::None.as_i16());
                     out.put_i64(hwm);
                     if version >= 4 {
-                        out.put_i64(hwm); // last_stable_offset ≈ hwm (no control markers)
+                        out.put_i64(hwm); // last_stable_offset == hwm
                         out.put_i32(0); // aborted_transactions empty
                     }
                     put_bytes(out, Some(&set));
@@ -2218,6 +2233,113 @@ fn encode_describe_groups(broker: &Broker, src: &mut impl Buf, out: &mut BytesMu
                     put_string(out, "");
                     out.put_i32(0);
                 }
+            }
+        }
+    }
+}
+
+fn encode_offset_delete(
+    broker: &Broker,
+    src: &mut impl Buf,
+    out: &mut BytesMut,
+    principal: &str,
+) {
+    // OffsetDelete v0: group_id, [topic [partition]]
+    // Response: error_code, throttle_time_ms, [topic [partition, error_code]]
+    let group_id = match get_string(src) {
+        Ok(g) => g,
+        Err(_) => {
+            out.put_i16(KafkaErrorCode::InvalidRequest.as_i16());
+            out.put_i32(0);
+            out.put_i32(0);
+            return;
+        }
+    };
+
+    struct TopicParts {
+        name: String,
+        partitions: Vec<i32>,
+    }
+    let mut topics: Vec<TopicParts> = Vec::new();
+    if src.remaining() >= 4 {
+        let topic_count = src.get_i32();
+        for _ in 0..topic_count.max(0) {
+            let name = match get_string(src) {
+                Ok(n) => n,
+                Err(_) => break,
+            };
+            if src.remaining() < 4 {
+                break;
+            }
+            let pc = src.get_i32();
+            let mut partitions = Vec::new();
+            for _ in 0..pc.max(0) {
+                if src.remaining() < 4 {
+                    break;
+                }
+                partitions.push(src.get_i32());
+            }
+            topics.push(TopicParts { name, partitions });
+        }
+    }
+
+    let auth_denied = broker.acls().is_enabled()
+        && !broker.acls().authorize(
+            Some(principal),
+            ResourceType::Group,
+            &group_id,
+            AclOperation::Delete,
+        );
+
+    if auth_denied {
+        out.put_i16(KafkaErrorCode::GroupAuthorizationFailed.as_i16());
+        out.put_i32(0); // throttle
+        out.put_i32(topics.len() as i32);
+        for t in &topics {
+            put_string(out, &t.name);
+            out.put_i32(t.partitions.len() as i32);
+            for p in &t.partitions {
+                out.put_i32(*p);
+                out.put_i16(KafkaErrorCode::GroupAuthorizationFailed.as_i16());
+            }
+        }
+        return;
+    }
+
+    // Collect pairs for a single delete_offsets call (never empty-all unless
+    // the client listed partitions — empty topics means no-op).
+    let mut pairs: Vec<(String, u32)> = Vec::new();
+    for t in &topics {
+        for &p in &t.partitions {
+            if p >= 0 {
+                pairs.push((t.name.clone(), p as u32));
+            }
+        }
+    }
+
+    let delete_err = if pairs.is_empty() {
+        None
+    } else {
+        match broker.groups().delete_offsets(&group_id, &pairs) {
+            Ok(_) => None,
+            Err(_) => Some(KafkaErrorCode::Unknown.as_i16()),
+        }
+    };
+
+    out.put_i16(KafkaErrorCode::None.as_i16());
+    out.put_i32(0); // throttle
+    out.put_i32(topics.len() as i32);
+    for t in &topics {
+        put_string(out, &t.name);
+        out.put_i32(t.partitions.len() as i32);
+        for &p in &t.partitions {
+            out.put_i32(p);
+            if p < 0 {
+                out.put_i16(KafkaErrorCode::InvalidRequest.as_i16());
+            } else if let Some(e) = delete_err {
+                out.put_i16(e);
+            } else {
+                out.put_i16(KafkaErrorCode::None.as_i16());
             }
         }
     }

@@ -10,7 +10,7 @@
 | `--log-format` | | `text` | `text` or `json` |
 | `--auth-token` | `VOLANT_AUTH_TOKEN` | *unset* | Shared-token auth |
 | `--scram-user USER:PASS` | | *unset* | Upsert SCRAM user at startup (repeatable; Phase 22) |
-| `--kafka-listen` | | *disabled* | Kafka wire protocol shim (Phase 23–35) |
+| `--kafka-listen` | | *disabled* | Kafka wire protocol shim (Phase 23–36) |
 | `--tls-cert` / `--tls-key` | | *unset* | Server TLS (feature `tls`) |
 | `--tls-peer-insecure` | | `true` | Skip inter-broker cert verify (lab) |
 | `--tls-ca` | | *unset* | CA PEM for inter-broker peer verify |
@@ -157,6 +157,7 @@ Supported APIs:
 | DescribeAcls | 0–1 | filter → Volant ACL list |
 | CreateAcls | 0–1 | maps Kafka types/ops; enables ACL store |
 | DeleteAcls | 0–1 | filter match → exact delete |
+| OffsetDelete | 0 | group offset delete (Phase 12) |
 
 Topic config keys: `retention.ms`, `retention.bytes`, `segment.bytes`,
 `cleanup.policy` (`delete`|`compact`).
@@ -192,10 +193,16 @@ Limitations:
   / re-add `User:`; cluster resource name `kafka-cluster` ⇄ `volant`. Host is
   always `*`; only LITERAL patterns. CreateAcls enables enforcement — after that
   Cluster Alter/Describe is required for further ACL admin (or use a super-user).
+- **OffsetDelete** maps to Phase 12 `delete_offsets` (listed partitions only;
+  empty topic list is a no-op, not delete-all). Requires Group Delete when ACLs
+  are on.
+- **Fetch isolation** (`READ_UNCOMMITTED` / `READ_COMMITTED`): uncommitted
+  transactional data never hits the log (buffer-until-commit), so LSO always
+  equals HWM and `aborted_transactions` is always empty. No control markers.
 - Prefer binding to localhost / private networks; leave disabled in production
   unless you need Kafka-protocol discovery.
 
-See [PHASE23_SPEC.md](./PHASE23_SPEC.md) … [PHASE35_SPEC.md](./PHASE35_SPEC.md).
+See [PHASE23_SPEC.md](./PHASE23_SPEC.md) … [PHASE36_SPEC.md](./PHASE36_SPEC.md).
 
 ## TLS (Phase 7 listen + Phase 9 verification / inter-broker)
 
