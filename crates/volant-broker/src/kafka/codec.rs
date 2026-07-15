@@ -228,7 +228,16 @@ pub fn decode_produce_batches(data: &[u8]) -> Result<Vec<DecodedRecordBatch>> {
 }
 
 /// Decode a Kafka MessageSet (magic 0 or 1) into Volant messages.
+///
+/// Honors compressed wrapper messages (Phase 33): attributes bits 0–2 ≠ 0 means
+/// `value` is a compressed nested MessageSet.
 pub fn decode_message_set(data: &[u8]) -> Result<Vec<Message>> {
+    decode_message_set_depth(data, 0)
+}
+
+const MAX_MESSAGE_SET_COMPRESSION_DEPTH: u8 = 3;
+
+fn decode_message_set_depth(data: &[u8], depth: u8) -> Result<Vec<Message>> {
     let mut src = data;
     let mut out = Vec::new();
     while src.remaining() >= 12 {
@@ -266,7 +275,7 @@ pub fn decode_message_set(data: &[u8]) -> Result<Vec<Message>> {
 
         let mut m = payload_for_crc;
         let magic = m.get_i8();
-        let _attributes = m.get_i8();
+        let attributes = m.get_i8();
         let timestamp_ms = if magic == 1 {
             if m.remaining() < 8 {
                 return Err(Error::Protocol("truncated kafka message timestamp".into()));
@@ -281,6 +290,21 @@ pub fn decode_message_set(data: &[u8]) -> Result<Vec<Message>> {
         };
         let key = get_bytes(&mut m)?;
         let value = get_bytes(&mut m)?.unwrap_or_default();
+
+        // Phase 33: compressed wrapper → nested MessageSet in value.
+        let codec = CompressionCodec::from_attributes(i16::from(attributes & 0x07))?;
+        if codec != CompressionCodec::None {
+            if depth >= MAX_MESSAGE_SET_COMPRESSION_DEPTH {
+                return Err(Error::Protocol(
+                    "message set compression nesting too deep".into(),
+                ));
+            }
+            let plain = compress::decompress(codec, &value)?;
+            let nested = decode_message_set_depth(&plain, depth + 1)?;
+            out.extend(nested);
+            continue;
+        }
+
         out.push(Message {
             key,
             value,
@@ -291,8 +315,12 @@ pub fn decode_message_set(data: &[u8]) -> Result<Vec<Message>> {
     Ok(out)
 }
 
-/// Encode records as a Kafka MessageSet (magic 1).
+/// Encode records as a Kafka MessageSet (magic 1, uncompressed).
 pub fn encode_message_set(records: &[Record]) -> BytesMut {
+    encode_message_set_inner(records)
+}
+
+fn encode_message_set_inner(records: &[Record]) -> BytesMut {
     let mut out = BytesMut::new();
     for r in records {
         let mut msg = BytesMut::new();
@@ -312,6 +340,52 @@ pub fn encode_message_set(records: &[Record]) -> BytesMut {
         out.extend_from_slice(&msg);
     }
     out
+}
+
+/// Encode a compressed MessageSet wrapper (Phase 33).
+///
+/// Classic MessageSet has no zstd; [`CompressionCodec::Zstd`] is mapped to lz4.
+/// Codec [`CompressionCodec::None`] delegates to [`encode_message_set`].
+pub fn encode_message_set_compressed(
+    records: &[Record],
+    codec: CompressionCodec,
+) -> Result<BytesMut> {
+    if records.is_empty() {
+        return Ok(BytesMut::new());
+    }
+    let codec = match codec {
+        CompressionCodec::None => return Ok(encode_message_set_inner(records)),
+        // MessageSet never had zstd; keep fetch env usable.
+        CompressionCodec::Zstd => CompressionCodec::Lz4,
+        other => other,
+    };
+
+    let inner = encode_message_set_inner(records);
+    let compressed = compress::compress(codec, &inner)?;
+    let last_offset = records.last().map(|r| r.offset.raw() as i64).unwrap_or(0);
+    let max_ts = records
+        .iter()
+        .map(|r| r.timestamp_ms)
+        .max()
+        .unwrap_or(0);
+
+    let mut msg = BytesMut::new();
+    msg.put_i8(1); // magic
+    msg.put_i8(codec.as_u8() as i8); // attributes bits 0–2
+    msg.put_i64(max_ts);
+    put_bytes(&mut msg, None); // null key
+    put_bytes(&mut msg, Some(&compressed));
+
+    let mut hasher = Crc32Ieee::new();
+    hasher.update(&msg);
+    let crc = hasher.finalize() as i32;
+
+    let mut out = BytesMut::new();
+    out.put_i64(last_offset);
+    out.put_i32((4 + msg.len()) as i32);
+    out.put_i32(crc);
+    out.extend_from_slice(&msg);
+    Ok(out)
 }
 
 /// Decode one or more contiguous RecordBatches (magic 2).
@@ -845,6 +919,52 @@ mod tests {
         assert!(matches!(set[16] as i8, 0 | 1));
         let decoded = decode_records(&set).unwrap();
         assert_eq!(decoded[0].value.as_ref(), b"b");
+    }
+
+    #[test]
+    fn compressed_message_set_roundtrips_all_codecs() {
+        use crate::kafka::compress::CompressionCodec;
+        let records = vec![
+            Record {
+                offset: Offset::new(0),
+                key: Some(Bytes::from_static(b"k")),
+                value: Bytes::from(b"payload-one ".repeat(40)),
+                timestamp_ms: 1000,
+                headers: vec![],
+            },
+            Record {
+                offset: Offset::new(1),
+                key: None,
+                value: Bytes::from_static(b"payload-two"),
+                timestamp_ms: 2000,
+                headers: vec![],
+            },
+        ];
+        for codec in [
+            CompressionCodec::None,
+            CompressionCodec::Gzip,
+            CompressionCodec::Snappy,
+            CompressionCodec::Lz4,
+            CompressionCodec::Zstd, // maps to lz4 on encode
+        ] {
+            let set = encode_message_set_compressed(&records, codec).unwrap();
+            if codec != CompressionCodec::None {
+                // Wrapper: magic at 16, attributes at 17
+                assert_eq!(set[16] as i8, 1);
+                let attrs = set[17] as i8;
+                let expected = if codec == CompressionCodec::Zstd {
+                    CompressionCodec::Lz4.as_u8()
+                } else {
+                    codec.as_u8()
+                };
+                assert_eq!(attrs & 0x07, expected as i8, "codec={codec:?}");
+            }
+            let decoded = decode_message_set(&set).unwrap();
+            assert_eq!(decoded.len(), 2, "codec={codec:?}");
+            assert_eq!(decoded[0].key.as_ref().unwrap().as_ref(), b"k");
+            assert_eq!(decoded[0].value.as_ref(), records[0].value.as_ref());
+            assert_eq!(decoded[1].value.as_ref(), b"payload-two");
+        }
     }
 
     #[test]

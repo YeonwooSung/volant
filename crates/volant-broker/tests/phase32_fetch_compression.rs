@@ -208,7 +208,7 @@ async fn fetch_v4_default_lz4_compressed() {
 }
 
 #[tokio::test]
-async fn fetch_v0_message_set_stays_uncompressed() {
+async fn fetch_v0_message_set_decodes() {
     let dir = temp_dir("ms");
     let broker = Arc::new(Broker::new(StorageConfig {
         data_dir: dir.clone(),
@@ -245,11 +245,9 @@ async fn fetch_v0_message_set_stays_uncompressed() {
     assert_eq!(src.get_i16(), 0);
     let _hwm = src.get_i64();
     let set = get_bytes(&mut src).unwrap().unwrap_or_default();
-    // MessageSet magic 1 at offset 16 within first message (offset 8 + size 4 + crc 4 = 16)
-    // layout: offset(8) + msg_size(4) + crc(4) + magic(1) + attrs(1) ...
+    // MessageSet path (Phase 33 may compress with wrapper attributes ≠ 0).
     assert!(set.len() > 18);
     assert_eq!(set[16] as i8, 1, "MessageSet magic");
-    assert_eq!(set[17] as i8, 0, "MessageSet attributes compression = none");
 
     let msgs = decode_records(&set).unwrap();
     assert_eq!(msgs.len(), 1);

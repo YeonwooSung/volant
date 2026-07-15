@@ -14,9 +14,10 @@ use crate::broker::{Broker, IdempotentCheck};
 
 use super::codec::{
     decode_consumer_subscription, decode_produce_batches, decode_request_header,
-    encode_consumer_assignment, encode_message_set, encode_record_batch,
-    encode_record_batch_compressed, encode_response_frame, get_bytes, get_nullable_string,
-    get_string, put_bytes, put_nullable_string, put_response_header, put_string, try_decode_request,
+    encode_consumer_assignment, encode_message_set, encode_message_set_compressed,
+    encode_record_batch, encode_record_batch_compressed, encode_response_frame, get_bytes,
+    get_nullable_string, get_string, put_bytes, put_nullable_string, put_response_header,
+    put_string, try_decode_request,
 };
 use super::compress::{fetch_compression_codec, CompressionCodec};
 use super::sasl::{self, SaslMechanism, SaslState, MECHANISMS};
@@ -880,15 +881,28 @@ fn encode_fetch(broker: &Broker, src: &mut impl Buf, out: &mut BytesMut, version
     }
 }
 
-/// Encode partition records for a Fetch response (Phase 32 compression on v4).
+/// Encode partition records for a Fetch response.
+///
+/// Phase 32: v4 RecordBatch compression. Phase 33: v0–3 MessageSet wrapper compression.
 fn encode_fetch_record_set(records: &[volant_core::Record], version: i16) -> BytesMut {
-    if version < 4 {
-        return encode_message_set(records);
-    }
     if records.is_empty() {
         return BytesMut::new();
     }
     let codec = fetch_compression_codec();
+    if version < 4 {
+        // MessageSet path (Phase 33).
+        if codec == CompressionCodec::None {
+            return encode_message_set(records);
+        }
+        return match encode_message_set_compressed(records, codec) {
+            Ok(set) => set,
+            Err(e) => {
+                debug!(error = %e, ?codec, "message set fetch compression failed; plain");
+                encode_message_set(records)
+            }
+        };
+    }
+    // RecordBatch path (Phase 32).
     if codec == CompressionCodec::None {
         return encode_record_batch(records);
     }

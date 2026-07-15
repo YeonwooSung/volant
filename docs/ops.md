@@ -130,7 +130,7 @@ Supported APIs:
 | ApiVersions | 0 | Advertises supported keys/versions |
 | Metadata | 0–1 | Brokers + topics from Volant catalog |
 | Produce | 0–3 | MessageSet magic 0/1 **or** RecordBatch magic 2 (auto-detect); compression + idempotent PID/seq |
-| Fetch | 0–4 | v0–3 MessageSet (uncompressed); v4 RecordBatch compressed (default lz4; see env) |
+| Fetch | 0–4 | v0–3 MessageSet + v4 RecordBatch compressed (default lz4; see env) |
 | InitProducerId | 0–1 | plain + transactional_id fencing; timeout ignored |
 | FindCoordinator | 0–1 | v1 `key_type` 0=group, 1=transaction |
 | AddPartitionsToTxn | 0 | opens txn (Kafka has no BeginTxn) |
@@ -159,10 +159,11 @@ Topic config keys: `retention.ms`, `retention.bytes`, `segment.bytes`,
 
 Limitations:
 
-- RecordBatch compression: **Produce** accepts gzip/snappy/lz4/zstd; **Fetch v4**
-  re-encodes with `VOLANT_KAFKA_FETCH_COMPRESSION` (default **lz4**;
-  `none`/`gzip`/`snappy`/`lz4`/`zstd`). MessageSet Fetch (v0–3) stays
-  uncompressed; MessageSet Produce compression unsupported.
+- Compression: **Produce** accepts compressed RecordBatch (gzip/snappy/lz4/zstd)
+  and compressed MessageSet wrappers (gzip/snappy/lz4). **Fetch** re-encodes
+  with `VOLANT_KAFKA_FETCH_COMPRESSION` (default **lz4**;
+  `none`/`gzip`/`snappy`/`lz4`/`zstd`). MessageSet has no zstd — env `zstd`
+  maps to lz4 for v0–3. Log storage remains plain.
 - Idempotent Produce requires RecordBatch magic 2 + InitProducerId; MessageSet
   cannot carry PID/sequence.
 - Kafka transactions: InitProducerId(`transactional_id`) + AddPartitionsToTxn
@@ -182,7 +183,7 @@ Limitations:
 - Prefer binding to localhost / private networks; leave disabled in production
   unless you need Kafka-protocol discovery.
 
-See [PHASE23_SPEC.md](./PHASE23_SPEC.md) … [PHASE32_SPEC.md](./PHASE32_SPEC.md).
+See [PHASE23_SPEC.md](./PHASE23_SPEC.md) … [PHASE33_SPEC.md](./PHASE33_SPEC.md).
 
 ## TLS (Phase 7 listen + Phase 9 verification / inter-broker)
 

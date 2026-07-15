@@ -1,4 +1,4 @@
-//! Kafka RecordBatch compression codecs (Phases 28 / 32).
+//! Kafka compression codecs for RecordBatch and MessageSet (Phases 28 / 32 / 33).
 
 use std::io::{Read, Write};
 use std::sync::OnceLock;

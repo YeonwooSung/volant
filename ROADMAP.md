@@ -824,11 +824,29 @@ Binding: **[docs/PHASE32_SPEC.md](./docs/PHASE32_SPEC.md)**.
 - [x] Fetch v0–3 MessageSet remains uncompressed
 - [x] Integration tests (`phase32_fetch_compression`)
 
-**Honest limitations:** MessageSet Fetch never compressed; codec is process-global
-env (not per-topic); log storage still plain (re-encode on Fetch); no level knobs.
+**Honest limitations (at ship):** MessageSet Fetch was still uncompressed — closed
+by **Phase 33**. Codec is process-global env (not per-topic); log storage still
+plain (re-encode on Fetch); no level knobs.
+
+---
+
+### Phase 33 — Kafka MessageSet compression ✅
+
+**Goal:** Legacy MessageSet (magic 0/1) Produce accepts compressed wrappers;
+Fetch v0–3 can return compressed MessageSets using the same fetch codec env.
+
+Binding: **[docs/PHASE33_SPEC.md](./docs/PHASE33_SPEC.md)**.
+
+- [x] `decode_message_set` decompresses wrapper messages (attributes bits 0–2)
+- [x] `encode_message_set_compressed` for Produce tests + Fetch v0–3
+- [x] Codecs: gzip / snappy / lz4 (zstd → lz4 on MessageSet encode)
+- [x] Integration tests (`phase33_message_set_compression`)
+
+**Honest limitations:** No native zstd MessageSet; wrapper encode is magic 1;
+process-global codec only; log stays plain.
 
 **Still deferred:** multi-lang clients, SCRAM-SHA-512, cargo-fuzz corpus CI,
-MessageSet compression, Kafka control batches / `READ_COMMITTED` markers.
+Kafka control batches / `READ_COMMITTED` markers.
 
 ---
 

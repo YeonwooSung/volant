@@ -209,9 +209,11 @@ v1 for transaction coordinators.
 **Phase 32:** Kafka compressed Fetch — Fetch v4 RecordBatches compressed by
 default (lz4); override with `VOLANT_KAFKA_FETCH_COMPRESSION`.
 
+**Phase 33:** Kafka MessageSet compression — compressed Produce wrappers and
+Fetch v0–3 MessageSets (gzip/snappy/lz4; zstd maps to lz4).
+
 **Still deferred:** multi-language clients, SCRAM-SHA-512, chaos-mesh /
-cargo-fuzz corpus CI, MessageSet compression, Kafka control batches /
-`READ_COMMITTED` isolation.
+cargo-fuzz corpus CI, Kafka control batches / `READ_COMMITTED` isolation.
 
 ### Networked client (library)
 

@@ -1,14 +1,14 @@
-//! Kafka wire protocol shim (Phases 23–32).
+//! Kafka wire protocol shim (Phases 23–33).
 //!
 //! Classic (non-flexible) framing. Produce/Fetch, admin, consumer groups,
 //! List/Describe/DeleteGroups, CreatePartitions, Describe/AlterConfigs,
-//! RecordBatch compression (Produce + Fetch v4), InitProducerId + idempotent
-//! Produce, SASL, and transactions (AddPartitionsToTxn / EndTxn / TxnOffsetCommit).
-//! See `docs/PHASE23_SPEC.md` … `docs/PHASE32_SPEC.md`.
+//! RecordBatch + MessageSet compression, InitProducerId + idempotent Produce,
+//! SASL, and transactions (AddPartitionsToTxn / EndTxn / TxnOffsetCommit).
+//! See `docs/PHASE23_SPEC.md` … `docs/PHASE33_SPEC.md`.
 
 /// Kafka wire primitives, MessageSet (magic 0/1), and RecordBatch (magic 2).
 pub mod codec;
-/// RecordBatch compression codecs (gzip / snappy / lz4 / zstd); Fetch codec env.
+/// Compression codecs (gzip / snappy / lz4 / zstd); Fetch codec env.
 pub mod compress;
 mod handler;
 /// SASL PLAIN + SCRAM-SHA-256 state machine (Phase 30).
