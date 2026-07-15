@@ -10,7 +10,7 @@
 | `--log-format` | | `text` | `text` or `json` |
 | `--auth-token` | `VOLANT_AUTH_TOKEN` | *unset* | Shared-token auth |
 | `--scram-user USER:PASS` | | *unset* | Upsert SCRAM user at startup (repeatable; Phase 22) |
-| `--kafka-listen` | | *disabled* | Kafka wire protocol shim (Phase 23–30) |
+| `--kafka-listen` | | *disabled* | Kafka wire protocol shim (Phase 23–35) |
 | `--tls-cert` / `--tls-key` | | *unset* | Server TLS (feature `tls`) |
 | `--tls-peer-insecure` | | `true` | Skip inter-broker cert verify (lab) |
 | `--tls-ca` | | *unset* | CA PEM for inter-broker peer verify |
@@ -153,6 +153,10 @@ Supported APIs:
 | CreatePartitions | 0 | total partition count |
 | DescribeConfigs | 0 | TOPIC resources; Volant keys |
 | AlterConfigs | 0 | TOPIC resources; Volant keys |
+| DeleteRecords | 0–1 | whole sealed segments only (Phase 14) |
+| DescribeAcls | 0–1 | filter → Volant ACL list |
+| CreateAcls | 0–1 | maps Kafka types/ops; enables ACL store |
+| DeleteAcls | 0–1 | filter match → exact delete |
 
 Topic config keys: `retention.ms`, `retention.bytes`, `segment.bytes`,
 `cleanup.policy` (`delete`|`compact`).
@@ -182,10 +186,16 @@ Limitations:
 - DescribeConfigs is TOPIC-only (no broker configs).
 - FindCoordinator host/port is the Volant advertised address (often `--listen`).
 - When ACLs are enabled and SASL is unused, the shim principal is `kafka-anonymous`.
+- **DeleteRecords** only drops whole sealed segments (same as native Phase 14).
+- **ACL admin** maps Kafka resource types (Topic=2, Group=3, Cluster=4),
+  operations, and permission types to Volant Phase 20/21 ACLs. Principals strip
+  / re-add `User:`; cluster resource name `kafka-cluster` ⇄ `volant`. Host is
+  always `*`; only LITERAL patterns. CreateAcls enables enforcement — after that
+  Cluster Alter/Describe is required for further ACL admin (or use a super-user).
 - Prefer binding to localhost / private networks; leave disabled in production
   unless you need Kafka-protocol discovery.
 
-See [PHASE23_SPEC.md](./PHASE23_SPEC.md) … [PHASE34_SPEC.md](./PHASE34_SPEC.md).
+See [PHASE23_SPEC.md](./PHASE23_SPEC.md) … [PHASE35_SPEC.md](./PHASE35_SPEC.md).
 
 ## TLS (Phase 7 listen + Phase 9 verification / inter-broker)
 

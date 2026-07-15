@@ -215,6 +215,9 @@ Fetch v0–3 MessageSets (gzip/snappy/lz4; zstd maps to lz4).
 **Phase 34:** SCRAM-SHA-512 on the Kafka shim — dual SHA-256/512 credentials
 per user; SaslHandshake advertises SCRAM-SHA-512.
 
+**Phase 35:** Kafka DeleteRecords + ACL admin on the shim — keys 21 / 29 / 30 /
+31 mapped to Phase 14 truncate and Phase 20/21 ACL store.
+
 **Still deferred:** multi-language clients, chaos-mesh / cargo-fuzz corpus CI,
 Kafka control batches / `READ_COMMITTED` isolation.
 

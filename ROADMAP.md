@@ -863,6 +863,28 @@ Binding: **[docs/PHASE34_SPEC.md](./docs/PHASE34_SPEC.md)**.
 **Honest limitations:** Legacy users need re-upsert for SHA-512; Volant-native
 SCRAM wire remains SHA-256 only; no channel binding / GSSAPI / OAUTHBEARER.
 
+**Still deferred (at ship):** multi-lang clients, cargo-fuzz corpus CI, Kafka
+DeleteRecords / ACL admin on the shim, control batches / `READ_COMMITTED`.
+
+---
+
+### Phase 35 — Kafka DeleteRecords + ACL admin ✅
+
+**Goal:** Kafka admin clients can truncate logs (`DeleteRecords`) and manage
+ACLs (`DescribeAcls` / `CreateAcls` / `DeleteAcls`) on `--kafka-listen`.
+
+Binding: **[docs/PHASE35_SPEC.md](./docs/PHASE35_SPEC.md)**.
+
+- [x] DeleteRecords (21) v0–1 → Phase 14 segment truncate + low watermark
+- [x] DescribeAcls (29) / CreateAcls (30) / DeleteAcls (31) v0–1
+- [x] Kafka↔Volant resource type / operation / permission mapping
+- [x] `User:` principal strip/prefix; `kafka-cluster` ⇄ `volant`
+- [x] Integration tests (`phase35_delete_records_acls`)
+
+**Honest limitations:** Segment-granularity delete only; no host/prefix ACLs;
+DescribeConfigs/AlterConfigs/IdempotentWrite ops collapse to Describe/Alter/Write;
+no flexible Kafka versions.
+
 **Still deferred:** multi-lang clients, cargo-fuzz corpus CI, Kafka control
 batches / `READ_COMMITTED` markers.
 

@@ -1,10 +1,11 @@
-//! Kafka wire protocol shim (Phases 23–33).
+//! Kafka wire protocol shim (Phases 23–35).
 //!
 //! Classic (non-flexible) framing. Produce/Fetch, admin, consumer groups,
 //! List/Describe/DeleteGroups, CreatePartitions, Describe/AlterConfigs,
 //! RecordBatch + MessageSet compression, InitProducerId + idempotent Produce,
-//! SASL, and transactions (AddPartitionsToTxn / EndTxn / TxnOffsetCommit).
-//! See `docs/PHASE23_SPEC.md` … `docs/PHASE33_SPEC.md`.
+//! SASL, transactions, DeleteRecords, and ACL admin
+//! (Describe/Create/DeleteAcls).
+//! See `docs/PHASE23_SPEC.md` … `docs/PHASE35_SPEC.md`.
 
 /// Kafka wire primitives, MessageSet (magic 0/1), and RecordBatch (magic 2).
 pub mod codec;
@@ -158,6 +159,8 @@ pub enum ApiKey {
     CreateTopics = 19,
     /// DeleteTopics.
     DeleteTopics = 20,
+    /// DeleteRecords.
+    DeleteRecords = 21,
     /// InitProducerId.
     InitProducerId = 22,
     /// AddPartitionsToTxn.
@@ -168,6 +171,12 @@ pub enum ApiKey {
     EndTxn = 26,
     /// TxnOffsetCommit.
     TxnOffsetCommit = 28,
+    /// DescribeAcls.
+    DescribeAcls = 29,
+    /// CreateAcls.
+    CreateAcls = 30,
+    /// DeleteAcls.
+    DeleteAcls = 31,
     /// DescribeConfigs.
     DescribeConfigs = 32,
     /// AlterConfigs.
@@ -200,11 +209,15 @@ impl ApiKey {
             18 => Some(Self::ApiVersions),
             19 => Some(Self::CreateTopics),
             20 => Some(Self::DeleteTopics),
+            21 => Some(Self::DeleteRecords),
             22 => Some(Self::InitProducerId),
             24 => Some(Self::AddPartitionsToTxn),
             25 => Some(Self::AddOffsetsToTxn),
             26 => Some(Self::EndTxn),
             28 => Some(Self::TxnOffsetCommit),
+            29 => Some(Self::DescribeAcls),
+            30 => Some(Self::CreateAcls),
+            31 => Some(Self::DeleteAcls),
             32 => Some(Self::DescribeConfigs),
             33 => Some(Self::AlterConfigs),
             36 => Some(Self::SaslAuthenticate),
@@ -234,11 +247,15 @@ pub const SUPPORTED_APIS: &[(ApiKey, i16, i16)] = &[
     (ApiKey::ApiVersions, 0, 0),
     (ApiKey::CreateTopics, 0, 1),
     (ApiKey::DeleteTopics, 0, 1),
+    (ApiKey::DeleteRecords, 0, 1),
     (ApiKey::InitProducerId, 0, 1),
     (ApiKey::AddPartitionsToTxn, 0, 0),
     (ApiKey::AddOffsetsToTxn, 0, 0),
     (ApiKey::EndTxn, 0, 0),
     (ApiKey::TxnOffsetCommit, 0, 0),
+    (ApiKey::DescribeAcls, 0, 1),
+    (ApiKey::CreateAcls, 0, 1),
+    (ApiKey::DeleteAcls, 0, 1),
     (ApiKey::DescribeConfigs, 0, 0),
     (ApiKey::AlterConfigs, 0, 0),
     (ApiKey::SaslAuthenticate, 0, 1),
