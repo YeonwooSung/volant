@@ -241,6 +241,30 @@ impl ScramStore {
         Ok((challenge, salt, iterations, combined_nonce))
     }
 
+    /// Verify a plaintext password against a stored SCRAM credential (Phase 30 PLAIN).
+    ///
+    /// Returns `false` for unknown users or wrong passwords (constant-time compare
+    /// of derived StoredKey when the user exists).
+    pub fn verify_password(&self, username: &str, password: &str) -> bool {
+        if username.is_empty() || password.is_empty() {
+            return false;
+        }
+        let users = self.users.read();
+        let Some(cred) = users.get(username) else {
+            return false;
+        };
+        let Ok(salt) = cred.salt() else {
+            return false;
+        };
+        let Ok(stored_key) = cred.stored_key() else {
+            return false;
+        };
+        let Ok((derived, _)) = derive_keys(password, &salt, cred.iterations) else {
+            return false;
+        };
+        bool::from(derived.ct_eq(&stored_key))
+    }
+
     /// Finish SCRAM: verify client proof, return server signature.
     pub fn finish(
         &self,

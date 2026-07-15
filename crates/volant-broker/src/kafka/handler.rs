@@ -18,10 +18,34 @@ use super::codec::{
     get_bytes, get_nullable_string, get_string, put_bytes, put_nullable_string, put_response_header,
     put_string, try_decode_request,
 };
+use super::sasl::{self, SaslMechanism, SaslState, MECHANISMS};
 use super::{
     map_group_error, map_idempotent_error, ApiKey, KafkaErrorCode, KAFKA_ANONYMOUS_PRINCIPAL,
     SUPPORTED_APIS,
 };
+
+/// Per-connection Kafka auth state (Phase 30).
+#[derive(Debug, Default)]
+struct KafkaConnState {
+    /// Authenticated principal (SCRAM username), if any.
+    principal: Option<String>,
+    /// SASL state machine.
+    sasl: SaslState,
+}
+
+impl KafkaConnState {
+    /// Principal used for ACL checks.
+    fn acl_principal(&self) -> &str {
+        self.principal
+            .as_deref()
+            .unwrap_or(KAFKA_ANONYMOUS_PRINCIPAL)
+    }
+
+    /// Whether the connection is authenticated for ACL / gate purposes.
+    fn authenticated(&self) -> bool {
+        self.principal.is_some()
+    }
+}
 
 /// Accept Kafka-protocol connections until the listener fails fatally.
 pub async fn serve_kafka_listener(listener: TcpListener, broker: Arc<Broker>) -> Result<()> {
@@ -50,11 +74,12 @@ pub async fn serve_kafka_listener(listener: TcpListener, broker: Arc<Broker>) ->
 
 async fn handle_kafka_connection(mut stream: TcpStream, broker: Arc<Broker>) -> Result<()> {
     let mut buf = BytesMut::with_capacity(8 * 1024);
+    let mut conn = KafkaConnState::default();
     loop {
         loop {
             match try_decode_request(&mut buf)? {
                 Some(body) => {
-                    let response = dispatch_kafka(&broker, body);
+                    let response = dispatch_kafka(&broker, body, &mut conn);
                     let frame = encode_response_frame(&response);
                     stream.write_all(&frame).await?;
                 }
@@ -68,7 +93,7 @@ async fn handle_kafka_connection(mut stream: TcpStream, broker: Arc<Broker>) -> 
     }
 }
 
-fn dispatch_kafka(broker: &Broker, body: bytes::Bytes) -> BytesMut {
+fn dispatch_kafka(broker: &Broker, body: bytes::Bytes, conn: &mut KafkaConnState) -> BytesMut {
     let mut src = body;
     let hdr = match decode_request_header(&mut src) {
         Ok(h) => h,
@@ -82,69 +107,94 @@ fn dispatch_kafka(broker: &Broker, body: bytes::Bytes) -> BytesMut {
     let mut out = BytesMut::new();
     put_response_header(&mut out, corr);
 
-    match ApiKey::from_i16(hdr.api_key) {
+    let api = ApiKey::from_i16(hdr.api_key);
+    // When SCRAM users exist, require SASL before non-auth APIs (Phase 30).
+    let auth_gate = broker.scram().has_users() && !conn.authenticated();
+    if auth_gate {
+        let allowed = matches!(
+            api,
+            Some(ApiKey::ApiVersions)
+                | Some(ApiKey::SaslHandshake)
+                | Some(ApiKey::SaslAuthenticate)
+        );
+        if !allowed {
+            out.put_i16(KafkaErrorCode::SaslAuthenticationFailed.as_i16());
+            return out;
+        }
+    }
+
+    let principal = conn.acl_principal().to_owned();
+    let principal = principal.as_str();
+
+    match api {
         Some(ApiKey::ApiVersions) if hdr.api_version == 0 => {
             encode_api_versions(&mut out);
         }
+        Some(ApiKey::SaslHandshake) if (0..=1).contains(&hdr.api_version) => {
+            encode_sasl_handshake(&mut src, &mut out, conn);
+        }
+        Some(ApiKey::SaslAuthenticate) if (0..=1).contains(&hdr.api_version) => {
+            encode_sasl_authenticate(broker, &mut src, &mut out, hdr.api_version, conn);
+        }
         Some(ApiKey::Metadata) if (0..=1).contains(&hdr.api_version) => {
-            encode_metadata(broker, &mut src, &mut out, hdr.api_version);
+            encode_metadata(broker, &mut src, &mut out, hdr.api_version, principal);
         }
         Some(ApiKey::Produce) if (0..=3).contains(&hdr.api_version) => {
-            encode_produce(broker, &mut src, &mut out, hdr.api_version);
+            encode_produce(broker, &mut src, &mut out, hdr.api_version, principal);
         }
         Some(ApiKey::Fetch) if (0..=4).contains(&hdr.api_version) => {
-            encode_fetch(broker, &mut src, &mut out, hdr.api_version);
+            encode_fetch(broker, &mut src, &mut out, hdr.api_version, principal);
         }
         Some(ApiKey::ListOffsets) if (0..=1).contains(&hdr.api_version) => {
-            encode_list_offsets(broker, &mut src, &mut out, hdr.api_version);
+            encode_list_offsets(broker, &mut src, &mut out, hdr.api_version, principal);
         }
         Some(ApiKey::CreateTopics) if (0..=1).contains(&hdr.api_version) => {
-            encode_create_topics(broker, &mut src, &mut out, hdr.api_version);
+            encode_create_topics(broker, &mut src, &mut out, hdr.api_version, principal);
         }
         Some(ApiKey::DeleteTopics) if (0..=1).contains(&hdr.api_version) => {
-            encode_delete_topics(broker, &mut src, &mut out, hdr.api_version);
+            encode_delete_topics(broker, &mut src, &mut out, hdr.api_version, principal);
         }
         Some(ApiKey::FindCoordinator) if hdr.api_version == 0 => {
             encode_find_coordinator(broker, &mut src, &mut out);
         }
         Some(ApiKey::JoinGroup) if (0..=1).contains(&hdr.api_version) => {
-            encode_join_group(broker, &mut src, &mut out, hdr.api_version);
+            encode_join_group(broker, &mut src, &mut out, hdr.api_version, principal);
         }
         Some(ApiKey::SyncGroup) if hdr.api_version == 0 => {
-            encode_sync_group(broker, &mut src, &mut out);
+            encode_sync_group(broker, &mut src, &mut out, principal);
         }
         Some(ApiKey::Heartbeat) if hdr.api_version == 0 => {
-            encode_heartbeat(broker, &mut src, &mut out);
+            encode_heartbeat(broker, &mut src, &mut out, principal);
         }
         Some(ApiKey::LeaveGroup) if hdr.api_version == 0 => {
-            encode_leave_group(broker, &mut src, &mut out);
+            encode_leave_group(broker, &mut src, &mut out, principal);
         }
         Some(ApiKey::OffsetCommit) if (0..=2).contains(&hdr.api_version) => {
-            encode_offset_commit(broker, &mut src, &mut out, hdr.api_version);
+            encode_offset_commit(broker, &mut src, &mut out, hdr.api_version, principal);
         }
         Some(ApiKey::OffsetFetch) if (0..=1).contains(&hdr.api_version) => {
-            encode_offset_fetch(broker, &mut src, &mut out);
+            encode_offset_fetch(broker, &mut src, &mut out, principal);
         }
         Some(ApiKey::DescribeGroups) if hdr.api_version == 0 => {
-            encode_describe_groups(broker, &mut src, &mut out);
+            encode_describe_groups(broker, &mut src, &mut out, principal);
         }
         Some(ApiKey::ListGroups) if hdr.api_version == 0 => {
-            encode_list_groups(broker, &mut out);
+            encode_list_groups(broker, &mut out, principal);
         }
         Some(ApiKey::DeleteGroups) if hdr.api_version == 0 => {
-            encode_delete_groups(broker, &mut src, &mut out);
+            encode_delete_groups(broker, &mut src, &mut out, principal);
         }
         Some(ApiKey::CreatePartitions) if hdr.api_version == 0 => {
-            encode_create_partitions(broker, &mut src, &mut out);
+            encode_create_partitions(broker, &mut src, &mut out, principal);
         }
         Some(ApiKey::DescribeConfigs) if hdr.api_version == 0 => {
-            encode_describe_configs(broker, &mut src, &mut out);
+            encode_describe_configs(broker, &mut src, &mut out, principal);
         }
         Some(ApiKey::AlterConfigs) if hdr.api_version == 0 => {
-            encode_alter_configs(broker, &mut src, &mut out);
+            encode_alter_configs(broker, &mut src, &mut out, principal);
         }
         Some(ApiKey::InitProducerId) if (0..=1).contains(&hdr.api_version) => {
-            encode_init_producer_id(broker, &mut src, &mut out);
+            encode_init_producer_id(broker, &mut src, &mut out, principal);
         }
         Some(_) => {
             // Supported API but wrong version — use a generic error body when possible.
@@ -158,6 +208,84 @@ fn dispatch_kafka(broker: &Broker, body: bytes::Bytes) -> BytesMut {
     out
 }
 
+fn encode_sasl_handshake(src: &mut impl Buf, out: &mut BytesMut, conn: &mut KafkaConnState) {
+    let mechanism = match get_string(src) {
+        Ok(m) => m,
+        Err(_) => {
+            out.put_i16(KafkaErrorCode::InvalidRequest.as_i16());
+            put_mechanisms_list(out);
+            return;
+        }
+    };
+    match SaslMechanism::parse(&mechanism) {
+        Some(m) => {
+            conn.sasl = SaslState::Selected(m);
+            out.put_i16(KafkaErrorCode::None.as_i16());
+        }
+        None => {
+            out.put_i16(KafkaErrorCode::UnsupportedSaslMechanism.as_i16());
+        }
+    }
+    put_mechanisms_list(out);
+}
+
+fn put_mechanisms_list(out: &mut BytesMut) {
+    out.put_i32(MECHANISMS.len() as i32);
+    for m in MECHANISMS {
+        put_string(out, m);
+    }
+}
+
+fn encode_sasl_authenticate(
+    broker: &Broker,
+    src: &mut impl Buf,
+    out: &mut BytesMut,
+    version: i16,
+    conn: &mut KafkaConnState,
+) {
+    let auth_bytes = match get_bytes(src) {
+        Ok(b) => b.unwrap_or_default(),
+        Err(_) => {
+            out.put_i16(KafkaErrorCode::InvalidRequest.as_i16());
+            put_nullable_string(out, Some("truncated auth bytes"));
+            put_bytes(out, None);
+            if version >= 1 {
+                out.put_i64(0);
+            }
+            return;
+        }
+    };
+
+    let step = match sasl::authenticate_step(broker, &mut conn.sasl, &auth_bytes) {
+        Ok(s) => s,
+        Err(e) => {
+            out.put_i16(KafkaErrorCode::SaslAuthenticationFailed.as_i16());
+            put_nullable_string(out, Some(&e.to_string()));
+            put_bytes(out, None);
+            if version >= 1 {
+                out.put_i64(0);
+            }
+            return;
+        }
+    };
+
+    if step.failed {
+        out.put_i16(KafkaErrorCode::SaslAuthenticationFailed.as_i16());
+        put_nullable_string(out, step.error_message.as_deref());
+        put_bytes(out, Some(&step.auth_bytes));
+    } else {
+        if let Some(p) = step.principal {
+            conn.principal = Some(p);
+        }
+        out.put_i16(KafkaErrorCode::None.as_i16());
+        put_nullable_string(out, None);
+        put_bytes(out, Some(&step.auth_bytes));
+    }
+    if version >= 1 {
+        out.put_i64(0); // session_lifetime_ms
+    }
+}
+
 fn encode_api_versions(out: &mut BytesMut) {
     out.put_i16(KafkaErrorCode::None.as_i16());
     out.put_i32(SUPPORTED_APIS.len() as i32);
@@ -168,7 +296,7 @@ fn encode_api_versions(out: &mut BytesMut) {
     }
 }
 
-fn encode_metadata(broker: &Broker, src: &mut impl Buf, out: &mut BytesMut, version: i16) {
+fn encode_metadata(broker: &Broker, src: &mut impl Buf, out: &mut BytesMut, version: i16, principal: &str) {
     // Authorization: Cluster Describe when listing all; Topic Describe per topic.
     if broker.acls().is_enabled() {
         // We'll check per-topic below; for empty list need cluster describe.
@@ -192,7 +320,7 @@ fn encode_metadata(broker: &Broker, src: &mut impl Buf, out: &mut BytesMut, vers
     if broker.acls().is_enabled() {
         if requested.is_empty() {
             if !broker.acls().authorize(
-                Some(KAFKA_ANONYMOUS_PRINCIPAL),
+                Some(principal),
                 ResourceType::Cluster,
                 CLUSTER_RESOURCE,
                 AclOperation::Describe,
@@ -239,7 +367,7 @@ fn encode_metadata(broker: &Broker, src: &mut impl Buf, out: &mut BytesMut, vers
                 return true;
             }
             broker.acls().authorize(
-                Some(KAFKA_ANONYMOUS_PRINCIPAL),
+                Some(principal),
                 ResourceType::Topic,
                 t.name.as_str(),
                 AclOperation::Describe,
@@ -270,7 +398,7 @@ fn encode_metadata(broker: &Broker, src: &mut impl Buf, out: &mut BytesMut, vers
     }
 }
 
-fn encode_produce(broker: &Broker, src: &mut impl Buf, out: &mut BytesMut, version: i16) {
+fn encode_produce(broker: &Broker, src: &mut impl Buf, out: &mut BytesMut, version: i16, principal: &str) {
     // Produce v3+ prepends transactional_id (nullable string).
     if version >= 3 {
         let _txn_id = match get_nullable_string(src) {
@@ -337,7 +465,7 @@ fn encode_produce(broker: &Broker, src: &mut impl Buf, out: &mut BytesMut, versi
 
             if broker.acls().is_enabled()
                 && !broker.acls().authorize(
-                    Some(KAFKA_ANONYMOUS_PRINCIPAL),
+                    Some(principal),
                     ResourceType::Topic,
                     &topic,
                     AclOperation::Write,
@@ -518,10 +646,10 @@ fn map_produce_ack_error(err: u16) -> i16 {
 }
 
 /// InitProducerId (API key 22) — Phase 29.
-fn encode_init_producer_id(broker: &Broker, src: &mut impl Buf, out: &mut BytesMut) {
+fn encode_init_producer_id(broker: &Broker, src: &mut impl Buf, out: &mut BytesMut, principal: &str) {
     if broker.acls().is_enabled()
         && !broker.acls().authorize(
-            Some(KAFKA_ANONYMOUS_PRINCIPAL),
+            Some(principal),
             ResourceType::Cluster,
             CLUSTER_RESOURCE,
             AclOperation::Write,
@@ -556,7 +684,7 @@ fn encode_init_producer_id(broker: &Broker, src: &mut impl Buf, out: &mut BytesM
     out.put_i16(epoch as i16);
 }
 
-fn encode_fetch(broker: &Broker, src: &mut impl Buf, out: &mut BytesMut, version: i16) {
+fn encode_fetch(broker: &Broker, src: &mut impl Buf, out: &mut BytesMut, version: i16, principal: &str) {
     // FetchRequest v0–2: replica_id, max_wait, min_bytes, [topic ...]
     // v3: + max_bytes
     // v4: + isolation_level
@@ -627,7 +755,7 @@ fn encode_fetch(broker: &Broker, src: &mut impl Buf, out: &mut BytesMut, version
 
             if broker.acls().is_enabled()
                 && !broker.acls().authorize(
-                    Some(KAFKA_ANONYMOUS_PRINCIPAL),
+                    Some(principal),
                     ResourceType::Topic,
                     &topic,
                     AclOperation::Read,
@@ -718,7 +846,7 @@ fn encode_fetch(broker: &Broker, src: &mut impl Buf, out: &mut BytesMut, version
     }
 }
 
-fn encode_list_offsets(broker: &Broker, src: &mut impl Buf, out: &mut BytesMut, version: i16) {
+fn encode_list_offsets(broker: &Broker, src: &mut impl Buf, out: &mut BytesMut, version: i16, principal: &str) {
     // ListOffsets v0: replica_id, [topic [partition, timestamp, max_num_offsets]]
     // ListOffsets v1: replica_id, [topic [partition, timestamp]]
     if src.remaining() < 4 {
@@ -764,7 +892,7 @@ fn encode_list_offsets(broker: &Broker, src: &mut impl Buf, out: &mut BytesMut, 
 
             if broker.acls().is_enabled()
                 && !broker.acls().authorize(
-                    Some(KAFKA_ANONYMOUS_PRINCIPAL),
+                    Some(principal),
                     ResourceType::Topic,
                     &topic,
                     AclOperation::Describe,
@@ -834,7 +962,7 @@ fn encode_list_offsets(broker: &Broker, src: &mut impl Buf, out: &mut BytesMut, 
     }
 }
 
-fn encode_create_topics(broker: &Broker, src: &mut impl Buf, out: &mut BytesMut, version: i16) {
+fn encode_create_topics(broker: &Broker, src: &mut impl Buf, out: &mut BytesMut, version: i16, principal: &str) {
     // CreateTopics v0: [topic_data]
     // CreateTopics v1: [topic_data] timeout_ms
     // topic_data: name, num_partitions, replication_factor,
@@ -920,13 +1048,13 @@ fn encode_create_topics(broker: &Broker, src: &mut impl Buf, out: &mut BytesMut,
 
         if broker.acls().is_enabled()
             && !broker.acls().authorize(
-                Some(KAFKA_ANONYMOUS_PRINCIPAL),
+                Some(principal),
                 ResourceType::Cluster,
                 CLUSTER_RESOURCE,
                 AclOperation::Create,
             )
             && !broker.acls().authorize(
-                Some(KAFKA_ANONYMOUS_PRINCIPAL),
+                Some(principal),
                 ResourceType::Topic,
                 &t.name,
                 AclOperation::Create,
@@ -963,7 +1091,7 @@ fn encode_create_topics(broker: &Broker, src: &mut impl Buf, out: &mut BytesMut,
     }
 }
 
-fn encode_delete_topics(broker: &Broker, src: &mut impl Buf, out: &mut BytesMut, version: i16) {
+fn encode_delete_topics(broker: &Broker, src: &mut impl Buf, out: &mut BytesMut, version: i16, principal: &str) {
     // DeleteTopics v0/v1: [topic names] timeout_ms
     if src.remaining() < 4 {
         out.put_i32(0);
@@ -989,7 +1117,7 @@ fn encode_delete_topics(broker: &Broker, src: &mut impl Buf, out: &mut BytesMut,
         put_string(out, &name);
         if broker.acls().is_enabled()
             && !broker.acls().authorize(
-                Some(KAFKA_ANONYMOUS_PRINCIPAL),
+                Some(principal),
                 ResourceType::Topic,
                 &name,
                 AclOperation::Delete,
@@ -1035,7 +1163,7 @@ fn encode_find_coordinator(broker: &Broker, src: &mut impl Buf, out: &mut BytesM
     out.put_i32(i32::from(port));
 }
 
-fn encode_join_group(broker: &Broker, src: &mut impl Buf, out: &mut BytesMut, version: i16) {
+fn encode_join_group(broker: &Broker, src: &mut impl Buf, out: &mut BytesMut, version: i16, principal: &str) {
     // JoinGroup v0: group_id, session_timeout, member_id, protocol_type, [protocols]
     // JoinGroup v1: + rebalance_timeout after session_timeout
     let group_id = match get_string(src) {
@@ -1074,7 +1202,7 @@ fn encode_join_group(broker: &Broker, src: &mut impl Buf, out: &mut BytesMut, ve
 
     if broker.acls().is_enabled()
         && !broker.acls().authorize(
-            Some(KAFKA_ANONYMOUS_PRINCIPAL),
+            Some(principal),
             ResourceType::Group,
             &group_id,
             AclOperation::Read,
@@ -1172,7 +1300,7 @@ fn encode_join_group(broker: &Broker, src: &mut impl Buf, out: &mut BytesMut, ve
     }
 }
 
-fn encode_sync_group(broker: &Broker, src: &mut impl Buf, out: &mut BytesMut) {
+fn encode_sync_group(broker: &Broker, src: &mut impl Buf, out: &mut BytesMut, principal: &str) {
     // SyncGroup v0: group_id, generation, member_id, [member_id assignment_bytes]
     let group_id = match get_string(src) {
         Ok(g) => g,
@@ -1207,7 +1335,7 @@ fn encode_sync_group(broker: &Broker, src: &mut impl Buf, out: &mut BytesMut) {
 
     if broker.acls().is_enabled()
         && !broker.acls().authorize(
-            Some(KAFKA_ANONYMOUS_PRINCIPAL),
+            Some(principal),
             ResourceType::Group,
             &group_id,
             AclOperation::Read,
@@ -1235,7 +1363,7 @@ fn encode_sync_group(broker: &Broker, src: &mut impl Buf, out: &mut BytesMut) {
     put_bytes(out, Some(&bytes));
 }
 
-fn encode_heartbeat(broker: &Broker, src: &mut impl Buf, out: &mut BytesMut) {
+fn encode_heartbeat(broker: &Broker, src: &mut impl Buf, out: &mut BytesMut, principal: &str) {
     let group_id = match get_string(src) {
         Ok(g) => g,
         Err(_) => {
@@ -1258,7 +1386,7 @@ fn encode_heartbeat(broker: &Broker, src: &mut impl Buf, out: &mut BytesMut) {
 
     if broker.acls().is_enabled()
         && !broker.acls().authorize(
-            Some(KAFKA_ANONYMOUS_PRINCIPAL),
+            Some(principal),
             ResourceType::Group,
             &group_id,
             AclOperation::Read,
@@ -1272,7 +1400,7 @@ fn encode_heartbeat(broker: &Broker, src: &mut impl Buf, out: &mut BytesMut) {
     out.put_i16(map_group_error(result.error_code));
 }
 
-fn encode_leave_group(broker: &Broker, src: &mut impl Buf, out: &mut BytesMut) {
+fn encode_leave_group(broker: &Broker, src: &mut impl Buf, out: &mut BytesMut, principal: &str) {
     let group_id = match get_string(src) {
         Ok(g) => g,
         Err(_) => {
@@ -1290,7 +1418,7 @@ fn encode_leave_group(broker: &Broker, src: &mut impl Buf, out: &mut BytesMut) {
 
     if broker.acls().is_enabled()
         && !broker.acls().authorize(
-            Some(KAFKA_ANONYMOUS_PRINCIPAL),
+            Some(principal),
             ResourceType::Group,
             &group_id,
             AclOperation::Read,
@@ -1306,7 +1434,7 @@ fn encode_leave_group(broker: &Broker, src: &mut impl Buf, out: &mut BytesMut) {
     out.put_i16(map_group_error(result.error_code));
 }
 
-fn encode_offset_commit(broker: &Broker, src: &mut impl Buf, out: &mut BytesMut, version: i16) {
+fn encode_offset_commit(broker: &Broker, src: &mut impl Buf, out: &mut BytesMut, version: i16, principal: &str) {
     // v0: group_id, [topic [partition, offset, metadata]]
     // v1: group_id, generation, member_id, [topic [partition, offset, timestamp, metadata]]
     // v2: group_id, generation, member_id, retention_time, [topic [partition, offset, metadata]]
@@ -1344,7 +1472,7 @@ fn encode_offset_commit(broker: &Broker, src: &mut impl Buf, out: &mut BytesMut,
 
     let auth_denied = broker.acls().is_enabled()
         && !broker.acls().authorize(
-            Some(KAFKA_ANONYMOUS_PRINCIPAL),
+            Some(principal),
             ResourceType::Group,
             &group_id,
             AclOperation::Read,
@@ -1418,7 +1546,7 @@ fn encode_offset_commit(broker: &Broker, src: &mut impl Buf, out: &mut BytesMut,
     }
 }
 
-fn encode_offset_fetch(broker: &Broker, src: &mut impl Buf, out: &mut BytesMut) {
+fn encode_offset_fetch(broker: &Broker, src: &mut impl Buf, out: &mut BytesMut, principal: &str) {
     // OffsetFetch v0–1: group_id, [topic [partitions]]
     // Empty topics array means all committed offsets for the group (Kafka v0–1
     // actually uses null topics for all; we treat count 0 as all).
@@ -1432,7 +1560,7 @@ fn encode_offset_fetch(broker: &Broker, src: &mut impl Buf, out: &mut BytesMut) 
 
     if broker.acls().is_enabled()
         && !broker.acls().authorize(
-            Some(KAFKA_ANONYMOUS_PRINCIPAL),
+            Some(principal),
             ResourceType::Group,
             &group_id,
             AclOperation::Read,
@@ -1529,10 +1657,10 @@ fn encode_offset_fetch(broker: &Broker, src: &mut impl Buf, out: &mut BytesMut) 
     }
 }
 
-fn encode_list_groups(broker: &Broker, out: &mut BytesMut) {
+fn encode_list_groups(broker: &Broker, out: &mut BytesMut, principal: &str) {
     if broker.acls().is_enabled()
         && !broker.acls().authorize(
-            Some(KAFKA_ANONYMOUS_PRINCIPAL),
+            Some(principal),
             ResourceType::Cluster,
             CLUSTER_RESOURCE,
             AclOperation::Describe,
@@ -1551,7 +1679,7 @@ fn encode_list_groups(broker: &Broker, out: &mut BytesMut) {
     }
 }
 
-fn encode_describe_groups(broker: &Broker, src: &mut impl Buf, out: &mut BytesMut) {
+fn encode_describe_groups(broker: &Broker, src: &mut impl Buf, out: &mut BytesMut, principal: &str) {
     // DescribeGroups v0: [group_id]
     if src.remaining() < 4 {
         out.put_i32(0);
@@ -1569,7 +1697,7 @@ fn encode_describe_groups(broker: &Broker, src: &mut impl Buf, out: &mut BytesMu
     for group_id in ids {
         if broker.acls().is_enabled()
             && !broker.acls().authorize(
-                Some(KAFKA_ANONYMOUS_PRINCIPAL),
+                Some(principal),
                 ResourceType::Group,
                 &group_id,
                 AclOperation::Describe,
@@ -1631,7 +1759,7 @@ fn encode_describe_groups(broker: &Broker, src: &mut impl Buf, out: &mut BytesMu
     }
 }
 
-fn encode_delete_groups(broker: &Broker, src: &mut impl Buf, out: &mut BytesMut) {
+fn encode_delete_groups(broker: &Broker, src: &mut impl Buf, out: &mut BytesMut, principal: &str) {
     if src.remaining() < 4 {
         out.put_i32(0);
         return;
@@ -1649,7 +1777,7 @@ fn encode_delete_groups(broker: &Broker, src: &mut impl Buf, out: &mut BytesMut)
         put_string(out, &group_id);
         if broker.acls().is_enabled()
             && !broker.acls().authorize(
-                Some(KAFKA_ANONYMOUS_PRINCIPAL),
+                Some(principal),
                 ResourceType::Group,
                 &group_id,
                 AclOperation::Delete,
@@ -1668,7 +1796,7 @@ fn encode_delete_groups(broker: &Broker, src: &mut impl Buf, out: &mut BytesMut)
     }
 }
 
-fn encode_create_partitions(broker: &Broker, src: &mut impl Buf, out: &mut BytesMut) {
+fn encode_create_partitions(broker: &Broker, src: &mut impl Buf, out: &mut BytesMut, principal: &str) {
     // CreatePartitions v0: [topic, count, [assignment]] timeout
     if src.remaining() < 4 {
         out.put_i32(0);
@@ -1719,7 +1847,7 @@ fn encode_create_partitions(broker: &Broker, src: &mut impl Buf, out: &mut Bytes
         put_string(out, &r.topic);
         if broker.acls().is_enabled()
             && !broker.acls().authorize(
-                Some(KAFKA_ANONYMOUS_PRINCIPAL),
+                Some(principal),
                 ResourceType::Topic,
                 &r.topic,
                 AclOperation::Alter,
@@ -1755,7 +1883,7 @@ fn encode_create_partitions(broker: &Broker, src: &mut impl Buf, out: &mut Bytes
     }
 }
 
-fn encode_describe_configs(broker: &Broker, src: &mut impl Buf, out: &mut BytesMut) {
+fn encode_describe_configs(broker: &Broker, src: &mut impl Buf, out: &mut BytesMut, principal: &str) {
     // DescribeConfigs v0: [resource_type:i8, resource_name, [config_names] | null]
     if src.remaining() < 4 {
         out.put_i32(0);
@@ -1809,7 +1937,7 @@ fn encode_describe_configs(broker: &Broker, src: &mut impl Buf, out: &mut BytesM
         }
         if broker.acls().is_enabled()
             && !broker.acls().authorize(
-                Some(KAFKA_ANONYMOUS_PRINCIPAL),
+                Some(principal),
                 ResourceType::Topic,
                 &r.name,
                 AclOperation::Describe,
@@ -1864,7 +1992,7 @@ fn encode_describe_configs(broker: &Broker, src: &mut impl Buf, out: &mut BytesM
     }
 }
 
-fn encode_alter_configs(broker: &Broker, src: &mut impl Buf, out: &mut BytesMut) {
+fn encode_alter_configs(broker: &Broker, src: &mut impl Buf, out: &mut BytesMut, principal: &str) {
     // AlterConfigs v0: [resource_type, resource_name, [name, value]] validate_only
     if src.remaining() < 4 {
         out.put_i32(0);
@@ -1931,7 +2059,7 @@ fn encode_alter_configs(broker: &Broker, src: &mut impl Buf, out: &mut BytesMut)
         }
         if broker.acls().is_enabled()
             && !broker.acls().authorize(
-                Some(KAFKA_ANONYMOUS_PRINCIPAL),
+                Some(principal),
                 ResourceType::Topic,
                 &r.name,
                 AclOperation::Alter,

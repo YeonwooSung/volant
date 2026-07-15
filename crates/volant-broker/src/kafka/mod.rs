@@ -1,15 +1,17 @@
-//! Kafka wire protocol shim (Phases 23–29).
+//! Kafka wire protocol shim (Phases 23–30).
 //!
 //! Classic (non-flexible) framing. Produce/Fetch, admin, consumer groups,
 //! List/Describe/DeleteGroups, CreatePartitions, Describe/AlterConfigs,
-//! RecordBatch compression, InitProducerId + idempotent Produce.
-//! See `docs/PHASE23_SPEC.md` … `docs/PHASE29_SPEC.md`.
+//! RecordBatch compression, InitProducerId + idempotent Produce, SASL.
+//! See `docs/PHASE23_SPEC.md` … `docs/PHASE30_SPEC.md`.
 
 /// Kafka wire primitives, MessageSet (magic 0/1), and RecordBatch (magic 2).
 pub mod codec;
 /// RecordBatch compression codecs (gzip / snappy / lz4 / zstd).
 pub mod compress;
 mod handler;
+/// SASL PLAIN + SCRAM-SHA-256 state machine (Phase 30).
+pub mod sasl;
 
 pub use handler::serve_kafka_listener;
 
@@ -80,6 +82,10 @@ pub enum KafkaErrorCode {
     InvalidProducerEpoch = 47,
     /// Invalid transaction state.
     InvalidTxnState = 48,
+    /// Unsupported SASL mechanism.
+    UnsupportedSaslMechanism = 33,
+    /// SASL authentication failed.
+    SaslAuthenticationFailed = 58,
     /// Unknown producer id.
     UnknownProducerId = 59,
 }
@@ -143,6 +149,8 @@ pub enum ApiKey {
     DescribeGroups = 15,
     /// ListGroups.
     ListGroups = 16,
+    /// SaslHandshake.
+    SaslHandshake = 17,
     /// ApiVersions.
     ApiVersions = 18,
     /// CreateTopics.
@@ -155,6 +163,8 @@ pub enum ApiKey {
     DescribeConfigs = 32,
     /// AlterConfigs.
     AlterConfigs = 33,
+    /// SaslAuthenticate.
+    SaslAuthenticate = 36,
     /// CreatePartitions.
     CreatePartitions = 37,
     /// DeleteGroups.
@@ -177,12 +187,14 @@ impl ApiKey {
             14 => Some(Self::SyncGroup),
             15 => Some(Self::DescribeGroups),
             16 => Some(Self::ListGroups),
+            17 => Some(Self::SaslHandshake),
             18 => Some(Self::ApiVersions),
             19 => Some(Self::CreateTopics),
             20 => Some(Self::DeleteTopics),
             22 => Some(Self::InitProducerId),
             32 => Some(Self::DescribeConfigs),
             33 => Some(Self::AlterConfigs),
+            36 => Some(Self::SaslAuthenticate),
             37 => Some(Self::CreatePartitions),
             42 => Some(Self::DeleteGroups),
             _ => None,
@@ -205,12 +217,14 @@ pub const SUPPORTED_APIS: &[(ApiKey, i16, i16)] = &[
     (ApiKey::SyncGroup, 0, 0),
     (ApiKey::DescribeGroups, 0, 0),
     (ApiKey::ListGroups, 0, 0),
+    (ApiKey::SaslHandshake, 0, 1),
     (ApiKey::ApiVersions, 0, 0),
     (ApiKey::CreateTopics, 0, 1),
     (ApiKey::DeleteTopics, 0, 1),
     (ApiKey::InitProducerId, 0, 1),
     (ApiKey::DescribeConfigs, 0, 0),
     (ApiKey::AlterConfigs, 0, 0),
+    (ApiKey::SaslAuthenticate, 0, 1),
     (ApiKey::CreatePartitions, 0, 0),
     (ApiKey::DeleteGroups, 0, 0),
 ];

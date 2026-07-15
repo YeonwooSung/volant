@@ -771,9 +771,27 @@ Binding: **[docs/PHASE29_SPEC.md](./docs/PHASE29_SPEC.md)**.
 shim; MessageSet cannot carry sequences; `transaction_timeout_ms` ignored;
 Volant reserves PID `0` as non-idempotent.
 
-**Still deferred:** multi-lang clients, Kafka SASL, SCRAM-SHA-512, Kafka
-transactions on the shim, cargo-fuzz corpus CI, MessageSet compression,
-compressed Fetch responses.
+---
+
+### Phase 30 — Kafka SASL (PLAIN + SCRAM-SHA-256) ✅
+
+**Goal:** Real Kafka clients can authenticate on `--kafka-listen` with PLAIN or
+SCRAM-SHA-256 using the same durable users as Volant Phase 22.
+
+Binding: **[docs/PHASE30_SPEC.md](./docs/PHASE30_SPEC.md)**.
+
+- [x] SaslHandshake (17) v0–1 — mechanisms `PLAIN`, `SCRAM-SHA-256`
+- [x] SaslAuthenticate (36) v0–1 — PLAIN + SCRAM multi-step
+- [x] `ScramStore::verify_password` for PLAIN
+- [x] Connection principal after success; ACL checks use it
+- [x] When SCRAM users exist, gate non-auth APIs
+- [x] Integration tests (`phase30_kafka_sasl`)
+
+**Honest limitations:** No SCRAM-SHA-512 / GSSAPI / OAUTHBEARER; no channel
+binding; no pre-1.0 raw SASL frames; shared-token does not apply to Kafka port.
+
+**Still deferred:** multi-lang clients, SCRAM-SHA-512, Kafka transactions on
+the shim, cargo-fuzz corpus CI, MessageSet compression, compressed Fetch.
 
 ---
 

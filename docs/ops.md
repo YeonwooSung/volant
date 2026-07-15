@@ -10,7 +10,7 @@
 | `--log-format` | | `text` | `text` or `json` |
 | `--auth-token` | `VOLANT_AUTH_TOKEN` | *unset* | Shared-token auth |
 | `--scram-user USER:PASS` | | *unset* | Upsert SCRAM user at startup (repeatable; Phase 22) |
-| `--kafka-listen` | | *disabled* | Kafka wire protocol shim (Phase 23–29) |
+| `--kafka-listen` | | *disabled* | Kafka wire protocol shim (Phase 23–30) |
 | `--tls-cert` / `--tls-key` | | *unset* | Server TLS (feature `tls`) |
 | `--tls-peer-insecure` | | `true` | Skip inter-broker cert verify (lab) |
 | `--tls-ca` | | *unset* | CA PEM for inter-broker peer verify |
@@ -132,6 +132,8 @@ Supported APIs:
 | Produce | 0–3 | MessageSet magic 0/1 **or** RecordBatch magic 2 (auto-detect); compression + idempotent PID/seq |
 | Fetch | 0–4 | v0–3 MessageSet; v4 RecordBatch uncompressed (+ throttle, LSO) |
 | InitProducerId | 0–1 | plain + transactional_id fencing; timeout ignored |
+| SaslHandshake | 0–1 | mechanisms: PLAIN, SCRAM-SHA-256 |
+| SaslAuthenticate | 0–1 | PLAIN / SCRAM-SHA-256 against Volant SCRAM store |
 | ListOffsets | 0–1 | timestamp -1 latest, -2 earliest |
 | CreateTopics | 0–1 | partition count; RF/assignment ignored |
 | DeleteTopics | 0–1 | by name |
@@ -158,7 +160,11 @@ Limitations:
 - Idempotent Produce requires RecordBatch magic 2 + InitProducerId; MessageSet
   cannot carry PID/sequence. **No** Kafka transactions (Begin/End/AddPartitions)
   on the shim — transactional PIDs reject ordinary Produce.
-- **No** Kafka SASL or flexible versions.
+- Kafka SASL: **PLAIN** and **SCRAM-SHA-256** only (no GSSAPI / SCRAM-SHA-512).
+  When SCRAM users exist (`--scram-user` / `volant user create`), SASL is
+  **required** before other APIs. Shared-token Auth does not apply on the Kafka
+  port. Principal after SASL = username (feeds ACLs).
+- **No** flexible (compact) Kafka versions.
 - Consumer assignment is **coordinator-driven** (not Kafka leader assignor).
 - CreateTopics / CreatePartitions ignore Kafka replica assignment arrays.
 - DescribeConfigs is TOPIC-only (no broker configs).
@@ -167,7 +173,7 @@ Limitations:
 - Prefer binding to localhost / private networks; leave disabled in production
   unless you need Kafka-protocol discovery.
 
-See [PHASE23_SPEC.md](./PHASE23_SPEC.md) … [PHASE29_SPEC.md](./PHASE29_SPEC.md).
+See [PHASE23_SPEC.md](./PHASE23_SPEC.md) … [PHASE30_SPEC.md](./PHASE30_SPEC.md).
 
 ## TLS (Phase 7 listen + Phase 9 verification / inter-broker)
 

@@ -199,9 +199,12 @@ lz4 frame, zstd. Fetch remains uncompressed.
 **Phase 29:** Kafka InitProducerId + idempotent Produce (PID/epoch/sequence
 de-dupe on RecordBatch). Maps onto Volant Phase 10/11 producer state.
 
-**Still deferred:** multi-language clients, Kafka SASL, SCRAM-SHA-512,
-Kafka transactions on the shim, chaos-mesh / cargo-fuzz corpus CI,
-MessageSet compression, compressed Fetch.
+**Phase 30:** Kafka SASL on the shim — SaslHandshake / SaslAuthenticate with
+PLAIN and SCRAM-SHA-256 against the Volant SCRAM store; principal feeds ACLs.
+
+**Still deferred:** multi-language clients, SCRAM-SHA-512, Kafka transactions
+on the shim, chaos-mesh / cargo-fuzz corpus CI, MessageSet compression,
+compressed Fetch.
 
 ### Networked client (library)
 

@@ -46,3 +46,4 @@ rustls-pemfile = { version = "2", optional = true }
 uuid = { workspace = true }
 volant-client = { workspace = true }
 tokio = { workspace = true }
+base64 = { workspace = true }

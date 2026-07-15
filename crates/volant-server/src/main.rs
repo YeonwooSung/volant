@@ -388,7 +388,7 @@ async fn async_main(args: Args) -> Result<()> {
                 tracing::error!(error = %e, "kafka shim server exited");
             }
         });
-        info!(%kaddr, "kafka wire protocol shim enabled (Phase 23–29)");
+        info!(%kaddr, "kafka wire protocol shim enabled (Phase 23–30)");
     }
 
     info!(
