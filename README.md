@@ -202,9 +202,13 @@ de-dupe on RecordBatch). Maps onto Volant Phase 10/11 producer state.
 **Phase 30:** Kafka SASL on the shim — SaslHandshake / SaslAuthenticate with
 PLAIN and SCRAM-SHA-256 against the Volant SCRAM store; principal feeds ACLs.
 
-**Still deferred:** multi-language clients, SCRAM-SHA-512, Kafka transactions
-on the shim, chaos-mesh / cargo-fuzz corpus CI, MessageSet compression,
-compressed Fetch.
+**Phase 31:** Kafka transactions on the shim — AddPartitionsToTxn / EndTxn /
+TxnOffsetCommit mapped to Volant Phase 18 buffer-until-commit; FindCoordinator
+v1 for transaction coordinators.
+
+**Still deferred:** multi-language clients, SCRAM-SHA-512, chaos-mesh /
+cargo-fuzz corpus CI, MessageSet compression, compressed Fetch, Kafka control
+batches / `READ_COMMITTED` isolation.
 
 ### Networked client (library)
 

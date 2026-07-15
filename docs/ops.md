@@ -132,12 +132,16 @@ Supported APIs:
 | Produce | 0–3 | MessageSet magic 0/1 **or** RecordBatch magic 2 (auto-detect); compression + idempotent PID/seq |
 | Fetch | 0–4 | v0–3 MessageSet; v4 RecordBatch uncompressed (+ throttle, LSO) |
 | InitProducerId | 0–1 | plain + transactional_id fencing; timeout ignored |
+| FindCoordinator | 0–1 | v1 `key_type` 0=group, 1=transaction |
+| AddPartitionsToTxn | 0 | opens txn (Kafka has no BeginTxn) |
+| AddOffsetsToTxn | 0 | registers group for transactional offsets |
+| EndTxn | 0 | commit/abort; flushes buffered produces + offsets |
+| TxnOffsetCommit | 0 | buffers offsets until EndTxn commit |
 | SaslHandshake | 0–1 | mechanisms: PLAIN, SCRAM-SHA-256 |
 | SaslAuthenticate | 0–1 | PLAIN / SCRAM-SHA-256 against Volant SCRAM store |
 | ListOffsets | 0–1 | timestamp -1 latest, -2 earliest |
 | CreateTopics | 0–1 | partition count; RF/assignment ignored |
 | DeleteTopics | 0–1 | by name |
-| FindCoordinator | 0 | returns advertised broker |
 | JoinGroup | 0–1 | consumer protocol subscription |
 | SyncGroup | 0 | coordinator assignment (leader payload ignored) |
 | Heartbeat / LeaveGroup | 0 | session liveness |
@@ -158,8 +162,11 @@ Limitations:
 - RecordBatch compression on **Produce** only (gzip/snappy/lz4/zstd); Fetch
   still returns **uncompressed** batches. MessageSet compression unsupported.
 - Idempotent Produce requires RecordBatch magic 2 + InitProducerId; MessageSet
-  cannot carry PID/sequence. **No** Kafka transactions (Begin/End/AddPartitions)
-  on the shim — transactional PIDs reject ordinary Produce.
+  cannot carry PID/sequence.
+- Kafka transactions: InitProducerId(`transactional_id`) + AddPartitionsToTxn
+  opens a txn; Produce buffers until EndTxn commit/abort; TxnOffsetCommit
+  offsets apply only on commit. No control markers / `READ_COMMITTED` filtering;
+  crash ≡ abort open txns.
 - Kafka SASL: **PLAIN** and **SCRAM-SHA-256** only (no GSSAPI / SCRAM-SHA-512).
   When SCRAM users exist (`--scram-user` / `volant user create`), SASL is
   **required** before other APIs. Shared-token Auth does not apply on the Kafka
@@ -169,11 +176,11 @@ Limitations:
 - CreateTopics / CreatePartitions ignore Kafka replica assignment arrays.
 - DescribeConfigs is TOPIC-only (no broker configs).
 - FindCoordinator host/port is the Volant advertised address (often `--listen`).
-- When ACLs are enabled, the shim principal is `kafka-anonymous`.
+- When ACLs are enabled and SASL is unused, the shim principal is `kafka-anonymous`.
 - Prefer binding to localhost / private networks; leave disabled in production
   unless you need Kafka-protocol discovery.
 
-See [PHASE23_SPEC.md](./PHASE23_SPEC.md) … [PHASE30_SPEC.md](./PHASE30_SPEC.md).
+See [PHASE23_SPEC.md](./PHASE23_SPEC.md) … [PHASE31_SPEC.md](./PHASE31_SPEC.md).
 
 ## TLS (Phase 7 listen + Phase 9 verification / inter-broker)
 

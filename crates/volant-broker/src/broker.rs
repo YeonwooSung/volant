@@ -142,6 +142,9 @@ struct OpenTxn {
     batches: Vec<TxnBufferedBatch>,
     /// Sequences accepted inside this txn (not yet committed to `partitions`).
     pending: HashMap<(String, u32), IdempotentBatchState>,
+    /// Deferred consumer offsets (Phase 18 EndTxn trailer + Phase 31 TxnOffsetCommit).
+    /// Each entry: `(group_id, topic, partition, offset, metadata)`.
+    deferred_offsets: Vec<(String, String, u32, u64, String)>,
 }
 
 /// Result of committing a transaction (Phase 18).
@@ -513,9 +516,61 @@ impl Broker {
         0
     }
 
+    /// Ensure a transaction is open (Phase 31 / Kafka AddPartitionsToTxn).
+    ///
+    /// If one is already open for this PID+epoch, returns success. Otherwise
+    /// begins a new transaction (Kafka has no separate BeginTxn API).
+    pub fn ensure_txn_open(&self, producer_id: u64, producer_epoch: u16) -> u16 {
+        {
+            let state = self.producer_state.read();
+            let Some(prod) = state.get(&producer_id) else {
+                return ErrorCode::UnknownProducerId as u16;
+            };
+            if prod.epoch != producer_epoch {
+                return ErrorCode::InvalidProducerEpoch as u16;
+            }
+            if !prod.transactional {
+                return ErrorCode::InvalidTxnState as u16;
+            }
+        }
+        if self.has_open_txn(producer_id) {
+            return 0;
+        }
+        self.begin_txn(producer_id, producer_epoch)
+    }
+
     /// Whether this producer currently has an open transaction.
     pub fn has_open_txn(&self, producer_id: u64) -> bool {
         self.open_txns.lock().contains_key(&producer_id)
+    }
+
+    /// Buffer consumer offsets to apply on commit (Phase 31 TxnOffsetCommit).
+    ///
+    /// Entries: `(group_id, topic, partition, offset, metadata)`.
+    pub fn buffer_txn_offsets(
+        &self,
+        producer_id: u64,
+        producer_epoch: u16,
+        offsets: &[(String, String, u32, u64, String)],
+    ) -> u16 {
+        {
+            let state = self.producer_state.read();
+            let Some(prod) = state.get(&producer_id) else {
+                return ErrorCode::UnknownProducerId as u16;
+            };
+            if prod.epoch != producer_epoch {
+                return ErrorCode::InvalidProducerEpoch as u16;
+            }
+            if !prod.transactional {
+                return ErrorCode::InvalidTxnState as u16;
+            }
+        }
+        let mut open = self.open_txns.lock();
+        let Some(txn) = open.get_mut(&producer_id) else {
+            return ErrorCode::InvalidTxnState as u16;
+        };
+        txn.deferred_offsets.extend(offsets.iter().cloned());
+        0
     }
 
     /// Whether the producer id is transactional (Phase 18).
@@ -641,7 +696,7 @@ impl Broker {
         };
 
         if !committed {
-            // Abort: drop buffer; sequences stay at last committed.
+            // Abort: drop buffer + deferred offsets; sequences stay at last committed.
             return Ok((0, Vec::new()));
         }
 
@@ -677,7 +732,12 @@ impl Broker {
             });
         }
 
-        for (group_id, topic, partition, offset, metadata) in offsets {
+        // Merge EndTxn trailer offsets with any TxnOffsetCommit-buffered ones.
+        let mut all_offsets = txn.deferred_offsets;
+        for o in offsets {
+            all_offsets.push(o.clone());
+        }
+        for (group_id, topic, partition, offset, metadata) in &all_offsets {
             let _ = self.groups().commit_offsets(
                 group_id,
                 "",

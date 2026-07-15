@@ -790,8 +790,28 @@ Binding: **[docs/PHASE30_SPEC.md](./docs/PHASE30_SPEC.md)**.
 **Honest limitations:** No SCRAM-SHA-512 / GSSAPI / OAUTHBEARER; no channel
 binding; no pre-1.0 raw SASL frames; shared-token does not apply to Kafka port.
 
-**Still deferred:** multi-lang clients, SCRAM-SHA-512, Kafka transactions on
-the shim, cargo-fuzz corpus CI, MessageSet compression, compressed Fetch.
+---
+
+### Phase 31 — Kafka transactions on the shim ✅
+
+**Goal:** Kafka transactional producers can commit/abort multi-partition
+produces (and deferred offsets) on `--kafka-listen` via Phase 18 buffer semantics.
+
+Binding: **[docs/PHASE31_SPEC.md](./docs/PHASE31_SPEC.md)**.
+
+- [x] AddPartitionsToTxn (24) → `ensure_txn_open`
+- [x] AddOffsetsToTxn (25) / TxnOffsetCommit (28) → deferred offsets
+- [x] EndTxn (26) → commit/abort flush
+- [x] Transactional Produce buffers off-log until EndTxn
+- [x] FindCoordinator v1 (`key_type` group|transaction)
+- [x] Integration tests (`phase31_transactions`)
+
+**Honest limitations:** No control markers / `READ_COMMITTED` fetch filtering;
+crash ≡ abort; `transaction_timeout_ms` ignored; no flexible versions;
+partition membership not strictly enforced after AddPartitions.
+
+**Still deferred:** multi-lang clients, SCRAM-SHA-512, cargo-fuzz corpus CI,
+MessageSet compression, compressed Fetch, Kafka control batches / markers.
 
 ---
 

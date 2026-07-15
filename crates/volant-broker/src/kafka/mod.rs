@@ -1,9 +1,10 @@
-//! Kafka wire protocol shim (Phases 23–30).
+//! Kafka wire protocol shim (Phases 23–31).
 //!
 //! Classic (non-flexible) framing. Produce/Fetch, admin, consumer groups,
 //! List/Describe/DeleteGroups, CreatePartitions, Describe/AlterConfigs,
-//! RecordBatch compression, InitProducerId + idempotent Produce, SASL.
-//! See `docs/PHASE23_SPEC.md` … `docs/PHASE30_SPEC.md`.
+//! RecordBatch compression, InitProducerId + idempotent Produce, SASL,
+//! and transactions (AddPartitionsToTxn / EndTxn / TxnOffsetCommit).
+//! See `docs/PHASE23_SPEC.md` … `docs/PHASE31_SPEC.md`.
 
 /// Kafka wire primitives, MessageSet (magic 0/1), and RecordBatch (magic 2).
 pub mod codec;
@@ -159,6 +160,14 @@ pub enum ApiKey {
     DeleteTopics = 20,
     /// InitProducerId.
     InitProducerId = 22,
+    /// AddPartitionsToTxn.
+    AddPartitionsToTxn = 24,
+    /// AddOffsetsToTxn.
+    AddOffsetsToTxn = 25,
+    /// EndTxn.
+    EndTxn = 26,
+    /// TxnOffsetCommit.
+    TxnOffsetCommit = 28,
     /// DescribeConfigs.
     DescribeConfigs = 32,
     /// AlterConfigs.
@@ -192,6 +201,10 @@ impl ApiKey {
             19 => Some(Self::CreateTopics),
             20 => Some(Self::DeleteTopics),
             22 => Some(Self::InitProducerId),
+            24 => Some(Self::AddPartitionsToTxn),
+            25 => Some(Self::AddOffsetsToTxn),
+            26 => Some(Self::EndTxn),
+            28 => Some(Self::TxnOffsetCommit),
             32 => Some(Self::DescribeConfigs),
             33 => Some(Self::AlterConfigs),
             36 => Some(Self::SaslAuthenticate),
@@ -210,7 +223,7 @@ pub const SUPPORTED_APIS: &[(ApiKey, i16, i16)] = &[
     (ApiKey::Metadata, 0, 1),
     (ApiKey::OffsetCommit, 0, 2),
     (ApiKey::OffsetFetch, 0, 1),
-    (ApiKey::FindCoordinator, 0, 0),
+    (ApiKey::FindCoordinator, 0, 1),
     (ApiKey::JoinGroup, 0, 1),
     (ApiKey::Heartbeat, 0, 0),
     (ApiKey::LeaveGroup, 0, 0),
@@ -222,6 +235,10 @@ pub const SUPPORTED_APIS: &[(ApiKey, i16, i16)] = &[
     (ApiKey::CreateTopics, 0, 1),
     (ApiKey::DeleteTopics, 0, 1),
     (ApiKey::InitProducerId, 0, 1),
+    (ApiKey::AddPartitionsToTxn, 0, 0),
+    (ApiKey::AddOffsetsToTxn, 0, 0),
+    (ApiKey::EndTxn, 0, 0),
+    (ApiKey::TxnOffsetCommit, 0, 0),
     (ApiKey::DescribeConfigs, 0, 0),
     (ApiKey::AlterConfigs, 0, 0),
     (ApiKey::SaslAuthenticate, 0, 1),
