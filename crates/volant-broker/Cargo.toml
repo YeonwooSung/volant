@@ -32,6 +32,11 @@ subtle = { workspace = true }
 base64 = { workspace = true }
 crc32fast = { workspace = true }
 crc32c = "0.6"
+# RecordBatch compression (Phase 28)
+flate2 = "1"
+snap = "1"
+lz4_flex = { version = "0.11", default-features = true }
+zstd = "0.13"
 tokio-rustls = { version = "0.26", optional = true, default-features = false, features = ["ring", "tls12"] }
 rustls = { version = "0.23", optional = true, default-features = false, features = ["ring", "std"] }
 webpki-roots = { version = "0.26", optional = true }

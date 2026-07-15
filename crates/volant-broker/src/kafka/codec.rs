@@ -4,6 +4,8 @@ use bytes::{Buf, BufMut, Bytes, BytesMut};
 use crc32fast::Hasher as Crc32Ieee;
 use volant_core::{Error, Message, Record, Result};
 
+use super::compress::{self, CompressionCodec};
+
 /// Read a full Kafka request frame (size-prefixed) from a buffer.
 ///
 /// Returns `None` if more bytes are needed. On success, returns the request
@@ -307,12 +309,7 @@ fn decode_one_record_batch(body: &[u8]) -> Result<Vec<Message>> {
     }
 
     let attributes = src.get_i16();
-    let compression = attributes & 0x07;
-    if compression != 0 {
-        return Err(Error::Protocol(format!(
-            "compressed record batch not supported (attributes={attributes:#x})"
-        )));
-    }
+    let codec = CompressionCodec::from_attributes(attributes)?;
     let _last_offset_delta = src.get_i32();
     let first_timestamp = src.get_i64();
     let _max_timestamp = src.get_i64();
@@ -324,9 +321,22 @@ fn decode_one_record_batch(body: &[u8]) -> Result<Vec<Message>> {
         return Err(Error::Protocol("negative records count".into()));
     }
 
+    // When compressed, remaining bytes are one compressed blob of DefaultRecords.
+    let records_bytes = if codec == CompressionCodec::None {
+        let rem = src.remaining();
+        let b = src.copy_to_bytes(rem);
+        b
+    } else {
+        let rem = src.remaining();
+        let compressed = src.copy_to_bytes(rem);
+        let plain = compress::decompress(codec, &compressed)?;
+        Bytes::from(plain)
+    };
+
+    let mut rec_src = records_bytes;
     let mut out = Vec::with_capacity(records_count as usize);
     for _ in 0..records_count {
-        out.push(decode_default_record(&mut src, first_timestamp)?);
+        out.push(decode_default_record(&mut rec_src, first_timestamp)?);
     }
     Ok(out)
 }
@@ -385,9 +395,30 @@ fn decode_default_record(src: &mut impl Buf, first_timestamp: i64) -> Result<Mes
 }
 
 /// Encode records as a single Kafka RecordBatch (magic 2, no compression).
+///
+/// Fetch responses use this path for broad client compatibility.
 pub fn encode_record_batch(records: &[Record]) -> BytesMut {
+    encode_record_batch_with_codec(records, CompressionCodec::None)
+        .expect("uncompressed encode cannot fail")
+}
+
+/// Encode records as a RecordBatch with the given compression codec (Phase 28).
+///
+/// Used by tests and clients that want compressed produce payloads. Fetch still
+/// returns uncompressed batches via [`encode_record_batch`].
+pub fn encode_record_batch_compressed(
+    records: &[Record],
+    codec: CompressionCodec,
+) -> Result<BytesMut> {
+    encode_record_batch_with_codec(records, codec)
+}
+
+fn encode_record_batch_with_codec(
+    records: &[Record],
+    codec: CompressionCodec,
+) -> Result<BytesMut> {
     if records.is_empty() {
-        return BytesMut::new();
+        return Ok(BytesMut::new());
     }
     let base_offset = records[0].offset.raw() as i64;
     let first_timestamp = records[0].timestamp_ms;
@@ -408,9 +439,15 @@ pub fn encode_record_batch(records: &[Record]) -> BytesMut {
         );
     }
 
+    let records_payload = if codec == CompressionCodec::None {
+        records_buf.freeze()
+    } else {
+        Bytes::from(compress::compress(codec, &records_buf)?)
+    };
+
     // Attributes through end of records (CRC payload).
     let mut crc_payload = BytesMut::new();
-    crc_payload.put_i16(0); // attributes
+    crc_payload.put_i16(i16::from(codec.as_u8())); // attributes bits 0–2
     crc_payload.put_i32(last_offset_delta);
     crc_payload.put_i64(first_timestamp);
     crc_payload.put_i64(max_timestamp);
@@ -418,7 +455,7 @@ pub fn encode_record_batch(records: &[Record]) -> BytesMut {
     crc_payload.put_i16(-1); // producerEpoch
     crc_payload.put_i32(-1); // baseSequence
     crc_payload.put_i32(records.len() as i32);
-    crc_payload.extend_from_slice(&records_buf);
+    crc_payload.extend_from_slice(&records_payload);
 
     let crc = crc32c::crc32c(&crc_payload);
 
@@ -433,7 +470,7 @@ pub fn encode_record_batch(records: &[Record]) -> BytesMut {
     out.put_i8(2); // magic
     out.put_u32(crc);
     out.extend_from_slice(&crc_payload);
-    out
+    Ok(out)
 }
 
 fn encode_default_record(
@@ -743,17 +780,57 @@ mod tests {
     }
 
     #[test]
-    fn compressed_record_batch_rejected() {
-        // Minimal hand-built batch with attributes compression = 1 (gzip).
+    fn compressed_record_batch_roundtrips_all_codecs() {
+        use crate::kafka::compress::CompressionCodec;
+
+        let records = vec![
+            Record {
+                offset: Offset::new(0),
+                key: Some(Bytes::from_static(b"ck")),
+                value: Bytes::from_static(b"compressed-value-payload-0123456789"),
+                timestamp_ms: 1_700_000_000_000,
+                headers: vec![("h".into(), Bytes::from_static(b"hv"))],
+            },
+            Record {
+                offset: Offset::new(1),
+                key: None,
+                value: Bytes::from_static(b"second"),
+                timestamp_ms: 1_700_000_000_100,
+                headers: vec![],
+            },
+        ];
+        for codec in [
+            CompressionCodec::None,
+            CompressionCodec::Gzip,
+            CompressionCodec::Snappy,
+            CompressionCodec::Lz4,
+            CompressionCodec::Zstd,
+        ] {
+            let batch = encode_record_batch_compressed(&records, codec).unwrap();
+            assert_eq!(batch[16] as i8, 2);
+            let decoded = decode_records(&batch).unwrap();
+            assert_eq!(decoded.len(), 2, "codec={codec:?}");
+            assert_eq!(decoded[0].key.as_ref().unwrap().as_ref(), b"ck");
+            assert_eq!(
+                decoded[0].value.as_ref(),
+                b"compressed-value-payload-0123456789"
+            );
+            assert_eq!(decoded[0].headers.len(), 1);
+            assert_eq!(decoded[1].value.as_ref(), b"second");
+        }
+    }
+
+    #[test]
+    fn unknown_compression_codec_rejected() {
         let mut crc_payload = BytesMut::new();
-        crc_payload.put_i16(1); // attributes: gzip
-        crc_payload.put_i32(0); // lastOffsetDelta
-        crc_payload.put_i64(0); // firstTimestamp
-        crc_payload.put_i64(0); // maxTimestamp
+        crc_payload.put_i16(5); // attributes: invalid codec
+        crc_payload.put_i32(0);
+        crc_payload.put_i64(0);
+        crc_payload.put_i64(0);
         crc_payload.put_i64(-1);
         crc_payload.put_i16(-1);
         crc_payload.put_i32(-1);
-        crc_payload.put_i32(0); // records count
+        crc_payload.put_i32(0);
         let crc = crc32c::crc32c(&crc_payload);
         let mut batch = BytesMut::new();
         batch.put_i64(0);
@@ -764,6 +841,9 @@ mod tests {
         batch.extend_from_slice(&crc_payload);
         let err = decode_record_batches(&batch).unwrap_err();
         let msg = format!("{err}");
-        assert!(msg.contains("compressed"), "{msg}");
+        assert!(
+            msg.contains("unsupported") || msg.contains("compression"),
+            "{msg}"
+        );
     }
 }

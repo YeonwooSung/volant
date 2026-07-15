@@ -1,11 +1,14 @@
-//! Kafka wire protocol shim (Phases 23–27).
+//! Kafka wire protocol shim (Phases 23–28).
 //!
 //! Classic (non-flexible) framing. Produce/Fetch, admin, consumer groups,
-//! List/Describe/DeleteGroups, CreatePartitions, Describe/AlterConfigs.
-//! See `docs/PHASE23_SPEC.md` … `docs/PHASE27_SPEC.md`.
+//! List/Describe/DeleteGroups, CreatePartitions, Describe/AlterConfigs,
+//! RecordBatch compression (gzip/snappy/lz4/zstd).
+//! See `docs/PHASE23_SPEC.md` … `docs/PHASE28_SPEC.md`.
 
 /// Kafka wire primitives, MessageSet (magic 0/1), and RecordBatch (magic 2).
 pub mod codec;
+/// RecordBatch compression codecs (gzip / snappy / lz4 / zstd).
+pub mod compress;
 mod handler;
 
 pub use handler::serve_kafka_listener;

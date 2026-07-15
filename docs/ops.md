@@ -10,7 +10,7 @@
 | `--log-format` | | `text` | `text` or `json` |
 | `--auth-token` | `VOLANT_AUTH_TOKEN` | *unset* | Shared-token auth |
 | `--scram-user USER:PASS` | | *unset* | Upsert SCRAM user at startup (repeatable; Phase 22) |
-| `--kafka-listen` | | *disabled* | Kafka wire protocol shim (Phase 23–24) |
+| `--kafka-listen` | | *disabled* | Kafka wire protocol shim (Phase 23–28) |
 | `--tls-cert` / `--tls-key` | | *unset* | Server TLS (feature `tls`) |
 | `--tls-peer-insecure` | | `true` | Skip inter-broker cert verify (lab) |
 | `--tls-ca` | | *unset* | CA PEM for inter-broker peer verify |
@@ -129,8 +129,8 @@ Supported APIs:
 |-----|----------|-------|
 | ApiVersions | 0 | Advertises supported keys/versions |
 | Metadata | 0–1 | Brokers + topics from Volant catalog |
-| Produce | 0–3 | MessageSet magic 0/1 **or** RecordBatch magic 2 (auto-detect) |
-| Fetch | 0–4 | v0–3 MessageSet; v4 RecordBatch (+ throttle, LSO) |
+| Produce | 0–3 | MessageSet magic 0/1 **or** RecordBatch magic 2 (auto-detect); RecordBatch gzip/snappy/lz4/zstd |
+| Fetch | 0–4 | v0–3 MessageSet; v4 RecordBatch uncompressed (+ throttle, LSO) |
 | ListOffsets | 0–1 | timestamp -1 latest, -2 earliest |
 | CreateTopics | 0–1 | partition count; RF/assignment ignored |
 | DeleteTopics | 0–1 | by name |
@@ -152,7 +152,8 @@ Topic config keys: `retention.ms`, `retention.bytes`, `segment.bytes`,
 
 Limitations:
 
-- **No** compression on RecordBatch (attributes compression bits must be 0).
+- RecordBatch compression on **Produce** only (gzip/snappy/lz4/zstd); Fetch
+  still returns **uncompressed** batches. MessageSet compression unsupported.
 - **No** Kafka SASL or flexible versions.
 - Consumer assignment is **coordinator-driven** (not Kafka leader assignor).
 - CreateTopics / CreatePartitions ignore Kafka replica assignment arrays.
@@ -162,7 +163,7 @@ Limitations:
 - Prefer binding to localhost / private networks; leave disabled in production
   unless you need Kafka-protocol discovery.
 
-See [PHASE23_SPEC.md](./PHASE23_SPEC.md) … [PHASE27_SPEC.md](./PHASE27_SPEC.md).
+See [PHASE23_SPEC.md](./PHASE23_SPEC.md) … [PHASE28_SPEC.md](./PHASE28_SPEC.md).
 
 ## TLS (Phase 7 listen + Phase 9 verification / inter-broker)
 

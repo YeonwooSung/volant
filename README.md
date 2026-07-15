@@ -193,8 +193,11 @@ Heartbeat/Leave, OffsetCommit/Fetch mapped to Volant's group coordinator.
 **Phase 27:** Kafka ops surface — List/Describe/DeleteGroups, CreatePartitions,
 DescribeConfigs / AlterConfigs (topic keys).
 
+**Phase 28:** Kafka RecordBatch compression on Produce — gzip, snappy (Xerial),
+lz4 frame, zstd. Fetch remains uncompressed.
+
 **Still deferred:** multi-language clients, Kafka SASL, SCRAM-SHA-512,
-chaos-mesh / cargo-fuzz corpus CI, RecordBatch compression.
+chaos-mesh / cargo-fuzz corpus CI, MessageSet compression, compressed Fetch.
 
 ### Networked client (library)
 

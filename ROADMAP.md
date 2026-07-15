@@ -733,8 +733,27 @@ Binding: **[docs/PHASE27_SPEC.md](./docs/PHASE27_SPEC.md)**.
 synonyms/docs; DescribeGroups member metadata is best-effort; CreatePartitions
 ignores replica assignment; no IncrementalAlterConfigs; no Kafka SASL.
 
+---
+
+### Phase 28 — Kafka RecordBatch compression ✅
+
+**Goal:** Accept compressed RecordBatch payloads from real Kafka producers
+(gzip / snappy / lz4 / zstd) on the shim Produce path.
+
+Binding: **[docs/PHASE28_SPEC.md](./docs/PHASE28_SPEC.md)**.
+
+- [x] Decompress attributes bits 0–2 on Produce (RecordBatch magic 2)
+- [x] Codecs: none, gzip (`flate2`), snappy (Xerial + raw), lz4 frame, zstd
+- [x] `encode_record_batch_compressed` for tests / tooling
+- [x] Fetch still returns uncompressed RecordBatch / MessageSet
+- [x] Integration tests (`phase28_compression`)
+
+**Honest limitations:** MessageSet compression still unsupported; Fetch never
+compresses; snappy/lz4 framing is best-effort Kafka-compatible; no compression
+level knobs; no client-negotiated preferred codec.
+
 **Still deferred:** multi-lang clients, Kafka SASL, SCRAM-SHA-512, cargo-fuzz
-corpus CI, RecordBatch compression.
+corpus CI, MessageSet compression, compressed Fetch responses.
 
 ---
 
