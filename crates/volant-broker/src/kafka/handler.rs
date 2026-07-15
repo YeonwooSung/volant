@@ -13,8 +13,9 @@ use crate::acl::{AclOperation, ResourceType, CLUSTER_RESOURCE};
 use crate::broker::Broker;
 
 use super::codec::{
-    decode_message_set, decode_request_header, encode_message_set, encode_response_frame,
-    get_bytes, get_string, put_bytes, put_response_header, put_string, try_decode_request,
+    decode_records, decode_request_header, encode_message_set, encode_record_batch,
+    encode_response_frame, get_bytes, get_nullable_string, get_string, put_bytes,
+    put_response_header, put_string, try_decode_request,
 };
 use super::{ApiKey, KafkaErrorCode, KAFKA_ANONYMOUS_PRINCIPAL, SUPPORTED_APIS};
 
@@ -84,11 +85,11 @@ fn dispatch_kafka(broker: &Broker, body: bytes::Bytes) -> BytesMut {
         Some(ApiKey::Metadata) if (0..=1).contains(&hdr.api_version) => {
             encode_metadata(broker, &mut src, &mut out, hdr.api_version);
         }
-        Some(ApiKey::Produce) if hdr.api_version == 0 => {
-            encode_produce(broker, &mut src, &mut out);
+        Some(ApiKey::Produce) if (0..=3).contains(&hdr.api_version) => {
+            encode_produce(broker, &mut src, &mut out, hdr.api_version);
         }
-        Some(ApiKey::Fetch) if hdr.api_version == 0 => {
-            encode_fetch(broker, &mut src, &mut out);
+        Some(ApiKey::Fetch) if (0..=4).contains(&hdr.api_version) => {
+            encode_fetch(broker, &mut src, &mut out, hdr.api_version);
         }
         Some(_) => {
             // Supported API but wrong version — use a generic error body when possible.
@@ -214,7 +215,18 @@ fn encode_metadata(broker: &Broker, src: &mut impl Buf, out: &mut BytesMut, vers
     }
 }
 
-fn encode_produce(broker: &Broker, src: &mut impl Buf, out: &mut BytesMut) {
+fn encode_produce(broker: &Broker, src: &mut impl Buf, out: &mut BytesMut, version: i16) {
+    // Produce v3+ prepends transactional_id (nullable string).
+    if version >= 3 {
+        let _txn_id = match get_nullable_string(src) {
+            Ok(v) => v,
+            Err(_) => {
+                out.put_i32(0);
+                return;
+            }
+        };
+    }
+
     if src.remaining() < 2 + 4 {
         out.put_i32(0); // topic responses empty
         return;
@@ -259,6 +271,9 @@ fn encode_produce(broker: &Broker, src: &mut impl Buf, out: &mut BytesMut) {
                     out.put_i32(partition);
                     out.put_i16(KafkaErrorCode::InvalidMessage.as_i16());
                     out.put_i64(-1);
+                    if version >= 2 {
+                        out.put_i64(-1); // log_append_time
+                    }
                     continue;
                 }
             };
@@ -275,21 +290,30 @@ fn encode_produce(broker: &Broker, src: &mut impl Buf, out: &mut BytesMut) {
             {
                 out.put_i16(KafkaErrorCode::TopicAuthorizationFailed.as_i16());
                 out.put_i64(-1);
+                if version >= 2 {
+                    out.put_i64(-1);
+                }
                 continue;
             }
 
-            let messages = match decode_message_set(&record_set) {
+            let messages = match decode_records(&record_set) {
                 Ok(m) => m,
                 Err(e) => {
-                    debug!(error = %e, "kafka produce message set decode failed");
+                    debug!(error = %e, "kafka produce records decode failed");
                     out.put_i16(KafkaErrorCode::CorruptMessage.as_i16());
                     out.put_i64(-1);
+                    if version >= 2 {
+                        out.put_i64(-1);
+                    }
                     continue;
                 }
             };
             if messages.is_empty() {
                 out.put_i16(KafkaErrorCode::None.as_i16());
                 out.put_i64(0);
+                if version >= 2 {
+                    out.put_i64(-1);
+                }
                 continue;
             }
 
@@ -314,39 +338,87 @@ fn encode_produce(broker: &Broker, src: &mut impl Buf, out: &mut BytesMut) {
                         .unwrap_or(0);
                     out.put_i16(KafkaErrorCode::None.as_i16());
                     out.put_i64(base);
+                    if version >= 2 {
+                        out.put_i64(-1); // log_append_time unused
+                    }
                 }
                 Ok((_, err))
                     if err == volant_protocol::ErrorCode::NotLeaderForPartition as u16 =>
                 {
                     out.put_i16(KafkaErrorCode::NotLeaderForPartition.as_i16());
                     out.put_i64(-1);
+                    if version >= 2 {
+                        out.put_i64(-1);
+                    }
                 }
                 Ok((_, _)) => {
                     out.put_i16(KafkaErrorCode::Unknown.as_i16());
                     out.put_i64(-1);
+                    if version >= 2 {
+                        out.put_i64(-1);
+                    }
                 }
                 Err(Error::NotFound(_)) => {
                     out.put_i16(KafkaErrorCode::UnknownTopicOrPartition.as_i16());
                     out.put_i64(-1);
+                    if version >= 2 {
+                        out.put_i64(-1);
+                    }
                 }
                 Err(_) => {
                     out.put_i16(KafkaErrorCode::Unknown.as_i16());
                     out.put_i64(-1);
+                    if version >= 2 {
+                        out.put_i64(-1);
+                    }
                 }
             }
         }
     }
+
+    // Produce v1+ appends throttle_time_ms at the end.
+    if version >= 1 {
+        out.put_i32(0);
+    }
 }
 
-fn encode_fetch(broker: &Broker, src: &mut impl Buf, out: &mut BytesMut) {
-    // FetchRequest v0: replica_id, max_wait, min_bytes, [topic [partition, offset, max_bytes]]
+fn encode_fetch(broker: &Broker, src: &mut impl Buf, out: &mut BytesMut, version: i16) {
+    // FetchRequest v0–2: replica_id, max_wait, min_bytes, [topic ...]
+    // v3: + max_bytes
+    // v4: + isolation_level
     if src.remaining() < 4 + 4 + 4 {
+        if version >= 1 {
+            out.put_i32(0); // throttle
+        }
         out.put_i32(0);
         return;
     }
     let _replica_id = src.get_i32();
     let _max_wait = src.get_i32();
     let _min_bytes = src.get_i32();
+    if version >= 3 {
+        if src.remaining() < 4 {
+            if version >= 1 {
+                out.put_i32(0);
+            }
+            out.put_i32(0);
+            return;
+        }
+        let _max_bytes = src.get_i32();
+    }
+    if version >= 4 {
+        if src.remaining() < 1 {
+            out.put_i32(0); // throttle
+            out.put_i32(0);
+            return;
+        }
+        let _isolation = src.get_u8();
+    }
+
+    // Fetch response v1+ starts with throttle_time_ms.
+    if version >= 1 {
+        out.put_i32(0);
+    }
 
     if src.remaining() < 4 {
         out.put_i32(0);
@@ -389,6 +461,10 @@ fn encode_fetch(broker: &Broker, src: &mut impl Buf, out: &mut BytesMut) {
             {
                 out.put_i16(KafkaErrorCode::TopicAuthorizationFailed.as_i16());
                 out.put_i64(-1); // high_watermark
+                if version >= 4 {
+                    out.put_i64(-1); // last_stable_offset
+                    out.put_i32(0); // aborted_transactions
+                }
                 put_bytes(out, Some(&[]));
                 continue;
             }
@@ -432,19 +508,35 @@ fn encode_fetch(broker: &Broker, src: &mut impl Buf, out: &mut BytesMut) {
                         })
                         .unwrap_or(hwm);
 
-                    let set = encode_message_set(&selected);
+                    let set = if version >= 4 {
+                        encode_record_batch(&selected)
+                    } else {
+                        encode_message_set(&selected)
+                    };
                     out.put_i16(KafkaErrorCode::None.as_i16());
                     out.put_i64(hwm);
+                    if version >= 4 {
+                        out.put_i64(hwm); // last_stable_offset ≈ hwm (no txns)
+                        out.put_i32(0); // aborted_transactions empty
+                    }
                     put_bytes(out, Some(&set));
                 }
                 Err(Error::NotFound(_)) => {
                     out.put_i16(KafkaErrorCode::UnknownTopicOrPartition.as_i16());
                     out.put_i64(-1);
+                    if version >= 4 {
+                        out.put_i64(-1);
+                        out.put_i32(0);
+                    }
                     put_bytes(out, Some(&[]));
                 }
                 Err(_) => {
                     out.put_i16(KafkaErrorCode::Unknown.as_i16());
                     out.put_i64(-1);
+                    if version >= 4 {
+                        out.put_i64(-1);
+                        out.put_i32(0);
+                    }
                     put_bytes(out, Some(&[]));
                 }
             }

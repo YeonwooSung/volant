@@ -1,9 +1,9 @@
-//! Kafka wire protocol shim (Phase 23 MVP).
+//! Kafka wire protocol shim (Phase 23 + Phase 24 RecordBatch).
 //!
 //! Classic (non-flexible) framing only. Supported APIs: Produce, Fetch,
-//! Metadata, ApiVersions. See `docs/PHASE23_SPEC.md`.
+//! Metadata, ApiVersions. See `docs/PHASE23_SPEC.md` and `docs/PHASE24_SPEC.md`.
 
-/// Kafka wire primitives and MessageSet encode/decode.
+/// Kafka wire primitives, MessageSet (magic 0/1), and RecordBatch (magic 2).
 pub mod codec;
 mod handler;
 
@@ -80,8 +80,8 @@ impl ApiKey {
 
 /// Supported version ranges advertised in ApiVersions.
 pub const SUPPORTED_APIS: &[(ApiKey, i16, i16)] = &[
-    (ApiKey::Produce, 0, 0),
-    (ApiKey::Fetch, 0, 0),
+    (ApiKey::Produce, 0, 3),
+    (ApiKey::Fetch, 0, 4),
     (ApiKey::Metadata, 0, 1),
     (ApiKey::ApiVersions, 0, 0),
 ];

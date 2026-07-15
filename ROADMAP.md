@@ -638,11 +638,34 @@ Binding: **[docs/PHASE23_SPEC.md](./docs/PHASE23_SPEC.md)**.
 - [x] ACL checks as principal `kafka-anonymous` when ACLs enabled
 - [x] Integration tests (`phase23_kafka_shim`) + MessageSet unit tests
 
-**Honest limitations:** no magic=2 RecordBatch; no Kafka consumer groups / SASL /
-CreateTopics on the shim port; no flexible versions; sequential req/resp only.
+**Honest limitations (at ship):** no magic=2 RecordBatch — closed by **Phase 24**;
+no Kafka consumer groups / SASL / CreateTopics on the shim port; no flexible
+versions; sequential req/resp only.
 
-**Still deferred:** multi-lang clients, full Kafka API surface, RecordBatch,
+**Still deferred (at ship):** multi-lang clients, RecordBatch, full Kafka API,
 Kafka SASL, full SASL/SCRAM-SHA-512, cargo-fuzz corpus CI.
+
+---
+
+### Phase 24 — Kafka RecordBatch (magic 2) ✅
+
+**Goal:** Accept and emit Kafka RecordBatch (magic=2) on the shim port so modern
+clients that no longer speak legacy MessageSet can produce/fetch.
+
+Binding: **[docs/PHASE24_SPEC.md](./docs/PHASE24_SPEC.md)**.
+
+- [x] Auto-detect produce payload by magic at byte 16 (0/1 MessageSet, 2 RecordBatch)
+- [x] RecordBatch encode/decode with CRC-32C + zig-zag varint records + headers
+- [x] Produce advertised 0–3 (v3 transactional_id field ignored); Fetch 0–4
+- [x] Fetch v0–3 → MessageSet; Fetch v4 → RecordBatch (+ throttle, LSO)
+- [x] Reject compressed batches; integration tests (`phase24_record_batch`)
+
+**Honest limitations:** no compression (gzip/snappy/lz4/zstd); no transactional /
+idempotent producer semantics; no control batches; Fetch v4 has empty aborted
+txns only; no flexible versions / tagged fields; no Kafka consumer groups or SASL.
+
+**Still deferred:** multi-lang clients, full Kafka API surface (groups, CreateTopics,
+offsets, SASL), SCRAM-SHA-512, cargo-fuzz corpus CI.
 
 ---
 

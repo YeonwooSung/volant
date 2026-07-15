@@ -181,8 +181,11 @@ multi-partition atomic commit, deferred offsets; `volant txn produce`.
 ApiVersions / Metadata / Produce / Fetch (MessageSet magic 0/1). Native
 Volant protocol stays on `--listen`.
 
-**Still deferred:** multi-language clients, full Kafka API / RecordBatch /
-Kafka SASL, SCRAM-SHA-512, chaos-mesh / cargo-fuzz corpus CI.
+**Phase 24:** Kafka RecordBatch (magic 2) on the shim — auto-detect produce
+format; Fetch v4 returns RecordBatch; Produce 0–3 / Fetch 0–4 advertised.
+
+**Still deferred:** multi-language clients, full Kafka API (groups / CreateTopics
+/ SASL), SCRAM-SHA-512, chaos-mesh / cargo-fuzz corpus CI.
 
 ### Networked client (library)
 
