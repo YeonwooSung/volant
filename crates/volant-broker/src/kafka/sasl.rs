@@ -1,14 +1,14 @@
-//! Kafka SASL handshake state (PLAIN + SCRAM-SHA-256) — Phase 30.
+//! Kafka SASL handshake state (PLAIN + SCRAM-SHA-256/512) — Phases 30 / 34.
 
 use base64::engine::general_purpose::STANDARD as B64;
 use base64::Engine;
 use volant_core::{Error, Result};
 
 use crate::broker::Broker;
-use crate::scram::ScramChallenge;
+use crate::scram::{ScramChallenge, ScramHash};
 
 /// Mechanisms advertised by SaslHandshake.
-pub const MECHANISMS: &[&str] = &["PLAIN", "SCRAM-SHA-256"];
+pub const MECHANISMS: &[&str] = &["PLAIN", "SCRAM-SHA-256", "SCRAM-SHA-512"];
 
 /// Selected SASL mechanism.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -17,6 +17,8 @@ pub enum SaslMechanism {
     Plain,
     /// SCRAM-SHA-256 (RFC 5802 / 7677).
     ScramSha256,
+    /// SCRAM-SHA-512 (Phase 34).
+    ScramSha512,
 }
 
 impl SaslMechanism {
@@ -25,6 +27,7 @@ impl SaslMechanism {
         match name {
             "PLAIN" => Some(Self::Plain),
             "SCRAM-SHA-256" => Some(Self::ScramSha256),
+            "SCRAM-SHA-512" => Some(Self::ScramSha512),
             _ => None,
         }
     }
@@ -34,6 +37,7 @@ impl SaslMechanism {
         match self {
             Self::Plain => "PLAIN",
             Self::ScramSha256 => "SCRAM-SHA-256",
+            Self::ScramSha512 => "SCRAM-SHA-512",
         }
     }
 }
@@ -86,7 +90,12 @@ pub fn authenticate_step(
             Ok(result)
         }
         SaslState::Selected(SaslMechanism::ScramSha256) => {
-            let (step, next) = scram_client_first(broker, auth_bytes)?;
+            let (step, next) = scram_client_first(broker, auth_bytes, ScramHash::Sha256)?;
+            *state = next;
+            Ok(step)
+        }
+        SaslState::Selected(SaslMechanism::ScramSha512) => {
+            let (step, next) = scram_client_first(broker, auth_bytes, ScramHash::Sha512)?;
             *state = next;
             Ok(step)
         }
@@ -161,6 +170,7 @@ fn plain_authenticate(broker: &Broker, auth_bytes: &[u8]) -> AuthStep {
 fn scram_client_first(
     broker: &Broker,
     auth_bytes: &[u8],
+    hash: ScramHash,
 ) -> Result<(AuthStep, SaslState)> {
     let msg = std::str::from_utf8(auth_bytes)
         .map_err(|_| Error::Protocol("SCRAM client-first not utf8".into()))?;
@@ -204,7 +214,10 @@ fn scram_client_first(
         }
     };
 
-    match broker.scram().begin(&username, &client_nonce) {
+    match broker
+        .scram()
+        .begin_with_hash(&username, &client_nonce, hash)
+    {
         Ok((chal, salt, iterations, combined_nonce)) => {
             let server_first = format!(
                 "r={combined_nonce},s={},i={iterations}",
@@ -302,7 +315,7 @@ fn sasl_decode_name(s: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::scram::client_proof_and_server_sig;
+    use crate::scram::{client_proof_and_server_sig, client_proof_and_server_sig_for, ScramHash};
     use volant_storage::StorageConfig;
 
     fn broker_with_user(user: &str, pass: &str) -> Broker {
@@ -386,6 +399,48 @@ mod tests {
         assert!(std::str::from_utf8(&step2.auth_bytes)
             .unwrap()
             .starts_with("v="));
+        assert!(matches!(state, SaslState::Done));
+    }
+
+    #[test]
+    fn scram_sha512_roundtrip() {
+        let b = broker_with_user("carol", "p@ssw0rd");
+        let mut state = SaslState::Selected(SaslMechanism::ScramSha512);
+        let client_nonce = "nY0m2cV5T1xQ";
+        let first = format!("n,,n=carol,r={client_nonce}");
+        let step1 = authenticate_step(&b, &mut state, first.as_bytes()).unwrap();
+        assert!(!step1.failed);
+        let server_first = std::str::from_utf8(&step1.auth_bytes).unwrap();
+        let mut combined = None;
+        let mut salt_b64 = None;
+        let mut iter = None;
+        for part in server_first.split(',') {
+            if let Some(r) = part.strip_prefix("r=") {
+                combined = Some(r.to_owned());
+            } else if let Some(s) = part.strip_prefix("s=") {
+                salt_b64 = Some(s.to_owned());
+            } else if let Some(i) = part.strip_prefix("i=") {
+                iter = Some(i.parse::<u32>().unwrap());
+            }
+        }
+        let combined = combined.unwrap();
+        let salt = B64.decode(salt_b64.unwrap()).unwrap();
+        let iterations = iter.unwrap();
+        let (proof, _sig) = client_proof_and_server_sig_for(
+            ScramHash::Sha512,
+            "carol",
+            "p@ssw0rd",
+            client_nonce,
+            &combined,
+            &salt,
+            iterations,
+        )
+        .unwrap();
+        assert_eq!(proof.len(), 64);
+        let final_msg = format!("c=biws,r={combined},p={}", B64.encode(&proof));
+        let step2 = authenticate_step(&b, &mut state, final_msg.as_bytes()).unwrap();
+        assert!(!step2.failed, "{:?}", step2.error_message);
+        assert_eq!(step2.principal.as_deref(), Some("carol"));
         assert!(matches!(state, SaslState::Done));
     }
 }

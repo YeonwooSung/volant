@@ -212,8 +212,11 @@ default (lz4); override with `VOLANT_KAFKA_FETCH_COMPRESSION`.
 **Phase 33:** Kafka MessageSet compression — compressed Produce wrappers and
 Fetch v0–3 MessageSets (gzip/snappy/lz4; zstd maps to lz4).
 
-**Still deferred:** multi-language clients, SCRAM-SHA-512, chaos-mesh /
-cargo-fuzz corpus CI, Kafka control batches / `READ_COMMITTED` isolation.
+**Phase 34:** SCRAM-SHA-512 on the Kafka shim — dual SHA-256/512 credentials
+per user; SaslHandshake advertises SCRAM-SHA-512.
+
+**Still deferred:** multi-language clients, chaos-mesh / cargo-fuzz corpus CI,
+Kafka control batches / `READ_COMMITTED` isolation.
 
 ### Networked client (library)
 

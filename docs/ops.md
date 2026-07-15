@@ -137,8 +137,8 @@ Supported APIs:
 | AddOffsetsToTxn | 0 | registers group for transactional offsets |
 | EndTxn | 0 | commit/abort; flushes buffered produces + offsets |
 | TxnOffsetCommit | 0 | buffers offsets until EndTxn commit |
-| SaslHandshake | 0–1 | mechanisms: PLAIN, SCRAM-SHA-256 |
-| SaslAuthenticate | 0–1 | PLAIN / SCRAM-SHA-256 against Volant SCRAM store |
+| SaslHandshake | 0–1 | mechanisms: PLAIN, SCRAM-SHA-256, SCRAM-SHA-512 |
+| SaslAuthenticate | 0–1 | PLAIN / SCRAM-SHA-256 / SCRAM-SHA-512 against Volant SCRAM store |
 | ListOffsets | 0–1 | timestamp -1 latest, -2 earliest |
 | CreateTopics | 0–1 | partition count; RF/assignment ignored |
 | DeleteTopics | 0–1 | by name |
@@ -170,10 +170,12 @@ Limitations:
   opens a txn; Produce buffers until EndTxn commit/abort; TxnOffsetCommit
   offsets apply only on commit. No control markers / `READ_COMMITTED` filtering;
   crash ≡ abort open txns.
-- Kafka SASL: **PLAIN** and **SCRAM-SHA-256** only (no GSSAPI / SCRAM-SHA-512).
-  When SCRAM users exist (`--scram-user` / `volant user create`), SASL is
-  **required** before other APIs. Shared-token Auth does not apply on the Kafka
-  port. Principal after SASL = username (feeds ACLs).
+- Kafka SASL: **PLAIN**, **SCRAM-SHA-256**, and **SCRAM-SHA-512** (no GSSAPI /
+  OAUTHBEARER). New users store both SHA-256 and SHA-512 credentials from one
+  password. Legacy single-credential users (pre–Phase 34) are SHA-256 only until
+  re-upsert. When SCRAM users exist (`--scram-user` / `volant user create`),
+  SASL is **required** before other APIs. Shared-token Auth does not apply on
+  the Kafka port. Principal after SASL = username (feeds ACLs).
 - **No** flexible (compact) Kafka versions.
 - Consumer assignment is **coordinator-driven** (not Kafka leader assignor).
 - CreateTopics / CreatePartitions ignore Kafka replica assignment arrays.
@@ -183,7 +185,7 @@ Limitations:
 - Prefer binding to localhost / private networks; leave disabled in production
   unless you need Kafka-protocol discovery.
 
-See [PHASE23_SPEC.md](./PHASE23_SPEC.md) … [PHASE33_SPEC.md](./PHASE33_SPEC.md).
+See [PHASE23_SPEC.md](./PHASE23_SPEC.md) … [PHASE34_SPEC.md](./PHASE34_SPEC.md).
 
 ## TLS (Phase 7 listen + Phase 9 verification / inter-broker)
 

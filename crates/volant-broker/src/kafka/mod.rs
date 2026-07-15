@@ -11,7 +11,7 @@ pub mod codec;
 /// Compression codecs (gzip / snappy / lz4 / zstd); Fetch codec env.
 pub mod compress;
 mod handler;
-/// SASL PLAIN + SCRAM-SHA-256 state machine (Phase 30).
+/// SASL PLAIN + SCRAM-SHA-256/512 state machine (Phases 30 / 34).
 pub mod sasl;
 
 pub use handler::serve_kafka_listener;

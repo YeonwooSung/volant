@@ -1,6 +1,7 @@
-//! SCRAM-SHA-256 credentials and crypto (Phase 22).
+//! SCRAM credentials and crypto (Phase 22 SHA-256; Phase 34 SHA-512).
 //!
-//! Wire messages are Volant-binary; crypto follows RFC 5802 / 7677.
+//! Wire messages for Volant-native are binary; Kafka SASL uses the same store.
+//! Crypto follows RFC 5802 / 7677.
 
 use std::collections::HashMap;
 use std::fs::{self, File, OpenOptions};
@@ -14,16 +15,46 @@ use parking_lot::RwLock;
 use pbkdf2::pbkdf2_hmac;
 use rand::RngCore;
 use serde::{Deserialize, Serialize};
-use sha2::{Digest, Sha256};
+use sha2::{Digest, Sha256, Sha512};
 use subtle::ConstantTimeEq;
 use volant_core::{Error, Result};
 
 type HmacSha256 = Hmac<Sha256>;
+type HmacSha512 = Hmac<Sha512>;
 
 /// Default PBKDF2 iterations for new users.
 pub const DEFAULT_ITERATIONS: u32 = 4096;
 
-/// Stored SCRAM credential (never contains the password).
+/// Hash algorithm for SCRAM (Phase 34).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum ScramHash {
+    /// SCRAM-SHA-256 (Phase 22 default).
+    #[default]
+    Sha256,
+    /// SCRAM-SHA-512 (Phase 34).
+    Sha512,
+}
+
+impl ScramHash {
+    /// Output length of H() / HMAC / client proof.
+    pub fn digest_len(self) -> usize {
+        match self {
+            Self::Sha256 => 32,
+            Self::Sha512 => 64,
+        }
+    }
+
+    /// Kafka SASL mechanism name.
+    pub fn sasl_name(self) -> &'static str {
+        match self {
+            Self::Sha256 => "SCRAM-SHA-256",
+            Self::Sha512 => "SCRAM-SHA-512",
+        }
+    }
+}
+
+/// Stored SCRAM credential for one hash algorithm (never contains the password).
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct ScramCredential {
     /// Base64 salt.
@@ -53,10 +84,57 @@ impl ScramCredential {
     }
 }
 
+/// Per-user credentials (one optional record per hash).
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
+struct UserCreds {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    sha256: Option<ScramCredential>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    sha512: Option<ScramCredential>,
+}
+
+impl UserCreds {
+    fn get(&self, hash: ScramHash) -> Option<&ScramCredential> {
+        match hash {
+            ScramHash::Sha256 => self.sha256.as_ref(),
+            ScramHash::Sha512 => self.sha512.as_ref(),
+        }
+    }
+
+    fn set(&mut self, hash: ScramHash, cred: ScramCredential) {
+        match hash {
+            ScramHash::Sha256 => self.sha256 = Some(cred),
+            ScramHash::Sha512 => self.sha512 = Some(cred),
+        }
+    }
+}
+
+/// On-disk user entry: legacy flat credential or multi-mechanism object.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(untagged)]
+enum ScramUserRecord {
+    /// Phase 22: single SHA-256 credential at the user key.
+    Legacy(ScramCredential),
+    /// Phase 34: per-mechanism credentials.
+    Multi(UserCreds),
+}
+
+impl ScramUserRecord {
+    fn into_creds(self) -> UserCreds {
+        match self {
+            Self::Legacy(c) => UserCreds {
+                sha256: Some(c),
+                sha512: None,
+            },
+            Self::Multi(u) => u,
+        }
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 struct ScramFile {
     #[serde(default)]
-    users: HashMap<String, ScramCredential>,
+    users: HashMap<String, ScramUserRecord>,
 }
 
 /// Pending first-message state for one connection.
@@ -78,13 +156,15 @@ pub struct ScramChallenge {
     pub stored_key: Vec<u8>,
     /// Server key when known.
     pub server_key: Vec<u8>,
+    /// Hash algorithm for this exchange (Phase 34).
+    pub hash: ScramHash,
 }
 
 /// Durable SCRAM user store.
 #[derive(Debug)]
 pub struct ScramStore {
     path: PathBuf,
-    users: RwLock<HashMap<String, ScramCredential>>,
+    users: RwLock<HashMap<String, UserCreds>>,
 }
 
 impl ScramStore {
@@ -108,6 +188,9 @@ impl ScramStore {
                 let file: ScramFile = serde_json::from_str(&buf)
                     .map_err(|e| Error::Storage(format!("parse scram store: {e}")))?;
                 file.users
+                    .into_iter()
+                    .map(|(k, v)| (k, v.into_creds()))
+                    .collect()
             }
         } else {
             HashMap::new()
@@ -119,8 +202,13 @@ impl ScramStore {
     }
 
     fn persist(&self) -> Result<()> {
-        let snap = ScramFile {
-            users: self.users.read().clone(),
+        let snap = {
+            let guard = self.users.read();
+            let mut users = HashMap::new();
+            for (name, creds) in guard.iter() {
+                users.insert(name.clone(), ScramUserRecord::Multi(creds.clone()));
+            }
+            ScramFile { users }
         };
         let parent = self.path.parent().unwrap_or_else(|| Path::new("."));
         let tmp = parent.join("users.json.tmp");
@@ -166,6 +254,9 @@ impl ScramStore {
     }
 
     /// Create or replace a user from a plaintext password.
+    ///
+    /// Stores **both** SHA-256 and SHA-512 credentials (Phase 34) so either
+    /// Kafka SASL mechanism works with the same password.
     pub fn upsert_user(&self, username: &str, password: &str, iterations: u32) -> Result<()> {
         if username.is_empty() || username.contains(',') || username.contains('=') {
             return Err(Error::InvalidArgument(
@@ -180,8 +271,10 @@ impl ScramStore {
         } else {
             iterations
         };
-        let cred = hash_password(password, iter)?;
-        self.users.write().insert(username.to_owned(), cred);
+        let mut entry = UserCreds::default();
+        entry.set(ScramHash::Sha256, hash_password_for(password, iter, ScramHash::Sha256)?);
+        entry.set(ScramHash::Sha512, hash_password_for(password, iter, ScramHash::Sha512)?);
+        self.users.write().insert(username.to_owned(), entry);
         self.persist()
     }
 
@@ -194,8 +287,22 @@ impl ScramStore {
         Ok(removed)
     }
 
-    /// Begin SCRAM: build server-first fields + challenge.
-    pub fn begin(&self, username: &str, client_nonce: &str) -> Result<(ScramChallenge, Vec<u8>, u32, String)> {
+    /// Begin SCRAM-SHA-256 (Volant-native + default).
+    pub fn begin(
+        &self,
+        username: &str,
+        client_nonce: &str,
+    ) -> Result<(ScramChallenge, Vec<u8>, u32, String)> {
+        self.begin_with_hash(username, client_nonce, ScramHash::Sha256)
+    }
+
+    /// Begin SCRAM with an explicit hash (Phase 34 Kafka SCRAM-SHA-512).
+    pub fn begin_with_hash(
+        &self,
+        username: &str,
+        client_nonce: &str,
+        hash: ScramHash,
+    ) -> Result<(ScramChallenge, Vec<u8>, u32, String)> {
         if client_nonce.is_empty()
             || client_nonce.chars().any(|c| c == ',' || !c.is_ascii_graphic())
         {
@@ -203,26 +310,39 @@ impl ScramStore {
         }
         let server_nonce = random_nonce(18);
         let combined_nonce = format!("{client_nonce}{server_nonce}");
+        let dig_len = hash.digest_len();
 
         let users = self.users.read();
         let (salt, iterations, stored_key, server_key, user_known) =
-            if let Some(cred) = users.get(username) {
-                (
-                    cred.salt()?,
-                    cred.iterations,
-                    cred.stored_key()?,
-                    cred.server_key()?,
-                    true,
-                )
+            if let Some(creds) = users.get(username) {
+                if let Some(cred) = creds.get(hash) {
+                    (
+                        cred.salt()?,
+                        cred.iterations,
+                        cred.stored_key()?,
+                        cred.server_key()?,
+                        true,
+                    )
+                } else {
+                    // User exists but not for this hash (e.g. legacy SHA-256 only).
+                    let mut salt = vec![0u8; 16];
+                    rand::thread_rng().fill_bytes(&mut salt);
+                    (
+                        salt,
+                        DEFAULT_ITERATIONS,
+                        vec![0u8; dig_len],
+                        vec![0u8; dig_len],
+                        false,
+                    )
+                }
             } else {
-                // Anti-enumeration: random salt, default iterations, dummy keys.
                 let mut salt = vec![0u8; 16];
                 rand::thread_rng().fill_bytes(&mut salt);
                 (
                     salt,
                     DEFAULT_ITERATIONS,
-                    vec![0u8; 32],
-                    vec![0u8; 32],
+                    vec![0u8; dig_len],
+                    vec![0u8; dig_len],
                     false,
                 )
             };
@@ -237,32 +357,40 @@ impl ScramStore {
             user_known,
             stored_key,
             server_key,
+            hash,
         };
         Ok((challenge, salt, iterations, combined_nonce))
     }
 
-    /// Verify a plaintext password against a stored SCRAM credential (Phase 30 PLAIN).
+    /// Verify a plaintext password against a stored SCRAM credential (PLAIN).
     ///
-    /// Returns `false` for unknown users or wrong passwords (constant-time compare
-    /// of derived StoredKey when the user exists).
+    /// Tries SHA-256 first, then SHA-512.
     pub fn verify_password(&self, username: &str, password: &str) -> bool {
         if username.is_empty() || password.is_empty() {
             return false;
         }
         let users = self.users.read();
-        let Some(cred) = users.get(username) else {
+        let Some(creds) = users.get(username) else {
             return false;
         };
-        let Ok(salt) = cred.salt() else {
-            return false;
-        };
-        let Ok(stored_key) = cred.stored_key() else {
-            return false;
-        };
-        let Ok((derived, _)) = derive_keys(password, &salt, cred.iterations) else {
-            return false;
-        };
-        bool::from(derived.ct_eq(&stored_key))
+        for hash in [ScramHash::Sha256, ScramHash::Sha512] {
+            let Some(cred) = creds.get(hash) else {
+                continue;
+            };
+            let Ok(salt) = cred.salt() else {
+                continue;
+            };
+            let Ok(stored_key) = cred.stored_key() else {
+                continue;
+            };
+            let Ok((derived, _)) = derive_keys(password, &salt, cred.iterations, hash) else {
+                continue;
+            };
+            if bool::from(derived.ct_eq(&stored_key)) {
+                return true;
+            }
+        }
+        false
     }
 
     /// Finish SCRAM: verify client proof, return server signature.
@@ -279,7 +407,8 @@ impl ScramStore {
         if !challenge.user_known {
             return Err(Error::InvalidArgument("authentication failed".into()));
         }
-        if client_proof.len() != 32 {
+        let dig = challenge.hash.digest_len();
+        if client_proof.len() != dig {
             return Err(Error::InvalidArgument("invalid client_proof length".into()));
         }
 
@@ -291,24 +420,33 @@ impl ScramStore {
             challenge.iterations,
         );
 
-        let client_signature = hmac_sha256(&challenge.stored_key, auth_message.as_bytes())?;
-        let mut client_key = vec![0u8; 32];
-        for i in 0..32 {
+        let client_signature = hmac_hash(challenge.hash, &challenge.stored_key, auth_message.as_bytes())?;
+        let mut client_key = vec![0u8; dig];
+        for i in 0..dig {
             client_key[i] = client_proof[i] ^ client_signature[i];
         }
-        let stored_key_check = sha256(&client_key);
+        let stored_key_check = hash_digest(challenge.hash, &client_key);
         if !bool::from(stored_key_check.ct_eq(&challenge.stored_key)) {
             return Err(Error::InvalidArgument("authentication failed".into()));
         }
-        hmac_sha256(&challenge.server_key, auth_message.as_bytes())
+        hmac_hash(challenge.hash, &challenge.server_key, auth_message.as_bytes())
     }
 }
 
-/// Hash a password into a durable credential.
+/// Hash a password into a durable SHA-256 credential (compat helper).
 pub fn hash_password(password: &str, iterations: u32) -> Result<ScramCredential> {
+    hash_password_for(password, iterations, ScramHash::Sha256)
+}
+
+/// Hash a password for a specific SCRAM hash algorithm.
+pub fn hash_password_for(
+    password: &str,
+    iterations: u32,
+    hash: ScramHash,
+) -> Result<ScramCredential> {
     let mut salt = vec![0u8; 16];
     rand::thread_rng().fill_bytes(&mut salt);
-    let (stored_key, server_key) = derive_keys(password, &salt, iterations)?;
+    let (stored_key, server_key) = derive_keys(password, &salt, iterations, hash)?;
     Ok(ScramCredential {
         salt_b64: B64.encode(&salt),
         stored_key_b64: B64.encode(&stored_key),
@@ -317,7 +455,7 @@ pub fn hash_password(password: &str, iterations: u32) -> Result<ScramCredential>
     })
 }
 
-/// Client-side: compute client proof and expected server signature.
+/// Client-side: compute client proof and expected server signature (SHA-256).
 pub fn client_proof_and_server_sig(
     username: &str,
     password: &str,
@@ -326,46 +464,101 @@ pub fn client_proof_and_server_sig(
     salt: &[u8],
     iterations: u32,
 ) -> Result<(Vec<u8>, Vec<u8>)> {
-    let salted = hi(password.as_bytes(), salt, iterations);
-    let client_key = hmac_sha256(&salted, b"Client Key")?;
-    let stored_key = sha256(&client_key);
-    let server_key = hmac_sha256(&salted, b"Server Key")?;
+    client_proof_and_server_sig_for(
+        ScramHash::Sha256,
+        username,
+        password,
+        client_nonce,
+        combined_nonce,
+        salt,
+        iterations,
+    )
+}
+
+/// Client-side proof for an explicit hash (Phase 34).
+pub fn client_proof_and_server_sig_for(
+    hash: ScramHash,
+    username: &str,
+    password: &str,
+    client_nonce: &str,
+    combined_nonce: &str,
+    salt: &[u8],
+    iterations: u32,
+) -> Result<(Vec<u8>, Vec<u8>)> {
+    let dig = hash.digest_len();
+    let salted = hi(password.as_bytes(), salt, iterations, hash);
+    let client_key = hmac_hash(hash, &salted, b"Client Key")?;
+    let stored_key = hash_digest(hash, &client_key);
+    let server_key = hmac_hash(hash, &salted, b"Server Key")?;
     let auth_message =
         build_auth_message(username, client_nonce, combined_nonce, salt, iterations);
-    let client_signature = hmac_sha256(&stored_key, auth_message.as_bytes())?;
-    let mut proof = vec![0u8; 32];
-    for i in 0..32 {
+    let client_signature = hmac_hash(hash, &stored_key, auth_message.as_bytes())?;
+    let mut proof = vec![0u8; dig];
+    for i in 0..dig {
         proof[i] = client_key[i] ^ client_signature[i];
     }
-    let server_sig = hmac_sha256(&server_key, auth_message.as_bytes())?;
+    let server_sig = hmac_hash(hash, &server_key, auth_message.as_bytes())?;
     Ok((proof, server_sig))
 }
 
-fn derive_keys(password: &str, salt: &[u8], iterations: u32) -> Result<(Vec<u8>, Vec<u8>)> {
-    let salted = hi(password.as_bytes(), salt, iterations);
-    let client_key = hmac_sha256(&salted, b"Client Key")?;
-    let stored_key = sha256(&client_key);
-    let server_key = hmac_sha256(&salted, b"Server Key")?;
+fn derive_keys(
+    password: &str,
+    salt: &[u8],
+    iterations: u32,
+    hash: ScramHash,
+) -> Result<(Vec<u8>, Vec<u8>)> {
+    let salted = hi(password.as_bytes(), salt, iterations, hash);
+    let client_key = hmac_hash(hash, &salted, b"Client Key")?;
+    let stored_key = hash_digest(hash, &client_key);
+    let server_key = hmac_hash(hash, &salted, b"Server Key")?;
     Ok((stored_key, server_key))
 }
 
-fn hi(password: &[u8], salt: &[u8], iterations: u32) -> Vec<u8> {
-    let mut out = [0u8; 32];
-    pbkdf2_hmac::<Sha256>(password, salt, iterations, &mut out);
-    out.to_vec()
+fn hi(password: &[u8], salt: &[u8], iterations: u32, hash: ScramHash) -> Vec<u8> {
+    match hash {
+        ScramHash::Sha256 => {
+            let mut out = [0u8; 32];
+            pbkdf2_hmac::<Sha256>(password, salt, iterations, &mut out);
+            out.to_vec()
+        }
+        ScramHash::Sha512 => {
+            let mut out = [0u8; 64];
+            pbkdf2_hmac::<Sha512>(password, salt, iterations, &mut out);
+            out.to_vec()
+        }
+    }
 }
 
-fn sha256(data: &[u8]) -> Vec<u8> {
-    let mut h = Sha256::new();
-    h.update(data);
-    h.finalize().to_vec()
+fn hash_digest(hash: ScramHash, data: &[u8]) -> Vec<u8> {
+    match hash {
+        ScramHash::Sha256 => {
+            let mut h = Sha256::new();
+            h.update(data);
+            h.finalize().to_vec()
+        }
+        ScramHash::Sha512 => {
+            let mut h = Sha512::new();
+            h.update(data);
+            h.finalize().to_vec()
+        }
+    }
 }
 
-fn hmac_sha256(key: &[u8], data: &[u8]) -> Result<Vec<u8>> {
-    let mut mac = HmacSha256::new_from_slice(key)
-        .map_err(|e| Error::InvalidArgument(format!("hmac key: {e}")))?;
-    mac.update(data);
-    Ok(mac.finalize().into_bytes().to_vec())
+fn hmac_hash(hash: ScramHash, key: &[u8], data: &[u8]) -> Result<Vec<u8>> {
+    match hash {
+        ScramHash::Sha256 => {
+            let mut mac = HmacSha256::new_from_slice(key)
+                .map_err(|e| Error::InvalidArgument(format!("hmac key: {e}")))?;
+            mac.update(data);
+            Ok(mac.finalize().into_bytes().to_vec())
+        }
+        ScramHash::Sha512 => {
+            let mut mac = HmacSha512::new_from_slice(key)
+                .map_err(|e| Error::InvalidArgument(format!("hmac key: {e}")))?;
+            mac.update(data);
+            Ok(mac.finalize().into_bytes().to_vec())
+        }
+    }
 }
 
 fn build_auth_message(
@@ -388,7 +581,6 @@ fn build_auth_message(
 fn random_nonce(nbytes: usize) -> String {
     let mut buf = vec![0u8; nbytes];
     rand::thread_rng().fill_bytes(&mut buf);
-    // Printable nonce without ',' .
     B64.encode(buf).replace(',', "A")
 }
 
@@ -402,7 +594,7 @@ mod tests {
     use super::*;
 
     #[test]
-    fn scram_roundtrip_proof() {
+    fn scram_sha256_roundtrip_proof() {
         let dir = std::env::temp_dir().join(format!(
             "volant-scram-{}-{}",
             std::process::id(),
@@ -418,16 +610,135 @@ mod tests {
 
         let client_nonce = generate_client_nonce();
         let (chal, salt, iter, combined) = store.begin("alice", &client_nonce).unwrap();
+        assert_eq!(chal.hash, ScramHash::Sha256);
         let (proof, expected_sig) =
             client_proof_and_server_sig("alice", "s3cret", &client_nonce, &combined, &salt, iter)
                 .unwrap();
-        let server_sig = store
-            .finish(&chal, "alice", &combined, &proof)
-            .unwrap();
+        let server_sig = store.finish(&chal, "alice", &combined, &proof).unwrap();
         assert_eq!(server_sig, expected_sig);
 
         let bad = store.finish(&chal, "alice", &combined, &[0u8; 32]);
         assert!(bad.is_err());
+
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn scram_sha512_roundtrip_proof() {
+        let dir = std::env::temp_dir().join(format!(
+            "volant-scram512-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        let _ = fs::remove_dir_all(&dir);
+        fs::create_dir_all(&dir).unwrap();
+        let store = ScramStore::open(&dir).unwrap();
+        store.upsert_user("alice", "s3cret", 4096).unwrap();
+
+        let client_nonce = generate_client_nonce();
+        let (chal, salt, iter, combined) = store
+            .begin_with_hash("alice", &client_nonce, ScramHash::Sha512)
+            .unwrap();
+        assert_eq!(chal.hash, ScramHash::Sha512);
+        let (proof, expected_sig) = client_proof_and_server_sig_for(
+            ScramHash::Sha512,
+            "alice",
+            "s3cret",
+            &client_nonce,
+            &combined,
+            &salt,
+            iter,
+        )
+        .unwrap();
+        assert_eq!(proof.len(), 64);
+        let server_sig = store.finish(&chal, "alice", &combined, &proof).unwrap();
+        assert_eq!(server_sig, expected_sig);
+
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn both_mechanisms_after_upsert() {
+        let dir = std::env::temp_dir().join(format!(
+            "volant-scram-both-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        let _ = fs::remove_dir_all(&dir);
+        fs::create_dir_all(&dir).unwrap();
+        let store = ScramStore::open(&dir).unwrap();
+        store.upsert_user("bob", "pw", 0).unwrap();
+        assert!(store.verify_password("bob", "pw"));
+        assert!(!store.verify_password("bob", "wrong"));
+
+        for hash in [ScramHash::Sha256, ScramHash::Sha512] {
+            let cn = generate_client_nonce();
+            let (chal, salt, iter, combined) =
+                store.begin_with_hash("bob", &cn, hash).unwrap();
+            let (proof, _) =
+                client_proof_and_server_sig_for(hash, "bob", "pw", &cn, &combined, &salt, iter)
+                    .unwrap();
+            assert!(store.finish(&chal, "bob", &combined, &proof).is_ok());
+        }
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn legacy_users_json_loads_as_sha256() {
+        let dir = std::env::temp_dir().join(format!(
+            "volant-scram-legacy-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        let _ = fs::remove_dir_all(&dir);
+        let scram_dir = dir.join("__scram");
+        fs::create_dir_all(&scram_dir).unwrap();
+        let cred = hash_password("legacy-pass", 4096).unwrap();
+        let json = serde_json::json!({
+            "users": {
+                "legacy": {
+                    "salt_b64": cred.salt_b64,
+                    "stored_key_b64": cred.stored_key_b64,
+                    "server_key_b64": cred.server_key_b64,
+                    "iterations": cred.iterations
+                }
+            }
+        });
+        fs::write(
+            scram_dir.join("users.json"),
+            serde_json::to_string_pretty(&json).unwrap(),
+        )
+        .unwrap();
+
+        let store = ScramStore::open(&dir).unwrap();
+        assert!(store.verify_password("legacy", "legacy-pass"));
+        let cn = generate_client_nonce();
+        let (chal, salt, iter, combined) = store.begin("legacy", &cn).unwrap();
+        let (proof, _) = client_proof_and_server_sig(
+            "legacy",
+            "legacy-pass",
+            &cn,
+            &combined,
+            &salt,
+            iter,
+        )
+        .unwrap();
+        assert!(store.finish(&chal, "legacy", &combined, &proof).is_ok());
+
+        // SHA-512 not available until re-upsert.
+        let (chal512, _, _, _) = store
+            .begin_with_hash("legacy", &cn, ScramHash::Sha512)
+            .unwrap();
+        assert!(!chal512.user_known);
 
         let _ = fs::remove_dir_all(&dir);
     }

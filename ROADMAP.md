@@ -845,8 +845,26 @@ Binding: **[docs/PHASE33_SPEC.md](./docs/PHASE33_SPEC.md)**.
 **Honest limitations:** No native zstd MessageSet; wrapper encode is magic 1;
 process-global codec only; log stays plain.
 
-**Still deferred:** multi-lang clients, SCRAM-SHA-512, cargo-fuzz corpus CI,
-Kafka control batches / `READ_COMMITTED` markers.
+---
+
+### Phase 34 — SCRAM-SHA-512 ✅
+
+**Goal:** Kafka clients can authenticate with SCRAM-SHA-512; new users get both
+SHA-256 and SHA-512 credentials from one password upsert.
+
+Binding: **[docs/PHASE34_SPEC.md](./docs/PHASE34_SPEC.md)**.
+
+- [x] Dual-credential store (legacy flat SHA-256 still loads)
+- [x] `begin_with_hash` / `client_proof_and_server_sig_for`
+- [x] Kafka SaslHandshake lists `SCRAM-SHA-512`; full auth round-trip
+- [x] PLAIN + SCRAM-SHA-256 unchanged
+- [x] Integration tests (`phase34_scram_sha512`)
+
+**Honest limitations:** Legacy users need re-upsert for SHA-512; Volant-native
+SCRAM wire remains SHA-256 only; no channel binding / GSSAPI / OAUTHBEARER.
+
+**Still deferred:** multi-lang clients, cargo-fuzz corpus CI, Kafka control
+batches / `READ_COMMITTED` markers.
 
 ---
 
