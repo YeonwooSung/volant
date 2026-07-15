@@ -1,11 +1,11 @@
-//! Kafka wire protocol shim (Phases 23–36).
+//! Kafka wire protocol shim (Phases 23–37).
 //!
 //! Classic (non-flexible) framing. Produce/Fetch, admin, consumer groups,
 //! List/Describe/DeleteGroups, CreatePartitions, Describe/AlterConfigs,
-//! RecordBatch + MessageSet compression, InitProducerId + idempotent Produce,
-//! SASL, transactions, DeleteRecords, ACL admin (Describe/Create/DeleteAcls),
-//! OffsetDelete, and Fetch isolation-level honesty.
-//! See `docs/PHASE23_SPEC.md` … `docs/PHASE36_SPEC.md`.
+//! IncrementalAlterConfigs, RecordBatch + MessageSet compression,
+//! InitProducerId + idempotent Produce, SASL, transactions, DeleteRecords,
+//! ACL admin, OffsetDelete, and Fetch isolation-level honesty.
+//! See `docs/PHASE23_SPEC.md` … `docs/PHASE37_SPEC.md`.
 
 /// Kafka wire primitives, MessageSet (magic 0/1), and RecordBatch (magic 2).
 pub mod codec;
@@ -187,6 +187,8 @@ pub enum ApiKey {
     CreatePartitions = 37,
     /// DeleteGroups.
     DeleteGroups = 42,
+    /// IncrementalAlterConfigs.
+    IncrementalAlterConfigs = 44,
     /// OffsetDelete.
     OffsetDelete = 47,
 }
@@ -225,6 +227,7 @@ impl ApiKey {
             36 => Some(Self::SaslAuthenticate),
             37 => Some(Self::CreatePartitions),
             42 => Some(Self::DeleteGroups),
+            44 => Some(Self::IncrementalAlterConfigs),
             47 => Some(Self::OffsetDelete),
             _ => None,
         }
@@ -264,5 +267,6 @@ pub const SUPPORTED_APIS: &[(ApiKey, i16, i16)] = &[
     (ApiKey::SaslAuthenticate, 0, 1),
     (ApiKey::CreatePartitions, 0, 0),
     (ApiKey::DeleteGroups, 0, 0),
+    (ApiKey::IncrementalAlterConfigs, 0, 0),
     (ApiKey::OffsetDelete, 0, 0),
 ];

@@ -221,8 +221,10 @@ per user; SaslHandshake advertises SCRAM-SHA-512.
 **Phase 36:** Kafka OffsetDelete + Fetch isolation honesty — key 47 maps to
 Phase 12 offset delete; `READ_COMMITTED` LSO equals HWM (buffer-until-commit).
 
-**Still deferred:** multi-language clients, chaos-mesh / cargo-fuzz corpus CI,
-Kafka control batch records (not required under buffer-until-commit).
+**Phase 37:** Kafka IncrementalAlterConfigs — key 44 SET/DELETE on topic
+configs (Phase 13); APPEND/SUBTRACT rejected.
+
+**Still deferred:** multi-language clients, chaos-mesh / cargo-fuzz corpus CI.
 
 ### Networked client (library)
 

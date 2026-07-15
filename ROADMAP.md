@@ -907,8 +907,27 @@ Binding: **[docs/PHASE36_SPEC.md](./docs/PHASE36_SPEC.md)**.
 **Honest limitations:** No control markers / aborted-txn lists (nothing unstable
 on the log); empty OffsetDelete topic list is a no-op (not delete-all).
 
-**Still deferred:** multi-lang clients, cargo-fuzz corpus CI, Kafka control
-batch records (unnecessary while buffer-until-commit holds).
+**Still deferred (at ship):** multi-lang clients, cargo-fuzz corpus CI,
+IncrementalAlterConfigs on the Kafka wire.
+
+---
+
+### Phase 37 — Kafka IncrementalAlterConfigs ✅
+
+**Goal:** Modern Kafka AdminClient config updates via IncrementalAlterConfigs
+(SET/DELETE) on topic resources, mapped to Phase 13 topic configs.
+
+Binding: **[docs/PHASE37_SPEC.md](./docs/PHASE37_SPEC.md)**.
+
+- [x] IncrementalAlterConfigs (44) v0 classic
+- [x] SET → alter_configs; DELETE → clear (empty value)
+- [x] APPEND/SUBTRACT → InvalidConfig; TOPIC-only
+- [x] `validate_only` does not persist
+- [x] Integration tests (`phase37_incremental_alter_configs`)
+
+**Honest limitations:** TOPIC only; no list-typed APPEND/SUBTRACT; no flexible v1.
+
+**Still deferred:** multi-lang clients, cargo-fuzz corpus CI.
 
 ---
 

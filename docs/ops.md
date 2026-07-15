@@ -10,7 +10,7 @@
 | `--log-format` | | `text` | `text` or `json` |
 | `--auth-token` | `VOLANT_AUTH_TOKEN` | *unset* | Shared-token auth |
 | `--scram-user USER:PASS` | | *unset* | Upsert SCRAM user at startup (repeatable; Phase 22) |
-| `--kafka-listen` | | *disabled* | Kafka wire protocol shim (Phase 23–36) |
+| `--kafka-listen` | | *disabled* | Kafka wire protocol shim (Phase 23–37) |
 | `--tls-cert` / `--tls-key` | | *unset* | Server TLS (feature `tls`) |
 | `--tls-peer-insecure` | | `true` | Skip inter-broker cert verify (lab) |
 | `--tls-ca` | | *unset* | CA PEM for inter-broker peer verify |
@@ -153,6 +153,7 @@ Supported APIs:
 | CreatePartitions | 0 | total partition count |
 | DescribeConfigs | 0 | TOPIC resources; Volant keys |
 | AlterConfigs | 0 | TOPIC resources; Volant keys |
+| IncrementalAlterConfigs | 0 | SET/DELETE on TOPIC keys |
 | DeleteRecords | 0–1 | whole sealed segments only (Phase 14) |
 | DescribeAcls | 0–1 | filter → Volant ACL list |
 | CreateAcls | 0–1 | maps Kafka types/ops; enables ACL store |
@@ -196,13 +197,14 @@ Limitations:
 - **OffsetDelete** maps to Phase 12 `delete_offsets` (listed partitions only;
   empty topic list is a no-op, not delete-all). Requires Group Delete when ACLs
   are on.
+- **IncrementalAlterConfigs** (44): SET/DELETE on TOPIC Volant keys; APPEND/SUBTRACT rejected; `validate_only` supported.
 - **Fetch isolation** (`READ_UNCOMMITTED` / `READ_COMMITTED`): uncommitted
   transactional data never hits the log (buffer-until-commit), so LSO always
   equals HWM and `aborted_transactions` is always empty. No control markers.
 - Prefer binding to localhost / private networks; leave disabled in production
   unless you need Kafka-protocol discovery.
 
-See [PHASE23_SPEC.md](./PHASE23_SPEC.md) … [PHASE36_SPEC.md](./PHASE36_SPEC.md).
+See [PHASE23_SPEC.md](./PHASE23_SPEC.md) … [PHASE37_SPEC.md](./PHASE37_SPEC.md).
 
 ## TLS (Phase 7 listen + Phase 9 verification / inter-broker)
 

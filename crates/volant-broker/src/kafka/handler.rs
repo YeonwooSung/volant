@@ -224,6 +224,9 @@ fn dispatch_kafka(broker: &Broker, body: bytes::Bytes, conn: &mut KafkaConnState
         Some(ApiKey::AlterConfigs) if hdr.api_version == 0 => {
             encode_alter_configs(broker, &mut src, &mut out, principal);
         }
+        Some(ApiKey::IncrementalAlterConfigs) if hdr.api_version == 0 => {
+            encode_incremental_alter_configs(broker, &mut src, &mut out, principal);
+        }
         Some(ApiKey::InitProducerId) if (0..=1).contains(&hdr.api_version) => {
             encode_init_producer_id(broker, &mut src, &mut out, principal);
         }
@@ -2697,6 +2700,179 @@ fn encode_alter_configs(broker: &Broker, src: &mut impl Buf, out: &mut BytesMut,
 
 fn volant_broker_topic_config_validate(entries: &[(String, String)]) -> std::result::Result<(), String> {
     crate::topic_config::TopicConfig::from_entries(entries).map(|_| ()).map_err(|e| e.to_string())
+}
+
+/// IncrementalAlterConfigs (API 44) v0 — Phase 37.
+///
+/// Kafka `ConfigOperation`: 0=SET, 1=DELETE, 2=APPEND, 3=SUBTRACT.
+/// Volant topic configs only support SET and DELETE (clear via empty value).
+fn encode_incremental_alter_configs(
+    broker: &Broker,
+    src: &mut impl Buf,
+    out: &mut BytesMut,
+    principal: &str,
+) {
+    out.put_i32(0); // throttle_time_ms
+
+    if src.remaining() < 4 {
+        out.put_i32(0);
+        return;
+    }
+    let n = src.get_i32();
+
+    /// Kafka ConfigOperation::Set.
+    const OP_SET: i8 = 0;
+    /// Kafka ConfigOperation::Delete.
+    const OP_DELETE: i8 = 1;
+
+    struct Res {
+        rtype: i8,
+        name: String,
+        /// Flattened SET/DELETE entries for Volant (`""` value = clear).
+        entries: Vec<(String, String)>,
+        /// Parse-time error for this resource (if any).
+        parse_err: Option<String>,
+    }
+
+    let mut resources = Vec::new();
+    for _ in 0..n.max(0) {
+        if src.remaining() < 1 {
+            break;
+        }
+        let rtype = src.get_i8();
+        let name = match get_string(src) {
+            Ok(s) => s,
+            Err(_) => break,
+        };
+        if src.remaining() < 4 {
+            break;
+        }
+        let cfg_count = src.get_i32();
+        let mut entries = Vec::new();
+        let mut parse_err = None;
+        for _ in 0..cfg_count.max(0) {
+            // Always drain the entry fields so subsequent resources / validate_only
+            // stay aligned even after a parse error on an earlier op.
+            let key = match get_string(src) {
+                Ok(s) => s,
+                Err(_) => {
+                    if parse_err.is_none() {
+                        parse_err = Some("invalid config name".into());
+                    }
+                    break;
+                }
+            };
+            if src.remaining() < 1 {
+                if parse_err.is_none() {
+                    parse_err = Some("truncated config operation".into());
+                }
+                break;
+            }
+            let op = src.get_i8();
+            let value = match get_nullable_string(src) {
+                Ok(v) => v.unwrap_or_default(),
+                Err(_) => {
+                    if parse_err.is_none() {
+                        parse_err = Some("invalid config value".into());
+                    }
+                    break;
+                }
+            };
+            if parse_err.is_some() {
+                continue;
+            }
+            match op {
+                OP_SET => entries.push((key, value)),
+                OP_DELETE => entries.push((key, String::new())),
+                2 | 3 => {
+                    parse_err = Some(
+                        "APPEND/SUBTRACT not supported (no list-typed topic configs)".into(),
+                    );
+                }
+                other => {
+                    parse_err = Some(format!("unknown config operation {other}"));
+                }
+            }
+        }
+        resources.push(Res {
+            rtype,
+            name,
+            entries,
+            parse_err,
+        });
+    }
+    let validate_only = if src.remaining() >= 1 {
+        src.get_u8() != 0
+    } else {
+        false
+    };
+
+    out.put_i32(resources.len() as i32);
+    for r in resources {
+        if r.rtype != 2 {
+            out.put_i16(KafkaErrorCode::InvalidRequest.as_i16());
+            put_nullable_string(out, Some("only TOPIC resources supported"));
+            out.put_i8(r.rtype);
+            put_string(out, &r.name);
+            continue;
+        }
+        if broker.acls().is_enabled()
+            && !broker.acls().authorize(
+                Some(principal),
+                ResourceType::Topic,
+                &r.name,
+                AclOperation::Alter,
+            )
+        {
+            out.put_i16(KafkaErrorCode::TopicAuthorizationFailed.as_i16());
+            put_nullable_string(out, None);
+            out.put_i8(r.rtype);
+            put_string(out, &r.name);
+            continue;
+        }
+        if let Some(msg) = r.parse_err {
+            out.put_i16(KafkaErrorCode::InvalidConfig.as_i16());
+            put_nullable_string(out, Some(&msg));
+            out.put_i8(r.rtype);
+            put_string(out, &r.name);
+            continue;
+        }
+        if validate_only {
+            match volant_broker_topic_config_validate(&r.entries) {
+                Ok(()) => {
+                    out.put_i16(KafkaErrorCode::None.as_i16());
+                    put_nullable_string(out, None);
+                }
+                Err(msg) => {
+                    out.put_i16(KafkaErrorCode::InvalidConfig.as_i16());
+                    put_nullable_string(out, Some(&msg));
+                }
+            }
+            out.put_i8(r.rtype);
+            put_string(out, &r.name);
+            continue;
+        }
+        match broker.alter_configs(&r.name, &r.entries) {
+            Ok(_) => {
+                out.put_i16(KafkaErrorCode::None.as_i16());
+                put_nullable_string(out, None);
+            }
+            Err(Error::NotFound(_)) => {
+                out.put_i16(KafkaErrorCode::UnknownTopicOrPartition.as_i16());
+                put_nullable_string(out, Some("topic not found"));
+            }
+            Err(Error::InvalidArgument(msg)) => {
+                out.put_i16(KafkaErrorCode::InvalidConfig.as_i16());
+                put_nullable_string(out, Some(&msg));
+            }
+            Err(_) => {
+                out.put_i16(KafkaErrorCode::Unknown.as_i16());
+                put_nullable_string(out, None);
+            }
+        }
+        out.put_i8(r.rtype);
+        put_string(out, &r.name);
+    }
 }
 
 // ---------------------------------------------------------------------------
