@@ -415,9 +415,9 @@ Binding: **[docs/PHASE11_SPEC.md](./docs/PHASE11_SPEC.md)**.
 - [x] `DescribeGroup` (opcode 34/35) + `Client::describe_group` + `volant group describe`
 - [x] Integration tests (`phase11_sticky_durable`)
 
-**Honest limitations:** eager rebalance only (no cooperative revoke); sticky is Volant-local (not Kafka sticky wire protocol); no multi-partition transactions.
+**Honest limitations (at ship):** eager rebalance only — closed by **Phase 17** for incremental handoff; sticky is Volant-local (not Kafka sticky wire protocol); no multi-partition transactions.
 
-**Still deferred:** Kafka shim, multi-lang clients, SCRAM, mTLS, cooperative rebalance, transactions.
+**Still deferred:** Kafka shim, multi-lang clients, SCRAM, mTLS, transactions.
 
 ---
 
@@ -432,9 +432,9 @@ Binding: **[docs/PHASE12_SPEC.md](./docs/PHASE12_SPEC.md)**.
 - [x] Static membership via JoinGroup `group_instance_id` → `static:{id}` member ids
 - [x] Integration tests (`phase12_group_admin`)
 
-**Honest limitations:** eager rebalance only; static membership is Volant-local (not Kafka `group.instance.id` wire parity).
+**Honest limitations (at ship):** eager rebalance only — closed by **Phase 17**; static membership is Volant-local (not Kafka `group.instance.id` wire parity).
 
-**Still deferred:** Kafka shim, multi-lang clients, SCRAM, mTLS, cooperative rebalance, transactions.
+**Still deferred:** Kafka shim, multi-lang clients, SCRAM, mTLS, transactions.
 
 ---
 
@@ -453,7 +453,7 @@ Binding: **[docs/PHASE13_SPEC.md](./docs/PHASE13_SPEC.md)**.
 
 **Honest limitations (at ship):** configs durable; topic partition auto-reload on restart deferred to **Phase 14**. No compact cleanup policy.
 
-**Still deferred:** Kafka shim, multi-lang clients, SCRAM, mTLS, cooperative rebalance, transactions.
+**Still deferred:** Kafka shim, multi-lang clients, SCRAM, mTLS, transactions.
 
 ---
 
@@ -471,7 +471,7 @@ Binding: **[docs/PHASE14_SPEC.md](./docs/PHASE14_SPEC.md)**.
 
 **Honest limitations:** DeleteRecords does not fan out to cluster followers; no compact policy; dynamic partition count increase deferred to **Phase 15**.
 
-**Still deferred:** Kafka shim, multi-lang clients, SCRAM, mTLS, cooperative rebalance, transactions.
+**Still deferred:** Kafka shim, multi-lang clients, SCRAM, mTLS, transactions.
 
 ---
 
@@ -489,7 +489,7 @@ Binding: **[docs/PHASE15_SPEC.md](./docs/PHASE15_SPEC.md)**.
 
 **Honest limitations:** cannot shrink partitions; new partitions start empty; cluster CreatePartitions does not wait for all brokers; ListOffsets latest is LEO not client HWM; compact policy deferred to **Phase 16**.
 
-**Still deferred:** Kafka shim, multi-lang clients, SCRAM, mTLS, cooperative rebalance, transactions.
+**Still deferred:** Kafka shim, multi-lang clients, SCRAM, mTLS, transactions.
 
 ---
 
@@ -508,7 +508,25 @@ Binding: **[docs/PHASE16_SPEC.md](./docs/PHASE16_SPEC.md)**.
 
 **Honest limitations:** no dirty-ratio gating; active segment not compacted until roll; tombstones dropped at compact time (no separate tombstone retention); cluster replicas compact independently.
 
-**Still deferred:** Kafka shim, multi-lang clients, SCRAM, mTLS, cooperative rebalance, transactions.
+**Still deferred:** Kafka shim, multi-lang clients, SCRAM, mTLS, transactions.
+
+---
+
+### Phase 17 — Cooperative rebalance ✅
+
+**Goal:** Incremental partition handoff on rebalance — keep fetch positions for sticky-retained partitions; surface revoked lists.
+
+Binding: **[docs/PHASE17_SPEC.md](./docs/PHASE17_SPEC.md)**.
+
+- [x] JoinGroup response trailing `revoked` list (backward compatible)
+- [x] Coordinator tracks per-member `delivered` assignment for accurate revoke
+- [x] `GroupConsumer` cooperative position handoff (retain / add / drop)
+- [x] CLI join line prints `revoked=...`
+- [x] Integration tests (`phase17_cooperative`)
+
+**Honest limitations:** not Kafka cooperative-sticky (no two-phase revoke barrier / assignor epochs); revoke applied at re-join not mid-batch; sticky assignor still Volant-local.
+
+**Still deferred:** Kafka shim, multi-lang clients, SCRAM, mTLS, transactions.
 
 ---
 

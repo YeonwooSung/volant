@@ -26,6 +26,9 @@ pub struct JoinResult {
     pub member_id: String,
     /// This member's assignment: (topic, partition).
     pub assignment: Vec<(String, u32)>,
+    /// Partitions this member lost vs its prior assignment (Phase 17 cooperative).
+    /// Empty when the member is new or the coordinator no longer holds the prior list.
+    pub revoked: Vec<(String, u32)>,
 }
 
 /// Result of Heartbeat.
@@ -104,7 +107,12 @@ struct Member {
     session_timeout_ms: u32,
     last_heartbeat: Instant,
     topics: Vec<String>,
+    /// Current coordinator assignment (updated on every rebalance).
     assignment: Vec<(String, u32)>,
+    /// Assignment last returned to this member on JoinGroup (Phase 17).
+    /// Used to compute `revoked` when the member re-syncs after another
+    /// member's join already updated `assignment`.
+    delivered: Vec<(String, u32)>,
 }
 
 #[derive(Debug)]
@@ -192,11 +200,23 @@ impl GroupCoordinator {
                     .get(&resolved_id)
                     .map(|m| m.assignment.clone())
                     .unwrap_or_default();
+                // Revoked = last delivered to this member − new assignment
+                // (covers both topics-change reassign and re-sync after peer join).
+                let previous = group
+                    .members
+                    .get(&resolved_id)
+                    .map(|m| m.delivered.clone())
+                    .unwrap_or_default();
+                let revoked = partition_diff(&previous, &assignment);
+                if let Some(m) = group.members.get_mut(&resolved_id) {
+                    m.delivered = assignment.clone();
+                }
                 return Ok(JoinResult {
                     error_code: 0,
                     generation: group.generation,
                     member_id: resolved_id,
                     assignment,
+                    revoked,
                 });
             }
         }
@@ -208,6 +228,7 @@ impl GroupCoordinator {
             resolved_id
         };
 
+        // New member (or unknown id): no prior assignment to revoke.
         group.members.insert(
             mid.clone(),
             Member {
@@ -216,6 +237,7 @@ impl GroupCoordinator {
                 last_heartbeat: Instant::now(),
                 topics,
                 assignment: Vec::new(),
+                delivered: Vec::new(),
             },
         );
 
@@ -227,12 +249,16 @@ impl GroupCoordinator {
             .get(&mid)
             .map(|m| m.assignment.clone())
             .unwrap_or_default();
+        if let Some(m) = group.members.get_mut(&mid) {
+            m.delivered = assignment.clone();
+        }
 
         Ok(JoinResult {
             error_code: 0,
             generation: group.generation,
             member_id: mid,
             assignment,
+            revoked: Vec::new(),
         })
     }
 
@@ -501,6 +527,15 @@ impl GroupCoordinator {
     }
 }
 
+/// Partitions in `old` that are not in `new` (set difference).
+fn partition_diff(old: &[(String, u32)], new: &[(String, u32)]) -> Vec<(String, u32)> {
+    let new_set: std::collections::HashSet<&(String, u32)> = new.iter().collect();
+    old.iter()
+        .filter(|tp| !new_set.contains(tp))
+        .cloned()
+        .collect()
+}
+
 fn reassign<F>(group: &mut Group, partition_counts: &F)
 where
     F: Fn(&str) -> Option<u32>,
@@ -651,6 +686,96 @@ mod tests {
         assert_eq!(ok.error_code, 0);
         let bad = coord.heartbeat("g", &j.member_id, j.generation + 1);
         assert_eq!(bad.error_code, ErrorCode::RebalanceInProgress as u16);
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn topics_change_returns_revoked_partitions() {
+        let dir = temp_dir();
+        let coord = GroupCoordinator::new(&dir).unwrap();
+        let counts_multi = |t: &str| -> Option<u32> {
+            match t {
+                "t" | "u" => Some(4),
+                _ => None,
+            }
+        };
+        let j1 = coord
+            .join("g", "", 10_000, vec!["t".into()], "", counts_multi)
+            .unwrap();
+        assert!(j1.revoked.is_empty());
+        assert_eq!(j1.assignment.len(), 4);
+
+        // Change subscription from t → u: all t partitions are revoked.
+        let j2 = coord
+            .join(
+                "g",
+                &j1.member_id,
+                10_000,
+                vec!["u".into()],
+                "",
+                counts_multi,
+            )
+            .unwrap();
+        assert_eq!(j2.error_code, 0);
+        let revoked: std::collections::HashSet<_> = j2.revoked.iter().cloned().collect();
+        let old: std::collections::HashSet<_> = j1.assignment.iter().cloned().collect();
+        assert_eq!(revoked, old);
+        assert!(j2
+            .assignment
+            .iter()
+            .all(|(t, _)| t == "u"));
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn new_member_join_has_empty_revoked() {
+        let dir = temp_dir();
+        let coord = GroupCoordinator::new(&dir).unwrap();
+        let j1 = coord
+            .join("g", "", 10_000, vec!["t".into()], "", counts)
+            .unwrap();
+        let j2 = coord
+            .join("g", "", 10_000, vec!["t".into()], "", counts)
+            .unwrap();
+        assert!(j1.revoked.is_empty());
+        assert!(j2.revoked.is_empty());
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn resync_after_peer_join_returns_revoked() {
+        let dir = temp_dir();
+        let coord = GroupCoordinator::new(&dir).unwrap();
+        let j1 = coord
+            .join("g", "", 10_000, vec!["t".into()], "", counts)
+            .unwrap();
+        assert_eq!(j1.assignment.len(), 4);
+        let first: std::collections::HashSet<_> = j1.assignment.iter().cloned().collect();
+
+        let j2 = coord
+            .join("g", "", 10_000, vec!["t".into()], "", counts)
+            .unwrap();
+        assert!(j2.revoked.is_empty());
+
+        // Member 1 re-syncs: should see revoked = old − new.
+        let j1b = coord
+            .join(
+                "g",
+                &j1.member_id,
+                10_000,
+                vec!["t".into()],
+                "",
+                counts,
+            )
+            .unwrap();
+        let now: std::collections::HashSet<_> = j1b.assignment.iter().cloned().collect();
+        let revoked: std::collections::HashSet<_> = j1b.revoked.iter().cloned().collect();
+        let expected_revoked: std::collections::HashSet<_> =
+            first.difference(&now).cloned().collect();
+        assert_eq!(revoked, expected_revoked);
+        assert!(!j1b.revoked.is_empty(), "solo→two members should revoke some");
+        // Retained partitions are sticky subset of original.
+        assert!(now.is_subset(&first));
         let _ = fs::remove_dir_all(&dir);
     }
 }

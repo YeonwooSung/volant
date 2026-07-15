@@ -169,6 +169,18 @@ unknown groups return NotFound.
 
 Rebalance uses a **sticky** assignor by default (minimize ownership churn).
 
+## Cooperative rebalance (Phase 17)
+
+On re-JoinGroup after a generation bump, consumers keep in-memory fetch
+positions for partitions they still own and only OffsetFetch newly assigned
+partitions. JoinGroup responses include a trailing **`revoked`** list
+(partitions lost since the member's last join).
+
+`GroupConsumer` applies this automatically; CLI group consume prints
+`revoked=[...]` on join.
+
+Not Kafka cooperative-sticky (no two-phase revoke barrier).
+
 ## Group list & delete offsets (Phase 12)
 
 ```bash
@@ -252,5 +264,5 @@ is only compacted after it rolls.
 ## Deferred
 
 Kafka wire shim, multi-language clients, SCRAM, mTLS identity, full chaos-mesh
-suites, cargo-fuzz corpus CI, cooperative rebalance, transactions.
+suites, cargo-fuzz corpus CI, transactions.
 See [ROADMAP.md](../ROADMAP.md).

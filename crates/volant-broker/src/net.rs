@@ -906,6 +906,11 @@ async fn handle_request(broker: &Broker, req: Request) -> Result<Response> {
                     .into_iter()
                     .map(|(topic, partition)| Assignment { topic, partition })
                     .collect(),
+                revoked: result
+                    .revoked
+                    .into_iter()
+                    .map(|(topic, partition)| Assignment { topic, partition })
+                    .collect(),
             })
         }
         Request::Heartbeat {

@@ -158,8 +158,11 @@ ListOffsets).
 **Phase 16:** `cleanup.policy=compact` — key compaction on sealed segments
 (tombstone = empty value).
 
+**Phase 17:** cooperative rebalance — JoinGroup `revoked` list; `GroupConsumer`
+keeps fetch positions on sticky-retained partitions.
+
 **Still deferred:** Kafka wire shim, multi-language clients, SCRAM, mTLS identity,
-chaos-mesh / cargo-fuzz corpus CI, cooperative rebalance, transactions.
+chaos-mesh / cargo-fuzz corpus CI, transactions.
 
 ### Networked client (library)
 

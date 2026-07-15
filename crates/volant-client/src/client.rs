@@ -73,6 +73,10 @@ pub struct JoinGroupResult {
     pub member_id: String,
     /// Partition assignment for this member.
     pub assignment: Vec<Assignment>,
+    /// Partitions this member lost vs prior assignment (Phase 17).
+    /// May be empty when the broker cannot observe the prior list; clients
+    /// should also diff local old vs new assignment.
+    pub revoked: Vec<Assignment>,
 }
 
 /// Result of a Heartbeat call.
@@ -819,12 +823,14 @@ impl Client {
                 generation,
                 member_id,
                 assignment,
+                revoked,
             } => {
                 check_ok(error_code, "join_group")?;
                 Ok(JoinGroupResult {
                     generation,
                     member_id,
                     assignment,
+                    revoked,
                 })
             }
             Response::Error { code, message } => Err(error_from_code(code, message)),

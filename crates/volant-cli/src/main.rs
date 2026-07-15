@@ -675,10 +675,11 @@ async fn main() -> Result<()> {
                 .with_context(|| format!("join group '{group_id}'"))?;
 
                 println!(
-                    "joined group={group_id} member={} generation={} assignment={:?}",
+                    "joined group={group_id} member={} generation={} assignment={:?} revoked={:?}",
                     consumer.member_id(),
                     consumer.generation(),
-                    consumer.assignment()
+                    consumer.assignment(),
+                    consumer.last_revoked()
                 );
 
                 let mut total = 0u32;

@@ -1,6 +1,6 @@
 //! Group-coordinated consumer (`GroupConsumer`).
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 
 use volant_core::{Offset, Result};
@@ -23,6 +23,8 @@ pub struct GroupConsumer {
     group_instance_id: String,
     generation: u32,
     assignment: Vec<(String, u32)>,
+    /// Partitions dropped on the last rebalance (Phase 17 cooperative).
+    last_revoked: Vec<(String, u32)>,
     /// Next fetch offset per (topic, partition).
     positions: HashMap<(String, u32), u64>,
 }
@@ -64,6 +66,7 @@ impl GroupConsumer {
             group_instance_id,
             generation: 0,
             assignment: Vec::new(),
+            last_revoked: Vec::new(),
             positions: HashMap::new(),
         };
         this.do_join().await?;
@@ -71,6 +74,7 @@ impl GroupConsumer {
     }
 
     async fn do_join(&mut self) -> Result<()> {
+        let previous = self.assignment.clone();
         let result = self
             .client
             .join_group_with_instance(
@@ -83,22 +87,62 @@ impl GroupConsumer {
             .await?;
         self.member_id = result.member_id;
         self.generation = result.generation;
-        self.assignment = result
+        let new_assignment: Vec<(String, u32)> = result
             .assignment
             .into_iter()
             .map(|a| (a.topic, a.partition))
             .collect();
-        self.reset_positions_from_offsets().await?;
+
+        // Cooperative handoff (Phase 17): retain positions for sticky-kept
+        // partitions; only OffsetFetch newly assigned; drop revoked.
+        let old_set: HashSet<(String, u32)> = previous.iter().cloned().collect();
+        let new_set: HashSet<(String, u32)> = new_assignment.iter().cloned().collect();
+
+        let mut revoked: Vec<(String, u32)> = old_set
+            .difference(&new_set)
+            .cloned()
+            .collect();
+        // Union with broker-reported revoked (best-effort).
+        for a in result.revoked {
+            let tp = (a.topic, a.partition);
+            if !revoked.contains(&tp) {
+                revoked.push(tp);
+            }
+        }
+        revoked.sort();
+
+        let added: Vec<(String, u32)> = new_set.difference(&old_set).cloned().collect();
+
+        for tp in &revoked {
+            self.positions.remove(tp);
+        }
+
+        self.assignment = new_assignment;
+        self.last_revoked = revoked;
+
+        if !added.is_empty() || self.positions.is_empty() && !self.assignment.is_empty() {
+            // First join: positions empty and assignment full → fetch all.
+            // Rebalance: only fetch offsets for newly added partitions.
+            let to_fetch: Vec<(String, u32)> = if previous.is_empty() {
+                self.assignment.clone()
+            } else {
+                added
+            };
+            self.fetch_positions_for(&to_fetch).await?;
+        }
+
+        // Ensure every assigned partition has a position.
+        for (t, p) in &self.assignment {
+            self.positions.entry((t.clone(), *p)).or_insert(0);
+        }
         Ok(())
     }
 
-    async fn reset_positions_from_offsets(&mut self) -> Result<()> {
-        self.positions.clear();
-        if self.assignment.is_empty() {
+    async fn fetch_positions_for(&mut self, partitions: &[(String, u32)]) -> Result<()> {
+        if partitions.is_empty() {
             return Ok(());
         }
-        let entries: Vec<OffsetEntry> = self
-            .assignment
+        let entries: Vec<OffsetEntry> = partitions
             .iter()
             .map(|(t, p)| OffsetEntry {
                 topic: t.clone(),
@@ -107,12 +151,12 @@ impl GroupConsumer {
             .collect();
         let fetched = self.client.fetch_offsets(&self.group_id, entries).await?;
         for e in fetched {
-            let pos = if e.offset == OFFSET_UNKNOWN { 0 } else { e.offset };
+            let pos = if e.offset == OFFSET_UNKNOWN {
+                0
+            } else {
+                e.offset
+            };
             self.positions.insert((e.topic, e.partition), pos);
-        }
-        // Ensure every assigned partition has a position.
-        for (t, p) in &self.assignment {
-            self.positions.entry((t.clone(), *p)).or_insert(0);
         }
         Ok(())
     }
@@ -179,6 +223,11 @@ impl GroupConsumer {
     /// Current assignment as (topic, partition) pairs.
     pub fn assignment(&self) -> &[(String, u32)] {
         &self.assignment
+    }
+
+    /// Partitions revoked on the most recent join/rebalance (Phase 17).
+    pub fn last_revoked(&self) -> &[(String, u32)] {
+        &self.last_revoked
     }
 
     /// Group member id.

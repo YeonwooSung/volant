@@ -748,12 +748,19 @@ pub fn encode_response(resp: &Response) -> Result<Bytes> {
             generation,
             member_id,
             assignment,
+            revoked,
         } => {
             dst.put_u16_le(*error_code);
             dst.put_u32_le(*generation);
             put_string(&mut dst, member_id)?;
             dst.put_u32_le(assignment.len() as u32);
             for a in assignment {
+                put_string(&mut dst, &a.topic)?;
+                dst.put_u32_le(a.partition);
+            }
+            // Phase 17 trailing revoked list (always written by current encoders).
+            dst.put_u32_le(revoked.len() as u32);
+            for a in revoked {
                 put_string(&mut dst, &a.topic)?;
                 dst.put_u32_le(a.partition);
             }
@@ -1171,11 +1178,28 @@ pub fn decode_response(opcode: u16, payload: &[u8]) -> Result<Response> {
                     partition: src.get_u32_le(),
                 });
             }
+            // Phase 17 trailing revoked list; legacy payloads omit it.
+            let mut revoked = Vec::new();
+            if src.remaining() >= 4 {
+                let revoked_count = src.get_u32_le() as usize;
+                revoked.reserve(revoked_count);
+                for _ in 0..revoked_count {
+                    let topic = get_string(&mut src)?;
+                    if src.remaining() < 4 {
+                        return Err(Error::Protocol("truncated join group revoked partition".into()));
+                    }
+                    revoked.push(Assignment {
+                        topic,
+                        partition: src.get_u32_le(),
+                    });
+                }
+            }
             Ok(Response::JoinGroup {
                 error_code,
                 generation,
                 member_id,
                 assignment,
+                revoked,
             })
         }
         ResponseOpcode::Heartbeat => {
@@ -2079,11 +2103,39 @@ mod tests {
                     partition: 1,
                 },
             ],
+            revoked: vec![Assignment {
+                topic: "events".into(),
+                partition: 2,
+            }],
         };
         let b = encode_response(&join).unwrap();
         assert_eq!(
             decode_response(ResponseOpcode::JoinGroup as u16, &b).unwrap(),
             join
+        );
+
+        // Legacy JoinGroup response without revoked trailer decodes as empty revoked.
+        let mut legacy = bytes::BytesMut::new();
+        legacy.put_u16_le(0);
+        legacy.put_u32_le(1);
+        put_string(&mut legacy, "uuid-1").unwrap();
+        legacy.put_u32_le(1);
+        put_string(&mut legacy, "events").unwrap();
+        legacy.put_u32_le(0);
+        let decoded =
+            decode_response(ResponseOpcode::JoinGroup as u16, &legacy.freeze()).unwrap();
+        assert_eq!(
+            decoded,
+            Response::JoinGroup {
+                error_code: 0,
+                generation: 1,
+                member_id: "uuid-1".into(),
+                assignment: vec![Assignment {
+                    topic: "events".into(),
+                    partition: 0,
+                }],
+                revoked: vec![],
+            }
         );
 
         let of = Response::OffsetFetch {

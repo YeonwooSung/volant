@@ -393,6 +393,9 @@ pub enum Response {
         member_id: String,
         /// This member's partition assignment.
         assignment: Vec<Assignment>,
+        /// Partitions this member lost since its prior assignment (Phase 17).
+        /// Empty when unknown or none revoked. Legacy payloads omit the trailer.
+        revoked: Vec<Assignment>,
     },
     /// Heartbeat result.
     Heartbeat {
