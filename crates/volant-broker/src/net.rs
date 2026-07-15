@@ -577,7 +577,8 @@ fn record_response_metrics(broker: &Broker, resp: &Response) {
         | Response::ListGroups { error_code, .. }
         | Response::DeleteOffsets { error_code, .. }
         | Response::DescribeConfigs { error_code, .. }
-        | Response::AlterConfigs { error_code, .. } => {
+        | Response::AlterConfigs { error_code, .. }
+        | Response::DeleteRecords { error_code, .. } => {
             if *error_code != 0 {
                 m.record_error(*error_code);
             }
@@ -1106,6 +1107,25 @@ async fn handle_request(broker: &Broker, req: Request) -> Result<Response> {
             Err(Error::NotFound(_)) => Ok(Response::AlterConfigs {
                 error_code: ErrorCode::NotFound as u16,
                 topic,
+            }),
+            Err(e) => Err(e),
+        },
+        Request::DeleteRecords {
+            topic,
+            partition,
+            before_offset,
+        } => match broker.delete_records(&topic, partition, before_offset) {
+            Ok((low_watermark, error_code)) => Ok(Response::DeleteRecords {
+                error_code,
+                topic,
+                partition,
+                low_watermark,
+            }),
+            Err(Error::NotFound(_)) => Ok(Response::DeleteRecords {
+                error_code: ErrorCode::NotFound as u16,
+                topic,
+                partition,
+                low_watermark: 0,
             }),
             Err(e) => Err(e),
         },

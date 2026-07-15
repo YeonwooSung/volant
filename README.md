@@ -149,6 +149,9 @@ lag metrics + `volant group lag`.
 **Phase 13:** per-topic configs (`retention.ms` / `retention.bytes` /
 `segment.bytes`), `volant topic describe` / `config`, background retention.
 
+**Phase 14:** single-node topic catalog survives restart; `volant topic
+delete-records` (truncate sealed segments before an offset).
+
 **Still deferred:** Kafka wire shim, multi-language clients, SCRAM, mTLS identity,
 chaos-mesh / cargo-fuzz corpus CI, cooperative rebalance, transactions.
 

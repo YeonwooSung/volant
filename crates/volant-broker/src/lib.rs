@@ -26,6 +26,7 @@ pub mod partition;
 pub mod producer_state;
 pub mod replica;
 pub mod topic;
+pub mod topic_catalog;
 pub mod topic_config;
 
 pub use assignor::{range_assign, range_assign_multi, sticky_assign, sticky_assign_multi};
@@ -38,6 +39,7 @@ pub use group::{
     static_member_id, GroupCoordinator, GroupDescription, GroupListEntry, GroupMemberDescription,
     STATIC_MEMBER_PREFIX,
 };
+pub use topic_catalog::{CatalogTopic, TopicCatalogFile, TopicCatalogStore};
 pub use topic_config::{
     TopicConfig, TopicConfigStore, KEY_RETENTION_BYTES, KEY_RETENTION_MS, KEY_SEGMENT_BYTES,
 };

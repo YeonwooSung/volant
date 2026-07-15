@@ -30,6 +30,7 @@ use crate::producer_state::{
     StoredProducer,
 };
 use crate::topic::Topic;
+use crate::topic_catalog::{CatalogTopic, TopicCatalogFile, TopicCatalogStore};
 use crate::topic_config::{TopicConfig, TopicConfigStore};
 
 /// Snapshot of cluster metadata for a Metadata response.
@@ -174,10 +175,15 @@ pub struct Broker {
     producer_store: ProducerStateStore,
     /// Durable per-topic configs under `data_dir/__topic_configs` (Phase 13).
     topic_configs: TopicConfigStore,
+    /// Durable single-node topic catalog under `data_dir/__topics` (Phase 14).
+    topic_catalog: TopicCatalogStore,
 }
 
 impl Broker {
     /// Create a single-node broker with the given storage configuration.
+    ///
+    /// Reloads topics from `{data_dir}/__topics/catalog.json` and opens existing
+    /// partition logs (Phase 14).
     pub fn new(storage: StorageConfig) -> Self {
         let groups = GroupCoordinator::new(&storage.data_dir)
             .expect("failed to initialize group coordinator / offset store");
@@ -186,7 +192,9 @@ impl Broker {
         let (next_pid, producers) = load_producer_maps(&producer_store);
         let topic_configs = TopicConfigStore::open(&storage.data_dir)
             .expect("failed to open topic config store");
-        Self {
+        let topic_catalog = TopicCatalogStore::open(&storage.data_dir)
+            .expect("failed to open topic catalog store");
+        let broker = Self {
             storage,
             topics: RwLock::new(HashMap::new()),
             next_topic_id: AtomicU32::new(1),
@@ -206,7 +214,12 @@ impl Broker {
             producer_state: RwLock::new(producers),
             producer_store,
             topic_configs,
-        }
+            topic_catalog,
+        };
+        broker
+            .reload_single_node_topics()
+            .expect("failed to reload single-node topic catalog");
+        broker
     }
 
     /// Create a multi-node broker with static cluster config.
@@ -244,6 +257,8 @@ impl Broker {
         let (next_pid, producers) = load_producer_maps(&producer_store);
         let topic_configs = TopicConfigStore::open(&storage.data_dir)
             .expect("failed to open topic config store");
+        let topic_catalog = TopicCatalogStore::open(&storage.data_dir)
+            .expect("failed to open topic catalog store");
         let broker = Self {
             storage,
             topics: RwLock::new(HashMap::new()),
@@ -264,6 +279,7 @@ impl Broker {
             producer_state: RwLock::new(producers),
             producer_store,
             topic_configs,
+            topic_catalog,
         };
         // Open local partitions from persisted assignment.
         broker.apply_local_assignment()?;
@@ -604,6 +620,8 @@ impl Broker {
             .write()
             .insert(name.clone(), AtomicU64::new(0));
         self.topic_configs.save(name.as_str(), &topic_cfg)?;
+        drop(topics);
+        self.persist_topic_catalog()?;
         Ok(id)
     }
 
@@ -713,7 +731,100 @@ impl Broker {
             })?;
         }
         let _ = self.topic_configs.delete(name.as_str());
+        drop(topics);
+        if self.cluster.is_none() {
+            self.persist_topic_catalog()?;
+        }
         Ok(())
+    }
+
+    /// Delete records before `before_offset` on a partition (Phase 14).
+    ///
+    /// Drops whole sealed segments only. Returns `(low_watermark, error_code)`.
+    /// Leader-only in cluster mode; followers are not notified.
+    pub fn delete_records(
+        &self,
+        topic: &str,
+        partition: u32,
+        before_offset: u64,
+    ) -> Result<(u64, u16)> {
+        let name = TopicName::new(topic);
+        let mut topics = self.topics.write();
+        let t = topics
+            .get_mut(&name)
+            .ok_or_else(|| Error::NotFound(format!("topic {topic}")))?;
+        let part = t
+            .partitions
+            .get_mut(&PartitionId(partition))
+            .ok_or_else(|| {
+                Error::NotFound(format!("partition {topic}/{partition}"))
+            })?;
+        if self.cluster.is_some() && !part.is_leader(self.node_id) {
+            return Ok((0, ErrorCode::NotLeaderForPartition as u16));
+        }
+        let low = part
+            .log
+            .delete_records(Offset::new(before_offset))?;
+        Ok((low.raw(), 0))
+    }
+
+    /// Reload topics from the durable single-node catalog (Phase 14).
+    fn reload_single_node_topics(&self) -> Result<()> {
+        if self.cluster.is_some() {
+            return Ok(());
+        }
+        let catalog = self.topic_catalog.load()?;
+        let mut topics = self.topics.write();
+        for (name, meta) in &catalog.topics {
+            if meta.partitions == 0 {
+                continue;
+            }
+            let tname = TopicName::new(name.clone());
+            if topics.contains_key(&tname) {
+                continue;
+            }
+            let cfg = self.topic_configs.load(name).unwrap_or_default();
+            let topic = Topic::create_with_config(
+                TopicId(meta.id),
+                tname.clone(),
+                meta.partitions,
+                &self.storage,
+                &cfg,
+            )?;
+            topics.insert(tname.clone(), topic);
+            self.rr_counters
+                .write()
+                .entry(tname)
+                .or_insert_with(|| AtomicU64::new(0));
+        }
+        let next = catalog.next_id.max(1);
+        let cur = self.next_topic_id.load(Ordering::SeqCst);
+        if next > cur {
+            self.next_topic_id.store(next, Ordering::SeqCst);
+        }
+        Ok(())
+    }
+
+    /// Persist the single-node topic catalog from live topics (Phase 14).
+    fn persist_topic_catalog(&self) -> Result<()> {
+        if self.cluster.is_some() {
+            return Ok(());
+        }
+        let topics = self.topics.read();
+        let mut file = TopicCatalogFile {
+            next_id: self.next_topic_id.load(Ordering::SeqCst),
+            topics: HashMap::new(),
+        };
+        for (name, t) in topics.iter() {
+            file.topics.insert(
+                name.as_str().to_owned(),
+                CatalogTopic {
+                    id: t.id.0,
+                    partitions: t.partitions.len() as u32,
+                },
+            );
+        }
+        self.topic_catalog.save(&file)
     }
 
     /// Describe topic configs (Phase 13).

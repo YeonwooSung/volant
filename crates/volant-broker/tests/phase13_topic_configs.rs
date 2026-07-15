@@ -165,7 +165,7 @@ fn durable_config_survives_store_reload() {
         data_dir: dir.clone(),
         ..StorageConfig::default()
     });
-    // Topic itself is not auto-reloaded on single-node, but config file is.
+    // Config file is durable; Phase 14 also reloads the topic itself.
     // Recreate topic name isn't needed — describe fails without live topic.
     // Load via alter after recreate would merge; check store directly.
     let store = volant_broker::TopicConfigStore::open(&dir).unwrap();

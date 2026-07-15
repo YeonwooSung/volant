@@ -204,6 +204,21 @@ volant topic config set events --key retention.ms --value ''   # clear
 Keys: `retention.ms`, `retention.bytes`, `segment.bytes`. Stored under
 `{data_dir}/__topic_configs/`. Broker applies retention about every 5 seconds.
 
+## Durable topics & delete-records (Phase 14)
+
+Single-node topic metadata is stored under `{data_dir}/__topics/catalog.json`.
+After a broker restart, topics and partition logs reload automatically (no need
+to re-create topics). Multi-node continues to use `cluster/assignment.json`.
+
+```bash
+# Drop sealed segments entirely before offset N on partition P
+volant topic delete-records events --partition 0 --before-offset 1000
+```
+
+DeleteRecords only truncates **whole sealed segments** (same as storage
+`delete_records`). On a multi-node cluster it runs on the leader only; followers
+are not notified (use retention for cluster-wide cleanup).
+
 ## Deferred
 
 Kafka wire shim, multi-language clients, SCRAM, mTLS identity, full chaos-mesh

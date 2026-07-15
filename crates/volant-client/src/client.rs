@@ -113,6 +113,17 @@ pub struct DescribeConfigsResult {
     pub configs: Vec<(String, String)>,
 }
 
+/// Result of DeleteRecords (Phase 14).
+#[derive(Debug, Clone)]
+pub struct DeleteRecordsResult {
+    /// Topic name.
+    pub topic: String,
+    /// Partition id.
+    pub partition: u32,
+    /// New log start offset after deletion.
+    pub low_watermark: u64,
+}
+
 impl HeartbeatResult {
     /// Whether the client should re-join the group.
     pub fn needs_rebalance(&self) -> bool {
@@ -311,6 +322,43 @@ impl Client {
             Response::Error { code, message } => Err(error_from_code(code, message)),
             other => Err(Error::Protocol(format!(
                 "unexpected response for alter_configs: {other:?}"
+            ))),
+        }
+    }
+
+    /// Delete records before `before_offset` on a partition (Phase 14).
+    ///
+    /// Returns the new log start offset (low watermark).
+    pub async fn delete_records(
+        &self,
+        topic: &str,
+        partition: u32,
+        before_offset: u64,
+    ) -> Result<DeleteRecordsResult> {
+        let resp = self
+            .round_trip(Request::DeleteRecords {
+                topic: topic.to_owned(),
+                partition,
+                before_offset,
+            })
+            .await?;
+        match resp {
+            Response::DeleteRecords {
+                error_code,
+                topic,
+                partition,
+                low_watermark,
+            } => {
+                check_ok(error_code, "delete_records")?;
+                Ok(DeleteRecordsResult {
+                    topic,
+                    partition,
+                    low_watermark,
+                })
+            }
+            Response::Error { code, message } => Err(error_from_code(code, message)),
+            other => Err(Error::Protocol(format!(
+                "unexpected response for delete_records: {other:?}"
             ))),
         }
     }

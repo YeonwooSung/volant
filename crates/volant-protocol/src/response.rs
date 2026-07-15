@@ -46,6 +46,8 @@ pub enum ResponseOpcode {
     DescribeConfigs = 41,
     /// Alter configs result (Phase 13).
     AlterConfigs = 43,
+    /// Delete records result (Phase 14).
+    DeleteRecords = 45,
     /// Error response.
     Error = 0xFFFF,
 }
@@ -74,6 +76,7 @@ impl ResponseOpcode {
             39 => Self::DeleteOffsets,
             41 => Self::DescribeConfigs,
             43 => Self::AlterConfigs,
+            45 => Self::DeleteRecords,
             0xFFFF => Self::Error,
             _ => return None,
         })
@@ -491,6 +494,17 @@ pub enum Response {
         /// Topic name.
         topic: String,
     },
+    /// Delete records result (Phase 14).
+    DeleteRecords {
+        /// 0 = ok; 2 = not found; 13 = not leader.
+        error_code: u16,
+        /// Topic name.
+        topic: String,
+        /// Partition id.
+        partition: u32,
+        /// New log start offset after deletion.
+        low_watermark: u64,
+    },
     /// Error response.
     Error {
         /// Error code.
@@ -524,6 +538,7 @@ impl Response {
             Self::DeleteOffsets { .. } => ResponseOpcode::DeleteOffsets as u16,
             Self::DescribeConfigs { .. } => ResponseOpcode::DescribeConfigs as u16,
             Self::AlterConfigs { .. } => ResponseOpcode::AlterConfigs as u16,
+            Self::DeleteRecords { .. } => ResponseOpcode::DeleteRecords as u16,
             Self::Error { .. } => ResponseOpcode::Error as u16,
         }
     }

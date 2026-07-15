@@ -301,6 +301,15 @@ pub fn encode_request(req: &Request) -> Result<Bytes> {
                 put_string(&mut dst, v)?;
             }
         }
+        Request::DeleteRecords {
+            topic,
+            partition,
+            before_offset,
+        } => {
+            put_string(&mut dst, topic)?;
+            dst.put_u32_le(*partition);
+            dst.put_u64_le(*before_offset);
+        }
     }
     finish_payload(dst)
 }
@@ -581,6 +590,19 @@ pub fn decode_request(opcode: u16, payload: &[u8]) -> Result<Request> {
             }
             Ok(Request::AlterConfigs { topic, configs })
         }
+        RequestOpcode::DeleteRecords => {
+            let topic = get_string(&mut src)?;
+            if src.remaining() < 4 + 8 {
+                return Err(Error::Protocol("truncated delete records".into()));
+            }
+            let partition = src.get_u32_le();
+            let before_offset = src.get_u64_le();
+            Ok(Request::DeleteRecords {
+                topic,
+                partition,
+                before_offset,
+            })
+        }
     }
 }
 
@@ -839,6 +861,17 @@ pub fn encode_response(resp: &Response) -> Result<Bytes> {
         Response::AlterConfigs { error_code, topic } => {
             dst.put_u16_le(*error_code);
             put_string(&mut dst, topic)?;
+        }
+        Response::DeleteRecords {
+            error_code,
+            topic,
+            partition,
+            low_watermark,
+        } => {
+            dst.put_u16_le(*error_code);
+            put_string(&mut dst, topic)?;
+            dst.put_u32_le(*partition);
+            dst.put_u64_le(*low_watermark);
         }
         Response::Error { code, message } => {
             dst.put_u16_le(*code);
@@ -1366,6 +1399,24 @@ pub fn decode_response(opcode: u16, payload: &[u8]) -> Result<Response> {
             let topic = get_string(&mut src)?;
             Ok(Response::AlterConfigs { error_code, topic })
         }
+        ResponseOpcode::DeleteRecords => {
+            if src.remaining() < 2 {
+                return Err(Error::Protocol("truncated delete records error".into()));
+            }
+            let error_code = src.get_u16_le();
+            let topic = get_string(&mut src)?;
+            if src.remaining() < 4 + 8 {
+                return Err(Error::Protocol("truncated delete records body".into()));
+            }
+            let partition = src.get_u32_le();
+            let low_watermark = src.get_u64_le();
+            Ok(Response::DeleteRecords {
+                error_code,
+                topic,
+                partition,
+                low_watermark,
+            })
+        }
         ResponseOpcode::Error => {
             if src.remaining() < 2 {
                 return Err(Error::Protocol("truncated error code".into()));
@@ -1588,6 +1639,31 @@ mod tests {
         assert_eq!(
             decode_response(ResponseOpcode::AlterConfigs as u16, &b).unwrap(),
             alt_resp
+        );
+    }
+
+    #[test]
+    fn phase14_delete_records_roundtrip() {
+        let req = Request::DeleteRecords {
+            topic: "events".into(),
+            partition: 2,
+            before_offset: 100,
+        };
+        let b = encode_request(&req).unwrap();
+        assert_eq!(
+            decode_request(RequestOpcode::DeleteRecords as u16, &b).unwrap(),
+            req
+        );
+        let resp = Response::DeleteRecords {
+            error_code: 0,
+            topic: "events".into(),
+            partition: 2,
+            low_watermark: 96,
+        };
+        let b = encode_response(&resp).unwrap();
+        assert_eq!(
+            decode_response(ResponseOpcode::DeleteRecords as u16, &b).unwrap(),
+            resp
         );
     }
 

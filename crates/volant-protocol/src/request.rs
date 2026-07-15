@@ -46,6 +46,8 @@ pub enum RequestOpcode {
     DescribeConfigs = 40,
     /// Alter topic configs (Phase 13).
     AlterConfigs = 42,
+    /// Delete records before an offset (Phase 14).
+    DeleteRecords = 44,
 }
 
 impl RequestOpcode {
@@ -72,6 +74,7 @@ impl RequestOpcode {
             38 => Self::DeleteOffsets,
             40 => Self::DescribeConfigs,
             42 => Self::AlterConfigs,
+            44 => Self::DeleteRecords,
             _ => return None,
         })
     }
@@ -274,6 +277,15 @@ pub enum Request {
         /// Config entries; empty value clears that key.
         configs: Vec<(String, String)>,
     },
+    /// Delete records before an offset (Phase 14).
+    DeleteRecords {
+        /// Topic name.
+        topic: String,
+        /// Partition id.
+        partition: u32,
+        /// Drop sealed segments entirely before this offset.
+        before_offset: u64,
+    },
 }
 
 impl Request {
@@ -300,6 +312,7 @@ impl Request {
             Self::DeleteOffsets { .. } => RequestOpcode::DeleteOffsets as u16,
             Self::DescribeConfigs { .. } => RequestOpcode::DescribeConfigs as u16,
             Self::AlterConfigs { .. } => RequestOpcode::AlterConfigs as u16,
+            Self::DeleteRecords { .. } => RequestOpcode::DeleteRecords as u16,
         }
     }
 }

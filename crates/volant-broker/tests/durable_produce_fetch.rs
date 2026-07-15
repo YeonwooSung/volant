@@ -169,15 +169,13 @@ fn durable_reopen_via_broker_preserves_records() {
         // Broker + open PartitionLogs drop here.
     }
 
-    // Reopen same data_dir; topic metadata is in-memory so recreate the topic
-    // (PartitionLog::open must recover segments from disk).
+    // Reopen same data_dir; Phase 14 catalog reloads the topic and opens logs.
     let config = StorageConfig {
         data_dir: data_dir.clone(),
         flush_every_n: 0,
         ..StorageConfig::default()
     };
     let broker = Broker::new(config);
-    broker.create_topic(topic.clone(), 1).unwrap();
 
     let records = broker.fetch(&topic, partition, Offset::ZERO, 100).unwrap();
     assert_eq!(

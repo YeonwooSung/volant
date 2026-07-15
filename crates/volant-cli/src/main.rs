@@ -126,6 +126,20 @@ enum TopicCmd {
         #[command(subcommand)]
         action: TopicConfigCmd,
     },
+    /// Delete records before an offset (Phase 14).
+    DeleteRecords {
+        /// Topic name.
+        name: String,
+        /// Partition id.
+        #[arg(long)]
+        partition: u32,
+        /// Drop sealed segments entirely before this offset.
+        #[arg(long)]
+        before_offset: u64,
+        /// Broker address.
+        #[arg(long, default_value = "127.0.0.1:9092")]
+        broker: String,
+    },
 }
 
 #[derive(Debug, Subcommand)]
@@ -243,7 +257,7 @@ async fn main() -> Result<()> {
     match cli.command {
         Commands::Version => {
             println!("volant {}", env!("CARGO_PKG_VERSION"));
-            println!("status: Phase 13 — topic configs and retention ops");
+            println!("status: Phase 14 — durable topics and delete-records");
         }
         Commands::Topic { action } => match action {
             TopicCmd::List { broker } => {
@@ -343,6 +357,22 @@ async fn main() -> Result<()> {
                     }
                 }
             },
+            TopicCmd::DeleteRecords {
+                name,
+                partition,
+                before_offset,
+                broker,
+            } => {
+                let client = connect(&broker, auth).await?;
+                let res = client
+                    .delete_records(&name, partition, before_offset)
+                    .await
+                    .with_context(|| format!("delete-records '{name}' p{partition}"))?;
+                println!(
+                    "deleted records before {before_offset} on {name}/{partition}; low_watermark={}",
+                    res.low_watermark
+                );
+            }
         },
         Commands::Group { action } => match action {
             GroupCmd::FetchOffsets {

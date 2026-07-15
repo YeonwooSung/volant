@@ -451,7 +451,25 @@ Binding: **[docs/PHASE13_SPEC.md](./docs/PHASE13_SPEC.md)**.
 - [x] Background retention task (5s)
 - [x] Integration tests (`phase13_topic_configs`)
 
-**Honest limitations:** single-node still does not auto-reload topic partitions on restart (configs durable); no compact cleanup policy.
+**Honest limitations (at ship):** configs durable; topic partition auto-reload on restart deferred to **Phase 14**. No compact cleanup policy.
+
+**Still deferred:** Kafka shim, multi-lang clients, SCRAM, mTLS, cooperative rebalance, transactions.
+
+---
+
+### Phase 14 — Durable topic catalog & DeleteRecords ✅
+
+**Goal:** Single-node topics and data survive broker restart; admin truncate-by-offset.
+
+Binding: **[docs/PHASE14_SPEC.md](./docs/PHASE14_SPEC.md)**.
+
+- [x] Durable catalog `{data_dir}/__topics/catalog.json` (id + partition count)
+- [x] `Broker::new` reloads topics and opens existing partition logs (+ Phase 13 configs)
+- [x] Persist catalog on create/delete (single-node); cluster still uses `assignment.json`
+- [x] `DeleteRecords` (opcode 44/45) + `Client::delete_records` + `volant topic delete-records`
+- [x] Integration tests (`phase14_topic_catalog`)
+
+**Honest limitations:** DeleteRecords does not fan out to cluster followers; no compact policy; no dynamic partition count increase.
 
 **Still deferred:** Kafka shim, multi-lang clients, SCRAM, mTLS, cooperative rebalance, transactions.
 
