@@ -145,6 +145,15 @@ fn dispatch_kafka(broker: &Broker, body: bytes::Bytes, conn: &mut KafkaConnState
     ) || matches!(
         (api, hdr.api_version),
         (Some(ApiKey::OffsetFetch), v) if v >= 6
+    ) || matches!(
+        (api, hdr.api_version),
+        (Some(ApiKey::DescribeGroups), v) if v >= 5
+    ) || matches!(
+        (api, hdr.api_version),
+        (Some(ApiKey::ListGroups), v) if v >= 3
+    ) || matches!(
+        (api, hdr.api_version),
+        (Some(ApiKey::DeleteGroups), v) if v >= 2
     );
 
     let mut out = BytesMut::new();
@@ -301,13 +310,28 @@ fn dispatch_kafka(broker: &Broker, body: bytes::Bytes, conn: &mut KafkaConnState
             }
             encode_offset_fetch(broker, &mut src, &mut out, hdr.api_version, principal);
         }
-        Some(ApiKey::DescribeGroups) if (0..=4).contains(&hdr.api_version) => {
+        Some(ApiKey::DescribeGroups) if (0..=5).contains(&hdr.api_version) => {
+            if hdr.api_version >= 5 {
+                if let Err(e) = skip_tag_buffer(&mut src) {
+                    debug!(error = %e, "describe groups flexible header tag buffer");
+                }
+            }
             encode_describe_groups(broker, &mut src, &mut out, hdr.api_version, principal);
         }
-        Some(ApiKey::ListGroups) if (0..=2).contains(&hdr.api_version) => {
-            encode_list_groups(broker, &mut out, hdr.api_version, principal);
+        Some(ApiKey::ListGroups) if (0..=3).contains(&hdr.api_version) => {
+            if hdr.api_version >= 3 {
+                if let Err(e) = skip_tag_buffer(&mut src) {
+                    debug!(error = %e, "list groups flexible header tag buffer");
+                }
+            }
+            encode_list_groups(broker, &mut src, &mut out, hdr.api_version, principal);
         }
-        Some(ApiKey::DeleteGroups) if (0..=1).contains(&hdr.api_version) => {
+        Some(ApiKey::DeleteGroups) if (0..=2).contains(&hdr.api_version) => {
+            if hdr.api_version >= 2 {
+                if let Err(e) = skip_tag_buffer(&mut src) {
+                    debug!(error = %e, "delete groups flexible header tag buffer");
+                }
+            }
             encode_delete_groups(broker, &mut src, &mut out, hdr.api_version, principal);
         }
         Some(ApiKey::OffsetDelete) if hdr.api_version == 0 => {
@@ -4411,10 +4435,21 @@ fn encode_offset_fetch_multi(
     put_empty_tag_buffer(out); // top-level tags
 }
 
-fn encode_list_groups(broker: &Broker, out: &mut BytesMut, version: i16, principal: &str) {
-    // ListGroups classic v0–2:
-    //   request: empty
-    //   response: throttle_time_ms (v1+), error_code, [group_id, protocol_type]
+fn encode_list_groups(
+    broker: &Broker,
+    src: &mut impl Buf,
+    out: &mut BytesMut,
+    version: i16,
+    principal: &str,
+) {
+    // ListGroups classic v0–2: empty request; response throttle (v1+), error, groups[].
+    // Flexible v3: request body is TAG_BUFFER only; response uses compact strings/arrays
+    // and response header v1. StatesFilter (v4) / TypesFilter (v5) deferred.
+    let flexible = version >= 3;
+    if flexible {
+        let _ = skip_tag_buffer(src); // body tags (no fields until v4)
+    }
+
     if version >= 1 {
         out.put_i32(0); // throttle
     }
@@ -4427,15 +4462,30 @@ fn encode_list_groups(broker: &Broker, out: &mut BytesMut, version: i16, princip
         )
     {
         out.put_i16(KafkaErrorCode::ClusterAuthorizationFailed.as_i16());
-        out.put_i32(0);
+        if flexible {
+            put_compact_array_len(out, 0);
+            put_empty_tag_buffer(out);
+        } else {
+            out.put_i32(0);
+        }
         return;
     }
     let groups = broker.groups().list_groups();
     out.put_i16(KafkaErrorCode::None.as_i16());
-    out.put_i32(groups.len() as i32);
-    for g in groups {
-        put_string(out, &g.group_id);
-        put_string(out, "consumer"); // protocol_type
+    if flexible {
+        put_compact_array_len(out, groups.len());
+        for g in groups {
+            put_compact_string(out, &g.group_id);
+            put_compact_string(out, "consumer");
+            put_empty_tag_buffer(out); // ListedGroup tags
+        }
+        put_empty_tag_buffer(out); // top-level tags
+    } else {
+        out.put_i32(groups.len() as i32);
+        for g in groups {
+            put_string(out, &g.group_id);
+            put_string(out, "consumer"); // protocol_type
+        }
     }
 }
 
@@ -4446,37 +4496,79 @@ fn encode_describe_groups(
     version: i16,
     principal: &str,
 ) {
-    // DescribeGroups classic v0–4:
-    //   request: [group_id], include_authorized_operations (v3+)
-    //   response: throttle (v1+), [error, group_id, state, protocol_type, protocol,
+    // DescribeGroups classic v0–4 + flexible v5:
+    //   request: groups[], include_authorized_operations (v3+)
+    //   response: throttle (v1+), groups[{error, group_id, state, protocol_type, protocol,
     //             members[{member_id, group_instance_id (v4+), client_id, client_host,
-    //             metadata, assignment}], authorized_operations (v3+)]
-    if src.remaining() < 4 {
-        if version >= 1 {
-            out.put_i32(0);
-        }
-        out.put_i32(0);
-        return;
-    }
-    let n = src.get_i32();
+    //             metadata, assignment}], authorized_operations (v3+)}]
+    // Flexible v5: compact arrays/strings/bytes + TAG_BUFFER; ErrorMessage (v6) deferred.
+    let flexible = version >= 5;
     let mut ids = Vec::new();
-    for _ in 0..n.max(0) {
-        match get_string(src) {
-            Ok(g) => ids.push(g),
-            Err(_) => break,
+    let include_ops;
+    if flexible {
+        match get_compact_array_len(src) {
+            Ok(Some(n)) => {
+                for _ in 0..n {
+                    match get_compact_string(src) {
+                        Ok(g) => ids.push(g),
+                        Err(_) => break,
+                    }
+                }
+            }
+            Ok(None) | Err(_) => {}
         }
-    }
-    let include_ops = if version >= 3 && src.remaining() >= 1 {
-        src.get_u8() != 0
+        include_ops = if version >= 3 && src.remaining() >= 1 {
+            src.get_u8() != 0
+        } else {
+            false
+        };
+        let _ = skip_tag_buffer(src);
     } else {
-        false
-    };
+        if src.remaining() < 4 {
+            if version >= 1 {
+                out.put_i32(0);
+            }
+            out.put_i32(0);
+            return;
+        }
+        let n = src.get_i32();
+        for _ in 0..n.max(0) {
+            match get_string(src) {
+                Ok(g) => ids.push(g),
+                Err(_) => break,
+            }
+        }
+        include_ops = if version >= 3 && src.remaining() >= 1 {
+            src.get_u8() != 0
+        } else {
+            false
+        };
+    }
 
     if version >= 1 {
         out.put_i32(0); // throttle
     }
-    out.put_i32(ids.len() as i32);
+    if flexible {
+        put_compact_array_len(out, ids.len());
+    } else {
+        out.put_i32(ids.len() as i32);
+    }
     for group_id in ids {
+        let write_strings = |out: &mut BytesMut, err: i16, state: &str, ptype: &str, proto: &str| {
+            out.put_i16(err);
+            if flexible {
+                put_compact_string(out, &group_id);
+                put_compact_string(out, state);
+                put_compact_string(out, ptype);
+                put_compact_string(out, proto);
+            } else {
+                put_string(out, &group_id);
+                put_string(out, state);
+                put_string(out, ptype);
+                put_string(out, proto);
+            }
+        };
+
         if broker.acls().is_enabled()
             && !broker.acls().authorize(
                 Some(principal),
@@ -4485,46 +4577,66 @@ fn encode_describe_groups(
                 AclOperation::Describe,
             )
         {
-            out.put_i16(KafkaErrorCode::GroupAuthorizationFailed.as_i16());
-            put_string(out, &group_id);
-            put_string(out, ""); // state
-            put_string(out, ""); // protocol_type
-            put_string(out, ""); // protocol
-            out.put_i32(0); // members
+            write_strings(
+                out,
+                KafkaErrorCode::GroupAuthorizationFailed.as_i16(),
+                "",
+                "",
+                "",
+            );
+            if flexible {
+                put_compact_array_len(out, 0);
+            } else {
+                out.put_i32(0); // members
+            }
             if version >= 3 {
                 out.put_i32(group_authorized_ops(broker, principal, &group_id, include_ops));
+            }
+            if flexible {
+                put_empty_tag_buffer(out); // DescribedGroup tags
             }
             continue;
         }
 
         match broker.groups().describe_group(&group_id) {
             Some(desc) => {
-                out.put_i16(KafkaErrorCode::None.as_i16());
-                put_string(out, &group_id);
-                put_string(out, "Stable");
-                put_string(out, "consumer");
-                put_string(out, "range");
-                out.put_i32(desc.members.len() as i32);
+                write_strings(out, KafkaErrorCode::None.as_i16(), "Stable", "consumer", "range");
+                if flexible {
+                    put_compact_array_len(out, desc.members.len());
+                } else {
+                    out.put_i32(desc.members.len() as i32);
+                }
                 for m in &desc.members {
-                    put_string(out, &m.member_id);
-                    if version >= 4 {
-                        // Derive instance id from Phase 12 static: prefix.
-                        if let Some(inst) = m.member_id.strip_prefix("static:") {
-                            put_nullable_string(out, Some(inst));
-                        } else {
-                            put_nullable_string(out, None);
-                        }
-                    }
-                    put_string(out, "volant-kafka"); // client_id
-                    put_string(out, "/"); // client_host
+                    let instance = m.member_id.strip_prefix("static:");
                     let topics: Vec<&str> = m.topics.iter().map(|s| s.as_str()).collect();
                     let meta = super::codec::encode_consumer_subscription(&topics);
-                    put_bytes(out, Some(&meta));
                     let asg = encode_consumer_assignment(&m.assignment);
-                    put_bytes(out, Some(&asg));
+                    if flexible {
+                        put_compact_string(out, &m.member_id);
+                        if version >= 4 {
+                            put_compact_nullable_string(out, instance);
+                        }
+                        put_compact_string(out, "volant-kafka");
+                        put_compact_string(out, "/");
+                        put_compact_bytes(out, Some(&meta));
+                        put_compact_bytes(out, Some(&asg));
+                        put_empty_tag_buffer(out); // member tags
+                    } else {
+                        put_string(out, &m.member_id);
+                        if version >= 4 {
+                            put_nullable_string(out, instance);
+                        }
+                        put_string(out, "volant-kafka");
+                        put_string(out, "/");
+                        put_bytes(out, Some(&meta));
+                        put_bytes(out, Some(&asg));
+                    }
                 }
                 if version >= 3 {
                     out.put_i32(group_authorized_ops(broker, principal, &group_id, include_ops));
+                }
+                if flexible {
+                    put_empty_tag_buffer(out); // DescribedGroup tags
                 }
             }
             None => {
@@ -4535,25 +4647,32 @@ fn encode_describe_groups(
                     .iter()
                     .any(|g| g == &group_id);
                 if known {
-                    out.put_i16(KafkaErrorCode::None.as_i16());
-                    put_string(out, &group_id);
-                    put_string(out, "Empty");
-                    put_string(out, "consumer");
-                    put_string(out, "");
-                    out.put_i32(0);
+                    write_strings(out, KafkaErrorCode::None.as_i16(), "Empty", "consumer", "");
                 } else {
-                    out.put_i16(KafkaErrorCode::GroupIdNotFound.as_i16());
-                    put_string(out, &group_id);
-                    put_string(out, "Dead");
-                    put_string(out, "");
-                    put_string(out, "");
+                    write_strings(
+                        out,
+                        KafkaErrorCode::GroupIdNotFound.as_i16(),
+                        "Dead",
+                        "",
+                        "",
+                    );
+                }
+                if flexible {
+                    put_compact_array_len(out, 0);
+                } else {
                     out.put_i32(0);
                 }
                 if version >= 3 {
                     out.put_i32(group_authorized_ops(broker, principal, &group_id, include_ops));
                 }
+                if flexible {
+                    put_empty_tag_buffer(out);
+                }
             }
         }
+    }
+    if flexible {
+        put_empty_tag_buffer(out); // top-level tags
     }
 }
 
@@ -4694,31 +4813,56 @@ fn encode_delete_groups(
     broker: &Broker,
     src: &mut impl Buf,
     out: &mut BytesMut,
-    _version: i16,
+    version: i16,
     principal: &str,
 ) {
-    // DeleteGroups classic v0–1:
-    //   request: [group_id]
-    //   response: throttle_time_ms (all versions), [group_id, error_code]
+    // DeleteGroups classic v0–1 + flexible v2:
+    //   request: groups_names[]
+    //   response: throttle_time_ms (all versions), results[{group_id, error_code}]
     // Kafka includes throttle from v0; Phase 43 corrects the earlier missing field.
-    if src.remaining() < 4 {
-        out.put_i32(0); // throttle
-        out.put_i32(0); // results
-        return;
-    }
-    let n = src.get_i32();
+    // Flexible v2: compact arrays/strings + TAG_BUFFER; ErrorMessage (v3) deferred.
+    let flexible = version >= 2;
     let mut ids = Vec::new();
-    for _ in 0..n.max(0) {
-        match get_string(src) {
-            Ok(g) => ids.push(g),
-            Err(_) => break,
+    if flexible {
+        match get_compact_array_len(src) {
+            Ok(Some(n)) => {
+                for _ in 0..n {
+                    match get_compact_string(src) {
+                        Ok(g) => ids.push(g),
+                        Err(_) => break,
+                    }
+                }
+            }
+            Ok(None) | Err(_) => {}
+        }
+        let _ = skip_tag_buffer(src);
+    } else {
+        if src.remaining() < 4 {
+            out.put_i32(0); // throttle
+            out.put_i32(0); // results
+            return;
+        }
+        let n = src.get_i32();
+        for _ in 0..n.max(0) {
+            match get_string(src) {
+                Ok(g) => ids.push(g),
+                Err(_) => break,
+            }
         }
     }
     out.put_i32(0); // throttle
-    out.put_i32(ids.len() as i32);
+    if flexible {
+        put_compact_array_len(out, ids.len());
+    } else {
+        out.put_i32(ids.len() as i32);
+    }
     for group_id in ids {
-        put_string(out, &group_id);
-        if broker.acls().is_enabled()
+        if flexible {
+            put_compact_string(out, &group_id);
+        } else {
+            put_string(out, &group_id);
+        }
+        let err = if broker.acls().is_enabled()
             && !broker.acls().authorize(
                 Some(principal),
                 ResourceType::Group,
@@ -4726,16 +4870,23 @@ fn encode_delete_groups(
                 AclOperation::Delete,
             )
         {
-            out.put_i16(KafkaErrorCode::GroupAuthorizationFailed.as_i16());
-            continue;
+            KafkaErrorCode::GroupAuthorizationFailed.as_i16()
+        } else {
+            match broker.groups().delete_group(&group_id) {
+                Ok(0) => KafkaErrorCode::None.as_i16(),
+                Ok(68) => KafkaErrorCode::NonEmptyGroup.as_i16(),
+                Ok(69) => KafkaErrorCode::GroupIdNotFound.as_i16(),
+                Ok(_) => KafkaErrorCode::Unknown.as_i16(),
+                Err(_) => KafkaErrorCode::Unknown.as_i16(),
+            }
+        };
+        out.put_i16(err);
+        if flexible {
+            put_empty_tag_buffer(out); // DeletableGroupResult tags
         }
-        match broker.groups().delete_group(&group_id) {
-            Ok(0) => out.put_i16(KafkaErrorCode::None.as_i16()),
-            Ok(68) => out.put_i16(KafkaErrorCode::NonEmptyGroup.as_i16()),
-            Ok(69) => out.put_i16(KafkaErrorCode::GroupIdNotFound.as_i16()),
-            Ok(_) => out.put_i16(KafkaErrorCode::Unknown.as_i16()),
-            Err(_) => out.put_i16(KafkaErrorCode::Unknown.as_i16()),
-        }
+    }
+    if flexible {
+        put_empty_tag_buffer(out); // top-level tags
     }
 }
 

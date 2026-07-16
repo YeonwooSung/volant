@@ -149,9 +149,9 @@ Supported APIs:
 | LeaveGroup | 0–5 | Classic 0–3; **v4+ flexible** + response header v1; v3 batch members; **v5** Reason (ignored) |
 | OffsetCommit | 0–8 | Classic 0–7; **v8 flexible** compact topics + response header v1; durable `__consumer_offsets`; throttle v3+; leader epoch ignored; group.instance.id v7+; v9 KIP-848 unsupported |
 | OffsetFetch | 0–8 | Classic 0–5; **v6–7** single-group flexible; **v8 multi-group** Groups[] + per-group error; response header v1 for v6+; null=all; leader_epoch=-1; RequireStable ignored; MemberId v9+ unsupported |
-| ListGroups | 0–2 | active + offset-backed groups; throttle v1+ |
-| DescribeGroups | 0–4 | state + members; throttle v1+; authorized_ops v3+; group_instance_id v4+ (from `static:`) |
-| DeleteGroups | 0–1 | empty groups only (`NON_EMPTY_GROUP` if live); throttle all versions |
+| ListGroups | 0–3 | Classic 0–2; **v3 flexible** + response header v1; active + offset-backed groups; throttle v1+; StatesFilter v4+ unsupported |
+| DescribeGroups | 0–5 | Classic 0–4; **v5 flexible** + response header v1; state + members; throttle v1+; authorized_ops v3+; group_instance_id v4+ (from `static:`); ErrorMessage v6 unsupported |
+| DeleteGroups | 0–2 | Classic 0–1; **v2 flexible** + response header v1; empty groups only (`NON_EMPTY_GROUP` if live); throttle all versions; ErrorMessage v3 unsupported |
 | CreatePartitions | 0–1 | total partition count; throttle all versions; validate_only dry-run |
 | DescribeConfigs | 0–3 | TOPIC resources; throttle; v1+ config_source + empty synonyms; v3+ type/docs |
 | AlterConfigs | 0–1 | TOPIC resources; throttle all versions; validate_only |

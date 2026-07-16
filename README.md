@@ -287,6 +287,9 @@ ignored; multi-group v8+ deferred).
 **Phase 58:** OffsetFetch multi-group flexible v8 — Groups[] request/response
 with per-group ACL errors.
 
+**Phase 59:** Flexible group admin — DescribeGroups v5, ListGroups v3,
+DeleteGroups v2 (compact + response header v1).
+
 **Still deferred:** multi-language clients, chaos-mesh / cargo-fuzz corpus CI.
 
 ### Networked client (library)

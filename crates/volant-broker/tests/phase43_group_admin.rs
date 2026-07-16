@@ -93,9 +93,9 @@ async fn api_versions_group_admin_classic_max() {
         let max_v = src.get_i16();
         found.insert(key, (min_v, max_v));
     }
-    assert_eq!(found.get(&15), Some(&(0, 4))); // DescribeGroups
-    assert_eq!(found.get(&16), Some(&(0, 2))); // ListGroups
-    assert_eq!(found.get(&42), Some(&(0, 1))); // DeleteGroups
+    assert_eq!(found.get(&15), Some(&(0, 5))); // DescribeGroups (Phase 59 flex v5)
+    assert_eq!(found.get(&16), Some(&(0, 3))); // ListGroups (Phase 59 flex v3)
+    assert_eq!(found.get(&42), Some(&(0, 2))); // DeleteGroups (Phase 59 flex v2)
     server.abort();
     let _ = std::fs::remove_dir_all(&dir);
 }

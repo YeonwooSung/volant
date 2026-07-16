@@ -1330,8 +1330,28 @@ Binding: **[docs/PHASE58_SPEC.md](./docs/PHASE58_SPEC.md)**.
 leader epoch always -1; empty tags only.
 
 **Still deferred:** multi-lang clients, cargo-fuzz corpus CI, flexible
-admin/txn, Metadata TopicId, DescribeCluster / ListTransactions, true
-control-marker READ_COMMITTED.
+admin/txn — group-admin flex closed by **Phase 59**. Metadata TopicId,
+DescribeCluster / ListTransactions, true control-marker READ_COMMITTED.
+
+### Phase 59 — Flexible group admin ✅
+
+**Goal:** First flexible versions of DescribeGroups / ListGroups / DeleteGroups
+so modern admin clients can use compact framing and response header v1.
+
+Binding: **[docs/PHASE59_SPEC.md](./docs/PHASE59_SPEC.md)**.
+
+- [x] DescribeGroups 0–5 (v5 flexible; classic 0–4 unchanged)
+- [x] ListGroups 0–3 (v3 flexible; classic 0–2 unchanged)
+- [x] DeleteGroups 0–2 (v2 flexible; classic 0–1 unchanged)
+- [x] Response header v1 for those flexible versions
+- [x] Integration tests (`phase59_flexible_group_admin`)
+
+**Honest limitations:** no Describe/Delete ErrorMessage (v6/v3); no List
+StatesFilter/TypesFilter or GroupState/GroupType (v4+/v5+); empty tags only.
+
+**Still deferred:** multi-lang clients, cargo-fuzz corpus CI, flexible txn,
+Metadata TopicId, DescribeCluster / ListTransactions, true control-marker
+READ_COMMITTED.
 
 ---
 
