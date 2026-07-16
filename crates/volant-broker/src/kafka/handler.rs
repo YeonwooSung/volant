@@ -13,6 +13,7 @@ use crate::acl::{
     AclEntry, AclOperation, AclPermission, ResourceType, CLUSTER_RESOURCE,
 };
 use crate::broker::{Broker, IdempotentCheck};
+use crate::group::static_member_id;
 
 use super::codec::{
     decode_consumer_subscription, decode_produce_batches, decode_request_header,
@@ -185,17 +186,17 @@ fn dispatch_kafka(broker: &Broker, body: bytes::Bytes, conn: &mut KafkaConnState
         Some(ApiKey::TxnOffsetCommit) if hdr.api_version == 0 => {
             encode_txn_offset_commit(broker, &mut src, &mut out, principal);
         }
-        Some(ApiKey::JoinGroup) if (0..=1).contains(&hdr.api_version) => {
+        Some(ApiKey::JoinGroup) if (0..=5).contains(&hdr.api_version) => {
             encode_join_group(broker, &mut src, &mut out, hdr.api_version, principal);
         }
-        Some(ApiKey::SyncGroup) if hdr.api_version == 0 => {
-            encode_sync_group(broker, &mut src, &mut out, principal);
+        Some(ApiKey::SyncGroup) if (0..=3).contains(&hdr.api_version) => {
+            encode_sync_group(broker, &mut src, &mut out, hdr.api_version, principal);
         }
-        Some(ApiKey::Heartbeat) if hdr.api_version == 0 => {
-            encode_heartbeat(broker, &mut src, &mut out, principal);
+        Some(ApiKey::Heartbeat) if (0..=3).contains(&hdr.api_version) => {
+            encode_heartbeat(broker, &mut src, &mut out, hdr.api_version, principal);
         }
-        Some(ApiKey::LeaveGroup) if hdr.api_version == 0 => {
-            encode_leave_group(broker, &mut src, &mut out, principal);
+        Some(ApiKey::LeaveGroup) if (0..=3).contains(&hdr.api_version) => {
+            encode_leave_group(broker, &mut src, &mut out, hdr.api_version, principal);
         }
         Some(ApiKey::OffsetCommit) if (0..=2).contains(&hdr.api_version) => {
             encode_offset_commit(broker, &mut src, &mut out, hdr.api_version, principal);
@@ -2105,23 +2106,38 @@ fn encode_txn_offset_commit(
 }
 
 fn encode_join_group(broker: &Broker, src: &mut impl Buf, out: &mut BytesMut, version: i16, principal: &str) {
-    // JoinGroup v0: group_id, session_timeout, member_id, protocol_type, [protocols]
-    // JoinGroup v1: + rebalance_timeout after session_timeout
+    // JoinGroup classic v0–5:
+    //   group_id, session_timeout, rebalance_timeout (v1+), member_id,
+    //   group_instance_id (v5+), protocol_type, [protocols]
+    // Response: throttle (v2+), error, generation, protocol, leader, member_id,
+    //   members[{ member_id, group_instance_id (v5+), metadata }]
+    let write_error_body = |out: &mut BytesMut, err: i16, generation: i32, protocol: &str, mid: &str| {
+        if version >= 2 {
+            out.put_i32(0); // throttle
+        }
+        out.put_i16(err);
+        out.put_i32(generation);
+        put_string(out, protocol);
+        put_string(out, "");
+        put_string(out, mid);
+        out.put_i32(0);
+    };
+
     let group_id = match get_string(src) {
         Ok(g) => g,
         Err(_) => {
-            out.put_i16(KafkaErrorCode::InvalidRequest.as_i16());
+            write_error_body(out, KafkaErrorCode::InvalidRequest.as_i16(), 0, "", "");
             return;
         }
     };
     if src.remaining() < 4 {
-        out.put_i16(KafkaErrorCode::InvalidRequest.as_i16());
+        write_error_body(out, KafkaErrorCode::InvalidRequest.as_i16(), 0, "", "");
         return;
     }
     let session_timeout = src.get_i32().max(0) as u32;
     if version >= 1 {
         if src.remaining() < 4 {
-            out.put_i16(KafkaErrorCode::InvalidRequest.as_i16());
+            write_error_body(out, KafkaErrorCode::InvalidRequest.as_i16(), 0, "", "");
             return;
         }
         let _rebalance_timeout = src.get_i32();
@@ -2129,14 +2145,19 @@ fn encode_join_group(broker: &Broker, src: &mut impl Buf, out: &mut BytesMut, ve
     let member_id = match get_string(src) {
         Ok(m) => m,
         Err(_) => {
-            out.put_i16(KafkaErrorCode::InvalidRequest.as_i16());
+            write_error_body(out, KafkaErrorCode::InvalidRequest.as_i16(), 0, "", "");
             return;
         }
+    };
+    let group_instance_id = if version >= 5 {
+        get_nullable_string(src).ok().flatten().unwrap_or_default()
+    } else {
+        String::new()
     };
     let _protocol_type = match get_string(src) {
         Ok(p) => p,
         Err(_) => {
-            out.put_i16(KafkaErrorCode::InvalidRequest.as_i16());
+            write_error_body(out, KafkaErrorCode::InvalidRequest.as_i16(), 0, "", "");
             return;
         }
     };
@@ -2149,17 +2170,18 @@ fn encode_join_group(broker: &Broker, src: &mut impl Buf, out: &mut BytesMut, ve
             AclOperation::Read,
         )
     {
-        out.put_i16(KafkaErrorCode::GroupAuthorizationFailed.as_i16());
-        out.put_i32(0);
-        put_string(out, "");
-        put_string(out, "");
-        put_string(out, "");
-        out.put_i32(0);
+        write_error_body(
+            out,
+            KafkaErrorCode::GroupAuthorizationFailed.as_i16(),
+            0,
+            "",
+            "",
+        );
         return;
     }
 
     if src.remaining() < 4 {
-        out.put_i16(KafkaErrorCode::InvalidRequest.as_i16());
+        write_error_body(out, KafkaErrorCode::InvalidRequest.as_i16(), 0, "", "");
         return;
     }
     let protocol_count = src.get_i32();
@@ -2187,28 +2209,30 @@ fn encode_join_group(broker: &Broker, src: &mut impl Buf, out: &mut BytesMut, ve
         &member_id,
         session_timeout,
         topics,
-        "",
+        &group_instance_id,
         |t| broker.partition_count_opt(t),
     ) {
         Ok(r) => r,
         Err(_) => {
-            out.put_i16(KafkaErrorCode::Unknown.as_i16());
-            out.put_i32(0);
-            put_string(out, &selected_protocol);
-            put_string(out, "");
-            put_string(out, "");
-            out.put_i32(0);
+            write_error_body(
+                out,
+                KafkaErrorCode::Unknown.as_i16(),
+                0,
+                &selected_protocol,
+                "",
+            );
             return;
         }
     };
 
     if result.error_code != 0 {
-        out.put_i16(map_group_error(result.error_code));
-        out.put_i32(result.generation as i32);
-        put_string(out, &selected_protocol);
-        put_string(out, "");
-        put_string(out, &result.member_id);
-        out.put_i32(0);
+        write_error_body(
+            out,
+            map_group_error(result.error_code),
+            result.generation as i32,
+            &selected_protocol,
+            &result.member_id,
+        );
         return;
     }
 
@@ -2225,6 +2249,16 @@ fn encode_join_group(broker: &Broker, src: &mut impl Buf, out: &mut BytesMut, ve
         .unwrap_or(result.member_id.as_str())
         .to_owned();
 
+    // Echo instance id for this member when present (static members only).
+    let self_instance = if group_instance_id.is_empty() {
+        None
+    } else {
+        Some(group_instance_id.as_str())
+    };
+
+    if version >= 2 {
+        out.put_i32(0); // throttle
+    }
     out.put_i16(KafkaErrorCode::None.as_i16());
     out.put_i32(result.generation as i32);
     put_string(out, &selected_protocol);
@@ -2234,6 +2268,16 @@ fn encode_join_group(broker: &Broker, src: &mut impl Buf, out: &mut BytesMut, ve
         out.put_i32(members_snap.len() as i32);
         for m in &members_snap {
             put_string(out, &m.member_id);
+            if version >= 5 {
+                // Best-effort: only the joining static member knows its instance id.
+                if m.member_id == result.member_id {
+                    put_nullable_string(out, self_instance);
+                } else if let Some(inst) = m.member_id.strip_prefix("static:") {
+                    put_nullable_string(out, Some(inst));
+                } else {
+                    put_nullable_string(out, None);
+                }
+            }
             put_bytes(out, Some(&[]));
         }
     } else {
@@ -2241,30 +2285,49 @@ fn encode_join_group(broker: &Broker, src: &mut impl Buf, out: &mut BytesMut, ve
     }
 }
 
-fn encode_sync_group(broker: &Broker, src: &mut impl Buf, out: &mut BytesMut, principal: &str) {
-    // SyncGroup v0: group_id, generation, member_id, [member_id assignment_bytes]
+fn encode_sync_group(
+    broker: &Broker,
+    src: &mut impl Buf,
+    out: &mut BytesMut,
+    version: i16,
+    principal: &str,
+) {
+    // SyncGroup classic v0–3:
+    //   group_id, generation, member_id, group_instance_id (v3+), [assignments]
+    // Response: throttle (v1+), error, assignment bytes
+    let fail = |out: &mut BytesMut, err: i16| {
+        if version >= 1 {
+            out.put_i32(0);
+        }
+        out.put_i16(err);
+        put_bytes(out, Some(&[]));
+    };
+
     let group_id = match get_string(src) {
         Ok(g) => g,
         Err(_) => {
-            out.put_i16(KafkaErrorCode::InvalidRequest.as_i16());
-            put_bytes(out, Some(&[]));
+            fail(out, KafkaErrorCode::InvalidRequest.as_i16());
             return;
         }
     };
     if src.remaining() < 4 {
-        out.put_i16(KafkaErrorCode::InvalidRequest.as_i16());
-        put_bytes(out, Some(&[]));
+        fail(out, KafkaErrorCode::InvalidRequest.as_i16());
         return;
     }
     let generation = src.get_i32() as u32;
-    let member_id = match get_string(src) {
+    let mut member_id = match get_string(src) {
         Ok(m) => m,
         Err(_) => {
-            out.put_i16(KafkaErrorCode::InvalidRequest.as_i16());
-            put_bytes(out, Some(&[]));
+            fail(out, KafkaErrorCode::InvalidRequest.as_i16());
             return;
         }
     };
+    if version >= 3 {
+        let instance = get_nullable_string(src).ok().flatten().unwrap_or_default();
+        if member_id.is_empty() && !instance.is_empty() {
+            member_id = static_member_id(&instance);
+        }
+    }
     // Consume leader assignments (ignored — coordinator already assigned).
     if src.remaining() >= 4 {
         let n = src.get_i32();
@@ -2282,16 +2345,13 @@ fn encode_sync_group(broker: &Broker, src: &mut impl Buf, out: &mut BytesMut, pr
             AclOperation::Read,
         )
     {
-        out.put_i16(KafkaErrorCode::GroupAuthorizationFailed.as_i16());
-        put_bytes(out, Some(&[]));
+        fail(out, KafkaErrorCode::GroupAuthorizationFailed.as_i16());
         return;
     }
 
-    // Generation check via heartbeat (updates last_heartbeat too).
     let hb = broker.groups().heartbeat(&group_id, &member_id, generation);
     if hb.error_code != 0 {
-        out.put_i16(map_group_error(hb.error_code));
-        put_bytes(out, Some(&[]));
+        fail(out, map_group_error(hb.error_code));
         return;
     }
 
@@ -2300,30 +2360,54 @@ fn encode_sync_group(broker: &Broker, src: &mut impl Buf, out: &mut BytesMut, pr
         .assignment(&group_id, &member_id)
         .unwrap_or_default();
     let bytes = encode_consumer_assignment(&assignment);
+    if version >= 1 {
+        out.put_i32(0); // throttle
+    }
     out.put_i16(KafkaErrorCode::None.as_i16());
     put_bytes(out, Some(&bytes));
 }
 
-fn encode_heartbeat(broker: &Broker, src: &mut impl Buf, out: &mut BytesMut, principal: &str) {
+fn encode_heartbeat(
+    broker: &Broker,
+    src: &mut impl Buf,
+    out: &mut BytesMut,
+    version: i16,
+    principal: &str,
+) {
+    // Heartbeat classic v0–3: group_id, generation, member_id, group_instance_id (v3+)
+    // Response: throttle (v1+), error
+    let fail = |out: &mut BytesMut, err: i16| {
+        if version >= 1 {
+            out.put_i32(0);
+        }
+        out.put_i16(err);
+    };
+
     let group_id = match get_string(src) {
         Ok(g) => g,
         Err(_) => {
-            out.put_i16(KafkaErrorCode::InvalidRequest.as_i16());
+            fail(out, KafkaErrorCode::InvalidRequest.as_i16());
             return;
         }
     };
     if src.remaining() < 4 {
-        out.put_i16(KafkaErrorCode::InvalidRequest.as_i16());
+        fail(out, KafkaErrorCode::InvalidRequest.as_i16());
         return;
     }
     let generation = src.get_i32() as u32;
-    let member_id = match get_string(src) {
+    let mut member_id = match get_string(src) {
         Ok(m) => m,
         Err(_) => {
-            out.put_i16(KafkaErrorCode::InvalidRequest.as_i16());
+            fail(out, KafkaErrorCode::InvalidRequest.as_i16());
             return;
         }
     };
+    if version >= 3 {
+        let instance = get_nullable_string(src).ok().flatten().unwrap_or_default();
+        if member_id.is_empty() && !instance.is_empty() {
+            member_id = static_member_id(&instance);
+        }
+    }
 
     if broker.acls().is_enabled()
         && !broker.acls().authorize(
@@ -2333,29 +2417,85 @@ fn encode_heartbeat(broker: &Broker, src: &mut impl Buf, out: &mut BytesMut, pri
             AclOperation::Read,
         )
     {
-        out.put_i16(KafkaErrorCode::GroupAuthorizationFailed.as_i16());
+        fail(out, KafkaErrorCode::GroupAuthorizationFailed.as_i16());
         return;
     }
 
     let result = broker.groups().heartbeat(&group_id, &member_id, generation);
+    if version >= 1 {
+        out.put_i32(0); // throttle
+    }
     out.put_i16(map_group_error(result.error_code));
 }
 
-fn encode_leave_group(broker: &Broker, src: &mut impl Buf, out: &mut BytesMut, principal: &str) {
+fn encode_leave_group(
+    broker: &Broker,
+    src: &mut impl Buf,
+    out: &mut BytesMut,
+    version: i16,
+    principal: &str,
+) {
+    // LeaveGroup classic v0–3:
+    //   v0–2: group_id, member_id
+    //   v3: group_id, members[{ member_id, group_instance_id }]
+    // Response: throttle (v1+), error, members[] (v3+)
     let group_id = match get_string(src) {
         Ok(g) => g,
         Err(_) => {
+            if version >= 1 {
+                out.put_i32(0);
+            }
             out.put_i16(KafkaErrorCode::InvalidRequest.as_i16());
+            if version >= 3 {
+                out.put_i32(0);
+            }
             return;
         }
     };
-    let member_id = match get_string(src) {
-        Ok(m) => m,
-        Err(_) => {
+
+    // Collect members to leave: (member_id, optional instance_id for response).
+    let mut to_leave: Vec<(String, Option<String>)> = Vec::new();
+    if version >= 3 {
+        if src.remaining() < 4 {
+            if version >= 1 {
+                out.put_i32(0);
+            }
             out.put_i16(KafkaErrorCode::InvalidRequest.as_i16());
+            out.put_i32(0);
             return;
         }
-    };
+        let n = src.get_i32();
+        for _ in 0..n.max(0) {
+            let mid = match get_string(src) {
+                Ok(m) => m,
+                Err(_) => break,
+            };
+            let instance = get_nullable_string(src).ok().flatten();
+            let resolved = if !mid.is_empty() {
+                mid
+            } else if let Some(ref inst) = instance {
+                if inst.is_empty() {
+                    continue;
+                }
+                static_member_id(inst)
+            } else {
+                continue;
+            };
+            to_leave.push((resolved, instance));
+        }
+    } else {
+        let member_id = match get_string(src) {
+            Ok(m) => m,
+            Err(_) => {
+                if version >= 1 {
+                    out.put_i32(0);
+                }
+                out.put_i16(KafkaErrorCode::InvalidRequest.as_i16());
+                return;
+            }
+        };
+        to_leave.push((member_id, None));
+    }
 
     if broker.acls().is_enabled()
         && !broker.acls().authorize(
@@ -2365,14 +2505,46 @@ fn encode_leave_group(broker: &Broker, src: &mut impl Buf, out: &mut BytesMut, p
             AclOperation::Read,
         )
     {
+        if version >= 1 {
+            out.put_i32(0);
+        }
         out.put_i16(KafkaErrorCode::GroupAuthorizationFailed.as_i16());
+        if version >= 3 {
+            out.put_i32(to_leave.len() as i32);
+            for (mid, inst) in &to_leave {
+                put_string(out, mid);
+                put_nullable_string(out, inst.as_deref());
+                out.put_i16(KafkaErrorCode::GroupAuthorizationFailed.as_i16());
+            }
+        }
         return;
     }
 
-    let result = broker
-        .groups()
-        .leave(&group_id, &member_id, |t| broker.partition_count_opt(t));
-    out.put_i16(map_group_error(result.error_code));
+    let mut member_results: Vec<(String, Option<String>, i16)> = Vec::new();
+    let mut top_err = KafkaErrorCode::None.as_i16();
+    for (mid, inst) in to_leave {
+        let result = broker
+            .groups()
+            .leave(&group_id, &mid, |t| broker.partition_count_opt(t));
+        let err = map_group_error(result.error_code);
+        if err != 0 && top_err == 0 {
+            top_err = err;
+        }
+        member_results.push((mid, inst, err));
+    }
+
+    if version >= 1 {
+        out.put_i32(0); // throttle
+    }
+    out.put_i16(top_err);
+    if version >= 3 {
+        out.put_i32(member_results.len() as i32);
+        for (mid, inst, err) in member_results {
+            put_string(out, &mid);
+            put_nullable_string(out, inst.as_deref());
+            out.put_i16(err);
+        }
+    }
 }
 
 fn encode_offset_commit(broker: &Broker, src: &mut impl Buf, out: &mut BytesMut, version: i16, principal: &str) {

@@ -10,7 +10,7 @@
 | `--log-format` | | `text` | `text` or `json` |
 | `--auth-token` | `VOLANT_AUTH_TOKEN` | *unset* | Shared-token auth |
 | `--scram-user USER:PASS` | | *unset* | Upsert SCRAM user at startup (repeatable; Phase 22) |
-| `--kafka-listen` | | *disabled* | Kafka wire protocol shim (Phase 23–41) |
+| `--kafka-listen` | | *disabled* | Kafka wire protocol shim (Phase 23–42) |
 | `--tls-cert` / `--tls-key` | | *unset* | Server TLS (feature `tls`) |
 | `--tls-peer-insecure` | | `true` | Skip inter-broker cert verify (lab) |
 | `--tls-ca` | | *unset* | CA PEM for inter-broker peer verify |
@@ -143,9 +143,10 @@ Supported APIs:
 | ListOffsets | 0–5 | -1 latest / -2 earliest; v2+ isolation (LSO≡HWM) + throttle; v4+ leader-epoch fencing; flexible v6+ unsupported |
 | CreateTopics | 0–1 | partition count; RF/assignment ignored |
 | DeleteTopics | 0–1 | by name |
-| JoinGroup | 0–1 | consumer protocol subscription |
-| SyncGroup | 0 | coordinator assignment (leader payload ignored) |
-| Heartbeat / LeaveGroup | 0 | session liveness |
+| JoinGroup | 0–5 | consumer protocol; v5+ group.instance.id → static:{id}; throttle v2+ |
+| SyncGroup | 0–3 | coordinator assignment; v3 group.instance.id; throttle v1+ |
+| Heartbeat | 0–3 | session liveness; v3 group.instance.id; throttle v1+ |
+| LeaveGroup | 0–3 | v3 batch members + instance id; throttle v1+ |
 | OffsetCommit | 0–2 | durable `__consumer_offsets` |
 | OffsetFetch | 0–5 | committed offsets (`-1` if unknown); v2+ null=all + top-level error; v3+ throttle; v5+ committed_leader_epoch=-1 |
 | ListGroups | 0 | active + offset-backed groups |

@@ -239,6 +239,9 @@ current_leader_epoch fencing, response leader_epoch; flexible v6+ out of scope.
 error, throttle, committed_leader_epoch=-1; flexible v6+ / multi-group out of
 scope.
 
+**Phase 42:** Kafka group classic static membership — JoinGroup 0–5,
+Heartbeat/Sync/Leave 0–3 with `group.instance.id` → `static:{id}`.
+
 **Still deferred:** multi-language clients, chaos-mesh / cargo-fuzz corpus CI.
 
 ### Networked client (library)

@@ -1007,6 +1007,25 @@ leader epoch; no require_stable.
 **Still deferred:** multi-lang clients, cargo-fuzz corpus CI, flexible modern
 admin APIs (DescribeCluster / ListTransactions).
 
+### Phase 42 — Kafka group classic static membership ✅
+
+**Goal:** Raise JoinGroup / Heartbeat / SyncGroup / LeaveGroup classic versions
+and wire `group.instance.id` to Volant Phase 12 static membership (`static:{id}`).
+
+Binding: **[docs/PHASE42_SPEC.md](./docs/PHASE42_SPEC.md)**.
+
+- [x] JoinGroup 0–5 (throttle v2+, group_instance_id v5+)
+- [x] Heartbeat / SyncGroup / LeaveGroup 0–3 (throttle v1+, instance v3+)
+- [x] LeaveGroup v3 batch members + per-member errors
+- [x] Static join → `static:{instance}`; rejoin stable
+- [x] Integration tests (`phase42_group_static`); phase26 still works
+
+**Honest limitations:** no flexible group versions; no MEMBER_ID_REQUIRED
+double-join; instance id not stored separately (prefix-derived).
+
+**Still deferred:** multi-lang clients, cargo-fuzz corpus CI, flexible modern
+admin APIs (DescribeCluster / ListTransactions).
+
 ---
 
 ## Performance targets (aspirational)
