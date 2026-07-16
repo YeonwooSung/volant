@@ -149,7 +149,7 @@ async fn api_versions_offset_flex_maxes() {
         found.insert(key, (min_v, max_v));
     }
     assert_eq!(found.get(&8), Some(&(0, 8)));
-    assert_eq!(found.get(&9), Some(&(0, 7)));
+    assert_eq!(found.get(&9), Some(&(0, 8))); // Phase 58 multi-group
     server.abort();
     let _ = std::fs::remove_dir_all(&dir);
 }
@@ -335,25 +335,4 @@ async fn offset_commit_v9_unsupported_header_v1() {
     let _ = std::fs::remove_dir_all(&dir);
 }
 
-#[tokio::test]
-async fn offset_fetch_v8_unsupported_header_v1() {
-    let dir = temp_dir("fetch8");
-    let broker = Arc::new(Broker::new(StorageConfig {
-        data_dir: dir.clone(),
-        ..StorageConfig::default()
-    }));
-    let (addr, server) = boot_kafka(Arc::clone(&broker)).await;
-
-    let resp = rpc(
-        &addr,
-        encode_request_flexible(9, 8, 2, Some("c"), &[]),
-    )
-    .await;
-    let mut src = resp.freeze();
-    assert_eq!(src.get_i32(), 2);
-    skip_tag_buffer(&mut src).unwrap();
-    assert_eq!(src.get_i16(), 35);
-
-    server.abort();
-    let _ = std::fs::remove_dir_all(&dir);
-}
+// OffsetFetch multi-group v8: phase58_flexible_offset_fetch_multi.

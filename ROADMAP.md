@@ -1307,12 +1307,31 @@ Binding: **[docs/PHASE57_SPEC.md](./docs/PHASE57_SPEC.md)**.
 - [x] Response header v1 for those flexible versions
 - [x] Integration tests (`phase57_flexible_offsets`)
 
-**Honest limitations:** no multi-group OffsetFetch v8+; leader epoch not
-stored; RequireStable ignored; empty tags only.
+**Honest limitations:** no multi-group OffsetFetch v8+ — closed by **Phase 58**.
+Leader epoch not stored; RequireStable ignored; empty tags only.
 
 **Still deferred:** multi-lang clients, cargo-fuzz corpus CI, flexible
-admin/txn, OffsetFetch multi-group, Metadata TopicId, DescribeCluster /
-ListTransactions, true control-marker READ_COMMITTED.
+admin/txn, Metadata TopicId, DescribeCluster / ListTransactions, true
+control-marker READ_COMMITTED.
+
+### Phase 58 — OffsetFetch multi-group v8 ✅
+
+**Goal:** Support **OffsetFetch v8** multi-group `Groups[]` framing so modern
+clients can fetch offsets for multiple groups in one request.
+
+Binding: **[docs/PHASE58_SPEC.md](./docs/PHASE58_SPEC.md)**.
+
+- [x] OffsetFetch 0–8 (v8 multi-group; v6–7 single-group flexible unchanged)
+- [x] Per-group ACL error without failing sibling groups
+- [x] Null topics = all; empty topics = none
+- [x] Integration tests (`phase58_flexible_offset_fetch_multi`)
+
+**Honest limitations:** no MemberId/MemberEpoch (v9+); RequireStable ignored;
+leader epoch always -1; empty tags only.
+
+**Still deferred:** multi-lang clients, cargo-fuzz corpus CI, flexible
+admin/txn, Metadata TopicId, DescribeCluster / ListTransactions, true
+control-marker READ_COMMITTED.
 
 ---
 

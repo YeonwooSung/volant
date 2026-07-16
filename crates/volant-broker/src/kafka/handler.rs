@@ -293,7 +293,7 @@ fn dispatch_kafka(broker: &Broker, body: bytes::Bytes, conn: &mut KafkaConnState
             }
             encode_offset_commit(broker, &mut src, &mut out, hdr.api_version, principal);
         }
-        Some(ApiKey::OffsetFetch) if (0..=7).contains(&hdr.api_version) => {
+        Some(ApiKey::OffsetFetch) if (0..=8).contains(&hdr.api_version) => {
             if hdr.api_version >= 6 {
                 if let Err(e) = skip_tag_buffer(&mut src) {
                     debug!(error = %e, "offset fetch flexible header tag buffer");
@@ -3971,13 +3971,17 @@ fn encode_offset_fetch(
     version: i16,
     principal: &str,
 ) {
-    // OffsetFetch classic v0–5 / flexible v6–7 (single-group):
-    //   group_id, topics nullable array (v2+: null=all, empty=none; v0–1: empty=all)
-    //   require_stable (v7+, ignored — no unstable offsets)
-    //   multi-group Groups[] (v8+) deferred
-    // Response: throttle (v3+), topics[{ name, partitions[{ partition, offset,
-    //   committed_leader_epoch (v5+), metadata, error }] }], top-level error (v2+)
+    // OffsetFetch classic v0–5 / flexible v6–7 (single-group) / multi-group v8:
+    //   v0–7: group_id, topics nullable (v2+: null=all), require_stable (v7+)
+    //   v8+: Groups[] multi-group (no top-level GroupId/Topics); RequireStable
+    // Response v0–7: throttle (v3+), topics[], top-level error (v2+)
+    // Response v8+: throttle, Groups[{ GroupId, Topics, ErrorCode, tags }], tags
     // Flexible: compact arrays/strings + TAG_BUFFER; response header v1
+    if version >= 8 {
+        encode_offset_fetch_multi(broker, src, out, principal);
+        return;
+    }
+
     let flex = version >= 6;
 
     let write_partition = |out: &mut BytesMut, partition: i32, offset: i64, meta: &str| {
@@ -4233,6 +4237,178 @@ fn encode_offset_fetch(
         }
     }
     finish(out, KafkaErrorCode::None.as_i16());
+}
+
+/// OffsetFetch v8 multi-group flexible body.
+fn encode_offset_fetch_multi(
+    broker: &Broker,
+    src: &mut impl Buf,
+    out: &mut BytesMut,
+    principal: &str,
+) {
+    // Request: Groups[{ GroupId, Topics nullable, TAG }], RequireStable, TAG
+    // Response: Throttle, Groups[{ GroupId, Topics, ErrorCode, TAG }], TAG
+    struct GroupReq {
+        group_id: String,
+        list_all: bool,
+        list_none: bool,
+        query: Vec<(String, u32)>,
+        requested: Vec<(String, Vec<i32>)>,
+    }
+
+    let mut groups: Vec<GroupReq> = Vec::new();
+    let group_count = match get_compact_array_len(src) {
+        Ok(Some(n)) => n,
+        Ok(None) => 0,
+        Err(_) => {
+            out.put_i32(0); // throttle
+            put_compact_array_len(out, 0);
+            put_empty_tag_buffer(out);
+            return;
+        }
+    };
+    for _ in 0..group_count {
+        let group_id = match get_compact_string(src) {
+            Ok(g) => g,
+            Err(_) => break,
+        };
+        let mut query: Vec<(String, u32)> = Vec::new();
+        let mut requested: Vec<(String, Vec<i32>)> = Vec::new();
+        let (list_all, list_none) = match get_compact_array_len(src) {
+            Ok(None) => (true, false),
+            Ok(Some(0)) => (false, true),
+            Ok(Some(n)) => {
+                for _ in 0..n {
+                    let topic = match get_compact_string(src) {
+                        Ok(t) => t,
+                        Err(_) => break,
+                    };
+                    let pc = match get_compact_array_len(src) {
+                        Ok(Some(p)) => p,
+                        Ok(None) | Err(_) => 0,
+                    };
+                    let mut parts = Vec::new();
+                    for _ in 0..pc {
+                        if src.remaining() < 4 {
+                            break;
+                        }
+                        let p = src.get_i32();
+                        parts.push(p);
+                        query.push((topic.clone(), p as u32));
+                    }
+                    let _ = skip_tag_buffer(src); // topic tags
+                    requested.push((topic, parts));
+                }
+                (false, false)
+            }
+            Err(_) => (false, true),
+        };
+        let _ = skip_tag_buffer(src); // group tags
+        groups.push(GroupReq {
+            group_id,
+            list_all,
+            list_none,
+            query,
+            requested,
+        });
+    }
+    // RequireStable (v7+ always present for v8): ignored.
+    if src.remaining() >= 1 {
+        let _require_stable = src.get_u8();
+    }
+    let _ = skip_tag_buffer(src); // request top-level tags
+
+    out.put_i32(0); // throttle
+    put_compact_array_len(out, groups.len());
+    for g in groups {
+        put_compact_string(out, &g.group_id);
+
+        let auth_denied = broker.acls().is_enabled()
+            && !broker.acls().authorize(
+                Some(principal),
+                ResourceType::Group,
+                &g.group_id,
+                AclOperation::Read,
+            );
+
+        if auth_denied {
+            put_compact_array_len(out, 0); // empty topics
+            out.put_i16(KafkaErrorCode::GroupAuthorizationFailed.as_i16());
+            put_empty_tag_buffer(out);
+            continue;
+        }
+
+        if g.list_none {
+            put_compact_array_len(out, 0);
+            out.put_i16(KafkaErrorCode::None.as_i16());
+            put_empty_tag_buffer(out);
+            continue;
+        }
+
+        let fetched = match broker.groups().fetch_offsets(
+            &g.group_id,
+            if g.list_all { &[] } else { &g.query },
+        ) {
+            Ok(r) => r.entries,
+            Err(_) => Vec::new(),
+        };
+
+        if g.list_all {
+            use std::collections::BTreeMap;
+            let mut by_topic: BTreeMap<String, Vec<(u32, i64, String)>> = BTreeMap::new();
+            for e in fetched {
+                let off = if e.offset == u64::MAX {
+                    -1i64
+                } else {
+                    e.offset as i64
+                };
+                by_topic
+                    .entry(e.topic)
+                    .or_default()
+                    .push((e.partition, off, e.metadata));
+            }
+            put_compact_array_len(out, by_topic.len());
+            for (topic, parts) in by_topic {
+                put_compact_string(out, &topic);
+                put_compact_array_len(out, parts.len());
+                for (p, off, meta) in parts {
+                    out.put_i32(p as i32);
+                    out.put_i64(off);
+                    out.put_i32(-1); // committed_leader_epoch
+                    put_compact_nullable_string(out, Some(&meta));
+                    out.put_i16(KafkaErrorCode::None.as_i16());
+                    put_empty_tag_buffer(out);
+                }
+                put_empty_tag_buffer(out); // topic tags
+            }
+        } else {
+            put_compact_array_len(out, g.requested.len());
+            for (topic, parts) in &g.requested {
+                put_compact_string(out, topic);
+                put_compact_array_len(out, parts.len());
+                for &p in parts {
+                    let entry = fetched
+                        .iter()
+                        .find(|e| e.topic == *topic && e.partition == p as u32);
+                    let (off, meta) = match entry {
+                        Some(e) if e.offset == u64::MAX => (-1i64, e.metadata.as_str()),
+                        Some(e) => (e.offset as i64, e.metadata.as_str()),
+                        None => (-1i64, ""),
+                    };
+                    out.put_i32(p);
+                    out.put_i64(off);
+                    out.put_i32(-1);
+                    put_compact_nullable_string(out, Some(meta));
+                    out.put_i16(KafkaErrorCode::None.as_i16());
+                    put_empty_tag_buffer(out);
+                }
+                put_empty_tag_buffer(out); // topic tags
+            }
+        }
+        out.put_i16(KafkaErrorCode::None.as_i16()); // group-level error
+        put_empty_tag_buffer(out); // group tags
+    }
+    put_empty_tag_buffer(out); // top-level tags
 }
 
 fn encode_list_groups(broker: &Broker, out: &mut BytesMut, version: i16, principal: &str) {

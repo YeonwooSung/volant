@@ -284,6 +284,9 @@ Reason, SkipAssignment), SyncGroup v5, LeaveGroup v5.
 **Phase 57:** Flexible OffsetCommit v8 + OffsetFetch v6–7 (RequireStable
 ignored; multi-group v8+ deferred).
 
+**Phase 58:** OffsetFetch multi-group flexible v8 — Groups[] request/response
+with per-group ACL errors.
+
 **Still deferred:** multi-language clients, chaos-mesh / cargo-fuzz corpus CI.
 
 ### Networked client (library)
