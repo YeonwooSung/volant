@@ -242,6 +242,9 @@ scope.
 **Phase 42:** Kafka group classic static membership — JoinGroup 0–5,
 Heartbeat/Sync/Leave 0–3 with `group.instance.id` → `static:{id}`.
 
+**Phase 43:** Kafka group admin classic versions — DescribeGroups 0–4,
+ListGroups 0–2, DeleteGroups 0–1 (throttle + authorized_ops + instance id).
+
 **Still deferred:** multi-language clients, chaos-mesh / cargo-fuzz corpus CI.
 
 ### Networked client (library)

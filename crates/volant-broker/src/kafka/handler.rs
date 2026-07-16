@@ -204,14 +204,14 @@ fn dispatch_kafka(broker: &Broker, body: bytes::Bytes, conn: &mut KafkaConnState
         Some(ApiKey::OffsetFetch) if (0..=5).contains(&hdr.api_version) => {
             encode_offset_fetch(broker, &mut src, &mut out, hdr.api_version, principal);
         }
-        Some(ApiKey::DescribeGroups) if hdr.api_version == 0 => {
-            encode_describe_groups(broker, &mut src, &mut out, principal);
+        Some(ApiKey::DescribeGroups) if (0..=4).contains(&hdr.api_version) => {
+            encode_describe_groups(broker, &mut src, &mut out, hdr.api_version, principal);
         }
-        Some(ApiKey::ListGroups) if hdr.api_version == 0 => {
-            encode_list_groups(broker, &mut out, principal);
+        Some(ApiKey::ListGroups) if (0..=2).contains(&hdr.api_version) => {
+            encode_list_groups(broker, &mut out, hdr.api_version, principal);
         }
-        Some(ApiKey::DeleteGroups) if hdr.api_version == 0 => {
-            encode_delete_groups(broker, &mut src, &mut out, principal);
+        Some(ApiKey::DeleteGroups) if (0..=1).contains(&hdr.api_version) => {
+            encode_delete_groups(broker, &mut src, &mut out, hdr.api_version, principal);
         }
         Some(ApiKey::OffsetDelete) if hdr.api_version == 0 => {
             encode_offset_delete(broker, &mut src, &mut out, principal);
@@ -2831,7 +2831,13 @@ fn encode_offset_fetch(
     finish(out, KafkaErrorCode::None.as_i16());
 }
 
-fn encode_list_groups(broker: &Broker, out: &mut BytesMut, principal: &str) {
+fn encode_list_groups(broker: &Broker, out: &mut BytesMut, version: i16, principal: &str) {
+    // ListGroups classic v0–2:
+    //   request: empty
+    //   response: throttle_time_ms (v1+), error_code, [group_id, protocol_type]
+    if version >= 1 {
+        out.put_i32(0); // throttle
+    }
     if broker.acls().is_enabled()
         && !broker.acls().authorize(
             Some(principal),
@@ -2853,9 +2859,22 @@ fn encode_list_groups(broker: &Broker, out: &mut BytesMut, principal: &str) {
     }
 }
 
-fn encode_describe_groups(broker: &Broker, src: &mut impl Buf, out: &mut BytesMut, principal: &str) {
-    // DescribeGroups v0: [group_id]
+fn encode_describe_groups(
+    broker: &Broker,
+    src: &mut impl Buf,
+    out: &mut BytesMut,
+    version: i16,
+    principal: &str,
+) {
+    // DescribeGroups classic v0–4:
+    //   request: [group_id], include_authorized_operations (v3+)
+    //   response: throttle (v1+), [error, group_id, state, protocol_type, protocol,
+    //             members[{member_id, group_instance_id (v4+), client_id, client_host,
+    //             metadata, assignment}], authorized_operations (v3+)]
     if src.remaining() < 4 {
+        if version >= 1 {
+            out.put_i32(0);
+        }
         out.put_i32(0);
         return;
     }
@@ -2866,6 +2885,15 @@ fn encode_describe_groups(broker: &Broker, src: &mut impl Buf, out: &mut BytesMu
             Ok(g) => ids.push(g),
             Err(_) => break,
         }
+    }
+    let include_ops = if version >= 3 && src.remaining() >= 1 {
+        src.get_u8() != 0
+    } else {
+        false
+    };
+
+    if version >= 1 {
+        out.put_i32(0); // throttle
     }
     out.put_i32(ids.len() as i32);
     for group_id in ids {
@@ -2883,6 +2911,9 @@ fn encode_describe_groups(broker: &Broker, src: &mut impl Buf, out: &mut BytesMu
             put_string(out, ""); // protocol_type
             put_string(out, ""); // protocol
             out.put_i32(0); // members
+            if version >= 3 {
+                out.put_i32(group_authorized_ops(broker, principal, &group_id, include_ops));
+            }
             continue;
         }
 
@@ -2896,14 +2927,24 @@ fn encode_describe_groups(broker: &Broker, src: &mut impl Buf, out: &mut BytesMu
                 out.put_i32(desc.members.len() as i32);
                 for m in &desc.members {
                     put_string(out, &m.member_id);
+                    if version >= 4 {
+                        // Derive instance id from Phase 12 static: prefix.
+                        if let Some(inst) = m.member_id.strip_prefix("static:") {
+                            put_nullable_string(out, Some(inst));
+                        } else {
+                            put_nullable_string(out, None);
+                        }
+                    }
                     put_string(out, "volant-kafka"); // client_id
                     put_string(out, "/"); // client_host
-                    // member metadata: consumer subscription of topics
                     let topics: Vec<&str> = m.topics.iter().map(|s| s.as_str()).collect();
                     let meta = super::codec::encode_consumer_subscription(&topics);
                     put_bytes(out, Some(&meta));
                     let asg = encode_consumer_assignment(&m.assignment);
                     put_bytes(out, Some(&asg));
+                }
+                if version >= 3 {
+                    out.put_i32(group_authorized_ops(broker, principal, &group_id, include_ops));
                 }
             }
             None => {
@@ -2928,9 +2969,38 @@ fn encode_describe_groups(broker: &Broker, src: &mut impl Buf, out: &mut BytesMu
                     put_string(out, "");
                     out.put_i32(0);
                 }
+                if version >= 3 {
+                    out.put_i32(group_authorized_ops(broker, principal, &group_id, include_ops));
+                }
             }
         }
     }
+}
+
+/// Kafka authorized-operations bitfield for a consumer group (DescribeGroups v3+).
+fn group_authorized_ops(broker: &Broker, principal: &str, group_id: &str, include: bool) -> i32 {
+    if !include {
+        return AUTH_OPS_OMITTED;
+    }
+    let ops = [
+        AclOperation::Read,
+        AclOperation::Delete,
+        AclOperation::Describe,
+    ];
+    let mut bits = 0i32;
+    for op in ops {
+        let allowed = if broker.acls().is_enabled() {
+            broker
+                .acls()
+                .authorize(Some(principal), ResourceType::Group, group_id, op)
+        } else {
+            true
+        };
+        if allowed {
+            bits |= 1i32 << (volant_op_to_kafka(op) as u32);
+        }
+    }
+    bits
 }
 
 fn encode_offset_delete(
@@ -3040,9 +3110,20 @@ fn encode_offset_delete(
     }
 }
 
-fn encode_delete_groups(broker: &Broker, src: &mut impl Buf, out: &mut BytesMut, principal: &str) {
+fn encode_delete_groups(
+    broker: &Broker,
+    src: &mut impl Buf,
+    out: &mut BytesMut,
+    _version: i16,
+    principal: &str,
+) {
+    // DeleteGroups classic v0–1:
+    //   request: [group_id]
+    //   response: throttle_time_ms (all versions), [group_id, error_code]
+    // Kafka includes throttle from v0; Phase 43 corrects the earlier missing field.
     if src.remaining() < 4 {
-        out.put_i32(0);
+        out.put_i32(0); // throttle
+        out.put_i32(0); // results
         return;
     }
     let n = src.get_i32();
@@ -3053,6 +3134,7 @@ fn encode_delete_groups(broker: &Broker, src: &mut impl Buf, out: &mut BytesMut,
             Err(_) => break,
         }
     }
+    out.put_i32(0); // throttle
     out.put_i32(ids.len() as i32);
     for group_id in ids {
         put_string(out, &group_id);

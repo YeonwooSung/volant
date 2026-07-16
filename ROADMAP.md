@@ -1026,6 +1026,24 @@ double-join; instance id not stored separately (prefix-derived).
 **Still deferred:** multi-lang clients, cargo-fuzz corpus CI, flexible modern
 admin APIs (DescribeCluster / ListTransactions).
 
+### Phase 43 — Kafka group admin classic versions ✅
+
+**Goal:** Raise DescribeGroups / ListGroups / DeleteGroups classic versions;
+fix DeleteGroups throttle framing; surface static instance ids on Describe v4.
+
+Binding: **[docs/PHASE43_SPEC.md](./docs/PHASE43_SPEC.md)**.
+
+- [x] DescribeGroups 0–4 (throttle v1+, authorized_ops v3+, group_instance_id v4+)
+- [x] ListGroups 0–2 (throttle v1+)
+- [x] DeleteGroups 0–1 (throttle on all versions; was missing on v0)
+- [x] Integration tests (`phase43_group_admin`); phase27 updated for throttle
+
+**Honest limitations:** no flexible group-admin versions; no StatesFilter;
+instance id only for `static:` members; coarse authorized-ops bitfield.
+
+**Still deferred:** multi-lang clients, cargo-fuzz corpus CI, flexible modern
+admin APIs (DescribeCluster / ListTransactions).
+
 ---
 
 ## Performance targets (aspirational)

@@ -152,13 +152,14 @@ async fn list_describe_delete_groups() {
     let _ = get_bytes(&mut ds).unwrap();
     let _ = get_bytes(&mut ds).unwrap();
 
-    // DeleteGroups while non-empty → 68
+    // DeleteGroups while non-empty → 68 (throttle present on all versions)
     let mut del = BytesMut::new();
     del.put_i32(1);
     put_string(&mut del, "ops-g");
     let delr = rpc(&addr, encode_request(42, 0, 4, Some("c"), &del)).await;
     let mut dels = delr.freeze();
     dels.advance(4);
+    assert_eq!(dels.get_i32(), 0); // throttle
     assert_eq!(dels.get_i32(), 1);
     assert_eq!(get_string(&mut dels).unwrap(), "ops-g");
     assert_eq!(dels.get_i16(), 68);
@@ -175,6 +176,7 @@ async fn list_describe_delete_groups() {
     let delr2 = rpc(&addr, encode_request(42, 0, 6, Some("c"), &del)).await;
     let mut d2 = delr2.freeze();
     d2.advance(4);
+    assert_eq!(d2.get_i32(), 0); // throttle
     assert_eq!(d2.get_i32(), 1);
     assert_eq!(get_string(&mut d2).unwrap(), "ops-g");
     // may be 0 or 69 depending on offsets; after leave empty group may still be removed

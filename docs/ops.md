@@ -149,9 +149,9 @@ Supported APIs:
 | LeaveGroup | 0–3 | v3 batch members + instance id; throttle v1+ |
 | OffsetCommit | 0–2 | durable `__consumer_offsets` |
 | OffsetFetch | 0–5 | committed offsets (`-1` if unknown); v2+ null=all + top-level error; v3+ throttle; v5+ committed_leader_epoch=-1 |
-| ListGroups | 0 | active + offset-backed groups |
-| DescribeGroups | 0 | state + members |
-| DeleteGroups | 0 | empty groups only (`NON_EMPTY_GROUP` if live) |
+| ListGroups | 0–2 | active + offset-backed groups; throttle v1+ |
+| DescribeGroups | 0–4 | state + members; throttle v1+; authorized_ops v3+; group_instance_id v4+ (from `static:`) |
+| DeleteGroups | 0–1 | empty groups only (`NON_EMPTY_GROUP` if live); throttle all versions |
 | CreatePartitions | 0 | total partition count |
 | DescribeConfigs | 0 | TOPIC resources; Volant keys |
 | AlterConfigs | 0 | TOPIC resources; Volant keys |
