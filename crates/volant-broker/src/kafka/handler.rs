@@ -139,6 +139,12 @@ fn dispatch_kafka(broker: &Broker, body: bytes::Bytes, conn: &mut KafkaConnState
                 | Some(ApiKey::LeaveGroup),
             v
         ) if v >= 4
+    ) || matches!(
+        (api, hdr.api_version),
+        (Some(ApiKey::OffsetCommit), v) if v >= 8
+    ) || matches!(
+        (api, hdr.api_version),
+        (Some(ApiKey::OffsetFetch), v) if v >= 6
     );
 
     let mut out = BytesMut::new();
@@ -279,10 +285,20 @@ fn dispatch_kafka(broker: &Broker, body: bytes::Bytes, conn: &mut KafkaConnState
             }
             encode_leave_group(broker, &mut src, &mut out, hdr.api_version, principal);
         }
-        Some(ApiKey::OffsetCommit) if (0..=7).contains(&hdr.api_version) => {
+        Some(ApiKey::OffsetCommit) if (0..=8).contains(&hdr.api_version) => {
+            if hdr.api_version >= 8 {
+                if let Err(e) = skip_tag_buffer(&mut src) {
+                    debug!(error = %e, "offset commit flexible header tag buffer");
+                }
+            }
             encode_offset_commit(broker, &mut src, &mut out, hdr.api_version, principal);
         }
-        Some(ApiKey::OffsetFetch) if (0..=5).contains(&hdr.api_version) => {
+        Some(ApiKey::OffsetFetch) if (0..=7).contains(&hdr.api_version) => {
+            if hdr.api_version >= 6 {
+                if let Err(e) = skip_tag_buffer(&mut src) {
+                    debug!(error = %e, "offset fetch flexible header tag buffer");
+                }
+            }
             encode_offset_fetch(broker, &mut src, &mut out, hdr.api_version, principal);
         }
         Some(ApiKey::DescribeGroups) if (0..=4).contains(&hdr.api_version) => {
@@ -3709,26 +3725,43 @@ fn encode_offset_commit(
     version: i16,
     principal: &str,
 ) {
-    // OffsetCommit classic v0–7 (flexible 8+):
+    // OffsetCommit classic v0–7 / flexible v8:
     //   v0: group_id, [topic [partition, offset, metadata]]
     //   v1: + generation, member_id; partition commit_timestamp
     //   v2–4: + retention_time_ms (no commit_timestamp)
     //   v5: no retention_time
     //   v6+: + committed_leader_epoch per partition (ignored; not stored)
     //   v7+: + group_instance_id (nullable; maps to static: when member_id empty)
-    // Response: throttle_time_ms (v3+), [topic [partition, error]]
-    let empty = |out: &mut BytesMut, version: i16| {
+    //   v8+: compact strings/arrays + TAG_BUFFER; response header v1
+    // Response: throttle_time_ms (v3+), [topic [partition, error]] (+ tags when flex)
+    let flex = version >= 8;
+    let empty = |out: &mut BytesMut| {
         if version >= 3 {
             out.put_i32(0); // throttle
         }
-        out.put_i32(0);
+        if flex {
+            put_compact_array_len(out, 0);
+            put_empty_tag_buffer(out);
+        } else {
+            out.put_i32(0);
+        }
     };
 
-    let group_id = match get_string(src) {
-        Ok(g) => g,
-        Err(_) => {
-            empty(out, version);
-            return;
+    let group_id = if flex {
+        match get_compact_string(src) {
+            Ok(g) => g,
+            Err(_) => {
+                empty(out);
+                return;
+            }
+        }
+    } else {
+        match get_string(src) {
+            Ok(g) => g,
+            Err(_) => {
+                empty(out);
+                return;
+            }
         }
     };
 
@@ -3736,28 +3769,43 @@ fn encode_offset_commit(
     let mut member_id = String::new();
     if version >= 1 {
         if src.remaining() < 4 {
-            empty(out, version);
+            empty(out);
             return;
         }
         generation = src.get_i32() as u32;
-        member_id = match get_string(src) {
-            Ok(m) => m,
-            Err(_) => {
-                empty(out, version);
-                return;
+        member_id = if flex {
+            match get_compact_string(src) {
+                Ok(m) => m,
+                Err(_) => {
+                    empty(out);
+                    return;
+                }
+            }
+        } else {
+            match get_string(src) {
+                Ok(m) => m,
+                Err(_) => {
+                    empty(out);
+                    return;
+                }
             }
         };
     }
     // v7+: group_instance_id (nullable). Prefer member_id when set; otherwise
     // derive static:{instance} like JoinGroup / Heartbeat.
     if version >= 7 {
-        match get_nullable_string(src) {
+        let inst = if flex {
+            get_compact_nullable_string(src)
+        } else {
+            get_nullable_string(src)
+        };
+        match inst {
             Ok(Some(inst)) if member_id.is_empty() && !inst.is_empty() => {
                 member_id = static_member_id(&inst);
             }
             Ok(_) => {}
             Err(_) => {
-                empty(out, version);
+                empty(out);
                 return;
             }
         }
@@ -3765,7 +3813,7 @@ fn encode_offset_commit(
     // Retention only on v2–4 (ignored — broker-controlled retention).
     if (2..=4).contains(&version) {
         if src.remaining() < 8 {
-            empty(out, version);
+            empty(out);
             return;
         }
         let _retention = src.get_i64();
@@ -3779,12 +3827,6 @@ fn encode_offset_commit(
             AclOperation::Read,
         );
 
-    if src.remaining() < 4 {
-        empty(out, version);
-        return;
-    }
-    let topic_count = src.get_i32();
-
     struct TopicReq {
         topic: String,
         partitions: Vec<i32>,
@@ -3792,44 +3834,93 @@ fn encode_offset_commit(
     let mut parsed: Vec<TopicReq> = Vec::new();
     let mut entries: Vec<(String, u32, u64, String)> = Vec::new();
 
-    for _ in 0..topic_count.max(0) {
-        let topic = match get_string(src) {
-            Ok(t) => t,
-            Err(_) => break,
-        };
-        if src.remaining() < 4 {
-            break;
-        }
-        let part_count = src.get_i32();
-        let mut partitions = Vec::new();
-        for _ in 0..part_count.max(0) {
-            if src.remaining() < 4 + 8 {
-                break;
+    if flex {
+        let topic_count = match get_compact_array_len(src) {
+            Ok(Some(n)) => n,
+            Ok(None) => 0,
+            Err(_) => {
+                empty(out);
+                return;
             }
-            let partition = src.get_i32();
-            let offset = src.get_i64().max(0) as u64;
-            // v6+: committed_leader_epoch (not stored; OffsetFetch returns -1).
-            if version >= 6 {
+        };
+        for _ in 0..topic_count {
+            let topic = match get_compact_string(src) {
+                Ok(t) => t,
+                Err(_) => break,
+            };
+            let part_count = match get_compact_array_len(src) {
+                Ok(Some(n)) => n,
+                Ok(None) | Err(_) => 0,
+            };
+            let mut partitions = Vec::new();
+            for _ in 0..part_count {
+                if src.remaining() < 4 + 8 {
+                    break;
+                }
+                let partition = src.get_i32();
+                let offset = src.get_i64().max(0) as u64;
+                // v6+ always for flex v8: committed_leader_epoch
                 if src.remaining() < 4 {
                     break;
                 }
                 let _leader_epoch = src.get_i32();
+                let metadata = get_compact_nullable_string(src)
+                    .ok()
+                    .flatten()
+                    .unwrap_or_default();
+                let _ = skip_tag_buffer(src); // partition tags
+                entries.push((topic.clone(), partition as u32, offset, metadata));
+                partitions.push(partition);
             }
-            // v1 only: commit_timestamp
-            if version == 1 {
-                if src.remaining() < 8 {
+            let _ = skip_tag_buffer(src); // topic tags
+            parsed.push(TopicReq { topic, partitions });
+        }
+        let _ = skip_tag_buffer(src); // request top-level tags
+    } else {
+        if src.remaining() < 4 {
+            empty(out);
+            return;
+        }
+        let topic_count = src.get_i32();
+        for _ in 0..topic_count.max(0) {
+            let topic = match get_string(src) {
+                Ok(t) => t,
+                Err(_) => break,
+            };
+            if src.remaining() < 4 {
+                break;
+            }
+            let part_count = src.get_i32();
+            let mut partitions = Vec::new();
+            for _ in 0..part_count.max(0) {
+                if src.remaining() < 4 + 8 {
                     break;
                 }
-                let _ts = src.get_i64();
+                let partition = src.get_i32();
+                let offset = src.get_i64().max(0) as u64;
+                // v6+: committed_leader_epoch (not stored; OffsetFetch returns -1).
+                if version >= 6 {
+                    if src.remaining() < 4 {
+                        break;
+                    }
+                    let _leader_epoch = src.get_i32();
+                }
+                // v1 only: commit_timestamp
+                if version == 1 {
+                    if src.remaining() < 8 {
+                        break;
+                    }
+                    let _ts = src.get_i64();
+                }
+                let metadata = match get_string(src) {
+                    Ok(m) => m,
+                    Err(_) => String::new(),
+                };
+                entries.push((topic.clone(), partition as u32, offset, metadata));
+                partitions.push(partition);
             }
-            let metadata = match get_string(src) {
-                Ok(m) => m,
-                Err(_) => String::new(),
-            };
-            entries.push((topic.clone(), partition as u32, offset, metadata));
-            partitions.push(partition);
+            parsed.push(TopicReq { topic, partitions });
         }
-        parsed.push(TopicReq { topic, partitions });
     }
 
     let kerr = if auth_denied {
@@ -3847,13 +3938,28 @@ fn encode_offset_commit(
     if version >= 3 {
         out.put_i32(0); // throttle
     }
-    out.put_i32(parsed.len() as i32);
-    for t in parsed {
-        put_string(out, &t.topic);
-        out.put_i32(t.partitions.len() as i32);
-        for p in t.partitions {
-            out.put_i32(p);
-            out.put_i16(kerr);
+    if flex {
+        put_compact_array_len(out, parsed.len());
+        for t in parsed {
+            put_compact_string(out, &t.topic);
+            put_compact_array_len(out, t.partitions.len());
+            for p in t.partitions {
+                out.put_i32(p);
+                out.put_i16(kerr);
+                put_empty_tag_buffer(out); // partition tags
+            }
+            put_empty_tag_buffer(out); // topic tags
+        }
+        put_empty_tag_buffer(out); // top-level tags
+    } else {
+        out.put_i32(parsed.len() as i32);
+        for t in parsed {
+            put_string(out, &t.topic);
+            out.put_i32(t.partitions.len() as i32);
+            for p in t.partitions {
+                out.put_i32(p);
+                out.put_i16(kerr);
+            }
         }
     }
 }
@@ -3865,35 +3971,87 @@ fn encode_offset_fetch(
     version: i16,
     principal: &str,
 ) {
-    // OffsetFetch classic v0–5:
+    // OffsetFetch classic v0–5 / flexible v6–7 (single-group):
     //   group_id, topics nullable array (v2+: null=all, empty=none; v0–1: empty=all)
+    //   require_stable (v7+, ignored — no unstable offsets)
+    //   multi-group Groups[] (v8+) deferred
     // Response: throttle (v3+), topics[{ name, partitions[{ partition, offset,
     //   committed_leader_epoch (v5+), metadata, error }] }], top-level error (v2+)
+    // Flexible: compact arrays/strings + TAG_BUFFER; response header v1
+    let flex = version >= 6;
+
     let write_partition = |out: &mut BytesMut, partition: i32, offset: i64, meta: &str| {
         out.put_i32(partition);
         out.put_i64(offset);
         if version >= 5 {
             out.put_i32(-1); // committed_leader_epoch unknown
         }
-        put_string(out, meta);
-        out.put_i16(KafkaErrorCode::None.as_i16());
+        if flex {
+            put_compact_nullable_string(out, Some(meta));
+            out.put_i16(KafkaErrorCode::None.as_i16());
+            put_empty_tag_buffer(out);
+        } else {
+            put_string(out, meta);
+            out.put_i16(KafkaErrorCode::None.as_i16());
+        }
+    };
+
+    let write_topics_header = |out: &mut BytesMut, n: usize| {
+        if flex {
+            put_compact_array_len(out, n);
+        } else {
+            out.put_i32(n as i32);
+        }
+    };
+
+    let write_topic_name = |out: &mut BytesMut, topic: &str| {
+        if flex {
+            put_compact_string(out, topic);
+        } else {
+            put_string(out, topic);
+        }
+    };
+
+    let write_parts_header = |out: &mut BytesMut, n: usize| {
+        if flex {
+            put_compact_array_len(out, n);
+        } else {
+            out.put_i32(n as i32);
+        }
     };
 
     let finish = |out: &mut BytesMut, top_error: i16| {
         if version >= 2 {
             out.put_i16(top_error);
         }
+        if flex {
+            put_empty_tag_buffer(out);
+        }
     };
 
-    let group_id = match get_string(src) {
-        Ok(g) => g,
-        Err(_) => {
-            if version >= 3 {
-                out.put_i32(0);
-            }
+    let empty_error = |out: &mut BytesMut, top_error: i16| {
+        if version >= 3 {
             out.put_i32(0);
-            finish(out, KafkaErrorCode::InvalidRequest.as_i16());
-            return;
+        }
+        write_topics_header(out, 0);
+        finish(out, top_error);
+    };
+
+    let group_id = if flex {
+        match get_compact_string(src) {
+            Ok(g) => g,
+            Err(_) => {
+                empty_error(out, KafkaErrorCode::InvalidRequest.as_i16());
+                return;
+            }
+        }
+    } else {
+        match get_string(src) {
+            Ok(g) => g,
+            Err(_) => {
+                empty_error(out, KafkaErrorCode::InvalidRequest.as_i16());
+                return;
+            }
         }
     };
 
@@ -3905,12 +4063,8 @@ fn encode_offset_fetch(
             AclOperation::Read,
         )
     {
-        if version >= 3 {
-            out.put_i32(0); // throttle
-        }
-        out.put_i32(0); // empty topics
         // v0–1: empty topics only; v2+: GroupAuthorizationFailed
-        finish(
+        empty_error(
             out,
             if version >= 2 {
                 KafkaErrorCode::GroupAuthorizationFailed.as_i16()
@@ -3921,48 +4075,93 @@ fn encode_offset_fetch(
         return;
     }
 
-    if src.remaining() < 4 {
-        if version >= 3 {
-            out.put_i32(0);
-        }
-        out.put_i32(0);
-        finish(out, KafkaErrorCode::None.as_i16());
-        return;
-    }
-    let topic_count = src.get_i32();
-
-    // Topics array semantics:
-    //   v0–1: count <= 0 → all (legacy empty-as-all)
-    //   v2+:  count < 0 (null) → all; count == 0 → none; count > 0 → listed
-    let list_all = if version >= 2 {
-        topic_count < 0
-    } else {
-        topic_count <= 0
-    };
-    let list_none = version >= 2 && topic_count == 0;
-
     let mut query: Vec<(String, u32)> = Vec::new();
     let mut requested: Vec<(String, Vec<i32>)> = Vec::new();
-    if topic_count > 0 {
-        for _ in 0..topic_count {
-            let topic = match get_string(src) {
-                Ok(t) => t,
-                Err(_) => break,
-            };
-            if src.remaining() < 4 {
-                break;
+    let list_all;
+    let list_none;
+
+    if flex {
+        // Compact nullable topics array: None=all, Some(0)=none, Some(n)=listed.
+        match get_compact_array_len(src) {
+            Ok(None) => {
+                list_all = true;
+                list_none = false;
             }
-            let pc = src.get_i32();
-            let mut parts = Vec::new();
-            for _ in 0..pc.max(0) {
+            Ok(Some(0)) => {
+                list_all = false;
+                list_none = true;
+            }
+            Ok(Some(n)) => {
+                list_all = false;
+                list_none = false;
+                for _ in 0..n {
+                    let topic = match get_compact_string(src) {
+                        Ok(t) => t,
+                        Err(_) => break,
+                    };
+                    let pc = match get_compact_array_len(src) {
+                        Ok(Some(p)) => p,
+                        Ok(None) | Err(_) => 0,
+                    };
+                    let mut parts = Vec::new();
+                    for _ in 0..pc {
+                        if src.remaining() < 4 {
+                            break;
+                        }
+                        let p = src.get_i32();
+                        parts.push(p);
+                        query.push((topic.clone(), p as u32));
+                    }
+                    let _ = skip_tag_buffer(src); // topic tags
+                    requested.push((topic, parts));
+                }
+            }
+            Err(_) => {
+                empty_error(out, KafkaErrorCode::InvalidRequest.as_i16());
+                return;
+            }
+        }
+        // RequireStable (v7+): ignored — no unstable/pending txn offsets.
+        if version >= 7 && src.remaining() >= 1 {
+            let _require_stable = src.get_u8();
+        }
+        let _ = skip_tag_buffer(src); // request top-level tags
+    } else {
+        if src.remaining() < 4 {
+            empty_error(out, KafkaErrorCode::None.as_i16());
+            return;
+        }
+        let topic_count = src.get_i32();
+        // Topics array semantics:
+        //   v0–1: count <= 0 → all (legacy empty-as-all)
+        //   v2+:  count < 0 (null) → all; count == 0 → none; count > 0 → listed
+        list_all = if version >= 2 {
+            topic_count < 0
+        } else {
+            topic_count <= 0
+        };
+        list_none = version >= 2 && topic_count == 0;
+        if topic_count > 0 {
+            for _ in 0..topic_count {
+                let topic = match get_string(src) {
+                    Ok(t) => t,
+                    Err(_) => break,
+                };
                 if src.remaining() < 4 {
                     break;
                 }
-                let p = src.get_i32();
-                parts.push(p);
-                query.push((topic.clone(), p as u32));
+                let pc = src.get_i32();
+                let mut parts = Vec::new();
+                for _ in 0..pc.max(0) {
+                    if src.remaining() < 4 {
+                        break;
+                    }
+                    let p = src.get_i32();
+                    parts.push(p);
+                    query.push((topic.clone(), p as u32));
+                }
+                requested.push((topic, parts));
             }
-            requested.push((topic, parts));
         }
     }
 
@@ -3971,7 +4170,7 @@ fn encode_offset_fetch(
     }
 
     if list_none {
-        out.put_i32(0);
+        write_topics_header(out, 0);
         finish(out, KafkaErrorCode::None.as_i16());
         return;
     }
@@ -3999,22 +4198,25 @@ fn encode_offset_fetch(
                 .or_default()
                 .push((e.partition, off, e.metadata));
         }
-        out.put_i32(by_topic.len() as i32);
+        write_topics_header(out, by_topic.len());
         for (topic, parts) in by_topic {
-            put_string(out, &topic);
-            out.put_i32(parts.len() as i32);
+            write_topic_name(out, &topic);
+            write_parts_header(out, parts.len());
             for (p, off, meta) in parts {
                 write_partition(out, p as i32, off, &meta);
+            }
+            if flex {
+                put_empty_tag_buffer(out); // topic tags
             }
         }
         finish(out, KafkaErrorCode::None.as_i16());
         return;
     }
 
-    out.put_i32(requested.len() as i32);
+    write_topics_header(out, requested.len());
     for (topic, parts) in requested {
-        put_string(out, &topic);
-        out.put_i32(parts.len() as i32);
+        write_topic_name(out, &topic);
+        write_parts_header(out, parts.len());
         for p in parts {
             let entry = fetched
                 .iter()
@@ -4025,6 +4227,9 @@ fn encode_offset_fetch(
                 None => (-1i64, String::new()),
             };
             write_partition(out, p, off, &meta);
+        }
+        if flex {
+            put_empty_tag_buffer(out); // topic tags
         }
     }
     finish(out, KafkaErrorCode::None.as_i16());

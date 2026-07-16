@@ -127,7 +127,7 @@ async fn api_versions_offset_commit_and_find_coordinator() {
         let max_v = src.get_i16();
         found.insert(key, (min_v, max_v));
     }
-    assert_eq!(found.get(&8), Some(&(0, 7))); // OffsetCommit
+    assert_eq!(found.get(&8), Some(&(0, 8))); // OffsetCommit (Phase 57 flex v8)
     assert_eq!(found.get(&10), Some(&(0, 4))); // FindCoordinator (Phase 52 flexible)
     server.abort();
     let _ = std::fs::remove_dir_all(&dir);

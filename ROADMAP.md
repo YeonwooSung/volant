@@ -1291,7 +1291,27 @@ Binding: **[docs/PHASE56_SPEC.md](./docs/PHASE56_SPEC.md)**.
 not validated against join; Reason fields discarded; empty tags only.
 
 **Still deferred:** multi-lang clients, cargo-fuzz corpus CI, flexible
-OffsetCommit/OffsetFetch/admin/txn, Metadata TopicId, DescribeCluster /
+OffsetCommit/OffsetFetch/admin/txn — OffsetCommit/Fetch closed by **Phase 57**.
+Metadata TopicId, DescribeCluster / ListTransactions, true control-marker
+READ_COMMITTED.
+
+### Phase 57 — Flexible OffsetCommit + OffsetFetch ✅
+
+**Goal:** Extend KIP-482 flexible framing to consumer offset APIs —
+**OffsetCommit v8** and **OffsetFetch v6–7** (RequireStable flag).
+
+Binding: **[docs/PHASE57_SPEC.md](./docs/PHASE57_SPEC.md)**.
+
+- [x] OffsetCommit 0–8 (v8 flexible; classic 0–7 unchanged)
+- [x] OffsetFetch 0–7 (v6 flexible; v7 RequireStable ignored)
+- [x] Response header v1 for those flexible versions
+- [x] Integration tests (`phase57_flexible_offsets`)
+
+**Honest limitations:** no multi-group OffsetFetch v8+; leader epoch not
+stored; RequireStable ignored; empty tags only.
+
+**Still deferred:** multi-lang clients, cargo-fuzz corpus CI, flexible
+admin/txn, OffsetFetch multi-group, Metadata TopicId, DescribeCluster /
 ListTransactions, true control-marker READ_COMMITTED.
 
 ---
