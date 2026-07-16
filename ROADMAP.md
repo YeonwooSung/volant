@@ -1080,6 +1080,24 @@ ignored; default partitions = 1.
 **Still deferred:** multi-lang clients, cargo-fuzz corpus CI, flexible modern
 admin APIs (DescribeCluster / ListTransactions).
 
+### Phase 46 — Kafka Describe/AlterConfigs classic versions ✅
+
+**Goal:** Raise DescribeConfigs / AlterConfigs classic versions; fix leading
+throttle and DescribeConfigs field order to match Kafka.
+
+Binding: **[docs/PHASE46_SPEC.md](./docs/PHASE46_SPEC.md)**.
+
+- [x] DescribeConfigs 0–3 (throttle; config_source/synonyms v1+; type/docs v3+)
+- [x] AlterConfigs 0–1 (leading throttle all versions)
+- [x] Kafka field order: error → error_message → type → name
+- [x] Integration tests (`phase46_configs`); phase27 framing fixes
+
+**Honest limitations:** TOPIC only; empty synonyms; IncrementalAlterConfigs
+stays classic v0 (flexible 1+).
+
+**Still deferred:** multi-lang clients, cargo-fuzz corpus CI, flexible modern
+admin APIs (DescribeCluster / ListTransactions).
+
 ---
 
 ## Performance targets (aspirational)

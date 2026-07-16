@@ -251,6 +251,9 @@ leader epoch field, `group.instance.id` on commit.
 **Phase 45:** Kafka topic admin classic — CreateTopics 0–4, DeleteTopics 0–3,
 CreatePartitions 0–1 (throttle framing + validate_only).
 
+**Phase 46:** Kafka DescribeConfigs 0–3 + AlterConfigs 0–1 — throttle,
+config_source/synonyms, config_type/documentation.
+
 **Still deferred:** multi-language clients, chaos-mesh / cargo-fuzz corpus CI.
 
 ### Networked client (library)

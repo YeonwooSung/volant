@@ -219,11 +219,11 @@ fn dispatch_kafka(broker: &Broker, body: bytes::Bytes, conn: &mut KafkaConnState
         Some(ApiKey::CreatePartitions) if (0..=1).contains(&hdr.api_version) => {
             encode_create_partitions(broker, &mut src, &mut out, hdr.api_version, principal);
         }
-        Some(ApiKey::DescribeConfigs) if hdr.api_version == 0 => {
-            encode_describe_configs(broker, &mut src, &mut out, principal);
+        Some(ApiKey::DescribeConfigs) if (0..=3).contains(&hdr.api_version) => {
+            encode_describe_configs(broker, &mut src, &mut out, hdr.api_version, principal);
         }
-        Some(ApiKey::AlterConfigs) if hdr.api_version == 0 => {
-            encode_alter_configs(broker, &mut src, &mut out, principal);
+        Some(ApiKey::AlterConfigs) if (0..=1).contains(&hdr.api_version) => {
+            encode_alter_configs(broker, &mut src, &mut out, hdr.api_version, principal);
         }
         Some(ApiKey::IncrementalAlterConfigs) if hdr.api_version == 0 => {
             encode_incremental_alter_configs(broker, &mut src, &mut out, principal);
@@ -3393,9 +3393,47 @@ fn encode_create_partitions(
     }
 }
 
-fn encode_describe_configs(broker: &Broker, src: &mut impl Buf, out: &mut BytesMut, principal: &str) {
-    // DescribeConfigs v0: [resource_type:i8, resource_name, [config_names] | null]
+/// Kafka `DescribeConfigsResponse.ConfigSource` ids (classic).
+const CFG_SRC_TOPIC: i8 = 1;
+const CFG_SRC_DEFAULT: i8 = 5;
+/// Kafka `DescribeConfigsResponse.ConfigType` ids.
+const CFG_TYPE_STRING: i8 = 2;
+const CFG_TYPE_LONG: i8 = 5;
+
+fn config_type_for_key(key: &str) -> i8 {
+    match key {
+        "retention.ms" | "retention.bytes" | "segment.bytes" => CFG_TYPE_LONG,
+        _ => CFG_TYPE_STRING,
+    }
+}
+
+fn config_documentation(key: &str) -> Option<&'static str> {
+    match key {
+        "retention.ms" => Some("Log retention time in milliseconds"),
+        "retention.bytes" => Some("Log retention size in bytes"),
+        "segment.bytes" => Some("Segment roll size in bytes"),
+        "cleanup.policy" => Some("delete | compact"),
+        _ => None,
+    }
+}
+
+fn encode_describe_configs(
+    broker: &Broker,
+    src: &mut impl Buf,
+    out: &mut BytesMut,
+    version: i16,
+    principal: &str,
+) {
+    // DescribeConfigs classic v0–3 (flexible 4+):
+    //   request: resources[], include_synonyms (v1+), include_documentation (v3+)
+    //   response: throttle (all versions),
+    //     [error, error_message, resource_type, resource_name, configs[…]]
+    //   config entry: name, value, read_only,
+    //     is_default (v0) | config_source (v1+), is_sensitive,
+    //     synonyms (v1+), config_type + documentation (v3+)
+    // Phase 46: leading throttle + Kafka field order (error_message before type/name).
     if src.remaining() < 4 {
+        out.put_i32(0); // throttle
         out.put_i32(0);
         return;
     }
@@ -3433,15 +3471,38 @@ fn encode_describe_configs(broker: &Broker, src: &mut impl Buf, out: &mut BytesM
         };
         resources.push(Res { rtype, name, keys });
     }
+    // include_synonyms (v1+): parsed for wire compatibility; we always emit an
+    // empty synonyms list (no layered broker-default store).
+    if version >= 1 && src.remaining() >= 1 {
+        let _include_synonyms = src.get_u8() != 0;
+    }
+    let include_docs = if version >= 3 && src.remaining() >= 1 {
+        src.get_u8() != 0
+    } else {
+        false
+    };
 
+    out.put_i32(0); // throttle
     out.put_i32(resources.len() as i32);
     for r in resources {
+        // Kafka field order: error, error_message, resource_type, resource_name, configs
+        let write_header =
+            |out: &mut BytesMut, code: KafkaErrorCode, msg: Option<&str>, rtype: i8, name: &str| {
+                out.put_i16(code.as_i16());
+                put_nullable_string(out, msg);
+                out.put_i8(rtype);
+                put_string(out, name);
+            };
+
         // resource_type 2 = TOPIC
         if r.rtype != 2 {
-            out.put_i16(KafkaErrorCode::InvalidRequest.as_i16());
-            out.put_i8(r.rtype);
-            put_string(out, &r.name);
-            put_nullable_string(out, Some("only TOPIC resources supported"));
+            write_header(
+                out,
+                KafkaErrorCode::InvalidRequest,
+                Some("only TOPIC resources supported"),
+                r.rtype,
+                &r.name,
+            );
             out.put_i32(0);
             continue;
         }
@@ -3453,10 +3514,13 @@ fn encode_describe_configs(broker: &Broker, src: &mut impl Buf, out: &mut BytesM
                 AclOperation::Describe,
             )
         {
-            out.put_i16(KafkaErrorCode::TopicAuthorizationFailed.as_i16());
-            out.put_i8(r.rtype);
-            put_string(out, &r.name);
-            put_nullable_string(out, None);
+            write_header(
+                out,
+                KafkaErrorCode::TopicAuthorizationFailed,
+                None,
+                r.rtype,
+                &r.name,
+            );
             out.put_i32(0);
             continue;
         }
@@ -3466,45 +3530,73 @@ fn encode_describe_configs(broker: &Broker, src: &mut impl Buf, out: &mut BytesM
                 if let Some(filter) = &r.keys {
                     entries.retain(|(k, _)| filter.iter().any(|f| f == k));
                 }
-                out.put_i16(KafkaErrorCode::None.as_i16());
-                out.put_i8(r.rtype);
-                put_string(out, &r.name);
-                put_nullable_string(out, None); // error message
+                write_header(out, KafkaErrorCode::None, None, r.rtype, &r.name);
                 out.put_i32(entries.len() as i32);
                 for (k, v) in entries {
+                    let is_default = v.is_empty();
                     put_string(out, &k);
-                    // config_value nullable
-                    if v.is_empty() {
+                    if is_default {
                         put_nullable_string(out, None);
                     } else {
                         put_nullable_string(out, Some(&v));
                     }
                     out.put_u8(0); // read_only
-                    out.put_u8(if v.is_empty() { 1 } else { 0 }); // is_default
+                    if version == 0 {
+                        out.put_u8(if is_default { 1 } else { 0 }); // is_default
+                    } else {
+                        // config_source
+                        out.put_i8(if is_default {
+                            CFG_SRC_DEFAULT
+                        } else {
+                            CFG_SRC_TOPIC
+                        });
+                    }
                     out.put_u8(0); // is_sensitive
+                    if version >= 1 {
+                        // synonyms: empty (no layered broker defaults)
+                        out.put_i32(0);
+                    }
+                    if version >= 3 {
+                        out.put_i8(config_type_for_key(&k));
+                        if include_docs {
+                            put_nullable_string(out, config_documentation(&k));
+                        } else {
+                            put_nullable_string(out, None);
+                        }
+                    }
                 }
             }
             Err(Error::NotFound(_)) => {
-                out.put_i16(KafkaErrorCode::UnknownTopicOrPartition.as_i16());
-                out.put_i8(r.rtype);
-                put_string(out, &r.name);
-                put_nullable_string(out, Some("topic not found"));
+                write_header(
+                    out,
+                    KafkaErrorCode::UnknownTopicOrPartition,
+                    Some("topic not found"),
+                    r.rtype,
+                    &r.name,
+                );
                 out.put_i32(0);
             }
             Err(_) => {
-                out.put_i16(KafkaErrorCode::Unknown.as_i16());
-                out.put_i8(r.rtype);
-                put_string(out, &r.name);
-                put_nullable_string(out, None);
+                write_header(out, KafkaErrorCode::Unknown, None, r.rtype, &r.name);
                 out.put_i32(0);
             }
         }
     }
 }
 
-fn encode_alter_configs(broker: &Broker, src: &mut impl Buf, out: &mut BytesMut, principal: &str) {
-    // AlterConfigs v0: [resource_type, resource_name, [name, value]] validate_only
+fn encode_alter_configs(
+    broker: &Broker,
+    src: &mut impl Buf,
+    out: &mut BytesMut,
+    _version: i16,
+    principal: &str,
+) {
+    // AlterConfigs classic v0–1 (flexible 2+):
+    //   request: [resource_type, resource_name, [name, value]] validate_only
+    //   response: throttle (all versions), [error, error_message, type, name]
+    // Phase 46: leading throttle (Kafka has throttle on v0+).
     if src.remaining() < 4 {
+        out.put_i32(0); // throttle
         out.put_i32(0);
         return;
     }
@@ -3534,14 +3626,10 @@ fn encode_alter_configs(broker: &Broker, src: &mut impl Buf, out: &mut BytesMut,
                 Ok(s) => s,
                 Err(_) => break,
             };
-            // value is nullable string in some versions; treat as string
             let v = match get_nullable_string(src) {
                 Ok(Some(s)) => s,
                 Ok(None) => String::new(),
-                Err(_) => match get_string(src) {
-                    Ok(s) => s,
-                    Err(_) => String::new(),
-                },
+                Err(_) => String::new(),
             };
             entries.push((k, v));
         }
@@ -3557,7 +3645,7 @@ fn encode_alter_configs(broker: &Broker, src: &mut impl Buf, out: &mut BytesMut,
         false
     };
 
-    // Response: [error_code, error_message, resource_type, resource_name]
+    out.put_i32(0); // throttle
     out.put_i32(resources.len() as i32);
     for r in resources {
         if r.rtype != 2 {

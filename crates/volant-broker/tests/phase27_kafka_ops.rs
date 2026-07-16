@@ -217,7 +217,7 @@ async fn create_partitions_and_configs() {
     let meta = broker.metadata(Some(&[TopicName::new("orders")]));
     assert_eq!(meta.topics[0].partitions.len(), 3);
 
-    // AlterConfigs
+    // AlterConfigs (throttle first on all versions)
     let mut abody = BytesMut::new();
     abody.put_i32(1);
     abody.put_i8(2); // TOPIC
@@ -231,13 +231,14 @@ async fn create_partitions_and_configs() {
     let aresp = rpc(&addr, encode_request(33, 0, 2, Some("c"), &abody)).await;
     let mut asrc = aresp.freeze();
     asrc.advance(4);
+    assert_eq!(asrc.get_i32(), 0); // throttle
     assert_eq!(asrc.get_i32(), 1);
     assert_eq!(asrc.get_i16(), 0);
     let _ = get_nullable_string(&mut asrc).unwrap();
     assert_eq!(asrc.get_i8(), 2);
     assert_eq!(get_string(&mut asrc).unwrap(), "orders");
 
-    // DescribeConfigs
+    // DescribeConfigs v0 (throttle first; Kafka field order: err, msg, type, name)
     let mut dbody = BytesMut::new();
     dbody.put_i32(1);
     dbody.put_i8(2);
@@ -246,11 +247,12 @@ async fn create_partitions_and_configs() {
     let dresp = rpc(&addr, encode_request(32, 0, 3, Some("c"), &dbody)).await;
     let mut ds = dresp.freeze();
     ds.advance(4);
+    assert_eq!(ds.get_i32(), 0); // throttle
     assert_eq!(ds.get_i32(), 1);
     assert_eq!(ds.get_i16(), 0);
+    let _ = get_nullable_string(&mut ds).unwrap(); // error_message
     assert_eq!(ds.get_i8(), 2);
     assert_eq!(get_string(&mut ds).unwrap(), "orders");
-    let _ = get_nullable_string(&mut ds).unwrap();
     let ncfg = ds.get_i32();
     assert!(ncfg >= 2);
     let mut got_retention = false;
@@ -259,7 +261,7 @@ async fn create_partitions_and_configs() {
         let k = get_string(&mut ds).unwrap();
         let v = get_nullable_string(&mut ds).unwrap().unwrap_or_default();
         let _ro = ds.get_u8();
-        let _def = ds.get_u8();
+        let _def = ds.get_u8(); // is_default (v0)
         let _sens = ds.get_u8();
         if k == "retention.ms" {
             assert_eq!(v, "60000");

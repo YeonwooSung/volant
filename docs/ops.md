@@ -153,8 +153,8 @@ Supported APIs:
 | DescribeGroups | 0–4 | state + members; throttle v1+; authorized_ops v3+; group_instance_id v4+ (from `static:`) |
 | DeleteGroups | 0–1 | empty groups only (`NON_EMPTY_GROUP` if live); throttle all versions |
 | CreatePartitions | 0–1 | total partition count; throttle all versions; validate_only dry-run |
-| DescribeConfigs | 0 | TOPIC resources; Volant keys |
-| AlterConfigs | 0 | TOPIC resources; Volant keys |
+| DescribeConfigs | 0–3 | TOPIC resources; throttle; v1+ config_source + empty synonyms; v3+ type/docs |
+| AlterConfigs | 0–1 | TOPIC resources; throttle all versions; validate_only |
 | IncrementalAlterConfigs | 0 | SET/DELETE on TOPIC keys |
 | DeleteRecords | 0–1 | whole sealed segments only (Phase 14) |
 | DescribeAcls | 0–1 | filter → Volant ACL list |
