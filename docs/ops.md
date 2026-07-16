@@ -131,7 +131,7 @@ Supported APIs:
 | Metadata | 0–8 | Classic through v8: rack, cluster_id=`volant`, throttle 0, empty offline_replicas, leader_epoch=-1, optional authorized-ops (flexible v9+ unsupported) |
 | OffsetForLeaderEpoch | 0–3 | End offset by leader epoch; no epoch history (eligible → HWM); fencing via current_leader_epoch |
 | Produce | 0–8 | MessageSet magic 0/1 **or** RecordBatch magic 2 (auto-detect); compression + idempotent PID/seq; v5+ log_start_offset; v8+ empty record_errors; flexible v9+ unsupported |
-| Fetch | 0–4 | v0–3 MessageSet + v4 RecordBatch compressed (default lz4; see env) |
+| Fetch | 0–11 | v0–3 MessageSet + v4–11 RecordBatch compressed (default lz4); v5+ log_start; v7+ session header (no real sessions); v9+ leader-epoch fence; v11 preferred_read_replica=-1; flexible v12+ unsupported |
 | InitProducerId | 0–1 | plain + transactional_id fencing; timeout ignored |
 | FindCoordinator | 0–2 | v1+ key_type 0=group/1=transaction; throttle + error_message; v2 wire-identical to v1 |
 | AddPartitionsToTxn | 0–2 | opens txn (Kafka has no BeginTxn); v1–2 wire-identical to v0 |
@@ -206,7 +206,7 @@ Limitations:
 - Prefer binding to localhost / private networks; leave disabled in production
   unless you need Kafka-protocol discovery.
 
-See [PHASE23_SPEC.md](./PHASE23_SPEC.md) … [PHASE48_SPEC.md](./PHASE48_SPEC.md).
+See [PHASE23_SPEC.md](./PHASE23_SPEC.md) … [PHASE49_SPEC.md](./PHASE49_SPEC.md).
 
 ## TLS (Phase 7 listen + Phase 9 verification / inter-broker)
 

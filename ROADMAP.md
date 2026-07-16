@@ -1133,10 +1133,29 @@ Binding: **[docs/PHASE48_SPEC.md](./docs/PHASE48_SPEC.md)**.
 - [x] Integration tests (`phase48_produce`); phase24 ApiVersions update
 
 **Honest limitations:** no flexible Produce v9+; record_errors always empty;
-log_append_time always -1; Fetch still classic max 4.
+log_append_time always -1.
 
-**Still deferred:** multi-lang clients, cargo-fuzz corpus CI, Fetch classic
-bumps (0–11), flexible modern admin, true control-marker READ_COMMITTED.
+**Still deferred:** multi-lang clients, cargo-fuzz corpus CI, flexible modern
+admin, true control-marker READ_COMMITTED.
+
+### Phase 49 — Kafka Fetch classic versions ✅
+
+**Goal:** Raise Fetch from classic 0–4 to classic max **0–11** (flexible 12+);
+parse session/rack/epoch fields; emit log_start_offset and preferred_read_replica.
+
+Binding: **[docs/PHASE49_SPEC.md](./docs/PHASE49_SPEC.md)**.
+
+- [x] Fetch 0–11 dispatch + ApiVersions max 11
+- [x] Request: log_start_offset (v5+), session (v7+), leader epoch (v9+), rack (v11+)
+- [x] Response: log_start_offset (v5+), top-level error+session (v7+), preferred_read_replica=-1 (v11+)
+- [x] Leader-epoch fencing (v9+); LSO≡HWM honesty unchanged
+- [x] Integration tests (`phase49_fetch`); phase24/48 ApiVersions updates
+
+**Honest limitations:** no flexible Fetch v12+; no real incremental sessions;
+preferred_read_replica always -1; aborted_transactions always empty.
+
+**Still deferred:** multi-lang clients, cargo-fuzz corpus CI, ApiVersions 0–2,
+flexible modern admin, true control-marker READ_COMMITTED.
 
 ---
 

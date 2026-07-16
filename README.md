@@ -260,6 +260,9 @@ AddOffsetsToTxn, EndTxn, TxnOffsetCommit (v2 leader_epoch ignored).
 **Phase 48:** Kafka Produce classic 0–8 — log_start_offset (v5+), empty
 record_errors + error_message (v8+); flexible v9+ deferred.
 
+**Phase 49:** Kafka Fetch classic 0–11 — log_start_offset, session header,
+leader-epoch fence, preferred_read_replica=-1; flexible v12+ deferred.
+
 **Still deferred:** multi-language clients, chaos-mesh / cargo-fuzz corpus CI.
 
 ### Networked client (library)

@@ -147,7 +147,7 @@ fn dispatch_kafka(broker: &Broker, body: bytes::Bytes, conn: &mut KafkaConnState
         Some(ApiKey::Produce) if (0..=8).contains(&hdr.api_version) => {
             encode_produce(broker, &mut src, &mut out, hdr.api_version, principal);
         }
-        Some(ApiKey::Fetch) if (0..=4).contains(&hdr.api_version) => {
+        Some(ApiKey::Fetch) if (0..=11).contains(&hdr.api_version) => {
             encode_fetch(broker, &mut src, &mut out, hdr.api_version, principal);
         }
         Some(ApiKey::ListOffsets) if (0..=5).contains(&hdr.api_version) => {
@@ -1001,15 +1001,69 @@ fn encode_init_producer_id(broker: &Broker, src: &mut impl Buf, out: &mut BytesM
     out.put_i16(epoch as i16);
 }
 
-fn encode_fetch(broker: &Broker, src: &mut impl Buf, out: &mut BytesMut, version: i16, principal: &str) {
-    // FetchRequest v0–2: replica_id, max_wait, min_bytes, [topic ...]
-    // v3: + max_bytes
-    // v4: + isolation_level
-    if src.remaining() < 4 + 4 + 4 {
-        if version >= 1 {
-            out.put_i32(0); // throttle
-        }
+/// Write Fetch response header before topic array (classic v0–11).
+fn put_fetch_response_header(out: &mut BytesMut, version: i16, session_id: i32) {
+    // throttle (v1+), top-level error + session_id (v7+)
+    if version >= 1 {
         out.put_i32(0);
+    }
+    if version >= 7 {
+        out.put_i16(KafkaErrorCode::None.as_i16());
+        out.put_i32(session_id);
+    }
+}
+
+/// Write one FetchResponse partition entry (classic v0–11).
+///
+/// Order: index, error, hwm, lso (v4+), log_start (v5+), aborted[] (v4+),
+/// preferred_read_replica (v11+), records.
+fn put_fetch_partition_response(
+    out: &mut BytesMut,
+    version: i16,
+    partition: i32,
+    error: i16,
+    hwm: i64,
+    log_start: i64,
+    records: &[u8],
+) {
+    out.put_i32(partition);
+    out.put_i16(error);
+    out.put_i64(hwm);
+    if version >= 4 {
+        // LSO == HWM under buffer-until-commit (Phase 36 honesty).
+        out.put_i64(if error == 0 { hwm } else { -1 });
+    }
+    if version >= 5 {
+        out.put_i64(if error == 0 { log_start } else { -1 });
+    }
+    if version >= 4 {
+        out.put_i32(0); // aborted_transactions empty
+    }
+    if version >= 11 {
+        out.put_i32(-1); // preferred_read_replica (no rack-aware follower fetch)
+    }
+    put_bytes(out, Some(records));
+}
+
+fn encode_fetch(broker: &Broker, src: &mut impl Buf, out: &mut BytesMut, version: i16, principal: &str) {
+    // Fetch classic v0–11 (flexible 12+):
+    //   request: replica_id, max_wait, min_bytes,
+    //            max_bytes (v3+), isolation (v4+),
+    //            session_id + session_epoch (v7+),
+    //            topics[{ name, partitions[{
+    //              partition, current_leader_epoch (v9+), fetch_offset,
+    //              log_start_offset (v5+ follower), partition_max_bytes
+    //            }]}],
+    //            forgotten_topics (v7+), rack_id (v11+)
+    //   response: throttle (v1+), error+session_id (v7+),
+    //             topics[{ partitions[{ fields by version }]}]
+    let empty = |out: &mut BytesMut, version: i16, session_id: i32| {
+        put_fetch_response_header(out, version, session_id);
+        out.put_i32(0);
+    };
+
+    if src.remaining() < 4 + 4 + 4 {
+        empty(out, version, 0);
         return;
     }
     let _replica_id = src.get_i32();
@@ -1017,44 +1071,45 @@ fn encode_fetch(broker: &Broker, src: &mut impl Buf, out: &mut BytesMut, version
     let _min_bytes = src.get_i32();
     if version >= 3 {
         if src.remaining() < 4 {
-            if version >= 1 {
-                out.put_i32(0);
-            }
-            out.put_i32(0);
+            empty(out, version, 0);
             return;
         }
         let _max_bytes = src.get_i32();
     }
-    // Phase 36: isolation_level (v4). 0 = READ_UNCOMMITTED, 1 = READ_COMMITTED.
-    // Volant buffer-until-commit means both levels see only committed log data;
-    // LSO always equals HWM and aborted_transactions is always empty.
+    // Phase 36: isolation_level (v4). Both levels share the same path.
     let mut isolation = 0u8;
     if version >= 4 {
         if src.remaining() < 1 {
-            out.put_i32(0); // throttle
-            out.put_i32(0);
+            empty(out, version, 0);
             return;
         }
         isolation = src.get_u8();
         if isolation > 1 {
-            // Invalid isolation — empty response with throttle.
-            out.put_i32(0);
-            out.put_i32(0);
+            empty(out, version, 0);
             return;
         }
     }
-    let _ = isolation; // both levels share the same encode path (honest).
+    let _ = isolation;
 
-    // Fetch response v1+ starts with throttle_time_ms.
-    if version >= 1 {
-        out.put_i32(0);
+    // v7+: incremental fetch session fields (no real session; always full response).
+    let mut session_id = 0i32;
+    if version >= 7 {
+        if src.remaining() < 4 + 4 {
+            empty(out, version, 0);
+            return;
+        }
+        session_id = src.get_i32();
+        let _session_epoch = src.get_i32();
+        // Echo non-zero session_id; 0 means "not part of a session".
     }
 
     if src.remaining() < 4 {
-        out.put_i32(0);
+        empty(out, version, session_id);
         return;
     }
     let topic_count = src.get_i32();
+
+    put_fetch_response_header(out, version, session_id);
     out.put_i32(topic_count.max(0));
 
     for _ in 0..topic_count.max(0) {
@@ -1072,14 +1127,27 @@ fn encode_fetch(broker: &Broker, src: &mut impl Buf, out: &mut BytesMut, version
         out.put_i32(part_count.max(0));
 
         for _ in 0..part_count.max(0) {
-            if src.remaining() < 4 + 8 + 4 {
+            // partition + optional current_leader_epoch + fetch_offset
+            // + optional log_start_offset + partition_max_bytes
+            let need = 4
+                + if version >= 9 { 4 } else { 0 }
+                + 8
+                + if version >= 5 { 8 } else { 0 }
+                + 4;
+            if src.remaining() < need {
                 break;
             }
             let partition = src.get_i32();
+            let current_leader_epoch = if version >= 9 {
+                src.get_i32()
+            } else {
+                -1
+            };
             let fetch_offset = src.get_i64();
+            if version >= 5 {
+                let _follower_log_start = src.get_i64(); // ignored (consumer path)
+            }
             let max_bytes = src.get_i32().max(0) as usize;
-
-            out.put_i32(partition);
 
             if broker.acls().is_enabled()
                 && !broker.acls().authorize(
@@ -1089,18 +1157,55 @@ fn encode_fetch(broker: &Broker, src: &mut impl Buf, out: &mut BytesMut, version
                     AclOperation::Read,
                 )
             {
-                out.put_i16(KafkaErrorCode::TopicAuthorizationFailed.as_i16());
-                out.put_i64(-1); // high_watermark
-                if version >= 4 {
-                    out.put_i64(-1); // last_stable_offset
-                    out.put_i32(0); // aborted_transactions
-                }
-                put_bytes(out, Some(&[]));
+                put_fetch_partition_response(
+                    out,
+                    version,
+                    partition,
+                    KafkaErrorCode::TopicAuthorizationFailed.as_i16(),
+                    -1,
+                    -1,
+                    &[],
+                );
                 continue;
             }
 
             let name = TopicName::new(topic.clone());
-            // Estimate max messages from max_bytes (rough).
+            let snap = broker.metadata(Some(&[name.clone()]));
+            let part_meta = snap.topics.first().and_then(|t| {
+                t.partitions
+                    .iter()
+                    .find(|p| p.partition_id.0 == partition as u32)
+            });
+
+            // v9+: fence on current_leader_epoch (-1 = no fence).
+            if current_leader_epoch != -1 {
+                let current_epoch = part_meta.map(|p| p.leader_epoch as i32).unwrap_or(-1);
+                if current_leader_epoch > current_epoch && current_epoch >= 0 {
+                    put_fetch_partition_response(
+                        out,
+                        version,
+                        partition,
+                        KafkaErrorCode::UnknownLeaderEpoch.as_i16(),
+                        -1,
+                        -1,
+                        &[],
+                    );
+                    continue;
+                }
+                if current_epoch >= 0 && current_leader_epoch < current_epoch {
+                    put_fetch_partition_response(
+                        out,
+                        version,
+                        partition,
+                        KafkaErrorCode::FencedLeaderEpoch.as_i16(),
+                        -1,
+                        -1,
+                        &[],
+                    );
+                    continue;
+                }
+            }
+
             let max_messages = (max_bytes / 64).clamp(1, 10_000);
             match broker.fetch(
                 &name,
@@ -1109,7 +1214,6 @@ fn encode_fetch(broker: &Broker, src: &mut impl Buf, out: &mut BytesMut, version
                 max_messages,
             ) {
                 Ok(records) => {
-                    // Trim to max_bytes approximately.
                     let mut selected = Vec::new();
                     let mut used = 0usize;
                     for r in records {
@@ -1121,54 +1225,70 @@ fn encode_fetch(broker: &Broker, src: &mut impl Buf, out: &mut BytesMut, version
                         used += approx;
                         selected.push(r);
                     }
-                    let hwm = selected
+                    let hwm_fallback = selected
                         .last()
                         .map(|r| r.offset.raw() as i64 + 1)
                         .unwrap_or(fetch_offset);
-                    // Prefer broker HWM if available via metadata.
-                    let hwm = broker
-                        .metadata(Some(&[name.clone()]))
-                        .topics
-                        .first()
-                        .and_then(|t| {
-                            t.partitions
-                                .iter()
-                                .find(|p| p.partition_id.0 == partition as u32)
-                                .map(|p| p.hwm as i64)
-                        })
-                        .unwrap_or(hwm);
-
-                    // Phase 32: Fetch v4 RecordBatches may be compressed.
-                    // Phase 36: LSO = HWM for both isolation levels (no unstable log data).
+                    let hwm = part_meta.map(|p| p.hwm as i64).unwrap_or(hwm_fallback);
+                    let log_start = produce_log_start_offset(broker, &topic, partition as u32);
+                    // Phase 32: v4+ RecordBatch (may be compressed); v0–3 MessageSet.
                     let set = encode_fetch_record_set(&selected, version);
-                    out.put_i16(KafkaErrorCode::None.as_i16());
-                    out.put_i64(hwm);
-                    if version >= 4 {
-                        out.put_i64(hwm); // last_stable_offset == hwm
-                        out.put_i32(0); // aborted_transactions empty
-                    }
-                    put_bytes(out, Some(&set));
+                    put_fetch_partition_response(
+                        out,
+                        version,
+                        partition,
+                        KafkaErrorCode::None.as_i16(),
+                        hwm,
+                        log_start,
+                        &set,
+                    );
                 }
                 Err(Error::NotFound(_)) => {
-                    out.put_i16(KafkaErrorCode::UnknownTopicOrPartition.as_i16());
-                    out.put_i64(-1);
-                    if version >= 4 {
-                        out.put_i64(-1);
-                        out.put_i32(0);
-                    }
-                    put_bytes(out, Some(&[]));
+                    put_fetch_partition_response(
+                        out,
+                        version,
+                        partition,
+                        KafkaErrorCode::UnknownTopicOrPartition.as_i16(),
+                        -1,
+                        -1,
+                        &[],
+                    );
                 }
                 Err(_) => {
-                    out.put_i16(KafkaErrorCode::Unknown.as_i16());
-                    out.put_i64(-1);
-                    if version >= 4 {
-                        out.put_i64(-1);
-                        out.put_i32(0);
-                    }
-                    put_bytes(out, Some(&[]));
+                    put_fetch_partition_response(
+                        out,
+                        version,
+                        partition,
+                        KafkaErrorCode::Unknown.as_i16(),
+                        -1,
+                        -1,
+                        &[],
+                    );
                 }
             }
         }
+    }
+
+    // v7+: forgotten_topics_data (parse and ignore — no incremental sessions).
+    if version >= 7 && src.remaining() >= 4 {
+        let forgotten = src.get_i32();
+        for _ in 0..forgotten.max(0) {
+            let _ = get_string(src);
+            if src.remaining() < 4 {
+                break;
+            }
+            let n = src.get_i32();
+            for _ in 0..n.max(0) {
+                if src.remaining() < 4 {
+                    break;
+                }
+                let _ = src.get_i32();
+            }
+        }
+    }
+    // v11+: rack_id (ignored — preferred_read_replica always -1).
+    if version >= 11 {
+        let _ = get_string(src);
     }
 }
 

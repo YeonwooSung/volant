@@ -89,7 +89,7 @@ async fn api_versions_advertise_produce3_fetch4() {
         }
     }
     assert_eq!(produce_max, Some(8)); // Phase 48 classic max
-    assert_eq!(fetch_max, Some(4));
+    assert_eq!(fetch_max, Some(11)); // Phase 49 classic max
 
     server.abort();
     let _ = std::fs::remove_dir_all(&dir);

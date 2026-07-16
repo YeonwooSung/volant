@@ -1,4 +1,5 @@
-//! Phase 48: Kafka Produce classic v0–8 (log_start_offset, record_errors).
+//! Phase 49: Kafka Fetch classic v0–11
+//! (log_start_offset, session header, preferred_read_replica, leader epoch).
 
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -8,8 +9,7 @@ use bytes::{Buf, BufMut, Bytes, BytesMut};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::{TcpListener, TcpStream};
 use volant_broker::kafka::codec::{
-    encode_record_batch, encode_request, get_nullable_string, get_string, put_bytes,
-    put_nullable_string, put_string,
+    encode_record_batch, encode_request, get_bytes, get_string, put_bytes, put_string,
 };
 use volant_broker::{serve_kafka_listener, Broker};
 use volant_core::{Offset, Record};
@@ -21,7 +21,7 @@ fn temp_dir(label: &str) -> PathBuf {
         .unwrap()
         .as_nanos();
     let dir = std::env::temp_dir().join(format!(
-        "volant-p48-{label}-{}-{}",
+        "volant-p49-{label}-{}-{}",
         std::process::id(),
         nanos
     ));
@@ -70,11 +70,10 @@ fn sample_records(value: &'static [u8]) -> Vec<Record> {
     }]
 }
 
-/// Produce body for classic v3–8 (transactional_id + acks + timeout + one partition).
 fn produce_body_v3(topic: &str, batch: &[u8]) -> BytesMut {
     let mut body = BytesMut::new();
-    put_nullable_string(&mut body, None); // transactional_id
-    body.put_i16(1); // acks
+    volant_broker::kafka::codec::put_nullable_string(&mut body, None);
+    body.put_i16(1);
     body.put_i32(5000);
     body.put_i32(1);
     put_string(&mut body, topic);
@@ -84,8 +83,56 @@ fn produce_body_v3(topic: &str, batch: &[u8]) -> BytesMut {
     body
 }
 
+/// Fetch body for classic versions 4–11.
+///
+/// `version` controls optional fields: session (v7+), leader_epoch (v9+),
+/// follower log_start (v5+), forgotten (v7+), rack (v11+).
+fn fetch_body(
+    version: i16,
+    topic: &str,
+    fetch_offset: i64,
+    isolation: u8,
+    session_id: i32,
+    current_leader_epoch: i32,
+    rack: Option<&str>,
+) -> BytesMut {
+    let mut body = BytesMut::new();
+    body.put_i32(-1); // replica
+    body.put_i32(0); // max_wait
+    body.put_i32(1); // min_bytes
+    if version >= 3 {
+        body.put_i32(1_048_576); // max_bytes
+    }
+    if version >= 4 {
+        body.put_u8(isolation);
+    }
+    if version >= 7 {
+        body.put_i32(session_id);
+        body.put_i32(-1); // session_epoch
+    }
+    body.put_i32(1); // topics
+    put_string(&mut body, topic);
+    body.put_i32(1); // partitions
+    body.put_i32(0); // partition index
+    if version >= 9 {
+        body.put_i32(current_leader_epoch);
+    }
+    body.put_i64(fetch_offset);
+    if version >= 5 {
+        body.put_i64(-1); // follower log_start_offset
+    }
+    body.put_i32(1_000_000); // partition_max_bytes
+    if version >= 7 {
+        body.put_i32(0); // forgotten_topics empty
+    }
+    if version >= 11 {
+        put_string(&mut body, rack.unwrap_or(""));
+    }
+    body
+}
+
 #[tokio::test]
-async fn api_versions_produce_classic_max_v8() {
+async fn api_versions_fetch_classic_max_v11() {
     let dir = temp_dir("api");
     let broker = Arc::new(Broker::new(StorageConfig {
         data_dir: dir.clone(),
@@ -95,8 +142,7 @@ async fn api_versions_produce_classic_max_v8() {
 
     let resp = rpc(&addr, encode_request(18, 0, 1, Some("t"), &[])).await;
     let mut src = resp.freeze();
-    assert_eq!(src.get_i32(), 1);
-    assert_eq!(src.get_i16(), 0);
+    src.advance(4 + 2);
     let n = src.get_i32();
     let mut produce = None;
     let mut fetch = None;
@@ -112,14 +158,14 @@ async fn api_versions_produce_classic_max_v8() {
         }
     }
     assert_eq!(produce, Some((0, 8)));
-    assert_eq!(fetch, Some((0, 11))); // Phase 49 Fetch classic max
+    assert_eq!(fetch, Some((0, 11)));
 
     server.abort();
     let _ = std::fs::remove_dir_all(&dir);
 }
 
 #[tokio::test]
-async fn produce_v5_log_start_offset() {
+async fn fetch_v5_log_start_offset() {
     let dir = temp_dir("v5");
     let broker = Arc::new(Broker::new(StorageConfig {
         data_dir: dir.clone(),
@@ -128,69 +174,49 @@ async fn produce_v5_log_start_offset() {
     broker.create_topic("orders", 1).unwrap();
     let (addr, server) = boot_kafka(Arc::clone(&broker)).await;
 
-    let batch = encode_record_batch(&sample_records(b"hello-v5"));
-    let resp = rpc(
+    let batch = encode_record_batch(&sample_records(b"v5-msg"));
+    let _ = rpc(
         &addr,
-        encode_request(0, 5, 2, Some("c"), &produce_body_v3("orders", &batch)),
+        encode_request(0, 5, 2, Some("p"), &produce_body_v3("orders", &batch)),
     )
     .await;
-    let mut src = resp.freeze();
-    assert_eq!(src.get_i32(), 2); // corr
-    assert_eq!(src.get_i32(), 1); // topics
-    assert_eq!(get_string(&mut src).unwrap(), "orders");
-    assert_eq!(src.get_i32(), 1); // partitions
-    assert_eq!(src.get_i32(), 0); // index
-    assert_eq!(src.get_i16(), 0); // error
-    let base = src.get_i64();
-    assert!(base >= 0);
-    assert_eq!(src.get_i64(), -1); // log_append_time
-    let log_start = src.get_i64();
-    assert!(log_start >= 0, "log_start_offset should be known, got {log_start}");
-    assert_eq!(src.get_i32(), 0); // trailing throttle
 
-    server.abort();
-    let _ = std::fs::remove_dir_all(&dir);
-}
-
-#[tokio::test]
-async fn produce_v8_record_errors_and_error_message() {
-    let dir = temp_dir("v8");
-    let broker = Arc::new(Broker::new(StorageConfig {
-        data_dir: dir.clone(),
-        ..StorageConfig::default()
-    }));
-    broker.create_topic("events", 1).unwrap();
-    let (addr, server) = boot_kafka(Arc::clone(&broker)).await;
-
-    let batch = encode_record_batch(&sample_records(b"hello-v8"));
     let resp = rpc(
         &addr,
-        encode_request(0, 8, 3, Some("c"), &produce_body_v3("events", &batch)),
+        encode_request(
+            1,
+            5,
+            3,
+            Some("c"),
+            &fetch_body(5, "orders", 0, 0, 0, -1, None),
+        ),
     )
     .await;
     let mut src = resp.freeze();
     assert_eq!(src.get_i32(), 3);
-    assert_eq!(src.get_i32(), 1);
-    assert_eq!(get_string(&mut src).unwrap(), "events");
+    assert_eq!(src.get_i32(), 0); // throttle
+    assert_eq!(src.get_i32(), 1); // topics
+    assert_eq!(get_string(&mut src).unwrap(), "orders");
     assert_eq!(src.get_i32(), 1);
     assert_eq!(src.get_i32(), 0);
     assert_eq!(src.get_i16(), 0);
-    let base = src.get_i64();
-    assert!(base >= 0);
-    assert_eq!(src.get_i64(), -1); // log_append_time
+    let hwm = src.get_i64();
+    let lso = src.get_i64();
     let log_start = src.get_i64();
-    assert!(log_start >= 0);
-    assert_eq!(src.get_i32(), 0); // record_errors empty
-    assert_eq!(get_nullable_string(&mut src).unwrap(), None); // error_message
-    assert_eq!(src.get_i32(), 0); // throttle
+    assert_eq!(lso, hwm);
+    assert!(hwm >= 1);
+    assert!(log_start >= 0, "log_start={log_start}");
+    assert_eq!(src.get_i32(), 0); // aborted empty
+    let records = get_bytes(&mut src).unwrap().unwrap();
+    assert!(!records.is_empty());
 
     server.abort();
     let _ = std::fs::remove_dir_all(&dir);
 }
 
 #[tokio::test]
-async fn produce_v0_still_works() {
-    let dir = temp_dir("v0");
+async fn fetch_v7_session_header() {
+    let dir = temp_dir("v7");
     let broker = Arc::new(Broker::new(StorageConfig {
         data_dir: dir.clone(),
         ..StorageConfig::default()
@@ -198,45 +224,116 @@ async fn produce_v0_still_works() {
     broker.create_topic("t", 1).unwrap();
     let (addr, server) = boot_kafka(Arc::clone(&broker)).await;
 
-    // v0 body: no transactional_id
-    let batch = encode_record_batch(&sample_records(b"v0"));
-    let mut body = BytesMut::new();
-    body.put_i16(1);
-    body.put_i32(5000);
-    body.put_i32(1);
-    put_string(&mut body, "t");
-    body.put_i32(1);
-    body.put_i32(0);
-    put_bytes(&mut body, Some(&batch));
+    let batch = encode_record_batch(&sample_records(b"s"));
+    let _ = rpc(
+        &addr,
+        encode_request(0, 5, 2, Some("p"), &produce_body_v3("t", &batch)),
+    )
+    .await;
 
-    let resp = rpc(&addr, encode_request(0, 0, 4, Some("c"), &body)).await;
+    let resp = rpc(
+        &addr,
+        encode_request(
+            1,
+            7,
+            4,
+            Some("c"),
+            &fetch_body(7, "t", 0, 0, 42, -1, None),
+        ),
+    )
+    .await;
     let mut src = resp.freeze();
     assert_eq!(src.get_i32(), 4);
+    assert_eq!(src.get_i32(), 0); // throttle
+    assert_eq!(src.get_i16(), 0); // top-level error
+    assert_eq!(src.get_i32(), 42); // session_id echo
     assert_eq!(src.get_i32(), 1);
     assert_eq!(get_string(&mut src).unwrap(), "t");
     assert_eq!(src.get_i32(), 1);
     assert_eq!(src.get_i32(), 0);
     assert_eq!(src.get_i16(), 0);
-    assert!(src.get_i64() >= 0);
-    // v0: no log_append_time, no throttle
+    let hwm = src.get_i64();
+    let lso = src.get_i64();
+    let log_start = src.get_i64();
+    assert_eq!(lso, hwm);
+    assert!(log_start >= 0);
+    assert_eq!(src.get_i32(), 0); // aborted
+    let _ = get_bytes(&mut src).unwrap();
 
     server.abort();
     let _ = std::fs::remove_dir_all(&dir);
 }
 
 #[tokio::test]
-async fn produce_v9_unsupported_version() {
-    let dir = temp_dir("v9");
+async fn fetch_v11_preferred_read_replica() {
+    let dir = temp_dir("v11");
+    let broker = Arc::new(Broker::new(StorageConfig {
+        data_dir: dir.clone(),
+        ..StorageConfig::default()
+    }));
+    broker.create_topic("rack-t", 1).unwrap();
+    let (addr, server) = boot_kafka(Arc::clone(&broker)).await;
+
+    let batch = encode_record_batch(&sample_records(b"rack"));
+    let _ = rpc(
+        &addr,
+        encode_request(0, 8, 2, Some("p"), &produce_body_v3("rack-t", &batch)),
+    )
+    .await;
+
+    let resp = rpc(
+        &addr,
+        encode_request(
+            1,
+            11,
+            5,
+            Some("c"),
+            &fetch_body(11, "rack-t", 0, 1, 0, -1, Some("us-east-1a")),
+        ),
+    )
+    .await;
+    let mut src = resp.freeze();
+    assert_eq!(src.get_i32(), 5);
+    assert_eq!(src.get_i32(), 0); // throttle
+    assert_eq!(src.get_i16(), 0); // top error
+    assert_eq!(src.get_i32(), 0); // session
+    assert_eq!(src.get_i32(), 1);
+    assert_eq!(get_string(&mut src).unwrap(), "rack-t");
+    assert_eq!(src.get_i32(), 1);
+    assert_eq!(src.get_i32(), 0);
+    assert_eq!(src.get_i16(), 0);
+    let hwm = src.get_i64();
+    let lso = src.get_i64();
+    let log_start = src.get_i64();
+    assert_eq!(lso, hwm);
+    assert!(log_start >= 0);
+    assert_eq!(src.get_i32(), 0); // aborted
+    assert_eq!(src.get_i32(), -1); // preferred_read_replica
+    let records = get_bytes(&mut src).unwrap().unwrap();
+    assert!(!records.is_empty());
+
+    server.abort();
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[tokio::test]
+async fn fetch_v12_unsupported_version() {
+    let dir = temp_dir("v12");
     let broker = Arc::new(Broker::new(StorageConfig {
         data_dir: dir.clone(),
         ..StorageConfig::default()
     }));
     let (addr, server) = boot_kafka(Arc::clone(&broker)).await;
 
-    let batch = encode_record_batch(&sample_records(b"x"));
     let resp = rpc(
         &addr,
-        encode_request(0, 9, 9, Some("c"), &produce_body_v3("t", &batch)),
+        encode_request(
+            1,
+            12,
+            9,
+            Some("c"),
+            &fetch_body(11, "t", 0, 0, 0, -1, Some("")),
+        ),
     )
     .await;
     let mut src = resp.freeze();
