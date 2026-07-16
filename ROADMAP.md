@@ -1044,6 +1044,24 @@ instance id only for `static:` members; coarse authorized-ops bitfield.
 **Still deferred:** multi-lang clients, cargo-fuzz corpus CI, flexible modern
 admin APIs (DescribeCluster / ListTransactions).
 
+### Phase 44 — Kafka OffsetCommit classic + FindCoordinator v2 ✅
+
+**Goal:** Raise OffsetCommit to classic 0–7 (throttle, leader epoch, static
+instance id) and FindCoordinator to 0–2.
+
+Binding: **[docs/PHASE44_SPEC.md](./docs/PHASE44_SPEC.md)**.
+
+- [x] OffsetCommit 0–7 (throttle v3+, no retention v5+, epoch v6+, instance v7+)
+- [x] FindCoordinator 0–2 (v2 wire-identical to v1)
+- [x] Static instance on commit maps to `static:{id}` when member_id empty
+- [x] Integration tests (`phase44_offset_commit`); phase26/31 updated
+
+**Honest limitations:** no flexible versions; leader epoch not stored; retention
+ignored; no multi-key FindCoordinator batch.
+
+**Still deferred:** multi-lang clients, cargo-fuzz corpus CI, flexible modern
+admin APIs (DescribeCluster / ListTransactions).
+
 ---
 
 ## Performance targets (aspirational)

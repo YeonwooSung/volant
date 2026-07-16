@@ -133,7 +133,7 @@ Supported APIs:
 | Produce | 0–3 | MessageSet magic 0/1 **or** RecordBatch magic 2 (auto-detect); compression + idempotent PID/seq |
 | Fetch | 0–4 | v0–3 MessageSet + v4 RecordBatch compressed (default lz4; see env) |
 | InitProducerId | 0–1 | plain + transactional_id fencing; timeout ignored |
-| FindCoordinator | 0–1 | v1 `key_type` 0=group, 1=transaction |
+| FindCoordinator | 0–2 | v1+ key_type 0=group/1=transaction; throttle + error_message; v2 wire-identical to v1 |
 | AddPartitionsToTxn | 0 | opens txn (Kafka has no BeginTxn) |
 | AddOffsetsToTxn | 0 | registers group for transactional offsets |
 | EndTxn | 0 | commit/abort; flushes buffered produces + offsets |
@@ -147,7 +147,7 @@ Supported APIs:
 | SyncGroup | 0–3 | coordinator assignment; v3 group.instance.id; throttle v1+ |
 | Heartbeat | 0–3 | session liveness; v3 group.instance.id; throttle v1+ |
 | LeaveGroup | 0–3 | v3 batch members + instance id; throttle v1+ |
-| OffsetCommit | 0–2 | durable `__consumer_offsets` |
+| OffsetCommit | 0–7 | durable `__consumer_offsets`; throttle v3+; no retention v5+; leader epoch ignored v6+; group.instance.id v7+ |
 | OffsetFetch | 0–5 | committed offsets (`-1` if unknown); v2+ null=all + top-level error; v3+ throttle; v5+ committed_leader_epoch=-1 |
 | ListGroups | 0–2 | active + offset-backed groups; throttle v1+ |
 | DescribeGroups | 0–4 | state + members; throttle v1+; authorized_ops v3+; group_instance_id v4+ (from `static:`) |

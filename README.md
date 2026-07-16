@@ -245,6 +245,9 @@ Heartbeat/Sync/Leave 0–3 with `group.instance.id` → `static:{id}`.
 **Phase 43:** Kafka group admin classic versions — DescribeGroups 0–4,
 ListGroups 0–2, DeleteGroups 0–1 (throttle + authorized_ops + instance id).
 
+**Phase 44:** Kafka OffsetCommit classic 0–7 + FindCoordinator 0–2 — throttle,
+leader epoch field, `group.instance.id` on commit.
+
 **Still deferred:** multi-language clients, chaos-mesh / cargo-fuzz corpus CI.
 
 ### Networked client (library)

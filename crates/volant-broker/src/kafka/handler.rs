@@ -171,7 +171,7 @@ fn dispatch_kafka(broker: &Broker, body: bytes::Bytes, conn: &mut KafkaConnState
         Some(ApiKey::DeleteAcls) if (0..=1).contains(&hdr.api_version) => {
             encode_delete_acls(broker, &mut src, &mut out, hdr.api_version, principal);
         }
-        Some(ApiKey::FindCoordinator) if (0..=1).contains(&hdr.api_version) => {
+        Some(ApiKey::FindCoordinator) if (0..=2).contains(&hdr.api_version) => {
             encode_find_coordinator(broker, &mut src, &mut out, hdr.api_version);
         }
         Some(ApiKey::AddPartitionsToTxn) if hdr.api_version == 0 => {
@@ -198,7 +198,7 @@ fn dispatch_kafka(broker: &Broker, body: bytes::Bytes, conn: &mut KafkaConnState
         Some(ApiKey::LeaveGroup) if (0..=3).contains(&hdr.api_version) => {
             encode_leave_group(broker, &mut src, &mut out, hdr.api_version, principal);
         }
-        Some(ApiKey::OffsetCommit) if (0..=2).contains(&hdr.api_version) => {
+        Some(ApiKey::OffsetCommit) if (0..=7).contains(&hdr.api_version) => {
             encode_offset_commit(broker, &mut src, &mut out, hdr.api_version, principal);
         }
         Some(ApiKey::OffsetFetch) if (0..=5).contains(&hdr.api_version) => {
@@ -1701,8 +1701,10 @@ fn encode_delete_topics(broker: &Broker, src: &mut impl Buf, out: &mut BytesMut,
 }
 
 fn encode_find_coordinator(broker: &Broker, src: &mut impl Buf, out: &mut BytesMut, version: i16) {
-    // FindCoordinator v0: key STRING
-    // FindCoordinator v1: key STRING + key_type INT8 (0=group, 1=transaction)
+    // FindCoordinator classic v0–2 (flexible 3+):
+    //   v0: key
+    //   v1–2: key + key_type (0=group, 1=transaction); response throttle + error_message
+    // v2 is wire-identical to v1 (quota-timing semantics only on real Kafka).
     let _key = match get_string(src) {
         Ok(g) => g,
         Err(_) => {
@@ -2547,14 +2549,32 @@ fn encode_leave_group(
     }
 }
 
-fn encode_offset_commit(broker: &Broker, src: &mut impl Buf, out: &mut BytesMut, version: i16, principal: &str) {
-    // v0: group_id, [topic [partition, offset, metadata]]
-    // v1: group_id, generation, member_id, [topic [partition, offset, timestamp, metadata]]
-    // v2: group_id, generation, member_id, retention_time, [topic [partition, offset, metadata]]
+fn encode_offset_commit(
+    broker: &Broker,
+    src: &mut impl Buf,
+    out: &mut BytesMut,
+    version: i16,
+    principal: &str,
+) {
+    // OffsetCommit classic v0–7 (flexible 8+):
+    //   v0: group_id, [topic [partition, offset, metadata]]
+    //   v1: + generation, member_id; partition commit_timestamp
+    //   v2–4: + retention_time_ms (no commit_timestamp)
+    //   v5: no retention_time
+    //   v6+: + committed_leader_epoch per partition (ignored; not stored)
+    //   v7+: + group_instance_id (nullable; maps to static: when member_id empty)
+    // Response: throttle_time_ms (v3+), [topic [partition, error]]
+    let empty = |out: &mut BytesMut, version: i16| {
+        if version >= 3 {
+            out.put_i32(0); // throttle
+        }
+        out.put_i32(0);
+    };
+
     let group_id = match get_string(src) {
         Ok(g) => g,
         Err(_) => {
-            out.put_i32(0);
+            empty(out, version);
             return;
         }
     };
@@ -2563,21 +2583,36 @@ fn encode_offset_commit(broker: &Broker, src: &mut impl Buf, out: &mut BytesMut,
     let mut member_id = String::new();
     if version >= 1 {
         if src.remaining() < 4 {
-            out.put_i32(0);
+            empty(out, version);
             return;
         }
         generation = src.get_i32() as u32;
         member_id = match get_string(src) {
             Ok(m) => m,
             Err(_) => {
-                out.put_i32(0);
+                empty(out, version);
                 return;
             }
         };
     }
-    if version >= 2 {
+    // v7+: group_instance_id (nullable). Prefer member_id when set; otherwise
+    // derive static:{instance} like JoinGroup / Heartbeat.
+    if version >= 7 {
+        match get_nullable_string(src) {
+            Ok(Some(inst)) if member_id.is_empty() && !inst.is_empty() => {
+                member_id = static_member_id(&inst);
+            }
+            Ok(_) => {}
+            Err(_) => {
+                empty(out, version);
+                return;
+            }
+        }
+    }
+    // Retention only on v2–4 (ignored — broker-controlled retention).
+    if (2..=4).contains(&version) {
         if src.remaining() < 8 {
-            out.put_i32(0);
+            empty(out, version);
             return;
         }
         let _retention = src.get_i64();
@@ -2592,7 +2627,7 @@ fn encode_offset_commit(broker: &Broker, src: &mut impl Buf, out: &mut BytesMut,
         );
 
     if src.remaining() < 4 {
-        out.put_i32(0);
+        empty(out, version);
         return;
     }
     let topic_count = src.get_i32();
@@ -2620,6 +2655,14 @@ fn encode_offset_commit(broker: &Broker, src: &mut impl Buf, out: &mut BytesMut,
             }
             let partition = src.get_i32();
             let offset = src.get_i64().max(0) as u64;
+            // v6+: committed_leader_epoch (not stored; OffsetFetch returns -1).
+            if version >= 6 {
+                if src.remaining() < 4 {
+                    break;
+                }
+                let _leader_epoch = src.get_i32();
+            }
+            // v1 only: commit_timestamp
             if version == 1 {
                 if src.remaining() < 8 {
                     break;
@@ -2648,6 +2691,9 @@ fn encode_offset_commit(broker: &Broker, src: &mut impl Buf, out: &mut BytesMut,
         }
     };
 
+    if version >= 3 {
+        out.put_i32(0); // throttle
+    }
     out.put_i32(parsed.len() as i32);
     for t in parsed {
         put_string(out, &t.topic);
