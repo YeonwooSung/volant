@@ -157,7 +157,7 @@ async fn api_versions_fetch_classic_max_v11() {
             fetch = Some((min, max));
         }
     }
-    assert_eq!(produce, Some((0, 8)));
+    assert_eq!(produce, Some((0, 9)));
     assert_eq!(fetch, Some((0, 11)));
 
     server.abort();

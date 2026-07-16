@@ -163,6 +163,34 @@ pub fn put_bytes(dst: &mut BytesMut, b: Option<&[u8]>) {
     }
 }
 
+/// Read compact nullable bytes / records (`uvarint(0)` = null; else `uvarint(len+1)+bytes`).
+///
+/// Used for flexible `bytes` and `records` fields (KIP-482).
+pub fn get_compact_bytes(src: &mut impl Buf) -> Result<Option<Bytes>> {
+    let n = read_unsigned_varint(src)?;
+    if n == 0 {
+        return Ok(None);
+    }
+    let len = (n - 1) as usize;
+    if src.remaining() < len {
+        return Err(Error::Protocol("truncated compact bytes body".into()));
+    }
+    let mut buf = vec![0u8; len];
+    src.copy_to_slice(&mut buf);
+    Ok(Some(Bytes::from(buf)))
+}
+
+/// Write compact nullable bytes / records.
+pub fn put_compact_bytes(dst: &mut BytesMut, b: Option<&[u8]>) {
+    match b {
+        None => put_unsigned_varint(dst, 0),
+        Some(v) => {
+            put_unsigned_varint(dst, (v.len() as u32).saturating_add(1));
+            dst.extend_from_slice(v);
+        }
+    }
+}
+
 /// Producer identity fields from a RecordBatch header (Phase 29).
 ///
 /// Kafka uses `-1` for all three when the batch is non-idempotent.
@@ -1046,6 +1074,19 @@ mod tests {
         assert_eq!(get_compact_nullable_string(&mut src).unwrap().as_deref(), Some(""));
         assert_eq!(get_compact_array_len(&mut src).unwrap(), Some(3));
         skip_tag_buffer(&mut src).unwrap();
+        assert_eq!(src.remaining(), 0);
+    }
+
+    #[test]
+    fn compact_bytes_roundtrip() {
+        let mut buf = BytesMut::new();
+        put_compact_bytes(&mut buf, None);
+        put_compact_bytes(&mut buf, Some(&[]));
+        put_compact_bytes(&mut buf, Some(b"abc"));
+        let mut src = buf.freeze();
+        assert_eq!(get_compact_bytes(&mut src).unwrap(), None);
+        assert_eq!(get_compact_bytes(&mut src).unwrap().unwrap().as_ref(), b"");
+        assert_eq!(get_compact_bytes(&mut src).unwrap().unwrap().as_ref(), b"abc");
         assert_eq!(src.remaining(), 0);
     }
 

@@ -271,6 +271,8 @@ encoding; first flexible API on the shim.
 **Phase 52:** Flexible Metadata v9 + FindCoordinator v3–4 (batch keys);
 response header v1 for those APIs.
 
+**Phase 53:** Flexible Produce v9 — compact records/topics + response header v1.
+
 **Still deferred:** multi-language clients, chaos-mesh / cargo-fuzz corpus CI.
 
 ### Networked client (library)

@@ -1213,6 +1213,25 @@ group/txn/admin; empty tag buffers only.
 Produce/Fetch/admin, DescribeCluster / ListTransactions, true control-marker
 READ_COMMITTED.
 
+### Phase 53 — Flexible Produce v9 ✅
+
+**Goal:** Extend KIP-482 flexible framing to **Produce v9** (compact
+transactional_id / topics / records + response header v1).
+
+Binding: **[docs/PHASE53_SPEC.md](./docs/PHASE53_SPEC.md)**.
+
+- [x] Compact bytes/records codec (`get_compact_bytes` / `put_compact_bytes`)
+- [x] Produce 0–9 (v9 flexible; classic 0–8 unchanged)
+- [x] Response header v1 for Produce v9+
+- [x] Integration tests (`phase53_flexible_produce`)
+
+**Honest limitations:** no Produce v10 CurrentLeader/NodeEndpoints; empty
+record_errors; no flexible Fetch v12+ / group / txn / admin.
+
+**Still deferred:** multi-lang clients, cargo-fuzz corpus CI, flexible
+Fetch/admin, Metadata TopicId, DescribeCluster / ListTransactions, true
+control-marker READ_COMMITTED.
+
 ---
 
 ## Performance targets (aspirational)

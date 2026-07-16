@@ -130,7 +130,7 @@ async fn api_versions_v3_flexible_roundtrip() {
             saw_self = true;
         }
         if key == 0 {
-            assert_eq!((min, max), (0, 8));
+            assert_eq!((min, max), (0, 9));
             saw_produce = true;
         }
         if key == 1 {

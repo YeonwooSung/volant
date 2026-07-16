@@ -19,10 +19,11 @@ use super::codec::{
     decode_consumer_subscription, decode_produce_batches, decode_request_header,
     encode_consumer_assignment, encode_message_set, encode_message_set_compressed,
     encode_record_batch, encode_record_batch_compressed, encode_response_frame, get_bytes,
-    get_compact_array_len, get_compact_string, get_nullable_string, get_string, put_bytes,
-    put_compact_array_len, put_compact_nullable_string, put_compact_string, put_empty_tag_buffer,
-    put_nullable_string, put_response_header, put_response_header_v1, put_string, skip_tag_buffer,
-    try_decode_request,
+    get_compact_array_len, get_compact_bytes, get_compact_nullable_string, get_compact_string,
+    get_nullable_string, get_string,
+    put_bytes, put_compact_array_len, put_compact_nullable_string, put_compact_string,
+    put_empty_tag_buffer, put_nullable_string, put_response_header, put_response_header_v1,
+    put_string, skip_tag_buffer, try_decode_request,
 };
 use super::compress::{fetch_compression_codec, CompressionCodec};
 use super::sasl::{self, SaslMechanism, SaslState, MECHANISMS};
@@ -121,6 +122,9 @@ fn dispatch_kafka(broker: &Broker, body: bytes::Bytes, conn: &mut KafkaConnState
     ) || matches!(
         (api, hdr.api_version),
         (Some(ApiKey::FindCoordinator), v) if v >= 3
+    ) || matches!(
+        (api, hdr.api_version),
+        (Some(ApiKey::Produce), v) if v >= 9
     );
 
     let mut out = BytesMut::new();
@@ -172,7 +176,12 @@ fn dispatch_kafka(broker: &Broker, body: bytes::Bytes, conn: &mut KafkaConnState
             }
             encode_metadata(broker, &mut src, &mut out, hdr.api_version, principal);
         }
-        Some(ApiKey::Produce) if (0..=8).contains(&hdr.api_version) => {
+        Some(ApiKey::Produce) if (0..=9).contains(&hdr.api_version) => {
+            if hdr.api_version >= 9 {
+                if let Err(e) = skip_tag_buffer(&mut src) {
+                    debug!(error = %e, "produce flexible header tag buffer");
+                }
+            }
             encode_produce(broker, &mut src, &mut out, hdr.api_version, principal);
         }
         Some(ApiKey::Fetch) if (0..=11).contains(&hdr.api_version) => {
@@ -824,10 +833,10 @@ fn produce_log_start_offset(broker: &Broker, topic: &str, partition: u32) -> i64
     }
 }
 
-/// Write one ProduceResponse partition entry (classic v0–8).
+/// Write one ProduceResponse partition entry (classic v0–8 / flexible v9).
 ///
 /// Field order: index, error, base_offset, log_append_time (v2+),
-/// log_start_offset (v5+), record_errors[] + error_message (v8+).
+/// log_start_offset (v5+), record_errors[] + error_message (v8+), TAG_BUFFER (v9+).
 fn put_produce_partition_response(
     out: &mut BytesMut,
     version: i16,
@@ -836,6 +845,7 @@ fn put_produce_partition_response(
     base_offset: i64,
     log_start_offset: i64,
 ) {
+    let flexible = version >= 9;
     out.put_i32(partition);
     out.put_i16(error);
     out.put_i64(base_offset);
@@ -846,37 +856,63 @@ fn put_produce_partition_response(
         out.put_i64(log_start_offset);
     }
     if version >= 8 {
-        out.put_i32(0); // record_errors (empty; no per-record drop detail)
-        put_nullable_string(out, None); // error_message
+        if flexible {
+            put_compact_array_len(out, 0); // record_errors empty
+            put_compact_nullable_string(out, None); // error_message
+        } else {
+            out.put_i32(0); // record_errors (empty; no per-record drop detail)
+            put_nullable_string(out, None); // error_message
+        }
+    }
+    if flexible {
+        put_empty_tag_buffer(out);
+    }
+}
+
+/// Empty Produce response (no topics) with correct classic/flexible framing.
+fn put_produce_empty_response(out: &mut BytesMut, version: i16) {
+    let flexible = version >= 9;
+    if flexible {
+        put_compact_array_len(out, 0);
+    } else {
+        out.put_i32(0);
+    }
+    if version >= 1 {
+        out.put_i32(0); // throttle
+    }
+    if flexible {
+        put_empty_tag_buffer(out);
     }
 }
 
 fn encode_produce(broker: &Broker, src: &mut impl Buf, out: &mut BytesMut, version: i16, principal: &str) {
-    // Produce classic v0–8 (flexible 9+):
+    // Produce classic v0–8 + flexible v9:
     //   request: transactional_id (v3+), acks, timeout, [topic [partition, records]]
-    //   response: [topic [partition responses…]], throttle (v1+ at end)
+    //   response: [topic [partition responses…]], throttle (v1+ at end), tags (v9+)
     //   v4: same wire as v3 (KAFKA_STORAGE_ERROR readiness)
     //   v5–6: log_start_offset in response
     //   v7: ZStd in batches (already supported; request wire unchanged)
     //   v8: record_errors[] + error_message per partition
+    //   v9: compact strings/arrays/records + tag buffers + response header v1
+    let flexible = version >= 9;
+
     if version >= 3 {
-        let _txn_id = match get_nullable_string(src) {
+        let txn_result = if flexible {
+            get_compact_nullable_string(src)
+        } else {
+            get_nullable_string(src)
+        };
+        let _txn_id = match txn_result {
             Ok(v) => v,
             Err(_) => {
-                out.put_i32(0);
-                if version >= 1 {
-                    out.put_i32(0);
-                }
+                put_produce_empty_response(out, version);
                 return;
             }
         };
     }
 
     if src.remaining() < 2 + 4 {
-        out.put_i32(0); // topic responses empty
-        if version >= 1 {
-            out.put_i32(0);
-        }
+        put_produce_empty_response(out, version);
         return;
     }
     let acks = src.get_i16();
@@ -887,49 +923,112 @@ fn encode_produce(broker: &Broker, src: &mut impl Buf, out: &mut BytesMut, versi
         _ => 1,
     };
 
-    if src.remaining() < 4 {
-        out.put_i32(0);
-        if version >= 1 {
-            out.put_i32(0);
+    let topic_count = if flexible {
+        match get_compact_array_len(src) {
+            Ok(Some(n)) => n as i32,
+            Ok(None) | Err(_) => {
+                put_produce_empty_response(out, version);
+                return;
+            }
         }
-        return;
+    } else {
+        if src.remaining() < 4 {
+            put_produce_empty_response(out, version);
+            return;
+        }
+        src.get_i32()
+    };
+
+    if flexible {
+        put_compact_array_len(out, topic_count.max(0) as usize);
+    } else {
+        out.put_i32(topic_count.max(0));
     }
-    let topic_count = src.get_i32();
-    out.put_i32(topic_count.max(0));
 
     for _ in 0..topic_count.max(0) {
-        let topic = match get_string(src) {
-            Ok(t) => t,
-            Err(_) => break,
+        let topic = if flexible {
+            match get_compact_string(src) {
+                Ok(t) => t,
+                Err(_) => break,
+            }
+        } else {
+            match get_string(src) {
+                Ok(t) => t,
+                Err(_) => break,
+            }
         };
-        put_string(out, &topic);
-
-        if src.remaining() < 4 {
-            out.put_i32(0);
-            break;
+        if flexible {
+            put_compact_string(out, &topic);
+        } else {
+            put_string(out, &topic);
         }
-        let part_count = src.get_i32();
-        out.put_i32(part_count.max(0));
+
+        let part_count = if flexible {
+            match get_compact_array_len(src) {
+                Ok(Some(n)) => n as i32,
+                Ok(None) | Err(_) => {
+                    if flexible {
+                        put_compact_array_len(out, 0);
+                        put_empty_tag_buffer(out);
+                    } else {
+                        out.put_i32(0);
+                    }
+                    break;
+                }
+            }
+        } else {
+            if src.remaining() < 4 {
+                out.put_i32(0);
+                break;
+            }
+            src.get_i32()
+        };
+        if flexible {
+            put_compact_array_len(out, part_count.max(0) as usize);
+        } else {
+            out.put_i32(part_count.max(0));
+        }
 
         for _ in 0..part_count.max(0) {
             if src.remaining() < 4 {
                 break;
             }
             let partition = src.get_i32();
-            let record_set = match get_bytes(src) {
-                Ok(b) => b.unwrap_or_default(),
-                Err(_) => {
-                    put_produce_partition_response(
-                        out,
-                        version,
-                        partition,
-                        KafkaErrorCode::InvalidMessage.as_i16(),
-                        -1,
-                        -1,
-                    );
-                    continue;
+            let record_set = if flexible {
+                match get_compact_bytes(src) {
+                    Ok(b) => b.unwrap_or_default(),
+                    Err(_) => {
+                        put_produce_partition_response(
+                            out,
+                            version,
+                            partition,
+                            KafkaErrorCode::InvalidMessage.as_i16(),
+                            -1,
+                            -1,
+                        );
+                        let _ = skip_tag_buffer(src);
+                        continue;
+                    }
+                }
+            } else {
+                match get_bytes(src) {
+                    Ok(b) => b.unwrap_or_default(),
+                    Err(_) => {
+                        put_produce_partition_response(
+                            out,
+                            version,
+                            partition,
+                            KafkaErrorCode::InvalidMessage.as_i16(),
+                            -1,
+                            -1,
+                        );
+                        continue;
+                    }
                 }
             };
+            if flexible {
+                let _ = skip_tag_buffer(src); // partition tags
+            }
 
             if broker.acls().is_enabled()
                 && !broker.acls().authorize(
@@ -1009,11 +1108,21 @@ fn encode_produce(broker: &Broker, src: &mut impl Buf, out: &mut BytesMut, versi
                 }
             }
         }
+        if flexible {
+            put_empty_tag_buffer(out); // topic tags
+            let _ = skip_tag_buffer(src); // request topic tags
+        }
+    }
+    if flexible {
+        let _ = skip_tag_buffer(src); // request top-level tags
     }
 
     // Produce v1+ appends throttle_time_ms at the end.
     if version >= 1 {
         out.put_i32(0);
+    }
+    if flexible {
+        put_empty_tag_buffer(out); // response top-level tags
     }
 }
 

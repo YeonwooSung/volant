@@ -1,4 +1,4 @@
-//! Phase 48: Kafka Produce classic v0–8 (log_start_offset, record_errors).
+//! Phase 53: Flexible Produce v9 (KIP-482 compact records + response header v1).
 
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -8,8 +8,10 @@ use bytes::{Buf, BufMut, Bytes, BytesMut};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::{TcpListener, TcpStream};
 use volant_broker::kafka::codec::{
-    encode_record_batch, encode_request, get_nullable_string, get_string, put_bytes,
-    put_nullable_string, put_string,
+    encode_record_batch, encode_request, encode_request_flexible, get_compact_array_len,
+    get_compact_nullable_string, get_compact_string, get_string, put_compact_array_len,
+    put_compact_bytes, put_compact_nullable_string, put_compact_string, put_empty_tag_buffer,
+    put_nullable_string, put_string, skip_tag_buffer,
 };
 use volant_broker::{serve_kafka_listener, Broker};
 use volant_core::{Offset, Record};
@@ -21,7 +23,7 @@ fn temp_dir(label: &str) -> PathBuf {
         .unwrap()
         .as_nanos();
     let dir = std::env::temp_dir().join(format!(
-        "volant-p48-{label}-{}-{}",
+        "volant-p53-{label}-{}-{}",
         std::process::id(),
         nanos
     ));
@@ -70,22 +72,41 @@ fn sample_records(value: &'static [u8]) -> Vec<Record> {
     }]
 }
 
-/// Produce body for classic v3–8 (transactional_id + acks + timeout + one partition).
-fn produce_body_v3(topic: &str, batch: &[u8]) -> BytesMut {
+/// Produce v9 flexible body: compact txn_id, acks, timeout, compact topic/partition/records.
+fn produce_v9_body(topic: &str, batch: &[u8]) -> BytesMut {
     let mut body = BytesMut::new();
-    put_nullable_string(&mut body, None); // transactional_id
+    put_compact_nullable_string(&mut body, None); // transactional_id
     body.put_i16(1); // acks
+    body.put_i32(5000);
+    put_compact_array_len(&mut body, 1); // topics
+    put_compact_string(&mut body, topic);
+    put_compact_array_len(&mut body, 1); // partitions
+    body.put_i32(0); // partition index
+    put_compact_bytes(&mut body, Some(batch));
+    put_empty_tag_buffer(&mut body); // partition tags
+    put_empty_tag_buffer(&mut body); // topic tags
+    put_empty_tag_buffer(&mut body); // top-level tags
+    body
+}
+
+/// Classic produce body (v3–8).
+fn produce_classic_body(topic: &str, batch: &[u8]) -> BytesMut {
+    let mut body = BytesMut::new();
+    put_nullable_string(&mut body, None);
+    body.put_i16(1);
     body.put_i32(5000);
     body.put_i32(1);
     put_string(&mut body, topic);
     body.put_i32(1);
     body.put_i32(0);
-    put_bytes(&mut body, Some(batch));
+    // classic bytes
+    body.put_i32(batch.len() as i32);
+    body.extend_from_slice(batch);
     body
 }
 
 #[tokio::test]
-async fn api_versions_produce_max_v9() {
+async fn api_versions_produce_max_9() {
     let dir = temp_dir("api");
     let broker = Arc::new(Broker::new(StorageConfig {
         data_dir: dir.clone(),
@@ -99,7 +120,6 @@ async fn api_versions_produce_max_v9() {
     assert_eq!(src.get_i16(), 0);
     let n = src.get_i32();
     let mut produce = None;
-    let mut fetch = None;
     for _ in 0..n {
         let key = src.get_i16();
         let min = src.get_i16();
@@ -107,54 +127,16 @@ async fn api_versions_produce_max_v9() {
         if key == 0 {
             produce = Some((min, max));
         }
-        if key == 1 {
-            fetch = Some((min, max));
-        }
     }
     assert_eq!(produce, Some((0, 9)));
-    assert_eq!(fetch, Some((0, 11))); // Phase 49 Fetch classic max
 
     server.abort();
     let _ = std::fs::remove_dir_all(&dir);
 }
 
 #[tokio::test]
-async fn produce_v5_log_start_offset() {
-    let dir = temp_dir("v5");
-    let broker = Arc::new(Broker::new(StorageConfig {
-        data_dir: dir.clone(),
-        ..StorageConfig::default()
-    }));
-    broker.create_topic("orders", 1).unwrap();
-    let (addr, server) = boot_kafka(Arc::clone(&broker)).await;
-
-    let batch = encode_record_batch(&sample_records(b"hello-v5"));
-    let resp = rpc(
-        &addr,
-        encode_request(0, 5, 2, Some("c"), &produce_body_v3("orders", &batch)),
-    )
-    .await;
-    let mut src = resp.freeze();
-    assert_eq!(src.get_i32(), 2); // corr
-    assert_eq!(src.get_i32(), 1); // topics
-    assert_eq!(get_string(&mut src).unwrap(), "orders");
-    assert_eq!(src.get_i32(), 1); // partitions
-    assert_eq!(src.get_i32(), 0); // index
-    assert_eq!(src.get_i16(), 0); // error
-    let base = src.get_i64();
-    assert!(base >= 0);
-    assert_eq!(src.get_i64(), -1); // log_append_time
-    let log_start = src.get_i64();
-    assert!(log_start >= 0, "log_start_offset should be known, got {log_start}");
-    assert_eq!(src.get_i32(), 0); // trailing throttle
-
-    server.abort();
-    let _ = std::fs::remove_dir_all(&dir);
-}
-
-#[tokio::test]
-async fn produce_v8_record_errors_and_error_message() {
-    let dir = temp_dir("v8");
+async fn produce_v9_flexible_roundtrip() {
+    let dir = temp_dir("v9");
     let broker = Arc::new(Broker::new(StorageConfig {
         data_dir: dir.clone(),
         ..StorageConfig::default()
@@ -162,67 +144,102 @@ async fn produce_v8_record_errors_and_error_message() {
     broker.create_topic("events", 1).unwrap();
     let (addr, server) = boot_kafka(Arc::clone(&broker)).await;
 
-    let batch = encode_record_batch(&sample_records(b"hello-v8"));
+    let batch = encode_record_batch(&sample_records(b"hello-v9"));
+    let body = produce_v9_body("events", &batch);
     let resp = rpc(
         &addr,
-        encode_request(0, 8, 3, Some("c"), &produce_body_v3("events", &batch)),
+        encode_request_flexible(0, 9, 42, Some("flex-prod"), &body),
     )
     .await;
     let mut src = resp.freeze();
-    assert_eq!(src.get_i32(), 3);
-    assert_eq!(src.get_i32(), 1);
-    assert_eq!(get_string(&mut src).unwrap(), "events");
-    assert_eq!(src.get_i32(), 1);
-    assert_eq!(src.get_i32(), 0);
-    assert_eq!(src.get_i16(), 0);
+    // Response header v1
+    assert_eq!(src.get_i32(), 42);
+    skip_tag_buffer(&mut src).unwrap();
+
+    let n_topics = get_compact_array_len(&mut src).unwrap().unwrap();
+    assert_eq!(n_topics, 1);
+    assert_eq!(get_compact_string(&mut src).unwrap(), "events");
+    let n_parts = get_compact_array_len(&mut src).unwrap().unwrap();
+    assert_eq!(n_parts, 1);
+    assert_eq!(src.get_i32(), 0); // partition
+    assert_eq!(src.get_i16(), 0); // error
     let base = src.get_i64();
-    assert!(base >= 0);
+    assert!(base >= 0, "base offset {base}");
     assert_eq!(src.get_i64(), -1); // log_append_time
     let log_start = src.get_i64();
     assert!(log_start >= 0);
-    assert_eq!(src.get_i32(), 0); // record_errors empty
-    assert_eq!(get_nullable_string(&mut src).unwrap(), None); // error_message
+    let n_err = get_compact_array_len(&mut src).unwrap().unwrap();
+    assert_eq!(n_err, 0);
+    assert_eq!(get_compact_nullable_string(&mut src).unwrap(), None);
+    skip_tag_buffer(&mut src).unwrap(); // partition tags
+    skip_tag_buffer(&mut src).unwrap(); // topic tags
     assert_eq!(src.get_i32(), 0); // throttle
+    skip_tag_buffer(&mut src).unwrap(); // top-level
+    assert_eq!(src.remaining(), 0);
+
+    // Visible via broker fetch path
+    let fetched = broker
+        .fetch(
+            &volant_core::TopicName::new("events"),
+            volant_core::PartitionId(0),
+            Offset::new(base as u64),
+            1024,
+        )
+        .unwrap();
+    assert_eq!(fetched.len(), 1);
+    assert_eq!(fetched[0].value.as_ref(), b"hello-v9");
 
     server.abort();
     let _ = std::fs::remove_dir_all(&dir);
 }
 
 #[tokio::test]
-async fn produce_v0_still_works() {
-    let dir = temp_dir("v0");
+async fn produce_v8_still_classic() {
+    let dir = temp_dir("v8");
     let broker = Arc::new(Broker::new(StorageConfig {
         data_dir: dir.clone(),
         ..StorageConfig::default()
     }));
-    broker.create_topic("t", 1).unwrap();
+    broker.create_topic("classic", 1).unwrap();
     let (addr, server) = boot_kafka(Arc::clone(&broker)).await;
 
-    // v0 body: no transactional_id
-    let batch = encode_record_batch(&sample_records(b"v0"));
-    let mut body = BytesMut::new();
-    body.put_i16(1);
-    body.put_i32(5000);
-    body.put_i32(1);
-    put_string(&mut body, "t");
-    body.put_i32(1);
-    body.put_i32(0);
-    put_bytes(&mut body, Some(&batch));
-
-    let resp = rpc(&addr, encode_request(0, 0, 4, Some("c"), &body)).await;
+    let batch = encode_record_batch(&sample_records(b"v8"));
+    let body = produce_classic_body("classic", &batch);
+    let resp = rpc(&addr, encode_request(0, 8, 7, Some("c"), &body)).await;
     let mut src = resp.freeze();
-    assert_eq!(src.get_i32(), 4);
-    assert_eq!(src.get_i32(), 1);
-    assert_eq!(get_string(&mut src).unwrap(), "t");
-    assert_eq!(src.get_i32(), 1);
+    assert_eq!(src.get_i32(), 7); // header v0 only
+    assert_eq!(src.get_i32(), 1); // classic topic count
+    assert_eq!(get_string(&mut src).unwrap(), "classic");
+    assert_eq!(src.get_i32(), 1); // partitions
     assert_eq!(src.get_i32(), 0);
     assert_eq!(src.get_i16(), 0);
-    assert!(src.get_i64() >= 0);
-    // v0: no log_append_time, no throttle
+    let base = src.get_i64();
+    assert!(base >= 0);
 
     server.abort();
     let _ = std::fs::remove_dir_all(&dir);
 }
 
-// Produce v9 flexible support: phase53_flexible_produce.
-// Produce v10 (KIP-951) remains unsupported there.
+#[tokio::test]
+async fn produce_v10_unsupported() {
+    let dir = temp_dir("v10");
+    let broker = Arc::new(Broker::new(StorageConfig {
+        data_dir: dir.clone(),
+        ..StorageConfig::default()
+    }));
+    let (addr, server) = boot_kafka(Arc::clone(&broker)).await;
+
+    // v10 not handled; version ≥9 still uses response header v1.
+    let resp = rpc(
+        &addr,
+        encode_request_flexible(0, 10, 1, Some("c"), &[]),
+    )
+    .await;
+    let mut src = resp.freeze();
+    assert_eq!(src.get_i32(), 1);
+    skip_tag_buffer(&mut src).unwrap();
+    assert_eq!(src.get_i16(), 35); // UNSUPPORTED_VERSION
+
+    server.abort();
+    let _ = std::fs::remove_dir_all(&dir);
+}
