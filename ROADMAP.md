@@ -1098,6 +1098,27 @@ stays classic v0 (flexible 1+).
 **Still deferred:** multi-lang clients, cargo-fuzz corpus CI, flexible modern
 admin APIs (DescribeCluster / ListTransactions).
 
+### Phase 47 — Kafka transaction APIs classic versions ✅
+
+**Goal:** Raise AddPartitionsToTxn / AddOffsetsToTxn / EndTxn / TxnOffsetCommit
+to classic max v0–2 (last non-flexible); parse TxnOffsetCommit v2 leader_epoch.
+
+Binding: **[docs/PHASE47_SPEC.md](./docs/PHASE47_SPEC.md)**.
+
+- [x] AddPartitionsToTxn 0–2 (v1–2 wire-identical to v0)
+- [x] AddOffsetsToTxn 0–2
+- [x] EndTxn 0–2
+- [x] TxnOffsetCommit 0–2 (`committed_leader_epoch` parsed, ignored)
+- [x] InitProducerId stays 0–1 (already classic max; flexible 2+)
+- [x] Integration tests (`phase47_transactions`); phase31 ApiVersions update
+
+**Honest limitations:** no flexible txn APIs (v3+); no control markers /
+READ_COMMITTED LSO filtering; crash ≡ abort; leader epoch not stored.
+
+**Still deferred:** multi-lang clients, cargo-fuzz corpus CI, flexible modern
+admin APIs (DescribeCluster / ListTransactions), true control-marker
+READ_COMMITTED.
+
 ---
 
 ## Performance targets (aspirational)

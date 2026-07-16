@@ -134,10 +134,10 @@ Supported APIs:
 | Fetch | 0–4 | v0–3 MessageSet + v4 RecordBatch compressed (default lz4; see env) |
 | InitProducerId | 0–1 | plain + transactional_id fencing; timeout ignored |
 | FindCoordinator | 0–2 | v1+ key_type 0=group/1=transaction; throttle + error_message; v2 wire-identical to v1 |
-| AddPartitionsToTxn | 0 | opens txn (Kafka has no BeginTxn) |
-| AddOffsetsToTxn | 0 | registers group for transactional offsets |
-| EndTxn | 0 | commit/abort; flushes buffered produces + offsets |
-| TxnOffsetCommit | 0 | buffers offsets until EndTxn commit |
+| AddPartitionsToTxn | 0–2 | opens txn (Kafka has no BeginTxn); v1–2 wire-identical to v0 |
+| AddOffsetsToTxn | 0–2 | registers group for transactional offsets; v1–2 = v0 |
+| EndTxn | 0–2 | commit/abort; flushes buffered produces + offsets; v1–2 = v0 |
+| TxnOffsetCommit | 0–2 | buffers offsets until EndTxn commit; v2+ leader_epoch ignored |
 | SaslHandshake | 0–1 | mechanisms: PLAIN, SCRAM-SHA-256, SCRAM-SHA-512 |
 | SaslAuthenticate | 0–1 | PLAIN / SCRAM-SHA-256 / SCRAM-SHA-512 against Volant SCRAM store |
 | ListOffsets | 0–5 | -1 latest / -2 earliest; v2+ isolation (LSO≡HWM) + throttle; v4+ leader-epoch fencing; flexible v6+ unsupported |
@@ -206,7 +206,7 @@ Limitations:
 - Prefer binding to localhost / private networks; leave disabled in production
   unless you need Kafka-protocol discovery.
 
-See [PHASE23_SPEC.md](./PHASE23_SPEC.md) … [PHASE37_SPEC.md](./PHASE37_SPEC.md).
+See [PHASE23_SPEC.md](./PHASE23_SPEC.md) … [PHASE47_SPEC.md](./PHASE47_SPEC.md).
 
 ## TLS (Phase 7 listen + Phase 9 verification / inter-broker)
 

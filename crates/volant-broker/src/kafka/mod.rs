@@ -1,4 +1,4 @@
-//! Kafka wire protocol shim (Phases 23–46).
+//! Kafka wire protocol shim (Phases 23–47).
 //!
 //! Classic (non-flexible) framing. Produce/Fetch, admin, consumer groups
 //! (JoinGroup v0–5, Heartbeat/Sync/Leave v0–3 + static membership),
@@ -6,10 +6,10 @@
 //! FindCoordinator v0–2, CreateTopics/DeleteTopics classic, CreatePartitions,
 //! DescribeConfigs/AlterConfigs classic, IncrementalAlterConfigs, RecordBatch
 //! + MessageSet compression, InitProducerId + idempotent Produce, SASL,
-//! transactions, DeleteRecords, ACL admin, OffsetDelete, Fetch isolation-level
-//! honesty, Metadata v0–8, OffsetForLeaderEpoch, ListOffsets v0–5, and
-//! OffsetFetch v0–5.
-//! See `docs/PHASE23_SPEC.md` … `docs/PHASE46_SPEC.md`.
+//! transactions (classic txn APIs through v2), DeleteRecords, ACL admin,
+//! OffsetDelete, Fetch isolation-level honesty, Metadata v0–8,
+//! OffsetForLeaderEpoch, ListOffsets v0–5, and OffsetFetch v0–5.
+//! See `docs/PHASE23_SPEC.md` … `docs/PHASE47_SPEC.md`.
 
 /// Kafka wire primitives, MessageSet (magic 0/1), and RecordBatch (magic 2).
 pub mod codec;
@@ -267,10 +267,10 @@ pub const SUPPORTED_APIS: &[(ApiKey, i16, i16)] = &[
     (ApiKey::DeleteRecords, 0, 1),
     (ApiKey::InitProducerId, 0, 1),
     (ApiKey::OffsetForLeaderEpoch, 0, 3),
-    (ApiKey::AddPartitionsToTxn, 0, 0),
-    (ApiKey::AddOffsetsToTxn, 0, 0),
-    (ApiKey::EndTxn, 0, 0),
-    (ApiKey::TxnOffsetCommit, 0, 0),
+    (ApiKey::AddPartitionsToTxn, 0, 2),
+    (ApiKey::AddOffsetsToTxn, 0, 2),
+    (ApiKey::EndTxn, 0, 2),
+    (ApiKey::TxnOffsetCommit, 0, 2),
     (ApiKey::DescribeAcls, 0, 1),
     (ApiKey::CreateAcls, 0, 1),
     (ApiKey::DeleteAcls, 0, 1),

@@ -194,10 +194,10 @@ async fn api_versions_includes_txn_apis() {
         found.insert(key, (min, max));
     }
     assert_eq!(found.get(&10), Some(&(0, 2))); // FindCoordinator
-    assert_eq!(found.get(&24), Some(&(0, 0))); // AddPartitionsToTxn
-    assert_eq!(found.get(&25), Some(&(0, 0))); // AddOffsetsToTxn
-    assert_eq!(found.get(&26), Some(&(0, 0))); // EndTxn
-    assert_eq!(found.get(&28), Some(&(0, 0))); // TxnOffsetCommit
+    assert_eq!(found.get(&24), Some(&(0, 2))); // AddPartitionsToTxn (Phase 47)
+    assert_eq!(found.get(&25), Some(&(0, 2))); // AddOffsetsToTxn (Phase 47)
+    assert_eq!(found.get(&26), Some(&(0, 2))); // EndTxn (Phase 47)
+    assert_eq!(found.get(&28), Some(&(0, 2))); // TxnOffsetCommit (Phase 47)
 
     server.abort();
     let _ = std::fs::remove_dir_all(&dir);

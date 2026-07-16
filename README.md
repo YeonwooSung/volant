@@ -254,6 +254,9 @@ CreatePartitions 0–1 (throttle framing + validate_only).
 **Phase 46:** Kafka DescribeConfigs 0–3 + AlterConfigs 0–1 — throttle,
 config_source/synonyms, config_type/documentation.
 
+**Phase 47:** Kafka transaction APIs classic 0–2 — AddPartitionsToTxn,
+AddOffsetsToTxn, EndTxn, TxnOffsetCommit (v2 leader_epoch ignored).
+
 **Still deferred:** multi-language clients, chaos-mesh / cargo-fuzz corpus CI.
 
 ### Networked client (library)

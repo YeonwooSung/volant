@@ -174,17 +174,17 @@ fn dispatch_kafka(broker: &Broker, body: bytes::Bytes, conn: &mut KafkaConnState
         Some(ApiKey::FindCoordinator) if (0..=2).contains(&hdr.api_version) => {
             encode_find_coordinator(broker, &mut src, &mut out, hdr.api_version);
         }
-        Some(ApiKey::AddPartitionsToTxn) if hdr.api_version == 0 => {
-            encode_add_partitions_to_txn(broker, &mut src, &mut out, principal);
+        Some(ApiKey::AddPartitionsToTxn) if (0..=2).contains(&hdr.api_version) => {
+            encode_add_partitions_to_txn(broker, &mut src, &mut out, hdr.api_version, principal);
         }
-        Some(ApiKey::AddOffsetsToTxn) if hdr.api_version == 0 => {
-            encode_add_offsets_to_txn(broker, &mut src, &mut out, principal);
+        Some(ApiKey::AddOffsetsToTxn) if (0..=2).contains(&hdr.api_version) => {
+            encode_add_offsets_to_txn(broker, &mut src, &mut out, hdr.api_version, principal);
         }
-        Some(ApiKey::EndTxn) if hdr.api_version == 0 => {
-            encode_end_txn(broker, &mut src, &mut out, principal);
+        Some(ApiKey::EndTxn) if (0..=2).contains(&hdr.api_version) => {
+            encode_end_txn(broker, &mut src, &mut out, hdr.api_version, principal);
         }
-        Some(ApiKey::TxnOffsetCommit) if hdr.api_version == 0 => {
-            encode_txn_offset_commit(broker, &mut src, &mut out, principal);
+        Some(ApiKey::TxnOffsetCommit) if (0..=2).contains(&hdr.api_version) => {
+            encode_txn_offset_commit(broker, &mut src, &mut out, hdr.api_version, principal);
         }
         Some(ApiKey::JoinGroup) if (0..=5).contains(&hdr.api_version) => {
             encode_join_group(broker, &mut src, &mut out, hdr.api_version, principal);
@@ -1828,14 +1828,17 @@ fn encode_find_coordinator(broker: &Broker, src: &mut impl Buf, out: &mut BytesM
     out.put_i32(i32::from(port));
 }
 
-/// AddPartitionsToTxn (API 24) v0 — opens a txn if needed (Phase 31).
+/// AddPartitionsToTxn (API 24) classic v0–2 (flexible 3+) — opens a txn if needed.
 fn encode_add_partitions_to_txn(
     broker: &Broker,
     src: &mut impl Buf,
     out: &mut BytesMut,
+    _version: i16,
     principal: &str,
 ) {
-    // Request: transactional_id, producer_id, producer_epoch, [topics → [partitions]]
+    // Request (classic 0–2): transactional_id, producer_id, producer_epoch, [topics → [partitions]]
+    // Response: throttle (all versions), [topic [partition, error]]
+    // v1–2 wire-identical to v0 (quota-timing / PRODUCER_FENCED semantics only on real Kafka).
     let _txn_id = match get_string(src) {
         Ok(t) => t,
         Err(_) => {
@@ -1932,14 +1935,16 @@ fn encode_add_partitions_to_txn(
     }
 }
 
-/// AddOffsetsToTxn (API 25) v0 — register group for transactional offsets (Phase 31).
+/// AddOffsetsToTxn (API 25) classic v0–2 (flexible 3+).
 fn encode_add_offsets_to_txn(
     broker: &Broker,
     src: &mut impl Buf,
     out: &mut BytesMut,
+    _version: i16,
     principal: &str,
 ) {
     // Request: transactional_id, producer_id, producer_epoch, group_id
+    // Response: throttle (all versions), error_code
     let _txn_id = match get_string(src) {
         Ok(t) => t,
         Err(_) => {
@@ -1987,9 +1992,16 @@ fn encode_add_offsets_to_txn(
     });
 }
 
-/// EndTxn (API 26) v0 — commit or abort (Phase 31).
-fn encode_end_txn(broker: &Broker, src: &mut impl Buf, out: &mut BytesMut, principal: &str) {
+/// EndTxn (API 26) classic v0–2 (flexible 3+).
+fn encode_end_txn(
+    broker: &Broker,
+    src: &mut impl Buf,
+    out: &mut BytesMut,
+    _version: i16,
+    principal: &str,
+) {
     // Request: transactional_id, producer_id, producer_epoch, committed (bool)
+    // Response: throttle (all versions), error_code
     let _txn_id = match get_string(src) {
         Ok(t) => t,
         Err(_) => {
@@ -2036,15 +2048,18 @@ fn encode_end_txn(broker: &Broker, src: &mut impl Buf, out: &mut BytesMut, princ
     }
 }
 
-/// TxnOffsetCommit (API 28) v0 — buffer offsets until EndTxn commit (Phase 31).
+/// TxnOffsetCommit (API 28) classic v0–2 (flexible 3+).
 fn encode_txn_offset_commit(
     broker: &Broker,
     src: &mut impl Buf,
     out: &mut BytesMut,
+    version: i16,
     principal: &str,
 ) {
     // Request: transactional_id, group_id, producer_id, producer_epoch,
-    //          [topics → [partition, offset, metadata]]
+    //          [topics → [partition, offset, committed_leader_epoch (v2+), metadata]]
+    // Response: throttle (all versions), [topic [partition, error]]
+    // Leader epoch is parsed and ignored (not stored; same as OffsetCommit).
     let _txn_id = match get_string(src) {
         Ok(t) => t,
         Err(_) => {
@@ -2093,12 +2108,18 @@ fn encode_txn_offset_commit(
             let n = src.get_i32();
             out.put_i32(n.max(0));
             for _ in 0..n.max(0) {
-                // skip partition, offset, metadata
+                // skip partition, offset, committed_leader_epoch (v2+), metadata
                 if src.remaining() < 4 + 8 {
                     break;
                 }
                 let p = src.get_i32();
                 let _ = src.get_i64();
+                if version >= 2 {
+                    if src.remaining() < 4 {
+                        break;
+                    }
+                    let _epoch = src.get_i32();
+                }
                 let _ = get_nullable_string(src);
                 out.put_i32(p);
                 out.put_i16(KafkaErrorCode::GroupAuthorizationFailed.as_i16());
@@ -2139,6 +2160,13 @@ fn encode_txn_offset_commit(
             }
             let partition = src.get_i32();
             let offset = src.get_i64();
+            // v2+: committed_leader_epoch (ignored; not stored)
+            if version >= 2 {
+                if src.remaining() < 4 {
+                    break;
+                }
+                let _leader_epoch = src.get_i32();
+            }
             let metadata = get_nullable_string(src).ok().flatten().unwrap_or_default();
             if offset >= 0 {
                 collected.push((

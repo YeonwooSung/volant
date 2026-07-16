@@ -79,13 +79,15 @@ fn incremental_body(
 }
 
 fn describe_retention_ms(src: &mut impl Buf) -> Option<String> {
-    // DescribeConfigs response: corr already consumed by caller? caller leaves corr.
+    // DescribeConfigs v0 (Phase 46 framing): after corr → throttle, then
+    // [error, error_message, resource_type, resource_name, configs[…]]
+    let _throttle = src.get_i32();
     let n = src.get_i32();
     assert_eq!(n, 1);
     assert_eq!(src.get_i16(), 0); // error
-    assert_eq!(src.get_i8(), 2);
-    let _ = get_string(src).unwrap();
-    let _ = get_nullable_string(src).unwrap();
+    let _ = get_nullable_string(src).unwrap(); // error_message
+    assert_eq!(src.get_i8(), 2); // TOPIC
+    let _ = get_string(src).unwrap(); // name
     let cn = src.get_i32();
     for _ in 0..cn {
         let k = get_string(src).unwrap();
