@@ -143,10 +143,10 @@ Supported APIs:
 | ListOffsets | 0–5 | -1 latest / -2 earliest; v2+ isolation (LSO≡HWM) + throttle; v4+ leader-epoch fencing; flexible v6+ unsupported |
 | CreateTopics | 0–4 | partition count; RF/assignment ignored; error_message v1+; throttle v2+; validate_only; v4 partitions=-1 → 1 |
 | DeleteTopics | 0–3 | by name; throttle v1+ (leading) |
-| JoinGroup | 0–5 | consumer protocol; v5+ group.instance.id → static:{id}; throttle v2+ |
-| SyncGroup | 0–3 | coordinator assignment; v3 group.instance.id; throttle v1+ |
-| Heartbeat | 0–3 | session liveness; v3 group.instance.id; throttle v1+ |
-| LeaveGroup | 0–3 | v3 batch members + instance id; throttle v1+ |
+| JoinGroup | 0–6 | Classic 0–5; **v6 flexible** compact protocols + response header v1; v5+ group.instance.id → static:{id}; throttle v2+; ProtocolType/Reason/SkipAssignment (v7+) unsupported |
+| SyncGroup | 0–4 | Classic 0–3; **v4 flexible** compact assignment + response header v1; v3 group.instance.id; ProtocolType/Name (v5+) unsupported |
+| Heartbeat | 0–4 | Classic 0–3; **v4 flexible** + response header v1; v3 group.instance.id |
+| LeaveGroup | 0–4 | Classic 0–3; **v4 flexible** compact members + response header v1; v3 batch members; Reason (v5+) unsupported |
 | OffsetCommit | 0–7 | durable `__consumer_offsets`; throttle v3+; no retention v5+; leader epoch ignored v6+; group.instance.id v7+ |
 | OffsetFetch | 0–5 | committed offsets (`-1` if unknown); v2+ null=all + top-level error; v3+ throttle; v5+ committed_leader_epoch=-1 |
 | ListGroups | 0–2 | active + offset-backed groups; throttle v1+ |

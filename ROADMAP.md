@@ -1251,6 +1251,28 @@ CurrentLeader tags; no real incremental sessions; empty aborted list.
 group/txn/admin, Metadata TopicId, DescribeCluster / ListTransactions, true
 control-marker READ_COMMITTED.
 
+### Phase 55 — Flexible group consumer APIs ✅
+
+**Goal:** Extend KIP-482 flexible framing to consumer group lifecycle APIs —
+**JoinGroup v6**, **SyncGroup v4**, **Heartbeat v4**, **LeaveGroup v4** —
+so modern clients can complete join/sync/heartbeat/leave without falling back
+to classic versions.
+
+Binding: **[docs/PHASE55_SPEC.md](./docs/PHASE55_SPEC.md)**.
+
+- [x] JoinGroup 0–6 (v6 flexible; classic 0–5 unchanged)
+- [x] SyncGroup / Heartbeat / LeaveGroup 0–4 (v4 flexible; classic 0–3 unchanged)
+- [x] Response header v1 for those flexible versions
+- [x] Integration tests (`phase55_flexible_group`)
+
+**Honest limitations:** no JoinGroup ProtocolType/Reason/SkipAssignment (v7+);
+no SyncGroup ProtocolType/Name (v5+); no LeaveGroup Reason (v5+); empty tags
+only; coordinator semantics unchanged.
+
+**Still deferred:** multi-lang clients, cargo-fuzz corpus CI, flexible
+OffsetCommit/OffsetFetch/admin/txn, Metadata TopicId, DescribeCluster /
+ListTransactions, true control-marker READ_COMMITTED.
+
 ---
 
 ## Performance targets (aspirational)

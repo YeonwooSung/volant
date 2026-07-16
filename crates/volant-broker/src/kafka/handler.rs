@@ -128,6 +128,17 @@ fn dispatch_kafka(broker: &Broker, body: bytes::Bytes, conn: &mut KafkaConnState
     ) || matches!(
         (api, hdr.api_version),
         (Some(ApiKey::Fetch), v) if v >= 12
+    ) || matches!(
+        (api, hdr.api_version),
+        (Some(ApiKey::JoinGroup), v) if v >= 6
+    ) || matches!(
+        (api, hdr.api_version),
+        (
+            Some(ApiKey::SyncGroup)
+                | Some(ApiKey::Heartbeat)
+                | Some(ApiKey::LeaveGroup),
+            v
+        ) if v >= 4
     );
 
     let mut out = BytesMut::new();
@@ -236,16 +247,36 @@ fn dispatch_kafka(broker: &Broker, body: bytes::Bytes, conn: &mut KafkaConnState
         Some(ApiKey::TxnOffsetCommit) if (0..=2).contains(&hdr.api_version) => {
             encode_txn_offset_commit(broker, &mut src, &mut out, hdr.api_version, principal);
         }
-        Some(ApiKey::JoinGroup) if (0..=5).contains(&hdr.api_version) => {
+        Some(ApiKey::JoinGroup) if (0..=6).contains(&hdr.api_version) => {
+            if hdr.api_version >= 6 {
+                if let Err(e) = skip_tag_buffer(&mut src) {
+                    debug!(error = %e, "join group flexible header tag buffer");
+                }
+            }
             encode_join_group(broker, &mut src, &mut out, hdr.api_version, principal);
         }
-        Some(ApiKey::SyncGroup) if (0..=3).contains(&hdr.api_version) => {
+        Some(ApiKey::SyncGroup) if (0..=4).contains(&hdr.api_version) => {
+            if hdr.api_version >= 4 {
+                if let Err(e) = skip_tag_buffer(&mut src) {
+                    debug!(error = %e, "sync group flexible header tag buffer");
+                }
+            }
             encode_sync_group(broker, &mut src, &mut out, hdr.api_version, principal);
         }
-        Some(ApiKey::Heartbeat) if (0..=3).contains(&hdr.api_version) => {
+        Some(ApiKey::Heartbeat) if (0..=4).contains(&hdr.api_version) => {
+            if hdr.api_version >= 4 {
+                if let Err(e) = skip_tag_buffer(&mut src) {
+                    debug!(error = %e, "heartbeat flexible header tag buffer");
+                }
+            }
             encode_heartbeat(broker, &mut src, &mut out, hdr.api_version, principal);
         }
-        Some(ApiKey::LeaveGroup) if (0..=3).contains(&hdr.api_version) => {
+        Some(ApiKey::LeaveGroup) if (0..=4).contains(&hdr.api_version) => {
+            if hdr.api_version >= 4 {
+                if let Err(e) = skip_tag_buffer(&mut src) {
+                    debug!(error = %e, "leave group flexible header tag buffer");
+                }
+            }
             encode_leave_group(broker, &mut src, &mut out, hdr.api_version, principal);
         }
         Some(ApiKey::OffsetCommit) if (0..=7).contains(&hdr.api_version) => {
@@ -2901,28 +2932,49 @@ fn encode_txn_offset_commit(
 }
 
 fn encode_join_group(broker: &Broker, src: &mut impl Buf, out: &mut BytesMut, version: i16, principal: &str) {
-    // JoinGroup classic v0–5:
+    // JoinGroup classic v0–5 / flexible v6:
     //   group_id, session_timeout, rebalance_timeout (v1+), member_id,
     //   group_instance_id (v5+), protocol_type, [protocols]
     // Response: throttle (v2+), error, generation, protocol, leader, member_id,
     //   members[{ member_id, group_instance_id (v5+), metadata }]
+    // Flexible (v6+): compact strings/arrays/bytes + TAG_BUFFER per struct;
+    // response header v1 (handled in dispatch).
+    let flex = version >= 6;
     let write_error_body = |out: &mut BytesMut, err: i16, generation: i32, protocol: &str, mid: &str| {
         if version >= 2 {
             out.put_i32(0); // throttle
         }
         out.put_i16(err);
         out.put_i32(generation);
-        put_string(out, protocol);
-        put_string(out, "");
-        put_string(out, mid);
-        out.put_i32(0);
+        if flex {
+            put_compact_string(out, protocol);
+            put_compact_string(out, "");
+            put_compact_string(out, mid);
+            put_compact_array_len(out, 0);
+            put_empty_tag_buffer(out);
+        } else {
+            put_string(out, protocol);
+            put_string(out, "");
+            put_string(out, mid);
+            out.put_i32(0);
+        }
     };
 
-    let group_id = match get_string(src) {
-        Ok(g) => g,
-        Err(_) => {
-            write_error_body(out, KafkaErrorCode::InvalidRequest.as_i16(), 0, "", "");
-            return;
+    let group_id = if flex {
+        match get_compact_string(src) {
+            Ok(g) => g,
+            Err(_) => {
+                write_error_body(out, KafkaErrorCode::InvalidRequest.as_i16(), 0, "", "");
+                return;
+            }
+        }
+    } else {
+        match get_string(src) {
+            Ok(g) => g,
+            Err(_) => {
+                write_error_body(out, KafkaErrorCode::InvalidRequest.as_i16(), 0, "", "");
+                return;
+            }
         }
     };
     if src.remaining() < 4 {
@@ -2937,23 +2989,50 @@ fn encode_join_group(broker: &Broker, src: &mut impl Buf, out: &mut BytesMut, ve
         }
         let _rebalance_timeout = src.get_i32();
     }
-    let member_id = match get_string(src) {
-        Ok(m) => m,
-        Err(_) => {
-            write_error_body(out, KafkaErrorCode::InvalidRequest.as_i16(), 0, "", "");
-            return;
+    let member_id = if flex {
+        match get_compact_string(src) {
+            Ok(m) => m,
+            Err(_) => {
+                write_error_body(out, KafkaErrorCode::InvalidRequest.as_i16(), 0, "", "");
+                return;
+            }
+        }
+    } else {
+        match get_string(src) {
+            Ok(m) => m,
+            Err(_) => {
+                write_error_body(out, KafkaErrorCode::InvalidRequest.as_i16(), 0, "", "");
+                return;
+            }
         }
     };
     let group_instance_id = if version >= 5 {
-        get_nullable_string(src).ok().flatten().unwrap_or_default()
+        if flex {
+            get_compact_nullable_string(src)
+                .ok()
+                .flatten()
+                .unwrap_or_default()
+        } else {
+            get_nullable_string(src).ok().flatten().unwrap_or_default()
+        }
     } else {
         String::new()
     };
-    let _protocol_type = match get_string(src) {
-        Ok(p) => p,
-        Err(_) => {
-            write_error_body(out, KafkaErrorCode::InvalidRequest.as_i16(), 0, "", "");
-            return;
+    let _protocol_type = if flex {
+        match get_compact_string(src) {
+            Ok(p) => p,
+            Err(_) => {
+                write_error_body(out, KafkaErrorCode::InvalidRequest.as_i16(), 0, "", "");
+                return;
+            }
+        }
+    } else {
+        match get_string(src) {
+            Ok(p) => p,
+            Err(_) => {
+                write_error_body(out, KafkaErrorCode::InvalidRequest.as_i16(), 0, "", "");
+                return;
+            }
         }
     };
 
@@ -2975,26 +3054,55 @@ fn encode_join_group(broker: &Broker, src: &mut impl Buf, out: &mut BytesMut, ve
         return;
     }
 
-    if src.remaining() < 4 {
-        write_error_body(out, KafkaErrorCode::InvalidRequest.as_i16(), 0, "", "");
-        return;
-    }
-    let protocol_count = src.get_i32();
     let mut selected_protocol = String::from("range");
     let mut topics: Vec<String> = Vec::new();
-    for i in 0..protocol_count.max(0) {
-        let name = match get_string(src) {
-            Ok(n) => n,
-            Err(_) => break,
+    if flex {
+        let protocol_count = match get_compact_array_len(src) {
+            Ok(Some(n)) => n,
+            Ok(None) => 0,
+            Err(_) => {
+                write_error_body(out, KafkaErrorCode::InvalidRequest.as_i16(), 0, "", "");
+                return;
+            }
         };
-        let meta = match get_bytes(src) {
-            Ok(b) => b.unwrap_or_default(),
-            Err(_) => break,
-        };
-        if i == 0 {
-            selected_protocol = name;
-            if let Ok(t) = decode_consumer_subscription(&meta) {
-                topics = t;
+        for i in 0..protocol_count {
+            let name = match get_compact_string(src) {
+                Ok(n) => n,
+                Err(_) => break,
+            };
+            let meta = match get_compact_bytes(src) {
+                Ok(b) => b.unwrap_or_default(),
+                Err(_) => break,
+            };
+            let _ = skip_tag_buffer(src); // protocol tags
+            if i == 0 {
+                selected_protocol = name;
+                if let Ok(t) = decode_consumer_subscription(&meta) {
+                    topics = t;
+                }
+            }
+        }
+        let _ = skip_tag_buffer(src); // request top-level tags
+    } else {
+        if src.remaining() < 4 {
+            write_error_body(out, KafkaErrorCode::InvalidRequest.as_i16(), 0, "", "");
+            return;
+        }
+        let protocol_count = src.get_i32();
+        for i in 0..protocol_count.max(0) {
+            let name = match get_string(src) {
+                Ok(n) => n,
+                Err(_) => break,
+            };
+            let meta = match get_bytes(src) {
+                Ok(b) => b.unwrap_or_default(),
+                Err(_) => break,
+            };
+            if i == 0 {
+                selected_protocol = name;
+                if let Ok(t) = decode_consumer_subscription(&meta) {
+                    topics = t;
+                }
             }
         }
     }
@@ -3056,27 +3164,52 @@ fn encode_join_group(broker: &Broker, src: &mut impl Buf, out: &mut BytesMut, ve
     }
     out.put_i16(KafkaErrorCode::None.as_i16());
     out.put_i32(result.generation as i32);
-    put_string(out, &selected_protocol);
-    put_string(out, &leader);
-    put_string(out, &result.member_id);
-    if result.member_id == leader {
-        out.put_i32(members_snap.len() as i32);
-        for m in &members_snap {
-            put_string(out, &m.member_id);
-            if version >= 5 {
-                // Best-effort: only the joining static member knows its instance id.
+    if flex {
+        put_compact_string(out, &selected_protocol);
+        put_compact_string(out, &leader);
+        put_compact_string(out, &result.member_id);
+        if result.member_id == leader {
+            put_compact_array_len(out, members_snap.len());
+            for m in &members_snap {
+                put_compact_string(out, &m.member_id);
+                // group_instance_id v5+ (always present for flex v6)
                 if m.member_id == result.member_id {
-                    put_nullable_string(out, self_instance);
+                    put_compact_nullable_string(out, self_instance);
                 } else if let Some(inst) = m.member_id.strip_prefix("static:") {
-                    put_nullable_string(out, Some(inst));
+                    put_compact_nullable_string(out, Some(inst));
                 } else {
-                    put_nullable_string(out, None);
+                    put_compact_nullable_string(out, None);
                 }
+                put_compact_bytes(out, Some(&[]));
+                put_empty_tag_buffer(out); // member tags
             }
-            put_bytes(out, Some(&[]));
+        } else {
+            put_compact_array_len(out, 0);
         }
+        put_empty_tag_buffer(out); // top-level tags
     } else {
-        out.put_i32(0);
+        put_string(out, &selected_protocol);
+        put_string(out, &leader);
+        put_string(out, &result.member_id);
+        if result.member_id == leader {
+            out.put_i32(members_snap.len() as i32);
+            for m in &members_snap {
+                put_string(out, &m.member_id);
+                if version >= 5 {
+                    // Best-effort: only the joining static member knows its instance id.
+                    if m.member_id == result.member_id {
+                        put_nullable_string(out, self_instance);
+                    } else if let Some(inst) = m.member_id.strip_prefix("static:") {
+                        put_nullable_string(out, Some(inst));
+                    } else {
+                        put_nullable_string(out, None);
+                    }
+                }
+                put_bytes(out, Some(&[]));
+            }
+        } else {
+            out.put_i32(0);
+        }
     }
 }
 
@@ -3087,22 +3220,38 @@ fn encode_sync_group(
     version: i16,
     principal: &str,
 ) {
-    // SyncGroup classic v0–3:
+    // SyncGroup classic v0–3 / flexible v4:
     //   group_id, generation, member_id, group_instance_id (v3+), [assignments]
-    // Response: throttle (v1+), error, assignment bytes
+    // Response: throttle (v1+), error, assignment bytes (+ TAG_BUFFER when flex)
+    let flex = version >= 4;
     let fail = |out: &mut BytesMut, err: i16| {
         if version >= 1 {
             out.put_i32(0);
         }
         out.put_i16(err);
-        put_bytes(out, Some(&[]));
+        if flex {
+            put_compact_bytes(out, Some(&[]));
+            put_empty_tag_buffer(out);
+        } else {
+            put_bytes(out, Some(&[]));
+        }
     };
 
-    let group_id = match get_string(src) {
-        Ok(g) => g,
-        Err(_) => {
-            fail(out, KafkaErrorCode::InvalidRequest.as_i16());
-            return;
+    let group_id = if flex {
+        match get_compact_string(src) {
+            Ok(g) => g,
+            Err(_) => {
+                fail(out, KafkaErrorCode::InvalidRequest.as_i16());
+                return;
+            }
+        }
+    } else {
+        match get_string(src) {
+            Ok(g) => g,
+            Err(_) => {
+                fail(out, KafkaErrorCode::InvalidRequest.as_i16());
+                return;
+            }
         }
     };
     if src.remaining() < 4 {
@@ -3110,21 +3259,50 @@ fn encode_sync_group(
         return;
     }
     let generation = src.get_i32() as u32;
-    let mut member_id = match get_string(src) {
-        Ok(m) => m,
-        Err(_) => {
-            fail(out, KafkaErrorCode::InvalidRequest.as_i16());
-            return;
+    let mut member_id = if flex {
+        match get_compact_string(src) {
+            Ok(m) => m,
+            Err(_) => {
+                fail(out, KafkaErrorCode::InvalidRequest.as_i16());
+                return;
+            }
+        }
+    } else {
+        match get_string(src) {
+            Ok(m) => m,
+            Err(_) => {
+                fail(out, KafkaErrorCode::InvalidRequest.as_i16());
+                return;
+            }
         }
     };
     if version >= 3 {
-        let instance = get_nullable_string(src).ok().flatten().unwrap_or_default();
+        let instance = if flex {
+            get_compact_nullable_string(src)
+                .ok()
+                .flatten()
+                .unwrap_or_default()
+        } else {
+            get_nullable_string(src).ok().flatten().unwrap_or_default()
+        };
         if member_id.is_empty() && !instance.is_empty() {
             member_id = static_member_id(&instance);
         }
     }
     // Consume leader assignments (ignored — coordinator already assigned).
-    if src.remaining() >= 4 {
+    if flex {
+        match get_compact_array_len(src) {
+            Ok(Some(n)) => {
+                for _ in 0..n {
+                    let _ = get_compact_string(src);
+                    let _ = get_compact_bytes(src);
+                    let _ = skip_tag_buffer(src);
+                }
+            }
+            Ok(None) | Err(_) => {}
+        }
+        let _ = skip_tag_buffer(src); // request top-level tags
+    } else if src.remaining() >= 4 {
         let n = src.get_i32();
         for _ in 0..n.max(0) {
             let _ = get_string(src);
@@ -3159,7 +3337,12 @@ fn encode_sync_group(
         out.put_i32(0); // throttle
     }
     out.put_i16(KafkaErrorCode::None.as_i16());
-    put_bytes(out, Some(&bytes));
+    if flex {
+        put_compact_bytes(out, Some(&bytes));
+        put_empty_tag_buffer(out);
+    } else {
+        put_bytes(out, Some(&bytes));
+    }
 }
 
 fn encode_heartbeat(
@@ -3169,20 +3352,35 @@ fn encode_heartbeat(
     version: i16,
     principal: &str,
 ) {
-    // Heartbeat classic v0–3: group_id, generation, member_id, group_instance_id (v3+)
-    // Response: throttle (v1+), error
+    // Heartbeat classic v0–3 / flexible v4:
+    //   group_id, generation, member_id, group_instance_id (v3+)
+    // Response: throttle (v1+), error (+ TAG_BUFFER when flex)
+    let flex = version >= 4;
     let fail = |out: &mut BytesMut, err: i16| {
         if version >= 1 {
             out.put_i32(0);
         }
         out.put_i16(err);
+        if flex {
+            put_empty_tag_buffer(out);
+        }
     };
 
-    let group_id = match get_string(src) {
-        Ok(g) => g,
-        Err(_) => {
-            fail(out, KafkaErrorCode::InvalidRequest.as_i16());
-            return;
+    let group_id = if flex {
+        match get_compact_string(src) {
+            Ok(g) => g,
+            Err(_) => {
+                fail(out, KafkaErrorCode::InvalidRequest.as_i16());
+                return;
+            }
+        }
+    } else {
+        match get_string(src) {
+            Ok(g) => g,
+            Err(_) => {
+                fail(out, KafkaErrorCode::InvalidRequest.as_i16());
+                return;
+            }
         }
     };
     if src.remaining() < 4 {
@@ -3190,18 +3388,38 @@ fn encode_heartbeat(
         return;
     }
     let generation = src.get_i32() as u32;
-    let mut member_id = match get_string(src) {
-        Ok(m) => m,
-        Err(_) => {
-            fail(out, KafkaErrorCode::InvalidRequest.as_i16());
-            return;
+    let mut member_id = if flex {
+        match get_compact_string(src) {
+            Ok(m) => m,
+            Err(_) => {
+                fail(out, KafkaErrorCode::InvalidRequest.as_i16());
+                return;
+            }
+        }
+    } else {
+        match get_string(src) {
+            Ok(m) => m,
+            Err(_) => {
+                fail(out, KafkaErrorCode::InvalidRequest.as_i16());
+                return;
+            }
         }
     };
     if version >= 3 {
-        let instance = get_nullable_string(src).ok().flatten().unwrap_or_default();
+        let instance = if flex {
+            get_compact_nullable_string(src)
+                .ok()
+                .flatten()
+                .unwrap_or_default()
+        } else {
+            get_nullable_string(src).ok().flatten().unwrap_or_default()
+        };
         if member_id.is_empty() && !instance.is_empty() {
             member_id = static_member_id(&instance);
         }
+    }
+    if flex {
+        let _ = skip_tag_buffer(src); // request top-level tags
     }
 
     if broker.acls().is_enabled()
@@ -3221,6 +3439,9 @@ fn encode_heartbeat(
         out.put_i32(0); // throttle
     }
     out.put_i16(map_group_error(result.error_code));
+    if flex {
+        put_empty_tag_buffer(out);
+    }
 }
 
 fn encode_leave_group(
@@ -3230,62 +3451,120 @@ fn encode_leave_group(
     version: i16,
     principal: &str,
 ) {
-    // LeaveGroup classic v0–3:
+    // LeaveGroup classic v0–3 / flexible v4:
     //   v0–2: group_id, member_id
-    //   v3: group_id, members[{ member_id, group_instance_id }]
-    // Response: throttle (v1+), error, members[] (v3+)
-    let group_id = match get_string(src) {
-        Ok(g) => g,
-        Err(_) => {
-            if version >= 1 {
-                out.put_i32(0);
+    //   v3+: group_id, members[{ member_id, group_instance_id }]
+    // Response: throttle (v1+), error, members[] (v3+; compact + tags when flex)
+    let flex = version >= 4;
+
+    let write_leave_error = |out: &mut BytesMut, err: i16, members: &[(String, Option<String>)]| {
+        if version >= 1 {
+            out.put_i32(0);
+        }
+        out.put_i16(err);
+        if version >= 3 {
+            if flex {
+                put_compact_array_len(out, members.len());
+                for (mid, inst) in members {
+                    put_compact_string(out, mid);
+                    put_compact_nullable_string(out, inst.as_deref());
+                    out.put_i16(err);
+                    put_empty_tag_buffer(out);
+                }
+                put_empty_tag_buffer(out);
+            } else {
+                out.put_i32(members.len() as i32);
+                for (mid, inst) in members {
+                    put_string(out, mid);
+                    put_nullable_string(out, inst.as_deref());
+                    out.put_i16(err);
+                }
             }
-            out.put_i16(KafkaErrorCode::InvalidRequest.as_i16());
-            if version >= 3 {
-                out.put_i32(0);
+        } else if flex {
+            put_empty_tag_buffer(out);
+        }
+    };
+
+    let group_id = if flex {
+        match get_compact_string(src) {
+            Ok(g) => g,
+            Err(_) => {
+                write_leave_error(out, KafkaErrorCode::InvalidRequest.as_i16(), &[]);
+                return;
             }
-            return;
+        }
+    } else {
+        match get_string(src) {
+            Ok(g) => g,
+            Err(_) => {
+                write_leave_error(out, KafkaErrorCode::InvalidRequest.as_i16(), &[]);
+                return;
+            }
         }
     };
 
     // Collect members to leave: (member_id, optional instance_id for response).
     let mut to_leave: Vec<(String, Option<String>)> = Vec::new();
     if version >= 3 {
-        if src.remaining() < 4 {
-            if version >= 1 {
-                out.put_i32(0);
-            }
-            out.put_i16(KafkaErrorCode::InvalidRequest.as_i16());
-            out.put_i32(0);
-            return;
-        }
-        let n = src.get_i32();
-        for _ in 0..n.max(0) {
-            let mid = match get_string(src) {
-                Ok(m) => m,
-                Err(_) => break,
-            };
-            let instance = get_nullable_string(src).ok().flatten();
-            let resolved = if !mid.is_empty() {
-                mid
-            } else if let Some(ref inst) = instance {
-                if inst.is_empty() {
-                    continue;
+        if flex {
+            let n = match get_compact_array_len(src) {
+                Ok(Some(n)) => n,
+                Ok(None) => 0,
+                Err(_) => {
+                    write_leave_error(out, KafkaErrorCode::InvalidRequest.as_i16(), &[]);
+                    return;
                 }
-                static_member_id(inst)
-            } else {
-                continue;
             };
-            to_leave.push((resolved, instance));
+            for _ in 0..n {
+                let mid = match get_compact_string(src) {
+                    Ok(m) => m,
+                    Err(_) => break,
+                };
+                let instance = get_compact_nullable_string(src).ok().flatten();
+                let _ = skip_tag_buffer(src); // member tags
+                let resolved = if !mid.is_empty() {
+                    mid
+                } else if let Some(ref inst) = instance {
+                    if inst.is_empty() {
+                        continue;
+                    }
+                    static_member_id(inst)
+                } else {
+                    continue;
+                };
+                to_leave.push((resolved, instance));
+            }
+            let _ = skip_tag_buffer(src); // request top-level tags
+        } else {
+            if src.remaining() < 4 {
+                write_leave_error(out, KafkaErrorCode::InvalidRequest.as_i16(), &[]);
+                return;
+            }
+            let n = src.get_i32();
+            for _ in 0..n.max(0) {
+                let mid = match get_string(src) {
+                    Ok(m) => m,
+                    Err(_) => break,
+                };
+                let instance = get_nullable_string(src).ok().flatten();
+                let resolved = if !mid.is_empty() {
+                    mid
+                } else if let Some(ref inst) = instance {
+                    if inst.is_empty() {
+                        continue;
+                    }
+                    static_member_id(inst)
+                } else {
+                    continue;
+                };
+                to_leave.push((resolved, instance));
+            }
         }
     } else {
         let member_id = match get_string(src) {
             Ok(m) => m,
             Err(_) => {
-                if version >= 1 {
-                    out.put_i32(0);
-                }
-                out.put_i16(KafkaErrorCode::InvalidRequest.as_i16());
+                write_leave_error(out, KafkaErrorCode::InvalidRequest.as_i16(), &[]);
                 return;
             }
         };
@@ -3300,18 +3579,11 @@ fn encode_leave_group(
             AclOperation::Read,
         )
     {
-        if version >= 1 {
-            out.put_i32(0);
-        }
-        out.put_i16(KafkaErrorCode::GroupAuthorizationFailed.as_i16());
-        if version >= 3 {
-            out.put_i32(to_leave.len() as i32);
-            for (mid, inst) in &to_leave {
-                put_string(out, mid);
-                put_nullable_string(out, inst.as_deref());
-                out.put_i16(KafkaErrorCode::GroupAuthorizationFailed.as_i16());
-            }
-        }
+        write_leave_error(
+            out,
+            KafkaErrorCode::GroupAuthorizationFailed.as_i16(),
+            &to_leave,
+        );
         return;
     }
 
@@ -3333,12 +3605,25 @@ fn encode_leave_group(
     }
     out.put_i16(top_err);
     if version >= 3 {
-        out.put_i32(member_results.len() as i32);
-        for (mid, inst, err) in member_results {
-            put_string(out, &mid);
-            put_nullable_string(out, inst.as_deref());
-            out.put_i16(err);
+        if flex {
+            put_compact_array_len(out, member_results.len());
+            for (mid, inst, err) in &member_results {
+                put_compact_string(out, mid);
+                put_compact_nullable_string(out, inst.as_deref());
+                out.put_i16(*err);
+                put_empty_tag_buffer(out);
+            }
+            put_empty_tag_buffer(out);
+        } else {
+            out.put_i32(member_results.len() as i32);
+            for (mid, inst, err) in member_results {
+                put_string(out, &mid);
+                put_nullable_string(out, inst.as_deref());
+                out.put_i16(err);
+            }
         }
+    } else if flex {
+        put_empty_tag_buffer(out);
     }
 }
 
