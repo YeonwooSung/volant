@@ -232,6 +232,9 @@ out of scope.
 leader epoch for consumer truncation checks; no durable epoch history (eligible
 epochs map to HWM).
 
+**Phase 40:** Kafka ListOffsets classic v0–5 — isolation_level, throttle,
+current_leader_epoch fencing, response leader_epoch; flexible v6+ out of scope.
+
 **Still deferred:** multi-language clients, chaos-mesh / cargo-fuzz corpus CI.
 
 ### Networked client (library)

@@ -149,7 +149,7 @@ fn dispatch_kafka(broker: &Broker, body: bytes::Bytes, conn: &mut KafkaConnState
         Some(ApiKey::Fetch) if (0..=4).contains(&hdr.api_version) => {
             encode_fetch(broker, &mut src, &mut out, hdr.api_version, principal);
         }
-        Some(ApiKey::ListOffsets) if (0..=1).contains(&hdr.api_version) => {
+        Some(ApiKey::ListOffsets) if (0..=5).contains(&hdr.api_version) => {
             encode_list_offsets(broker, &mut src, &mut out, hdr.api_version, principal);
         }
         Some(ApiKey::CreateTopics) if (0..=1).contains(&hdr.api_version) => {
@@ -1293,19 +1293,76 @@ fn encode_offset_for_leader_epoch(
 }
 
 fn encode_list_offsets(broker: &Broker, src: &mut impl Buf, out: &mut BytesMut, version: i16, principal: &str) {
-    // ListOffsets v0: replica_id, [topic [partition, timestamp, max_num_offsets]]
-    // ListOffsets v1: replica_id, [topic [partition, timestamp]]
+    // ListOffsets classic v0–5:
+    //   replica_id, isolation_level (v2+),
+    //   topics[{ name, partitions[{ partition, current_leader_epoch (v4+),
+    //     timestamp, max_num_offsets (v0) }] }]
+    // Response: throttle (v2+), topics[{ name, partitions[{ partition, error,
+    //   v0: [timestamp,offset] array | v1+: timestamp, offset, leader_epoch (v4+) }] }]
     if src.remaining() < 4 {
+        if version >= 2 {
+            out.put_i32(0);
+        }
         out.put_i32(0);
         return;
     }
     let _replica_id = src.get_i32();
+
+    // v2+: isolation_level (0 / 1). Both map to the same offsets under
+    // buffer-until-commit (LSO ≡ HWM); accept and ignore.
+    if version >= 2 {
+        if src.remaining() < 1 {
+            out.put_i32(0); // throttle
+            out.put_i32(0);
+            return;
+        }
+        let isolation = src.get_u8();
+        if isolation > 1 {
+            out.put_i32(0);
+            out.put_i32(0);
+            return;
+        }
+    }
+
+    if version >= 2 {
+        out.put_i32(0); // throttle_time_ms
+    }
+
     if src.remaining() < 4 {
         out.put_i32(0);
         return;
     }
     let topic_count = src.get_i32();
     out.put_i32(topic_count.max(0));
+
+    /// Write a partition result with versioned fields.
+    fn write_part(
+        out: &mut BytesMut,
+        version: i16,
+        partition: i32,
+        err: i16,
+        timestamp: i64,
+        offset: i64,
+        leader_epoch: i32,
+    ) {
+        out.put_i32(partition);
+        out.put_i16(err);
+        if version == 0 {
+            if err == KafkaErrorCode::None.as_i16() {
+                out.put_i32(1);
+                out.put_i64(timestamp);
+                out.put_i64(offset);
+            } else {
+                out.put_i32(0); // empty old-style offsets array
+            }
+        } else {
+            out.put_i64(timestamp);
+            out.put_i64(offset);
+            if version >= 4 {
+                out.put_i32(leader_epoch);
+            }
+        }
+    }
 
     for _ in 0..topic_count.max(0) {
         let topic = match get_string(src) {
@@ -1322,10 +1379,21 @@ fn encode_list_offsets(broker: &Broker, src: &mut impl Buf, out: &mut BytesMut, 
         out.put_i32(part_count.max(0));
 
         for _ in 0..part_count.max(0) {
-            if src.remaining() < 4 + 8 {
+            // partition + optional current_leader_epoch + timestamp [+ max_num v0]
+            let need = if version >= 4 {
+                4 + 4 + 8
+            } else {
+                4 + 8
+            };
+            if src.remaining() < need {
                 break;
             }
             let partition = src.get_i32();
+            let current_leader_epoch = if version >= 4 {
+                src.get_i32()
+            } else {
+                -1
+            };
             let timestamp = src.get_i64();
             if version == 0 {
                 if src.remaining() < 4 {
@@ -1333,8 +1401,6 @@ fn encode_list_offsets(broker: &Broker, src: &mut impl Buf, out: &mut BytesMut, 
                 }
                 let _max_num = src.get_i32();
             }
-
-            out.put_i32(partition);
 
             if broker.acls().is_enabled()
                 && !broker.acls().authorize(
@@ -1344,27 +1410,71 @@ fn encode_list_offsets(broker: &Broker, src: &mut impl Buf, out: &mut BytesMut, 
                     AclOperation::Describe,
                 )
             {
-                out.put_i16(KafkaErrorCode::TopicAuthorizationFailed.as_i16());
-                if version == 0 {
-                    out.put_i32(0); // empty offset array
-                } else {
-                    out.put_i64(timestamp);
-                    out.put_i64(-1);
-                }
+                write_part(
+                    out,
+                    version,
+                    partition,
+                    KafkaErrorCode::TopicAuthorizationFailed.as_i16(),
+                    timestamp,
+                    -1,
+                    -1,
+                );
                 continue;
+            }
+
+            // Resolve current partition epoch for fencing / response (v4+).
+            let name = TopicName::new(topic.clone());
+            let part_meta = broker.metadata(Some(&[name])).topics.first().and_then(|t| {
+                t.partitions
+                    .iter()
+                    .find(|p| p.partition_id.0 == partition as u32)
+                    .cloned()
+            });
+            let current_epoch = part_meta
+                .as_ref()
+                .map(|p| p.leader_epoch as i32)
+                .unwrap_or(-1);
+
+            if current_leader_epoch != -1 {
+                if current_leader_epoch > current_epoch && current_epoch >= 0 {
+                    write_part(
+                        out,
+                        version,
+                        partition,
+                        KafkaErrorCode::UnknownLeaderEpoch.as_i16(),
+                        timestamp,
+                        -1,
+                        current_epoch,
+                    );
+                    continue;
+                }
+                if current_leader_epoch < current_epoch {
+                    write_part(
+                        out,
+                        version,
+                        partition,
+                        KafkaErrorCode::FencedLeaderEpoch.as_i16(),
+                        timestamp,
+                        -1,
+                        current_epoch,
+                    );
+                    continue;
+                }
             }
 
             // Kafka: -1 = latest, -2 = earliest.
             let want_earliest = timestamp == -2;
             let want_latest = timestamp == -1;
             if !want_earliest && !want_latest {
-                out.put_i16(KafkaErrorCode::InvalidTimestamp.as_i16());
-                if version == 0 {
-                    out.put_i32(0);
-                } else {
-                    out.put_i64(timestamp);
-                    out.put_i64(-1);
-                }
+                write_part(
+                    out,
+                    version,
+                    partition,
+                    KafkaErrorCode::InvalidTimestamp.as_i16(),
+                    timestamp,
+                    -1,
+                    current_epoch,
+                );
                 continue;
             }
 
@@ -1375,33 +1485,37 @@ fn encode_list_offsets(broker: &Broker, src: &mut impl Buf, out: &mut BytesMut, 
                         .map(|(_, e, l)| (*e as i64, *l as i64))
                         .unwrap_or((0, 0));
                     let offset = if want_earliest { earliest } else { latest };
-                    out.put_i16(KafkaErrorCode::None.as_i16());
-                    if version == 0 {
-                        out.put_i32(1);
-                        out.put_i64(timestamp);
-                        out.put_i64(offset);
-                    } else {
-                        out.put_i64(timestamp);
-                        out.put_i64(offset);
-                    }
+                    write_part(
+                        out,
+                        version,
+                        partition,
+                        KafkaErrorCode::None.as_i16(),
+                        timestamp,
+                        offset,
+                        current_epoch.max(0),
+                    );
                 }
                 Err(Error::NotFound(_)) => {
-                    out.put_i16(KafkaErrorCode::UnknownTopicOrPartition.as_i16());
-                    if version == 0 {
-                        out.put_i32(0);
-                    } else {
-                        out.put_i64(timestamp);
-                        out.put_i64(-1);
-                    }
+                    write_part(
+                        out,
+                        version,
+                        partition,
+                        KafkaErrorCode::UnknownTopicOrPartition.as_i16(),
+                        timestamp,
+                        -1,
+                        -1,
+                    );
                 }
                 Err(_) => {
-                    out.put_i16(KafkaErrorCode::Unknown.as_i16());
-                    if version == 0 {
-                        out.put_i32(0);
-                    } else {
-                        out.put_i64(timestamp);
-                        out.put_i64(-1);
-                    }
+                    write_part(
+                        out,
+                        version,
+                        partition,
+                        KafkaErrorCode::Unknown.as_i16(),
+                        timestamp,
+                        -1,
+                        -1,
+                    );
                 }
             }
         }

@@ -10,7 +10,7 @@
 | `--log-format` | | `text` | `text` or `json` |
 | `--auth-token` | `VOLANT_AUTH_TOKEN` | *unset* | Shared-token auth |
 | `--scram-user USER:PASS` | | *unset* | Upsert SCRAM user at startup (repeatable; Phase 22) |
-| `--kafka-listen` | | *disabled* | Kafka wire protocol shim (Phase 23–39) |
+| `--kafka-listen` | | *disabled* | Kafka wire protocol shim (Phase 23–40) |
 | `--tls-cert` / `--tls-key` | | *unset* | Server TLS (feature `tls`) |
 | `--tls-peer-insecure` | | `true` | Skip inter-broker cert verify (lab) |
 | `--tls-ca` | | *unset* | CA PEM for inter-broker peer verify |
@@ -140,7 +140,7 @@ Supported APIs:
 | TxnOffsetCommit | 0 | buffers offsets until EndTxn commit |
 | SaslHandshake | 0–1 | mechanisms: PLAIN, SCRAM-SHA-256, SCRAM-SHA-512 |
 | SaslAuthenticate | 0–1 | PLAIN / SCRAM-SHA-256 / SCRAM-SHA-512 against Volant SCRAM store |
-| ListOffsets | 0–1 | timestamp -1 latest, -2 earliest |
+| ListOffsets | 0–5 | -1 latest / -2 earliest; v2+ isolation (LSO≡HWM) + throttle; v4+ leader-epoch fencing; flexible v6+ unsupported |
 | CreateTopics | 0–1 | partition count; RF/assignment ignored |
 | DeleteTopics | 0–1 | by name |
 | JoinGroup | 0–1 | consumer protocol subscription |

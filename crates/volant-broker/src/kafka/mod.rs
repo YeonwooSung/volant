@@ -1,12 +1,12 @@
-//! Kafka wire protocol shim (Phases 23–39).
+//! Kafka wire protocol shim (Phases 23–40).
 //!
 //! Classic (non-flexible) framing. Produce/Fetch, admin, consumer groups,
 //! List/Describe/DeleteGroups, CreatePartitions, Describe/AlterConfigs,
 //! IncrementalAlterConfigs, RecordBatch + MessageSet compression,
 //! InitProducerId + idempotent Produce, SASL, transactions, DeleteRecords,
 //! ACL admin, OffsetDelete, Fetch isolation-level honesty, Metadata v0–8,
-//! and OffsetForLeaderEpoch.
-//! See `docs/PHASE23_SPEC.md` … `docs/PHASE39_SPEC.md`.
+//! OffsetForLeaderEpoch, and ListOffsets v0–5.
+//! See `docs/PHASE23_SPEC.md` … `docs/PHASE40_SPEC.md`.
 
 /// Kafka wire primitives, MessageSet (magic 0/1), and RecordBatch (magic 2).
 pub mod codec;
@@ -246,7 +246,7 @@ impl ApiKey {
 pub const SUPPORTED_APIS: &[(ApiKey, i16, i16)] = &[
     (ApiKey::Produce, 0, 3),
     (ApiKey::Fetch, 0, 4),
-    (ApiKey::ListOffsets, 0, 1),
+    (ApiKey::ListOffsets, 0, 5),
     (ApiKey::Metadata, 0, 8),
     (ApiKey::OffsetCommit, 0, 2),
     (ApiKey::OffsetFetch, 0, 1),

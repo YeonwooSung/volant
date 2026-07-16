@@ -968,6 +968,25 @@ current HWM); no flexible v4+; Metadata still advertises leader_epoch=-1.
 **Still deferred:** multi-lang clients, cargo-fuzz corpus CI, flexible modern
 admin APIs (DescribeCluster / ListTransactions).
 
+### Phase 40 — Kafka ListOffsets classic v0–5 ✅
+
+**Goal:** Raise ListOffsets (API key 2) from classic v0–1 to classic **v0–5**
+so modern consumers negotiate isolation_level, throttle, and leader-epoch fencing.
+
+Binding: **[docs/PHASE40_SPEC.md](./docs/PHASE40_SPEC.md)**.
+
+- [x] ListOffsets max version 5 in ApiVersions
+- [x] v2+ isolation_level (accepted; LSO ≡ HWM) + throttle 0
+- [x] v4+ current_leader_epoch fencing + response leader_epoch
+- [x] earliest/latest only; invalid timestamps rejected
+- [x] Integration tests (`phase40_list_offsets`); phase25 v1 still works
+
+**Honest limitations:** no flexible v6+; no timestamp/max-timestamp/tiered
+lookups; isolation does not filter under buffer-until-commit.
+
+**Still deferred:** multi-lang clients, cargo-fuzz corpus CI, flexible modern
+admin APIs (DescribeCluster / ListTransactions).
+
 ---
 
 ## Performance targets (aspirational)
