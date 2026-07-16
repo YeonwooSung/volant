@@ -19,9 +19,10 @@ use super::codec::{
     decode_consumer_subscription, decode_produce_batches, decode_request_header,
     encode_consumer_assignment, encode_message_set, encode_message_set_compressed,
     encode_record_batch, encode_record_batch_compressed, encode_response_frame, get_bytes,
-    get_compact_string, get_nullable_string, get_string, put_bytes, put_compact_array_len,
-    put_empty_tag_buffer, put_nullable_string, put_response_header, put_string,
-    skip_tag_buffer, try_decode_request,
+    get_compact_array_len, get_compact_string, get_nullable_string, get_string, put_bytes,
+    put_compact_array_len, put_compact_nullable_string, put_compact_string, put_empty_tag_buffer,
+    put_nullable_string, put_response_header, put_response_header_v1, put_string, skip_tag_buffer,
+    try_decode_request,
 };
 use super::compress::{fetch_compression_codec, CompressionCodec};
 use super::sasl::{self, SaslMechanism, SaslState, MECHANISMS};
@@ -110,10 +111,25 @@ fn dispatch_kafka(broker: &Broker, body: bytes::Bytes, conn: &mut KafkaConnState
         }
     };
     let corr = hdr.correlation_id;
-    let mut out = BytesMut::new();
-    put_response_header(&mut out, corr);
-
     let api = ApiKey::from_i16(hdr.api_key);
+
+    // Flexible APIs (except ApiVersions) use response header v1: corr + TAG_BUFFER.
+    // ApiVersions always uses response header v0 even when the body is flexible.
+    let flexible_response_header = matches!(
+        (api, hdr.api_version),
+        (Some(ApiKey::Metadata), v) if v >= 9
+    ) || matches!(
+        (api, hdr.api_version),
+        (Some(ApiKey::FindCoordinator), v) if v >= 3
+    );
+
+    let mut out = BytesMut::new();
+    if flexible_response_header {
+        put_response_header_v1(&mut out, corr);
+    } else {
+        put_response_header(&mut out, corr);
+    }
+
     // When SCRAM users exist, require SASL before non-auth APIs (Phase 30).
     let auth_gate = broker.scram().has_users() && !conn.authenticated();
     if auth_gate {
@@ -148,7 +164,12 @@ fn dispatch_kafka(broker: &Broker, body: bytes::Bytes, conn: &mut KafkaConnState
         Some(ApiKey::SaslAuthenticate) if (0..=1).contains(&hdr.api_version) => {
             encode_sasl_authenticate(broker, &mut src, &mut out, hdr.api_version, conn);
         }
-        Some(ApiKey::Metadata) if (0..=8).contains(&hdr.api_version) => {
+        Some(ApiKey::Metadata) if (0..=9).contains(&hdr.api_version) => {
+            if hdr.api_version >= 9 {
+                if let Err(e) = skip_tag_buffer(&mut src) {
+                    debug!(error = %e, "metadata flexible header tag buffer");
+                }
+            }
             encode_metadata(broker, &mut src, &mut out, hdr.api_version, principal);
         }
         Some(ApiKey::Produce) if (0..=8).contains(&hdr.api_version) => {
@@ -178,7 +199,12 @@ fn dispatch_kafka(broker: &Broker, body: bytes::Bytes, conn: &mut KafkaConnState
         Some(ApiKey::DeleteAcls) if (0..=1).contains(&hdr.api_version) => {
             encode_delete_acls(broker, &mut src, &mut out, hdr.api_version, principal);
         }
-        Some(ApiKey::FindCoordinator) if (0..=2).contains(&hdr.api_version) => {
+        Some(ApiKey::FindCoordinator) if (0..=4).contains(&hdr.api_version) => {
+            if hdr.api_version >= 3 {
+                if let Err(e) = skip_tag_buffer(&mut src) {
+                    debug!(error = %e, "find coordinator flexible header tag buffer");
+                }
+            }
             encode_find_coordinator(broker, &mut src, &mut out, hdr.api_version);
         }
         Some(ApiKey::AddPartitionsToTxn) if (0..=2).contains(&hdr.api_version) => {
@@ -378,39 +404,64 @@ const AUTH_OPS_OMITTED: i32 = i32::MIN;
 
 fn encode_metadata(broker: &Broker, src: &mut impl Buf, out: &mut BytesMut, version: i16, principal: &str) {
     // Request:
-    //   topics: array (v0) / nullable array (v1+)
+    //   topics: array (v0) / nullable array (v1+) / compact nullable (v9+)
     //     v0: empty = all topics
-    //     v1+: null (-1) = all topics; empty (0) = no topics
+    //     v1+: null = all topics; empty = no topics
     //   allow_auto_topic_creation: bool (v4+, ignored)
-    //   include_cluster_authorized_operations: bool (v8)
-    //   include_topic_authorized_operations: bool (v8)
-    let topic_len = if src.remaining() >= 4 {
-        src.get_i32()
-    } else {
-        0
-    };
+    //   include_cluster_authorized_operations: bool (v8–10)
+    //   include_topic_authorized_operations: bool (v8+)
+    //   TAG_BUFFER (v9+)
+    let flexible = version >= 9;
 
     let list_all: bool;
     let mut requested: Vec<String> = Vec::new();
-    if version == 0 {
-        list_all = topic_len <= 0;
-        if topic_len > 0 {
+
+    if flexible {
+        match get_compact_array_len(src) {
+            Ok(None) => {
+                list_all = true;
+            }
+            Ok(Some(n)) => {
+                list_all = false;
+                for _ in 0..n {
+                    match get_compact_string(src) {
+                        Ok(t) => {
+                            requested.push(t);
+                            let _ = skip_tag_buffer(src); // per-topic tags
+                        }
+                        Err(_) => break,
+                    }
+                }
+            }
+            Err(_) => {
+                list_all = true;
+            }
+        }
+    } else {
+        let topic_len = if src.remaining() >= 4 {
+            src.get_i32()
+        } else {
+            0
+        };
+        if version == 0 {
+            list_all = topic_len <= 0;
+            if topic_len > 0 {
+                for _ in 0..topic_len {
+                    match get_string(src) {
+                        Ok(t) => requested.push(t),
+                        Err(_) => break,
+                    }
+                }
+            }
+        } else if topic_len < 0 {
+            list_all = true;
+        } else {
+            list_all = false;
             for _ in 0..topic_len {
                 match get_string(src) {
                     Ok(t) => requested.push(t),
                     Err(_) => break,
                 }
-            }
-        }
-    } else if topic_len < 0 {
-        // null array → all topics
-        list_all = true;
-    } else {
-        list_all = false;
-        for _ in 0..topic_len {
-            match get_string(src) {
-                Ok(t) => requested.push(t),
-                Err(_) => break,
             }
         }
     }
@@ -430,6 +481,9 @@ fn encode_metadata(broker: &Broker, src: &mut impl Buf, out: &mut BytesMut, vers
             include_topic_ops = src.get_u8() != 0;
         }
     }
+    if flexible {
+        let _ = skip_tag_buffer(src); // request body tags
+    }
 
     let need_cluster_describe = list_all;
     if broker.acls().is_enabled() && need_cluster_describe {
@@ -439,7 +493,6 @@ fn encode_metadata(broker: &Broker, src: &mut impl Buf, out: &mut BytesMut, vers
             CLUSTER_RESOURCE,
             AclOperation::Describe,
         ) {
-            // Empty brokers + empty topics with versioned framing.
             write_metadata_empty(out, version, include_cluster_ops, principal, broker);
             return;
         }
@@ -448,15 +501,24 @@ fn encode_metadata(broker: &Broker, src: &mut impl Buf, out: &mut BytesMut, vers
     let filter: Option<Vec<TopicName>> = if list_all {
         None
     } else if requested.is_empty() {
-        // Explicit empty list → no topics in the response.
         write_metadata_brokers_header(broker, out, version);
-        out.put_i32(0); // topics
-        if version >= 8 {
+        if flexible {
+            put_compact_array_len(out, 0); // empty topics
             out.put_i32(cluster_authorized_ops(
                 broker,
                 principal,
                 include_cluster_ops,
             ));
+            put_empty_tag_buffer(out);
+        } else {
+            out.put_i32(0); // topics
+            if version >= 8 {
+                out.put_i32(cluster_authorized_ops(
+                    broker,
+                    principal,
+                    include_cluster_ops,
+                ));
+            }
         }
         return;
     } else {
@@ -474,19 +536,34 @@ fn encode_metadata(broker: &Broker, src: &mut impl Buf, out: &mut BytesMut, vers
     }
 
     // Brokers
-    out.put_i32(snap.brokers.len() as i32);
-    for (id, host, port) in &snap.brokers {
-        out.put_i32(*id as i32);
-        put_string(out, host);
-        out.put_i32(i32::from(*port));
-        if version >= 1 {
-            put_nullable_string(out, None); // rack
+    if flexible {
+        put_compact_array_len(out, snap.brokers.len());
+        for (id, host, port) in &snap.brokers {
+            out.put_i32(*id as i32);
+            put_compact_string(out, host);
+            out.put_i32(i32::from(*port));
+            put_compact_nullable_string(out, None); // rack
+            put_empty_tag_buffer(out);
+        }
+    } else {
+        out.put_i32(snap.brokers.len() as i32);
+        for (id, host, port) in &snap.brokers {
+            out.put_i32(*id as i32);
+            put_string(out, host);
+            out.put_i32(i32::from(*port));
+            if version >= 1 {
+                put_nullable_string(out, None); // rack
+            }
         }
     }
 
     // cluster_id (v2+)
     if version >= 2 {
-        put_nullable_string(out, Some(KAFKA_CLUSTER_ID));
+        if flexible {
+            put_compact_nullable_string(out, Some(KAFKA_CLUSTER_ID));
+        } else {
+            put_nullable_string(out, Some(KAFKA_CLUSTER_ID));
+        }
     }
 
     // controller_id (v1+)
@@ -510,49 +587,89 @@ fn encode_metadata(broker: &Broker, src: &mut impl Buf, out: &mut BytesMut, vers
             )
         })
         .collect();
-    out.put_i32(topics.len() as i32);
-    for t in topics {
-        out.put_i16(KafkaErrorCode::None.as_i16());
-        put_string(out, t.name.as_str());
-        if version >= 1 {
-            out.put_u8(0); // is_internal = false
-        }
-        out.put_i32(t.partitions.len() as i32);
-        for p in &t.partitions {
+
+    if flexible {
+        put_compact_array_len(out, topics.len());
+        for t in topics {
             out.put_i16(KafkaErrorCode::None.as_i16());
-            out.put_i32(p.partition_id.0 as i32);
-            out.put_i32(p.leader as i32);
-            if version >= 7 {
-                out.put_i32(-1); // leader_epoch unknown
+            put_compact_string(out, t.name.as_str());
+            out.put_u8(0); // is_internal
+            put_compact_array_len(out, t.partitions.len());
+            for p in &t.partitions {
+                out.put_i16(KafkaErrorCode::None.as_i16());
+                out.put_i32(p.partition_id.0 as i32);
+                out.put_i32(p.leader as i32);
+                out.put_i32(-1); // leader_epoch
+                put_compact_array_len(out, p.replicas.len());
+                for r in &p.replicas {
+                    out.put_i32(*r as i32);
+                }
+                put_compact_array_len(out, p.isr.len());
+                for r in &p.isr {
+                    out.put_i32(*r as i32);
+                }
+                put_compact_array_len(out, 0); // offline_replicas
+                put_empty_tag_buffer(out); // partition tags
             }
-            out.put_i32(p.replicas.len() as i32);
-            for r in &p.replicas {
-                out.put_i32(*r as i32);
-            }
-            out.put_i32(p.isr.len() as i32);
-            for r in &p.isr {
-                out.put_i32(*r as i32);
-            }
-            if version >= 5 {
-                out.put_i32(0); // offline_replicas empty
-            }
-        }
-        if version >= 8 {
             out.put_i32(topic_authorized_ops(
                 broker,
                 principal,
                 t.name.as_str(),
                 include_topic_ops,
             ));
+            put_empty_tag_buffer(out); // topic tags
         }
-    }
-
-    if version >= 8 {
         out.put_i32(cluster_authorized_ops(
             broker,
             principal,
             include_cluster_ops,
         ));
+        put_empty_tag_buffer(out); // top-level tags
+    } else {
+        out.put_i32(topics.len() as i32);
+        for t in topics {
+            out.put_i16(KafkaErrorCode::None.as_i16());
+            put_string(out, t.name.as_str());
+            if version >= 1 {
+                out.put_u8(0); // is_internal = false
+            }
+            out.put_i32(t.partitions.len() as i32);
+            for p in &t.partitions {
+                out.put_i16(KafkaErrorCode::None.as_i16());
+                out.put_i32(p.partition_id.0 as i32);
+                out.put_i32(p.leader as i32);
+                if version >= 7 {
+                    out.put_i32(-1); // leader_epoch unknown
+                }
+                out.put_i32(p.replicas.len() as i32);
+                for r in &p.replicas {
+                    out.put_i32(*r as i32);
+                }
+                out.put_i32(p.isr.len() as i32);
+                for r in &p.isr {
+                    out.put_i32(*r as i32);
+                }
+                if version >= 5 {
+                    out.put_i32(0); // offline_replicas empty
+                }
+            }
+            if version >= 8 {
+                out.put_i32(topic_authorized_ops(
+                    broker,
+                    principal,
+                    t.name.as_str(),
+                    include_topic_ops,
+                ));
+            }
+        }
+
+        if version >= 8 {
+            out.put_i32(cluster_authorized_ops(
+                broker,
+                principal,
+                include_cluster_ops,
+            ));
+        }
     }
 }
 
@@ -560,23 +677,37 @@ fn encode_metadata(broker: &Broker, src: &mut impl Buf, out: &mut BytesMut, vers
 fn write_metadata_brokers_header(broker: &Broker, out: &mut BytesMut, version: i16) {
     // Brokers/controller only; topic array is written by the caller.
     let snap = broker.metadata(None);
+    let flexible = version >= 9;
     if version >= 3 {
         out.put_i32(0); // throttle
     }
-    out.put_i32(snap.brokers.len() as i32);
-    for (id, host, port) in &snap.brokers {
-        out.put_i32(*id as i32);
-        put_string(out, host);
-        out.put_i32(i32::from(*port));
-        if version >= 1 {
-            put_nullable_string(out, None);
+    if flexible {
+        put_compact_array_len(out, snap.brokers.len());
+        for (id, host, port) in &snap.brokers {
+            out.put_i32(*id as i32);
+            put_compact_string(out, host);
+            out.put_i32(i32::from(*port));
+            put_compact_nullable_string(out, None);
+            put_empty_tag_buffer(out);
         }
-    }
-    if version >= 2 {
-        put_nullable_string(out, Some(KAFKA_CLUSTER_ID));
-    }
-    if version >= 1 {
+        put_compact_nullable_string(out, Some(KAFKA_CLUSTER_ID));
         out.put_i32(snap.controller_id as i32);
+    } else {
+        out.put_i32(snap.brokers.len() as i32);
+        for (id, host, port) in &snap.brokers {
+            out.put_i32(*id as i32);
+            put_string(out, host);
+            out.put_i32(i32::from(*port));
+            if version >= 1 {
+                put_nullable_string(out, None);
+            }
+        }
+        if version >= 2 {
+            put_nullable_string(out, Some(KAFKA_CLUSTER_ID));
+        }
+        if version >= 1 {
+            out.put_i32(snap.controller_id as i32);
+        }
     }
 }
 
@@ -588,20 +719,38 @@ fn write_metadata_empty(
     _principal: &str,
     _broker: &Broker,
 ) {
+    let flexible = version >= 9;
     if version >= 3 {
         out.put_i32(0);
     }
-    out.put_i32(0); // brokers
-    if version >= 2 {
-        put_nullable_string(out, Some(KAFKA_CLUSTER_ID));
-    }
-    if version >= 1 {
+    if flexible {
+        put_compact_array_len(out, 0); // brokers
+        put_compact_nullable_string(out, Some(KAFKA_CLUSTER_ID));
         out.put_i32(-1); // controller_id
-    }
-    out.put_i32(0); // topics
-    if version >= 8 {
-        // Denied cluster describe → omit ops (or empty bitfield). Use omitted when not requested.
-        out.put_i32(if include_cluster_ops { 0 } else { AUTH_OPS_OMITTED });
+        put_compact_array_len(out, 0); // topics
+        out.put_i32(if include_cluster_ops {
+            0
+        } else {
+            AUTH_OPS_OMITTED
+        });
+        put_empty_tag_buffer(out);
+    } else {
+        out.put_i32(0); // brokers
+        if version >= 2 {
+            put_nullable_string(out, Some(KAFKA_CLUSTER_ID));
+        }
+        if version >= 1 {
+            out.put_i32(-1); // controller_id
+        }
+        out.put_i32(0); // topics
+        if version >= 8 {
+            // Denied cluster describe → omit ops (or empty bitfield). Use omitted when not requested.
+            out.put_i32(if include_cluster_ops {
+                0
+            } else {
+                AUTH_OPS_OMITTED
+            });
+        }
     }
 }
 
@@ -1987,64 +2136,176 @@ fn encode_delete_topics(
 }
 
 fn encode_find_coordinator(broker: &Broker, src: &mut impl Buf, out: &mut BytesMut, version: i16) {
-    // FindCoordinator classic v0–2 (flexible 3+):
+    // FindCoordinator classic v0–2 + flexible v3–4:
     //   v0: key
-    //   v1–2: key + key_type (0=group, 1=transaction); response throttle + error_message
-    // v2 is wire-identical to v1 (quota-timing semantics only on real Kafka).
-    let _key = match get_string(src) {
-        Ok(g) => g,
-        Err(_) => {
-            if version >= 1 {
-                out.put_i32(0); // throttle
-            }
-            out.put_i16(KafkaErrorCode::InvalidRequest.as_i16());
-            if version >= 1 {
-                put_nullable_string(out, Some("invalid key"));
-            }
-            out.put_i32(-1);
-            put_string(out, "");
-            out.put_i32(-1);
-            return;
-        }
-    };
-    if version >= 1 {
-        if src.remaining() < 1 {
-            out.put_i32(0);
-            out.put_i16(KafkaErrorCode::InvalidRequest.as_i16());
-            put_nullable_string(out, Some("missing key_type"));
-            out.put_i32(-1);
-            put_string(out, "");
-            out.put_i32(-1);
-            return;
-        }
-        let key_type = src.get_i8();
-        // 0 = group, 1 = transaction — both resolve to this broker.
-        if key_type != 0 && key_type != 1 {
-            out.put_i32(0);
-            out.put_i16(KafkaErrorCode::InvalidRequest.as_i16());
-            put_nullable_string(out, Some("unsupported key_type"));
-            out.put_i32(-1);
-            put_string(out, "");
-            out.put_i32(-1);
-            return;
-        }
-    }
+    //   v1–2: key + key_type; response throttle + error_message
+    //   v3: compact key + key_type + tags; compact host/error_message + tags
+    //   v4: key_type + compact CoordinatorKeys batch → Coordinators array
+    let flexible = version >= 3;
     let snap = broker.metadata(None);
     let (id, host, port) = snap
         .brokers
         .first()
         .cloned()
         .unwrap_or((snap.node_id, snap.host.clone(), snap.port));
+    let node_id = id as i32;
+    let port_i32 = i32::from(port);
+
+    if version >= 4 {
+        // v4 request: KeyType + CoordinatorKeys (compact) + tags
+        if src.remaining() < 1 {
+            write_find_coordinator_v4_error(out, &[], "missing key_type");
+            return;
+        }
+        let key_type = src.get_i8();
+        if key_type != 0 && key_type != 1 {
+            write_find_coordinator_v4_error(out, &[], "unsupported key_type");
+            return;
+        }
+        let keys = match get_compact_array_len(src) {
+            Ok(Some(n)) => {
+                let mut keys = Vec::with_capacity(n);
+                for _ in 0..n {
+                    match get_compact_string(src) {
+                        Ok(k) => keys.push(k),
+                        Err(_) => break,
+                    }
+                }
+                keys
+            }
+            Ok(None) | Err(_) => Vec::new(),
+        };
+        let _ = skip_tag_buffer(src);
+
+        out.put_i32(0); // throttle
+        put_compact_array_len(out, keys.len());
+        for key in &keys {
+            put_compact_string(out, key);
+            out.put_i32(node_id);
+            put_compact_string(out, &host);
+            out.put_i32(port_i32);
+            out.put_i16(KafkaErrorCode::None.as_i16());
+            put_compact_nullable_string(out, None); // error_message
+            put_empty_tag_buffer(out);
+        }
+        put_empty_tag_buffer(out);
+        return;
+    }
+
+    // v0–3 single key
+    let key_result = if flexible {
+        get_compact_string(src)
+    } else {
+        get_string(src)
+    };
+    let _key = match key_result {
+        Ok(g) => g,
+        Err(_) => {
+            write_find_coordinator_error(
+                out,
+                version,
+                flexible,
+                KafkaErrorCode::InvalidRequest,
+                Some("invalid key"),
+            );
+            return;
+        }
+    };
+
+    if version >= 1 {
+        if src.remaining() < 1 {
+            write_find_coordinator_error(
+                out,
+                version,
+                flexible,
+                KafkaErrorCode::InvalidRequest,
+                Some("missing key_type"),
+            );
+            return;
+        }
+        let key_type = src.get_i8();
+        // 0 = group, 1 = transaction — both resolve to this broker.
+        if key_type != 0 && key_type != 1 {
+            write_find_coordinator_error(
+                out,
+                version,
+                flexible,
+                KafkaErrorCode::InvalidRequest,
+                Some("unsupported key_type"),
+            );
+            return;
+        }
+    }
+    if flexible {
+        let _ = skip_tag_buffer(src);
+    }
+
     if version >= 1 {
         out.put_i32(0); // throttle_time_ms
     }
     out.put_i16(KafkaErrorCode::None.as_i16());
     if version >= 1 {
-        put_nullable_string(out, None); // error_message
+        if flexible {
+            put_compact_nullable_string(out, None);
+        } else {
+            put_nullable_string(out, None);
+        }
     }
-    out.put_i32(id as i32);
-    put_string(out, &host);
-    out.put_i32(i32::from(port));
+    out.put_i32(node_id);
+    if flexible {
+        put_compact_string(out, &host);
+    } else {
+        put_string(out, &host);
+    }
+    out.put_i32(port_i32);
+    if flexible {
+        put_empty_tag_buffer(out);
+    }
+}
+
+fn write_find_coordinator_error(
+    out: &mut BytesMut,
+    version: i16,
+    flexible: bool,
+    code: KafkaErrorCode,
+    msg: Option<&str>,
+) {
+    if version >= 1 {
+        out.put_i32(0); // throttle
+    }
+    out.put_i16(code.as_i16());
+    if version >= 1 {
+        if flexible {
+            put_compact_nullable_string(out, msg);
+        } else {
+            put_nullable_string(out, msg);
+        }
+    }
+    out.put_i32(-1);
+    if flexible {
+        put_compact_string(out, "");
+    } else {
+        put_string(out, "");
+    }
+    out.put_i32(-1);
+    if flexible {
+        put_empty_tag_buffer(out);
+    }
+}
+
+fn write_find_coordinator_v4_error(out: &mut BytesMut, keys: &[&str], msg: &str) {
+    out.put_i32(0); // throttle
+    put_compact_array_len(out, keys.len());
+    for key in keys {
+        put_compact_string(out, key);
+        out.put_i32(-1);
+        put_compact_string(out, "");
+        out.put_i32(-1);
+        out.put_i16(KafkaErrorCode::InvalidRequest.as_i16());
+        put_compact_nullable_string(out, Some(msg));
+        put_empty_tag_buffer(out);
+    }
+    put_empty_tag_buffer(out);
 }
 
 /// AddPartitionsToTxn (API 24) classic v0–2 (flexible 3+) — opens a txn if needed.

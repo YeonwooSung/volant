@@ -217,7 +217,7 @@ fn parse_metadata(src: &mut impl Buf, version: i16) -> MetaParsed {
 }
 
 #[tokio::test]
-async fn api_versions_metadata_max_8() {
+async fn api_versions_metadata_max_9() {
     let dir = temp_dir("api");
     let broker = Arc::new(Broker::new(StorageConfig {
         data_dir: dir.clone(),
@@ -237,7 +237,8 @@ async fn api_versions_metadata_max_8() {
             found = Some((min_v, max_v));
         }
     }
-    assert_eq!(found, Some((0, 8)));
+    // Phase 52 raised Metadata max to flexible v9.
+    assert_eq!(found, Some((0, 9)));
     server.abort();
     let _ = std::fs::remove_dir_all(&dir);
 }

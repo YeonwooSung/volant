@@ -73,6 +73,14 @@ pub fn put_response_header(dst: &mut BytesMut, correlation_id: i32) {
     dst.put_i32(correlation_id);
 }
 
+/// Write response header v1 (flexible): correlation_id + empty TAG_BUFFER.
+///
+/// Used for flexible API responses **except** ApiVersions (always header v0).
+pub fn put_response_header_v1(dst: &mut BytesMut, correlation_id: i32) {
+    dst.put_i32(correlation_id);
+    put_empty_tag_buffer(dst);
+}
+
 /// Write a non-null Kafka string (`i16` length + UTF-8 bytes).
 pub fn put_string(dst: &mut BytesMut, s: &str) {
     let b = s.as_bytes();
@@ -1051,6 +1059,16 @@ mod tests {
         assert_eq!(hdr.api_key, 18);
         assert_eq!(hdr.api_version, 3);
         assert_eq!(hdr.client_id.as_deref(), Some("flex"));
+        skip_tag_buffer(&mut src).unwrap();
+        assert_eq!(src.remaining(), 0);
+    }
+
+    #[test]
+    fn response_header_v1_has_tag_buffer() {
+        let mut buf = BytesMut::new();
+        put_response_header_v1(&mut buf, 42);
+        let mut src = buf.freeze();
+        assert_eq!(src.get_i32(), 42);
         skip_tag_buffer(&mut src).unwrap();
         assert_eq!(src.remaining(), 0);
     }

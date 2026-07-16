@@ -1194,6 +1194,25 @@ other APIs still classic-only.
 Metadata/Produce/Fetch/admin, DescribeCluster / ListTransactions, true
 control-marker READ_COMMITTED.
 
+### Phase 52 — Flexible Metadata v9 + FindCoordinator v3–4 ✅
+
+**Goal:** Extend KIP-482 flexible framing to **Metadata v9** and
+**FindCoordinator v3–4** (including batch keys), with response header **v1**.
+
+Binding: **[docs/PHASE52_SPEC.md](./docs/PHASE52_SPEC.md)**.
+
+- [x] Response header v1 helper (`put_response_header_v1`)
+- [x] Metadata 0–9 (v9 compact topics/brokers/tags; classic 0–8 unchanged)
+- [x] FindCoordinator 0–4 (v3 compact single-key; v4 CoordinatorKeys batch)
+- [x] Integration tests (`phase52_flexible_metadata_find_coordinator`)
+
+**Honest limitations:** no Metadata TopicId (v10+); no flexible Produce/Fetch/
+group/txn/admin; empty tag buffers only.
+
+**Still deferred:** multi-lang clients, cargo-fuzz corpus CI, flexible
+Produce/Fetch/admin, DescribeCluster / ListTransactions, true control-marker
+READ_COMMITTED.
+
 ---
 
 ## Performance targets (aspirational)

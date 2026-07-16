@@ -113,7 +113,7 @@ Notes:
 
 ## Kafka wire shim (Phase 23–24)
 
-Optional second socket speaking classic Kafka framing (big-endian, non-flexible).
+Optional second socket speaking Kafka framing (classic + selected flexible APIs).
 Native Volant protocol remains on `--listen`.
 
 ```bash
@@ -127,13 +127,13 @@ Supported APIs:
 
 | API | Versions | Notes |
 |-----|----------|-------|
-| ApiVersions | 0–3 | v0–2 classic; **v3 flexible** (compact api_keys + tag buffers); software name/version ignored; no feature tags |
-| Metadata | 0–8 | Classic through v8: rack, cluster_id=`volant`, throttle 0, empty offline_replicas, leader_epoch=-1, optional authorized-ops (flexible v9+ unsupported) |
+| ApiVersions | 0–3 | v0–2 classic; **v3 flexible** (compact api_keys + tag buffers); software name/version ignored; no feature tags; response header always v0 |
+| Metadata | 0–9 | Classic 0–8; **v9 flexible** (compact brokers/topics + response header v1); cluster_id=`volant`; leader_epoch=-1; TopicId v10+ unsupported |
 | OffsetForLeaderEpoch | 0–3 | End offset by leader epoch; no epoch history (eligible → HWM); fencing via current_leader_epoch |
 | Produce | 0–8 | MessageSet magic 0/1 **or** RecordBatch magic 2 (auto-detect); compression + idempotent PID/seq; v5+ log_start_offset; v8+ empty record_errors; flexible v9+ unsupported |
 | Fetch | 0–11 | v0–3 MessageSet + v4–11 RecordBatch compressed (default lz4); v5+ log_start; v7+ session header (no real sessions); v9+ leader-epoch fence; v11 preferred_read_replica=-1; flexible v12+ unsupported |
 | InitProducerId | 0–1 | plain + transactional_id fencing; timeout ignored |
-| FindCoordinator | 0–2 | v1+ key_type 0=group/1=transaction; throttle + error_message; v2 wire-identical to v1 |
+| FindCoordinator | 0–4 | Classic 0–2; **v3 flexible** compact key/host; **v4 batch** CoordinatorKeys; all keys → this broker; response header v1 for v3+ |
 | AddPartitionsToTxn | 0–2 | opens txn (Kafka has no BeginTxn); v1–2 wire-identical to v0 |
 | AddOffsetsToTxn | 0–2 | registers group for transactional offsets; v1–2 = v0 |
 | EndTxn | 0–2 | commit/abort; flushes buffered produces + offsets; v1–2 = v0 |

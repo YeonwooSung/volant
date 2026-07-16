@@ -268,6 +268,9 @@ leader-epoch fence, preferred_read_replica=-1; flexible v12+ deferred.
 **Phase 51:** Flexible wire foundation (KIP-482) + ApiVersions v3 compact
 encoding; first flexible API on the shim.
 
+**Phase 52:** Flexible Metadata v9 + FindCoordinator v3–4 (batch keys);
+response header v1 for those APIs.
+
 **Still deferred:** multi-language clients, chaos-mesh / cargo-fuzz corpus CI.
 
 ### Networked client (library)
