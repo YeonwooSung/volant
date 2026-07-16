@@ -1119,6 +1119,25 @@ READ_COMMITTED LSO filtering; crash ≡ abort; leader epoch not stored.
 admin APIs (DescribeCluster / ListTransactions), true control-marker
 READ_COMMITTED.
 
+### Phase 48 — Kafka Produce classic versions ✅
+
+**Goal:** Raise Produce from classic 0–3 to classic max **0–8** (flexible 9+);
+emit log_start_offset and v8 record_errors framing.
+
+Binding: **[docs/PHASE48_SPEC.md](./docs/PHASE48_SPEC.md)**.
+
+- [x] Produce 0–8 dispatch + ApiVersions max 8
+- [x] Response log_append_time (v2+), log_start_offset (v5+)
+- [x] Response empty record_errors[] + null error_message (v8+)
+- [x] Trailing throttle_time_ms (v1+)
+- [x] Integration tests (`phase48_produce`); phase24 ApiVersions update
+
+**Honest limitations:** no flexible Produce v9+; record_errors always empty;
+log_append_time always -1; Fetch still classic max 4.
+
+**Still deferred:** multi-lang clients, cargo-fuzz corpus CI, Fetch classic
+bumps (0–11), flexible modern admin, true control-marker READ_COMMITTED.
+
 ---
 
 ## Performance targets (aspirational)

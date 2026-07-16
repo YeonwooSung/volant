@@ -88,7 +88,7 @@ async fn api_versions_advertise_produce3_fetch4() {
             fetch_max = Some(max);
         }
     }
-    assert_eq!(produce_max, Some(3));
+    assert_eq!(produce_max, Some(8)); // Phase 48 classic max
     assert_eq!(fetch_max, Some(4));
 
     server.abort();

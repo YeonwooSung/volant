@@ -144,7 +144,7 @@ fn dispatch_kafka(broker: &Broker, body: bytes::Bytes, conn: &mut KafkaConnState
         Some(ApiKey::Metadata) if (0..=8).contains(&hdr.api_version) => {
             encode_metadata(broker, &mut src, &mut out, hdr.api_version, principal);
         }
-        Some(ApiKey::Produce) if (0..=3).contains(&hdr.api_version) => {
+        Some(ApiKey::Produce) if (0..=8).contains(&hdr.api_version) => {
             encode_produce(broker, &mut src, &mut out, hdr.api_version, principal);
         }
         Some(ApiKey::Fetch) if (0..=4).contains(&hdr.api_version) => {
@@ -628,13 +628,60 @@ fn cluster_authorized_ops(broker: &Broker, principal: &str, include: bool) -> i3
     bits
 }
 
+/// Log start offset for a partition (Produce v5+), or `-1` if unknown.
+fn produce_log_start_offset(broker: &Broker, topic: &str, partition: u32) -> i64 {
+    match broker.list_offsets(topic, &[partition]) {
+        Ok(rows) => rows
+            .first()
+            .map(|(_, earliest, _)| *earliest as i64)
+            .unwrap_or(-1),
+        Err(_) => -1,
+    }
+}
+
+/// Write one ProduceResponse partition entry (classic v0–8).
+///
+/// Field order: index, error, base_offset, log_append_time (v2+),
+/// log_start_offset (v5+), record_errors[] + error_message (v8+).
+fn put_produce_partition_response(
+    out: &mut BytesMut,
+    version: i16,
+    partition: i32,
+    error: i16,
+    base_offset: i64,
+    log_start_offset: i64,
+) {
+    out.put_i32(partition);
+    out.put_i16(error);
+    out.put_i64(base_offset);
+    if version >= 2 {
+        out.put_i64(-1); // log_append_time_ms (CreateTime topics)
+    }
+    if version >= 5 {
+        out.put_i64(log_start_offset);
+    }
+    if version >= 8 {
+        out.put_i32(0); // record_errors (empty; no per-record drop detail)
+        put_nullable_string(out, None); // error_message
+    }
+}
+
 fn encode_produce(broker: &Broker, src: &mut impl Buf, out: &mut BytesMut, version: i16, principal: &str) {
-    // Produce v3+ prepends transactional_id (nullable string).
+    // Produce classic v0–8 (flexible 9+):
+    //   request: transactional_id (v3+), acks, timeout, [topic [partition, records]]
+    //   response: [topic [partition responses…]], throttle (v1+ at end)
+    //   v4: same wire as v3 (KAFKA_STORAGE_ERROR readiness)
+    //   v5–6: log_start_offset in response
+    //   v7: ZStd in batches (already supported; request wire unchanged)
+    //   v8: record_errors[] + error_message per partition
     if version >= 3 {
         let _txn_id = match get_nullable_string(src) {
             Ok(v) => v,
             Err(_) => {
                 out.put_i32(0);
+                if version >= 1 {
+                    out.put_i32(0);
+                }
                 return;
             }
         };
@@ -642,6 +689,9 @@ fn encode_produce(broker: &Broker, src: &mut impl Buf, out: &mut BytesMut, versi
 
     if src.remaining() < 2 + 4 {
         out.put_i32(0); // topic responses empty
+        if version >= 1 {
+            out.put_i32(0);
+        }
         return;
     }
     let acks = src.get_i16();
@@ -654,6 +704,9 @@ fn encode_produce(broker: &Broker, src: &mut impl Buf, out: &mut BytesMut, versi
 
     if src.remaining() < 4 {
         out.put_i32(0);
+        if version >= 1 {
+            out.put_i32(0);
+        }
         return;
     }
     let topic_count = src.get_i32();
@@ -681,17 +734,17 @@ fn encode_produce(broker: &Broker, src: &mut impl Buf, out: &mut BytesMut, versi
             let record_set = match get_bytes(src) {
                 Ok(b) => b.unwrap_or_default(),
                 Err(_) => {
-                    out.put_i32(partition);
-                    out.put_i16(KafkaErrorCode::InvalidMessage.as_i16());
-                    out.put_i64(-1);
-                    if version >= 2 {
-                        out.put_i64(-1); // log_append_time
-                    }
+                    put_produce_partition_response(
+                        out,
+                        version,
+                        partition,
+                        KafkaErrorCode::InvalidMessage.as_i16(),
+                        -1,
+                        -1,
+                    );
                     continue;
                 }
             };
-
-            out.put_i32(partition);
 
             if broker.acls().is_enabled()
                 && !broker.acls().authorize(
@@ -701,11 +754,14 @@ fn encode_produce(broker: &Broker, src: &mut impl Buf, out: &mut BytesMut, versi
                     AclOperation::Write,
                 )
             {
-                out.put_i16(KafkaErrorCode::TopicAuthorizationFailed.as_i16());
-                out.put_i64(-1);
-                if version >= 2 {
-                    out.put_i64(-1);
-                }
+                put_produce_partition_response(
+                    out,
+                    version,
+                    partition,
+                    KafkaErrorCode::TopicAuthorizationFailed.as_i16(),
+                    -1,
+                    -1,
+                );
                 continue;
             }
 
@@ -713,20 +769,27 @@ fn encode_produce(broker: &Broker, src: &mut impl Buf, out: &mut BytesMut, versi
                 Ok(b) => b,
                 Err(e) => {
                     debug!(error = %e, "kafka produce records decode failed");
-                    out.put_i16(KafkaErrorCode::CorruptMessage.as_i16());
-                    out.put_i64(-1);
-                    if version >= 2 {
-                        out.put_i64(-1);
-                    }
+                    put_produce_partition_response(
+                        out,
+                        version,
+                        partition,
+                        KafkaErrorCode::CorruptMessage.as_i16(),
+                        -1,
+                        -1,
+                    );
                     continue;
                 }
             };
             if batches.is_empty() || batches.iter().all(|b| b.messages.is_empty()) {
-                out.put_i16(KafkaErrorCode::None.as_i16());
-                out.put_i64(0);
-                if version >= 2 {
-                    out.put_i64(-1);
-                }
+                let log_start = produce_log_start_offset(broker, &topic, partition as u32);
+                put_produce_partition_response(
+                    out,
+                    version,
+                    partition,
+                    KafkaErrorCode::None.as_i16(),
+                    0,
+                    log_start,
+                );
                 continue;
             }
 
@@ -746,18 +809,18 @@ fn encode_produce(broker: &Broker, src: &mut impl Buf, out: &mut BytesMut, versi
                 wait,
             ) {
                 Ok(base) => {
-                    out.put_i16(KafkaErrorCode::None.as_i16());
-                    out.put_i64(base);
-                    if version >= 2 {
-                        out.put_i64(-1); // log_append_time unused
-                    }
+                    let log_start = produce_log_start_offset(broker, &topic, partition as u32);
+                    put_produce_partition_response(
+                        out,
+                        version,
+                        partition,
+                        KafkaErrorCode::None.as_i16(),
+                        base,
+                        log_start,
+                    );
                 }
                 Err(code) => {
-                    out.put_i16(code);
-                    out.put_i64(-1);
-                    if version >= 2 {
-                        out.put_i64(-1);
-                    }
+                    put_produce_partition_response(out, version, partition, code, -1, -1);
                 }
             }
         }

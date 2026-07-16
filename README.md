@@ -257,6 +257,9 @@ config_source/synonyms, config_type/documentation.
 **Phase 47:** Kafka transaction APIs classic 0–2 — AddPartitionsToTxn,
 AddOffsetsToTxn, EndTxn, TxnOffsetCommit (v2 leader_epoch ignored).
 
+**Phase 48:** Kafka Produce classic 0–8 — log_start_offset (v5+), empty
+record_errors + error_message (v8+); flexible v9+ deferred.
+
 **Still deferred:** multi-language clients, chaos-mesh / cargo-fuzz corpus CI.
 
 ### Networked client (library)
