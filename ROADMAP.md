@@ -1154,8 +1154,27 @@ Binding: **[docs/PHASE49_SPEC.md](./docs/PHASE49_SPEC.md)**.
 **Honest limitations:** no flexible Fetch v12+; no real incremental sessions;
 preferred_read_replica always -1; aborted_transactions always empty.
 
-**Still deferred:** multi-lang clients, cargo-fuzz corpus CI, ApiVersions 0–2,
-flexible modern admin, true control-marker READ_COMMITTED.
+**Still deferred:** multi-lang clients, cargo-fuzz corpus CI, flexible modern
+admin, true control-marker READ_COMMITTED.
+
+### Phase 50 — Kafka ApiVersions classic versions ✅
+
+**Goal:** Raise ApiVersions from classic v0 to classic max **0–2** (flexible 3+);
+emit trailing throttle_time_ms on v1–2.
+
+Binding: **[docs/PHASE50_SPEC.md](./docs/PHASE50_SPEC.md)**.
+
+- [x] ApiVersions 0–2 dispatch + self-advertise max 2
+- [x] Response trailing throttle_time_ms (v1+)
+- [x] v2 wire-identical to v1
+- [x] Integration tests (`phase50_api_versions`)
+
+**Honest limitations:** no flexible ApiVersions v3+; no client software fields;
+no SupportedFeatures / FinalizedFeatures; throttle always 0.
+
+**Still deferred:** multi-lang clients, cargo-fuzz corpus CI, flexible modern
+admin (DescribeCluster / ListTransactions), true control-marker READ_COMMITTED,
+compact/flexible encoding for remaining APIs.
 
 ---
 

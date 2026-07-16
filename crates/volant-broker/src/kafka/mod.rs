@@ -1,15 +1,16 @@
-//! Kafka wire protocol shim (Phases 23–49).
+//! Kafka wire protocol shim (Phases 23–50).
 //!
-//! Classic (non-flexible) framing. Produce v0–8 / Fetch v0–11, admin, consumer
-//! groups (JoinGroup v0–5, Heartbeat/Sync/Leave v0–3 + static membership),
-//! List/Describe/DeleteGroups classic versions, OffsetCommit v0–7,
-//! FindCoordinator v0–2, CreateTopics/DeleteTopics classic, CreatePartitions,
-//! DescribeConfigs/AlterConfigs classic, IncrementalAlterConfigs, RecordBatch
-//! + MessageSet compression, InitProducerId + idempotent Produce, SASL,
-//! transactions (classic txn APIs through v2), DeleteRecords, ACL admin,
-//! OffsetDelete, Fetch isolation-level honesty, Metadata v0–8,
-//! OffsetForLeaderEpoch, ListOffsets v0–5, and OffsetFetch v0–5.
-//! See `docs/PHASE23_SPEC.md` … `docs/PHASE49_SPEC.md`.
+//! Classic (non-flexible) framing. Produce v0–8 / Fetch v0–11, ApiVersions
+//! v0–2, admin, consumer groups (JoinGroup v0–5, Heartbeat/Sync/Leave v0–3 +
+//! static membership), List/Describe/DeleteGroups classic versions,
+//! OffsetCommit v0–7, FindCoordinator v0–2, CreateTopics/DeleteTopics classic,
+//! CreatePartitions, DescribeConfigs/AlterConfigs classic,
+//! IncrementalAlterConfigs, RecordBatch + MessageSet compression,
+//! InitProducerId + idempotent Produce, SASL, transactions (classic txn APIs
+//! through v2), DeleteRecords, ACL admin, OffsetDelete, Fetch isolation-level
+//! honesty, Metadata v0–8, OffsetForLeaderEpoch, ListOffsets v0–5, and
+//! OffsetFetch v0–5.
+//! See `docs/PHASE23_SPEC.md` … `docs/PHASE50_SPEC.md`.
 
 /// Kafka wire primitives, MessageSet (magic 0/1), and RecordBatch (magic 2).
 pub mod codec;
@@ -261,7 +262,7 @@ pub const SUPPORTED_APIS: &[(ApiKey, i16, i16)] = &[
     (ApiKey::DescribeGroups, 0, 4),
     (ApiKey::ListGroups, 0, 2),
     (ApiKey::SaslHandshake, 0, 1),
-    (ApiKey::ApiVersions, 0, 0),
+    (ApiKey::ApiVersions, 0, 2),
     (ApiKey::CreateTopics, 0, 4),
     (ApiKey::DeleteTopics, 0, 3),
     (ApiKey::DeleteRecords, 0, 1),

@@ -132,8 +132,8 @@ fn dispatch_kafka(broker: &Broker, body: bytes::Bytes, conn: &mut KafkaConnState
     let principal = principal.as_str();
 
     match api {
-        Some(ApiKey::ApiVersions) if hdr.api_version == 0 => {
-            encode_api_versions(&mut out);
+        Some(ApiKey::ApiVersions) if (0..=2).contains(&hdr.api_version) => {
+            encode_api_versions(&mut out, hdr.api_version);
         }
         Some(ApiKey::SaslHandshake) if (0..=1).contains(&hdr.api_version) => {
             encode_sasl_handshake(&mut src, &mut out, conn);
@@ -324,13 +324,21 @@ fn encode_sasl_authenticate(
     }
 }
 
-fn encode_api_versions(out: &mut BytesMut) {
+/// ApiVersions classic v0–2 (flexible 3+).
+///
+/// Response: error_code, api_keys[{key,min,max}], throttle_time_ms (v1+ trailing).
+/// v2 is wire-identical to v1 (quota-timing semantics only on real Kafka).
+/// Request body is empty for classic 0–2.
+fn encode_api_versions(out: &mut BytesMut, version: i16) {
     out.put_i16(KafkaErrorCode::None.as_i16());
     out.put_i32(SUPPORTED_APIS.len() as i32);
     for (key, min_v, max_v) in SUPPORTED_APIS {
         out.put_i16(*key as i16);
         out.put_i16(*min_v);
         out.put_i16(*max_v);
+    }
+    if version >= 1 {
+        out.put_i32(0); // throttle_time_ms
     }
 }
 

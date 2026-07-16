@@ -127,7 +127,7 @@ Supported APIs:
 
 | API | Versions | Notes |
 |-----|----------|-------|
-| ApiVersions | 0 | Advertises supported keys/versions |
+| ApiVersions | 0–2 | Advertises supported keys/versions; v1+ trailing throttle; flexible v3+ unsupported |
 | Metadata | 0–8 | Classic through v8: rack, cluster_id=`volant`, throttle 0, empty offline_replicas, leader_epoch=-1, optional authorized-ops (flexible v9+ unsupported) |
 | OffsetForLeaderEpoch | 0–3 | End offset by leader epoch; no epoch history (eligible → HWM); fencing via current_leader_epoch |
 | Produce | 0–8 | MessageSet magic 0/1 **or** RecordBatch magic 2 (auto-detect); compression + idempotent PID/seq; v5+ log_start_offset; v8+ empty record_errors; flexible v9+ unsupported |
@@ -206,7 +206,7 @@ Limitations:
 - Prefer binding to localhost / private networks; leave disabled in production
   unless you need Kafka-protocol discovery.
 
-See [PHASE23_SPEC.md](./PHASE23_SPEC.md) … [PHASE49_SPEC.md](./PHASE49_SPEC.md).
+See [PHASE23_SPEC.md](./PHASE23_SPEC.md) … [PHASE50_SPEC.md](./PHASE50_SPEC.md).
 
 ## TLS (Phase 7 listen + Phase 9 verification / inter-broker)
 
