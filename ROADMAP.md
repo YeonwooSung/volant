@@ -1266,8 +1266,29 @@ Binding: **[docs/PHASE55_SPEC.md](./docs/PHASE55_SPEC.md)**.
 - [x] Integration tests (`phase55_flexible_group`)
 
 **Honest limitations:** no JoinGroup ProtocolType/Reason/SkipAssignment (v7+);
-no SyncGroup ProtocolType/Name (v5+); no LeaveGroup Reason (v5+); empty tags
-only; coordinator semantics unchanged.
+no SyncGroup ProtocolType/Name (v5+); no LeaveGroup Reason (v5+) — closed by
+**Phase 56**. Empty tags only; coordinator semantics unchanged.
+
+**Still deferred:** multi-lang clients, cargo-fuzz corpus CI, flexible
+OffsetCommit/OffsetFetch/admin/txn, Metadata TopicId, DescribeCluster /
+ListTransactions, true control-marker READ_COMMITTED.
+
+### Phase 56 — Flexible group field completeness ✅
+
+**Goal:** Raise flexible group APIs to Kafka-current field sets —
+**JoinGroup v7–9** (ProtocolType, Reason, SkipAssignment), **SyncGroup v5**
+(ProtocolType/Name), **LeaveGroup v5** (Reason).
+
+Binding: **[docs/PHASE56_SPEC.md](./docs/PHASE56_SPEC.md)**.
+
+- [x] JoinGroup 0–9 (v7 ProtocolType; v8 Reason ignored; v9 SkipAssignment=false)
+- [x] SyncGroup 0–5 (v5 ProtocolType/Name echo)
+- [x] LeaveGroup 0–5 (v5 member Reason ignored)
+- [x] Heartbeat remains 0–4
+- [x] Integration tests (`phase56_flexible_group_fields`)
+
+**Honest limitations:** SkipAssignment always false; Sync ProtocolType/Name
+not validated against join; Reason fields discarded; empty tags only.
 
 **Still deferred:** multi-lang clients, cargo-fuzz corpus CI, flexible
 OffsetCommit/OffsetFetch/admin/txn, Metadata TopicId, DescribeCluster /

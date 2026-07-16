@@ -130,10 +130,10 @@ async fn api_versions_advertises_flex_group_maxes() {
         let max_v = src.get_i16();
         found.insert(key, (min_v, max_v));
     }
-    assert_eq!(found.get(&11), Some(&(0, 6))); // JoinGroup
+    assert_eq!(found.get(&11), Some(&(0, 9))); // JoinGroup (Phase 56)
     assert_eq!(found.get(&12), Some(&(0, 4))); // Heartbeat
-    assert_eq!(found.get(&13), Some(&(0, 4))); // LeaveGroup
-    assert_eq!(found.get(&14), Some(&(0, 4))); // SyncGroup
+    assert_eq!(found.get(&13), Some(&(0, 5))); // LeaveGroup (Phase 56)
+    assert_eq!(found.get(&14), Some(&(0, 5))); // SyncGroup (Phase 56)
     server.abort();
     let _ = std::fs::remove_dir_all(&dir);
 }
@@ -284,49 +284,4 @@ async fn join_v5_still_classic() {
     let _ = std::fs::remove_dir_all(&dir);
 }
 
-#[tokio::test]
-async fn join_v7_unsupported_uses_header_v1() {
-    let dir = temp_dir("v7");
-    let broker = Arc::new(Broker::new(StorageConfig {
-        data_dir: dir.clone(),
-        ..StorageConfig::default()
-    }));
-    let (addr, server) = boot_kafka(Arc::clone(&broker)).await;
-
-    // v7 not handled; version ≥6 still uses response header v1.
-    let resp = rpc(
-        &addr,
-        encode_request_flexible(11, 7, 1, Some("c"), &[]),
-    )
-    .await;
-    let mut src = resp.freeze();
-    assert_eq!(src.get_i32(), 1);
-    skip_tag_buffer(&mut src).unwrap();
-    assert_eq!(src.get_i16(), 35); // UNSUPPORTED_VERSION
-
-    server.abort();
-    let _ = std::fs::remove_dir_all(&dir);
-}
-
-#[tokio::test]
-async fn sync_v5_unsupported_uses_header_v1() {
-    let dir = temp_dir("sync5");
-    let broker = Arc::new(Broker::new(StorageConfig {
-        data_dir: dir.clone(),
-        ..StorageConfig::default()
-    }));
-    let (addr, server) = boot_kafka(Arc::clone(&broker)).await;
-
-    let resp = rpc(
-        &addr,
-        encode_request_flexible(14, 5, 2, Some("c"), &[]),
-    )
-    .await;
-    let mut src = resp.freeze();
-    assert_eq!(src.get_i32(), 2);
-    skip_tag_buffer(&mut src).unwrap();
-    assert_eq!(src.get_i16(), 35);
-
-    server.abort();
-    let _ = std::fs::remove_dir_all(&dir);
-}
+// JoinGroup v7+ / SyncGroup v5 support: phase56_flexible_group_fields.

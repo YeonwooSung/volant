@@ -1,15 +1,16 @@
-//! Kafka wire protocol shim (Phases 23–55).
+//! Kafka wire protocol shim (Phases 23–56).
 //!
 //! Classic framing plus flexible APIs (KIP-482): ApiVersions v3, Metadata v9,
-//! FindCoordinator v3–4, Produce v9, Fetch v12, JoinGroup v6, SyncGroup /
-//! Heartbeat / LeaveGroup v4. Produce v0–9 / Fetch v0–12, admin, consumer
-//! groups, OffsetCommit v0–7, FindCoordinator v0–4, CreateTopics/DeleteTopics
-//! classic, CreatePartitions, DescribeConfigs/AlterConfigs classic,
-//! IncrementalAlterConfigs, RecordBatch + MessageSet compression,
-//! InitProducerId + idempotent Produce, SASL, transactions (classic txn APIs
-//! through v2), DeleteRecords, ACL admin, OffsetDelete, Metadata v0–9,
-//! OffsetForLeaderEpoch, ListOffsets v0–5, and OffsetFetch v0–5.
-//! See `docs/PHASE23_SPEC.md` … `docs/PHASE55_SPEC.md`.
+//! FindCoordinator v3–4, Produce v9, Fetch v12, JoinGroup v6–9, SyncGroup
+//! v4–5, Heartbeat v4, LeaveGroup v4–5. Produce v0–9 / Fetch v0–12, admin,
+//! consumer groups, OffsetCommit v0–7, FindCoordinator v0–4,
+//! CreateTopics/DeleteTopics classic, CreatePartitions,
+//! DescribeConfigs/AlterConfigs classic, IncrementalAlterConfigs, RecordBatch
+//! + MessageSet compression, InitProducerId + idempotent Produce, SASL,
+//! transactions (classic txn APIs through v2), DeleteRecords, ACL admin,
+//! OffsetDelete, Metadata v0–9, OffsetForLeaderEpoch, ListOffsets v0–5, and
+//! OffsetFetch v0–5.
+//! See `docs/PHASE23_SPEC.md` … `docs/PHASE56_SPEC.md`.
 
 /// Kafka wire primitives, MessageSet (magic 0/1), and RecordBatch (magic 2).
 pub mod codec;
@@ -254,10 +255,10 @@ pub const SUPPORTED_APIS: &[(ApiKey, i16, i16)] = &[
     (ApiKey::OffsetCommit, 0, 7),
     (ApiKey::OffsetFetch, 0, 5),
     (ApiKey::FindCoordinator, 0, 4),
-    (ApiKey::JoinGroup, 0, 6),
+    (ApiKey::JoinGroup, 0, 9),
     (ApiKey::Heartbeat, 0, 4),
-    (ApiKey::LeaveGroup, 0, 4),
-    (ApiKey::SyncGroup, 0, 4),
+    (ApiKey::LeaveGroup, 0, 5),
+    (ApiKey::SyncGroup, 0, 5),
     (ApiKey::DescribeGroups, 0, 4),
     (ApiKey::ListGroups, 0, 2),
     (ApiKey::SaslHandshake, 0, 1),

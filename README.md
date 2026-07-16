@@ -278,6 +278,9 @@ response header v1 for those APIs.
 **Phase 55:** Flexible group consumer APIs — JoinGroup v6, SyncGroup /
 Heartbeat / LeaveGroup v4 (compact + response header v1).
 
+**Phase 56:** Group flex field completeness — JoinGroup v7–9 (ProtocolType,
+Reason, SkipAssignment), SyncGroup v5, LeaveGroup v5.
+
 **Still deferred:** multi-language clients, chaos-mesh / cargo-fuzz corpus CI.
 
 ### Networked client (library)

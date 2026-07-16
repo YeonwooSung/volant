@@ -94,10 +94,10 @@ async fn api_versions_group_classic_max() {
         let max_v = src.get_i16();
         found.insert(key, (min_v, max_v));
     }
-    assert_eq!(found.get(&11), Some(&(0, 6))); // JoinGroup (Phase 55 flex v6)
+    assert_eq!(found.get(&11), Some(&(0, 9))); // JoinGroup (Phase 56 flex v6–9)
     assert_eq!(found.get(&12), Some(&(0, 4))); // Heartbeat (Phase 55 flex v4)
-    assert_eq!(found.get(&13), Some(&(0, 4))); // LeaveGroup (Phase 55 flex v4)
-    assert_eq!(found.get(&14), Some(&(0, 4))); // SyncGroup (Phase 55 flex v4)
+    assert_eq!(found.get(&13), Some(&(0, 5))); // LeaveGroup (Phase 56 flex v4–5)
+    assert_eq!(found.get(&14), Some(&(0, 5))); // SyncGroup (Phase 56 flex v4–5)
     server.abort();
     let _ = std::fs::remove_dir_all(&dir);
 }
