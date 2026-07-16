@@ -290,6 +290,9 @@ with per-group ACL errors.
 **Phase 59:** Flexible group admin — DescribeGroups v5, ListGroups v3,
 DeleteGroups v2 (compact + response header v1).
 
+**Phase 60:** Flexible topic admin — CreateTopics v5, DeleteTopics v4,
+CreatePartitions v2.
+
 **Still deferred:** multi-language clients, chaos-mesh / cargo-fuzz corpus CI.
 
 ### Networked client (library)

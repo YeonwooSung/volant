@@ -1349,9 +1349,29 @@ Binding: **[docs/PHASE59_SPEC.md](./docs/PHASE59_SPEC.md)**.
 **Honest limitations:** no Describe/Delete ErrorMessage (v6/v3); no List
 StatesFilter/TypesFilter or GroupState/GroupType (v4+/v5+); empty tags only.
 
-**Still deferred:** multi-lang clients, cargo-fuzz corpus CI, flexible txn,
-Metadata TopicId, DescribeCluster / ListTransactions, true control-marker
-READ_COMMITTED.
+**Still deferred:** multi-lang clients, cargo-fuzz corpus CI, flexible txn /
+configs, Metadata TopicId, DescribeCluster / ListTransactions, true
+control-marker READ_COMMITTED. Topic-admin flex closed by **Phase 60**.
+
+### Phase 60 — Flexible topic admin ✅
+
+**Goal:** First flexible versions of CreateTopics / DeleteTopics /
+CreatePartitions for modern admin clients.
+
+Binding: **[docs/PHASE60_SPEC.md](./docs/PHASE60_SPEC.md)**.
+
+- [x] CreateTopics 0–5 (v5 flexible; classic 0–4 unchanged)
+- [x] DeleteTopics 0–4 (v4 flexible; classic 0–3 unchanged)
+- [x] CreatePartitions 0–2 (v2 flexible; classic 0–1 unchanged)
+- [x] Response header v1 for those flexible versions
+- [x] Integration tests (`phase60_flexible_topic_admin`)
+
+**Honest limitations:** null CreateTopics configs; no TopicId; no Delete
+ErrorMessage; empty tags only.
+
+**Still deferred:** multi-lang clients, cargo-fuzz corpus CI, flexible
+configs/txn, Metadata TopicId, DescribeCluster / ListTransactions, true
+control-marker READ_COMMITTED.
 
 ---
 

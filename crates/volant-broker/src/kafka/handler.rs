@@ -23,7 +23,7 @@ use super::codec::{
     get_nullable_string, get_string,
     put_bytes, put_compact_array_len, put_compact_bytes, put_compact_nullable_string,
     put_compact_string, put_empty_tag_buffer, put_nullable_string, put_response_header,
-    put_response_header_v1, put_string, skip_tag_buffer, try_decode_request,
+    put_response_header_v1, put_string, put_unsigned_varint, skip_tag_buffer, try_decode_request,
 };
 use super::compress::{fetch_compression_codec, CompressionCodec};
 use super::sasl::{self, SaslMechanism, SaslState, MECHANISMS};
@@ -154,6 +154,15 @@ fn dispatch_kafka(broker: &Broker, body: bytes::Bytes, conn: &mut KafkaConnState
     ) || matches!(
         (api, hdr.api_version),
         (Some(ApiKey::DeleteGroups), v) if v >= 2
+    ) || matches!(
+        (api, hdr.api_version),
+        (Some(ApiKey::CreateTopics), v) if v >= 5
+    ) || matches!(
+        (api, hdr.api_version),
+        (Some(ApiKey::DeleteTopics), v) if v >= 4
+    ) || matches!(
+        (api, hdr.api_version),
+        (Some(ApiKey::CreatePartitions), v) if v >= 2
     );
 
     let mut out = BytesMut::new();
@@ -224,10 +233,20 @@ fn dispatch_kafka(broker: &Broker, body: bytes::Bytes, conn: &mut KafkaConnState
         Some(ApiKey::ListOffsets) if (0..=5).contains(&hdr.api_version) => {
             encode_list_offsets(broker, &mut src, &mut out, hdr.api_version, principal);
         }
-        Some(ApiKey::CreateTopics) if (0..=4).contains(&hdr.api_version) => {
+        Some(ApiKey::CreateTopics) if (0..=5).contains(&hdr.api_version) => {
+            if hdr.api_version >= 5 {
+                if let Err(e) = skip_tag_buffer(&mut src) {
+                    debug!(error = %e, "create topics flexible header tag buffer");
+                }
+            }
             encode_create_topics(broker, &mut src, &mut out, hdr.api_version, principal);
         }
-        Some(ApiKey::DeleteTopics) if (0..=3).contains(&hdr.api_version) => {
+        Some(ApiKey::DeleteTopics) if (0..=4).contains(&hdr.api_version) => {
+            if hdr.api_version >= 4 {
+                if let Err(e) = skip_tag_buffer(&mut src) {
+                    debug!(error = %e, "delete topics flexible header tag buffer");
+                }
+            }
             encode_delete_topics(broker, &mut src, &mut out, hdr.api_version, principal);
         }
         Some(ApiKey::DeleteRecords) if (0..=1).contains(&hdr.api_version) => {
@@ -337,7 +356,12 @@ fn dispatch_kafka(broker: &Broker, body: bytes::Bytes, conn: &mut KafkaConnState
         Some(ApiKey::OffsetDelete) if hdr.api_version == 0 => {
             encode_offset_delete(broker, &mut src, &mut out, principal);
         }
-        Some(ApiKey::CreatePartitions) if (0..=1).contains(&hdr.api_version) => {
+        Some(ApiKey::CreatePartitions) if (0..=2).contains(&hdr.api_version) => {
+            if hdr.api_version >= 2 {
+                if let Err(e) = skip_tag_buffer(&mut src) {
+                    debug!(error = %e, "create partitions flexible header tag buffer");
+                }
+            }
             encode_create_partitions(broker, &mut src, &mut out, hdr.api_version, principal);
         }
         Some(ApiKey::DescribeConfigs) if (0..=3).contains(&hdr.api_version) => {
@@ -2190,105 +2214,194 @@ fn encode_create_topics(
     version: i16,
     principal: &str,
 ) {
-    // CreateTopics classic v0–4 (flexible 5+):
-    //   request: [name, num_partitions, rf, assignments, configs], timeout, validate_only (v1+)
-    //   response: throttle (v2+), [name, error, error_message (v1+)]
-    // v4: num_partitions / rf may be -1 (default partitions; RF ignored).
-    if src.remaining() < 4 {
-        if version >= 2 {
-            out.put_i32(0);
-        }
-        out.put_i32(0);
-        return;
-    }
-    let topic_count = src.get_i32();
+    // CreateTopics classic v0–4 + flexible v5:
+    //   request: topics[{name, partitions, rf, assignments, configs}], timeout, validate_only (v1+)
+    //   response: throttle (v2+), topics[{name, error, error_message (v1+),
+    //             num_partitions/rf/configs (v5+)}]
+    // v4+: num_partitions / rf may be -1 (default partitions; RF ignored).
+    // Flexible v5: compact framing + TAG_BUFFER; TopicId (v7) deferred.
+    let flexible = version >= 5;
     struct TopicReq {
         name: String,
         partitions: i32,
         configs: Vec<(String, String)>,
     }
     let mut reqs = Vec::new();
-    for _ in 0..topic_count.max(0) {
-        let name = match get_string(src) {
-            Ok(n) => n,
-            Err(_) => break,
+    let validate_only;
+
+    if flexible {
+        match get_compact_array_len(src) {
+            Ok(Some(n)) => {
+                for _ in 0..n {
+                    let name = match get_compact_string(src) {
+                        Ok(s) => s,
+                        Err(_) => break,
+                    };
+                    if src.remaining() < 4 + 2 {
+                        break;
+                    }
+                    let partitions = src.get_i32();
+                    let _rf = src.get_i16();
+                    if let Ok(Some(ac)) = get_compact_array_len(src) {
+                        for _ in 0..ac {
+                            if src.remaining() < 4 {
+                                break;
+                            }
+                            let _part = src.get_i32();
+                            if let Ok(Some(bc)) = get_compact_array_len(src) {
+                                for _ in 0..bc {
+                                    if src.remaining() < 4 {
+                                        break;
+                                    }
+                                    let _ = src.get_i32();
+                                }
+                            }
+                            let _ = skip_tag_buffer(src);
+                        }
+                    }
+                    let mut configs = Vec::new();
+                    if let Ok(Some(cc)) = get_compact_array_len(src) {
+                        for _ in 0..cc {
+                            let k = match get_compact_string(src) {
+                                Ok(s) => s,
+                                Err(_) => break,
+                            };
+                            let v = match get_compact_nullable_string(src) {
+                                Ok(Some(s)) => s,
+                                Ok(None) => String::new(),
+                                Err(_) => break,
+                            };
+                            let _ = skip_tag_buffer(src);
+                            configs.push((k, v));
+                        }
+                    }
+                    let _ = skip_tag_buffer(src);
+                    reqs.push(TopicReq {
+                        name,
+                        partitions,
+                        configs,
+                    });
+                }
+            }
+            Ok(None) | Err(_) => {}
+        }
+        if src.remaining() >= 4 {
+            let _timeout = src.get_i32();
+        }
+        validate_only = if version >= 1 && src.remaining() >= 1 {
+            src.get_u8() != 0
+        } else {
+            false
         };
-        if src.remaining() < 4 + 2 {
-            break;
-        }
-        let partitions = src.get_i32();
-        let _rf = src.get_i16();
-        // replica assignments (ignored)
+        let _ = skip_tag_buffer(src);
+    } else {
         if src.remaining() < 4 {
-            break;
+            if version >= 2 {
+                out.put_i32(0);
+            }
+            out.put_i32(0);
+            return;
         }
-        let assign_count = src.get_i32();
-        for _ in 0..assign_count.max(0) {
-            if src.remaining() < 4 + 4 {
+        let topic_count = src.get_i32();
+        for _ in 0..topic_count.max(0) {
+            let name = match get_string(src) {
+                Ok(n) => n,
+                Err(_) => break,
+            };
+            if src.remaining() < 4 + 2 {
                 break;
             }
-            let _part = src.get_i32();
-            let broker_count = src.get_i32();
-            for _ in 0..broker_count.max(0) {
-                if src.remaining() < 4 {
+            let partitions = src.get_i32();
+            let _rf = src.get_i16();
+            if src.remaining() < 4 {
+                break;
+            }
+            let assign_count = src.get_i32();
+            for _ in 0..assign_count.max(0) {
+                if src.remaining() < 4 + 4 {
                     break;
                 }
-                let _ = src.get_i32();
+                let _part = src.get_i32();
+                let broker_count = src.get_i32();
+                for _ in 0..broker_count.max(0) {
+                    if src.remaining() < 4 {
+                        break;
+                    }
+                    let _ = src.get_i32();
+                }
             }
-        }
-        // configs
-        let mut configs = Vec::new();
-        if src.remaining() < 4 {
+            let mut configs = Vec::new();
+            if src.remaining() < 4 {
+                reqs.push(TopicReq {
+                    name,
+                    partitions,
+                    configs,
+                });
+                break;
+            }
+            let cfg_count = src.get_i32();
+            for _ in 0..cfg_count.max(0) {
+                let k = match get_string(src) {
+                    Ok(s) => s,
+                    Err(_) => break,
+                };
+                let v = match get_nullable_string(src) {
+                    Ok(Some(s)) => s,
+                    Ok(None) => String::new(),
+                    Err(_) => break,
+                };
+                configs.push((k, v));
+            }
             reqs.push(TopicReq {
                 name,
                 partitions,
                 configs,
             });
-            break;
         }
-        let cfg_count = src.get_i32();
-        for _ in 0..cfg_count.max(0) {
-            let k = match get_string(src) {
-                Ok(s) => s,
-                Err(_) => break,
-            };
-            // Kafka values are nullable strings.
-            let v = match get_nullable_string(src) {
-                Ok(Some(s)) => s,
-                Ok(None) => String::new(),
-                Err(_) => break,
-            };
-            configs.push((k, v));
+        if src.remaining() >= 4 {
+            let _timeout = src.get_i32();
         }
-        reqs.push(TopicReq {
-            name,
-            partitions,
-            configs,
-        });
+        validate_only = if version >= 1 && src.remaining() >= 1 {
+            src.get_u8() != 0
+        } else {
+            false
+        };
     }
-    // timeout_ms is present on all Kafka versions; tolerate short bodies.
-    if src.remaining() >= 4 {
-        let _timeout = src.get_i32();
-    }
-    let validate_only = if version >= 1 && src.remaining() >= 1 {
-        src.get_u8() != 0
-    } else {
-        false
-    };
 
     if version >= 2 {
         out.put_i32(0); // throttle
     }
-    out.put_i32(reqs.len() as i32);
-    for t in reqs {
-        put_string(out, &t.name);
+    if flexible {
+        put_compact_array_len(out, reqs.len());
+    } else {
+        out.put_i32(reqs.len() as i32);
+    }
 
-        let write_err = |out: &mut BytesMut, code: KafkaErrorCode, msg: Option<&str>| {
-            out.put_i16(code.as_i16());
-            if version >= 1 {
-                put_nullable_string(out, msg);
-            }
-        };
+    for t in reqs {
+        if flexible {
+            put_compact_string(out, &t.name);
+        } else {
+            put_string(out, &t.name);
+        }
+
+        let write_result =
+            |out: &mut BytesMut, code: KafkaErrorCode, msg: Option<&str>, parts: i32, rf: i16| {
+                out.put_i16(code.as_i16());
+                if version >= 1 {
+                    if flexible {
+                        put_compact_nullable_string(out, msg);
+                    } else {
+                        put_nullable_string(out, msg);
+                    }
+                }
+                if flexible {
+                    // v5+: NumPartitions, ReplicationFactor, Configs (null), tags
+                    out.put_i32(parts);
+                    out.put_i16(rf);
+                    put_unsigned_varint_null_array(out); // null configs
+                    put_empty_tag_buffer(out);
+                }
+            };
 
         if broker.acls().is_enabled()
             && !broker.acls().authorize(
@@ -2304,44 +2417,54 @@ fn encode_create_topics(
                 AclOperation::Create,
             )
         {
-            write_err(
+            write_result(
                 out,
                 KafkaErrorCode::TopicAuthorizationFailed,
                 Some("topic authorization failed"),
+                -1,
+                -1,
             );
             continue;
         }
 
-        // Resolve partition count: v4+ allows -1 → default.
         let partitions = if t.partitions == -1 && version >= 4 {
             DEFAULT_TOPIC_PARTITIONS
         } else if t.partitions <= 0 {
-            write_err(
+            write_result(
                 out,
                 KafkaErrorCode::InvalidPartitions,
                 Some("invalid partition count"),
+                -1,
+                -1,
             );
             continue;
         } else {
             t.partitions as u32
         };
 
-        // Already exists?
         let exists = !broker
             .metadata(Some(&[TopicName::new(t.name.clone())]))
             .topics
             .is_empty();
         if exists {
-            write_err(
+            write_result(
                 out,
                 KafkaErrorCode::TopicAlreadyExists,
                 Some("topic already exists"),
+                -1,
+                -1,
             );
             continue;
         }
 
         if validate_only {
-            write_err(out, KafkaErrorCode::None, None);
+            write_result(
+                out,
+                KafkaErrorCode::None,
+                None,
+                partitions as i32,
+                1,
+            );
             continue;
         }
 
@@ -2352,20 +2475,36 @@ fn encode_create_topics(
         };
 
         match result {
-            Ok(_) => write_err(out, KafkaErrorCode::None, None),
+            Ok(_) => write_result(out, KafkaErrorCode::None, None, partitions as i32, 1),
             Err(Error::InvalidArgument(msg)) if msg.contains("already exists") => {
-                write_err(
+                write_result(
                     out,
                     KafkaErrorCode::TopicAlreadyExists,
                     Some("topic already exists"),
+                    -1,
+                    -1,
                 );
             }
             Err(Error::InvalidArgument(msg)) => {
-                write_err(out, KafkaErrorCode::InvalidTopicException, Some(&msg));
+                write_result(
+                    out,
+                    KafkaErrorCode::InvalidTopicException,
+                    Some(&msg),
+                    -1,
+                    -1,
+                );
             }
-            Err(_) => write_err(out, KafkaErrorCode::Unknown, None),
+            Err(_) => write_result(out, KafkaErrorCode::Unknown, None, -1, -1),
         }
     }
+    if flexible {
+        put_empty_tag_buffer(out);
+    }
+}
+
+/// Compact null array length (`uvarint(0)`).
+fn put_unsigned_varint_null_array(dst: &mut BytesMut) {
+    put_unsigned_varint(dst, 0);
 }
 
 fn encode_delete_topics(
@@ -2375,35 +2514,63 @@ fn encode_delete_topics(
     version: i16,
     principal: &str,
 ) {
-    // DeleteTopics classic v0–3 (flexible 4+):
-    //   request: [topic names] timeout_ms
-    //   response: throttle (v1+), [name, error_code]
-    if src.remaining() < 4 {
-        if version >= 1 {
-            out.put_i32(0);
-        }
-        out.put_i32(0);
-        return;
-    }
-    let topic_count = src.get_i32();
+    // DeleteTopics classic v0–3 + flexible v4:
+    //   request: topic_names[] + timeout_ms
+    //   response: throttle (v1+), responses[{name, error_code}]
+    // Flexible v4: compact strings/arrays + TAG_BUFFER; ErrorMessage (v5) / TopicId (v6) deferred.
+    let flexible = version >= 4;
     let mut names = Vec::new();
-    for _ in 0..topic_count.max(0) {
-        match get_string(src) {
-            Ok(n) => names.push(n),
-            Err(_) => break,
+    if flexible {
+        match get_compact_array_len(src) {
+            Ok(Some(n)) => {
+                for _ in 0..n {
+                    match get_compact_string(src) {
+                        Ok(s) => names.push(s),
+                        Err(_) => break,
+                    }
+                }
+            }
+            Ok(None) | Err(_) => {}
         }
-    }
-    if src.remaining() >= 4 {
-        let _timeout = src.get_i32();
+        if src.remaining() >= 4 {
+            let _timeout = src.get_i32();
+        }
+        let _ = skip_tag_buffer(src);
+    } else {
+        if src.remaining() < 4 {
+            if version >= 1 {
+                out.put_i32(0);
+            }
+            out.put_i32(0);
+            return;
+        }
+        let topic_count = src.get_i32();
+        for _ in 0..topic_count.max(0) {
+            match get_string(src) {
+                Ok(n) => names.push(n),
+                Err(_) => break,
+            }
+        }
+        if src.remaining() >= 4 {
+            let _timeout = src.get_i32();
+        }
     }
 
     if version >= 1 {
-        out.put_i32(0); // throttle (Kafka places this first)
+        out.put_i32(0); // throttle
     }
-    out.put_i32(names.len() as i32);
+    if flexible {
+        put_compact_array_len(out, names.len());
+    } else {
+        out.put_i32(names.len() as i32);
+    }
     for name in names {
-        put_string(out, &name);
-        if broker.acls().is_enabled()
+        if flexible {
+            put_compact_string(out, &name);
+        } else {
+            put_string(out, &name);
+        }
+        let err = if broker.acls().is_enabled()
             && !broker.acls().authorize(
                 Some(principal),
                 ResourceType::Topic,
@@ -2411,16 +2578,21 @@ fn encode_delete_topics(
                 AclOperation::Delete,
             )
         {
-            out.put_i16(KafkaErrorCode::TopicAuthorizationFailed.as_i16());
-            continue;
-        }
-        match broker.delete_topic(&TopicName::new(name.clone())) {
-            Ok(()) => out.put_i16(KafkaErrorCode::None.as_i16()),
-            Err(Error::NotFound(_)) => {
-                out.put_i16(KafkaErrorCode::UnknownTopicOrPartition.as_i16());
+            KafkaErrorCode::TopicAuthorizationFailed.as_i16()
+        } else {
+            match broker.delete_topic(&TopicName::new(name.clone())) {
+                Ok(()) => KafkaErrorCode::None.as_i16(),
+                Err(Error::NotFound(_)) => KafkaErrorCode::UnknownTopicOrPartition.as_i16(),
+                Err(_) => KafkaErrorCode::Unknown.as_i16(),
             }
-            Err(_) => out.put_i16(KafkaErrorCode::Unknown.as_i16()),
+        };
+        out.put_i16(err);
+        if flexible {
+            put_empty_tag_buffer(out);
         }
+    }
+    if flexible {
+        put_empty_tag_buffer(out);
     }
 }
 
@@ -4894,68 +5066,126 @@ fn encode_create_partitions(
     broker: &Broker,
     src: &mut impl Buf,
     out: &mut BytesMut,
-    _version: i16,
+    version: i16,
     principal: &str,
 ) {
-    // CreatePartitions classic v0–1 (flexible 2+):
-    //   request: [topic, count, assignments|null], timeout, validate_only
-    //   response: throttle (all versions), [name, error, error_message]
+    // CreatePartitions classic v0–1 + flexible v2:
+    //   request: topics[{name, count, assignments|null}], timeout, validate_only
+    //   response: throttle (all versions), results[{name, error, error_message}]
     // Phase 45 adds missing throttle framing (Kafka has throttle on v0+).
-    if src.remaining() < 4 {
-        out.put_i32(0); // throttle
-        out.put_i32(0);
-        return;
-    }
-    let topic_count = src.get_i32();
+    // Flexible v2: compact framing + TAG_BUFFER; quota error (v3) deferred.
+    let flexible = version >= 2;
     struct Req {
         topic: String,
         count: i32,
     }
     let mut reqs = Vec::new();
-    for _ in 0..topic_count.max(0) {
-        let topic = match get_string(src) {
-            Ok(t) => t,
-            Err(_) => break,
-        };
-        if src.remaining() < 4 {
-            break;
-        }
-        let count = src.get_i32();
-        // assignments: array of broker id arrays (nullable: -1 length)
-        if src.remaining() < 4 {
-            break;
-        }
-        let assign_len = src.get_i32();
-        if assign_len >= 0 {
-            for _ in 0..assign_len {
-                if src.remaining() < 4 {
-                    break;
-                }
-                let brokers = src.get_i32();
-                for _ in 0..brokers.max(0) {
+    let validate_only;
+
+    if flexible {
+        match get_compact_array_len(src) {
+            Ok(Some(n)) => {
+                for _ in 0..n {
+                    let topic = match get_compact_string(src) {
+                        Ok(t) => t,
+                        Err(_) => break,
+                    };
                     if src.remaining() < 4 {
                         break;
                     }
-                    let _ = src.get_i32();
+                    let count = src.get_i32();
+                    // assignments: compact nullable array
+                    match get_compact_array_len(src) {
+                        Ok(None) => {}
+                        Ok(Some(ac)) => {
+                            for _ in 0..ac {
+                                if let Ok(Some(bc)) = get_compact_array_len(src) {
+                                    for _ in 0..bc {
+                                        if src.remaining() < 4 {
+                                            break;
+                                        }
+                                        let _ = src.get_i32();
+                                    }
+                                }
+                                let _ = skip_tag_buffer(src);
+                            }
+                        }
+                        Err(_) => {}
+                    }
+                    let _ = skip_tag_buffer(src);
+                    reqs.push(Req { topic, count });
                 }
             }
+            Ok(None) | Err(_) => {}
         }
-        reqs.push(Req { topic, count });
-    }
-    if src.remaining() >= 4 {
-        let _timeout = src.get_i32();
-    }
-    let validate_only = if src.remaining() >= 1 {
-        src.get_u8() != 0
+        if src.remaining() >= 4 {
+            let _timeout = src.get_i32();
+        }
+        validate_only = if src.remaining() >= 1 {
+            src.get_u8() != 0
+        } else {
+            false
+        };
+        let _ = skip_tag_buffer(src);
     } else {
-        false
-    };
+        if src.remaining() < 4 {
+            out.put_i32(0); // throttle
+            out.put_i32(0);
+            return;
+        }
+        let topic_count = src.get_i32();
+        for _ in 0..topic_count.max(0) {
+            let topic = match get_string(src) {
+                Ok(t) => t,
+                Err(_) => break,
+            };
+            if src.remaining() < 4 {
+                break;
+            }
+            let count = src.get_i32();
+            if src.remaining() < 4 {
+                break;
+            }
+            let assign_len = src.get_i32();
+            if assign_len >= 0 {
+                for _ in 0..assign_len {
+                    if src.remaining() < 4 {
+                        break;
+                    }
+                    let brokers = src.get_i32();
+                    for _ in 0..brokers.max(0) {
+                        if src.remaining() < 4 {
+                            break;
+                        }
+                        let _ = src.get_i32();
+                    }
+                }
+            }
+            reqs.push(Req { topic, count });
+        }
+        if src.remaining() >= 4 {
+            let _timeout = src.get_i32();
+        }
+        validate_only = if src.remaining() >= 1 {
+            src.get_u8() != 0
+        } else {
+            false
+        };
+    }
 
     out.put_i32(0); // throttle
-    out.put_i32(reqs.len() as i32);
+    if flexible {
+        put_compact_array_len(out, reqs.len());
+    } else {
+        out.put_i32(reqs.len() as i32);
+    }
     for r in reqs {
-        put_string(out, &r.topic);
-        if broker.acls().is_enabled()
+        if flexible {
+            put_compact_string(out, &r.topic);
+        } else {
+            put_string(out, &r.topic);
+        }
+        let (code, msg): (i16, Option<&str>) = if broker.acls().is_enabled()
             && !broker.acls().authorize(
                 Some(principal),
                 ResourceType::Topic,
@@ -4963,51 +5193,64 @@ fn encode_create_partitions(
                 AclOperation::Alter,
             )
         {
-            out.put_i16(KafkaErrorCode::TopicAuthorizationFailed.as_i16());
-            put_nullable_string(out, Some("topic authorization failed"));
-            continue;
-        }
-        if r.count <= 0 {
-            out.put_i16(KafkaErrorCode::InvalidPartitions.as_i16());
-            put_nullable_string(out, Some("invalid partition count"));
-            continue;
-        }
-        if validate_only {
-            // Dry-run: topic must exist and count must be a valid increase.
+            (
+                KafkaErrorCode::TopicAuthorizationFailed.as_i16(),
+                Some("topic authorization failed"),
+            )
+        } else if r.count <= 0 {
+            (
+                KafkaErrorCode::InvalidPartitions.as_i16(),
+                Some("invalid partition count"),
+            )
+        } else if validate_only {
             let meta = broker.metadata(Some(&[TopicName::new(r.topic.clone())]));
             if meta.topics.is_empty() {
-                out.put_i16(KafkaErrorCode::UnknownTopicOrPartition.as_i16());
-                put_nullable_string(out, Some("topic not found"));
+                (
+                    KafkaErrorCode::UnknownTopicOrPartition.as_i16(),
+                    Some("topic not found"),
+                )
             } else {
                 let cur = meta.topics[0].partitions.len() as i32;
                 if r.count < cur {
-                    out.put_i16(KafkaErrorCode::InvalidPartitions.as_i16());
-                    put_nullable_string(out, Some("partition count must not decrease"));
+                    (
+                        KafkaErrorCode::InvalidPartitions.as_i16(),
+                        Some("partition count must not decrease"),
+                    )
                 } else {
-                    out.put_i16(KafkaErrorCode::None.as_i16());
-                    put_nullable_string(out, None);
+                    (KafkaErrorCode::None.as_i16(), None)
                 }
             }
-            continue;
+        } else {
+            match broker.create_partitions(&r.topic, r.count as u32) {
+                Ok(_) => (KafkaErrorCode::None.as_i16(), None),
+                Err(Error::NotFound(_)) => (
+                    KafkaErrorCode::UnknownTopicOrPartition.as_i16(),
+                    Some("topic not found"),
+                ),
+                Err(Error::InvalidArgument(ref msg)) => {
+                    // Need owned string for message — write below with String
+                    out.put_i16(KafkaErrorCode::InvalidPartitions.as_i16());
+                    if flexible {
+                        put_compact_nullable_string(out, Some(msg));
+                        put_empty_tag_buffer(out);
+                    } else {
+                        put_nullable_string(out, Some(msg));
+                    }
+                    continue;
+                }
+                Err(_) => (KafkaErrorCode::Unknown.as_i16(), None),
+            }
+        };
+        out.put_i16(code);
+        if flexible {
+            put_compact_nullable_string(out, msg);
+            put_empty_tag_buffer(out);
+        } else {
+            put_nullable_string(out, msg);
         }
-        match broker.create_partitions(&r.topic, r.count as u32) {
-            Ok(_) => {
-                out.put_i16(KafkaErrorCode::None.as_i16());
-                put_nullable_string(out, None);
-            }
-            Err(Error::NotFound(_)) => {
-                out.put_i16(KafkaErrorCode::UnknownTopicOrPartition.as_i16());
-                put_nullable_string(out, Some("topic not found"));
-            }
-            Err(Error::InvalidArgument(msg)) => {
-                out.put_i16(KafkaErrorCode::InvalidPartitions.as_i16());
-                put_nullable_string(out, Some(&msg));
-            }
-            Err(_) => {
-                out.put_i16(KafkaErrorCode::Unknown.as_i16());
-                put_nullable_string(out, None);
-            }
-        }
+    }
+    if flexible {
+        put_empty_tag_buffer(out);
     }
 }
 

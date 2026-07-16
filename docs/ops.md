@@ -141,8 +141,8 @@ Supported APIs:
 | SaslHandshake | 0–1 | mechanisms: PLAIN, SCRAM-SHA-256, SCRAM-SHA-512 |
 | SaslAuthenticate | 0–1 | PLAIN / SCRAM-SHA-256 / SCRAM-SHA-512 against Volant SCRAM store |
 | ListOffsets | 0–5 | -1 latest / -2 earliest; v2+ isolation (LSO≡HWM) + throttle; v4+ leader-epoch fencing; flexible v6+ unsupported |
-| CreateTopics | 0–4 | partition count; RF/assignment ignored; error_message v1+; throttle v2+; validate_only; v4 partitions=-1 → 1 |
-| DeleteTopics | 0–3 | by name; throttle v1+ (leading) |
+| CreateTopics | 0–5 | Classic 0–4; **v5 flexible** + response header v1; validate_only v1+; default partitions v4+; configs response null; TopicId v7 unsupported |
+| DeleteTopics | 0–4 | Classic 0–3; **v4 flexible** + response header v1; throttle v1+ (leading); ErrorMessage v5 / TopicId v6 unsupported |
 | JoinGroup | 0–9 | Classic 0–5; **v6+ flexible** + response header v1; v5+ group.instance.id → static:{id}; **v7** ProtocolType; **v8** Reason (ignored); **v9** SkipAssignment=false; throttle v2+ |
 | SyncGroup | 0–5 | Classic 0–3; **v4+ flexible** + response header v1; v3 group.instance.id; **v5** ProtocolType/Name echo (no consistency check) |
 | Heartbeat | 0–4 | Classic 0–3; **v4 flexible** + response header v1; v3 group.instance.id |
@@ -152,7 +152,7 @@ Supported APIs:
 | ListGroups | 0–3 | Classic 0–2; **v3 flexible** + response header v1; active + offset-backed groups; throttle v1+; StatesFilter v4+ unsupported |
 | DescribeGroups | 0–5 | Classic 0–4; **v5 flexible** + response header v1; state + members; throttle v1+; authorized_ops v3+; group_instance_id v4+ (from `static:`); ErrorMessage v6 unsupported |
 | DeleteGroups | 0–2 | Classic 0–1; **v2 flexible** + response header v1; empty groups only (`NON_EMPTY_GROUP` if live); throttle all versions; ErrorMessage v3 unsupported |
-| CreatePartitions | 0–1 | total partition count; throttle all versions; validate_only dry-run |
+| CreatePartitions | 0–2 | Classic 0–1; **v2 flexible** + response header v1; throttle all versions; validate_only dry-run |
 | DescribeConfigs | 0–3 | TOPIC resources; throttle; v1+ config_source + empty synonyms; v3+ type/docs |
 | AlterConfigs | 0–1 | TOPIC resources; throttle all versions; validate_only |
 | IncrementalAlterConfigs | 0 | SET/DELETE on TOPIC keys |
