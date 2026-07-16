@@ -134,7 +134,7 @@ async fn api_versions_v3_flexible_roundtrip() {
             saw_produce = true;
         }
         if key == 1 {
-            assert_eq!((min, max), (0, 11));
+            assert_eq!((min, max), (0, 12));
             saw_fetch = true;
         }
     }

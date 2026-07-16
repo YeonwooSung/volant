@@ -1232,6 +1232,25 @@ record_errors; no flexible Fetch v12+ / group / txn / admin.
 Fetch/admin, Metadata TopicId, DescribeCluster / ListTransactions, true
 control-marker READ_COMMITTED.
 
+### Phase 54 — Flexible Fetch v12 ✅
+
+**Goal:** Extend KIP-482 flexible framing to **Fetch v12** (compact topics /
+records + response header v1), pairing with Produce v9 for modern clients.
+
+Binding: **[docs/PHASE54_SPEC.md](./docs/PHASE54_SPEC.md)**.
+
+- [x] Fetch 0–12 (v12 flexible; classic 0–11 unchanged)
+- [x] Parse LastFetchedEpoch / forgotten / rack / ClusterId tags (ignored)
+- [x] Compact records + empty partition/top-level tag buffers
+- [x] Integration tests (`phase54_flexible_fetch`)
+
+**Honest limitations:** no Fetch TopicId (v13+); no diverging-epoch /
+CurrentLeader tags; no real incremental sessions; empty aborted list.
+
+**Still deferred:** multi-lang clients, cargo-fuzz corpus CI, flexible
+group/txn/admin, Metadata TopicId, DescribeCluster / ListTransactions, true
+control-marker READ_COMMITTED.
+
 ---
 
 ## Performance targets (aspirational)

@@ -273,6 +273,8 @@ response header v1 for those APIs.
 
 **Phase 53:** Flexible Produce v9 — compact records/topics + response header v1.
 
+**Phase 54:** Flexible Fetch v12 — compact topics/records + response header v1.
+
 **Still deferred:** multi-language clients, chaos-mesh / cargo-fuzz corpus CI.
 
 ### Networked client (library)

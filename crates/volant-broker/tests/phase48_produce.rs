@@ -112,7 +112,7 @@ async fn api_versions_produce_max_v9() {
         }
     }
     assert_eq!(produce, Some((0, 9)));
-    assert_eq!(fetch, Some((0, 11))); // Phase 49 Fetch classic max
+    assert_eq!(fetch, Some((0, 12))); // Phase 54 Fetch flexible
 
     server.abort();
     let _ = std::fs::remove_dir_all(&dir);

@@ -21,9 +21,9 @@ use super::codec::{
     encode_record_batch, encode_record_batch_compressed, encode_response_frame, get_bytes,
     get_compact_array_len, get_compact_bytes, get_compact_nullable_string, get_compact_string,
     get_nullable_string, get_string,
-    put_bytes, put_compact_array_len, put_compact_nullable_string, put_compact_string,
-    put_empty_tag_buffer, put_nullable_string, put_response_header, put_response_header_v1,
-    put_string, skip_tag_buffer, try_decode_request,
+    put_bytes, put_compact_array_len, put_compact_bytes, put_compact_nullable_string,
+    put_compact_string, put_empty_tag_buffer, put_nullable_string, put_response_header,
+    put_response_header_v1, put_string, skip_tag_buffer, try_decode_request,
 };
 use super::compress::{fetch_compression_codec, CompressionCodec};
 use super::sasl::{self, SaslMechanism, SaslState, MECHANISMS};
@@ -125,6 +125,9 @@ fn dispatch_kafka(broker: &Broker, body: bytes::Bytes, conn: &mut KafkaConnState
     ) || matches!(
         (api, hdr.api_version),
         (Some(ApiKey::Produce), v) if v >= 9
+    ) || matches!(
+        (api, hdr.api_version),
+        (Some(ApiKey::Fetch), v) if v >= 12
     );
 
     let mut out = BytesMut::new();
@@ -184,7 +187,12 @@ fn dispatch_kafka(broker: &Broker, body: bytes::Bytes, conn: &mut KafkaConnState
             }
             encode_produce(broker, &mut src, &mut out, hdr.api_version, principal);
         }
-        Some(ApiKey::Fetch) if (0..=11).contains(&hdr.api_version) => {
+        Some(ApiKey::Fetch) if (0..=12).contains(&hdr.api_version) => {
+            if hdr.api_version >= 12 {
+                if let Err(e) = skip_tag_buffer(&mut src) {
+                    debug!(error = %e, "fetch flexible header tag buffer");
+                }
+            }
             encode_fetch(broker, &mut src, &mut out, hdr.api_version, principal);
         }
         Some(ApiKey::ListOffsets) if (0..=5).contains(&hdr.api_version) => {
@@ -1295,7 +1303,7 @@ fn encode_init_producer_id(broker: &Broker, src: &mut impl Buf, out: &mut BytesM
     out.put_i16(epoch as i16);
 }
 
-/// Write Fetch response header before topic array (classic v0–11).
+/// Write Fetch response header before topic array (classic v0–11 / flexible v12).
 fn put_fetch_response_header(out: &mut BytesMut, version: i16, session_id: i32) {
     // throttle (v1+), top-level error + session_id (v7+)
     if version >= 1 {
@@ -1307,10 +1315,22 @@ fn put_fetch_response_header(out: &mut BytesMut, version: i16, session_id: i32) 
     }
 }
 
-/// Write one FetchResponse partition entry (classic v0–11).
+/// Empty Fetch response (no topics) with correct classic/flexible framing.
+fn put_fetch_empty_response(out: &mut BytesMut, version: i16, session_id: i32) {
+    let flexible = version >= 12;
+    put_fetch_response_header(out, version, session_id);
+    if flexible {
+        put_compact_array_len(out, 0);
+        put_empty_tag_buffer(out);
+    } else {
+        out.put_i32(0);
+    }
+}
+
+/// Write one FetchResponse partition entry (classic v0–11 / flexible v12).
 ///
 /// Order: index, error, hwm, lso (v4+), log_start (v5+), aborted[] (v4+),
-/// preferred_read_replica (v11+), records.
+/// preferred_read_replica (v11+), records, TAG_BUFFER (v12+).
 fn put_fetch_partition_response(
     out: &mut BytesMut,
     version: i16,
@@ -1320,6 +1340,7 @@ fn put_fetch_partition_response(
     log_start: i64,
     records: &[u8],
 ) {
+    let flexible = version >= 12;
     out.put_i32(partition);
     out.put_i16(error);
     out.put_i64(hwm);
@@ -1331,33 +1352,41 @@ fn put_fetch_partition_response(
         out.put_i64(if error == 0 { log_start } else { -1 });
     }
     if version >= 4 {
-        out.put_i32(0); // aborted_transactions empty
+        if flexible {
+            put_compact_array_len(out, 0); // aborted_transactions empty
+        } else {
+            out.put_i32(0); // aborted_transactions empty
+        }
     }
     if version >= 11 {
         out.put_i32(-1); // preferred_read_replica (no rack-aware follower fetch)
     }
-    put_bytes(out, Some(records));
+    if flexible {
+        put_compact_bytes(out, Some(records));
+        put_empty_tag_buffer(out); // no DivergingEpoch / CurrentLeader / SnapshotId
+    } else {
+        put_bytes(out, Some(records));
+    }
 }
 
 fn encode_fetch(broker: &Broker, src: &mut impl Buf, out: &mut BytesMut, version: i16, principal: &str) {
-    // Fetch classic v0–11 (flexible 12+):
+    // Fetch classic v0–11 + flexible v12:
     //   request: replica_id, max_wait, min_bytes,
     //            max_bytes (v3+), isolation (v4+),
     //            session_id + session_epoch (v7+),
     //            topics[{ name, partitions[{
     //              partition, current_leader_epoch (v9+), fetch_offset,
-    //              log_start_offset (v5+ follower), partition_max_bytes
+    //              last_fetched_epoch (v12+), log_start_offset (v5+),
+    //              partition_max_bytes
     //            }]}],
-    //            forgotten_topics (v7+), rack_id (v11+)
+    //            forgotten_topics (v7+), rack_id (v11+), tags (v12+)
     //   response: throttle (v1+), error+session_id (v7+),
-    //             topics[{ partitions[{ fields by version }]}]
-    let empty = |out: &mut BytesMut, version: i16, session_id: i32| {
-        put_fetch_response_header(out, version, session_id);
-        out.put_i32(0);
-    };
+    //             topics[{ partitions[{ fields by version }]}], tags (v12+)
+    // ClusterId (v12+) is a top-level tagged field — ignored via skip_tag_buffer.
+    let flexible = version >= 12;
 
     if src.remaining() < 4 + 4 + 4 {
-        empty(out, version, 0);
+        put_fetch_empty_response(out, version, 0);
         return;
     }
     let _replica_id = src.get_i32();
@@ -1365,7 +1394,7 @@ fn encode_fetch(broker: &Broker, src: &mut impl Buf, out: &mut BytesMut, version
     let _min_bytes = src.get_i32();
     if version >= 3 {
         if src.remaining() < 4 {
-            empty(out, version, 0);
+            put_fetch_empty_response(out, version, 0);
             return;
         }
         let _max_bytes = src.get_i32();
@@ -1374,12 +1403,12 @@ fn encode_fetch(broker: &Broker, src: &mut impl Buf, out: &mut BytesMut, version
     let mut isolation = 0u8;
     if version >= 4 {
         if src.remaining() < 1 {
-            empty(out, version, 0);
+            put_fetch_empty_response(out, version, 0);
             return;
         }
         isolation = src.get_u8();
         if isolation > 1 {
-            empty(out, version, 0);
+            put_fetch_empty_response(out, version, 0);
             return;
         }
     }
@@ -1389,7 +1418,7 @@ fn encode_fetch(broker: &Broker, src: &mut impl Buf, out: &mut BytesMut, version
     let mut session_id = 0i32;
     if version >= 7 {
         if src.remaining() < 4 + 4 {
-            empty(out, version, 0);
+            put_fetch_empty_response(out, version, 0);
             return;
         }
         session_id = src.get_i32();
@@ -1397,35 +1426,80 @@ fn encode_fetch(broker: &Broker, src: &mut impl Buf, out: &mut BytesMut, version
         // Echo non-zero session_id; 0 means "not part of a session".
     }
 
-    if src.remaining() < 4 {
-        empty(out, version, session_id);
-        return;
-    }
-    let topic_count = src.get_i32();
+    let topic_count = if flexible {
+        match get_compact_array_len(src) {
+            Ok(Some(n)) => n as i32,
+            Ok(None) | Err(_) => {
+                put_fetch_empty_response(out, version, session_id);
+                return;
+            }
+        }
+    } else {
+        if src.remaining() < 4 {
+            put_fetch_empty_response(out, version, session_id);
+            return;
+        }
+        src.get_i32()
+    };
 
     put_fetch_response_header(out, version, session_id);
-    out.put_i32(topic_count.max(0));
+    if flexible {
+        put_compact_array_len(out, topic_count.max(0) as usize);
+    } else {
+        out.put_i32(topic_count.max(0));
+    }
 
     for _ in 0..topic_count.max(0) {
-        let topic = match get_string(src) {
-            Ok(t) => t,
-            Err(_) => break,
+        let topic = if flexible {
+            match get_compact_string(src) {
+                Ok(t) => t,
+                Err(_) => break,
+            }
+        } else {
+            match get_string(src) {
+                Ok(t) => t,
+                Err(_) => break,
+            }
         };
-        put_string(out, &topic);
-
-        if src.remaining() < 4 {
-            out.put_i32(0);
-            break;
+        if flexible {
+            put_compact_string(out, &topic);
+        } else {
+            put_string(out, &topic);
         }
-        let part_count = src.get_i32();
-        out.put_i32(part_count.max(0));
+
+        let part_count = if flexible {
+            match get_compact_array_len(src) {
+                Ok(Some(n)) => n as i32,
+                Ok(None) | Err(_) => {
+                    if flexible {
+                        put_compact_array_len(out, 0);
+                        put_empty_tag_buffer(out);
+                    } else {
+                        out.put_i32(0);
+                    }
+                    break;
+                }
+            }
+        } else {
+            if src.remaining() < 4 {
+                out.put_i32(0);
+                break;
+            }
+            src.get_i32()
+        };
+        if flexible {
+            put_compact_array_len(out, part_count.max(0) as usize);
+        } else {
+            out.put_i32(part_count.max(0));
+        }
 
         for _ in 0..part_count.max(0) {
             // partition + optional current_leader_epoch + fetch_offset
-            // + optional log_start_offset + partition_max_bytes
+            // + last_fetched_epoch (v12+) + optional log_start_offset + partition_max_bytes
             let need = 4
                 + if version >= 9 { 4 } else { 0 }
                 + 8
+                + if version >= 12 { 4 } else { 0 }
                 + if version >= 5 { 8 } else { 0 }
                 + 4;
             if src.remaining() < need {
@@ -1438,10 +1512,16 @@ fn encode_fetch(broker: &Broker, src: &mut impl Buf, out: &mut BytesMut, version
                 -1
             };
             let fetch_offset = src.get_i64();
+            if version >= 12 {
+                let _last_fetched_epoch = src.get_i32(); // ignored (no diverging-epoch tags)
+            }
             if version >= 5 {
                 let _follower_log_start = src.get_i64(); // ignored (consumer path)
             }
             let max_bytes = src.get_i32().max(0) as usize;
+            if flexible {
+                let _ = skip_tag_buffer(src); // partition request tags
+            }
 
             if broker.acls().is_enabled()
                 && !broker.acls().authorize(
@@ -1561,28 +1641,57 @@ fn encode_fetch(broker: &Broker, src: &mut impl Buf, out: &mut BytesMut, version
                 }
             }
         }
+        if flexible {
+            put_empty_tag_buffer(out); // topic response tags
+            let _ = skip_tag_buffer(src); // topic request tags
+        }
     }
 
     // v7+: forgotten_topics_data (parse and ignore — no incremental sessions).
-    if version >= 7 && src.remaining() >= 4 {
-        let forgotten = src.get_i32();
-        for _ in 0..forgotten.max(0) {
-            let _ = get_string(src);
-            if src.remaining() < 4 {
-                break;
+    if version >= 7 {
+        if flexible {
+            if let Ok(Some(n)) = get_compact_array_len(src) {
+                for _ in 0..n {
+                    let _ = get_compact_string(src);
+                    if let Ok(Some(pn)) = get_compact_array_len(src) {
+                        for _ in 0..pn {
+                            if src.remaining() < 4 {
+                                break;
+                            }
+                            let _ = src.get_i32();
+                        }
+                    }
+                    let _ = skip_tag_buffer(src);
+                }
             }
-            let n = src.get_i32();
-            for _ in 0..n.max(0) {
+        } else if src.remaining() >= 4 {
+            let forgotten = src.get_i32();
+            for _ in 0..forgotten.max(0) {
+                let _ = get_string(src);
                 if src.remaining() < 4 {
                     break;
                 }
-                let _ = src.get_i32();
+                let n = src.get_i32();
+                for _ in 0..n.max(0) {
+                    if src.remaining() < 4 {
+                        break;
+                    }
+                    let _ = src.get_i32();
+                }
             }
         }
     }
     // v11+: rack_id (ignored — preferred_read_replica always -1).
     if version >= 11 {
-        let _ = get_string(src);
+        if flexible {
+            let _ = get_compact_string(src);
+        } else {
+            let _ = get_string(src);
+        }
+    }
+    if flexible {
+        let _ = skip_tag_buffer(src); // request top-level tags (ClusterId, …)
+        put_empty_tag_buffer(out); // response top-level tags
     }
 }
 
