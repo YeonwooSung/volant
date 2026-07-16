@@ -8,7 +8,7 @@ use bytes::{Buf, BufMut, Bytes, BytesMut};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::{TcpListener, TcpStream};
 use volant_broker::kafka::codec::{
-    encode_record_batch, encode_request, get_string, put_bytes, put_string,
+    encode_record_batch, encode_request, get_nullable_string, get_string, put_bytes, put_string,
 };
 use volant_broker::{serve_kafka_listener, Broker};
 use volant_core::{Offset, PartitionId, Record, TopicName};
@@ -96,7 +96,7 @@ async fn create_topics_produce_list_offsets_delete() {
     }));
     let (addr, server) = boot_kafka(Arc::clone(&broker)).await;
 
-    // CreateTopics v1
+    // CreateTopics v1 (error_message, no throttle)
     let mut body = BytesMut::new();
     body.put_i32(1); // topic count
     put_string(&mut body, "orders");
@@ -105,13 +105,14 @@ async fn create_topics_produce_list_offsets_delete() {
     body.put_i32(0); // replica assignments
     body.put_i32(0); // configs
     body.put_i32(5000); // timeout
+    body.put_u8(0); // validate_only
     let resp = rpc(&addr, encode_request(19, 1, 10, Some("admin"), &body)).await;
     let mut src = resp.freeze();
     assert_eq!(src.get_i32(), 10);
     assert_eq!(src.get_i32(), 1);
     assert_eq!(get_string(&mut src).unwrap(), "orders");
     assert_eq!(src.get_i16(), 0, "create topics error");
-    assert_eq!(src.get_i32(), 0); // throttle
+    assert_eq!(get_nullable_string(&mut src).unwrap(), None); // error_message
 
     // Topic exists on native path.
     let meta = broker.metadata(Some(&[TopicName::new("orders")]));
@@ -126,6 +127,7 @@ async fn create_topics_produce_list_offsets_delete() {
     body2.put_i16(1);
     body2.put_i32(0);
     body2.put_i32(0);
+    body2.put_i32(5000); // timeout
     let resp2 = rpc(&addr, encode_request(19, 0, 11, Some("admin"), &body2)).await;
     let mut s2 = resp2.freeze();
     s2.advance(4); // corr
@@ -185,7 +187,7 @@ async fn create_topics_produce_list_offsets_delete() {
     let latest = ls.get_i64();
     assert_eq!(latest, 1, "LEO after one produce");
 
-    // DeleteTopics v1
+    // DeleteTopics v1 (throttle first)
     let mut dbody = BytesMut::new();
     dbody.put_i32(1);
     put_string(&mut dbody, "orders");
@@ -193,10 +195,10 @@ async fn create_topics_produce_list_offsets_delete() {
     let dresp = rpc(&addr, encode_request(20, 1, 14, Some("del"), &dbody)).await;
     let mut ds = dresp.freeze();
     assert_eq!(ds.get_i32(), 14);
+    assert_eq!(ds.get_i32(), 0); // throttle
     assert_eq!(ds.get_i32(), 1);
     assert_eq!(get_string(&mut ds).unwrap(), "orders");
     assert_eq!(ds.get_i16(), 0);
-    assert_eq!(ds.get_i32(), 0);
 
     assert!(broker
         .metadata(Some(&[TopicName::new("orders")]))

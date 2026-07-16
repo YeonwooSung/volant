@@ -1062,6 +1062,24 @@ ignored; no multi-key FindCoordinator batch.
 **Still deferred:** multi-lang clients, cargo-fuzz corpus CI, flexible modern
 admin APIs (DescribeCluster / ListTransactions).
 
+### Phase 45 — Kafka topic admin classic versions ✅
+
+**Goal:** Raise CreateTopics / DeleteTopics / CreatePartitions classic versions;
+fix throttle and error_message framing to match Kafka.
+
+Binding: **[docs/PHASE45_SPEC.md](./docs/PHASE45_SPEC.md)**.
+
+- [x] CreateTopics 0–4 (error_message v1+, throttle v2+, default partitions v4)
+- [x] DeleteTopics 0–3 (leading throttle v1+)
+- [x] CreatePartitions 0–1 (throttle all versions + validate_only)
+- [x] Integration tests (`phase45_topic_admin`); phase25/27 framing fixes
+
+**Honest limitations:** no flexible topic-admin; no topic UUID; RF/assignments
+ignored; default partitions = 1.
+
+**Still deferred:** multi-lang clients, cargo-fuzz corpus CI, flexible modern
+admin APIs (DescribeCluster / ListTransactions).
+
 ---
 
 ## Performance targets (aspirational)

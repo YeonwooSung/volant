@@ -153,10 +153,10 @@ fn dispatch_kafka(broker: &Broker, body: bytes::Bytes, conn: &mut KafkaConnState
         Some(ApiKey::ListOffsets) if (0..=5).contains(&hdr.api_version) => {
             encode_list_offsets(broker, &mut src, &mut out, hdr.api_version, principal);
         }
-        Some(ApiKey::CreateTopics) if (0..=1).contains(&hdr.api_version) => {
+        Some(ApiKey::CreateTopics) if (0..=4).contains(&hdr.api_version) => {
             encode_create_topics(broker, &mut src, &mut out, hdr.api_version, principal);
         }
-        Some(ApiKey::DeleteTopics) if (0..=1).contains(&hdr.api_version) => {
+        Some(ApiKey::DeleteTopics) if (0..=3).contains(&hdr.api_version) => {
             encode_delete_topics(broker, &mut src, &mut out, hdr.api_version, principal);
         }
         Some(ApiKey::DeleteRecords) if (0..=1).contains(&hdr.api_version) => {
@@ -216,8 +216,8 @@ fn dispatch_kafka(broker: &Broker, body: bytes::Bytes, conn: &mut KafkaConnState
         Some(ApiKey::OffsetDelete) if hdr.api_version == 0 => {
             encode_offset_delete(broker, &mut src, &mut out, principal);
         }
-        Some(ApiKey::CreatePartitions) if hdr.api_version == 0 => {
-            encode_create_partitions(broker, &mut src, &mut out, principal);
+        Some(ApiKey::CreatePartitions) if (0..=1).contains(&hdr.api_version) => {
+            encode_create_partitions(broker, &mut src, &mut out, hdr.api_version, principal);
         }
         Some(ApiKey::DescribeConfigs) if hdr.api_version == 0 => {
             encode_describe_configs(broker, &mut src, &mut out, principal);
@@ -1523,20 +1523,28 @@ fn encode_list_offsets(broker: &Broker, src: &mut impl Buf, out: &mut BytesMut, 
     }
 }
 
-fn encode_create_topics(broker: &Broker, src: &mut impl Buf, out: &mut BytesMut, version: i16, principal: &str) {
-    // CreateTopics v0: [topic_data]
-    // CreateTopics v1: [topic_data] timeout_ms
-    // topic_data: name, num_partitions, replication_factor,
-    //   [assigned_partition → [broker]], [config_key → config_value]
+/// Default partition count when CreateTopics v4+ sends `num_partitions = -1`.
+const DEFAULT_TOPIC_PARTITIONS: u32 = 1;
+
+fn encode_create_topics(
+    broker: &Broker,
+    src: &mut impl Buf,
+    out: &mut BytesMut,
+    version: i16,
+    principal: &str,
+) {
+    // CreateTopics classic v0–4 (flexible 5+):
+    //   request: [name, num_partitions, rf, assignments, configs], timeout, validate_only (v1+)
+    //   response: throttle (v2+), [name, error, error_message (v1+)]
+    // v4: num_partitions / rf may be -1 (default partitions; RF ignored).
     if src.remaining() < 4 {
-        out.put_i32(0);
-        if version >= 1 {
+        if version >= 2 {
             out.put_i32(0);
         }
+        out.put_i32(0);
         return;
     }
     let topic_count = src.get_i32();
-    // Collect first so we can still parse timeout if present.
     struct TopicReq {
         name: String,
         partitions: i32,
@@ -1553,7 +1561,7 @@ fn encode_create_topics(broker: &Broker, src: &mut impl Buf, out: &mut BytesMut,
         }
         let partitions = src.get_i32();
         let _rf = src.get_i16();
-        // replica assignments
+        // replica assignments (ignored)
         if src.remaining() < 4 {
             break;
         }
@@ -1587,8 +1595,10 @@ fn encode_create_topics(broker: &Broker, src: &mut impl Buf, out: &mut BytesMut,
                 Ok(s) => s,
                 Err(_) => break,
             };
-            let v = match get_string(src) {
-                Ok(s) => s,
+            // Kafka values are nullable strings.
+            let v = match get_nullable_string(src) {
+                Ok(Some(s)) => s,
+                Ok(None) => String::new(),
                 Err(_) => break,
             };
             configs.push((k, v));
@@ -1599,13 +1609,29 @@ fn encode_create_topics(broker: &Broker, src: &mut impl Buf, out: &mut BytesMut,
             configs,
         });
     }
-    if version >= 1 && src.remaining() >= 4 {
+    // timeout_ms is present on all Kafka versions; tolerate short bodies.
+    if src.remaining() >= 4 {
         let _timeout = src.get_i32();
     }
+    let validate_only = if version >= 1 && src.remaining() >= 1 {
+        src.get_u8() != 0
+    } else {
+        false
+    };
 
+    if version >= 2 {
+        out.put_i32(0); // throttle
+    }
     out.put_i32(reqs.len() as i32);
     for t in reqs {
         put_string(out, &t.name);
+
+        let write_err = |out: &mut BytesMut, code: KafkaErrorCode, msg: Option<&str>| {
+            out.put_i16(code.as_i16());
+            if version >= 1 {
+                put_nullable_string(out, msg);
+            }
+        };
 
         if broker.acls().is_enabled()
             && !broker.acls().authorize(
@@ -1621,44 +1647,85 @@ fn encode_create_topics(broker: &Broker, src: &mut impl Buf, out: &mut BytesMut,
                 AclOperation::Create,
             )
         {
-            out.put_i16(KafkaErrorCode::TopicAuthorizationFailed.as_i16());
+            write_err(
+                out,
+                KafkaErrorCode::TopicAuthorizationFailed,
+                Some("topic authorization failed"),
+            );
             continue;
         }
 
-        if t.partitions <= 0 {
-            out.put_i16(KafkaErrorCode::InvalidPartitions.as_i16());
+        // Resolve partition count: v4+ allows -1 → default.
+        let partitions = if t.partitions == -1 && version >= 4 {
+            DEFAULT_TOPIC_PARTITIONS
+        } else if t.partitions <= 0 {
+            write_err(
+                out,
+                KafkaErrorCode::InvalidPartitions,
+                Some("invalid partition count"),
+            );
+            continue;
+        } else {
+            t.partitions as u32
+        };
+
+        // Already exists?
+        let exists = !broker
+            .metadata(Some(&[TopicName::new(t.name.clone())]))
+            .topics
+            .is_empty();
+        if exists {
+            write_err(
+                out,
+                KafkaErrorCode::TopicAlreadyExists,
+                Some("topic already exists"),
+            );
+            continue;
+        }
+
+        if validate_only {
+            write_err(out, KafkaErrorCode::None, None);
             continue;
         }
 
         let result = if t.configs.is_empty() {
-            broker.create_topic(t.name.as_str(), t.partitions as u32)
+            broker.create_topic(t.name.as_str(), partitions)
         } else {
-            broker.create_topic_with_configs(t.name.as_str(), t.partitions as u32, &t.configs)
+            broker.create_topic_with_configs(t.name.as_str(), partitions, &t.configs)
         };
 
         match result {
-            Ok(_) => out.put_i16(KafkaErrorCode::None.as_i16()),
+            Ok(_) => write_err(out, KafkaErrorCode::None, None),
             Err(Error::InvalidArgument(msg)) if msg.contains("already exists") => {
-                out.put_i16(KafkaErrorCode::TopicAlreadyExists.as_i16());
+                write_err(
+                    out,
+                    KafkaErrorCode::TopicAlreadyExists,
+                    Some("topic already exists"),
+                );
             }
-            Err(Error::InvalidArgument(_)) => {
-                out.put_i16(KafkaErrorCode::InvalidTopicException.as_i16());
+            Err(Error::InvalidArgument(msg)) => {
+                write_err(out, KafkaErrorCode::InvalidTopicException, Some(&msg));
             }
-            Err(_) => out.put_i16(KafkaErrorCode::Unknown.as_i16()),
+            Err(_) => write_err(out, KafkaErrorCode::Unknown, None),
         }
-    }
-    if version >= 1 {
-        out.put_i32(0); // throttle_time_ms
     }
 }
 
-fn encode_delete_topics(broker: &Broker, src: &mut impl Buf, out: &mut BytesMut, version: i16, principal: &str) {
-    // DeleteTopics v0/v1: [topic names] timeout_ms
+fn encode_delete_topics(
+    broker: &Broker,
+    src: &mut impl Buf,
+    out: &mut BytesMut,
+    version: i16,
+    principal: &str,
+) {
+    // DeleteTopics classic v0–3 (flexible 4+):
+    //   request: [topic names] timeout_ms
+    //   response: throttle (v1+), [name, error_code]
     if src.remaining() < 4 {
-        out.put_i32(0);
         if version >= 1 {
             out.put_i32(0);
         }
+        out.put_i32(0);
         return;
     }
     let topic_count = src.get_i32();
@@ -1673,6 +1740,9 @@ fn encode_delete_topics(broker: &Broker, src: &mut impl Buf, out: &mut BytesMut,
         let _timeout = src.get_i32();
     }
 
+    if version >= 1 {
+        out.put_i32(0); // throttle (Kafka places this first)
+    }
     out.put_i32(names.len() as i32);
     for name in names {
         put_string(out, &name);
@@ -1694,9 +1764,6 @@ fn encode_delete_topics(broker: &Broker, src: &mut impl Buf, out: &mut BytesMut,
             }
             Err(_) => out.put_i16(KafkaErrorCode::Unknown.as_i16()),
         }
-    }
-    if version >= 1 {
-        out.put_i32(0);
     }
 }
 
@@ -3205,9 +3272,19 @@ fn encode_delete_groups(
     }
 }
 
-fn encode_create_partitions(broker: &Broker, src: &mut impl Buf, out: &mut BytesMut, principal: &str) {
-    // CreatePartitions v0: [topic, count, [assignment]] timeout
+fn encode_create_partitions(
+    broker: &Broker,
+    src: &mut impl Buf,
+    out: &mut BytesMut,
+    _version: i16,
+    principal: &str,
+) {
+    // CreatePartitions classic v0–1 (flexible 2+):
+    //   request: [topic, count, assignments|null], timeout, validate_only
+    //   response: throttle (all versions), [name, error, error_message]
+    // Phase 45 adds missing throttle framing (Kafka has throttle on v0+).
     if src.remaining() < 4 {
+        out.put_i32(0); // throttle
         out.put_i32(0);
         return;
     }
@@ -3250,7 +3327,13 @@ fn encode_create_partitions(broker: &Broker, src: &mut impl Buf, out: &mut Bytes
     if src.remaining() >= 4 {
         let _timeout = src.get_i32();
     }
+    let validate_only = if src.remaining() >= 1 {
+        src.get_u8() != 0
+    } else {
+        false
+    };
 
+    out.put_i32(0); // throttle
     out.put_i32(reqs.len() as i32);
     for r in reqs {
         put_string(out, &r.topic);
@@ -3269,6 +3352,24 @@ fn encode_create_partitions(broker: &Broker, src: &mut impl Buf, out: &mut Bytes
         if r.count <= 0 {
             out.put_i16(KafkaErrorCode::InvalidPartitions.as_i16());
             put_nullable_string(out, Some("invalid partition count"));
+            continue;
+        }
+        if validate_only {
+            // Dry-run: topic must exist and count must be a valid increase.
+            let meta = broker.metadata(Some(&[TopicName::new(r.topic.clone())]));
+            if meta.topics.is_empty() {
+                out.put_i16(KafkaErrorCode::UnknownTopicOrPartition.as_i16());
+                put_nullable_string(out, Some("topic not found"));
+            } else {
+                let cur = meta.topics[0].partitions.len() as i32;
+                if r.count < cur {
+                    out.put_i16(KafkaErrorCode::InvalidPartitions.as_i16());
+                    put_nullable_string(out, Some("partition count must not decrease"));
+                } else {
+                    out.put_i16(KafkaErrorCode::None.as_i16());
+                    put_nullable_string(out, None);
+                }
+            }
             continue;
         }
         match broker.create_partitions(&r.topic, r.count as u32) {

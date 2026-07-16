@@ -197,16 +197,18 @@ async fn create_partitions_and_configs() {
     broker.create_topic("orders", 1).unwrap();
     let (addr, server) = boot_kafka(Arc::clone(&broker)).await;
 
-    // CreatePartitions → total 3
+    // CreatePartitions → total 3 (throttle present on all versions)
     let mut body = BytesMut::new();
     body.put_i32(1);
     put_string(&mut body, "orders");
     body.put_i32(3); // total count
     body.put_i32(-1); // null assignments
     body.put_i32(5000); // timeout
+    body.put_u8(0); // validate_only
     let resp = rpc(&addr, encode_request(37, 0, 1, Some("c"), &body)).await;
     let mut src = resp.freeze();
     src.advance(4);
+    assert_eq!(src.get_i32(), 0); // throttle
     assert_eq!(src.get_i32(), 1);
     assert_eq!(get_string(&mut src).unwrap(), "orders");
     assert_eq!(src.get_i16(), 0);

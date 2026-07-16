@@ -141,8 +141,8 @@ Supported APIs:
 | SaslHandshake | 0–1 | mechanisms: PLAIN, SCRAM-SHA-256, SCRAM-SHA-512 |
 | SaslAuthenticate | 0–1 | PLAIN / SCRAM-SHA-256 / SCRAM-SHA-512 against Volant SCRAM store |
 | ListOffsets | 0–5 | -1 latest / -2 earliest; v2+ isolation (LSO≡HWM) + throttle; v4+ leader-epoch fencing; flexible v6+ unsupported |
-| CreateTopics | 0–1 | partition count; RF/assignment ignored |
-| DeleteTopics | 0–1 | by name |
+| CreateTopics | 0–4 | partition count; RF/assignment ignored; error_message v1+; throttle v2+; validate_only; v4 partitions=-1 → 1 |
+| DeleteTopics | 0–3 | by name; throttle v1+ (leading) |
 | JoinGroup | 0–5 | consumer protocol; v5+ group.instance.id → static:{id}; throttle v2+ |
 | SyncGroup | 0–3 | coordinator assignment; v3 group.instance.id; throttle v1+ |
 | Heartbeat | 0–3 | session liveness; v3 group.instance.id; throttle v1+ |
@@ -152,7 +152,7 @@ Supported APIs:
 | ListGroups | 0–2 | active + offset-backed groups; throttle v1+ |
 | DescribeGroups | 0–4 | state + members; throttle v1+; authorized_ops v3+; group_instance_id v4+ (from `static:`) |
 | DeleteGroups | 0–1 | empty groups only (`NON_EMPTY_GROUP` if live); throttle all versions |
-| CreatePartitions | 0 | total partition count |
+| CreatePartitions | 0–1 | total partition count; throttle all versions; validate_only dry-run |
 | DescribeConfigs | 0 | TOPIC resources; Volant keys |
 | AlterConfigs | 0 | TOPIC resources; Volant keys |
 | IncrementalAlterConfigs | 0 | SET/DELETE on TOPIC keys |

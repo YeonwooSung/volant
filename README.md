@@ -248,6 +248,9 @@ ListGroups 0–2, DeleteGroups 0–1 (throttle + authorized_ops + instance id).
 **Phase 44:** Kafka OffsetCommit classic 0–7 + FindCoordinator 0–2 — throttle,
 leader epoch field, `group.instance.id` on commit.
 
+**Phase 45:** Kafka topic admin classic — CreateTopics 0–4, DeleteTopics 0–3,
+CreatePartitions 0–1 (throttle framing + validate_only).
+
 **Still deferred:** multi-language clients, chaos-mesh / cargo-fuzz corpus CI.
 
 ### Networked client (library)

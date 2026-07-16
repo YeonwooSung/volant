@@ -1,14 +1,14 @@
-//! Kafka wire protocol shim (Phases 23–44).
+//! Kafka wire protocol shim (Phases 23–45).
 //!
 //! Classic (non-flexible) framing. Produce/Fetch, admin, consumer groups
 //! (JoinGroup v0–5, Heartbeat/Sync/Leave v0–3 + static membership),
 //! List/Describe/DeleteGroups classic versions, OffsetCommit v0–7,
-//! FindCoordinator v0–2, CreatePartitions, Describe/AlterConfigs,
-//! IncrementalAlterConfigs, RecordBatch + MessageSet compression,
-//! InitProducerId + idempotent Produce, SASL, transactions, DeleteRecords,
-//! ACL admin, OffsetDelete, Fetch isolation-level honesty, Metadata v0–8,
-//! OffsetForLeaderEpoch, ListOffsets v0–5, and OffsetFetch v0–5.
-//! See `docs/PHASE23_SPEC.md` … `docs/PHASE44_SPEC.md`.
+//! FindCoordinator v0–2, CreateTopics/DeleteTopics classic, CreatePartitions,
+//! Describe/AlterConfigs, IncrementalAlterConfigs, RecordBatch + MessageSet
+//! compression, InitProducerId + idempotent Produce, SASL, transactions,
+//! DeleteRecords, ACL admin, OffsetDelete, Fetch isolation-level honesty,
+//! Metadata v0–8, OffsetForLeaderEpoch, ListOffsets v0–5, and OffsetFetch v0–5.
+//! See `docs/PHASE23_SPEC.md` … `docs/PHASE45_SPEC.md`.
 
 /// Kafka wire primitives, MessageSet (magic 0/1), and RecordBatch (magic 2).
 pub mod codec;
@@ -261,8 +261,8 @@ pub const SUPPORTED_APIS: &[(ApiKey, i16, i16)] = &[
     (ApiKey::ListGroups, 0, 2),
     (ApiKey::SaslHandshake, 0, 1),
     (ApiKey::ApiVersions, 0, 0),
-    (ApiKey::CreateTopics, 0, 1),
-    (ApiKey::DeleteTopics, 0, 1),
+    (ApiKey::CreateTopics, 0, 4),
+    (ApiKey::DeleteTopics, 0, 3),
     (ApiKey::DeleteRecords, 0, 1),
     (ApiKey::InitProducerId, 0, 1),
     (ApiKey::OffsetForLeaderEpoch, 0, 3),
@@ -276,7 +276,7 @@ pub const SUPPORTED_APIS: &[(ApiKey, i16, i16)] = &[
     (ApiKey::DescribeConfigs, 0, 0),
     (ApiKey::AlterConfigs, 0, 0),
     (ApiKey::SaslAuthenticate, 0, 1),
-    (ApiKey::CreatePartitions, 0, 0),
+    (ApiKey::CreatePartitions, 0, 1),
     (ApiKey::DeleteGroups, 0, 1),
     (ApiKey::IncrementalAlterConfigs, 0, 0),
     (ApiKey::OffsetDelete, 0, 0),
