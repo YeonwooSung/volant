@@ -235,6 +235,10 @@ epochs map to HWM).
 **Phase 40:** Kafka ListOffsets classic v0–5 — isolation_level, throttle,
 current_leader_epoch fencing, response leader_epoch; flexible v6+ out of scope.
 
+**Phase 41:** Kafka OffsetFetch classic v0–5 — null topics = all, top-level
+error, throttle, committed_leader_epoch=-1; flexible v6+ / multi-group out of
+scope.
+
 **Still deferred:** multi-language clients, chaos-mesh / cargo-fuzz corpus CI.
 
 ### Networked client (library)

@@ -987,6 +987,26 @@ lookups; isolation does not filter under buffer-until-commit.
 **Still deferred:** multi-lang clients, cargo-fuzz corpus CI, flexible modern
 admin APIs (DescribeCluster / ListTransactions).
 
+### Phase 41 — Kafka OffsetFetch classic v0–5 ✅
+
+**Goal:** Raise OffsetFetch (API key 9) from classic v0–1 to classic **v0–5**
+for modern consumer offset reads (null topics, throttle, top-level error,
+committed leader epoch field).
+
+Binding: **[docs/PHASE41_SPEC.md](./docs/PHASE41_SPEC.md)**.
+
+- [x] OffsetFetch max version 5 in ApiVersions
+- [x] v2+ null topics = all / empty = none; top-level error
+- [x] v3+ throttle 0; v5+ committed_leader_epoch = -1
+- [x] Group Read ACL → GroupAuthorizationFailed (v2+)
+- [x] Integration tests (`phase41_offset_fetch`); phase26/36 still work
+
+**Honest limitations:** no flexible v6+ / multi-group v8+; no durable committed
+leader epoch; no require_stable.
+
+**Still deferred:** multi-lang clients, cargo-fuzz corpus CI, flexible modern
+admin APIs (DescribeCluster / ListTransactions).
+
 ---
 
 ## Performance targets (aspirational)

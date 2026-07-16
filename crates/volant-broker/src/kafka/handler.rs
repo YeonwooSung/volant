@@ -200,8 +200,8 @@ fn dispatch_kafka(broker: &Broker, body: bytes::Bytes, conn: &mut KafkaConnState
         Some(ApiKey::OffsetCommit) if (0..=2).contains(&hdr.api_version) => {
             encode_offset_commit(broker, &mut src, &mut out, hdr.api_version, principal);
         }
-        Some(ApiKey::OffsetFetch) if (0..=1).contains(&hdr.api_version) => {
-            encode_offset_fetch(broker, &mut src, &mut out, principal);
+        Some(ApiKey::OffsetFetch) if (0..=5).contains(&hdr.api_version) => {
+            encode_offset_fetch(broker, &mut src, &mut out, hdr.api_version, principal);
         }
         Some(ApiKey::DescribeGroups) if hdr.api_version == 0 => {
             encode_describe_groups(broker, &mut src, &mut out, principal);
@@ -2487,14 +2487,41 @@ fn encode_offset_commit(broker: &Broker, src: &mut impl Buf, out: &mut BytesMut,
     }
 }
 
-fn encode_offset_fetch(broker: &Broker, src: &mut impl Buf, out: &mut BytesMut, principal: &str) {
-    // OffsetFetch v0–1: group_id, [topic [partitions]]
-    // Empty topics array means all committed offsets for the group (Kafka v0–1
-    // actually uses null topics for all; we treat count 0 as all).
+fn encode_offset_fetch(
+    broker: &Broker,
+    src: &mut impl Buf,
+    out: &mut BytesMut,
+    version: i16,
+    principal: &str,
+) {
+    // OffsetFetch classic v0–5:
+    //   group_id, topics nullable array (v2+: null=all, empty=none; v0–1: empty=all)
+    // Response: throttle (v3+), topics[{ name, partitions[{ partition, offset,
+    //   committed_leader_epoch (v5+), metadata, error }] }], top-level error (v2+)
+    let write_partition = |out: &mut BytesMut, partition: i32, offset: i64, meta: &str| {
+        out.put_i32(partition);
+        out.put_i64(offset);
+        if version >= 5 {
+            out.put_i32(-1); // committed_leader_epoch unknown
+        }
+        put_string(out, meta);
+        out.put_i16(KafkaErrorCode::None.as_i16());
+    };
+
+    let finish = |out: &mut BytesMut, top_error: i16| {
+        if version >= 2 {
+            out.put_i16(top_error);
+        }
+    };
+
     let group_id = match get_string(src) {
         Ok(g) => g,
         Err(_) => {
+            if version >= 3 {
+                out.put_i32(0);
+            }
             out.put_i32(0);
+            finish(out, KafkaErrorCode::InvalidRequest.as_i16());
             return;
         }
     };
@@ -2507,17 +2534,42 @@ fn encode_offset_fetch(broker: &Broker, src: &mut impl Buf, out: &mut BytesMut, 
             AclOperation::Read,
         )
     {
-        out.put_i32(0);
+        if version >= 3 {
+            out.put_i32(0); // throttle
+        }
+        out.put_i32(0); // empty topics
+        // v0–1: empty topics only; v2+: GroupAuthorizationFailed
+        finish(
+            out,
+            if version >= 2 {
+                KafkaErrorCode::GroupAuthorizationFailed.as_i16()
+            } else {
+                0
+            },
+        );
         return;
     }
 
     if src.remaining() < 4 {
+        if version >= 3 {
+            out.put_i32(0);
+        }
         out.put_i32(0);
+        finish(out, KafkaErrorCode::None.as_i16());
         return;
     }
     let topic_count = src.get_i32();
 
-    // Build query list.
+    // Topics array semantics:
+    //   v0–1: count <= 0 → all (legacy empty-as-all)
+    //   v2+:  count < 0 (null) → all; count == 0 → none; count > 0 → listed
+    let list_all = if version >= 2 {
+        topic_count < 0
+    } else {
+        topic_count <= 0
+    };
+    let list_none = version >= 2 && topic_count == 0;
+
     let mut query: Vec<(String, u32)> = Vec::new();
     let mut requested: Vec<(String, Vec<i32>)> = Vec::new();
     if topic_count > 0 {
@@ -2543,13 +2595,26 @@ fn encode_offset_fetch(broker: &Broker, src: &mut impl Buf, out: &mut BytesMut, 
         }
     }
 
-    let fetched = match broker.groups().fetch_offsets(&group_id, &query) {
+    if version >= 3 {
+        out.put_i32(0); // throttle_time_ms
+    }
+
+    if list_none {
+        out.put_i32(0);
+        finish(out, KafkaErrorCode::None.as_i16());
+        return;
+    }
+
+    // Empty query when list_all → fetch_all inside group coordinator.
+    let fetched = match broker.groups().fetch_offsets(
+        &group_id,
+        if list_all { &[] } else { &query },
+    ) {
         Ok(r) => r.entries,
         Err(_) => Vec::new(),
     };
 
-    if topic_count <= 0 {
-        // All offsets: group by topic.
+    if list_all {
         use std::collections::BTreeMap;
         let mut by_topic: BTreeMap<String, Vec<(u32, i64, String)>> = BTreeMap::new();
         for e in fetched {
@@ -2568,12 +2633,10 @@ fn encode_offset_fetch(broker: &Broker, src: &mut impl Buf, out: &mut BytesMut, 
             put_string(out, &topic);
             out.put_i32(parts.len() as i32);
             for (p, off, meta) in parts {
-                out.put_i32(p as i32);
-                out.put_i64(off);
-                put_string(out, &meta);
-                out.put_i16(KafkaErrorCode::None.as_i16());
+                write_partition(out, p as i32, off, &meta);
             }
         }
+        finish(out, KafkaErrorCode::None.as_i16());
         return;
     }
 
@@ -2590,12 +2653,10 @@ fn encode_offset_fetch(broker: &Broker, src: &mut impl Buf, out: &mut BytesMut, 
                 Some(e) => (e.offset as i64, e.metadata.clone()),
                 None => (-1i64, String::new()),
             };
-            out.put_i32(p);
-            out.put_i64(off);
-            put_string(out, &meta);
-            out.put_i16(KafkaErrorCode::None.as_i16());
+            write_partition(out, p, off, &meta);
         }
     }
+    finish(out, KafkaErrorCode::None.as_i16());
 }
 
 fn encode_list_groups(broker: &Broker, out: &mut BytesMut, principal: &str) {
