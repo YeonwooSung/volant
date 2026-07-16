@@ -19,8 +19,9 @@ use super::codec::{
     decode_consumer_subscription, decode_produce_batches, decode_request_header,
     encode_consumer_assignment, encode_message_set, encode_message_set_compressed,
     encode_record_batch, encode_record_batch_compressed, encode_response_frame, get_bytes,
-    get_nullable_string, get_string, put_bytes, put_nullable_string, put_response_header,
-    put_string, try_decode_request,
+    get_compact_string, get_nullable_string, get_string, put_bytes, put_compact_array_len,
+    put_empty_tag_buffer, put_nullable_string, put_response_header, put_string,
+    skip_tag_buffer, try_decode_request,
 };
 use super::compress::{fetch_compression_codec, CompressionCodec};
 use super::sasl::{self, SaslMechanism, SaslState, MECHANISMS};
@@ -132,8 +133,14 @@ fn dispatch_kafka(broker: &Broker, body: bytes::Bytes, conn: &mut KafkaConnState
     let principal = principal.as_str();
 
     match api {
-        Some(ApiKey::ApiVersions) if (0..=2).contains(&hdr.api_version) => {
-            encode_api_versions(&mut out, hdr.api_version);
+        Some(ApiKey::ApiVersions) if (0..=3).contains(&hdr.api_version) => {
+            // Flexible request header (v3+): classic ClientId + header TAG_BUFFER.
+            if hdr.api_version >= 3 {
+                if let Err(e) = skip_tag_buffer(&mut src) {
+                    debug!(error = %e, "api versions flexible header tag buffer");
+                }
+            }
+            encode_api_versions(&mut src, &mut out, hdr.api_version);
         }
         Some(ApiKey::SaslHandshake) if (0..=1).contains(&hdr.api_version) => {
             encode_sasl_handshake(&mut src, &mut out, conn);
@@ -324,12 +331,33 @@ fn encode_sasl_authenticate(
     }
 }
 
-/// ApiVersions classic v0–2 (flexible 3+).
+/// ApiVersions classic v0–2 + flexible v3 (Phase 50/51).
 ///
-/// Response: error_code, api_keys[{key,min,max}], throttle_time_ms (v1+ trailing).
-/// v2 is wire-identical to v1 (quota-timing semantics only on real Kafka).
-/// Request body is empty for classic 0–2.
-fn encode_api_versions(out: &mut BytesMut, version: i16) {
+/// Classic response: error, api_keys[{key,min,max}], throttle (v1+ trailing).
+/// Flexible v3: compact api_keys (each entry ends with TAG_BUFFER), throttle,
+/// top-level empty TAG_BUFFER. Response **header** stays v0 (correlation only).
+///
+/// Request body: empty for v0–2; v3+ compact ClientSoftwareName/Version + tags.
+fn encode_api_versions(src: &mut impl Buf, out: &mut BytesMut, version: i16) {
+    if version >= 3 {
+        // Parse and ignore client software fields (KIP-511).
+        let _name = get_compact_string(src).ok();
+        let _ver = get_compact_string(src).ok();
+        let _ = skip_tag_buffer(src);
+
+        out.put_i16(KafkaErrorCode::None.as_i16());
+        put_compact_array_len(out, SUPPORTED_APIS.len());
+        for (key, min_v, max_v) in SUPPORTED_APIS {
+            out.put_i16(*key as i16);
+            out.put_i16(*min_v);
+            out.put_i16(*max_v);
+            put_empty_tag_buffer(out); // per-struct tags
+        }
+        out.put_i32(0); // throttle_time_ms
+        put_empty_tag_buffer(out); // top-level tags (no SupportedFeatures yet)
+        return;
+    }
+
     out.put_i16(KafkaErrorCode::None.as_i16());
     out.put_i32(SUPPORTED_APIS.len() as i32);
     for (key, min_v, max_v) in SUPPORTED_APIS {

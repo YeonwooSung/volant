@@ -1169,12 +1169,30 @@ Binding: **[docs/PHASE50_SPEC.md](./docs/PHASE50_SPEC.md)**.
 - [x] v2 wire-identical to v1
 - [x] Integration tests (`phase50_api_versions`)
 
-**Honest limitations:** no flexible ApiVersions v3+; no client software fields;
-no SupportedFeatures / FinalizedFeatures; throttle always 0.
+**Honest limitations (at ship):** no flexible ApiVersions — closed by **Phase 51**.
 
 **Still deferred:** multi-lang clients, cargo-fuzz corpus CI, flexible modern
-admin (DescribeCluster / ListTransactions), true control-marker READ_COMMITTED,
-compact/flexible encoding for remaining APIs.
+admin, true control-marker READ_COMMITTED.
+
+### Phase 51 — Flexible wire foundation + ApiVersions v3 ✅
+
+**Goal:** Introduce KIP-482 compact/tag-buffer codec primitives and ship the
+first flexible API (**ApiVersions v3**).
+
+Binding: **[docs/PHASE51_SPEC.md](./docs/PHASE51_SPEC.md)**.
+
+- [x] Unsigned varint, compact string/array, tag buffer encode/decode
+- [x] Flexible request helper (`encode_request_flexible`) + header TAG_BUFFER
+- [x] ApiVersions 0–3 (v3 compact response; header stays v0)
+- [x] Parse ClientSoftwareName/Version (ignored); empty feature tags
+- [x] Integration tests (`phase51_flexible_api_versions`); codec unit tests
+
+**Honest limitations:** only ApiVersions is flexible; no SupportedFeatures;
+other APIs still classic-only.
+
+**Still deferred:** multi-lang clients, cargo-fuzz corpus CI, flexible
+Metadata/Produce/Fetch/admin, DescribeCluster / ListTransactions, true
+control-marker READ_COMMITTED.
 
 ---
 

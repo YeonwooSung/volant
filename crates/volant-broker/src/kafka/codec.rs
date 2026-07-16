@@ -800,7 +800,7 @@ pub fn encode_consumer_subscription(topics: &[&str]) -> BytesMut {
     out
 }
 
-/// Build a size-prefixed Kafka request for tests / tooling.
+/// Build a size-prefixed Kafka request for tests / tooling (classic header).
 pub fn encode_request(
     api_key: i16,
     api_version: i16,
@@ -818,6 +818,144 @@ pub fn encode_request(
     out.put_i32(inner.len() as i32);
     out.extend_from_slice(&inner);
     out
+}
+
+/// Build a size-prefixed flexible request (RequestHeader v2 + body).
+///
+/// ClientId stays classic nullable string; header ends with an empty TAG_BUFFER.
+pub fn encode_request_flexible(
+    api_key: i16,
+    api_version: i16,
+    correlation_id: i32,
+    client_id: Option<&str>,
+    body: &[u8],
+) -> BytesMut {
+    let mut inner = BytesMut::new();
+    inner.put_i16(api_key);
+    inner.put_i16(api_version);
+    inner.put_i32(correlation_id);
+    // ClientId is never compact in the request header (Kafka special case).
+    put_nullable_string(&mut inner, client_id);
+    put_empty_tag_buffer(&mut inner);
+    inner.extend_from_slice(body);
+    let mut out = BytesMut::with_capacity(4 + inner.len());
+    out.put_i32(inner.len() as i32);
+    out.extend_from_slice(&inner);
+    out
+}
+
+// ─── Flexible / compact encoding (KIP-482) ───────────────────────────────────
+
+/// Read an unsigned varint (protobuf-style, no zig-zag).
+pub fn read_unsigned_varint(src: &mut impl Buf) -> Result<u32> {
+    let mut shift = 0u32;
+    let mut result = 0u32;
+    loop {
+        if !src.has_remaining() {
+            return Err(Error::Protocol("truncated unsigned varint".into()));
+        }
+        let b = src.get_u8();
+        result |= u32::from(b & 0x7f) << shift;
+        if b & 0x80 == 0 {
+            return Ok(result);
+        }
+        shift += 7;
+        if shift > 28 {
+            return Err(Error::Protocol("unsigned varint too long".into()));
+        }
+    }
+}
+
+/// Write an unsigned varint.
+pub fn put_unsigned_varint(dst: &mut BytesMut, mut value: u32) {
+    loop {
+        if (value & !0x7f) == 0 {
+            dst.put_u8(value as u8);
+            break;
+        }
+        dst.put_u8(((value & 0x7f) | 0x80) as u8);
+        value >>= 7;
+    }
+}
+
+/// Write a compact (non-null) string: `uvarint(len+1) + bytes`.
+pub fn put_compact_string(dst: &mut BytesMut, s: &str) {
+    let b = s.as_bytes();
+    put_unsigned_varint(dst, (b.len() as u32).saturating_add(1));
+    dst.extend_from_slice(b);
+}
+
+/// Write a compact nullable string (`uvarint(0)` = null).
+pub fn put_compact_nullable_string(dst: &mut BytesMut, s: Option<&str>) {
+    match s {
+        None => put_unsigned_varint(dst, 0),
+        Some(v) => put_compact_string(dst, v),
+    }
+}
+
+/// Read a compact (non-null) string.
+pub fn get_compact_string(src: &mut impl Buf) -> Result<String> {
+    let n = read_unsigned_varint(src)?;
+    if n == 0 {
+        return Err(Error::Protocol("unexpected null compact string".into()));
+    }
+    let len = (n - 1) as usize;
+    if src.remaining() < len {
+        return Err(Error::Protocol("truncated compact string body".into()));
+    }
+    let mut buf = vec![0u8; len];
+    src.copy_to_slice(&mut buf);
+    String::from_utf8(buf).map_err(|e| Error::Protocol(format!("compact string utf8: {e}")))
+}
+
+/// Read a compact nullable string.
+pub fn get_compact_nullable_string(src: &mut impl Buf) -> Result<Option<String>> {
+    let n = read_unsigned_varint(src)?;
+    if n == 0 {
+        return Ok(None);
+    }
+    let len = (n - 1) as usize;
+    if src.remaining() < len {
+        return Err(Error::Protocol("truncated compact nullable string".into()));
+    }
+    let mut buf = vec![0u8; len];
+    src.copy_to_slice(&mut buf);
+    let s = String::from_utf8(buf)
+        .map_err(|e| Error::Protocol(format!("compact string utf8: {e}")))?;
+    Ok(Some(s))
+}
+
+/// Write compact array length (`uvarint(n+1)`; `0` = null).
+pub fn put_compact_array_len(dst: &mut BytesMut, n: usize) {
+    put_unsigned_varint(dst, (n as u32).saturating_add(1));
+}
+
+/// Read compact array length. Returns `None` for null array.
+pub fn get_compact_array_len(src: &mut impl Buf) -> Result<Option<usize>> {
+    let n = read_unsigned_varint(src)?;
+    if n == 0 {
+        return Ok(None);
+    }
+    Ok(Some((n - 1) as usize))
+}
+
+/// Write an empty TAG_BUFFER (`uvarint(0)`).
+pub fn put_empty_tag_buffer(dst: &mut BytesMut) {
+    put_unsigned_varint(dst, 0);
+}
+
+/// Skip a TAG_BUFFER (any number of tagged fields).
+pub fn skip_tag_buffer(src: &mut impl Buf) -> Result<()> {
+    let n = read_unsigned_varint(src)?;
+    for _ in 0..n {
+        let _tag = read_unsigned_varint(src)?;
+        let len = read_unsigned_varint(src)? as usize;
+        if src.remaining() < len {
+            return Err(Error::Protocol("truncated tagged field body".into()));
+        }
+        src.advance(len);
+    }
+    Ok(())
 }
 
 #[cfg(test)]
@@ -871,6 +1009,50 @@ mod tests {
         assert_eq!(hdr.api_key, 18);
         assert_eq!(hdr.correlation_id, 7);
         assert_eq!(hdr.client_id.as_deref(), Some("test"));
+    }
+
+    #[test]
+    fn unsigned_varint_roundtrip() {
+        let cases = [0u32, 1, 127, 128, 255, 300, 16_383, 16_384, u32::MAX / 2];
+        for v in cases {
+            let mut buf = BytesMut::new();
+            put_unsigned_varint(&mut buf, v);
+            let mut src = buf.freeze();
+            assert_eq!(read_unsigned_varint(&mut src).unwrap(), v);
+            assert_eq!(src.remaining(), 0);
+        }
+    }
+
+    #[test]
+    fn compact_string_and_array_roundtrip() {
+        let mut buf = BytesMut::new();
+        put_compact_string(&mut buf, "hello");
+        put_compact_nullable_string(&mut buf, None);
+        put_compact_nullable_string(&mut buf, Some(""));
+        put_compact_array_len(&mut buf, 3);
+        put_empty_tag_buffer(&mut buf);
+
+        let mut src = buf.freeze();
+        assert_eq!(get_compact_string(&mut src).unwrap(), "hello");
+        assert_eq!(get_compact_nullable_string(&mut src).unwrap(), None);
+        assert_eq!(get_compact_nullable_string(&mut src).unwrap().as_deref(), Some(""));
+        assert_eq!(get_compact_array_len(&mut src).unwrap(), Some(3));
+        skip_tag_buffer(&mut src).unwrap();
+        assert_eq!(src.remaining(), 0);
+    }
+
+    #[test]
+    fn flexible_request_header_has_tag_buffer() {
+        let body = encode_request_flexible(18, 3, 9, Some("flex"), &[]);
+        let mut buf = body;
+        let req = try_decode_request(&mut buf).unwrap().unwrap();
+        let mut src = req;
+        let hdr = decode_request_header(&mut src).unwrap();
+        assert_eq!(hdr.api_key, 18);
+        assert_eq!(hdr.api_version, 3);
+        assert_eq!(hdr.client_id.as_deref(), Some("flex"));
+        skip_tag_buffer(&mut src).unwrap();
+        assert_eq!(src.remaining(), 0);
     }
 
     #[test]

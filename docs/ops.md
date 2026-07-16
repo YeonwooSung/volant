@@ -127,7 +127,7 @@ Supported APIs:
 
 | API | Versions | Notes |
 |-----|----------|-------|
-| ApiVersions | 0–2 | Advertises supported keys/versions; v1+ trailing throttle; flexible v3+ unsupported |
+| ApiVersions | 0–3 | v0–2 classic; **v3 flexible** (compact api_keys + tag buffers); software name/version ignored; no feature tags |
 | Metadata | 0–8 | Classic through v8: rack, cluster_id=`volant`, throttle 0, empty offline_replicas, leader_epoch=-1, optional authorized-ops (flexible v9+ unsupported) |
 | OffsetForLeaderEpoch | 0–3 | End offset by leader epoch; no epoch history (eligible → HWM); fencing via current_leader_epoch |
 | Produce | 0–8 | MessageSet magic 0/1 **or** RecordBatch magic 2 (auto-detect); compression + idempotent PID/seq; v5+ log_start_offset; v8+ empty record_errors; flexible v9+ unsupported |
@@ -184,7 +184,9 @@ Limitations:
   re-upsert. When SCRAM users exist (`--scram-user` / `volant user create`),
   SASL is **required** before other APIs. Shared-token Auth does not apply on
   the Kafka port. Principal after SASL = username (feeds ACLs).
-- **No** flexible (compact) Kafka versions.
+- Flexible (compact) Kafka versions: **ApiVersions v3 only** so far (KIP-482
+  primitives). All other APIs remain classic; clients must negotiate classic
+  max versions for Produce/Fetch/admin/group APIs.
 - Consumer assignment is **coordinator-driven** (not Kafka leader assignor).
 - CreateTopics / CreatePartitions ignore Kafka replica assignment arrays.
 - DescribeConfigs is TOPIC-only (no broker configs).
@@ -206,7 +208,7 @@ Limitations:
 - Prefer binding to localhost / private networks; leave disabled in production
   unless you need Kafka-protocol discovery.
 
-See [PHASE23_SPEC.md](./PHASE23_SPEC.md) … [PHASE50_SPEC.md](./PHASE50_SPEC.md).
+See [PHASE23_SPEC.md](./PHASE23_SPEC.md) … [PHASE51_SPEC.md](./PHASE51_SPEC.md).
 
 ## TLS (Phase 7 listen + Phase 9 verification / inter-broker)
 

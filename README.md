@@ -263,8 +263,10 @@ record_errors + error_message (v8+); flexible v9+ deferred.
 **Phase 49:** Kafka Fetch classic 0–11 — log_start_offset, session header,
 leader-epoch fence, preferred_read_replica=-1; flexible v12+ deferred.
 
-**Phase 50:** Kafka ApiVersions classic 0–2 — trailing throttle on v1–2;
-flexible v3+ (client software / features) deferred.
+**Phase 50:** Kafka ApiVersions classic 0–2 — trailing throttle on v1–2.
+
+**Phase 51:** Flexible wire foundation (KIP-482) + ApiVersions v3 compact
+encoding; first flexible API on the shim.
 
 **Still deferred:** multi-language clients, chaos-mesh / cargo-fuzz corpus CI.
 
