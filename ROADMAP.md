@@ -1394,6 +1394,31 @@ READ_COMMITTED.
 
 ---
 
+### Phase 62 — Flexible transaction APIs ✅
+
+**Goal:** First flexible versions of InitProducerId and the classic txn APIs
+for modern transactional producers (KIP-482).
+
+Binding: **[docs/PHASE62_SPEC.md](./docs/PHASE62_SPEC.md)**.
+
+- [x] InitProducerId 0–2 (v2 flexible; classic 0–1 unchanged)
+- [x] AddPartitionsToTxn 0–3 (v3 flexible; classic 0–2 unchanged)
+- [x] AddOffsetsToTxn 0–3 (v3 flexible)
+- [x] EndTxn 0–3 (v3 flexible)
+- [x] TxnOffsetCommit 0–3 (v3 flexible; member/generation ignored)
+- [x] Response header v1 for those flexible versions
+- [x] Integration tests (`phase62_flexible_transactions`)
+
+**Honest limitations:** no Init v3+ resume/2PC; no AddPartitions v4+ broker-batch;
+no EndTxn v5 pid/epoch; no TxnOffsetCommit TopicId; empty tags only; same
+buffer-until-commit honesty as classic.
+
+**Still deferred:** multi-lang clients, cargo-fuzz corpus CI, Metadata TopicId,
+DescribeCluster / ListTransactions, true control-marker READ_COMMITTED,
+higher KIP-890 txn versions.
+
+---
+
 ## Performance targets (aspirational)
 
 | Metric | Single node target | Notes |

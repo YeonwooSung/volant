@@ -115,7 +115,7 @@ async fn api_versions_includes_init_producer_id() {
             found = Some((min, max));
         }
     }
-    assert_eq!(found, Some((0, 1)));
+    assert_eq!(found, Some((0, 2))); // Phase 62 flexible v2
 
     server.abort();
     let _ = std::fs::remove_dir_all(&dir);

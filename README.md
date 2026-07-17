@@ -296,6 +296,9 @@ CreatePartitions v2.
 **Phase 61:** Flexible configs — DescribeConfigs v4, AlterConfigs v2,
 IncrementalAlterConfigs v1.
 
+**Phase 62:** Flexible transaction APIs — InitProducerId v2, AddPartitionsToTxn /
+AddOffsetsToTxn / EndTxn / TxnOffsetCommit v3; classic paths unchanged.
+
 **Still deferred:** multi-language clients, chaos-mesh / cargo-fuzz corpus CI.
 
 ### Networked client (library)

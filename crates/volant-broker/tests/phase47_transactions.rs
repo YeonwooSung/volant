@@ -186,11 +186,11 @@ async fn api_versions_txn_classic_max_v2() {
         let max = src.get_i16();
         found.insert(key, (min, max));
     }
-    assert_eq!(found.get(&22), Some(&(0, 1))); // InitProducerId stays classic max 1
-    assert_eq!(found.get(&24), Some(&(0, 2))); // AddPartitionsToTxn
-    assert_eq!(found.get(&25), Some(&(0, 2))); // AddOffsetsToTxn
-    assert_eq!(found.get(&26), Some(&(0, 2))); // EndTxn
-    assert_eq!(found.get(&28), Some(&(0, 2))); // TxnOffsetCommit
+    assert_eq!(found.get(&22), Some(&(0, 2))); // InitProducerId (Phase 62 flex v2)
+    assert_eq!(found.get(&24), Some(&(0, 3))); // AddPartitionsToTxn (Phase 62 flex v3)
+    assert_eq!(found.get(&25), Some(&(0, 3))); // AddOffsetsToTxn
+    assert_eq!(found.get(&26), Some(&(0, 3))); // EndTxn
+    assert_eq!(found.get(&28), Some(&(0, 3))); // TxnOffsetCommit
 
     server.abort();
     let _ = std::fs::remove_dir_all(&dir);
@@ -370,22 +370,24 @@ async fn txn_offset_commit_v2_leader_epoch_applies_on_commit() {
 }
 
 #[tokio::test]
-async fn txn_api_v3_unsupported_version() {
-    let dir = temp_dir("v3");
+async fn txn_api_v4_unsupported_version() {
+    let dir = temp_dir("v4");
     let broker = Arc::new(Broker::new(StorageConfig {
         data_dir: dir.clone(),
         ..StorageConfig::default()
     }));
     let (addr, server) = boot_kafka(Arc::clone(&broker)).await;
 
-    // Empty-ish body is fine — dispatch rejects version before full parse.
+    // v4+ broker-batch remains unsupported (Phase 62 max is flexible v3).
+    // Flexible request header → response header v1 + UnsupportedVersion.
     let resp = rpc(
         &addr,
-        encode_request(24, 3, 9, Some("c"), &add_partitions_body("x", 1, 0, "t", &[0])),
+        volant_broker::kafka::codec::encode_request_flexible(24, 4, 9, Some("c"), &[]),
     )
     .await;
     let mut src = resp.freeze();
     assert_eq!(src.get_i32(), 9);
+    volant_broker::kafka::codec::skip_tag_buffer(&mut src).unwrap();
     assert_eq!(src.get_i16(), 35); // UNSUPPORTED_VERSION
 
     server.abort();

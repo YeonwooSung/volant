@@ -132,12 +132,12 @@ Supported APIs:
 | OffsetForLeaderEpoch | 0–3 | End offset by leader epoch; no epoch history (eligible → HWM); fencing via current_leader_epoch |
 | Produce | 0–9 | Classic 0–8; **v9 flexible** compact transactional_id/topics/records + response header v1; MessageSet or RecordBatch; compression + idempotent PID/seq; empty record_errors; v10 KIP-951 unsupported |
 | Fetch | 0–12 | Classic 0–11; **v12 flexible** compact topics/records + response header v1; v0–3 MessageSet + v4+ RecordBatch (default lz4); session header (no real sessions); leader-epoch fence; preferred_read_replica=-1; TopicId v13+ unsupported |
-| InitProducerId | 0–1 | plain + transactional_id fencing; timeout ignored |
+| InitProducerId | 0–2 | Classic 0–1; **v2 flexible** + response header v1; transactional_id fencing; timeout ignored; v3+ resume unsupported |
 | FindCoordinator | 0–4 | Classic 0–2; **v3 flexible** compact key/host; **v4 batch** CoordinatorKeys; all keys → this broker; response header v1 for v3+ |
-| AddPartitionsToTxn | 0–2 | opens txn (Kafka has no BeginTxn); v1–2 wire-identical to v0 |
-| AddOffsetsToTxn | 0–2 | registers group for transactional offsets; v1–2 = v0 |
-| EndTxn | 0–2 | commit/abort; flushes buffered produces + offsets; v1–2 = v0 |
-| TxnOffsetCommit | 0–2 | buffers offsets until EndTxn commit; v2+ leader_epoch ignored |
+| AddPartitionsToTxn | 0–3 | Classic 0–2; **v3 flexible** + response header v1; opens txn; v4+ broker-batch unsupported |
+| AddOffsetsToTxn | 0–3 | Classic 0–2; **v3 flexible** + response header v1; registers group for transactional offsets |
+| EndTxn | 0–3 | Classic 0–2; **v3 flexible** + response header v1; commit/abort flushes buffered produces + offsets |
+| TxnOffsetCommit | 0–3 | Classic 0–2; **v3 flexible** + response header v1; buffers until EndTxn; v2+ leader_epoch + v3 member/generation ignored |
 | SaslHandshake | 0–1 | mechanisms: PLAIN, SCRAM-SHA-256, SCRAM-SHA-512 |
 | SaslAuthenticate | 0–1 | PLAIN / SCRAM-SHA-256 / SCRAM-SHA-512 against Volant SCRAM store |
 | ListOffsets | 0–5 | -1 latest / -2 earliest; v2+ isolation (LSO≡HWM) + throttle; v4+ leader-epoch fencing; flexible v6+ unsupported |
