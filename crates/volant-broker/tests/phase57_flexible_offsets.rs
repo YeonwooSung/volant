@@ -148,8 +148,8 @@ async fn api_versions_offset_flex_maxes() {
         let max_v = src.get_i16();
         found.insert(key, (min_v, max_v));
     }
-    assert_eq!(found.get(&8), Some(&(0, 8)));
-    assert_eq!(found.get(&9), Some(&(0, 8))); // Phase 58 multi-group
+    assert_eq!(found.get(&8), Some(&(0, 10))); // Phase 72 TopicId
+    assert_eq!(found.get(&9), Some(&(0, 10))); // Phase 72 TopicId
     server.abort();
     let _ = std::fs::remove_dir_all(&dir);
 }
@@ -313,8 +313,8 @@ async fn offset_commit_v7_still_classic() {
 }
 
 #[tokio::test]
-async fn offset_commit_v9_unsupported_header_v1() {
-    let dir = temp_dir("v9");
+async fn offset_commit_v11_unsupported_header_v1() {
+    let dir = temp_dir("v11");
     let broker = Arc::new(Broker::new(StorageConfig {
         data_dir: dir.clone(),
         ..StorageConfig::default()
@@ -323,7 +323,7 @@ async fn offset_commit_v9_unsupported_header_v1() {
 
     let resp = rpc(
         &addr,
-        encode_request_flexible(8, 9, 1, Some("c"), &[]),
+        encode_request_flexible(8, 11, 1, Some("c"), &[]),
     )
     .await;
     let mut src = resp.freeze();

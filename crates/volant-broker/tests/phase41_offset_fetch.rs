@@ -114,7 +114,7 @@ async fn api_versions_offset_fetch_max_5() {
             found = Some((min_v, max_v));
         }
     }
-    assert_eq!(found, Some((0, 8))); // Phase 58 multi-group v8
+    assert_eq!(found, Some((0, 10))); // Phase 72 TopicId
     server.abort();
     let _ = std::fs::remove_dir_all(&dir);
 }

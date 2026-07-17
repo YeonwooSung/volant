@@ -1613,7 +1613,28 @@ Binding: **[docs/PHASE71_SPEC.md](./docs/PHASE71_SPEC.md)**.
 record_errors empty; no v14+.
 
 **Still deferred:** multi-lang clients, cargo-fuzz corpus CI, true control-marker
-READ_COMMITTED, higher KIP-890 txn versions.
+READ_COMMITTED, higher KIP-890 txn versions, OffsetCommit/Fetch TopicId.
+OffsetCommit/Fetch TopicId closed by **Phase 72**.
+
+---
+
+### Phase 72 — OffsetCommit/OffsetFetch TopicId (v9–10) ✅
+
+**Goal:** Modern clients can commit and fetch consumer offsets by Kafka TopicId
+UUID (KIP-516), and negotiate OffsetFetch v9 MemberId fields without rejection.
+
+Binding: **[docs/PHASE72_SPEC.md](./docs/PHASE72_SPEC.md)**.
+
+- [x] OffsetCommit 0–10 (v9 wire≈v8 name path; v10 TopicId request/response)
+- [x] OffsetFetch 0–10 (v9 MemberId+MemberEpoch ignored; v10 TopicId)
+- [x] Unknown / non-Volant UUID → UnknownTopicId (100) per partition
+- [x] Integration tests (`phase72_offset_topic_id`)
+
+**Honest limitations:** MemberId/Epoch ignored (no KIP-848); RequireStable
+ignored; leader_epoch always -1 on fetch; deterministic UUID only; no v11+.
+
+**Still deferred:** multi-lang clients, cargo-fuzz corpus CI, true control-marker
+READ_COMMITTED, higher KIP-890 txn versions, ListOffsets TopicId, Metadata v13+.
 
 ---
 

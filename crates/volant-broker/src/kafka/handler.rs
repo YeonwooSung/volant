@@ -436,7 +436,7 @@ fn dispatch_kafka(broker: &Broker, body: bytes::Bytes, conn: &mut KafkaConnState
             }
             encode_leave_group(broker, &mut src, &mut out, hdr.api_version, principal);
         }
-        Some(ApiKey::OffsetCommit) if (0..=8).contains(&hdr.api_version) => {
+        Some(ApiKey::OffsetCommit) if (0..=10).contains(&hdr.api_version) => {
             if hdr.api_version >= 8 {
                 if let Err(e) = skip_tag_buffer(&mut src) {
                     debug!(error = %e, "offset commit flexible header tag buffer");
@@ -444,7 +444,7 @@ fn dispatch_kafka(broker: &Broker, body: bytes::Bytes, conn: &mut KafkaConnState
             }
             encode_offset_commit(broker, &mut src, &mut out, hdr.api_version, principal);
         }
-        Some(ApiKey::OffsetFetch) if (0..=8).contains(&hdr.api_version) => {
+        Some(ApiKey::OffsetFetch) if (0..=10).contains(&hdr.api_version) => {
             if hdr.api_version >= 6 {
                 if let Err(e) = skip_tag_buffer(&mut src) {
                     debug!(error = %e, "offset fetch flexible header tag buffer");
@@ -5304,16 +5304,18 @@ fn encode_offset_commit(
     version: i16,
     principal: &str,
 ) {
-    // OffsetCommit classic v0–7 / flexible v8:
+    // OffsetCommit classic v0–7 / flexible v8–10:
     //   v0: group_id, [topic [partition, offset, metadata]]
     //   v1: + generation, member_id; partition commit_timestamp
     //   v2–4: + retention_time_ms (no commit_timestamp)
     //   v5: no retention_time
     //   v6+: + committed_leader_epoch per partition (ignored; not stored)
     //   v7+: + group_instance_id (nullable; maps to static: when member_id empty)
-    //   v8+: compact strings/arrays + TAG_BUFFER; response header v1
+    //   v8–9: compact strings/arrays + TAG_BUFFER; response header v1
+    //   v10: TopicId UUID instead of Name (request + response)
     // Response: throttle_time_ms (v3+), [topic [partition, error]] (+ tags when flex)
     let flex = version >= 8;
+    let use_topic_id = version >= 10;
     let empty = |out: &mut BytesMut| {
         if version >= 3 {
             out.put_i32(0); // throttle
@@ -5407,8 +5409,12 @@ fn encode_offset_commit(
         );
 
     struct TopicReq {
+        /// Resolved topic name (empty when unknown TopicId).
         topic: String,
+        /// Request UUID when v10+ (echoed on response).
+        uuid: [u8; 16],
         partitions: Vec<i32>,
+        unknown_topic_id: bool,
     }
     let mut parsed: Vec<TopicReq> = Vec::new();
     let mut entries: Vec<(String, u32, u64, String)> = Vec::new();
@@ -5423,9 +5429,22 @@ fn encode_offset_commit(
             }
         };
         for _ in 0..topic_count {
-            let topic = match get_compact_string(src) {
-                Ok(t) => t,
-                Err(_) => break,
+            let (topic, uuid, unknown_topic_id) = if use_topic_id {
+                let uuid = match get_uuid(src) {
+                    Ok(u) => u,
+                    Err(_) => break,
+                };
+                match parse_volant_topic_uuid(&uuid)
+                    .and_then(|id| broker.topic_name_by_id(id))
+                {
+                    Some(name) => (name, uuid, false),
+                    None => (String::new(), uuid, true),
+                }
+            } else {
+                match get_compact_string(src) {
+                    Ok(t) => (t, KAFKA_UUID_ZERO, false),
+                    Err(_) => break,
+                }
             };
             let part_count = match get_compact_array_len(src) {
                 Ok(Some(n)) => n,
@@ -5448,11 +5467,18 @@ fn encode_offset_commit(
                     .flatten()
                     .unwrap_or_default();
                 let _ = skip_tag_buffer(src); // partition tags
-                entries.push((topic.clone(), partition as u32, offset, metadata));
+                if !unknown_topic_id {
+                    entries.push((topic.clone(), partition as u32, offset, metadata));
+                }
                 partitions.push(partition);
             }
             let _ = skip_tag_buffer(src); // topic tags
-            parsed.push(TopicReq { topic, partitions });
+            parsed.push(TopicReq {
+                topic,
+                uuid,
+                partitions,
+                unknown_topic_id,
+            });
         }
         let _ = skip_tag_buffer(src); // request top-level tags
     } else {
@@ -5498,12 +5524,23 @@ fn encode_offset_commit(
                 entries.push((topic.clone(), partition as u32, offset, metadata));
                 partitions.push(partition);
             }
-            parsed.push(TopicReq { topic, partitions });
+            parsed.push(TopicReq {
+                topic,
+                uuid: KAFKA_UUID_ZERO,
+                partitions,
+                unknown_topic_id: false,
+            });
         }
     }
 
+    let has_unknown_id = parsed.iter().any(|t| t.unknown_topic_id);
     let kerr = if auth_denied {
         KafkaErrorCode::GroupAuthorizationFailed.as_i16()
+    } else if entries.is_empty() && has_unknown_id {
+        // All topics unknown by id — still write per-partition UnknownTopicId below.
+        KafkaErrorCode::None.as_i16()
+    } else if entries.is_empty() {
+        KafkaErrorCode::None.as_i16()
     } else {
         match broker
             .groups()
@@ -5520,11 +5557,20 @@ fn encode_offset_commit(
     if flex {
         put_compact_array_len(out, parsed.len());
         for t in parsed {
-            put_compact_string(out, &t.topic);
+            if use_topic_id {
+                put_uuid(out, &t.uuid);
+            } else {
+                put_compact_string(out, &t.topic);
+            }
             put_compact_array_len(out, t.partitions.len());
             for p in t.partitions {
                 out.put_i32(p);
-                out.put_i16(kerr);
+                let pe = if t.unknown_topic_id {
+                    KafkaErrorCode::UnknownTopicId.as_i16()
+                } else {
+                    kerr
+                };
+                out.put_i16(pe);
                 put_empty_tag_buffer(out); // partition tags
             }
             put_empty_tag_buffer(out); // topic tags
@@ -5550,14 +5596,16 @@ fn encode_offset_fetch(
     version: i16,
     principal: &str,
 ) {
-    // OffsetFetch classic v0–5 / flexible v6–7 (single-group) / multi-group v8:
+    // OffsetFetch classic v0–5 / flexible v6–7 (single-group) / multi-group v8–10:
     //   v0–7: group_id, topics nullable (v2+: null=all), require_stable (v7+)
     //   v8+: Groups[] multi-group (no top-level GroupId/Topics); RequireStable
+    //   v9+: MemberId + MemberEpoch per group (parsed, ignored)
+    //   v10: TopicId UUID instead of Name in Topics[]
     // Response v0–7: throttle (v3+), topics[], top-level error (v2+)
     // Response v8+: throttle, Groups[{ GroupId, Topics, ErrorCode, tags }], tags
     // Flexible: compact arrays/strings + TAG_BUFFER; response header v1
     if version >= 8 {
-        encode_offset_fetch_multi(broker, src, out, principal);
+        encode_offset_fetch_multi(broker, src, out, version, principal);
         return;
     }
 
@@ -5818,21 +5866,31 @@ fn encode_offset_fetch(
     finish(out, KafkaErrorCode::None.as_i16());
 }
 
-/// OffsetFetch v8 multi-group flexible body.
+/// OffsetFetch v8–10 multi-group flexible body.
 fn encode_offset_fetch_multi(
     broker: &Broker,
     src: &mut impl Buf,
     out: &mut BytesMut,
+    version: i16,
     principal: &str,
 ) {
-    // Request: Groups[{ GroupId, Topics nullable, TAG }], RequireStable, TAG
-    // Response: Throttle, Groups[{ GroupId, Topics, ErrorCode, TAG }], TAG
+    // Request: Groups[{ GroupId, MemberId+Epoch (v9+), Topics nullable, TAG }],
+    //          RequireStable, TAG
+    // Response: Throttle, Groups[{ GroupId, Topics (name|TopicId), ErrorCode, TAG }], TAG
+    let use_topic_id = version >= 10;
+
+    struct TopicReq {
+        name: String,
+        uuid: [u8; 16],
+        parts: Vec<i32>,
+        unknown_topic_id: bool,
+    }
     struct GroupReq {
         group_id: String,
         list_all: bool,
         list_none: bool,
         query: Vec<(String, u32)>,
-        requested: Vec<(String, Vec<i32>)>,
+        requested: Vec<TopicReq>,
     }
 
     let mut groups: Vec<GroupReq> = Vec::new();
@@ -5851,16 +5909,36 @@ fn encode_offset_fetch_multi(
             Ok(g) => g,
             Err(_) => break,
         };
+        // v9+: MemberId (nullable) + MemberEpoch (ignored — no KIP-848 membership).
+        if version >= 9 {
+            let _member_id = get_compact_nullable_string(src);
+            if src.remaining() >= 4 {
+                let _member_epoch = src.get_i32();
+            }
+        }
         let mut query: Vec<(String, u32)> = Vec::new();
-        let mut requested: Vec<(String, Vec<i32>)> = Vec::new();
+        let mut requested: Vec<TopicReq> = Vec::new();
         let (list_all, list_none) = match get_compact_array_len(src) {
             Ok(None) => (true, false),
             Ok(Some(0)) => (false, true),
             Ok(Some(n)) => {
                 for _ in 0..n {
-                    let topic = match get_compact_string(src) {
-                        Ok(t) => t,
-                        Err(_) => break,
+                    let (name, uuid, unknown) = if use_topic_id {
+                        let uuid = match get_uuid(src) {
+                            Ok(u) => u,
+                            Err(_) => break,
+                        };
+                        match parse_volant_topic_uuid(&uuid)
+                            .and_then(|id| broker.topic_name_by_id(id))
+                        {
+                            Some(n) => (n, uuid, false),
+                            None => (String::new(), uuid, true),
+                        }
+                    } else {
+                        match get_compact_string(src) {
+                            Ok(t) => (t, KAFKA_UUID_ZERO, false),
+                            Err(_) => break,
+                        }
                     };
                     let pc = match get_compact_array_len(src) {
                         Ok(Some(p)) => p,
@@ -5873,10 +5951,17 @@ fn encode_offset_fetch_multi(
                         }
                         let p = src.get_i32();
                         parts.push(p);
-                        query.push((topic.clone(), p as u32));
+                        if !unknown {
+                            query.push((name.clone(), p as u32));
+                        }
                     }
                     let _ = skip_tag_buffer(src); // topic tags
-                    requested.push((topic, parts));
+                    requested.push(TopicReq {
+                        name,
+                        uuid,
+                        parts,
+                        unknown_topic_id: unknown,
+                    });
                 }
                 (false, false)
             }
@@ -5948,7 +6033,17 @@ fn encode_offset_fetch_multi(
             }
             put_compact_array_len(out, by_topic.len());
             for (topic, parts) in by_topic {
-                put_compact_string(out, &topic);
+                if use_topic_id {
+                    let uuid = broker
+                        .metadata(Some(&[TopicName::new(topic.clone())]))
+                        .topics
+                        .first()
+                        .map(|t| volant_topic_uuid(t.topic_id.0))
+                        .unwrap_or(KAFKA_UUID_ZERO);
+                    put_uuid(out, &uuid);
+                } else {
+                    put_compact_string(out, &topic);
+                }
                 put_compact_array_len(out, parts.len());
                 for (p, off, meta) in parts {
                     out.put_i32(p as i32);
@@ -5962,13 +6057,26 @@ fn encode_offset_fetch_multi(
             }
         } else {
             put_compact_array_len(out, g.requested.len());
-            for (topic, parts) in &g.requested {
-                put_compact_string(out, topic);
-                put_compact_array_len(out, parts.len());
-                for &p in parts {
+            for t in &g.requested {
+                if use_topic_id {
+                    put_uuid(out, &t.uuid);
+                } else {
+                    put_compact_string(out, &t.name);
+                }
+                put_compact_array_len(out, t.parts.len());
+                for &p in &t.parts {
+                    if t.unknown_topic_id {
+                        out.put_i32(p);
+                        out.put_i64(-1);
+                        out.put_i32(-1);
+                        put_compact_nullable_string(out, None);
+                        out.put_i16(KafkaErrorCode::UnknownTopicId.as_i16());
+                        put_empty_tag_buffer(out);
+                        continue;
+                    }
                     let entry = fetched
                         .iter()
-                        .find(|e| e.topic == *topic && e.partition == p as u32);
+                        .find(|e| e.topic == t.name && e.partition == p as u32);
                     let (off, meta) = match entry {
                         Some(e) if e.offset == u64::MAX => (-1i64, e.metadata.as_str()),
                         Some(e) => (e.offset as i64, e.metadata.as_str()),

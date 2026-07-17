@@ -324,6 +324,10 @@ v5 ErrorMessage + v6 delete-by-TopicId.
 **Phase 71:** Produce TopicId v13 — UUID topics (v10–12 name path unchanged);
 unknown id → UnknownTopicId; KIP-951 tags empty.
 
+**Phase 72:** OffsetCommit/OffsetFetch v9–10 — OffsetCommit v9≈v8 name path,
+v10 TopicId; OffsetFetch v9 MemberId+MemberEpoch (ignored), v10 TopicId;
+unknown id → UnknownTopicId.
+
 **Still deferred:** multi-language clients, chaos-mesh / cargo-fuzz corpus CI.
 
 ### Networked client (library)

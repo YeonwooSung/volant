@@ -112,7 +112,7 @@ fn fetch_v8_multi(groups: &[(&str, GroupTopics<'_>)], require_stable: bool) -> B
 }
 
 #[tokio::test]
-async fn api_versions_offset_fetch_max_8() {
+async fn api_versions_offset_fetch_max_10() {
     let dir = temp_dir("api");
     let broker = Arc::new(Broker::new(StorageConfig {
         data_dir: dir.clone(),
@@ -132,7 +132,7 @@ async fn api_versions_offset_fetch_max_8() {
             found = Some((min_v, max_v));
         }
     }
-    assert_eq!(found, Some((0, 8)));
+    assert_eq!(found, Some((0, 10))); // Phase 72 TopicId
     server.abort();
     let _ = std::fs::remove_dir_all(&dir);
 }
@@ -411,8 +411,8 @@ async fn offset_fetch_v7_still_single_group() {
 }
 
 #[tokio::test]
-async fn offset_fetch_v9_unsupported_header_v1() {
-    let dir = temp_dir("v9");
+async fn offset_fetch_v11_unsupported_header_v1() {
+    let dir = temp_dir("v11");
     let broker = Arc::new(Broker::new(StorageConfig {
         data_dir: dir.clone(),
         ..StorageConfig::default()
@@ -421,7 +421,7 @@ async fn offset_fetch_v9_unsupported_header_v1() {
 
     let resp = rpc(
         &addr,
-        encode_request_flexible(9, 9, 1, Some("c"), &[]),
+        encode_request_flexible(9, 11, 1, Some("c"), &[]),
     )
     .await;
     let mut src = resp.freeze();
