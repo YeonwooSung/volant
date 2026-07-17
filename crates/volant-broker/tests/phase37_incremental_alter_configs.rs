@@ -123,7 +123,7 @@ async fn api_versions_includes_incremental_alter_configs() {
             found = Some((min_v, max_v));
         }
     }
-    assert_eq!(found, Some((0, 0)));
+    assert_eq!(found, Some((0, 1))); // Phase 61 flex v1
     server.abort();
     let _ = std::fs::remove_dir_all(&dir);
 }

@@ -1369,9 +1369,28 @@ Binding: **[docs/PHASE60_SPEC.md](./docs/PHASE60_SPEC.md)**.
 **Honest limitations:** null CreateTopics configs; no TopicId; no Delete
 ErrorMessage; empty tags only.
 
-**Still deferred:** multi-lang clients, cargo-fuzz corpus CI, flexible
-configs/txn, Metadata TopicId, DescribeCluster / ListTransactions, true
-control-marker READ_COMMITTED.
+**Still deferred:** multi-lang clients, cargo-fuzz corpus CI, flexible txn,
+Metadata TopicId, DescribeCluster / ListTransactions, true control-marker
+READ_COMMITTED. Configs flex closed by **Phase 61**.
+
+### Phase 61 — Flexible configs ✅
+
+**Goal:** First flexible versions of DescribeConfigs / AlterConfigs /
+IncrementalAlterConfigs for modern admin clients.
+
+Binding: **[docs/PHASE61_SPEC.md](./docs/PHASE61_SPEC.md)**.
+
+- [x] DescribeConfigs 0–4 (v4 flexible; classic 0–3 unchanged)
+- [x] AlterConfigs 0–2 (v2 flexible; classic 0–1 unchanged)
+- [x] IncrementalAlterConfigs 0–1 (v1 flexible; classic v0 unchanged)
+- [x] Response header v1 for those flexible versions
+- [x] Integration tests (`phase61_flexible_configs`)
+
+**Honest limitations:** TOPIC only; empty synonyms; no APPEND/SUBTRACT; empty tags only.
+
+**Still deferred:** multi-lang clients, cargo-fuzz corpus CI, flexible txn,
+Metadata TopicId, DescribeCluster / ListTransactions, true control-marker
+READ_COMMITTED.
 
 ---
 

@@ -153,9 +153,9 @@ Supported APIs:
 | DescribeGroups | 0–5 | Classic 0–4; **v5 flexible** + response header v1; state + members; throttle v1+; authorized_ops v3+; group_instance_id v4+ (from `static:`); ErrorMessage v6 unsupported |
 | DeleteGroups | 0–2 | Classic 0–1; **v2 flexible** + response header v1; empty groups only (`NON_EMPTY_GROUP` if live); throttle all versions; ErrorMessage v3 unsupported |
 | CreatePartitions | 0–2 | Classic 0–1; **v2 flexible** + response header v1; throttle all versions; validate_only dry-run |
-| DescribeConfigs | 0–3 | TOPIC resources; throttle; v1+ config_source + empty synonyms; v3+ type/docs |
-| AlterConfigs | 0–1 | TOPIC resources; throttle all versions; validate_only |
-| IncrementalAlterConfigs | 0 | SET/DELETE on TOPIC keys |
+| DescribeConfigs | 0–4 | Classic 0–3; **v4 flexible** + response header v1; TOPIC resources; throttle; v1+ config_source + empty synonyms; v3+ type/docs |
+| AlterConfigs | 0–2 | Classic 0–1; **v2 flexible** + response header v1; TOPIC resources; throttle all versions; validate_only |
+| IncrementalAlterConfigs | 0–1 | Classic v0; **v1 flexible** + response header v1; SET/DELETE on TOPIC keys; APPEND/SUBTRACT unsupported |
 | DeleteRecords | 0–1 | whole sealed segments only (Phase 14) |
 | DescribeAcls | 0–1 | filter → Volant ACL list |
 | CreateAcls | 0–1 | maps Kafka types/ops; enables ACL store |

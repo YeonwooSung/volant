@@ -293,6 +293,9 @@ DeleteGroups v2 (compact + response header v1).
 **Phase 60:** Flexible topic admin — CreateTopics v5, DeleteTopics v4,
 CreatePartitions v2.
 
+**Phase 61:** Flexible configs — DescribeConfigs v4, AlterConfigs v2,
+IncrementalAlterConfigs v1.
+
 **Still deferred:** multi-language clients, chaos-mesh / cargo-fuzz corpus CI.
 
 ### Networked client (library)

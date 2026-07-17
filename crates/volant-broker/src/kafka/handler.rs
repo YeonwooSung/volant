@@ -163,6 +163,15 @@ fn dispatch_kafka(broker: &Broker, body: bytes::Bytes, conn: &mut KafkaConnState
     ) || matches!(
         (api, hdr.api_version),
         (Some(ApiKey::CreatePartitions), v) if v >= 2
+    ) || matches!(
+        (api, hdr.api_version),
+        (Some(ApiKey::DescribeConfigs), v) if v >= 4
+    ) || matches!(
+        (api, hdr.api_version),
+        (Some(ApiKey::AlterConfigs), v) if v >= 2
+    ) || matches!(
+        (api, hdr.api_version),
+        (Some(ApiKey::IncrementalAlterConfigs), v) if v >= 1
     );
 
     let mut out = BytesMut::new();
@@ -364,14 +373,29 @@ fn dispatch_kafka(broker: &Broker, body: bytes::Bytes, conn: &mut KafkaConnState
             }
             encode_create_partitions(broker, &mut src, &mut out, hdr.api_version, principal);
         }
-        Some(ApiKey::DescribeConfigs) if (0..=3).contains(&hdr.api_version) => {
+        Some(ApiKey::DescribeConfigs) if (0..=4).contains(&hdr.api_version) => {
+            if hdr.api_version >= 4 {
+                if let Err(e) = skip_tag_buffer(&mut src) {
+                    debug!(error = %e, "describe configs flexible header tag buffer");
+                }
+            }
             encode_describe_configs(broker, &mut src, &mut out, hdr.api_version, principal);
         }
-        Some(ApiKey::AlterConfigs) if (0..=1).contains(&hdr.api_version) => {
+        Some(ApiKey::AlterConfigs) if (0..=2).contains(&hdr.api_version) => {
+            if hdr.api_version >= 2 {
+                if let Err(e) = skip_tag_buffer(&mut src) {
+                    debug!(error = %e, "alter configs flexible header tag buffer");
+                }
+            }
             encode_alter_configs(broker, &mut src, &mut out, hdr.api_version, principal);
         }
-        Some(ApiKey::IncrementalAlterConfigs) if hdr.api_version == 0 => {
-            encode_incremental_alter_configs(broker, &mut src, &mut out, principal);
+        Some(ApiKey::IncrementalAlterConfigs) if (0..=1).contains(&hdr.api_version) => {
+            if hdr.api_version >= 1 {
+                if let Err(e) = skip_tag_buffer(&mut src) {
+                    debug!(error = %e, "incremental alter configs flexible header tag buffer");
+                }
+            }
+            encode_incremental_alter_configs(broker, &mut src, &mut out, hdr.api_version, principal);
         }
         Some(ApiKey::InitProducerId) if (0..=1).contains(&hdr.api_version) => {
             encode_init_producer_id(broker, &mut src, &mut out, principal);
@@ -5285,7 +5309,7 @@ fn encode_describe_configs(
     version: i16,
     principal: &str,
 ) {
-    // DescribeConfigs classic v0–3 (flexible 4+):
+    // DescribeConfigs classic v0–3 + flexible v4:
     //   request: resources[], include_synonyms (v1+), include_documentation (v3+)
     //   response: throttle (all versions),
     //     [error, error_message, resource_type, resource_name, configs[…]]
@@ -5293,69 +5317,130 @@ fn encode_describe_configs(
     //     is_default (v0) | config_source (v1+), is_sensitive,
     //     synonyms (v1+), config_type + documentation (v3+)
     // Phase 46: leading throttle + Kafka field order (error_message before type/name).
-    if src.remaining() < 4 {
-        out.put_i32(0); // throttle
-        out.put_i32(0);
-        return;
-    }
-    let n = src.get_i32();
+    // Flexible v4: compact strings/arrays + TAG_BUFFER per nested struct.
+    let flexible = version >= 4;
     struct Res {
         rtype: i8,
         name: String,
         keys: Option<Vec<String>>,
     }
     let mut resources = Vec::new();
-    for _ in 0..n.max(0) {
-        if src.remaining() < 1 {
-            break;
-        }
-        let rtype = src.get_i8();
-        let name = match get_string(src) {
-            Ok(s) => s,
-            Err(_) => break,
-        };
-        if src.remaining() < 4 {
-            break;
-        }
-        let key_count = src.get_i32();
-        let keys = if key_count < 0 {
-            None
-        } else {
-            let mut ks = Vec::new();
-            for _ in 0..key_count {
-                match get_string(src) {
-                    Ok(k) => ks.push(k),
-                    Err(_) => break,
+    let include_docs;
+
+    if flexible {
+        match get_compact_array_len(src) {
+            Ok(Some(n)) => {
+                for _ in 0..n {
+                    if src.remaining() < 1 {
+                        break;
+                    }
+                    let rtype = src.get_i8();
+                    let name = match get_compact_string(src) {
+                        Ok(s) => s,
+                        Err(_) => break,
+                    };
+                    let keys = match get_compact_array_len(src) {
+                        Ok(None) => None,
+                        Ok(Some(kc)) => {
+                            let mut ks = Vec::new();
+                            for _ in 0..kc {
+                                match get_compact_string(src) {
+                                    Ok(k) => ks.push(k),
+                                    Err(_) => break,
+                                }
+                            }
+                            Some(ks)
+                        }
+                        Err(_) => None,
+                    };
+                    let _ = skip_tag_buffer(src);
+                    resources.push(Res { rtype, name, keys });
                 }
             }
-            Some(ks)
+            Ok(None) | Err(_) => {}
+        }
+        if version >= 1 && src.remaining() >= 1 {
+            let _include_synonyms = src.get_u8() != 0;
+        }
+        include_docs = if version >= 3 && src.remaining() >= 1 {
+            src.get_u8() != 0
+        } else {
+            false
         };
-        resources.push(Res { rtype, name, keys });
-    }
-    // include_synonyms (v1+): parsed for wire compatibility; we always emit an
-    // empty synonyms list (no layered broker-default store).
-    if version >= 1 && src.remaining() >= 1 {
-        let _include_synonyms = src.get_u8() != 0;
-    }
-    let include_docs = if version >= 3 && src.remaining() >= 1 {
-        src.get_u8() != 0
+        let _ = skip_tag_buffer(src);
     } else {
-        false
-    };
+        if src.remaining() < 4 {
+            out.put_i32(0); // throttle
+            out.put_i32(0);
+            return;
+        }
+        let n = src.get_i32();
+        for _ in 0..n.max(0) {
+            if src.remaining() < 1 {
+                break;
+            }
+            let rtype = src.get_i8();
+            let name = match get_string(src) {
+                Ok(s) => s,
+                Err(_) => break,
+            };
+            if src.remaining() < 4 {
+                break;
+            }
+            let key_count = src.get_i32();
+            let keys = if key_count < 0 {
+                None
+            } else {
+                let mut ks = Vec::new();
+                for _ in 0..key_count {
+                    match get_string(src) {
+                        Ok(k) => ks.push(k),
+                        Err(_) => break,
+                    }
+                }
+                Some(ks)
+            };
+            resources.push(Res { rtype, name, keys });
+        }
+        if version >= 1 && src.remaining() >= 1 {
+            let _include_synonyms = src.get_u8() != 0;
+        }
+        include_docs = if version >= 3 && src.remaining() >= 1 {
+            src.get_u8() != 0
+        } else {
+            false
+        };
+    }
 
     out.put_i32(0); // throttle
-    out.put_i32(resources.len() as i32);
+    if flexible {
+        put_compact_array_len(out, resources.len());
+    } else {
+        out.put_i32(resources.len() as i32);
+    }
     for r in resources {
-        // Kafka field order: error, error_message, resource_type, resource_name, configs
         let write_header =
             |out: &mut BytesMut, code: KafkaErrorCode, msg: Option<&str>, rtype: i8, name: &str| {
                 out.put_i16(code.as_i16());
-                put_nullable_string(out, msg);
-                out.put_i8(rtype);
-                put_string(out, name);
+                if flexible {
+                    put_compact_nullable_string(out, msg);
+                    out.put_i8(rtype);
+                    put_compact_string(out, name);
+                } else {
+                    put_nullable_string(out, msg);
+                    out.put_i8(rtype);
+                    put_string(out, name);
+                }
             };
+        let write_empty_configs = |out: &mut BytesMut| {
+            if flexible {
+                put_compact_array_len(out, 0);
+                put_empty_tag_buffer(out);
+            } else {
+                out.put_i32(0);
+            }
+        };
 
-        // resource_type 2 = TOPIC
         if r.rtype != 2 {
             write_header(
                 out,
@@ -5364,7 +5449,7 @@ fn encode_describe_configs(
                 r.rtype,
                 &r.name,
             );
-            out.put_i32(0);
+            write_empty_configs(out);
             continue;
         }
         if broker.acls().is_enabled()
@@ -5382,7 +5467,7 @@ fn encode_describe_configs(
                 r.rtype,
                 &r.name,
             );
-            out.put_i32(0);
+            write_empty_configs(out);
             continue;
         }
         match broker.describe_configs(&r.name) {
@@ -5392,20 +5477,32 @@ fn encode_describe_configs(
                     entries.retain(|(k, _)| filter.iter().any(|f| f == k));
                 }
                 write_header(out, KafkaErrorCode::None, None, r.rtype, &r.name);
-                out.put_i32(entries.len() as i32);
+                if flexible {
+                    put_compact_array_len(out, entries.len());
+                } else {
+                    out.put_i32(entries.len() as i32);
+                }
                 for (k, v) in entries {
                     let is_default = v.is_empty();
-                    put_string(out, &k);
-                    if is_default {
-                        put_nullable_string(out, None);
+                    if flexible {
+                        put_compact_string(out, &k);
+                        if is_default {
+                            put_compact_nullable_string(out, None);
+                        } else {
+                            put_compact_nullable_string(out, Some(&v));
+                        }
                     } else {
-                        put_nullable_string(out, Some(&v));
+                        put_string(out, &k);
+                        if is_default {
+                            put_nullable_string(out, None);
+                        } else {
+                            put_nullable_string(out, Some(&v));
+                        }
                     }
                     out.put_u8(0); // read_only
                     if version == 0 {
-                        out.put_u8(if is_default { 1 } else { 0 }); // is_default
+                        out.put_u8(if is_default { 1 } else { 0 });
                     } else {
-                        // config_source
                         out.put_i8(if is_default {
                             CFG_SRC_DEFAULT
                         } else {
@@ -5414,17 +5511,31 @@ fn encode_describe_configs(
                     }
                     out.put_u8(0); // is_sensitive
                     if version >= 1 {
-                        // synonyms: empty (no layered broker defaults)
-                        out.put_i32(0);
+                        if flexible {
+                            put_compact_array_len(out, 0); // empty synonyms
+                        } else {
+                            out.put_i32(0);
+                        }
                     }
                     if version >= 3 {
                         out.put_i8(config_type_for_key(&k));
-                        if include_docs {
-                            put_nullable_string(out, config_documentation(&k));
+                        let doc = if include_docs {
+                            config_documentation(&k)
                         } else {
-                            put_nullable_string(out, None);
+                            None
+                        };
+                        if flexible {
+                            put_compact_nullable_string(out, doc);
+                        } else {
+                            put_nullable_string(out, doc);
                         }
                     }
+                    if flexible {
+                        put_empty_tag_buffer(out); // config entry tags
+                    }
+                }
+                if flexible {
+                    put_empty_tag_buffer(out); // result tags
                 }
             }
             Err(Error::NotFound(_)) => {
@@ -5435,13 +5546,16 @@ fn encode_describe_configs(
                     r.rtype,
                     &r.name,
                 );
-                out.put_i32(0);
+                write_empty_configs(out);
             }
             Err(_) => {
                 write_header(out, KafkaErrorCode::Unknown, None, r.rtype, &r.name);
-                out.put_i32(0);
+                write_empty_configs(out);
             }
         }
+    }
+    if flexible {
+        put_empty_tag_buffer(out);
     }
 }
 
@@ -5449,74 +5563,125 @@ fn encode_alter_configs(
     broker: &Broker,
     src: &mut impl Buf,
     out: &mut BytesMut,
-    _version: i16,
+    version: i16,
     principal: &str,
 ) {
-    // AlterConfigs classic v0–1 (flexible 2+):
-    //   request: [resource_type, resource_name, [name, value]] validate_only
-    //   response: throttle (all versions), [error, error_message, type, name]
+    // AlterConfigs classic v0–1 + flexible v2:
+    //   request: resources[{type, name, configs[{name, value}]}], validate_only
+    //   response: throttle (all versions), responses[{error, error_message, type, name}]
     // Phase 46: leading throttle (Kafka has throttle on v0+).
-    if src.remaining() < 4 {
-        out.put_i32(0); // throttle
-        out.put_i32(0);
-        return;
-    }
-    let n = src.get_i32();
+    let flexible = version >= 2;
     struct Res {
         rtype: i8,
         name: String,
         entries: Vec<(String, String)>,
     }
     let mut resources = Vec::new();
-    for _ in 0..n.max(0) {
-        if src.remaining() < 1 {
-            break;
+    let validate_only;
+
+    if flexible {
+        match get_compact_array_len(src) {
+            Ok(Some(n)) => {
+                for _ in 0..n {
+                    if src.remaining() < 1 {
+                        break;
+                    }
+                    let rtype = src.get_i8();
+                    let name = match get_compact_string(src) {
+                        Ok(s) => s,
+                        Err(_) => break,
+                    };
+                    let mut entries = Vec::new();
+                    if let Ok(Some(ec)) = get_compact_array_len(src) {
+                        for _ in 0..ec {
+                            let k = match get_compact_string(src) {
+                                Ok(s) => s,
+                                Err(_) => break,
+                            };
+                            let v = match get_compact_nullable_string(src) {
+                                Ok(Some(s)) => s,
+                                Ok(None) => String::new(),
+                                Err(_) => String::new(),
+                            };
+                            let _ = skip_tag_buffer(src);
+                            entries.push((k, v));
+                        }
+                    }
+                    let _ = skip_tag_buffer(src);
+                    resources.push(Res {
+                        rtype,
+                        name,
+                        entries,
+                    });
+                }
+            }
+            Ok(None) | Err(_) => {}
         }
-        let rtype = src.get_i8();
-        let name = match get_string(src) {
-            Ok(s) => s,
-            Err(_) => break,
+        validate_only = if src.remaining() >= 1 {
+            src.get_u8() != 0
+        } else {
+            false
         };
+        let _ = skip_tag_buffer(src);
+    } else {
         if src.remaining() < 4 {
-            break;
+            out.put_i32(0); // throttle
+            out.put_i32(0);
+            return;
         }
-        let ec = src.get_i32();
-        let mut entries = Vec::new();
-        for _ in 0..ec.max(0) {
-            let k = match get_string(src) {
+        let n = src.get_i32();
+        for _ in 0..n.max(0) {
+            if src.remaining() < 1 {
+                break;
+            }
+            let rtype = src.get_i8();
+            let name = match get_string(src) {
                 Ok(s) => s,
                 Err(_) => break,
             };
-            let v = match get_nullable_string(src) {
-                Ok(Some(s)) => s,
-                Ok(None) => String::new(),
-                Err(_) => String::new(),
-            };
-            entries.push((k, v));
+            if src.remaining() < 4 {
+                break;
+            }
+            let ec = src.get_i32();
+            let mut entries = Vec::new();
+            for _ in 0..ec.max(0) {
+                let k = match get_string(src) {
+                    Ok(s) => s,
+                    Err(_) => break,
+                };
+                let v = match get_nullable_string(src) {
+                    Ok(Some(s)) => s,
+                    Ok(None) => String::new(),
+                    Err(_) => String::new(),
+                };
+                entries.push((k, v));
+            }
+            resources.push(Res {
+                rtype,
+                name,
+                entries,
+            });
         }
-        resources.push(Res {
-            rtype,
-            name,
-            entries,
-        });
+        validate_only = if src.remaining() >= 1 {
+            src.get_u8() != 0
+        } else {
+            false
+        };
     }
-    let validate_only = if src.remaining() >= 1 {
-        src.get_u8() != 0
-    } else {
-        false
-    };
 
     out.put_i32(0); // throttle
-    out.put_i32(resources.len() as i32);
+    if flexible {
+        put_compact_array_len(out, resources.len());
+    } else {
+        out.put_i32(resources.len() as i32);
+    }
     for r in resources {
-        if r.rtype != 2 {
-            out.put_i16(KafkaErrorCode::InvalidRequest.as_i16());
-            put_nullable_string(out, Some("only TOPIC resources supported"));
-            out.put_i8(r.rtype);
-            put_string(out, &r.name);
-            continue;
-        }
-        if broker.acls().is_enabled()
+        let (code, msg): (i16, Option<String>) = if r.rtype != 2 {
+            (
+                KafkaErrorCode::InvalidRequest.as_i16(),
+                Some("only TOPIC resources supported".into()),
+            )
+        } else if broker.acls().is_enabled()
             && !broker.acls().authorize(
                 Some(principal),
                 ResourceType::Topic,
@@ -5524,47 +5689,39 @@ fn encode_alter_configs(
                 AclOperation::Alter,
             )
         {
-            out.put_i16(KafkaErrorCode::TopicAuthorizationFailed.as_i16());
-            put_nullable_string(out, None);
-            out.put_i8(r.rtype);
-            put_string(out, &r.name);
-            continue;
-        }
-        if validate_only {
+            (KafkaErrorCode::TopicAuthorizationFailed.as_i16(), None)
+        } else if validate_only {
             match volant_broker_topic_config_validate(&r.entries) {
-                Ok(()) => {
-                    out.put_i16(KafkaErrorCode::None.as_i16());
-                    put_nullable_string(out, None);
-                }
-                Err(msg) => {
-                    out.put_i16(KafkaErrorCode::InvalidConfig.as_i16());
-                    put_nullable_string(out, Some(&msg));
-                }
+                Ok(()) => (KafkaErrorCode::None.as_i16(), None),
+                Err(msg) => (KafkaErrorCode::InvalidConfig.as_i16(), Some(msg)),
             }
+        } else {
+            match broker.alter_configs(&r.name, &r.entries) {
+                Ok(_) => (KafkaErrorCode::None.as_i16(), None),
+                Err(Error::NotFound(_)) => (
+                    KafkaErrorCode::UnknownTopicOrPartition.as_i16(),
+                    Some("topic not found".into()),
+                ),
+                Err(Error::InvalidArgument(msg)) => {
+                    (KafkaErrorCode::InvalidConfig.as_i16(), Some(msg))
+                }
+                Err(_) => (KafkaErrorCode::Unknown.as_i16(), None),
+            }
+        };
+        out.put_i16(code);
+        if flexible {
+            put_compact_nullable_string(out, msg.as_deref());
+            out.put_i8(r.rtype);
+            put_compact_string(out, &r.name);
+            put_empty_tag_buffer(out);
+        } else {
+            put_nullable_string(out, msg.as_deref());
             out.put_i8(r.rtype);
             put_string(out, &r.name);
-            continue;
         }
-        match broker.alter_configs(&r.name, &r.entries) {
-            Ok(_) => {
-                out.put_i16(KafkaErrorCode::None.as_i16());
-                put_nullable_string(out, None);
-            }
-            Err(Error::NotFound(_)) => {
-                out.put_i16(KafkaErrorCode::UnknownTopicOrPartition.as_i16());
-                put_nullable_string(out, Some("topic not found"));
-            }
-            Err(Error::InvalidArgument(msg)) => {
-                out.put_i16(KafkaErrorCode::InvalidConfig.as_i16());
-                put_nullable_string(out, Some(&msg));
-            }
-            Err(_) => {
-                out.put_i16(KafkaErrorCode::Unknown.as_i16());
-                put_nullable_string(out, None);
-            }
-        }
-        out.put_i8(r.rtype);
-        put_string(out, &r.name);
+    }
+    if flexible {
+        put_empty_tag_buffer(out);
     }
 }
 
@@ -5572,7 +5729,7 @@ fn volant_broker_topic_config_validate(entries: &[(String, String)]) -> std::res
     crate::topic_config::TopicConfig::from_entries(entries).map(|_| ()).map_err(|e| e.to_string())
 }
 
-/// IncrementalAlterConfigs (API 44) v0 — Phase 37.
+/// IncrementalAlterConfigs (API 44) classic v0 + flexible v1.
 ///
 /// Kafka `ConfigOperation`: 0=SET, 1=DELETE, 2=APPEND, 3=SUBTRACT.
 /// Volant topic configs only support SET and DELETE (clear via empty value).
@@ -5580,16 +5737,10 @@ fn encode_incremental_alter_configs(
     broker: &Broker,
     src: &mut impl Buf,
     out: &mut BytesMut,
+    version: i16,
     principal: &str,
 ) {
-    out.put_i32(0); // throttle_time_ms
-
-    if src.remaining() < 4 {
-        out.put_i32(0);
-        return;
-    }
-    let n = src.get_i32();
-
+    let flexible = version >= 1;
     /// Kafka ConfigOperation::Set.
     const OP_SET: i8 = 0;
     /// Kafka ConfigOperation::Delete.
@@ -5598,95 +5749,182 @@ fn encode_incremental_alter_configs(
     struct Res {
         rtype: i8,
         name: String,
-        /// Flattened SET/DELETE entries for Volant (`""` value = clear).
         entries: Vec<(String, String)>,
-        /// Parse-time error for this resource (if any).
         parse_err: Option<String>,
     }
 
     let mut resources = Vec::new();
-    for _ in 0..n.max(0) {
-        if src.remaining() < 1 {
-            break;
-        }
-        let rtype = src.get_i8();
-        let name = match get_string(src) {
-            Ok(s) => s,
-            Err(_) => break,
-        };
-        if src.remaining() < 4 {
-            break;
-        }
-        let cfg_count = src.get_i32();
-        let mut entries = Vec::new();
-        let mut parse_err = None;
-        for _ in 0..cfg_count.max(0) {
-            // Always drain the entry fields so subsequent resources / validate_only
-            // stay aligned even after a parse error on an earlier op.
-            let key = match get_string(src) {
-                Ok(s) => s,
-                Err(_) => {
-                    if parse_err.is_none() {
-                        parse_err = Some("invalid config name".into());
+    let validate_only;
+
+    if flexible {
+        match get_compact_array_len(src) {
+            Ok(Some(n)) => {
+                for _ in 0..n {
+                    if src.remaining() < 1 {
+                        break;
                     }
-                    break;
+                    let rtype = src.get_i8();
+                    let name = match get_compact_string(src) {
+                        Ok(s) => s,
+                        Err(_) => break,
+                    };
+                    let mut entries = Vec::new();
+                    let mut parse_err = None;
+                    if let Ok(Some(cfg_count)) = get_compact_array_len(src) {
+                        for _ in 0..cfg_count {
+                            let key = match get_compact_string(src) {
+                                Ok(s) => s,
+                                Err(_) => {
+                                    if parse_err.is_none() {
+                                        parse_err = Some("invalid config name".into());
+                                    }
+                                    break;
+                                }
+                            };
+                            if src.remaining() < 1 {
+                                if parse_err.is_none() {
+                                    parse_err = Some("truncated config operation".into());
+                                }
+                                break;
+                            }
+                            let op = src.get_i8();
+                            let value = match get_compact_nullable_string(src) {
+                                Ok(v) => v.unwrap_or_default(),
+                                Err(_) => {
+                                    if parse_err.is_none() {
+                                        parse_err = Some("invalid config value".into());
+                                    }
+                                    break;
+                                }
+                            };
+                            let _ = skip_tag_buffer(src);
+                            if parse_err.is_some() {
+                                continue;
+                            }
+                            match op {
+                                OP_SET => entries.push((key, value)),
+                                OP_DELETE => entries.push((key, String::new())),
+                                2 | 3 => {
+                                    parse_err = Some(
+                                        "APPEND/SUBTRACT not supported (no list-typed topic configs)"
+                                            .into(),
+                                    );
+                                }
+                                other => {
+                                    parse_err =
+                                        Some(format!("unknown config operation {other}"));
+                                }
+                            }
+                        }
+                    }
+                    let _ = skip_tag_buffer(src);
+                    resources.push(Res {
+                        rtype,
+                        name,
+                        entries,
+                        parse_err,
+                    });
                 }
-            };
+            }
+            Ok(None) | Err(_) => {}
+        }
+        validate_only = if src.remaining() >= 1 {
+            src.get_u8() != 0
+        } else {
+            false
+        };
+        let _ = skip_tag_buffer(src);
+    } else {
+        if src.remaining() < 4 {
+            out.put_i32(0); // throttle
+            out.put_i32(0);
+            return;
+        }
+        let n = src.get_i32();
+        for _ in 0..n.max(0) {
             if src.remaining() < 1 {
-                if parse_err.is_none() {
-                    parse_err = Some("truncated config operation".into());
-                }
                 break;
             }
-            let op = src.get_i8();
-            let value = match get_nullable_string(src) {
-                Ok(v) => v.unwrap_or_default(),
-                Err(_) => {
+            let rtype = src.get_i8();
+            let name = match get_string(src) {
+                Ok(s) => s,
+                Err(_) => break,
+            };
+            if src.remaining() < 4 {
+                break;
+            }
+            let cfg_count = src.get_i32();
+            let mut entries = Vec::new();
+            let mut parse_err = None;
+            for _ in 0..cfg_count.max(0) {
+                let key = match get_string(src) {
+                    Ok(s) => s,
+                    Err(_) => {
+                        if parse_err.is_none() {
+                            parse_err = Some("invalid config name".into());
+                        }
+                        break;
+                    }
+                };
+                if src.remaining() < 1 {
                     if parse_err.is_none() {
-                        parse_err = Some("invalid config value".into());
+                        parse_err = Some("truncated config operation".into());
                     }
                     break;
                 }
-            };
-            if parse_err.is_some() {
-                continue;
-            }
-            match op {
-                OP_SET => entries.push((key, value)),
-                OP_DELETE => entries.push((key, String::new())),
-                2 | 3 => {
-                    parse_err = Some(
-                        "APPEND/SUBTRACT not supported (no list-typed topic configs)".into(),
-                    );
+                let op = src.get_i8();
+                let value = match get_nullable_string(src) {
+                    Ok(v) => v.unwrap_or_default(),
+                    Err(_) => {
+                        if parse_err.is_none() {
+                            parse_err = Some("invalid config value".into());
+                        }
+                        break;
+                    }
+                };
+                if parse_err.is_some() {
+                    continue;
                 }
-                other => {
-                    parse_err = Some(format!("unknown config operation {other}"));
+                match op {
+                    OP_SET => entries.push((key, value)),
+                    OP_DELETE => entries.push((key, String::new())),
+                    2 | 3 => {
+                        parse_err = Some(
+                            "APPEND/SUBTRACT not supported (no list-typed topic configs)".into(),
+                        );
+                    }
+                    other => {
+                        parse_err = Some(format!("unknown config operation {other}"));
+                    }
                 }
             }
+            resources.push(Res {
+                rtype,
+                name,
+                entries,
+                parse_err,
+            });
         }
-        resources.push(Res {
-            rtype,
-            name,
-            entries,
-            parse_err,
-        });
+        validate_only = if src.remaining() >= 1 {
+            src.get_u8() != 0
+        } else {
+            false
+        };
     }
-    let validate_only = if src.remaining() >= 1 {
-        src.get_u8() != 0
-    } else {
-        false
-    };
 
-    out.put_i32(resources.len() as i32);
+    out.put_i32(0); // throttle
+    if flexible {
+        put_compact_array_len(out, resources.len());
+    } else {
+        out.put_i32(resources.len() as i32);
+    }
     for r in resources {
-        if r.rtype != 2 {
-            out.put_i16(KafkaErrorCode::InvalidRequest.as_i16());
-            put_nullable_string(out, Some("only TOPIC resources supported"));
-            out.put_i8(r.rtype);
-            put_string(out, &r.name);
-            continue;
-        }
-        if broker.acls().is_enabled()
+        let (code, msg): (i16, Option<String>) = if r.rtype != 2 {
+            (
+                KafkaErrorCode::InvalidRequest.as_i16(),
+                Some("only TOPIC resources supported".into()),
+            )
+        } else if broker.acls().is_enabled()
             && !broker.acls().authorize(
                 Some(principal),
                 ResourceType::Topic,
@@ -5694,54 +5932,41 @@ fn encode_incremental_alter_configs(
                 AclOperation::Alter,
             )
         {
-            out.put_i16(KafkaErrorCode::TopicAuthorizationFailed.as_i16());
-            put_nullable_string(out, None);
-            out.put_i8(r.rtype);
-            put_string(out, &r.name);
-            continue;
-        }
-        if let Some(msg) = r.parse_err {
-            out.put_i16(KafkaErrorCode::InvalidConfig.as_i16());
-            put_nullable_string(out, Some(&msg));
-            out.put_i8(r.rtype);
-            put_string(out, &r.name);
-            continue;
-        }
-        if validate_only {
+            (KafkaErrorCode::TopicAuthorizationFailed.as_i16(), None)
+        } else if let Some(msg) = r.parse_err {
+            (KafkaErrorCode::InvalidConfig.as_i16(), Some(msg))
+        } else if validate_only {
             match volant_broker_topic_config_validate(&r.entries) {
-                Ok(()) => {
-                    out.put_i16(KafkaErrorCode::None.as_i16());
-                    put_nullable_string(out, None);
-                }
-                Err(msg) => {
-                    out.put_i16(KafkaErrorCode::InvalidConfig.as_i16());
-                    put_nullable_string(out, Some(&msg));
-                }
+                Ok(()) => (KafkaErrorCode::None.as_i16(), None),
+                Err(msg) => (KafkaErrorCode::InvalidConfig.as_i16(), Some(msg)),
             }
+        } else {
+            match broker.alter_configs(&r.name, &r.entries) {
+                Ok(_) => (KafkaErrorCode::None.as_i16(), None),
+                Err(Error::NotFound(_)) => (
+                    KafkaErrorCode::UnknownTopicOrPartition.as_i16(),
+                    Some("topic not found".into()),
+                ),
+                Err(Error::InvalidArgument(msg)) => {
+                    (KafkaErrorCode::InvalidConfig.as_i16(), Some(msg))
+                }
+                Err(_) => (KafkaErrorCode::Unknown.as_i16(), None),
+            }
+        };
+        out.put_i16(code);
+        if flexible {
+            put_compact_nullable_string(out, msg.as_deref());
+            out.put_i8(r.rtype);
+            put_compact_string(out, &r.name);
+            put_empty_tag_buffer(out);
+        } else {
+            put_nullable_string(out, msg.as_deref());
             out.put_i8(r.rtype);
             put_string(out, &r.name);
-            continue;
         }
-        match broker.alter_configs(&r.name, &r.entries) {
-            Ok(_) => {
-                out.put_i16(KafkaErrorCode::None.as_i16());
-                put_nullable_string(out, None);
-            }
-            Err(Error::NotFound(_)) => {
-                out.put_i16(KafkaErrorCode::UnknownTopicOrPartition.as_i16());
-                put_nullable_string(out, Some("topic not found"));
-            }
-            Err(Error::InvalidArgument(msg)) => {
-                out.put_i16(KafkaErrorCode::InvalidConfig.as_i16());
-                put_nullable_string(out, Some(&msg));
-            }
-            Err(_) => {
-                out.put_i16(KafkaErrorCode::Unknown.as_i16());
-                put_nullable_string(out, None);
-            }
-        }
-        out.put_i8(r.rtype);
-        put_string(out, &r.name);
+    }
+    if flexible {
+        put_empty_tag_buffer(out);
     }
 }
 

@@ -77,9 +77,9 @@ async fn api_versions_configs_classic_max() {
         let max_v = src.get_i16();
         found.insert(key, (min_v, max_v));
     }
-    assert_eq!(found.get(&32), Some(&(0, 3))); // DescribeConfigs
-    assert_eq!(found.get(&33), Some(&(0, 1))); // AlterConfigs
-    assert_eq!(found.get(&44), Some(&(0, 0))); // IncrementalAlterConfigs stays v0
+    assert_eq!(found.get(&32), Some(&(0, 4))); // DescribeConfigs (Phase 61 flex v4)
+    assert_eq!(found.get(&33), Some(&(0, 2))); // AlterConfigs (Phase 61 flex v2)
+    assert_eq!(found.get(&44), Some(&(0, 1))); // IncrementalAlterConfigs (Phase 61 flex v1)
     server.abort();
     let _ = std::fs::remove_dir_all(&dir);
 }
