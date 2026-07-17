@@ -14,6 +14,12 @@ pub mod codec;
 /// Compression codecs (gzip / snappy / lz4 / zstd); Fetch codec env.
 pub mod compress;
 mod handler;
+/// Shared TopicId / topic-name wire identity helpers.
+mod topic_id;
+/// Transaction API handlers (Init / Add* / End / TxnOffsetCommit).
+mod txn;
+/// Shared classic/flexible wire read helpers.
+mod wire;
 /// SASL PLAIN + SCRAM-SHA-256/512 state machine (Phases 30 / 34).
 pub mod sasl;
 

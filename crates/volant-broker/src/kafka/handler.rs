@@ -28,6 +28,8 @@ use super::codec::{
 };
 use super::compress::{fetch_compression_codec, CompressionCodec};
 use super::sasl::{self, SaslMechanism, SaslState, MECHANISMS};
+use super::topic_id;
+use super::txn;
 use super::{
     map_group_error, map_idempotent_error, ApiKey, KafkaErrorCode, KAFKA_ANONYMOUS_PRINCIPAL,
     SUPPORTED_APIS,
@@ -378,7 +380,7 @@ fn dispatch_kafka(broker: &Broker, body: bytes::Bytes, conn: &mut KafkaConnState
                     debug!(error = %e, "add partitions to txn flexible header tag buffer");
                 }
             }
-            encode_add_partitions_to_txn(broker, &mut src, &mut out, hdr.api_version, principal);
+            txn::encode_add_partitions_to_txn(broker, &mut src, &mut out, hdr.api_version, principal);
         }
         Some(ApiKey::AddOffsetsToTxn) if (0..=3).contains(&hdr.api_version) => {
             if hdr.api_version >= 3 {
@@ -386,7 +388,7 @@ fn dispatch_kafka(broker: &Broker, body: bytes::Bytes, conn: &mut KafkaConnState
                     debug!(error = %e, "add offsets to txn flexible header tag buffer");
                 }
             }
-            encode_add_offsets_to_txn(broker, &mut src, &mut out, hdr.api_version, principal);
+            txn::encode_add_offsets_to_txn(broker, &mut src, &mut out, hdr.api_version, principal);
         }
         Some(ApiKey::EndTxn) if (0..=5).contains(&hdr.api_version) => {
             if hdr.api_version >= 3 {
@@ -394,7 +396,7 @@ fn dispatch_kafka(broker: &Broker, body: bytes::Bytes, conn: &mut KafkaConnState
                     debug!(error = %e, "end txn flexible header tag buffer");
                 }
             }
-            encode_end_txn(broker, &mut src, &mut out, hdr.api_version, principal);
+            txn::encode_end_txn(broker, &mut src, &mut out, hdr.api_version, principal);
         }
         Some(ApiKey::TxnOffsetCommit) if (0..=6).contains(&hdr.api_version) => {
             if hdr.api_version >= 3 {
@@ -402,7 +404,7 @@ fn dispatch_kafka(broker: &Broker, body: bytes::Bytes, conn: &mut KafkaConnState
                     debug!(error = %e, "txn offset commit flexible header tag buffer");
                 }
             }
-            encode_txn_offset_commit(broker, &mut src, &mut out, hdr.api_version, principal);
+            txn::encode_txn_offset_commit(broker, &mut src, &mut out, hdr.api_version, principal);
         }
         Some(ApiKey::JoinGroup) if (0..=9).contains(&hdr.api_version) => {
             if hdr.api_version >= 6 {
@@ -517,7 +519,7 @@ fn dispatch_kafka(broker: &Broker, body: bytes::Bytes, conn: &mut KafkaConnState
                     debug!(error = %e, "init producer id flexible header tag buffer");
                 }
             }
-            encode_init_producer_id(broker, &mut src, &mut out, hdr.api_version, principal);
+            txn::encode_init_producer_id(broker, &mut src, &mut out, hdr.api_version, principal);
         }
         Some(ApiKey::OffsetForLeaderEpoch) if (0..=4).contains(&hdr.api_version) => {
             if hdr.api_version >= 4 {
@@ -1799,33 +1801,13 @@ fn encode_produce(broker: &Broker, src: &mut impl Buf, out: &mut BytesMut, versi
 
     for _ in 0..topic_count.max(0) {
         // v13+: TopicId UUID; ≤v12: topic name string.
-        let (topic_name, unknown_topic_id) = if use_topic_id {
-            let uuid = match get_uuid(src) {
-                Ok(u) => u,
-                Err(_) => break,
-            };
-            put_uuid(out, &uuid);
-            match parse_volant_topic_uuid(&uuid)
-                .and_then(|id| broker.topic_name_by_id(id))
-            {
-                Some(name) => (name, false),
-                None => (String::new(), true),
-            }
-        } else if flexible {
-            let topic = match get_compact_string(src) {
-                Ok(t) => t,
-                Err(_) => break,
-            };
-            put_compact_string(out, &topic);
-            (topic, false)
-        } else {
-            let topic = match get_string(src) {
-                Ok(t) => t,
-                Err(_) => break,
-            };
-            put_string(out, &topic);
-            (topic, false)
+        let resolved = match topic_id::read_and_resolve(broker, src, flexible, use_topic_id) {
+            Ok(r) => r,
+            Err(_) => break,
         };
+        topic_id::write_wire_id(out, flexible, &resolved.wire);
+        let topic_name = resolved.name_or_empty().to_string();
+        let unknown_topic_id = resolved.is_unknown();
 
         let part_count = if flexible {
             match get_compact_array_len(src) {
@@ -2134,91 +2116,6 @@ fn map_produce_ack_error(err: u16) -> i16 {
     }
 }
 
-/// InitProducerId (API key 22) classic v0–1 / flexible v2–5 — Phase 29 / 62 / 75.
-fn encode_init_producer_id(
-    broker: &Broker,
-    src: &mut impl Buf,
-    out: &mut BytesMut,
-    version: i16,
-    principal: &str,
-) {
-    // Request: transactional_id (nullable), transaction_timeout_ms
-    //   [, ProducerId + ProducerEpoch v3–5] [, tags v2+]
-    // Response: throttle, error, producer_id, producer_epoch [, tags v2+]
-    // Resume fields (v3–5) are parsed and ignored — always allocate via
-    // init_producer_id_with_txn. v6 OngoingTxn* / 2PC out of scope.
-    let flex = version >= 2;
-
-    let write_body = |out: &mut BytesMut, err: i16, pid: i64, epoch: i16| {
-        out.put_i32(0); // throttle
-        out.put_i16(err);
-        out.put_i64(pid);
-        out.put_i16(epoch);
-        if flex {
-            put_empty_tag_buffer(out);
-        }
-    };
-
-    if broker.acls().is_enabled()
-        && !broker.acls().authorize(
-            Some(principal),
-            ResourceType::Cluster,
-            CLUSTER_RESOURCE,
-            AclOperation::Write,
-        )
-    {
-        write_body(
-            out,
-            KafkaErrorCode::ClusterAuthorizationFailed.as_i16(),
-            -1,
-            -1,
-        );
-        return;
-    }
-
-    let txn_id = if flex {
-        match get_compact_nullable_string(src) {
-            Ok(v) => v.unwrap_or_default(),
-            Err(_) => {
-                write_body(out, KafkaErrorCode::InvalidRequest.as_i16(), -1, -1);
-                return;
-            }
-        }
-    } else {
-        match get_nullable_string(src) {
-            Ok(v) => v.unwrap_or_default(),
-            Err(_) => {
-                write_body(out, KafkaErrorCode::InvalidRequest.as_i16(), -1, -1);
-                return;
-            }
-        }
-    };
-    // transaction_timeout_ms — ignored (no Kafka txn coordinator timeout).
-    if src.remaining() >= 4 {
-        let _timeout = src.get_i32();
-    }
-    // v3–5: ProducerId + ProducerEpoch resume fields (ignored; always re-allocate).
-    if version >= 3 {
-        if src.remaining() < 8 + 2 {
-            write_body(out, KafkaErrorCode::InvalidRequest.as_i16(), -1, -1);
-            return;
-        }
-        let _resume_pid = src.get_i64();
-        let _resume_epoch = src.get_i16();
-    }
-    if flex {
-        let _ = skip_tag_buffer(src);
-    }
-
-    let (pid, epoch) = broker.init_producer_id_with_txn(&txn_id);
-    write_body(
-        out,
-        KafkaErrorCode::None.as_i16(),
-        pid as i64,
-        epoch as i16,
-    );
-}
-
 /// Write Fetch response header before topic array (classic v0–11 / flexible v12).
 fn put_fetch_response_header(out: &mut BytesMut, version: i16, session_id: i32) {
     // throttle (v1+), top-level error + session_id (v7+)
@@ -2369,33 +2266,13 @@ fn encode_fetch(broker: &Broker, src: &mut impl Buf, out: &mut BytesMut, version
 
     for _ in 0..topic_count.max(0) {
         // v13+: TopicId UUID; ≤v12: topic name string.
-        let (topic_name, unknown_topic_id) = if use_topic_id {
-            let uuid = match get_uuid(src) {
-                Ok(u) => u,
-                Err(_) => break,
-            };
-            put_uuid(out, &uuid);
-            match parse_volant_topic_uuid(&uuid)
-                .and_then(|id| broker.topic_name_by_id(id))
-            {
-                Some(name) => (name, false),
-                None => (String::new(), true),
-            }
-        } else if flexible {
-            let topic = match get_compact_string(src) {
-                Ok(t) => t,
-                Err(_) => break,
-            };
-            put_compact_string(out, &topic);
-            (topic, false)
-        } else {
-            let topic = match get_string(src) {
-                Ok(t) => t,
-                Err(_) => break,
-            };
-            put_string(out, &topic);
-            (topic, false)
+        let resolved = match topic_id::read_and_resolve(broker, src, flexible, use_topic_id) {
+            Ok(r) => r,
+            Err(_) => break,
         };
+        topic_id::write_wire_id(out, flexible, &resolved.wire);
+        let topic_name = resolved.name_or_empty().to_string();
+        let unknown_topic_id = resolved.is_unknown();
 
         let part_count = if flexible {
             match get_compact_array_len(src) {
@@ -4053,833 +3930,6 @@ fn write_find_coordinator_v4_error(out: &mut BytesMut, keys: &[&str], msg: &str)
     put_empty_tag_buffer(out);
 }
 
-/// AddPartitionsToTxn (API 24) classic v0–2 / flexible v3 / batch v4–5 — Phase 47 / 62 / 75.
-///
-/// v0–3: flat V3AndBelow fields (transactional_id, pid, epoch, topics[]).
-/// v4–5: batch `Transactions[]` with VerifyOnly (ignored — always add path).
-fn encode_add_partitions_to_txn(
-    broker: &Broker,
-    src: &mut impl Buf,
-    out: &mut BytesMut,
-    version: i16,
-    principal: &str,
-) {
-    if version >= 4 {
-        encode_add_partitions_to_txn_batch(broker, src, out, principal);
-        return;
-    }
-
-    // Request (0–3): transactional_id, producer_id, producer_epoch, topics[{name, partitions[]}]
-    // Response: throttle, results_by_topic[{name, results[{partition, error}]}]
-    // Flexible v3: compact strings/arrays + TAG_BUFFER per struct.
-    let flex = version >= 3;
-
-    let empty_resp = |out: &mut BytesMut| {
-        out.put_i32(0); // throttle
-        if flex {
-            put_compact_array_len(out, 0);
-            put_empty_tag_buffer(out);
-        } else {
-            out.put_i32(0);
-        }
-    };
-
-    let _txn_id = if flex {
-        match get_compact_string(src) {
-            Ok(t) => t,
-            Err(_) => {
-                empty_resp(out);
-                return;
-            }
-        }
-    } else {
-        match get_string(src) {
-            Ok(t) => t,
-            Err(_) => {
-                empty_resp(out);
-                return;
-            }
-        }
-    };
-    if src.remaining() < 8 + 2 {
-        empty_resp(out);
-        return;
-    }
-    let producer_id = src.get_i64() as u64;
-    let producer_epoch = src.get_i16() as u16;
-
-    // Collect topics first so we can authorize and respond with correct framing.
-    struct TopicIn {
-        name: String,
-        partitions: Vec<i32>,
-    }
-    let mut topics: Vec<TopicIn> = Vec::new();
-    if flex {
-        let topic_count = match get_compact_array_len(src) {
-            Ok(Some(n)) => n,
-            Ok(None) => 0,
-            Err(_) => {
-                empty_resp(out);
-                return;
-            }
-        };
-        for _ in 0..topic_count {
-            let name = match get_compact_string(src) {
-                Ok(t) => t,
-                Err(_) => break,
-            };
-            let part_count = match get_compact_array_len(src) {
-                Ok(Some(n)) => n,
-                Ok(None) => 0,
-                Err(_) => break,
-            };
-            let mut partitions = Vec::with_capacity(part_count);
-            for _ in 0..part_count {
-                if src.remaining() < 4 {
-                    break;
-                }
-                partitions.push(src.get_i32());
-            }
-            let _ = skip_tag_buffer(src); // topic tags
-            topics.push(TopicIn { name, partitions });
-        }
-        let _ = skip_tag_buffer(src); // request top-level tags
-    } else {
-        if src.remaining() < 4 {
-            empty_resp(out);
-            return;
-        }
-        let topic_count = src.get_i32();
-        for _ in 0..topic_count.max(0) {
-            let name = match get_string(src) {
-                Ok(t) => t,
-                Err(_) => break,
-            };
-            if src.remaining() < 4 {
-                topics.push(TopicIn {
-                    name,
-                    partitions: vec![],
-                });
-                break;
-            }
-            let part_count = src.get_i32();
-            let mut partitions = Vec::new();
-            for _ in 0..part_count.max(0) {
-                if src.remaining() < 4 {
-                    break;
-                }
-                partitions.push(src.get_i32());
-            }
-            topics.push(TopicIn { name, partitions });
-        }
-    }
-
-    let cluster_denied = broker.acls().is_enabled()
-        && !broker.acls().authorize(
-            Some(principal),
-            ResourceType::Cluster,
-            CLUSTER_RESOURCE,
-            AclOperation::Write,
-        );
-
-    let open_err = if cluster_denied {
-        -1i16 // sentinel; use ClusterAuthorizationFailed below
-    } else {
-        let e = broker.ensure_txn_open(producer_id, producer_epoch);
-        if e == 0 {
-            0
-        } else {
-            map_idempotent_error(e)
-        }
-    };
-
-    out.put_i32(0); // throttle
-    if flex {
-        put_compact_array_len(out, topics.len());
-    } else {
-        out.put_i32(topics.len() as i32);
-    }
-    for t in topics {
-        if flex {
-            put_compact_string(out, &t.name);
-            put_compact_array_len(out, t.partitions.len());
-        } else {
-            put_string(out, &t.name);
-            out.put_i32(t.partitions.len() as i32);
-        }
-        for partition in t.partitions {
-            out.put_i32(partition);
-            let err = if cluster_denied {
-                KafkaErrorCode::ClusterAuthorizationFailed.as_i16()
-            } else if open_err != 0 {
-                open_err
-            } else if broker.acls().is_enabled()
-                && !broker.acls().authorize(
-                    Some(principal),
-                    ResourceType::Topic,
-                    &t.name,
-                    AclOperation::Write,
-                )
-            {
-                KafkaErrorCode::TopicAuthorizationFailed.as_i16()
-            } else {
-                KafkaErrorCode::None.as_i16()
-            };
-            out.put_i16(err);
-            if flex {
-                put_empty_tag_buffer(out); // partition tags
-            }
-        }
-        if flex {
-            put_empty_tag_buffer(out); // topic tags
-        }
-    }
-    if flex {
-        put_empty_tag_buffer(out); // response top-level tags
-    }
-}
-
-/// AddPartitionsToTxn v4–5 batch request/response (KIP-890-era wire).
-///
-/// Request: Transactions[{ TransactionalId, ProducerId, ProducerEpoch, VerifyOnly,
-///   Topics[{Name, Partitions[]}], tags }], tags
-/// Response: Throttle, ErrorCode (top-level), ResultsByTransaction[{
-///   TransactionalId, TopicResults[{Name, ResultsByPartition[{Partition, Error}], tags}],
-///   tags }], tags
-///
-/// VerifyOnly is parsed and ignored — always runs ensure_txn_open (add path).
-fn encode_add_partitions_to_txn_batch(
-    broker: &Broker,
-    src: &mut impl Buf,
-    out: &mut BytesMut,
-    principal: &str,
-) {
-    struct TopicIn {
-        name: String,
-        partitions: Vec<i32>,
-    }
-    struct TxnIn {
-        txn_id: String,
-        producer_id: u64,
-        producer_epoch: u16,
-        topics: Vec<TopicIn>,
-    }
-
-    let empty_resp = |out: &mut BytesMut| {
-        out.put_i32(0); // throttle
-        out.put_i16(KafkaErrorCode::InvalidRequest.as_i16()); // top-level error
-        put_compact_array_len(out, 0); // ResultsByTransaction
-        put_empty_tag_buffer(out);
-    };
-
-    let txn_count = match get_compact_array_len(src) {
-        Ok(Some(n)) => n,
-        Ok(None) => 0,
-        Err(_) => {
-            empty_resp(out);
-            return;
-        }
-    };
-
-    let mut txns: Vec<TxnIn> = Vec::with_capacity(txn_count);
-    for _ in 0..txn_count {
-        let txn_id = match get_compact_string(src) {
-            Ok(t) => t,
-            Err(_) => {
-                empty_resp(out);
-                return;
-            }
-        };
-        if src.remaining() < 8 + 2 + 1 {
-            empty_resp(out);
-            return;
-        }
-        let producer_id = src.get_i64() as u64;
-        let producer_epoch = src.get_i16() as u16;
-        let _verify_only = src.get_u8() != 0; // ignored — always add path
-
-        let topic_count = match get_compact_array_len(src) {
-            Ok(Some(n)) => n,
-            Ok(None) => 0,
-            Err(_) => {
-                empty_resp(out);
-                return;
-            }
-        };
-        let mut topics = Vec::with_capacity(topic_count);
-        for _ in 0..topic_count {
-            let name = match get_compact_string(src) {
-                Ok(t) => t,
-                Err(_) => {
-                    empty_resp(out);
-                    return;
-                }
-            };
-            let part_count = match get_compact_array_len(src) {
-                Ok(Some(n)) => n,
-                Ok(None) => 0,
-                Err(_) => {
-                    empty_resp(out);
-                    return;
-                }
-            };
-            let mut partitions = Vec::with_capacity(part_count);
-            for _ in 0..part_count {
-                if src.remaining() < 4 {
-                    empty_resp(out);
-                    return;
-                }
-                partitions.push(src.get_i32());
-            }
-            let _ = skip_tag_buffer(src); // topic tags
-            topics.push(TopicIn { name, partitions });
-        }
-        let _ = skip_tag_buffer(src); // transaction tags
-        txns.push(TxnIn {
-            txn_id,
-            producer_id,
-            producer_epoch,
-            topics,
-        });
-    }
-    let _ = skip_tag_buffer(src); // request top-level tags
-
-    let cluster_denied = broker.acls().is_enabled()
-        && !broker.acls().authorize(
-            Some(principal),
-            ResourceType::Cluster,
-            CLUSTER_RESOURCE,
-            AclOperation::Write,
-        );
-
-    out.put_i32(0); // throttle
-    out.put_i16(KafkaErrorCode::None.as_i16()); // top-level error (per-partition errors below)
-    put_compact_array_len(out, txns.len());
-    for txn in txns {
-        put_compact_string(out, &txn.txn_id);
-
-        let open_err = if cluster_denied {
-            -1i16
-        } else {
-            let e = broker.ensure_txn_open(txn.producer_id, txn.producer_epoch);
-            if e == 0 {
-                0
-            } else {
-                map_idempotent_error(e)
-            }
-        };
-
-        put_compact_array_len(out, txn.topics.len());
-        for t in txn.topics {
-            put_compact_string(out, &t.name);
-            put_compact_array_len(out, t.partitions.len());
-            for partition in t.partitions {
-                out.put_i32(partition);
-                let err = if cluster_denied {
-                    KafkaErrorCode::ClusterAuthorizationFailed.as_i16()
-                } else if open_err != 0 {
-                    open_err
-                } else if broker.acls().is_enabled()
-                    && !broker.acls().authorize(
-                        Some(principal),
-                        ResourceType::Topic,
-                        &t.name,
-                        AclOperation::Write,
-                    )
-                {
-                    KafkaErrorCode::TopicAuthorizationFailed.as_i16()
-                } else {
-                    KafkaErrorCode::None.as_i16()
-                };
-                out.put_i16(err);
-                put_empty_tag_buffer(out); // partition tags
-            }
-            put_empty_tag_buffer(out); // topic tags
-        }
-        put_empty_tag_buffer(out); // transaction tags
-    }
-    put_empty_tag_buffer(out); // response top-level tags
-}
-
-/// AddOffsetsToTxn (API 25) classic v0–2 / flexible v3.
-fn encode_add_offsets_to_txn(
-    broker: &Broker,
-    src: &mut impl Buf,
-    out: &mut BytesMut,
-    version: i16,
-    principal: &str,
-) {
-    // Request: transactional_id, producer_id, producer_epoch, group_id [, tags v3+]
-    // Response: throttle, error_code [, tags v3+]
-    let flex = version >= 3;
-
-    let write_err = |out: &mut BytesMut, err: i16| {
-        out.put_i32(0); // throttle
-        out.put_i16(err);
-        if flex {
-            put_empty_tag_buffer(out);
-        }
-    };
-
-    let _txn_id = if flex {
-        match get_compact_string(src) {
-            Ok(t) => t,
-            Err(_) => {
-                write_err(out, KafkaErrorCode::InvalidRequest.as_i16());
-                return;
-            }
-        }
-    } else {
-        match get_string(src) {
-            Ok(t) => t,
-            Err(_) => {
-                write_err(out, KafkaErrorCode::InvalidRequest.as_i16());
-                return;
-            }
-        }
-    };
-    if src.remaining() < 8 + 2 {
-        write_err(out, KafkaErrorCode::InvalidRequest.as_i16());
-        return;
-    }
-    let producer_id = src.get_i64() as u64;
-    let producer_epoch = src.get_i16() as u16;
-    let group_id = if flex {
-        match get_compact_string(src) {
-            Ok(g) => g,
-            Err(_) => {
-                write_err(out, KafkaErrorCode::InvalidRequest.as_i16());
-                return;
-            }
-        }
-    } else {
-        match get_string(src) {
-            Ok(g) => g,
-            Err(_) => {
-                write_err(out, KafkaErrorCode::InvalidRequest.as_i16());
-                return;
-            }
-        }
-    };
-    if flex {
-        let _ = skip_tag_buffer(src);
-    }
-
-    if broker.acls().is_enabled()
-        && !broker.acls().authorize(
-            Some(principal),
-            ResourceType::Group,
-            &group_id,
-            AclOperation::Read,
-        )
-    {
-        write_err(out, KafkaErrorCode::GroupAuthorizationFailed.as_i16());
-        return;
-    }
-
-    // Ensure txn is open (idempotent if already open via AddPartitionsToTxn).
-    let err = broker.ensure_txn_open(producer_id, producer_epoch);
-    write_err(
-        out,
-        if err == 0 {
-            KafkaErrorCode::None.as_i16()
-        } else {
-            map_idempotent_error(err)
-        },
-    );
-}
-
-/// EndTxn (API 26) classic v0–2 / flexible v3–5 — Phase 47 / 62 / 75.
-fn encode_end_txn(
-    broker: &Broker,
-    src: &mut impl Buf,
-    out: &mut BytesMut,
-    version: i16,
-    principal: &str,
-) {
-    // Request: transactional_id, producer_id, producer_epoch, committed [, tags v3+]
-    // Response: throttle, error_code [, ProducerId + ProducerEpoch v5] [, tags v3+]
-    // v4 request/response same as v3; v5 adds pid/epoch echo in response.
-    let flex = version >= 3;
-
-    let write_resp = |out: &mut BytesMut, err: i16, pid: i64, epoch: i16| {
-        out.put_i32(0); // throttle
-        out.put_i16(err);
-        // v5: echo ProducerId + ProducerEpoch after error_code.
-        if version >= 5 {
-            out.put_i64(pid);
-            out.put_i16(epoch);
-        }
-        if flex {
-            put_empty_tag_buffer(out);
-        }
-    };
-
-    let _txn_id = if flex {
-        match get_compact_string(src) {
-            Ok(t) => t,
-            Err(_) => {
-                write_resp(out, KafkaErrorCode::InvalidRequest.as_i16(), -1, -1);
-                return;
-            }
-        }
-    } else {
-        match get_string(src) {
-            Ok(t) => t,
-            Err(_) => {
-                write_resp(out, KafkaErrorCode::InvalidRequest.as_i16(), -1, -1);
-                return;
-            }
-        }
-    };
-    if src.remaining() < 8 + 2 + 1 {
-        write_resp(out, KafkaErrorCode::InvalidRequest.as_i16(), -1, -1);
-        return;
-    }
-    let producer_id_i64 = src.get_i64();
-    let producer_epoch_i16 = src.get_i16();
-    let producer_id = producer_id_i64 as u64;
-    let producer_epoch = producer_epoch_i16 as u16;
-    let committed = src.get_u8() != 0;
-    if flex {
-        let _ = skip_tag_buffer(src);
-    }
-
-    if broker.acls().is_enabled()
-        && !broker.acls().authorize(
-            Some(principal),
-            ResourceType::Cluster,
-            CLUSTER_RESOURCE,
-            AclOperation::Write,
-        )
-    {
-        write_resp(
-            out,
-            KafkaErrorCode::ClusterAuthorizationFailed.as_i16(),
-            producer_id_i64,
-            producer_epoch_i16,
-        );
-        return;
-    }
-
-    match broker.end_txn(producer_id, producer_epoch, committed, &[]) {
-        Ok((err, _results)) => {
-            write_resp(
-                out,
-                if err == 0 {
-                    KafkaErrorCode::None.as_i16()
-                } else {
-                    map_idempotent_error(err)
-                },
-                producer_id_i64,
-                producer_epoch_i16,
-            );
-        }
-        Err(_) => {
-            write_resp(
-                out,
-                KafkaErrorCode::Unknown.as_i16(),
-                producer_id_i64,
-                producer_epoch_i16,
-            );
-        }
-    }
-}
-
-/// TxnOffsetCommit (API 28) classic v0–2 / flexible v3–6 — Phase 47 / 62 / 75 / 76.
-///
-/// v4–5 wire is identical to v3 (name-based topics). v6 uses TopicId UUID.
-fn encode_txn_offset_commit(
-    broker: &Broker,
-    src: &mut impl Buf,
-    out: &mut BytesMut,
-    version: i16,
-    principal: &str,
-) {
-    // Request: transactional_id, group_id, producer_id, producer_epoch,
-    //   generation/member/instance (v3+), topics[{name|topic_id (v6+), partitions[{
-    //     partition, offset, leader_epoch (v2+), metadata}]}]
-    // Response: throttle, topics[{name|topic_id (v6+), partitions[{partition, error}]}]
-    // Leader epoch / member fields parsed and ignored (same honesty as classic).
-    // v4–5 wire-identical to v3 (name-based flexible); v6 uses TopicId UUID.
-    let flex = version >= 3;
-    let use_topic_id = version >= 6;
-
-    let empty_resp = |out: &mut BytesMut| {
-        out.put_i32(0); // throttle
-        if flex {
-            put_compact_array_len(out, 0);
-            put_empty_tag_buffer(out);
-        } else {
-            out.put_i32(0);
-        }
-    };
-
-    let _txn_id = if flex {
-        match get_compact_string(src) {
-            Ok(t) => t,
-            Err(_) => {
-                empty_resp(out);
-                return;
-            }
-        }
-    } else {
-        match get_string(src) {
-            Ok(t) => t,
-            Err(_) => {
-                empty_resp(out);
-                return;
-            }
-        }
-    };
-    let group_id = if flex {
-        match get_compact_string(src) {
-            Ok(g) => g,
-            Err(_) => {
-                empty_resp(out);
-                return;
-            }
-        }
-    } else {
-        match get_string(src) {
-            Ok(g) => g,
-            Err(_) => {
-                empty_resp(out);
-                return;
-            }
-        }
-    };
-    if src.remaining() < 8 + 2 {
-        empty_resp(out);
-        return;
-    }
-    let producer_id = src.get_i64() as u64;
-    let producer_epoch = src.get_i16() as u16;
-
-    // v3+: generation_id, member_id, group_instance_id (ignored; no group membership check).
-    if version >= 3 {
-        if src.remaining() < 4 {
-            empty_resp(out);
-            return;
-        }
-        let _generation = src.get_i32();
-        if flex {
-            let _member = get_compact_string(src).ok();
-            let _instance = get_compact_nullable_string(src).ok();
-        } else {
-            // Unreachable with flex==version>=3; keep for clarity.
-            let _member = get_string(src).ok();
-            let _instance = get_nullable_string(src).ok();
-        }
-    }
-
-    // Collect offsets + structure for response echo.
-    let mut collected: Vec<(String, String, u32, u64, String)> = Vec::new();
-    struct Part {
-        partition: i32,
-    }
-    struct TopicParts {
-        /// Resolved topic name (empty when unknown TopicId).
-        name: String,
-        /// Request UUID when v6+ (echoed on response).
-        uuid: [u8; 16],
-        parts: Vec<Part>,
-        unknown_topic_id: bool,
-    }
-    let mut structure: Vec<TopicParts> = Vec::new();
-
-    if flex {
-        let topic_count = match get_compact_array_len(src) {
-            Ok(Some(n)) => n,
-            Ok(None) => 0,
-            Err(_) => {
-                empty_resp(out);
-                return;
-            }
-        };
-        for _ in 0..topic_count {
-            let (topic, uuid, unknown_topic_id) = if use_topic_id {
-                let uuid = match get_uuid(src) {
-                    Ok(u) => u,
-                    Err(_) => break,
-                };
-                match parse_volant_topic_uuid(&uuid)
-                    .and_then(|id| broker.topic_name_by_id(id))
-                {
-                    Some(name) => (name, uuid, false),
-                    None => (String::new(), uuid, true),
-                }
-            } else {
-                match get_compact_string(src) {
-                    Ok(t) => (t, KAFKA_UUID_ZERO, false),
-                    Err(_) => break,
-                }
-            };
-            let part_count = match get_compact_array_len(src) {
-                Ok(Some(n)) => n,
-                Ok(None) => 0,
-                Err(_) => break,
-            };
-            let mut parts = Vec::new();
-            for _ in 0..part_count {
-                if src.remaining() < 4 + 8 {
-                    break;
-                }
-                let partition = src.get_i32();
-                let offset = src.get_i64();
-                // v2+ leader epoch (always present at flex v3+)
-                if version >= 2 {
-                    if src.remaining() < 4 {
-                        break;
-                    }
-                    let _leader_epoch = src.get_i32();
-                }
-                let metadata = get_compact_nullable_string(src)
-                    .ok()
-                    .flatten()
-                    .unwrap_or_default();
-                let _ = skip_tag_buffer(src); // partition tags
-                if offset >= 0 && !unknown_topic_id {
-                    collected.push((
-                        group_id.clone(),
-                        topic.clone(),
-                        partition as u32,
-                        offset as u64,
-                        metadata,
-                    ));
-                }
-                parts.push(Part { partition });
-            }
-            let _ = skip_tag_buffer(src); // topic tags
-            structure.push(TopicParts {
-                name: topic,
-                uuid,
-                parts,
-                unknown_topic_id,
-            });
-        }
-        let _ = skip_tag_buffer(src); // request top-level tags
-    } else {
-        if src.remaining() < 4 {
-            empty_resp(out);
-            return;
-        }
-        let topic_count = src.get_i32();
-        for _ in 0..topic_count.max(0) {
-            let topic = match get_string(src) {
-                Ok(t) => t,
-                Err(_) => break,
-            };
-            if src.remaining() < 4 {
-                structure.push(TopicParts {
-                    name: topic,
-                    uuid: KAFKA_UUID_ZERO,
-                    parts: vec![],
-                    unknown_topic_id: false,
-                });
-                break;
-            }
-            let part_count = src.get_i32();
-            let mut parts = Vec::new();
-            for _ in 0..part_count.max(0) {
-                if src.remaining() < 4 + 8 {
-                    break;
-                }
-                let partition = src.get_i32();
-                let offset = src.get_i64();
-                if version >= 2 {
-                    if src.remaining() < 4 {
-                        break;
-                    }
-                    let _leader_epoch = src.get_i32();
-                }
-                let metadata = get_nullable_string(src).ok().flatten().unwrap_or_default();
-                if offset >= 0 {
-                    collected.push((
-                        group_id.clone(),
-                        topic.clone(),
-                        partition as u32,
-                        offset as u64,
-                        metadata,
-                    ));
-                }
-                parts.push(Part { partition });
-            }
-            structure.push(TopicParts {
-                name: topic,
-                uuid: KAFKA_UUID_ZERO,
-                parts,
-                unknown_topic_id: false,
-            });
-        }
-    }
-
-    let auth_err = if broker.acls().is_enabled()
-        && !broker.acls().authorize(
-            Some(principal),
-            ResourceType::Group,
-            &group_id,
-            AclOperation::Read,
-        )
-    {
-        Some(KafkaErrorCode::GroupAuthorizationFailed.as_i16())
-    } else {
-        None
-    };
-
-    // Only call buffer when there is something to buffer (skip pure-unknown-id).
-    let part_err = if let Some(e) = auth_err {
-        e
-    } else if collected.is_empty() {
-        KafkaErrorCode::None.as_i16()
-    } else {
-        let err = broker.buffer_txn_offsets(producer_id, producer_epoch, &collected);
-        if err == 0 {
-            KafkaErrorCode::None.as_i16()
-        } else {
-            map_idempotent_error(err)
-        }
-    };
-
-    out.put_i32(0); // throttle
-    if flex {
-        put_compact_array_len(out, structure.len());
-    } else {
-        out.put_i32(structure.len() as i32);
-    }
-    for t in structure {
-        if flex {
-            if use_topic_id {
-                put_uuid(out, &t.uuid);
-            } else {
-                put_compact_string(out, &t.name);
-            }
-            put_compact_array_len(out, t.parts.len());
-        } else {
-            put_string(out, &t.name);
-            out.put_i32(t.parts.len() as i32);
-        }
-        for p in t.parts {
-            out.put_i32(p.partition);
-            let pe = if t.unknown_topic_id {
-                KafkaErrorCode::UnknownTopicId.as_i16()
-            } else {
-                part_err
-            };
-            out.put_i16(pe);
-            if flex {
-                put_empty_tag_buffer(out);
-            }
-        }
-        if flex {
-            put_empty_tag_buffer(out);
-        }
-    }
-    if flex {
-        put_empty_tag_buffer(out);
-    }
-}
-
 fn encode_join_group(broker: &Broker, src: &mut impl Buf, out: &mut BytesMut, version: i16, principal: &str) {
     // JoinGroup classic v0–5 / flexible v6–9:
     //   group_id, session_timeout, rebalance_timeout (v1+), member_id,
@@ -5763,10 +4813,10 @@ fn encode_offset_commit(
         );
 
     struct TopicReq {
+        /// Wire identity to echo (name or TopicId).
+        wire: topic_id::TopicWireId,
         /// Resolved topic name (empty when unknown TopicId).
         topic: String,
-        /// Request UUID when v10+ (echoed on response).
-        uuid: [u8; 16],
         partitions: Vec<i32>,
         unknown_topic_id: bool,
     }
@@ -5783,23 +4833,13 @@ fn encode_offset_commit(
             }
         };
         for _ in 0..topic_count {
-            let (topic, uuid, unknown_topic_id) = if use_topic_id {
-                let uuid = match get_uuid(src) {
-                    Ok(u) => u,
-                    Err(_) => break,
-                };
-                match parse_volant_topic_uuid(&uuid)
-                    .and_then(|id| broker.topic_name_by_id(id))
-                {
-                    Some(name) => (name, uuid, false),
-                    None => (String::new(), uuid, true),
-                }
-            } else {
-                match get_compact_string(src) {
-                    Ok(t) => (t, KAFKA_UUID_ZERO, false),
-                    Err(_) => break,
-                }
+            let resolved = match topic_id::read_and_resolve(broker, src, true, use_topic_id) {
+                Ok(r) => r,
+                Err(_) => break,
             };
+            let topic = resolved.name_or_empty().to_string();
+            let unknown_topic_id = resolved.is_unknown();
+            let wire = resolved.wire;
             let part_count = match get_compact_array_len(src) {
                 Ok(Some(n)) => n,
                 Ok(None) | Err(_) => 0,
@@ -5828,8 +4868,8 @@ fn encode_offset_commit(
             }
             let _ = skip_tag_buffer(src); // topic tags
             parsed.push(TopicReq {
+                wire,
                 topic,
-                uuid,
                 partitions,
                 unknown_topic_id,
             });
@@ -5879,8 +4919,8 @@ fn encode_offset_commit(
                 partitions.push(partition);
             }
             parsed.push(TopicReq {
+                wire: topic_id::TopicWireId::Name(topic.clone()),
                 topic,
-                uuid: KAFKA_UUID_ZERO,
                 partitions,
                 unknown_topic_id: false,
             });
@@ -5911,11 +4951,7 @@ fn encode_offset_commit(
     if flex {
         put_compact_array_len(out, parsed.len());
         for t in parsed {
-            if use_topic_id {
-                put_uuid(out, &t.uuid);
-            } else {
-                put_compact_string(out, &t.topic);
-            }
+            topic_id::write_wire_id(out, true, &t.wire);
             put_compact_array_len(out, t.partitions.len());
             for p in t.partitions {
                 out.put_i32(p);
@@ -6235,7 +5271,7 @@ fn encode_offset_fetch_multi(
 
     struct TopicReq {
         name: String,
-        uuid: [u8; 16],
+        wire: topic_id::TopicWireId,
         parts: Vec<i32>,
         unknown_topic_id: bool,
     }
@@ -6277,23 +5313,13 @@ fn encode_offset_fetch_multi(
             Ok(Some(0)) => (false, true),
             Ok(Some(n)) => {
                 for _ in 0..n {
-                    let (name, uuid, unknown) = if use_topic_id {
-                        let uuid = match get_uuid(src) {
-                            Ok(u) => u,
-                            Err(_) => break,
-                        };
-                        match parse_volant_topic_uuid(&uuid)
-                            .and_then(|id| broker.topic_name_by_id(id))
-                        {
-                            Some(n) => (n, uuid, false),
-                            None => (String::new(), uuid, true),
-                        }
-                    } else {
-                        match get_compact_string(src) {
-                            Ok(t) => (t, KAFKA_UUID_ZERO, false),
-                            Err(_) => break,
-                        }
+                    let resolved = match topic_id::read_and_resolve(broker, src, true, use_topic_id) {
+                        Ok(r) => r,
+                        Err(_) => break,
                     };
+                    let name = resolved.name_or_empty().to_string();
+                    let unknown = resolved.is_unknown();
+                    let wire = resolved.wire;
                     let pc = match get_compact_array_len(src) {
                         Ok(Some(p)) => p,
                         Ok(None) | Err(_) => 0,
@@ -6312,7 +5338,7 @@ fn encode_offset_fetch_multi(
                     let _ = skip_tag_buffer(src); // topic tags
                     requested.push(TopicReq {
                         name,
-                        uuid,
+                        wire,
                         parts,
                         unknown_topic_id: unknown,
                     });
@@ -6387,17 +5413,11 @@ fn encode_offset_fetch_multi(
             }
             put_compact_array_len(out, by_topic.len());
             for (topic, parts) in by_topic {
-                if use_topic_id {
-                    let uuid = broker
-                        .metadata(Some(&[TopicName::new(topic.clone())]))
-                        .topics
-                        .first()
-                        .map(|t| volant_topic_uuid(t.topic_id.0))
-                        .unwrap_or(KAFKA_UUID_ZERO);
-                    put_uuid(out, &uuid);
-                } else {
-                    put_compact_string(out, &topic);
-                }
+                topic_id::write_wire_id(
+                    out,
+                    true,
+                    &topic_id::wire_id_for_name(broker, &topic, use_topic_id),
+                );
                 put_compact_array_len(out, parts.len());
                 for (p, off, meta) in parts {
                     out.put_i32(p as i32);
@@ -6412,11 +5432,7 @@ fn encode_offset_fetch_multi(
         } else {
             put_compact_array_len(out, g.requested.len());
             for t in &g.requested {
-                if use_topic_id {
-                    put_uuid(out, &t.uuid);
-                } else {
-                    put_compact_string(out, &t.name);
-                }
+                topic_id::write_wire_id(out, true, &t.wire);
                 put_compact_array_len(out, t.parts.len());
                 for &p in &t.parts {
                     if t.unknown_topic_id {
