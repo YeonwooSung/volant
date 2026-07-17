@@ -669,6 +669,14 @@ impl Broker {
             .unwrap_or(false)
     }
 
+    /// Resolve topic name from numeric Volant topic id (Metadata TopicId lookup).
+    pub fn topic_name_by_id(&self, topic_id: u32) -> Option<String> {
+        let map = self.topics.read();
+        map.values()
+            .find(|t| t.id.0 == topic_id)
+            .map(|t| t.name.as_str().to_owned())
+    }
+
     /// Buffer consumer offsets to apply on commit (Phase 31 TxnOffsetCommit).
     ///
     /// Entries: `(group_id, topic, partition, offset, metadata)`.

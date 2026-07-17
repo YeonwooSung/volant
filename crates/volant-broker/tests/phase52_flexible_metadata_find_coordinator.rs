@@ -137,7 +137,7 @@ async fn api_versions_advertises_metadata_9_find_coord_4() {
             fc = Some((min, max));
         }
     }
-    assert_eq!(meta, Some((0, 9)));
+    assert_eq!(meta, Some((0, 12))); // Phase 67 TopicId
     assert_eq!(fc, Some((0, 4)));
 
     server.abort();
@@ -395,18 +395,18 @@ async fn find_coordinator_v2_still_classic() {
 }
 
 #[tokio::test]
-async fn metadata_v10_unsupported() {
-    let dir = temp_dir("meta-v10");
+async fn metadata_v13_unsupported() {
+    let dir = temp_dir("meta-v13");
     let broker = Arc::new(Broker::new(StorageConfig {
         data_dir: dir.clone(),
         ..StorageConfig::default()
     }));
     let (addr, server) = boot_kafka(Arc::clone(&broker)).await;
 
-    // v10 not handled, but request version ≥9 still gets response header v1.
+    // v13 not handled; request version ≥9 still gets response header v1.
     let resp = rpc(
         &addr,
-        encode_request_flexible(3, 10, 1, Some("c"), &[]),
+        encode_request_flexible(3, 13, 1, Some("c"), &[]),
     )
     .await;
     let mut src = resp.freeze();

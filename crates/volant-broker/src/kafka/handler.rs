@@ -20,10 +20,11 @@ use super::codec::{
     encode_consumer_assignment, encode_message_set, encode_message_set_compressed,
     encode_record_batch, encode_record_batch_compressed, encode_response_frame, get_bytes,
     get_compact_array_len, get_compact_bytes, get_compact_nullable_string, get_compact_string,
-    get_nullable_string, get_string,
+    get_nullable_string, get_string, get_uuid,
     put_bytes, put_compact_array_len, put_compact_bytes, put_compact_nullable_string,
     put_compact_string, put_empty_tag_buffer, put_nullable_string, put_response_header,
-    put_response_header_v1, put_string, put_unsigned_varint, skip_tag_buffer, try_decode_request,
+    put_response_header_v1, put_string, put_unsigned_varint, put_uuid, skip_tag_buffer,
+    try_decode_request, volant_topic_uuid, parse_volant_topic_uuid, KAFKA_UUID_ZERO,
 };
 use super::compress::{fetch_compression_codec, CompressionCodec};
 use super::sasl::{self, SaslMechanism, SaslState, MECHANISMS};
@@ -283,7 +284,7 @@ fn dispatch_kafka(broker: &Broker, body: bytes::Bytes, conn: &mut KafkaConnState
             }
             encode_list_transactions(broker, &mut src, &mut out, hdr.api_version, principal);
         }
-        Some(ApiKey::Metadata) if (0..=9).contains(&hdr.api_version) => {
+        Some(ApiKey::Metadata) if (0..=12).contains(&hdr.api_version) => {
             if hdr.api_version >= 9 {
                 if let Err(e) = skip_tag_buffer(&mut src) {
                     debug!(error = %e, "metadata flexible header tag buffer");
@@ -1071,14 +1072,22 @@ fn encode_metadata(broker: &Broker, src: &mut impl Buf, out: &mut BytesMut, vers
     //   topics: array (v0) / nullable array (v1+) / compact nullable (v9+)
     //     v0: empty = all topics
     //     v1+: null = all topics; empty = no topics
+    //     v10+: each topic = TopicId uuid + compact nullable Name + tags
     //   allow_auto_topic_creation: bool (v4+, ignored)
-    //   include_cluster_authorized_operations: bool (v8–10)
+    //   include_cluster_authorized_operations: bool (v8–10 only)
     //   include_topic_authorized_operations: bool (v8+)
     //   TAG_BUFFER (v9+)
     let flexible = version >= 9;
+    // Per-request topic: resolved name (if any) and raw uuid for error rows.
+    struct ReqTopic {
+        name: Option<String>,
+        uuid: [u8; 16],
+        // True when the client asked by id only (v12+) and id was unknown.
+        unknown_id: bool,
+    }
 
     let list_all: bool;
-    let mut requested: Vec<String> = Vec::new();
+    let mut requested: Vec<ReqTopic> = Vec::new();
 
     if flexible {
         match get_compact_array_len(src) {
@@ -1088,12 +1097,63 @@ fn encode_metadata(broker: &Broker, src: &mut impl Buf, out: &mut BytesMut, vers
             Ok(Some(n)) => {
                 list_all = false;
                 for _ in 0..n {
-                    match get_compact_string(src) {
-                        Ok(t) => {
-                            requested.push(t);
-                            let _ = skip_tag_buffer(src); // per-topic tags
+                    if version >= 10 {
+                        let uuid = match get_uuid(src) {
+                            Ok(u) => u,
+                            Err(_) => break,
+                        };
+                        let name = match get_compact_nullable_string(src) {
+                            Ok(n) => n,
+                            Err(_) => break,
+                        };
+                        let _ = skip_tag_buffer(src);
+                        if let Some(n) = name {
+                            requested.push(ReqTopic {
+                                name: Some(n),
+                                uuid,
+                                unknown_id: false,
+                            });
+                        } else if version >= 12 {
+                            // Lookup by TopicId (KIP-516 full support from v12).
+                            if let Some(id) = parse_volant_topic_uuid(&uuid) {
+                                if let Some(n) = broker.topic_name_by_id(id) {
+                                    requested.push(ReqTopic {
+                                        name: Some(n),
+                                        uuid,
+                                        unknown_id: false,
+                                    });
+                                } else {
+                                    requested.push(ReqTopic {
+                                        name: None,
+                                        uuid,
+                                        unknown_id: true,
+                                    });
+                                }
+                            } else if uuid == KAFKA_UUID_ZERO {
+                                // Zero id + null name → skip (nothing to resolve).
+                            } else {
+                                requested.push(ReqTopic {
+                                    name: None,
+                                    uuid,
+                                    unknown_id: true,
+                                });
+                            }
+                        } else {
+                            // v10–11: null name not used for lookup (Kafka server note).
+                            // Ignore entry if name missing.
                         }
-                        Err(_) => break,
+                    } else {
+                        match get_compact_string(src) {
+                            Ok(t) => {
+                                requested.push(ReqTopic {
+                                    name: Some(t),
+                                    uuid: KAFKA_UUID_ZERO,
+                                    unknown_id: false,
+                                });
+                                let _ = skip_tag_buffer(src);
+                            }
+                            Err(_) => break,
+                        }
                     }
                 }
             }
@@ -1112,7 +1172,11 @@ fn encode_metadata(broker: &Broker, src: &mut impl Buf, out: &mut BytesMut, vers
             if topic_len > 0 {
                 for _ in 0..topic_len {
                     match get_string(src) {
-                        Ok(t) => requested.push(t),
+                        Ok(t) => requested.push(ReqTopic {
+                            name: Some(t),
+                            uuid: KAFKA_UUID_ZERO,
+                            unknown_id: false,
+                        }),
                         Err(_) => break,
                     }
                 }
@@ -1123,7 +1187,11 @@ fn encode_metadata(broker: &Broker, src: &mut impl Buf, out: &mut BytesMut, vers
             list_all = false;
             for _ in 0..topic_len {
                 match get_string(src) {
-                    Ok(t) => requested.push(t),
+                    Ok(t) => requested.push(ReqTopic {
+                        name: Some(t),
+                        uuid: KAFKA_UUID_ZERO,
+                        unknown_id: false,
+                    }),
                     Err(_) => break,
                 }
             }
@@ -1138,7 +1206,8 @@ fn encode_metadata(broker: &Broker, src: &mut impl Buf, out: &mut BytesMut, vers
     let mut include_cluster_ops = false;
     let mut include_topic_ops = false;
     if version >= 8 {
-        if src.remaining() >= 1 {
+        // Cluster authorized ops flag only on request versions 8–10.
+        if version <= 10 && src.remaining() >= 1 {
             include_cluster_ops = src.get_u8() != 0;
         }
         if src.remaining() >= 1 {
@@ -1149,6 +1218,9 @@ fn encode_metadata(broker: &Broker, src: &mut impl Buf, out: &mut BytesMut, vers
         let _ = skip_tag_buffer(src); // request body tags
     }
 
+    // Response includes ClusterAuthorizedOperations only on v8–10.
+    let emit_cluster_ops = (8..=10).contains(&version);
+
     let need_cluster_describe = list_all;
     if broker.acls().is_enabled() && need_cluster_describe {
         if !broker.acls().authorize(
@@ -1157,22 +1229,35 @@ fn encode_metadata(broker: &Broker, src: &mut impl Buf, out: &mut BytesMut, vers
             CLUSTER_RESOURCE,
             AclOperation::Describe,
         ) {
-            write_metadata_empty(out, version, include_cluster_ops, principal, broker);
+            write_metadata_empty(out, version, include_cluster_ops && emit_cluster_ops, principal, broker);
             return;
         }
     }
 
+    // Unknown-id-only entries (v12) are emitted as error topics after the snap.
+    let unknown_ids: Vec<[u8; 16]> = requested
+        .iter()
+        .filter(|r| r.unknown_id)
+        .map(|r| r.uuid)
+        .collect();
+    let named: Vec<String> = requested
+        .iter()
+        .filter_map(|r| r.name.clone())
+        .collect();
+
     let filter: Option<Vec<TopicName>> = if list_all {
         None
-    } else if requested.is_empty() {
+    } else if named.is_empty() && unknown_ids.is_empty() {
         write_metadata_brokers_header(broker, out, version);
         if flexible {
             put_compact_array_len(out, 0); // empty topics
-            out.put_i32(cluster_authorized_ops(
-                broker,
-                principal,
-                include_cluster_ops,
-            ));
+            if emit_cluster_ops {
+                out.put_i32(cluster_authorized_ops(
+                    broker,
+                    principal,
+                    include_cluster_ops,
+                ));
+            }
             put_empty_tag_buffer(out);
         } else {
             out.put_i32(0); // topics
@@ -1185,8 +1270,32 @@ fn encode_metadata(broker: &Broker, src: &mut impl Buf, out: &mut BytesMut, vers
             }
         }
         return;
+    } else if named.is_empty() {
+        // Only unknown ids — still write broker header, then error topics.
+        write_metadata_brokers_header(broker, out, version);
+        if flexible {
+            put_compact_array_len(out, unknown_ids.len());
+            for uuid in &unknown_ids {
+                out.put_i16(KafkaErrorCode::UnknownTopicId.as_i16());
+                put_compact_nullable_string(out, None); // name null
+                put_uuid(out, uuid);
+                out.put_u8(0); // is_internal
+                put_compact_array_len(out, 0); // partitions
+                out.put_i32(AUTH_OPS_OMITTED);
+                put_empty_tag_buffer(out);
+            }
+            if emit_cluster_ops {
+                out.put_i32(cluster_authorized_ops(
+                    broker,
+                    principal,
+                    include_cluster_ops,
+                ));
+            }
+            put_empty_tag_buffer(out);
+        }
+        return;
     } else {
-        Some(requested.iter().map(|t| TopicName::new(t.clone())).collect())
+        Some(named.iter().map(|t| TopicName::new(t.clone())).collect())
     };
 
     let snap = match &filter {
@@ -1253,10 +1362,14 @@ fn encode_metadata(broker: &Broker, src: &mut impl Buf, out: &mut BytesMut, vers
         .collect();
 
     if flexible {
-        put_compact_array_len(out, topics.len());
+        let total = topics.len() + unknown_ids.len();
+        put_compact_array_len(out, total);
         for t in topics {
             out.put_i16(KafkaErrorCode::None.as_i16());
             put_compact_string(out, t.name.as_str());
+            if version >= 10 {
+                put_uuid(out, &volant_topic_uuid(t.topic_id.0));
+            }
             out.put_u8(0); // is_internal
             put_compact_array_len(out, t.partitions.len());
             for p in &t.partitions {
@@ -1283,11 +1396,22 @@ fn encode_metadata(broker: &Broker, src: &mut impl Buf, out: &mut BytesMut, vers
             ));
             put_empty_tag_buffer(out); // topic tags
         }
-        out.put_i32(cluster_authorized_ops(
-            broker,
-            principal,
-            include_cluster_ops,
-        ));
+        for uuid in &unknown_ids {
+            out.put_i16(KafkaErrorCode::UnknownTopicId.as_i16());
+            put_compact_nullable_string(out, None);
+            put_uuid(out, uuid);
+            out.put_u8(0);
+            put_compact_array_len(out, 0);
+            out.put_i32(AUTH_OPS_OMITTED);
+            put_empty_tag_buffer(out);
+        }
+        if emit_cluster_ops {
+            out.put_i32(cluster_authorized_ops(
+                broker,
+                principal,
+                include_cluster_ops,
+            ));
+        }
         put_empty_tag_buffer(out); // top-level tags
     } else {
         out.put_i32(topics.len() as i32);
@@ -1384,6 +1508,7 @@ fn write_metadata_empty(
     _broker: &Broker,
 ) {
     let flexible = version >= 9;
+    let emit_cluster_ops = (8..=10).contains(&version);
     if version >= 3 {
         out.put_i32(0);
     }
@@ -1392,11 +1517,13 @@ fn write_metadata_empty(
         put_compact_nullable_string(out, Some(KAFKA_CLUSTER_ID));
         out.put_i32(-1); // controller_id
         put_compact_array_len(out, 0); // topics
-        out.put_i32(if include_cluster_ops {
-            0
-        } else {
-            AUTH_OPS_OMITTED
-        });
+        if emit_cluster_ops {
+            out.put_i32(if include_cluster_ops {
+                0
+            } else {
+                AUTH_OPS_OMITTED
+            });
+        }
         put_empty_tag_buffer(out);
     } else {
         out.put_i32(0); // brokers

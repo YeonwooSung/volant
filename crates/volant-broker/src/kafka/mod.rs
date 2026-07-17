@@ -1,12 +1,12 @@
-//! Kafka wire protocol shim (Phases 23–66).
+//! Kafka wire protocol shim (Phases 23–67).
 //!
-//! Classic framing plus flexible APIs (KIP-482): ApiVersions v3, Metadata v9,
-//! FindCoordinator v3–4, Produce v9, Fetch v12, group/offset/admin/config/txn
-//! flex, ListOffsets v6, OffsetForLeaderEpoch v4, DeleteRecords v2, ACL
-//! admin, SaslAuthenticate v2, DescribeCluster 0–1, ListTransactions 0–1,
-//! DescribeTransactions v0, DescribeProducers v0. Produce v0–9 / Fetch v0–12,
-//! SASL, OffsetDelete, Metadata v0–9. See `docs/PHASE23_SPEC.md` …
-//! `docs/PHASE66_SPEC.md`.
+//! Classic framing plus flexible APIs (KIP-482): ApiVersions v3, Metadata
+//! v9–12 (TopicId), FindCoordinator v3–4, Produce v9, Fetch v12,
+//! group/offset/admin/config/txn flex, ListOffsets v6, OffsetForLeaderEpoch v4,
+//! DeleteRecords v2, ACL admin, SaslAuthenticate v2, DescribeCluster 0–1,
+//! ListTransactions 0–1, DescribeTransactions v0, DescribeProducers v0.
+//! Produce v0–9 / Fetch v0–12, SASL, OffsetDelete. See `docs/PHASE23_SPEC.md`
+//! … `docs/PHASE67_SPEC.md`.
 
 /// Kafka wire primitives, MessageSet (magic 0/1), and RecordBatch (magic 2).
 pub mod codec;
@@ -95,6 +95,8 @@ pub enum KafkaErrorCode {
     FencedLeaderEpoch = 74,
     /// Unknown leader epoch.
     UnknownLeaderEpoch = 75,
+    /// Unknown topic id (Metadata by TopicId).
+    UnknownTopicId = 100,
     /// Transactional id not found (DescribeTransactions).
     TransactionalIdNotFound = 105,
     /// Unsupported endpoint type (DescribeCluster v1+).
@@ -263,7 +265,7 @@ pub const SUPPORTED_APIS: &[(ApiKey, i16, i16)] = &[
     (ApiKey::Produce, 0, 9),
     (ApiKey::Fetch, 0, 12),
     (ApiKey::ListOffsets, 0, 6),
-    (ApiKey::Metadata, 0, 9),
+    (ApiKey::Metadata, 0, 12),
     (ApiKey::OffsetCommit, 0, 8),
     (ApiKey::OffsetFetch, 0, 8),
     (ApiKey::FindCoordinator, 0, 4),

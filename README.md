@@ -309,6 +309,9 @@ v0 (always-flexible modern admin APIs).
 **Phase 66:** DescribeTransactions v0 + DescribeProducers v0; DescribeCluster
 0–1 (EndpointType); ListTransactions 0–1 (DurationFilter ignored).
 
+**Phase 67:** Metadata TopicId v10–12 — deterministic UUID mapping, v11 cluster
+ops removal, v12 lookup by TopicId.
+
 **Still deferred:** multi-language clients, chaos-mesh / cargo-fuzz corpus CI.
 
 ### Networked client (library)

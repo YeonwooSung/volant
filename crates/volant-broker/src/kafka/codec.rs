@@ -191,6 +191,50 @@ pub fn put_compact_bytes(dst: &mut BytesMut, b: Option<&[u8]>) {
     }
 }
 
+/// Kafka UUID wire size (16 bytes, big-endian most-significant first).
+pub const KAFKA_UUID_LEN: usize = 16;
+
+/// Zero UUID (unknown / unset topic id).
+pub const KAFKA_UUID_ZERO: [u8; KAFKA_UUID_LEN] = [0u8; KAFKA_UUID_LEN];
+
+/// Write a Kafka UUID (16 raw bytes).
+pub fn put_uuid(dst: &mut BytesMut, uuid: &[u8; KAFKA_UUID_LEN]) {
+    dst.extend_from_slice(uuid);
+}
+
+/// Read a Kafka UUID.
+pub fn get_uuid(src: &mut impl Buf) -> Result<[u8; KAFKA_UUID_LEN]> {
+    if src.remaining() < KAFKA_UUID_LEN {
+        return Err(Error::Protocol("truncated kafka uuid".into()));
+    }
+    let mut u = [0u8; KAFKA_UUID_LEN];
+    src.copy_to_slice(&mut u);
+    Ok(u)
+}
+
+/// Map Volant numeric [`TopicId`] to a deterministic Kafka topic UUID.
+///
+/// Layout: ASCII `"volant"` in bytes 0–5, zeros in 6–11, big-endian `u32` id
+/// in bytes 12–15. Stable across restarts for the same numeric id.
+pub fn volant_topic_uuid(topic_id: u32) -> [u8; KAFKA_UUID_LEN] {
+    let mut u = [0u8; KAFKA_UUID_LEN];
+    u[0..6].copy_from_slice(b"volant");
+    u[12..16].copy_from_slice(&topic_id.to_be_bytes());
+    u
+}
+
+/// Inverse of [`volant_topic_uuid`]. Returns `None` for the zero UUID or
+/// unrecognized layouts.
+pub fn parse_volant_topic_uuid(uuid: &[u8; KAFKA_UUID_LEN]) -> Option<u32> {
+    if uuid == &KAFKA_UUID_ZERO {
+        return None;
+    }
+    if &uuid[0..6] == b"volant" && uuid[6..12].iter().all(|&b| b == 0) {
+        return Some(u32::from_be_bytes([uuid[12], uuid[13], uuid[14], uuid[15]]));
+    }
+    None
+}
+
 /// Producer identity fields from a RecordBatch header (Phase 29).
 ///
 /// Kafka uses `-1` for all three when the batch is non-idempotent.
@@ -1088,6 +1132,17 @@ mod tests {
         assert_eq!(get_compact_bytes(&mut src).unwrap().unwrap().as_ref(), b"");
         assert_eq!(get_compact_bytes(&mut src).unwrap().unwrap().as_ref(), b"abc");
         assert_eq!(src.remaining(), 0);
+    }
+
+    #[test]
+    fn volant_topic_uuid_roundtrip() {
+        let u = volant_topic_uuid(42);
+        assert_eq!(parse_volant_topic_uuid(&u), Some(42));
+        assert_eq!(parse_volant_topic_uuid(&KAFKA_UUID_ZERO), None);
+        let mut buf = BytesMut::new();
+        put_uuid(&mut buf, &u);
+        let mut src = buf.freeze();
+        assert_eq!(get_uuid(&mut src).unwrap(), u);
     }
 
     #[test]

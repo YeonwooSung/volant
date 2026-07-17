@@ -1510,6 +1510,29 @@ v2, ListTransactions v2.
 
 ---
 
+### Phase 67 — Metadata TopicId (v10–12) ✅
+
+**Goal:** Modern clients receive and can query by Kafka TopicId UUIDs on
+Metadata (KIP-516 / KIP-482).
+
+Binding: **[docs/PHASE67_SPEC.md](./docs/PHASE67_SPEC.md)**.
+
+- [x] Metadata 0–12 (v10+ TopicId in response; classic/v9 unchanged)
+- [x] Deterministic UUID from Volant numeric topic id
+- [x] v11: no ClusterAuthorizedOperations request/response field
+- [x] v12: resolve by TopicId; unknown → UnknownTopicId
+- [x] Integration tests (`phase67_metadata_topic_id`)
+
+**Honest limitations:** deterministic UUID (not random KRaft ids); unknown
+name still omitted (no error row); no Metadata v13 top-level error; Fetch/Produce
+TopicId versions still deferred.
+
+**Still deferred:** multi-lang clients, cargo-fuzz corpus CI, true control-marker
+READ_COMMITTED, higher KIP-890 txn versions, DescribeCluster v2, ListTransactions
+v2, Fetch/admin TopicId.
+
+---
+
 ## Performance targets (aspirational)
 
 | Metric | Single node target | Notes |
