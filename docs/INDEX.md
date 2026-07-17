@@ -31,8 +31,8 @@ Start here. Prefer living docs over individual phase ship records.
 
 | Document | Purpose |
 |----------|---------|
-| [history/PHASE_HISTORY.md](./history/PHASE_HISTORY.md) | One-line index for phases 0–84 |
-| [PHASE7_SPEC.md](./PHASE7_SPEC.md) … [PHASE84_SPEC.md](./PHASE84_SPEC.md) | Per-phase ship records (deep dive) |
+| [history/PHASE_HISTORY.md](./history/PHASE_HISTORY.md) | One-line index for phases 0–85 |
+| [PHASE7_SPEC.md](./PHASE7_SPEC.md) … [PHASE85_SPEC.md](./PHASE85_SPEC.md) | Per-phase ship records (deep dive) |
 | [history/archive/](./history/archive/) | Implementation plans & reviews (archaeology) |
 
 ## Config samples
@@ -54,13 +54,13 @@ Start here. Prefer living docs over individual phase ship records.
 
 ## Compaction note (2026-07-18)
 
-Living docs re-verified against HEAD `a3e60f2` (Phase 84 Fetch **0–18**):
+Living docs re-verified against Phase 85 (ACL admin **0–3** User resource):
 
-- **Status ceiling:** Phases **0–84**; Kafka shim **23–84**
+- **Status ceiling:** Phases **0–85**; Kafka shim **23–85**
 - **Kafka SoT:** [KAFKA_COMPAT.md](./KAFKA_COMPAT.md) — full matrix + semantic honesty
 - **WHITEPAPER:** architecture + positioning; no per-key version matrix duplicate
 - **Binding** core: PHASE1–6 at top level
-- **Ship records:** PHASE7–84 via [PHASE_HISTORY](./history/PHASE_HISTORY.md)
+- **Ship records:** PHASE7–85 via [PHASE_HISTORY](./history/PHASE_HISTORY.md)
 - **Archived:** `history/archive/` plan/review archaeology
 - **Still deferred (product):** multi-lang clients, chaos-mesh / cargo-fuzz CI,
-  true `READ_COMMITTED`, real 2PC (Fetch v14+ **closed** by Phase 84)
+  true `READ_COMMITTED`, real 2PC (ACL admin v3 **closed** by Phase 85)

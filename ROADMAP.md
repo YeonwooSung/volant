@@ -1897,6 +1897,29 @@ Binding: **[docs/PHASE84_SPEC.md](./docs/PHASE84_SPEC.md)**.
 fetch sessions / DivergingEpoch; LSO ≡ HWM; preferred_read_replica always -1.
 
 **Still deferred:** multi-lang clients, cargo-fuzz corpus CI, true control-marker
+READ_COMMITTED, real 2PC / prepared transaction state. ACL admin v3 closed by
+**Phase 85**.
+
+---
+
+### Phase 85 — ACL admin v3 (User resource type; Kafka max) ✅
+
+**Goal:** Raise Describe/Create/DeleteAcls to Kafka wire max **0–3** and accept
+the **User** resource type on flexible v3 (wire-identical framing to v2).
+
+Binding: **[docs/PHASE85_SPEC.md](./docs/PHASE85_SPEC.md)**.
+
+- [x] DescribeAcls / CreateAcls / DeleteAcls 0–3 (flex v2–3; classic 0–1)
+- [x] v3 wire-identical to v2; `ResourceType = 7` (User) accepted on v3 only
+- [x] Persist User ACLs as `ResourceType::User` in Phase 20/21 store
+- [x] v2 + User type → InvalidRequest; v4 → UnsupportedVersion + header v1
+- [x] Integration tests (`phase85_acl_v3`); phase64 max assertions updated
+
+**Honest limitations:** User ACLs are storage/admin round-trip only (no SCRAM
+credential API gating); no TransactionalId/DelegationToken; host always `*`;
+LITERAL only; no cluster ACL consensus.
+
+**Still deferred:** multi-lang clients, cargo-fuzz corpus CI, true control-marker
 READ_COMMITTED, real 2PC / prepared transaction state.
 
 ---
@@ -1924,18 +1947,18 @@ READ_COMMITTED, real 2PC / prepared transaction state.
 | Storage | Page cache + OS | Explicit mmap + optional io_uring/O_DIRECT |
 | Stream processing | Kafka Streams / ksqlDB | In-process `volant-stream` operators |
 | Ops model | ZooKeeper/KRaft + heavy footprint | Single binary → small static ISR quorum |
-| Protocol | Kafka wire protocol | Native binary first; optional Kafka shim (`--kafka-listen`, Phases 23–84) |
+| Protocol | Kafka wire protocol | Native binary first; optional Kafka shim (`--kafka-listen`, Phases 23–85) |
 | Goal | Full ecosystem | Subset that is fast, small, and correct |
 
 Volant is **not** a drop-in Kafka replacement. It prioritizes a clean core; the
-optional Kafka wire shim is **shipped** (Phases 23–84) — see
+optional Kafka wire shim is **shipped** (Phases 23–85) — see
 [docs/KAFKA_COMPAT.md](./docs/KAFKA_COMPAT.md).
 
 ---
 
 ## Suggested implementation order (PRs)
 
-Phases **0–84 are shipped**. Historical PR order for the core:
+Phases **0–85 are shipped**. Historical PR order for the core:
 
 1. Phase 1 segment format + unit tests  
 2. Phase 1 recovery + retention  
@@ -1948,7 +1971,7 @@ Phases **0–84 are shipped**. Historical PR order for the core:
 9. Phase 6 replication prototype (2–3 nodes) ✅  
 10. Phase 7 metrics, TLS, packaging ✅  
 11. Phases 8–22 (redirect, groups, configs, txns, mTLS, ACLs, SCRAM) ✅  
-12. Phases 23–84 (Kafka wire shim surface) ✅  
+12. Phases 23–85 (Kafka wire shim surface) ✅  
 
 ---
 
@@ -1957,7 +1980,7 @@ Phases **0–84 are shipped**. Historical PR order for the core:
 Track these before locking APIs:
 
 1. **Replication:** ~~Raft-per-partition vs leader/follower + controller (Kafka-like)?~~ → **Kafka-style ISR (Phase 6)**
-2. **Kafka wire compatibility:** ~~first-class or optional adapter?~~ → **optional adapter (`--kafka-listen`, Phases 23–84 shipped)**
+2. **Kafka wire compatibility:** ~~first-class or optional adapter?~~ → **optional adapter (`--kafka-listen`, Phases 23–85 shipped)**
 3. **State store for streams:** embed RocksDB, redb, or custom mmap store?
 4. **Default durability:** fsync every batch vs group commit window?
 5. **Multi-tenancy:** namespaces / quotas in v1 or later?
@@ -1989,9 +2012,9 @@ cargo run -p volant-bench --release
 cargo test --workspace
 ```
 
-**Status (post–Phase 84):** core broker, ops (metrics / TLS / auth / SCRAM /
-ACLs / Helm), and the Kafka wire shim are **shipped** (Fetch 0–18 Kafka max).
-Still deferred: multi-language clients, full chaos-mesh suites, cargo-fuzz
-corpus CI, true control-marker `READ_COMMITTED`, real 2PC / prepared
-transactions. Details: [docs/KAFKA_COMPAT.md](./docs/KAFKA_COMPAT.md),
-[docs/ops.md](./docs/ops.md).
+**Status (post–Phase 85):** core broker, ops (metrics / TLS / auth / SCRAM /
+ACLs / Helm), and the Kafka wire shim are **shipped** (Fetch 0–18 Kafka max;
+ACL admin 0–3 with User resource). Still deferred: multi-language clients,
+full chaos-mesh suites, cargo-fuzz corpus CI, true control-marker
+`READ_COMMITTED`, real 2PC / prepared transactions. Details:
+[docs/KAFKA_COMPAT.md](./docs/KAFKA_COMPAT.md), [docs/ops.md](./docs/ops.md).

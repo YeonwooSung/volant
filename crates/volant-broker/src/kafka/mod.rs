@@ -1,4 +1,4 @@
-//! Kafka wire protocol shim (Phases 23–84).
+//! Kafka wire protocol shim (Phases 23–85).
 //!
 //! Classic framing plus flexible APIs (KIP-482): ApiVersions v3–5 (header
 //! stays v0; empty feature tags; v5 ClusterId/NodeId ignored), Metadata
@@ -8,13 +8,13 @@
 //! CreateTopics v5–7 / DeleteTopics v4–6 (TopicId), group/offset/admin/config/txn
 //! flex (ListGroups 0–5 States/Types filter, DescribeGroups 0–6 ErrorMessage,
 //! DeleteGroups 0–3 ErrorMessage), ListOffsets v6–11 (max-timestamp / local / tiered specials),
-//! OffsetForLeaderEpoch v4, DeleteRecords v2, ACL admin,
+//! OffsetForLeaderEpoch v4, DeleteRecords v2, ACL admin 0–3 (User resource v3),
 //! SaslAuthenticate v2, DescribeCluster 0–2, ListTransactions 0–2,
 //! DescribeTransactions v0, DescribeProducers v0, KIP-890-era txn max versions
 //! (InitProducerId 0–6 OngoingTxn wire, AddPartitionsToTxn/EndTxn 0–5,
 //! AddOffsetsToTxn 0–4 wire-identical v3/v4, TxnOffsetCommit 0–6 TopicId),
 //! CreatePartitions 0–3 (v3 = v2 wire; no KIP-599).
-//! See `docs/PHASE23_SPEC.md` … `docs/PHASE84_SPEC.md`.
+//! See `docs/PHASE23_SPEC.md` … `docs/PHASE85_SPEC.md`.
 
 /// Kafka wire primitives, MessageSet (magic 0/1), and RecordBatch (magic 2).
 pub mod codec;
@@ -309,9 +309,9 @@ pub const SUPPORTED_APIS: &[(ApiKey, i16, i16)] = &[
     (ApiKey::AddOffsetsToTxn, 0, 4),
     (ApiKey::EndTxn, 0, 5),
     (ApiKey::TxnOffsetCommit, 0, 6),
-    (ApiKey::DescribeAcls, 0, 2),
-    (ApiKey::CreateAcls, 0, 2),
-    (ApiKey::DeleteAcls, 0, 2),
+    (ApiKey::DescribeAcls, 0, 3),
+    (ApiKey::CreateAcls, 0, 3),
+    (ApiKey::DeleteAcls, 0, 3),
     (ApiKey::DescribeConfigs, 0, 4),
     (ApiKey::AlterConfigs, 0, 2),
     (ApiKey::SaslAuthenticate, 0, 2),

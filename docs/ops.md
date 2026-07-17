@@ -10,7 +10,7 @@
 | `--log-format` | | `text` | `text` or `json` |
 | `--auth-token` | `VOLANT_AUTH_TOKEN` | *unset* | Shared-token auth |
 | `--scram-user USER:PASS` | | *unset* | Upsert SCRAM user at startup (repeatable; Phase 22) |
-| `--kafka-listen` | | *disabled* | Kafka wire protocol shim (Phases 23–84) |
+| `--kafka-listen` | | *disabled* | Kafka wire protocol shim (Phases 23–85) |
 | `--tls-cert` / `--tls-key` | | *unset* | Server TLS (feature `tls`) |
 | `--tls-peer-insecure` | | `true` | Skip inter-broker cert verify (lab) |
 | `--tls-ca` | | *unset* | CA PEM for inter-broker peer verify |
@@ -115,7 +115,7 @@ Notes:
 
 Optional second socket speaking Kafka framing (classic + flexible). Native
 Volant protocol remains on `--listen`. API versions and honesty notes live in
-**[KAFKA_COMPAT.md](./KAFKA_COMPAT.md)** (source of truth; Phases 23–84).
+**[KAFKA_COMPAT.md](./KAFKA_COMPAT.md)** (source of truth; Phases 23–85).
 
 ### Enable
 
@@ -145,9 +145,11 @@ volant-server \
 - **Transactions / isolation:** buffer-until-commit (no control markers);
   `READ_COMMITTED` is not real isolation (LSO ≡ HWM). Crash aborts open txns.
 - **ACLs:** Kafka ACL admin maps to Volant Phase 20/21 ACLs (LITERAL only;
-  CreateAcls enables enforcement).
+  CreateAcls enables enforcement). Describe/Create/DeleteAcls **0–3**: v3 accepts
+  Kafka **User** resource type (stored as `ResourceType::User`; not used on the
+  produce/fetch authorize path; no SCRAM-admin gating).
 
-Deep dives: [PHASE23_SPEC.md](./PHASE23_SPEC.md) … [PHASE82_SPEC.md](./PHASE82_SPEC.md).
+Deep dives: [PHASE23_SPEC.md](./PHASE23_SPEC.md) … [PHASE85_SPEC.md](./PHASE85_SPEC.md).
 
 ## TLS (Phase 7 listen + Phase 9 verification / inter-broker)
 
@@ -479,6 +481,6 @@ is only compacted after it rolls.
 
 Multi-language clients, full chaos-mesh suites, cargo-fuzz corpus CI, true
 control-marker `READ_COMMITTED`, real 2PC / prepared transactions.
-Kafka shim (Phases 23–84; includes ApiVersions 0–5, Fetch 0–18), SCRAM, and
+Kafka shim (Phases 23–85; includes ApiVersions 0–5, Fetch 0–18, ACL admin 0–3), SCRAM, and
 SASL PLAIN/SCRAM are **shipped** — see [KAFKA_COMPAT.md](./KAFKA_COMPAT.md).
 Full deferred list: [ROADMAP.md](../ROADMAP.md).

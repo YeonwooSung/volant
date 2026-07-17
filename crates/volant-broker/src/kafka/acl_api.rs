@@ -24,6 +24,8 @@ const KAFKA_RT_TOPIC: i8 = 2;
 const KAFKA_RT_GROUP: i8 = 3;
 /// Kafka ResourceType: Cluster.
 const KAFKA_RT_CLUSTER: i8 = 4;
+/// Kafka ResourceType: User (Describe/Create/DeleteAcls v3+).
+const KAFKA_RT_USER: i8 = 7;
 
 /// Kafka AclOperation: Any.
 const KAFKA_OP_ANY: i8 = 1;
@@ -223,9 +225,9 @@ pub(crate) fn encode_describe_acls(
     version: i16,
     principal: &str,
 ) {
-    // DescribeAcls classic v0–1 / flexible v2:
+    // DescribeAcls classic v0–1 / flexible v2–3 (Kafka max):
     //   filter fields → throttle, error, msg, resources[{type, name, pattern, acls[]}]
-    // v3 USER resource type out of scope.
+    // v3: same wire as v2; ResourceType User (7) accepted.
     let flex = version >= 2;
 
     let write_err = |out: &mut BytesMut, err: i16, msg: Option<&str>| {
@@ -324,7 +326,8 @@ pub(crate) fn encode_create_acls(
     version: i16,
     principal: &str,
 ) {
-    // CreateAcls classic v0–1 / flexible v2: creations[] → throttle + results[]
+    // CreateAcls classic v0–1 / flexible v2–3 (Kafka max): creations[] →
+    // throttle + results[]. v3 wire-identical to v2; User resource type ok.
     let flex = version >= 2;
 
     let empty = |out: &mut BytesMut| {
@@ -451,7 +454,8 @@ pub(crate) fn encode_delete_acls(
     version: i16,
     principal: &str,
 ) {
-    // DeleteAcls classic v0–1 / flexible v2: filters[] → throttle + filter_results[]
+    // DeleteAcls classic v0–1 / flexible v2–3 (Kafka max): filters[] →
+    // throttle + filter_results[]. v3 wire-identical to v2; User resource ok.
     let flex = version >= 2;
 
     let empty = |out: &mut BytesMut| {
@@ -620,7 +624,7 @@ pub(crate) fn parse_acl_filter(
         return Err("truncated ACL filter".into());
     }
     let rt_raw = src.get_i8();
-    let resource_type = kafka_rt_to_volant_filter(rt_raw)?;
+    let resource_type = kafka_rt_to_volant_filter(rt_raw, version)?;
     let resource_name = if flex {
         match get_compact_nullable_string(src) {
             Ok(Some(s)) if !s.is_empty() => Some(normalize_resource_name(resource_type, &s)),
@@ -696,7 +700,7 @@ pub(crate) fn parse_acl_creation(
         return Err("truncated ACL creation".into());
     }
     let rt_raw = src.get_i8();
-    let resource_type = kafka_rt_to_volant(rt_raw)?;
+    let resource_type = kafka_rt_to_volant(rt_raw, version)?;
     let resource_name = if flex {
         match get_compact_string(src) {
             Ok(s) if !s.is_empty() => normalize_resource_name(Some(resource_type), &s),
@@ -799,20 +803,32 @@ pub(crate) fn group_acls_by_resource(entries: &[AclEntry]) -> Vec<(i8, String, V
         .collect()
 }
 
-pub(crate) fn kafka_rt_to_volant(v: i8) -> std::result::Result<ResourceType, String> {
+/// Map Kafka resource type int8 → Volant.
+///
+/// `User` (7) is only accepted on Describe/Create/DeleteAcls **v3+** (Kafka max).
+/// TransactionalId / DelegationToken remain unsupported at every version.
+pub(crate) fn kafka_rt_to_volant(
+    v: i8,
+    version: i16,
+) -> std::result::Result<ResourceType, String> {
     match v {
         KAFKA_RT_TOPIC => Ok(ResourceType::Topic),
         KAFKA_RT_GROUP => Ok(ResourceType::Group),
         KAFKA_RT_CLUSTER => Ok(ResourceType::Cluster),
+        KAFKA_RT_USER if version >= 3 => Ok(ResourceType::User),
+        KAFKA_RT_USER => Err("User resource type requires Describe/Create/DeleteAcls v3+".into()),
         other => Err(format!("unsupported resource type {other}")),
     }
 }
 
-pub(crate) fn kafka_rt_to_volant_filter(v: i8) -> std::result::Result<Option<ResourceType>, String> {
+pub(crate) fn kafka_rt_to_volant_filter(
+    v: i8,
+    version: i16,
+) -> std::result::Result<Option<ResourceType>, String> {
     if v == KAFKA_RT_ANY {
         return Ok(None);
     }
-    kafka_rt_to_volant(v).map(Some)
+    kafka_rt_to_volant(v, version).map(Some)
 }
 
 pub(crate) fn volant_rt_to_kafka(rt: ResourceType) -> i8 {
@@ -820,6 +836,7 @@ pub(crate) fn volant_rt_to_kafka(rt: ResourceType) -> i8 {
         ResourceType::Topic => KAFKA_RT_TOPIC,
         ResourceType::Group => KAFKA_RT_GROUP,
         ResourceType::Cluster => KAFKA_RT_CLUSTER,
+        ResourceType::User => KAFKA_RT_USER,
     }
 }
 

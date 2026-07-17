@@ -1069,7 +1069,8 @@ fn parse_resource_type_u8(s: &str) -> Result<u8> {
         "topic" => Ok(0),
         "group" => Ok(1),
         "cluster" => Ok(2),
-        other => bail!("unknown resource_type '{other}' (Topic|Group|Cluster)"),
+        "user" => Ok(3),
+        other => bail!("unknown resource_type '{other}' (Topic|Group|Cluster|User)"),
     }
 }
 
@@ -1116,6 +1117,7 @@ fn resource_type_name(v: u8) -> &'static str {
         0 => "Topic",
         1 => "Group",
         2 => "Cluster",
+        3 => "User",
         _ => "?",
     }
 }

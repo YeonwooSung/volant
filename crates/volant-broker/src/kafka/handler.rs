@@ -329,7 +329,7 @@ fn dispatch_kafka(broker: &Broker, body: bytes::Bytes, conn: &mut KafkaConnState
             }
             acl_api::encode_delete_records(broker, &mut src, &mut out, hdr.api_version, principal);
         }
-        Some(ApiKey::DescribeAcls) if (0..=2).contains(&hdr.api_version) => {
+        Some(ApiKey::DescribeAcls) if (0..=3).contains(&hdr.api_version) => {
             if hdr.api_version >= 2 {
                 if let Err(e) = skip_tag_buffer(&mut src) {
                     debug!(error = %e, "describe acls flexible header tag buffer");
@@ -337,7 +337,7 @@ fn dispatch_kafka(broker: &Broker, body: bytes::Bytes, conn: &mut KafkaConnState
             }
             acl_api::encode_describe_acls(broker, &mut src, &mut out, hdr.api_version, principal);
         }
-        Some(ApiKey::CreateAcls) if (0..=2).contains(&hdr.api_version) => {
+        Some(ApiKey::CreateAcls) if (0..=3).contains(&hdr.api_version) => {
             if hdr.api_version >= 2 {
                 if let Err(e) = skip_tag_buffer(&mut src) {
                     debug!(error = %e, "create acls flexible header tag buffer");
@@ -345,7 +345,7 @@ fn dispatch_kafka(broker: &Broker, body: bytes::Bytes, conn: &mut KafkaConnState
             }
             acl_api::encode_create_acls(broker, &mut src, &mut out, hdr.api_version, principal);
         }
-        Some(ApiKey::DeleteAcls) if (0..=2).contains(&hdr.api_version) => {
+        Some(ApiKey::DeleteAcls) if (0..=3).contains(&hdr.api_version) => {
             if hdr.api_version >= 2 {
                 if let Err(e) = skip_tag_buffer(&mut src) {
                     debug!(error = %e, "delete acls flexible header tag buffer");

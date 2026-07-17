@@ -1,6 +1,6 @@
 # Phase history index
 
-Ship records for **phases 0–84**. Binding core contracts are
+Ship records for **phases 0–85**. Binding core contracts are
 **[PHASE1_SPEC](../PHASE1_SPEC.md)–[PHASE6_SPEC](../PHASE6_SPEC.md)**. Living
 docs for day-to-day reading: [ops](../ops.md), [consistency](../consistency.md),
 [tuning](../tuning.md), [KAFKA_COMPAT](../KAFKA_COMPAT.md),
@@ -126,12 +126,14 @@ docs for day-to-day reading: [ops](../ops.md), [consistency](../consistency.md),
 | 82 | ✅ | AddOffsetsToTxn v4 — wire-identical to v3; no TRANSACTION_ABORTABLE | [PHASE82_SPEC.md](../PHASE82_SPEC.md) |
 | 83 | ✅ | ApiVersions v4–5 — Kafka max; empty feature tags; v5 ClusterId/NodeId ignored | [PHASE83_SPEC.md](../PHASE83_SPEC.md) |
 | 84 | ✅ | Fetch v14–18 — Kafka max; ReplicaState ignore; NodeEndpoints v16+ | [PHASE84_SPEC.md](../PHASE84_SPEC.md) |
+| 85 | ✅ | ACL admin v3 — User resource type; Describe/Create/DeleteAcls 0–3 Kafka max | [PHASE85_SPEC.md](../PHASE85_SPEC.md) |
 
 ---
 
-## Still deferred (post–Phase 84)
+## Still deferred (post–Phase 85)
 
 - Multi-language clients
 - Chaos-mesh / cargo-fuzz corpus CI
 - True control-marker `READ_COMMITTED`
 - Real 2PC / prepared transaction state
+- Durable OffsetForLeaderEpoch history / real fetch sessions / DivergingEpoch

@@ -9,9 +9,9 @@ Volant is a resource-efficient alternative to Apache Kafka, built for:
 - **Streaming processing** — first-class operators (`map`, `filter`, windows) without a heavy runtime
 - **Small footprint** — native binary, predictable memory, simple operations
 
-> Status: **Phases 0–84 landed** — durable log, clustering, security, stream
+> Status: **Phases 0–85 landed** — durable log, clustering, security, stream
 > operators, and a broad optional Kafka wire shim (classic + flexible;
-> ApiVersions 0–5; Fetch 0–18). Single-node mode (no `--cluster-config`) preserves the
+> ApiVersions 0–5; Fetch 0–18; ACL admin 0–3). Single-node mode (no `--cluster-config`) preserves the
 > simple path. Start with the [whitepaper](./docs/WHITEPAPER.md) and
 > [docs index](./docs/INDEX.md); also [ROADMAP.md](./ROADMAP.md),
 > [ops](./docs/ops.md), [deploy/](./deploy/), [consistency](./docs/consistency.md).
@@ -366,6 +366,10 @@ v0; no SupportedFeatures / REBOOTSTRAP_REQUIRED.
 **Phase 84:** Fetch 0–18 (Kafka max) — v14 = v13 wire; v15 drops top-level
 ReplicaId (ReplicaState tag ignored); v16+ NodeEndpoints on leader errors;
 v17–18 partition tags parse-ignore.
+
+**Phase 85:** ACL admin 0–3 (Kafka max) — Describe/Create/DeleteAcls v3
+wire-identical to flexible v2; User resource type (`ResourceType = 7`) accepted
+on v3 only and stored as `ResourceType::User` (storage/admin only).
 
 **Still deferred:** multi-language clients, chaos-mesh / cargo-fuzz corpus CI,
 true control-marker READ_COMMITTED, real 2PC.

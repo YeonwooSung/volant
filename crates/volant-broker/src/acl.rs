@@ -20,6 +20,10 @@ pub enum ResourceType {
     Group = 1,
     /// Cluster-scoped resource (`volant`).
     Cluster = 2,
+    /// User resource (Kafka ACL v3 / SCRAM credential subject). Stored and
+    /// listed via Kafka Describe/Create/DeleteAcls; not consulted on the
+    /// produce/fetch authorize path today.
+    User = 3,
 }
 
 impl ResourceType {
@@ -29,6 +33,7 @@ impl ResourceType {
             0 => Some(Self::Topic),
             1 => Some(Self::Group),
             2 => Some(Self::Cluster),
+            3 => Some(Self::User),
             _ => None,
         }
     }
@@ -44,6 +49,7 @@ impl ResourceType {
             "topic" => Ok(Self::Topic),
             "group" => Ok(Self::Group),
             "cluster" => Ok(Self::Cluster),
+            "user" => Ok(Self::User),
             other => Err(Error::InvalidArgument(format!(
                 "unknown resource_type '{other}'"
             ))),
@@ -56,6 +62,7 @@ impl ResourceType {
             Self::Topic => "Topic",
             Self::Group => "Group",
             Self::Cluster => "Cluster",
+            Self::User => "User",
         }
     }
 }

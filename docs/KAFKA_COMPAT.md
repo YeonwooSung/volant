@@ -1,8 +1,8 @@
 # Kafka compatibility matrix
 
 **Living document** for the optional Kafka wire shim (`--kafka-listen`).
-Ship history: Phases **23–84**. Binding deep dives: `PHASE23_SPEC.md` …
-`PHASE84_SPEC.md`. Overview: [WHITEPAPER.md](./WHITEPAPER.md).
+Ship history: Phases **23–85**. Binding deep dives: `PHASE23_SPEC.md` …
+`PHASE85_SPEC.md`. Overview: [WHITEPAPER.md](./WHITEPAPER.md).
 
 ## Enable
 
@@ -46,7 +46,7 @@ From `SUPPORTED_APIS` in `crates/volant-broker/src/kafka/mod.rs`:
 | 25 | AddOffsetsToTxn | 0–4 | Flex v3+; v4 = v3 wire (no TRANSACTION_ABORTABLE) |
 | 26 | EndTxn | 0–5 | Flex v3+; v5 pid/epoch echo |
 | 28 | TxnOffsetCommit | 0–6 | Flex v3+; TopicId v6 |
-| 29–31 | ACL admin | 0–2 | Flex v2; LITERAL only |
+| 29–31 | ACL admin | 0–3 | Flex v2+; User resource v3; LITERAL only |
 | 32 | DescribeConfigs | 0–4 | Flex v4; topic keys |
 | 33 | AlterConfigs | 0–2 | Flex v2 |
 | 36 | SaslAuthenticate | 0–2 | Flex v2 |
@@ -67,7 +67,7 @@ From `SUPPORTED_APIS` in `crates/volant-broker/src/kafka/mod.rs`:
 | Formats | 28–34 | Compression, idempotence, SASL, SCRAM-512 |
 | Classic max | 35–50 | Version ratchets for classic framing |
 | Flexible | 51–66 | KIP-482 compact + modern admin |
-| TopicId / modern | 67–84 | UUID topics, ListOffsets specials, KIP-890, KIP-951, group admin, CreatePartitions v3, FindCoordinator v5–6, AddOffsetsToTxn v4, ApiVersions 0–5, Fetch 0–18 |
+| TopicId / modern | 67–85 | UUID topics, ListOffsets specials, KIP-890, KIP-951, group admin, CreatePartitions v3, FindCoordinator v5–6, AddOffsetsToTxn v4, ApiVersions 0–5, Fetch 0–18, ACL admin User resource v3 |
 
 ## Semantic honesty (open)
 
@@ -85,7 +85,7 @@ These are **current** product facts, not temporary docs lag:
 | CreateTopics | Replica assignment arrays ignored; configs response often null |
 | Storage | Log stores uncompressed Volant records; Fetch re-encodes |
 | Auth | Kafka port: SASL or `kafka-anonymous`; no shared-token on Kafka port |
-| ACLs | LITERAL only; host always `*`; no cluster ACL consensus |
+| ACLs | LITERAL only; host always `*`; User resource (v3) stored only (no SCRAM-admin gating); no TransactionalId/DelegationToken; no cluster ACL consensus |
 | KIP-951 | CurrentLeader on leader errors; Produce NodeEndpoints v10+; Fetch NodeEndpoints v16+; empty tags on success |
 | ApiVersions features | Empty SupportedFeatures / FinalizedFeatures / ZkMigrationReady tags; no REBOOTSTRAP_REQUIRED |
 | Missing APIs | Large Kafka surface still unsupported (GSSAPI, OAUTH, broker configs, …) |
