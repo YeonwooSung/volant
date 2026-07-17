@@ -54,12 +54,14 @@ Start here. Prefer living docs over individual phase ship records.
 
 ## Compaction note (2026-07-18)
 
-Documentation was compacted; living docs refreshed for Phase 83 status honesty
-(ApiVersions 0–5; whitepaper / KAFKA_COMPAT / INDEX / PHASE_HISTORY aligned
-to 0–83):
+Living docs re-verified against HEAD (`03bc0e3`, Phase 83 ApiVersions 0–5):
 
+- **Status ceiling:** Phases **0–83**; Kafka shim **23–83**
 - **Living** docs: INDEX, WHITEPAPER, KAFKA_COMPAT, features, ops, consistency, tuning
+- **WHITEPAPER:** architecture + honesty overview; Kafka version matrix **not**
+  duplicated — [KAFKA_COMPAT.md](./KAFKA_COMPAT.md) is the source of truth
 - **Binding** core: PHASE1–6 kept at top level
-- **Ship records**: PHASE7–83 kept for deep dives; navigated via PHASE_HISTORY
-- **Archived**: `phase2/`–`phase18/` plan/review work logs → `history/archive/`
-- **Kafka API matrix:** [KAFKA_COMPAT.md](./KAFKA_COMPAT.md) is the source of truth
+- **Ship records:** PHASE7–83 deep dives via [PHASE_HISTORY](./history/PHASE_HISTORY.md)
+- **Archived:** `phase2/`–`phase18/` plan/review work logs → `history/archive/`
+- **Still deferred (product):** multi-lang clients, chaos-mesh / cargo-fuzz CI,
+  true `READ_COMMITTED`, real 2PC, Fetch v14+

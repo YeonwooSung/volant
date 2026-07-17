@@ -9,12 +9,12 @@ Volant is a resource-efficient alternative to Apache Kafka, built for:
 - **Streaming processing** — first-class operators (`map`, `filter`, windows) without a heavy runtime
 - **Small footprint** — native binary, predictable memory, simple operations
 
-> Status: **Phases 0–82 landed** — durable log, clustering, security, stream
-> operators, and a broad optional Kafka wire shim (classic + flexible).
-> Single-node mode (no `--cluster-config`) preserves the simple path. Start with
-> the [whitepaper](./docs/WHITEPAPER.md) and [docs index](./docs/INDEX.md); also
-> [ROADMAP.md](./ROADMAP.md), [ops](./docs/ops.md), [deploy/](./deploy/),
-> [consistency](./docs/consistency.md).
+> Status: **Phases 0–83 landed** — durable log, clustering, security, stream
+> operators, and a broad optional Kafka wire shim (classic + flexible;
+> ApiVersions 0–5). Single-node mode (no `--cluster-config`) preserves the
+> simple path. Start with the [whitepaper](./docs/WHITEPAPER.md) and
+> [docs index](./docs/INDEX.md); also [ROADMAP.md](./ROADMAP.md),
+> [ops](./docs/ops.md), [deploy/](./deploy/), [consistency](./docs/consistency.md).
 
 ---
 
