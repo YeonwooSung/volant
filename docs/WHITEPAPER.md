@@ -18,7 +18,9 @@ combines an append-only, DMA-friendly partition log with a small operational
 footprint: one server binary, one CLI, Prometheus metrics, and optional
 multi-node ISR replication. A **native binary protocol** is the primary client
 path; an optional **Kafka wire-protocol shim** reuses the same storage, groups,
-and security model for interop experiments.
+and security model for interop experiments. The shim advertises **ApiVersions
+0–5** and **Fetch 0–18** at Apache Kafka wire max for those keys, with empty
+feature tags and buffer-until-commit transactions—not full isolation parity.
 
 Volant is **not** a drop-in Apache Kafka replacement. It prioritizes sequential
 I/O, explicit complexity, and honest non-parity (especially around
@@ -270,7 +272,8 @@ Volant deliberately does **not** claim production Kafka parity. Open gaps:
 - Static multi-node ISR replication and `acks=all`  
 - Consumer groups with durable offsets  
 - Native security (token / SCRAM / mTLS / ACL / TLS)  
-- Large Kafka wire surface for interop experiments  
+- Optional Kafka shim (~38 keys): ApiVersions **0–5**, Fetch **0–18**,
+  Produce/Metadata **0–13** (see [KAFKA_COMPAT.md](./KAFKA_COMPAT.md))  
 - Lightweight in-process stream operators  
 - Ops packaging (metrics, CLI, Docker, Helm)
 
@@ -278,14 +281,10 @@ Volant deliberately does **not** claim production Kafka parity. Open gaps:
 
 ## 11. Positioning vs Kafka
 
-| Area | Kafka | Volant direction |
-|------|-------|------------------|
-| Runtime | JVM | Native Rust |
-| Storage | Page cache + OS | Explicit mmap + optional io_uring / O_DIRECT |
-| Stream processing | Kafka Streams / ksqlDB | In-process `volant-stream` |
-| Ops model | ZooKeeper/KRaft + heavy footprint | Single binary → small static quorum |
-| Protocol | Kafka wire | Native first; optional Kafka shim |
-| Goal | Full ecosystem | Subset that is fast, small, and correct |
+Native Rust single binary vs JVM + ZooKeeper/KRaft; explicit mmap / optional
+`io_uring` vs page-cache-first storage; in-process `volant-stream` vs Kafka
+Streams; native protocol first with optional Kafka shim vs wire-only ecosystem.
+Detail: [ROADMAP.md](../ROADMAP.md) comparison table.
 
 ---
 
