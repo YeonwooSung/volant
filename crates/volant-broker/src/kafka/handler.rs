@@ -316,7 +316,7 @@ fn dispatch_kafka(broker: &Broker, body: bytes::Bytes, conn: &mut KafkaConnState
             }
             encode_list_offsets(broker, &mut src, &mut out, hdr.api_version, principal);
         }
-        Some(ApiKey::CreateTopics) if (0..=5).contains(&hdr.api_version) => {
+        Some(ApiKey::CreateTopics) if (0..=7).contains(&hdr.api_version) => {
             if hdr.api_version >= 5 {
                 if let Err(e) = skip_tag_buffer(&mut src) {
                     debug!(error = %e, "create topics flexible header tag buffer");
@@ -324,7 +324,7 @@ fn dispatch_kafka(broker: &Broker, body: bytes::Bytes, conn: &mut KafkaConnState
             }
             encode_create_topics(broker, &mut src, &mut out, hdr.api_version, principal);
         }
-        Some(ApiKey::DeleteTopics) if (0..=4).contains(&hdr.api_version) => {
+        Some(ApiKey::DeleteTopics) if (0..=6).contains(&hdr.api_version) => {
             if hdr.api_version >= 4 {
                 if let Err(e) = skip_tag_buffer(&mut src) {
                     debug!(error = %e, "delete topics flexible header tag buffer");
@@ -3154,12 +3154,13 @@ fn encode_create_topics(
     version: i16,
     principal: &str,
 ) {
-    // CreateTopics classic v0–4 + flexible v5:
+    // CreateTopics classic v0–4 + flexible v5–7:
     //   request: topics[{name, partitions, rf, assignments, configs}], timeout, validate_only (v1+)
-    //   response: throttle (v2+), topics[{name, error, error_message (v1+),
+    //   response: throttle (v2+), topics[{name, TopicId (v7+), error, error_message (v1+),
     //             num_partitions/rf/configs (v5+)}]
     // v4+: num_partitions / rf may be -1 (default partitions; RF ignored).
-    // Flexible v5: compact framing + TAG_BUFFER; TopicId (v7) deferred.
+    // v6: same wire as v5 (quota throttle error accepted/ignored).
+    // v7: TopicId UUID after name (deterministic Volant mapping).
     let flexible = version >= 5;
     struct TopicReq {
         name: String,
@@ -3324,24 +3325,35 @@ fn encode_create_topics(
             put_string(out, &t.name);
         }
 
-        let write_result =
-            |out: &mut BytesMut, code: KafkaErrorCode, msg: Option<&str>, parts: i32, rf: i16| {
-                out.put_i16(code.as_i16());
-                if version >= 1 {
-                    if flexible {
-                        put_compact_nullable_string(out, msg);
-                    } else {
-                        put_nullable_string(out, msg);
-                    }
-                }
+        let write_result = |out: &mut BytesMut,
+                            code: KafkaErrorCode,
+                            msg: Option<&str>,
+                            parts: i32,
+                            rf: i16,
+                            topic_id: Option<u32>| {
+            // v7+: TopicId immediately after Name.
+            if version >= 7 {
+                let uuid = topic_id
+                    .map(volant_topic_uuid)
+                    .unwrap_or(KAFKA_UUID_ZERO);
+                put_uuid(out, &uuid);
+            }
+            out.put_i16(code.as_i16());
+            if version >= 1 {
                 if flexible {
-                    // v5+: NumPartitions, ReplicationFactor, Configs (null), tags
-                    out.put_i32(parts);
-                    out.put_i16(rf);
-                    put_unsigned_varint_null_array(out); // null configs
-                    put_empty_tag_buffer(out);
+                    put_compact_nullable_string(out, msg);
+                } else {
+                    put_nullable_string(out, msg);
                 }
-            };
+            }
+            if flexible {
+                // v5+: NumPartitions, ReplicationFactor, Configs (null), tags
+                out.put_i32(parts);
+                out.put_i16(rf);
+                put_unsigned_varint_null_array(out); // null configs
+                put_empty_tag_buffer(out);
+            }
+        };
 
         if broker.acls().is_enabled()
             && !broker.acls().authorize(
@@ -3363,6 +3375,7 @@ fn encode_create_topics(
                 Some("topic authorization failed"),
                 -1,
                 -1,
+                None,
             );
             continue;
         }
@@ -3376,6 +3389,7 @@ fn encode_create_topics(
                 Some("invalid partition count"),
                 -1,
                 -1,
+                None,
             );
             continue;
         } else {
@@ -3393,6 +3407,7 @@ fn encode_create_topics(
                 Some("topic already exists"),
                 -1,
                 -1,
+                None,
             );
             continue;
         }
@@ -3404,6 +3419,7 @@ fn encode_create_topics(
                 None,
                 partitions as i32,
                 1,
+                None, // no id until actually created
             );
             continue;
         }
@@ -3415,7 +3431,14 @@ fn encode_create_topics(
         };
 
         match result {
-            Ok(_) => write_result(out, KafkaErrorCode::None, None, partitions as i32, 1),
+            Ok(id) => write_result(
+                out,
+                KafkaErrorCode::None,
+                None,
+                partitions as i32,
+                1,
+                Some(id.0),
+            ),
             Err(Error::InvalidArgument(msg)) if msg.contains("already exists") => {
                 write_result(
                     out,
@@ -3423,6 +3446,7 @@ fn encode_create_topics(
                     Some("topic already exists"),
                     -1,
                     -1,
+                    None,
                 );
             }
             Err(Error::InvalidArgument(msg)) => {
@@ -3432,9 +3456,10 @@ fn encode_create_topics(
                     Some(&msg),
                     -1,
                     -1,
+                    None,
                 );
             }
-            Err(_) => write_result(out, KafkaErrorCode::Unknown, None, -1, -1),
+            Err(_) => write_result(out, KafkaErrorCode::Unknown, None, -1, -1, None),
         }
     }
     if flexible {
@@ -3454,18 +3479,94 @@ fn encode_delete_topics(
     version: i16,
     principal: &str,
 ) {
-    // DeleteTopics classic v0–3 + flexible v4:
-    //   request: topic_names[] + timeout_ms
-    //   response: throttle (v1+), responses[{name, error_code}]
-    // Flexible v4: compact strings/arrays + TAG_BUFFER; ErrorMessage (v5) / TopicId (v6) deferred.
+    // DeleteTopics classic v0–3 + flexible v4–6:
+    //   request ≤v5: topic_names[] + timeout_ms
+    //   request v6: topics[{name nullable, topicId, tags}] + timeout + tags
+    //   response: throttle (v1+), responses[{
+    //     name (≤v5 string / v6 nullable), TopicId (v6+),
+    //     error, ErrorMessage (v5+), tags (flex)
+    //   }]
     let flexible = version >= 4;
-    let mut names = Vec::new();
-    if flexible {
+    let by_topic_id = version >= 6;
+
+    /// One delete target after request parse.
+    struct DelReq {
+        name: Option<String>,
+        uuid: [u8; 16],
+        /// Resolved name for delete (if any).
+        resolved: Option<String>,
+        /// Resolved numeric id (if known before delete).
+        numeric_id: Option<u32>,
+        /// Parse-time error (e.g. unknown TopicId).
+        early_err: Option<KafkaErrorCode>,
+    }
+
+    let mut reqs: Vec<DelReq> = Vec::new();
+
+    if by_topic_id {
+        match get_compact_array_len(src) {
+            Ok(Some(n)) => {
+                for _ in 0..n {
+                    let name = match get_compact_nullable_string(src) {
+                        Ok(n) => n,
+                        Err(_) => break,
+                    };
+                    let uuid = match get_uuid(src) {
+                        Ok(u) => u,
+                        Err(_) => break,
+                    };
+                    let _ = skip_tag_buffer(src);
+
+                    let (resolved, numeric_id, early_err) = if let Some(ref n) = name {
+                        let id = broker
+                            .metadata(Some(&[TopicName::new(n.clone())]))
+                            .topics
+                            .first()
+                            .map(|t| t.topic_id.0);
+                        (Some(n.clone()), id, None)
+                    } else if let Some(id) = parse_volant_topic_uuid(&uuid) {
+                        match broker.topic_name_by_id(id) {
+                            Some(n) => (Some(n), Some(id), None),
+                            None => (None, None, Some(KafkaErrorCode::UnknownTopicId)),
+                        }
+                    } else {
+                        (None, None, Some(KafkaErrorCode::UnknownTopicId))
+                    };
+
+                    reqs.push(DelReq {
+                        name,
+                        uuid,
+                        resolved,
+                        numeric_id,
+                        early_err,
+                    });
+                }
+            }
+            Ok(None) | Err(_) => {}
+        }
+        if src.remaining() >= 4 {
+            let _timeout = src.get_i32();
+        }
+        let _ = skip_tag_buffer(src);
+    } else if flexible {
         match get_compact_array_len(src) {
             Ok(Some(n)) => {
                 for _ in 0..n {
                     match get_compact_string(src) {
-                        Ok(s) => names.push(s),
+                        Ok(s) => {
+                            let id = broker
+                                .metadata(Some(&[TopicName::new(s.clone())]))
+                                .topics
+                                .first()
+                                .map(|t| t.topic_id.0);
+                            reqs.push(DelReq {
+                                name: Some(s.clone()),
+                                uuid: id.map(volant_topic_uuid).unwrap_or(KAFKA_UUID_ZERO),
+                                resolved: Some(s),
+                                numeric_id: id,
+                                early_err: None,
+                            });
+                        }
                         Err(_) => break,
                     }
                 }
@@ -3487,7 +3588,13 @@ fn encode_delete_topics(
         let topic_count = src.get_i32();
         for _ in 0..topic_count.max(0) {
             match get_string(src) {
-                Ok(n) => names.push(n),
+                Ok(s) => reqs.push(DelReq {
+                    name: Some(s.clone()),
+                    uuid: KAFKA_UUID_ZERO,
+                    resolved: Some(s),
+                    numeric_id: None,
+                    early_err: None,
+                }),
                 Err(_) => break,
             }
         }
@@ -3500,33 +3607,66 @@ fn encode_delete_topics(
         out.put_i32(0); // throttle
     }
     if flexible {
-        put_compact_array_len(out, names.len());
+        put_compact_array_len(out, reqs.len());
     } else {
-        out.put_i32(names.len() as i32);
+        out.put_i32(reqs.len() as i32);
     }
-    for name in names {
-        if flexible {
-            put_compact_string(out, &name);
+
+    for r in reqs {
+        // Name field: classic/v4–5 non-null string; v6 nullable compact.
+        if by_topic_id {
+            put_compact_nullable_string(out, r.name.as_deref().or(r.resolved.as_deref()));
+            // Prefer request uuid; fall back to resolved numeric mapping.
+            let uuid = if r.uuid != KAFKA_UUID_ZERO {
+                r.uuid
+            } else {
+                r.numeric_id
+                    .map(volant_topic_uuid)
+                    .unwrap_or(KAFKA_UUID_ZERO)
+            };
+            put_uuid(out, &uuid);
+        } else if flexible {
+            put_compact_string(out, r.name.as_deref().unwrap_or(""));
         } else {
-            put_string(out, &name);
+            put_string(out, r.name.as_deref().unwrap_or(""));
         }
-        let err = if broker.acls().is_enabled()
-            && !broker.acls().authorize(
-                Some(principal),
-                ResourceType::Topic,
-                &name,
-                AclOperation::Delete,
-            )
-        {
-            KafkaErrorCode::TopicAuthorizationFailed.as_i16()
-        } else {
-            match broker.delete_topic(&TopicName::new(name.clone())) {
-                Ok(()) => KafkaErrorCode::None.as_i16(),
-                Err(Error::NotFound(_)) => KafkaErrorCode::UnknownTopicOrPartition.as_i16(),
-                Err(_) => KafkaErrorCode::Unknown.as_i16(),
+
+        let (err, err_msg): (KafkaErrorCode, Option<&str>) = if let Some(e) = r.early_err {
+            (e, Some("unknown topic id"))
+        } else if let Some(ref name) = r.resolved {
+            if broker.acls().is_enabled()
+                && !broker.acls().authorize(
+                    Some(principal),
+                    ResourceType::Topic,
+                    name,
+                    AclOperation::Delete,
+                )
+            {
+                (
+                    KafkaErrorCode::TopicAuthorizationFailed,
+                    Some("topic authorization failed"),
+                )
+            } else {
+                match broker.delete_topic(&TopicName::new(name.clone())) {
+                    Ok(()) => (KafkaErrorCode::None, None),
+                    Err(Error::NotFound(_)) => (
+                        KafkaErrorCode::UnknownTopicOrPartition,
+                        Some("unknown topic or partition"),
+                    ),
+                    Err(_) => (KafkaErrorCode::Unknown, None),
+                }
             }
+        } else {
+            (
+                KafkaErrorCode::UnknownTopicOrPartition,
+                Some("unknown topic or partition"),
+            )
         };
-        out.put_i16(err);
+
+        out.put_i16(err.as_i16());
+        if version >= 5 {
+            put_compact_nullable_string(out, err_msg);
+        }
         if flexible {
             put_empty_tag_buffer(out);
         }

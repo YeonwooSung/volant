@@ -1550,7 +1550,29 @@ sessions; LSO ≡ HWM; deterministic UUID only.
 
 **Still deferred:** multi-lang clients, cargo-fuzz corpus CI, true control-marker
 READ_COMMITTED, higher KIP-890 txn versions, DescribeCluster v2, ListTransactions
-v2, admin TopicId (Create/DeleteTopics), Produce TopicId.
+v2, admin TopicId (Create/DeleteTopics), Produce TopicId. Admin TopicId closed
+by **Phase 69**.
+
+---
+
+### Phase 69 — Admin TopicId (CreateTopics v7 / DeleteTopics v5–6) ✅
+
+**Goal:** Topic admin APIs expose and accept Kafka TopicId UUIDs for modern
+clients (KIP-516), matching Metadata/Fetch deterministic mapping.
+
+Binding: **[docs/PHASE69_SPEC.md](./docs/PHASE69_SPEC.md)**.
+
+- [x] CreateTopics 0–7 (v7 response TopicId; v5–6 flexible unchanged)
+- [x] DeleteTopics 0–6 (v5 ErrorMessage; v6 delete by TopicId)
+- [x] Unknown TopicId → UnknownTopicId (100)
+- [x] Integration tests (`phase69_admin_topic_id`)
+
+**Honest limitations:** CreateTopics Configs always null; validate_only returns
+zero TopicId; no quota throttle errors; deterministic UUID only.
+
+**Still deferred:** multi-lang clients, cargo-fuzz corpus CI, true control-marker
+READ_COMMITTED, higher KIP-890 txn versions, DescribeCluster v2, ListTransactions
+v2, Produce TopicId.
 
 ---
 

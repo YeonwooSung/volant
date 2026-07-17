@@ -98,8 +98,8 @@ async fn api_versions_topic_admin_classic_max() {
         let max_v = src.get_i16();
         found.insert(key, (min_v, max_v));
     }
-    assert_eq!(found.get(&19), Some(&(0, 5))); // CreateTopics (Phase 60 flex v5)
-    assert_eq!(found.get(&20), Some(&(0, 4))); // DeleteTopics (Phase 60 flex v4)
+    assert_eq!(found.get(&19), Some(&(0, 7))); // CreateTopics (Phase 69 TopicId v7)
+    assert_eq!(found.get(&20), Some(&(0, 6))); // DeleteTopics (Phase 69 TopicId v6)
     assert_eq!(found.get(&37), Some(&(0, 2))); // CreatePartitions (Phase 60 flex v2)
     server.abort();
     let _ = std::fs::remove_dir_all(&dir);

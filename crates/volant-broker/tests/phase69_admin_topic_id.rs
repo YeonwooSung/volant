@@ -1,4 +1,4 @@
-//! Phase 60: Flexible CreateTopics v5 / DeleteTopics v4 / CreatePartitions v2.
+//! Phase 69: CreateTopics TopicId v7 + DeleteTopics TopicId v6 / ErrorMessage v5.
 
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -9,8 +9,9 @@ use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::{TcpListener, TcpStream};
 use volant_broker::kafka::codec::{
     encode_request, encode_request_flexible, get_compact_array_len, get_compact_nullable_string,
-    get_compact_string, get_nullable_string, get_string, put_compact_array_len, put_compact_string,
-    put_empty_tag_buffer, put_string, put_unsigned_varint, skip_tag_buffer,
+    get_compact_string, get_uuid, put_compact_array_len, put_compact_nullable_string,
+    put_compact_string, put_empty_tag_buffer, put_uuid, skip_tag_buffer, volant_topic_uuid,
+    KAFKA_UUID_ZERO,
 };
 use volant_broker::{serve_kafka_listener, Broker};
 use volant_core::TopicName;
@@ -22,7 +23,7 @@ fn temp_dir(label: &str) -> PathBuf {
         .unwrap()
         .as_nanos();
     let dir = std::env::temp_dir().join(format!(
-        "volant-p60-{label}-{}-{}",
+        "volant-p69-{label}-{}-{}",
         std::process::id(),
         nanos
     ));
@@ -61,22 +62,22 @@ async fn rpc(addr: &str, request: BytesMut) -> BytesMut {
     panic!("connection closed without full kafka response");
 }
 
-fn create_topics_v5(name: &str, partitions: i32, validate_only: bool) -> BytesMut {
+fn create_topics_v7(name: &str, partitions: i32) -> BytesMut {
     let mut body = BytesMut::new();
     put_compact_array_len(&mut body, 1);
     put_compact_string(&mut body, name);
     body.put_i32(partitions);
-    body.put_i16(-1); // rf
-    put_compact_array_len(&mut body, 0); // assignments
-    put_compact_array_len(&mut body, 0); // configs
-    put_empty_tag_buffer(&mut body); // topic tags
-    body.put_i32(5000); // timeout
-    body.put_u8(if validate_only { 1 } else { 0 });
+    body.put_i16(-1);
+    put_compact_array_len(&mut body, 0);
+    put_compact_array_len(&mut body, 0);
+    put_empty_tag_buffer(&mut body);
+    body.put_i32(5000);
+    body.put_u8(0);
     put_empty_tag_buffer(&mut body);
     body
 }
 
-fn delete_topics_v4(name: &str) -> BytesMut {
+fn delete_topics_v5(name: &str) -> BytesMut {
     let mut body = BytesMut::new();
     put_compact_array_len(&mut body, 1);
     put_compact_string(&mut body, name);
@@ -85,21 +86,30 @@ fn delete_topics_v4(name: &str) -> BytesMut {
     body
 }
 
-fn create_partitions_v2(name: &str, count: i32, validate_only: bool) -> BytesMut {
+fn delete_topics_v6_by_id(uuid: &[u8; 16]) -> BytesMut {
     let mut body = BytesMut::new();
     put_compact_array_len(&mut body, 1);
-    put_compact_string(&mut body, name);
-    body.put_i32(count);
-    put_unsigned_varint(&mut body, 0); // null assignments
+    put_compact_nullable_string(&mut body, None);
+    put_uuid(&mut body, uuid);
     put_empty_tag_buffer(&mut body);
     body.put_i32(5000);
-    body.put_u8(if validate_only { 1 } else { 0 });
+    put_empty_tag_buffer(&mut body);
+    body
+}
+
+fn delete_topics_v6_by_name(name: &str) -> BytesMut {
+    let mut body = BytesMut::new();
+    put_compact_array_len(&mut body, 1);
+    put_compact_nullable_string(&mut body, Some(name));
+    put_uuid(&mut body, &KAFKA_UUID_ZERO);
+    put_empty_tag_buffer(&mut body);
+    body.put_i32(5000);
     put_empty_tag_buffer(&mut body);
     body
 }
 
 #[tokio::test]
-async fn api_versions_topic_admin_flex_maxes() {
+async fn api_versions_admin_topic_id_maxes() {
     let dir = temp_dir("api");
     let broker = Arc::new(Broker::new(StorageConfig {
         data_dir: dir.clone(),
@@ -117,127 +127,117 @@ async fn api_versions_topic_admin_flex_maxes() {
         let max_v = src.get_i16();
         found.insert(key, (min_v, max_v));
     }
-    assert_eq!(found.get(&19), Some(&(0, 7))); // Phase 69 TopicId
-    assert_eq!(found.get(&20), Some(&(0, 6))); // Phase 69 TopicId
-    assert_eq!(found.get(&37), Some(&(0, 2)));
+    assert_eq!(found.get(&19), Some(&(0, 7)));
+    assert_eq!(found.get(&20), Some(&(0, 6)));
     server.abort();
     let _ = std::fs::remove_dir_all(&dir);
 }
 
 #[tokio::test]
-async fn create_delete_partitions_flexible_roundtrip() {
-    let dir = temp_dir("roundtrip");
+async fn create_topics_v7_returns_topic_id() {
+    let dir = temp_dir("create-v7");
     let broker = Arc::new(Broker::new(StorageConfig {
         data_dir: dir.clone(),
         ..StorageConfig::default()
     }));
     let (addr, server) = boot_kafka(Arc::clone(&broker)).await;
 
-    // CreateTopics v5
     let resp = rpc(
         &addr,
-        encode_request_flexible(19, 5, 10, Some("a"), &create_topics_v5("flex-t", 2, false)),
+        encode_request_flexible(19, 7, 10, Some("a"), &create_topics_v7("tid-t", 2)),
     )
     .await;
     let mut src = resp.freeze();
     assert_eq!(src.get_i32(), 10);
     skip_tag_buffer(&mut src).unwrap();
-    assert_eq!(src.get_i32(), 0); // throttle
-    assert_eq!(get_compact_array_len(&mut src).unwrap(), Some(1));
-    assert_eq!(get_compact_string(&mut src).unwrap(), "flex-t");
-    assert_eq!(src.get_i16(), 0); // error
-    assert_eq!(get_compact_nullable_string(&mut src).unwrap(), None);
-    assert_eq!(src.get_i32(), 2); // num partitions
-    assert_eq!(src.get_i16(), 1); // rf placeholder
-    // null configs
-    assert_eq!(get_compact_array_len(&mut src).unwrap(), None);
-    skip_tag_buffer(&mut src).unwrap();
-    skip_tag_buffer(&mut src).unwrap();
-
-    let meta = broker.metadata(Some(&[TopicName::new("flex-t")]));
-    assert_eq!(meta.topics[0].partitions.len(), 2);
-
-    // CreatePartitions v2: grow to 4
-    let resp = rpc(
-        &addr,
-        encode_request_flexible(
-            37,
-            2,
-            11,
-            Some("a"),
-            &create_partitions_v2("flex-t", 4, false),
-        ),
-    )
-    .await;
-    let mut src = resp.freeze();
-    assert_eq!(src.get_i32(), 11);
-    skip_tag_buffer(&mut src).unwrap();
     assert_eq!(src.get_i32(), 0);
     assert_eq!(get_compact_array_len(&mut src).unwrap(), Some(1));
-    assert_eq!(get_compact_string(&mut src).unwrap(), "flex-t");
+    assert_eq!(get_compact_string(&mut src).unwrap(), "tid-t");
+    let uuid = get_uuid(&mut src).unwrap();
+    assert_ne!(uuid, KAFKA_UUID_ZERO);
     assert_eq!(src.get_i16(), 0);
     assert_eq!(get_compact_nullable_string(&mut src).unwrap(), None);
-    skip_tag_buffer(&mut src).unwrap();
-    skip_tag_buffer(&mut src).unwrap();
-
-    let meta = broker.metadata(Some(&[TopicName::new("flex-t")]));
-    assert_eq!(meta.topics[0].partitions.len(), 4);
-
-    // DeleteTopics v4
-    let resp = rpc(
-        &addr,
-        encode_request_flexible(20, 4, 12, Some("a"), &delete_topics_v4("flex-t")),
-    )
-    .await;
-    let mut src = resp.freeze();
-    assert_eq!(src.get_i32(), 12);
-    skip_tag_buffer(&mut src).unwrap();
-    assert_eq!(src.get_i32(), 0);
-    assert_eq!(get_compact_array_len(&mut src).unwrap(), Some(1));
-    assert_eq!(get_compact_string(&mut src).unwrap(), "flex-t");
-    assert_eq!(src.get_i16(), 0);
-    skip_tag_buffer(&mut src).unwrap();
-    skip_tag_buffer(&mut src).unwrap();
-
-    assert!(broker
-        .metadata(Some(&[TopicName::new("flex-t")]))
-        .topics
-        .is_empty());
-
-    server.abort();
-    let _ = std::fs::remove_dir_all(&dir);
-}
-
-#[tokio::test]
-async fn create_topics_v5_validate_only_and_default_partitions() {
-    let dir = temp_dir("vo");
-    let broker = Arc::new(Broker::new(StorageConfig {
-        data_dir: dir.clone(),
-        ..StorageConfig::default()
-    }));
-    let (addr, server) = boot_kafka(Arc::clone(&broker)).await;
-
-    let resp = rpc(
-        &addr,
-        encode_request_flexible(19, 5, 1, Some("a"), &create_topics_v5("dry", -1, true)),
-    )
-    .await;
-    let mut src = resp.freeze();
-    assert_eq!(src.get_i32(), 1);
-    skip_tag_buffer(&mut src).unwrap();
-    assert_eq!(src.get_i32(), 0);
-    assert_eq!(get_compact_array_len(&mut src).unwrap(), Some(1));
-    assert_eq!(get_compact_string(&mut src).unwrap(), "dry");
-    assert_eq!(src.get_i16(), 0);
-    let _ = get_compact_nullable_string(&mut src).unwrap();
-    assert_eq!(src.get_i32(), 1); // default partitions
+    assert_eq!(src.get_i32(), 2);
     assert_eq!(src.get_i16(), 1);
     assert_eq!(get_compact_array_len(&mut src).unwrap(), None);
     skip_tag_buffer(&mut src).unwrap();
     skip_tag_buffer(&mut src).unwrap();
 
+    let meta = broker.metadata(Some(&[TopicName::new("tid-t")]));
+    assert_eq!(meta.topics.len(), 1);
+    assert_eq!(uuid, volant_topic_uuid(meta.topics[0].topic_id.0));
+
+    server.abort();
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[tokio::test]
+async fn delete_topics_v5_error_message() {
+    let dir = temp_dir("del-v5");
+    let broker = Arc::new(Broker::new(StorageConfig {
+        data_dir: dir.clone(),
+        ..StorageConfig::default()
+    }));
+    let (addr, server) = boot_kafka(Arc::clone(&broker)).await;
+
+    let resp = rpc(
+        &addr,
+        encode_request_flexible(20, 5, 3, Some("a"), &delete_topics_v5("nope")),
+    )
+    .await;
+    let mut src = resp.freeze();
+    assert_eq!(src.get_i32(), 3);
+    skip_tag_buffer(&mut src).unwrap();
+    assert_eq!(src.get_i32(), 0);
+    assert_eq!(get_compact_array_len(&mut src).unwrap(), Some(1));
+    assert_eq!(get_compact_string(&mut src).unwrap(), "nope");
+    assert_eq!(src.get_i16(), 3); // UNKNOWN_TOPIC_OR_PARTITION
+    let msg = get_compact_nullable_string(&mut src).unwrap();
+    assert!(msg.is_some());
+    skip_tag_buffer(&mut src).unwrap();
+    skip_tag_buffer(&mut src).unwrap();
+
+    server.abort();
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[tokio::test]
+async fn delete_topics_v6_by_topic_id() {
+    let dir = temp_dir("del-id");
+    let broker = Arc::new(Broker::new(StorageConfig {
+        data_dir: dir.clone(),
+        ..StorageConfig::default()
+    }));
+    broker.create_topic("doomed", 1).unwrap();
+    let id = broker
+        .metadata(Some(&[TopicName::new("doomed")]))
+        .topics[0]
+        .topic_id
+        .0;
+    let uuid = volant_topic_uuid(id);
+    let (addr, server) = boot_kafka(Arc::clone(&broker)).await;
+
+    let resp = rpc(
+        &addr,
+        encode_request_flexible(20, 6, 4, Some("a"), &delete_topics_v6_by_id(&uuid)),
+    )
+    .await;
+    let mut src = resp.freeze();
+    assert_eq!(src.get_i32(), 4);
+    skip_tag_buffer(&mut src).unwrap();
+    assert_eq!(src.get_i32(), 0);
+    assert_eq!(get_compact_array_len(&mut src).unwrap(), Some(1));
+    // Name may be filled from resolution.
+    let name = get_compact_nullable_string(&mut src).unwrap();
+    assert_eq!(name.as_deref(), Some("doomed"));
+    assert_eq!(get_uuid(&mut src).unwrap(), uuid);
+    assert_eq!(src.get_i16(), 0);
+    assert_eq!(get_compact_nullable_string(&mut src).unwrap(), None);
+    skip_tag_buffer(&mut src).unwrap();
+    skip_tag_buffer(&mut src).unwrap();
+
     assert!(broker
-        .metadata(Some(&[TopicName::new("dry")]))
+        .metadata(Some(&[TopicName::new("doomed")]))
         .topics
         .is_empty());
 
@@ -246,57 +246,99 @@ async fn create_topics_v5_validate_only_and_default_partitions() {
 }
 
 #[tokio::test]
-async fn classic_topic_admin_still_works() {
-    let dir = temp_dir("classic");
+async fn delete_topics_v6_unknown_id() {
+    let dir = temp_dir("del-unk");
     let broker = Arc::new(Broker::new(StorageConfig {
         data_dir: dir.clone(),
         ..StorageConfig::default()
     }));
     let (addr, server) = boot_kafka(Arc::clone(&broker)).await;
 
-    let mut body = BytesMut::new();
-    body.put_i32(1);
-    put_string(&mut body, "c-t");
-    body.put_i32(1);
-    body.put_i16(-1);
-    body.put_i32(0);
-    body.put_i32(0);
-    body.put_i32(5000);
-    body.put_u8(0);
-    let resp = rpc(&addr, encode_request(19, 4, 10, Some("a"), &body)).await;
+    let mut bad = [0u8; 16];
+    bad[0] = 0xab;
+    let resp = rpc(
+        &addr,
+        encode_request_flexible(20, 6, 5, Some("a"), &delete_topics_v6_by_id(&bad)),
+    )
+    .await;
     let mut src = resp.freeze();
-    assert_eq!(src.get_i32(), 10);
-    assert_eq!(src.get_i32(), 0); // no header tags
-    assert_eq!(src.get_i32(), 1);
-    assert_eq!(get_string(&mut src).unwrap(), "c-t");
-    assert_eq!(src.get_i16(), 0);
-    assert_eq!(get_nullable_string(&mut src).unwrap(), None);
+    assert_eq!(src.get_i32(), 5);
+    skip_tag_buffer(&mut src).unwrap();
+    let _ = src.get_i32();
+    assert_eq!(get_compact_array_len(&mut src).unwrap(), Some(1));
+    let _ = get_compact_nullable_string(&mut src).unwrap();
+    assert_eq!(get_uuid(&mut src).unwrap(), bad);
+    assert_eq!(src.get_i16(), 100); // UNKNOWN_TOPIC_ID
 
     server.abort();
     let _ = std::fs::remove_dir_all(&dir);
 }
 
 #[tokio::test]
-async fn unsupported_versions_use_header_v1() {
-    let dir = temp_dir("unsup");
+async fn delete_topics_v6_by_name_still_works() {
+    let dir = temp_dir("del-name");
+    let broker = Arc::new(Broker::new(StorageConfig {
+        data_dir: dir.clone(),
+        ..StorageConfig::default()
+    }));
+    broker.create_topic("named-del", 1).unwrap();
+    let id = broker
+        .metadata(Some(&[TopicName::new("named-del")]))
+        .topics[0]
+        .topic_id
+        .0;
+    let (addr, server) = boot_kafka(Arc::clone(&broker)).await;
+
+    let resp = rpc(
+        &addr,
+        encode_request_flexible(
+            20,
+            6,
+            6,
+            Some("a"),
+            &delete_topics_v6_by_name("named-del"),
+        ),
+    )
+    .await;
+    let mut src = resp.freeze();
+    assert_eq!(src.get_i32(), 6);
+    skip_tag_buffer(&mut src).unwrap();
+    let _ = src.get_i32();
+    assert_eq!(get_compact_array_len(&mut src).unwrap(), Some(1));
+    assert_eq!(
+        get_compact_nullable_string(&mut src).unwrap().as_deref(),
+        Some("named-del")
+    );
+    assert_eq!(get_uuid(&mut src).unwrap(), volant_topic_uuid(id));
+    assert_eq!(src.get_i16(), 0);
+
+    server.abort();
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[tokio::test]
+async fn create_topics_v5_still_no_topic_id_field() {
+    let dir = temp_dir("v5");
     let broker = Arc::new(Broker::new(StorageConfig {
         data_dir: dir.clone(),
         ..StorageConfig::default()
     }));
     let (addr, server) = boot_kafka(Arc::clone(&broker)).await;
 
-    // CreateTopics v8 / DeleteTopics v7 / CreatePartitions v3 unsupported.
-    for (api, ver, corr) in [(19i16, 8i16, 1i32), (20, 7, 2), (37, 3, 3)] {
-        let resp = rpc(
-            &addr,
-            encode_request_flexible(api, ver, corr, Some("c"), &[]),
-        )
-        .await;
-        let mut src = resp.freeze();
-        assert_eq!(src.get_i32(), corr);
-        skip_tag_buffer(&mut src).unwrap();
-        assert_eq!(src.get_i16(), 35, "api={api} ver={ver}");
-    }
+    // Same body layout as v7 (request unchanged).
+    let resp = rpc(
+        &addr,
+        encode_request_flexible(19, 5, 1, Some("a"), &create_topics_v7("old-t", 1)),
+    )
+    .await;
+    let mut src = resp.freeze();
+    assert_eq!(src.get_i32(), 1);
+    skip_tag_buffer(&mut src).unwrap();
+    assert_eq!(src.get_i32(), 0);
+    assert_eq!(get_compact_array_len(&mut src).unwrap(), Some(1));
+    assert_eq!(get_compact_string(&mut src).unwrap(), "old-t");
+    // Immediately error code — no UUID between name and error on v5.
+    assert_eq!(src.get_i16(), 0);
 
     server.abort();
     let _ = std::fs::remove_dir_all(&dir);

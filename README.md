@@ -315,6 +315,9 @@ ops removal, v12 lookup by TopicId.
 **Phase 68:** Fetch TopicId v13 — request/response UUID topics (KIP-516);
 unknown id → UnknownTopicId; v12 name path unchanged.
 
+**Phase 69:** Admin TopicId — CreateTopics v7 TopicId response; DeleteTopics
+v5 ErrorMessage + v6 delete-by-TopicId.
+
 **Still deferred:** multi-language clients, chaos-mesh / cargo-fuzz corpus CI.
 
 ### Networked client (library)

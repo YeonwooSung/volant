@@ -145,8 +145,8 @@ Supported APIs:
 | DescribeTransactions | 0 | **Always flexible**; Empty/Ongoing from txn registry; unknown → TransactionalIdNotFound; timeout/start=0 |
 | ListTransactions | 0–1 | **Always flexible**; open txns as `Ongoing`; state/pid filters; **v1 DurationFilter** accepted/ignored; v2 pattern unsupported |
 | ListOffsets | 0–6 | Classic 0–5; **v6 flexible** + response header v1; -1 latest / -2 earliest; isolation ignored (LSO≡HWM); v4+ leader-epoch fencing; v7+ max-timestamp unsupported |
-| CreateTopics | 0–5 | Classic 0–4; **v5 flexible** + response header v1; validate_only v1+; default partitions v4+; configs response null; TopicId v7 unsupported |
-| DeleteTopics | 0–4 | Classic 0–3; **v4 flexible** + response header v1; throttle v1+ (leading); ErrorMessage v5 / TopicId v6 unsupported |
+| CreateTopics | 0–7 | Classic 0–4; **v5–7 flexible** + response header v1; validate_only v1+; default partitions v4+; configs response null; **v7 TopicId** (deterministic UUID); v8 unsupported |
+| DeleteTopics | 0–6 | Classic 0–3; **v4–6 flexible** + response header v1; throttle v1+; **v5 ErrorMessage**; **v6 TopicId** delete-by-id (unknown → UnknownTopicId); v7 unsupported |
 | JoinGroup | 0–9 | Classic 0–5; **v6+ flexible** + response header v1; v5+ group.instance.id → static:{id}; **v7** ProtocolType; **v8** Reason (ignored); **v9** SkipAssignment=false; throttle v2+ |
 | SyncGroup | 0–5 | Classic 0–3; **v4+ flexible** + response header v1; v3 group.instance.id; **v5** ProtocolType/Name echo (no consistency check) |
 | Heartbeat | 0–4 | Classic 0–3; **v4 flexible** + response header v1; v3 group.instance.id |
