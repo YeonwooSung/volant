@@ -318,6 +318,9 @@ unknown id → UnknownTopicId; v12 name path unchanged.
 **Phase 69:** Admin TopicId — CreateTopics v7 TopicId response; DeleteTopics
 v5 ErrorMessage + v6 delete-by-TopicId.
 
+**Phase 70:** DescribeCluster v2 (IsFenced always false) + ListTransactions v2
+(TransactionalIdPattern simple `*` glob).
+
 **Still deferred:** multi-language clients, chaos-mesh / cargo-fuzz corpus CI.
 
 ### Networked client (library)

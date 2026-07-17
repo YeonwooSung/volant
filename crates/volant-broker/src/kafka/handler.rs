@@ -260,7 +260,7 @@ fn dispatch_kafka(broker: &Broker, body: bytes::Bytes, conn: &mut KafkaConnState
             }
             encode_sasl_authenticate(broker, &mut src, &mut out, hdr.api_version, conn);
         }
-        Some(ApiKey::DescribeCluster) if (0..=1).contains(&hdr.api_version) => {
+        Some(ApiKey::DescribeCluster) if (0..=2).contains(&hdr.api_version) => {
             if let Err(e) = skip_tag_buffer(&mut src) {
                 debug!(error = %e, "describe cluster flexible header tag buffer");
             }
@@ -278,7 +278,7 @@ fn dispatch_kafka(broker: &Broker, body: bytes::Bytes, conn: &mut KafkaConnState
             }
             encode_describe_transactions(broker, &mut src, &mut out, principal);
         }
-        Some(ApiKey::ListTransactions) if (0..=1).contains(&hdr.api_version) => {
+        Some(ApiKey::ListTransactions) if (0..=2).contains(&hdr.api_version) => {
             if let Err(e) = skip_tag_buffer(&mut src) {
                 debug!(error = %e, "list transactions flexible header tag buffer");
             }
@@ -656,12 +656,12 @@ fn encode_sasl_authenticate(
     }
 }
 
-/// DescribeCluster v0–1 (always flexible, KIP-700 / Phase 65–66).
+/// DescribeCluster v0–2 (always flexible, KIP-700 / Phase 65–66 / 70).
 ///
 /// Request: include_cluster_authorized_operations (bool), EndpointType (v1+),
-/// TAG_BUFFER.
+/// IncludeFencedBrokers (v2+, accepted; Volant has no fenced brokers), TAG_BUFFER.
 /// Response (header v1): throttle, error, error_message, EndpointType (v1+),
-/// cluster_id, controller_id, brokers[{id, host, port, rack, tags}],
+/// cluster_id, controller_id, brokers[{id, host, port, rack, IsFenced (v2+), tags}],
 /// cluster_authorized_ops, tags.
 fn encode_describe_cluster(
     broker: &Broker,
@@ -681,6 +681,10 @@ fn encode_describe_cluster(
     } else {
         1
     };
+    // IncludeFencedBrokers (v2+): parse and ignore — no fenced membership.
+    if version >= 2 && src.has_remaining() {
+        let _include_fenced = src.get_u8() != 0;
+    }
     let _ = skip_tag_buffer(src);
 
     if version >= 1 && endpoint_type != 1 {
@@ -734,16 +738,19 @@ fn encode_describe_cluster(
         put_compact_string(out, host);
         out.put_i32(i32::from(*port));
         put_compact_nullable_string(out, None); // rack
+        if version >= 2 {
+            out.put_u8(0); // IsFenced = false (no fenced brokers)
+        }
         put_empty_tag_buffer(out);
     }
     out.put_i32(cluster_authorized_ops(broker, principal, include_ops));
     put_empty_tag_buffer(out);
 }
 
-/// ListTransactions v0–1 (always flexible, Phase 65–66).
+/// ListTransactions v0–2 (always flexible, Phase 65–66 / 70).
 ///
 /// Request: compact StateFilters[], compact ProducerIdFilters[],
-/// DurationFilter (v1+, ignored), tags.
+/// DurationFilter (v1+, ignored), TransactionalIdPattern (v2+, simple glob), tags.
 /// Response: throttle, error, compact UnknownStateFilters[], compact
 /// TransactionStates[{id, producer_id, state, tags}], tags.
 fn encode_list_transactions(
@@ -802,6 +809,12 @@ fn encode_list_transactions(
     if version >= 1 && src.remaining() >= 8 {
         let _duration_filter = src.get_i64();
     }
+    // TransactionalIdPattern (v2+): nullable compact string; simple `*` glob.
+    let id_pattern = if version >= 2 {
+        get_compact_nullable_string(src).ok().flatten()
+    } else {
+        None
+    };
     let _ = skip_tag_buffer(src);
 
     let mut unknown_filters: Vec<&str> = Vec::new();
@@ -814,7 +827,7 @@ fn encode_list_transactions(
     let open = broker.list_open_transactions();
     let filtered: Vec<_> = open
         .into_iter()
-        .filter(|(_tid, pid, state)| {
+        .filter(|(tid, pid, state)| {
             if !state_filters.is_empty()
                 && !state_filters.iter().any(|f| f == state)
             {
@@ -822,6 +835,11 @@ fn encode_list_transactions(
             }
             if !pid_filters.is_empty() && !pid_filters.contains(&(*pid as i64)) {
                 return false;
+            }
+            if let Some(ref pat) = id_pattern {
+                if !txn_id_pattern_matches(pat, tid) {
+                    return false;
+                }
             }
             true
         })
@@ -841,6 +859,42 @@ fn encode_list_transactions(
         put_empty_tag_buffer(out);
     }
     put_empty_tag_buffer(out);
+}
+
+/// Match a transactional id against ListTransactions v2 pattern.
+///
+/// Kafka uses RE2J; Volant supports a minimal glob: `*` = any sequence
+/// (including empty), other characters are literal. Empty pattern matches all.
+fn txn_id_pattern_matches(pattern: &str, tid: &str) -> bool {
+    if pattern.is_empty() {
+        return true;
+    }
+    let pat = pattern.as_bytes();
+    let s = tid.as_bytes();
+    let mut pi = 0usize;
+    let mut si = 0usize;
+    let mut star_pi: Option<usize> = None;
+    let mut star_si = 0usize;
+    while si < s.len() {
+        if pi < pat.len() && pat[pi] == b'*' {
+            star_pi = Some(pi);
+            star_si = si;
+            pi += 1;
+        } else if pi < pat.len() && pat[pi] == s[si] {
+            pi += 1;
+            si += 1;
+        } else if let Some(sp) = star_pi {
+            pi = sp + 1;
+            star_si += 1;
+            si = star_si;
+        } else {
+            return false;
+        }
+    }
+    while pi < pat.len() && pat[pi] == b'*' {
+        pi += 1;
+    }
+    pi == pat.len()
 }
 
 /// DescribeTransactions v0 (always flexible, Phase 66).

@@ -140,10 +140,10 @@ Supported APIs:
 | TxnOffsetCommit | 0–3 | Classic 0–2; **v3 flexible** + response header v1; buffers until EndTxn; v2+ leader_epoch + v3 member/generation ignored |
 | SaslHandshake | 0–1 | mechanisms: PLAIN, SCRAM-SHA-256, SCRAM-SHA-512 |
 | SaslAuthenticate | 0–2 | Classic 0–1; **v2 flexible** + response header v1; PLAIN / SCRAM-SHA-256 / SCRAM-SHA-512; session_lifetime=0 |
-| DescribeCluster | 0–1 | **Always flexible** (KIP-700); cluster_id=`volant`; brokers + controller; **v1 EndpointType** (brokers only; controllers → UnsupportedEndpointType); v2 fenced unsupported |
+| DescribeCluster | 0–2 | **Always flexible** (KIP-700); cluster_id=`volant`; brokers + controller; **v1 EndpointType** (brokers only); **v2 IncludeFencedBrokers + IsFenced** (always false); v3 unsupported |
 | DescribeProducers | 0 | **Always flexible**; active producers from sequences + open-txn activity; last_ts/coord_epoch/txn_start placeholders |
 | DescribeTransactions | 0 | **Always flexible**; Empty/Ongoing from txn registry; unknown → TransactionalIdNotFound; timeout/start=0 |
-| ListTransactions | 0–1 | **Always flexible**; open txns as `Ongoing`; state/pid filters; **v1 DurationFilter** accepted/ignored; v2 pattern unsupported |
+| ListTransactions | 0–2 | **Always flexible**; open txns as `Ongoing`; state/pid filters; **v1 DurationFilter** accepted/ignored; **v2 TransactionalIdPattern** (`*` glob, not full RE2J); v3 unsupported |
 | ListOffsets | 0–6 | Classic 0–5; **v6 flexible** + response header v1; -1 latest / -2 earliest; isolation ignored (LSO≡HWM); v4+ leader-epoch fencing; v7+ max-timestamp unsupported |
 | CreateTopics | 0–7 | Classic 0–4; **v5–7 flexible** + response header v1; validate_only v1+; default partitions v4+; configs response null; **v7 TopicId** (deterministic UUID); v8 unsupported |
 | DeleteTopics | 0–6 | Classic 0–3; **v4–6 flexible** + response header v1; throttle v1+; **v5 ErrorMessage**; **v6 TopicId** delete-by-id (unknown → UnknownTopicId); v7 unsupported |

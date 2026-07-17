@@ -4,9 +4,9 @@
 //! v9–12 (TopicId), FindCoordinator v3–4, Produce v9, Fetch v12–13 (TopicId),
 //! CreateTopics v5–7 / DeleteTopics v4–6 (TopicId), group/offset/admin/config/txn
 //! flex, ListOffsets v6, OffsetForLeaderEpoch v4, DeleteRecords v2, ACL admin,
-//! SaslAuthenticate v2, DescribeCluster 0–1, ListTransactions 0–1,
+//! SaslAuthenticate v2, DescribeCluster 0–2, ListTransactions 0–2,
 //! DescribeTransactions v0, DescribeProducers v0. See `docs/PHASE23_SPEC.md`
-//! … `docs/PHASE69_SPEC.md`.
+//! … `docs/PHASE70_SPEC.md`.
 
 /// Kafka wire primitives, MessageSet (magic 0/1), and RecordBatch (magic 2).
 pub mod codec;
@@ -296,8 +296,8 @@ pub const SUPPORTED_APIS: &[(ApiKey, i16, i16)] = &[
     (ApiKey::DeleteGroups, 0, 2),
     (ApiKey::IncrementalAlterConfigs, 0, 1),
     (ApiKey::OffsetDelete, 0, 0),
-    (ApiKey::DescribeCluster, 0, 1),
+    (ApiKey::DescribeCluster, 0, 2),
     (ApiKey::DescribeProducers, 0, 0),
     (ApiKey::DescribeTransactions, 0, 0),
-    (ApiKey::ListTransactions, 0, 1),
+    (ApiKey::ListTransactions, 0, 2),
 ];

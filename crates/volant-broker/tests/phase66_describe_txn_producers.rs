@@ -126,10 +126,10 @@ async fn api_versions_p66_maxes() {
         let max_v = src.get_i16();
         found.insert(key, (min_v, max_v));
     }
-    assert_eq!(found.get(&60), Some(&(0, 1))); // DescribeCluster
+    assert_eq!(found.get(&60), Some(&(0, 2))); // DescribeCluster (Phase 70)
     assert_eq!(found.get(&61), Some(&(0, 0))); // DescribeProducers
     assert_eq!(found.get(&65), Some(&(0, 0))); // DescribeTransactions
-    assert_eq!(found.get(&66), Some(&(0, 1))); // ListTransactions
+    assert_eq!(found.get(&66), Some(&(0, 2))); // ListTransactions (Phase 70)
     server.abort();
     let _ = std::fs::remove_dir_all(&dir);
 }
@@ -362,11 +362,12 @@ async fn unsupported_versions_use_header_v1() {
     }));
     let (addr, server) = boot_kafka(Arc::clone(&broker)).await;
 
+    // DescribeCluster/ListTransactions v3 unsupported (v2 closed by Phase 70).
     for (api, ver, corr) in [
-        (60i16, 2i16, 40i32),
+        (60i16, 3i16, 40i32),
         (61, 1, 41),
         (65, 1, 42),
-        (66, 2, 43),
+        (66, 3, 43),
     ] {
         let resp = rpc(
             &addr,

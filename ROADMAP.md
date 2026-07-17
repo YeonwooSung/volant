@@ -1572,7 +1572,26 @@ zero TopicId; no quota throttle errors; deterministic UUID only.
 
 **Still deferred:** multi-lang clients, cargo-fuzz corpus CI, true control-marker
 READ_COMMITTED, higher KIP-890 txn versions, DescribeCluster v2, ListTransactions
-v2, Produce TopicId.
+v2, Produce TopicId. DescribeCluster/ListTransactions v2 closed by **Phase 70**.
+
+---
+
+### Phase 70 — DescribeCluster v2 + ListTransactions v2 ✅
+
+**Goal:** Finish remaining always-flexible admin version bumps for fenced-broker
+visibility (KIP-1073) and transactional-id pattern filter (KIP-1152).
+
+Binding: **[docs/PHASE70_SPEC.md](./docs/PHASE70_SPEC.md)**.
+
+- [x] DescribeCluster 0–2 (IncludeFencedBrokers; IsFenced always false)
+- [x] ListTransactions 0–2 (TransactionalIdPattern simple `*` glob)
+- [x] Integration tests (`phase70_describe_cluster_list_txn_v2`)
+
+**Honest limitations:** no real fenced membership; pattern is glob not RE2J;
+DurationFilter still ignored; only Ongoing open memory txns.
+
+**Still deferred:** multi-lang clients, cargo-fuzz corpus CI, true control-marker
+READ_COMMITTED, higher KIP-890 txn versions, Produce TopicId.
 
 ---
 
