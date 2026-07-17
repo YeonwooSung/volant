@@ -6,7 +6,7 @@
 |---|---|
 | Version | 0.1.0 (Apache-2.0) |
 | Language | Rust 1.75+ |
-| Status | Phases 0–79 landed |
+| Status | Phases 0–80 landed |
 | Date | 2026-07-18 |
 
 ---
@@ -226,7 +226,8 @@ KAFKA_COMPAT when they disagree.
 
 **Highlights:** TopicId (deterministic UUID), KIP-951 CurrentLeader tags on
 leader errors, KIP-890-era txn max versions (2PC fields parsed and ignored),
-RecordBatch + MessageSet compression (gzip/snappy/lz4/zstd).
+CreatePartitions v3 (wire-identical to v2; no KIP-599 quotas), RecordBatch +
+MessageSet compression (gzip/snappy/lz4/zstd).
 
 ---
 
@@ -324,7 +325,7 @@ cargo run -p volant-server -- \
 | [tuning.md](./tuning.md) | Performance tuning |
 | [KAFKA_COMPAT.md](./KAFKA_COMPAT.md) | Current Kafka API matrix + honesty |
 | [features.md](./features.md) | Native features (post-core) |
-| [history/PHASE_HISTORY.md](./history/PHASE_HISTORY.md) | Phase 0–79 one-line index |
+| [history/PHASE_HISTORY.md](./history/PHASE_HISTORY.md) | Phase 0–80 one-line index |
 | [PHASE1_SPEC.md](./PHASE1_SPEC.md)–[PHASE6_SPEC.md](./PHASE6_SPEC.md) | Binding core specs |
 | [../ROADMAP.md](../ROADMAP.md) | Full roadmap + deferred work |
 | [../README.md](../README.md) | Quick start |

@@ -1,6 +1,6 @@
 # Phase history index
 
-Ship records for **phases 0–79**. Binding core contracts are
+Ship records for **phases 0–80**. Binding core contracts are
 **[PHASE1_SPEC](../PHASE1_SPEC.md)–[PHASE6_SPEC](../PHASE6_SPEC.md)**. Living
 docs for day-to-day reading: [ops](../ops.md), [consistency](../consistency.md),
 [tuning](../tuning.md), [KAFKA_COMPAT](../KAFKA_COMPAT.md),
@@ -88,7 +88,7 @@ docs for day-to-day reading: [ops](../ops.md), [consistency](../consistency.md),
 
 ---
 
-## Kafka flexible/modern (51–79)
+## Kafka flexible/modern (51–80)
 
 | Phase | Status | One-line goal | Spec |
 |------:|:------:|---------------|------|

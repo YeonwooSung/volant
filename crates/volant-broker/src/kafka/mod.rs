@@ -9,8 +9,8 @@
 //! SaslAuthenticate v2, DescribeCluster 0–2, ListTransactions 0–2,
 //! DescribeTransactions v0, DescribeProducers v0, KIP-890-era txn max versions
 //! (InitProducerId 0–6 OngoingTxn wire, AddPartitionsToTxn/EndTxn 0–5,
-//! TxnOffsetCommit 0–6 TopicId).
-//! See `docs/PHASE23_SPEC.md` … `docs/PHASE79_SPEC.md`.
+//! TxnOffsetCommit 0–6 TopicId), CreatePartitions 0–3 (v3 = v2 wire; no KIP-599).
+//! See `docs/PHASE23_SPEC.md` … `docs/PHASE80_SPEC.md`.
 
 /// Kafka wire primitives, MessageSet (magic 0/1), and RecordBatch (magic 2).
 pub mod codec;

@@ -31,8 +31,8 @@ Start here. Prefer living docs over individual phase ship records.
 
 | Document | Purpose |
 |----------|---------|
-| [history/PHASE_HISTORY.md](./history/PHASE_HISTORY.md) | One-line index for phases 0–79 |
-| [PHASE7_SPEC.md](./PHASE7_SPEC.md) … [PHASE79_SPEC.md](./PHASE79_SPEC.md) | Per-phase ship records (deep dive) |
+| [history/PHASE_HISTORY.md](./history/PHASE_HISTORY.md) | One-line index for phases 0–80 |
+| [PHASE7_SPEC.md](./PHASE7_SPEC.md) … [PHASE80_SPEC.md](./PHASE80_SPEC.md) | Per-phase ship records (deep dive) |
 | [history/archive/](./history/archive/) | Implementation plans & reviews (archaeology) |
 
 ## Config samples
@@ -54,8 +54,9 @@ Start here. Prefer living docs over individual phase ship records.
 
 ## Compaction note (2026-07-18)
 
-Documentation was compacted; living docs refreshed again (ops Kafka section
-shortened; tuning DPDK essay trimmed; ROADMAP tail aligned to Phase 80):
+Documentation was compacted; living docs refreshed for Phase 80 status honesty
+(CreatePartitions v3; consistency idempotence + txn atomicity wording; ops
+title; whitepaper / KAFKA_COMPAT / INDEX / PHASE_HISTORY aligned to 0–80):
 
 - **Living** docs: INDEX, WHITEPAPER, KAFKA_COMPAT, features, ops, consistency, tuning
 - **Binding** core: PHASE1–6 kept at top level

@@ -42,12 +42,12 @@ When `acks=all`, if `|ISR| < min_insync_replicas`, the leader rejects the produc
 |--------------|-------------------------------|
 | `acks=all` (response received) | **Yes** — every ISR member has the data; new leader is elected from ISR |
 | `acks=1` (response received) | **Maybe not** — data may exist only on the dead leader |
-| In-flight produce (no response) | Client should retry; with Phase 10 `enable_idempotence` duplicates are de-duped per PID/seq (in-memory; lost on broker restart) |
+| In-flight produce (no response) | Client should retry; with Phase 10 `enable_idempotence` duplicates are de-duped per PID/seq. Phase 11 persists that state under `{data_dir}/__producer_state/` so de-dupe survives broker restart |
 
-### What Volant does **not** guarantee (Phase 6)
+### What Volant does **not** guarantee (Phase 6+)
 
-- Exactly-once produce/consume
-- Cross-partition atomicity
+- Exactly-once produce/consume end-to-end (no Kafka EOS / control-marker `READ_COMMITTED`)
+- Kafka-style isolation or durable in-flight txn recovery (open txn crash ≡ abort); Phase 18 **does** provide multi-partition buffer-until-commit atomicity on a live broker
 - Linearizability of metadata during controller failover (brief windows of stale Metadata)
 - Durability if `min_insync_replicas=1` and that sole replica dies after ack
 

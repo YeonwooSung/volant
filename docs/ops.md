@@ -1,4 +1,4 @@
-# Volant operations runbook (Phase 7–9)
+# Volant operations runbook
 
 ## Process flags
 
