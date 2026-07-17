@@ -88,7 +88,7 @@ async fn api_versions_advertise_produce3_fetch4() {
             fetch_max = Some(max);
         }
     }
-    assert_eq!(produce_max, Some(9)); // Phase 53 flexible max
+    assert_eq!(produce_max, Some(13)); // Phase 71 TopicId
     assert_eq!(fetch_max, Some(13)); // Phase 68 TopicId
 
     server.abort();

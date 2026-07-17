@@ -85,7 +85,7 @@ fn produce_body_v3(topic: &str, batch: &[u8]) -> BytesMut {
 }
 
 #[tokio::test]
-async fn api_versions_produce_max_v9() {
+async fn api_versions_produce_max_v13() {
     let dir = temp_dir("api");
     let broker = Arc::new(Broker::new(StorageConfig {
         data_dir: dir.clone(),
@@ -111,7 +111,7 @@ async fn api_versions_produce_max_v9() {
             fetch = Some((min, max));
         }
     }
-    assert_eq!(produce, Some((0, 9)));
+    assert_eq!(produce, Some((0, 13))); // Phase 71 TopicId
     assert_eq!(fetch, Some((0, 13))); // Phase 68 Fetch TopicId
 
     server.abort();
@@ -225,4 +225,4 @@ async fn produce_v0_still_works() {
 }
 
 // Produce v9 flexible support: phase53_flexible_produce.
-// Produce v10 (KIP-951) remains unsupported there.
+// Produce v13 TopicId: phase71_produce_topic_id.

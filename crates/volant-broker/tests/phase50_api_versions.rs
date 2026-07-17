@@ -83,7 +83,7 @@ async fn api_versions_self_advertises_max_2() {
     assert_eq!(src.get_i16(), 0);
     let found = parse_api_keys(&mut src);
     assert_eq!(found.get(&18), Some(&(0, 3))); // ApiVersions through flexible v3 (Phase 51)
-    assert_eq!(found.get(&0), Some(&(0, 9))); // Produce (Phase 53)
+    assert_eq!(found.get(&0), Some(&(0, 13))); // Produce (Phase 71 TopicId)
     assert_eq!(found.get(&1), Some(&(0, 13))); // Fetch (Phase 68)
     // v0 has no trailing throttle
     assert_eq!(src.remaining(), 0);

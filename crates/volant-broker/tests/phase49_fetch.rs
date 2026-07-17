@@ -157,7 +157,7 @@ async fn api_versions_fetch_max_v13() {
             fetch = Some((min, max));
         }
     }
-    assert_eq!(produce, Some((0, 9)));
+    assert_eq!(produce, Some((0, 13))); // Phase 71 TopicId
     assert_eq!(fetch, Some((0, 13))); // Phase 68 TopicId
 
     server.abort();

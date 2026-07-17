@@ -292,7 +292,7 @@ fn dispatch_kafka(broker: &Broker, body: bytes::Bytes, conn: &mut KafkaConnState
             }
             encode_metadata(broker, &mut src, &mut out, hdr.api_version, principal);
         }
-        Some(ApiKey::Produce) if (0..=9).contains(&hdr.api_version) => {
+        Some(ApiKey::Produce) if (0..=13).contains(&hdr.api_version) => {
             if hdr.api_version >= 9 {
                 if let Err(e) = skip_tag_buffer(&mut src) {
                     debug!(error = %e, "produce flexible header tag buffer");
@@ -1722,7 +1722,7 @@ fn put_produce_empty_response(out: &mut BytesMut, version: i16) {
 }
 
 fn encode_produce(broker: &Broker, src: &mut impl Buf, out: &mut BytesMut, version: i16, principal: &str) {
-    // Produce classic v0–8 + flexible v9:
+    // Produce classic v0–8 + flexible v9–13:
     //   request: transactional_id (v3+), acks, timeout, [topic [partition, records]]
     //   response: [topic [partition responses…]], throttle (v1+ at end), tags (v9+)
     //   v4: same wire as v3 (KAFKA_STORAGE_ERROR readiness)
@@ -1730,7 +1730,10 @@ fn encode_produce(broker: &Broker, src: &mut impl Buf, out: &mut BytesMut, versi
     //   v7: ZStd in batches (already supported; request wire unchanged)
     //   v8: record_errors[] + error_message per partition
     //   v9: compact strings/arrays/records + tag buffers + response header v1
+    //   v10–12: same as v9 (KIP-951 CurrentLeader/NodeEndpoints tags empty)
+    //   v13: TopicId UUID instead of topic name (request + response)
     let flexible = version >= 9;
+    let use_topic_id = version >= 13;
 
     if version >= 3 {
         let txn_result = if flexible {
@@ -1782,22 +1785,34 @@ fn encode_produce(broker: &Broker, src: &mut impl Buf, out: &mut BytesMut, versi
     }
 
     for _ in 0..topic_count.max(0) {
-        let topic = if flexible {
-            match get_compact_string(src) {
+        // v13+: TopicId UUID; ≤v12: topic name string.
+        let (topic_name, unknown_topic_id) = if use_topic_id {
+            let uuid = match get_uuid(src) {
+                Ok(u) => u,
+                Err(_) => break,
+            };
+            put_uuid(out, &uuid);
+            match parse_volant_topic_uuid(&uuid)
+                .and_then(|id| broker.topic_name_by_id(id))
+            {
+                Some(name) => (name, false),
+                None => (String::new(), true),
+            }
+        } else if flexible {
+            let topic = match get_compact_string(src) {
                 Ok(t) => t,
                 Err(_) => break,
-            }
-        } else {
-            match get_string(src) {
-                Ok(t) => t,
-                Err(_) => break,
-            }
-        };
-        if flexible {
+            };
             put_compact_string(out, &topic);
+            (topic, false)
         } else {
+            let topic = match get_string(src) {
+                Ok(t) => t,
+                Err(_) => break,
+            };
             put_string(out, &topic);
-        }
+            (topic, false)
+        };
 
         let part_count = if flexible {
             match get_compact_array_len(src) {
@@ -1866,11 +1881,23 @@ fn encode_produce(broker: &Broker, src: &mut impl Buf, out: &mut BytesMut, versi
                 let _ = skip_tag_buffer(src); // partition tags
             }
 
+            if unknown_topic_id {
+                put_produce_partition_response(
+                    out,
+                    version,
+                    partition,
+                    KafkaErrorCode::UnknownTopicId.as_i16(),
+                    -1,
+                    -1,
+                );
+                continue;
+            }
+
             if broker.acls().is_enabled()
                 && !broker.acls().authorize(
                     Some(principal),
                     ResourceType::Topic,
-                    &topic,
+                    &topic_name,
                     AclOperation::Write,
                 )
             {
@@ -1901,7 +1928,8 @@ fn encode_produce(broker: &Broker, src: &mut impl Buf, out: &mut BytesMut, versi
                 }
             };
             if batches.is_empty() || batches.iter().all(|b| b.messages.is_empty()) {
-                let log_start = produce_log_start_offset(broker, &topic, partition as u32);
+                let log_start =
+                    produce_log_start_offset(broker, &topic_name, partition as u32);
                 put_produce_partition_response(
                     out,
                     version,
@@ -1913,7 +1941,7 @@ fn encode_produce(broker: &Broker, src: &mut impl Buf, out: &mut BytesMut, versi
                 continue;
             }
 
-            let name = TopicName::new(topic.clone());
+            let name = TopicName::new(topic_name.clone());
             let wait = if volant_acks == 255 {
                 Some(Duration::from_secs(5))
             } else {
@@ -1929,7 +1957,8 @@ fn encode_produce(broker: &Broker, src: &mut impl Buf, out: &mut BytesMut, versi
                 wait,
             ) {
                 Ok(base) => {
-                    let log_start = produce_log_start_offset(broker, &topic, partition as u32);
+                    let log_start =
+                        produce_log_start_offset(broker, &topic_name, partition as u32);
                     put_produce_partition_response(
                         out,
                         version,

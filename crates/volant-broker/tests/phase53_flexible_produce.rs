@@ -106,7 +106,7 @@ fn produce_classic_body(topic: &str, batch: &[u8]) -> BytesMut {
 }
 
 #[tokio::test]
-async fn api_versions_produce_max_9() {
+async fn api_versions_produce_max_13() {
     let dir = temp_dir("api");
     let broker = Arc::new(Broker::new(StorageConfig {
         data_dir: dir.clone(),
@@ -128,7 +128,7 @@ async fn api_versions_produce_max_9() {
             produce = Some((min, max));
         }
     }
-    assert_eq!(produce, Some((0, 9)));
+    assert_eq!(produce, Some((0, 13))); // Phase 71 TopicId
 
     server.abort();
     let _ = std::fs::remove_dir_all(&dir);
@@ -221,18 +221,18 @@ async fn produce_v8_still_classic() {
 }
 
 #[tokio::test]
-async fn produce_v10_unsupported() {
-    let dir = temp_dir("v10");
+async fn produce_v14_unsupported() {
+    let dir = temp_dir("v14");
     let broker = Arc::new(Broker::new(StorageConfig {
         data_dir: dir.clone(),
         ..StorageConfig::default()
     }));
     let (addr, server) = boot_kafka(Arc::clone(&broker)).await;
 
-    // v10 not handled; version ≥9 still uses response header v1.
+    // v14 not handled; version ≥9 still uses response header v1.
     let resp = rpc(
         &addr,
-        encode_request_flexible(0, 10, 1, Some("c"), &[]),
+        encode_request_flexible(0, 14, 1, Some("c"), &[]),
     )
     .await;
     let mut src = resp.freeze();

@@ -321,6 +321,9 @@ v5 ErrorMessage + v6 delete-by-TopicId.
 **Phase 70:** DescribeCluster v2 (IsFenced always false) + ListTransactions v2
 (TransactionalIdPattern simple `*` glob).
 
+**Phase 71:** Produce TopicId v13 — UUID topics (v10–12 name path unchanged);
+unknown id → UnknownTopicId; KIP-951 tags empty.
+
 **Still deferred:** multi-language clients, chaos-mesh / cargo-fuzz corpus CI.
 
 ### Networked client (library)

@@ -1591,7 +1591,29 @@ Binding: **[docs/PHASE70_SPEC.md](./docs/PHASE70_SPEC.md)**.
 DurationFilter still ignored; only Ongoing open memory txns.
 
 **Still deferred:** multi-lang clients, cargo-fuzz corpus CI, true control-marker
-READ_COMMITTED, higher KIP-890 txn versions, Produce TopicId.
+READ_COMMITTED, higher KIP-890 txn versions, Produce TopicId. Produce TopicId
+closed by **Phase 71**.
+
+---
+
+### Phase 71 — Produce TopicId (v10–13) ✅
+
+**Goal:** Modern clients can Produce by Kafka TopicId UUID (KIP-516), matching
+Metadata/Fetch/admin deterministic mapping; intermediate flexible versions
+v10–12 advertised for negotiation.
+
+Binding: **[docs/PHASE71_SPEC.md](./docs/PHASE71_SPEC.md)**.
+
+- [x] Produce 0–13 (v13 TopicId request/response; v9–12 name path unchanged)
+- [x] Unknown / non-Volant UUID → UnknownTopicId (100)
+- [x] KIP-951 CurrentLeader/NodeEndpoints tags empty (honest)
+- [x] Integration tests (`phase71_produce_topic_id`)
+
+**Honest limitations:** no CurrentLeader redirect hints; deterministic UUID only;
+record_errors empty; no v14+.
+
+**Still deferred:** multi-lang clients, cargo-fuzz corpus CI, true control-marker
+READ_COMMITTED, higher KIP-890 txn versions.
 
 ---
 
