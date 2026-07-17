@@ -1791,6 +1791,29 @@ Binding: **[docs/PHASE79_SPEC.md](./docs/PHASE79_SPEC.md)**.
 no KIP-848 / share GroupType; ErrorMessage is short static English.
 
 **Still deferred:** multi-lang clients, cargo-fuzz corpus CI, true control-marker
+READ_COMMITTED, real 2PC / prepared transaction state. CreatePartitions v3
+closed by **Phase 80**.
+
+---
+
+### Phase 80 — CreatePartitions v3 ✅
+
+**Goal:** Raise CreatePartitions to Kafka wire max **0–3** so modern admin
+clients negotiate v3 without UnsupportedVersion. v3 is wire-identical to
+flexible v2 (KIP-599 quota error only — not implemented).
+
+Binding: **[docs/PHASE80_SPEC.md](./docs/PHASE80_SPEC.md)**.
+
+- [x] CreatePartitions 0–3 (v2–3 flexible; classic 0–1 unchanged)
+- [x] v3 same compact framing + ErrorMessage as v2
+- [x] Never emit THROTTLING_QUOTA_EXCEEDED; ThrottleTimeMs always 0
+- [x] v4 → UnsupportedVersion + response header v1
+- [x] Integration tests (`phase80_create_partitions_v3`); phase60/45 maxes updated
+
+**Honest limitations:** no quota system / KIP-599; replica assignments ignored;
+no TopicId on CreatePartitions.
+
+**Still deferred:** multi-lang clients, cargo-fuzz corpus CI, true control-marker
 READ_COMMITTED, real 2PC / prepared transaction state.
 
 ---
@@ -1818,18 +1841,18 @@ READ_COMMITTED, real 2PC / prepared transaction state.
 | Storage | Page cache + OS | Explicit mmap + optional io_uring/O_DIRECT |
 | Stream processing | Kafka Streams / ksqlDB | In-process `volant-stream` operators |
 | Ops model | ZooKeeper/KRaft + heavy footprint | Single binary → small static ISR quorum |
-| Protocol | Kafka wire protocol | Native binary first; optional Kafka shim (`--kafka-listen`, Phases 23–79) |
+| Protocol | Kafka wire protocol | Native binary first; optional Kafka shim (`--kafka-listen`, Phases 23–80) |
 | Goal | Full ecosystem | Subset that is fast, small, and correct |
 
 Volant is **not** a drop-in Kafka replacement. It prioritizes a clean core; the
-optional Kafka wire shim is **shipped** (Phases 23–79) — see
+optional Kafka wire shim is **shipped** (Phases 23–80) — see
 [docs/KAFKA_COMPAT.md](./docs/KAFKA_COMPAT.md).
 
 ---
 
 ## Suggested implementation order (PRs)
 
-Phases **0–79 are shipped**. Historical PR order for the core:
+Phases **0–80 are shipped**. Historical PR order for the core:
 
 1. Phase 1 segment format + unit tests  
 2. Phase 1 recovery + retention  
@@ -1842,7 +1865,7 @@ Phases **0–79 are shipped**. Historical PR order for the core:
 9. Phase 6 replication prototype (2–3 nodes) ✅  
 10. Phase 7 metrics, TLS, packaging ✅  
 11. Phases 8–22 (redirect, groups, configs, txns, mTLS, ACLs, SCRAM) ✅  
-12. Phases 23–79 (Kafka wire shim surface) ✅  
+12. Phases 23–80 (Kafka wire shim surface) ✅  
 
 ---
 
@@ -1851,7 +1874,7 @@ Phases **0–79 are shipped**. Historical PR order for the core:
 Track these before locking APIs:
 
 1. **Replication:** ~~Raft-per-partition vs leader/follower + controller (Kafka-like)?~~ → **Kafka-style ISR (Phase 6)**
-2. **Kafka wire compatibility:** ~~first-class or optional adapter?~~ → **optional adapter (`--kafka-listen`, Phases 23–79 shipped)**
+2. **Kafka wire compatibility:** ~~first-class or optional adapter?~~ → **optional adapter (`--kafka-listen`, Phases 23–80 shipped)**
 3. **State store for streams:** embed RocksDB, redb, or custom mmap store?
 4. **Default durability:** fsync every batch vs group commit window?
 5. **Multi-tenancy:** namespaces / quotas in v1 or later?
@@ -1883,7 +1906,7 @@ cargo run -p volant-bench --release
 cargo test --workspace
 ```
 
-**Status (post–Phase 79):** core broker, ops (metrics / TLS / auth / SCRAM /
+**Status (post–Phase 80):** core broker, ops (metrics / TLS / auth / SCRAM /
 ACLs / Helm), and the Kafka wire shim are **shipped**. Still deferred:
 multi-language clients, full chaos-mesh suites, cargo-fuzz corpus CI, true
 control-marker `READ_COMMITTED`, real 2PC / prepared transactions. Details:

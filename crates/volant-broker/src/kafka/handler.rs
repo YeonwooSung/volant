@@ -467,7 +467,7 @@ fn dispatch_kafka(broker: &Broker, body: bytes::Bytes, conn: &mut KafkaConnState
         Some(ApiKey::OffsetDelete) if hdr.api_version == 0 => {
             group_api::encode_offset_delete(broker, &mut src, &mut out, principal);
         }
-        Some(ApiKey::CreatePartitions) if (0..=2).contains(&hdr.api_version) => {
+        Some(ApiKey::CreatePartitions) if (0..=3).contains(&hdr.api_version) => {
             if hdr.api_version >= 2 {
                 if let Err(e) = skip_tag_buffer(&mut src) {
                     debug!(error = %e, "create partitions flexible header tag buffer");

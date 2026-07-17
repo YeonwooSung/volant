@@ -121,10 +121,11 @@ docs for day-to-day reading: [ops](../ops.md), [consistency](../consistency.md),
 | 77 | ✅ | InitProducerId v6 — Enable2Pc/KeepPreparedTxn parsed+ignored; no real 2PC | [PHASE77_SPEC.md](../PHASE77_SPEC.md) |
 | 78 | ✅ | KIP-951 CurrentLeader / NodeEndpoints on Produce/Fetch leader errors | [PHASE78_SPEC.md](../PHASE78_SPEC.md) |
 | 79 | ✅ | Group admin version bumps — List 0–5, Describe 0–6, Delete 0–3 | [PHASE79_SPEC.md](../PHASE79_SPEC.md) |
+| 80 | ✅ | CreatePartitions v3 — wire-identical to v2; no KIP-599 quotas | [PHASE80_SPEC.md](../PHASE80_SPEC.md) |
 
 ---
 
-## Still deferred (post–Phase 79)
+## Still deferred (post–Phase 80)
 
 - Multi-language clients
 - Chaos-mesh / cargo-fuzz corpus CI

@@ -74,7 +74,7 @@ async fn api_versions_topic_admin_flex_maxes() {
     }
     assert_eq!(found.get(&19), Some(&(0, 7))); // Phase 69 TopicId
     assert_eq!(found.get(&20), Some(&(0, 6))); // Phase 69 TopicId
-    assert_eq!(found.get(&37), Some(&(0, 2)));
+    assert_eq!(found.get(&37), Some(&(0, 3))); // Phase 80 v3 (wire-identical to v2)
     server.abort();
     let _ = std::fs::remove_dir_all(&dir);
 }
@@ -240,8 +240,8 @@ async fn unsupported_versions_use_header_v1() {
     }));
     let (addr, server) = boot_kafka(Arc::clone(&broker)).await;
 
-    // CreateTopics v8 / DeleteTopics v7 / CreatePartitions v3 unsupported.
-    for (api, ver, corr) in [(19i16, 8i16, 1i32), (20, 7, 2), (37, 3, 3)] {
+    // CreateTopics v8 / DeleteTopics v7 / CreatePartitions v4 unsupported.
+    for (api, ver, corr) in [(19i16, 8i16, 1i32), (20, 7, 2), (37, 4, 3)] {
         let resp = rpc(
             &addr,
             encode_request_flexible(api, ver, corr, Some("c"), &[]),

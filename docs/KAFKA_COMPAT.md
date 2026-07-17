@@ -50,7 +50,7 @@ From `SUPPORTED_APIS` in `crates/volant-broker/src/kafka/mod.rs`:
 | 32 | DescribeConfigs | 0–4 | Flex v4; topic keys |
 | 33 | AlterConfigs | 0–2 | Flex v2 |
 | 36 | SaslAuthenticate | 0–2 | Flex v2 |
-| 37 | CreatePartitions | 0–2 | Flex v2 |
+| 37 | CreatePartitions | 0–3 | Flex v2+; v3 = v2 wire (no KIP-599 quota) |
 | 42 | DeleteGroups | 0–3 | Flex v2; ErrorMessage v3 |
 | 44 | IncrementalAlterConfigs | 0–1 | SET/DELETE only |
 | 47 | OffsetDelete | 0 | Classic only |
@@ -67,7 +67,7 @@ From `SUPPORTED_APIS` in `crates/volant-broker/src/kafka/mod.rs`:
 | Formats | 28–34 | Compression, idempotence, SASL, SCRAM-512 |
 | Classic max | 35–50 | Version ratchets for classic framing |
 | Flexible | 51–66 | KIP-482 compact + modern admin |
-| TopicId / modern | 67–79 | UUID topics, ListOffsets specials, KIP-890, KIP-951, group admin |
+| TopicId / modern | 67–80 | UUID topics, ListOffsets specials, KIP-890, KIP-951, group admin, CreatePartitions v3 |
 
 ## Semantic honesty (open)
 

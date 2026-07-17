@@ -195,7 +195,7 @@ Inter-broker uses shared-token Auth, not SCRAM. No GSSAPI / OAUTHBEARER.
 
 ## 7. Kafka compatibility shim
 
-Enable with `--kafka-listen host:port`. Phases **23–79** built classic then
+Enable with `--kafka-listen host:port`. Phases **23–80** built classic then
 flexible (KIP-482) coverage for the APIs modern clients negotiate most often.
 
 **Authoritative API versions, per-key notes, and open limitations:**
@@ -214,7 +214,7 @@ KAFKA_COMPAT when they disagree.
 | DescribeGroups | 0–6 | ListGroups | 0–5 |
 | DeleteGroups | 0–3 | ApiVersions | 0–3 |
 | CreateTopics | 0–7 | DeleteTopics | 0–6 |
-| CreatePartitions | 0–2 | InitProducerId | 0–6 |
+| CreatePartitions | 0–3 | InitProducerId | 0–6 |
 | AddPartitionsToTxn | 0–5 | EndTxn | 0–5 |
 | TxnOffsetCommit | 0–6 | AddOffsetsToTxn | 0–3 |
 | DescribeConfigs | 0–4 | AlterConfigs | 0–2 |

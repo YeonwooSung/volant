@@ -532,11 +532,13 @@ pub(crate) fn encode_create_partitions(
     version: i16,
     principal: &str,
 ) {
-    // CreatePartitions classic v0–1 + flexible v2:
+    // CreatePartitions classic v0–1 + flexible v2–3:
     //   request: topics[{name, count, assignments|null}], timeout, validate_only
     //   response: throttle (all versions), results[{name, error, error_message}]
     // Phase 45 adds missing throttle framing (Kafka has throttle on v0+).
-    // Flexible v2: compact framing + TAG_BUFFER; quota error (v3) deferred.
+    // Flexible v2: compact framing + TAG_BUFFER.
+    // Phase 80: v3 is wire-identical to v2 (KIP-599 may return
+    // THROTTLING_QUOTA_EXCEEDED — Volant has no quotas, so never emits it).
     let flexible = version >= 2;
     struct Req {
         topic: String,

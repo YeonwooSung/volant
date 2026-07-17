@@ -350,6 +350,9 @@ v12+ emit leader tags on NotLeader/FencedLeaderEpoch; success keeps empty tags.
 TypesFilter/GroupType=`classic`), DescribeGroups 0–6 + DeleteGroups 0–3
 ErrorMessage fields.
 
+**Phase 80:** CreatePartitions 0–3 — v3 wire-identical to flexible v2; KIP-599
+THROTTLING_QUOTA_EXCEEDED never emitted (no quotas).
+
 **Still deferred:** multi-language clients, chaos-mesh / cargo-fuzz corpus CI,
 true control-marker READ_COMMITTED, real 2PC.
 
