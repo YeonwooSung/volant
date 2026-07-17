@@ -352,7 +352,7 @@ fn dispatch_kafka(broker: &Broker, body: bytes::Bytes, conn: &mut KafkaConnState
             }
             acl_api::encode_delete_acls(broker, &mut src, &mut out, hdr.api_version, principal);
         }
-        Some(ApiKey::FindCoordinator) if (0..=4).contains(&hdr.api_version) => {
+        Some(ApiKey::FindCoordinator) if (0..=6).contains(&hdr.api_version) => {
             if hdr.api_version >= 3 {
                 if let Err(e) = skip_tag_buffer(&mut src) {
                     debug!(error = %e, "find coordinator flexible header tag buffer");

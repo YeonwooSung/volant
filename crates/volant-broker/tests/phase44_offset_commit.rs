@@ -83,7 +83,7 @@ async fn api_versions_offset_commit_and_find_coordinator() {
         found.insert(key, (min_v, max_v));
     }
     assert_eq!(found.get(&8), Some(&(0, 10))); // OffsetCommit (Phase 72 v9–10 TopicId)
-    assert_eq!(found.get(&10), Some(&(0, 4))); // FindCoordinator (Phase 52 flexible)
+    assert_eq!(found.get(&10), Some(&(0, 6))); // FindCoordinator (Phase 81 max v6)
     server.abort();
     let _ = std::fs::remove_dir_all(&dir);
 }

@@ -1,8 +1,8 @@
 # Kafka compatibility matrix
 
 **Living document** for the optional Kafka wire shim (`--kafka-listen`).
-Ship history: Phases **23–80**. Binding deep dives: `PHASE23_SPEC.md` …
-`PHASE80_SPEC.md`. Overview: [WHITEPAPER.md](./WHITEPAPER.md).
+Ship history: Phases **23–81**. Binding deep dives: `PHASE23_SPEC.md` …
+`PHASE81_SPEC.md`. Overview: [WHITEPAPER.md](./WHITEPAPER.md).
 
 ## Enable
 
@@ -28,7 +28,7 @@ From `SUPPORTED_APIS` in `crates/volant-broker/src/kafka/mod.rs`:
 | 3 | Metadata | 0–13 | Flex v9+; TopicId v10–13; top-level ErrorCode v13 |
 | 8 | OffsetCommit | 0–10 | Flex v8+; TopicId v10 |
 | 9 | OffsetFetch | 0–10 | Flex v6+; multi-group v8; TopicId v10 |
-| 10 | FindCoordinator | 0–4 | Flex v3; batch keys v4 |
+| 10 | FindCoordinator | 0–6 | Flex v3; batch v4–6; no share key_type; no TRANSACTION_ABORTABLE |
 | 11 | JoinGroup | 0–9 | Flex v6+; ProtocolType/Reason/SkipAssignment v7–9 |
 | 12 | Heartbeat | 0–4 | Flex v4 |
 | 13 | LeaveGroup | 0–5 | Flex v4+; Reason v5 |
@@ -67,7 +67,7 @@ From `SUPPORTED_APIS` in `crates/volant-broker/src/kafka/mod.rs`:
 | Formats | 28–34 | Compression, idempotence, SASL, SCRAM-512 |
 | Classic max | 35–50 | Version ratchets for classic framing |
 | Flexible | 51–66 | KIP-482 compact + modern admin |
-| TopicId / modern | 67–80 | UUID topics, ListOffsets specials, KIP-890, KIP-951, group admin, CreatePartitions v3 |
+| TopicId / modern | 67–81 | UUID topics, ListOffsets specials, KIP-890, KIP-951, group admin, CreatePartitions v3, FindCoordinator v5–6 |
 
 ## Semantic honesty (open)
 

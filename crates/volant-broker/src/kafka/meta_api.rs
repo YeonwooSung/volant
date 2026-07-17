@@ -1006,11 +1006,13 @@ pub(crate) fn cluster_authorized_ops(broker: &Broker, principal: &str, include: 
 }
 
 pub(crate) fn encode_find_coordinator(broker: &Broker, src: &mut impl Buf, out: &mut BytesMut, version: i16) {
-    // FindCoordinator classic v0–2 + flexible v3–4:
+    // FindCoordinator classic v0–2 + flexible v3–6:
     //   v0: key
     //   v1–2: key + key_type; response throttle + error_message
     //   v3: compact key + key_type + tags; compact host/error_message + tags
     //   v4: key_type + compact CoordinatorKeys batch → Coordinators array
+    //   v5: wire-identical to v4 (KIP-890 TRANSACTION_ABORTABLE — never emitted)
+    //   v6: wire-identical to v4/v5 (KIP-932 share key_type 2 rejected)
     let flexible = version >= 3;
     let snap = broker.metadata(None);
     let (id, host, port) = snap
@@ -1022,12 +1024,14 @@ pub(crate) fn encode_find_coordinator(broker: &Broker, src: &mut impl Buf, out: 
     let port_i32 = i32::from(port);
 
     if version >= 4 {
-        // v4 request: KeyType + CoordinatorKeys (compact) + tags
+        // v4–6 request: KeyType + CoordinatorKeys (compact) + tags
         if src.remaining() < 1 {
             write_find_coordinator_v4_error(out, &[], "missing key_type");
             return;
         }
         let key_type = src.get_i8();
+        // 0 = group, 1 = transaction — both resolve to this broker.
+        // 2 = share (KIP-932) — not supported; reject with InvalidRequest.
         if key_type != 0 && key_type != 1 {
             write_find_coordinator_v4_error(out, &[], "unsupported key_type");
             return;

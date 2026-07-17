@@ -31,8 +31,8 @@ Start here. Prefer living docs over individual phase ship records.
 
 | Document | Purpose |
 |----------|---------|
-| [history/PHASE_HISTORY.md](./history/PHASE_HISTORY.md) | One-line index for phases 0–80 |
-| [PHASE7_SPEC.md](./PHASE7_SPEC.md) … [PHASE80_SPEC.md](./PHASE80_SPEC.md) | Per-phase ship records (deep dive) |
+| [history/PHASE_HISTORY.md](./history/PHASE_HISTORY.md) | One-line index for phases 0–81 |
+| [PHASE7_SPEC.md](./PHASE7_SPEC.md) … [PHASE81_SPEC.md](./PHASE81_SPEC.md) | Per-phase ship records (deep dive) |
 | [history/archive/](./history/archive/) | Implementation plans & reviews (archaeology) |
 
 ## Config samples
@@ -54,12 +54,12 @@ Start here. Prefer living docs over individual phase ship records.
 
 ## Compaction note (2026-07-18)
 
-Documentation was compacted; living docs refreshed for Phase 80 status honesty
-(CreatePartitions v3; consistency idempotence + txn atomicity wording; ops
-title; whitepaper / KAFKA_COMPAT / INDEX / PHASE_HISTORY aligned to 0–80):
+Documentation was compacted; living docs refreshed for Phase 81 status honesty
+(FindCoordinator v5–6; whitepaper / KAFKA_COMPAT / INDEX / PHASE_HISTORY aligned
+to 0–81):
 
 - **Living** docs: INDEX, WHITEPAPER, KAFKA_COMPAT, features, ops, consistency, tuning
 - **Binding** core: PHASE1–6 kept at top level
-- **Ship records**: PHASE7–80 kept for deep dives; navigated via PHASE_HISTORY
+- **Ship records**: PHASE7–81 kept for deep dives; navigated via PHASE_HISTORY
 - **Archived**: `phase2/`–`phase18/` plan/review work logs → `history/archive/`
 - **Kafka API matrix:** [KAFKA_COMPAT.md](./KAFKA_COMPAT.md) is the source of truth

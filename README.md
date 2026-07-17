@@ -9,7 +9,7 @@ Volant is a resource-efficient alternative to Apache Kafka, built for:
 - **Streaming processing** — first-class operators (`map`, `filter`, windows) without a heavy runtime
 - **Small footprint** — native binary, predictable memory, simple operations
 
-> Status: **Phases 0–80 landed** — durable log, clustering, security, stream
+> Status: **Phases 0–81 landed** — durable log, clustering, security, stream
 > operators, and a broad optional Kafka wire shim (classic + flexible).
 > Single-node mode (no `--cluster-config`) preserves the simple path. Start with
 > the [whitepaper](./docs/WHITEPAPER.md) and [docs index](./docs/INDEX.md); also
@@ -353,8 +353,11 @@ ErrorMessage fields.
 **Phase 80:** CreatePartitions 0–3 — v3 wire-identical to flexible v2; KIP-599
 THROTTLING_QUOTA_EXCEEDED never emitted (no quotas).
 
+**Phase 81:** FindCoordinator 0–6 — v5–6 wire-identical to flexible v4 batch;
+TRANSACTION_ABORTABLE never emitted; share key_type (KIP-932) rejected.
+
 **Still deferred:** multi-language clients, chaos-mesh / cargo-fuzz corpus CI,
-true control-marker READ_COMMITTED, real 2PC.
+true control-marker READ_COMMITTED, real 2PC, AddOffsetsToTxn v4.
 
 ### Networked client (library)
 

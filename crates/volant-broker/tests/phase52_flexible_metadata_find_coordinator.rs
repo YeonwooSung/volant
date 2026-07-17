@@ -66,7 +66,7 @@ fn find_coord_v4_body(key_type: i8, keys: &[&str]) -> BytesMut {
 }
 
 #[tokio::test]
-async fn api_versions_advertises_metadata_9_find_coord_4() {
+async fn api_versions_advertises_metadata_9_find_coord_6() {
     let dir = temp_dir("p52", "adv");
     let broker = Arc::new(Broker::new(StorageConfig {
         data_dir: dir.clone(),
@@ -93,7 +93,7 @@ async fn api_versions_advertises_metadata_9_find_coord_4() {
         }
     }
     assert_eq!(meta, Some((0, 13))); // Phase 73 top-level ErrorCode
-    assert_eq!(fc, Some((0, 4)));
+    assert_eq!(fc, Some((0, 6))); // Phase 81 FindCoordinator v5–6
 
     server.abort();
     let _ = std::fs::remove_dir_all(&dir);
@@ -374,18 +374,18 @@ async fn metadata_v14_unsupported() {
 }
 
 #[tokio::test]
-async fn find_coordinator_v5_unsupported() {
-    let dir = temp_dir("p52", "fc-v5");
+async fn find_coordinator_v7_unsupported() {
+    let dir = temp_dir("p52", "fc-v7");
     let broker = Arc::new(Broker::new(StorageConfig {
         data_dir: dir.clone(),
         ..StorageConfig::default()
     }));
     let (addr, server) = boot_kafka(Arc::clone(&broker)).await;
 
-    // v5 not handled; version ≥3 still uses response header v1.
+    // v7 not handled; version ≥3 still uses response header v1.
     let resp = rpc(
         &addr,
-        encode_request_flexible(10, 5, 1, Some("c"), &[]),
+        encode_request_flexible(10, 7, 1, Some("c"), &[]),
     )
     .await;
     let mut src = resp.freeze();

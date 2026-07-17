@@ -10,7 +10,7 @@
 | `--log-format` | | `text` | `text` or `json` |
 | `--auth-token` | `VOLANT_AUTH_TOKEN` | *unset* | Shared-token auth |
 | `--scram-user USER:PASS` | | *unset* | Upsert SCRAM user at startup (repeatable; Phase 22) |
-| `--kafka-listen` | | *disabled* | Kafka wire protocol shim (Phase 23–80) |
+| `--kafka-listen` | | *disabled* | Kafka wire protocol shim (Phase 23–81) |
 | `--tls-cert` / `--tls-key` | | *unset* | Server TLS (feature `tls`) |
 | `--tls-peer-insecure` | | `true` | Skip inter-broker cert verify (lab) |
 | `--tls-ca` | | *unset* | CA PEM for inter-broker peer verify |
@@ -115,7 +115,7 @@ Notes:
 
 Optional second socket speaking Kafka framing (classic + flexible). Native
 Volant protocol remains on `--listen`. API versions and honesty notes live in
-**[KAFKA_COMPAT.md](./KAFKA_COMPAT.md)** (source of truth; Phases 23–80).
+**[KAFKA_COMPAT.md](./KAFKA_COMPAT.md)** (source of truth; Phases 23–81).
 
 ### Enable
 
@@ -147,7 +147,7 @@ volant-server \
 - **ACLs:** Kafka ACL admin maps to Volant Phase 20/21 ACLs (LITERAL only;
   CreateAcls enables enforcement).
 
-Deep dives: [PHASE23_SPEC.md](./PHASE23_SPEC.md) … [PHASE80_SPEC.md](./PHASE80_SPEC.md).
+Deep dives: [PHASE23_SPEC.md](./PHASE23_SPEC.md) … [PHASE81_SPEC.md](./PHASE81_SPEC.md).
 
 ## TLS (Phase 7 listen + Phase 9 verification / inter-broker)
 
@@ -479,6 +479,6 @@ is only compacted after it rolls.
 
 Multi-language clients, full chaos-mesh suites, cargo-fuzz corpus CI, true
 control-marker `READ_COMMITTED`, real 2PC / prepared transactions. Kafka shim
-(Phases 23–80), SCRAM, and SASL PLAIN/SCRAM are **shipped** — see
+(Phases 23–81), SCRAM, and SASL PLAIN/SCRAM are **shipped** — see
 [KAFKA_COMPAT.md](./KAFKA_COMPAT.md). Full deferred list:
 [ROADMAP.md](../ROADMAP.md).

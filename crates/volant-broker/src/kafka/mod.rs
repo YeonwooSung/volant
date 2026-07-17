@@ -1,7 +1,8 @@
-//! Kafka wire protocol shim (Phases 23–80).
+//! Kafka wire protocol shim (Phases 23–81).
 //!
 //! Classic framing plus flexible APIs (KIP-482): ApiVersions v3, Metadata
-//! v9–13 (TopicId; v13 top-level ErrorCode), FindCoordinator v3–4, Produce v9–13 (TopicId v13; KIP-951 tags), Fetch v12–13 (TopicId; CurrentLeader tag),
+//! v9–13 (TopicId; v13 top-level ErrorCode), FindCoordinator v3–6 (batch v4+;
+//! v5–6 wire-identical; no share-group key type), Produce v9–13 (TopicId v13; KIP-951 tags), Fetch v12–13 (TopicId; CurrentLeader tag),
 //! CreateTopics v5–7 / DeleteTopics v4–6 (TopicId), group/offset/admin/config/txn
 //! flex (ListGroups 0–5 States/Types filter, DescribeGroups 0–6 ErrorMessage,
 //! DeleteGroups 0–3 ErrorMessage), ListOffsets v6–11 (max-timestamp / local / tiered specials),
@@ -10,7 +11,7 @@
 //! DescribeTransactions v0, DescribeProducers v0, KIP-890-era txn max versions
 //! (InitProducerId 0–6 OngoingTxn wire, AddPartitionsToTxn/EndTxn 0–5,
 //! TxnOffsetCommit 0–6 TopicId), CreatePartitions 0–3 (v3 = v2 wire; no KIP-599).
-//! See `docs/PHASE23_SPEC.md` … `docs/PHASE80_SPEC.md`.
+//! See `docs/PHASE23_SPEC.md` … `docs/PHASE81_SPEC.md`.
 
 /// Kafka wire primitives, MessageSet (magic 0/1), and RecordBatch (magic 2).
 pub mod codec;
@@ -287,7 +288,7 @@ pub const SUPPORTED_APIS: &[(ApiKey, i16, i16)] = &[
     (ApiKey::Metadata, 0, 13),
     (ApiKey::OffsetCommit, 0, 10),
     (ApiKey::OffsetFetch, 0, 10),
-    (ApiKey::FindCoordinator, 0, 4),
+    (ApiKey::FindCoordinator, 0, 6),
     (ApiKey::JoinGroup, 0, 9),
     (ApiKey::Heartbeat, 0, 4),
     (ApiKey::LeaveGroup, 0, 5),

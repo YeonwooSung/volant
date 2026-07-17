@@ -118,7 +118,7 @@ async fn create_partitions_v3_grow_and_error_message() {
     let meta = broker.metadata(Some(&[TopicName::new("p80-t")]));
     assert_eq!(meta.topics[0].partitions.len(), 4);
 
-    // CreatePartitions v3: shrink rejected with ErrorMessage
+    // CreatePartitions v3: shrink rejected with InvalidPartitions + ErrorMessage
     let resp = rpc(
         &addr,
         encode_request_flexible(
@@ -136,7 +136,35 @@ async fn create_partitions_v3_grow_and_error_message() {
     assert_eq!(src.get_i32(), 0);
     assert_eq!(get_compact_array_len(&mut src).unwrap(), Some(1));
     assert_eq!(get_compact_string(&mut src).unwrap(), "p80-t");
-    assert_ne!(src.get_i16(), 0); // InvalidPartitions
+    let shrink_err = src.get_i16();
+    assert_eq!(shrink_err, 37); // InvalidPartitions
+    assert_ne!(shrink_err, 89); // never THROTTLING_QUOTA_EXCEEDED
+    let msg = get_compact_nullable_string(&mut src).unwrap();
+    assert!(msg.is_some());
+    skip_tag_buffer(&mut src).unwrap();
+    skip_tag_buffer(&mut src).unwrap();
+
+    // CreatePartitions v3: unknown topic → UnknownTopicOrPartition + ErrorMessage
+    let resp = rpc(
+        &addr,
+        encode_request_flexible(
+            37,
+            3,
+            14,
+            Some("a"),
+            &create_partitions_flex("p80-missing", 2, false),
+        ),
+    )
+    .await;
+    let mut src = resp.freeze();
+    assert_eq!(src.get_i32(), 14);
+    skip_tag_buffer(&mut src).unwrap();
+    assert_eq!(src.get_i32(), 0);
+    assert_eq!(get_compact_array_len(&mut src).unwrap(), Some(1));
+    assert_eq!(get_compact_string(&mut src).unwrap(), "p80-missing");
+    let unknown_err = src.get_i16();
+    assert_eq!(unknown_err, 3); // UnknownTopicOrPartition
+    assert_ne!(unknown_err, 89);
     let msg = get_compact_nullable_string(&mut src).unwrap();
     assert!(msg.is_some());
     skip_tag_buffer(&mut src).unwrap();

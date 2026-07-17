@@ -1814,7 +1814,32 @@ Binding: **[docs/PHASE80_SPEC.md](./docs/PHASE80_SPEC.md)**.
 no TopicId on CreatePartitions.
 
 **Still deferred:** multi-lang clients, cargo-fuzz corpus CI, true control-marker
-READ_COMMITTED, real 2PC / prepared transaction state.
+READ_COMMITTED, real 2PC / prepared transaction state. FindCoordinator v5–6
+closed by **Phase 81**.
+
+---
+
+### Phase 81 — FindCoordinator v5–6 ✅
+
+**Goal:** Raise FindCoordinator to Kafka wire max **0–6** so modern clients
+negotiate v5–6 without UnsupportedVersion. v5–6 are wire-identical to flexible
+v4 batch (KIP-890 TRANSACTION_ABORTABLE never emitted; KIP-932 share key_type
+rejected).
+
+Binding: **[docs/PHASE81_SPEC.md](./docs/PHASE81_SPEC.md)**.
+
+- [x] FindCoordinator 0–6 (v3 flex single-key; v4–6 batch; classic 0–2 unchanged)
+- [x] v5–6 same compact Coordinators framing as v4
+- [x] Never emit TRANSACTION_ABORTABLE; share key_type 2 → InvalidRequest
+- [x] v7 → UnsupportedVersion + response header v1
+- [x] Integration tests (`phase81_find_coordinator_v5_v6`); phase52/31/44 maxes updated
+
+**Honest limitations:** no share groups (KIP-932); no TRANSACTION_ABORTABLE;
+always resolves to local broker; ThrottleTimeMs always 0.
+
+**Still deferred:** multi-lang clients, cargo-fuzz corpus CI, true control-marker
+READ_COMMITTED, real 2PC / prepared transaction state, AddOffsetsToTxn v4,
+ApiVersions v4–5, Fetch v14+.
 
 ---
 
@@ -1841,18 +1866,18 @@ READ_COMMITTED, real 2PC / prepared transaction state.
 | Storage | Page cache + OS | Explicit mmap + optional io_uring/O_DIRECT |
 | Stream processing | Kafka Streams / ksqlDB | In-process `volant-stream` operators |
 | Ops model | ZooKeeper/KRaft + heavy footprint | Single binary → small static ISR quorum |
-| Protocol | Kafka wire protocol | Native binary first; optional Kafka shim (`--kafka-listen`, Phases 23–80) |
+| Protocol | Kafka wire protocol | Native binary first; optional Kafka shim (`--kafka-listen`, Phases 23–81) |
 | Goal | Full ecosystem | Subset that is fast, small, and correct |
 
 Volant is **not** a drop-in Kafka replacement. It prioritizes a clean core; the
-optional Kafka wire shim is **shipped** (Phases 23–80) — see
+optional Kafka wire shim is **shipped** (Phases 23–81) — see
 [docs/KAFKA_COMPAT.md](./docs/KAFKA_COMPAT.md).
 
 ---
 
 ## Suggested implementation order (PRs)
 
-Phases **0–80 are shipped**. Historical PR order for the core:
+Phases **0–81 are shipped**. Historical PR order for the core:
 
 1. Phase 1 segment format + unit tests  
 2. Phase 1 recovery + retention  
@@ -1865,7 +1890,7 @@ Phases **0–80 are shipped**. Historical PR order for the core:
 9. Phase 6 replication prototype (2–3 nodes) ✅  
 10. Phase 7 metrics, TLS, packaging ✅  
 11. Phases 8–22 (redirect, groups, configs, txns, mTLS, ACLs, SCRAM) ✅  
-12. Phases 23–80 (Kafka wire shim surface) ✅  
+12. Phases 23–81 (Kafka wire shim surface) ✅  
 
 ---
 
@@ -1874,7 +1899,7 @@ Phases **0–80 are shipped**. Historical PR order for the core:
 Track these before locking APIs:
 
 1. **Replication:** ~~Raft-per-partition vs leader/follower + controller (Kafka-like)?~~ → **Kafka-style ISR (Phase 6)**
-2. **Kafka wire compatibility:** ~~first-class or optional adapter?~~ → **optional adapter (`--kafka-listen`, Phases 23–80 shipped)**
+2. **Kafka wire compatibility:** ~~first-class or optional adapter?~~ → **optional adapter (`--kafka-listen`, Phases 23–81 shipped)**
 3. **State store for streams:** embed RocksDB, redb, or custom mmap store?
 4. **Default durability:** fsync every batch vs group commit window?
 5. **Multi-tenancy:** namespaces / quotas in v1 or later?
@@ -1906,8 +1931,9 @@ cargo run -p volant-bench --release
 cargo test --workspace
 ```
 
-**Status (post–Phase 80):** core broker, ops (metrics / TLS / auth / SCRAM /
+**Status (post–Phase 81):** core broker, ops (metrics / TLS / auth / SCRAM /
 ACLs / Helm), and the Kafka wire shim are **shipped**. Still deferred:
 multi-language clients, full chaos-mesh suites, cargo-fuzz corpus CI, true
-control-marker `READ_COMMITTED`, real 2PC / prepared transactions. Details:
-[docs/KAFKA_COMPAT.md](./docs/KAFKA_COMPAT.md), [docs/ops.md](./docs/ops.md).
+control-marker `READ_COMMITTED`, real 2PC / prepared transactions,
+AddOffsetsToTxn v4. Details: [docs/KAFKA_COMPAT.md](./docs/KAFKA_COMPAT.md),
+[docs/ops.md](./docs/ops.md).
