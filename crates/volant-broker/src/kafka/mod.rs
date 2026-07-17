@@ -1,11 +1,12 @@
-//! Kafka wire protocol shim (Phases 23–65).
+//! Kafka wire protocol shim (Phases 23–66).
 //!
 //! Classic framing plus flexible APIs (KIP-482): ApiVersions v3, Metadata v9,
 //! FindCoordinator v3–4, Produce v9, Fetch v12, group/offset/admin/config/txn
 //! flex, ListOffsets v6, OffsetForLeaderEpoch v4, DeleteRecords v2, ACL
-//! admin Describe/Create/DeleteAcls v2, SaslAuthenticate v2, DescribeCluster
-//! v0, ListTransactions v0. Produce v0–9 / Fetch v0–12, SASL, OffsetDelete,
-//! Metadata v0–9. See `docs/PHASE23_SPEC.md` … `docs/PHASE65_SPEC.md`.
+//! admin, SaslAuthenticate v2, DescribeCluster 0–1, ListTransactions 0–1,
+//! DescribeTransactions v0, DescribeProducers v0. Produce v0–9 / Fetch v0–12,
+//! SASL, OffsetDelete, Metadata v0–9. See `docs/PHASE23_SPEC.md` …
+//! `docs/PHASE66_SPEC.md`.
 
 /// Kafka wire primitives, MessageSet (magic 0/1), and RecordBatch (magic 2).
 pub mod codec;
@@ -94,6 +95,10 @@ pub enum KafkaErrorCode {
     FencedLeaderEpoch = 74,
     /// Unknown leader epoch.
     UnknownLeaderEpoch = 75,
+    /// Transactional id not found (DescribeTransactions).
+    TransactionalIdNotFound = 105,
+    /// Unsupported endpoint type (DescribeCluster v1+).
+    UnsupportedEndpointType = 115,
 }
 
 /// Map Volant group error codes to Kafka wire error codes.
@@ -199,6 +204,10 @@ pub enum ApiKey {
     OffsetDelete = 47,
     /// DescribeCluster (always flexible).
     DescribeCluster = 60,
+    /// DescribeProducers (always flexible).
+    DescribeProducers = 61,
+    /// DescribeTransactions (always flexible).
+    DescribeTransactions = 65,
     /// ListTransactions (always flexible).
     ListTransactions = 66,
 }
@@ -241,6 +250,8 @@ impl ApiKey {
             44 => Some(Self::IncrementalAlterConfigs),
             47 => Some(Self::OffsetDelete),
             60 => Some(Self::DescribeCluster),
+            61 => Some(Self::DescribeProducers),
+            65 => Some(Self::DescribeTransactions),
             66 => Some(Self::ListTransactions),
             _ => None,
         }
@@ -283,6 +294,8 @@ pub const SUPPORTED_APIS: &[(ApiKey, i16, i16)] = &[
     (ApiKey::DeleteGroups, 0, 2),
     (ApiKey::IncrementalAlterConfigs, 0, 1),
     (ApiKey::OffsetDelete, 0, 0),
-    (ApiKey::DescribeCluster, 0, 0),
-    (ApiKey::ListTransactions, 0, 0),
+    (ApiKey::DescribeCluster, 0, 1),
+    (ApiKey::DescribeProducers, 0, 0),
+    (ApiKey::DescribeTransactions, 0, 0),
+    (ApiKey::ListTransactions, 0, 1),
 ];

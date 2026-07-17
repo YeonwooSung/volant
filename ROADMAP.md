@@ -1486,6 +1486,30 @@ v1–2, ListTransactions v1–2, DescribeTransactions.
 
 ---
 
+### Phase 66 — DescribeTransactions + DescribeProducers + admin bumps ✅
+
+**Goal:** Complete modern txn/admin describe APIs and small version bumps for
+DescribeCluster / ListTransactions (KIP-700 / KIP-664).
+
+Binding: **[docs/PHASE66_SPEC.md](./docs/PHASE66_SPEC.md)**.
+
+- [x] DescribeTransactions 0 (always flexible; Empty/Ongoing)
+- [x] DescribeProducers 0 (always flexible; active producers)
+- [x] DescribeCluster 0–1 (EndpointType brokers-only)
+- [x] ListTransactions 0–1 (DurationFilter ignored)
+- [x] Response header v1 for those APIs
+- [x] Integration tests (`phase66_describe_txn_producers`)
+
+**Honest limitations:** timeout/start always 0; duration filter ignored; no
+fenced brokers / controller endpoint; DescribeProducers timestamp/coord/txn-start
+placeholders; no ListTransactions pattern filter.
+
+**Still deferred:** multi-lang clients, cargo-fuzz corpus CI, Metadata TopicId,
+true control-marker READ_COMMITTED, higher KIP-890 txn versions, DescribeCluster
+v2, ListTransactions v2.
+
+---
+
 ## Performance targets (aspirational)
 
 | Metric | Single node target | Notes |

@@ -306,6 +306,9 @@ AddOffsetsToTxn / EndTxn / TxnOffsetCommit v3; classic paths unchanged.
 **Phase 65:** SaslAuthenticate v2 flexible + DescribeCluster v0 + ListTransactions
 v0 (always-flexible modern admin APIs).
 
+**Phase 66:** DescribeTransactions v0 + DescribeProducers v0; DescribeCluster
+0–1 (EndpointType); ListTransactions 0–1 (DurationFilter ignored).
+
 **Still deferred:** multi-language clients, chaos-mesh / cargo-fuzz corpus CI.
 
 ### Networked client (library)

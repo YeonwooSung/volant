@@ -565,6 +565,110 @@ impl Broker {
         out
     }
 
+    /// Describe one transactional id for DescribeTransactions (Phase 66).
+    ///
+    /// Returns `None` when the transactional id is unknown. When known:
+    /// - state `"Ongoing"` if an open txn exists, else `"Empty"`
+    /// - topics/partitions from buffered produce batches (open txn only)
+    /// - timeout/start times are `0` (not tracked)
+    pub fn describe_transaction(
+        &self,
+        transactional_id: &str,
+    ) -> Option<(
+        String,                 // state
+        i32,                    // timeout_ms
+        i64,                    // start_time_ms
+        u64,                    // producer_id
+        u16,                    // producer_epoch
+        Vec<(String, Vec<i32>)>, // topics → partitions
+    )> {
+        let txn_ids = self.transactional_ids.read();
+        let Some(&pid) = txn_ids.get(transactional_id) else {
+            return None;
+        };
+        drop(txn_ids);
+        let prods = self.producer_state.read();
+        let Some(prod) = prods.get(&pid) else {
+            return None;
+        };
+        let epoch = prod.epoch;
+        drop(prods);
+
+        let open = self.open_txns.lock();
+        if let Some(txn) = open.get(&pid) {
+            // Group partitions from buffered batches + pending keys.
+            let mut map: HashMap<String, Vec<i32>> = HashMap::new();
+            for b in &txn.batches {
+                map.entry(b.topic.clone())
+                    .or_default()
+                    .push(b.partition as i32);
+            }
+            for (topic, part) in txn.pending.keys() {
+                map.entry(topic.clone()).or_default().push(*part as i32);
+            }
+            let mut topics: Vec<(String, Vec<i32>)> = map
+                .into_iter()
+                .map(|(t, mut parts)| {
+                    parts.sort_unstable();
+                    parts.dedup();
+                    (t, parts)
+                })
+                .collect();
+            topics.sort_by(|a, b| a.0.cmp(&b.0));
+            Some(("Ongoing".to_string(), 0, 0, pid, epoch, topics))
+        } else {
+            Some(("Empty".to_string(), 0, 0, pid, epoch, Vec::new()))
+        }
+    }
+
+    /// Active producers for a partition (DescribeProducers, Phase 66).
+    ///
+    /// Includes producers with committed sequences on the partition and those
+    /// with open-txn pending/buffer activity. Fields:
+    /// `(producer_id, epoch, last_sequence, last_timestamp=-1, coordinator_epoch=0, txn_start_offset=-1)`.
+    pub fn describe_producers_for_partition(
+        &self,
+        topic: &str,
+        partition: u32,
+    ) -> Vec<(u64, i32, i32, i64, i32, i64)> {
+        let key = (topic.to_owned(), partition);
+        let prods = self.producer_state.read();
+        let open = self.open_txns.lock();
+        let mut out = Vec::new();
+        for (&pid, prod) in prods.iter() {
+            let mut last_seq = -1i32;
+            let mut in_scope = false;
+            if let Some(st) = prod.partitions.get(&key) {
+                last_seq = st.base_sequence.saturating_add(st.count as i32).saturating_sub(1);
+                in_scope = true;
+            }
+            if let Some(txn) = open.get(&pid) {
+                if let Some(st) = txn.pending.get(&key) {
+                    last_seq = st.base_sequence.saturating_add(st.count as i32).saturating_sub(1);
+                    in_scope = true;
+                } else if txn.batches.iter().any(|b| b.topic == topic && b.partition == partition)
+                {
+                    in_scope = true;
+                }
+            }
+            if in_scope {
+                out.push((pid, i32::from(prod.epoch), last_seq, -1, 0, -1));
+            }
+        }
+        out.sort_by_key(|p| p.0);
+        out
+    }
+
+    /// Whether a topic/partition exists (DescribeProducers).
+    pub fn partition_exists(&self, topic: &str, partition: u32) -> bool {
+        let name = TopicName::new(topic);
+        self.topics
+            .read()
+            .get(&name)
+            .map(|t| t.partitions.contains_key(&PartitionId(partition)))
+            .unwrap_or(false)
+    }
+
     /// Buffer consumer offsets to apply on commit (Phase 31 TxnOffsetCommit).
     ///
     /// Entries: `(group_id, topic, partition, offset, metadata)`.

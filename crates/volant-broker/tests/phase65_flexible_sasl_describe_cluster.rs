@@ -139,8 +139,8 @@ async fn api_versions_p65_maxes() {
         found.insert(key, (min_v, max_v));
     }
     assert_eq!(found.get(&36), Some(&(0, 2))); // SaslAuthenticate
-    assert_eq!(found.get(&60), Some(&(0, 0))); // DescribeCluster
-    assert_eq!(found.get(&66), Some(&(0, 0))); // ListTransactions
+    assert_eq!(found.get(&60), Some(&(0, 1))); // DescribeCluster (Phase 66)
+    assert_eq!(found.get(&66), Some(&(0, 1))); // ListTransactions (Phase 66)
     server.abort();
     let _ = std::fs::remove_dir_all(&dir);
 }
@@ -335,7 +335,7 @@ async fn unsupported_versions_use_header_v1() {
     }));
     let (addr, server) = boot_kafka(Arc::clone(&broker)).await;
 
-    for (api, ver, corr) in [(36i16, 3i16, 40i32), (60, 1, 41), (66, 1, 42)] {
+    for (api, ver, corr) in [(36i16, 3i16, 40i32), (60, 2, 41), (66, 2, 42)] {
         let resp = rpc(
             &addr,
             encode_request_flexible(api, ver, corr, Some("a"), &[]),

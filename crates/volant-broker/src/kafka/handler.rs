@@ -204,7 +204,13 @@ fn dispatch_kafka(broker: &Broker, body: bytes::Bytes, conn: &mut KafkaConnState
         (Some(ApiKey::SaslAuthenticate), v) if v >= 2
     ) || matches!(
         (api, hdr.api_version),
-        (Some(ApiKey::DescribeCluster) | Some(ApiKey::ListTransactions), _)
+        (
+            Some(ApiKey::DescribeCluster)
+                | Some(ApiKey::DescribeProducers)
+                | Some(ApiKey::DescribeTransactions)
+                | Some(ApiKey::ListTransactions),
+            _
+        )
     );
 
     let mut out = BytesMut::new();
@@ -253,17 +259,29 @@ fn dispatch_kafka(broker: &Broker, body: bytes::Bytes, conn: &mut KafkaConnState
             }
             encode_sasl_authenticate(broker, &mut src, &mut out, hdr.api_version, conn);
         }
-        Some(ApiKey::DescribeCluster) if hdr.api_version == 0 => {
+        Some(ApiKey::DescribeCluster) if (0..=1).contains(&hdr.api_version) => {
             if let Err(e) = skip_tag_buffer(&mut src) {
                 debug!(error = %e, "describe cluster flexible header tag buffer");
             }
-            encode_describe_cluster(broker, &mut src, &mut out, principal);
+            encode_describe_cluster(broker, &mut src, &mut out, hdr.api_version, principal);
         }
-        Some(ApiKey::ListTransactions) if hdr.api_version == 0 => {
+        Some(ApiKey::DescribeProducers) if hdr.api_version == 0 => {
+            if let Err(e) = skip_tag_buffer(&mut src) {
+                debug!(error = %e, "describe producers flexible header tag buffer");
+            }
+            encode_describe_producers(broker, &mut src, &mut out, principal);
+        }
+        Some(ApiKey::DescribeTransactions) if hdr.api_version == 0 => {
+            if let Err(e) = skip_tag_buffer(&mut src) {
+                debug!(error = %e, "describe transactions flexible header tag buffer");
+            }
+            encode_describe_transactions(broker, &mut src, &mut out, principal);
+        }
+        Some(ApiKey::ListTransactions) if (0..=1).contains(&hdr.api_version) => {
             if let Err(e) = skip_tag_buffer(&mut src) {
                 debug!(error = %e, "list transactions flexible header tag buffer");
             }
-            encode_list_transactions(broker, &mut src, &mut out, principal);
+            encode_list_transactions(broker, &mut src, &mut out, hdr.api_version, principal);
         }
         Some(ApiKey::Metadata) if (0..=9).contains(&hdr.api_version) => {
             if hdr.api_version >= 9 {
@@ -637,16 +655,18 @@ fn encode_sasl_authenticate(
     }
 }
 
-/// DescribeCluster v0 (always flexible, KIP-700 / Phase 65).
+/// DescribeCluster v0–1 (always flexible, KIP-700 / Phase 65–66).
 ///
-/// Request: include_cluster_authorized_operations (bool), TAG_BUFFER.
-/// Response (header v1): throttle, error, error_message, cluster_id,
-/// controller_id, brokers[{id, host, port, rack, tags}], cluster_authorized_ops,
-/// tags.
+/// Request: include_cluster_authorized_operations (bool), EndpointType (v1+),
+/// TAG_BUFFER.
+/// Response (header v1): throttle, error, error_message, EndpointType (v1+),
+/// cluster_id, controller_id, brokers[{id, host, port, rack, tags}],
+/// cluster_authorized_ops, tags.
 fn encode_describe_cluster(
     broker: &Broker,
     src: &mut impl Buf,
     out: &mut BytesMut,
+    version: i16,
     principal: &str,
 ) {
     let include_ops = if src.has_remaining() {
@@ -654,7 +674,26 @@ fn encode_describe_cluster(
     } else {
         false
     };
+    // EndpointType: 1=brokers (default), 2=controllers. Volant only serves brokers.
+    let endpoint_type = if version >= 1 && src.has_remaining() {
+        src.get_i8()
+    } else {
+        1
+    };
     let _ = skip_tag_buffer(src);
+
+    if version >= 1 && endpoint_type != 1 {
+        out.put_i32(0);
+        out.put_i16(KafkaErrorCode::UnsupportedEndpointType.as_i16());
+        put_compact_nullable_string(out, Some("only brokers endpoint (type=1) is supported"));
+        out.put_i8(endpoint_type);
+        put_compact_string(out, KAFKA_CLUSTER_ID);
+        out.put_i32(-1);
+        put_compact_array_len(out, 0);
+        out.put_i32(AUTH_OPS_OMITTED);
+        put_empty_tag_buffer(out);
+        return;
+    }
 
     // Cluster Describe ACL when ACLs are enabled.
     if broker.acls().is_enabled()
@@ -668,6 +707,9 @@ fn encode_describe_cluster(
         out.put_i32(0); // throttle
         out.put_i16(KafkaErrorCode::ClusterAuthorizationFailed.as_i16());
         put_compact_nullable_string(out, Some("Cluster authorization failed"));
+        if version >= 1 {
+            out.put_i8(1);
+        }
         put_compact_string(out, KAFKA_CLUSTER_ID);
         out.put_i32(-1); // controller
         put_compact_array_len(out, 0); // brokers
@@ -680,6 +722,9 @@ fn encode_describe_cluster(
     out.put_i32(0); // throttle
     out.put_i16(KafkaErrorCode::None.as_i16());
     put_compact_nullable_string(out, None); // error_message
+    if version >= 1 {
+        out.put_i8(1); // EndpointType = brokers
+    }
     put_compact_string(out, KAFKA_CLUSTER_ID);
     out.put_i32(snap.controller_id as i32);
     put_compact_array_len(out, snap.brokers.len());
@@ -694,16 +739,17 @@ fn encode_describe_cluster(
     put_empty_tag_buffer(out);
 }
 
-/// ListTransactions v0 (always flexible, Phase 65).
+/// ListTransactions v0–1 (always flexible, Phase 65–66).
 ///
-/// Request: compact StateFilters[] (strings, no per-element tags), compact
-/// ProducerIdFilters[] (int64s), tags.
+/// Request: compact StateFilters[], compact ProducerIdFilters[],
+/// DurationFilter (v1+, ignored), tags.
 /// Response: throttle, error, compact UnknownStateFilters[], compact
 /// TransactionStates[{id, producer_id, state, tags}], tags.
 fn encode_list_transactions(
     broker: &Broker,
     src: &mut impl Buf,
     out: &mut BytesMut,
+    version: i16,
     principal: &str,
 ) {
     if broker.acls().is_enabled()
@@ -751,6 +797,10 @@ fn encode_list_transactions(
             }
         }
     }
+    // DurationFilter (v1+): accept and ignore (no start-time tracking).
+    if version >= 1 && src.remaining() >= 8 {
+        let _duration_filter = src.get_i64();
+    }
     let _ = skip_tag_buffer(src);
 
     let mut unknown_filters: Vec<&str> = Vec::new();
@@ -788,6 +838,185 @@ fn encode_list_transactions(
         out.put_i64(*pid as i64);
         put_compact_string(out, state);
         put_empty_tag_buffer(out);
+    }
+    put_empty_tag_buffer(out);
+}
+
+/// DescribeTransactions v0 (always flexible, Phase 66).
+///
+/// Request: compact TransactionalIds[] (strings), tags.
+/// Response: throttle, compact TransactionStates[{error, id, state, timeout,
+/// start, producer_id, epoch, compact topics[{name, compact partitions[], tags}],
+/// tags}], tags.
+fn encode_describe_transactions(
+    broker: &Broker,
+    src: &mut impl Buf,
+    out: &mut BytesMut,
+    principal: &str,
+) {
+    if broker.acls().is_enabled()
+        && !broker.acls().authorize(
+            Some(principal),
+            ResourceType::Cluster,
+            CLUSTER_RESOURCE,
+            AclOperation::Describe,
+        )
+    {
+        // Still emit one entry per requested id with auth error if we can parse ids.
+        let mut ids = Vec::new();
+        if let Ok(Some(n)) = get_compact_array_len(src) {
+            for _ in 0..n {
+                if let Ok(s) = get_compact_string(src) {
+                    ids.push(s);
+                }
+            }
+        }
+        let _ = skip_tag_buffer(src);
+        out.put_i32(0);
+        put_compact_array_len(out, ids.len());
+        for id in &ids {
+            out.put_i16(KafkaErrorCode::ClusterAuthorizationFailed.as_i16());
+            put_compact_string(out, id);
+            put_compact_string(out, "");
+            out.put_i32(0);
+            out.put_i64(0);
+            out.put_i64(-1);
+            out.put_i16(-1);
+            put_compact_array_len(out, 0);
+            put_empty_tag_buffer(out);
+        }
+        put_empty_tag_buffer(out);
+        return;
+    }
+
+    let mut ids = Vec::new();
+    if let Ok(Some(n)) = get_compact_array_len(src) {
+        for _ in 0..n {
+            if let Ok(s) = get_compact_string(src) {
+                ids.push(s);
+            }
+        }
+    }
+    let _ = skip_tag_buffer(src);
+
+    out.put_i32(0); // throttle
+    put_compact_array_len(out, ids.len());
+    for id in &ids {
+        match broker.describe_transaction(id) {
+            None => {
+                out.put_i16(KafkaErrorCode::TransactionalIdNotFound.as_i16());
+                put_compact_string(out, id);
+                put_compact_string(out, "");
+                out.put_i32(0);
+                out.put_i64(0);
+                out.put_i64(-1);
+                out.put_i16(-1);
+                put_compact_array_len(out, 0);
+                put_empty_tag_buffer(out);
+            }
+            Some((state, timeout_ms, start_ms, pid, epoch, topics)) => {
+                out.put_i16(KafkaErrorCode::None.as_i16());
+                put_compact_string(out, id);
+                put_compact_string(out, &state);
+                out.put_i32(timeout_ms);
+                out.put_i64(start_ms);
+                out.put_i64(pid as i64);
+                out.put_i16(epoch as i16);
+                put_compact_array_len(out, topics.len());
+                for (topic, parts) in &topics {
+                    put_compact_string(out, topic);
+                    put_compact_array_len(out, parts.len());
+                    for p in parts {
+                        out.put_i32(*p);
+                    }
+                    put_empty_tag_buffer(out); // topic tags
+                }
+                put_empty_tag_buffer(out); // state tags
+            }
+        }
+    }
+    put_empty_tag_buffer(out);
+}
+
+/// DescribeProducers v0 (always flexible, Phase 66).
+///
+/// Request: compact topics[{name, compact partition_indexes[], tags}], tags.
+/// Response: throttle, compact topics[{name, compact partitions[{index, error,
+/// error_message, compact active_producers[{pid, epoch, last_seq, last_ts,
+/// coord_epoch, txn_start, tags}], tags}], tags}], tags.
+fn encode_describe_producers(
+    broker: &Broker,
+    src: &mut impl Buf,
+    out: &mut BytesMut,
+    principal: &str,
+) {
+    // Parse topics.
+    let mut topics: Vec<(String, Vec<i32>)> = Vec::new();
+    if let Ok(Some(n)) = get_compact_array_len(src) {
+        for _ in 0..n {
+            let name = match get_compact_string(src) {
+                Ok(s) => s,
+                Err(_) => break,
+            };
+            let mut parts = Vec::new();
+            if let Ok(Some(pn)) = get_compact_array_len(src) {
+                for _ in 0..pn {
+                    if src.remaining() >= 4 {
+                        parts.push(src.get_i32());
+                    }
+                }
+            }
+            let _ = skip_tag_buffer(src);
+            topics.push((name, parts));
+        }
+    }
+    let _ = skip_tag_buffer(src);
+
+    out.put_i32(0); // throttle
+    put_compact_array_len(out, topics.len());
+    for (name, parts) in &topics {
+        put_compact_string(out, name);
+        put_compact_array_len(out, parts.len());
+        for &part in parts {
+            out.put_i32(part);
+            // ACL: Describe on topic when enabled.
+            if broker.acls().is_enabled()
+                && !broker.acls().authorize(
+                    Some(principal),
+                    ResourceType::Topic,
+                    name,
+                    AclOperation::Describe,
+                )
+            {
+                out.put_i16(KafkaErrorCode::TopicAuthorizationFailed.as_i16());
+                put_compact_nullable_string(out, Some("Topic authorization failed"));
+                put_compact_array_len(out, 0);
+                put_empty_tag_buffer(out);
+                continue;
+            }
+            if !broker.partition_exists(name, part as u32) {
+                out.put_i16(KafkaErrorCode::UnknownTopicOrPartition.as_i16());
+                put_compact_nullable_string(out, Some("Unknown topic or partition"));
+                put_compact_array_len(out, 0);
+                put_empty_tag_buffer(out);
+                continue;
+            }
+            let active = broker.describe_producers_for_partition(name, part as u32);
+            out.put_i16(KafkaErrorCode::None.as_i16());
+            put_compact_nullable_string(out, None);
+            put_compact_array_len(out, active.len());
+            for (pid, epoch, last_seq, last_ts, coord_epoch, txn_start) in &active {
+                out.put_i64(*pid as i64);
+                out.put_i32(*epoch);
+                out.put_i32(*last_seq);
+                out.put_i64(*last_ts);
+                out.put_i32(*coord_epoch);
+                out.put_i64(*txn_start);
+                put_empty_tag_buffer(out);
+            }
+            put_empty_tag_buffer(out); // partition tags
+        }
+        put_empty_tag_buffer(out); // topic tags
     }
     put_empty_tag_buffer(out);
 }
