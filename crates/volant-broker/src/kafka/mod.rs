@@ -1,12 +1,13 @@
-//! Kafka wire protocol shim (Phases 23–69).
+//! Kafka wire protocol shim (Phases 23–76).
 //!
 //! Classic framing plus flexible APIs (KIP-482): ApiVersions v3, Metadata
 //! v9–13 (TopicId; v13 top-level ErrorCode), FindCoordinator v3–4, Produce v9–13 (TopicId v13), Fetch v12–13 (TopicId),
 //! CreateTopics v5–7 / DeleteTopics v4–6 (TopicId), group/offset/admin/config/txn
 //! flex, ListOffsets v6–11 (max-timestamp / local / tiered specials), OffsetForLeaderEpoch v4, DeleteRecords v2, ACL admin,
 //! SaslAuthenticate v2, DescribeCluster 0–2, ListTransactions 0–2,
-//! DescribeTransactions v0, DescribeProducers v0. See `docs/PHASE23_SPEC.md`
-//! … `docs/PHASE70_SPEC.md`.
+//! DescribeTransactions v0, DescribeProducers v0, KIP-890-era txn max versions
+//! (InitProducerId 0–5, AddPartitionsToTxn/EndTxn 0–5, TxnOffsetCommit 0–6 TopicId).
+//! See `docs/PHASE23_SPEC.md` … `docs/PHASE76_SPEC.md`.
 
 /// Kafka wire primitives, MessageSet (magic 0/1), and RecordBatch (magic 2).
 pub mod codec;
@@ -95,12 +96,16 @@ pub enum KafkaErrorCode {
     FencedLeaderEpoch = 74,
     /// Unknown leader epoch.
     UnknownLeaderEpoch = 75,
+    /// Producer fenced (epoch / transactional id fencing).
+    ProducerFenced = 90,
     /// Unknown topic id (Metadata by TopicId).
     UnknownTopicId = 100,
     /// Transactional id not found (DescribeTransactions).
     TransactionalIdNotFound = 105,
     /// Unsupported endpoint type (DescribeCluster v1+).
     UnsupportedEndpointType = 115,
+    /// Transaction abortable (KIP-890); defined for honesty, not yet emitted.
+    TransactionAbortable = 123,
 }
 
 /// Map Volant group error codes to Kafka wire error codes.
@@ -280,12 +285,12 @@ pub const SUPPORTED_APIS: &[(ApiKey, i16, i16)] = &[
     (ApiKey::CreateTopics, 0, 7),
     (ApiKey::DeleteTopics, 0, 6),
     (ApiKey::DeleteRecords, 0, 2),
-    (ApiKey::InitProducerId, 0, 2),
+    (ApiKey::InitProducerId, 0, 5),
     (ApiKey::OffsetForLeaderEpoch, 0, 4),
-    (ApiKey::AddPartitionsToTxn, 0, 3),
+    (ApiKey::AddPartitionsToTxn, 0, 5),
     (ApiKey::AddOffsetsToTxn, 0, 3),
-    (ApiKey::EndTxn, 0, 3),
-    (ApiKey::TxnOffsetCommit, 0, 3),
+    (ApiKey::EndTxn, 0, 5),
+    (ApiKey::TxnOffsetCommit, 0, 6),
     (ApiKey::DescribeAcls, 0, 2),
     (ApiKey::CreateAcls, 0, 2),
     (ApiKey::DeleteAcls, 0, 2),

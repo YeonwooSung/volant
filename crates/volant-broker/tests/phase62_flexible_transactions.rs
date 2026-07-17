@@ -196,11 +196,11 @@ async fn api_versions_txn_flex_maxes() {
         let max_v = src.get_i16();
         found.insert(key, (min_v, max_v));
     }
-    assert_eq!(found.get(&22), Some(&(0, 2)));
-    assert_eq!(found.get(&24), Some(&(0, 3)));
-    assert_eq!(found.get(&25), Some(&(0, 3)));
-    assert_eq!(found.get(&26), Some(&(0, 3)));
-    assert_eq!(found.get(&28), Some(&(0, 3)));
+    assert_eq!(found.get(&22), Some(&(0, 5))); // InitProducerId (Phase 75 KIP-890)
+    assert_eq!(found.get(&24), Some(&(0, 5))); // AddPartitionsToTxn
+    assert_eq!(found.get(&25), Some(&(0, 3))); // AddOffsetsToTxn unchanged
+    assert_eq!(found.get(&26), Some(&(0, 5))); // EndTxn
+    assert_eq!(found.get(&28), Some(&(0, 6))); // TxnOffsetCommit (Phase 76 TopicId)
 
     server.abort();
     let _ = std::fs::remove_dir_all(&dir);
@@ -364,10 +364,10 @@ async fn unsupported_txn_versions_use_header_v1() {
     }));
     let (addr, server) = boot_kafka(Arc::clone(&broker)).await;
 
-    // InitProducerId v3 (beyond max 2) → header v1 + UnsupportedVersion
+    // InitProducerId v6 (beyond max 5; 2PC deferred) → header v1 + UnsupportedVersion
     let resp = rpc(
         &addr,
-        encode_request_flexible(22, 3, 10, Some("c"), &[]),
+        encode_request_flexible(22, 6, 10, Some("c"), &[]),
     )
     .await;
     let mut src = resp.freeze();
@@ -375,10 +375,10 @@ async fn unsupported_txn_versions_use_header_v1() {
     skip_tag_buffer(&mut src).unwrap();
     assert_eq!(src.get_i16(), 35); // UnsupportedVersion
 
-    // AddPartitionsToTxn v4 (broker-batch) → header v1 + UnsupportedVersion
+    // AddPartitionsToTxn v6 (beyond max 5) → header v1 + UnsupportedVersion
     let resp = rpc(
         &addr,
-        encode_request_flexible(24, 4, 11, Some("c"), &[]),
+        encode_request_flexible(24, 6, 11, Some("c"), &[]),
     )
     .await;
     let mut src = resp.freeze();

@@ -334,6 +334,13 @@ as v12 TopicId path.
 **Phase 74:** ListOffsets v7–11 — MAX_TIMESTAMP (-3) scan; EARLIEST_LOCAL (-4);
 tiered specials empty; TimeoutMs (v10) ignored.
 
+**Phase 75:** KIP-890-era txn max versions — InitProducerId 0–5 (resume fields
+ignored), AddPartitionsToTxn 0–5 (v4–5 batch), EndTxn 0–5 (v5 pid/epoch echo),
+TxnOffsetCommit 0–5 (name path); AddOffsetsToTxn stays 0–3; no 2PC.
+
+**Phase 76:** TxnOffsetCommit v6 TopicId — UUID topics (v3–5 name path unchanged);
+unknown id → UnknownTopicId; buffers until EndTxn.
+
 **Still deferred:** multi-language clients, chaos-mesh / cargo-fuzz corpus CI.
 
 ### Networked client (library)

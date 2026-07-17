@@ -186,11 +186,11 @@ async fn api_versions_txn_classic_max_v2() {
         let max = src.get_i16();
         found.insert(key, (min, max));
     }
-    assert_eq!(found.get(&22), Some(&(0, 2))); // InitProducerId (Phase 62 flex v2)
-    assert_eq!(found.get(&24), Some(&(0, 3))); // AddPartitionsToTxn (Phase 62 flex v3)
-    assert_eq!(found.get(&25), Some(&(0, 3))); // AddOffsetsToTxn
-    assert_eq!(found.get(&26), Some(&(0, 3))); // EndTxn
-    assert_eq!(found.get(&28), Some(&(0, 3))); // TxnOffsetCommit
+    assert_eq!(found.get(&22), Some(&(0, 5))); // InitProducerId (Phase 75 KIP-890)
+    assert_eq!(found.get(&24), Some(&(0, 5))); // AddPartitionsToTxn
+    assert_eq!(found.get(&25), Some(&(0, 3))); // AddOffsetsToTxn unchanged
+    assert_eq!(found.get(&26), Some(&(0, 5))); // EndTxn
+    assert_eq!(found.get(&28), Some(&(0, 6))); // TxnOffsetCommit (Phase 76 TopicId)
 
     server.abort();
     let _ = std::fs::remove_dir_all(&dir);
@@ -370,19 +370,19 @@ async fn txn_offset_commit_v2_leader_epoch_applies_on_commit() {
 }
 
 #[tokio::test]
-async fn txn_api_v4_unsupported_version() {
-    let dir = temp_dir("v4");
+async fn txn_api_v6_unsupported_version() {
+    let dir = temp_dir("v6");
     let broker = Arc::new(Broker::new(StorageConfig {
         data_dir: dir.clone(),
         ..StorageConfig::default()
     }));
     let (addr, server) = boot_kafka(Arc::clone(&broker)).await;
 
-    // v4+ broker-batch remains unsupported (Phase 62 max is flexible v3).
+    // Phase 75 max is v5; v6 remains unsupported (2PC / higher KIP-890).
     // Flexible request header → response header v1 + UnsupportedVersion.
     let resp = rpc(
         &addr,
-        volant_broker::kafka::codec::encode_request_flexible(24, 4, 9, Some("c"), &[]),
+        volant_broker::kafka::codec::encode_request_flexible(24, 6, 9, Some("c"), &[]),
     )
     .await;
     let mut src = resp.freeze();

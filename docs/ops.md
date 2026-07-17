@@ -132,12 +132,12 @@ Supported APIs:
 | OffsetForLeaderEpoch | 0–4 | Classic 0–3; **v4 flexible** + response header v1; no epoch history (eligible → HWM); fencing via current_leader_epoch |
 | Produce | 0–13 | Classic 0–8; **v9–12 flexible** compact name topics/records + response header v1; **v13 TopicId UUID** (deterministic Volant mapping; unknown → UnknownTopicId); MessageSet or RecordBatch; compression + idempotent PID/seq; empty record_errors; KIP-951 CurrentLeader tags empty; v14 unsupported |
 | Fetch | 0–13 | Classic 0–11; **v12 flexible** compact name topics/records + response header v1; **v13 TopicId UUID** (deterministic Volant mapping; unknown → UnknownTopicId); v0–3 MessageSet + v4+ RecordBatch (default lz4); session header (no real sessions); leader-epoch fence; preferred_read_replica=-1; v14+ unsupported |
-| InitProducerId | 0–2 | Classic 0–1; **v2 flexible** + response header v1; transactional_id fencing; timeout ignored; v3+ resume unsupported |
+| InitProducerId | 0–5 | Classic 0–1; **v2–5 flexible** + response header v1; transactional_id fencing; timeout ignored; **v3–5** ProducerId/Epoch resume fields parsed+ignored (always re-allocate); v6 2PC unsupported |
 | FindCoordinator | 0–4 | Classic 0–2; **v3 flexible** compact key/host; **v4 batch** CoordinatorKeys; all keys → this broker; response header v1 for v3+ |
-| AddPartitionsToTxn | 0–3 | Classic 0–2; **v3 flexible** + response header v1; opens txn; v4+ broker-batch unsupported |
+| AddPartitionsToTxn | 0–5 | Classic 0–2; **v3 flexible** flat path; **v4–5 batch** Transactions[] (VerifyOnly ignored — always add); opens txn; v6 unsupported |
 | AddOffsetsToTxn | 0–3 | Classic 0–2; **v3 flexible** + response header v1; registers group for transactional offsets |
-| EndTxn | 0–3 | Classic 0–2; **v3 flexible** + response header v1; commit/abort flushes buffered produces + offsets |
-| TxnOffsetCommit | 0–3 | Classic 0–2; **v3 flexible** + response header v1; buffers until EndTxn; v2+ leader_epoch + v3 member/generation ignored |
+| EndTxn | 0–5 | Classic 0–2; **v3–5 flexible** + response header v1; commit/abort flushes buffered produces + offsets; **v5** response echoes ProducerId/Epoch; v6 unsupported |
+| TxnOffsetCommit | 0–6 | Classic 0–2; **v3–5 flexible** name topics + response header v1; **v6 TopicId UUID** (unknown → UnknownTopicId); buffers until EndTxn; member/generation/leader_epoch ignored; v7 unsupported |
 | SaslHandshake | 0–1 | mechanisms: PLAIN, SCRAM-SHA-256, SCRAM-SHA-512 |
 | SaslAuthenticate | 0–2 | Classic 0–1; **v2 flexible** + response header v1; PLAIN / SCRAM-SHA-256 / SCRAM-SHA-512; session_lifetime=0 |
 | DescribeCluster | 0–2 | **Always flexible** (KIP-700); cluster_id=`volant`; brokers + controller; **v1 EndpointType** (brokers only); **v2 IncludeFencedBrokers + IsFenced** (always false); v3 unsupported |

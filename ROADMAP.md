@@ -1676,7 +1676,53 @@ tiered/remote storage; TimeoutMs ignored; positive timestamps still
 InvalidTimestamp; no v12+.
 
 **Still deferred:** multi-lang clients, cargo-fuzz corpus CI, true control-marker
-READ_COMMITTED, higher KIP-890 txn versions.
+READ_COMMITTED, higher KIP-890 txn versions. KIP-890-era txn maxes closed by
+**Phase 75**.
+
+---
+
+### Phase 75 — KIP-890-era transaction API max versions ✅
+
+**Goal:** Modern clients can negotiate InitProducerId / AddPartitionsToTxn /
+EndTxn / TxnOffsetCommit through v5 with honest shallow semantics (no 2PC,
+no TopicId, no real TRANSACTION_ABORTABLE).
+
+Binding: **[docs/PHASE75_SPEC.md](./docs/PHASE75_SPEC.md)**.
+
+- [x] InitProducerId 0–5 (v3–5 resume fields parsed+ignored; v6 unsupported)
+- [x] AddPartitionsToTxn 0–5 (v4–5 batch Transactions[]; VerifyOnly ignored)
+- [x] EndTxn 0–5 (v5 response ProducerId/Epoch echo)
+- [x] TxnOffsetCommit 0–5 (name path = v3 wire; TopicId deferred)
+- [x] AddOffsetsToTxn stays 0–3
+- [x] ProducerFenced / TransactionAbortable error codes defined
+- [x] Integration tests (`phase75_kip890_txn_versions`)
+
+**Honest limitations:** resume fields ignored; VerifyOnly always add;
+no TRANSACTION_ABORTABLE emission; no 2PC; no TxnOffsetCommit TopicId;
+no READ_COMMITTED; buffer-until-commit unchanged.
+
+**Still deferred:** multi-lang clients, cargo-fuzz corpus CI, true control-marker
+READ_COMMITTED, InitProducerId v6 2PC, TxnOffsetCommit TopicId (Phase 76).
+
+---
+
+### Phase 76 — TxnOffsetCommit TopicId (v6) ✅
+
+**Goal:** Modern transactional consumers can commit offsets by Kafka TopicId
+UUID (KIP-1319), matching Metadata/OffsetCommit deterministic mapping.
+
+Binding: **[docs/PHASE76_SPEC.md](./docs/PHASE76_SPEC.md)**.
+
+- [x] TxnOffsetCommit 0–6 (v3–5 name flexible; **v6 TopicId** request/response)
+- [x] Unknown / non-Volant UUID → UnknownTopicId (100) per partition (no buffer)
+- [x] v0–5 name path unchanged; v7 UnsupportedVersion header v1
+- [x] Integration tests (`phase76_txn_offset_topic_id`)
+
+**Honest limitations:** v4–5 wire≡v3; member/generation ignored; leader_epoch
+ignored; buffer-until-EndTxn unchanged; deterministic UUID only; no v7+.
+
+**Still deferred:** multi-lang clients, cargo-fuzz corpus CI, true control-marker
+READ_COMMITTED, InitProducerId v6 2PC.
 
 ---
 
