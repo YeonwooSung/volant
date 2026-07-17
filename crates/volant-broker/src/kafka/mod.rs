@@ -1,10 +1,11 @@
-//! Kafka wire protocol shim (Phases 23–64).
+//! Kafka wire protocol shim (Phases 23–65).
 //!
 //! Classic framing plus flexible APIs (KIP-482): ApiVersions v3, Metadata v9,
 //! FindCoordinator v3–4, Produce v9, Fetch v12, group/offset/admin/config/txn
-//! flex, ListOffsets v6, OffsetForLeaderEpoch v4, DeleteRecords v2, and ACL
-//! admin Describe/Create/DeleteAcls v2. Produce v0–9 / Fetch v0–12, SASL,
-//! OffsetDelete, Metadata v0–9. See `docs/PHASE23_SPEC.md` … `docs/PHASE64_SPEC.md`.
+//! flex, ListOffsets v6, OffsetForLeaderEpoch v4, DeleteRecords v2, ACL
+//! admin Describe/Create/DeleteAcls v2, SaslAuthenticate v2, DescribeCluster
+//! v0, ListTransactions v0. Produce v0–9 / Fetch v0–12, SASL, OffsetDelete,
+//! Metadata v0–9. See `docs/PHASE23_SPEC.md` … `docs/PHASE65_SPEC.md`.
 
 /// Kafka wire primitives, MessageSet (magic 0/1), and RecordBatch (magic 2).
 pub mod codec;
@@ -196,6 +197,10 @@ pub enum ApiKey {
     IncrementalAlterConfigs = 44,
     /// OffsetDelete.
     OffsetDelete = 47,
+    /// DescribeCluster (always flexible).
+    DescribeCluster = 60,
+    /// ListTransactions (always flexible).
+    ListTransactions = 66,
 }
 
 impl ApiKey {
@@ -235,6 +240,8 @@ impl ApiKey {
             42 => Some(Self::DeleteGroups),
             44 => Some(Self::IncrementalAlterConfigs),
             47 => Some(Self::OffsetDelete),
+            60 => Some(Self::DescribeCluster),
+            66 => Some(Self::ListTransactions),
             _ => None,
         }
     }
@@ -271,9 +278,11 @@ pub const SUPPORTED_APIS: &[(ApiKey, i16, i16)] = &[
     (ApiKey::DeleteAcls, 0, 2),
     (ApiKey::DescribeConfigs, 0, 4),
     (ApiKey::AlterConfigs, 0, 2),
-    (ApiKey::SaslAuthenticate, 0, 1),
+    (ApiKey::SaslAuthenticate, 0, 2),
     (ApiKey::CreatePartitions, 0, 2),
     (ApiKey::DeleteGroups, 0, 2),
     (ApiKey::IncrementalAlterConfigs, 0, 1),
     (ApiKey::OffsetDelete, 0, 0),
+    (ApiKey::DescribeCluster, 0, 0),
+    (ApiKey::ListTransactions, 0, 0),
 ];

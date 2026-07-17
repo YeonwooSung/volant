@@ -544,6 +544,27 @@ impl Broker {
         self.open_txns.lock().contains_key(&producer_id)
     }
 
+    /// List open transactions for ListTransactions (Phase 65).
+    ///
+    /// Returns `(transactional_id, producer_id, state)` where state is always
+    /// `"Ongoing"` (Volant only tracks open buffer-until-commit txns in memory).
+    pub fn list_open_transactions(&self) -> Vec<(String, u64, String)> {
+        let open = self.open_txns.lock();
+        let prods = self.producer_state.read();
+        let mut out = Vec::with_capacity(open.len());
+        for &pid in open.keys() {
+            let Some(prod) = prods.get(&pid) else {
+                continue;
+            };
+            if prod.transactional_id.is_empty() {
+                continue;
+            }
+            out.push((prod.transactional_id.clone(), pid, "Ongoing".to_string()));
+        }
+        out.sort_by(|a, b| a.0.cmp(&b.0));
+        out
+    }
+
     /// Buffer consumer offsets to apply on commit (Phase 31 TxnOffsetCommit).
     ///
     /// Entries: `(group_id, topic, partition, offset, metadata)`.

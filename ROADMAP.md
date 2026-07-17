@@ -1463,6 +1463,29 @@ higher KIP-890 txn versions, SASL flex.
 
 ---
 
+### Phase 65 — SaslAuthenticate flexible + DescribeCluster + ListTransactions ✅
+
+**Goal:** Finish remaining flexible SASL and always-flexible modern admin APIs
+(KIP-482 / KIP-700).
+
+Binding: **[docs/PHASE65_SPEC.md](./docs/PHASE65_SPEC.md)**.
+
+- [x] SaslAuthenticate 0–2 (v2 flexible; classic 0–1 unchanged)
+- [x] DescribeCluster 0 (always flexible; cluster_id + brokers)
+- [x] ListTransactions 0 (always flexible; open txns as Ongoing)
+- [x] Response header v1 for those flexible versions
+- [x] Integration tests (`phase65_flexible_sasl_describe_cluster`)
+
+**Honest limitations:** session_lifetime=0; no DescribeCluster EndpointType /
+fenced brokers; ListTransactions only Ongoing open memory txns; no
+DescribeTransactions / duration or pattern filters.
+
+**Still deferred:** multi-lang clients, cargo-fuzz corpus CI, Metadata TopicId,
+true control-marker READ_COMMITTED, higher KIP-890 txn versions, DescribeCluster
+v1–2, ListTransactions v1–2, DescribeTransactions.
+
+---
+
 ## Performance targets (aspirational)
 
 | Metric | Single node target | Notes |

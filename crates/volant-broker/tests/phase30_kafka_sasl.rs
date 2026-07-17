@@ -114,7 +114,7 @@ async fn api_versions_includes_sasl_keys() {
         }
     }
     assert_eq!(hs, Some((0, 1)));
-    assert_eq!(auth, Some((0, 1)));
+    assert_eq!(auth, Some((0, 2)));
 
     server.abort();
     let _ = std::fs::remove_dir_all(&dir);

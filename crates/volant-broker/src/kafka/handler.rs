@@ -199,6 +199,12 @@ fn dispatch_kafka(broker: &Broker, body: bytes::Bytes, conn: &mut KafkaConnState
                 | Some(ApiKey::DeleteAcls),
             v
         ) if v >= 2
+    ) || matches!(
+        (api, hdr.api_version),
+        (Some(ApiKey::SaslAuthenticate), v) if v >= 2
+    ) || matches!(
+        (api, hdr.api_version),
+        (Some(ApiKey::DescribeCluster) | Some(ApiKey::ListTransactions), _)
     );
 
     let mut out = BytesMut::new();
@@ -239,8 +245,25 @@ fn dispatch_kafka(broker: &Broker, body: bytes::Bytes, conn: &mut KafkaConnState
         Some(ApiKey::SaslHandshake) if (0..=1).contains(&hdr.api_version) => {
             encode_sasl_handshake(&mut src, &mut out, conn);
         }
-        Some(ApiKey::SaslAuthenticate) if (0..=1).contains(&hdr.api_version) => {
+        Some(ApiKey::SaslAuthenticate) if (0..=2).contains(&hdr.api_version) => {
+            if hdr.api_version >= 2 {
+                if let Err(e) = skip_tag_buffer(&mut src) {
+                    debug!(error = %e, "sasl authenticate flexible header tag buffer");
+                }
+            }
             encode_sasl_authenticate(broker, &mut src, &mut out, hdr.api_version, conn);
+        }
+        Some(ApiKey::DescribeCluster) if hdr.api_version == 0 => {
+            if let Err(e) = skip_tag_buffer(&mut src) {
+                debug!(error = %e, "describe cluster flexible header tag buffer");
+            }
+            encode_describe_cluster(broker, &mut src, &mut out, principal);
+        }
+        Some(ApiKey::ListTransactions) if hdr.api_version == 0 => {
+            if let Err(e) = skip_tag_buffer(&mut src) {
+                debug!(error = %e, "list transactions flexible header tag buffer");
+            }
+            encode_list_transactions(broker, &mut src, &mut out, principal);
         }
         Some(ApiKey::Metadata) if (0..=9).contains(&hdr.api_version) => {
             if hdr.api_version >= 9 {
@@ -532,16 +555,35 @@ fn encode_sasl_authenticate(
     version: i16,
     conn: &mut KafkaConnState,
 ) {
-    let auth_bytes = match get_bytes(src) {
-        Ok(b) => b.unwrap_or_default(),
-        Err(_) => {
-            out.put_i16(KafkaErrorCode::InvalidRequest.as_i16());
-            put_nullable_string(out, Some("truncated auth bytes"));
-            put_bytes(out, None);
-            if version >= 1 {
-                out.put_i64(0);
+    let flexible = version >= 2;
+
+    let auth_bytes = if flexible {
+        match get_compact_bytes(src) {
+            Ok(b) => {
+                let _ = skip_tag_buffer(src);
+                b.unwrap_or_default()
             }
-            return;
+            Err(_) => {
+                out.put_i16(KafkaErrorCode::InvalidRequest.as_i16());
+                put_compact_nullable_string(out, Some("truncated auth bytes"));
+                put_compact_bytes(out, None);
+                out.put_i64(0); // session_lifetime_ms (v1+)
+                put_empty_tag_buffer(out);
+                return;
+            }
+        }
+    } else {
+        match get_bytes(src) {
+            Ok(b) => b.unwrap_or_default(),
+            Err(_) => {
+                out.put_i16(KafkaErrorCode::InvalidRequest.as_i16());
+                put_nullable_string(out, Some("truncated auth bytes"));
+                put_bytes(out, None);
+                if version >= 1 {
+                    out.put_i64(0);
+                }
+                return;
+            }
         }
     };
 
@@ -549,10 +591,17 @@ fn encode_sasl_authenticate(
         Ok(s) => s,
         Err(e) => {
             out.put_i16(KafkaErrorCode::SaslAuthenticationFailed.as_i16());
-            put_nullable_string(out, Some(&e.to_string()));
-            put_bytes(out, None);
-            if version >= 1 {
+            if flexible {
+                put_compact_nullable_string(out, Some(&e.to_string()));
+                put_compact_bytes(out, None);
                 out.put_i64(0);
+                put_empty_tag_buffer(out);
+            } else {
+                put_nullable_string(out, Some(&e.to_string()));
+                put_bytes(out, None);
+                if version >= 1 {
+                    out.put_i64(0);
+                }
             }
             return;
         }
@@ -560,19 +609,187 @@ fn encode_sasl_authenticate(
 
     if step.failed {
         out.put_i16(KafkaErrorCode::SaslAuthenticationFailed.as_i16());
-        put_nullable_string(out, step.error_message.as_deref());
-        put_bytes(out, Some(&step.auth_bytes));
+        if flexible {
+            put_compact_nullable_string(out, step.error_message.as_deref());
+            put_compact_bytes(out, Some(&step.auth_bytes));
+        } else {
+            put_nullable_string(out, step.error_message.as_deref());
+            put_bytes(out, Some(&step.auth_bytes));
+        }
     } else {
         if let Some(p) = step.principal {
             conn.principal = Some(p);
         }
         out.put_i16(KafkaErrorCode::None.as_i16());
-        put_nullable_string(out, None);
-        put_bytes(out, Some(&step.auth_bytes));
+        if flexible {
+            put_compact_nullable_string(out, None);
+            put_compact_bytes(out, Some(&step.auth_bytes));
+        } else {
+            put_nullable_string(out, None);
+            put_bytes(out, Some(&step.auth_bytes));
+        }
     }
     if version >= 1 {
         out.put_i64(0); // session_lifetime_ms
     }
+    if flexible {
+        put_empty_tag_buffer(out);
+    }
+}
+
+/// DescribeCluster v0 (always flexible, KIP-700 / Phase 65).
+///
+/// Request: include_cluster_authorized_operations (bool), TAG_BUFFER.
+/// Response (header v1): throttle, error, error_message, cluster_id,
+/// controller_id, brokers[{id, host, port, rack, tags}], cluster_authorized_ops,
+/// tags.
+fn encode_describe_cluster(
+    broker: &Broker,
+    src: &mut impl Buf,
+    out: &mut BytesMut,
+    principal: &str,
+) {
+    let include_ops = if src.has_remaining() {
+        src.get_u8() != 0
+    } else {
+        false
+    };
+    let _ = skip_tag_buffer(src);
+
+    // Cluster Describe ACL when ACLs are enabled.
+    if broker.acls().is_enabled()
+        && !broker.acls().authorize(
+            Some(principal),
+            ResourceType::Cluster,
+            CLUSTER_RESOURCE,
+            AclOperation::Describe,
+        )
+    {
+        out.put_i32(0); // throttle
+        out.put_i16(KafkaErrorCode::ClusterAuthorizationFailed.as_i16());
+        put_compact_nullable_string(out, Some("Cluster authorization failed"));
+        put_compact_string(out, KAFKA_CLUSTER_ID);
+        out.put_i32(-1); // controller
+        put_compact_array_len(out, 0); // brokers
+        out.put_i32(AUTH_OPS_OMITTED);
+        put_empty_tag_buffer(out);
+        return;
+    }
+
+    let snap = broker.metadata(None);
+    out.put_i32(0); // throttle
+    out.put_i16(KafkaErrorCode::None.as_i16());
+    put_compact_nullable_string(out, None); // error_message
+    put_compact_string(out, KAFKA_CLUSTER_ID);
+    out.put_i32(snap.controller_id as i32);
+    put_compact_array_len(out, snap.brokers.len());
+    for (id, host, port) in &snap.brokers {
+        out.put_i32(*id as i32);
+        put_compact_string(out, host);
+        out.put_i32(i32::from(*port));
+        put_compact_nullable_string(out, None); // rack
+        put_empty_tag_buffer(out);
+    }
+    out.put_i32(cluster_authorized_ops(broker, principal, include_ops));
+    put_empty_tag_buffer(out);
+}
+
+/// ListTransactions v0 (always flexible, Phase 65).
+///
+/// Request: compact StateFilters[] (strings, no per-element tags), compact
+/// ProducerIdFilters[] (int64s), tags.
+/// Response: throttle, error, compact UnknownStateFilters[], compact
+/// TransactionStates[{id, producer_id, state, tags}], tags.
+fn encode_list_transactions(
+    broker: &Broker,
+    src: &mut impl Buf,
+    out: &mut BytesMut,
+    principal: &str,
+) {
+    if broker.acls().is_enabled()
+        && !broker.acls().authorize(
+            Some(principal),
+            ResourceType::Cluster,
+            CLUSTER_RESOURCE,
+            AclOperation::Describe,
+        )
+    {
+        out.put_i32(0);
+        out.put_i16(KafkaErrorCode::ClusterAuthorizationFailed.as_i16());
+        put_compact_array_len(out, 0);
+        put_compact_array_len(out, 0);
+        put_empty_tag_buffer(out);
+        return;
+    }
+
+    // Known Kafka transaction states (subset we might filter against).
+    const KNOWN_STATES: &[&str] = &[
+        "Empty",
+        "Ongoing",
+        "PrepareCommit",
+        "PrepareAbort",
+        "CompleteCommit",
+        "CompleteAbort",
+        "Dead",
+        "PrepareEpochFence",
+    ];
+
+    let mut state_filters: Vec<String> = Vec::new();
+    if let Ok(Some(n)) = get_compact_array_len(src) {
+        for _ in 0..n {
+            if let Ok(s) = get_compact_string(src) {
+                state_filters.push(s);
+            }
+        }
+    }
+
+    let mut pid_filters: Vec<i64> = Vec::new();
+    if let Ok(Some(n)) = get_compact_array_len(src) {
+        for _ in 0..n {
+            if src.remaining() >= 8 {
+                pid_filters.push(src.get_i64());
+            }
+        }
+    }
+    let _ = skip_tag_buffer(src);
+
+    let mut unknown_filters: Vec<&str> = Vec::new();
+    for f in &state_filters {
+        if !KNOWN_STATES.iter().any(|k| *k == f.as_str()) {
+            unknown_filters.push(f.as_str());
+        }
+    }
+
+    let open = broker.list_open_transactions();
+    let filtered: Vec<_> = open
+        .into_iter()
+        .filter(|(_tid, pid, state)| {
+            if !state_filters.is_empty()
+                && !state_filters.iter().any(|f| f == state)
+            {
+                return false;
+            }
+            if !pid_filters.is_empty() && !pid_filters.contains(&(*pid as i64)) {
+                return false;
+            }
+            true
+        })
+        .collect();
+
+    out.put_i32(0); // throttle
+    out.put_i16(KafkaErrorCode::None.as_i16());
+    put_compact_array_len(out, unknown_filters.len());
+    for f in &unknown_filters {
+        put_compact_string(out, f);
+    }
+    put_compact_array_len(out, filtered.len());
+    for (tid, pid, state) in &filtered {
+        put_compact_string(out, tid);
+        out.put_i64(*pid as i64);
+        put_compact_string(out, state);
+        put_empty_tag_buffer(out);
+    }
+    put_empty_tag_buffer(out);
 }
 
 /// ApiVersions classic v0–2 + flexible v3 (Phase 50/51).

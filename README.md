@@ -303,6 +303,9 @@ AddOffsetsToTxn / EndTxn / TxnOffsetCommit v3; classic paths unchanged.
 
 **Phase 64:** Flexible DeleteRecords v2 + Describe/Create/DeleteAcls v2.
 
+**Phase 65:** SaslAuthenticate v2 flexible + DescribeCluster v0 + ListTransactions
+v0 (always-flexible modern admin APIs).
+
 **Still deferred:** multi-language clients, chaos-mesh / cargo-fuzz corpus CI.
 
 ### Networked client (library)

@@ -139,7 +139,9 @@ Supported APIs:
 | EndTxn | 0–3 | Classic 0–2; **v3 flexible** + response header v1; commit/abort flushes buffered produces + offsets |
 | TxnOffsetCommit | 0–3 | Classic 0–2; **v3 flexible** + response header v1; buffers until EndTxn; v2+ leader_epoch + v3 member/generation ignored |
 | SaslHandshake | 0–1 | mechanisms: PLAIN, SCRAM-SHA-256, SCRAM-SHA-512 |
-| SaslAuthenticate | 0–1 | PLAIN / SCRAM-SHA-256 / SCRAM-SHA-512 against Volant SCRAM store |
+| SaslAuthenticate | 0–2 | Classic 0–1; **v2 flexible** + response header v1; PLAIN / SCRAM-SHA-256 / SCRAM-SHA-512; session_lifetime=0 |
+| DescribeCluster | 0 | **Always flexible** (KIP-700); cluster_id=`volant`; brokers + controller; authorized ops optional; v1 EndpointType / v2 fenced unsupported |
+| ListTransactions | 0 | **Always flexible**; open buffer-until-commit txns as `Ongoing`; state/pid filters; v1+ duration/pattern unsupported |
 | ListOffsets | 0–6 | Classic 0–5; **v6 flexible** + response header v1; -1 latest / -2 earliest; isolation ignored (LSO≡HWM); v4+ leader-epoch fencing; v7+ max-timestamp unsupported |
 | CreateTopics | 0–5 | Classic 0–4; **v5 flexible** + response header v1; validate_only v1+; default partitions v4+; configs response null; TopicId v7 unsupported |
 | DeleteTopics | 0–4 | Classic 0–3; **v4 flexible** + response header v1; throttle v1+ (leading); ErrorMessage v5 / TopicId v6 unsupported |
