@@ -23,7 +23,7 @@ fn api_versions_v3_body(name: &str, version: &str) -> BytesMut {
 }
 
 #[tokio::test]
-async fn api_versions_advertises_max_3() {
+async fn api_versions_advertises_max_5() {
     let dir = temp_dir("p51", "adv");
     let broker = Arc::new(Broker::new(StorageConfig {
         data_dir: dir.clone(),
@@ -45,7 +45,7 @@ async fn api_versions_advertises_max_3() {
             max18 = Some(max);
         }
     }
-    assert_eq!(max18, Some(3));
+    assert_eq!(max18, Some(5)); // Phase 83 raised max to Kafka 0–5
 
     server.abort();
     let _ = std::fs::remove_dir_all(&dir);
@@ -81,7 +81,7 @@ async fn api_versions_v3_flexible_roundtrip() {
         let max = src.get_i16();
         skip_tag_buffer(&mut src).unwrap(); // per-entry tags
         if key == 18 {
-            assert_eq!((min, max), (0, 3));
+            assert_eq!((min, max), (0, 5)); // Phase 83
             saw_self = true;
         }
         if key == 0 {

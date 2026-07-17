@@ -359,8 +359,12 @@ TRANSACTION_ABORTABLE never emitted; share key_type (KIP-932) rejected.
 **Phase 82:** AddOffsetsToTxn 0–4 — v4 wire-identical to flexible v3; KIP-890
 TRANSACTION_ABORTABLE never emitted (buffer-until-commit only).
 
+**Phase 83:** ApiVersions 0–5 — v4 wire-identical to flexible v3 body (empty
+feature tags); v5 ClusterId/NodeId parsed and ignored; response header always
+v0; no SupportedFeatures / REBOOTSTRAP_REQUIRED.
+
 **Still deferred:** multi-language clients, chaos-mesh / cargo-fuzz corpus CI,
-true control-marker READ_COMMITTED, real 2PC, ApiVersions v4–5 / Fetch v14+.
+true control-marker READ_COMMITTED, real 2PC, Fetch v14+.
 
 ### Networked client (library)
 

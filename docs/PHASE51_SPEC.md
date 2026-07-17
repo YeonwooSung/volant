@@ -63,7 +63,10 @@ TAG_BUFFER                         # empty (no features)
 
 ## Honest limitations
 
-- Only ApiVersions is flexible so far
-- No SupportedFeatures / feature flags
-- Other APIs remain classic-only; modern clients that require flexible Metadata
-  etc. still need classic version negotiation or future phases
+- Only ApiVersions is flexible so far (closed for other APIs by later phases)
+- No SupportedFeatures / feature flags (still true after Phase 83 empty tags)
+- Other APIs remain classic-only at Phase 51 ship; later phases add flexible
+  Metadata etc.
+
+**Superseded max:** Phase 83 raised ApiVersions to **0–5** (v4–5 flexible;
+still empty feature tags; response header still v0).

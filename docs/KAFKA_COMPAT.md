@@ -1,8 +1,8 @@
 # Kafka compatibility matrix
 
 **Living document** for the optional Kafka wire shim (`--kafka-listen`).
-Ship history: Phases **23–82**. Binding deep dives: `PHASE23_SPEC.md` …
-`PHASE82_SPEC.md`. Overview: [WHITEPAPER.md](./WHITEPAPER.md).
+Ship history: Phases **23–83**. Binding deep dives: `PHASE23_SPEC.md` …
+`PHASE83_SPEC.md`. Overview: [WHITEPAPER.md](./WHITEPAPER.md).
 
 ## Enable
 
@@ -36,7 +36,7 @@ From `SUPPORTED_APIS` in `crates/volant-broker/src/kafka/mod.rs`:
 | 15 | DescribeGroups | 0–6 | Flex v5; ErrorMessage v6 |
 | 16 | ListGroups | 0–5 | Flex v3; StatesFilter v4; TypesFilter v5 (`classic`) |
 | 17 | SaslHandshake | 0–1 | PLAIN, SCRAM-SHA-256, SCRAM-SHA-512 |
-| 18 | ApiVersions | 0–3 | Flex v3 |
+| 18 | ApiVersions | 0–5 | Flex v3–5; header always v0; empty feature tags; v5 ClusterId/NodeId ignored |
 | 19 | CreateTopics | 0–7 | Flex v5+; TopicId response v7 |
 | 20 | DeleteTopics | 0–6 | Flex v4+; ErrorMessage v5; TopicId v6 |
 | 21 | DeleteRecords | 0–2 | Flex v2 |
@@ -67,7 +67,7 @@ From `SUPPORTED_APIS` in `crates/volant-broker/src/kafka/mod.rs`:
 | Formats | 28–34 | Compression, idempotence, SASL, SCRAM-512 |
 | Classic max | 35–50 | Version ratchets for classic framing |
 | Flexible | 51–66 | KIP-482 compact + modern admin |
-| TopicId / modern | 67–82 | UUID topics, ListOffsets specials, KIP-890, KIP-951, group admin, CreatePartitions v3, FindCoordinator v5–6, AddOffsetsToTxn v4 |
+| TopicId / modern | 67–83 | UUID topics, ListOffsets specials, KIP-890, KIP-951, group admin, CreatePartitions v3, FindCoordinator v5–6, AddOffsetsToTxn v4, ApiVersions 0–5 |
 
 ## Semantic honesty (open)
 
@@ -87,6 +87,7 @@ These are **current** product facts, not temporary docs lag:
 | Auth | Kafka port: SASL or `kafka-anonymous`; no shared-token on Kafka port |
 | ACLs | LITERAL only; host always `*`; no cluster ACL consensus |
 | KIP-951 | CurrentLeader on leader errors; empty tags on success; no Fetch NodeEndpoints (need v16) |
+| ApiVersions features | Empty SupportedFeatures / FinalizedFeatures / ZkMigrationReady tags; no REBOOTSTRAP_REQUIRED |
 | Missing APIs | Large Kafka surface still unsupported (GSSAPI, OAUTH, broker configs, …) |
 
 ## Related

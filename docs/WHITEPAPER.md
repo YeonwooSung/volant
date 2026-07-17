@@ -212,7 +212,7 @@ below may lag; trust KAFKA_COMPAT when they disagree.
 | JoinGroup | 0–9 | Heartbeat | 0–4 |
 | LeaveGroup | 0–5 | SyncGroup | 0–5 |
 | DescribeGroups | 0–6 | ListGroups | 0–5 |
-| DeleteGroups | 0–3 | ApiVersions | 0–3 |
+| DeleteGroups | 0–3 | ApiVersions | 0–5 |
 | CreateTopics | 0–7 | DeleteTopics | 0–6 |
 | CreatePartitions | 0–3 | InitProducerId | 0–6 |
 | AddPartitionsToTxn | 0–5 | EndTxn | 0–5 |
@@ -229,7 +229,8 @@ leader errors, KIP-890-era txn max versions (2PC fields parsed and ignored),
 CreatePartitions v3 (wire-identical to v2; no KIP-599 quotas), FindCoordinator
 v5–6 (wire-identical to v4 batch; no `TRANSACTION_ABORTABLE`; share key_type
 rejected), AddOffsetsToTxn v4 (wire-identical to v3; no `TRANSACTION_ABORTABLE`),
-RecordBatch + MessageSet compression (gzip/snappy/lz4/zstd).
+ApiVersions 0–5 (empty feature tags; v5 ClusterId/NodeId ignored; header always
+v0), RecordBatch + MessageSet compression (gzip/snappy/lz4/zstd).
 
 ---
 

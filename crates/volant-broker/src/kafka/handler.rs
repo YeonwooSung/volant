@@ -228,8 +228,9 @@ fn dispatch_kafka(broker: &Broker, body: bytes::Bytes, conn: &mut KafkaConnState
     let principal = principal.as_str();
 
     match api {
-        Some(ApiKey::ApiVersions) if (0..=3).contains(&hdr.api_version) => {
+        Some(ApiKey::ApiVersions) if (0..=5).contains(&hdr.api_version) => {
             // Flexible request header (v3+): classic ClientId + header TAG_BUFFER.
+            // Response header stays v0 even for flexible body (Kafka special case).
             if hdr.api_version >= 3 {
                 if let Err(e) = skip_tag_buffer(&mut src) {
                     debug!(error = %e, "api versions flexible header tag buffer");

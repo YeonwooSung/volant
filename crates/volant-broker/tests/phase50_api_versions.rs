@@ -37,7 +37,7 @@ async fn api_versions_self_advertises_max_2() {
     assert_eq!(src.get_i32(), 1);
     assert_eq!(src.get_i16(), 0);
     let found = parse_api_keys(&mut src);
-    assert_eq!(found.get(&18), Some(&(0, 3))); // ApiVersions through flexible v3 (Phase 51)
+    assert_eq!(found.get(&18), Some(&(0, 5))); // ApiVersions through flexible v5 (Phase 83)
     assert_eq!(found.get(&0), Some(&(0, 13))); // Produce (Phase 71 TopicId)
     assert_eq!(found.get(&1), Some(&(0, 13))); // Fetch (Phase 68)
     // v0 has no trailing throttle
@@ -62,7 +62,7 @@ async fn api_versions_v1_trailing_throttle() {
     assert_eq!(src.get_i16(), 0);
     let found = parse_api_keys(&mut src);
     assert!(found.len() >= 10);
-    assert_eq!(found.get(&18), Some(&(0, 3)));
+    assert_eq!(found.get(&18), Some(&(0, 5)));
     assert_eq!(src.get_i32(), 0); // throttle trailing
     assert_eq!(src.remaining(), 0);
 
@@ -84,7 +84,7 @@ async fn api_versions_v2_wire_identical_to_v1() {
     assert_eq!(src.get_i32(), 3);
     assert_eq!(src.get_i16(), 0);
     let found = parse_api_keys(&mut src);
-    assert_eq!(found.get(&18), Some(&(0, 3)));
+    assert_eq!(found.get(&18), Some(&(0, 5)));
     assert_eq!(src.get_i32(), 0); // throttle
     assert_eq!(src.remaining(), 0);
 
@@ -93,16 +93,17 @@ async fn api_versions_v2_wire_identical_to_v1() {
 }
 
 #[tokio::test]
-async fn api_versions_v4_unsupported() {
-    let dir = temp_dir("p50", "v4");
+async fn api_versions_v6_unsupported() {
+    let dir = temp_dir("p50", "v6");
     let broker = Arc::new(Broker::new(StorageConfig {
         data_dir: dir.clone(),
         ..StorageConfig::default()
     }));
     let (addr, server) = boot_kafka(Arc::clone(&broker)).await;
 
-    // v4 not advertised; flexible body not required for unsupported-version path.
-    let resp = rpc(&addr, encode_request(18, 4, 9, Some("c"), &[])).await;
+    // v6 beyond Kafka max 5; flexible body not required for unsupported-version path.
+    // ApiVersions response header stays v0 (correlation only).
+    let resp = rpc(&addr, encode_request(18, 6, 9, Some("c"), &[])).await;
     let mut src = resp.freeze();
     assert_eq!(src.get_i32(), 9);
     assert_eq!(src.get_i16(), 35); // UNSUPPORTED_VERSION

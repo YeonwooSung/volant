@@ -115,7 +115,7 @@ Notes:
 
 Optional second socket speaking Kafka framing (classic + flexible). Native
 Volant protocol remains on `--listen`. API versions and honesty notes live in
-**[KAFKA_COMPAT.md](./KAFKA_COMPAT.md)** (source of truth; Phases 23–82).
+**[KAFKA_COMPAT.md](./KAFKA_COMPAT.md)** (source of truth; Phases 23–83).
 
 ### Enable
 
@@ -479,7 +479,6 @@ is only compacted after it rolls.
 
 Multi-language clients, full chaos-mesh suites, cargo-fuzz corpus CI, true
 control-marker `READ_COMMITTED`, real 2PC / prepared transactions,
-ApiVersions v4–5 / Fetch v14+. Kafka shim (Phases 23–82; includes
-AddOffsetsToTxn 0–4), SCRAM, and SASL PLAIN/SCRAM are **shipped** — see
-[KAFKA_COMPAT.md](./KAFKA_COMPAT.md). Full deferred list:
-[ROADMAP.md](../ROADMAP.md).
+Fetch v14+. Kafka shim (Phases 23–83; includes ApiVersions 0–5), SCRAM, and
+SASL PLAIN/SCRAM are **shipped** — see [KAFKA_COMPAT.md](./KAFKA_COMPAT.md).
+Full deferred list: [ROADMAP.md](../ROADMAP.md).

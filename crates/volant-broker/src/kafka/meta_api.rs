@@ -436,18 +436,34 @@ pub(crate) fn encode_describe_producers(
     put_empty_tag_buffer(out);
 }
 
-/// ApiVersions classic v0–2 + flexible v3 (Phase 50/51).
+/// ApiVersions classic v0–2 + flexible v3–5 (Phase 50/51/83).
 ///
 /// Classic response: error, api_keys[{key,min,max}], throttle (v1+ trailing).
-/// Flexible v3: compact api_keys (each entry ends with TAG_BUFFER), throttle,
+/// Flexible v3–5: compact api_keys (each entry ends with TAG_BUFFER), throttle,
 /// top-level empty TAG_BUFFER. Response **header** stays v0 (correlation only).
 ///
-/// Request body: empty for v0–2; v3+ compact ClientSoftwareName/Version + tags.
+/// Request body:
+/// - v0–2: empty
+/// - v3–4: compact ClientSoftwareName/Version + tags (parsed, ignored)
+/// - v5: same + ClusterId (nullable compact) + NodeId (int32) + tags (ignored;
+///   no REBOOTSTRAP_REQUIRED — Volant does not check cluster/node identity)
+///
+/// Response body for v3–5 is wire-identical: empty feature tags (no
+/// SupportedFeatures / FinalizedFeatures / ZkMigrationReady). v4 only changes
+/// Apache Kafka's MinVersion=0 feature serialization rule; with empty features
+/// there is no delta.
 pub(crate) fn encode_api_versions(src: &mut impl Buf, out: &mut BytesMut, version: i16) {
     if version >= 3 {
         // Parse and ignore client software fields (KIP-511).
         let _name = get_compact_string(src).ok();
         let _ver = get_compact_string(src).ok();
+        if version >= 5 {
+            // KIP-1242: ClusterId + NodeId for rebootstrap checks — ignored.
+            let _cluster_id = get_compact_nullable_string(src).ok();
+            if src.remaining() >= 4 {
+                let _node_id = src.get_i32();
+            }
+        }
         let _ = skip_tag_buffer(src);
 
         out.put_i16(KafkaErrorCode::None.as_i16());
@@ -459,7 +475,9 @@ pub(crate) fn encode_api_versions(src: &mut impl Buf, out: &mut BytesMut, versio
             put_empty_tag_buffer(out); // per-struct tags
         }
         out.put_i32(0); // throttle_time_ms
-        put_empty_tag_buffer(out); // top-level tags (no SupportedFeatures yet)
+        // Empty top-level tags: no SupportedFeatures (tag 0), FinalizedFeaturesEpoch
+        // (tag 1), FinalizedFeatures (tag 2), or ZkMigrationReady (tag 3).
+        put_empty_tag_buffer(out);
         return;
     }
 
