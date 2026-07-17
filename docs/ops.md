@@ -128,7 +128,7 @@ Supported APIs:
 | API | Versions | Notes |
 |-----|----------|-------|
 | ApiVersions | 0–3 | v0–2 classic; **v3 flexible** (compact api_keys + tag buffers); software name/version ignored; no feature tags; response header always v0 |
-| Metadata | 0–12 | Classic 0–8; **v9 flexible**; **v10–12 TopicId** (deterministic UUID from Volant id); v11 drops cluster authorized ops; v12 lookup by TopicId; leader_epoch=-1; v13 unsupported |
+| Metadata | 0–13 | Classic 0–8; **v9 flexible**; **v10–13 TopicId** (deterministic UUID from Volant id); v11 drops cluster authorized ops; v12 lookup by TopicId; **v13 top-level ErrorCode** (always 0); leader_epoch=-1; v14 unsupported |
 | OffsetForLeaderEpoch | 0–4 | Classic 0–3; **v4 flexible** + response header v1; no epoch history (eligible → HWM); fencing via current_leader_epoch |
 | Produce | 0–13 | Classic 0–8; **v9–12 flexible** compact name topics/records + response header v1; **v13 TopicId UUID** (deterministic Volant mapping; unknown → UnknownTopicId); MessageSet or RecordBatch; compression + idempotent PID/seq; empty record_errors; KIP-951 CurrentLeader tags empty; v14 unsupported |
 | Fetch | 0–13 | Classic 0–11; **v12 flexible** compact name topics/records + response header v1; **v13 TopicId UUID** (deterministic Volant mapping; unknown → UnknownTopicId); v0–3 MessageSet + v4+ RecordBatch (default lz4); session header (no real sessions); leader-epoch fence; preferred_read_replica=-1; v14+ unsupported |

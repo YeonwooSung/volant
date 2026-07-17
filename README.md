@@ -328,6 +328,9 @@ unknown id → UnknownTopicId; KIP-951 tags empty.
 v10 TopicId; OffsetFetch v9 MemberId+MemberEpoch (ignored), v10 TopicId;
 unknown id → UnknownTopicId.
 
+**Phase 73:** Metadata v13 — top-level ErrorCode (always 0); request wire same
+as v12 TopicId path.
+
 **Still deferred:** multi-language clients, chaos-mesh / cargo-fuzz corpus CI.
 
 ### Networked client (library)

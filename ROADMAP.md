@@ -1634,7 +1634,27 @@ Binding: **[docs/PHASE72_SPEC.md](./docs/PHASE72_SPEC.md)**.
 ignored; leader_epoch always -1 on fetch; deterministic UUID only; no v11+.
 
 **Still deferred:** multi-lang clients, cargo-fuzz corpus CI, true control-marker
-READ_COMMITTED, higher KIP-890 txn versions, ListOffsets TopicId, Metadata v13+.
+READ_COMMITTED, higher KIP-890 txn versions, Metadata v13+. Metadata v13 closed
+by **Phase 73**. (ListOffsets has no TopicId in Apache Kafka protocol.)
+
+---
+
+### Phase 73 — Metadata v13 (top-level ErrorCode) ✅
+
+**Goal:** Advertise Metadata through v13 so modern clients negotiate the latest
+stable Metadata version; emit top-level response ErrorCode.
+
+Binding: **[docs/PHASE73_SPEC.md](./docs/PHASE73_SPEC.md)**.
+
+- [x] Metadata 0–13 (v13 request = v12 TopicId path; response + ErrorCode)
+- [x] Success path ErrorCode always 0
+- [x] Integration tests (`phase73_metadata_v13`)
+
+**Honest limitations:** top-level ErrorCode always 0 (no cluster-level failure
+path); no v14+.
+
+**Still deferred:** multi-lang clients, cargo-fuzz corpus CI, true control-marker
+READ_COMMITTED, higher KIP-890 txn versions, ListOffsets v7+ max-timestamp.
 
 ---
 

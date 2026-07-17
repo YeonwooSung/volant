@@ -237,8 +237,8 @@ async fn api_versions_metadata_max_9() {
             found = Some((min_v, max_v));
         }
     }
-    // Phase 67 raised Metadata max to flexible v12 (TopicId).
-    assert_eq!(found, Some((0, 12)));
+    // Phase 73 raised Metadata max to flexible v13 (top-level ErrorCode).
+    assert_eq!(found, Some((0, 13)));
     server.abort();
     let _ = std::fs::remove_dir_all(&dir);
 }

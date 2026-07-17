@@ -284,7 +284,7 @@ fn dispatch_kafka(broker: &Broker, body: bytes::Bytes, conn: &mut KafkaConnState
             }
             encode_list_transactions(broker, &mut src, &mut out, hdr.api_version, principal);
         }
-        Some(ApiKey::Metadata) if (0..=12).contains(&hdr.api_version) => {
+        Some(ApiKey::Metadata) if (0..=13).contains(&hdr.api_version) => {
             if hdr.api_version >= 9 {
                 if let Err(e) = skip_tag_buffer(&mut src) {
                     debug!(error = %e, "metadata flexible header tag buffer");
@@ -1131,6 +1131,7 @@ fn encode_metadata(broker: &Broker, src: &mut impl Buf, out: &mut BytesMut, vers
     //   include_cluster_authorized_operations: bool (v8–10 only)
     //   include_topic_authorized_operations: bool (v8+)
     //   TAG_BUFFER (v9+)
+    // Response v13+: top-level ErrorCode (int16) before body TAG_BUFFER.
     let flexible = version >= 9;
     // Per-request topic: resolved name (if any) and raw uuid for error rows.
     struct ReqTopic {
@@ -1312,6 +1313,9 @@ fn encode_metadata(broker: &Broker, src: &mut impl Buf, out: &mut BytesMut, vers
                     include_cluster_ops,
                 ));
             }
+            if version >= 13 {
+                out.put_i16(KafkaErrorCode::None.as_i16()); // top-level ErrorCode
+            }
             put_empty_tag_buffer(out);
         } else {
             out.put_i32(0); // topics
@@ -1344,6 +1348,9 @@ fn encode_metadata(broker: &Broker, src: &mut impl Buf, out: &mut BytesMut, vers
                     principal,
                     include_cluster_ops,
                 ));
+            }
+            if version >= 13 {
+                out.put_i16(KafkaErrorCode::None.as_i16());
             }
             put_empty_tag_buffer(out);
         }
@@ -1466,6 +1473,9 @@ fn encode_metadata(broker: &Broker, src: &mut impl Buf, out: &mut BytesMut, vers
                 include_cluster_ops,
             ));
         }
+        if version >= 13 {
+            out.put_i16(KafkaErrorCode::None.as_i16()); // top-level ErrorCode
+        }
         put_empty_tag_buffer(out); // top-level tags
     } else {
         out.put_i32(topics.len() as i32);
@@ -1577,6 +1587,9 @@ fn write_metadata_empty(
             } else {
                 AUTH_OPS_OMITTED
             });
+        }
+        if version >= 13 {
+            out.put_i16(KafkaErrorCode::None.as_i16());
         }
         put_empty_tag_buffer(out);
     } else {
