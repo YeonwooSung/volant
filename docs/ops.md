@@ -10,7 +10,7 @@
 | `--log-format` | | `text` | `text` or `json` |
 | `--auth-token` | `VOLANT_AUTH_TOKEN` | *unset* | Shared-token auth |
 | `--scram-user USER:PASS` | | *unset* | Upsert SCRAM user at startup (repeatable; Phase 22) |
-| `--kafka-listen` | | *disabled* | Kafka wire protocol shim (Phase 23–42) |
+| `--kafka-listen` | | *disabled* | Kafka wire protocol shim (Phase 23–79) |
 | `--tls-cert` / `--tls-key` | | *unset* | Server TLS (feature `tls`) |
 | `--tls-peer-insecure` | | `true` | Skip inter-broker cert verify (lab) |
 | `--tls-ca` | | *unset* | CA PEM for inter-broker peer verify |
@@ -111,108 +111,43 @@ Notes:
 - Password is sent in clear on CreateScramUser — use TLS in production.
 - Inter-broker RPC still uses shared-token Auth, not SCRAM.
 
-## Kafka wire shim (Phase 23–24)
+## Kafka wire shim
 
-Optional second socket speaking Kafka framing (classic + selected flexible APIs).
-Native Volant protocol remains on `--listen`.
+Optional second socket speaking Kafka framing (classic + flexible). Native
+Volant protocol remains on `--listen`. API versions and honesty notes live in
+**[KAFKA_COMPAT.md](./KAFKA_COMPAT.md)** (source of truth; Phases 23–79).
+
+### Enable
 
 ```bash
-cargo run -p volant-server -- \
+volant-server \
   --data-dir ./data \
   --listen 127.0.0.1:9092 \
   --kafka-listen 127.0.0.1:9093
 ```
 
-Supported APIs:
+### Ops notes
 
-| API | Versions | Notes |
-|-----|----------|-------|
-| ApiVersions | 0–3 | v0–2 classic; **v3 flexible** (compact api_keys + tag buffers); software name/version ignored; no feature tags; response header always v0 |
-| Metadata | 0–13 | Classic 0–8; **v9 flexible**; **v10–13 TopicId** (deterministic UUID from Volant id); v11 drops cluster authorized ops; v12 lookup by TopicId; **v13 top-level ErrorCode** (always 0); leader_epoch=-1; v14 unsupported |
-| OffsetForLeaderEpoch | 0–4 | Classic 0–3; **v4 flexible** + response header v1; no epoch history (eligible → HWM); fencing via current_leader_epoch |
-| Produce | 0–13 | Classic 0–8; **v9–12 flexible** compact name topics/records + response header v1; **v13 TopicId UUID** (deterministic Volant mapping; unknown → UnknownTopicId); MessageSet or RecordBatch; compression + idempotent PID/seq; empty record_errors; **v10+ KIP-951** CurrentLeader (partition tag 0) + NodeEndpoints (top tag 0) on NotLeader/FencedLeaderEpoch (empty tags on success); v14 unsupported |
-| Fetch | 0–13 | Classic 0–11; **v12 flexible** compact name topics/records + response header v1; **v13 TopicId UUID** (deterministic Volant mapping; unknown → UnknownTopicId); v0–3 MessageSet + v4+ RecordBatch (default lz4); session header (no real sessions); leader-epoch fence; preferred_read_replica=-1; **v12+ KIP-951** CurrentLeader (partition tag 1) on FencedLeaderEpoch (empty tags on success; no NodeEndpoints until Kafka v16); v14+ unsupported |
-| InitProducerId | 0–6 | Classic 0–1; **v2–6 flexible** + response header v1; transactional_id fencing; timeout ignored; **v3–6** ProducerId/Epoch resume fields parsed+ignored (always re-allocate); **v6** Enable2Pc/KeepPreparedTxn parsed+ignored; response OngoingTxn* always -1 (no prepared/2PC); v7 unsupported |
-| FindCoordinator | 0–4 | Classic 0–2; **v3 flexible** compact key/host; **v4 batch** CoordinatorKeys; all keys → this broker; response header v1 for v3+ |
-| AddPartitionsToTxn | 0–5 | Classic 0–2; **v3 flexible** flat path; **v4–5 batch** Transactions[] (VerifyOnly ignored — always add); opens txn; v6 unsupported |
-| AddOffsetsToTxn | 0–3 | Classic 0–2; **v3 flexible** + response header v1; registers group for transactional offsets |
-| EndTxn | 0–5 | Classic 0–2; **v3–5 flexible** + response header v1; commit/abort flushes buffered produces + offsets; **v5** response echoes ProducerId/Epoch; v6 unsupported |
-| TxnOffsetCommit | 0–6 | Classic 0–2; **v3–5 flexible** name topics + response header v1; **v6 TopicId UUID** (unknown → UnknownTopicId); buffers until EndTxn; member/generation/leader_epoch ignored; v7 unsupported |
-| SaslHandshake | 0–1 | mechanisms: PLAIN, SCRAM-SHA-256, SCRAM-SHA-512 |
-| SaslAuthenticate | 0–2 | Classic 0–1; **v2 flexible** + response header v1; PLAIN / SCRAM-SHA-256 / SCRAM-SHA-512; session_lifetime=0 |
-| DescribeCluster | 0–2 | **Always flexible** (KIP-700); cluster_id=`volant`; brokers + controller; **v1 EndpointType** (brokers only); **v2 IncludeFencedBrokers + IsFenced** (always false); v3 unsupported |
-| DescribeProducers | 0 | **Always flexible**; active producers from sequences + open-txn activity; last_ts/coord_epoch/txn_start placeholders |
-| DescribeTransactions | 0 | **Always flexible**; Empty/Ongoing from txn registry; unknown → TransactionalIdNotFound; timeout/start=0 |
-| ListTransactions | 0–2 | **Always flexible**; open txns as `Ongoing`; state/pid filters; **v1 DurationFilter** accepted/ignored; **v2 TransactionalIdPattern** (`*` glob, not full RE2J); v3 unsupported |
-| ListOffsets | 0–11 | Classic 0–5; **v6–11 flexible** + response header v1; -1 latest / -2 earliest; **v7 -3 MAX_TIMESTAMP** (log scan); **v8 -4 EARLIEST_LOCAL** ≡ earliest; **v9 -5 / v11 -6** tiered specials → -1/-1 (no remote); **v10 TimeoutMs** ignored; isolation ignored (LSO≡HWM); v4+ leader-epoch fencing; positive timestamps InvalidTimestamp; v12 unsupported |
-| CreateTopics | 0–7 | Classic 0–4; **v5–7 flexible** + response header v1; validate_only v1+; default partitions v4+; configs response null; **v7 TopicId** (deterministic UUID); v8 unsupported |
-| DeleteTopics | 0–6 | Classic 0–3; **v4–6 flexible** + response header v1; throttle v1+; **v5 ErrorMessage**; **v6 TopicId** delete-by-id (unknown → UnknownTopicId); v7 unsupported |
-| JoinGroup | 0–9 | Classic 0–5; **v6+ flexible** + response header v1; v5+ group.instance.id → static:{id}; **v7** ProtocolType; **v8** Reason (ignored); **v9** SkipAssignment=false; throttle v2+ |
-| SyncGroup | 0–5 | Classic 0–3; **v4+ flexible** + response header v1; v3 group.instance.id; **v5** ProtocolType/Name echo (no consistency check) |
-| Heartbeat | 0–4 | Classic 0–3; **v4 flexible** + response header v1; v3 group.instance.id |
-| LeaveGroup | 0–5 | Classic 0–3; **v4+ flexible** + response header v1; v3 batch members; **v5** Reason (ignored) |
-| OffsetCommit | 0–10 | Classic 0–7; **v8–9 flexible** compact name topics + response header v1; **v10 TopicId UUID** (unknown → UnknownTopicId); durable `__consumer_offsets`; throttle v3+; leader epoch ignored; group.instance.id v7+; v11 unsupported |
-| OffsetFetch | 0–10 | Classic 0–5; **v6–7** single-group flexible; **v8 multi-group** Groups[]; **v9 MemberId+MemberEpoch** (parsed, ignored); **v10 TopicId UUID** (unknown → UnknownTopicId); response header v1 for v6+; null=all; leader_epoch=-1; RequireStable ignored; v11 unsupported |
-| ListGroups | 0–5 | Classic 0–2; **v3 flexible** + response header v1; active + offset-backed groups; throttle v1+; **v4 StatesFilter + GroupState**; **v5 TypesFilter + GroupType** (always `"classic"`); v6 unsupported |
-| DescribeGroups | 0–6 | Classic 0–4; **v5 flexible** + response header v1; state + members; throttle v1+; authorized_ops v3+; group_instance_id v4+ (from `static:`); **v6 ErrorMessage** (null on success); v7 unsupported |
-| DeleteGroups | 0–3 | Classic 0–1; **v2 flexible** + response header v1; empty groups only (`NON_EMPTY_GROUP` if live); throttle all versions; **v3 ErrorMessage**; v4 unsupported |
-| CreatePartitions | 0–2 | Classic 0–1; **v2 flexible** + response header v1; throttle all versions; validate_only dry-run |
-| DescribeConfigs | 0–4 | Classic 0–3; **v4 flexible** + response header v1; TOPIC resources; throttle; v1+ config_source + empty synonyms; v3+ type/docs |
-| AlterConfigs | 0–2 | Classic 0–1; **v2 flexible** + response header v1; TOPIC resources; throttle all versions; validate_only |
-| IncrementalAlterConfigs | 0–1 | Classic v0; **v1 flexible** + response header v1; SET/DELETE on TOPIC keys; APPEND/SUBTRACT unsupported |
-| DeleteRecords | 0–2 | Classic 0–1; **v2 flexible** + response header v1; whole sealed segments only |
-| DescribeAcls | 0–2 | Classic 0–1; **v2 flexible** + response header v1; filter → Volant ACL list; v3 USER unsupported |
-| CreateAcls | 0–2 | Classic 0–1; **v2 flexible** + response header v1; maps Kafka types/ops; enables ACL store |
-| DeleteAcls | 0–2 | Classic 0–1; **v2 flexible** + response header v1; filter match → exact delete |
-| OffsetDelete | 0 | group offset delete (Phase 12) |
-
-Topic config keys: `retention.ms`, `retention.bytes`, `segment.bytes`,
-`cleanup.policy` (`delete`|`compact`).
-
-Limitations:
-
-- Compression: **Produce** accepts compressed RecordBatch (gzip/snappy/lz4/zstd)
-  and compressed MessageSet wrappers (gzip/snappy/lz4). **Fetch** re-encodes
-  with `VOLANT_KAFKA_FETCH_COMPRESSION` (default **lz4**;
-  `none`/`gzip`/`snappy`/`lz4`/`zstd`). MessageSet has no zstd — env `zstd`
-  maps to lz4 for v0–3. Log storage remains plain.
-- Idempotent Produce requires RecordBatch magic 2 + InitProducerId; MessageSet
-  cannot carry PID/sequence.
-- Kafka transactions: InitProducerId(`transactional_id`) + AddPartitionsToTxn
-  opens a txn; Produce buffers until EndTxn commit/abort; TxnOffsetCommit
-  offsets apply only on commit. No control markers / `READ_COMMITTED` filtering;
-  crash ≡ abort open txns.
-- Kafka SASL: **PLAIN**, **SCRAM-SHA-256**, and **SCRAM-SHA-512** (no GSSAPI /
-  OAUTHBEARER). New users store both SHA-256 and SHA-512 credentials from one
-  password. Legacy single-credential users (pre–Phase 34) are SHA-256 only until
-  re-upsert. When SCRAM users exist (`--scram-user` / `volant user create`),
-  SASL is **required** before other APIs. Shared-token Auth does not apply on
-  the Kafka port. Principal after SASL = username (feeds ACLs).
-- Flexible (compact) Kafka versions: **ApiVersions v3 only** so far (KIP-482
-  primitives). All other APIs remain classic; clients must negotiate classic
-  max versions for Produce/Fetch/admin/group APIs.
-- Consumer assignment is **coordinator-driven** (not Kafka leader assignor).
-- CreateTopics / CreatePartitions ignore Kafka replica assignment arrays.
-- DescribeConfigs is TOPIC-only (no broker configs).
-- FindCoordinator host/port is the Volant advertised address (often `--listen`).
-- When ACLs are enabled and SASL is unused, the shim principal is `kafka-anonymous`.
-- **DeleteRecords** only drops whole sealed segments (same as native Phase 14).
-- **ACL admin** maps Kafka resource types (Topic=2, Group=3, Cluster=4),
-  operations, and permission types to Volant Phase 20/21 ACLs. Principals strip
-  / re-add `User:`; cluster resource name `kafka-cluster` ⇄ `volant`. Host is
-  always `*`; only LITERAL patterns. CreateAcls enables enforcement — after that
-  Cluster Alter/Describe is required for further ACL admin (or use a super-user).
-- **OffsetDelete** maps to Phase 12 `delete_offsets` (listed partitions only;
-  empty topic list is a no-op, not delete-all). Requires Group Delete when ACLs
-  are on.
-- **IncrementalAlterConfigs** (44): SET/DELETE on TOPIC Volant keys; APPEND/SUBTRACT rejected; `validate_only` supported.
-- **Fetch isolation** (`READ_UNCOMMITTED` / `READ_COMMITTED`): uncommitted
-  transactional data never hits the log (buffer-until-commit), so LSO always
-  equals HWM and `aborted_transactions` is always empty. No control markers.
-- Prefer binding to localhost / private networks; leave disabled in production
+- **Dual ports:** native clients on `--listen`; Kafka clients on `--kafka-listen`.
+  Prefer binding the Kafka port to localhost / private networks; leave disabled
   unless you need Kafka-protocol discovery.
+- **Auth:** shared-token (`--auth-token` / `VOLANT_AUTH_TOKEN`) is **native-only**.
+  On the Kafka port use SASL (**PLAIN**, **SCRAM-SHA-256**, **SCRAM-SHA-512**) or
+  anonymous + ACLs. When SCRAM users exist (`--scram-user` / `volant user create`),
+  SASL is required before other APIs. Principal after SASL = username (feeds ACLs);
+  without SASL the shim principal is `kafka-anonymous`.
+- **Compression:** Produce accepts gzip/snappy/lz4/zstd RecordBatch (and gzip/
+  snappy/lz4 MessageSet). Fetch re-encodes with `VOLANT_KAFKA_FETCH_COMPRESSION`
+  (default **lz4**; `none`/`gzip`/`snappy`/`lz4`/`zstd`). MessageSet has no zstd —
+  env `zstd` maps to lz4 for Fetch v0–3. Log storage remains uncompressed.
+- **Topic config keys** (Describe/AlterConfigs): `retention.ms`, `retention.bytes`,
+  `segment.bytes`, `cleanup.policy` (`delete`|`compact`).
+- **Transactions / isolation:** buffer-until-commit (no control markers);
+  `READ_COMMITTED` is not real isolation (LSO ≡ HWM). Crash aborts open txns.
+- **ACLs:** Kafka ACL admin maps to Volant Phase 20/21 ACLs (LITERAL only;
+  CreateAcls enables enforcement).
 
-See [KAFKA_COMPAT.md](./KAFKA_COMPAT.md) and [PHASE23_SPEC.md](./PHASE23_SPEC.md) … [PHASE79_SPEC.md](./PHASE79_SPEC.md).
+Deep dives: [PHASE23_SPEC.md](./PHASE23_SPEC.md) … [PHASE79_SPEC.md](./PHASE79_SPEC.md).
 
 ## TLS (Phase 7 listen + Phase 9 verification / inter-broker)
 

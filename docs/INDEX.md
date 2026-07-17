@@ -52,11 +52,13 @@ Start here. Prefer living docs over individual phase ship records.
 | Protocol implementer | PHASE1–6 binding specs |
 | Roadmap / deferred | ROADMAP end sections |
 
-## Compaction note (2026-07)
+## Compaction note (2026-07-18)
 
-Documentation was compacted:
+Documentation was compacted; living docs refreshed again (ops Kafka section
+shortened; tuning DPDK essay trimmed; ROADMAP tail aligned to Phase 79):
 
 - **Living** docs: INDEX, WHITEPAPER, KAFKA_COMPAT, features, ops, consistency, tuning
 - **Binding** core: PHASE1–6 kept at top level
 - **Ship records**: PHASE7–79 kept for deep dives; navigated via PHASE_HISTORY
 - **Archived**: `phase2/`–`phase18/` plan/review work logs → `history/archive/`
+- **Kafka API matrix:** [KAFKA_COMPAT.md](./KAFKA_COMPAT.md) is the source of truth

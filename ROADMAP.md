@@ -1817,16 +1817,19 @@ READ_COMMITTED, real 2PC / prepared transaction state.
 | Runtime | JVM | Native Rust |
 | Storage | Page cache + OS | Explicit mmap + optional io_uring/O_DIRECT |
 | Stream processing | Kafka Streams / ksqlDB | In-process `volant-stream` operators |
-| Ops model | ZooKeeper/KRaft + heavy footprint | Single binary → small Raft quorum |
-| Protocol | Kafka wire protocol | Native binary first; optional Kafka shim later |
+| Ops model | ZooKeeper/KRaft + heavy footprint | Single binary → small static ISR quorum |
+| Protocol | Kafka wire protocol | Native binary first; optional Kafka shim (`--kafka-listen`, Phases 23–79) |
 | Goal | Full ecosystem | Subset that is fast, small, and correct |
 
-Volant is **not** a drop-in Kafka replacement on day one. It prioritizes a clean
-core over protocol compatibility; a compatibility layer is Phase 7 optional work.
+Volant is **not** a drop-in Kafka replacement. It prioritizes a clean core; the
+optional Kafka wire shim is **shipped** (Phases 23–79) — see
+[docs/KAFKA_COMPAT.md](./docs/KAFKA_COMPAT.md).
 
 ---
 
 ## Suggested implementation order (PRs)
+
+Phases **0–79 are shipped**. Historical PR order for the core:
 
 1. Phase 1 segment format + unit tests  
 2. Phase 1 recovery + retention  
@@ -1837,7 +1840,9 @@ core over protocol compatibility; a compatibility layer is Phase 7 optional work
 7. Phase 4 stream operators + example  
 8. Phase 5 io_uring feature flag + benches  
 9. Phase 6 replication prototype (2–3 nodes) ✅  
-10. Phase 7 metrics, TLS, packaging ✅ (MVP; deferred items listed above)  
+10. Phase 7 metrics, TLS, packaging ✅  
+11. Phases 8–22 (redirect, groups, configs, txns, mTLS, ACLs, SCRAM) ✅  
+12. Phases 23–79 (Kafka wire shim surface) ✅  
 
 ---
 
@@ -1846,7 +1851,7 @@ core over protocol compatibility; a compatibility layer is Phase 7 optional work
 Track these before locking APIs:
 
 1. **Replication:** ~~Raft-per-partition vs leader/follower + controller (Kafka-like)?~~ → **Kafka-style ISR (Phase 6)**
-2. **Kafka wire compatibility:** ~~first-class or optional adapter?~~ → **optional adapter (`--kafka-listen`, Phase 23 MVP)**
+2. **Kafka wire compatibility:** ~~first-class or optional adapter?~~ → **optional adapter (`--kafka-listen`, Phases 23–79 shipped)**
 3. **State store for streams:** embed RocksDB, redb, or custom mmap store?
 4. **Default durability:** fsync every batch vs group commit window?
 5. **Multi-tenancy:** namespaces / quotas in v1 or later?
@@ -1859,10 +1864,16 @@ Track these before locking APIs:
 # Build everything
 cargo build --workspace
 
-# Run the placeholder server
-cargo run -p volant-server -- --data-dir ./data
+# Run the server (native protocol)
+cargo run -p volant-server -- --data-dir ./data --listen 127.0.0.1:9092
 
-# CLI version
+# Optional Kafka wire port
+cargo run -p volant-server -- \
+  --data-dir ./data \
+  --listen 127.0.0.1:9092 \
+  --kafka-listen 127.0.0.1:9093
+
+# CLI
 cargo run -p volant-cli -- version
 
 # Phase 1 append micro-bench (release recommended)
@@ -1872,6 +1883,8 @@ cargo run -p volant-bench --release
 cargo test --workspace
 ```
 
-Phase 5 complete (`BufferPool`, `IoBackend`, `io-uring` / `direct-io` features,
-batch produce coalescing, multi-mode `volant-bench`, `docs/tuning.md`,
-`thread-per-core`). **Phase 7 MVP complete** (metrics, auth, optional TLS, packaging); deferred: Kafka shim, multi-lang, Helm, SCRAM.
+**Status (post–Phase 79):** core broker, ops (metrics / TLS / auth / SCRAM /
+ACLs / Helm), and the Kafka wire shim are **shipped**. Still deferred:
+multi-language clients, full chaos-mesh suites, cargo-fuzz corpus CI, true
+control-marker `READ_COMMITTED`, real 2PC / prepared transactions. Details:
+[docs/KAFKA_COMPAT.md](./docs/KAFKA_COMPAT.md), [docs/ops.md](./docs/ops.md).

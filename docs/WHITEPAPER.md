@@ -198,7 +198,11 @@ Inter-broker uses shared-token Auth, not SCRAM. No GSSAPI / OAUTHBEARER.
 Enable with `--kafka-listen host:port`. Phases **23–79** built classic then
 flexible (KIP-482) coverage for the APIs modern clients negotiate most often.
 
-### Advertised version matrix (current)
+**Authoritative API versions, per-key notes, and open limitations:**
+[KAFKA_COMPAT.md](./KAFKA_COMPAT.md). The summary matrix below may lag; trust
+KAFKA_COMPAT when they disagree.
+
+### Advertised version matrix (summary)
 
 | API | Versions | API | Versions |
 |-----|----------|-----|----------|
@@ -223,8 +227,6 @@ flexible (KIP-482) coverage for the APIs modern clients negotiate most often.
 **Highlights:** TopicId (deterministic UUID), KIP-951 CurrentLeader tags on
 leader errors, KIP-890-era txn max versions (2PC fields parsed and ignored),
 RecordBatch + MessageSet compression (gzip/snappy/lz4/zstd).
-
-Full notes and open limitations: [KAFKA_COMPAT.md](./KAFKA_COMPAT.md).
 
 ---
 

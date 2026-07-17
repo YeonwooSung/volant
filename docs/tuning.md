@@ -79,9 +79,8 @@ runtime feature required for the basic path.
 # Example Linux release build with optional I/O features
 cargo build --release -p volant-server \
   --features thread-per-core
-# Storage features are selected via volant-storage / volant-broker dependency
-# features once wired by the storage-io agent, e.g.:
-#   cargo build -p volant-broker --features ...
+# Storage features (io-uring / direct-io) on volant-storage:
+#   cargo build -p volant-storage --features "io-uring,direct-io"
 ```
 
 ---
@@ -386,25 +385,11 @@ sysctl net.ipv4.tcp_tw_reuse
 
 ---
 
-## Kernel bypass — research only (DPDK / AF_XDP)
+## Kernel bypass (DPDK / AF_XDP)
 
-**Not implemented. Not on the default roadmap for production Phase 5.**
-
-| Technology | Why interesting | Why deferred |
-|------------|-----------------|--------------|
-| **AF_XDP** | Zero-copy packet path into user space; socket-like API | Requires XDP programs, driver support, redesign of the TCP framing path |
-| **DPDK** | Poll-mode drivers, kernel bypass NIC I/O | Heavy ops model, huge-page pools, not a drop-in for Tokio TCP |
-| **io_uring + TCP** | Lower syscall overhead without full bypass | Prefer this before DPDK/AF_XDP |
-
-Volant’s Phase 5 focus is **storage-path** efficiency (mmap / O_DIRECT / io_uring
-append) and optional **CPU pinning**. Network kernel bypass would imply replacing
-or flanking the Tokio stack — a research spike, not a feature flag today.
-
-If exploring AF_XDP/DPDK:
-
-1. Keep the Volant frame codec unchanged.
-2. Prototype a separate `net` backend trait; do not hard-wire DPDK into default builds.
-3. Document NIC, driver, and huge-page requirements separately from this guide.
+**Not supported.** Volant uses Tokio TCP. Network kernel bypass (DPDK, AF_XDP)
+is research-only and not on the production roadmap. Prefer storage-path
+features (`mmap` / `O_DIRECT` / `io_uring`) and optional CPU pinning first.
 
 ---
 
@@ -463,7 +448,7 @@ Env:           VOLANT_CPU_LIST set only when cores are isolated
 ulimit -n:     65536+
 StorageConfig: segment_size=256MiB, flush_every_n=0, retention_bytes set
 Clients:       batch produces; use consumer groups for scale-out readers
-Observability: Phase 7 metrics — until then, OS tools (iostat, perf, sar)
+Observability: --metrics-addr for Prometheus; OS tools (iostat, perf, sar)
 ```
 
 Enable `direct-io` / `io-uring` only after:
