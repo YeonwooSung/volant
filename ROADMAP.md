@@ -1440,6 +1440,29 @@ DeleteRecords/ACL flex, higher KIP-890 txn versions.
 
 ---
 
+### Phase 64 — Flexible DeleteRecords + ACL admin ✅
+
+**Goal:** First flexible versions of DeleteRecords and Describe/Create/DeleteAcls
+for modern admin clients (KIP-482).
+
+Binding: **[docs/PHASE64_SPEC.md](./docs/PHASE64_SPEC.md)**.
+
+- [x] DeleteRecords 0–2 (v2 flexible; classic 0–1 unchanged)
+- [x] DescribeAcls 0–2 (v2 flexible; classic 0–1 unchanged)
+- [x] CreateAcls 0–2 (v2 flexible)
+- [x] DeleteAcls 0–2 (v2 flexible)
+- [x] Response header v1 for those flexible versions
+- [x] Integration tests (`phase64_flexible_delete_records_acls`)
+
+**Honest limitations:** no USER resource (v3); LITERAL patterns only; host filter
+ignored; sealed-segment DeleteRecords only; empty tags only.
+
+**Still deferred:** multi-lang clients, cargo-fuzz corpus CI, Metadata TopicId,
+DescribeCluster / ListTransactions, true control-marker READ_COMMITTED,
+higher KIP-890 txn versions, SASL flex.
+
+---
+
 ## Performance targets (aspirational)
 
 | Metric | Single node target | Notes |

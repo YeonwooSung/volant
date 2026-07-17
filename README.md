@@ -301,6 +301,8 @@ AddOffsetsToTxn / EndTxn / TxnOffsetCommit v3; classic paths unchanged.
 
 **Phase 63:** Flexible ListOffsets v6 + OffsetForLeaderEpoch v4.
 
+**Phase 64:** Flexible DeleteRecords v2 + Describe/Create/DeleteAcls v2.
+
 **Still deferred:** multi-language clients, chaos-mesh / cargo-fuzz corpus CI.
 
 ### Networked client (library)

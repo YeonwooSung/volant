@@ -156,10 +156,10 @@ Supported APIs:
 | DescribeConfigs | 0–4 | Classic 0–3; **v4 flexible** + response header v1; TOPIC resources; throttle; v1+ config_source + empty synonyms; v3+ type/docs |
 | AlterConfigs | 0–2 | Classic 0–1; **v2 flexible** + response header v1; TOPIC resources; throttle all versions; validate_only |
 | IncrementalAlterConfigs | 0–1 | Classic v0; **v1 flexible** + response header v1; SET/DELETE on TOPIC keys; APPEND/SUBTRACT unsupported |
-| DeleteRecords | 0–1 | whole sealed segments only (Phase 14) |
-| DescribeAcls | 0–1 | filter → Volant ACL list |
-| CreateAcls | 0–1 | maps Kafka types/ops; enables ACL store |
-| DeleteAcls | 0–1 | filter match → exact delete |
+| DeleteRecords | 0–2 | Classic 0–1; **v2 flexible** + response header v1; whole sealed segments only |
+| DescribeAcls | 0–2 | Classic 0–1; **v2 flexible** + response header v1; filter → Volant ACL list; v3 USER unsupported |
+| CreateAcls | 0–2 | Classic 0–1; **v2 flexible** + response header v1; maps Kafka types/ops; enables ACL store |
+| DeleteAcls | 0–2 | Classic 0–1; **v2 flexible** + response header v1; filter match → exact delete |
 | OffsetDelete | 0 | group offset delete (Phase 12) |
 
 Topic config keys: `retention.ms`, `retention.bytes`, `segment.bytes`,

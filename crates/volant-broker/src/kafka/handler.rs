@@ -190,6 +190,15 @@ fn dispatch_kafka(broker: &Broker, body: bytes::Bytes, conn: &mut KafkaConnState
     ) || matches!(
         (api, hdr.api_version),
         (Some(ApiKey::OffsetForLeaderEpoch), v) if v >= 4
+    ) || matches!(
+        (api, hdr.api_version),
+        (
+            Some(ApiKey::DeleteRecords)
+                | Some(ApiKey::DescribeAcls)
+                | Some(ApiKey::CreateAcls)
+                | Some(ApiKey::DeleteAcls),
+            v
+        ) if v >= 2
     );
 
     let mut out = BytesMut::new();
@@ -281,16 +290,36 @@ fn dispatch_kafka(broker: &Broker, body: bytes::Bytes, conn: &mut KafkaConnState
             }
             encode_delete_topics(broker, &mut src, &mut out, hdr.api_version, principal);
         }
-        Some(ApiKey::DeleteRecords) if (0..=1).contains(&hdr.api_version) => {
-            encode_delete_records(broker, &mut src, &mut out, principal);
+        Some(ApiKey::DeleteRecords) if (0..=2).contains(&hdr.api_version) => {
+            if hdr.api_version >= 2 {
+                if let Err(e) = skip_tag_buffer(&mut src) {
+                    debug!(error = %e, "delete records flexible header tag buffer");
+                }
+            }
+            encode_delete_records(broker, &mut src, &mut out, hdr.api_version, principal);
         }
-        Some(ApiKey::DescribeAcls) if (0..=1).contains(&hdr.api_version) => {
+        Some(ApiKey::DescribeAcls) if (0..=2).contains(&hdr.api_version) => {
+            if hdr.api_version >= 2 {
+                if let Err(e) = skip_tag_buffer(&mut src) {
+                    debug!(error = %e, "describe acls flexible header tag buffer");
+                }
+            }
             encode_describe_acls(broker, &mut src, &mut out, hdr.api_version, principal);
         }
-        Some(ApiKey::CreateAcls) if (0..=1).contains(&hdr.api_version) => {
+        Some(ApiKey::CreateAcls) if (0..=2).contains(&hdr.api_version) => {
+            if hdr.api_version >= 2 {
+                if let Err(e) = skip_tag_buffer(&mut src) {
+                    debug!(error = %e, "create acls flexible header tag buffer");
+                }
+            }
             encode_create_acls(broker, &mut src, &mut out, hdr.api_version, principal);
         }
-        Some(ApiKey::DeleteAcls) if (0..=1).contains(&hdr.api_version) => {
+        Some(ApiKey::DeleteAcls) if (0..=2).contains(&hdr.api_version) => {
+            if hdr.api_version >= 2 {
+                if let Err(e) = skip_tag_buffer(&mut src) {
+                    debug!(error = %e, "delete acls flexible header tag buffer");
+                }
+            }
             encode_delete_acls(broker, &mut src, &mut out, hdr.api_version, principal);
         }
         Some(ApiKey::FindCoordinator) if (0..=4).contains(&hdr.api_version) => {
@@ -6506,16 +6535,24 @@ fn encode_delete_records(
     broker: &Broker,
     src: &mut impl Buf,
     out: &mut BytesMut,
+    version: i16,
     principal: &str,
 ) {
-    // DeleteRecords v0/v1: [topic [partition offset]] timeout_ms
-    // Response: throttle [topic [partition low_watermark error]]
-    out.put_i32(0); // throttle_time_ms
-    if src.remaining() < 4 {
-        out.put_i32(0);
-        return;
-    }
-    let topic_count = src.get_i32();
+    // DeleteRecords classic v0–1 / flexible v2:
+    //   topics[{ name, partitions[{ partition, offset }]}], timeout_ms
+    // Response: throttle, topics[{ name, partitions[{ partition, low_watermark, error }]}]
+    let flex = version >= 2;
+
+    let empty = |out: &mut BytesMut| {
+        out.put_i32(0); // throttle
+        if flex {
+            put_compact_array_len(out, 0);
+            put_empty_tag_buffer(out);
+        } else {
+            out.put_i32(0);
+        }
+    };
+
     struct PartReq {
         partition: i32,
         offset: i64,
@@ -6525,35 +6562,90 @@ fn encode_delete_records(
         parts: Vec<PartReq>,
     }
     let mut topics = Vec::new();
-    for _ in 0..topic_count.max(0) {
-        let name = match get_string(src) {
-            Ok(n) => n,
-            Err(_) => break,
+
+    if flex {
+        let topic_count = match get_compact_array_len(src) {
+            Ok(Some(n)) => n,
+            Ok(None) => 0,
+            Err(_) => {
+                empty(out);
+                return;
+            }
         };
-        if src.remaining() < 4 {
-            break;
+        for _ in 0..topic_count {
+            let name = match get_compact_string(src) {
+                Ok(n) => n,
+                Err(_) => break,
+            };
+            let pc = match get_compact_array_len(src) {
+                Ok(Some(n)) => n,
+                Ok(None) => 0,
+                Err(_) => break,
+            };
+            let mut parts = Vec::with_capacity(pc);
+            for _ in 0..pc {
+                if src.remaining() < 12 {
+                    break;
+                }
+                parts.push(PartReq {
+                    partition: src.get_i32(),
+                    offset: src.get_i64(),
+                });
+                let _ = skip_tag_buffer(src);
+            }
+            let _ = skip_tag_buffer(src);
+            topics.push(TopicReq { name, parts });
         }
-        let pc = src.get_i32();
-        let mut parts = Vec::new();
-        for _ in 0..pc.max(0) {
-            if src.remaining() < 12 {
+        if src.remaining() >= 4 {
+            let _timeout = src.get_i32();
+        }
+        let _ = skip_tag_buffer(src);
+    } else {
+        if src.remaining() < 4 {
+            empty(out);
+            return;
+        }
+        let topic_count = src.get_i32();
+        for _ in 0..topic_count.max(0) {
+            let name = match get_string(src) {
+                Ok(n) => n,
+                Err(_) => break,
+            };
+            if src.remaining() < 4 {
                 break;
             }
-            parts.push(PartReq {
-                partition: src.get_i32(),
-                offset: src.get_i64(),
-            });
+            let pc = src.get_i32();
+            let mut parts = Vec::new();
+            for _ in 0..pc.max(0) {
+                if src.remaining() < 12 {
+                    break;
+                }
+                parts.push(PartReq {
+                    partition: src.get_i32(),
+                    offset: src.get_i64(),
+                });
+            }
+            topics.push(TopicReq { name, parts });
         }
-        topics.push(TopicReq { name, parts });
-    }
-    if src.remaining() >= 4 {
-        let _timeout = src.get_i32();
+        if src.remaining() >= 4 {
+            let _timeout = src.get_i32();
+        }
     }
 
-    out.put_i32(topics.len() as i32);
+    out.put_i32(0); // throttle
+    if flex {
+        put_compact_array_len(out, topics.len());
+    } else {
+        out.put_i32(topics.len() as i32);
+    }
     for t in topics {
-        put_string(out, &t.name);
-        out.put_i32(t.parts.len() as i32);
+        if flex {
+            put_compact_string(out, &t.name);
+            put_compact_array_len(out, t.parts.len());
+        } else {
+            put_string(out, &t.name);
+            out.put_i32(t.parts.len() as i32);
+        }
         let topic_allowed = !broker.acls().is_enabled()
             || broker.acls().authorize(
                 Some(principal),
@@ -6566,11 +6658,17 @@ fn encode_delete_records(
             if !topic_allowed {
                 out.put_i64(0);
                 out.put_i16(KafkaErrorCode::TopicAuthorizationFailed.as_i16());
+                if flex {
+                    put_empty_tag_buffer(out);
+                }
                 continue;
             }
             if p.partition < 0 || p.offset < 0 {
                 out.put_i64(0);
                 out.put_i16(KafkaErrorCode::InvalidRequest.as_i16());
+                if flex {
+                    put_empty_tag_buffer(out);
+                }
                 continue;
             }
             match broker.delete_records(&t.name, p.partition as u32, p.offset as u64) {
@@ -6579,7 +6677,6 @@ fn encode_delete_records(
                     let kerr = if err == 0 {
                         KafkaErrorCode::None.as_i16()
                     } else if err == 13 {
-                        // Volant ErrorCode::NotLeaderForPartition
                         KafkaErrorCode::NotLeaderForPartition.as_i16()
                     } else {
                         KafkaErrorCode::Unknown.as_i16()
@@ -6595,7 +6692,16 @@ fn encode_delete_records(
                     out.put_i16(KafkaErrorCode::Unknown.as_i16());
                 }
             }
+            if flex {
+                put_empty_tag_buffer(out);
+            }
         }
+        if flex {
+            put_empty_tag_buffer(out);
+        }
+    }
+    if flex {
+        put_empty_tag_buffer(out);
     }
 }
 
@@ -6606,8 +6712,23 @@ fn encode_describe_acls(
     version: i16,
     principal: &str,
 ) {
-    // DescribeAcls v0/v1 request fields; response: throttle, error, msg, resources
-    out.put_i32(0); // throttle
+    // DescribeAcls classic v0–1 / flexible v2:
+    //   filter fields → throttle, error, msg, resources[{type, name, pattern, acls[]}]
+    // v3 USER resource type out of scope.
+    let flex = version >= 2;
+
+    let write_err = |out: &mut BytesMut, err: i16, msg: Option<&str>| {
+        out.put_i32(0); // throttle
+        out.put_i16(err);
+        if flex {
+            put_compact_nullable_string(out, msg);
+            put_compact_array_len(out, 0);
+            put_empty_tag_buffer(out);
+        } else {
+            put_nullable_string(out, msg);
+            out.put_i32(0);
+        }
+    };
 
     if broker.acls().is_enabled()
         && !broker.acls().authorize(
@@ -6617,18 +6738,20 @@ fn encode_describe_acls(
             AclOperation::Describe,
         )
     {
-        out.put_i16(KafkaErrorCode::ClusterAuthorizationFailed.as_i16());
-        put_nullable_string(out, Some("Cluster Describe denied"));
-        out.put_i32(0);
+        write_err(
+            out,
+            KafkaErrorCode::ClusterAuthorizationFailed.as_i16(),
+            Some("Cluster Describe denied"),
+        );
         return;
     }
 
-    let filter = match parse_acl_filter(src, version) {
+    // DescribeAcls filter fields are top-level; parse_acl_filter consumes the
+    // flexible TAG_BUFFER when flex is true.
+    let filter = match parse_acl_filter(src, version, flex) {
         Ok(f) => f,
         Err(msg) => {
-            out.put_i16(KafkaErrorCode::InvalidRequest.as_i16());
-            put_nullable_string(out, Some(&msg));
-            out.put_i32(0);
+            write_err(out, KafkaErrorCode::InvalidRequest.as_i16(), Some(&msg));
             return;
         }
     };
@@ -6636,22 +6759,50 @@ fn encode_describe_acls(
     let matched = filter_acl_entries(broker, &filter);
     let groups = group_acls_by_resource(&matched);
 
+    out.put_i32(0); // throttle
     out.put_i16(KafkaErrorCode::None.as_i16());
-    put_nullable_string(out, None);
-    out.put_i32(groups.len() as i32);
+    if flex {
+        put_compact_nullable_string(out, None);
+        put_compact_array_len(out, groups.len());
+    } else {
+        put_nullable_string(out, None);
+        out.put_i32(groups.len() as i32);
+    }
     for (rt, name, acls) in groups {
         out.put_i8(rt);
-        put_string(out, &name);
+        if flex {
+            put_compact_string(out, &name);
+        } else {
+            put_string(out, &name);
+        }
         if version >= 1 {
             out.put_i8(KAFKA_PATTERN_LITERAL);
         }
-        out.put_i32(acls.len() as i32);
+        if flex {
+            put_compact_array_len(out, acls.len());
+        } else {
+            out.put_i32(acls.len() as i32);
+        }
         for e in acls {
-            put_string(out, &kafka_principal(&e.principal));
-            put_string(out, "*");
+            if flex {
+                put_compact_string(out, &kafka_principal(&e.principal));
+                put_compact_string(out, "*");
+            } else {
+                put_string(out, &kafka_principal(&e.principal));
+                put_string(out, "*");
+            }
             out.put_i8(volant_op_to_kafka(e.operation));
             out.put_i8(volant_perm_to_kafka(e.permission));
+            if flex {
+                put_empty_tag_buffer(out); // acl tags
+            }
         }
+        if flex {
+            put_empty_tag_buffer(out); // resource tags
+        }
+    }
+    if flex {
+        put_empty_tag_buffer(out);
     }
 }
 
@@ -6662,14 +6813,37 @@ fn encode_create_acls(
     version: i16,
     principal: &str,
 ) {
-    // CreateAcls: [creations...] → throttle + [error, msg] per creation
-    out.put_i32(0); // throttle
+    // CreateAcls classic v0–1 / flexible v2: creations[] → throttle + results[]
+    let flex = version >= 2;
 
-    if src.remaining() < 4 {
-        out.put_i32(0);
-        return;
-    }
-    let n = src.get_i32();
+    let empty = |out: &mut BytesMut| {
+        out.put_i32(0); // throttle
+        if flex {
+            put_compact_array_len(out, 0);
+            put_empty_tag_buffer(out);
+        } else {
+            out.put_i32(0);
+        }
+    };
+
+    let n = if flex {
+        match get_compact_array_len(src) {
+            Ok(Some(n)) => n as i32,
+            Ok(None) => 0,
+            Err(_) => {
+                empty(out);
+                return;
+            }
+        }
+    } else {
+        if src.remaining() < 4 {
+            empty(out);
+            return;
+        }
+        src.get_i32()
+    };
+
+    out.put_i32(0); // throttle
 
     if broker.acls().is_enabled()
         && !broker.acls().authorize(
@@ -6679,12 +6853,24 @@ fn encode_create_acls(
             AclOperation::Alter,
         )
     {
-        out.put_i32(n.max(0));
+        if flex {
+            put_compact_array_len(out, n.max(0) as usize);
+        } else {
+            out.put_i32(n.max(0));
+        }
         for _ in 0..n.max(0) {
-            // Drain remaining request fields best-effort so we still respond.
-            let _ = parse_acl_creation(src, version);
+            let _ = parse_acl_creation(src, version, flex);
             out.put_i16(KafkaErrorCode::ClusterAuthorizationFailed.as_i16());
-            put_nullable_string(out, Some("Cluster Alter denied"));
+            if flex {
+                put_compact_nullable_string(out, Some("Cluster Alter denied"));
+                put_empty_tag_buffer(out);
+            } else {
+                put_nullable_string(out, Some("Cluster Alter denied"));
+            }
+        }
+        if flex {
+            let _ = skip_tag_buffer(src);
+            put_empty_tag_buffer(out);
         }
         return;
     }
@@ -6697,7 +6883,7 @@ fn encode_create_acls(
     let mut to_create = Vec::new();
 
     for _ in 0..n.max(0) {
-        match parse_acl_creation(src, version) {
+        match parse_acl_creation(src, version, flex) {
             Ok(entry) => {
                 to_create.push(entry);
                 results.push(CreationResult {
@@ -6713,10 +6899,12 @@ fn encode_create_acls(
             }
         }
     }
+    if flex {
+        let _ = skip_tag_buffer(src);
+    }
 
     if !to_create.is_empty() {
         if let Err(_) = broker.acls().create(to_create) {
-            // Mark previously-ok results as storage failure.
             for r in results.iter_mut() {
                 if r.error == KafkaErrorCode::None.as_i16() {
                     r.error = KafkaErrorCode::Unknown.as_i16();
@@ -6726,10 +6914,22 @@ fn encode_create_acls(
         }
     }
 
-    out.put_i32(results.len() as i32);
+    if flex {
+        put_compact_array_len(out, results.len());
+    } else {
+        out.put_i32(results.len() as i32);
+    }
     for r in results {
         out.put_i16(r.error);
-        put_nullable_string(out, r.message.as_deref());
+        if flex {
+            put_compact_nullable_string(out, r.message.as_deref());
+            put_empty_tag_buffer(out);
+        } else {
+            put_nullable_string(out, r.message.as_deref());
+        }
+    }
+    if flex {
+        put_empty_tag_buffer(out);
     }
 }
 
@@ -6740,14 +6940,37 @@ fn encode_delete_acls(
     version: i16,
     principal: &str,
 ) {
-    // DeleteAcls: [filters...] → throttle + [error, msg, matching_acls...]
-    out.put_i32(0); // throttle
+    // DeleteAcls classic v0–1 / flexible v2: filters[] → throttle + filter_results[]
+    let flex = version >= 2;
 
-    if src.remaining() < 4 {
-        out.put_i32(0);
-        return;
-    }
-    let n = src.get_i32();
+    let empty = |out: &mut BytesMut| {
+        out.put_i32(0); // throttle
+        if flex {
+            put_compact_array_len(out, 0);
+            put_empty_tag_buffer(out);
+        } else {
+            out.put_i32(0);
+        }
+    };
+
+    let n = if flex {
+        match get_compact_array_len(src) {
+            Ok(Some(n)) => n as i32,
+            Ok(None) => 0,
+            Err(_) => {
+                empty(out);
+                return;
+            }
+        }
+    } else {
+        if src.remaining() < 4 {
+            empty(out);
+            return;
+        }
+        src.get_i32()
+    };
+
+    out.put_i32(0); // throttle
 
     if broker.acls().is_enabled()
         && !broker.acls().authorize(
@@ -6757,24 +6980,48 @@ fn encode_delete_acls(
             AclOperation::Alter,
         )
     {
-        out.put_i32(n.max(0));
+        if flex {
+            put_compact_array_len(out, n.max(0) as usize);
+        } else {
+            out.put_i32(n.max(0));
+        }
         for _ in 0..n.max(0) {
-            let _ = parse_acl_filter(src, version);
+            let _ = parse_acl_filter(src, version, flex);
             out.put_i16(KafkaErrorCode::ClusterAuthorizationFailed.as_i16());
-            put_nullable_string(out, Some("Cluster Alter denied"));
-            out.put_i32(0);
+            if flex {
+                put_compact_nullable_string(out, Some("Cluster Alter denied"));
+                put_compact_array_len(out, 0);
+                put_empty_tag_buffer(out);
+            } else {
+                put_nullable_string(out, Some("Cluster Alter denied"));
+                out.put_i32(0);
+            }
+        }
+        if flex {
+            let _ = skip_tag_buffer(src);
+            put_empty_tag_buffer(out);
         }
         return;
     }
 
-    out.put_i32(n.max(0));
+    if flex {
+        put_compact_array_len(out, n.max(0) as usize);
+    } else {
+        out.put_i32(n.max(0));
+    }
     for _ in 0..n.max(0) {
-        let filter = match parse_acl_filter(src, version) {
+        let filter = match parse_acl_filter(src, version, flex) {
             Ok(f) => f,
             Err(msg) => {
                 out.put_i16(KafkaErrorCode::InvalidRequest.as_i16());
-                put_nullable_string(out, Some(&msg));
-                out.put_i32(0);
+                if flex {
+                    put_compact_nullable_string(out, Some(&msg));
+                    put_compact_array_len(out, 0);
+                    put_empty_tag_buffer(out);
+                } else {
+                    put_nullable_string(out, Some(&msg));
+                    out.put_i32(0);
+                }
                 continue;
             }
         };
@@ -6782,28 +7029,65 @@ fn encode_delete_acls(
         match broker.acls().delete(&matched) {
             Ok(_) => {
                 out.put_i16(KafkaErrorCode::None.as_i16());
-                put_nullable_string(out, None);
-                out.put_i32(matched.len() as i32);
+                if flex {
+                    put_compact_nullable_string(out, None);
+                    put_compact_array_len(out, matched.len());
+                } else {
+                    put_nullable_string(out, None);
+                    out.put_i32(matched.len() as i32);
+                }
                 for e in &matched {
                     out.put_i16(KafkaErrorCode::None.as_i16());
-                    put_nullable_string(out, None);
+                    if flex {
+                        put_compact_nullable_string(out, None);
+                    } else {
+                        put_nullable_string(out, None);
+                    }
                     out.put_i8(volant_rt_to_kafka(e.resource_type));
-                    put_string(out, &kafka_resource_name(e.resource_type, &e.resource));
+                    if flex {
+                        put_compact_string(
+                            out,
+                            &kafka_resource_name(e.resource_type, &e.resource),
+                        );
+                    } else {
+                        put_string(out, &kafka_resource_name(e.resource_type, &e.resource));
+                    }
                     if version >= 1 {
                         out.put_i8(KAFKA_PATTERN_LITERAL);
                     }
-                    put_string(out, &kafka_principal(&e.principal));
-                    put_string(out, "*");
+                    if flex {
+                        put_compact_string(out, &kafka_principal(&e.principal));
+                        put_compact_string(out, "*");
+                    } else {
+                        put_string(out, &kafka_principal(&e.principal));
+                        put_string(out, "*");
+                    }
                     out.put_i8(volant_op_to_kafka(e.operation));
                     out.put_i8(volant_perm_to_kafka(e.permission));
+                    if flex {
+                        put_empty_tag_buffer(out);
+                    }
+                }
+                if flex {
+                    put_empty_tag_buffer(out);
                 }
             }
             Err(_) => {
                 out.put_i16(KafkaErrorCode::Unknown.as_i16());
-                put_nullable_string(out, Some("failed to delete ACLs"));
-                out.put_i32(0);
+                if flex {
+                    put_compact_nullable_string(out, Some("failed to delete ACLs"));
+                    put_compact_array_len(out, 0);
+                    put_empty_tag_buffer(out);
+                } else {
+                    put_nullable_string(out, Some("failed to delete ACLs"));
+                    out.put_i32(0);
+                }
             }
         }
+    }
+    if flex {
+        let _ = skip_tag_buffer(src);
+        put_empty_tag_buffer(out);
     }
 }
 
@@ -6816,16 +7100,28 @@ struct AclFilter {
     permission: Option<AclPermission>,
 }
 
-fn parse_acl_filter(src: &mut impl Buf, version: i16) -> std::result::Result<AclFilter, String> {
+fn parse_acl_filter(
+    src: &mut impl Buf,
+    version: i16,
+    flex: bool,
+) -> std::result::Result<AclFilter, String> {
     if src.remaining() < 1 {
         return Err("truncated ACL filter".into());
     }
     let rt_raw = src.get_i8();
     let resource_type = kafka_rt_to_volant_filter(rt_raw)?;
-    let resource_name = match get_nullable_string(src) {
-        Ok(Some(s)) if !s.is_empty() => Some(normalize_resource_name(resource_type, &s)),
-        Ok(_) => None,
-        Err(_) => return Err("invalid resource name filter".into()),
+    let resource_name = if flex {
+        match get_compact_nullable_string(src) {
+            Ok(Some(s)) if !s.is_empty() => Some(normalize_resource_name(resource_type, &s)),
+            Ok(_) => None,
+            Err(_) => return Err("invalid resource name filter".into()),
+        }
+    } else {
+        match get_nullable_string(src) {
+            Ok(Some(s)) if !s.is_empty() => Some(normalize_resource_name(resource_type, &s)),
+            Ok(_) => None,
+            Err(_) => return Err("invalid resource name filter".into()),
+        }
     };
     if version >= 1 {
         if src.remaining() < 1 {
@@ -6836,15 +7132,30 @@ fn parse_acl_filter(src: &mut impl Buf, version: i16) -> std::result::Result<Acl
             return Err(format!("unsupported pattern type {pattern}"));
         }
     }
-    let principal = match get_nullable_string(src) {
-        Ok(Some(s)) if !s.is_empty() => Some(strip_user_prefix(&s)),
-        Ok(_) => None,
-        Err(_) => return Err("invalid principal filter".into()),
+    let principal = if flex {
+        match get_compact_nullable_string(src) {
+            Ok(Some(s)) if !s.is_empty() => Some(strip_user_prefix(&s)),
+            Ok(_) => None,
+            Err(_) => return Err("invalid principal filter".into()),
+        }
+    } else {
+        match get_nullable_string(src) {
+            Ok(Some(s)) if !s.is_empty() => Some(strip_user_prefix(&s)),
+            Ok(_) => None,
+            Err(_) => return Err("invalid principal filter".into()),
+        }
     };
     // Host filter — ignored (Volant has no host dimension).
-    let _host = match get_nullable_string(src) {
-        Ok(h) => h,
-        Err(_) => return Err("invalid host filter".into()),
+    let _host = if flex {
+        match get_compact_nullable_string(src) {
+            Ok(h) => h,
+            Err(_) => return Err("invalid host filter".into()),
+        }
+    } else {
+        match get_nullable_string(src) {
+            Ok(h) => h,
+            Err(_) => return Err("invalid host filter".into()),
+        }
     };
     if src.remaining() < 2 {
         return Err("truncated operation/permission filter".into());
@@ -6853,6 +7164,9 @@ fn parse_acl_filter(src: &mut impl Buf, version: i16) -> std::result::Result<Acl
     let perm_raw = src.get_i8();
     let operation = kafka_op_to_volant_filter(op_raw)?;
     let permission = kafka_perm_to_volant_filter(perm_raw)?;
+    if flex {
+        let _ = skip_tag_buffer(src); // filter struct tags
+    }
     Ok(AclFilter {
         resource_type,
         resource_name,
@@ -6862,16 +7176,28 @@ fn parse_acl_filter(src: &mut impl Buf, version: i16) -> std::result::Result<Acl
     })
 }
 
-fn parse_acl_creation(src: &mut impl Buf, version: i16) -> std::result::Result<AclEntry, String> {
+fn parse_acl_creation(
+    src: &mut impl Buf,
+    version: i16,
+    flex: bool,
+) -> std::result::Result<AclEntry, String> {
     if src.remaining() < 1 {
         return Err("truncated ACL creation".into());
     }
     let rt_raw = src.get_i8();
     let resource_type = kafka_rt_to_volant(rt_raw)?;
-    let resource_name = match get_string(src) {
-        Ok(s) if !s.is_empty() => normalize_resource_name(Some(resource_type), &s),
-        Ok(_) => return Err("empty resource name".into()),
-        Err(_) => return Err("invalid resource name".into()),
+    let resource_name = if flex {
+        match get_compact_string(src) {
+            Ok(s) if !s.is_empty() => normalize_resource_name(Some(resource_type), &s),
+            Ok(_) => return Err("empty resource name".into()),
+            Err(_) => return Err("invalid resource name".into()),
+        }
+    } else {
+        match get_string(src) {
+            Ok(s) if !s.is_empty() => normalize_resource_name(Some(resource_type), &s),
+            Ok(_) => return Err("empty resource name".into()),
+            Err(_) => return Err("invalid resource name".into()),
+        }
     };
     if version >= 1 {
         if src.remaining() < 1 {
@@ -6882,14 +7208,29 @@ fn parse_acl_creation(src: &mut impl Buf, version: i16) -> std::result::Result<A
             return Err(format!("unsupported pattern type {pattern} (only LITERAL)"));
         }
     }
-    let principal = match get_string(src) {
-        Ok(s) if !s.is_empty() => strip_user_prefix(&s),
-        Ok(_) => return Err("empty principal".into()),
-        Err(_) => return Err("invalid principal".into()),
+    let principal = if flex {
+        match get_compact_string(src) {
+            Ok(s) if !s.is_empty() => strip_user_prefix(&s),
+            Ok(_) => return Err("empty principal".into()),
+            Err(_) => return Err("invalid principal".into()),
+        }
+    } else {
+        match get_string(src) {
+            Ok(s) if !s.is_empty() => strip_user_prefix(&s),
+            Ok(_) => return Err("empty principal".into()),
+            Err(_) => return Err("invalid principal".into()),
+        }
     };
-    let _host = match get_string(src) {
-        Ok(h) => h,
-        Err(_) => return Err("invalid host".into()),
+    let _host = if flex {
+        match get_compact_string(src) {
+            Ok(h) => h,
+            Err(_) => return Err("invalid host".into()),
+        }
+    } else {
+        match get_string(src) {
+            Ok(h) => h,
+            Err(_) => return Err("invalid host".into()),
+        }
     };
     if src.remaining() < 2 {
         return Err("truncated operation/permission".into());
@@ -6898,6 +7239,9 @@ fn parse_acl_creation(src: &mut impl Buf, version: i16) -> std::result::Result<A
     let perm_raw = src.get_i8();
     let operation = kafka_op_to_volant(op_raw)?;
     let permission = kafka_perm_to_volant(perm_raw)?;
+    if flex {
+        let _ = skip_tag_buffer(src); // creation struct tags
+    }
     Ok(AclEntry {
         principal,
         resource_type,
