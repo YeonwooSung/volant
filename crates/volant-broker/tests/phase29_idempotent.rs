@@ -70,7 +70,7 @@ async fn api_versions_includes_init_producer_id() {
             found = Some((min, max));
         }
     }
-    assert_eq!(found, Some((0, 5))); // Phase 75 KIP-890 max
+    assert_eq!(found, Some((0, 6))); // Phase 77 OngoingTxn max
 
     server.abort();
     let _ = std::fs::remove_dir_all(&dir);

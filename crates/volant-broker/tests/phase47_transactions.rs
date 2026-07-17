@@ -141,7 +141,7 @@ async fn api_versions_txn_classic_max_v2() {
         let max = src.get_i16();
         found.insert(key, (min, max));
     }
-    assert_eq!(found.get(&22), Some(&(0, 5))); // InitProducerId (Phase 75 KIP-890)
+    assert_eq!(found.get(&22), Some(&(0, 6))); // InitProducerId (Phase 77 OngoingTxn)
     assert_eq!(found.get(&24), Some(&(0, 5))); // AddPartitionsToTxn
     assert_eq!(found.get(&25), Some(&(0, 3))); // AddOffsetsToTxn unchanged
     assert_eq!(found.get(&26), Some(&(0, 5))); // EndTxn

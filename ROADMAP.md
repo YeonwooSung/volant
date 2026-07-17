@@ -1702,7 +1702,8 @@ no TRANSACTION_ABORTABLE emission; no 2PC; no TxnOffsetCommit TopicId;
 no READ_COMMITTED; buffer-until-commit unchanged.
 
 **Still deferred:** multi-lang clients, cargo-fuzz corpus CI, true control-marker
-READ_COMMITTED, InitProducerId v6 2PC, TxnOffsetCommit TopicId (Phase 76).
+READ_COMMITTED, InitProducerId v6 OngoingTxn wire (Phase 77), TxnOffsetCommit
+TopicId (Phase 76).
 
 ---
 
@@ -1722,7 +1723,29 @@ Binding: **[docs/PHASE76_SPEC.md](./docs/PHASE76_SPEC.md)**.
 ignored; buffer-until-EndTxn unchanged; deterministic UUID only; no v7+.
 
 **Still deferred:** multi-lang clients, cargo-fuzz corpus CI, true control-marker
-READ_COMMITTED, InitProducerId v6 2PC.
+READ_COMMITTED, InitProducerId v6 OngoingTxn wire closed by **Phase 77**.
+
+---
+
+### Phase 77 — InitProducerId v6 (OngoingTxn / 2PC wire) ✅
+
+**Goal:** Modern clients can negotiate InitProducerId through v6 and parse
+Enable2Pc / KeepPreparedTxn / OngoingTxn* without UnsupportedVersion, with
+honest shallow semantics (no real prepared/2PC transactions).
+
+Binding: **[docs/PHASE77_SPEC.md](./docs/PHASE77_SPEC.md)**.
+
+- [x] InitProducerId 0–6 (v6 Enable2Pc + KeepPreparedTxn parsed+ignored)
+- [x] v6 response OngoingTxnProducerId/Epoch always **-1** (no prepared txns)
+- [x] v0–5 response shape unchanged; v7 UnsupportedVersion header v1
+- [x] Integration tests (`phase77_init_producer_id_v6`)
+
+**Honest limitations:** no real 2PC / prepared transactions; OngoingTxn* never
+surfaces open buffer-until-commit txns; resume pid/epoch still ignored; no
+TRANSACTION_ABORTABLE emission; AddPartitions/EndTxn maxes unchanged.
+
+**Still deferred:** multi-lang clients, cargo-fuzz corpus CI, true control-marker
+READ_COMMITTED, real 2PC / prepared transaction state.
 
 ---
 

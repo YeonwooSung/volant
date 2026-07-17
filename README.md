@@ -341,7 +341,11 @@ TxnOffsetCommit 0–5 (name path); AddOffsetsToTxn stays 0–3; no 2PC.
 **Phase 76:** TxnOffsetCommit v6 TopicId — UUID topics (v3–5 name path unchanged);
 unknown id → UnknownTopicId; buffers until EndTxn.
 
-**Still deferred:** multi-language clients, chaos-mesh / cargo-fuzz corpus CI.
+**Phase 77:** InitProducerId v6 — Enable2Pc / KeepPreparedTxn parsed+ignored;
+OngoingTxnProducerId/Epoch always -1 (no prepared/2PC); max 0–6.
+
+**Still deferred:** multi-language clients, chaos-mesh / cargo-fuzz corpus CI,
+true control-marker READ_COMMITTED, real 2PC.
 
 ### Networked client (library)
 

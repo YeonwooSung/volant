@@ -499,7 +499,7 @@ fn dispatch_kafka(broker: &Broker, body: bytes::Bytes, conn: &mut KafkaConnState
             }
             admin_api::encode_incremental_alter_configs(broker, &mut src, &mut out, hdr.api_version, principal);
         }
-        Some(ApiKey::InitProducerId) if (0..=5).contains(&hdr.api_version) => {
+        Some(ApiKey::InitProducerId) if (0..=6).contains(&hdr.api_version) => {
             if hdr.api_version >= 2 {
                 if let Err(e) = skip_tag_buffer(&mut src) {
                     debug!(error = %e, "init producer id flexible header tag buffer");

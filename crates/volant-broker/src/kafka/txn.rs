@@ -116,7 +116,7 @@ fn open_txn_error(broker: &Broker, producer_id: u64, producer_epoch: u16, cluste
 
 // ─── InitProducerId ──────────────────────────────────────────────────────────
 
-/// InitProducerId (API key 22) classic v0–1 / flexible v2–5 — Phase 29 / 62 / 75.
+/// InitProducerId (API key 22) classic v0–1 / flexible v2–6 — Phase 29 / 62 / 75 / 77.
 pub(crate) fn encode_init_producer_id(
     broker: &Broker,
     src: &mut impl Buf,
@@ -124,15 +124,23 @@ pub(crate) fn encode_init_producer_id(
     version: i16,
     principal: &str,
 ) {
-    // Resume fields (v3–5) are parsed and discarded — always allocate via
-    // init_producer_id_with_txn. v6 OngoingTxn* / 2PC out of scope.
+    // Resume fields (v3+) and Enable2Pc/KeepPreparedTxn (v6) are parsed and
+    // discarded — always allocate via init_producer_id_with_txn. v6 response
+    // OngoingTxn* is always -1 (no prepared/2PC state).
     let flex = version >= 2;
+    let v6 = version >= 6;
 
     let write_body = |out: &mut BytesMut, err: i16, pid: i64, epoch: i16| {
         out.put_i32(0); // throttle
         out.put_i16(err);
         out.put_i64(pid);
         out.put_i16(epoch);
+        if v6 {
+            // OngoingTxnProducerId / OngoingTxnProducerEpoch (KIP-890 / KIP-939).
+            // Honest: Volant has no prepared/2PC transactions.
+            out.put_i64(-1);
+            out.put_i16(-1);
+        }
         if flex {
             put_empty_tag_buffer(out);
         }
@@ -159,7 +167,7 @@ pub(crate) fn encode_init_producer_id(
     if src.remaining() >= 4 {
         let _timeout = src.get_i32();
     }
-    // v3–5: ProducerId + ProducerEpoch resume fields (explicitly skipped).
+    // v3+: ProducerId + ProducerEpoch resume fields (explicitly skipped).
     if version >= 3 {
         if src.remaining() < 8 + 2 {
             write_body(out, KafkaErrorCode::InvalidRequest.as_i16(), -1, -1);
@@ -167,6 +175,15 @@ pub(crate) fn encode_init_producer_id(
         }
         let _resume_pid = src.get_i64();
         let _resume_epoch = src.get_i16();
+    }
+    // v6+: Enable2Pc + KeepPreparedTxn (parsed, ignored — no real 2PC).
+    if v6 {
+        if src.remaining() < 2 {
+            write_body(out, KafkaErrorCode::InvalidRequest.as_i16(), -1, -1);
+            return;
+        }
+        let _enable_2pc = src.get_u8() != 0;
+        let _keep_prepared = src.get_u8() != 0;
     }
     if flex {
         let _ = skip_tag_buffer(src);

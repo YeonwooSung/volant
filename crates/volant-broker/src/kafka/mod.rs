@@ -1,4 +1,4 @@
-//! Kafka wire protocol shim (Phases 23–76).
+//! Kafka wire protocol shim (Phases 23–77).
 //!
 //! Classic framing plus flexible APIs (KIP-482): ApiVersions v3, Metadata
 //! v9–13 (TopicId; v13 top-level ErrorCode), FindCoordinator v3–4, Produce v9–13 (TopicId v13), Fetch v12–13 (TopicId),
@@ -6,8 +6,9 @@
 //! flex, ListOffsets v6–11 (max-timestamp / local / tiered specials), OffsetForLeaderEpoch v4, DeleteRecords v2, ACL admin,
 //! SaslAuthenticate v2, DescribeCluster 0–2, ListTransactions 0–2,
 //! DescribeTransactions v0, DescribeProducers v0, KIP-890-era txn max versions
-//! (InitProducerId 0–5, AddPartitionsToTxn/EndTxn 0–5, TxnOffsetCommit 0–6 TopicId).
-//! See `docs/PHASE23_SPEC.md` … `docs/PHASE76_SPEC.md`.
+//! (InitProducerId 0–6 OngoingTxn wire, AddPartitionsToTxn/EndTxn 0–5,
+//! TxnOffsetCommit 0–6 TopicId).
+//! See `docs/PHASE23_SPEC.md` … `docs/PHASE77_SPEC.md`.
 
 /// Kafka wire primitives, MessageSet (magic 0/1), and RecordBatch (magic 2).
 pub mod codec;
@@ -296,7 +297,7 @@ pub const SUPPORTED_APIS: &[(ApiKey, i16, i16)] = &[
     (ApiKey::CreateTopics, 0, 7),
     (ApiKey::DeleteTopics, 0, 6),
     (ApiKey::DeleteRecords, 0, 2),
-    (ApiKey::InitProducerId, 0, 5),
+    (ApiKey::InitProducerId, 0, 6),
     (ApiKey::OffsetForLeaderEpoch, 0, 4),
     (ApiKey::AddPartitionsToTxn, 0, 5),
     (ApiKey::AddOffsetsToTxn, 0, 3),

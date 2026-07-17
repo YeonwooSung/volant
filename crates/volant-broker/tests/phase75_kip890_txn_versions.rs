@@ -116,7 +116,7 @@ async fn api_versions_kip890_txn_maxes() {
         let max_v = src.get_i16();
         found.insert(key, (min_v, max_v));
     }
-    assert_eq!(found.get(&22), Some(&(0, 5)), "InitProducerId");
+    assert_eq!(found.get(&22), Some(&(0, 6)), "InitProducerId (Phase 77 OngoingTxn)");
     assert_eq!(found.get(&24), Some(&(0, 5)), "AddPartitionsToTxn");
     assert_eq!(found.get(&25), Some(&(0, 3)), "AddOffsetsToTxn stays 0–3");
     assert_eq!(found.get(&26), Some(&(0, 5)), "EndTxn");
@@ -367,10 +367,10 @@ async fn unsupported_v6_txn_versions() {
     }));
     let (addr, server) = boot_kafka(Arc::clone(&broker)).await;
 
-    // InitProducerId v6 → header v1 + UnsupportedVersion (35)
+    // InitProducerId v7 (beyond max 6) → header v1 + UnsupportedVersion (35)
     let resp = rpc(
         &addr,
-        encode_request_flexible(22, 6, 10, Some("c"), &[]),
+        encode_request_flexible(22, 7, 10, Some("c"), &[]),
     )
     .await;
     let mut src = resp.freeze();
