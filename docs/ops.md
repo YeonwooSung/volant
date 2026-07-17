@@ -129,7 +129,7 @@ Supported APIs:
 |-----|----------|-------|
 | ApiVersions | 0–3 | v0–2 classic; **v3 flexible** (compact api_keys + tag buffers); software name/version ignored; no feature tags; response header always v0 |
 | Metadata | 0–9 | Classic 0–8; **v9 flexible** (compact brokers/topics + response header v1); cluster_id=`volant`; leader_epoch=-1; TopicId v10+ unsupported |
-| OffsetForLeaderEpoch | 0–3 | End offset by leader epoch; no epoch history (eligible → HWM); fencing via current_leader_epoch |
+| OffsetForLeaderEpoch | 0–4 | Classic 0–3; **v4 flexible** + response header v1; no epoch history (eligible → HWM); fencing via current_leader_epoch |
 | Produce | 0–9 | Classic 0–8; **v9 flexible** compact transactional_id/topics/records + response header v1; MessageSet or RecordBatch; compression + idempotent PID/seq; empty record_errors; v10 KIP-951 unsupported |
 | Fetch | 0–12 | Classic 0–11; **v12 flexible** compact topics/records + response header v1; v0–3 MessageSet + v4+ RecordBatch (default lz4); session header (no real sessions); leader-epoch fence; preferred_read_replica=-1; TopicId v13+ unsupported |
 | InitProducerId | 0–2 | Classic 0–1; **v2 flexible** + response header v1; transactional_id fencing; timeout ignored; v3+ resume unsupported |
@@ -140,7 +140,7 @@ Supported APIs:
 | TxnOffsetCommit | 0–3 | Classic 0–2; **v3 flexible** + response header v1; buffers until EndTxn; v2+ leader_epoch + v3 member/generation ignored |
 | SaslHandshake | 0–1 | mechanisms: PLAIN, SCRAM-SHA-256, SCRAM-SHA-512 |
 | SaslAuthenticate | 0–1 | PLAIN / SCRAM-SHA-256 / SCRAM-SHA-512 against Volant SCRAM store |
-| ListOffsets | 0–5 | -1 latest / -2 earliest; v2+ isolation (LSO≡HWM) + throttle; v4+ leader-epoch fencing; flexible v6+ unsupported |
+| ListOffsets | 0–6 | Classic 0–5; **v6 flexible** + response header v1; -1 latest / -2 earliest; isolation ignored (LSO≡HWM); v4+ leader-epoch fencing; v7+ max-timestamp unsupported |
 | CreateTopics | 0–5 | Classic 0–4; **v5 flexible** + response header v1; validate_only v1+; default partitions v4+; configs response null; TopicId v7 unsupported |
 | DeleteTopics | 0–4 | Classic 0–3; **v4 flexible** + response header v1; throttle v1+ (leading); ErrorMessage v5 / TopicId v6 unsupported |
 | JoinGroup | 0–9 | Classic 0–5; **v6+ flexible** + response header v1; v5+ group.instance.id → static:{id}; **v7** ProtocolType; **v8** Reason (ignored); **v9** SkipAssignment=false; throttle v2+ |

@@ -1419,6 +1419,27 @@ higher KIP-890 txn versions.
 
 ---
 
+### Phase 63 — Flexible ListOffsets + OffsetForLeaderEpoch ✅
+
+**Goal:** First flexible versions of ListOffsets and OffsetForLeaderEpoch for
+modern consumer offset/epoch queries (KIP-482).
+
+Binding: **[docs/PHASE63_SPEC.md](./docs/PHASE63_SPEC.md)**.
+
+- [x] ListOffsets 0–6 (v6 flexible; classic 0–5 unchanged)
+- [x] OffsetForLeaderEpoch 0–4 (v4 flexible; classic 0–3 unchanged)
+- [x] Response header v1 for those flexible versions
+- [x] Integration tests (`phase63_flexible_list_offsets_ofle`)
+
+**Honest limitations:** no ListOffsets v7+ max-timestamp/tiered/remote; no epoch
+history; empty tags only.
+
+**Still deferred:** multi-lang clients, cargo-fuzz corpus CI, Metadata TopicId,
+DescribeCluster / ListTransactions, true control-marker READ_COMMITTED,
+DeleteRecords/ACL flex, higher KIP-890 txn versions.
+
+---
+
 ## Performance targets (aspirational)
 
 | Metric | Single node target | Notes |

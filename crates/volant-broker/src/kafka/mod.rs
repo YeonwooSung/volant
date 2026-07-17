@@ -1,13 +1,13 @@
-//! Kafka wire protocol shim (Phases 23–62).
+//! Kafka wire protocol shim (Phases 23–63).
 //!
 //! Classic framing plus flexible APIs (KIP-482): ApiVersions v3, Metadata v9,
 //! FindCoordinator v3–4, Produce v9, Fetch v12, JoinGroup v6–9, SyncGroup
 //! v4–5, Heartbeat v4, LeaveGroup v4–5, OffsetCommit v8, OffsetFetch v6–8
-//! (multi-group v8), topic admin/configs flex, and transaction APIs
-//! (InitProducerId v2, AddPartitions/AddOffsets/EndTxn/TxnOffsetCommit v3).
-//! Produce v0–9 / Fetch v0–12, admin, consumer groups, SASL, DeleteRecords,
-//! ACL admin, OffsetDelete, Metadata v0–9, OffsetForLeaderEpoch, ListOffsets
-//! v0–5. See `docs/PHASE23_SPEC.md` … `docs/PHASE62_SPEC.md`.
+//! (multi-group v8), topic admin/configs flex, transaction APIs
+//! (InitProducerId v2, AddPartitions/AddOffsets/EndTxn/TxnOffsetCommit v3),
+//! ListOffsets v6, and OffsetForLeaderEpoch v4. Produce v0–9 / Fetch v0–12,
+//! admin, consumer groups, SASL, DeleteRecords, ACL admin, OffsetDelete,
+//! Metadata v0–9. See `docs/PHASE23_SPEC.md` … `docs/PHASE63_SPEC.md`.
 
 /// Kafka wire primitives, MessageSet (magic 0/1), and RecordBatch (magic 2).
 pub mod codec;
@@ -247,7 +247,7 @@ impl ApiKey {
 pub const SUPPORTED_APIS: &[(ApiKey, i16, i16)] = &[
     (ApiKey::Produce, 0, 9),
     (ApiKey::Fetch, 0, 12),
-    (ApiKey::ListOffsets, 0, 5),
+    (ApiKey::ListOffsets, 0, 6),
     (ApiKey::Metadata, 0, 9),
     (ApiKey::OffsetCommit, 0, 8),
     (ApiKey::OffsetFetch, 0, 8),
@@ -264,7 +264,7 @@ pub const SUPPORTED_APIS: &[(ApiKey, i16, i16)] = &[
     (ApiKey::DeleteTopics, 0, 4),
     (ApiKey::DeleteRecords, 0, 1),
     (ApiKey::InitProducerId, 0, 2),
-    (ApiKey::OffsetForLeaderEpoch, 0, 3),
+    (ApiKey::OffsetForLeaderEpoch, 0, 4),
     (ApiKey::AddPartitionsToTxn, 0, 3),
     (ApiKey::AddOffsetsToTxn, 0, 3),
     (ApiKey::EndTxn, 0, 3),

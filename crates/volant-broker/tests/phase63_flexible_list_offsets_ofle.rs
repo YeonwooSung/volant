@@ -1,0 +1,313 @@
+//! Phase 63: Flexible ListOffsets v6 + OffsetForLeaderEpoch v4.
+
+use std::path::PathBuf;
+use std::sync::Arc;
+use std::time::{SystemTime, UNIX_EPOCH};
+
+use bytes::{Buf, BufMut, Bytes, BytesMut};
+use tokio::io::{AsyncReadExt, AsyncWriteExt};
+use tokio::net::{TcpListener, TcpStream};
+use volant_broker::kafka::codec::{
+    encode_record_batch, encode_request, encode_request_flexible, get_compact_array_len,
+    get_compact_string, put_bytes, put_compact_array_len, put_compact_string, put_empty_tag_buffer,
+    put_string, skip_tag_buffer,
+};
+use volant_broker::{serve_kafka_listener, Broker};
+use volant_core::{Offset, Record};
+use volant_storage::StorageConfig;
+
+fn temp_dir(label: &str) -> PathBuf {
+    let nanos = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap()
+        .as_nanos();
+    let dir = std::env::temp_dir().join(format!(
+        "volant-p63-{label}-{}-{}",
+        std::process::id(),
+        nanos
+    ));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    dir
+}
+
+async fn boot_kafka(broker: Arc<Broker>) -> (String, tokio::task::JoinHandle<()>) {
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    let handle = tokio::spawn(async move {
+        serve_kafka_listener(listener, broker).await.ok();
+    });
+    tokio::task::yield_now().await;
+    (format!("127.0.0.1:{}", addr.port()), handle)
+}
+
+async fn rpc(addr: &str, request: BytesMut) -> BytesMut {
+    let mut stream = TcpStream::connect(addr).await.unwrap();
+    stream.write_all(&request).await.unwrap();
+    let mut buf = BytesMut::with_capacity(64 * 1024);
+    loop {
+        let n = stream.read_buf(&mut buf).await.unwrap();
+        if n == 0 {
+            break;
+        }
+        if buf.len() >= 4 {
+            let size = i32::from_be_bytes([buf[0], buf[1], buf[2], buf[3]]) as usize;
+            if buf.len() >= 4 + size {
+                let _ = buf.split_to(4);
+                return buf.split_to(size);
+            }
+        }
+    }
+    panic!("connection closed without full kafka response");
+}
+
+fn list_offsets_v6(topic: &str, partition: i32, timestamp: i64) -> BytesMut {
+    let mut body = BytesMut::new();
+    body.put_i32(-1); // replica_id
+    body.put_u8(0); // isolation READ_UNCOMMITTED
+    put_compact_array_len(&mut body, 1);
+    put_compact_string(&mut body, topic);
+    put_compact_array_len(&mut body, 1);
+    body.put_i32(partition);
+    body.put_i32(-1); // current_leader_epoch
+    body.put_i64(timestamp);
+    put_empty_tag_buffer(&mut body); // partition tags
+    put_empty_tag_buffer(&mut body); // topic tags
+    put_empty_tag_buffer(&mut body); // request tags
+    body
+}
+
+fn ofle_v4(topic: &str, partition: i32, current_epoch: i32, leader_epoch: i32) -> BytesMut {
+    let mut body = BytesMut::new();
+    body.put_i32(-1); // replica_id (consumer)
+    put_compact_array_len(&mut body, 1);
+    put_compact_string(&mut body, topic);
+    put_compact_array_len(&mut body, 1);
+    body.put_i32(partition);
+    body.put_i32(current_epoch);
+    body.put_i32(leader_epoch);
+    put_empty_tag_buffer(&mut body);
+    put_empty_tag_buffer(&mut body);
+    put_empty_tag_buffer(&mut body);
+    body
+}
+
+async fn produce_one(addr: &str, topic: &str) {
+    let batch = encode_record_batch(&[Record {
+        offset: Offset::new(0),
+        key: None,
+        value: Bytes::from_static(b"x"),
+        timestamp_ms: 1,
+        headers: vec![],
+    }]);
+    let mut body = BytesMut::new();
+    body.put_i16(1);
+    body.put_i32(1000);
+    body.put_i32(1);
+    put_string(&mut body, topic);
+    body.put_i32(1);
+    body.put_i32(0);
+    put_bytes(&mut body, Some(&batch));
+    let resp = rpc(addr, encode_request(0, 0, 1, Some("p"), &body)).await;
+    let mut src = resp.freeze();
+    assert_eq!(src.get_i32(), 1);
+    assert_eq!(src.get_i32(), 1); // topics
+    assert_eq!(volant_broker::kafka::codec::get_string(&mut src).unwrap(), topic);
+    assert_eq!(src.get_i32(), 1);
+    assert_eq!(src.get_i32(), 0);
+    assert_eq!(src.get_i16(), 0);
+}
+
+#[tokio::test]
+async fn api_versions_list_offsets_ofle_flex_maxes() {
+    let dir = temp_dir("api");
+    let broker = Arc::new(Broker::new(StorageConfig {
+        data_dir: dir.clone(),
+        ..StorageConfig::default()
+    }));
+    let (addr, server) = boot_kafka(Arc::clone(&broker)).await;
+    let resp = rpc(&addr, encode_request(18, 0, 1, Some("t"), &[])).await;
+    let mut src = resp.freeze();
+    src.advance(4 + 2);
+    let n = src.get_i32();
+    let mut found = std::collections::HashMap::new();
+    for _ in 0..n {
+        let key = src.get_i16();
+        let min_v = src.get_i16();
+        let max_v = src.get_i16();
+        found.insert(key, (min_v, max_v));
+    }
+    assert_eq!(found.get(&2), Some(&(0, 6))); // ListOffsets
+    assert_eq!(found.get(&23), Some(&(0, 4))); // OffsetForLeaderEpoch
+    server.abort();
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[tokio::test]
+async fn list_offsets_v6_flexible_earliest_latest() {
+    let dir = temp_dir("lo");
+    let broker = Arc::new(Broker::new(StorageConfig {
+        data_dir: dir.clone(),
+        ..StorageConfig::default()
+    }));
+    broker.create_topic("orders", 1).unwrap();
+    let (addr, server) = boot_kafka(Arc::clone(&broker)).await;
+
+    produce_one(&addr, "orders").await;
+    produce_one(&addr, "orders").await;
+    produce_one(&addr, "orders").await;
+
+    // latest (-1)
+    let resp = rpc(
+        &addr,
+        encode_request_flexible(2, 6, 10, Some("c"), &list_offsets_v6("orders", 0, -1)),
+    )
+    .await;
+    let mut src = resp.freeze();
+    assert_eq!(src.get_i32(), 10);
+    skip_tag_buffer(&mut src).unwrap();
+    assert_eq!(src.get_i32(), 0); // throttle
+    assert_eq!(get_compact_array_len(&mut src).unwrap(), Some(1));
+    assert_eq!(get_compact_string(&mut src).unwrap(), "orders");
+    assert_eq!(get_compact_array_len(&mut src).unwrap(), Some(1));
+    assert_eq!(src.get_i32(), 0); // partition
+    assert_eq!(src.get_i16(), 0); // error
+    assert_eq!(src.get_i64(), -1); // timestamp echo
+    assert_eq!(src.get_i64(), 3); // latest offset (next offset / HWM)
+    let _epoch = src.get_i32();
+    skip_tag_buffer(&mut src).unwrap();
+    skip_tag_buffer(&mut src).unwrap();
+    skip_tag_buffer(&mut src).unwrap();
+
+    // earliest (-2)
+    let resp = rpc(
+        &addr,
+        encode_request_flexible(2, 6, 11, Some("c"), &list_offsets_v6("orders", 0, -2)),
+    )
+    .await;
+    let mut src = resp.freeze();
+    assert_eq!(src.get_i32(), 11);
+    skip_tag_buffer(&mut src).unwrap();
+    assert_eq!(src.get_i32(), 0);
+    assert_eq!(get_compact_array_len(&mut src).unwrap(), Some(1));
+    assert_eq!(get_compact_string(&mut src).unwrap(), "orders");
+    assert_eq!(get_compact_array_len(&mut src).unwrap(), Some(1));
+    assert_eq!(src.get_i32(), 0);
+    assert_eq!(src.get_i16(), 0);
+    assert_eq!(src.get_i64(), -2);
+    assert_eq!(src.get_i64(), 0); // earliest
+    let _ = src.get_i32();
+    skip_tag_buffer(&mut src).unwrap();
+    skip_tag_buffer(&mut src).unwrap();
+    skip_tag_buffer(&mut src).unwrap();
+
+    server.abort();
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[tokio::test]
+async fn ofle_v4_flexible_hwm() {
+    let dir = temp_dir("ofle");
+    let broker = Arc::new(Broker::new(StorageConfig {
+        data_dir: dir.clone(),
+        ..StorageConfig::default()
+    }));
+    broker.create_topic("t", 1).unwrap();
+    let (addr, server) = boot_kafka(Arc::clone(&broker)).await;
+    produce_one(&addr, "t").await;
+    produce_one(&addr, "t").await;
+
+    let resp = rpc(
+        &addr,
+        encode_request_flexible(23, 4, 20, Some("c"), &ofle_v4("t", 0, -1, -1)),
+    )
+    .await;
+    let mut src = resp.freeze();
+    assert_eq!(src.get_i32(), 20);
+    skip_tag_buffer(&mut src).unwrap();
+    assert_eq!(src.get_i32(), 0); // throttle
+    assert_eq!(get_compact_array_len(&mut src).unwrap(), Some(1));
+    assert_eq!(get_compact_string(&mut src).unwrap(), "t");
+    assert_eq!(get_compact_array_len(&mut src).unwrap(), Some(1));
+    assert_eq!(src.get_i16(), 0); // error
+    assert_eq!(src.get_i32(), 0); // partition
+    let epoch = src.get_i32();
+    assert!(epoch >= 0);
+    assert_eq!(src.get_i64(), 2); // end offset = HWM
+    skip_tag_buffer(&mut src).unwrap();
+    skip_tag_buffer(&mut src).unwrap();
+    skip_tag_buffer(&mut src).unwrap();
+
+    server.abort();
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[tokio::test]
+async fn classic_list_offsets_still_works() {
+    let dir = temp_dir("classic");
+    let broker = Arc::new(Broker::new(StorageConfig {
+        data_dir: dir.clone(),
+        ..StorageConfig::default()
+    }));
+    broker.create_topic("c", 1).unwrap();
+    let (addr, server) = boot_kafka(Arc::clone(&broker)).await;
+    produce_one(&addr, "c").await;
+
+    let mut body = BytesMut::new();
+    body.put_i32(-1);
+    body.put_u8(0);
+    body.put_i32(1);
+    put_string(&mut body, "c");
+    body.put_i32(1);
+    body.put_i32(0);
+    body.put_i64(-1); // latest, no epoch field in v2
+    let resp = rpc(&addr, encode_request(2, 2, 1, Some("c"), &body)).await;
+    let mut src = resp.freeze();
+    assert_eq!(src.get_i32(), 1);
+    assert_eq!(src.get_i32(), 0); // throttle
+    assert_eq!(src.get_i32(), 1);
+    assert_eq!(volant_broker::kafka::codec::get_string(&mut src).unwrap(), "c");
+    assert_eq!(src.get_i32(), 1);
+    assert_eq!(src.get_i32(), 0);
+    assert_eq!(src.get_i16(), 0);
+    assert_eq!(src.get_i64(), -1);
+    assert_eq!(src.get_i64(), 1);
+
+    server.abort();
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[tokio::test]
+async fn unsupported_versions_use_header_v1() {
+    let dir = temp_dir("unsup");
+    let broker = Arc::new(Broker::new(StorageConfig {
+        data_dir: dir.clone(),
+        ..StorageConfig::default()
+    }));
+    let (addr, server) = boot_kafka(Arc::clone(&broker)).await;
+
+    // ListOffsets v7 (max timestamp) unsupported
+    let resp = rpc(
+        &addr,
+        encode_request_flexible(2, 7, 30, Some("c"), &[]),
+    )
+    .await;
+    let mut src = resp.freeze();
+    assert_eq!(src.get_i32(), 30);
+    skip_tag_buffer(&mut src).unwrap();
+    assert_eq!(src.get_i16(), 35);
+
+    // OFLE v5 unsupported
+    let resp = rpc(
+        &addr,
+        encode_request_flexible(23, 5, 31, Some("c"), &[]),
+    )
+    .await;
+    let mut src = resp.freeze();
+    assert_eq!(src.get_i32(), 31);
+    skip_tag_buffer(&mut src).unwrap();
+    assert_eq!(src.get_i16(), 35);
+
+    server.abort();
+    let _ = std::fs::remove_dir_all(&dir);
+}

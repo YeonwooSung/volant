@@ -137,7 +137,7 @@ async fn api_versions_includes_offset_for_leader_epoch() {
             found = Some((min_v, max_v));
         }
     }
-    assert_eq!(found, Some((0, 3)));
+    assert_eq!(found, Some((0, 4))); // Phase 63 flexible v4
     server.abort();
     let _ = std::fs::remove_dir_all(&dir);
 }

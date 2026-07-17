@@ -184,6 +184,12 @@ fn dispatch_kafka(broker: &Broker, body: bytes::Bytes, conn: &mut KafkaConnState
                 | Some(ApiKey::TxnOffsetCommit),
             v
         ) if v >= 3
+    ) || matches!(
+        (api, hdr.api_version),
+        (Some(ApiKey::ListOffsets), v) if v >= 6
+    ) || matches!(
+        (api, hdr.api_version),
+        (Some(ApiKey::OffsetForLeaderEpoch), v) if v >= 4
     );
 
     let mut out = BytesMut::new();
@@ -251,7 +257,12 @@ fn dispatch_kafka(broker: &Broker, body: bytes::Bytes, conn: &mut KafkaConnState
             }
             encode_fetch(broker, &mut src, &mut out, hdr.api_version, principal);
         }
-        Some(ApiKey::ListOffsets) if (0..=5).contains(&hdr.api_version) => {
+        Some(ApiKey::ListOffsets) if (0..=6).contains(&hdr.api_version) => {
+            if hdr.api_version >= 6 {
+                if let Err(e) = skip_tag_buffer(&mut src) {
+                    debug!(error = %e, "list offsets flexible header tag buffer");
+                }
+            }
             encode_list_offsets(broker, &mut src, &mut out, hdr.api_version, principal);
         }
         Some(ApiKey::CreateTopics) if (0..=5).contains(&hdr.api_version) => {
@@ -437,7 +448,12 @@ fn dispatch_kafka(broker: &Broker, body: bytes::Bytes, conn: &mut KafkaConnState
             }
             encode_init_producer_id(broker, &mut src, &mut out, hdr.api_version, principal);
         }
-        Some(ApiKey::OffsetForLeaderEpoch) if (0..=3).contains(&hdr.api_version) => {
+        Some(ApiKey::OffsetForLeaderEpoch) if (0..=4).contains(&hdr.api_version) => {
+            if hdr.api_version >= 4 {
+                if let Err(e) = skip_tag_buffer(&mut src) {
+                    debug!(error = %e, "offset for leader epoch flexible header tag buffer");
+                }
+            }
             encode_offset_for_leader_epoch(broker, &mut src, &mut out, hdr.api_version, principal);
         }
         Some(_) => {
@@ -1920,7 +1936,7 @@ fn encode_fetch_record_set(records: &[volant_core::Record], version: i16) -> Byt
     }
 }
 
-/// OffsetForLeaderEpoch (API key 23) classic v0–3.
+/// OffsetForLeaderEpoch (API key 23) classic v0–3 / flexible v4 — Phase 39 / 63.
 ///
 /// Without epoch history, any requested epoch ≤ the current partition epoch
 /// (or -1 = latest) returns end_offset = HWM and the current leader epoch.
@@ -1932,72 +1948,159 @@ fn encode_offset_for_leader_epoch(
     principal: &str,
 ) {
     // Request: replica_id (v3+), topics[{ name, partitions[{ partition,
-    //   current_leader_epoch (v2+), leader_epoch }] }]
+    //   current_leader_epoch (v2+), leader_epoch }]}] [, tags v4+]
+    // Response: throttle (v2+), topics[{ name, partitions[{ error, partition,
+    //   leader_epoch (v1+), end_offset }]}] [, tags v4+]
+    let flex = version >= 4;
+
+    let empty = |out: &mut BytesMut| {
+        if version >= 2 {
+            out.put_i32(0); // throttle
+        }
+        if flex {
+            put_compact_array_len(out, 0);
+            put_empty_tag_buffer(out);
+        } else {
+            out.put_i32(0);
+        }
+    };
+
     if version >= 3 {
         if src.remaining() < 4 {
-            if version >= 2 {
-                out.put_i32(0); // throttle
-            }
-            out.put_i32(0);
+            empty(out);
             return;
         }
         let _replica_id = src.get_i32();
     }
 
-    if version >= 2 {
-        out.put_i32(0); // throttle_time_ms
+    struct PartIn {
+        partition: i32,
+        current_leader_epoch: i32,
+        leader_epoch: i32,
     }
-
-    if src.remaining() < 4 {
-        out.put_i32(0);
-        return;
+    struct TopicIn {
+        name: String,
+        parts: Vec<PartIn>,
     }
-    let topic_count = src.get_i32();
-    out.put_i32(topic_count.max(0));
+    let mut topics: Vec<TopicIn> = Vec::new();
 
-    for _ in 0..topic_count.max(0) {
-        let topic = match get_string(src) {
-            Ok(t) => t,
-            Err(_) => break,
+    if flex {
+        let topic_count = match get_compact_array_len(src) {
+            Ok(Some(n)) => n,
+            Ok(None) => 0,
+            Err(_) => {
+                empty(out);
+                return;
+            }
         };
-        put_string(out, &topic);
-
-        if src.remaining() < 4 {
-            out.put_i32(0);
-            break;
+        for _ in 0..topic_count {
+            let name = match get_compact_string(src) {
+                Ok(t) => t,
+                Err(_) => break,
+            };
+            let part_count = match get_compact_array_len(src) {
+                Ok(Some(n)) => n,
+                Ok(None) => 0,
+                Err(_) => break,
+            };
+            let mut parts = Vec::with_capacity(part_count);
+            for _ in 0..part_count {
+                // partition + current_leader_epoch (v2+) + leader_epoch
+                if src.remaining() < 4 + 4 + 4 {
+                    break;
+                }
+                let partition = src.get_i32();
+                let current_leader_epoch = src.get_i32();
+                let leader_epoch = src.get_i32();
+                let _ = skip_tag_buffer(src);
+                parts.push(PartIn {
+                    partition,
+                    current_leader_epoch,
+                    leader_epoch,
+                });
+            }
+            let _ = skip_tag_buffer(src);
+            topics.push(TopicIn { name, parts });
         }
-        let part_count = src.get_i32();
-        out.put_i32(part_count.max(0));
-
-        for _ in 0..part_count.max(0) {
-            // partition + optional current_leader_epoch + leader_epoch
-            let need = if version >= 2 { 4 + 4 + 4 } else { 4 + 4 };
-            if src.remaining() < need {
+        let _ = skip_tag_buffer(src);
+    } else {
+        if src.remaining() < 4 {
+            empty(out);
+            return;
+        }
+        let topic_count = src.get_i32();
+        for _ in 0..topic_count.max(0) {
+            let name = match get_string(src) {
+                Ok(t) => t,
+                Err(_) => break,
+            };
+            if src.remaining() < 4 {
+                topics.push(TopicIn {
+                    name,
+                    parts: vec![],
+                });
                 break;
             }
-            let partition = src.get_i32();
-            let current_leader_epoch = if version >= 2 {
-                src.get_i32()
-            } else {
-                -1
-            };
-            let leader_epoch = src.get_i32();
+            let part_count = src.get_i32();
+            let mut parts = Vec::new();
+            for _ in 0..part_count.max(0) {
+                let need = if version >= 2 { 4 + 4 + 4 } else { 4 + 4 };
+                if src.remaining() < need {
+                    break;
+                }
+                let partition = src.get_i32();
+                let current_leader_epoch = if version >= 2 {
+                    src.get_i32()
+                } else {
+                    -1
+                };
+                let leader_epoch = src.get_i32();
+                parts.push(PartIn {
+                    partition,
+                    current_leader_epoch,
+                    leader_epoch,
+                });
+            }
+            topics.push(TopicIn { name, parts });
+        }
+    }
 
-            // Response partition entry: error, partition, leader_epoch (v1+), end_offset.
+    if version >= 2 {
+        out.put_i32(0); // throttle
+    }
+    if flex {
+        put_compact_array_len(out, topics.len());
+    } else {
+        out.put_i32(topics.len() as i32);
+    }
+
+    for t in topics {
+        if flex {
+            put_compact_string(out, &t.name);
+            put_compact_array_len(out, t.parts.len());
+        } else {
+            put_string(out, &t.name);
+            out.put_i32(t.parts.len() as i32);
+        }
+
+        for p in t.parts {
             let write_part = |out: &mut BytesMut, err: i16, epoch: i32, end: i64| {
                 out.put_i16(err);
-                out.put_i32(partition);
+                out.put_i32(p.partition);
                 if version >= 1 {
                     out.put_i32(epoch);
                 }
                 out.put_i64(end);
+                if flex {
+                    put_empty_tag_buffer(out);
+                }
             };
 
             if broker.acls().is_enabled()
                 && !broker.acls().authorize(
                     Some(principal),
                     ResourceType::Topic,
-                    &topic,
+                    &t.name,
                     AclOperation::Describe,
                 )
             {
@@ -2010,12 +2113,13 @@ fn encode_offset_for_leader_epoch(
                 continue;
             }
 
-            let name = TopicName::new(topic.clone());
+            let name = TopicName::new(t.name.clone());
             let snap = broker.metadata(Some(&[name]));
-            let part_meta = snap.topics.first().and_then(|t| {
-                t.partitions
+            let part_meta = snap.topics.first().and_then(|topic| {
+                topic
+                    .partitions
                     .iter()
-                    .find(|p| p.partition_id.0 == partition as u32)
+                    .find(|pm| pm.partition_id.0 == p.partition as u32)
             });
 
             let Some(pm) = part_meta else {
@@ -2031,9 +2135,8 @@ fn encode_offset_for_leader_epoch(
             let current_epoch = pm.leader_epoch as i32;
             let hwm = pm.hwm as i64;
 
-            // Fence on current_leader_epoch (v2+).
-            if current_leader_epoch != -1 {
-                if current_leader_epoch > current_epoch {
+            if p.current_leader_epoch != -1 {
+                if p.current_leader_epoch > current_epoch {
                     write_part(
                         out,
                         KafkaErrorCode::UnknownLeaderEpoch.as_i16(),
@@ -2042,7 +2145,7 @@ fn encode_offset_for_leader_epoch(
                     );
                     continue;
                 }
-                if current_leader_epoch < current_epoch {
+                if p.current_leader_epoch < current_epoch {
                     write_part(
                         out,
                         KafkaErrorCode::FencedLeaderEpoch.as_i16(),
@@ -2053,8 +2156,7 @@ fn encode_offset_for_leader_epoch(
                 }
             }
 
-            // Lookup requested leader_epoch (-1 = latest / current).
-            if leader_epoch != -1 && leader_epoch > current_epoch {
+            if p.leader_epoch != -1 && p.leader_epoch > current_epoch {
                 write_part(
                     out,
                     KafkaErrorCode::UnknownLeaderEpoch.as_i16(),
@@ -2067,21 +2169,46 @@ fn encode_offset_for_leader_epoch(
             // No epoch history: any eligible epoch maps to current HWM.
             write_part(out, KafkaErrorCode::None.as_i16(), current_epoch, hwm);
         }
+        if flex {
+            put_empty_tag_buffer(out); // topic tags
+        }
+    }
+    if flex {
+        put_empty_tag_buffer(out); // response top-level tags
     }
 }
 
-fn encode_list_offsets(broker: &Broker, src: &mut impl Buf, out: &mut BytesMut, version: i16, principal: &str) {
-    // ListOffsets classic v0–5:
+fn encode_list_offsets(
+    broker: &Broker,
+    src: &mut impl Buf,
+    out: &mut BytesMut,
+    version: i16,
+    principal: &str,
+) {
+    // ListOffsets classic v0–5 / flexible v6:
     //   replica_id, isolation_level (v2+),
     //   topics[{ name, partitions[{ partition, current_leader_epoch (v4+),
-    //     timestamp, max_num_offsets (v0) }] }]
+    //     timestamp, max_num_offsets (v0) }]}] [, tags v6+]
     // Response: throttle (v2+), topics[{ name, partitions[{ partition, error,
-    //   v0: [timestamp,offset] array | v1+: timestamp, offset, leader_epoch (v4+) }] }]
-    if src.remaining() < 4 {
+    //   v0: [timestamp,offset] array | v1+: timestamp, offset, leader_epoch (v4+) }]}]
+    //   [, tags v6+]
+    // v7+ max-timestamp / local-log-start / tiered timestamps out of scope.
+    let flex = version >= 6;
+
+    let empty = |out: &mut BytesMut| {
         if version >= 2 {
             out.put_i32(0);
         }
-        out.put_i32(0);
+        if flex {
+            put_compact_array_len(out, 0);
+            put_empty_tag_buffer(out);
+        } else {
+            out.put_i32(0);
+        }
+    };
+
+    if src.remaining() < 4 {
+        empty(out);
         return;
     }
     let _replica_id = src.get_i32();
@@ -2090,33 +2217,119 @@ fn encode_list_offsets(broker: &Broker, src: &mut impl Buf, out: &mut BytesMut, 
     // buffer-until-commit (LSO ≡ HWM); accept and ignore.
     if version >= 2 {
         if src.remaining() < 1 {
-            out.put_i32(0); // throttle
-            out.put_i32(0);
+            empty(out);
             return;
         }
         let isolation = src.get_u8();
         if isolation > 1 {
-            out.put_i32(0);
-            out.put_i32(0);
+            empty(out);
             return;
         }
     }
 
-    if version >= 2 {
-        out.put_i32(0); // throttle_time_ms
+    struct PartIn {
+        partition: i32,
+        current_leader_epoch: i32,
+        timestamp: i64,
     }
+    struct TopicIn {
+        name: String,
+        parts: Vec<PartIn>,
+    }
+    let mut topics: Vec<TopicIn> = Vec::new();
 
-    if src.remaining() < 4 {
-        out.put_i32(0);
-        return;
+    if flex {
+        let topic_count = match get_compact_array_len(src) {
+            Ok(Some(n)) => n,
+            Ok(None) => 0,
+            Err(_) => {
+                empty(out);
+                return;
+            }
+        };
+        for _ in 0..topic_count {
+            let name = match get_compact_string(src) {
+                Ok(t) => t,
+                Err(_) => break,
+            };
+            let part_count = match get_compact_array_len(src) {
+                Ok(Some(n)) => n,
+                Ok(None) => 0,
+                Err(_) => break,
+            };
+            let mut parts = Vec::with_capacity(part_count);
+            for _ in 0..part_count {
+                // partition + current_leader_epoch (v4+) + timestamp
+                if src.remaining() < 4 + 4 + 8 {
+                    break;
+                }
+                let partition = src.get_i32();
+                let current_leader_epoch = src.get_i32();
+                let timestamp = src.get_i64();
+                let _ = skip_tag_buffer(src);
+                parts.push(PartIn {
+                    partition,
+                    current_leader_epoch,
+                    timestamp,
+                });
+            }
+            let _ = skip_tag_buffer(src);
+            topics.push(TopicIn { name, parts });
+        }
+        let _ = skip_tag_buffer(src);
+    } else {
+        if src.remaining() < 4 {
+            empty(out);
+            return;
+        }
+        let topic_count = src.get_i32();
+        for _ in 0..topic_count.max(0) {
+            let name = match get_string(src) {
+                Ok(t) => t,
+                Err(_) => break,
+            };
+            if src.remaining() < 4 {
+                topics.push(TopicIn {
+                    name,
+                    parts: vec![],
+                });
+                break;
+            }
+            let part_count = src.get_i32();
+            let mut parts = Vec::new();
+            for _ in 0..part_count.max(0) {
+                let need = if version >= 4 { 4 + 4 + 8 } else { 4 + 8 };
+                if src.remaining() < need {
+                    break;
+                }
+                let partition = src.get_i32();
+                let current_leader_epoch = if version >= 4 {
+                    src.get_i32()
+                } else {
+                    -1
+                };
+                let timestamp = src.get_i64();
+                if version == 0 {
+                    if src.remaining() < 4 {
+                        break;
+                    }
+                    let _max_num = src.get_i32();
+                }
+                parts.push(PartIn {
+                    partition,
+                    current_leader_epoch,
+                    timestamp,
+                });
+            }
+            topics.push(TopicIn { name, parts });
+        }
     }
-    let topic_count = src.get_i32();
-    out.put_i32(topic_count.max(0));
 
     /// Write a partition result with versioned fields.
     fn write_part(
         out: &mut BytesMut,
         version: i16,
+        flex: bool,
         partition: i32,
         err: i16,
         timestamp: i64,
@@ -2140,99 +2353,86 @@ fn encode_list_offsets(broker: &Broker, src: &mut impl Buf, out: &mut BytesMut, 
                 out.put_i32(leader_epoch);
             }
         }
+        if flex {
+            put_empty_tag_buffer(out);
+        }
     }
 
-    for _ in 0..topic_count.max(0) {
-        let topic = match get_string(src) {
-            Ok(t) => t,
-            Err(_) => break,
-        };
-        put_string(out, &topic);
+    if version >= 2 {
+        out.put_i32(0); // throttle
+    }
+    if flex {
+        put_compact_array_len(out, topics.len());
+    } else {
+        out.put_i32(topics.len() as i32);
+    }
 
-        if src.remaining() < 4 {
-            out.put_i32(0);
-            break;
+    for t in topics {
+        if flex {
+            put_compact_string(out, &t.name);
+            put_compact_array_len(out, t.parts.len());
+        } else {
+            put_string(out, &t.name);
+            out.put_i32(t.parts.len() as i32);
         }
-        let part_count = src.get_i32();
-        out.put_i32(part_count.max(0));
 
-        for _ in 0..part_count.max(0) {
-            // partition + optional current_leader_epoch + timestamp [+ max_num v0]
-            let need = if version >= 4 {
-                4 + 4 + 8
-            } else {
-                4 + 8
-            };
-            if src.remaining() < need {
-                break;
-            }
-            let partition = src.get_i32();
-            let current_leader_epoch = if version >= 4 {
-                src.get_i32()
-            } else {
-                -1
-            };
-            let timestamp = src.get_i64();
-            if version == 0 {
-                if src.remaining() < 4 {
-                    break;
-                }
-                let _max_num = src.get_i32();
-            }
-
+        for p in t.parts {
             if broker.acls().is_enabled()
                 && !broker.acls().authorize(
                     Some(principal),
                     ResourceType::Topic,
-                    &topic,
+                    &t.name,
                     AclOperation::Describe,
                 )
             {
                 write_part(
                     out,
                     version,
-                    partition,
+                    flex,
+                    p.partition,
                     KafkaErrorCode::TopicAuthorizationFailed.as_i16(),
-                    timestamp,
+                    p.timestamp,
                     -1,
                     -1,
                 );
                 continue;
             }
 
-            // Resolve current partition epoch for fencing / response (v4+).
-            let name = TopicName::new(topic.clone());
-            let part_meta = broker.metadata(Some(&[name])).topics.first().and_then(|t| {
-                t.partitions
+            let name = TopicName::new(t.name.clone());
+            let part_meta = broker.metadata(Some(&[name])).topics.first().and_then(|topic| {
+                topic
+                    .partitions
                     .iter()
-                    .find(|p| p.partition_id.0 == partition as u32)
+                    .find(|pm| pm.partition_id.0 == p.partition as u32)
                     .cloned()
             });
             let current_epoch = part_meta
                 .as_ref()
-                .map(|p| p.leader_epoch as i32)
+                .map(|pm| pm.leader_epoch as i32)
                 .unwrap_or(-1);
 
-            if current_leader_epoch != -1 {
-                if current_leader_epoch > current_epoch && current_epoch >= 0 {
+            if p.current_leader_epoch != -1 {
+                if p.current_leader_epoch > current_epoch && current_epoch >= 0 {
                     write_part(
                         out,
                         version,
-                        partition,
+                        flex,
+                        p.partition,
                         KafkaErrorCode::UnknownLeaderEpoch.as_i16(),
-                        timestamp,
+                        p.timestamp,
                         -1,
                         current_epoch,
                     );
                     continue;
                 }
-                if current_leader_epoch < current_epoch {
+                if p.current_leader_epoch < current_epoch {
                     write_part(
                         out,
                         version,
-                        partition,
+                        flex,
+                        p.partition,
                         KafkaErrorCode::FencedLeaderEpoch.as_i16(),
-                        timestamp,
+                        p.timestamp,
                         -1,
                         current_epoch,
                     );
@@ -2241,22 +2441,23 @@ fn encode_list_offsets(broker: &Broker, src: &mut impl Buf, out: &mut BytesMut, 
             }
 
             // Kafka: -1 = latest, -2 = earliest.
-            let want_earliest = timestamp == -2;
-            let want_latest = timestamp == -1;
+            let want_earliest = p.timestamp == -2;
+            let want_latest = p.timestamp == -1;
             if !want_earliest && !want_latest {
                 write_part(
                     out,
                     version,
-                    partition,
+                    flex,
+                    p.partition,
                     KafkaErrorCode::InvalidTimestamp.as_i16(),
-                    timestamp,
+                    p.timestamp,
                     -1,
                     current_epoch,
                 );
                 continue;
             }
 
-            match broker.list_offsets(&topic, &[partition as u32]) {
+            match broker.list_offsets(&t.name, &[p.partition as u32]) {
                 Ok(entries) => {
                     let (earliest, latest) = entries
                         .first()
@@ -2266,9 +2467,10 @@ fn encode_list_offsets(broker: &Broker, src: &mut impl Buf, out: &mut BytesMut, 
                     write_part(
                         out,
                         version,
-                        partition,
+                        flex,
+                        p.partition,
                         KafkaErrorCode::None.as_i16(),
-                        timestamp,
+                        p.timestamp,
                         offset,
                         current_epoch.max(0),
                     );
@@ -2277,9 +2479,10 @@ fn encode_list_offsets(broker: &Broker, src: &mut impl Buf, out: &mut BytesMut, 
                     write_part(
                         out,
                         version,
-                        partition,
+                        flex,
+                        p.partition,
                         KafkaErrorCode::UnknownTopicOrPartition.as_i16(),
-                        timestamp,
+                        p.timestamp,
                         -1,
                         -1,
                     );
@@ -2288,15 +2491,22 @@ fn encode_list_offsets(broker: &Broker, src: &mut impl Buf, out: &mut BytesMut, 
                     write_part(
                         out,
                         version,
-                        partition,
+                        flex,
+                        p.partition,
                         KafkaErrorCode::Unknown.as_i16(),
-                        timestamp,
+                        p.timestamp,
                         -1,
                         -1,
                     );
                 }
             }
         }
+        if flex {
+            put_empty_tag_buffer(out); // topic tags
+        }
+    }
+    if flex {
+        put_empty_tag_buffer(out); // response top-level tags
     }
 }
 

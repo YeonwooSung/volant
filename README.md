@@ -299,6 +299,8 @@ IncrementalAlterConfigs v1.
 **Phase 62:** Flexible transaction APIs — InitProducerId v2, AddPartitionsToTxn /
 AddOffsetsToTxn / EndTxn / TxnOffsetCommit v3; classic paths unchanged.
 
+**Phase 63:** Flexible ListOffsets v6 + OffsetForLeaderEpoch v4.
+
 **Still deferred:** multi-language clients, chaos-mesh / cargo-fuzz corpus CI.
 
 ### Networked client (library)
