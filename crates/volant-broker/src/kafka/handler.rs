@@ -308,7 +308,7 @@ fn dispatch_kafka(broker: &Broker, body: bytes::Bytes, conn: &mut KafkaConnState
             }
             encode_fetch(broker, &mut src, &mut out, hdr.api_version, principal);
         }
-        Some(ApiKey::ListOffsets) if (0..=6).contains(&hdr.api_version) => {
+        Some(ApiKey::ListOffsets) if (0..=11).contains(&hdr.api_version) => {
             if hdr.api_version >= 6 {
                 if let Err(e) = skip_tag_buffer(&mut src) {
                     debug!(error = %e, "list offsets flexible header tag buffer");
@@ -2915,14 +2915,20 @@ fn encode_list_offsets(
     version: i16,
     principal: &str,
 ) {
-    // ListOffsets classic v0–5 / flexible v6:
+    // ListOffsets classic v0–5 / flexible v6–11:
     //   replica_id, isolation_level (v2+),
     //   topics[{ name, partitions[{ partition, current_leader_epoch (v4+),
-    //     timestamp, max_num_offsets (v0) }]}] [, tags v6+]
+    //     timestamp, max_num_offsets (v0) }]}]
+    //   TimeoutMs (v10+, ignored), [, tags v6+]
     // Response: throttle (v2+), topics[{ name, partitions[{ partition, error,
     //   v0: [timestamp,offset] array | v1+: timestamp, offset, leader_epoch (v4+) }]}]
     //   [, tags v6+]
-    // v7+ max-timestamp / local-log-start / tiered timestamps out of scope.
+    // Special timestamps (Kafka ListOffsetsRequest):
+    //   -1 latest, -2 earliest,
+    //   -3 max timestamp (v7+, KIP-734), -4 earliest local (v8+ ≡ earliest),
+    //   -5 latest tiered (v9+, no remote → -1/-1),
+    //   -6 earliest pending upload (v11+, no remote → -1/-1).
+    // Positive / other timestamps → InvalidTimestamp (no time index).
     let flex = version >= 6;
 
     let empty = |out: &mut BytesMut| {
@@ -3005,6 +3011,10 @@ fn encode_list_offsets(
             }
             let _ = skip_tag_buffer(src);
             topics.push(TopicIn { name, parts });
+        }
+        // v10+: TimeoutMs (remote/tiered await) — parsed, ignored.
+        if version >= 10 && src.remaining() >= 4 {
+            let _timeout_ms = src.get_i32();
         }
         let _ = skip_tag_buffer(src);
     } else {
@@ -3170,23 +3180,110 @@ fn encode_list_offsets(
                 }
             }
 
-            // Kafka: -1 = latest, -2 = earliest.
-            let want_earliest = p.timestamp == -2;
-            let want_latest = p.timestamp == -1;
-            if !want_earliest && !want_latest {
+            // Kafka special timestamps (version-gated).
+            const LATEST: i64 = -1;
+            const EARLIEST: i64 = -2;
+            const MAX_TIMESTAMP: i64 = -3;
+            const EARLIEST_LOCAL: i64 = -4;
+            const LATEST_TIERED: i64 = -5;
+            const EARLIEST_PENDING_UPLOAD: i64 = -6;
+
+            let ts = p.timestamp;
+            let allowed = match ts {
+                LATEST | EARLIEST => true,
+                MAX_TIMESTAMP if version >= 7 => true,
+                EARLIEST_LOCAL if version >= 8 => true,
+                LATEST_TIERED if version >= 9 => true,
+                EARLIEST_PENDING_UPLOAD if version >= 11 => true,
+                _ => false,
+            };
+            if !allowed {
                 write_part(
                     out,
                     version,
                     flex,
                     p.partition,
                     KafkaErrorCode::InvalidTimestamp.as_i16(),
-                    p.timestamp,
+                    ts,
                     -1,
                     current_epoch,
                 );
                 continue;
             }
 
+            // No remote/tiered storage: tiered specials return empty (-1/-1).
+            if ts == LATEST_TIERED || ts == EARLIEST_PENDING_UPLOAD {
+                write_part(
+                    out,
+                    version,
+                    flex,
+                    p.partition,
+                    KafkaErrorCode::None.as_i16(),
+                    -1,
+                    -1,
+                    current_epoch.max(0),
+                );
+                continue;
+            }
+
+            // MAX_TIMESTAMP: scan for the record with the largest timestamp.
+            if ts == MAX_TIMESTAMP {
+                match broker.max_timestamp_offset(&t.name, p.partition as u32) {
+                    Ok(Some((off, max_ts))) => {
+                        write_part(
+                            out,
+                            version,
+                            flex,
+                            p.partition,
+                            KafkaErrorCode::None.as_i16(),
+                            max_ts, // actual max timestamp, not the -3 sentinel
+                            off as i64,
+                            current_epoch.max(0),
+                        );
+                    }
+                    Ok(None) => {
+                        // Empty partition.
+                        write_part(
+                            out,
+                            version,
+                            flex,
+                            p.partition,
+                            KafkaErrorCode::None.as_i16(),
+                            -1,
+                            -1,
+                            current_epoch.max(0),
+                        );
+                    }
+                    Err(Error::NotFound(_)) => {
+                        write_part(
+                            out,
+                            version,
+                            flex,
+                            p.partition,
+                            KafkaErrorCode::UnknownTopicOrPartition.as_i16(),
+                            ts,
+                            -1,
+                            -1,
+                        );
+                    }
+                    Err(_) => {
+                        write_part(
+                            out,
+                            version,
+                            flex,
+                            p.partition,
+                            KafkaErrorCode::Unknown.as_i16(),
+                            ts,
+                            -1,
+                            -1,
+                        );
+                    }
+                }
+                continue;
+            }
+
+            // EARLIEST / EARLIEST_LOCAL / LATEST via list_offsets.
+            let want_earliest = ts == EARLIEST || ts == EARLIEST_LOCAL;
             match broker.list_offsets(&t.name, &[p.partition as u32]) {
                 Ok(entries) => {
                     let (earliest, latest) = entries
@@ -3200,7 +3297,7 @@ fn encode_list_offsets(
                         flex,
                         p.partition,
                         KafkaErrorCode::None.as_i16(),
-                        p.timestamp,
+                        ts,
                         offset,
                         current_epoch.max(0),
                     );
@@ -3212,7 +3309,7 @@ fn encode_list_offsets(
                         flex,
                         p.partition,
                         KafkaErrorCode::UnknownTopicOrPartition.as_i16(),
-                        p.timestamp,
+                        ts,
                         -1,
                         -1,
                     );
@@ -3224,7 +3321,7 @@ fn encode_list_offsets(
                         flex,
                         p.partition,
                         KafkaErrorCode::Unknown.as_i16(),
-                        p.timestamp,
+                        ts,
                         -1,
                         -1,
                     );

@@ -1655,6 +1655,28 @@ path); no v14+.
 
 **Still deferred:** multi-lang clients, cargo-fuzz corpus CI, true control-marker
 READ_COMMITTED, higher KIP-890 txn versions, ListOffsets v7+ max-timestamp.
+ListOffsets v7–11 specials closed by **Phase 74**.
+
+---
+
+### Phase 74 — ListOffsets v7–11 (special timestamps) ✅
+
+**Goal:** Modern clients can negotiate ListOffsets through v11 and use
+MAX_TIMESTAMP / local-log / tiered specials without UnsupportedVersion.
+
+Binding: **[docs/PHASE74_SPEC.md](./docs/PHASE74_SPEC.md)**.
+
+- [x] ListOffsets 0–11 (flexible v6–11; TimeoutMs v10 ignored)
+- [x] MAX_TIMESTAMP (-3) log scan → `(offset, max_ts)`
+- [x] EARLIEST_LOCAL (-4) ≡ earliest; tiered specials (-5/-6) → -1/-1
+- [x] Integration tests (`phase74_list_offsets_specials`)
+
+**Honest limitations:** full scan for max timestamp (no time index); no
+tiered/remote storage; TimeoutMs ignored; positive timestamps still
+InvalidTimestamp; no v12+.
+
+**Still deferred:** multi-lang clients, cargo-fuzz corpus CI, true control-marker
+READ_COMMITTED, higher KIP-890 txn versions.
 
 ---
 

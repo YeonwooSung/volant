@@ -136,7 +136,7 @@ async fn api_versions_list_offsets_max_5() {
             found = Some((min_v, max_v));
         }
     }
-    assert_eq!(found, Some((0, 6))); // Phase 63 flexible v6
+    assert_eq!(found, Some((0, 11))); // Phase 74 special timestamps
     server.abort();
     let _ = std::fs::remove_dir_all(&dir);
 }

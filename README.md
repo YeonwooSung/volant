@@ -331,6 +331,9 @@ unknown id → UnknownTopicId.
 **Phase 73:** Metadata v13 — top-level ErrorCode (always 0); request wire same
 as v12 TopicId path.
 
+**Phase 74:** ListOffsets v7–11 — MAX_TIMESTAMP (-3) scan; EARLIEST_LOCAL (-4);
+tiered specials empty; TimeoutMs (v10) ignored.
+
 **Still deferred:** multi-language clients, chaos-mesh / cargo-fuzz corpus CI.
 
 ### Networked client (library)

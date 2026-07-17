@@ -144,7 +144,7 @@ Supported APIs:
 | DescribeProducers | 0 | **Always flexible**; active producers from sequences + open-txn activity; last_ts/coord_epoch/txn_start placeholders |
 | DescribeTransactions | 0 | **Always flexible**; Empty/Ongoing from txn registry; unknown → TransactionalIdNotFound; timeout/start=0 |
 | ListTransactions | 0–2 | **Always flexible**; open txns as `Ongoing`; state/pid filters; **v1 DurationFilter** accepted/ignored; **v2 TransactionalIdPattern** (`*` glob, not full RE2J); v3 unsupported |
-| ListOffsets | 0–6 | Classic 0–5; **v6 flexible** + response header v1; -1 latest / -2 earliest; isolation ignored (LSO≡HWM); v4+ leader-epoch fencing; v7+ max-timestamp unsupported |
+| ListOffsets | 0–11 | Classic 0–5; **v6–11 flexible** + response header v1; -1 latest / -2 earliest; **v7 -3 MAX_TIMESTAMP** (log scan); **v8 -4 EARLIEST_LOCAL** ≡ earliest; **v9 -5 / v11 -6** tiered specials → -1/-1 (no remote); **v10 TimeoutMs** ignored; isolation ignored (LSO≡HWM); v4+ leader-epoch fencing; positive timestamps InvalidTimestamp; v12 unsupported |
 | CreateTopics | 0–7 | Classic 0–4; **v5–7 flexible** + response header v1; validate_only v1+; default partitions v4+; configs response null; **v7 TopicId** (deterministic UUID); v8 unsupported |
 | DeleteTopics | 0–6 | Classic 0–3; **v4–6 flexible** + response header v1; throttle v1+; **v5 ErrorMessage**; **v6 TopicId** delete-by-id (unknown → UnknownTopicId); v7 unsupported |
 | JoinGroup | 0–9 | Classic 0–5; **v6+ flexible** + response header v1; v5+ group.instance.id → static:{id}; **v7** ProtocolType; **v8** Reason (ignored); **v9** SkipAssignment=false; throttle v2+ |

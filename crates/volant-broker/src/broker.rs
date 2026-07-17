@@ -1498,6 +1498,57 @@ impl Broker {
         Ok(out)
     }
 
+    /// Offset of the record with the maximum timestamp in a partition (KIP-734).
+    ///
+    /// Scans the local log. Empty partition → `None`. Returns
+    /// `(offset, max_timestamp_ms)`.
+    pub fn max_timestamp_offset(
+        &self,
+        topic: &str,
+        partition: u32,
+    ) -> Result<Option<(u64, i64)>> {
+        let name = TopicName::new(topic);
+        let topics = self.topics.read();
+        let t = topics
+            .get(&name)
+            .ok_or_else(|| Error::NotFound(format!("topic {topic}")))?;
+        let part = t
+            .partitions
+            .get(&PartitionId(partition))
+            .ok_or_else(|| {
+                Error::NotFound(format!("partition {topic}/{partition}"))
+            })?;
+        let start = part.log.log_start_offset();
+        let end = part.log.log_end_offset();
+        if start.raw() >= end.raw() {
+            return Ok(None);
+        }
+        // Chunked scan — max timestamp wins; ties keep the later offset.
+        let mut best: Option<(u64, i64)> = None;
+        let mut cursor = start;
+        while cursor.raw() < end.raw() {
+            let batch = part.log.read(cursor, 512)?;
+            if batch.is_empty() {
+                break;
+            }
+            for r in &batch {
+                match best {
+                    None => best = Some((r.offset.raw(), r.timestamp_ms)),
+                    Some((_, ts)) if r.timestamp_ms >= ts => {
+                        best = Some((r.offset.raw(), r.timestamp_ms));
+                    }
+                    _ => {}
+                }
+            }
+            let next = batch.last().map(|r| r.offset.raw().saturating_add(1)).unwrap_or(end.raw());
+            if next <= cursor.raw() {
+                break;
+            }
+            cursor = Offset::new(next);
+        }
+        Ok(best)
+    }
+
     /// Delete records before `before_offset` on a partition (Phase 14).
     ///
     /// Drops whole sealed segments only. Returns `(low_watermark, error_code)`.
