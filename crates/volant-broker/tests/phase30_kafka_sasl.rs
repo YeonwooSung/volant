@@ -1,47 +1,24 @@
 //! Phase 30: Kafka SASL PLAIN + SCRAM-SHA-256 on the shim.
 
-use std::path::PathBuf;
+#[path = "common/mod.rs"]
+mod common;
+use common::{boot_kafka, temp_dir};
+
 use std::sync::Arc;
-use std::time::{SystemTime, UNIX_EPOCH};
 
 use base64::engine::general_purpose::STANDARD as B64;
 use base64::Engine;
 use bytes::{Buf, BufMut, Bytes, BytesMut};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
-use tokio::net::{TcpListener, TcpStream};
+use tokio::net::TcpStream;
 use volant_broker::kafka::codec::{
     encode_record_batch, encode_request, get_bytes, get_nullable_string, get_string, put_bytes,
     put_string,
 };
 use volant_broker::scram::client_proof_and_server_sig;
-use volant_broker::{serve_kafka_listener, Broker};
+use volant_broker::Broker;
 use volant_core::{Offset, Record};
 use volant_storage::StorageConfig;
-
-fn temp_dir(label: &str) -> PathBuf {
-    let nanos = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .unwrap()
-        .as_nanos();
-    let dir = std::env::temp_dir().join(format!(
-        "volant-p30-{label}-{}-{}",
-        std::process::id(),
-        nanos
-    ));
-    let _ = std::fs::remove_dir_all(&dir);
-    std::fs::create_dir_all(&dir).unwrap();
-    dir
-}
-
-async fn boot_kafka(broker: Arc<Broker>) -> (String, tokio::task::JoinHandle<()>) {
-    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
-    let addr = listener.local_addr().unwrap();
-    let handle = tokio::spawn(async move {
-        serve_kafka_listener(listener, broker).await.ok();
-    });
-    tokio::task::yield_now().await;
-    (format!("127.0.0.1:{}", addr.port()), handle)
-}
 
 struct KafkaClient {
     stream: TcpStream,
@@ -87,7 +64,7 @@ fn produce_body(topic: &str, batch: &[u8]) -> BytesMut {
 
 #[tokio::test]
 async fn api_versions_includes_sasl_keys() {
-    let dir = temp_dir("api");
+    let dir = temp_dir("p30", "api");
     let broker = Arc::new(Broker::new(StorageConfig {
         data_dir: dir.clone(),
         ..StorageConfig::default()
@@ -122,7 +99,7 @@ async fn api_versions_includes_sasl_keys() {
 
 #[tokio::test]
 async fn plain_auth_then_produce() {
-    let dir = temp_dir("plain");
+    let dir = temp_dir("p30", "plain");
     let broker = Arc::new(Broker::new(StorageConfig {
         data_dir: dir.clone(),
         ..StorageConfig::default()
@@ -198,7 +175,7 @@ async fn plain_auth_then_produce() {
 
 #[tokio::test]
 async fn scram_sha256_auth_roundtrip() {
-    let dir = temp_dir("scram");
+    let dir = temp_dir("p30", "scram");
     let broker = Arc::new(Broker::new(StorageConfig {
         data_dir: dir.clone(),
         ..StorageConfig::default()
@@ -290,7 +267,7 @@ async fn scram_sha256_auth_roundtrip() {
 
 #[tokio::test]
 async fn unsupported_mechanism() {
-    let dir = temp_dir("mech");
+    let dir = temp_dir("p30", "mech");
     let broker = Arc::new(Broker::new(StorageConfig {
         data_dir: dir.clone(),
         ..StorageConfig::default()

@@ -1,62 +1,17 @@
 //! Phase 41: Kafka OffsetFetch classic v0–5 on the shim.
 
-use std::path::PathBuf;
+#[path = "common/mod.rs"]
+mod common;
+use common::{boot_kafka, rpc, temp_dir};
+
 use std::sync::Arc;
-use std::time::{SystemTime, UNIX_EPOCH};
 
 use bytes::{Buf, BufMut, BytesMut};
-use tokio::io::{AsyncReadExt, AsyncWriteExt};
-use tokio::net::{TcpListener, TcpStream};
 use volant_broker::kafka::codec::{encode_request, get_string, put_string};
 use volant_broker::{
-    serve_kafka_listener, AclEntry, AclOperation, AclPermission, Broker, ResourceType,
+    AclEntry, AclOperation, AclPermission, Broker, ResourceType,
 };
 use volant_storage::StorageConfig;
-
-fn temp_dir(label: &str) -> PathBuf {
-    let nanos = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .unwrap()
-        .as_nanos();
-    let dir = std::env::temp_dir().join(format!(
-        "volant-p41-{label}-{}-{}",
-        std::process::id(),
-        nanos
-    ));
-    let _ = std::fs::remove_dir_all(&dir);
-    std::fs::create_dir_all(&dir).unwrap();
-    dir
-}
-
-async fn boot_kafka(broker: Arc<Broker>) -> (String, tokio::task::JoinHandle<()>) {
-    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
-    let addr = listener.local_addr().unwrap();
-    let handle = tokio::spawn(async move {
-        serve_kafka_listener(listener, broker).await.ok();
-    });
-    tokio::task::yield_now().await;
-    (format!("127.0.0.1:{}", addr.port()), handle)
-}
-
-async fn rpc(addr: &str, request: BytesMut) -> BytesMut {
-    let mut stream = TcpStream::connect(addr).await.unwrap();
-    stream.write_all(&request).await.unwrap();
-    let mut buf = BytesMut::with_capacity(64 * 1024);
-    loop {
-        let n = stream.read_buf(&mut buf).await.unwrap();
-        if n == 0 {
-            break;
-        }
-        if buf.len() >= 4 {
-            let size = i32::from_be_bytes([buf[0], buf[1], buf[2], buf[3]]) as usize;
-            if buf.len() >= 4 + size {
-                let _ = buf.split_to(4);
-                return buf.split_to(size);
-            }
-        }
-    }
-    panic!("connection closed without full kafka response");
-}
 
 /// OffsetCommit v0: group, [topic [partition, offset, metadata]] (no generation).
 fn commit_v0(group: &str, topic: &str, partition: i32, offset: i64, meta: &str) -> BytesMut {
@@ -95,7 +50,7 @@ fn fetch_body(version: i16, group: &str, topics: Option<&[(&str, &[i32])]>) -> B
 
 #[tokio::test]
 async fn api_versions_offset_fetch_max_5() {
-    let dir = temp_dir("api");
+    let dir = temp_dir("p41", "api");
     let broker = Arc::new(Broker::new(StorageConfig {
         data_dir: dir.clone(),
         ..StorageConfig::default()
@@ -121,7 +76,7 @@ async fn api_versions_offset_fetch_max_5() {
 
 #[tokio::test]
 async fn offset_fetch_v5_throttle_epoch_and_top_error() {
-    let dir = temp_dir("v5");
+    let dir = temp_dir("p41", "v5");
     let broker = Arc::new(Broker::new(StorageConfig {
         data_dir: dir.clone(),
         ..StorageConfig::default()
@@ -170,7 +125,7 @@ async fn offset_fetch_v5_throttle_epoch_and_top_error() {
 
 #[tokio::test]
 async fn offset_fetch_v2_null_topics_all() {
-    let dir = temp_dir("null");
+    let dir = temp_dir("p41", "null");
     let broker = Arc::new(Broker::new(StorageConfig {
         data_dir: dir.clone(),
         ..StorageConfig::default()
@@ -213,7 +168,7 @@ async fn offset_fetch_v2_null_topics_all() {
 
 #[tokio::test]
 async fn offset_fetch_v3_throttle() {
-    let dir = temp_dir("v3");
+    let dir = temp_dir("p41", "v3");
     let broker = Arc::new(Broker::new(StorageConfig {
         data_dir: dir.clone(),
         ..StorageConfig::default()
@@ -247,7 +202,7 @@ async fn offset_fetch_v3_throttle() {
 
 #[tokio::test]
 async fn offset_fetch_acl_denied_v5() {
-    let dir = temp_dir("acl");
+    let dir = temp_dir("p41", "acl");
     let broker = Arc::new(Broker::new(StorageConfig {
         data_dir: dir.clone(),
         ..StorageConfig::default()

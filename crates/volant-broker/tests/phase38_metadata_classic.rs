@@ -1,62 +1,17 @@
 //! Phase 38: Kafka Metadata classic v0–8 on the shim.
 
-use std::path::PathBuf;
+#[path = "common/mod.rs"]
+mod common;
+use common::{boot_kafka, rpc, temp_dir};
+
 use std::sync::Arc;
-use std::time::{SystemTime, UNIX_EPOCH};
 
 use bytes::{Buf, BufMut, BytesMut};
-use tokio::io::{AsyncReadExt, AsyncWriteExt};
-use tokio::net::{TcpListener, TcpStream};
 use volant_broker::kafka::codec::{
     encode_request, get_nullable_string, get_string, put_string,
 };
-use volant_broker::{serve_kafka_listener, Broker};
+use volant_broker::Broker;
 use volant_storage::StorageConfig;
-
-fn temp_dir(label: &str) -> PathBuf {
-    let nanos = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .unwrap()
-        .as_nanos();
-    let dir = std::env::temp_dir().join(format!(
-        "volant-p38-{label}-{}-{}",
-        std::process::id(),
-        nanos
-    ));
-    let _ = std::fs::remove_dir_all(&dir);
-    std::fs::create_dir_all(&dir).unwrap();
-    dir
-}
-
-async fn boot_kafka(broker: Arc<Broker>) -> (String, tokio::task::JoinHandle<()>) {
-    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
-    let addr = listener.local_addr().unwrap();
-    let handle = tokio::spawn(async move {
-        serve_kafka_listener(listener, broker).await.ok();
-    });
-    tokio::task::yield_now().await;
-    (format!("127.0.0.1:{}", addr.port()), handle)
-}
-
-async fn rpc(addr: &str, request: BytesMut) -> BytesMut {
-    let mut stream = TcpStream::connect(addr).await.unwrap();
-    stream.write_all(&request).await.unwrap();
-    let mut buf = BytesMut::with_capacity(64 * 1024);
-    loop {
-        let n = stream.read_buf(&mut buf).await.unwrap();
-        if n == 0 {
-            break;
-        }
-        if buf.len() >= 4 {
-            let size = i32::from_be_bytes([buf[0], buf[1], buf[2], buf[3]]) as usize;
-            if buf.len() >= 4 + size {
-                let _ = buf.split_to(4);
-                return buf.split_to(size);
-            }
-        }
-    }
-    panic!("connection closed without full kafka response");
-}
 
 /// Metadata request body for classic versions.
 /// `topics`: None → null array (all, v1+); Some([]) → empty; Some(names) → listed.
@@ -218,7 +173,7 @@ fn parse_metadata(src: &mut impl Buf, version: i16) -> MetaParsed {
 
 #[tokio::test]
 async fn api_versions_metadata_max_9() {
-    let dir = temp_dir("api");
+    let dir = temp_dir("p38", "api");
     let broker = Arc::new(Broker::new(StorageConfig {
         data_dir: dir.clone(),
         ..StorageConfig::default()
@@ -245,7 +200,7 @@ async fn api_versions_metadata_max_9() {
 
 #[tokio::test]
 async fn metadata_v2_cluster_id() {
-    let dir = temp_dir("v2");
+    let dir = temp_dir("p38", "v2");
     let broker = Arc::new(Broker::new(StorageConfig {
         data_dir: dir.clone(),
         ..StorageConfig::default()
@@ -271,7 +226,7 @@ async fn metadata_v2_cluster_id() {
 
 #[tokio::test]
 async fn metadata_v5_offline_and_throttle() {
-    let dir = temp_dir("v5");
+    let dir = temp_dir("p38", "v5");
     let broker = Arc::new(Broker::new(StorageConfig {
         data_dir: dir.clone(),
         ..StorageConfig::default()
@@ -295,7 +250,7 @@ async fn metadata_v5_offline_and_throttle() {
 
 #[tokio::test]
 async fn metadata_v7_leader_epoch() {
-    let dir = temp_dir("v7");
+    let dir = temp_dir("p38", "v7");
     let broker = Arc::new(Broker::new(StorageConfig {
         data_dir: dir.clone(),
         ..StorageConfig::default()
@@ -318,7 +273,7 @@ async fn metadata_v7_leader_epoch() {
 
 #[tokio::test]
 async fn metadata_v8_authorized_ops() {
-    let dir = temp_dir("v8");
+    let dir = temp_dir("p38", "v8");
     let broker = Arc::new(Broker::new(StorageConfig {
         data_dir: dir.clone(),
         ..StorageConfig::default()
@@ -355,7 +310,7 @@ async fn metadata_v8_authorized_ops() {
 
 #[tokio::test]
 async fn metadata_v1_empty_topics_means_none() {
-    let dir = temp_dir("empty");
+    let dir = temp_dir("p38", "empty");
     let broker = Arc::new(Broker::new(StorageConfig {
         data_dir: dir.clone(),
         ..StorageConfig::default()
@@ -377,7 +332,7 @@ async fn metadata_v1_empty_topics_means_none() {
 
 #[tokio::test]
 async fn metadata_v4_named_topic() {
-    let dir = temp_dir("named");
+    let dir = temp_dir("p38", "named");
     let broker = Arc::new(Broker::new(StorageConfig {
         data_dir: dir.clone(),
         ..StorageConfig::default()

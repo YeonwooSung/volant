@@ -1,63 +1,18 @@
 //! Phase 43: Kafka group-admin classic versions (Describe/List/DeleteGroups).
 
-use std::path::PathBuf;
+#[path = "common/mod.rs"]
+mod common;
+use common::{boot_kafka, rpc, temp_dir};
+
 use std::sync::Arc;
-use std::time::{SystemTime, UNIX_EPOCH};
 
 use bytes::{Buf, BufMut, BytesMut};
-use tokio::io::{AsyncReadExt, AsyncWriteExt};
-use tokio::net::{TcpListener, TcpStream};
 use volant_broker::kafka::codec::{
     encode_consumer_subscription, encode_request, get_bytes, get_nullable_string, get_string,
     put_bytes, put_nullable_string, put_string,
 };
-use volant_broker::{serve_kafka_listener, Broker};
+use volant_broker::Broker;
 use volant_storage::StorageConfig;
-
-fn temp_dir(label: &str) -> PathBuf {
-    let nanos = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .unwrap()
-        .as_nanos();
-    let dir = std::env::temp_dir().join(format!(
-        "volant-p43-{label}-{}-{}",
-        std::process::id(),
-        nanos
-    ));
-    let _ = std::fs::remove_dir_all(&dir);
-    std::fs::create_dir_all(&dir).unwrap();
-    dir
-}
-
-async fn boot_kafka(broker: Arc<Broker>) -> (String, tokio::task::JoinHandle<()>) {
-    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
-    let addr = listener.local_addr().unwrap();
-    let handle = tokio::spawn(async move {
-        serve_kafka_listener(listener, broker).await.ok();
-    });
-    tokio::task::yield_now().await;
-    (format!("127.0.0.1:{}", addr.port()), handle)
-}
-
-async fn rpc(addr: &str, request: BytesMut) -> BytesMut {
-    let mut stream = TcpStream::connect(addr).await.unwrap();
-    stream.write_all(&request).await.unwrap();
-    let mut buf = BytesMut::with_capacity(64 * 1024);
-    loop {
-        let n = stream.read_buf(&mut buf).await.unwrap();
-        if n == 0 {
-            break;
-        }
-        if buf.len() >= 4 {
-            let size = i32::from_be_bytes([buf[0], buf[1], buf[2], buf[3]]) as usize;
-            if buf.len() >= 4 + size {
-                let _ = buf.split_to(4);
-                return buf.split_to(size);
-            }
-        }
-    }
-    panic!("connection closed without full kafka response");
-}
 
 fn join_v5(group: &str, member_id: &str, instance: Option<&str>, topics: &[&str]) -> BytesMut {
     let mut body = BytesMut::new();
@@ -76,7 +31,7 @@ fn join_v5(group: &str, member_id: &str, instance: Option<&str>, topics: &[&str]
 
 #[tokio::test]
 async fn api_versions_group_admin_classic_max() {
-    let dir = temp_dir("api");
+    let dir = temp_dir("p43", "api");
     let broker = Arc::new(Broker::new(StorageConfig {
         data_dir: dir.clone(),
         ..StorageConfig::default()
@@ -102,7 +57,7 @@ async fn api_versions_group_admin_classic_max() {
 
 #[tokio::test]
 async fn list_groups_v2_throttle() {
-    let dir = temp_dir("list");
+    let dir = temp_dir("p43", "list");
     let broker = Arc::new(Broker::new(StorageConfig {
         data_dir: dir.clone(),
         ..StorageConfig::default()
@@ -141,7 +96,7 @@ async fn list_groups_v2_throttle() {
 
 #[tokio::test]
 async fn describe_groups_v4_static_and_auth_ops() {
-    let dir = temp_dir("describe");
+    let dir = temp_dir("p43", "describe");
     let broker = Arc::new(Broker::new(StorageConfig {
         data_dir: dir.clone(),
         ..StorageConfig::default()
@@ -232,7 +187,7 @@ async fn describe_groups_v4_static_and_auth_ops() {
 
 #[tokio::test]
 async fn delete_groups_v1_throttle_and_non_empty() {
-    let dir = temp_dir("delete");
+    let dir = temp_dir("p43", "delete");
     let broker = Arc::new(Broker::new(StorageConfig {
         data_dir: dir.clone(),
         ..StorageConfig::default()
@@ -286,7 +241,7 @@ async fn delete_groups_v1_throttle_and_non_empty() {
 
 #[tokio::test]
 async fn describe_groups_v0_still_works() {
-    let dir = temp_dir("v0");
+    let dir = temp_dir("p43", "v0");
     let broker = Arc::new(Broker::new(StorageConfig {
         data_dir: dir.clone(),
         ..StorageConfig::default()

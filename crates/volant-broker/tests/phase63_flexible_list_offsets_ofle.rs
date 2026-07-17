@@ -1,65 +1,20 @@
 //! Phase 63: Flexible ListOffsets v6 + OffsetForLeaderEpoch v4.
 
-use std::path::PathBuf;
+#[path = "common/mod.rs"]
+mod common;
+use common::{boot_kafka, rpc, temp_dir};
+
 use std::sync::Arc;
-use std::time::{SystemTime, UNIX_EPOCH};
 
 use bytes::{Buf, BufMut, Bytes, BytesMut};
-use tokio::io::{AsyncReadExt, AsyncWriteExt};
-use tokio::net::{TcpListener, TcpStream};
 use volant_broker::kafka::codec::{
     encode_record_batch, encode_request, encode_request_flexible, get_compact_array_len,
     get_compact_string, put_bytes, put_compact_array_len, put_compact_string, put_empty_tag_buffer,
     put_string, skip_tag_buffer,
 };
-use volant_broker::{serve_kafka_listener, Broker};
+use volant_broker::Broker;
 use volant_core::{Offset, Record};
 use volant_storage::StorageConfig;
-
-fn temp_dir(label: &str) -> PathBuf {
-    let nanos = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .unwrap()
-        .as_nanos();
-    let dir = std::env::temp_dir().join(format!(
-        "volant-p63-{label}-{}-{}",
-        std::process::id(),
-        nanos
-    ));
-    let _ = std::fs::remove_dir_all(&dir);
-    std::fs::create_dir_all(&dir).unwrap();
-    dir
-}
-
-async fn boot_kafka(broker: Arc<Broker>) -> (String, tokio::task::JoinHandle<()>) {
-    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
-    let addr = listener.local_addr().unwrap();
-    let handle = tokio::spawn(async move {
-        serve_kafka_listener(listener, broker).await.ok();
-    });
-    tokio::task::yield_now().await;
-    (format!("127.0.0.1:{}", addr.port()), handle)
-}
-
-async fn rpc(addr: &str, request: BytesMut) -> BytesMut {
-    let mut stream = TcpStream::connect(addr).await.unwrap();
-    stream.write_all(&request).await.unwrap();
-    let mut buf = BytesMut::with_capacity(64 * 1024);
-    loop {
-        let n = stream.read_buf(&mut buf).await.unwrap();
-        if n == 0 {
-            break;
-        }
-        if buf.len() >= 4 {
-            let size = i32::from_be_bytes([buf[0], buf[1], buf[2], buf[3]]) as usize;
-            if buf.len() >= 4 + size {
-                let _ = buf.split_to(4);
-                return buf.split_to(size);
-            }
-        }
-    }
-    panic!("connection closed without full kafka response");
-}
 
 fn list_offsets_v6(topic: &str, partition: i32, timestamp: i64) -> BytesMut {
     let mut body = BytesMut::new();
@@ -120,7 +75,7 @@ async fn produce_one(addr: &str, topic: &str) {
 
 #[tokio::test]
 async fn api_versions_list_offsets_ofle_flex_maxes() {
-    let dir = temp_dir("api");
+    let dir = temp_dir("p63", "api");
     let broker = Arc::new(Broker::new(StorageConfig {
         data_dir: dir.clone(),
         ..StorageConfig::default()
@@ -145,7 +100,7 @@ async fn api_versions_list_offsets_ofle_flex_maxes() {
 
 #[tokio::test]
 async fn list_offsets_v6_flexible_earliest_latest() {
-    let dir = temp_dir("lo");
+    let dir = temp_dir("p63", "lo");
     let broker = Arc::new(Broker::new(StorageConfig {
         data_dir: dir.clone(),
         ..StorageConfig::default()
@@ -207,7 +162,7 @@ async fn list_offsets_v6_flexible_earliest_latest() {
 
 #[tokio::test]
 async fn ofle_v4_flexible_hwm() {
-    let dir = temp_dir("ofle");
+    let dir = temp_dir("p63", "ofle");
     let broker = Arc::new(Broker::new(StorageConfig {
         data_dir: dir.clone(),
         ..StorageConfig::default()
@@ -244,7 +199,7 @@ async fn ofle_v4_flexible_hwm() {
 
 #[tokio::test]
 async fn classic_list_offsets_still_works() {
-    let dir = temp_dir("classic");
+    let dir = temp_dir("p63", "classic");
     let broker = Arc::new(Broker::new(StorageConfig {
         data_dir: dir.clone(),
         ..StorageConfig::default()
@@ -279,7 +234,7 @@ async fn classic_list_offsets_still_works() {
 
 #[tokio::test]
 async fn unsupported_versions_use_header_v1() {
-    let dir = temp_dir("unsup");
+    let dir = temp_dir("p63", "unsup");
     let broker = Arc::new(Broker::new(StorageConfig {
         data_dir: dir.clone(),
         ..StorageConfig::default()

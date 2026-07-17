@@ -1,65 +1,20 @@
 //! Phase 31: Kafka transactions on the shim
 //! (AddPartitionsToTxn / EndTxn / TxnOffsetCommit / FindCoordinator v1).
 
-use std::path::PathBuf;
+#[path = "common/mod.rs"]
+mod common;
+use common::{boot_kafka, rpc, temp_dir};
+
 use std::sync::Arc;
-use std::time::{SystemTime, UNIX_EPOCH};
 
 use bytes::{Buf, BufMut, Bytes, BytesMut};
-use tokio::io::{AsyncReadExt, AsyncWriteExt};
-use tokio::net::{TcpListener, TcpStream};
 use volant_broker::kafka::codec::{
     encode_record_batch_idempotent, encode_request, get_nullable_string, get_string, put_bytes,
     put_nullable_string, put_string,
 };
-use volant_broker::{serve_kafka_listener, Broker};
+use volant_broker::Broker;
 use volant_core::{Offset, PartitionId, Record, TopicName};
 use volant_storage::StorageConfig;
-
-fn temp_dir(label: &str) -> PathBuf {
-    let nanos = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .unwrap()
-        .as_nanos();
-    let dir = std::env::temp_dir().join(format!(
-        "volant-p31-{label}-{}-{}",
-        std::process::id(),
-        nanos
-    ));
-    let _ = std::fs::remove_dir_all(&dir);
-    std::fs::create_dir_all(&dir).unwrap();
-    dir
-}
-
-async fn boot_kafka(broker: Arc<Broker>) -> (String, tokio::task::JoinHandle<()>) {
-    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
-    let addr = listener.local_addr().unwrap();
-    let handle = tokio::spawn(async move {
-        serve_kafka_listener(listener, broker).await.ok();
-    });
-    tokio::task::yield_now().await;
-    (format!("127.0.0.1:{}", addr.port()), handle)
-}
-
-async fn rpc(addr: &str, request: BytesMut) -> BytesMut {
-    let mut stream = TcpStream::connect(addr).await.unwrap();
-    stream.write_all(&request).await.unwrap();
-    let mut buf = BytesMut::with_capacity(64 * 1024);
-    loop {
-        let n = stream.read_buf(&mut buf).await.unwrap();
-        if n == 0 {
-            break;
-        }
-        if buf.len() >= 4 {
-            let size = i32::from_be_bytes([buf[0], buf[1], buf[2], buf[3]]) as usize;
-            if buf.len() >= 4 + size {
-                let _ = buf.split_to(4);
-                return buf.split_to(size);
-            }
-        }
-    }
-    panic!("connection closed without full kafka response");
-}
 
 fn init_txn_body(txn_id: &str) -> BytesMut {
     let mut body = BytesMut::new();
@@ -174,7 +129,7 @@ fn sample_records(value: &'static [u8]) -> Vec<Record> {
 
 #[tokio::test]
 async fn api_versions_includes_txn_apis() {
-    let dir = temp_dir("api");
+    let dir = temp_dir("p31", "api");
     let broker = Arc::new(Broker::new(StorageConfig {
         data_dir: dir.clone(),
         ..StorageConfig::default()
@@ -205,7 +160,7 @@ async fn api_versions_includes_txn_apis() {
 
 #[tokio::test]
 async fn find_coordinator_v1_transaction_key_type() {
-    let dir = temp_dir("fc");
+    let dir = temp_dir("p31", "fc");
     let broker = Arc::new(Broker::new(StorageConfig {
         data_dir: dir.clone(),
         ..StorageConfig::default()
@@ -234,7 +189,7 @@ async fn find_coordinator_v1_transaction_key_type() {
 
 #[tokio::test]
 async fn commit_makes_produce_visible() {
-    let dir = temp_dir("commit");
+    let dir = temp_dir("p31", "commit");
     let broker = Arc::new(Broker::new(StorageConfig {
         data_dir: dir.clone(),
         ..StorageConfig::default()
@@ -342,7 +297,7 @@ async fn commit_makes_produce_visible() {
 
 #[tokio::test]
 async fn abort_leaves_no_records() {
-    let dir = temp_dir("abort");
+    let dir = temp_dir("p31", "abort");
     let broker = Arc::new(Broker::new(StorageConfig {
         data_dir: dir.clone(),
         ..StorageConfig::default()
@@ -402,7 +357,7 @@ async fn abort_leaves_no_records() {
 
 #[tokio::test]
 async fn produce_without_open_txn_rejected() {
-    let dir = temp_dir("noopen");
+    let dir = temp_dir("p31", "noopen");
     let broker = Arc::new(Broker::new(StorageConfig {
         data_dir: dir.clone(),
         ..StorageConfig::default()
@@ -429,7 +384,7 @@ async fn produce_without_open_txn_rejected() {
 
 #[tokio::test]
 async fn txn_offset_commit_applies_on_commit_only() {
-    let dir = temp_dir("offsets");
+    let dir = temp_dir("p31", "offsets");
     let broker = Arc::new(Broker::new(StorageConfig {
         data_dir: dir.clone(),
         ..StorageConfig::default()

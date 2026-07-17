@@ -1,65 +1,20 @@
 //! Phase 59: Flexible DescribeGroups v5 / ListGroups v3 / DeleteGroups v2.
 
-use std::path::PathBuf;
+#[path = "common/mod.rs"]
+mod common;
+use common::{boot_kafka, rpc, temp_dir};
+
 use std::sync::Arc;
-use std::time::{SystemTime, UNIX_EPOCH};
 
 use bytes::{Buf, BufMut, BytesMut};
-use tokio::io::{AsyncReadExt, AsyncWriteExt};
-use tokio::net::{TcpListener, TcpStream};
 use volant_broker::kafka::codec::{
     decode_consumer_assignment, encode_consumer_subscription, encode_request,
     encode_request_flexible, get_compact_array_len, get_compact_bytes,
     get_compact_nullable_string, get_compact_string, get_string, put_bytes, put_compact_array_len,
     put_compact_string, put_empty_tag_buffer, put_nullable_string, put_string, skip_tag_buffer,
 };
-use volant_broker::{serve_kafka_listener, Broker};
+use volant_broker::Broker;
 use volant_storage::StorageConfig;
-
-fn temp_dir(label: &str) -> PathBuf {
-    let nanos = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .unwrap()
-        .as_nanos();
-    let dir = std::env::temp_dir().join(format!(
-        "volant-p59-{label}-{}-{}",
-        std::process::id(),
-        nanos
-    ));
-    let _ = std::fs::remove_dir_all(&dir);
-    std::fs::create_dir_all(&dir).unwrap();
-    dir
-}
-
-async fn boot_kafka(broker: Arc<Broker>) -> (String, tokio::task::JoinHandle<()>) {
-    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
-    let addr = listener.local_addr().unwrap();
-    let handle = tokio::spawn(async move {
-        serve_kafka_listener(listener, broker).await.ok();
-    });
-    tokio::task::yield_now().await;
-    (format!("127.0.0.1:{}", addr.port()), handle)
-}
-
-async fn rpc(addr: &str, request: BytesMut) -> BytesMut {
-    let mut stream = TcpStream::connect(addr).await.unwrap();
-    stream.write_all(&request).await.unwrap();
-    let mut buf = BytesMut::with_capacity(64 * 1024);
-    loop {
-        let n = stream.read_buf(&mut buf).await.unwrap();
-        if n == 0 {
-            break;
-        }
-        if buf.len() >= 4 {
-            let size = i32::from_be_bytes([buf[0], buf[1], buf[2], buf[3]]) as usize;
-            if buf.len() >= 4 + size {
-                let _ = buf.split_to(4);
-                return buf.split_to(size);
-            }
-        }
-    }
-    panic!("connection closed without full kafka response");
-}
 
 fn join_v5(group: &str, member_id: &str, instance: Option<&str>, topics: &[&str]) -> BytesMut {
     let mut body = BytesMut::new();
@@ -101,7 +56,7 @@ fn delete_v2_body(group: &str) -> BytesMut {
 
 #[tokio::test]
 async fn api_versions_group_admin_flex_maxes() {
-    let dir = temp_dir("api");
+    let dir = temp_dir("p59", "api");
     let broker = Arc::new(Broker::new(StorageConfig {
         data_dir: dir.clone(),
         ..StorageConfig::default()
@@ -127,7 +82,7 @@ async fn api_versions_group_admin_flex_maxes() {
 
 #[tokio::test]
 async fn list_describe_delete_flexible_roundtrip() {
-    let dir = temp_dir("roundtrip");
+    let dir = temp_dir("p59", "roundtrip");
     let broker = Arc::new(Broker::new(StorageConfig {
         data_dir: dir.clone(),
         ..StorageConfig::default()
@@ -293,7 +248,7 @@ async fn list_describe_delete_flexible_roundtrip() {
 
 #[tokio::test]
 async fn classic_group_admin_still_works() {
-    let dir = temp_dir("classic");
+    let dir = temp_dir("p59", "classic");
     let broker = Arc::new(Broker::new(StorageConfig {
         data_dir: dir.clone(),
         ..StorageConfig::default()
@@ -344,7 +299,7 @@ async fn classic_group_admin_still_works() {
 
 #[tokio::test]
 async fn unsupported_versions_use_header_v1() {
-    let dir = temp_dir("unsup");
+    let dir = temp_dir("p59", "unsup");
     let broker = Arc::new(Broker::new(StorageConfig {
         data_dir: dir.clone(),
         ..StorageConfig::default()
@@ -390,7 +345,7 @@ async fn unsupported_versions_use_header_v1() {
 
 #[tokio::test]
 async fn describe_unknown_group_v5() {
-    let dir = temp_dir("unknown");
+    let dir = temp_dir("p59", "unknown");
     let broker = Arc::new(Broker::new(StorageConfig {
         data_dir: dir.clone(),
         ..StorageConfig::default()

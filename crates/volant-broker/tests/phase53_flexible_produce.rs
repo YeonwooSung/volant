@@ -1,66 +1,21 @@
 //! Phase 53: Flexible Produce v9 (KIP-482 compact records + response header v1).
 
-use std::path::PathBuf;
+#[path = "common/mod.rs"]
+mod common;
+use common::{boot_kafka, rpc, temp_dir};
+
 use std::sync::Arc;
-use std::time::{SystemTime, UNIX_EPOCH};
 
 use bytes::{Buf, BufMut, Bytes, BytesMut};
-use tokio::io::{AsyncReadExt, AsyncWriteExt};
-use tokio::net::{TcpListener, TcpStream};
 use volant_broker::kafka::codec::{
     encode_record_batch, encode_request, encode_request_flexible, get_compact_array_len,
     get_compact_nullable_string, get_compact_string, get_string, put_compact_array_len,
     put_compact_bytes, put_compact_nullable_string, put_compact_string, put_empty_tag_buffer,
     put_nullable_string, put_string, skip_tag_buffer,
 };
-use volant_broker::{serve_kafka_listener, Broker};
+use volant_broker::Broker;
 use volant_core::{Offset, Record};
 use volant_storage::StorageConfig;
-
-fn temp_dir(label: &str) -> PathBuf {
-    let nanos = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .unwrap()
-        .as_nanos();
-    let dir = std::env::temp_dir().join(format!(
-        "volant-p53-{label}-{}-{}",
-        std::process::id(),
-        nanos
-    ));
-    let _ = std::fs::remove_dir_all(&dir);
-    std::fs::create_dir_all(&dir).unwrap();
-    dir
-}
-
-async fn boot_kafka(broker: Arc<Broker>) -> (String, tokio::task::JoinHandle<()>) {
-    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
-    let addr = listener.local_addr().unwrap();
-    let handle = tokio::spawn(async move {
-        serve_kafka_listener(listener, broker).await.ok();
-    });
-    tokio::task::yield_now().await;
-    (format!("127.0.0.1:{}", addr.port()), handle)
-}
-
-async fn rpc(addr: &str, request: BytesMut) -> BytesMut {
-    let mut stream = TcpStream::connect(addr).await.unwrap();
-    stream.write_all(&request).await.unwrap();
-    let mut buf = BytesMut::with_capacity(64 * 1024);
-    loop {
-        let n = stream.read_buf(&mut buf).await.unwrap();
-        if n == 0 {
-            break;
-        }
-        if buf.len() >= 4 {
-            let size = i32::from_be_bytes([buf[0], buf[1], buf[2], buf[3]]) as usize;
-            if buf.len() >= 4 + size {
-                let _ = buf.split_to(4);
-                return buf.split_to(size);
-            }
-        }
-    }
-    panic!("connection closed without full kafka response");
-}
 
 fn sample_records(value: &'static [u8]) -> Vec<Record> {
     vec![Record {
@@ -107,7 +62,7 @@ fn produce_classic_body(topic: &str, batch: &[u8]) -> BytesMut {
 
 #[tokio::test]
 async fn api_versions_produce_max_13() {
-    let dir = temp_dir("api");
+    let dir = temp_dir("p53", "api");
     let broker = Arc::new(Broker::new(StorageConfig {
         data_dir: dir.clone(),
         ..StorageConfig::default()
@@ -136,7 +91,7 @@ async fn api_versions_produce_max_13() {
 
 #[tokio::test]
 async fn produce_v9_flexible_roundtrip() {
-    let dir = temp_dir("v9");
+    let dir = temp_dir("p53", "v9");
     let broker = Arc::new(Broker::new(StorageConfig {
         data_dir: dir.clone(),
         ..StorageConfig::default()
@@ -195,7 +150,7 @@ async fn produce_v9_flexible_roundtrip() {
 
 #[tokio::test]
 async fn produce_v8_still_classic() {
-    let dir = temp_dir("v8");
+    let dir = temp_dir("p53", "v8");
     let broker = Arc::new(Broker::new(StorageConfig {
         data_dir: dir.clone(),
         ..StorageConfig::default()
@@ -222,7 +177,7 @@ async fn produce_v8_still_classic() {
 
 #[tokio::test]
 async fn produce_v14_unsupported() {
-    let dir = temp_dir("v14");
+    let dir = temp_dir("p53", "v14");
     let broker = Arc::new(Broker::new(StorageConfig {
         data_dir: dir.clone(),
         ..StorageConfig::default()

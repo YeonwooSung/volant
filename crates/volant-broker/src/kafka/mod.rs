@@ -18,6 +18,11 @@ mod handler;
 mod topic_id;
 /// Transaction API handlers (Init / Add* / End / TxnOffsetCommit).
 mod txn;
+mod meta_api;
+mod produce_fetch;
+mod group_api;
+mod admin_api;
+mod acl_api;
 /// Shared classic/flexible wire read helpers.
 mod wire;
 /// SASL PLAIN + SCRAM-SHA-256/512 state machine (Phases 30 / 34).

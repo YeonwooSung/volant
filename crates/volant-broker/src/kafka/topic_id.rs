@@ -1,16 +1,17 @@
 //! Shared TopicId / topic-name wire identity for Kafka handlers.
 //!
-//! Produce, Fetch, OffsetCommit/Fetch, TxnOffsetCommit, and admin paths all need
-//! the same deterministic UUID mapping and response echo. Keep that logic here
-//! instead of copy-pasting `use_topic_id` triples across encode_* functions.
+//! Produce, Fetch, OffsetCommit/Fetch, TxnOffsetCommit, Metadata, DeleteTopics,
+//! and admin paths all need the same deterministic UUID mapping and response
+//! echo. Keep that logic here instead of copy-pasting resolve triples.
 
 use bytes::{Buf, BytesMut};
-use volant_core::Result;
+use volant_core::{Result, TopicName};
 
 use crate::broker::Broker;
 
 use super::codec::{
-    get_uuid, parse_volant_topic_uuid, put_compact_string, put_string, put_uuid, KAFKA_UUID_ZERO,
+    get_uuid, parse_volant_topic_uuid, put_compact_string, put_string, put_uuid, volant_topic_uuid,
+    KAFKA_UUID_ZERO,
 };
 use super::wire;
 
@@ -43,7 +44,7 @@ impl ResolvedTopic {
 
     /// Resolve a UUID against the broker catalog.
     pub fn from_uuid(broker: &Broker, uuid: [u8; 16]) -> Self {
-        let name = parse_volant_topic_uuid(&uuid).and_then(|id| broker.topic_name_by_id(id));
+        let name = name_for_uuid(broker, &uuid);
         Self {
             wire: TopicWireId::Uuid(uuid),
             name,
@@ -59,6 +60,37 @@ impl ResolvedTopic {
     pub fn name_or_empty(&self) -> &str {
         self.name.as_deref().unwrap_or("")
     }
+}
+
+/// Resolve a TopicId UUID to a catalog name (`None` if zero/invalid/unknown).
+pub fn name_for_uuid(broker: &Broker, uuid: &[u8; 16]) -> Option<String> {
+    parse_volant_topic_uuid(uuid).and_then(|id| broker.topic_name_by_id(id))
+}
+
+/// True when `uuid` is the all-zero TopicId.
+pub fn is_zero_uuid(uuid: &[u8; 16]) -> bool {
+    uuid == &KAFKA_UUID_ZERO
+}
+
+/// Numeric catalog id for a known topic name, if present.
+pub fn numeric_id_for_name(broker: &Broker, name: &str) -> Option<u32> {
+    broker
+        .metadata(Some(&[TopicName::new(name.to_string())]))
+        .topics
+        .first()
+        .map(|t| t.topic_id.0)
+}
+
+/// Deterministic wire UUID for a Volant topic id.
+pub fn uuid_for_numeric_id(id: u32) -> [u8; 16] {
+    volant_topic_uuid(id)
+}
+
+/// Wire UUID for a topic name (zero UUID when not in the catalog).
+pub fn uuid_for_name(broker: &Broker, name: &str) -> [u8; 16] {
+    numeric_id_for_name(broker, name)
+        .map(volant_topic_uuid)
+        .unwrap_or(KAFKA_UUID_ZERO)
 }
 
 /// Read topic name or TopicId from the request and resolve against the catalog.
@@ -91,6 +123,11 @@ pub fn write_wire_id(out: &mut BytesMut, flex: bool, wire_id: &TopicWireId) {
     }
 }
 
+/// Write a raw TopicId UUID field.
+pub fn write_uuid(out: &mut BytesMut, uuid: &[u8; 16]) {
+    put_uuid(out, uuid);
+}
+
 /// Write a name-based topic field (no TopicId), classic or flexible.
 pub fn write_name(out: &mut BytesMut, flex: bool, name: &str) {
     if flex {
@@ -103,16 +140,119 @@ pub fn write_name(out: &mut BytesMut, flex: bool, name: &str) {
 /// Resolve known-good name into a wire id for list-all responses that emit UUIDs.
 pub fn wire_id_for_name(broker: &Broker, name: &str, by_id: bool) -> TopicWireId {
     if by_id {
-        // Prefer catalog topic_id when available; fall back to zero UUID.
-        use volant_core::TopicName;
-        let uuid = broker
-            .metadata(Some(&[TopicName::new(name.to_string())]))
-            .topics
-            .first()
-            .map(|t| super::codec::volant_topic_uuid(t.topic_id.0))
-            .unwrap_or(KAFKA_UUID_ZERO);
-        TopicWireId::Uuid(uuid)
+        TopicWireId::Uuid(uuid_for_name(broker, name))
     } else {
         TopicWireId::Name(name.to_string())
+    }
+}
+
+/// Result of resolving a Metadata v10+ topic entry (uuid + optional name).
+#[derive(Debug, Clone)]
+pub struct MetadataTopicRef {
+    pub name: Option<String>,
+    pub uuid: [u8; 16],
+    /// Client asked by id only and the id was unknown.
+    pub unknown_id: bool,
+}
+
+/// Resolve a Metadata topic entry given already-read uuid + optional name.
+///
+/// * `allow_id_lookup` — Metadata v12+ permits null name + uuid lookup.
+/// * Zero uuid + null name → `None` (skip entry).
+pub fn resolve_metadata_entry(
+    broker: &Broker,
+    uuid: [u8; 16],
+    name: Option<String>,
+    allow_id_lookup: bool,
+) -> Option<MetadataTopicRef> {
+    if let Some(n) = name {
+        return Some(MetadataTopicRef {
+            name: Some(n),
+            uuid,
+            unknown_id: false,
+        });
+    }
+    if !allow_id_lookup {
+        // v10–11: null name not used for lookup.
+        return None;
+    }
+    if is_zero_uuid(&uuid) {
+        // Zero id + null name → skip.
+        return None;
+    }
+    match name_for_uuid(broker, &uuid) {
+        Some(n) => Some(MetadataTopicRef {
+            name: Some(n),
+            uuid,
+            unknown_id: false,
+        }),
+        None => Some(MetadataTopicRef {
+            name: None,
+            uuid,
+            unknown_id: true,
+        }),
+    }
+}
+
+/// Result of resolving a DeleteTopics v6 topic entry.
+#[derive(Debug, Clone)]
+pub struct DeleteTopicRef {
+    pub request_name: Option<String>,
+    pub uuid: [u8; 16],
+    pub resolved_name: Option<String>,
+    pub numeric_id: Option<u32>,
+    pub unknown_topic_id: bool,
+}
+
+/// Resolve DeleteTopics v6 entry (nullable name + uuid).
+pub fn resolve_delete_entry(
+    broker: &Broker,
+    name: Option<String>,
+    uuid: [u8; 16],
+) -> DeleteTopicRef {
+    if let Some(n) = name {
+        let id = numeric_id_for_name(broker, &n);
+        return DeleteTopicRef {
+            request_name: Some(n.clone()),
+            uuid,
+            resolved_name: Some(n),
+            numeric_id: id,
+            unknown_topic_id: false,
+        };
+    }
+    if let Some(id) = parse_volant_topic_uuid(&uuid) {
+        match broker.topic_name_by_id(id) {
+            Some(n) => DeleteTopicRef {
+                request_name: None,
+                uuid,
+                resolved_name: Some(n),
+                numeric_id: Some(id),
+                unknown_topic_id: false,
+            },
+            None => DeleteTopicRef {
+                request_name: None,
+                uuid,
+                resolved_name: None,
+                numeric_id: None,
+                unknown_topic_id: true,
+            },
+        }
+    } else {
+        DeleteTopicRef {
+            request_name: None,
+            uuid,
+            resolved_name: None,
+            numeric_id: None,
+            unknown_topic_id: true,
+        }
+    }
+}
+
+/// Prefer request uuid; fall back to resolved numeric mapping / zero.
+pub fn echo_uuid(request_uuid: [u8; 16], numeric_id: Option<u32>) -> [u8; 16] {
+    if !is_zero_uuid(&request_uuid) {
+        request_uuid
+    } else {
+        numeric_id.map(volant_topic_uuid).unwrap_or(KAFKA_UUID_ZERO)
     }
 }

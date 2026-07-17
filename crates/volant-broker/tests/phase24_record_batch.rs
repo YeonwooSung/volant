@@ -1,68 +1,23 @@
 //! Phase 24: Kafka RecordBatch (magic 2) produce/fetch.
 
-use std::path::PathBuf;
+#[path = "common/mod.rs"]
+mod common;
+use common::{boot_kafka, rpc, temp_dir};
+
 use std::sync::Arc;
-use std::time::{SystemTime, UNIX_EPOCH};
 
 use bytes::{Buf, BufMut, Bytes, BytesMut};
-use tokio::io::{AsyncReadExt, AsyncWriteExt};
-use tokio::net::{TcpListener, TcpStream};
 use volant_broker::kafka::codec::{
     decode_message_set, decode_records, encode_message_set, encode_record_batch, encode_request,
     get_bytes, get_string, put_bytes, put_string,
 };
-use volant_broker::{serve_kafka_listener, Broker};
+use volant_broker::Broker;
 use volant_core::{Offset, PartitionId, Record, TopicName};
 use volant_storage::StorageConfig;
 
-fn temp_dir(label: &str) -> PathBuf {
-    let nanos = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .unwrap()
-        .as_nanos();
-    let dir = std::env::temp_dir().join(format!(
-        "volant-p24-{label}-{}-{}",
-        std::process::id(),
-        nanos
-    ));
-    let _ = std::fs::remove_dir_all(&dir);
-    std::fs::create_dir_all(&dir).unwrap();
-    dir
-}
-
-async fn boot_kafka(broker: Arc<Broker>) -> (String, tokio::task::JoinHandle<()>) {
-    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
-    let addr = listener.local_addr().unwrap();
-    let handle = tokio::spawn(async move {
-        serve_kafka_listener(listener, broker).await.ok();
-    });
-    tokio::task::yield_now().await;
-    (format!("127.0.0.1:{}", addr.port()), handle)
-}
-
-async fn rpc(addr: &str, request: BytesMut) -> BytesMut {
-    let mut stream = TcpStream::connect(addr).await.unwrap();
-    stream.write_all(&request).await.unwrap();
-    let mut buf = BytesMut::with_capacity(64 * 1024);
-    loop {
-        let n = stream.read_buf(&mut buf).await.unwrap();
-        if n == 0 {
-            break;
-        }
-        if buf.len() >= 4 {
-            let size = i32::from_be_bytes([buf[0], buf[1], buf[2], buf[3]]) as usize;
-            if buf.len() >= 4 + size {
-                let _ = buf.split_to(4);
-                return buf.split_to(size);
-            }
-        }
-    }
-    panic!("connection closed without full kafka response");
-}
-
 #[tokio::test]
 async fn api_versions_advertise_produce3_fetch4() {
-    let dir = temp_dir("api-versions");
+    let dir = temp_dir("p24", "api-versions");
     let broker = Arc::new(Broker::new(StorageConfig {
         data_dir: dir.clone(),
         ..StorageConfig::default()
@@ -97,7 +52,7 @@ async fn api_versions_advertise_produce3_fetch4() {
 
 #[tokio::test]
 async fn produce_record_batch_fetch_v4_roundtrip() {
-    let dir = temp_dir("rb-roundtrip");
+    let dir = temp_dir("p24", "rb-roundtrip");
     let broker = Arc::new(Broker::new(StorageConfig {
         data_dir: dir.clone(),
         ..StorageConfig::default()
@@ -202,7 +157,7 @@ async fn produce_record_batch_fetch_v4_roundtrip() {
 
 #[tokio::test]
 async fn produce_record_batch_fetch_v0_messageset() {
-    let dir = temp_dir("rb-ms-fetch");
+    let dir = temp_dir("p24", "rb-ms-fetch");
     let broker = Arc::new(Broker::new(StorageConfig {
         data_dir: dir.clone(),
         ..StorageConfig::default()
@@ -264,7 +219,7 @@ async fn produce_record_batch_fetch_v0_messageset() {
 
 #[tokio::test]
 async fn messageset_still_works_alongside_record_batch() {
-    let dir = temp_dir("ms-still");
+    let dir = temp_dir("p24", "ms-still");
     let broker = Arc::new(Broker::new(StorageConfig {
         data_dir: dir.clone(),
         ..StorageConfig::default()

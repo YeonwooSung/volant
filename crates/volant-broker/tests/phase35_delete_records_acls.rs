@@ -1,17 +1,17 @@
 //! Phase 35: Kafka DeleteRecords + Describe/Create/DeleteAcls on the shim.
 
-use std::path::PathBuf;
+#[path = "common/mod.rs"]
+mod common;
+use common::{boot_kafka, rpc, temp_dir};
+
 use std::sync::Arc;
-use std::time::{SystemTime, UNIX_EPOCH};
 
 use bytes::{Buf, BufMut, BytesMut};
-use tokio::io::{AsyncReadExt, AsyncWriteExt};
-use tokio::net::{TcpListener, TcpStream};
 use volant_broker::kafka::codec::{
     encode_request, get_nullable_string, get_string, put_nullable_string, put_string,
 };
 use volant_broker::{
-    serve_kafka_listener, AclEntry, AclOperation, AclPermission, Broker, ResourceType,
+    AclEntry, AclOperation, AclPermission, Broker, ResourceType,
     CLUSTER_RESOURCE,
 };
 use volant_core::{PartitionId, TopicName};
@@ -41,54 +41,9 @@ fn seed_cluster_admin(broker: &Broker) {
         .unwrap();
 }
 
-fn temp_dir(label: &str) -> PathBuf {
-    let nanos = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .unwrap()
-        .as_nanos();
-    let dir = std::env::temp_dir().join(format!(
-        "volant-p35-{label}-{}-{}",
-        std::process::id(),
-        nanos
-    ));
-    let _ = std::fs::remove_dir_all(&dir);
-    std::fs::create_dir_all(&dir).unwrap();
-    dir
-}
-
-async fn boot_kafka(broker: Arc<Broker>) -> (String, tokio::task::JoinHandle<()>) {
-    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
-    let addr = listener.local_addr().unwrap();
-    let handle = tokio::spawn(async move {
-        serve_kafka_listener(listener, broker).await.ok();
-    });
-    tokio::task::yield_now().await;
-    (format!("127.0.0.1:{}", addr.port()), handle)
-}
-
-async fn rpc(addr: &str, request: BytesMut) -> BytesMut {
-    let mut stream = TcpStream::connect(addr).await.unwrap();
-    stream.write_all(&request).await.unwrap();
-    let mut buf = BytesMut::with_capacity(64 * 1024);
-    loop {
-        let n = stream.read_buf(&mut buf).await.unwrap();
-        if n == 0 {
-            break;
-        }
-        if buf.len() >= 4 {
-            let size = i32::from_be_bytes([buf[0], buf[1], buf[2], buf[3]]) as usize;
-            if buf.len() >= 4 + size {
-                let _ = buf.split_to(4);
-                return buf.split_to(size);
-            }
-        }
-    }
-    panic!("connection closed without full kafka response");
-}
-
 #[tokio::test]
 async fn api_versions_includes_delete_records_and_acl_keys() {
-    let dir = temp_dir("api");
+    let dir = temp_dir("p35", "api");
     let broker = Arc::new(Broker::new(StorageConfig {
         data_dir: dir.clone(),
         ..StorageConfig::default()
@@ -113,7 +68,7 @@ async fn api_versions_includes_delete_records_and_acl_keys() {
 
 #[tokio::test]
 async fn delete_records_returns_low_watermark() {
-    let dir = temp_dir("delrec");
+    let dir = temp_dir("p35", "delrec");
     // Small segments so delete_records can drop whole segments.
     let broker = Arc::new(Broker::new(StorageConfig {
         data_dir: dir.clone(),
@@ -181,7 +136,7 @@ async fn delete_records_returns_low_watermark() {
 
 #[tokio::test]
 async fn create_describe_delete_acls_round_trip() {
-    let dir = temp_dir("acls");
+    let dir = temp_dir("p35", "acls");
     let broker = Arc::new(Broker::new(StorageConfig {
         data_dir: dir.clone(),
         ..StorageConfig::default()
@@ -277,7 +232,7 @@ async fn create_describe_delete_acls_round_trip() {
 
 #[tokio::test]
 async fn create_acls_v0_and_cluster_resource() {
-    let dir = temp_dir("cluster-acl");
+    let dir = temp_dir("p35", "cluster-acl");
     let broker = Arc::new(Broker::new(StorageConfig {
         data_dir: dir.clone(),
         ..StorageConfig::default()
@@ -329,7 +284,7 @@ async fn create_acls_v0_and_cluster_resource() {
 
 #[tokio::test]
 async fn acl_admin_denied_without_cluster_alter() {
-    let dir = temp_dir("acl-deny");
+    let dir = temp_dir("p35", "acl-deny");
     let broker = Arc::new(Broker::new(StorageConfig {
         data_dir: dir.clone(),
         ..StorageConfig::default()
@@ -375,7 +330,7 @@ async fn acl_admin_denied_without_cluster_alter() {
 
 #[tokio::test]
 async fn delete_records_acl_denied() {
-    let dir = temp_dir("del-deny");
+    let dir = temp_dir("p35", "del-deny");
     let broker = Arc::new(Broker::new(StorageConfig {
         data_dir: dir.clone(),
         ..StorageConfig::default()
