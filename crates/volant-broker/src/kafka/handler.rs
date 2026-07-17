@@ -368,7 +368,7 @@ fn dispatch_kafka(broker: &Broker, body: bytes::Bytes, conn: &mut KafkaConnState
             }
             txn::encode_add_partitions_to_txn(broker, &mut src, &mut out, hdr.api_version, principal);
         }
-        Some(ApiKey::AddOffsetsToTxn) if (0..=3).contains(&hdr.api_version) => {
+        Some(ApiKey::AddOffsetsToTxn) if (0..=4).contains(&hdr.api_version) => {
             if hdr.api_version >= 3 {
                 if let Err(e) = skip_tag_buffer(&mut src) {
                     debug!(error = %e, "add offsets to txn flexible header tag buffer");

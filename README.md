@@ -9,7 +9,7 @@ Volant is a resource-efficient alternative to Apache Kafka, built for:
 - **Streaming processing** — first-class operators (`map`, `filter`, windows) without a heavy runtime
 - **Small footprint** — native binary, predictable memory, simple operations
 
-> Status: **Phases 0–81 landed** — durable log, clustering, security, stream
+> Status: **Phases 0–82 landed** — durable log, clustering, security, stream
 > operators, and a broad optional Kafka wire shim (classic + flexible).
 > Single-node mode (no `--cluster-config`) preserves the simple path. Start with
 > the [whitepaper](./docs/WHITEPAPER.md) and [docs index](./docs/INDEX.md); also
@@ -41,7 +41,7 @@ volant/
 │   ├── consistency.md    # HWM / ISR / acks
 │   ├── tuning.md         # Performance / I/O guide
 │   ├── PHASE1–6_SPEC.md  # Binding core specs
-│   ├── PHASE7–80_SPEC.md # Ship records (see history/)
+│   ├── PHASE7–82_SPEC.md # Ship records (see history/)
 │   └── history/          # Phase index + archived plans/reviews
 ├── deploy/               # Dockerfile, compose, systemd, Helm chart
 ├── ROADMAP.md
@@ -356,8 +356,11 @@ THROTTLING_QUOTA_EXCEEDED never emitted (no quotas).
 **Phase 81:** FindCoordinator 0–6 — v5–6 wire-identical to flexible v4 batch;
 TRANSACTION_ABORTABLE never emitted; share key_type (KIP-932) rejected.
 
+**Phase 82:** AddOffsetsToTxn 0–4 — v4 wire-identical to flexible v3; KIP-890
+TRANSACTION_ABORTABLE never emitted (buffer-until-commit only).
+
 **Still deferred:** multi-language clients, chaos-mesh / cargo-fuzz corpus CI,
-true control-marker READ_COMMITTED, real 2PC, AddOffsetsToTxn v4.
+true control-marker READ_COMMITTED, real 2PC, ApiVersions v4–5 / Fetch v14+.
 
 ### Networked client (library)
 

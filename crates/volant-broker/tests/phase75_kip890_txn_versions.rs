@@ -118,7 +118,7 @@ async fn api_versions_kip890_txn_maxes() {
     }
     assert_eq!(found.get(&22), Some(&(0, 6)), "InitProducerId (Phase 77 OngoingTxn)");
     assert_eq!(found.get(&24), Some(&(0, 5)), "AddPartitionsToTxn");
-    assert_eq!(found.get(&25), Some(&(0, 3)), "AddOffsetsToTxn stays 0–3");
+    assert_eq!(found.get(&25), Some(&(0, 4)), "AddOffsetsToTxn (Phase 82 v4)");
     assert_eq!(found.get(&26), Some(&(0, 5)), "EndTxn");
     assert_eq!(found.get(&28), Some(&(0, 6)), "TxnOffsetCommit (Phase 76 TopicId)");
 

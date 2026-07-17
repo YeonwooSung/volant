@@ -6,7 +6,7 @@
 |---|---|
 | Version | 0.1.0 (Apache-2.0) |
 | Language | Rust 1.75+ |
-| Status | Phases 0–81 landed |
+| Status | Phases 0–82 landed |
 | Date | 2026-07-18 |
 
 ---
@@ -195,12 +195,12 @@ Inter-broker uses shared-token Auth, not SCRAM. No GSSAPI / OAUTHBEARER.
 
 ## 7. Kafka compatibility shim
 
-Enable with `--kafka-listen host:port`. Phases **23–81** built classic then
+Enable with `--kafka-listen host:port`. Phases **23–82** built classic then
 flexible (KIP-482) coverage for the APIs modern clients negotiate most often.
 
 **Authoritative API versions, per-key notes, and open limitations:**
-[KAFKA_COMPAT.md](./KAFKA_COMPAT.md). The summary matrix below may lag; trust
-KAFKA_COMPAT when they disagree.
+[KAFKA_COMPAT.md](./KAFKA_COMPAT.md) (source of truth). The summary matrix
+below may lag; trust KAFKA_COMPAT when they disagree.
 
 ### Advertised version matrix (summary)
 
@@ -216,7 +216,7 @@ KAFKA_COMPAT when they disagree.
 | CreateTopics | 0–7 | DeleteTopics | 0–6 |
 | CreatePartitions | 0–3 | InitProducerId | 0–6 |
 | AddPartitionsToTxn | 0–5 | EndTxn | 0–5 |
-| TxnOffsetCommit | 0–6 | AddOffsetsToTxn | 0–3 |
+| TxnOffsetCommit | 0–6 | AddOffsetsToTxn | 0–4 |
 | DescribeConfigs | 0–4 | AlterConfigs | 0–2 |
 | IncrementalAlterConfigs | 0–1 | DeleteRecords | 0–2 |
 | ACL admin | 0–2 | OffsetForLeaderEpoch | 0–4 |
@@ -228,7 +228,8 @@ KAFKA_COMPAT when they disagree.
 leader errors, KIP-890-era txn max versions (2PC fields parsed and ignored),
 CreatePartitions v3 (wire-identical to v2; no KIP-599 quotas), FindCoordinator
 v5–6 (wire-identical to v4 batch; no `TRANSACTION_ABORTABLE`; share key_type
-rejected), RecordBatch + MessageSet compression (gzip/snappy/lz4/zstd).
+rejected), AddOffsetsToTxn v4 (wire-identical to v3; no `TRANSACTION_ABORTABLE`),
+RecordBatch + MessageSet compression (gzip/snappy/lz4/zstd).
 
 ---
 
@@ -326,7 +327,7 @@ cargo run -p volant-server -- \
 | [tuning.md](./tuning.md) | Performance tuning |
 | [KAFKA_COMPAT.md](./KAFKA_COMPAT.md) | Current Kafka API matrix + honesty |
 | [features.md](./features.md) | Native features (post-core) |
-| [history/PHASE_HISTORY.md](./history/PHASE_HISTORY.md) | Phase 0–81 one-line index |
+| [history/PHASE_HISTORY.md](./history/PHASE_HISTORY.md) | Phase 0–82 one-line index |
 | [PHASE1_SPEC.md](./PHASE1_SPEC.md)–[PHASE6_SPEC.md](./PHASE6_SPEC.md) | Binding core specs |
 | [../ROADMAP.md](../ROADMAP.md) | Full roadmap + deferred work |
 | [../README.md](../README.md) | Quick start |

@@ -436,7 +436,10 @@ fn encode_add_partitions_batch(
 
 // ─── AddOffsetsToTxn ─────────────────────────────────────────────────────────
 
-/// AddOffsetsToTxn (API 25) classic v0–2 / flexible v3.
+/// AddOffsetsToTxn (API 25) classic v0–2 / flexible v3–4.
+///
+/// Phase 82: v4 is wire-identical to v3 (KIP-890 may return
+/// TRANSACTION_ABORTABLE — Volant never emits it; buffer-until-commit only).
 pub(crate) fn encode_add_offsets_to_txn(
     broker: &Broker,
     src: &mut impl Buf,
@@ -444,6 +447,7 @@ pub(crate) fn encode_add_offsets_to_txn(
     version: i16,
     principal: &str,
 ) {
+    // v3–4 share flexible compact framing; v4 adds no new fields.
     let flex = version >= 3;
 
     let write_err = |out: &mut BytesMut, err: i16| {
