@@ -134,7 +134,7 @@ async fn api_versions_v3_flexible_roundtrip() {
             saw_produce = true;
         }
         if key == 1 {
-            assert_eq!((min, max), (0, 12));
+            assert_eq!((min, max), (0, 13)); // Phase 68 Fetch TopicId
             saw_fetch = true;
         }
     }

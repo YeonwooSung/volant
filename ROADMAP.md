@@ -1529,7 +1529,28 @@ TopicId versions still deferred.
 
 **Still deferred:** multi-lang clients, cargo-fuzz corpus CI, true control-marker
 READ_COMMITTED, higher KIP-890 txn versions, DescribeCluster v2, ListTransactions
-v2, Fetch/admin TopicId.
+v2, Fetch/admin TopicId. Fetch TopicId closed by **Phase 68**.
+
+---
+
+### Phase 68 — Fetch TopicId (v13) ✅
+
+**Goal:** Modern clients that negotiate TopicId can Fetch by UUID (KIP-516)
+using the same deterministic mapping as Metadata.
+
+Binding: **[docs/PHASE68_SPEC.md](./docs/PHASE68_SPEC.md)**.
+
+- [x] Fetch 0–13 (v13 TopicId request/response; v12 name path unchanged)
+- [x] ForgottenTopicsData TopicId on v13
+- [x] Unknown / non-Volant UUID → UnknownTopicId (100)
+- [x] Integration tests (`phase68_fetch_topic_id`)
+
+**Honest limitations:** no Fetch v14+ CurrentLeader/NodeEndpoints; no real
+sessions; LSO ≡ HWM; deterministic UUID only.
+
+**Still deferred:** multi-lang clients, cargo-fuzz corpus CI, true control-marker
+READ_COMMITTED, higher KIP-890 txn versions, DescribeCluster v2, ListTransactions
+v2, admin TopicId (Create/DeleteTopics), Produce TopicId.
 
 ---
 

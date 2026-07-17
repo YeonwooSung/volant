@@ -132,7 +132,7 @@ fn fetch_body(
 }
 
 #[tokio::test]
-async fn api_versions_fetch_max_v12() {
+async fn api_versions_fetch_max_v13() {
     let dir = temp_dir("api");
     let broker = Arc::new(Broker::new(StorageConfig {
         data_dir: dir.clone(),
@@ -158,7 +158,7 @@ async fn api_versions_fetch_max_v12() {
         }
     }
     assert_eq!(produce, Some((0, 9)));
-    assert_eq!(fetch, Some((0, 12)));
+    assert_eq!(fetch, Some((0, 13))); // Phase 68 TopicId
 
     server.abort();
     let _ = std::fs::remove_dir_all(&dir);

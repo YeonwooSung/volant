@@ -300,7 +300,7 @@ fn dispatch_kafka(broker: &Broker, body: bytes::Bytes, conn: &mut KafkaConnState
             }
             encode_produce(broker, &mut src, &mut out, hdr.api_version, principal);
         }
-        Some(ApiKey::Fetch) if (0..=12).contains(&hdr.api_version) => {
+        Some(ApiKey::Fetch) if (0..=13).contains(&hdr.api_version) => {
             if hdr.api_version >= 12 {
                 if let Err(e) = skip_tag_buffer(&mut src) {
                     debug!(error = %e, "fetch flexible header tag buffer");
@@ -2179,20 +2179,22 @@ fn put_fetch_partition_response(
 }
 
 fn encode_fetch(broker: &Broker, src: &mut impl Buf, out: &mut BytesMut, version: i16, principal: &str) {
-    // Fetch classic v0–11 + flexible v12:
+    // Fetch classic v0–11 + flexible v12 + TopicId v13:
     //   request: replica_id, max_wait, min_bytes,
     //            max_bytes (v3+), isolation (v4+),
     //            session_id + session_epoch (v7+),
-    //            topics[{ name, partitions[{
+    //            topics[{ name (≤v12) | TopicId uuid (v13+), partitions[{
     //              partition, current_leader_epoch (v9+), fetch_offset,
     //              last_fetched_epoch (v12+), log_start_offset (v5+),
     //              partition_max_bytes
     //            }]}],
-    //            forgotten_topics (v7+), rack_id (v11+), tags (v12+)
+    //            forgotten_topics (v7+; name ≤v12 / TopicId v13+),
+    //            rack_id (v11+), tags (v12+)
     //   response: throttle (v1+), error+session_id (v7+),
-    //             topics[{ partitions[{ fields by version }]}], tags (v12+)
+    //             topics[{ name ≤v12 | TopicId v13+, partitions[{…}]}], tags (v12+)
     // ClusterId (v12+) is a top-level tagged field — ignored via skip_tag_buffer.
     let flexible = version >= 12;
+    let use_topic_id = version >= 13;
 
     if src.remaining() < 4 + 4 + 4 {
         put_fetch_empty_response(out, version, 0);
@@ -2259,22 +2261,34 @@ fn encode_fetch(broker: &Broker, src: &mut impl Buf, out: &mut BytesMut, version
     }
 
     for _ in 0..topic_count.max(0) {
-        let topic = if flexible {
-            match get_compact_string(src) {
+        // v13+: TopicId UUID; ≤v12: topic name string.
+        let (topic_name, unknown_topic_id) = if use_topic_id {
+            let uuid = match get_uuid(src) {
+                Ok(u) => u,
+                Err(_) => break,
+            };
+            put_uuid(out, &uuid);
+            match parse_volant_topic_uuid(&uuid)
+                .and_then(|id| broker.topic_name_by_id(id))
+            {
+                Some(name) => (name, false),
+                None => (String::new(), true),
+            }
+        } else if flexible {
+            let topic = match get_compact_string(src) {
                 Ok(t) => t,
                 Err(_) => break,
-            }
-        } else {
-            match get_string(src) {
-                Ok(t) => t,
-                Err(_) => break,
-            }
-        };
-        if flexible {
+            };
             put_compact_string(out, &topic);
+            (topic, false)
         } else {
+            let topic = match get_string(src) {
+                Ok(t) => t,
+                Err(_) => break,
+            };
             put_string(out, &topic);
-        }
+            (topic, false)
+        };
 
         let part_count = if flexible {
             match get_compact_array_len(src) {
@@ -2332,11 +2346,24 @@ fn encode_fetch(broker: &Broker, src: &mut impl Buf, out: &mut BytesMut, version
                 let _ = skip_tag_buffer(src); // partition request tags
             }
 
+            if unknown_topic_id {
+                put_fetch_partition_response(
+                    out,
+                    version,
+                    partition,
+                    KafkaErrorCode::UnknownTopicId.as_i16(),
+                    -1,
+                    -1,
+                    &[],
+                );
+                continue;
+            }
+
             if broker.acls().is_enabled()
                 && !broker.acls().authorize(
                     Some(principal),
                     ResourceType::Topic,
-                    &topic,
+                    &topic_name,
                     AclOperation::Read,
                 )
             {
@@ -2352,7 +2379,7 @@ fn encode_fetch(broker: &Broker, src: &mut impl Buf, out: &mut BytesMut, version
                 continue;
             }
 
-            let name = TopicName::new(topic.clone());
+            let name = TopicName::new(topic_name.clone());
             let snap = broker.metadata(Some(&[name.clone()]));
             let part_meta = snap.topics.first().and_then(|t| {
                 t.partitions
@@ -2413,7 +2440,8 @@ fn encode_fetch(broker: &Broker, src: &mut impl Buf, out: &mut BytesMut, version
                         .map(|r| r.offset.raw() as i64 + 1)
                         .unwrap_or(fetch_offset);
                     let hwm = part_meta.map(|p| p.hwm as i64).unwrap_or(hwm_fallback);
-                    let log_start = produce_log_start_offset(broker, &topic, partition as u32);
+                    let log_start =
+                        produce_log_start_offset(broker, &topic_name, partition as u32);
                     // Phase 32: v4+ RecordBatch (may be compressed); v0–3 MessageSet.
                     let set = encode_fetch_record_set(&selected, version);
                     put_fetch_partition_response(
@@ -2461,7 +2489,11 @@ fn encode_fetch(broker: &Broker, src: &mut impl Buf, out: &mut BytesMut, version
         if flexible {
             if let Ok(Some(n)) = get_compact_array_len(src) {
                 for _ in 0..n {
-                    let _ = get_compact_string(src);
+                    if use_topic_id {
+                        let _ = get_uuid(src);
+                    } else {
+                        let _ = get_compact_string(src);
+                    }
                     if let Ok(Some(pn)) = get_compact_array_len(src) {
                         for _ in 0..pn {
                             if src.remaining() < 4 {

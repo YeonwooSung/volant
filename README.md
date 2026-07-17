@@ -312,6 +312,9 @@ v0 (always-flexible modern admin APIs).
 **Phase 67:** Metadata TopicId v10–12 — deterministic UUID mapping, v11 cluster
 ops removal, v12 lookup by TopicId.
 
+**Phase 68:** Fetch TopicId v13 — request/response UUID topics (KIP-516);
+unknown id → UnknownTopicId; v12 name path unchanged.
+
 **Still deferred:** multi-language clients, chaos-mesh / cargo-fuzz corpus CI.
 
 ### Networked client (library)

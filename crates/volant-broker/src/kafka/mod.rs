@@ -1,7 +1,7 @@
 //! Kafka wire protocol shim (Phases 23–67).
 //!
 //! Classic framing plus flexible APIs (KIP-482): ApiVersions v3, Metadata
-//! v9–12 (TopicId), FindCoordinator v3–4, Produce v9, Fetch v12,
+//! v9–12 (TopicId), FindCoordinator v3–4, Produce v9, Fetch v12–13 (TopicId),
 //! group/offset/admin/config/txn flex, ListOffsets v6, OffsetForLeaderEpoch v4,
 //! DeleteRecords v2, ACL admin, SaslAuthenticate v2, DescribeCluster 0–1,
 //! ListTransactions 0–1, DescribeTransactions v0, DescribeProducers v0.
@@ -263,7 +263,7 @@ impl ApiKey {
 /// Supported version ranges advertised in ApiVersions.
 pub const SUPPORTED_APIS: &[(ApiKey, i16, i16)] = &[
     (ApiKey::Produce, 0, 9),
-    (ApiKey::Fetch, 0, 12),
+    (ApiKey::Fetch, 0, 13),
     (ApiKey::ListOffsets, 0, 6),
     (ApiKey::Metadata, 0, 12),
     (ApiKey::OffsetCommit, 0, 8),

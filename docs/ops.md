@@ -131,7 +131,7 @@ Supported APIs:
 | Metadata | 0–12 | Classic 0–8; **v9 flexible**; **v10–12 TopicId** (deterministic UUID from Volant id); v11 drops cluster authorized ops; v12 lookup by TopicId; leader_epoch=-1; v13 unsupported |
 | OffsetForLeaderEpoch | 0–4 | Classic 0–3; **v4 flexible** + response header v1; no epoch history (eligible → HWM); fencing via current_leader_epoch |
 | Produce | 0–9 | Classic 0–8; **v9 flexible** compact transactional_id/topics/records + response header v1; MessageSet or RecordBatch; compression + idempotent PID/seq; empty record_errors; v10 KIP-951 unsupported |
-| Fetch | 0–12 | Classic 0–11; **v12 flexible** compact topics/records + response header v1; v0–3 MessageSet + v4+ RecordBatch (default lz4); session header (no real sessions); leader-epoch fence; preferred_read_replica=-1; TopicId v13+ unsupported |
+| Fetch | 0–13 | Classic 0–11; **v12 flexible** compact name topics/records + response header v1; **v13 TopicId UUID** (deterministic Volant mapping; unknown → UnknownTopicId); v0–3 MessageSet + v4+ RecordBatch (default lz4); session header (no real sessions); leader-epoch fence; preferred_read_replica=-1; v14+ unsupported |
 | InitProducerId | 0–2 | Classic 0–1; **v2 flexible** + response header v1; transactional_id fencing; timeout ignored; v3+ resume unsupported |
 | FindCoordinator | 0–4 | Classic 0–2; **v3 flexible** compact key/host; **v4 batch** CoordinatorKeys; all keys → this broker; response header v1 for v3+ |
 | AddPartitionsToTxn | 0–3 | Classic 0–2; **v3 flexible** + response header v1; opens txn; v4+ broker-batch unsupported |
