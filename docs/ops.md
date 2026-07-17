@@ -212,7 +212,7 @@ Limitations:
 - Prefer binding to localhost / private networks; leave disabled in production
   unless you need Kafka-protocol discovery.
 
-See [PHASE23_SPEC.md](./PHASE23_SPEC.md) … [PHASE51_SPEC.md](./PHASE51_SPEC.md).
+See [KAFKA_COMPAT.md](./KAFKA_COMPAT.md) and [PHASE23_SPEC.md](./PHASE23_SPEC.md) … [PHASE79_SPEC.md](./PHASE79_SPEC.md).
 
 ## TLS (Phase 7 listen + Phase 9 verification / inter-broker)
 
@@ -542,5 +542,8 @@ is only compacted after it rolls.
 
 ## Deferred
 
-Kafka wire shim, multi-language clients, SCRAM / full SASL, full chaos-mesh
-suites, cargo-fuzz corpus CI. See [ROADMAP.md](../ROADMAP.md).
+Multi-language clients, full chaos-mesh suites, cargo-fuzz corpus CI, true
+control-marker `READ_COMMITTED`, real 2PC / prepared transactions. Kafka shim
+(Phases 23–79), SCRAM, and SASL PLAIN/SCRAM are **shipped** — see
+[KAFKA_COMPAT.md](./KAFKA_COMPAT.md). Full deferred list:
+[ROADMAP.md](../ROADMAP.md).

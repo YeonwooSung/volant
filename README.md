@@ -9,12 +9,12 @@ Volant is a resource-efficient alternative to Apache Kafka, built for:
 - **Streaming processing** — first-class operators (`map`, `filter`, windows) without a heavy runtime
 - **Small footprint** — native binary, predictable memory, simple operations
 
-> Status: **Phase 8 complete** — client leader redirect, optional client TLS,
-> CLI auth token, Helm chart, rolling-restart tests; builds on Phase 6–7
-> clustering and production readiness. Single-node mode (no `--cluster-config`)
-> preserves Phase 1–5 behavior. See [ROADMAP.md](./ROADMAP.md),
-> [ops runbook](./docs/ops.md), [deploy/](./deploy/),
-> [consistency model](./docs/consistency.md), and Phase 1–8 specs under `docs/`.
+> Status: **Phases 0–79 landed** — durable log, clustering, security, stream
+> operators, and a broad optional Kafka wire shim (classic + flexible).
+> Single-node mode (no `--cluster-config`) preserves the simple path. Start with
+> the [whitepaper](./docs/WHITEPAPER.md) and [docs index](./docs/INDEX.md); also
+> [ROADMAP.md](./ROADMAP.md), [ops](./docs/ops.md), [deploy/](./deploy/),
+> [consistency](./docs/consistency.md).
 
 ---
 
@@ -33,17 +33,16 @@ volant/
 │   ├── volant-cli        # Admin CLI (`volant`)
 │   └── volant-bench      # Storage micro-benchmarks
 ├── docs/
-│   ├── PHASE1_SPEC.md    # Binding durable-log format & API
-│   ├── PHASE2_SPEC.md    # Binding TCP protocol & client/server API
-│   ├── PHASE3_SPEC.md    # Consumer groups & offsets
-│   ├── PHASE4_SPEC.md    # Stream operators & topology API
-│   ├── PHASE5_SPEC.md    # DMA / high-performance I/O
-│   ├── PHASE6_SPEC.md    # Clustering & ISR replication
-│   ├── PHASE7_SPEC.md    # Metrics, auth, TLS, packaging
-│   ├── PHASE8_SPEC.md    # Client redirect, client TLS, Helm
-│   ├── ops.md            # Operator runbook (metrics / auth / TLS)
-│   ├── consistency.md    # What “committed” means (HWM / acks)
-│   └── tuning.md         # Ops tuning guide (ulimit, I/O, affinity)
+│   ├── INDEX.md          # Documentation map
+│   ├── WHITEPAPER.md      # Technical whitepaper
+│   ├── KAFKA_COMPAT.md   # Kafka shim API matrix + honesty
+│   ├── features.md       # Native features (post-core)
+│   ├── ops.md            # Operator runbook
+│   ├── consistency.md    # HWM / ISR / acks
+│   ├── tuning.md         # Performance / I/O guide
+│   ├── PHASE1–6_SPEC.md  # Binding core specs
+│   ├── PHASE7–79_SPEC.md # Ship records (see history/)
+│   └── history/          # Phase index + archived plans/reviews
 ├── deploy/               # Dockerfile, compose, systemd, Helm chart
 ├── ROADMAP.md
 └── Cargo.toml            # Workspace root
