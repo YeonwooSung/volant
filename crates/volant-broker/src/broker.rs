@@ -2477,6 +2477,28 @@ impl Broker {
             .unwrap_or(false)
     }
 
+    /// Set the leader epoch for a partition (tests / controlled epoch bumps).
+    ///
+    /// Does not change the leader node id — only the epoch counter used for
+    /// fencing (`FencedLeaderEpoch` / KIP-951 CurrentLeader).
+    pub fn set_partition_leader_epoch(
+        &self,
+        topic: &TopicName,
+        partition: PartitionId,
+        epoch: u32,
+    ) -> Result<()> {
+        let mut topics = self.topics.write();
+        let t = topics
+            .get_mut(topic)
+            .ok_or_else(|| Error::NotFound(format!("topic {}", topic.as_str())))?;
+        let part = t
+            .partitions
+            .get_mut(&partition)
+            .ok_or_else(|| Error::NotFound(format!("partition {partition}")))?;
+        part.leader_epoch = epoch;
+        Ok(())
+    }
+
     /// Whether a local partition log exists.
     pub fn topics_has_partition(&self, topic: &TopicName, partition: PartitionId) -> bool {
         let topics = self.topics.read();

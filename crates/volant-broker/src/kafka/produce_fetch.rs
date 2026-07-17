@@ -14,7 +14,8 @@ use super::codec::{
     encode_record_batch_compressed, get_bytes, get_compact_array_len, get_compact_bytes,
     get_compact_nullable_string, get_compact_string, get_nullable_string, get_string, get_uuid,
     put_bytes, put_compact_array_len, put_compact_bytes, put_compact_nullable_string,
-    put_compact_string, put_empty_tag_buffer, put_nullable_string, put_string, skip_tag_buffer,
+    put_compact_string, put_empty_tag_buffer, put_nullable_string, put_string, put_unsigned_varint,
+    skip_tag_buffer,
 };
 use super::compress::{fetch_compression_codec, CompressionCodec};
 use super::topic_id;
@@ -31,10 +32,93 @@ pub(crate) fn produce_log_start_offset(broker: &Broker, topic: &str, partition: 
     }
 }
 
-/// Write one ProduceResponse partition entry (classic v0–8 / flexible v9).
+/// Whether this partition error should carry KIP-951 CurrentLeader.
+fn kip951_leader_error(error: i16) -> bool {
+    error == KafkaErrorCode::NotLeaderForPartition.as_i16()
+        || error == KafkaErrorCode::FencedLeaderEpoch.as_i16()
+}
+
+/// Resolve (leader_id, leader_epoch) for KIP-951 from partition metadata.
+fn resolve_current_leader(
+    broker: &Broker,
+    topic: &str,
+    partition: u32,
+    error: i16,
+) -> Option<(i32, i32)> {
+    if !kip951_leader_error(error) {
+        return None;
+    }
+    let name = TopicName::new(topic.to_string());
+    let snap = broker.metadata(Some(&[name]));
+    let part = snap.topics.first().and_then(|t| {
+        t.partitions
+            .iter()
+            .find(|p| p.partition_id.0 == partition)
+    })?;
+    Some((part.leader as i32, part.leader_epoch as i32))
+}
+
+/// Encode LeaderIdAndEpoch body (no outer tag framing).
+fn encode_leader_id_and_epoch(leader_id: i32, leader_epoch: i32) -> BytesMut {
+    let mut body = BytesMut::with_capacity(12);
+    body.put_i32(leader_id);
+    body.put_i32(leader_epoch);
+    put_empty_tag_buffer(&mut body);
+    body
+}
+
+/// Write a single tagged field TAG_BUFFER.
+fn put_single_tag(out: &mut BytesMut, tag: u32, value: &[u8]) {
+    put_unsigned_varint(out, 1);
+    put_unsigned_varint(out, tag);
+    put_unsigned_varint(out, value.len() as u32);
+    out.extend_from_slice(value);
+}
+
+/// Produce/Fetch NodeEndpoints entry for one broker.
+fn put_node_endpoints_tag(out: &mut BytesMut, endpoints: &[(i32, String, i32)]) {
+    let mut value = BytesMut::new();
+    put_compact_array_len(&mut value, endpoints.len());
+    for (id, host, port) in endpoints {
+        value.put_i32(*id);
+        put_compact_string(&mut value, host);
+        value.put_i32(*port);
+        put_compact_nullable_string(&mut value, None); // rack
+        put_empty_tag_buffer(&mut value);
+    }
+    put_single_tag(out, 0, &value);
+}
+
+/// Collect unique NodeEndpoints for leaders referenced by CurrentLeader ids.
+fn node_endpoints_for_leaders(broker: &Broker, leader_ids: &[i32]) -> Vec<(i32, String, i32)> {
+    if leader_ids.is_empty() {
+        return Vec::new();
+    }
+    let snap = broker.metadata(None);
+    let mut out = Vec::new();
+    let mut seen = std::collections::HashSet::new();
+    for &id in leader_ids {
+        if !seen.insert(id) {
+            continue;
+        }
+        let (host, port) = snap
+            .brokers
+            .iter()
+            .find(|(i, _, _)| *i as i32 == id)
+            .map(|(_, h, p)| (h.clone(), i32::from(*p)))
+            .unwrap_or((snap.host.clone(), i32::from(snap.port)));
+        out.push((id, host, port));
+    }
+    out
+}
+
+/// Write one ProduceResponse partition entry (classic v0–8 / flexible v9+).
 ///
 /// Field order: index, error, base_offset, log_append_time (v2+),
 /// log_start_offset (v5+), record_errors[] + error_message (v8+), TAG_BUFFER (v9+).
+///
+/// v10+: optional CurrentLeader (tag 0) when `current_leader` is `Some`.
+/// Returns `true` when CurrentLeader was written (caller may emit NodeEndpoints).
 pub(crate) fn put_produce_partition_response(
     out: &mut BytesMut,
     version: i16,
@@ -42,7 +126,8 @@ pub(crate) fn put_produce_partition_response(
     error: i16,
     base_offset: i64,
     log_start_offset: i64,
-) {
+    current_leader: Option<(i32, i32)>,
+) -> bool {
     let flexible = version >= 9;
     out.put_i32(partition);
     out.put_i16(error);
@@ -62,9 +147,21 @@ pub(crate) fn put_produce_partition_response(
             put_nullable_string(out, None); // error_message
         }
     }
+    let mut wrote_leader = false;
     if flexible {
-        put_empty_tag_buffer(out);
+        if version >= 10 {
+            if let Some((lid, lep)) = current_leader {
+                let body = encode_leader_id_and_epoch(lid, lep);
+                put_single_tag(out, 0, &body);
+                wrote_leader = true;
+            } else {
+                put_empty_tag_buffer(out);
+            }
+        } else {
+            put_empty_tag_buffer(out);
+        }
     }
+    wrote_leader
 }
 
 /// Empty Produce response (no topics) with correct classic/flexible framing.
@@ -92,10 +189,11 @@ pub(crate) fn encode_produce(broker: &Broker, src: &mut impl Buf, out: &mut Byte
     //   v7: ZStd in batches (already supported; request wire unchanged)
     //   v8: record_errors[] + error_message per partition
     //   v9: compact strings/arrays/records + tag buffers + response header v1
-    //   v10–12: same as v9 (KIP-951 CurrentLeader/NodeEndpoints tags empty)
+    //   v10–12: KIP-951 CurrentLeader (partition tag 0) + NodeEndpoints (top tag 0)
     //   v13: TopicId UUID instead of topic name (request + response)
     let flexible = version >= 9;
     let use_topic_id = version >= 13;
+    let mut kip951_leaders: Vec<i32> = Vec::new();
 
     if version >= 3 {
         let txn_result = if flexible {
@@ -197,8 +295,7 @@ pub(crate) fn encode_produce(broker: &Broker, src: &mut impl Buf, out: &mut Byte
                             partition,
                             KafkaErrorCode::InvalidMessage.as_i16(),
                             -1,
-                            -1,
-                        );
+                            -1, None);
                         let _ = skip_tag_buffer(src);
                         continue;
                     }
@@ -213,8 +310,7 @@ pub(crate) fn encode_produce(broker: &Broker, src: &mut impl Buf, out: &mut Byte
                             partition,
                             KafkaErrorCode::InvalidMessage.as_i16(),
                             -1,
-                            -1,
-                        );
+                            -1, None);
                         continue;
                     }
                 }
@@ -230,8 +326,7 @@ pub(crate) fn encode_produce(broker: &Broker, src: &mut impl Buf, out: &mut Byte
                     partition,
                     KafkaErrorCode::UnknownTopicId.as_i16(),
                     -1,
-                    -1,
-                );
+                    -1, None);
                 continue;
             }
 
@@ -249,8 +344,7 @@ pub(crate) fn encode_produce(broker: &Broker, src: &mut impl Buf, out: &mut Byte
                     partition,
                     KafkaErrorCode::TopicAuthorizationFailed.as_i16(),
                     -1,
-                    -1,
-                );
+                    -1, None);
                 continue;
             }
 
@@ -264,8 +358,7 @@ pub(crate) fn encode_produce(broker: &Broker, src: &mut impl Buf, out: &mut Byte
                         partition,
                         KafkaErrorCode::CorruptMessage.as_i16(),
                         -1,
-                        -1,
-                    );
+                        -1, None);
                     continue;
                 }
             };
@@ -278,8 +371,7 @@ pub(crate) fn encode_produce(broker: &Broker, src: &mut impl Buf, out: &mut Byte
                     partition,
                     KafkaErrorCode::None.as_i16(),
                     0,
-                    log_start,
-                );
+                    log_start, None);
                 continue;
             }
 
@@ -307,11 +399,20 @@ pub(crate) fn encode_produce(broker: &Broker, src: &mut impl Buf, out: &mut Byte
                         partition,
                         KafkaErrorCode::None.as_i16(),
                         base,
-                        log_start,
-                    );
+                        log_start, None);
                 }
                 Err(code) => {
-                    put_produce_partition_response(out, version, partition, code, -1, -1);
+                    let leader = if version >= 10 {
+                        resolve_current_leader(broker, &topic_name, partition as u32, code)
+                    } else {
+                        None
+                    };
+                    if let Some((lid, _)) = leader {
+                        kip951_leaders.push(lid);
+                    }
+                    put_produce_partition_response(
+                        out, version, partition, code, -1, -1, leader,
+                    );
                 }
             }
         }
@@ -329,7 +430,12 @@ pub(crate) fn encode_produce(broker: &Broker, src: &mut impl Buf, out: &mut Byte
         out.put_i32(0);
     }
     if flexible {
-        put_empty_tag_buffer(out); // response top-level tags
+        if version >= 10 && !kip951_leaders.is_empty() {
+            let endpoints = node_endpoints_for_leaders(broker, &kip951_leaders);
+            put_node_endpoints_tag(out, &endpoints);
+        } else {
+            put_empty_tag_buffer(out); // response top-level tags
+        }
     }
 }
 
@@ -491,6 +597,8 @@ pub(crate) fn put_fetch_empty_response(out: &mut BytesMut, version: i16, session
 ///
 /// Order: index, error, hwm, lso (v4+), log_start (v5+), aborted[] (v4+),
 /// preferred_read_replica (v11+), records, TAG_BUFFER (v12+).
+///
+/// v12+: optional CurrentLeader as **tag 1** (tag 0 is DivergingEpoch, unused).
 pub(crate) fn put_fetch_partition_response(
     out: &mut BytesMut,
     version: i16,
@@ -499,6 +607,7 @@ pub(crate) fn put_fetch_partition_response(
     hwm: i64,
     log_start: i64,
     records: &[u8],
+    current_leader: Option<(i32, i32)>,
 ) {
     let flexible = version >= 12;
     out.put_i32(partition);
@@ -523,7 +632,13 @@ pub(crate) fn put_fetch_partition_response(
     }
     if flexible {
         put_compact_bytes(out, Some(records));
-        put_empty_tag_buffer(out); // no DivergingEpoch / CurrentLeader / SnapshotId
+        if let Some((lid, lep)) = current_leader {
+            // Tag 1 = CurrentLeader (tag 0 would be DivergingEpoch).
+            let body = encode_leader_id_and_epoch(lid, lep);
+            put_single_tag(out, 1, &body);
+        } else {
+            put_empty_tag_buffer(out);
+        }
     } else {
         put_bytes(out, Some(records));
     }
@@ -685,8 +800,7 @@ pub(crate) fn encode_fetch(broker: &Broker, src: &mut impl Buf, out: &mut BytesM
                     KafkaErrorCode::UnknownTopicId.as_i16(),
                     -1,
                     -1,
-                    &[],
-                );
+                    &[], None);
                 continue;
             }
 
@@ -705,8 +819,7 @@ pub(crate) fn encode_fetch(broker: &Broker, src: &mut impl Buf, out: &mut BytesM
                     KafkaErrorCode::TopicAuthorizationFailed.as_i16(),
                     -1,
                     -1,
-                    &[],
-                );
+                    &[], None);
                 continue;
             }
 
@@ -729,11 +842,11 @@ pub(crate) fn encode_fetch(broker: &Broker, src: &mut impl Buf, out: &mut BytesM
                         KafkaErrorCode::UnknownLeaderEpoch.as_i16(),
                         -1,
                         -1,
-                        &[],
-                    );
+                        &[], None);
                     continue;
                 }
                 if current_epoch >= 0 && current_leader_epoch < current_epoch {
+                    let leader = part_meta.map(|p| (p.leader as i32, p.leader_epoch as i32));
                     put_fetch_partition_response(
                         out,
                         version,
@@ -742,6 +855,7 @@ pub(crate) fn encode_fetch(broker: &Broker, src: &mut impl Buf, out: &mut BytesM
                         -1,
                         -1,
                         &[],
+                        leader,
                     );
                     continue;
                 }
@@ -783,6 +897,7 @@ pub(crate) fn encode_fetch(broker: &Broker, src: &mut impl Buf, out: &mut BytesM
                         hwm,
                         log_start,
                         &set,
+                        None,
                     );
                 }
                 Err(Error::NotFound(_)) => {
@@ -794,6 +909,7 @@ pub(crate) fn encode_fetch(broker: &Broker, src: &mut impl Buf, out: &mut BytesM
                         -1,
                         -1,
                         &[],
+                        None,
                     );
                 }
                 Err(_) => {
@@ -804,8 +920,7 @@ pub(crate) fn encode_fetch(broker: &Broker, src: &mut impl Buf, out: &mut BytesM
                         KafkaErrorCode::Unknown.as_i16(),
                         -1,
                         -1,
-                        &[],
-                    );
+                        &[], None);
                 }
             }
         }

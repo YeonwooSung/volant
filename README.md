@@ -344,6 +344,9 @@ unknown id → UnknownTopicId; buffers until EndTxn.
 **Phase 77:** InitProducerId v6 — Enable2Pc / KeepPreparedTxn parsed+ignored;
 OngoingTxnProducerId/Epoch always -1 (no prepared/2PC); max 0–6.
 
+**Phase 78:** KIP-951 CurrentLeader / NodeEndpoints — Produce v10+ and Fetch
+v12+ emit leader tags on NotLeader/FencedLeaderEpoch; success keeps empty tags.
+
 **Still deferred:** multi-language clients, chaos-mesh / cargo-fuzz corpus CI,
 true control-marker READ_COMMITTED, real 2PC.
 

@@ -1745,6 +1745,29 @@ surfaces open buffer-until-commit txns; resume pid/epoch still ignored; no
 TRANSACTION_ABORTABLE emission; AddPartitions/EndTxn maxes unchanged.
 
 **Still deferred:** multi-lang clients, cargo-fuzz corpus CI, true control-marker
+READ_COMMITTED, real 2PC / prepared transaction state. KIP-951 CurrentLeader /
+NodeEndpoints closed by **Phase 78**.
+
+---
+
+### Phase 78 — KIP-951 CurrentLeader / NodeEndpoints ✅
+
+**Goal:** On leader-related Produce/Fetch errors, modern clients get
+CurrentLeader (and Produce NodeEndpoints) tagged fields instead of empty
+tag buffers, so they can refresh leader without a full Metadata round-trip.
+
+Binding: **[docs/PHASE78_SPEC.md](./docs/PHASE78_SPEC.md)**.
+
+- [x] Produce v10+: partition CurrentLeader (tag 0) on NotLeader / FencedLeaderEpoch
+- [x] Produce v10+: top-level NodeEndpoints (tag 0) when any CurrentLeader emitted
+- [x] Fetch v12+: partition CurrentLeader (tag 1) on FencedLeaderEpoch
+- [x] Success / other errors keep empty tags; no ApiVersions max bumps
+- [x] Integration tests (`phase78_kip951_current_leader`)
+
+**Honest limitations:** no Fetch NodeEndpoints (Kafka v16+); no DivergingEpoch;
+single-node CurrentLeader is almost always self; empty tags on success.
+
+**Still deferred:** multi-lang clients, cargo-fuzz corpus CI, true control-marker
 READ_COMMITTED, real 2PC / prepared transaction state.
 
 ---
