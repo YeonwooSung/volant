@@ -73,9 +73,9 @@ async fn api_versions_group_admin_flex_maxes() {
         let max_v = src.get_i16();
         found.insert(key, (min_v, max_v));
     }
-    assert_eq!(found.get(&15), Some(&(0, 5))); // DescribeGroups
-    assert_eq!(found.get(&16), Some(&(0, 3))); // ListGroups
-    assert_eq!(found.get(&42), Some(&(0, 2))); // DeleteGroups
+    assert_eq!(found.get(&15), Some(&(0, 6))); // DescribeGroups (Phase 79)
+    assert_eq!(found.get(&16), Some(&(0, 5))); // ListGroups (Phase 79)
+    assert_eq!(found.get(&42), Some(&(0, 3))); // DeleteGroups (Phase 79)
     server.abort();
     let _ = std::fs::remove_dir_all(&dir);
 }
@@ -306,10 +306,10 @@ async fn unsupported_versions_use_header_v1() {
     }));
     let (addr, server) = boot_kafka(Arc::clone(&broker)).await;
 
-    // DescribeGroups v6 (ErrorMessage) unsupported
+    // DescribeGroups v7 unsupported (v6 ErrorMessage closed by Phase 79)
     let resp = rpc(
         &addr,
-        encode_request_flexible(15, 6, 1, Some("c"), &[]),
+        encode_request_flexible(15, 7, 1, Some("c"), &[]),
     )
     .await;
     let mut src = resp.freeze();
@@ -317,10 +317,10 @@ async fn unsupported_versions_use_header_v1() {
     skip_tag_buffer(&mut src).unwrap();
     assert_eq!(src.get_i16(), 35); // UNSUPPORTED_VERSION
 
-    // ListGroups v4 (StatesFilter) unsupported
+    // ListGroups v6 unsupported (v4–5 closed by Phase 79)
     let resp = rpc(
         &addr,
-        encode_request_flexible(16, 4, 2, Some("c"), &[]),
+        encode_request_flexible(16, 6, 2, Some("c"), &[]),
     )
     .await;
     let mut src = resp.freeze();
@@ -328,10 +328,10 @@ async fn unsupported_versions_use_header_v1() {
     skip_tag_buffer(&mut src).unwrap();
     assert_eq!(src.get_i16(), 35);
 
-    // DeleteGroups v3 (ErrorMessage) unsupported
+    // DeleteGroups v4 unsupported (v3 ErrorMessage closed by Phase 79)
     let resp = rpc(
         &addr,
-        encode_request_flexible(42, 3, 3, Some("c"), &[]),
+        encode_request_flexible(42, 4, 3, Some("c"), &[]),
     )
     .await;
     let mut src = resp.freeze();

@@ -440,7 +440,7 @@ fn dispatch_kafka(broker: &Broker, body: bytes::Bytes, conn: &mut KafkaConnState
             }
             group_api::encode_offset_fetch(broker, &mut src, &mut out, hdr.api_version, principal);
         }
-        Some(ApiKey::DescribeGroups) if (0..=5).contains(&hdr.api_version) => {
+        Some(ApiKey::DescribeGroups) if (0..=6).contains(&hdr.api_version) => {
             if hdr.api_version >= 5 {
                 if let Err(e) = skip_tag_buffer(&mut src) {
                     debug!(error = %e, "describe groups flexible header tag buffer");
@@ -448,7 +448,7 @@ fn dispatch_kafka(broker: &Broker, body: bytes::Bytes, conn: &mut KafkaConnState
             }
             group_api::encode_describe_groups(broker, &mut src, &mut out, hdr.api_version, principal);
         }
-        Some(ApiKey::ListGroups) if (0..=3).contains(&hdr.api_version) => {
+        Some(ApiKey::ListGroups) if (0..=5).contains(&hdr.api_version) => {
             if hdr.api_version >= 3 {
                 if let Err(e) = skip_tag_buffer(&mut src) {
                     debug!(error = %e, "list groups flexible header tag buffer");
@@ -456,7 +456,7 @@ fn dispatch_kafka(broker: &Broker, body: bytes::Bytes, conn: &mut KafkaConnState
             }
             group_api::encode_list_groups(broker, &mut src, &mut out, hdr.api_version, principal);
         }
-        Some(ApiKey::DeleteGroups) if (0..=2).contains(&hdr.api_version) => {
+        Some(ApiKey::DeleteGroups) if (0..=3).contains(&hdr.api_version) => {
             if hdr.api_version >= 2 {
                 if let Err(e) = skip_tag_buffer(&mut src) {
                     debug!(error = %e, "delete groups flexible header tag buffer");

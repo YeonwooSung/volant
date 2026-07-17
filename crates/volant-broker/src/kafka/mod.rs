@@ -1,14 +1,16 @@
-//! Kafka wire protocol shim (Phases 23–78).
+//! Kafka wire protocol shim (Phases 23–79).
 //!
 //! Classic framing plus flexible APIs (KIP-482): ApiVersions v3, Metadata
 //! v9–13 (TopicId; v13 top-level ErrorCode), FindCoordinator v3–4, Produce v9–13 (TopicId v13; KIP-951 tags), Fetch v12–13 (TopicId; CurrentLeader tag),
 //! CreateTopics v5–7 / DeleteTopics v4–6 (TopicId), group/offset/admin/config/txn
-//! flex, ListOffsets v6–11 (max-timestamp / local / tiered specials), OffsetForLeaderEpoch v4, DeleteRecords v2, ACL admin,
+//! flex (ListGroups 0–5 States/Types filter, DescribeGroups 0–6 ErrorMessage,
+//! DeleteGroups 0–3 ErrorMessage), ListOffsets v6–11 (max-timestamp / local / tiered specials),
+//! OffsetForLeaderEpoch v4, DeleteRecords v2, ACL admin,
 //! SaslAuthenticate v2, DescribeCluster 0–2, ListTransactions 0–2,
 //! DescribeTransactions v0, DescribeProducers v0, KIP-890-era txn max versions
 //! (InitProducerId 0–6 OngoingTxn wire, AddPartitionsToTxn/EndTxn 0–5,
 //! TxnOffsetCommit 0–6 TopicId).
-//! See `docs/PHASE23_SPEC.md` … `docs/PHASE78_SPEC.md`.
+//! See `docs/PHASE23_SPEC.md` … `docs/PHASE79_SPEC.md`.
 
 /// Kafka wire primitives, MessageSet (magic 0/1), and RecordBatch (magic 2).
 pub mod codec;
@@ -290,8 +292,8 @@ pub const SUPPORTED_APIS: &[(ApiKey, i16, i16)] = &[
     (ApiKey::Heartbeat, 0, 4),
     (ApiKey::LeaveGroup, 0, 5),
     (ApiKey::SyncGroup, 0, 5),
-    (ApiKey::DescribeGroups, 0, 5),
-    (ApiKey::ListGroups, 0, 3),
+    (ApiKey::DescribeGroups, 0, 6),
+    (ApiKey::ListGroups, 0, 5),
     (ApiKey::SaslHandshake, 0, 1),
     (ApiKey::ApiVersions, 0, 3),
     (ApiKey::CreateTopics, 0, 7),
@@ -310,7 +312,7 @@ pub const SUPPORTED_APIS: &[(ApiKey, i16, i16)] = &[
     (ApiKey::AlterConfigs, 0, 2),
     (ApiKey::SaslAuthenticate, 0, 2),
     (ApiKey::CreatePartitions, 0, 2),
-    (ApiKey::DeleteGroups, 0, 2),
+    (ApiKey::DeleteGroups, 0, 3),
     (ApiKey::IncrementalAlterConfigs, 0, 1),
     (ApiKey::OffsetDelete, 0, 0),
     (ApiKey::DescribeCluster, 0, 2),

@@ -347,6 +347,10 @@ OngoingTxnProducerId/Epoch always -1 (no prepared/2PC); max 0–6.
 **Phase 78:** KIP-951 CurrentLeader / NodeEndpoints — Produce v10+ and Fetch
 v12+ emit leader tags on NotLeader/FencedLeaderEpoch; success keeps empty tags.
 
+**Phase 79:** Group admin version bumps — ListGroups 0–5 (StatesFilter/GroupState,
+TypesFilter/GroupType=`classic`), DescribeGroups 0–6 + DeleteGroups 0–3
+ErrorMessage fields.
+
 **Still deferred:** multi-language clients, chaos-mesh / cargo-fuzz corpus CI,
 true control-marker READ_COMMITTED, real 2PC.
 

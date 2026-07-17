@@ -1768,6 +1768,29 @@ Binding: **[docs/PHASE78_SPEC.md](./docs/PHASE78_SPEC.md)**.
 single-node CurrentLeader is almost always self; empty tags on success.
 
 **Still deferred:** multi-lang clients, cargo-fuzz corpus CI, true control-marker
+READ_COMMITTED, real 2PC / prepared transaction state. Group-admin version bumps
+closed by **Phase 79**.
+
+---
+
+### Phase 79 — Group admin version bumps ✅
+
+**Goal:** Raise List/Describe/DeleteGroups to current Kafka wire maxes so modern
+admin clients get StatesFilter / TypesFilter / ErrorMessage without
+UnsupportedVersion.
+
+Binding: **[docs/PHASE79_SPEC.md](./docs/PHASE79_SPEC.md)**.
+
+- [x] ListGroups 0–5: StatesFilter + GroupState (v4); TypesFilter + GroupType (v5)
+- [x] DescribeGroups 0–6: ErrorMessage per group (null on success)
+- [x] DeleteGroups 0–3: ErrorMessage per result
+- [x] GroupType always `"classic"`; states Stable/Empty only
+- [x] Integration tests (`phase79_group_admin_versions`); phase59 maxes updated
+
+**Honest limitations:** no PreparingRebalance/CompletingRebalance in ListGroups;
+no KIP-848 / share GroupType; ErrorMessage is short static English.
+
+**Still deferred:** multi-lang clients, cargo-fuzz corpus CI, true control-marker
 READ_COMMITTED, real 2PC / prepared transaction state.
 
 ---

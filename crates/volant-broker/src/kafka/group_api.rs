@@ -1565,10 +1565,36 @@ pub(crate) fn encode_list_groups(
 ) {
     // ListGroups classic v0–2: empty request; response throttle (v1+), error, groups[].
     // Flexible v3: request body is TAG_BUFFER only; response uses compact strings/arrays
-    // and response header v1. StatesFilter (v4) / TypesFilter (v5) deferred.
+    // and response header v1.
+    // v4: StatesFilter[] + GroupState on ListedGroup.
+    // v5: TypesFilter[] + GroupType on ListedGroup.
     let flexible = version >= 3;
+    let mut states_filter: Vec<String> = Vec::new();
+    let mut types_filter: Vec<String> = Vec::new();
     if flexible {
-        let _ = skip_tag_buffer(src); // body tags (no fields until v4)
+        if version >= 4 {
+            if let Ok(Some(n)) = get_compact_array_len(src) {
+                for _ in 0..n {
+                    if let Ok(s) = get_compact_string(src) {
+                        states_filter.push(s);
+                    } else {
+                        break;
+                    }
+                }
+            }
+        }
+        if version >= 5 {
+            if let Ok(Some(n)) = get_compact_array_len(src) {
+                for _ in 0..n {
+                    if let Ok(s) = get_compact_string(src) {
+                        types_filter.push(s);
+                    } else {
+                        break;
+                    }
+                }
+            }
+        }
+        let _ = skip_tag_buffer(src);
     }
 
     if version >= 1 {
@@ -1592,18 +1618,42 @@ pub(crate) fn encode_list_groups(
         return;
     }
     let groups = broker.groups().list_groups();
+    // ProtocolType is always "consumer"; GroupType (v5+) is always "classic".
+    // State: Stable when members present, else Empty.
+    let filtered: Vec<_> = groups
+        .into_iter()
+        .filter(|g| {
+            let state = if g.stable { "Stable" } else { "Empty" };
+            let gtype = "classic";
+            let state_ok = states_filter.is_empty()
+                || states_filter
+                    .iter()
+                    .any(|f| f.eq_ignore_ascii_case(state));
+            let type_ok = types_filter.is_empty()
+                || types_filter
+                    .iter()
+                    .any(|f| f.eq_ignore_ascii_case(gtype));
+            state_ok && type_ok
+        })
+        .collect();
     out.put_i16(KafkaErrorCode::None.as_i16());
     if flexible {
-        put_compact_array_len(out, groups.len());
-        for g in groups {
+        put_compact_array_len(out, filtered.len());
+        for g in filtered {
             put_compact_string(out, &g.group_id);
             put_compact_string(out, "consumer");
+            if version >= 4 {
+                put_compact_string(out, if g.stable { "Stable" } else { "Empty" });
+            }
+            if version >= 5 {
+                put_compact_string(out, "classic");
+            }
             put_empty_tag_buffer(out); // ListedGroup tags
         }
         put_empty_tag_buffer(out); // top-level tags
     } else {
-        out.put_i32(groups.len() as i32);
-        for g in groups {
+        out.put_i32(filtered.len() as i32);
+        for g in filtered {
             put_string(out, &g.group_id);
             put_string(out, "consumer"); // protocol_type
         }
@@ -1617,12 +1667,13 @@ pub(crate) fn encode_describe_groups(
     version: i16,
     principal: &str,
 ) {
-    // DescribeGroups classic v0–4 + flexible v5:
+    // DescribeGroups classic v0–4 + flexible v5–6:
     //   request: groups[], include_authorized_operations (v3+)
     //   response: throttle (v1+), groups[{error, group_id, state, protocol_type, protocol,
     //             members[{member_id, group_instance_id (v4+), client_id, client_host,
-    //             metadata, assignment}], authorized_operations (v3+)}]
-    // Flexible v5: compact arrays/strings/bytes + TAG_BUFFER; ErrorMessage (v6) deferred.
+    //             metadata, assignment}], authorized_operations (v3+),
+    //             error_message (v6+)}]
+    // Flexible v5+: compact arrays/strings/bytes + TAG_BUFFER.
     let flexible = version >= 5;
     let mut ids = Vec::new();
     let include_ops;
@@ -1690,6 +1741,12 @@ pub(crate) fn encode_describe_groups(
             }
         };
 
+        let put_group_error_message = |out: &mut BytesMut, msg: Option<&str>| {
+            if version >= 6 {
+                put_compact_nullable_string(out, msg);
+            }
+        };
+
         if broker.acls().is_enabled()
             && !broker.acls().authorize(
                 Some(principal),
@@ -1713,6 +1770,7 @@ pub(crate) fn encode_describe_groups(
             if version >= 3 {
                 out.put_i32(group_authorized_ops(broker, principal, &group_id, include_ops));
             }
+            put_group_error_message(out, Some("Group authorization failed"));
             if flexible {
                 put_empty_tag_buffer(out); // DescribedGroup tags
             }
@@ -1756,6 +1814,7 @@ pub(crate) fn encode_describe_groups(
                 if version >= 3 {
                     out.put_i32(group_authorized_ops(broker, principal, &group_id, include_ops));
                 }
+                put_group_error_message(out, None);
                 if flexible {
                     put_empty_tag_buffer(out); // DescribedGroup tags
                 }
@@ -1767,8 +1826,9 @@ pub(crate) fn encode_describe_groups(
                     .list_group_ids()
                     .iter()
                     .any(|g| g == &group_id);
-                if known {
+                let err_msg = if known {
                     write_strings(out, KafkaErrorCode::None.as_i16(), "Empty", "consumer", "");
+                    None
                 } else {
                     write_strings(
                         out,
@@ -1777,7 +1837,8 @@ pub(crate) fn encode_describe_groups(
                         "",
                         "",
                     );
-                }
+                    Some("Group id not found")
+                };
                 if flexible {
                     put_compact_array_len(out, 0);
                 } else {
@@ -1786,6 +1847,7 @@ pub(crate) fn encode_describe_groups(
                 if version >= 3 {
                     out.put_i32(group_authorized_ops(broker, principal, &group_id, include_ops));
                 }
+                put_group_error_message(out, err_msg);
                 if flexible {
                     put_empty_tag_buffer(out);
                 }
@@ -1937,11 +1999,12 @@ pub(crate) fn encode_delete_groups(
     version: i16,
     principal: &str,
 ) {
-    // DeleteGroups classic v0–1 + flexible v2:
+    // DeleteGroups classic v0–1 + flexible v2–3:
     //   request: groups_names[]
-    //   response: throttle_time_ms (all versions), results[{group_id, error_code}]
+    //   response: throttle_time_ms (all versions),
+    //     results[{group_id, error_code, error_message (v3+)}]
     // Kafka includes throttle from v0; Phase 43 corrects the earlier missing field.
-    // Flexible v2: compact arrays/strings + TAG_BUFFER; ErrorMessage (v3) deferred.
+    // Flexible v2+: compact arrays/strings + TAG_BUFFER.
     let flexible = version >= 2;
     let mut ids = Vec::new();
     if flexible {
@@ -1983,7 +2046,7 @@ pub(crate) fn encode_delete_groups(
         } else {
             put_string(out, &group_id);
         }
-        let err = if broker.acls().is_enabled()
+        let (err, err_msg) = if broker.acls().is_enabled()
             && !broker.acls().authorize(
                 Some(principal),
                 ResourceType::Group,
@@ -1991,17 +2054,29 @@ pub(crate) fn encode_delete_groups(
                 AclOperation::Delete,
             )
         {
-            KafkaErrorCode::GroupAuthorizationFailed.as_i16()
+            (
+                KafkaErrorCode::GroupAuthorizationFailed.as_i16(),
+                Some("Group authorization failed"),
+            )
         } else {
             match broker.groups().delete_group(&group_id) {
-                Ok(0) => KafkaErrorCode::None.as_i16(),
-                Ok(68) => KafkaErrorCode::NonEmptyGroup.as_i16(),
-                Ok(69) => KafkaErrorCode::GroupIdNotFound.as_i16(),
-                Ok(_) => KafkaErrorCode::Unknown.as_i16(),
-                Err(_) => KafkaErrorCode::Unknown.as_i16(),
+                Ok(0) => (KafkaErrorCode::None.as_i16(), None),
+                Ok(68) => (
+                    KafkaErrorCode::NonEmptyGroup.as_i16(),
+                    Some("Group is not empty"),
+                ),
+                Ok(69) => (
+                    KafkaErrorCode::GroupIdNotFound.as_i16(),
+                    Some("Group id not found"),
+                ),
+                Ok(_) => (KafkaErrorCode::Unknown.as_i16(), Some("Unknown error")),
+                Err(_) => (KafkaErrorCode::Unknown.as_i16(), Some("Unknown error")),
             }
         };
         out.put_i16(err);
+        if version >= 3 {
+            put_compact_nullable_string(out, err_msg);
+        }
         if flexible {
             put_empty_tag_buffer(out); // DeletableGroupResult tags
         }
