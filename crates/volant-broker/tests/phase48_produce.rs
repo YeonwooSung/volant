@@ -67,7 +67,7 @@ async fn api_versions_produce_max_v13() {
         }
     }
     assert_eq!(produce, Some((0, 13))); // Phase 71 TopicId
-    assert_eq!(fetch, Some((0, 13))); // Phase 68 Fetch TopicId
+    assert_eq!(fetch, Some((0, 18))); // Phase 84 Fetch Kafka max
 
     server.abort();
     let _ = std::fs::remove_dir_all(&dir);

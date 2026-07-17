@@ -9,9 +9,9 @@ Volant is a resource-efficient alternative to Apache Kafka, built for:
 - **Streaming processing** — first-class operators (`map`, `filter`, windows) without a heavy runtime
 - **Small footprint** — native binary, predictable memory, simple operations
 
-> Status: **Phases 0–83 landed** — durable log, clustering, security, stream
+> Status: **Phases 0–84 landed** — durable log, clustering, security, stream
 > operators, and a broad optional Kafka wire shim (classic + flexible;
-> ApiVersions 0–5). Single-node mode (no `--cluster-config`) preserves the
+> ApiVersions 0–5; Fetch 0–18). Single-node mode (no `--cluster-config`) preserves the
 > simple path. Start with the [whitepaper](./docs/WHITEPAPER.md) and
 > [docs index](./docs/INDEX.md); also [ROADMAP.md](./ROADMAP.md),
 > [ops](./docs/ops.md), [deploy/](./deploy/), [consistency](./docs/consistency.md).
@@ -363,8 +363,12 @@ TRANSACTION_ABORTABLE never emitted (buffer-until-commit only).
 feature tags); v5 ClusterId/NodeId parsed and ignored; response header always
 v0; no SupportedFeatures / REBOOTSTRAP_REQUIRED.
 
+**Phase 84:** Fetch 0–18 (Kafka max) — v14 = v13 wire; v15 drops top-level
+ReplicaId (ReplicaState tag ignored); v16+ NodeEndpoints on leader errors;
+v17–18 partition tags parse-ignore.
+
 **Still deferred:** multi-language clients, chaos-mesh / cargo-fuzz corpus CI,
-true control-marker READ_COMMITTED, real 2PC, Fetch v14+.
+true control-marker READ_COMMITTED, real 2PC.
 
 ### Networked client (library)
 

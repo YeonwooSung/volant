@@ -90,7 +90,7 @@ fn fetch_v11_body(topic: &str, fetch_offset: i64) -> BytesMut {
 }
 
 #[tokio::test]
-async fn api_versions_fetch_max_13() {
+async fn api_versions_fetch_max_18() {
     let dir = temp_dir("p54", "api");
     let broker = Arc::new(Broker::new(StorageConfig {
         data_dir: dir.clone(),
@@ -112,7 +112,7 @@ async fn api_versions_fetch_max_13() {
             fetch = Some((min, max));
         }
     }
-    assert_eq!(fetch, Some((0, 13))); // Phase 68 TopicId
+    assert_eq!(fetch, Some((0, 18))); // Phase 84 Kafka max
 
     server.abort();
     let _ = std::fs::remove_dir_all(&dir);
@@ -218,18 +218,18 @@ async fn fetch_v11_still_classic() {
 }
 
 #[tokio::test]
-async fn fetch_v14_unsupported() {
-    let dir = temp_dir("p54", "v14");
+async fn fetch_v19_unsupported() {
+    let dir = temp_dir("p54", "v19");
     let broker = Arc::new(Broker::new(StorageConfig {
         data_dir: dir.clone(),
         ..StorageConfig::default()
     }));
     let (addr, server) = boot_kafka(Arc::clone(&broker)).await;
 
-    // v14 not handled; version ≥12 still uses response header v1.
+    // v19 not handled; version ≥12 still uses response header v1.
     let resp = rpc(
         &addr,
-        encode_request_flexible(1, 14, 1, Some("c"), &[]),
+        encode_request_flexible(1, 19, 1, Some("c"), &[]),
     )
     .await;
     let mut src = resp.freeze();

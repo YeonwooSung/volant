@@ -104,7 +104,7 @@ async fn api_versions_v4_flexible_roundtrip() {
     assert!(found.len() >= 10, "expected many api keys, got {}", found.len());
     assert_eq!(found.get(&18), Some(&(0, 5)));
     assert_eq!(found.get(&0), Some(&(0, 13))); // Produce
-    assert_eq!(found.get(&1), Some(&(0, 13))); // Fetch
+    assert_eq!(found.get(&1), Some(&(0, 18))); // Fetch (Phase 84)
     assert_eq!(src.get_i32(), 0); // throttle
     skip_tag_buffer(&mut src).unwrap(); // empty top-level tags (no features)
     assert_eq!(src.remaining(), 0);

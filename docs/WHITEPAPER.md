@@ -6,7 +6,7 @@
 |---|---|
 | Version | 0.1.0 (Apache-2.0) |
 | Language | Rust 1.75+ |
-| Status | Phases 0–83 landed |
+| Status | Phases 0–84 landed |
 | Date | 2026-07-18 |
 
 ---
@@ -196,7 +196,7 @@ Inter-broker uses shared-token Auth, not SCRAM. No GSSAPI / OAUTHBEARER.
 
 ## 7. Kafka compatibility shim
 
-Enable with `--kafka-listen host:port`. Phases **23–83** shipped classic then
+Enable with `--kafka-listen host:port`. Phases **23–84** shipped classic then
 flexible (KIP-482) coverage for the APIs modern clients negotiate most often
 (~38 keys in `SUPPORTED_APIS`).
 
@@ -207,7 +207,7 @@ flexible (KIP-482) coverage for the APIs modern clients negotiate most often
 
 | Class | Examples | Ceiling notes |
 |-------|----------|---------------|
-| Produce / Fetch / Metadata | TopicId, flex framing | Produce/Metadata **0–13**; Fetch **0–13** (no v14+) |
+| Produce / Fetch / Metadata | TopicId, flex framing | Produce/Metadata **0–13**; Fetch **0–18** (Kafka max) |
 | Groups / offsets | Join–Leave, commit/fetch | Coordinator-driven; GroupType always `classic` |
 | Txn wire | Init / Add* / End / TxnOffsetCommit | Buffer-until-commit; 2PC fields ignored |
 | Admin / configs / ACLs | CreateTopics, CreatePartitions, ACLs | CreatePartitions max **3**; ACL LITERAL only |
@@ -216,12 +216,12 @@ flexible (KIP-482) coverage for the APIs modern clients negotiate most often
 **Auth on Kafka port:** SASL or principal `kafka-anonymous` (+ ACLs). Shared-token
 Auth applies only on the native `--listen` port.
 
-**Highlights (post–Phase 83):** deterministic TopicId UUIDs; KIP-951
-CurrentLeader on leader errors (no Fetch NodeEndpoints — needs v16);
-KIP-890 txn max versions with ignored 2PC; FindCoordinator 0–6 / AddOffsetsToTxn
-0–4 without `TRANSACTION_ABORTABLE`; ApiVersions 0–5 with empty feature tags
-and ignored v5 ClusterId/NodeId (never `REBOOTSTRAP_REQUIRED`); compression
-codecs gzip/snappy/lz4/zstd on the wire.
+**Highlights (post–Phase 84):** deterministic TopicId UUIDs; KIP-951
+CurrentLeader on leader errors + Produce NodeEndpoints v10+ / Fetch
+NodeEndpoints v16+; KIP-890 txn max versions with ignored 2PC; FindCoordinator
+0–6 / AddOffsetsToTxn 0–4 without `TRANSACTION_ABORTABLE`; ApiVersions 0–5 with
+empty feature tags and ignored v5 ClusterId/NodeId (never `REBOOTSTRAP_REQUIRED`);
+Fetch **0–18** (Kafka max); compression codecs gzip/snappy/lz4/zstd on the wire.
 
 ---
 
@@ -255,7 +255,7 @@ Volant deliberately does **not** claim production Kafka parity. Open gaps:
 1. Multi-language clients (Rust only)
 2. Dynamic membership / Raft metadata quorum
 3. True control-marker `READ_COMMITTED` and real 2PC
-4. Fetch **v14+** / NodeEndpoints; full Kafka API surface; real fetch sessions
+4. Full Kafka API surface beyond advertised keys; real fetch sessions / DivergingEpoch
 5. Durable leader-epoch history (eligible epochs map to HWM)
 6. Kafka cooperative-sticky assignor protocol parity
 7. Stream state durability and distributed stream topology
@@ -319,7 +319,7 @@ cargo run -p volant-server -- \
 | [tuning.md](./tuning.md) | Performance tuning |
 | [KAFKA_COMPAT.md](./KAFKA_COMPAT.md) | Current Kafka API matrix + honesty |
 | [features.md](./features.md) | Native features (post-core) |
-| [history/PHASE_HISTORY.md](./history/PHASE_HISTORY.md) | Phase 0–83 one-line index |
+| [history/PHASE_HISTORY.md](./history/PHASE_HISTORY.md) | Phase 0–84 one-line index |
 | [PHASE1_SPEC.md](./PHASE1_SPEC.md)–[PHASE6_SPEC.md](./PHASE6_SPEC.md) | Binding core specs |
 | [../ROADMAP.md](../ROADMAP.md) | Full roadmap + deferred work |
 | [../README.md](../README.md) | Quick start |

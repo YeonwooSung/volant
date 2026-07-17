@@ -87,7 +87,7 @@ fn fetch_body(
 }
 
 #[tokio::test]
-async fn api_versions_fetch_max_v13() {
+async fn api_versions_fetch_max_v18() {
     let dir = temp_dir("p49", "api");
     let broker = Arc::new(Broker::new(StorageConfig {
         data_dir: dir.clone(),
@@ -113,7 +113,7 @@ async fn api_versions_fetch_max_v13() {
         }
     }
     assert_eq!(produce, Some((0, 13))); // Phase 71 TopicId
-    assert_eq!(fetch, Some((0, 13))); // Phase 68 TopicId
+    assert_eq!(fetch, Some((0, 18))); // Phase 84 Kafka max
 
     server.abort();
     let _ = std::fs::remove_dir_all(&dir);
@@ -272,4 +272,5 @@ async fn fetch_v11_preferred_read_replica() {
 }
 
 // Fetch v12 flexible support: phase54_flexible_fetch.
-// Fetch v13+ (TopicId) remains unsupported there.
+// Fetch v13 TopicId: phase68_fetch_topic_id.
+// Fetch v14–18 Kafka max: phase84_fetch_v14_plus.

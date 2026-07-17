@@ -10,7 +10,7 @@
 | `--log-format` | | `text` | `text` or `json` |
 | `--auth-token` | `VOLANT_AUTH_TOKEN` | *unset* | Shared-token auth |
 | `--scram-user USER:PASS` | | *unset* | Upsert SCRAM user at startup (repeatable; Phase 22) |
-| `--kafka-listen` | | *disabled* | Kafka wire protocol shim (Phases 23–83) |
+| `--kafka-listen` | | *disabled* | Kafka wire protocol shim (Phases 23–84) |
 | `--tls-cert` / `--tls-key` | | *unset* | Server TLS (feature `tls`) |
 | `--tls-peer-insecure` | | `true` | Skip inter-broker cert verify (lab) |
 | `--tls-ca` | | *unset* | CA PEM for inter-broker peer verify |
@@ -115,7 +115,7 @@ Notes:
 
 Optional second socket speaking Kafka framing (classic + flexible). Native
 Volant protocol remains on `--listen`. API versions and honesty notes live in
-**[KAFKA_COMPAT.md](./KAFKA_COMPAT.md)** (source of truth; Phases 23–83).
+**[KAFKA_COMPAT.md](./KAFKA_COMPAT.md)** (source of truth; Phases 23–84).
 
 ### Enable
 
@@ -478,7 +478,7 @@ is only compacted after it rolls.
 ## Deferred
 
 Multi-language clients, full chaos-mesh suites, cargo-fuzz corpus CI, true
-control-marker `READ_COMMITTED`, real 2PC / prepared transactions,
-Fetch v14+. Kafka shim (Phases 23–83; includes ApiVersions 0–5), SCRAM, and
+control-marker `READ_COMMITTED`, real 2PC / prepared transactions.
+Kafka shim (Phases 23–84; includes ApiVersions 0–5, Fetch 0–18), SCRAM, and
 SASL PLAIN/SCRAM are **shipped** — see [KAFKA_COMPAT.md](./KAFKA_COMPAT.md).
 Full deferred list: [ROADMAP.md](../ROADMAP.md).

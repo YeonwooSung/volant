@@ -289,7 +289,7 @@ fn dispatch_kafka(broker: &Broker, body: bytes::Bytes, conn: &mut KafkaConnState
             }
             produce_fetch::encode_produce(broker, &mut src, &mut out, hdr.api_version, principal);
         }
-        Some(ApiKey::Fetch) if (0..=13).contains(&hdr.api_version) => {
+        Some(ApiKey::Fetch) if (0..=18).contains(&hdr.api_version) => {
             if hdr.api_version >= 12 {
                 if let Err(e) = skip_tag_buffer(&mut src) {
                     debug!(error = %e, "fetch flexible header tag buffer");

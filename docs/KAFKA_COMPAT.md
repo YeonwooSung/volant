@@ -1,8 +1,8 @@
 # Kafka compatibility matrix
 
 **Living document** for the optional Kafka wire shim (`--kafka-listen`).
-Ship history: Phases **23–83**. Binding deep dives: `PHASE23_SPEC.md` …
-`PHASE83_SPEC.md`. Overview: [WHITEPAPER.md](./WHITEPAPER.md).
+Ship history: Phases **23–84**. Binding deep dives: `PHASE23_SPEC.md` …
+`PHASE84_SPEC.md`. Overview: [WHITEPAPER.md](./WHITEPAPER.md).
 
 ## Enable
 
@@ -23,7 +23,7 @@ From `SUPPORTED_APIS` in `crates/volant-broker/src/kafka/mod.rs`:
 | Key | API | Versions | Notes |
 |----:|-----|----------|-------|
 | 0 | Produce | 0–13 | Classic 0–8; flex v9+; TopicId v13; KIP-951 CurrentLeader v10+ |
-| 1 | Fetch | 0–13 | Classic 0–11; flex v12+; TopicId v13; CurrentLeader tag v12+ |
+| 1 | Fetch | 0–18 | Classic 0–11; flex v12–18; TopicId v13+; ReplicaState v15+ ignore; NodeEndpoints v16+; CurrentLeader tag v12+ |
 | 2 | ListOffsets | 0–11 | Flex v6+; specials v7–11 (MAX_TIMESTAMP scan; tiered empty) |
 | 3 | Metadata | 0–13 | Flex v9+; TopicId v10–13; top-level ErrorCode v13 |
 | 8 | OffsetCommit | 0–10 | Flex v8+; TopicId v10 |
@@ -67,7 +67,7 @@ From `SUPPORTED_APIS` in `crates/volant-broker/src/kafka/mod.rs`:
 | Formats | 28–34 | Compression, idempotence, SASL, SCRAM-512 |
 | Classic max | 35–50 | Version ratchets for classic framing |
 | Flexible | 51–66 | KIP-482 compact + modern admin |
-| TopicId / modern | 67–83 | UUID topics, ListOffsets specials, KIP-890, KIP-951, group admin, CreatePartitions v3, FindCoordinator v5–6, AddOffsetsToTxn v4, ApiVersions 0–5 |
+| TopicId / modern | 67–84 | UUID topics, ListOffsets specials, KIP-890, KIP-951, group admin, CreatePartitions v3, FindCoordinator v5–6, AddOffsetsToTxn v4, ApiVersions 0–5, Fetch 0–18 |
 
 ## Semantic honesty (open)
 
@@ -86,7 +86,7 @@ These are **current** product facts, not temporary docs lag:
 | Storage | Log stores uncompressed Volant records; Fetch re-encodes |
 | Auth | Kafka port: SASL or `kafka-anonymous`; no shared-token on Kafka port |
 | ACLs | LITERAL only; host always `*`; no cluster ACL consensus |
-| KIP-951 | CurrentLeader on leader errors; empty tags on success; no Fetch NodeEndpoints (need v16) |
+| KIP-951 | CurrentLeader on leader errors; Produce NodeEndpoints v10+; Fetch NodeEndpoints v16+; empty tags on success |
 | ApiVersions features | Empty SupportedFeatures / FinalizedFeatures / ZkMigrationReady tags; no REBOOTSTRAP_REQUIRED |
 | Missing APIs | Large Kafka surface still unsupported (GSSAPI, OAUTH, broker configs, …) |
 

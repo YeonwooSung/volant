@@ -89,7 +89,7 @@ async fn api_versions_v3_flexible_roundtrip() {
             saw_produce = true;
         }
         if key == 1 {
-            assert_eq!((min, max), (0, 13)); // Phase 68 Fetch TopicId
+            assert_eq!((min, max), (0, 18)); // Phase 84 Fetch Kafka max
             saw_fetch = true;
         }
     }

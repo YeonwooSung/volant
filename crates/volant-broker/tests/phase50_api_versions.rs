@@ -39,7 +39,7 @@ async fn api_versions_self_advertises_max_2() {
     let found = parse_api_keys(&mut src);
     assert_eq!(found.get(&18), Some(&(0, 5))); // ApiVersions through flexible v5 (Phase 83)
     assert_eq!(found.get(&0), Some(&(0, 13))); // Produce (Phase 71 TopicId)
-    assert_eq!(found.get(&1), Some(&(0, 13))); // Fetch (Phase 68)
+    assert_eq!(found.get(&1), Some(&(0, 18))); // Fetch (Phase 84 Kafka max)
     // v0 has no trailing throttle
     assert_eq!(src.remaining(), 0);
 

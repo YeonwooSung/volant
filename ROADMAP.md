@@ -1872,7 +1872,32 @@ ZkMigrationReady; no REBOOTSTRAP_REQUIRED / cluster identity checks;
 ThrottleTimeMs always 0.
 
 **Still deferred:** multi-lang clients, cargo-fuzz corpus CI, true control-marker
-READ_COMMITTED, real 2PC / prepared transaction state, Fetch v14+.
+READ_COMMITTED, real 2PC / prepared transaction state. Fetch v14+ closed by
+**Phase 84**.
+
+---
+
+### Phase 84 — Fetch v14–18 (Kafka max) ✅
+
+**Goal:** Raise Fetch to Kafka wire max **0–18** so modern clients negotiate
+v14–18 without UnsupportedVersion. Honest parse-ignore for ReplicaState /
+directory / HWM tags; NodeEndpoints on v16+ leader errors.
+
+Binding: **[docs/PHASE84_SPEC.md](./docs/PHASE84_SPEC.md)**.
+
+- [x] Fetch 0–18 (classic 0–11; flex v12–18; TopicId v13+)
+- [x] v14 wire-identical to v13 (no OffsetMovedToTieredStorage)
+- [x] v15: drop top-level ReplicaId; ReplicaState tag parse-ignore
+- [x] v16+: NodeEndpoints (tag 0) when CurrentLeader emitted; empty on success
+- [x] v17–18: partition tags (ReplicaDirectoryId / HighWatermark) parse-ignore
+- [x] v19 → UnsupportedVersion + response header v1
+- [x] Integration tests (`phase84_fetch_v14_plus`); phase54/49/68/51/50 maxes updated
+
+**Honest limitations:** no tiered storage error; ReplicaState ignored; no real
+fetch sessions / DivergingEpoch; LSO ≡ HWM; preferred_read_replica always -1.
+
+**Still deferred:** multi-lang clients, cargo-fuzz corpus CI, true control-marker
+READ_COMMITTED, real 2PC / prepared transaction state.
 
 ---
 
@@ -1899,18 +1924,18 @@ READ_COMMITTED, real 2PC / prepared transaction state, Fetch v14+.
 | Storage | Page cache + OS | Explicit mmap + optional io_uring/O_DIRECT |
 | Stream processing | Kafka Streams / ksqlDB | In-process `volant-stream` operators |
 | Ops model | ZooKeeper/KRaft + heavy footprint | Single binary → small static ISR quorum |
-| Protocol | Kafka wire protocol | Native binary first; optional Kafka shim (`--kafka-listen`, Phases 23–83) |
+| Protocol | Kafka wire protocol | Native binary first; optional Kafka shim (`--kafka-listen`, Phases 23–84) |
 | Goal | Full ecosystem | Subset that is fast, small, and correct |
 
 Volant is **not** a drop-in Kafka replacement. It prioritizes a clean core; the
-optional Kafka wire shim is **shipped** (Phases 23–83) — see
+optional Kafka wire shim is **shipped** (Phases 23–84) — see
 [docs/KAFKA_COMPAT.md](./docs/KAFKA_COMPAT.md).
 
 ---
 
 ## Suggested implementation order (PRs)
 
-Phases **0–83 are shipped**. Historical PR order for the core:
+Phases **0–84 are shipped**. Historical PR order for the core:
 
 1. Phase 1 segment format + unit tests  
 2. Phase 1 recovery + retention  
@@ -1923,7 +1948,7 @@ Phases **0–83 are shipped**. Historical PR order for the core:
 9. Phase 6 replication prototype (2–3 nodes) ✅  
 10. Phase 7 metrics, TLS, packaging ✅  
 11. Phases 8–22 (redirect, groups, configs, txns, mTLS, ACLs, SCRAM) ✅  
-12. Phases 23–83 (Kafka wire shim surface) ✅  
+12. Phases 23–84 (Kafka wire shim surface) ✅  
 
 ---
 
@@ -1932,7 +1957,7 @@ Phases **0–83 are shipped**. Historical PR order for the core:
 Track these before locking APIs:
 
 1. **Replication:** ~~Raft-per-partition vs leader/follower + controller (Kafka-like)?~~ → **Kafka-style ISR (Phase 6)**
-2. **Kafka wire compatibility:** ~~first-class or optional adapter?~~ → **optional adapter (`--kafka-listen`, Phases 23–83 shipped)**
+2. **Kafka wire compatibility:** ~~first-class or optional adapter?~~ → **optional adapter (`--kafka-listen`, Phases 23–84 shipped)**
 3. **State store for streams:** embed RocksDB, redb, or custom mmap store?
 4. **Default durability:** fsync every batch vs group commit window?
 5. **Multi-tenancy:** namespaces / quotas in v1 or later?
@@ -1964,9 +1989,9 @@ cargo run -p volant-bench --release
 cargo test --workspace
 ```
 
-**Status (post–Phase 83):** core broker, ops (metrics / TLS / auth / SCRAM /
-ACLs / Helm), and the Kafka wire shim are **shipped**. Still deferred:
-multi-language clients, full chaos-mesh suites, cargo-fuzz corpus CI, true
-control-marker `READ_COMMITTED`, real 2PC / prepared transactions,
-Fetch v14+. Details: [docs/KAFKA_COMPAT.md](./docs/KAFKA_COMPAT.md),
+**Status (post–Phase 84):** core broker, ops (metrics / TLS / auth / SCRAM /
+ACLs / Helm), and the Kafka wire shim are **shipped** (Fetch 0–18 Kafka max).
+Still deferred: multi-language clients, full chaos-mesh suites, cargo-fuzz
+corpus CI, true control-marker `READ_COMMITTED`, real 2PC / prepared
+transactions. Details: [docs/KAFKA_COMPAT.md](./docs/KAFKA_COMPAT.md),
 [docs/ops.md](./docs/ops.md).

@@ -645,28 +645,38 @@ pub(crate) fn put_fetch_partition_response(
 }
 
 pub(crate) fn encode_fetch(broker: &Broker, src: &mut impl Buf, out: &mut BytesMut, version: i16, principal: &str) {
-    // Fetch classic v0–11 + flexible v12 + TopicId v13:
-    //   request: replica_id, max_wait, min_bytes,
+    // Fetch classic v0–11 + flexible v12–18 (Kafka max):
+    //   request: replica_id (≤v14 only), max_wait, min_bytes,
     //            max_bytes (v3+), isolation (v4+),
     //            session_id + session_epoch (v7+),
     //            topics[{ name (≤v12) | TopicId uuid (v13+), partitions[{
     //              partition, current_leader_epoch (v9+), fetch_offset,
     //              last_fetched_epoch (v12+), log_start_offset (v5+),
-    //              partition_max_bytes
+    //              partition_max_bytes, tags (ReplicaDirectoryId v17+,
+    //              HighWatermark v18+ ignored)
     //            }]}],
     //            forgotten_topics (v7+; name ≤v12 / TopicId v13+),
-    //            rack_id (v11+), tags (v12+)
+    //            rack_id (v11+), tags (v12+: ClusterId; v15+: ReplicaState)
     //   response: throttle (v1+), error+session_id (v7+),
-    //             topics[{ name ≤v12 | TopicId v13+, partitions[{…}]}], tags (v12+)
-    // ClusterId (v12+) is a top-level tagged field — ignored via skip_tag_buffer.
+    //             topics[{ name ≤v12 | TopicId v13+, partitions[{…}]}],
+    //             tags (v12+; NodeEndpoints tag 0 on v16+ when CurrentLeader set)
+    // v14: wire-identical to v13 (OffsetMovedToTieredStorage never emitted).
+    // v15: top-level ReplicaId dropped; ReplicaState is tagged (ignored).
+    // v16: NodeEndpoints top-level tag (KIP-951) on leader errors.
+    // v17–18: request-only tagged fields; response framing unchanged from v16.
     let flexible = version >= 12;
     let use_topic_id = version >= 13;
+    let mut kip951_leaders: Vec<i32> = Vec::new();
 
-    if src.remaining() < 4 + 4 + 4 {
+    // ReplicaId is a top-level field only through v14 (KIP-903 / Kafka v15+).
+    let header_need = if version <= 14 { 4 + 4 + 4 } else { 4 + 4 };
+    if src.remaining() < header_need {
         put_fetch_empty_response(out, version, 0);
         return;
     }
-    let _replica_id = src.get_i32();
+    if version <= 14 {
+        let _replica_id = src.get_i32();
+    }
     let _max_wait = src.get_i32();
     let _min_bytes = src.get_i32();
     if version >= 3 {
@@ -789,7 +799,9 @@ pub(crate) fn encode_fetch(broker: &Broker, src: &mut impl Buf, out: &mut BytesM
             }
             let max_bytes = src.get_i32().max(0) as usize;
             if flexible {
-                let _ = skip_tag_buffer(src); // partition request tags
+                // Partition tags: ReplicaDirectoryId (v17+ tag 0), HighWatermark
+                // (v18+ tag 1) — parse-ignore via skip.
+                let _ = skip_tag_buffer(src);
             }
 
             if unknown_topic_id {
@@ -847,6 +859,9 @@ pub(crate) fn encode_fetch(broker: &Broker, src: &mut impl Buf, out: &mut BytesM
                 }
                 if current_epoch >= 0 && current_leader_epoch < current_epoch {
                     let leader = part_meta.map(|p| (p.leader as i32, p.leader_epoch as i32));
+                    if let Some((lid, _)) = leader {
+                        kip951_leaders.push(lid);
+                    }
                     put_fetch_partition_response(
                         out,
                         version,
@@ -977,8 +992,15 @@ pub(crate) fn encode_fetch(broker: &Broker, src: &mut impl Buf, out: &mut BytesM
         }
     }
     if flexible {
-        let _ = skip_tag_buffer(src); // request top-level tags (ClusterId, …)
-        put_empty_tag_buffer(out); // response top-level tags
+        // Request top-level tags: ClusterId (v12+ tag 0), ReplicaState (v15+ tag 1).
+        let _ = skip_tag_buffer(src);
+        // Response top-level: NodeEndpoints (tag 0) on v16+ when any CurrentLeader.
+        if version >= 16 && !kip951_leaders.is_empty() {
+            let endpoints = node_endpoints_for_leaders(broker, &kip951_leaders);
+            put_node_endpoints_tag(out, &endpoints);
+        } else {
+            put_empty_tag_buffer(out);
+        }
     }
 }
 

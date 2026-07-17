@@ -68,7 +68,7 @@ fn fetch_v13_body(topic_uuid: &[u8; 16], fetch_offset: i64, session_id: i32) -> 
 }
 
 #[tokio::test]
-async fn api_versions_fetch_max_13() {
+async fn api_versions_fetch_max_18() {
     let dir = temp_dir("p68", "api");
     let broker = Arc::new(Broker::new(StorageConfig {
         data_dir: dir.clone(),
@@ -90,7 +90,7 @@ async fn api_versions_fetch_max_13() {
             fetch = Some((min, max));
         }
     }
-    assert_eq!(fetch, Some((0, 13)));
+    assert_eq!(fetch, Some((0, 18))); // Phase 84 Kafka max
 
     server.abort();
     let _ = std::fs::remove_dir_all(&dir);
