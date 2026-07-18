@@ -1,6 +1,6 @@
 # Phase history index
 
-Ship records for **phases 0–103**. Binding core contracts are
+Ship records for **phases 0–104**. Binding core contracts are
 **[PHASE1_SPEC](../PHASE1_SPEC.md)–[PHASE6_SPEC](../PHASE6_SPEC.md)**. Living
 docs for day-to-day reading: [ops](../ops.md), [consistency](../consistency.md),
 [tuning](../tuning.md), [KAFKA_COMPAT](../KAFKA_COMPAT.md),
@@ -145,10 +145,11 @@ docs for day-to-day reading: [ops](../ops.md), [consistency](../consistency.md),
 | 101 | ✅ | Graceful sweeper enable on 0→>0 interval without process restart | [PHASE101_SPEC.md](../PHASE101_SPEC.md) |
 | 102 | ✅ | Sparse durable broker config (only altered keys; env re-applies after DELETE) | [PHASE102_SPEC.md](../PHASE102_SPEC.md) |
 | 103 | ✅ | Validate BROKER resource name against local `node_id` (empty or decimal match) | [PHASE103_SPEC.md](../PHASE103_SPEC.md) |
+| 104 | ✅ | Aborted soft-marker GC with DeleteRecords / retention / load (MVP) | [PHASE104_SPEC.md](../PHASE104_SPEC.md) |
 
 ---
 
-## Still deferred (post–Phase 103)
+## Still deferred (post–Phase 104)
 
 - Multi-language clients
 - Chaos-mesh / cargo-fuzz corpus CI
@@ -158,5 +159,4 @@ docs for day-to-day reading: [ops](../ops.md), [consistency](../consistency.md),
 - Control batches for empty AddPartitions without data
 - Full Kafka broker catalog / KRaft DynamicBrokerConfig
 - Graceful sweeper shutdown / join on server stop
-- Marker compaction / GC with DeleteRecords
 - Multi-broker BROKER config fan-out (Phase 103 is local validation only)

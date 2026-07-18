@@ -18,7 +18,7 @@
 - BROKER_LOGGER / CLIENT_METRICS / GROUP config resources
 - Multi-broker per-node config fan-out
 - Synonym chains (broker defaults → topic overrides)
-- Multi-lang clients / fuzz CI / multi-broker 2PC / marker GC
+- Multi-lang clients / fuzz CI / multi-broker 2PC / marker GC → **closed by Phase 104**
 
 ## Config name table
 

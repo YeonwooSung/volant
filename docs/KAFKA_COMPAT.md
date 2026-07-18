@@ -1,8 +1,8 @@
 # Kafka compatibility matrix
 
 **Living document** for the optional Kafka wire shim (`--kafka-listen`).
-Ship history: Phases **23–100** (git HEAD product). Binding deep dives:
-`PHASE23_SPEC.md` … `PHASE100_SPEC.md`. Overview: [WHITEPAPER.md](./WHITEPAPER.md).
+Ship history: Phases **23–104** (git HEAD product). Binding deep dives:
+`PHASE23_SPEC.md` … `PHASE104_SPEC.md`. Overview: [WHITEPAPER.md](./WHITEPAPER.md).
 Semantic rows below describe **shipped** behavior.
 
 ## Enable
@@ -40,7 +40,7 @@ From `SUPPORTED_APIS` in `crates/volant-broker/src/kafka/mod.rs`:
 | 18 | ApiVersions | 0–5 | Flex v3–5; header always v0; empty feature tags; v5 ClusterId/NodeId ignored |
 | 19 | CreateTopics | 0–7 | Flex v5+; TopicId response v7 |
 | 20 | DeleteTopics | 0–6 | Flex v4+; ErrorMessage v5; TopicId v6 |
-| 21 | DeleteRecords | 0–2 | Flex v2 |
+| 21 | DeleteRecords | 0–2 | Flex v2; GC aborted soft markers below new log start (Phase 104) |
 | 22 | InitProducerId | 0–6 | Flex v2+; v6 Enable2Pc/KeepPreparedTxn (Phase 90 prepared MVP); OngoingTxn* when prepared |
 | 23 | OffsetForLeaderEpoch | 0–4 | Flex v4; durable epoch history MVP (Phase 87); prior epochs → transition end |
 | 24 | AddPartitionsToTxn | 0–5 | Flex v3; batch v4–5; 123 after timeout (Phase 94) |
@@ -85,6 +85,7 @@ From `SUPPORTED_APIS` in `crates/volant-broker/src/kafka/mod.rs`:
 | Broker DescribeConfigs knobs | 99 | BROKER resource: `transaction.max.timeout.ms` + `volant.*` open/prepared/session/sweep; Alter + Incremental SET/DELETE |
 | Durable broker config | 100 | Full snapshot of six knobs under `{data_dir}/__broker_config/state.json`; load after env; DELETE rewrites file |
 | Graceful sweeper enable | 101 | Always spawn sweeper task; `0` pauses; `0→>0` via setter/Alter enables without process restart |
+| Soft-marker GC | 104 | DeleteRecords / retention / load drop aborted soft markers with `end_offset <= log_start`; persist `__txn_markers`; metric `volant_aborted_markers_gc_total` |
 
 ## Semantic honesty (open)
 
@@ -92,7 +93,7 @@ These are **current** product facts, not temporary docs lag:
 
 | Area | Limitation |
 |------|------------|
-| Transactions | **Write-through** (Phase 86) + **control batches** (Phase 89/98) + **prepared 2PC MVP** (Phase 90) + **prepared timeout** (Phase 92) + **open timeout** (Phase 93) + **TRANSACTION_ABORTABLE subset** (Phase 94) + **max timeout clamp** (Phase 96) + **background sweeper** (Phase 97/101) + **broker config surface** (Phase 99) + **sparse durable restart** (Phase 100/102) + **BROKER name vs `node_id`** (Phase 103): data on log immediately; soft markers still SoT for LSO/aborted list; open crash≡abort **with ABORT control batches** (Phase 98); prepared survives restart under `__txn_prepared` until complete or timeout auto-abort; EndTxn control batches on finalize; open-txn honors InitProducerId `transaction_timeout_ms` (or `VOLANT_OPEN_TXN_TIMEOUT_MS` default 60s); broker max default **15m** (`VOLANT_TRANSACTION_MAX_TIMEOUT_MS`; `0` = no max) rejects over-max Init with **50** and clamps effective open/prepared; after timeout auto-abort Produce/EndTxn/Add*/TxnOffsetCommit may return **123** until EndTxn clears; open/prepared expiry runs lazy **and** on a background interval (default 1s / `VOLANT_SWEEP_INTERVAL_MS`; `0` = pause bg; always-spawn so 0→>0 without restart, Phase 101); knobs Describe/Alter via BROKER resource (Phase 99); name must be empty or local `node_id` decimal else **42** (Phase 103); Alter persists **sparse** under `__broker_config` (Phase 100/102; only altered keys; DELETE unfreezes env) |
+| Transactions | **Write-through** (Phase 86) + **control batches** (Phase 89/98) + **prepared 2PC MVP** (Phase 90) + **prepared timeout** (Phase 92) + **open timeout** (Phase 93) + **TRANSACTION_ABORTABLE subset** (Phase 94) + **max timeout clamp** (Phase 96) + **background sweeper** (Phase 97/101) + **broker config surface** (Phase 99) + **sparse durable restart** (Phase 100/102) + **BROKER name vs `node_id`** (Phase 103) + **soft-marker GC** (Phase 104): data on log immediately; soft markers still SoT for LSO/aborted list; markers with `end_offset <= log_start` dropped on DeleteRecords / retention / load (control batches on log not rewritten); open crash≡abort **with ABORT control batches** (Phase 98); prepared survives restart under `__txn_prepared` until complete or timeout auto-abort; EndTxn control batches on finalize; open-txn honors InitProducerId `transaction_timeout_ms` (or `VOLANT_OPEN_TXN_TIMEOUT_MS` default 60s); broker max default **15m** (`VOLANT_TRANSACTION_MAX_TIMEOUT_MS`; `0` = no max) rejects over-max Init with **50** and clamps effective open/prepared; after timeout auto-abort Produce/EndTxn/Add*/TxnOffsetCommit may return **123** until EndTxn clears; open/prepared expiry runs lazy **and** on a background interval (default 1s / `VOLANT_SWEEP_INTERVAL_MS`; `0` = pause bg; always-spawn so 0→>0 without restart, Phase 101); knobs Describe/Alter via BROKER resource (Phase 99); name must be empty or local `node_id` decimal else **42** (Phase 103); Alter persists **sparse** under `__broker_config` (Phase 100/102; only altered keys; DELETE unfreezes env) |
 | 2PC | **MVP** (Phase 90/92/94/96/97): Enable2Pc → first EndTxn prepares; second matching EndTxn finalizes; KeepPreparedTxn + OngoingTxn*; prepared timeout auto-abort (default 60s, env `VOLANT_PREPARED_TXN_TIMEOUT_MS`, clamped by max); timeout → abortable mark → Kafka **123** (Phase 94); background + lazy expiry (Phase 97); not full KIP-890/939 / multi-broker |
 | Epochs | **Durable history MVP** (Phase 87): `{data_dir}/__leader_epochs`; prior epochs return transition end offsets; Metadata advertises live epoch; not a full KRaft epoch state machine; Fetch **DivergingEpoch** on truncation (Phase 88) |
 | TopicId | Deterministic UUID from Volant id (`volant` + zeros + u32), not KRaft random |
