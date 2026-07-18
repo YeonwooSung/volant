@@ -439,10 +439,10 @@ pub(crate) fn encode_produce(broker: &Broker, src: &mut impl Buf, out: &mut Byte
     }
 }
 
-/// Produce one or more decoded batches for a single partition (Phase 29/31).
+/// Produce one or more decoded batches for a single partition (Phase 29/31/86).
 ///
 /// Returns the base offset of the first successful batch on success.
-/// Transactional produces buffer off-log until EndTxn (base offset 0).
+/// Transactional produces write-through to the log (Phase 86) and return real offsets.
 pub(crate) fn produce_partition_batches(
     broker: &Broker,
     topic: &TopicName,
@@ -465,7 +465,7 @@ pub(crate) fn produce_partition_batches(
             let epoch = producer.producer_epoch as u16;
             let base_seq = producer.base_sequence;
 
-            // Phase 31: transactional PID with open txn → buffer off-log.
+            // Phase 86: transactional PID with open txn → write-through + LSO hold.
             if broker.is_transactional_producer(pid) {
                 match broker.buffer_txn_produce(
                     pid,
@@ -475,9 +475,10 @@ pub(crate) fn produce_partition_batches(
                     base_seq,
                     batch.messages.clone(),
                 ) {
-                    IdempotentCheck::Accept | IdempotentCheck::Duplicate { .. } => {
+                    IdempotentCheck::Accept { base_offset }
+                    | IdempotentCheck::Duplicate { base_offset, .. } => {
                         if first_base.is_none() {
-                            first_base = Some(0);
+                            first_base = Some(base_offset as i64);
                         }
                     }
                     IdempotentCheck::Reject { error_code } => {
@@ -495,7 +496,7 @@ pub(crate) fn produce_partition_batches(
                 base_seq,
                 count,
             ) {
-                IdempotentCheck::Accept => {
+                IdempotentCheck::Accept { .. } => {
                     let mb = MessageBatch {
                         messages: batch.messages.clone(),
                     };
@@ -599,6 +600,9 @@ pub(crate) fn put_fetch_empty_response(out: &mut BytesMut, version: i16, session
 /// preferred_read_replica (v11+), records, TAG_BUFFER (v12+).
 ///
 /// v12+: optional CurrentLeader as **tag 1** (tag 0 is DivergingEpoch, unused).
+///
+/// Phase 86: `lso` may be `< hwm` while a write-through txn is open;
+/// `aborted` is `(producer_id, first_offset)` for soft abort markers.
 pub(crate) fn put_fetch_partition_response(
     out: &mut BytesMut,
     version: i16,
@@ -609,22 +613,57 @@ pub(crate) fn put_fetch_partition_response(
     records: &[u8],
     current_leader: Option<(i32, i32)>,
 ) {
+    put_fetch_partition_response_full(
+        out,
+        version,
+        partition,
+        error,
+        hwm,
+        if error == 0 { hwm } else { -1 },
+        log_start,
+        &[],
+        records,
+        current_leader,
+    );
+}
+
+/// Full Fetch partition response with explicit LSO + aborted list (Phase 86).
+pub(crate) fn put_fetch_partition_response_full(
+    out: &mut BytesMut,
+    version: i16,
+    partition: i32,
+    error: i16,
+    hwm: i64,
+    lso: i64,
+    log_start: i64,
+    aborted: &[(i64, i64)],
+    records: &[u8],
+    current_leader: Option<(i32, i32)>,
+) {
     let flexible = version >= 12;
     out.put_i32(partition);
     out.put_i16(error);
     out.put_i64(hwm);
     if version >= 4 {
-        // LSO == HWM under buffer-until-commit (Phase 36 honesty).
-        out.put_i64(if error == 0 { hwm } else { -1 });
+        out.put_i64(if error == 0 { lso } else { -1 });
     }
     if version >= 5 {
         out.put_i64(if error == 0 { log_start } else { -1 });
     }
     if version >= 4 {
         if flexible {
-            put_compact_array_len(out, 0); // aborted_transactions empty
+            put_compact_array_len(out, aborted.len());
+            for &(pid, first) in aborted {
+                out.put_i64(pid);
+                out.put_i64(first);
+                put_empty_tag_buffer(out);
+            }
         } else {
-            out.put_i32(0); // aborted_transactions empty
+            out.put_i32(aborted.len() as i32);
+            for &(pid, first) in aborted {
+                out.put_i64(pid);
+                out.put_i64(first);
+            }
         }
     }
     if version >= 11 {
@@ -686,7 +725,7 @@ pub(crate) fn encode_fetch(broker: &Broker, src: &mut impl Buf, out: &mut BytesM
         }
         let _max_bytes = src.get_i32();
     }
-    // Phase 36: isolation_level (v4). Both levels share the same path.
+    // Phase 36/86: isolation_level (v4). 0 = READ_UNCOMMITTED, 1 = READ_COMMITTED.
     let mut isolation = 0u8;
     if version >= 4 {
         if src.remaining() < 1 {
@@ -699,7 +738,7 @@ pub(crate) fn encode_fetch(broker: &Broker, src: &mut impl Buf, out: &mut BytesM
             return;
         }
     }
-    let _ = isolation;
+    let read_committed = isolation == 1;
 
     // v7+: incremental fetch session fields (no real session; always full response).
     let mut session_id = 0i32;
@@ -877,11 +916,13 @@ pub(crate) fn encode_fetch(broker: &Broker, src: &mut impl Buf, out: &mut BytesM
             }
 
             let max_messages = (max_bytes / 64).clamp(1, 10_000);
-            match broker.fetch(
+            let from = Offset::new(fetch_offset.max(0) as u64);
+            match broker.fetch_kafka(
                 &name,
                 PartitionId(partition as u32),
-                Offset::new(fetch_offset.max(0) as u64),
+                from,
                 max_messages,
+                read_committed,
             ) {
                 Ok(records) => {
                     let mut selected = Vec::new();
@@ -900,17 +941,35 @@ pub(crate) fn encode_fetch(broker: &Broker, src: &mut impl Buf, out: &mut BytesM
                         .map(|r| r.offset.raw() as i64 + 1)
                         .unwrap_or(fetch_offset);
                     let hwm = part_meta.map(|p| p.hwm as i64).unwrap_or(hwm_fallback);
+                    let lso = broker.last_stable_offset(name.as_str(), partition as u32) as i64;
                     let log_start =
                         produce_log_start_offset(broker, &topic_name, partition as u32);
+                    // Phase 86: aborted list for READ_COMMITTED when soft markers apply.
+                    let aborted_pairs: Vec<(i64, i64)> = if read_committed && version >= 4 {
+                        broker
+                            .aborted_transactions_for_fetch(
+                                name.as_str(),
+                                partition as u32,
+                                from.raw(),
+                                lso.max(0) as u64,
+                            )
+                            .into_iter()
+                            .map(|(pid, first)| (pid as i64, first as i64))
+                            .collect()
+                    } else {
+                        Vec::new()
+                    };
                     // Phase 32: v4+ RecordBatch (may be compressed); v0–3 MessageSet.
                     let set = encode_fetch_record_set(&selected, version);
-                    put_fetch_partition_response(
+                    put_fetch_partition_response_full(
                         out,
                         version,
                         partition,
                         KafkaErrorCode::None.as_i16(),
                         hwm,
+                        if version >= 4 { lso } else { hwm },
                         log_start,
+                        &aborted_pairs,
                         &set,
                         None,
                     );
@@ -1321,8 +1380,8 @@ pub(crate) fn encode_list_offsets(
     }
     let _replica_id = src.get_i32();
 
-    // v2+: isolation_level (0 / 1). Both map to the same offsets under
-    // buffer-until-commit (LSO ≡ HWM); accept and ignore.
+    // v2+: isolation_level (0 / 1). Phase 86: READ_COMMITTED latest uses LSO.
+    let mut list_read_committed = false;
     if version >= 2 {
         if src.remaining() < 1 {
             empty(out);
@@ -1333,6 +1392,7 @@ pub(crate) fn encode_list_offsets(
             empty(out);
             return;
         }
+        list_read_committed = isolation == 1;
     }
 
     struct PartIn {
@@ -1655,6 +1715,7 @@ pub(crate) fn encode_list_offsets(
             }
 
             // EARLIEST / EARLIEST_LOCAL / LATEST via list_offsets.
+            // Phase 86: READ_COMMITTED latest = LSO (may be < HWM during open txn).
             let want_earliest = ts == EARLIEST || ts == EARLIEST_LOCAL;
             match broker.list_offsets(&t.name, &[p.partition as u32]) {
                 Ok(entries) => {
@@ -1662,7 +1723,13 @@ pub(crate) fn encode_list_offsets(
                         .first()
                         .map(|(_, e, l)| (*e as i64, *l as i64))
                         .unwrap_or((0, 0));
-                    let offset = if want_earliest { earliest } else { latest };
+                    let offset = if want_earliest {
+                        earliest
+                    } else if list_read_committed {
+                        broker.last_stable_offset(t.name.as_str(), p.partition as u32) as i64
+                    } else {
+                        latest
+                    };
                     write_part(
                         out,
                         version,

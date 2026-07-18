@@ -57,7 +57,7 @@ async fn durable_producer_dedupe_across_restart() {
         let (pid, epoch) = broker.init_producer_id();
         assert!(matches!(
             broker.check_idempotent_produce(pid, epoch, "events", 0, 0, 1),
-            IdempotentCheck::Accept
+            IdempotentCheck::Accept { base_offset: 0 }
         ));
         broker.record_idempotent_produce(pid, epoch, "events", 0, 0, 1, 7);
         match broker.check_idempotent_produce(pid, epoch, "events", 0, 0, 1) {
@@ -91,7 +91,7 @@ async fn durable_producer_dedupe_across_restart() {
     // Next sequence still accepted.
     assert!(matches!(
         broker2.check_idempotent_produce(pid, epoch, "events", 0, 1, 1),
-        IdempotentCheck::Accept
+        IdempotentCheck::Accept { base_offset: 0 }
     ));
     // New init continues past previous id.
     let (pid2, _) = broker2.init_producer_id();

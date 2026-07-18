@@ -31,7 +31,7 @@ Start here. Prefer living docs over individual phase ship records.
 
 | Document | Purpose |
 |----------|---------|
-| [history/PHASE_HISTORY.md](./history/PHASE_HISTORY.md) | One-line index for phases 0–85 |
+| [history/PHASE_HISTORY.md](./history/PHASE_HISTORY.md) | One-line index for phases 0–86 |
 | [PHASE7_SPEC.md](./PHASE7_SPEC.md) … [PHASE85_SPEC.md](./PHASE85_SPEC.md) | Per-phase ship records (deep dive) |
 | [history/archive/](./history/archive/) | Implementation plans & reviews (archaeology) |
 
@@ -52,17 +52,15 @@ Start here. Prefer living docs over individual phase ship records.
 | Protocol implementer | PHASE1–6 binding specs |
 | Roadmap / deferred | ROADMAP end sections |
 
-## Compaction note (2026-07-18, post–Phase 85 ship)
+## Compaction note (2026-07-18, post–Phase 86 ship)
 
-Living docs match **git HEAD product** (`SUPPORTED_APIS`, last feature commit Phase **85**):
+Living docs match **git HEAD product** (`SUPPORTED_APIS`, last feature commit Phase **86**):
 
-- **Status ceiling:** Phases **0–85**; Kafka shim **23–85** (**38** keys)
+- **Status ceiling:** Phases **0–86**; Kafka shim **23–86** (**38** keys)
 - **Kafka SoT:** [KAFKA_COMPAT.md](./KAFKA_COMPAT.md) — matrix + semantic honesty
 - **WHITEPAPER:** architecture + positioning; no full API matrix
-- **Binding core:** PHASE1–6; **ship records:** PHASE7–85 via [PHASE_HISTORY](./history/PHASE_HISTORY.md)
+- **Binding core:** PHASE1–6; **ship records:** PHASE7–86 via [PHASE_HISTORY](./history/PHASE_HISTORY.md)
 - **README / ops:** compact bands + ops table (not per-phase diaries)
-- **Txn honesty (shipped):** buffer-until-commit; LSO ≡ HWM; no true `READ_COMMITTED`
-- **Still deferred (product):** multi-lang, chaos/fuzz corpus CI, true control-marker
-  `READ_COMMITTED`, real 2PC, durable epochs / real fetch sessions
-- **WIP (not shipped):** working tree may contain Phase 86 write-through / soft-marker
-  isolation — treat [PHASE86_SPEC](./PHASE86_SPEC.md) as draft until committed
+- **Txn honesty (shipped):** write-through + soft markers; true LSO; READ_COMMITTED MVP
+- **Still deferred (product):** multi-lang, chaos/fuzz corpus CI, Kafka control batches on
+  data log, real 2PC, durable epochs / real fetch sessions

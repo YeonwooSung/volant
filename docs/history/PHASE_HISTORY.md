@@ -127,13 +127,14 @@ docs for day-to-day reading: [ops](../ops.md), [consistency](../consistency.md),
 | 83 | ✅ | ApiVersions v4–5 — Kafka max; empty feature tags; v5 ClusterId/NodeId ignored | [PHASE83_SPEC.md](../PHASE83_SPEC.md) |
 | 84 | ✅ | Fetch v14–18 — Kafka max; ReplicaState ignore; NodeEndpoints v16+ | [PHASE84_SPEC.md](../PHASE84_SPEC.md) |
 | 85 | ✅ | ACL admin v3 — User resource type; Describe/Create/DeleteAcls 0–3 Kafka max | [PHASE85_SPEC.md](../PHASE85_SPEC.md) |
+| 86 | ✅ | Write-through txn + soft-marker READ_COMMITTED (true LSO, aborted list MVP) | [PHASE86_SPEC.md](../PHASE86_SPEC.md) |
 
 ---
 
-## Still deferred (post–Phase 85)
+## Still deferred (post–Phase 86)
 
 - Multi-language clients
 - Chaos-mesh / cargo-fuzz corpus CI
-- True control-marker `READ_COMMITTED`
+- Kafka control batches on the data log (soft markers only today)
 - Real 2PC / prepared transaction state
 - Durable OffsetForLeaderEpoch history / real fetch sessions / DivergingEpoch

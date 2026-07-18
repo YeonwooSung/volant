@@ -1,9 +1,9 @@
 # Kafka compatibility matrix
 
 **Living document** for the optional Kafka wire shim (`--kafka-listen`).
-Ship history: Phases **23–85** (git HEAD product). Binding deep dives:
-`PHASE23_SPEC.md` … `PHASE85_SPEC.md`. Overview: [WHITEPAPER.md](./WHITEPAPER.md).
-Semantic rows below describe **shipped** behavior, not uncommitted WIP.
+Ship history: Phases **23–86** (git HEAD product). Binding deep dives:
+`PHASE23_SPEC.md` … `PHASE86_SPEC.md`. Overview: [WHITEPAPER.md](./WHITEPAPER.md).
+Semantic rows below describe **shipped** behavior.
 
 ## Enable
 
@@ -24,8 +24,8 @@ From `SUPPORTED_APIS` in `crates/volant-broker/src/kafka/mod.rs`:
 | Key | API | Versions | Notes |
 |----:|-----|----------|-------|
 | 0 | Produce | 0–13 | Classic 0–8; flex v9+; TopicId v13; KIP-951 CurrentLeader v10+ |
-| 1 | Fetch | 0–18 | Classic 0–11; flex v12–18; TopicId v13+; ReplicaState v15+ ignore; NodeEndpoints v16+; CurrentLeader tag v12+ |
-| 2 | ListOffsets | 0–11 | Flex v6+; specials v7–11 (MAX_TIMESTAMP scan; tiered empty) |
+| 1 | Fetch | 0–18 | Classic 0–11; flex v12–18; TopicId v13+; isolation LSO/aborted (Phase 86); ReplicaState v15+ ignore; NodeEndpoints v16+; CurrentLeader tag v12+ |
+| 2 | ListOffsets | 0–11 | Flex v6+; specials v7–11; READ_COMMITTED latest = LSO (Phase 86) |
 | 3 | Metadata | 0–13 | Flex v9+; TopicId v10–13; top-level ErrorCode v13 |
 | 8 | OffsetCommit | 0–10 | Flex v8+; TopicId v10 |
 | 9 | OffsetFetch | 0–10 | Flex v6+; multi-group v8; TopicId v10 |
@@ -69,6 +69,7 @@ From `SUPPORTED_APIS` in `crates/volant-broker/src/kafka/mod.rs`:
 | Classic max | 35–50 | Version ratchets for classic framing |
 | Flexible | 51–66 | KIP-482 compact + modern admin |
 | TopicId / modern | 67–85 | UUID topics, ListOffsets specials, KIP-890, KIP-951, group admin, CreatePartitions v3, FindCoordinator v5–6, AddOffsetsToTxn v4, ApiVersions 0–5, Fetch 0–18, ACL admin User resource v3 |
+| READ_COMMITTED | 86 | Write-through txn + soft abort markers; true LSO; Fetch isolation filtering |
 
 ## Semantic honesty (open)
 
@@ -76,7 +77,7 @@ These are **current** product facts, not temporary docs lag:
 
 | Area | Limitation |
 |------|------------|
-| Transactions | Buffer-until-commit; no control markers; LSO ≡ HWM; empty aborted list |
+| Transactions | **Write-through** (Phase 86): data on log immediately; soft abort markers (not Kafka control batches); LSO may be `<` HWM while open; READ_COMMITTED filters aborted + caps at LSO; READ_UNCOMMITTED sees unstable/aborted; TxnOffsetCommit still deferred until EndTxn; markers in `__txn_markers` (crash ≡ abort open ranges) |
 | 2PC | InitProducerId v6 flags parsed **and ignored**; OngoingTxn* always -1 |
 | Epochs | No durable epoch history; eligible → HWM; leader_epoch often -1 |
 | TopicId | Deterministic UUID from Volant id (`volant` + zeros + u32), not KRaft random |

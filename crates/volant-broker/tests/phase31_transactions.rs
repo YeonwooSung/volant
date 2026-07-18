@@ -233,7 +233,8 @@ async fn commit_makes_produce_visible() {
         "events",
     );
     assert_eq!(e0, 0);
-    assert_eq!(base0, 0, "buffered produce reports base 0");
+    // Phase 86: write-through returns real log base offset (not buffer placeholder 0).
+    assert!(base0 >= 0);
 
     // Partition 1 needs its own sequence stream (base_seq 0 for that partition).
     let mut body1 = BytesMut::new();

@@ -1919,8 +1919,36 @@ Binding: **[docs/PHASE85_SPEC.md](./docs/PHASE85_SPEC.md)**.
 credential API gating); no TransactionalId/DelegationToken; host always `*`;
 LITERAL only; no cluster ACL consensus.
 
-**Still deferred:** multi-lang clients, cargo-fuzz corpus CI, true control-marker
-READ_COMMITTED, real 2PC / prepared transaction state.
+**Still deferred:** multi-lang clients, cargo-fuzz corpus CI, Kafka control
+batches on the data log (soft markers only), real 2PC / prepared transaction
+state. Soft-marker READ_COMMITTED closed by **Phase 86**.
+
+---
+
+### Phase 86 — True control-marker READ_COMMITTED (MVP) ✅
+
+**Goal:** Differentiate Fetch `isolation_level` with write-through transactional
+produces, true LSO, soft abort markers, and READ_COMMITTED filtering — without
+claiming full Kafka control-batch wire parity.
+
+Binding: **[docs/PHASE86_SPEC.md](./docs/PHASE86_SPEC.md)**.
+
+- [x] Transactional produce write-through (real base offsets; HWM advances)
+- [x] LSO = min open write-through first offset (may be `<` HWM)
+- [x] EndTxn commit finalizes sequences; abort records soft markers
+- [x] Fetch READ_COMMITTED: cap at LSO, filter aborted, non-empty aborted list
+- [x] Fetch READ_UNCOMMITTED: all data up to HWM (incl. unstable/aborted)
+- [x] ListOffsets READ_COMMITTED latest = LSO
+- [x] Native fetch remains committed-only; `__txn_markers` crash ≡ abort
+- [x] Integration tests (`phase86_read_committed`); prior txn tests updated
+
+**Honest limitations:** soft markers only (no Kafka control batch bytes on the
+data log); Fetch re-encode omits transactional attributes; aborted marker file
+not compacted with DeleteRecords; single-node coordinator; no 2PC.
+
+**Still deferred:** multi-lang clients, cargo-fuzz corpus CI, Kafka control
+batches on the data log, real 2PC / prepared transaction state, durable
+OffsetForLeaderEpoch history / real fetch sessions.
 
 ---
 
@@ -1947,11 +1975,11 @@ READ_COMMITTED, real 2PC / prepared transaction state.
 | Storage | Page cache + OS | Explicit mmap + optional io_uring/O_DIRECT |
 | Stream processing | Kafka Streams / ksqlDB | In-process `volant-stream` operators |
 | Ops model | ZooKeeper/KRaft + heavy footprint | Single binary → small static ISR quorum |
-| Protocol | Kafka wire protocol | Native binary first; optional Kafka shim (`--kafka-listen`, Phases 23–85) |
+| Protocol | Kafka wire protocol | Native binary first; optional Kafka shim (`--kafka-listen`, Phases 23–86) |
 | Goal | Full ecosystem | Subset that is fast, small, and correct |
 
 Volant is **not** a drop-in Kafka replacement. It prioritizes a clean core; the
-optional Kafka wire shim is **shipped** (Phases 23–85) — see
+optional Kafka wire shim is **shipped** (Phases 23–86) — see
 [docs/KAFKA_COMPAT.md](./docs/KAFKA_COMPAT.md).
 
 ---

@@ -302,7 +302,8 @@ async fn fetch_read_committed_after_txn_abort_empty() {
     es.advance(4 + 4);
     assert_eq!(es.get_i16(), 0);
 
-    // Fetch READ_COMMITTED — empty log
+    // Fetch READ_COMMITTED — aborted data filtered; soft abort marker present.
+    // Phase 86: write-through leaves records on the log (HWM > 0) but filters them.
     let mut fbody = BytesMut::new();
     fbody.put_i32(-1);
     fbody.put_i32(100);
@@ -325,11 +326,19 @@ async fn fetch_read_committed_after_txn_abort_empty() {
     assert_eq!(fs.get_i16(), 0);
     let hwm = fs.get_i64();
     let lso = fs.get_i64();
-    assert_eq!(hwm, 0);
-    assert_eq!(lso, 0);
-    assert_eq!(fs.get_i32(), 0); // aborted empty
+    assert!(hwm >= 1, "write-through abort leaves data on log, hwm={hwm}");
+    assert_eq!(lso, hwm, "after abort LSO catches up to HWM");
+    let aborted_n = fs.get_i32();
+    assert!(aborted_n >= 1, "soft abort marker expected, got {aborted_n}");
+    for _ in 0..aborted_n {
+        let _aborted_pid = fs.get_i64();
+        let _first = fs.get_i64();
+    }
     let records = get_bytes(&mut fs).unwrap();
-    assert!(records.as_ref().map(|b| b.is_empty()).unwrap_or(true));
+    assert!(
+        records.as_ref().map(|b| b.is_empty()).unwrap_or(true),
+        "READ_COMMITTED must filter aborted ranges"
+    );
 
     server.abort();
     let _ = std::fs::remove_dir_all(&dir);

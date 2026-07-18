@@ -148,7 +148,7 @@ async fn describe_transactions_empty_ongoing_unknown() {
         0,
         vec![Message::from_value("x")],
     ) {
-        volant_broker::IdempotentCheck::Accept => {}
+        volant_broker::IdempotentCheck::Accept { .. } => {}
         other => panic!("unexpected {other:?}"),
     }
 
@@ -198,7 +198,7 @@ async fn describe_producers_lists_active() {
         0,
         vec![Message::from_value("y")],
     ) {
-        volant_broker::IdempotentCheck::Accept => {}
+        volant_broker::IdempotentCheck::Accept { .. } => {}
         other => panic!("unexpected {other:?}"),
     }
     let (addr, server) = boot_kafka(Arc::clone(&broker)).await;
@@ -230,9 +230,11 @@ async fn describe_producers_lists_active() {
     assert_eq!(src.get_i64(), pid as i64);
     assert_eq!(src.get_i32(), i32::from(epoch));
     let _last_seq = src.get_i32();
-    assert_eq!(src.get_i64(), -1);
-    assert_eq!(src.get_i32(), 0);
-    assert_eq!(src.get_i64(), -1);
+    assert_eq!(src.get_i64(), -1); // last_timestamp not tracked
+    assert_eq!(src.get_i32(), 0); // coordinator_epoch
+    // Phase 86: txn_start_offset is first write-through offset when open.
+    let txn_start = src.get_i64();
+    assert!(txn_start >= 0, "expected open write-through start, got {txn_start}");
     skip_tag_buffer(&mut src).unwrap();
     skip_tag_buffer(&mut src).unwrap();
 

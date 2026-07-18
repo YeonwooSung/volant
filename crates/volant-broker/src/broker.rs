@@ -13,6 +13,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use parking_lot::{Condvar, Mutex, RwLock};
+use serde::{Deserialize, Serialize};
 use volant_core::{
     Error, Message, MessageBatch, Offset, PartitionId, Record, Result, TopicId, TopicName,
 };
@@ -127,24 +128,75 @@ struct ProducerEpochState {
     partitions: HashMap<(String, u32), IdempotentBatchState>,
 }
 
-/// One buffered produce batch inside an open transaction (Phase 18).
+/// One write-through range inside an open transaction (Phase 86).
+///
+/// Records are on the partition log immediately; stability is deferred until
+/// EndTxn commit. Abort records a soft marker over `[first_offset, end_offset)`.
 #[derive(Debug, Clone)]
-struct TxnBufferedBatch {
+struct TxnWrittenRange {
     topic: String,
     partition: u32,
-    messages: Vec<Message>,
+    /// Inclusive base offset of the first message in this batch.
+    first_offset: u64,
+    /// Exclusive end offset (`first_offset + count`).
+    end_offset: u64,
     base_sequence: i32,
+    count: u32,
 }
 
-/// Open transaction state (memory-only; crash ≡ abort).
+/// Soft abort marker for READ_COMMITTED filtering (Phase 86).
+#[derive(Debug, Clone)]
+struct AbortedTxnMarker {
+    producer_id: u64,
+    /// First offset of the aborted transactional writes on this partition.
+    first_offset: u64,
+    /// Exclusive end of the aborted range.
+    end_offset: u64,
+}
+
+/// Durable txn marker range (Phase 86 soft control markers).
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+struct StoredTxnRange {
+    producer_id: u64,
+    topic: String,
+    partition: u32,
+    first_offset: u64,
+    end_offset: u64,
+}
+
+/// On-disk soft marker snapshot under `{data_dir}/__txn_markers/state.json`.
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+struct TxnMarkersFile {
+    #[serde(default)]
+    open: Vec<StoredTxnRange>,
+    #[serde(default)]
+    aborted: Vec<StoredTxnRange>,
+}
+
+/// Open transaction state (Phase 18 write-through + Phase 86 markers).
+///
+/// In-flight ranges are also mirrored under `{data_dir}/__txn_markers` so a
+/// crash promotes them to aborted (crash ≡ abort).
 #[derive(Debug, Default)]
 struct OpenTxn {
-    batches: Vec<TxnBufferedBatch>,
+    /// Log ranges written while the txn is open (write-through).
+    written: Vec<TxnWrittenRange>,
     /// Sequences accepted inside this txn (not yet committed to `partitions`).
     pending: HashMap<(String, u32), IdempotentBatchState>,
     /// Deferred consumer offsets (Phase 18 EndTxn trailer + Phase 31 TxnOffsetCommit).
     /// Each entry: `(group_id, topic, partition, offset, metadata)`.
     deferred_offsets: Vec<(String, String, u32, u64, String)>,
+}
+
+/// Isolation policy for partition fetches (Phase 86).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum FetchIsolation {
+    /// Native Volant consumers: hide open + aborted transactional ranges.
+    CommittedOnly,
+    /// Kafka `isolation_level=1`: cap at LSO, filter aborted.
+    ReadCommitted,
+    /// Kafka `isolation_level=0`: all data up to HWM.
+    ReadUncommitted,
 }
 
 /// Result of committing a transaction (Phase 18).
@@ -163,8 +215,14 @@ pub struct TxnCommitResult {
 /// Outcome of an idempotent sequence check before append.
 #[derive(Debug, Clone)]
 pub enum IdempotentCheck {
-    /// Proceed with append; record state after success.
-    Accept,
+    /// Proceed with append (or write-through already applied for txn path).
+    ///
+    /// `base_offset` is the log base for transactional write-through (Phase 86);
+    /// non-transactional callers treat it as unused (`0`) until after append.
+    Accept {
+        /// Log base offset (real for txn write-through; `0` placeholder otherwise).
+        base_offset: u64,
+    },
     /// Exact duplicate of last batch — return cached offsets without append.
     Duplicate {
         /// Cached base offset.
@@ -214,8 +272,10 @@ pub struct Broker {
     producer_state: RwLock<HashMap<u64, ProducerEpochState>>,
     /// transactional_id → producer_id (Phase 18 fencing).
     transactional_ids: RwLock<HashMap<String, u64>>,
-    /// Open transactions keyed by producer_id (Phase 18; memory-only).
+    /// Open transactions keyed by producer_id (Phase 18/86).
     open_txns: Mutex<HashMap<u64, OpenTxn>>,
+    /// Soft abort markers for READ_COMMITTED (Phase 86): `(topic, partition) → markers`.
+    aborted_txns: Mutex<HashMap<(String, u32), Vec<AbortedTxnMarker>>>,
     /// Durable producer state store under `data_dir/__producer_state` (Phase 11).
     producer_store: ProducerStateStore,
     /// Durable per-topic configs under `data_dir/__topic_configs` (Phase 13).
@@ -269,6 +329,7 @@ impl Broker {
             producer_state: RwLock::new(producers),
             transactional_ids: RwLock::new(txn_ids),
             open_txns: Mutex::new(HashMap::new()),
+            aborted_txns: Mutex::new(HashMap::new()),
             producer_store,
             topic_configs,
             topic_catalog,
@@ -279,6 +340,7 @@ impl Broker {
         broker
             .reload_single_node_topics()
             .expect("failed to reload single-node topic catalog");
+        broker.load_txn_markers();
         broker
     }
 
@@ -343,6 +405,7 @@ impl Broker {
             producer_state: RwLock::new(producers),
             transactional_ids: RwLock::new(txn_ids),
             open_txns: Mutex::new(HashMap::new()),
+            aborted_txns: Mutex::new(HashMap::new()),
             producer_store,
             topic_configs,
             topic_catalog,
@@ -352,6 +415,7 @@ impl Broker {
         };
         // Open local partitions from persisted assignment.
         broker.apply_local_assignment()?;
+        broker.load_txn_markers();
         Ok(broker)
     }
 
@@ -455,7 +519,12 @@ impl Broker {
                     prod.transactional_id = transactional_id.to_owned();
                     let epoch = prod.epoch;
                     drop(state);
-                    self.open_txns.lock().remove(&existing);
+                    // Fence: open write-through ranges become aborted (Phase 86).
+                    // Drop the open_txns lock before record_aborted (persist re-locks).
+                    let fenced = self.open_txns.lock().remove(&existing);
+                    if let Some(txn) = fenced {
+                        self.record_aborted_from_txn(existing, &txn);
+                    }
                     let _ = self.persist_producer_state();
                     return (existing, epoch);
                 }
@@ -547,7 +616,7 @@ impl Broker {
     /// List open transactions for ListTransactions (Phase 65).
     ///
     /// Returns `(transactional_id, producer_id, state)` where state is always
-    /// `"Ongoing"` (Volant only tracks open buffer-until-commit txns in memory).
+    /// `"Ongoing"` (open write-through txn in memory + markers).
     pub fn list_open_transactions(&self) -> Vec<(String, u64, String)> {
         let open = self.open_txns.lock();
         let prods = self.producer_state.read();
@@ -569,7 +638,7 @@ impl Broker {
     ///
     /// Returns `None` when the transactional id is unknown. When known:
     /// - state `"Ongoing"` if an open txn exists, else `"Empty"`
-    /// - topics/partitions from buffered produce batches (open txn only)
+    /// - topics/partitions from write-through ranges + pending keys (open txn only)
     /// - timeout/start times are `0` (not tracked)
     pub fn describe_transaction(
         &self,
@@ -596,9 +665,9 @@ impl Broker {
 
         let open = self.open_txns.lock();
         if let Some(txn) = open.get(&pid) {
-            // Group partitions from buffered batches + pending keys.
+            // Group partitions from write-through ranges + pending keys.
             let mut map: HashMap<String, Vec<i32>> = HashMap::new();
-            for b in &txn.batches {
+            for b in &txn.written {
                 map.entry(b.topic.clone())
                     .or_default()
                     .push(b.partition as i32);
@@ -624,8 +693,9 @@ impl Broker {
     /// Active producers for a partition (DescribeProducers, Phase 66).
     ///
     /// Includes producers with committed sequences on the partition and those
-    /// with open-txn pending/buffer activity. Fields:
-    /// `(producer_id, epoch, last_sequence, last_timestamp=-1, coordinator_epoch=0, txn_start_offset=-1)`.
+    /// with open-txn write-through activity. Fields:
+    /// `(producer_id, epoch, last_sequence, last_timestamp=-1, coordinator_epoch=0, txn_start_offset)`.
+    /// `txn_start_offset` is the first open write-through offset when present, else `-1`.
     pub fn describe_producers_for_partition(
         &self,
         topic: &str,
@@ -638,6 +708,7 @@ impl Broker {
         for (&pid, prod) in prods.iter() {
             let mut last_seq = -1i32;
             let mut in_scope = false;
+            let mut txn_start = -1i64;
             if let Some(st) = prod.partitions.get(&key) {
                 last_seq = st.base_sequence.saturating_add(st.count as i32).saturating_sub(1);
                 in_scope = true;
@@ -646,13 +717,20 @@ impl Broker {
                 if let Some(st) = txn.pending.get(&key) {
                     last_seq = st.base_sequence.saturating_add(st.count as i32).saturating_sub(1);
                     in_scope = true;
-                } else if txn.batches.iter().any(|b| b.topic == topic && b.partition == partition)
+                }
+                if let Some(first) = txn
+                    .written
+                    .iter()
+                    .filter(|b| b.topic == topic && b.partition == partition)
+                    .map(|b| b.first_offset)
+                    .min()
                 {
                     in_scope = true;
+                    txn_start = first as i64;
                 }
             }
             if in_scope {
-                out.push((pid, i32::from(prod.epoch), last_seq, -1, 0, -1));
+                out.push((pid, i32::from(prod.epoch), last_seq, -1, 0, txn_start));
             }
         }
         out.sort_by_key(|p| p.0);
@@ -715,10 +793,11 @@ impl Broker {
             .unwrap_or(false)
     }
 
-    /// Buffer a produce batch inside an open transaction (Phase 18).
+    /// Write-through produce inside an open transaction (Phase 18/86).
     ///
-    /// On success returns [`IdempotentCheck::Accept`] or `Duplicate` (base_offset 0).
-    /// Does not append to the log.
+    /// Appends to the partition log immediately and records a range that holds
+    /// LSO back until EndTxn. On success returns [`IdempotentCheck::Accept`] or
+    /// `Duplicate` with the real log base offset.
     pub fn buffer_txn_produce(
         &self,
         producer_id: u64,
@@ -752,57 +831,108 @@ impl Broker {
                 };
             }
         }
+        // Sequence check under the open-txn lock, then append outside it.
+        let key = (topic.to_owned(), partition);
+        {
+            let open = self.open_txns.lock();
+            let Some(txn) = open.get(&producer_id) else {
+                return IdempotentCheck::Reject {
+                    error_code: ErrorCode::InvalidTxnState as u16,
+                };
+            };
+            let last = txn.pending.get(&key).cloned().or_else(|| {
+                self.producer_state
+                    .read()
+                    .get(&producer_id)
+                    .and_then(|p| p.partitions.get(&key).cloned())
+            });
+            match last {
+                None => {}
+                Some(last) => {
+                    if base_sequence == last.base_sequence && message_count == last.count {
+                        return IdempotentCheck::Duplicate {
+                            base_offset: last.base_offset,
+                            count: last.count,
+                        };
+                    }
+                    let expected = last.base_sequence.saturating_add(last.count as i32);
+                    if base_sequence != expected {
+                        return IdempotentCheck::Reject {
+                            error_code: ErrorCode::OutOfOrderSequence as u16,
+                        };
+                    }
+                }
+            }
+        }
+
+        // Write-through: append now so HWM advances and LSO can diverge.
+        let topic_name = TopicName::new(topic);
+        let mut mb = MessageBatch::default();
+        mb.messages = messages;
+        let (records, error_code) =
+            match self.produce_with_acks(&topic_name, PartitionId(partition), mb, 1, None) {
+                Ok(v) => v,
+                Err(_) => {
+                    return IdempotentCheck::Reject {
+                        error_code: ErrorCode::Unknown as u16,
+                    };
+                }
+            };
+        if error_code != 0 {
+            return IdempotentCheck::Reject {
+                error_code,
+            };
+        }
+        let base_offset = records.first().map(|r| r.offset.raw()).unwrap_or(0);
+        let end_offset = base_offset.saturating_add(message_count as u64);
+        let _ = self.flush(&topic_name, PartitionId(partition));
+
         let mut open = self.open_txns.lock();
         let Some(txn) = open.get_mut(&producer_id) else {
+            // Raced with EndTxn/fence after append — treat as aborted range.
+            drop(open);
+            self.push_aborted_marker(
+                topic,
+                partition,
+                AbortedTxnMarker {
+                    producer_id,
+                    first_offset: base_offset,
+                    end_offset,
+                },
+            );
+            self.persist_txn_markers();
             return IdempotentCheck::Reject {
                 error_code: ErrorCode::InvalidTxnState as u16,
             };
         };
-        let key = (topic.to_owned(), partition);
-        // Sequence vs last committed or last pending in this txn.
-        let last = txn.pending.get(&key).cloned().or_else(|| {
-            self.producer_state
-                .read()
-                .get(&producer_id)
-                .and_then(|p| p.partitions.get(&key).cloned())
-        });
-        match last {
-            None => {}
-            Some(last) => {
-                if base_sequence == last.base_sequence && message_count == last.count {
-                    return IdempotentCheck::Duplicate {
-                        base_offset: 0,
-                        count: last.count,
-                    };
-                }
-                let expected = last.base_sequence.saturating_add(last.count as i32);
-                if base_sequence != expected {
-                    return IdempotentCheck::Reject {
-                        error_code: ErrorCode::OutOfOrderSequence as u16,
-                    };
-                }
-            }
-        }
-        txn.batches.push(TxnBufferedBatch {
+        txn.written.push(TxnWrittenRange {
             topic: topic.to_owned(),
             partition,
-            messages,
+            first_offset: base_offset,
+            end_offset,
             base_sequence,
+            count: message_count,
         });
         txn.pending.insert(
             key,
             IdempotentBatchState {
                 base_sequence,
                 count: message_count,
-                base_offset: 0,
+                base_offset,
             },
         );
-        IdempotentCheck::Accept
+        drop(open);
+        self.persist_txn_markers();
+        IdempotentCheck::Accept { base_offset }
     }
 
-    /// Commit or abort an open transaction (Phase 18).
+    /// Commit or abort an open transaction (Phase 18/86).
     ///
-    /// On commit, flushes buffered batches to the log and applies deferred offsets.
+    /// On commit, written ranges become stable (sequences finalized) and deferred
+    /// offsets are applied. On abort, soft markers cover written ranges so
+    /// READ_COMMITTED / native fetch hide them; data remains on the log for
+    /// READ_UNCOMMITTED.
+    ///
     /// `offsets` entries are `(group_id, topic, partition, offset, metadata)`.
     pub fn end_txn(
         &self,
@@ -829,39 +959,27 @@ impl Broker {
         };
 
         if !committed {
-            // Abort: drop buffer + deferred offsets; sequences stay at last committed.
+            // Abort: soft-mark written ranges; sequences stay at last committed.
+            self.record_aborted_from_txn(producer_id, &txn);
             return Ok((0, Vec::new()));
         }
 
-        let mut results = Vec::with_capacity(txn.batches.len());
-        for batch in txn.batches {
-            let topic = TopicName::new(batch.topic.clone());
-            let pid = PartitionId(batch.partition);
-            let mut mb = MessageBatch::default();
-            mb.messages = batch.messages;
-            let (records, error_code) = self.produce_with_acks(&topic, pid, mb, 1, None)?;
-            if error_code != 0 {
-                // Best-effort: already-flushed batches stay; remaining dropped.
-                // Return error; client should fence/retry with new epoch.
-                return Ok((error_code, results));
-            }
-            let base_offset = records.first().map(|r| r.offset.raw()).unwrap_or(0);
-            let count = records.len() as u32;
+        let mut results = Vec::with_capacity(txn.written.len());
+        for batch in &txn.written {
             self.record_idempotent_produce(
                 producer_id,
                 producer_epoch,
                 &batch.topic,
                 batch.partition,
                 batch.base_sequence,
-                count,
-                base_offset,
+                batch.count,
+                batch.first_offset,
             );
-            let _ = self.flush(&topic, pid);
             results.push(TxnCommitResult {
-                topic: batch.topic,
+                topic: batch.topic.clone(),
                 partition: batch.partition,
-                base_offset,
-                count,
+                base_offset: batch.first_offset,
+                count: batch.count,
             });
         }
 
@@ -879,7 +997,195 @@ impl Broker {
             );
         }
 
+        self.persist_txn_markers();
         Ok((0, results))
+    }
+
+    /// Last stable offset for a partition (Phase 86).
+    ///
+    /// Equal to HWM when no open write-through ranges exist; otherwise the
+    /// minimum first offset among open transactional writes on the partition.
+    pub fn last_stable_offset(&self, topic: &str, partition: u32) -> u64 {
+        let hwm = self
+            .high_watermark(&TopicName::new(topic), PartitionId(partition))
+            .unwrap_or(0);
+        let open = self.open_txns.lock();
+        let mut lso = hwm;
+        for txn in open.values() {
+            for r in &txn.written {
+                if r.topic == topic && r.partition == partition {
+                    lso = lso.min(r.first_offset);
+                }
+            }
+        }
+        lso
+    }
+
+    /// Aborted transactions overlapping `[fetch_offset, upper_bound)` for Fetch.
+    ///
+    /// Returns `(producer_id, first_offset)` pairs (Kafka aborted_transactions wire).
+    pub fn aborted_transactions_for_fetch(
+        &self,
+        topic: &str,
+        partition: u32,
+        fetch_offset: u64,
+        upper_bound: u64,
+    ) -> Vec<(u64, u64)> {
+        let aborted = self.aborted_txns.lock();
+        let Some(list) = aborted.get(&(topic.to_owned(), partition)) else {
+            return Vec::new();
+        };
+        let mut out: Vec<(u64, u64)> = list
+            .iter()
+            .filter(|m| m.first_offset < upper_bound && m.end_offset > fetch_offset)
+            .map(|m| (m.producer_id, m.first_offset))
+            .collect();
+        out.sort_by_key(|e| e.1);
+        out.dedup();
+        out
+    }
+
+    /// Whether `offset` falls in an aborted transactional range on the partition.
+    pub fn is_aborted_offset(&self, topic: &str, partition: u32, offset: u64) -> bool {
+        let aborted = self.aborted_txns.lock();
+        let Some(list) = aborted.get(&(topic.to_owned(), partition)) else {
+            return false;
+        };
+        list.iter()
+            .any(|m| offset >= m.first_offset && offset < m.end_offset)
+    }
+
+    /// Whether `offset` is still unstable (open write-through txn).
+    pub fn is_unstable_offset(&self, topic: &str, partition: u32, offset: u64) -> bool {
+        let open = self.open_txns.lock();
+        for txn in open.values() {
+            for r in &txn.written {
+                if r.topic == topic
+                    && r.partition == partition
+                    && offset >= r.first_offset
+                    && offset < r.end_offset
+                {
+                    return true;
+                }
+            }
+        }
+        false
+    }
+
+    fn record_aborted_from_txn(&self, producer_id: u64, txn: &OpenTxn) {
+        // Collapse per-partition first/end for the producer (Kafka lists first offset).
+        let mut per_part: HashMap<(String, u32), (u64, u64)> = HashMap::new();
+        for r in &txn.written {
+            let e = per_part
+                .entry((r.topic.clone(), r.partition))
+                .or_insert((r.first_offset, r.end_offset));
+            e.0 = e.0.min(r.first_offset);
+            e.1 = e.1.max(r.end_offset);
+        }
+        for ((topic, part), (first, end)) in per_part {
+            self.push_aborted_marker(
+                &topic,
+                part,
+                AbortedTxnMarker {
+                    producer_id,
+                    first_offset: first,
+                    end_offset: end,
+                },
+            );
+        }
+        self.persist_txn_markers();
+    }
+
+    fn push_aborted_marker(&self, topic: &str, partition: u32, marker: AbortedTxnMarker) {
+        let mut aborted = self.aborted_txns.lock();
+        aborted
+            .entry((topic.to_owned(), partition))
+            .or_default()
+            .push(marker);
+    }
+
+    fn txn_markers_path(&self) -> PathBuf {
+        self.storage.data_dir.join("__txn_markers").join("state.json")
+    }
+
+    /// Load soft markers; promote any stored open ranges to aborted (crash ≡ abort).
+    fn load_txn_markers(&self) {
+        let path = self.txn_markers_path();
+        let Ok(bytes) = fs::read(&path) else {
+            return;
+        };
+        let Ok(file) = serde_json::from_slice::<TxnMarkersFile>(&bytes) else {
+            return;
+        };
+        {
+            let mut aborted = self.aborted_txns.lock();
+            for m in file.aborted {
+                aborted
+                    .entry((m.topic, m.partition))
+                    .or_default()
+                    .push(AbortedTxnMarker {
+                        producer_id: m.producer_id,
+                        first_offset: m.first_offset,
+                        end_offset: m.end_offset,
+                    });
+            }
+            // Crash recovery: open ranges → aborted.
+            for m in file.open {
+                aborted
+                    .entry((m.topic, m.partition))
+                    .or_default()
+                    .push(AbortedTxnMarker {
+                        producer_id: m.producer_id,
+                        first_offset: m.first_offset,
+                        end_offset: m.end_offset,
+                    });
+            }
+        }
+        // Persist cleaned state (no open ranges after recovery).
+        self.persist_txn_markers();
+    }
+
+    fn persist_txn_markers(&self) {
+        let path = self.txn_markers_path();
+        if let Some(parent) = path.parent() {
+            let _ = fs::create_dir_all(parent);
+        }
+        let mut file = TxnMarkersFile::default();
+        {
+            let open = self.open_txns.lock();
+            for (&pid, txn) in open.iter() {
+                for r in &txn.written {
+                    file.open.push(StoredTxnRange {
+                        producer_id: pid,
+                        topic: r.topic.clone(),
+                        partition: r.partition,
+                        first_offset: r.first_offset,
+                        end_offset: r.end_offset,
+                    });
+                }
+            }
+        }
+        {
+            let aborted = self.aborted_txns.lock();
+            for ((topic, part), list) in aborted.iter() {
+                for m in list {
+                    file.aborted.push(StoredTxnRange {
+                        producer_id: m.producer_id,
+                        topic: topic.clone(),
+                        partition: *part,
+                        first_offset: m.first_offset,
+                        end_offset: m.end_offset,
+                    });
+                }
+            }
+        }
+        let Ok(bytes) = serde_json::to_vec_pretty(&file) else {
+            return;
+        };
+        let tmp = path.with_extension("json.tmp");
+        if fs::write(&tmp, &bytes).is_ok() {
+            let _ = fs::rename(tmp, path);
+        }
     }
 
     /// Check idempotent produce sequence before appending.
@@ -899,7 +1205,7 @@ impl Broker {
         message_count: u32,
     ) -> IdempotentCheck {
         if producer_id == 0 || base_sequence < 0 {
-            return IdempotentCheck::Accept;
+            return IdempotentCheck::Accept { base_offset: 0 };
         }
         if message_count == 0 {
             return IdempotentCheck::Reject {
@@ -927,7 +1233,7 @@ impl Broker {
 
         let key = (topic.to_owned(), partition);
         match prod.partitions.get(&key) {
-            None => IdempotentCheck::Accept,
+            None => IdempotentCheck::Accept { base_offset: 0 },
             Some(last) => {
                 if base_sequence == last.base_sequence && message_count == last.count {
                     IdempotentCheck::Duplicate {
@@ -939,7 +1245,7 @@ impl Broker {
                         .base_sequence
                         .saturating_add(last.count as i32);
                     if base_sequence == expected {
-                        IdempotentCheck::Accept
+                        IdempotentCheck::Accept { base_offset: 0 }
                     } else {
                         IdempotentCheck::Reject {
                             error_code: ErrorCode::OutOfOrderSequence as u16,
@@ -1905,6 +2211,9 @@ impl Broker {
     }
 
     /// Fetch records starting at `from`, capped at committed HWM for clients.
+    ///
+    /// Native Volant consumers see a **committed-only** view (Phase 86): open
+    /// write-through ranges and soft-aborted offsets are excluded.
     pub fn fetch(
         &self,
         topic: &TopicName,
@@ -1912,7 +2221,34 @@ impl Broker {
         from: Offset,
         max_messages: usize,
     ) -> Result<Vec<Record>> {
-        self.fetch_up_to(topic, partition, from, max_messages, true)
+        self.fetch_up_to(
+            topic,
+            partition,
+            from,
+            max_messages,
+            true,
+            FetchIsolation::CommittedOnly,
+        )
+    }
+
+    /// Kafka Fetch with isolation level (Phase 86).
+    ///
+    /// - `read_committed`: cap at LSO, exclude aborted ranges
+    /// - `read_uncommitted`: cap at HWM, include unstable + aborted data
+    pub fn fetch_kafka(
+        &self,
+        topic: &TopicName,
+        partition: PartitionId,
+        from: Offset,
+        max_messages: usize,
+        read_committed: bool,
+    ) -> Result<Vec<Record>> {
+        let isolation = if read_committed {
+            FetchIsolation::ReadCommitted
+        } else {
+            FetchIsolation::ReadUncommitted
+        };
+        self.fetch_up_to(topic, partition, from, max_messages, true, isolation)
     }
 
     /// Fetch for replica replication (up to LEO, not capped at HWM).
@@ -1942,20 +2278,48 @@ impl Broker {
         from: Offset,
         max_messages: usize,
         cap_hwm: bool,
+        isolation: FetchIsolation,
     ) -> Result<Vec<Record>> {
-        let topics = self.topics.read();
-        let t = topics
-            .get(topic)
-            .ok_or_else(|| Error::NotFound(format!("topic {}", topic.as_str())))?;
-        let part = t
-            .partitions
-            .get(&partition)
-            .ok_or_else(|| Error::NotFound(format!("partition {partition}")))?;
+        let tname = topic.as_str();
+        let p = partition.0;
+        // Drop topics lock before consulting txn markers (avoid lock-order deadlock
+        // with write-through produce: open_txns → topics).
+        let mut records = {
+            let topics = self.topics.read();
+            let t = topics
+                .get(topic)
+                .ok_or_else(|| Error::NotFound(format!("topic {}", topic.as_str())))?;
+            let part = t
+                .partitions
+                .get(&partition)
+                .ok_or_else(|| Error::NotFound(format!("partition {partition}")))?;
 
-        let mut records = part.log.read(from, max_messages)?;
-        if cap_hwm {
-            let hwm = part.committed_hwm;
-            records.retain(|r| r.offset.raw() < hwm);
+            let mut records = part.log.read(from, max_messages)?;
+            if cap_hwm {
+                let hwm = part.committed_hwm;
+                records.retain(|r| r.offset.raw() < hwm);
+            }
+            records
+        };
+
+        match isolation {
+            FetchIsolation::ReadUncommitted => {
+                // All records up to HWM (already capped).
+            }
+            FetchIsolation::ReadCommitted => {
+                let lso = self.last_stable_offset(tname, p);
+                records.retain(|r| {
+                    let off = r.offset.raw();
+                    off < lso && !self.is_aborted_offset(tname, p, off)
+                });
+            }
+            FetchIsolation::CommittedOnly => {
+                records.retain(|r| {
+                    let off = r.offset.raw();
+                    !self.is_unstable_offset(tname, p, off)
+                        && !self.is_aborted_offset(tname, p, off)
+                });
+            }
         }
         Ok(records)
     }

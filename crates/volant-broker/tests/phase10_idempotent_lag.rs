@@ -113,7 +113,7 @@ async fn idempotent_unknown_pid_rejected() {
     let (pid, epoch) = broker.init_producer_id();
     assert!(matches!(
         broker.check_idempotent_produce(pid, epoch, "t", 0, 0, 1),
-        volant_broker::IdempotentCheck::Accept
+        volant_broker::IdempotentCheck::Accept { base_offset: 0 }
     ));
     broker.record_idempotent_produce(pid, epoch, "t", 0, 0, 1, 42);
     match broker.check_idempotent_produce(pid, epoch, "t", 0, 0, 1) {

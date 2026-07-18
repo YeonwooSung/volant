@@ -11,7 +11,7 @@
 | `--log-format` | | `text` | `text` or `json` |
 | `--auth-token` | `VOLANT_AUTH_TOKEN` | *unset* | Shared-token auth (native port only) |
 | `--scram-user USER:PASS` | | *unset* | Upsert SCRAM user at startup (repeatable; Phase 22) |
-| `--kafka-listen` | | *disabled* | Kafka wire protocol shim (Phases 23–85) |
+| `--kafka-listen` | | *disabled* | Kafka wire protocol shim (Phases 23–86) |
 | `--tls-cert` / `--tls-key` | | *unset* | Server TLS (feature `tls`) |
 | `--tls-peer-insecure` | | `true` | Skip inter-broker cert verify (lab) |
 | `--tls-ca` | | *unset* | CA PEM for inter-broker peer verify |
@@ -116,7 +116,7 @@ Notes:
 
 Optional second socket speaking Kafka framing (classic + flexible). Native
 Volant protocol remains on `--listen`. API versions and honesty notes live in
-**[KAFKA_COMPAT.md](./KAFKA_COMPAT.md)** (source of truth; Phases 23–85).
+**[KAFKA_COMPAT.md](./KAFKA_COMPAT.md)** (source of truth; Phases 23–86).
 
 ### Enable
 
@@ -143,14 +143,15 @@ volant-server \
   env `zstd` maps to lz4 for Fetch v0–3. Log storage remains uncompressed.
 - **Topic config keys** (Describe/AlterConfigs): `retention.ms`, `retention.bytes`,
   `segment.bytes`, `cleanup.policy` (`delete`|`compact`).
-- **Transactions / isolation:** buffer-until-commit (no control markers);
-  `READ_COMMITTED` is not real isolation (LSO ≡ HWM). Crash aborts open txns.
+- **Transactions / isolation:** write-through + soft abort markers (Phase 86);
+  `READ_COMMITTED` caps at LSO and filters aborted; `READ_UNCOMMITTED` sees all.
+  Crash promotes open ranges to aborted via `__txn_markers`.
 - **ACLs:** Kafka ACL admin maps to Volant Phase 20/21 ACLs (LITERAL only;
   CreateAcls enables enforcement). Describe/Create/DeleteAcls **0–3**: v3 accepts
   Kafka **User** resource type (stored as `ResourceType::User`; not used on the
   produce/fetch authorize path; no SCRAM-admin gating).
 
-Deep dives: [PHASE23_SPEC.md](./PHASE23_SPEC.md) … [PHASE85_SPEC.md](./PHASE85_SPEC.md).
+Deep dives: [PHASE23_SPEC.md](./PHASE23_SPEC.md) … [PHASE86_SPEC.md](./PHASE86_SPEC.md).
 
 ## TLS (Phase 7 listen + Phase 9 verification / inter-broker)
 
@@ -227,7 +228,7 @@ specs. Ops-critical notes only:
 | Groups | list / describe / delete-offsets; static membership `group_instance_id` |
 | Topic configs | `retention.ms` / `retention.bytes` / `segment.bytes` / `cleanup.policy` |
 | DeleteRecords | Truncates sealed segments; no follower fan-out |
-| Transactions (shipped) | **Buffer-until-commit** (Phase 18): off-log until EndTxn; crash ≡ abort; not Kafka control-marker EOS |
+| Transactions (shipped) | **Write-through + soft markers** (Phase 86): LSO/aborted filtering; crash ≡ abort open ranges; not Kafka control batches |
 | mTLS | Feature `tls`; `--tls-client-ca` / optional `--tls-client-allow` |
 | ACLs | `--acl-enable`; durable `__acls/acls.json`; User resource is Kafka admin store-only |
 | Compaction | `cleanup.policy=compact` on **sealed** segments; empty value = tombstone |
@@ -253,13 +254,13 @@ curl -s -H "Authorization: Bearer $VOLANT_METRICS_TOKEN" \
 
 - Multi-language clients
 - Full chaos-mesh suites / cargo-fuzz **corpus CI** (scaffold under `fuzz/` only)
-- True control-marker `READ_COMMITTED` / real 2PC / prepared transactions
+- Kafka control batches on the data log / real 2PC / prepared transactions
 - Durable leader-epoch history; real fetch sessions
 
 Full list: [ROADMAP.md](../ROADMAP.md).
 
 ## Shipped (not gaps)
 
-Kafka wire shim **Phases 23–85** (ApiVersions **0–5**, Fetch **0–18**, ACL admin
+Kafka wire shim **Phases 23–86** (ApiVersions **0–5**, Fetch **0–18**, ACL admin
 **0–3** User resource, ~38 keys), SCRAM-SHA-256/512, SASL PLAIN/SCRAM — see
 [KAFKA_COMPAT.md](./KAFKA_COMPAT.md).

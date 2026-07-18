@@ -46,11 +46,11 @@ shim: [KAFKA_COMPAT.md](./KAFKA_COMPAT.md).
 | Feature | Behavior |
 |---------|----------|
 | transactional_id fencing | Yes |
-| Buffer-until-commit | Produces off-log until EndTxn commit |
-| Abort | Leaves no records on log |
+| Write-through (Phase 86) | Txn produces append immediately; LSO holds until EndTxn |
+| Abort | Soft markers hide ranges (native + READ_COMMITTED); data stays on log for READ_UNCOMMITTED |
 | Deferred offsets | Txn offset commits apply on commit only |
-| Crash | Open txn ≡ abort |
-| Control markers / READ_COMMITTED | **Not shipped** (LSO ≡ HWM; buffer-until-commit) |
+| Crash | Open write-through ranges ≡ abort (persisted `__txn_markers`) |
+| READ_COMMITTED | MVP: LSO filtering + aborted list (soft markers, not control batches) |
 
 ## Security (19–22)
 
@@ -72,7 +72,8 @@ workers.
 
 - Multi-language clients deferred  
 - No Raft metadata / dynamic membership  
-- No true control-marker EOS  
+- No Kafka control batches on the data log (soft markers only)  
+- No real 2PC / prepared transactions  
 - ACL store is single-node file (no consensus)  
 - DeleteRecords does not fan out to cluster followers  
 - Compaction simpler than Kafka (no tombstone retention window)  

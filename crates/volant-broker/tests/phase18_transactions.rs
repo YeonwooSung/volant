@@ -266,7 +266,7 @@ fn broker_unit_txn_buffer_abort() {
         0,
         vec![Message::from_value(Bytes::from_static(b"x"))],
     ) {
-        volant_broker::IdempotentCheck::Accept => {}
+        volant_broker::IdempotentCheck::Accept { .. } => {}
         other => panic!("unexpected {other:?}"),
     }
     let (code, results) = broker.end_txn(pid, epoch, false, &[]).unwrap();

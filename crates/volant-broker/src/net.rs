@@ -1066,7 +1066,7 @@ async fn handle_request(broker: &Broker, req: Request) -> Result<Response> {
                     });
                 }
 
-                // Phase 18: transactional produce buffers off-log until EndTxn.
+                // Phase 18/86: transactional produce write-through; LSO holds until EndTxn.
                 if producer_id != 0
                     && base_sequence >= 0
                     && broker.is_transactional_producer(producer_id)
@@ -1102,20 +1102,23 @@ async fn handle_request(broker: &Broker, req: Request) -> Result<Response> {
                                 error_code,
                             });
                         }
-                        crate::broker::IdempotentCheck::Duplicate { count, .. } => {
+                        crate::broker::IdempotentCheck::Duplicate {
+                            base_offset,
+                            count,
+                        } => {
                             return Ok(Response::Produce {
                                 topic,
                                 partition: pid.0,
-                                base_offset: 0,
+                                base_offset,
                                 count,
                                 error_code: 0,
                             });
                         }
-                        crate::broker::IdempotentCheck::Accept => {
+                        crate::broker::IdempotentCheck::Accept { base_offset } => {
                             return Ok(Response::Produce {
                                 topic,
                                 partition: pid.0,
-                                base_offset: 0,
+                                base_offset,
                                 count: msg_count,
                                 error_code: 0,
                             });
@@ -1153,7 +1156,7 @@ async fn handle_request(broker: &Broker, req: Request) -> Result<Response> {
                             error_code: 0,
                         });
                     }
-                    crate::broker::IdempotentCheck::Accept => {}
+                    crate::broker::IdempotentCheck::Accept { .. } => {}
                 }
 
                 let mut batch = MessageBatch::default();

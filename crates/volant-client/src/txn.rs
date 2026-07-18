@@ -54,7 +54,7 @@ impl TransactionalProducer {
         Ok(())
     }
 
-    /// Produce inside the open transaction (buffered on broker until commit).
+    /// Produce inside the open transaction (write-through; LSO holds until commit).
     pub async fn produce(
         &self,
         topic: &str,

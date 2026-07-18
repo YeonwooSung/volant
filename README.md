@@ -9,7 +9,7 @@ Volant is a resource-efficient alternative to Apache Kafka, built for:
 - **Streaming processing** — first-class operators (`map`, `filter`, windows) without a heavy runtime
 - **Small footprint** — native binary, predictable memory, simple operations
 
-> Status: **Phases 0–85 landed** — durable log, clustering, security, stream
+> Status: **Phases 0–86 landed** — durable log, clustering, security, stream
 > operators, and a broad optional Kafka wire shim (classic + flexible;
 > ApiVersions 0–5; Fetch 0–18; ACL admin 0–3). Single-node mode (no `--cluster-config`) preserves the
 > simple path. Start with the [whitepaper](./docs/WHITEPAPER.md) and
@@ -41,7 +41,7 @@ volant/
 │   ├── consistency.md    # HWM / ISR / acks
 │   ├── tuning.md         # Performance / I/O guide
 │   ├── PHASE1–6_SPEC.md  # Binding core specs
-│   ├── PHASE7–85_SPEC.md # Ship records (see history/)
+│   ├── PHASE7–86_SPEC.md # Ship records (see history/)
 │   └── history/          # Phase index + archived plans/reviews
 ├── deploy/               # Dockerfile, compose, systemd, Helm chart
 ├── ROADMAP.md
@@ -140,15 +140,16 @@ static ISR). Later work is summarized by band — full chronicle in
 |------|--------|-------|
 | Ops / packaging | 7–9 | Metrics, token auth, TLS, Helm multi-node, client leader redirect |
 | Native reliability | 10–17 | Idempotence, sticky/cooperative groups, topic configs, compaction |
-| Txns & security | 18–22 | Buffer-until-commit txns, mTLS, ACLs, SCRAM-SHA-256 |
-| Kafka wire shim | 23–85 | Optional `--kafka-listen`; classic + flexible; **~38** keys |
+| Txns & security | 18–22, **86** | Write-through txns + soft READ_COMMITTED (LSO/aborted); mTLS, ACLs, SCRAM |
+| Kafka wire shim | 23–86 | Optional `--kafka-listen`; classic + flexible; **~38** keys |
 
 **Kafka ceilings (code SoT):** ApiVersions **0–5**, Fetch **0–18**, Produce/Metadata
-**0–13**, ACL admin **0–3** (User resource v3, store-only). Matrix + honesty:
+**0–13**, ACL admin **0–3** (User resource v3, store-only); Fetch isolation
+READ_COMMITTED MVP (Phase 86). Matrix + honesty:
 [docs/KAFKA_COMPAT.md](./docs/KAFKA_COMPAT.md).
 
 **Still deferred:** multi-language clients, chaos-mesh / cargo-fuzz corpus CI,
-true control-marker `READ_COMMITTED`, real 2PC / prepared transactions, durable
+Kafka control batches on the data log, real 2PC / prepared transactions, durable
 leader-epoch history.
 
 ### Networked client (library)
