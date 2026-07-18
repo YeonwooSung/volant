@@ -41,7 +41,7 @@ volant/
 │   ├── consistency.md    # HWM / ISR / acks
 │   ├── tuning.md         # Performance / I/O guide
 │   ├── PHASE1–6_SPEC.md  # Binding core specs
-│   ├── PHASE7–82_SPEC.md # Ship records (see history/)
+│   ├── PHASE7–85_SPEC.md # Ship records (see history/)
 │   └── history/          # Phase index + archived plans/reviews
 ├── deploy/               # Dockerfile, compose, systemd, Helm chart
 ├── ROADMAP.md
@@ -130,249 +130,26 @@ cargo run -p volant-server --features tls -- \
 Packaging: [deploy/README.md](./deploy/README.md) (Docker, systemd, **Helm** multi-node).  
 Ops details: [docs/ops.md](./docs/ops.md).
 
-**Phase 8 client behavior:** on `NotLeaderForPartition`, the Rust client refreshes
-metadata and **reconnects to the partition leader** (see `max_redirects`).
-
-**Phase 9:** multi-node Helm (`cluster.enabled`), inter-broker TLS, client CA roots,
-optional [fuzz/](./fuzz/) harness.
-
-**Phase 10:** idempotent produce (`enable_idempotence`), produce retries, consumer
-lag metrics + `volant group lag`.
-
-**Phase 11:** sticky partition assignor, durable producer PID state under
-`data_dir`, `volant group describe`.
-
-**Phase 12:** `volant group list` / `delete-offsets`, static membership via
-`group_instance_id`.
-
-**Phase 13:** per-topic configs (`retention.ms` / `retention.bytes` /
-`segment.bytes`), `volant topic describe` / `config`, background retention.
-
-**Phase 14:** single-node topic catalog survives restart; `volant topic
-delete-records` (truncate sealed segments before an offset).
-
-**Phase 15:** `volant topic add-partitions` / `topic offsets` (CreatePartitions +
-ListOffsets).
-
-**Phase 16:** `cleanup.policy=compact` — key compaction on sealed segments
-(tombstone = empty value).
-
-**Phase 17:** cooperative rebalance — JoinGroup `revoked` list; `GroupConsumer`
-keeps fetch positions on sticky-retained partitions.
-
-**Phase 18:** transactions MVP — `BeginTxn`/`EndTxn`, transactional id fencing,
-multi-partition atomic commit, deferred offsets; `volant txn produce`.
-
-**Phase 19:** mTLS identity — `--tls-client-ca` / `--tls-client-allow`; client
-`tls_cert`/`tls_key`; verified CN authenticates without shared token.
-
-**Phase 20:** principal ACLs — allow/deny on topic/group/cluster; `--acl-enable` /
-`--acl-file` / `--acl-super-users`; `volant acl create|list|delete`.
-
-**Phase 21:** durable ACLs (`data_dir/__acls/acls.json`) + metrics Bearer auth
-(`--metrics-token` / `VOLANT_METRICS_TOKEN`).
-
-**Phase 22:** SCRAM-SHA-256 — `--scram-user user:pass`, durable
-`data_dir/__scram/users.json`, client `scram_username`/`scram_password`,
-`volant user create|list|delete`. Coexists with shared-token Auth and mTLS.
-
-**Phase 23:** Kafka wire shim MVP — `--kafka-listen host:port` for
-ApiVersions / Metadata / Produce / Fetch (MessageSet magic 0/1). Native
-Volant protocol stays on `--listen`.
-
-**Phase 24:** Kafka RecordBatch (magic 2) on the shim — auto-detect produce
-format; Fetch v4 returns RecordBatch; Produce 0–3 / Fetch 0–4 advertised.
-
-**Phase 25:** Kafka admin on the shim — CreateTopics / DeleteTopics / ListOffsets
-(earliest & latest) so clients need less Volant-native setup.
-
-**Phase 26:** Kafka consumer groups on the shim — FindCoordinator, Join/Sync/
-Heartbeat/Leave, OffsetCommit/Fetch mapped to Volant's group coordinator.
-
-**Phase 27:** Kafka ops surface — List/Describe/DeleteGroups, CreatePartitions,
-DescribeConfigs / AlterConfigs (topic keys).
-
-**Phase 28:** Kafka RecordBatch compression on Produce — gzip, snappy (Xerial),
-lz4 frame, zstd. Fetch remains uncompressed.
-
-**Phase 29:** Kafka InitProducerId + idempotent Produce (PID/epoch/sequence
-de-dupe on RecordBatch). Maps onto Volant Phase 10/11 producer state.
-
-**Phase 30:** Kafka SASL on the shim — SaslHandshake / SaslAuthenticate with
-PLAIN and SCRAM-SHA-256 against the Volant SCRAM store; principal feeds ACLs.
-
-**Phase 31:** Kafka transactions on the shim — AddPartitionsToTxn / EndTxn /
-TxnOffsetCommit mapped to Volant Phase 18 buffer-until-commit; FindCoordinator
-v1 for transaction coordinators.
-
-**Phase 32:** Kafka compressed Fetch — Fetch v4 RecordBatches compressed by
-default (lz4); override with `VOLANT_KAFKA_FETCH_COMPRESSION`.
-
-**Phase 33:** Kafka MessageSet compression — compressed Produce wrappers and
-Fetch v0–3 MessageSets (gzip/snappy/lz4; zstd maps to lz4).
-
-**Phase 34:** SCRAM-SHA-512 on the Kafka shim — dual SHA-256/512 credentials
-per user; SaslHandshake advertises SCRAM-SHA-512.
-
-**Phase 35:** Kafka DeleteRecords + ACL admin on the shim — keys 21 / 29 / 30 /
-31 mapped to Phase 14 truncate and Phase 20/21 ACL store.
-
-**Phase 36:** Kafka OffsetDelete + Fetch isolation honesty — key 47 maps to
-Phase 12 offset delete; `READ_COMMITTED` LSO equals HWM (buffer-until-commit).
-
-**Phase 37:** Kafka IncrementalAlterConfigs — key 44 SET/DELETE on topic
-configs (Phase 13); APPEND/SUBTRACT rejected.
-
-**Phase 38:** Kafka Metadata classic v0–8 — cluster_id, throttle, rack,
-offline_replicas, leader_epoch=-1, authorized-ops bitfields; flexible v9+ still
-out of scope.
-
-**Phase 39:** Kafka OffsetForLeaderEpoch (key 23, classic v0–3) — end offset by
-leader epoch for consumer truncation checks; no durable epoch history (eligible
-epochs map to HWM).
-
-**Phase 40:** Kafka ListOffsets classic v0–5 — isolation_level, throttle,
-current_leader_epoch fencing, response leader_epoch; flexible v6+ out of scope.
-
-**Phase 41:** Kafka OffsetFetch classic v0–5 — null topics = all, top-level
-error, throttle, committed_leader_epoch=-1; flexible v6+ / multi-group out of
-scope.
-
-**Phase 42:** Kafka group classic static membership — JoinGroup 0–5,
-Heartbeat/Sync/Leave 0–3 with `group.instance.id` → `static:{id}`.
-
-**Phase 43:** Kafka group admin classic versions — DescribeGroups 0–4,
-ListGroups 0–2, DeleteGroups 0–1 (throttle + authorized_ops + instance id).
-
-**Phase 44:** Kafka OffsetCommit classic 0–7 + FindCoordinator 0–2 — throttle,
-leader epoch field, `group.instance.id` on commit.
-
-**Phase 45:** Kafka topic admin classic — CreateTopics 0–4, DeleteTopics 0–3,
-CreatePartitions 0–1 (throttle framing + validate_only).
-
-**Phase 46:** Kafka DescribeConfigs 0–3 + AlterConfigs 0–1 — throttle,
-config_source/synonyms, config_type/documentation.
-
-**Phase 47:** Kafka transaction APIs classic 0–2 — AddPartitionsToTxn,
-AddOffsetsToTxn, EndTxn, TxnOffsetCommit (v2 leader_epoch ignored).
-
-**Phase 48:** Kafka Produce classic 0–8 — log_start_offset (v5+), empty
-record_errors + error_message (v8+); flexible v9+ deferred.
-
-**Phase 49:** Kafka Fetch classic 0–11 — log_start_offset, session header,
-leader-epoch fence, preferred_read_replica=-1; flexible v12+ deferred.
-
-**Phase 50:** Kafka ApiVersions classic 0–2 — trailing throttle on v1–2.
-
-**Phase 51:** Flexible wire foundation (KIP-482) + ApiVersions v3 compact
-encoding; first flexible API on the shim.
-
-**Phase 52:** Flexible Metadata v9 + FindCoordinator v3–4 (batch keys);
-response header v1 for those APIs.
-
-**Phase 53:** Flexible Produce v9 — compact records/topics + response header v1.
-
-**Phase 54:** Flexible Fetch v12 — compact topics/records + response header v1.
-
-**Phase 55:** Flexible group consumer APIs — JoinGroup v6, SyncGroup /
-Heartbeat / LeaveGroup v4 (compact + response header v1).
-
-**Phase 56:** Group flex field completeness — JoinGroup v7–9 (ProtocolType,
-Reason, SkipAssignment), SyncGroup v5, LeaveGroup v5.
-
-**Phase 57:** Flexible OffsetCommit v8 + OffsetFetch v6–7 (RequireStable
-ignored; multi-group v8+ deferred).
-
-**Phase 58:** OffsetFetch multi-group flexible v8 — Groups[] request/response
-with per-group ACL errors.
-
-**Phase 59:** Flexible group admin — DescribeGroups v5, ListGroups v3,
-DeleteGroups v2 (compact + response header v1).
-
-**Phase 60:** Flexible topic admin — CreateTopics v5, DeleteTopics v4,
-CreatePartitions v2.
-
-**Phase 61:** Flexible configs — DescribeConfigs v4, AlterConfigs v2,
-IncrementalAlterConfigs v1.
-
-**Phase 62:** Flexible transaction APIs — InitProducerId v2, AddPartitionsToTxn /
-AddOffsetsToTxn / EndTxn / TxnOffsetCommit v3; classic paths unchanged.
-
-**Phase 63:** Flexible ListOffsets v6 + OffsetForLeaderEpoch v4.
-
-**Phase 64:** Flexible DeleteRecords v2 + Describe/Create/DeleteAcls v2.
-
-**Phase 65:** SaslAuthenticate v2 flexible + DescribeCluster v0 + ListTransactions
-v0 (always-flexible modern admin APIs).
-
-**Phase 66:** DescribeTransactions v0 + DescribeProducers v0; DescribeCluster
-0–1 (EndpointType); ListTransactions 0–1 (DurationFilter ignored).
-
-**Phase 67:** Metadata TopicId v10–12 — deterministic UUID mapping, v11 cluster
-ops removal, v12 lookup by TopicId.
-
-**Phase 68:** Fetch TopicId v13 — request/response UUID topics (KIP-516);
-unknown id → UnknownTopicId; v12 name path unchanged.
-
-**Phase 69:** Admin TopicId — CreateTopics v7 TopicId response; DeleteTopics
-v5 ErrorMessage + v6 delete-by-TopicId.
-
-**Phase 70:** DescribeCluster v2 (IsFenced always false) + ListTransactions v2
-(TransactionalIdPattern simple `*` glob).
-
-**Phase 71:** Produce TopicId v13 — UUID topics (v10–12 name path unchanged);
-unknown id → UnknownTopicId; KIP-951 tags empty.
-
-**Phase 72:** OffsetCommit/OffsetFetch v9–10 — OffsetCommit v9≈v8 name path,
-v10 TopicId; OffsetFetch v9 MemberId+MemberEpoch (ignored), v10 TopicId;
-unknown id → UnknownTopicId.
-
-**Phase 73:** Metadata v13 — top-level ErrorCode (always 0); request wire same
-as v12 TopicId path.
-
-**Phase 74:** ListOffsets v7–11 — MAX_TIMESTAMP (-3) scan; EARLIEST_LOCAL (-4);
-tiered specials empty; TimeoutMs (v10) ignored.
-
-**Phase 75:** KIP-890-era txn max versions — InitProducerId 0–5 (resume fields
-ignored), AddPartitionsToTxn 0–5 (v4–5 batch), EndTxn 0–5 (v5 pid/epoch echo),
-TxnOffsetCommit 0–5 (name path); AddOffsetsToTxn stays 0–3; no 2PC.
-
-**Phase 76:** TxnOffsetCommit v6 TopicId — UUID topics (v3–5 name path unchanged);
-unknown id → UnknownTopicId; buffers until EndTxn.
-
-**Phase 77:** InitProducerId v6 — Enable2Pc / KeepPreparedTxn parsed+ignored;
-OngoingTxnProducerId/Epoch always -1 (no prepared/2PC); max 0–6.
-
-**Phase 78:** KIP-951 CurrentLeader / NodeEndpoints — Produce v10+ and Fetch
-v12+ emit leader tags on NotLeader/FencedLeaderEpoch; success keeps empty tags.
-
-**Phase 79:** Group admin version bumps — ListGroups 0–5 (StatesFilter/GroupState,
-TypesFilter/GroupType=`classic`), DescribeGroups 0–6 + DeleteGroups 0–3
-ErrorMessage fields.
-
-**Phase 80:** CreatePartitions 0–3 — v3 wire-identical to flexible v2; KIP-599
-THROTTLING_QUOTA_EXCEEDED never emitted (no quotas).
-
-**Phase 81:** FindCoordinator 0–6 — v5–6 wire-identical to flexible v4 batch;
-TRANSACTION_ABORTABLE never emitted; share key_type (KIP-932) rejected.
-
-**Phase 82:** AddOffsetsToTxn 0–4 — v4 wire-identical to flexible v3; KIP-890
-TRANSACTION_ABORTABLE never emitted (buffer-until-commit only).
-
-**Phase 83:** ApiVersions 0–5 — v4 wire-identical to flexible v3 body (empty
-feature tags); v5 ClusterId/NodeId parsed and ignored; response header always
-v0; no SupportedFeatures / REBOOTSTRAP_REQUIRED.
-
-**Phase 84:** Fetch 0–18 (Kafka max) — v14 = v13 wire; v15 drops top-level
-ReplicaId (ReplicaState tag ignored); v16+ NodeEndpoints on leader errors;
-v17–18 partition tags parse-ignore.
-
-**Phase 85:** ACL admin 0–3 (Kafka max) — Describe/Create/DeleteAcls v3
-wire-identical to flexible v2; User resource type (`ResourceType = 7`) accepted
-on v3 only and stored as `ResourceType::User` (storage/admin only).
+### What shipped after core (compact)
+
+Phases **0–6** are the binding core (log, native protocol, groups, streams, DMA I/O,
+static ISR). Later work is summarized by band — full chronicle in
+[ROADMAP.md](./ROADMAP.md) and [docs/history/PHASE_HISTORY.md](./docs/history/PHASE_HISTORY.md).
+
+| Band | Phases | Theme |
+|------|--------|-------|
+| Ops / packaging | 7–9 | Metrics, token auth, TLS, Helm multi-node, client leader redirect |
+| Native reliability | 10–17 | Idempotence, sticky/cooperative groups, topic configs, compaction |
+| Txns & security | 18–22 | Buffer-until-commit txns, mTLS, ACLs, SCRAM-SHA-256 |
+| Kafka wire shim | 23–85 | Optional `--kafka-listen`; classic + flexible; **~38** keys |
+
+**Kafka ceilings (code SoT):** ApiVersions **0–5**, Fetch **0–18**, Produce/Metadata
+**0–13**, ACL admin **0–3** (User resource v3, store-only). Matrix + honesty:
+[docs/KAFKA_COMPAT.md](./docs/KAFKA_COMPAT.md).
 
 **Still deferred:** multi-language clients, chaos-mesh / cargo-fuzz corpus CI,
-true control-marker READ_COMMITTED, real 2PC.
+true control-marker `READ_COMMITTED`, real 2PC / prepared transactions, durable
+leader-epoch history.
 
 ### Networked client (library)
 

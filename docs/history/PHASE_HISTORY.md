@@ -88,7 +88,7 @@ docs for day-to-day reading: [ops](../ops.md), [consistency](../consistency.md),
 
 ---
 
-## Kafka flexible/modern (51–82)
+## Kafka flexible/modern (51–85)
 
 | Phase | Status | One-line goal | Spec |
 |------:|:------:|---------------|------|

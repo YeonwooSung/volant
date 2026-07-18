@@ -7,8 +7,9 @@
 | `--listen` | | `0.0.0.0:9092` | Client/broker TCP listen |
 | `--data-dir` | | `./data` | Segment + offset store root |
 | `--metrics-addr` | | *disabled* | Prometheus `GET /metrics` |
+| `--metrics-token` | `VOLANT_METRICS_TOKEN` | *unset* | Optional Bearer for `/metrics` (Phase 21) |
 | `--log-format` | | `text` | `text` or `json` |
-| `--auth-token` | `VOLANT_AUTH_TOKEN` | *unset* | Shared-token auth |
+| `--auth-token` | `VOLANT_AUTH_TOKEN` | *unset* | Shared-token auth (native port only) |
 | `--scram-user USER:PASS` | | *unset* | Upsert SCRAM user at startup (repeatable; Phase 22) |
 | `--kafka-listen` | | *disabled* | Kafka wire protocol shim (Phases 23–85) |
 | `--tls-cert` / `--tls-key` | | *unset* | Server TLS (feature `tls`) |
@@ -387,7 +388,8 @@ let client = Client::connect(ClientConfig {
 ```
 
 Principal is logged for ops correlation and used by **Phase 20 ACLs**.
-Metrics remain unauthenticated.
+Metrics auth is optional (`--metrics-token` / Phase 21); prefer binding
+`--metrics-addr` to localhost when the token is unset.
 
 ## Principal ACLs (Phase 20)
 
@@ -477,10 +479,17 @@ segments keeping the latest value per key. An **empty value** is a tombstone
 (removes the key). Null-key records are not compacted away. The active segment
 is only compacted after it rolls.
 
-## Deferred
+## Still deferred
 
-Multi-language clients, full chaos-mesh suites, cargo-fuzz corpus CI, true
-control-marker `READ_COMMITTED`, real 2PC / prepared transactions.
-Kafka shim (Phases 23–85; includes ApiVersions 0–5, Fetch 0–18, ACL admin 0–3), SCRAM, and
-SASL PLAIN/SCRAM are **shipped** — see [KAFKA_COMPAT.md](./KAFKA_COMPAT.md).
-Full deferred list: [ROADMAP.md](../ROADMAP.md).
+- Multi-language clients
+- Full chaos-mesh suites / cargo-fuzz **corpus CI** (scaffold under `fuzz/` only)
+- True control-marker `READ_COMMITTED` / real 2PC / prepared transactions
+- Durable leader-epoch history; real fetch sessions
+
+Full list: [ROADMAP.md](../ROADMAP.md).
+
+## Shipped (not gaps)
+
+Kafka wire shim **Phases 23–85** (ApiVersions **0–5**, Fetch **0–18**, ACL admin
+**0–3** User resource, ~38 keys), SCRAM-SHA-256/512, SASL PLAIN/SCRAM — see
+[KAFKA_COMPAT.md](./KAFKA_COMPAT.md).

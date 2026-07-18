@@ -14,13 +14,14 @@
 ## Abstract
 
 Volant is a resource-efficient streaming message broker written in Rust. It
-combines an append-only, DMA-friendly partition log with a small operational
-footprint: one server binary, one CLI, Prometheus metrics, and optional
-multi-node ISR replication. A **native binary protocol** is the primary client
-path; an optional **Kafka wire-protocol shim** reuses the same storage, groups,
-and security model for interop experiments. The shim advertises **ApiVersions
-0–5** and **Fetch 0–18** at Apache Kafka wire max for those keys, with empty
-feature tags and buffer-until-commit transactions—not full isolation parity.
+combines an append-only partition log (mmap segments; optional Linux
+`io_uring` / `O_DIRECT`) with a small operational footprint: one server binary,
+one CLI, Prometheus metrics, and optional multi-node ISR replication. A
+**native binary protocol** is the primary client path; an optional **Kafka
+wire-protocol shim** reuses the same storage, groups, and security model for
+interop. The shim advertises **ApiVersions 0–5** and **Fetch 0–18** at Apache
+Kafka wire max for those keys, with empty feature tags and
+buffer-until-commit transactions—not full isolation parity.
 
 Volant is **not** a drop-in Apache Kafka replacement. It prioritizes sequential
 I/O, explicit complexity, and honest non-parity (especially around
@@ -40,14 +41,14 @@ surface. Many deployments need:
 - A small binary and predictable latency
 - Optional Kafka client interop without running a full Kafka stack
 
-Volant targets that subset: **fast messaging**, **DMA-oriented storage**,
+Volant targets that subset: **fast messaging**, **mmap / optional high-perf I/O**,
 **in-process stream operators**, and a **single-binary ops model**.
 
 ### Design principles
 
 | Principle | Practice |
 |-----------|----------|
-| Zero-copy where it counts | Batch frames, mmap reads, length-prefixed binary protocol |
+| Zero-copy where it counts | Batch frames, mmap reads (copied into `Bytes` for clients), length-prefixed binary protocol |
 | Sequential I/O wins | Append-only segment logs; avoid random writes on the hot path |
 | Explicit complexity | Single-node correct first; static membership + ISR (not Raft-per-partition) |
 | Resource efficiency | Native binary, no GC tax, bounded buffers |
@@ -61,7 +62,7 @@ Volant targets that subset: **fast messaging**, **DMA-oriented storage**,
 ```
 ┌─────────────┐     ┌─────────────┐     ┌──────────────────┐
 │  Producers  │────▶│ volant-     │────▶│ volant-storage   │
-│  Consumers  │◀────│  server     │◀────│ (mmap / DMA log) │
+│  Consumers  │◀────│  server     │◀────│ (mmap / segment log) │
 │  Stream apps│     │  + broker   │     └──────────────────┘
 │  Kafka clis │     └──────┬──────┘
 └─────────────┘            │
@@ -93,7 +94,7 @@ and `volant-storage` logs.
 | `volant-stream` | In-process stream operators |
 | `volant-server` | Process entrypoint |
 | `volant-cli` | Admin CLI (`volant`) |
-| `volant-bench` | Storage micro-benchmarks |
+| `volant-bench` | Bench harness (`append` / `fetch` / `produce-batch`) |
 | `volant-examples` | Example apps (e.g. stream word-count) |
 
 ---
@@ -183,13 +184,14 @@ writing aborted data to the log, at the cost of Kafka-style isolation semantics.
 
 | Mechanism | Notes |
 |-----------|-------|
-| Shared-token Auth | Native protocol; `VOLANT_AUTH_TOKEN` |
-| SCRAM-SHA-256 / 512 | Durable `__scram/users.json`; Kafka SASL + native |
+| Shared-token Auth | Native protocol only; `VOLANT_AUTH_TOKEN` |
+| SCRAM-SHA-256 | Durable `__scram/users.json`; **native** + Kafka SASL |
+| SCRAM-SHA-512 | Dual-hash store; **Kafka SASL only** (native client is SHA-256) |
 | SASL PLAIN | Kafka shim only |
 | mTLS identity | Feature `tls`; CN/SAN principal |
 | TLS transport | Server, client, inter-broker |
-| ACLs | Principal / resource / op; durable `__acls/acls.json` |
-| Metrics Bearer | `--metrics-token` |
+| ACLs | Topic / group / cluster (+ Kafka **User** resource store-only); durable `__acls/acls.json` |
+| Metrics Bearer | Optional `--metrics-token` (Phase 21); open if unset |
 
 Auth is required when token **or** SCRAM users **or** mTLS is configured.
 Inter-broker uses shared-token Auth, not SCRAM. No GSSAPI / OAUTHBEARER.
@@ -239,14 +241,14 @@ plugins (deferred).
 
 ## 9. Performance intent
 
-| Metric | Target / baseline | Notes |
-|--------|-------------------|-------|
-| Single-partition append | ≥ 200k msgs/s exit; ~570k measured | ~100-byte values, laptop |
-| Produce p99 (aspirational) | < 5 ms | Local NVMe, acks=1 |
-| Idle RSS (aspirational) | < 50 MB | No topics under load |
-| Binary size (aspirational) | < 15 MB stripped | `volant-server` release |
+| Metric | Status | Notes |
+|--------|--------|-------|
+| Single-partition append | **Measured baseline** (Phase 1) | Exit criterion ≥ 200k msgs/s; ~570k once measured on a laptop (~100-byte values). Re-run: `cargo run -p volant-bench --release -- append` |
+| Produce p99 | **Aspirational** | < 5 ms local NVMe, acks=1 — not a CI SLA |
+| Idle RSS | **Aspirational** | < 50 MB with no topics under load |
+| Binary size | **Aspirational** | < 15 MB stripped `volant-server` |
 
-Baselines via `cargo run -p volant-bench --release`. Tuning:
+Do not treat aspirational rows as continuous guarantees. Tuning:
 [tuning.md](./tuning.md).
 
 ---
@@ -260,11 +262,11 @@ Volant deliberately does **not** claim production Kafka parity. Open gaps:
 3. True control-marker `READ_COMMITTED` and real 2PC
 4. Full Kafka API surface beyond advertised keys; real fetch sessions / DivergingEpoch
 5. Durable leader-epoch history (eligible epochs map to HWM)
-6. Kafka cooperative-sticky assignor protocol parity
-7. Stream state durability and distributed stream topology
-8. Full chaos-mesh / cargo-fuzz corpus CI
-9. ACL consensus across cluster nodes
-10. Version **0.1.0** — MVP-oriented production readiness
+6. Kafka cooperative-sticky assignor **protocol** parity (native JoinGroup revoke list exists)
+7. Stream state durability and distributed stream topology (`MemoryStore` only)
+8. Full chaos-mesh / cargo-fuzz **corpus CI** (`fuzz/` scaffold only)
+9. ACL consensus across cluster nodes; DeleteRecords does not fan out to followers
+10. Helm chart has no `--kafka-listen` surface; version **0.1.0** MVP readiness
 
 ### What is solid today
 
@@ -272,11 +274,12 @@ Volant deliberately does **not** claim production Kafka parity. Open gaps:
 - Multi-partition produce/fetch with HWM semantics  
 - Static multi-node ISR replication and `acks=all`  
 - Consumer groups with durable offsets  
-- Native security (token / SCRAM / mTLS / ACL / TLS)  
-- Optional Kafka shim (~38 keys): ApiVersions **0–5**, Fetch **0–18**,
-  Produce/Metadata **0–13** (see [KAFKA_COMPAT.md](./KAFKA_COMPAT.md))  
+- Native security (token / SCRAM-256 / mTLS / ACL / TLS)  
+- Optional Kafka shim (**38** keys in `SUPPORTED_APIS`): ApiVersions **0–5**,
+  Fetch **0–18**, Produce/Metadata **0–13**, ACL admin **0–3** (see
+  [KAFKA_COMPAT.md](./KAFKA_COMPAT.md))  
 - Lightweight in-process stream operators  
-- Ops packaging (metrics, CLI, Docker, Helm)
+- Ops packaging (metrics + optional Bearer, CLI, Docker, Helm)
 
 ---
 

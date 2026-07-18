@@ -52,15 +52,15 @@ Start here. Prefer living docs over individual phase ship records.
 | Protocol implementer | PHASE1–6 binding specs |
 | Roadmap / deferred | ROADMAP end sections |
 
-## Compaction note (2026-07-18)
+## Compaction note (2026-07-18, post–Phase 85)
 
-Living docs re-verified against Phase 85 (ACL admin **0–3** User resource):
+Living docs re-verified against codebase (`SUPPORTED_APIS`, HEAD Phase 85):
 
-- **Status ceiling:** Phases **0–85**; Kafka shim **23–85**
-- **Kafka SoT:** [KAFKA_COMPAT.md](./KAFKA_COMPAT.md) — full matrix + semantic honesty
-- **WHITEPAPER:** architecture + positioning; no per-key version matrix duplicate
-- **Binding** core: PHASE1–6 at top level
-- **Ship records:** PHASE7–85 via [PHASE_HISTORY](./history/PHASE_HISTORY.md)
-- **Archived:** `history/archive/` plan/review archaeology
-- **Still deferred (product):** multi-lang clients, chaos-mesh / cargo-fuzz CI,
-  true `READ_COMMITTED`, real 2PC (ACL admin v3 **closed** by Phase 85)
+- **Status ceiling:** Phases **0–85**; Kafka shim **23–85** (**38** keys)
+- **Kafka SoT:** [KAFKA_COMPAT.md](./KAFKA_COMPAT.md) — matrix + semantic honesty
+- **WHITEPAPER:** architecture + positioning; points at KAFKA_COMPAT (no full matrix)
+- **Binding core:** PHASE1–6; **ship records:** PHASE7–85 via [PHASE_HISTORY](./history/PHASE_HISTORY.md)
+- **README:** compact phase bands (not per-phase diary); tree `PHASE7–85`
+- **ops:** flags + Kafka listen + Deferred/Shipped split; metrics Bearer honest
+- **Still deferred:** multi-lang, chaos/fuzz corpus CI, true `READ_COMMITTED`, real 2PC,
+  durable epochs / real fetch sessions

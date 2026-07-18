@@ -68,9 +68,9 @@ Set `VOLANT_AUTH_TOKEN` (or `--auth-token`) on the server. Clients must set
 
 ## Metrics
 
-`GET /metrics` on `--metrics-addr` (Prometheus text 0.0.4). No auth on the
-metrics port — bind to `127.0.0.1` in production and scrape via a local agent
-or reverse proxy.
+`GET /metrics` on `--metrics-addr` (Prometheus text 0.0.4). Open by default;
+optional Bearer via `--metrics-token` / `VOLANT_METRICS_TOKEN` (Phase 21). Prefer
+binding to `127.0.0.1` in production when unauthenticated.
 
 ## TLS notes
 

@@ -57,10 +57,10 @@ shim: [KAFKA_COMPAT.md](./KAFKA_COMPAT.md).
 | Feature | Behavior |
 |---------|----------|
 | mTLS identity | Client cert CN/SAN as principal |
-| Principal ACLs | Topic / group / cluster; allow/deny; durable file |
+| Principal ACLs | Topic / group / cluster (+ Kafka User resource store-only); allow/deny; durable file |
 | Super-users | Bypass ACL checks |
-| SCRAM-SHA-256 | Durable users; native + Kafka SASL |
-| SCRAM-SHA-512 | Dual hashes per user (Kafka SASL) |
+| SCRAM-SHA-256 | Durable users; **native** + Kafka SASL |
+| SCRAM-SHA-512 | Dual hashes per user; **Kafka SASL only** |
 
 ## Stream processing (Phase 4+)
 
