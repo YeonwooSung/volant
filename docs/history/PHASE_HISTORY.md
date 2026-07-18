@@ -134,14 +134,15 @@ docs for day-to-day reading: [ops](../ops.md), [consistency](../consistency.md),
 | 90 | ✅ | Real 2PC / prepared transactions MVP (Enable2Pc, OngoingTxn*, durable prepare) | [PHASE90_SPEC.md](../PHASE90_SPEC.md) |
 | 91 | ✅ | Omit-unchanged incremental fetch session responses (MVP) | [PHASE91_SPEC.md](../PHASE91_SPEC.md) |
 | 92 | ✅ | Prepared transaction timeout / auto-abort (MVP) | [PHASE92_SPEC.md](../PHASE92_SPEC.md) |
+| 93 | ✅ | Open transaction timeout (InitProducerId / broker default; lazy auto-abort) | [PHASE93_SPEC.md](../PHASE93_SPEC.md) |
 
 ---
 
-## Still deferred (post–Phase 92)
+## Still deferred (post–Phase 93)
 
 - Multi-language clients
 - Chaos-mesh / cargo-fuzz corpus CI
-- Full multi-broker 2PC coordinator / TRANSACTION_ABORTABLE / open-txn timeout
+- Full multi-broker 2PC coordinator / TRANSACTION_ABORTABLE
 - Multi-broker session affinity / session TTL / byte-identical response cache
 - Full KRaft epoch state machine / remote-log epochs
 - Control batches for empty AddPartitions / crash open-txn without EndTxn

@@ -123,7 +123,7 @@ struct IdempotentBatchState {
     base_offset: u64,
 }
 
-/// In-memory state for one producer id (Phase 10/18/90).
+/// In-memory state for one producer id (Phase 10/18/90/93).
 #[derive(Debug)]
 struct ProducerEpochState {
     epoch: u16,
@@ -133,6 +133,8 @@ struct ProducerEpochState {
     transactional_id: String,
     /// Two-phase commit enabled (Phase 90; InitProducerId v6 Enable2Pc).
     enable_2pc: bool,
+    /// Client open-txn timeout from InitProducerId (Phase 93). `0` = broker default.
+    transaction_timeout_ms: u64,
     /// Per (topic, partition) last **committed** batch.
     partitions: HashMap<(String, u32), IdempotentBatchState>,
 }
@@ -188,6 +190,11 @@ struct TxnMarkersFile {
 /// crash promotes them to aborted (crash ≡ abort).
 #[derive(Debug, Default, Clone)]
 struct OpenTxn {
+    /// Unix epoch milliseconds when this open txn was created (Phase 93).
+    ///
+    /// Set by `begin_txn` / `ensure_txn_open` (first open). Not reset by produce.
+    /// Memory-only — open crash ≡ abort via `__txn_markers` without needing this.
+    opened_at_ms: i64,
     /// Log ranges written while the txn is open (write-through).
     written: Vec<TxnWrittenRange>,
     /// Sequences accepted inside this txn (not yet committed to `partitions`).
@@ -367,6 +374,13 @@ pub struct Broker {
     /// Default `60_000` ms; override via `VOLANT_PREPARED_TXN_TIMEOUT_MS` at
     /// construction or [`Broker::set_prepared_txn_timeout_ms`]. `0` disables.
     prepared_txn_timeout_ms: AtomicU64,
+    /// Broker-default max age of an **open** (non-prepared) txn (Phase 93).
+    ///
+    /// Used when the producer has no positive InitProducerId
+    /// `transaction_timeout_ms`. Default `60_000` ms; override via
+    /// `VOLANT_OPEN_TXN_TIMEOUT_MS` or [`Broker::set_open_txn_timeout_ms`].
+    /// `0` disables open auto-abort for producers without a client timeout.
+    open_txn_timeout_ms: AtomicU64,
     /// Soft abort markers for READ_COMMITTED (Phase 86): `(topic, partition) → markers`.
     aborted_txns: Mutex<HashMap<(String, u32), Vec<AbortedTxnMarker>>>,
     /// Durable producer state store under `data_dir/__producer_state` (Phase 11).
@@ -432,6 +446,7 @@ impl Broker {
             open_txns: Mutex::new(HashMap::new()),
             prepared_txns: Mutex::new(HashMap::new()),
             prepared_txn_timeout_ms: AtomicU64::new(default_prepared_txn_timeout_ms()),
+            open_txn_timeout_ms: AtomicU64::new(default_open_txn_timeout_ms()),
             aborted_txns: Mutex::new(HashMap::new()),
             producer_store,
             topic_configs,
@@ -448,7 +463,7 @@ impl Broker {
             .expect("failed to reload single-node topic catalog");
         broker.load_txn_markers();
         broker.load_prepared_txns();
-        broker.expire_timed_out_prepared_txns();
+        broker.expire_timed_out_txns();
         broker.load_leader_epochs();
         broker.seed_missing_leader_epochs();
         broker
@@ -519,6 +534,7 @@ impl Broker {
             open_txns: Mutex::new(HashMap::new()),
             prepared_txns: Mutex::new(HashMap::new()),
             prepared_txn_timeout_ms: AtomicU64::new(default_prepared_txn_timeout_ms()),
+            open_txn_timeout_ms: AtomicU64::new(default_open_txn_timeout_ms()),
             aborted_txns: Mutex::new(HashMap::new()),
             producer_store,
             topic_configs,
@@ -534,7 +550,7 @@ impl Broker {
         broker.apply_local_assignment()?;
         broker.load_txn_markers();
         broker.load_prepared_txns();
-        broker.expire_timed_out_prepared_txns();
+        broker.expire_timed_out_txns();
         broker.load_leader_epochs();
         broker.seed_missing_leader_epochs();
         Ok(broker)
@@ -623,7 +639,7 @@ impl Broker {
     ///
     /// State is persisted under `data_dir/__producer_state` (Phase 11).
     pub fn init_producer_id(&self) -> (u64, u16) {
-        let r = self.init_producer_id_with_opts("", false, false);
+        let r = self.init_producer_id_with_opts("", false, false, 0);
         (r.producer_id, r.epoch)
     }
 
@@ -632,8 +648,9 @@ impl Broker {
     /// Non-empty `transactional_id` fences any prior owner of that id by bumping
     /// epoch and clearing open transactions / sequences. Does not enable 2PC
     /// (use [`Self::init_producer_id_with_opts`] for InitProducerId v6).
+    /// Uses broker-default open-txn timeout (Phase 93).
     pub fn init_producer_id_with_txn(&self, transactional_id: &str) -> (u64, u16) {
-        let r = self.init_producer_id_with_opts(transactional_id, false, false);
+        let r = self.init_producer_id_with_opts(transactional_id, false, false, 0);
         (r.producer_id, r.epoch)
     }
 
@@ -650,7 +667,23 @@ impl Broker {
             .store(timeout_ms, Ordering::Relaxed);
     }
 
-    /// InitProducerId with Phase 90 2PC options (Enable2Pc / KeepPreparedTxn).
+    /// Current broker-default open-txn timeout in milliseconds (Phase 93).
+    ///
+    /// `0` means open auto-abort is disabled for producers without a positive
+    /// client `transaction_timeout_ms`.
+    pub fn open_txn_timeout_ms(&self) -> u64 {
+        self.open_txn_timeout_ms.load(Ordering::Relaxed)
+    }
+
+    /// Override broker-default open-txn timeout (Phase 93). `0` disables when
+    /// used as the effective timeout.
+    pub fn set_open_txn_timeout_ms(&self, timeout_ms: u64) {
+        self.open_txn_timeout_ms
+            .store(timeout_ms, Ordering::Relaxed);
+    }
+
+    /// InitProducerId with Phase 90 2PC options (Enable2Pc / KeepPreparedTxn)
+    /// and Phase 93 open-txn timeout.
     ///
     /// When a prepared txn exists for `transactional_id`:
     /// - `keep_prepared=true`: preserve it, return OngoingTxn* = prepared pid/epoch,
@@ -660,15 +693,25 @@ impl Broker {
     /// `enable_2pc=true` marks the producer so the first EndTxn prepares rather
     /// than one-shot finalizing.
     ///
-    /// Phase 92: timed-out prepared txns are auto-aborted before KeepPrepared
-    /// handling.
+    /// `transaction_timeout_ms` (Phase 93): when **> 0**, stored as the
+    /// producer open-txn timeout; when **≤ 0**, the producer uses the broker
+    /// default (`open_txn_timeout_ms` / `VOLANT_OPEN_TXN_TIMEOUT_MS`).
+    ///
+    /// Phase 92/93: timed-out prepared and open txns are auto-aborted before
+    /// KeepPrepared / fence handling.
     pub fn init_producer_id_with_opts(
         &self,
         transactional_id: &str,
         enable_2pc: bool,
         keep_prepared: bool,
+        transaction_timeout_ms: i32,
     ) -> InitProducerIdResult {
-        self.expire_timed_out_prepared_txns();
+        self.expire_timed_out_txns();
+        let client_timeout = if transaction_timeout_ms > 0 {
+            transaction_timeout_ms as u64
+        } else {
+            0
+        };
         if transactional_id.is_empty() {
             let id = self.next_producer_id.fetch_add(1, Ordering::Relaxed);
             let epoch = 0u16;
@@ -679,6 +722,7 @@ impl Broker {
                     transactional: false,
                     transactional_id: String::new(),
                     enable_2pc: false,
+                    transaction_timeout_ms: client_timeout,
                     partitions: HashMap::new(),
                 },
             );
@@ -700,7 +744,7 @@ impl Broker {
                 let ongoing_pid = prep.producer_id as i64;
                 let ongoing_epoch = prep.producer_epoch as i16;
                 drop(prepared);
-                // Ensure producer state reflects enable_2pc + identity.
+                // Ensure producer state reflects enable_2pc + identity + timeout.
                 {
                     let mut state = self.producer_state.write();
                     if let Some(prod) = state.get_mut(&pid) {
@@ -710,6 +754,7 @@ impl Broker {
                         if enable_2pc {
                             prod.enable_2pc = true;
                         }
+                        prod.transaction_timeout_ms = client_timeout;
                     } else {
                         state.insert(
                             pid,
@@ -718,6 +763,7 @@ impl Broker {
                                 transactional: true,
                                 transactional_id: transactional_id.to_owned(),
                                 enable_2pc,
+                                transaction_timeout_ms: client_timeout,
                                 partitions: HashMap::new(),
                             },
                         );
@@ -769,6 +815,7 @@ impl Broker {
                 if enable_2pc {
                     prod.enable_2pc = true;
                 }
+                prod.transaction_timeout_ms = client_timeout;
                 // Keep enable_2pc sticky if already set, unless caller is not
                 // using v6 — still allow sticky true from prior Init.
                 let epoch = prod.epoch;
@@ -803,6 +850,7 @@ impl Broker {
                 transactional: true,
                 transactional_id: transactional_id.to_owned(),
                 enable_2pc,
+                transaction_timeout_ms: client_timeout,
                 partitions: HashMap::new(),
             },
         );
@@ -820,9 +868,9 @@ impl Broker {
     /// Begin a transaction for a transactional producer (Phase 18).
     ///
     /// Returns protocol error code (`0` = ok). Rejects when a prepared txn
-    /// exists for this producer (Phase 90).
+    /// exists for this producer (Phase 90). Sets `opened_at_ms` (Phase 93).
     pub fn begin_txn(&self, producer_id: u64, producer_epoch: u16) -> u16 {
-        self.expire_timed_out_prepared_txns();
+        self.expire_timed_out_txns();
         let state = self.producer_state.read();
         let Some(prod) = state.get(&producer_id) else {
             return ErrorCode::UnknownProducerId as u16;
@@ -842,7 +890,13 @@ impl Broker {
         if open.contains_key(&producer_id) {
             return ErrorCode::InvalidTxnState as u16;
         }
-        open.insert(producer_id, OpenTxn::default());
+        open.insert(
+            producer_id,
+            OpenTxn {
+                opened_at_ms: unix_now_ms(),
+                ..OpenTxn::default()
+            },
+        );
         0
     }
 
@@ -850,9 +904,10 @@ impl Broker {
     ///
     /// If one is already open for this PID+epoch, returns success. Otherwise
     /// begins a new transaction (Kafka has no separate BeginTxn API).
+    /// Phase 93: times out aged open txns first; a timed-out open is recreated.
     pub fn ensure_txn_open(&self, producer_id: u64, producer_epoch: u16) -> u16 {
-        // begin_txn also expires; call once here for the prepared check path.
-        self.expire_timed_out_prepared_txns();
+        // begin_txn also expires; call once here for the prepared/open check path.
+        self.expire_timed_out_txns();
         let txn_id = {
             let state = self.producer_state.read();
             let Some(prod) = state.get(&producer_id) else {
@@ -883,9 +938,9 @@ impl Broker {
     /// List open + prepared transactions for ListTransactions (Phase 65/90).
     ///
     /// State is `"Ongoing"`, `"PrepareCommit"`, or `"PrepareAbort"`.
-    /// Phase 92: timed-out prepared entries are auto-aborted first.
+    /// Phase 92/93: timed-out prepared and open entries are auto-aborted first.
     pub fn list_open_transactions(&self) -> Vec<(String, u64, String)> {
-        self.expire_timed_out_prepared_txns();
+        self.expire_timed_out_txns();
         let open = self.open_txns.lock();
         let prepared = self.prepared_txns.lock();
         let prods = self.producer_state.read();
@@ -915,7 +970,7 @@ impl Broker {
         out
     }
 
-    /// Describe one transactional id for DescribeTransactions (Phase 66/90/92).
+    /// Describe one transactional id for DescribeTransactions (Phase 66/90/92/93).
     ///
     /// Returns `None` when the transactional id is unknown. When known:
     /// - `"PrepareCommit"` / `"PrepareAbort"` if prepared (Phase 90)
@@ -923,9 +978,10 @@ impl Broker {
     /// - else `"Empty"`
     /// - topics/partitions from write-through ranges + pending keys
     /// - prepared: timeout = configured prepared timeout; start = `prepared_at_ms`
-    /// - open/empty: timeout/start remain `0` (open start times not tracked)
+    /// - open: timeout = effective open timeout; start = `opened_at_ms` (Phase 93)
+    /// - empty: timeout/start remain `0`
     ///
-    /// Phase 92: timed-out prepared entries are auto-aborted first.
+    /// Phase 92/93: timed-out prepared and open entries are auto-aborted first.
     pub fn describe_transaction(
         &self,
         transactional_id: &str,
@@ -937,7 +993,7 @@ impl Broker {
         u16,                    // producer_epoch
         Vec<(String, Vec<i32>)>, // topics → partitions
     )> {
-        self.expire_timed_out_prepared_txns();
+        self.expire_timed_out_txns();
         let txn_ids = self.transactional_ids.read();
         let Some(&pid) = txn_ids.get(transactional_id) else {
             return None;
@@ -948,6 +1004,7 @@ impl Broker {
             return None;
         };
         let epoch = prod.epoch;
+        let open_timeout = self.effective_open_txn_timeout_ms(prod);
         drop(prods);
 
         // Prepared takes precedence over open (they should be mutually exclusive).
@@ -975,7 +1032,14 @@ impl Broker {
         let open = self.open_txns.lock();
         if let Some(txn) = open.get(&pid) {
             let topics = topics_from_open(txn);
-            Some(("Ongoing".to_string(), 0, 0, pid, epoch, topics))
+            Some((
+                "Ongoing".to_string(),
+                open_timeout as i32,
+                txn.opened_at_ms,
+                pid,
+                epoch,
+                topics,
+            ))
         } else {
             Some(("Empty".to_string(), 0, 0, pid, epoch, Vec::new()))
         }
@@ -992,7 +1056,7 @@ impl Broker {
         topic: &str,
         partition: u32,
     ) -> Vec<(u64, i32, i32, i64, i32, i64)> {
-        self.expire_timed_out_prepared_txns();
+        self.expire_timed_out_txns();
         let key = (topic.to_owned(), partition);
         let prods = self.producer_state.read();
         let open = self.open_txns.lock();
@@ -1077,7 +1141,7 @@ impl Broker {
         producer_epoch: u16,
         offsets: &[(String, String, u32, u64, String)],
     ) -> u16 {
-        self.expire_timed_out_prepared_txns();
+        self.expire_timed_out_txns();
         let txn_id = {
             let state = self.producer_state.read();
             let Some(prod) = state.get(&producer_id) else {
@@ -1125,7 +1189,7 @@ impl Broker {
         base_sequence: i32,
         messages: Vec<Message>,
     ) -> IdempotentCheck {
-        self.expire_timed_out_prepared_txns();
+        self.expire_timed_out_txns();
         let message_count = messages.len() as u32;
         if message_count == 0 {
             return IdempotentCheck::Reject {
@@ -1265,7 +1329,8 @@ impl Broker {
     /// open txn to **Prepared** (no markers yet). A second EndTxn with the same
     /// decision finalizes. Prepared txns also complete via this path.
     ///
-    /// Phase 92: timed-out prepared txns are auto-aborted before finalize/prepare.
+    /// Phase 92/93: timed-out prepared and open txns are auto-aborted before
+    /// finalize/prepare.
     ///
     /// `offsets` entries are `(group_id, topic, partition, offset, metadata)`.
     pub fn end_txn(
@@ -1275,7 +1340,7 @@ impl Broker {
         committed: bool,
         offsets: &[(String, String, u32, u64, String)],
     ) -> Result<(u16, Vec<TxnCommitResult>)> {
-        self.expire_timed_out_prepared_txns();
+        self.expire_timed_out_txns();
         let (enable_2pc, transactional_id) = {
             let state = self.producer_state.read();
             let Some(prod) = state.get(&producer_id) else {
@@ -1414,15 +1479,15 @@ impl Broker {
         Ok(results)
     }
 
-    /// Last stable offset for a partition (Phase 86/90/92).
+    /// Last stable offset for a partition (Phase 86/90/92/93).
     ///
     /// Equal to HWM when no open/prepared write-through ranges exist; otherwise
     /// the minimum first offset among open **and prepared** transactional writes.
     ///
-    /// Phase 92: expires timed-out prepared txns first so Fetch isolation
-    /// advances without a separate txn API call.
+    /// Phase 92/93: expires timed-out prepared and open txns first so Fetch
+    /// isolation advances without a separate txn API call.
     pub fn last_stable_offset(&self, topic: &str, partition: u32) -> u64 {
-        self.expire_timed_out_prepared_txns();
+        self.expire_timed_out_txns();
         let hwm = self
             .high_watermark(&TopicName::new(topic), PartitionId(partition))
             .unwrap_or(0);
@@ -1486,7 +1551,7 @@ impl Broker {
 
     /// Whether `offset` is still unstable (open or prepared write-through txn).
     pub fn is_unstable_offset(&self, topic: &str, partition: u32, offset: u64) -> bool {
-        self.expire_timed_out_prepared_txns();
+        self.expire_timed_out_txns();
         {
             let open = self.open_txns.lock();
             for txn in open.values() {
@@ -1528,6 +1593,85 @@ impl Broker {
             &prep.open,
         );
         self.persist_prepared_txns();
+    }
+
+    /// Lazy expiry of timed-out open **and** prepared txns (Phase 92/93).
+    ///
+    /// Called at the start of txn/LSO paths so isolation advances without a
+    /// background sweeper. Returns `(open_aborted, prepared_aborted)`.
+    pub fn expire_timed_out_txns(&self) -> (usize, usize) {
+        let open_n = self.expire_timed_out_open_txns();
+        let prep_n = self.expire_timed_out_prepared_txns();
+        (open_n, prep_n)
+    }
+
+    /// Effective open-txn timeout for a producer (Phase 93).
+    ///
+    /// Positive client timeout wins; otherwise broker default. `0` = disabled.
+    fn effective_open_txn_timeout_ms(&self, prod: &ProducerEpochState) -> u64 {
+        if prod.transaction_timeout_ms > 0 {
+            prod.transaction_timeout_ms
+        } else {
+            self.open_txn_timeout_ms.load(Ordering::Relaxed)
+        }
+    }
+
+    /// Auto-abort open (non-prepared) transactions older than their effective
+    /// timeout (Phase 93).
+    ///
+    /// Returns the number of open txns aborted. Same effect as EndTxn(abort):
+    /// soft markers + ABORT control batches; deferred offsets dropped.
+    pub fn expire_timed_out_open_txns(&self) -> usize {
+        let now = unix_now_ms();
+        let broker_default = self.open_txn_timeout_ms.load(Ordering::Relaxed);
+        let expired: Vec<(u64, u16, OpenTxn)> = {
+            let mut open = self.open_txns.lock();
+            if open.is_empty() {
+                return 0;
+            }
+            let prods = self.producer_state.read();
+            let mut keys: Vec<u64> = Vec::new();
+            for (&pid, txn) in open.iter() {
+                let timeout = prods
+                    .get(&pid)
+                    .map(|p| {
+                        if p.transaction_timeout_ms > 0 {
+                            p.transaction_timeout_ms
+                        } else {
+                            broker_default
+                        }
+                    })
+                    .unwrap_or(broker_default);
+                if timeout == 0 {
+                    continue;
+                }
+                let opened = if txn.opened_at_ms > 0 {
+                    txn.opened_at_ms
+                } else {
+                    // Defensive: treat missing clock as "now" (do not mass-abort).
+                    now
+                };
+                if now.saturating_sub(opened) >= timeout as i64 {
+                    keys.push(pid);
+                }
+            }
+            keys.into_iter()
+                .filter_map(|pid| {
+                    let txn = open.remove(&pid)?;
+                    let epoch = prods.get(&pid).map(|p| p.epoch).unwrap_or(0);
+                    Some((pid, epoch, txn))
+                })
+                .collect()
+        };
+        let n = expired.len();
+        for (pid, epoch, txn) in expired {
+            self.record_aborted_from_txn(pid, &txn);
+            self.append_txn_control_markers(pid, epoch, ControlMarkerType::Abort, &txn);
+        }
+        if n > 0 {
+            self.persist_txn_markers();
+        }
+        n
     }
 
     /// Auto-abort prepared transactions older than the configured timeout (Phase 92).
@@ -1590,6 +1734,19 @@ impl Broker {
         true
     }
 
+    /// Backdate an open txn's `opened_at_ms` for tests (Phase 93).
+    ///
+    /// `age_ms` is subtracted from the current wall clock. Returns `false` when
+    /// the producer has no open txn.
+    pub fn backdate_open_txn(&self, producer_id: u64, age_ms: i64) -> bool {
+        let mut open = self.open_txns.lock();
+        let Some(txn) = open.get_mut(&producer_id) else {
+            return false;
+        };
+        txn.opened_at_ms = unix_now_ms().saturating_sub(age_ms.max(0));
+        true
+    }
+
     fn prepared_txns_path(&self) -> PathBuf {
         self.storage
             .data_dir
@@ -1647,6 +1804,7 @@ impl Broker {
                     commit: s.commit,
                     prepared_at_ms,
                     open: OpenTxn {
+                        opened_at_ms: 0, // not used once prepared
                         written,
                         pending,
                         deferred_offsets: s.deferred_offsets,
@@ -1979,6 +2137,7 @@ impl Broker {
                     epoch: prod.epoch,
                     transactional_id: prod.transactional_id.clone(),
                     enable_2pc: prod.enable_2pc,
+                    transaction_timeout_ms: prod.transaction_timeout_ms,
                     partitions,
                 },
             );
@@ -3861,6 +4020,7 @@ fn load_producer_maps(
                 transactional,
                 transactional_id: prod.transactional_id,
                 enable_2pc: prod.enable_2pc,
+                transaction_timeout_ms: prod.transaction_timeout_ms,
                 partitions,
             },
         );
@@ -3868,8 +4028,7 @@ fn load_producer_maps(
     (next, map, txn_ids)
 }
 
-/// Collect topic → partitions from an open/prepared txn body.
-/// Unix epoch milliseconds (Phase 92 prepared_at).
+/// Unix epoch milliseconds (Phase 92 prepared_at / Phase 93 opened_at).
 fn unix_now_ms() -> i64 {
     SystemTime::now()
         .duration_since(UNIX_EPOCH)
@@ -3880,6 +4039,14 @@ fn unix_now_ms() -> i64 {
 /// Default prepared-txn timeout from env or 60s (Phase 92).
 fn default_prepared_txn_timeout_ms() -> u64 {
     std::env::var("VOLANT_PREPARED_TXN_TIMEOUT_MS")
+        .ok()
+        .and_then(|s| s.parse::<u64>().ok())
+        .unwrap_or(60_000)
+}
+
+/// Default open-txn timeout from env or 60s (Phase 93).
+fn default_open_txn_timeout_ms() -> u64 {
+    std::env::var("VOLANT_OPEN_TXN_TIMEOUT_MS")
         .ok()
         .and_then(|s| s.parse::<u64>().ok())
         .unwrap_or(60_000)

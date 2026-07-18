@@ -1,8 +1,8 @@
 # Kafka compatibility matrix
 
 **Living document** for the optional Kafka wire shim (`--kafka-listen`).
-Ship history: Phases **23–91** (git HEAD product). Binding deep dives:
-`PHASE23_SPEC.md` … `PHASE91_SPEC.md`. Overview: [WHITEPAPER.md](./WHITEPAPER.md).
+Ship history: Phases **23–93** (git HEAD product). Binding deep dives:
+`PHASE23_SPEC.md` … `PHASE93_SPEC.md`. Overview: [WHITEPAPER.md](./WHITEPAPER.md).
 Semantic rows below describe **shipped** behavior.
 
 ## Enable
@@ -76,6 +76,7 @@ From `SUPPORTED_APIS` in `crates/volant-broker/src/kafka/mod.rs`:
 | Prepared 2PC MVP | 90 | Enable2Pc prepare-then-complete EndTxn; KeepPreparedTxn + OngoingTxn*; durable `__txn_prepared` |
 | Omit-unchanged sessions | 91 | Empty-topics incremental omits partitions when HWM+LSO unchanged and records empty |
 | Prepared timeout | 92 | Lazy auto-abort of prepared txns after configurable timeout (default 60s) |
+| Open txn timeout | 93 | Honor InitProducerId `transaction_timeout_ms` (or broker default) for open write-through txns; lazy auto-abort |
 
 ## Semantic honesty (open)
 
@@ -83,7 +84,7 @@ These are **current** product facts, not temporary docs lag:
 
 | Area | Limitation |
 |------|------------|
-| Transactions | **Write-through** (Phase 86) + **control batches** (Phase 89) + **prepared 2PC MVP** (Phase 90) + **prepared timeout** (Phase 92): data on log immediately; soft markers still SoT for LSO/aborted list; open crash≡abort; prepared survives restart under `__txn_prepared` until complete or timeout auto-abort; EndTxn control batches on finalize; open-txn `transaction_timeout_ms` still ignored |
+| Transactions | **Write-through** (Phase 86) + **control batches** (Phase 89) + **prepared 2PC MVP** (Phase 90) + **prepared timeout** (Phase 92) + **open timeout** (Phase 93): data on log immediately; soft markers still SoT for LSO/aborted list; open crash≡abort; prepared survives restart under `__txn_prepared` until complete or timeout auto-abort; EndTxn control batches on finalize; open-txn honors InitProducerId `transaction_timeout_ms` (or `VOLANT_OPEN_TXN_TIMEOUT_MS` default 60s) |
 | 2PC | **MVP** (Phase 90/92): Enable2Pc → first EndTxn prepares; second matching EndTxn finalizes; KeepPreparedTxn + OngoingTxn*; prepared timeout auto-abort (default 60s, env `VOLANT_PREPARED_TXN_TIMEOUT_MS`); not full KIP-890/939 / multi-broker |
 | Epochs | **Durable history MVP** (Phase 87): `{data_dir}/__leader_epochs`; prior epochs return transition end offsets; Metadata advertises live epoch; not a full KRaft epoch state machine; Fetch **DivergingEpoch** on truncation (Phase 88) |
 | TopicId | Deterministic UUID from Volant id (`volant` + zeros + u32), not KRaft random |

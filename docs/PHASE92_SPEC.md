@@ -138,7 +138,7 @@ When prepared (and not yet expired):
 
 ## Phase 93 ideas
 
-- Open-txn timeout using InitProducerId `transaction_timeout_ms`
+- Open-txn timeout using InitProducerId `transaction_timeout_ms` → **closed by Phase 93**
 - `TRANSACTION_ABORTABLE` where Kafka emits it
 - Background prepared sweeper / metrics (expired count)
 - Multi-broker prepared replication

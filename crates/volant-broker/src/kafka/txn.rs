@@ -171,10 +171,11 @@ pub(crate) fn encode_init_producer_id(
             return;
         }
     };
-    // transaction_timeout_ms — still ignored for open txns (Phase 29/62 honesty).
-    // Prepared-txn timeout is broker-level (Phase 92: VOLANT_PREPARED_TXN_TIMEOUT_MS).
+    // transaction_timeout_ms — honored for open (non-prepared) txns (Phase 93).
+    // Prepared-txn timeout remains broker-level (Phase 92: VOLANT_PREPARED_TXN_TIMEOUT_MS).
+    let mut transaction_timeout_ms: i32 = 0;
     if src.remaining() >= 4 {
-        let _timeout = src.get_i32();
+        transaction_timeout_ms = src.get_i32();
     }
     // v3+: ProducerId + ProducerEpoch resume fields (explicitly skipped).
     if version >= 3 {
@@ -214,7 +215,12 @@ pub(crate) fn encode_init_producer_id(
         let _ = skip_tag_buffer(src);
     }
 
-    let r = broker.init_producer_id_with_opts(&txn_id, enable_2pc, keep_prepared);
+    let r = broker.init_producer_id_with_opts(
+        &txn_id,
+        enable_2pc,
+        keep_prepared,
+        transaction_timeout_ms,
+    );
     write_body(
         out,
         KafkaErrorCode::None.as_i16(),

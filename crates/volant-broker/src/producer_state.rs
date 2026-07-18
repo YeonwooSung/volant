@@ -32,6 +32,9 @@ pub struct StoredProducer {
     /// Two-phase commit enabled for this producer (Phase 90; InitProducerId v6).
     #[serde(default)]
     pub enable_2pc: bool,
+    /// Client open-txn timeout from InitProducerId (Phase 93). `0` = use broker default.
+    #[serde(default)]
+    pub transaction_timeout_ms: u64,
     /// Keyed as `"{topic}:{partition}"`.
     pub partitions: HashMap<String, StoredBatch>,
 }
@@ -176,6 +179,7 @@ mod tests {
                 epoch: 0,
                 transactional_id: String::new(),
                 enable_2pc: false,
+                transaction_timeout_ms: 0,
                 partitions: parts,
             },
         );

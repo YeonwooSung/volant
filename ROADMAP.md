@@ -2099,7 +2099,35 @@ InitProducerId `transaction_timeout_ms` still ignored for open txns; lazy only
 (no background sweeper); single-node clock; no TRANSACTION_ABORTABLE.
 
 **Still deferred:** multi-lang clients, cargo-fuzz corpus CI, multi-broker 2PC /
-session affinity, session TTL, open-txn timeout, TRANSACTION_ABORTABLE.
+session affinity, session TTL, open-txn timeout → **closed by Phase 93**,
+TRANSACTION_ABORTABLE.
+
+---
+
+### Phase 93 — Open transaction timeout (MVP) ✅
+
+**Goal:** Honor InitProducerId `transaction_timeout_ms` (or broker default/env)
+for **open** write-through transactions; lazy auto-abort on timeout so LSO does
+not pin forever without a background thread.
+
+Binding: **[docs/PHASE93_SPEC.md](./docs/PHASE93_SPEC.md)**.
+
+- [x] `opened_at_ms` on open txn (begin / ensure-open)
+- [x] Client `transaction_timeout_ms` stored per producer; broker default
+      **60s** via `VOLANT_OPEN_TXN_TIMEOUT_MS` + setter; effective `0` disables
+- [x] Lazy auto-abort (= EndTxn abort: soft markers + ABORT control batches;
+      drop deferred offsets)
+- [x] Sweep on InitProducerId / EndTxn / List/Describe / produce guards / LSO
+- [x] Clean interaction with prepared path (Phase 90/92)
+- [x] Integration tests (`phase93_open_txn_timeout`)
+
+**Honest limitations:** lazy only (no background sweeper); single-node clock;
+no TRANSACTION_ABORTABLE; no `transaction.max.timeout.ms` clamp; open
+`opened_at_ms` is memory-only (crash already aborts open ranges).
+
+**Still deferred:** multi-lang clients, cargo-fuzz corpus CI, multi-broker 2PC /
+session affinity, session TTL, TRANSACTION_ABORTABLE, background txn sweeper /
+metrics.
 
 ---
 
@@ -2126,11 +2154,11 @@ session affinity, session TTL, open-txn timeout, TRANSACTION_ABORTABLE.
 | Storage | Page cache + OS | Explicit mmap + optional io_uring/O_DIRECT |
 | Stream processing | Kafka Streams / ksqlDB | In-process `volant-stream` operators |
 | Ops model | ZooKeeper/KRaft + heavy footprint | Single binary → small static ISR quorum |
-| Protocol | Kafka wire protocol | Native binary first; optional Kafka shim (`--kafka-listen`, Phases 23–91) |
+| Protocol | Kafka wire protocol | Native binary first; optional Kafka shim (`--kafka-listen`, Phases 23–93) |
 | Goal | Full ecosystem | Subset that is fast, small, and correct |
 
 Volant is **not** a drop-in Kafka replacement. It prioritizes a clean core; the
-optional Kafka wire shim is **shipped** (Phases 23–91) — see
+optional Kafka wire shim is **shipped** (Phases 23–93) — see
 [docs/KAFKA_COMPAT.md](./docs/KAFKA_COMPAT.md).
 
 ---
@@ -2150,7 +2178,7 @@ Phases **0–91 are shipped**. Historical PR order for the core:
 9. Phase 6 replication prototype (2–3 nodes) ✅  
 10. Phase 7 metrics, TLS, packaging ✅  
 11. Phases 8–22 (redirect, groups, configs, txns, mTLS, ACLs, SCRAM) ✅  
-12. Phases 23–91 (Kafka wire shim surface) ✅  
+12. Phases 23–93 (Kafka wire shim surface) ✅  
 
 ---
 
@@ -2191,11 +2219,11 @@ cargo run -p volant-bench --release
 cargo test --workspace
 ```
 
-**Status (post–Phase 91):** core broker, ops (metrics / TLS / auth / SCRAM /
+**Status (post–Phase 93):** core broker, ops (metrics / TLS / auth / SCRAM /
 ACLs / Helm), and the Kafka wire shim are **shipped** (Fetch 0–18 Kafka max;
 ACL admin 0–3 with User resource; soft-marker `READ_COMMITTED`; durable OFLE
 history; Fetch DivergingEpoch + sessions with omit-unchanged incremental;
-Kafka control batches on EndTxn; prepared 2PC MVP). Still deferred:
-multi-language clients, full chaos-mesh suites, cargo-fuzz corpus CI,
-multi-broker session affinity, multi-broker 2PC.
+Kafka control batches on EndTxn; prepared 2PC MVP; prepared + open txn
+timeouts). Still deferred: multi-language clients, full chaos-mesh suites,
+cargo-fuzz corpus CI, multi-broker session affinity, multi-broker 2PC.
 Details: [docs/KAFKA_COMPAT.md](./docs/KAFKA_COMPAT.md), [docs/ops.md](./docs/ops.md).

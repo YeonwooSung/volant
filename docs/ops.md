@@ -11,7 +11,7 @@
 | `--log-format` | | `text` | `text` or `json` |
 | `--auth-token` | `VOLANT_AUTH_TOKEN` | *unset* | Shared-token auth (native port only) |
 | `--scram-user USER:PASS` | | *unset* | Upsert SCRAM user at startup (repeatable; Phase 22) |
-| `--kafka-listen` | | *disabled* | Kafka wire protocol shim (Phases 23–91) |
+| `--kafka-listen` | | *disabled* | Kafka wire protocol shim (Phases 23–93) |
 | `--tls-cert` / `--tls-key` | | *unset* | Server TLS (feature `tls`) |
 | `--tls-peer-insecure` | | `true` | Skip inter-broker cert verify (lab) |
 | `--tls-ca` | | *unset* | CA PEM for inter-broker peer verify |
@@ -116,7 +116,7 @@ Notes:
 
 Optional second socket speaking Kafka framing (classic + flexible). Native
 Volant protocol remains on `--listen`. API versions and honesty notes live in
-**[KAFKA_COMPAT.md](./KAFKA_COMPAT.md)** (source of truth; Phases 23–91).
+**[KAFKA_COMPAT.md](./KAFKA_COMPAT.md)** (source of truth; Phases 23–93).
 
 ### Enable
 
@@ -146,8 +146,10 @@ volant-server \
 - **Transactions / isolation:** write-through + soft abort markers (Phase 86) +
   EndTxn control batches on finalize (Phase 89) + prepared 2PC MVP (Phase 90) +
   prepared timeout auto-abort (Phase 92, default 60s,
-  `VOLANT_PREPARED_TXN_TIMEOUT_MS`; `0` disables); `READ_COMMITTED` caps at LSO
-  and filters aborted; `READ_UNCOMMITTED` sees all. Open crash≡abort via
+  `VOLANT_PREPARED_TXN_TIMEOUT_MS`; `0` disables) + open-txn timeout (Phase 93,
+  InitProducerId `transaction_timeout_ms` or default 60s /
+  `VOLANT_OPEN_TXN_TIMEOUT_MS`; effective `0` disables); `READ_COMMITTED` caps
+  at LSO and filters aborted; `READ_UNCOMMITTED` sees all. Open crash≡abort via
   `__txn_markers`; prepared durable under `__txn_prepared` until complete or
   timeout.
 - **Leader epochs:** durable history under `{data_dir}/__leader_epochs` (Phase 87);
@@ -163,7 +165,7 @@ volant-server \
   Kafka **User** resource type (stored as `ResourceType::User`; not used on the
   produce/fetch authorize path; no SCRAM-admin gating).
 
-Deep dives: [PHASE23_SPEC.md](./PHASE23_SPEC.md) … [PHASE92_SPEC.md](./PHASE92_SPEC.md).
+Deep dives: [PHASE23_SPEC.md](./PHASE23_SPEC.md) … [PHASE93_SPEC.md](./PHASE93_SPEC.md).
 
 ## TLS (Phase 7 listen + Phase 9 verification / inter-broker)
 
@@ -240,7 +242,7 @@ specs. Ops-critical notes only:
 | Groups | list / describe / delete-offsets; static membership `group_instance_id` |
 | Topic configs | `retention.ms` / `retention.bytes` / `segment.bytes` / `cleanup.policy` |
 | DeleteRecords | Truncates sealed segments; no follower fan-out |
-| Transactions (shipped) | **Write-through + soft markers** (Phase 86) + **control batches** on EndTxn finalize (Phase 89) + **prepared 2PC MVP** (Phase 90) + **prepared timeout** (Phase 92, default 60s / `VOLANT_PREPARED_TXN_TIMEOUT_MS`); LSO/aborted filtering; open crash≡abort; prepared durable under `__txn_prepared` until complete or timeout |
+| Transactions (shipped) | **Write-through + soft markers** (Phase 86) + **control batches** on EndTxn finalize (Phase 89) + **prepared 2PC MVP** (Phase 90) + **prepared timeout** (Phase 92, default 60s / `VOLANT_PREPARED_TXN_TIMEOUT_MS`) + **open timeout** (Phase 93, InitProducerId / `VOLANT_OPEN_TXN_TIMEOUT_MS`); LSO/aborted filtering; open crash≡abort; prepared durable under `__txn_prepared` until complete or timeout |
 | mTLS | Feature `tls`; `--tls-client-ca` / optional `--tls-client-allow` |
 | ACLs | `--acl-enable`; durable `__acls/acls.json`; User resource is Kafka admin store-only |
 | Compaction | `cleanup.policy=compact` on **sealed** segments; empty value = tombstone |
@@ -266,7 +268,7 @@ curl -s -H "Authorization: Bearer $VOLANT_METRICS_TOKEN" \
 
 - Multi-language clients
 - Full chaos-mesh suites / cargo-fuzz **corpus CI** (scaffold under `fuzz/` only)
-- Full multi-broker 2PC / TRANSACTION_ABORTABLE / open-txn timeout
+- Full multi-broker 2PC / TRANSACTION_ABORTABLE
 - Multi-broker session affinity; session TTL / max sessions / metrics
 - Byte-identical Kafka compressed response cache (omit is HWM+LSO based)
 
@@ -274,7 +276,7 @@ Full list: [ROADMAP.md](../ROADMAP.md).
 
 ## Shipped (not gaps)
 
-Kafka wire shim **Phases 23–92** (ApiVersions **0–5**, Fetch **0–18**, ACL admin
+Kafka wire shim **Phases 23–93** (ApiVersions **0–5**, Fetch **0–18**, ACL admin
 **0–3** User resource, prepared 2PC MVP + prepared timeout, omit-unchanged
 sessions, ~38 keys), SCRAM-SHA-256/512, SASL PLAIN/SCRAM — see
 [KAFKA_COMPAT.md](./KAFKA_COMPAT.md).

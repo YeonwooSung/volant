@@ -141,15 +141,15 @@ static ISR). Later work is summarized by band — full chronicle in
 | Ops / packaging | 7–9 | Metrics, token auth, TLS, Helm multi-node, client leader redirect |
 | Native reliability | 10–17 | Idempotence, sticky/cooperative groups, topic configs, compaction |
 | Txns & security | 18–22, **86** | Write-through txns + soft READ_COMMITTED (LSO/aborted); mTLS, ACLs, SCRAM |
-| Kafka wire shim | 23–92 | Optional `--kafka-listen`; classic + flexible; **~38** keys; prepared 2PC (**90**) + timeout (**92**); omit-unchanged sessions (**91**) |
+| Kafka wire shim | 23–93 | Optional `--kafka-listen`; classic + flexible; **~38** keys; prepared 2PC (**90**) + timeouts (**92**/open **93**); omit-unchanged sessions (**91**) |
 
 **Kafka ceilings (code SoT):** ApiVersions **0–5**, Fetch **0–18**, Produce/Metadata
 **0–13**, ACL admin **0–3** (User resource v3, store-only); Fetch isolation
-READ_COMMITTED MVP (Phase 86); durable OffsetForLeaderEpoch history (Phase 87); Fetch DivergingEpoch + real fetch sessions MVP (Phase 88); Kafka control batches on EndTxn (Phase 89); prepared 2PC MVP (Phase 90); omit-unchanged incremental sessions (Phase 91); prepared timeout auto-abort (Phase 92).
+READ_COMMITTED MVP (Phase 86); durable OffsetForLeaderEpoch history (Phase 87); Fetch DivergingEpoch + real fetch sessions MVP (Phase 88); Kafka control batches on EndTxn (Phase 89); prepared 2PC MVP (Phase 90); omit-unchanged incremental sessions (Phase 91); prepared timeout auto-abort (Phase 92); open-txn timeout (Phase 93).
 Matrix + honesty: [docs/KAFKA_COMPAT.md](./docs/KAFKA_COMPAT.md).
 
 **Still deferred:** multi-language clients, chaos-mesh / cargo-fuzz corpus CI,
-multi-broker 2PC parity, multi-broker session affinity, open-txn timeout.
+multi-broker 2PC parity, multi-broker session affinity.
 
 ### Networked client (library)
 
