@@ -410,11 +410,11 @@ pub struct Broker {
     /// - InitProducerId with client timeout **> max** → error **50**
     /// - Effective open/prepared timeouts are clamped to ≤ max
     transaction_max_timeout_ms: AtomicU64,
-    /// Background open/prepared/session sweep interval (Phase 97).
+    /// Background open/prepared/session sweep interval (Phase 97/101).
     ///
     /// Default `1_000` ms; override via `VOLANT_SWEEP_INTERVAL_MS` or
-    /// [`Broker::set_sweep_interval_ms`]. `0` disables the background sweeper
-    /// (lazy expire paths still run).
+    /// [`Broker::set_sweep_interval_ms`]. `0` pauses the background sweeper
+    /// (lazy expire paths still run); task always spawned so 0→>0 works live.
     sweep_interval_ms: AtomicU64,
     /// Open txns auto-aborted by timeout (lazy + background; Phase 97).
     open_txns_expired_total: AtomicU64,
@@ -778,14 +778,17 @@ impl Broker {
             .store(timeout_ms, Ordering::Relaxed);
     }
 
-    /// Background sweep interval in milliseconds (Phase 97).
+    /// Background sweep interval in milliseconds (Phase 97/101).
     ///
-    /// `0` means the background sweeper is disabled (lazy expire remains).
+    /// `0` pauses the background sweeper (lazy expire remains). The task is
+    /// always spawned from [`crate::net::start_background_tasks`] so a later
+    /// `0 → >0` transition takes effect without process restart.
     pub fn sweep_interval_ms(&self) -> u64 {
         self.sweep_interval_ms.load(Ordering::Relaxed)
     }
 
-    /// Override background sweep interval (Phase 97). `0` disables background.
+    /// Override background sweep interval (Phase 97/101). `0` pauses background
+    /// work; `>0` enables/resumes on the next poll cycle without restart.
     pub fn set_sweep_interval_ms(&self, interval_ms: u64) {
         self.sweep_interval_ms.store(interval_ms, Ordering::Relaxed);
     }
@@ -4484,9 +4487,9 @@ fn default_transaction_max_timeout_ms() -> u64 {
         .unwrap_or(900_000)
 }
 
-/// Default background sweep interval from env or 1s (Phase 97).
+/// Default background sweep interval from env or 1s (Phase 97/101).
 ///
-/// Env value `0` disables the background sweeper (lazy expire remains).
+/// Env value `0` pauses the background sweeper (lazy expire remains).
 fn default_sweep_interval_ms() -> u64 {
     std::env::var("VOLANT_SWEEP_INTERVAL_MS")
         .ok()

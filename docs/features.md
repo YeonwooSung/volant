@@ -56,6 +56,8 @@ shim: [KAFKA_COMPAT.md](./KAFKA_COMPAT.md).
 | Prepared timeout (Phase 92) | Lazy auto-abort after timeout (default 60s; `VOLANT_PREPARED_TXN_TIMEOUT_MS`; `0` disables) |
 | Open txn timeout (Phase 93) | Honor InitProducerId `transaction_timeout_ms` (or broker default `VOLANT_OPEN_TXN_TIMEOUT_MS`, 60s; effective `0` disables); lazy auto-abort |
 | Transaction max timeout (Phase 96) | Broker max default **15m** (`VOLANT_TRANSACTION_MAX_TIMEOUT_MS`; `0` = no max); Init over-max → **50**; effective open/prepared clamped |
+| Background sweeper (Phase 97/101) | Periodic open/prepared + idle session expiry (default 1s / `VOLANT_SWEEP_INTERVAL_MS`); `0` pauses bg; always-spawn so 0→>0 without restart; lazy paths remain |
+| BROKER config (Phase 99–100) | Describe/Alter txn/session/sweep knobs; durable under `__broker_config/state.json` |
 
 ## Security (19–22)
 

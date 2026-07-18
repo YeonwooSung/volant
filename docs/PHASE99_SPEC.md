@@ -125,7 +125,7 @@ via `start_background_tasks` (existing Phase 97 honesty).
 
 - Durable dynamic broker config file + restart restore → **closed by Phase 100**
 - Validate broker resource name against `node_id`
-- Graceful sweeper restart when interval transitions 0 → >0 without process restart
+- Graceful sweeper enable when interval transitions 0 → >0 without process restart → **closed by Phase 101**
 - Marker compaction / GC with DeleteRecords
 - Multi-broker config broadcast
 - Multi-lang clients / cargo-fuzz corpus CI

@@ -47,13 +47,15 @@
 ### Lifecycle
 
 `net::start_background_tasks(Arc<Broker>)` (already called from
-`volant-server`) spawns a tokio task when `sweep_interval_ms > 0`:
+`volant-server`) **always** spawns a tokio task (Phase 101; originally only
+when `sweep_interval_ms > 0`):
 
 ```text
 loop {
-  sleep(sweep_interval_ms)   // re-read Atomic each iteration
-  if interval == 0 { continue }  // allow runtime disable
-  broker.sweep_timeouts()
+  ms = re-read Atomic
+  if ms == 0 { sleep(200ms); continue }  // pause; observe later enable
+  sleep(ms)
+  if interval still > 0 { broker.sweep_timeouts() }
 }
 ```
 
@@ -109,9 +111,8 @@ per aborted txn.
 
 - Single-node wall clock; no multi-broker coordinated expiry
 - Fire-and-forget tokio task (no join on shutdown)
-- Interval re-read each loop but task always spawned when start interval > 0;
-  if started with 0, no task (call `start_background_tasks` after setting
-  interval, or use `Broker::sweep_timeouts` / re-start tasks)
+- Interval re-read each loop; task always spawned (Phase 101 closed the
+  boot-with-0 gap where no task existed for later `0→>0`)
 - Idle session sweep only (LRU still lazy-on-create)
 - No per-reason labels on a single counter (separate idle + total series)
 - No DynamicConfig / Admin surface for the interval

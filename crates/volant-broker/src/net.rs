@@ -264,16 +264,17 @@ pub fn start_background_tasks(broker: Arc<Broker>) {
         });
     }
 
-    // Phase 97: open/prepared txn timeout + idle fetch-session sweep.
-    // Interval 0 at spawn time skips the task; runtime 0 pauses work.
-    if broker.sweep_interval_ms() > 0 {
+    // Phase 97 + 101: open/prepared txn timeout + idle fetch-session sweep.
+    // Always spawn so 0→>0 (AlterConfigs / setter) enables without restart.
+    // Interval 0 pauses work (200ms poll); >0 sleeps then sweep_timeouts.
+    {
         let b = Arc::clone(&broker);
         tokio::spawn(async move {
             loop {
                 let ms = b.sweep_interval_ms();
                 if ms == 0 {
-                    // Disabled at runtime: poll occasionally so a later enable
-                    // is observed without spinning.
+                    // Paused: poll occasionally so a later enable is observed
+                    // without spinning (Phase 101: works from boot with 0 too).
                     tokio::time::sleep(Duration::from_millis(200)).await;
                     continue;
                 }

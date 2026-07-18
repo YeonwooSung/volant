@@ -20,7 +20,7 @@
 - Multi-lang clients / fuzz CI
 - Marker GC
 - Spawning a sweeper task when `volant.sweep.interval.ms` transitions
-  `0 → >0` without process restart (still gap; see limitations)
+  `0 → >0` without process restart → **closed by Phase 101**
 
 ## Path & format
 
@@ -120,10 +120,8 @@ Unchanged from Phase 99 (Cluster Describe / Alter).
 - Single-node; resource name still ignored
 - Full snapshot overrides env for all keys once any Alter has written the file
 - Direct setters do not persist (by design for this MVP)
-- Sweeper task spawn still tied to `start_background_tasks` initial interval:
-  if process started with `0` and never spawned the task, Alter to `>0` updates
-  the Atomic and the durable file, but does **not** create the background task
-  until server restart / re-entry via `start_background_tasks`
+- Sweeper task spawn at boot with interval `0` → **closed by Phase 101**
+  (always spawn; `0` pauses; `0→>0` live)
 - No multi-broker fan-out
 
 ## Test plan
@@ -139,7 +137,7 @@ Unchanged from Phase 99 (Cluster Describe / Alter).
 
 ## Phase 101 ideas
 
-- Graceful sweeper restart when interval transitions `0 → >0` without process restart
+- Graceful sweeper enable when interval transitions `0 → >0` without process restart → **closed by Phase 101**
 - Validate BROKER resource name against `node_id`
 - Sparse durable file (only keys differing from product default) so env re-applies after DELETE
 - Marker compaction / GC with DeleteRecords

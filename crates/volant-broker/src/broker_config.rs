@@ -73,7 +73,7 @@ pub fn documentation(key: &str) -> Option<&'static str> {
             Some("Max concurrent fetch sessions; 0 = unlimited")
         }
         KEY_SWEEP_INTERVAL_MS => {
-            Some("Background open/prepared/session sweep interval in ms; 0 disables sweeper")
+            Some("Background open/prepared/session sweep interval in ms; 0 pauses sweeper (lazy expire remains)")
         }
         _ => None,
     }

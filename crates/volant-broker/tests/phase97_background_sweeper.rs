@@ -326,7 +326,7 @@ async fn phase97_sweep_disabled_when_interval_zero() {
     broker.set_sweep_interval_ms(0);
     broker.create_topic("events", 1).unwrap();
     let (addr, server) = boot_kafka(Arc::clone(&broker)).await;
-    // start_background_tasks with interval 0 must not spawn the sweeper.
+    // Interval 0: sweeper task still runs (Phase 101) but pauses work.
     start_background_tasks(Arc::clone(&broker));
 
     let (pid, _epoch) =
