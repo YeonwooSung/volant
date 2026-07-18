@@ -31,7 +31,7 @@ Start here. Prefer living docs over individual phase ship records.
 
 | Document | Purpose |
 |----------|---------|
-| [history/PHASE_HISTORY.md](./history/PHASE_HISTORY.md) | One-line index for phases 0–99 |
+| [history/PHASE_HISTORY.md](./history/PHASE_HISTORY.md) | One-line index for phases 0–100 |
 | [PHASE7_SPEC.md](./PHASE7_SPEC.md) … [PHASE92_SPEC.md](./PHASE92_SPEC.md) | Per-phase ship records (deep dive) |
 | [history/archive/](./history/archive/) | Implementation plans & reviews (archaeology) |
 
@@ -52,18 +52,18 @@ Start here. Prefer living docs over individual phase ship records.
 | Protocol implementer | PHASE1–6 binding specs |
 | Roadmap / deferred | ROADMAP end sections |
 
-## Compaction note (2026-07-18, post–Phase 99 ship)
+## Compaction note (2026-07-18, post–Phase 100 ship)
 
-Living docs match **git HEAD product** (`SUPPORTED_APIS`, last feature commit Phase **99**):
+Living docs match **git HEAD product** (`SUPPORTED_APIS`, last feature commit Phase **100**):
 
-- **Status ceiling:** Phases **0–99**; Kafka shim **23–99**
+- **Status ceiling:** Phases **0–100**; Kafka shim **23–100**
 - **Kafka SoT:** [KAFKA_COMPAT.md](./KAFKA_COMPAT.md) — matrix + semantic honesty
 - **WHITEPAPER:** architecture + positioning; no full API matrix
-- **Binding core:** PHASE1–6; **ship records:** PHASE7–99 via [PHASE_HISTORY](./history/PHASE_HISTORY.md)
+- **Binding core:** PHASE1–6; **ship records:** PHASE7–100 via [PHASE_HISTORY](./history/PHASE_HISTORY.md)
 - **README / ops:** compact bands + ops table (not per-phase diaries)
-- **Txn honesty (shipped):** write-through + soft markers + EndTxn control batches (Phase 89) + crash-promote ABORT control (Phase 98) + prepared 2PC MVP (Phase 90) + prepared/open timeout (Phase 92/93) + TRANSACTION_ABORTABLE honest subset after timeout (Phase 94) + transaction max timeout clamp (Phase 96; default 15m; Init **50** over-max) + background sweeper (Phase 97) + BROKER Describe/AlterConfigs knobs (Phase 99)
+- **Txn honesty (shipped):** write-through + soft markers + EndTxn control batches (Phase 89) + crash-promote ABORT control (Phase 98) + prepared 2PC MVP (Phase 90) + prepared/open timeout (Phase 92/93) + TRANSACTION_ABORTABLE honest subset after timeout (Phase 94) + transaction max timeout clamp (Phase 96; default 15m; Init **50** over-max) + background sweeper (Phase 97) + BROKER Describe/AlterConfigs knobs (Phase 99) + durable restart restore (Phase 100)
 - **Epoch honesty (shipped):** durable OFLE history MVP; Metadata live leader_epoch; Fetch DivergingEpoch
-- **Fetch sessions (shipped MVP):** process-local create/forgotten/errors; omit-unchanged empty-topics incremental (Phase 91); idle TTL + max/LRU (Phase 95); background idle sweep (Phase 97); BROKER config surface (Phase 99)
+- **Fetch sessions (shipped MVP):** process-local create/forgotten/errors; omit-unchanged empty-topics incremental (Phase 91); idle TTL + max/LRU (Phase 95); background idle sweep (Phase 97); BROKER config surface (Phase 99–100 durable)
 - **Still deferred (product):** multi-lang, chaos/fuzz corpus CI, multi-broker 2PC /
   multi-broker session affinity / full KIP-890; empty-AddPartitions control markers;
-  durable dynamic broker config
+  graceful sweeper restart on 0→>0; full Kafka broker catalog

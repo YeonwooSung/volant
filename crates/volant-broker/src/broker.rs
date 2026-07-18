@@ -518,6 +518,10 @@ impl Broker {
         broker.expire_timed_out_txns();
         broker.load_leader_epochs();
         broker.seed_missing_leader_epochs();
+        // Phase 100: durable BROKER knobs after env defaults (product → env → file).
+        broker
+            .load_durable_broker_config()
+            .expect("failed to load durable broker config");
         broker
     }
 
@@ -610,6 +614,8 @@ impl Broker {
         broker.expire_timed_out_txns();
         broker.load_leader_epochs();
         broker.seed_missing_leader_epochs();
+        // Phase 100: durable BROKER knobs after env defaults (product → env → file).
+        broker.load_durable_broker_config()?;
         Ok(broker)
     }
 
@@ -785,7 +791,7 @@ impl Broker {
     }
 
     /// Current broker-level config entries for Kafka DescribeConfigs BROKER
-    /// (Phase 99). Values are live process knobs (env/setters).
+    /// (Phase 99–100). Values are live knobs (env → durable file → setters/alter).
     pub fn describe_broker_configs(&self) -> Vec<(String, String)> {
         vec![
             (
@@ -818,30 +824,64 @@ impl Broker {
     /// Apply broker-level config updates (Phase 99 Alter / IncrementalAlter).
     ///
     /// Empty value restores the **product** default for that key (not env).
-    /// Unknown keys → [`Error::InvalidArgument`]. Process-local only (not durable).
+    /// Unknown keys → [`Error::InvalidArgument`].
+    ///
+    /// Phase 100: on success, persists a full snapshot of all six knobs under
+    /// `{data_dir}/__broker_config/state.json` (survives restart). Direct
+    /// `set_*` setters remain process-local only.
     pub fn alter_broker_configs(&self, entries: &[(String, String)]) -> Result<()> {
         broker_config::validate_entries(entries)?;
         for (k, v) in entries {
             let val = broker_config::resolve_value(k, v)?;
-            match k.as_str() {
-                KEY_TRANSACTION_MAX_TIMEOUT_MS => self.set_transaction_max_timeout_ms(val),
-                KEY_OPEN_TXN_TIMEOUT_MS => self.set_open_txn_timeout_ms(val),
-                KEY_PREPARED_TXN_TIMEOUT_MS => self.set_prepared_txn_timeout_ms(val),
-                KEY_FETCH_SESSION_IDLE_MS => self.set_fetch_session_idle_ms(val),
-                KEY_FETCH_SESSION_MAX => {
-                    // Cap absurd values to usize::MAX on 32-bit; normal paths fit.
-                    let max = usize::try_from(val).unwrap_or(usize::MAX);
-                    self.set_fetch_session_max(max);
-                }
-                KEY_SWEEP_INTERVAL_MS => self.set_sweep_interval_ms(val),
-                _ => {
-                    return Err(Error::InvalidArgument(format!(
-                        "unknown broker config key: {k}"
-                    )));
-                }
+            self.apply_broker_config_value(k, val)?;
+        }
+        self.persist_broker_config()
+    }
+
+    /// Apply a single known broker config key (no persist).
+    fn apply_broker_config_value(&self, key: &str, val: u64) -> Result<()> {
+        match key {
+            KEY_TRANSACTION_MAX_TIMEOUT_MS => self.set_transaction_max_timeout_ms(val),
+            KEY_OPEN_TXN_TIMEOUT_MS => self.set_open_txn_timeout_ms(val),
+            KEY_PREPARED_TXN_TIMEOUT_MS => self.set_prepared_txn_timeout_ms(val),
+            KEY_FETCH_SESSION_IDLE_MS => self.set_fetch_session_idle_ms(val),
+            KEY_FETCH_SESSION_MAX => {
+                // Cap absurd values to usize::MAX on 32-bit; normal paths fit.
+                let max = usize::try_from(val).unwrap_or(usize::MAX);
+                self.set_fetch_session_max(max);
+            }
+            KEY_SWEEP_INTERVAL_MS => self.set_sweep_interval_ms(val),
+            _ => {
+                return Err(Error::InvalidArgument(format!(
+                    "unknown broker config key: {key}"
+                )));
             }
         }
         Ok(())
+    }
+
+    /// Load durable BROKER knobs from `{data_dir}/__broker_config/state.json`
+    /// (Phase 100). Applied **after** product default + env at construction.
+    fn load_durable_broker_config(&self) -> Result<()> {
+        let store = broker_config::BrokerConfigStore::open(&self.storage.data_dir)?;
+        let Some(file) = store.load()? else {
+            return Ok(());
+        };
+        // Apply known keys only; ignore unknown for forward compatibility.
+        for key in broker_config::BROKER_CONFIG_KEYS {
+            if let Some(val) = file.configs.get(*key) {
+                self.apply_broker_config_value(key, *val)?;
+            }
+        }
+        Ok(())
+    }
+
+    /// Persist full snapshot of the six live knobs (Phase 100).
+    fn persist_broker_config(&self) -> Result<()> {
+        let store = broker_config::BrokerConfigStore::open(&self.storage.data_dir)?;
+        let entries = self.describe_broker_configs();
+        let file = broker_config::BrokerConfigFile::from_entries(&entries)?;
+        store.save(&file)
     }
 
     /// Live open (non-prepared) transaction count (Phase 97 gauge).

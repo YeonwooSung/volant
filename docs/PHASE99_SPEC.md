@@ -73,8 +73,9 @@ Preferred MVP includes write (SET/DELETE already exist for topics).
 | `validate_only` | Parse/validate only; no mutation. |
 | ACL | Cluster **Alter** when ACLs enabled; deny → `CLUSTER_AUTHORIZATION_FAILED`. |
 
-**Persistence:** process-local only (same as existing setters). Not written to
-disk; lost on restart (startup env / product defaults re-apply).
+**Persistence (Phase 99):** process-local only via setters. **Phase 100** adds
+durable `{data_dir}/__broker_config/state.json` on successful Alter /
+IncrementalAlter (see [PHASE100_SPEC.md](./PHASE100_SPEC.md)).
 
 **Background sweeper note:** changing `volant.sweep.interval.ms` updates the
 Atomic read by the running loop; setting `0` stops further sweeps on the next
@@ -103,7 +104,7 @@ via `start_background_tasks` (existing Phase 97 honesty).
 ## Honest limitations
 
 - Single-node; resource name ignored
-- Non-durable dynamic broker config
+- Non-durable dynamic broker config → **closed by Phase 100** (six knobs only)
 - Six knobs only (not full Kafka broker config catalog)
 - Empty synonyms; no synonym layering
 - Sweeper task spawn still tied to `start_background_tasks` initial interval
@@ -122,7 +123,7 @@ via `start_background_tasks` (existing Phase 97 honesty).
 
 ## Phase 100 ideas
 
-- Durable dynamic broker config file + restart restore
+- Durable dynamic broker config file + restart restore → **closed by Phase 100**
 - Validate broker resource name against `node_id`
 - Graceful sweeper restart when interval transitions 0 → >0 without process restart
 - Marker compaction / GC with DeleteRecords

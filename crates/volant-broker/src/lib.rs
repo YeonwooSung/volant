@@ -17,7 +17,7 @@
 pub mod acl;
 pub mod assignor;
 pub mod broker;
-/// Broker-level Kafka Describe/AlterConfigs keys (Phase 99).
+/// Broker-level Kafka Describe/AlterConfigs keys + durable store (Phase 99–100).
 pub mod broker_config;
 pub mod cluster;
 pub mod group;
@@ -62,6 +62,7 @@ pub use topic_config::{
     KEY_SEGMENT_BYTES,
 };
 pub use broker_config::{
+    BrokerConfigFile, BrokerConfigStore, BROKER_CONFIG_DIR, BROKER_CONFIG_FILE_VERSION,
     BROKER_CONFIG_KEYS, DEFAULT_OPEN_TXN_TIMEOUT_MS, DEFAULT_PREPARED_TXN_TIMEOUT_MS,
     DEFAULT_SWEEP_INTERVAL_MS, DEFAULT_TRANSACTION_MAX_TIMEOUT_MS, KEY_FETCH_SESSION_IDLE_MS,
     KEY_FETCH_SESSION_MAX, KEY_OPEN_TXN_TIMEOUT_MS, KEY_PREPARED_TXN_TIMEOUT_MS,
