@@ -1,8 +1,8 @@
 # Kafka compatibility matrix
 
 **Living document** for the optional Kafka wire shim (`--kafka-listen`).
-Ship history: Phases **23–90** (git HEAD product). Binding deep dives:
-`PHASE23_SPEC.md` … `PHASE90_SPEC.md`. Overview: [WHITEPAPER.md](./WHITEPAPER.md).
+Ship history: Phases **23–91** (git HEAD product). Binding deep dives:
+`PHASE23_SPEC.md` … `PHASE91_SPEC.md`. Overview: [WHITEPAPER.md](./WHITEPAPER.md).
 Semantic rows below describe **shipped** behavior.
 
 ## Enable
@@ -24,7 +24,7 @@ From `SUPPORTED_APIS` in `crates/volant-broker/src/kafka/mod.rs`:
 | Key | API | Versions | Notes |
 |----:|-----|----------|-------|
 | 0 | Produce | 0–13 | Classic 0–8; flex v9+; TopicId v13; KIP-951 CurrentLeader v10+ |
-| 1 | Fetch | 0–18 | Classic 0–11; flex v12–18; TopicId v13+; isolation LSO/aborted (Phase 86); ReplicaState v15+ ignore; NodeEndpoints v16+; CurrentLeader tag v12+; DivergingEpoch + real sessions MVP (Phase 88) |
+| 1 | Fetch | 0–18 | Classic 0–11; flex v12–18; TopicId v13+; isolation LSO/aborted (Phase 86); ReplicaState v15+ ignore; NodeEndpoints v16+; CurrentLeader tag v12+; DivergingEpoch + sessions (Phase 88); omit-unchanged incremental (Phase 91) |
 | 2 | ListOffsets | 0–11 | Flex v6+; specials v7–11; READ_COMMITTED latest = LSO (Phase 86) |
 | 3 | Metadata | 0–13 | Flex v9+; TopicId v10–13; top-level ErrorCode v13; live leader_epoch (Phase 87) |
 | 8 | OffsetCommit | 0–10 | Flex v8+; TopicId v10 |
@@ -74,6 +74,7 @@ From `SUPPORTED_APIS` in `crates/volant-broker/src/kafka/mod.rs`:
 | Fetch sessions / DivergingEpoch | 88 | Process-local sessions (create/forgotten/invalid); DivergingEpoch tag 0 on truncation |
 | Control batches | 89 | EndTxn COMMIT/ABORT control RecordBatches on partition log (dual-write with soft markers) |
 | Prepared 2PC MVP | 90 | Enable2Pc prepare-then-complete EndTxn; KeepPreparedTxn + OngoingTxn*; durable `__txn_prepared` |
+| Omit-unchanged sessions | 91 | Empty-topics incremental omits partitions when HWM+LSO unchanged and records empty |
 
 ## Semantic honesty (open)
 
@@ -86,7 +87,7 @@ These are **current** product facts, not temporary docs lag:
 | Epochs | **Durable history MVP** (Phase 87): `{data_dir}/__leader_epochs`; prior epochs return transition end offsets; Metadata advertises live epoch; not a full KRaft epoch state machine; Fetch **DivergingEpoch** on truncation (Phase 88) |
 | TopicId | Deterministic UUID from Volant id (`volant` + zeros + u32), not KRaft random |
 | Groups | Coordinator-driven assignment; GroupType always `classic`; states Stable/Empty |
-| Fetch sessions | **Real MVP** (Phase 88): process-local create/merge/forgotten; empty-topics re-fetch; errors 70/71; always full record data (no omit-unchanged); lost on restart |
+| Fetch sessions | **Real MVP** (Phase 88 + **91**): process-local create/merge/forgotten; empty-topics re-fetch; errors 70/71; **omit-unchanged** when HWM+LSO unchanged and records empty; lost on restart; not multi-broker sticky |
 | Preferred replica | Always -1 |
 | CreateTopics | Replica assignment arrays ignored; configs response often null |
 | Storage | Log stores uncompressed Volant records; Fetch re-encodes |

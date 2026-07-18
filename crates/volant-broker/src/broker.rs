@@ -374,7 +374,7 @@ pub struct Broker {
     leader_epochs: RwLock<HashMap<(String, u32), Vec<EpochStart>>>,
     /// Durable leader-epoch store under `data_dir/__leader_epochs` (Phase 87).
     leader_epoch_store: LeaderEpochStore,
-    /// Process-local Fetch sessions (Phase 88 MVP).
+    /// Process-local Fetch sessions (Phase 88 + 91 omit-unchanged MVP).
     fetch_sessions: FetchSessionManager,
 }
 
@@ -525,7 +525,7 @@ impl Broker {
         Ok(broker)
     }
 
-    /// Process-local Fetch session manager (Phase 88).
+    /// Process-local Fetch session manager (Phase 88 + 91).
     pub fn fetch_sessions(&self) -> &FetchSessionManager {
         &self.fetch_sessions
     }

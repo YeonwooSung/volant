@@ -6,7 +6,7 @@
 |---|---|
 | Version | 0.1.0 (Apache-2.0) |
 | Language | Rust 1.75+ |
-| Status | Phases 0–90 landed (product / git HEAD) |
+| Status | Phases 0–91 landed (product / git HEAD) |
 | Date | 2026-07-18 |
 
 ---
@@ -23,8 +23,9 @@ interop. The shim advertises **ApiVersions 0–5** and **Fetch 0–18** at Apach
 Kafka wire max for those keys, with empty feature tags and
 write-through transactions with soft READ_COMMITTED markers (Phase 86) and
 Kafka-style COMMIT/ABORT control batches on EndTxn (Phase 89), prepared 2PC MVP (Phase 90), durable
-OffsetForLeaderEpoch history (Phase 87 MVP), and Fetch DivergingEpoch +
-process-local fetch sessions (Phase 88 MVP).
+OffsetForLeaderEpoch history (Phase 87 MVP), Fetch DivergingEpoch +
+process-local fetch sessions (Phase 88 MVP), and omit-unchanged incremental
+session responses (Phase 91 MVP).
 
 Volant is **not** a drop-in Apache Kafka replacement. It prioritizes sequential
 I/O, explicit complexity, and honest non-parity (especially around
@@ -191,7 +192,7 @@ the MVP; Kafka control-batch wire bytes on the partition log remain deferred.
 | Metadata `leader_epoch` | Live partition epoch |
 | Full KRaft epoch state machine | **No** |
 | Fetch DivergingEpoch | **Yes (MVP)** — tag 0 + OFFSET_OUT_OF_RANGE on truncation |
-| Real fetch sessions | **Yes (MVP)** — process-local; full data always; no multi-broker stickiness |
+| Real fetch sessions | **Yes (MVP)** — process-local; omit-unchanged on empty-topics incremental (Phase 91); no multi-broker stickiness |
 
 ---
 
@@ -235,14 +236,15 @@ flexible (KIP-482) coverage for the APIs modern clients negotiate most often
 **Auth on Kafka port:** SASL or principal `kafka-anonymous` (+ ACLs). Shared-token
 Auth applies only on the native `--listen` port.
 
-**Highlights (post–Phase 89):** deterministic TopicId UUIDs; KIP-951
+**Highlights (post–Phase 90/91):** deterministic TopicId UUIDs; KIP-951
 CurrentLeader on leader errors + Produce NodeEndpoints v10+ / Fetch
 NodeEndpoints v16+; KIP-890 txn max versions + prepared 2PC MVP (Phase 90); FindCoordinator
 0–6 / AddOffsetsToTxn 0–4 without `TRANSACTION_ABORTABLE`; ApiVersions 0–5 with
 empty feature tags and ignored v5 ClusterId/NodeId (never `REBOOTSTRAP_REQUIRED`);
-Fetch **0–18** (Kafka max); ACL admin **0–3** (User resource storage only);
-write-through txn + soft READ_COMMITTED (LSO/aborted); durable OffsetForLeaderEpoch
-history MVP + Metadata live leader_epoch; compression codecs gzip/snappy/lz4/zstd on the wire.
+Fetch **0–18** (Kafka max) with DivergingEpoch + omit-unchanged sessions (Phase 88/91);
+ACL admin **0–3** (User resource storage only); write-through txn + soft
+READ_COMMITTED (LSO/aborted); durable OffsetForLeaderEpoch history MVP + Metadata
+live leader_epoch; compression codecs gzip/snappy/lz4/zstd on the wire.
 
 ---
 
@@ -276,7 +278,7 @@ Volant deliberately does **not** claim production Kafka parity. Open gaps:
 1. Multi-language clients (Rust only)
 2. Dynamic membership / Raft metadata quorum
 3. Multi-broker 2PC / prepared timeout; control batches for crash-without-EndTxn
-4. Full Kafka API surface beyond advertised keys; omit-unchanged fetch session cache / multi-broker affinity
+4. Full Kafka API surface beyond advertised keys; multi-broker session affinity / durable sessions
 5. Full KRaft epoch state machine (durable history is MVP)
 6. Kafka cooperative-sticky assignor **protocol** parity (native JoinGroup revoke list exists)
 7. Stream state durability and distributed stream topology (`MemoryStore` only)
@@ -338,7 +340,7 @@ cargo run -p volant-server -- \
 | [tuning.md](./tuning.md) | Performance tuning |
 | [KAFKA_COMPAT.md](./KAFKA_COMPAT.md) | Current Kafka API matrix + honesty |
 | [features.md](./features.md) | Native features (post-core) |
-| [history/PHASE_HISTORY.md](./history/PHASE_HISTORY.md) | Phase 0–90 one-line index |
+| [history/PHASE_HISTORY.md](./history/PHASE_HISTORY.md) | Phase 0–91 one-line index |
 | [PHASE1_SPEC.md](./PHASE1_SPEC.md)–[PHASE6_SPEC.md](./PHASE6_SPEC.md) | Binding core specs |
 | [../ROADMAP.md](../ROADMAP.md) | Full roadmap + deferred work |
 | [../README.md](../README.md) | Quick start |

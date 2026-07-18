@@ -637,6 +637,10 @@ pub(crate) fn put_fetch_empty_response(
 ///
 /// Phase 86: `lso` may be `< hwm` while a write-through txn is open;
 /// `aborted` is `(producer_id, first_offset)` for soft abort markers.
+///
+/// Convenience wrapper around [`put_fetch_partition_response_full`] (LSO≡HWM on
+/// success; no aborted list / DivergingEpoch). Kept for call sites and tests.
+#[allow(dead_code)]
 pub(crate) fn put_fetch_partition_response(
     out: &mut BytesMut,
     version: i16,
@@ -743,6 +747,7 @@ pub(crate) fn encode_fetch(broker: &Broker, src: &mut impl Buf, out: &mut BytesM
     //             topics[{ name ≤v12 | TopicId v13+, partitions[{…}]}],
     //             tags (v12+; NodeEndpoints tag 0 on v16+ when CurrentLeader set)
     // Phase 88: real fetch sessions + DivergingEpoch (tag 0) on truncation.
+    // Phase 91: omit-unchanged on empty-topics incremental (last HWM/LSO cache).
     // v14: wire-identical to v13 (OffsetMovedToTieredStorage never emitted).
     // v15: top-level ReplicaId dropped; ReplicaState is tagged (ignored).
     // v16: NodeEndpoints top-level tag (KIP-951) on leader errors.
@@ -872,12 +877,12 @@ pub(crate) fn encode_fetch(broker: &Broker, src: &mut impl Buf, out: &mut BytesM
             }
             partitions.insert(
                 partition,
-                SessionPartition {
+                SessionPartition::new(
                     fetch_offset,
                     current_leader_epoch,
                     last_fetched_epoch,
                     max_bytes,
-                },
+                ),
             );
         }
         if flexible {
@@ -963,6 +968,8 @@ pub(crate) fn encode_fetch(broker: &Broker, src: &mut impl Buf, out: &mut BytesM
     let sessions = broker.fetch_sessions();
     let mut resp_session_id = 0i32;
     let mut top_error = KafkaErrorCode::None.as_i16();
+    // Phase 91: omit-unchanged only on empty-topics incremental.
+    let mut omit_unchanged = false;
     // Topics to actually fetch/respond (order + content).
     let (fetch_topics, fetch_order) = if version < 7 {
         (req_topics, req_topic_order)
@@ -1005,12 +1012,14 @@ pub(crate) fn encode_fetch(broker: &Broker, src: &mut impl Buf, out: &mut BytesM
                 sessions.merge_topics(req_session_id, &req_topics);
                 sessions.forget(req_session_id, &forgotten);
                 if req_topics.is_empty() {
-                    // Empty topics → re-fetch entire session set.
+                    // Empty topics → re-fetch entire session set; omit unchanged (Phase 91).
+                    omit_unchanged = true;
                     let fetch_topics = sessions.snapshot_topics(req_session_id);
                     let mut fetch_order: Vec<String> = fetch_topics.keys().cloned().collect();
                     fetch_order.sort(); // stable deterministic order
                     (fetch_topics, fetch_order)
                 } else {
+                    // Partial/updated topics: always include those partitions.
                     (req_topics, req_topic_order)
                 }
             }
@@ -1024,30 +1033,38 @@ pub(crate) fn encode_fetch(broker: &Broker, src: &mut impl Buf, out: &mut BytesM
         }
     };
 
-    // --- Encode responses ---
-    let mut kip951_leaders: Vec<i32> = Vec::new();
-    put_fetch_response_header(out, version, top_error, resp_session_id);
-    if flexible {
-        put_compact_array_len(out, fetch_order.len());
-    } else {
-        out.put_i32(fetch_order.len() as i32);
+    // --- Build + filter partition responses (Phase 91 may omit) ---
+    // One built partition ready to encode (or skip).
+    struct BuiltPart {
+        partition: i32,
+        error: i16,
+        hwm: i64,
+        lso: i64,
+        log_start: i64,
+        aborted: Vec<(i64, i64)>,
+        records: BytesMut,
+        current_leader: Option<(i32, i32)>,
+        diverging: Option<(i32, i64)>,
+        /// When true and omit_unchanged, drop from response.
+        omit: bool,
+        /// Update session last_hwm/lso after include.
+        note_cache: bool,
     }
+
+    let mut kip951_leaders: Vec<i32> = Vec::new();
+    // (topic_key, wire, name, included partitions)
+    let mut built_topics: Vec<(String, TopicWireId, String, Vec<BuiltPart>)> = Vec::new();
 
     for key in &fetch_order {
         let Some(topic) = fetch_topics.get(key) else {
             continue;
         };
-        topic_id::write_wire_id(out, flexible, &topic.wire);
         let topic_name = topic.name.clone();
         let unknown_topic_id = matches!(topic.wire, TopicWireId::Uuid(_)) && topic_name.is_empty();
 
         let mut part_ids: Vec<i32> = topic.partitions.keys().copied().collect();
         part_ids.sort_unstable();
-        if flexible {
-            put_compact_array_len(out, part_ids.len());
-        } else {
-            out.put_i32(part_ids.len() as i32);
-        }
+        let mut built_parts: Vec<BuiltPart> = Vec::new();
 
         for partition in part_ids {
             let Some(part_req) = topic.partitions.get(&partition) else {
@@ -1058,17 +1075,24 @@ pub(crate) fn encode_fetch(broker: &Broker, src: &mut impl Buf, out: &mut BytesM
             let last_fetched_epoch = part_req.last_fetched_epoch;
             let max_bytes = part_req.max_bytes;
 
-            if unknown_topic_id {
-                put_fetch_partition_response(
-                    out,
-                    version,
+            let mut push_err = |error: i16, current_leader: Option<(i32, i32)>| {
+                built_parts.push(BuiltPart {
                     partition,
-                    KafkaErrorCode::UnknownTopicId.as_i16(),
-                    -1,
-                    -1,
-                    &[],
-                    None,
-                );
+                    error,
+                    hwm: -1,
+                    lso: -1,
+                    log_start: -1,
+                    aborted: Vec::new(),
+                    records: BytesMut::new(),
+                    current_leader,
+                    diverging: None,
+                    omit: false,
+                    note_cache: false,
+                });
+            };
+
+            if unknown_topic_id {
+                push_err(KafkaErrorCode::UnknownTopicId.as_i16(), None);
                 continue;
             }
 
@@ -1080,16 +1104,7 @@ pub(crate) fn encode_fetch(broker: &Broker, src: &mut impl Buf, out: &mut BytesM
                     AclOperation::Read,
                 )
             {
-                put_fetch_partition_response(
-                    out,
-                    version,
-                    partition,
-                    KafkaErrorCode::TopicAuthorizationFailed.as_i16(),
-                    -1,
-                    -1,
-                    &[],
-                    None,
-                );
+                push_err(KafkaErrorCode::TopicAuthorizationFailed.as_i16(), None);
                 continue;
             }
 
@@ -1105,16 +1120,7 @@ pub(crate) fn encode_fetch(broker: &Broker, src: &mut impl Buf, out: &mut BytesM
             if current_leader_epoch != -1 {
                 let current_epoch = part_meta.map(|p| p.leader_epoch as i32).unwrap_or(-1);
                 if current_leader_epoch > current_epoch && current_epoch >= 0 {
-                    put_fetch_partition_response(
-                        out,
-                        version,
-                        partition,
-                        KafkaErrorCode::UnknownLeaderEpoch.as_i16(),
-                        -1,
-                        -1,
-                        &[],
-                        None,
-                    );
+                    push_err(KafkaErrorCode::UnknownLeaderEpoch.as_i16(), None);
                     continue;
                 }
                 if current_epoch >= 0 && current_leader_epoch < current_epoch {
@@ -1122,16 +1128,7 @@ pub(crate) fn encode_fetch(broker: &Broker, src: &mut impl Buf, out: &mut BytesM
                     if let Some((lid, _)) = leader {
                         kip951_leaders.push(lid);
                     }
-                    put_fetch_partition_response(
-                        out,
-                        version,
-                        partition,
-                        KafkaErrorCode::FencedLeaderEpoch.as_i16(),
-                        -1,
-                        -1,
-                        &[],
-                        leader,
-                    );
+                    push_err(KafkaErrorCode::FencedLeaderEpoch.as_i16(), leader);
                     continue;
                 }
             }
@@ -1147,19 +1144,19 @@ pub(crate) fn encode_fetch(broker: &Broker, src: &mut impl Buf, out: &mut BytesM
                             broker.last_stable_offset(name.as_str(), partition as u32) as i64;
                         let log_start =
                             produce_log_start_offset(broker, &topic_name, partition as u32);
-                        put_fetch_partition_response_full(
-                            out,
-                            version,
+                        built_parts.push(BuiltPart {
                             partition,
-                            KafkaErrorCode::OffsetOutOfRange.as_i16(),
+                            error: KafkaErrorCode::OffsetOutOfRange.as_i16(),
                             hwm,
-                            if version >= 4 { lso } else { hwm },
+                            lso: if version >= 4 { lso } else { hwm },
                             log_start,
-                            &[],
-                            &[],
-                            None,
-                            Some((found_epoch, end_offset)),
-                        );
+                            aborted: Vec::new(),
+                            records: BytesMut::new(),
+                            current_leader: None,
+                            diverging: Some((found_epoch, end_offset)),
+                            omit: false,
+                            note_cache: false,
+                        });
                         continue;
                     }
                 }
@@ -1209,44 +1206,88 @@ pub(crate) fn encode_fetch(broker: &Broker, src: &mut impl Buf, out: &mut BytesM
                         Vec::new()
                     };
                     let set = encode_fetch_record_set(&selected, version);
-                    put_fetch_partition_response_full(
-                        out,
-                        version,
+                    let resp_lso = if version >= 4 { lso } else { hwm };
+                    let records_empty = set.is_empty();
+                    let omit = omit_unchanged
+                        && part_req.should_omit_unchanged(
+                            hwm,
+                            resp_lso,
+                            records_empty,
+                            KafkaErrorCode::None.as_i16(),
+                        );
+                    built_parts.push(BuiltPart {
                         partition,
-                        KafkaErrorCode::None.as_i16(),
+                        error: KafkaErrorCode::None.as_i16(),
                         hwm,
-                        if version >= 4 { lso } else { hwm },
+                        lso: resp_lso,
                         log_start,
-                        &aborted_pairs,
-                        &set,
-                        None,
-                        None,
-                    );
+                        aborted: aborted_pairs,
+                        records: set,
+                        current_leader: None,
+                        diverging: None,
+                        omit,
+                        note_cache: true,
+                    });
                 }
                 Err(Error::NotFound(_)) => {
-                    put_fetch_partition_response(
-                        out,
-                        version,
-                        partition,
-                        KafkaErrorCode::UnknownTopicOrPartition.as_i16(),
-                        -1,
-                        -1,
-                        &[],
-                        None,
-                    );
+                    push_err(KafkaErrorCode::UnknownTopicOrPartition.as_i16(), None);
                 }
                 Err(_) => {
-                    put_fetch_partition_response(
-                        out,
-                        version,
-                        partition,
-                        KafkaErrorCode::Unknown.as_i16(),
-                        -1,
-                        -1,
-                        &[],
-                        None,
-                    );
+                    push_err(KafkaErrorCode::Unknown.as_i16(), None);
                 }
+            }
+        }
+
+        built_topics.push((
+            key.clone(),
+            topic.wire.clone(),
+            topic_name,
+            built_parts,
+        ));
+    }
+
+    // Filter omitted partitions; drop topics with no remaining partitions.
+    let mut topics_out: Vec<(String, TopicWireId, String, Vec<BuiltPart>)> = Vec::new();
+    for (key, wire, name, parts) in built_topics {
+        let kept: Vec<BuiltPart> = parts.into_iter().filter(|p| !p.omit).collect();
+        if kept.is_empty() {
+            continue;
+        }
+        topics_out.push((key, wire, name, kept));
+    }
+
+    // --- Encode responses ---
+    put_fetch_response_header(out, version, top_error, resp_session_id);
+    if flexible {
+        put_compact_array_len(out, topics_out.len());
+    } else {
+        out.put_i32(topics_out.len() as i32);
+    }
+
+    for (key, wire, _name, parts) in &topics_out {
+        topic_id::write_wire_id(out, flexible, wire);
+        if flexible {
+            put_compact_array_len(out, parts.len());
+        } else {
+            out.put_i32(parts.len() as i32);
+        }
+        for p in parts {
+            put_fetch_partition_response_full(
+                out,
+                version,
+                p.partition,
+                p.error,
+                p.hwm,
+                p.lso,
+                p.log_start,
+                &p.aborted,
+                &p.records,
+                p.current_leader,
+                p.diverging,
+            );
+            // Phase 91: seed/refresh omit cache for successful includes.
+            if p.note_cache && p.error == 0 && resp_session_id != 0 {
+                sessions.note_returned(resp_session_id, key, p.partition, p.hwm, p.lso);
             }
         }
         if flexible {

@@ -1,6 +1,6 @@
 # Phase history index
 
-Ship records for **phases 0–90**. Binding core contracts are
+Ship records for **phases 0–91**. Binding core contracts are
 **[PHASE1_SPEC](../PHASE1_SPEC.md)–[PHASE6_SPEC](../PHASE6_SPEC.md)**. Living
 docs for day-to-day reading: [ops](../ops.md), [consistency](../consistency.md),
 [tuning](../tuning.md), [KAFKA_COMPAT](../KAFKA_COMPAT.md),
@@ -132,14 +132,15 @@ docs for day-to-day reading: [ops](../ops.md), [consistency](../consistency.md),
 | 88 | ✅ | Fetch DivergingEpoch + real fetch sessions (MVP) | [PHASE88_SPEC.md](../PHASE88_SPEC.md) |
 | 89 | ✅ | Kafka control batches on the data log (COMMIT/ABORT dual-write) | [PHASE89_SPEC.md](../PHASE89_SPEC.md) |
 | 90 | ✅ | Real 2PC / prepared transactions MVP (Enable2Pc, OngoingTxn*, durable prepare) | [PHASE90_SPEC.md](../PHASE90_SPEC.md) |
+| 91 | ✅ | Omit-unchanged incremental fetch session responses (MVP) | [PHASE91_SPEC.md](../PHASE91_SPEC.md) |
 
 ---
 
-## Still deferred (post–Phase 90)
+## Still deferred (post–Phase 91)
 
 - Multi-language clients
 - Chaos-mesh / cargo-fuzz corpus CI
 - Full multi-broker 2PC coordinator / prepared timeout / TRANSACTION_ABORTABLE
-- Omit-unchanged incremental fetch cache / multi-broker session affinity
+- Multi-broker session affinity / session TTL / byte-identical response cache
 - Full KRaft epoch state machine / remote-log epochs
 - Control batches for empty AddPartitions / crash open-txn without EndTxn

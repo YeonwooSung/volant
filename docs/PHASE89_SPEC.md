@@ -23,7 +23,7 @@
 - Full multi-broker transaction log / KRaft txn coordinator
 - Real 2PC / prepared transactions
 - Multi-lang clients, cargo-fuzz CI
-- Omit-unchanged fetch session cache
+- Omit-unchanged fetch session cache → **closed by Phase 91 (MVP)**
 - Writing control batches for partitions that were AddPartitionsToTxn'd but never
   produced to (MVP: only partitions with write-through ranges)
 - Reconstructing missing control batches for crash≡abort of open txns that never

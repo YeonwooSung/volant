@@ -79,14 +79,15 @@ workers.
 | Metadata | Live `leader_epoch` (not always `-1`) |
 | Advance | Explicit bump / multi-node failover best-effort |
 
-## Fetch DivergingEpoch + sessions (Phase 88)
+## Fetch DivergingEpoch + sessions (Phase 88 + 91)
 
 | Feature | Behavior |
 |---------|----------|
 | DivergingEpoch | Fetch v12+ tag 0 when `last_fetched_epoch` + `fetch_offset` past epoch end |
 | Partition error | `OFFSET_OUT_OF_RANGE` with empty records; HWM/LSO still filled |
 | Sessions | Process-local create / merge / forgotten / FINAL close |
-| Incremental | Empty topics re-fetches session set; always full record data |
+| Incremental | Empty topics re-fetches session set |
+| Omit-unchanged (91) | Empty-topics incremental omits partition when HWM+LSO unchanged and records empty |
 | Errors | 70 session id not found; 71 invalid session epoch |
 
 ## Open limitations (native)
@@ -95,7 +96,7 @@ workers.
 - No Raft metadata / dynamic membership  
 - No control batch for crash≡abort without EndTxn  
 - Prepared 2PC is single-node MVP (no multi-broker txn log / TRANSACTION_ABORTABLE / timeout)  
-- Fetch sessions not durable / multi-broker sticky; no omit-unchanged cache  
+- Fetch sessions not durable / multi-broker sticky; omit cache is HWM+LSO only (not byte-identical Kafka response cache)  
 - ACL store is single-node file (no consensus)  
 - DeleteRecords does not fan out to cluster followers  
 - Compaction simpler than Kafka (no tombstone retention window)  

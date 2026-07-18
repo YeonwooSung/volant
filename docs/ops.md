@@ -11,7 +11,7 @@
 | `--log-format` | | `text` | `text` or `json` |
 | `--auth-token` | `VOLANT_AUTH_TOKEN` | *unset* | Shared-token auth (native port only) |
 | `--scram-user USER:PASS` | | *unset* | Upsert SCRAM user at startup (repeatable; Phase 22) |
-| `--kafka-listen` | | *disabled* | Kafka wire protocol shim (Phases 23–90) |
+| `--kafka-listen` | | *disabled* | Kafka wire protocol shim (Phases 23–91) |
 | `--tls-cert` / `--tls-key` | | *unset* | Server TLS (feature `tls`) |
 | `--tls-peer-insecure` | | `true` | Skip inter-broker cert verify (lab) |
 | `--tls-ca` | | *unset* | CA PEM for inter-broker peer verify |
@@ -116,7 +116,7 @@ Notes:
 
 Optional second socket speaking Kafka framing (classic + flexible). Native
 Volant protocol remains on `--listen`. API versions and honesty notes live in
-**[KAFKA_COMPAT.md](./KAFKA_COMPAT.md)** (source of truth; Phases 23–90).
+**[KAFKA_COMPAT.md](./KAFKA_COMPAT.md)** (source of truth; Phases 23–91).
 
 ### Enable
 
@@ -150,15 +150,17 @@ volant-server \
 - **Leader epochs:** durable history under `{data_dir}/__leader_epochs` (Phase 87);
   OffsetForLeaderEpoch returns prior-epoch end offsets; Metadata advertises live
   epoch. Not a full KRaft epoch state machine.
-- **Fetch DivergingEpoch / sessions (Phase 88):** truncation → OFFSET_OUT_OF_RANGE
-  + DivergingEpoch tag 0 from history; process-local fetch sessions (create /
-  forgotten / errors 70–71). Sessions are not durable or multi-broker sticky.
+- **Fetch DivergingEpoch / sessions (Phase 88 + 91):** truncation →
+  OFFSET_OUT_OF_RANGE + DivergingEpoch tag 0 from history; process-local fetch
+  sessions (create / forgotten / errors 70–71); empty-topics incremental
+  **omits** partitions when HWM+LSO unchanged and records empty (Phase 91).
+  Sessions are not durable or multi-broker sticky.
 - **ACLs:** Kafka ACL admin maps to Volant Phase 20/21 ACLs (LITERAL only;
   CreateAcls enables enforcement). Describe/Create/DeleteAcls **0–3**: v3 accepts
   Kafka **User** resource type (stored as `ResourceType::User`; not used on the
   produce/fetch authorize path; no SCRAM-admin gating).
 
-Deep dives: [PHASE23_SPEC.md](./PHASE23_SPEC.md) … [PHASE88_SPEC.md](./PHASE88_SPEC.md).
+Deep dives: [PHASE23_SPEC.md](./PHASE23_SPEC.md) … [PHASE91_SPEC.md](./PHASE91_SPEC.md).
 
 ## TLS (Phase 7 listen + Phase 9 verification / inter-broker)
 
@@ -262,12 +264,13 @@ curl -s -H "Authorization: Bearer $VOLANT_METRICS_TOKEN" \
 - Multi-language clients
 - Full chaos-mesh suites / cargo-fuzz **corpus CI** (scaffold under `fuzz/` only)
 - Full multi-broker 2PC / prepared timeout / TRANSACTION_ABORTABLE
-- Omit-unchanged fetch session cache; multi-broker session affinity
+- Multi-broker session affinity; session TTL / max sessions / metrics
+- Byte-identical Kafka compressed response cache (omit is HWM+LSO based)
 
 Full list: [ROADMAP.md](../ROADMAP.md).
 
 ## Shipped (not gaps)
 
-Kafka wire shim **Phases 23–90** (ApiVersions **0–5**, Fetch **0–18**, ACL admin
-**0–3** User resource, prepared 2PC MVP, ~38 keys), SCRAM-SHA-256/512, SASL
-PLAIN/SCRAM — see [KAFKA_COMPAT.md](./KAFKA_COMPAT.md).
+Kafka wire shim **Phases 23–91** (ApiVersions **0–5**, Fetch **0–18**, ACL admin
+**0–3** User resource, prepared 2PC MVP, omit-unchanged sessions, ~38 keys),
+SCRAM-SHA-256/512, SASL PLAIN/SCRAM — see [KAFKA_COMPAT.md](./KAFKA_COMPAT.md).

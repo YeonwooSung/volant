@@ -1,9 +1,8 @@
-//! In-memory Fetch session state (Phase 88 MVP).
+//! In-memory Fetch session state (Phase 88 + Phase 91 omit-unchanged MVP).
 //!
 //! Process-local only: not durable, not shared across brokers. Tracks topic
-//! partitions and last-seen fetch params so incremental (empty-topics) requests
-//! can re-fetch the session set. Always returns full record data (no
-//! omit-unchanged cache).
+//! partitions, last-seen fetch params, and last-returned HWM/LSO so empty-topics
+//! incremental Fetch can omit partitions with no new data.
 
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicI32, Ordering};
@@ -28,6 +27,41 @@ pub struct SessionPartition {
     pub last_fetched_epoch: i32,
     /// Last partition_max_bytes.
     pub max_bytes: usize,
+    /// High watermark last included in a successful session response (Phase 91).
+    pub last_hwm: Option<i64>,
+    /// Last stable offset last included in a successful session response (Phase 91).
+    pub last_lso: Option<i64>,
+}
+
+impl SessionPartition {
+    /// New partition params with no prior response cache.
+    pub fn new(
+        fetch_offset: i64,
+        current_leader_epoch: i32,
+        last_fetched_epoch: i32,
+        max_bytes: usize,
+    ) -> Self {
+        Self {
+            fetch_offset,
+            current_leader_epoch,
+            last_fetched_epoch,
+            max_bytes,
+            last_hwm: None,
+            last_lso: None,
+        }
+    }
+
+    /// Whether an empty, successful response with these offsets can be omitted
+    /// (Phase 91). Errors and non-empty records always include.
+    pub fn should_omit_unchanged(&self, hwm: i64, lso: i64, records_empty: bool, error: i16) -> bool {
+        if error != 0 || !records_empty {
+            return false;
+        }
+        match (self.last_hwm, self.last_lso) {
+            (Some(prev_hwm), Some(prev_lso)) => prev_hwm == hwm && prev_lso == lso,
+            _ => false,
+        }
+    }
 }
 
 /// One topic entry inside a fetch session.
@@ -139,6 +173,10 @@ impl FetchSessionManager {
     }
 
     /// Merge request topics/partitions into an existing session.
+    ///
+    /// New or updated partitions keep/replace fetch params; `last_hwm`/`last_lso`
+    /// are preserved when the same partition already existed (offset updates do
+    /// not clear the omit cache — empty-records + same HWM still omits).
     pub fn merge_topics(&self, session_id: i32, topics: &HashMap<String, SessionTopic>) {
         let mut guard = self.sessions.lock();
         let Some(session) = guard.get_mut(&session_id) else {
@@ -159,7 +197,17 @@ impl FetchSessionManager {
                 entry.name = topic.name.clone();
             }
             for (pid, part) in &topic.partitions {
-                entry.partitions.insert(*pid, part.clone());
+                let prev = entry.partitions.get(pid);
+                let mut merged = part.clone();
+                // Preserve omit cache across param merges unless the request
+                // carried explicit last_* (request path always None).
+                if merged.last_hwm.is_none() {
+                    if let Some(p) = prev {
+                        merged.last_hwm = p.last_hwm;
+                        merged.last_lso = p.last_lso;
+                    }
+                }
+                entry.partitions.insert(*pid, merged);
             }
         }
     }
@@ -201,6 +249,34 @@ impl FetchSessionManager {
             .map(|s| s.topics.clone())
             .unwrap_or_default()
     }
+
+    /// Record HWM/LSO returned for a partition after it was included in a response.
+    ///
+    /// Only call for `error == 0` includes (Phase 91 MVP).
+    pub fn note_returned(
+        &self,
+        session_id: i32,
+        topic_key: &str,
+        partition: i32,
+        hwm: i64,
+        lso: i64,
+    ) {
+        if session_id == 0 {
+            return;
+        }
+        let mut guard = self.sessions.lock();
+        let Some(session) = guard.get_mut(&session_id) else {
+            return;
+        };
+        let Some(topic) = session.topics.get_mut(topic_key) else {
+            return;
+        };
+        let Some(part) = topic.partitions.get_mut(&partition) else {
+            return;
+        };
+        part.last_hwm = Some(hwm);
+        part.last_lso = Some(lso);
+    }
 }
 
 /// Next session epoch after a successful request (Kafka `FetchSession.nextEpoch`).
@@ -231,6 +307,10 @@ mod hex {
 mod tests {
     use super::*;
 
+    fn part(offset: i64) -> SessionPartition {
+        SessionPartition::new(offset, -1, -1, 1_000_000)
+    }
+
     #[test]
     fn create_and_incremental_epoch() {
         let mgr = FetchSessionManager::new();
@@ -252,5 +332,56 @@ mod tests {
         assert_eq!(next_epoch(1), 2);
         assert_eq!(next_epoch(i32::MAX), 1);
         assert_eq!(next_epoch(-1), -1);
+    }
+
+    #[test]
+    fn omit_unchanged_requires_matching_hwm_lso() {
+        let mut p = part(0);
+        assert!(!p.should_omit_unchanged(1, 1, true, 0)); // never returned
+        p.last_hwm = Some(1);
+        p.last_lso = Some(1);
+        assert!(p.should_omit_unchanged(1, 1, true, 0));
+        assert!(!p.should_omit_unchanged(2, 1, true, 0)); // hwm advanced
+        assert!(!p.should_omit_unchanged(1, 2, true, 0)); // lso advanced
+        assert!(!p.should_omit_unchanged(1, 1, false, 0)); // has records
+        assert!(!p.should_omit_unchanged(1, 1, true, 1)); // error
+    }
+
+    #[test]
+    fn note_returned_and_merge_preserves_cache() {
+        let mgr = FetchSessionManager::new();
+        let mut topics = HashMap::new();
+        let mut parts = HashMap::new();
+        parts.insert(0, part(0));
+        topics.insert(
+            "t".into(),
+            SessionTopic {
+                wire: TopicWireId::Name("t".into()),
+                name: "t".into(),
+                partitions: parts,
+            },
+        );
+        let id = mgr.create(topics);
+        mgr.note_returned(id, "t", 0, 5, 5);
+        let snap = mgr.snapshot_topics(id);
+        assert_eq!(snap["t"].partitions[&0].last_hwm, Some(5));
+        assert_eq!(snap["t"].partitions[&0].last_lso, Some(5));
+
+        // Merge with new fetch offset; cache preserved.
+        let mut upd = HashMap::new();
+        let mut uparts = HashMap::new();
+        uparts.insert(0, part(5));
+        upd.insert(
+            "t".into(),
+            SessionTopic {
+                wire: TopicWireId::Name("t".into()),
+                name: "t".into(),
+                partitions: uparts,
+            },
+        );
+        mgr.merge_topics(id, &upd);
+        let snap = mgr.snapshot_topics(id);
+        assert_eq!(snap["t"].partitions[&0].fetch_offset, 5);
+        assert_eq!(snap["t"].partitions[&0].last_hwm, Some(5));
     }
 }

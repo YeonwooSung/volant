@@ -147,5 +147,5 @@ Control batches are written only on **finalize** (second EndTxn), not on prepare
 - Prepared timeout / auto-abort
 - TRANSACTION_ABORTABLE where Kafka emits it
 - Multi-broker prepared replication
-- Omit-unchanged fetch session cache
+- Omit-unchanged fetch session cache → **closed by Phase 91 (MVP)**
 - cargo-fuzz corpus CI / multi-lang clients

@@ -112,7 +112,7 @@ throttling, no tiered-storage divergence).
 
 ## Deferred (Phase 89+)
 
-- Omit-unchanged incremental responses / response size caps
+- Omit-unchanged incremental responses / response size caps → **closed by Phase 91 (MVP)**
 - Session TTL / max concurrent sessions / metrics
 - Multi-broker session affinity
 - SnapshotId; Kafka control batches; real 2PC; multi-lang; fuzz CI

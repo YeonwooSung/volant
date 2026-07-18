@@ -1994,12 +1994,13 @@ Binding: **[docs/PHASE88_SPEC.md](./docs/PHASE88_SPEC.md)**.
 - [x] Integration tests (`phase88_fetch_sessions_diverging`)
 
 **Honest limitations:** sessions process-local (not durable / multi-broker);
-always full record data (no omit-unchanged); no session TTL/eviction metrics;
+omit-unchanged closed by **Phase 91**; no session TTL/eviction metrics;
 DivergingEpoch from local history only.
 
 **Still deferred:** multi-lang clients, cargo-fuzz corpus CI, Kafka control
-batches on the data log (closed by **Phase 89**), real 2PC, omit-unchanged
-incremental caching, multi-broker session affinity.
+batches on the data log (closed by **Phase 89**), real 2PC (closed by
+**Phase 90**), omit-unchanged (closed by **Phase 91**), multi-broker session
+affinity.
 
 ---
 
@@ -2023,8 +2024,8 @@ markers for AddPartitions-only partitions; coordinator_epoch always 0; no
 multi-broker txn log / 2PC.
 
 **Still deferred:** multi-lang clients, cargo-fuzz corpus CI, real 2PC
-(closed by **Phase 90** MVP), omit-unchanged fetch cache, multi-broker session
-affinity.
+(closed by **Phase 90** MVP), omit-unchanged fetch cache (closed by
+**Phase 91**), multi-broker session affinity.
 
 ---
 
@@ -2050,9 +2051,33 @@ no TRANSACTION_ABORTABLE; no prepared timeout; KeepPreparedTxn does not keep
 ordinary open (non-prepared) txns; resume pid/epoch fields still ignored for
 allocation.
 
-**Still deferred:** multi-lang clients, cargo-fuzz corpus CI, omit-unchanged
-fetch session cache, multi-broker session affinity, full KRaft epoch SM,
-prepared timeout / multi-broker 2PC coordinator.
+**Still deferred:** multi-lang clients, cargo-fuzz corpus CI, multi-broker
+session affinity, full KRaft epoch SM, prepared timeout / multi-broker 2PC
+coordinator. Omit-unchanged closed by **Phase 91**.
+
+---
+
+### Phase 91 — Omit-unchanged incremental fetch sessions (MVP) ✅
+
+**Goal:** Close the main honesty gap left by Phase 88 sessions: empty-topics
+incremental Fetch **omits** partitions with no new data (HWM+LSO unchanged and
+empty records), and **includes** when HWM/LSO advanced or records are available.
+
+Binding: **[docs/PHASE91_SPEC.md](./docs/PHASE91_SPEC.md)**.
+
+- [x] Per-session per-partition `last_hwm` / `last_lso` cache
+- [x] Empty-topics incremental omit when unchanged
+- [x] Include on new produce / HWM or LSO advance (empty records + updated offsets OK)
+- [x] Create / forgotten / 70 / 71 / FINAL preserved (Phase 88)
+- [x] Integration tests (`phase91_omit_unchanged_sessions`)
+
+**Honest limitations:** process-local only; HWM+LSO+empty-records omit (not
+byte-identical Kafka compressed response cache); partial-topic incremental
+always returns those partitions; no session TTL / multi-broker affinity.
+
+**Still deferred:** multi-lang clients, cargo-fuzz corpus CI, multi-broker
+session affinity / durable sessions, prepared timeout / multi-broker 2PC,
+session TTL / max sessions / metrics.
 
 ---
 
@@ -2079,18 +2104,18 @@ prepared timeout / multi-broker 2PC coordinator.
 | Storage | Page cache + OS | Explicit mmap + optional io_uring/O_DIRECT |
 | Stream processing | Kafka Streams / ksqlDB | In-process `volant-stream` operators |
 | Ops model | ZooKeeper/KRaft + heavy footprint | Single binary → small static ISR quorum |
-| Protocol | Kafka wire protocol | Native binary first; optional Kafka shim (`--kafka-listen`, Phases 23–90) |
+| Protocol | Kafka wire protocol | Native binary first; optional Kafka shim (`--kafka-listen`, Phases 23–91) |
 | Goal | Full ecosystem | Subset that is fast, small, and correct |
 
 Volant is **not** a drop-in Kafka replacement. It prioritizes a clean core; the
-optional Kafka wire shim is **shipped** (Phases 23–90) — see
+optional Kafka wire shim is **shipped** (Phases 23–91) — see
 [docs/KAFKA_COMPAT.md](./docs/KAFKA_COMPAT.md).
 
 ---
 
 ## Suggested implementation order (PRs)
 
-Phases **0–90 are shipped**. Historical PR order for the core:
+Phases **0–91 are shipped**. Historical PR order for the core:
 
 1. Phase 1 segment format + unit tests  
 2. Phase 1 recovery + retention  
@@ -2103,7 +2128,7 @@ Phases **0–90 are shipped**. Historical PR order for the core:
 9. Phase 6 replication prototype (2–3 nodes) ✅  
 10. Phase 7 metrics, TLS, packaging ✅  
 11. Phases 8–22 (redirect, groups, configs, txns, mTLS, ACLs, SCRAM) ✅  
-12. Phases 23–90 (Kafka wire shim surface) ✅  
+12. Phases 23–91 (Kafka wire shim surface) ✅  
 
 ---
 
@@ -2144,10 +2169,11 @@ cargo run -p volant-bench --release
 cargo test --workspace
 ```
 
-**Status (post–Phase 90):** core broker, ops (metrics / TLS / auth / SCRAM /
+**Status (post–Phase 91):** core broker, ops (metrics / TLS / auth / SCRAM /
 ACLs / Helm), and the Kafka wire shim are **shipped** (Fetch 0–18 Kafka max;
 ACL admin 0–3 with User resource; soft-marker `READ_COMMITTED`; durable OFLE
-history; Fetch DivergingEpoch + sessions; Kafka control batches on EndTxn;
-prepared 2PC MVP). Still deferred: multi-language clients, full chaos-mesh
-suites, cargo-fuzz corpus CI, omit-unchanged session cache, multi-broker 2PC.
+history; Fetch DivergingEpoch + sessions with omit-unchanged incremental;
+Kafka control batches on EndTxn; prepared 2PC MVP). Still deferred:
+multi-language clients, full chaos-mesh suites, cargo-fuzz corpus CI,
+multi-broker session affinity, multi-broker 2PC.
 Details: [docs/KAFKA_COMPAT.md](./docs/KAFKA_COMPAT.md), [docs/ops.md](./docs/ops.md).

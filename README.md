@@ -9,7 +9,7 @@ Volant is a resource-efficient alternative to Apache Kafka, built for:
 - **Streaming processing** — first-class operators (`map`, `filter`, windows) without a heavy runtime
 - **Small footprint** — native binary, predictable memory, simple operations
 
-> Status: **Phases 0–90 landed** — durable log, clustering, security, stream
+> Status: **Phases 0–91 landed** — durable log, clustering, security, stream
 > operators, and a broad optional Kafka wire shim (classic + flexible;
 > ApiVersions 0–5; Fetch 0–18; ACL admin 0–3). Single-node mode (no `--cluster-config`) preserves the
 > simple path. Start with the [whitepaper](./docs/WHITEPAPER.md) and
@@ -41,7 +41,7 @@ volant/
 │   ├── consistency.md    # HWM / ISR / acks
 │   ├── tuning.md         # Performance / I/O guide
 │   ├── PHASE1–6_SPEC.md  # Binding core specs
-│   ├── PHASE7–89_SPEC.md # Ship records (see history/)
+│   ├── PHASE7–91_SPEC.md # Ship records (see history/)
 │   └── history/          # Phase index + archived plans/reviews
 ├── deploy/               # Dockerfile, compose, systemd, Helm chart
 ├── ROADMAP.md
@@ -141,16 +141,15 @@ static ISR). Later work is summarized by band — full chronicle in
 | Ops / packaging | 7–9 | Metrics, token auth, TLS, Helm multi-node, client leader redirect |
 | Native reliability | 10–17 | Idempotence, sticky/cooperative groups, topic configs, compaction |
 | Txns & security | 18–22, **86** | Write-through txns + soft READ_COMMITTED (LSO/aborted); mTLS, ACLs, SCRAM |
-| Kafka wire shim | 23–90 | Optional `--kafka-listen`; classic + flexible; **~38** keys; prepared 2PC MVP (**90**) |
+| Kafka wire shim | 23–91 | Optional `--kafka-listen`; classic + flexible; **~38** keys; prepared 2PC (**90**); omit-unchanged sessions (**91**) |
 
 **Kafka ceilings (code SoT):** ApiVersions **0–5**, Fetch **0–18**, Produce/Metadata
 **0–13**, ACL admin **0–3** (User resource v3, store-only); Fetch isolation
-READ_COMMITTED MVP (Phase 86); durable OffsetForLeaderEpoch history (Phase 87); Fetch DivergingEpoch + real fetch sessions MVP (Phase 88); Kafka control batches on EndTxn (Phase 89); prepared 2PC MVP (Phase 90).
+READ_COMMITTED MVP (Phase 86); durable OffsetForLeaderEpoch history (Phase 87); Fetch DivergingEpoch + real fetch sessions MVP (Phase 88); Kafka control batches on EndTxn (Phase 89); prepared 2PC MVP (Phase 90); omit-unchanged incremental sessions (Phase 91).
 Matrix + honesty: [docs/KAFKA_COMPAT.md](./docs/KAFKA_COMPAT.md).
 
 **Still deferred:** multi-language clients, chaos-mesh / cargo-fuzz corpus CI,
-multi-broker 2PC parity, omit-unchanged session cache / multi-broker session
-affinity.
+multi-broker 2PC parity, multi-broker session affinity.
 
 ### Networked client (library)
 
