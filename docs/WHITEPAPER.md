@@ -6,7 +6,7 @@
 |---|---|
 | Version | 0.1.0 (Apache-2.0) |
 | Language | Rust 1.75+ |
-| Status | Phases 0–85 landed |
+| Status | Phases 0–85 landed (product / git HEAD) |
 | Date | 2026-07-18 |
 
 ---
@@ -175,8 +175,10 @@ Admin: list / describe / delete groups, delete offsets, lag metrics.
 | True `READ_COMMITTED` / LSO filtering | **No** — LSO always equals HWM |
 | Real 2PC / prepared transactions | **No** (Kafka wire fields ignored) |
 
-This is intentional honesty: Volant achieves multi-partition atomicity without
-writing aborted data to the log, at the cost of Kafka-style isolation semantics.
+This is intentional honesty for the **shipped** product: multi-partition atomicity
+without writing aborted data to the log, at the cost of Kafka-style isolation
+semantics. (A write-through + soft-marker `READ_COMMITTED` MVP is tracked as
+Phase 86 draft only — not landed on `main` until its commit lands.)
 
 ---
 

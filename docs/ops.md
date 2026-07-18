@@ -190,7 +190,9 @@ Generate self-signed material for lab use only (see `examples/tls/`).
 ## Health checks
 
 - TCP connect to `--listen`
-- Optional: `GET /metrics` returns `200` with `volant_build_info`
+- Optional: `GET /metrics` returns `200` with `volant_build_info` when
+  unauthenticated; with `--metrics-token`, send `Authorization: Bearer …` or
+  expect `401`
 - Produce/fetch smoke via `volant` CLI
 
 ## Multi-node Helm (Phase 9)
@@ -212,241 +214,25 @@ Deploys a StatefulSet, headless Service, and ConfigMap `cluster.toml`
 Deterministic chaos tests always run with `cargo test -p volant-protocol`.
 Optional nightly: see [fuzz/README.md](../fuzz/README.md).
 
-## Idempotent produce & retries (Phase 10)
+## Native features after core (Phases 8–22)
 
-Rust client:
+Deep operator recipes (idempotence, groups, topic admin, txn CLI, mTLS, ACLs,
+compaction) are summarized in **[features.md](./features.md)** and the binding
+specs. Ops-critical notes only:
 
-```rust
-ClientConfig {
-    enable_idempotence: true,
-    max_retries: 3,
-    retry_backoff_ms: 50,
-    ..Default::default()
-}
-```
+| Area | Ops fact |
+|------|----------|
+| Idempotent produce | Client `enable_idempotence`; durable PID under `__producer_state/` |
+| Consumer lag | Metrics + `volant group lag` |
+| Groups | list / describe / delete-offsets; static membership `group_instance_id` |
+| Topic configs | `retention.ms` / `retention.bytes` / `segment.bytes` / `cleanup.policy` |
+| DeleteRecords | Truncates sealed segments; no follower fan-out |
+| Transactions (shipped) | **Buffer-until-commit** (Phase 18): off-log until EndTxn; crash ≡ abort; not Kafka control-marker EOS |
+| mTLS | Feature `tls`; `--tls-client-ca` / optional `--tls-client-allow` |
+| ACLs | `--acl-enable`; durable `__acls/acls.json`; User resource is Kafka admin store-only |
+| Compaction | `cleanup.policy=compact` on **sealed** segments; empty value = tombstone |
 
-- On first produce, the client calls `InitProducerId` and tracks per-partition sequences.
-- Exact retries of the same batch return the same offsets (no double-append).
-- Producer state is **durable** under `{data_dir}/__producer_state/state.json` (Phase 11).
-  Broker restart reloads PIDs so duplicate sequences still de-dupe.
-
-## Consumer lag (Phase 10)
-
-```bash
-volant group lag --group my-group --broker 127.0.0.1:9092
-# optional: --topic events
-```
-
-Metrics (when `--metrics-addr` is set):
-
-```
-volant_consumer_group_lag{group="my-group",topic="events",partition="0"} 12
-```
-
-## Group describe (Phase 11)
-
-```bash
-volant group describe --group my-group --broker 127.0.0.1:9092
-```
-
-Shows live members, subscribed topics, and partition assignments. Empty /
-unknown groups return NotFound.
-
-Rebalance uses a **sticky** assignor by default (minimize ownership churn).
-
-## Cooperative rebalance (Phase 17)
-
-On re-JoinGroup after a generation bump, consumers keep in-memory fetch
-positions for partitions they still own and only OffsetFetch newly assigned
-partitions. JoinGroup responses include a trailing **`revoked`** list
-(partitions lost since the member's last join).
-
-`GroupConsumer` applies this automatically; CLI group consume prints
-`revoked=[...]` on join.
-
-Not Kafka cooperative-sticky (no two-phase revoke barrier).
-
-## Group list & delete offsets (Phase 12)
-
-```bash
-volant group list --broker 127.0.0.1:9092
-volant group delete-offsets --group my-group --broker 127.0.0.1:9092
-# optional single partition:
-volant group delete-offsets --group my-group --topic events --partition 0
-```
-
-`list` shows live (**Stable**) and offset-only (**Empty**) groups.
-
-## Static membership (Phase 12)
-
-Pass a stable `group_instance_id` on join (Rust: `join_group_with_instance` /
-`GroupConsumer::join_static`). The broker assigns `member_id = static:{id}` so
-redeploys rejoin the same member without an extra generation bump when still
-in-session.
-
-## Topic configs & retention (Phase 13)
-
-```bash
-volant topic create events --partitions 4 \
-  --retention-ms 86400000 \
-  --retention-bytes 1073741824 \
-  --segment-bytes 268435456
-
-volant topic describe events
-volant topic config get events
-volant topic config set events --key retention.ms --value 3600000
-volant topic config set events --key retention.ms --value ''   # clear
-```
-
-Keys: `retention.ms`, `retention.bytes`, `segment.bytes`. Stored under
-`{data_dir}/__topic_configs/`. Broker applies retention about every 5 seconds.
-
-## Durable topics & delete-records (Phase 14)
-
-Single-node topic metadata is stored under `{data_dir}/__topics/catalog.json`.
-After a broker restart, topics and partition logs reload automatically (no need
-to re-create topics). Multi-node continues to use `cluster/assignment.json`.
-
-```bash
-# Drop sealed segments entirely before offset N on partition P
-volant topic delete-records events --partition 0 --before-offset 1000
-```
-
-DeleteRecords only truncates **whole sealed segments** (same as storage
-`delete_records`). On a multi-node cluster it runs on the leader only; followers
-are not notified (use retention for cluster-wide cleanup).
-
-## Create partitions & list offsets (Phase 15)
-
-```bash
-# Grow a topic to 8 partitions (must be greater than current)
-volant topic add-partitions events --total 8
-
-# Earliest (log start) and latest (LEO) per partition
-volant topic offsets events
-volant topic offsets events --partition 0
-```
-
-Multi-node: `add-partitions` must hit the **controller**. New partitions start
-empty (no data redistribution).
-
-## Transactions (Phase 18)
-
-Multi-partition atomic produce with a transactional id:
-
-```bash
-volant txn produce --transactional-id app-1 \
-  --topic events --partition 0 --value a \
-  --topic2 events --partition2 1 --value2 b
-```
-
-Rust:
-
-```rust
-let mut tp = TransactionalProducer::connect(vec!["127.0.0.1:9092".into()], "app-1").await?;
-tp.begin().await?;
-tp.produce("events", Some(0), msgs).await?;
-tp.add_offsets("cg", vec![("events".into(), 0, next_offset)]);
-let results = tp.commit().await?; // or tp.abort().await?
-```
-
-Produces inside a txn are **buffered off-log** until commit (abort leaves no
-records). Broker crash aborts open txns. Not Kafka control-marker EOS.
-
-## mTLS identity (Phase 19)
-
-Build with TLS and require client certificates signed by a CA:
-
-```bash
-cargo run -p volant-server --features tls -- \
-  --listen 0.0.0.0:9092 \
-  --tls-cert server.crt --tls-key server.key \
-  --tls-client-ca client-ca.crt \
-  --tls-client-allow alice,bob   # optional CN allowlist
-```
-
-- Verified client cert **CN** (else first DNS SAN) becomes the connection principal
-  and authenticates the connection (no shared Auth token required).
-- Empty / omitted `--tls-client-allow` accepts any client cert signed by the CA.
-- Auth opcode / shared token still work when configured (either path may authenticate).
-- Inter-broker TLS automatically presents the server cert as the client identity
-  when mTLS is on — sign server certs with the same client CA in lab clusters
-  (or use a dual-purpose CA).
-
-Rust client:
-
-```rust
-let client = Client::connect(ClientConfig {
-    brokers: vec!["127.0.0.1:9092".into()],
-    tls: true,
-    tls_ca: Some("ca.crt".into()),
-    tls_cert: Some("client.crt".into()),
-    tls_key: Some("client.key".into()),
-    ..ClientConfig::default()
-})
-.await?;
-```
-
-Principal is logged for ops correlation and used by **Phase 20 ACLs**.
-Metrics auth is optional (`--metrics-token` / Phase 21); prefer binding
-`--metrics-addr` to localhost when the token is unset.
-
-## Principal ACLs (Phase 20)
-
-Enable authorization (default deny when on):
-
-```bash
-cargo run -p volant-server -- \
-  --listen 0.0.0.0:9092 \
-  --auth-token secret \
-  --auth-principal alice \
-  --acl-enable \
-  --acl-super-users admin \
-  --acl-file acls.json   # optional JSON array; implies enable
-```
-
-Example `acls.json`:
-
-```json
-[
-  {
-    "principal": "alice",
-    "resource_type": "Topic",
-    "resource": "events",
-    "operation": "Write",
-    "permission": "Allow"
-  },
-  {
-    "principal": "alice",
-    "resource_type": "Topic",
-    "resource": "events",
-    "operation": "Read",
-    "permission": "Allow"
-  }
-]
-```
-
-CLI:
-
-```bash
-volant --auth-token secret acl create \
-  --principal alice --resource-type Topic --resource events \
-  --operation Write --permission Allow
-
-volant --auth-token secret acl list
-volant --auth-token secret acl delete \
-  --principal alice --resource-type Topic --resource events \
-  --operation Write --permission Allow
-```
-
-- Matching **Deny** beats **Allow**; no match → deny when enabled.
-- Super-users bypass all checks (runtime flag; not stored in the ACL file).
-- Token Auth sets principal to `--auth-principal` (default `token`).
-- mTLS CN is the principal when using Phase 19 client certs.
-- SCRAM sets principal to the SCRAM username (Phase 22).
-- ACLs are durable under `{data_dir}/__acls/acls.json` (Phase 21); CreateAcls /
-  DeleteAcls persist automatically. `--acl-file` imports then saves there.
-- Inter-broker opcodes are not ACL-gated.
+CLI examples: [features.md](./features.md), [../README.md](../README.md).
 
 ## Metrics auth (Phase 21)
 
@@ -462,22 +248,6 @@ curl -s -H "Authorization: Bearer $VOLANT_METRICS_TOKEN" \
 - When `--metrics-token` is unset, `/metrics` stays open (prefer bind localhost).
 - Wrong/missing token → `401` + `WWW-Authenticate: Bearer`.
 - Does not automatically reuse `--auth-token`; set both if they should match.
-
-## Log compaction (Phase 16)
-
-```bash
-volant topic create kv --partitions 1 \
-  --cleanup-policy compact \
-  --segment-bytes 1048576
-
-volant topic config set kv --key cleanup.policy --value compact
-volant topic config set kv --key cleanup.policy --value delete
-```
-
-When `cleanup.policy=compact`, the broker periodically rewrites **sealed**
-segments keeping the latest value per key. An **empty value** is a tombstone
-(removes the key). Null-key records are not compacted away. The active segment
-is only compacted after it rolls.
 
 ## Still deferred
 

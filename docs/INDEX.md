@@ -52,15 +52,17 @@ Start here. Prefer living docs over individual phase ship records.
 | Protocol implementer | PHASE1–6 binding specs |
 | Roadmap / deferred | ROADMAP end sections |
 
-## Compaction note (2026-07-18, post–Phase 85)
+## Compaction note (2026-07-18, post–Phase 85 ship)
 
-Living docs re-verified against codebase (`SUPPORTED_APIS`, HEAD Phase 85):
+Living docs match **git HEAD product** (`SUPPORTED_APIS`, last feature commit Phase **85**):
 
 - **Status ceiling:** Phases **0–85**; Kafka shim **23–85** (**38** keys)
 - **Kafka SoT:** [KAFKA_COMPAT.md](./KAFKA_COMPAT.md) — matrix + semantic honesty
-- **WHITEPAPER:** architecture + positioning; points at KAFKA_COMPAT (no full matrix)
+- **WHITEPAPER:** architecture + positioning; no full API matrix
 - **Binding core:** PHASE1–6; **ship records:** PHASE7–85 via [PHASE_HISTORY](./history/PHASE_HISTORY.md)
-- **README:** compact phase bands (not per-phase diary); tree `PHASE7–85`
-- **ops:** flags + Kafka listen + Deferred/Shipped split; metrics Bearer honest
-- **Still deferred:** multi-lang, chaos/fuzz corpus CI, true `READ_COMMITTED`, real 2PC,
-  durable epochs / real fetch sessions
+- **README / ops:** compact bands + ops table (not per-phase diaries)
+- **Txn honesty (shipped):** buffer-until-commit; LSO ≡ HWM; no true `READ_COMMITTED`
+- **Still deferred (product):** multi-lang, chaos/fuzz corpus CI, true control-marker
+  `READ_COMMITTED`, real 2PC, durable epochs / real fetch sessions
+- **WIP (not shipped):** working tree may contain Phase 86 write-through / soft-marker
+  isolation — treat [PHASE86_SPEC](./PHASE86_SPEC.md) as draft until committed

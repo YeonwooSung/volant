@@ -1,8 +1,9 @@
 # Kafka compatibility matrix
 
 **Living document** for the optional Kafka wire shim (`--kafka-listen`).
-Ship history: Phases **23–85**. Binding deep dives: `PHASE23_SPEC.md` …
-`PHASE85_SPEC.md`. Overview: [WHITEPAPER.md](./WHITEPAPER.md).
+Ship history: Phases **23–85** (git HEAD product). Binding deep dives:
+`PHASE23_SPEC.md` … `PHASE85_SPEC.md`. Overview: [WHITEPAPER.md](./WHITEPAPER.md).
+Semantic rows below describe **shipped** behavior, not uncommitted WIP.
 
 ## Enable
 

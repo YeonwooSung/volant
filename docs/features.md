@@ -50,7 +50,7 @@ shim: [KAFKA_COMPAT.md](./KAFKA_COMPAT.md).
 | Abort | Leaves no records on log |
 | Deferred offsets | Txn offset commits apply on commit only |
 | Crash | Open txn ≡ abort |
-| Control markers / READ_COMMITTED | **Not implemented** (LSO ≡ HWM) |
+| Control markers / READ_COMMITTED | **Not shipped** (LSO ≡ HWM; buffer-until-commit) |
 
 ## Security (19–22)
 
