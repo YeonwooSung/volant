@@ -141,16 +141,16 @@ static ISR). Later work is summarized by band — full chronicle in
 | Ops / packaging | 7–9 | Metrics, token auth, TLS, Helm multi-node, client leader redirect |
 | Native reliability | 10–17 | Idempotence, sticky/cooperative groups, topic configs, compaction |
 | Txns & security | 18–22, **86** | Write-through txns + soft READ_COMMITTED (LSO/aborted); mTLS, ACLs, SCRAM |
-| Kafka wire shim | 23–86 | Optional `--kafka-listen`; classic + flexible; **~38** keys |
+| Kafka wire shim | 23–87 | Optional `--kafka-listen`; classic + flexible; **~38** keys; durable OFLE history (**87**) |
 
 **Kafka ceilings (code SoT):** ApiVersions **0–5**, Fetch **0–18**, Produce/Metadata
 **0–13**, ACL admin **0–3** (User resource v3, store-only); Fetch isolation
-READ_COMMITTED MVP (Phase 86). Matrix + honesty:
-[docs/KAFKA_COMPAT.md](./docs/KAFKA_COMPAT.md).
+READ_COMMITTED MVP (Phase 86); durable OffsetForLeaderEpoch history (Phase 87).
+Matrix + honesty: [docs/KAFKA_COMPAT.md](./docs/KAFKA_COMPAT.md).
 
 **Still deferred:** multi-language clients, chaos-mesh / cargo-fuzz corpus CI,
-Kafka control batches on the data log, real 2PC / prepared transactions, durable
-leader-epoch history.
+Kafka control batches on the data log, real 2PC / prepared transactions, real
+fetch sessions / DivergingEpoch.
 
 ### Networked client (library)
 

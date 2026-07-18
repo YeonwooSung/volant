@@ -46,10 +46,26 @@ When `acks=all`, if `|ISR| < min_insync_replicas`, the leader rejects the produc
 
 ### What Volant does **not** guarantee (Phase 6+)
 
-- Exactly-once produce/consume end-to-end (no Kafka EOS / control-marker `READ_COMMITTED`)
-- Kafka-style isolation or durable in-flight txn recovery (open txn crash ≡ abort); Phase 18 **does** provide multi-partition buffer-until-commit atomicity on a live broker
+- Exactly-once produce/consume end-to-end (Kafka control-batch wire on the data log still deferred; Phase **86** soft-marker `READ_COMMITTED` MVP is shipped)
+- Durable in-flight txn recovery that resumes open transactions (open txn crash ≡ **abort** via `__txn_markers`; write-through ranges are not rolled forward)
 - Linearizability of metadata during controller failover (brief windows of stale Metadata)
 - Durability if `min_insync_replicas=1` and that sole replica dies after ack
+- Full KRaft leader-epoch state machine (Phase **87** durable OFLE history is a soft JSON MVP)
+
+### Transactions (Phase 86 write-through)
+
+| Mode | Behavior |
+|------|----------|
+| Open txn produce | Appends to the log immediately; HWM advances; LSO held at first unstable offset |
+| EndTxn commit | Ranges become stable; LSO catches HWM when no other open txn |
+| EndTxn abort | Soft abort markers hide ranges under `READ_COMMITTED` / native committed-only fetch |
+| Crash with open writes | Open ranges promoted to aborted on reload |
+
+### Leader epochs (Phase 87)
+
+Per-partition `(epoch, start_offset)` history under `{data_dir}/__leader_epochs`.
+OffsetForLeaderEpoch returns transition end offsets for prior epochs; Metadata
+advertises the live leader epoch.
 
 ## Single-node mode
 

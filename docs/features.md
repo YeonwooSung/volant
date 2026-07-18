@@ -68,12 +68,22 @@ In-process `volant-stream`: map, filter, flat_map, reduce, windows, foreach.
 **In-memory state only**; at-least-once. No durable state store, no distributed
 workers.
 
+## Leader epochs (Phase 87)
+
+| Feature | Behavior |
+|---------|----------|
+| Durable history | `{data_dir}/__leader_epochs/state.json` — `(epoch, start_offset)` per partition |
+| OffsetForLeaderEpoch | Prior epochs → transition end offset; current / `-1` → HWM |
+| Metadata | Live `leader_epoch` (not always `-1`) |
+| Advance | Explicit bump / multi-node failover best-effort |
+
 ## Open limitations (native)
 
 - Multi-language clients deferred  
 - No Raft metadata / dynamic membership  
 - No Kafka control batches on the data log (soft markers only)  
 - No real 2PC / prepared transactions  
+- No Fetch DivergingEpoch / real fetch sessions  
 - ACL store is single-node file (no consensus)  
 - DeleteRecords does not fan out to cluster followers  
 - Compaction simpler than Kafka (no tombstone retention window)  

@@ -789,7 +789,8 @@ pub(crate) fn encode_metadata(broker: &Broker, src: &mut impl Buf, out: &mut Byt
                 out.put_i16(KafkaErrorCode::None.as_i16());
                 out.put_i32(p.partition_id.0 as i32);
                 out.put_i32(p.leader as i32);
-                out.put_i32(-1); // leader_epoch
+                // Phase 87: advertise live leader epoch (was always -1).
+                out.put_i32(p.leader_epoch as i32);
                 put_compact_array_len(out, p.replicas.len());
                 for r in &p.replicas {
                     out.put_i32(*r as i32);
@@ -843,7 +844,8 @@ pub(crate) fn encode_metadata(broker: &Broker, src: &mut impl Buf, out: &mut Byt
                 out.put_i32(p.partition_id.0 as i32);
                 out.put_i32(p.leader as i32);
                 if version >= 7 {
-                    out.put_i32(-1); // leader_epoch unknown
+                    // Phase 87: advertise live leader epoch (was always -1).
+                    out.put_i32(p.leader_epoch as i32);
                 }
                 out.put_i32(p.replicas.len() as i32);
                 for r in &p.replicas {

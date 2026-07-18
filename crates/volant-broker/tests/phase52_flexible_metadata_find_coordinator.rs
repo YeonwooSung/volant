@@ -148,7 +148,8 @@ async fn metadata_v9_flexible_roundtrip() {
         assert_eq!(src.get_i16(), 0);
         assert_eq!(src.get_i32(), i as i32);
         let _leader = src.get_i32();
-        assert_eq!(src.get_i32(), -1); // leader_epoch
+        // Phase 87: live leader epoch (0 at create).
+        assert_eq!(src.get_i32(), 0); // leader_epoch
         let n_rep = get_compact_array_len(&mut src).unwrap().unwrap();
         for _ in 0..n_rep {
             let _ = src.get_i32();

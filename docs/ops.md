@@ -146,12 +146,15 @@ volant-server \
 - **Transactions / isolation:** write-through + soft abort markers (Phase 86);
   `READ_COMMITTED` caps at LSO and filters aborted; `READ_UNCOMMITTED` sees all.
   Crash promotes open ranges to aborted via `__txn_markers`.
+- **Leader epochs:** durable history under `{data_dir}/__leader_epochs` (Phase 87);
+  OffsetForLeaderEpoch returns prior-epoch end offsets; Metadata advertises live
+  epoch. Not a full KRaft epoch state machine; no Fetch DivergingEpoch yet.
 - **ACLs:** Kafka ACL admin maps to Volant Phase 20/21 ACLs (LITERAL only;
   CreateAcls enables enforcement). Describe/Create/DeleteAcls **0–3**: v3 accepts
   Kafka **User** resource type (stored as `ResourceType::User`; not used on the
   produce/fetch authorize path; no SCRAM-admin gating).
 
-Deep dives: [PHASE23_SPEC.md](./PHASE23_SPEC.md) … [PHASE86_SPEC.md](./PHASE86_SPEC.md).
+Deep dives: [PHASE23_SPEC.md](./PHASE23_SPEC.md) … [PHASE87_SPEC.md](./PHASE87_SPEC.md).
 
 ## TLS (Phase 7 listen + Phase 9 verification / inter-broker)
 

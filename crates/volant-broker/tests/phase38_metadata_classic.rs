@@ -264,7 +264,8 @@ async fn metadata_v7_leader_epoch() {
     assert_eq!(src.get_i32(), 12);
     let p = parse_metadata(&mut src, 7);
     assert_eq!(p.throttle, Some(0));
-    assert_eq!(p.leader_epoch, Some(-1));
+    // Phase 87: Metadata advertises the live leader epoch (0 at create).
+    assert_eq!(p.leader_epoch, Some(0));
     assert_eq!(p.offline_empty, Some(true));
 
     server.abort();

@@ -30,6 +30,9 @@ use crate::producer_state::{
     partition_key, parse_partition_key, ProducerStateFile, ProducerStateStore, StoredBatch,
     StoredProducer,
 };
+use crate::leader_epoch::{
+    self, end_offset_for, ensure_entry, EpochStart, LeaderEpochStore, LeaderEpochsFile,
+};
 use crate::topic::Topic;
 use crate::topic_catalog::{CatalogTopic, TopicCatalogFile, TopicCatalogStore};
 use crate::topic_config::{TopicConfig, TopicConfigStore};
@@ -288,6 +291,10 @@ pub struct Broker {
     metrics_token: RwLock<Option<String>>,
     /// Durable SCRAM-SHA-256 user store (Phase 22).
     scram: crate::scram::ScramStore,
+    /// In-memory leader-epoch history: `(topic, partition) → sorted entries` (Phase 87).
+    leader_epochs: RwLock<HashMap<(String, u32), Vec<EpochStart>>>,
+    /// Durable leader-epoch store under `data_dir/__leader_epochs` (Phase 87).
+    leader_epoch_store: LeaderEpochStore,
 }
 
 impl Broker {
@@ -309,6 +316,8 @@ impl Broker {
             .expect("failed to open ACL store");
         let scram = crate::scram::ScramStore::open(&storage.data_dir)
             .expect("failed to open SCRAM store");
+        let leader_epoch_store = LeaderEpochStore::open(&storage.data_dir)
+            .expect("failed to open leader epoch store");
         let broker = Self {
             storage,
             topics: RwLock::new(HashMap::new()),
@@ -336,11 +345,15 @@ impl Broker {
             acls,
             metrics_token: RwLock::new(None),
             scram,
+            leader_epochs: RwLock::new(HashMap::new()),
+            leader_epoch_store,
         };
         broker
             .reload_single_node_topics()
             .expect("failed to reload single-node topic catalog");
         broker.load_txn_markers();
+        broker.load_leader_epochs();
+        broker.seed_missing_leader_epochs();
         broker
     }
 
@@ -385,6 +398,8 @@ impl Broker {
             .expect("failed to open ACL store");
         let scram = crate::scram::ScramStore::open(&storage.data_dir)
             .expect("failed to open SCRAM store");
+        let leader_epoch_store = LeaderEpochStore::open(&storage.data_dir)
+            .expect("failed to open leader epoch store");
         let broker = Self {
             storage,
             topics: RwLock::new(HashMap::new()),
@@ -412,10 +427,14 @@ impl Broker {
             acls,
             metrics_token: RwLock::new(None),
             scram,
+            leader_epochs: RwLock::new(HashMap::new()),
+            leader_epoch_store,
         };
         // Open local partitions from persisted assignment.
         broker.apply_local_assignment()?;
         broker.load_txn_markers();
+        broker.load_leader_epochs();
+        broker.seed_missing_leader_epochs();
         Ok(broker)
     }
 
@@ -1490,6 +1509,16 @@ impl Broker {
             .write()
             .insert(name.clone(), AtomicU64::new(0));
         self.topic_configs.save(name.as_str(), &topic_cfg)?;
+        // Seed epoch 0 @ start 0 for each new partition (Phase 87).
+        {
+            let mut epochs = self.leader_epochs.write();
+            for pid in 0..partitions {
+                let key = (name.as_str().to_owned(), pid);
+                let e = epochs.entry(key).or_default();
+                ensure_entry(e, 0, 0);
+            }
+        }
+        self.persist_leader_epochs();
         drop(topics);
         self.persist_topic_catalog()?;
         Ok(id)
@@ -1570,6 +1599,15 @@ impl Broker {
             )?;
             topics.insert(name.clone(), topic);
         }
+        {
+            let mut epochs = self.leader_epochs.write();
+            for pid in 0..partitions {
+                let key = (name.as_str().to_owned(), pid);
+                let e = epochs.entry(key).or_default();
+                ensure_entry(e, 0, 0);
+            }
+        }
+        self.persist_leader_epochs();
         self.rr_counters
             .write()
             .insert(name.clone(), AtomicU64::new(0));
@@ -1650,6 +1688,15 @@ impl Broker {
             &topic_cfg,
         )?;
         drop(topics);
+        {
+            let mut epochs = self.leader_epochs.write();
+            for pid in current..total_count {
+                let key = (name.as_str().to_owned(), pid);
+                let e = epochs.entry(key).or_default();
+                ensure_entry(e, 0, 0);
+            }
+        }
+        self.persist_leader_epochs();
         self.persist_topic_catalog()?;
         Ok(total_count)
     }
@@ -1742,6 +1789,15 @@ impl Broker {
                 &topic_cfg,
             )?;
         }
+        {
+            let mut epochs = self.leader_epochs.write();
+            for pid in current..total_count {
+                let key = (name.as_str().to_owned(), pid);
+                let e = epochs.entry(key).or_default();
+                ensure_entry(e, 0, 0);
+            }
+        }
+        self.persist_leader_epochs();
         Ok(total_count)
     }
 
@@ -2778,11 +2834,13 @@ impl Broker {
         }
         let live = cluster.membership.read().live_brokers();
 
+        // Collect epoch transitions so we can record history with local LEO.
+        let mut epoch_bumps: Vec<(String, u32, u32, u64)> = Vec::new();
         let mut changed = false;
         {
             let mut asg = cluster.assignment.write();
             for ta in asg.topics.values_mut() {
-                for pa in ta.partitions.values_mut() {
+                for (pid, pa) in ta.partitions.iter_mut() {
                     // Shrink ISR.
                     pa.isr.retain(|id| live.contains(id));
                     if pa.isr.is_empty() {
@@ -2792,10 +2850,19 @@ impl Broker {
                     if pa.leader == dead_id || !live.contains(&pa.leader) {
                         if let Some(new_leader) = elect_leader(&pa.replicas, &pa.isr, &live) {
                             pa.leader = new_leader;
-                            pa.leader_epoch = pa.leader_epoch.saturating_add(1);
+                            let new_epoch = pa.leader_epoch.saturating_add(1);
+                            pa.leader_epoch = new_epoch;
                             if !pa.isr.contains(&new_leader) {
                                 pa.isr.push(new_leader);
                             }
+                            let start = self
+                                .topics
+                                .read()
+                                .get(&TopicName::new(ta.name.as_str()))
+                                .and_then(|t| t.partitions.get(&PartitionId(*pid)))
+                                .map(|p| p.leo())
+                                .unwrap_or(0);
+                            epoch_bumps.push((ta.name.clone(), *pid, new_epoch, start));
                             changed = true;
                         }
                     }
@@ -2805,6 +2872,9 @@ impl Broker {
                 asg.generation = asg.generation.saturating_add(1);
                 save_assignment(&cluster.data_dir, &asg)?;
             }
+        }
+        for (topic, pid, new_epoch, start) in epoch_bumps {
+            self.record_epoch_start(&topic, pid, new_epoch, start);
         }
         if changed {
             self.apply_local_assignment()?;
@@ -2845,22 +2915,175 @@ impl Broker {
     ///
     /// Does not change the leader node id — only the epoch counter used for
     /// fencing (`FencedLeaderEpoch` / KIP-951 CurrentLeader).
+    ///
+    /// When `epoch` advances past the current value, records durable leader-epoch
+    /// history with start offset = current LEO (Phase 87).
     pub fn set_partition_leader_epoch(
         &self,
         topic: &TopicName,
         partition: PartitionId,
         epoch: u32,
     ) -> Result<()> {
-        let mut topics = self.topics.write();
-        let t = topics
-            .get_mut(topic)
-            .ok_or_else(|| Error::NotFound(format!("topic {}", topic.as_str())))?;
-        let part = t
-            .partitions
-            .get_mut(&partition)
-            .ok_or_else(|| Error::NotFound(format!("partition {partition}")))?;
-        part.leader_epoch = epoch;
+        let (old_epoch, leo) = {
+            let mut topics = self.topics.write();
+            let t = topics
+                .get_mut(topic)
+                .ok_or_else(|| Error::NotFound(format!("topic {}", topic.as_str())))?;
+            let part = t
+                .partitions
+                .get_mut(&partition)
+                .ok_or_else(|| Error::NotFound(format!("partition {partition}")))?;
+            let old = part.leader_epoch;
+            let leo = part.leo();
+            part.leader_epoch = epoch;
+            (old, leo)
+        };
+        // Ensure prior epoch is in history, then record the new epoch start.
+        if epoch > old_epoch {
+            self.ensure_epoch_entry(topic.as_str(), partition.0, old_epoch, 0);
+            self.record_epoch_start(topic.as_str(), partition.0, epoch, leo);
+        } else if epoch == old_epoch {
+            self.ensure_epoch_entry(topic.as_str(), partition.0, epoch, 0);
+        } else {
+            // Epoch regression (unusual): keep history, just set live epoch.
+            self.ensure_epoch_entry(topic.as_str(), partition.0, epoch, 0);
+        }
+        // Keep cluster assignment in sync when present.
+        if let Some(cluster) = &self.cluster {
+            let mut asg = cluster.assignment.write();
+            if let Some(ta) = asg.topics.get_mut(topic.as_str()) {
+                if let Some(pa) = ta.partitions.get_mut(&partition.0) {
+                    pa.leader_epoch = epoch;
+                }
+            }
+        }
         Ok(())
+    }
+
+    /// Resolve OffsetForLeaderEpoch end offset from durable history (Phase 87).
+    ///
+    /// Returns `(found_epoch, end_offset)` or `None` when the requested epoch is
+    /// strictly greater than the current partition epoch.
+    pub fn offset_for_leader_epoch(
+        &self,
+        topic: &str,
+        partition: u32,
+        requested_epoch: i32,
+    ) -> Option<(i32, i64)> {
+        let (current_epoch, hwm) = {
+            let topics = self.topics.read();
+            let t = topics.get(&TopicName::new(topic))?;
+            let part = t.partitions.get(&PartitionId(partition))?;
+            let hwm = if self.cluster.is_none() {
+                part.committed_hwm.max(part.leo())
+            } else {
+                part.committed_hwm
+            };
+            (part.leader_epoch, hwm)
+        };
+        // Ensure at least epoch-0 seed so lookups work on pre-Phase-87 data dirs.
+        self.ensure_epoch_entry(topic, partition, 0, 0);
+        let epochs = self.leader_epochs.read();
+        let entries = epochs
+            .get(&(topic.to_owned(), partition))
+            .map(|v| v.as_slice())
+            .unwrap_or(&[]);
+        end_offset_for(entries, current_epoch, hwm, requested_epoch)
+    }
+
+    fn load_leader_epochs(&self) {
+        let Ok(file) = self.leader_epoch_store.load() else {
+            return;
+        };
+        let mut map = self.leader_epochs.write();
+        for (key, entries) in file.partitions {
+            if let Some((topic, part)) = crate::producer_state::parse_partition_key(&key) {
+                let mut sorted = entries;
+                sorted.sort_by_key(|e| e.epoch);
+                map.insert((topic, part), sorted);
+            }
+        }
+    }
+
+    fn persist_leader_epochs(&self) {
+        let epochs = self.leader_epochs.read();
+        let mut file = LeaderEpochsFile::default();
+        for ((topic, part), entries) in epochs.iter() {
+            file.partitions.insert(
+                leader_epoch::partition_key(topic, *part),
+                entries.clone(),
+            );
+        }
+        let _ = self.leader_epoch_store.save(&file);
+    }
+
+    /// Seed epoch 0 @ 0 for any live partition missing history, and restore
+    /// live `Partition.leader_epoch` from the highest stored history entry
+    /// (single-node has no assignment file for epochs).
+    fn seed_missing_leader_epochs(&self) {
+        let mut dirty = false;
+        {
+            let mut topics = self.topics.write();
+            let mut epochs = self.leader_epochs.write();
+            for (name, t) in topics.iter_mut() {
+                for (pid, part) in t.partitions.iter_mut() {
+                    let key = (name.as_str().to_owned(), pid.0);
+                    let e = epochs.entry(key).or_default();
+                    if e.is_empty() {
+                        ensure_entry(e, 0, 0);
+                        dirty = true;
+                    }
+                    // Restore live epoch from durable history when history is ahead
+                    // (e.g. single-node restart after set_partition_leader_epoch).
+                    if let Some(max) = e.iter().map(|x| x.epoch).max() {
+                        if max > part.leader_epoch {
+                            part.leader_epoch = max;
+                        } else if part.leader_epoch > max {
+                            // Live epoch ahead of history (shouldn't happen after
+                            // set_partition_leader_epoch) — ensure an entry.
+                            ensure_entry(e, part.leader_epoch, part.leo());
+                            dirty = true;
+                        }
+                    }
+                }
+            }
+        }
+        if dirty {
+            self.persist_leader_epochs();
+        }
+    }
+
+    fn ensure_epoch_entry(&self, topic: &str, partition: u32, epoch: u32, start_offset: u64) {
+        let mut epochs = self.leader_epochs.write();
+        let e = epochs
+            .entry((topic.to_owned(), partition))
+            .or_default();
+        let before = e.len();
+        ensure_entry(e, epoch, start_offset);
+        let changed = e.len() != before;
+        drop(epochs);
+        if changed {
+            self.persist_leader_epochs();
+        }
+    }
+
+    fn record_epoch_start(&self, topic: &str, partition: u32, epoch: u32, start_offset: u64) {
+        let mut epochs = self.leader_epochs.write();
+        let e = epochs
+            .entry((topic.to_owned(), partition))
+            .or_default();
+        // Always ensure prior epoch 0 exists for a continuous chain.
+        ensure_entry(e, 0, 0);
+        let before_len = e.len();
+        let had = e.iter().any(|x| x.epoch == epoch);
+        if !had {
+            ensure_entry(e, epoch, start_offset);
+        }
+        let changed = e.len() != before_len || !had;
+        drop(epochs);
+        if changed {
+            self.persist_leader_epochs();
+        }
     }
 
     /// Whether a local partition log exists.

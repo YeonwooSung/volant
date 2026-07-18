@@ -128,13 +128,15 @@ docs for day-to-day reading: [ops](../ops.md), [consistency](../consistency.md),
 | 84 | ✅ | Fetch v14–18 — Kafka max; ReplicaState ignore; NodeEndpoints v16+ | [PHASE84_SPEC.md](../PHASE84_SPEC.md) |
 | 85 | ✅ | ACL admin v3 — User resource type; Describe/Create/DeleteAcls 0–3 Kafka max | [PHASE85_SPEC.md](../PHASE85_SPEC.md) |
 | 86 | ✅ | Write-through txn + soft-marker READ_COMMITTED (true LSO, aborted list MVP) | [PHASE86_SPEC.md](../PHASE86_SPEC.md) |
+| 87 | ✅ | Durable OffsetForLeaderEpoch history MVP + Metadata live leader_epoch | [PHASE87_SPEC.md](../PHASE87_SPEC.md) |
 
 ---
 
-## Still deferred (post–Phase 86)
+## Still deferred (post–Phase 87)
 
 - Multi-language clients
 - Chaos-mesh / cargo-fuzz corpus CI
 - Kafka control batches on the data log (soft markers only today)
 - Real 2PC / prepared transaction state
-- Durable OffsetForLeaderEpoch history / real fetch sessions / DivergingEpoch
+- Real fetch sessions / Fetch DivergingEpoch
+- Full KRaft epoch state machine / remote-log epochs

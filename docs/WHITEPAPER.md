@@ -6,7 +6,7 @@
 |---|---|
 | Version | 0.1.0 (Apache-2.0) |
 | Language | Rust 1.75+ |
-| Status | Phases 0–86 landed (product / git HEAD) |
+| Status | Phases 0–87 landed (product / git HEAD) |
 | Date | 2026-07-18 |
 
 ---
@@ -21,7 +21,7 @@ one CLI, Prometheus metrics, and optional multi-node ISR replication. A
 wire-protocol shim** reuses the same storage, groups, and security model for
 interop. The shim advertises **ApiVersions 0–5** and **Fetch 0–18** at Apache
 Kafka wire max for those keys, with empty feature tags and
-write-through transactions with soft READ_COMMITTED markers (Phase 86)—not full Kafka control-batch parity.
+write-through transactions with soft READ_COMMITTED markers (Phase 86)—not full Kafka control-batch parity—and durable OffsetForLeaderEpoch history (Phase 87 MVP).
 
 Volant is **not** a drop-in Apache Kafka replacement. It prioritizes sequential
 I/O, explicit complexity, and honest non-parity (especially around
@@ -179,6 +179,16 @@ Admin: list / describe / delete groups, delete offsets, lag metrics.
 Native Volant fetch remains **committed-only**. Kafka Fetch isolation is real for
 the MVP; Kafka control-batch wire bytes on the partition log remain deferred.
 
+### Leader epochs (Phase 87)
+
+| Capability | Status |
+|------------|--------|
+| Durable epoch → start-offset history | **Yes (MVP)** — `{data_dir}/__leader_epochs` |
+| OffsetForLeaderEpoch prior epochs | Transition end offset (not always HWM) |
+| Metadata `leader_epoch` | Live partition epoch |
+| Full KRaft epoch state machine | **No** |
+| Fetch DivergingEpoch | **No** (deferred) |
+
 ---
 
 ## 6. Security
@@ -201,7 +211,7 @@ Inter-broker uses shared-token Auth, not SCRAM. No GSSAPI / OAUTHBEARER.
 
 ## 7. Kafka compatibility shim
 
-Enable with `--kafka-listen host:port`. Phases **23–86** shipped classic then
+Enable with `--kafka-listen host:port`. Phases **23–87** shipped classic then
 flexible (KIP-482) coverage for the APIs modern clients negotiate most often
 (~38 keys in `SUPPORTED_APIS`).
 
@@ -221,13 +231,14 @@ flexible (KIP-482) coverage for the APIs modern clients negotiate most often
 **Auth on Kafka port:** SASL or principal `kafka-anonymous` (+ ACLs). Shared-token
 Auth applies only on the native `--listen` port.
 
-**Highlights (post–Phase 86):** deterministic TopicId UUIDs; KIP-951
+**Highlights (post–Phase 87):** deterministic TopicId UUIDs; KIP-951
 CurrentLeader on leader errors + Produce NodeEndpoints v10+ / Fetch
 NodeEndpoints v16+; KIP-890 txn max versions with ignored 2PC; FindCoordinator
 0–6 / AddOffsetsToTxn 0–4 without `TRANSACTION_ABORTABLE`; ApiVersions 0–5 with
 empty feature tags and ignored v5 ClusterId/NodeId (never `REBOOTSTRAP_REQUIRED`);
 Fetch **0–18** (Kafka max); ACL admin **0–3** (User resource storage only);
-write-through txn + soft READ_COMMITTED (LSO/aborted); compression codecs gzip/snappy/lz4/zstd on the wire.
+write-through txn + soft READ_COMMITTED (LSO/aborted); durable OffsetForLeaderEpoch
+history MVP + Metadata live leader_epoch; compression codecs gzip/snappy/lz4/zstd on the wire.
 
 ---
 
@@ -323,7 +334,7 @@ cargo run -p volant-server -- \
 | [tuning.md](./tuning.md) | Performance tuning |
 | [KAFKA_COMPAT.md](./KAFKA_COMPAT.md) | Current Kafka API matrix + honesty |
 | [features.md](./features.md) | Native features (post-core) |
-| [history/PHASE_HISTORY.md](./history/PHASE_HISTORY.md) | Phase 0–86 one-line index |
+| [history/PHASE_HISTORY.md](./history/PHASE_HISTORY.md) | Phase 0–87 one-line index |
 | [PHASE1_SPEC.md](./PHASE1_SPEC.md)–[PHASE6_SPEC.md](./PHASE6_SPEC.md) | Binding core specs |
 | [../ROADMAP.md](../ROADMAP.md) | Full roadmap + deferred work |
 | [../README.md](../README.md) | Quick start |

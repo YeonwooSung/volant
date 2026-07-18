@@ -21,6 +21,8 @@ pub mod cluster;
 pub mod group;
 /// Kafka wire protocol shim (Phase 23 MVP).
 pub mod kafka;
+/// Durable leader-epoch history for OffsetForLeaderEpoch (Phase 87).
+pub mod leader_epoch;
 pub mod metrics;
 /// Framed TCP server and inter-broker RPC (public for TLS accept path).
 pub mod net;
@@ -57,6 +59,7 @@ pub use topic_config::{
     TopicConfig, TopicConfigStore, KEY_CLEANUP_POLICY, KEY_RETENTION_BYTES, KEY_RETENTION_MS,
     KEY_SEGMENT_BYTES,
 };
+pub use leader_epoch::{EpochStart, LeaderEpochStore, LeaderEpochsFile};
 pub use kafka::serve_kafka_listener;
 pub use metrics::Metrics;
 pub use net::{run_metrics_server, run_server, serve_listener, start_background_tasks};

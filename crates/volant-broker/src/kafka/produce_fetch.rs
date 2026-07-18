@@ -1097,10 +1097,11 @@ pub(crate) fn encode_fetch_record_set(records: &[volant_core::Record], version: 
     }
 }
 
-/// OffsetForLeaderEpoch (API key 23) classic v0–3 / flexible v4 — Phase 39 / 63.
+/// OffsetForLeaderEpoch (API key 23) classic v0–3 / flexible v4 — Phase 39 / 63 / 87.
 ///
-/// Without epoch history, any requested epoch ≤ the current partition epoch
-/// (or -1 = latest) returns end_offset = HWM and the current leader epoch.
+/// With durable epoch history (Phase 87), prior epochs return the end offset at
+/// which that epoch closed (start of the next epoch). Current / `-1` still map
+/// to HWM. Unknown requested epochs above the live epoch remain UNKNOWN.
 pub(crate) fn encode_offset_for_leader_epoch(
     broker: &Broker,
     src: &mut impl Buf,
@@ -1294,7 +1295,6 @@ pub(crate) fn encode_offset_for_leader_epoch(
             };
 
             let current_epoch = pm.leader_epoch as i32;
-            let hwm = pm.hwm as i64;
 
             if p.current_leader_epoch != -1 {
                 if p.current_leader_epoch > current_epoch {
@@ -1327,8 +1327,26 @@ pub(crate) fn encode_offset_for_leader_epoch(
                 continue;
             }
 
-            // No epoch history: any eligible epoch maps to current HWM.
-            write_part(out, KafkaErrorCode::None.as_i16(), current_epoch, hwm);
+            // Phase 87: durable history for prior epochs; current / -1 → HWM.
+            match broker.offset_for_leader_epoch(t.name.as_str(), p.partition as u32, p.leader_epoch)
+            {
+                Some((found_epoch, end_offset)) => {
+                    write_part(
+                        out,
+                        KafkaErrorCode::None.as_i16(),
+                        found_epoch,
+                        end_offset,
+                    );
+                }
+                None => {
+                    write_part(
+                        out,
+                        KafkaErrorCode::UnknownLeaderEpoch.as_i16(),
+                        current_epoch,
+                        -1,
+                    );
+                }
+            }
         }
         if flex {
             put_empty_tag_buffer(out); // topic tags

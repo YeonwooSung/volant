@@ -1947,8 +1947,31 @@ data log); Fetch re-encode omits transactional attributes; aborted marker file
 not compacted with DeleteRecords; single-node coordinator; no 2PC.
 
 **Still deferred:** multi-lang clients, cargo-fuzz corpus CI, Kafka control
-batches on the data log, real 2PC / prepared transaction state, durable
-OffsetForLeaderEpoch history / real fetch sessions.
+batches on the data log, real 2PC / prepared transaction state, real fetch
+sessions / DivergingEpoch. Durable OFLE history closed by **Phase 87**.
+
+---
+
+### Phase 87 — Durable OffsetForLeaderEpoch history (MVP) ✅
+
+**Goal:** Persist per-partition leader-epoch → start-offset history so
+OffsetForLeaderEpoch returns correct end offsets for prior epochs (not always
+HWM), and advertise live leader epochs on Metadata.
+
+Binding: **[docs/PHASE87_SPEC.md](./docs/PHASE87_SPEC.md)**.
+
+- [x] Durable `{data_dir}/__leader_epochs/state.json` history
+- [x] Record history on epoch bump (`set_partition_leader_epoch`) + failover best-effort
+- [x] OffsetForLeaderEpoch: prior epochs → transition end; current/`-1` → HWM
+- [x] Metadata v7+/flex: live `leader_epoch` (not always `-1`)
+- [x] History survives restart; seed epoch 0 on topic create
+- [x] Integration tests (`phase87_leader_epoch_history`)
+
+**Honest limitations:** JSON MVP (not KRaft epoch SM); multi-node start offset
+best-effort from local LEO; no Fetch DivergingEpoch; no real fetch sessions.
+
+**Still deferred:** multi-lang clients, cargo-fuzz corpus CI, Kafka control
+batches on the data log, real 2PC, real fetch sessions / DivergingEpoch.
 
 ---
 
@@ -1975,18 +1998,18 @@ OffsetForLeaderEpoch history / real fetch sessions.
 | Storage | Page cache + OS | Explicit mmap + optional io_uring/O_DIRECT |
 | Stream processing | Kafka Streams / ksqlDB | In-process `volant-stream` operators |
 | Ops model | ZooKeeper/KRaft + heavy footprint | Single binary → small static ISR quorum |
-| Protocol | Kafka wire protocol | Native binary first; optional Kafka shim (`--kafka-listen`, Phases 23–86) |
+| Protocol | Kafka wire protocol | Native binary first; optional Kafka shim (`--kafka-listen`, Phases 23–87) |
 | Goal | Full ecosystem | Subset that is fast, small, and correct |
 
 Volant is **not** a drop-in Kafka replacement. It prioritizes a clean core; the
-optional Kafka wire shim is **shipped** (Phases 23–86) — see
+optional Kafka wire shim is **shipped** (Phases 23–87) — see
 [docs/KAFKA_COMPAT.md](./docs/KAFKA_COMPAT.md).
 
 ---
 
 ## Suggested implementation order (PRs)
 
-Phases **0–85 are shipped**. Historical PR order for the core:
+Phases **0–87 are shipped**. Historical PR order for the core:
 
 1. Phase 1 segment format + unit tests  
 2. Phase 1 recovery + retention  
@@ -1999,7 +2022,7 @@ Phases **0–85 are shipped**. Historical PR order for the core:
 9. Phase 6 replication prototype (2–3 nodes) ✅  
 10. Phase 7 metrics, TLS, packaging ✅  
 11. Phases 8–22 (redirect, groups, configs, txns, mTLS, ACLs, SCRAM) ✅  
-12. Phases 23–85 (Kafka wire shim surface) ✅  
+12. Phases 23–87 (Kafka wire shim surface) ✅  
 
 ---
 
@@ -2040,9 +2063,10 @@ cargo run -p volant-bench --release
 cargo test --workspace
 ```
 
-**Status (post–Phase 85):** core broker, ops (metrics / TLS / auth / SCRAM /
+**Status (post–Phase 87):** core broker, ops (metrics / TLS / auth / SCRAM /
 ACLs / Helm), and the Kafka wire shim are **shipped** (Fetch 0–18 Kafka max;
-ACL admin 0–3 with User resource). Still deferred: multi-language clients,
-full chaos-mesh suites, cargo-fuzz corpus CI, true control-marker
-`READ_COMMITTED`, real 2PC / prepared transactions. Details:
+ACL admin 0–3 with User resource; soft-marker `READ_COMMITTED`; durable OFLE
+history MVP). Still deferred: multi-language clients, full chaos-mesh suites,
+cargo-fuzz corpus CI, Kafka control batches on the data log, real 2PC /
+prepared transactions, real fetch sessions / DivergingEpoch. Details:
 [docs/KAFKA_COMPAT.md](./docs/KAFKA_COMPAT.md), [docs/ops.md](./docs/ops.md).

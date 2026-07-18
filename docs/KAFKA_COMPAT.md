@@ -1,8 +1,8 @@
 # Kafka compatibility matrix
 
 **Living document** for the optional Kafka wire shim (`--kafka-listen`).
-Ship history: Phases **23–86** (git HEAD product). Binding deep dives:
-`PHASE23_SPEC.md` … `PHASE86_SPEC.md`. Overview: [WHITEPAPER.md](./WHITEPAPER.md).
+Ship history: Phases **23–87** (git HEAD product). Binding deep dives:
+`PHASE23_SPEC.md` … `PHASE87_SPEC.md`. Overview: [WHITEPAPER.md](./WHITEPAPER.md).
 Semantic rows below describe **shipped** behavior.
 
 ## Enable
@@ -26,7 +26,7 @@ From `SUPPORTED_APIS` in `crates/volant-broker/src/kafka/mod.rs`:
 | 0 | Produce | 0–13 | Classic 0–8; flex v9+; TopicId v13; KIP-951 CurrentLeader v10+ |
 | 1 | Fetch | 0–18 | Classic 0–11; flex v12–18; TopicId v13+; isolation LSO/aborted (Phase 86); ReplicaState v15+ ignore; NodeEndpoints v16+; CurrentLeader tag v12+ |
 | 2 | ListOffsets | 0–11 | Flex v6+; specials v7–11; READ_COMMITTED latest = LSO (Phase 86) |
-| 3 | Metadata | 0–13 | Flex v9+; TopicId v10–13; top-level ErrorCode v13 |
+| 3 | Metadata | 0–13 | Flex v9+; TopicId v10–13; top-level ErrorCode v13; live leader_epoch (Phase 87) |
 | 8 | OffsetCommit | 0–10 | Flex v8+; TopicId v10 |
 | 9 | OffsetFetch | 0–10 | Flex v6+; multi-group v8; TopicId v10 |
 | 10 | FindCoordinator | 0–6 | Flex v3; batch v4–6; no share key_type; no TRANSACTION_ABORTABLE |
@@ -42,7 +42,7 @@ From `SUPPORTED_APIS` in `crates/volant-broker/src/kafka/mod.rs`:
 | 20 | DeleteTopics | 0–6 | Flex v4+; ErrorMessage v5; TopicId v6 |
 | 21 | DeleteRecords | 0–2 | Flex v2 |
 | 22 | InitProducerId | 0–6 | Flex v2+; v6 Enable2Pc ignored; OngoingTxn* = -1 |
-| 23 | OffsetForLeaderEpoch | 0–4 | Flex v4; no durable epoch history → HWM |
+| 23 | OffsetForLeaderEpoch | 0–4 | Flex v4; durable epoch history MVP (Phase 87); prior epochs → transition end |
 | 24 | AddPartitionsToTxn | 0–5 | Flex v3; batch v4–5 |
 | 25 | AddOffsetsToTxn | 0–4 | Flex v3+; v4 = v3 wire (no TRANSACTION_ABORTABLE) |
 | 26 | EndTxn | 0–5 | Flex v3+; v5 pid/epoch echo |
@@ -70,6 +70,7 @@ From `SUPPORTED_APIS` in `crates/volant-broker/src/kafka/mod.rs`:
 | Flexible | 51–66 | KIP-482 compact + modern admin |
 | TopicId / modern | 67–85 | UUID topics, ListOffsets specials, KIP-890, KIP-951, group admin, CreatePartitions v3, FindCoordinator v5–6, AddOffsetsToTxn v4, ApiVersions 0–5, Fetch 0–18, ACL admin User resource v3 |
 | READ_COMMITTED | 86 | Write-through txn + soft abort markers; true LSO; Fetch isolation filtering |
+| Leader epochs | 87 | Durable OffsetForLeaderEpoch history MVP; Metadata live leader_epoch |
 
 ## Semantic honesty (open)
 
@@ -79,7 +80,7 @@ These are **current** product facts, not temporary docs lag:
 |------|------------|
 | Transactions | **Write-through** (Phase 86): data on log immediately; soft abort markers (not Kafka control batches); LSO may be `<` HWM while open; READ_COMMITTED filters aborted + caps at LSO; READ_UNCOMMITTED sees unstable/aborted; TxnOffsetCommit still deferred until EndTxn; markers in `__txn_markers` (crash ≡ abort open ranges) |
 | 2PC | InitProducerId v6 flags parsed **and ignored**; OngoingTxn* always -1 |
-| Epochs | No durable epoch history; eligible → HWM; leader_epoch often -1 |
+| Epochs | **Durable history MVP** (Phase 87): `{data_dir}/__leader_epochs`; prior epochs return transition end offsets; Metadata advertises live epoch; not a full KRaft epoch state machine; no Fetch DivergingEpoch |
 | TopicId | Deterministic UUID from Volant id (`volant` + zeros + u32), not KRaft random |
 | Groups | Coordinator-driven assignment; GroupType always `classic`; states Stable/Empty |
 | Fetch sessions | Session header accepted; no real incremental sessions |
