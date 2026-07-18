@@ -20,7 +20,7 @@
 - Multi-broker coordinated clocks / multi-broker 2PC
 - Multi-lang clients / fuzz CI
 - Sparse durable config → **closed by Phase 102** / BROKER name=`node_id` validation → **closed by Phase 103**
-- Marker GC / empty-AddPartitions control markers
+- Marker GC → **closed by Phase 104** / empty-AddPartitions control markers → **closed by Phase 105**
 - Full Kafka broker catalog
 
 ## Design (honest MVP)
@@ -108,4 +108,4 @@ start_background_tasks:
 - Marker compaction / GC with DeleteRecords
 - Multi-broker config broadcast / multi-broker 2PC
 - Multi-lang clients / cargo-fuzz corpus CI
-- Empty-AddPartitions control markers
+- Empty-AddPartitions control markers → **closed by Phase 105**

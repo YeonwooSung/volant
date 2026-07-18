@@ -146,17 +146,17 @@ docs for day-to-day reading: [ops](../ops.md), [consistency](../consistency.md),
 | 102 | ✅ | Sparse durable broker config (only altered keys; env re-applies after DELETE) | [PHASE102_SPEC.md](../PHASE102_SPEC.md) |
 | 103 | ✅ | Validate BROKER resource name against local `node_id` (empty or decimal match) | [PHASE103_SPEC.md](../PHASE103_SPEC.md) |
 | 104 | ✅ | Aborted soft-marker GC with DeleteRecords / retention / load (MVP) | [PHASE104_SPEC.md](../PHASE104_SPEC.md) |
+| 105 | ✅ | Control batches for empty AddPartitions (MVP) | [PHASE105_SPEC.md](../PHASE105_SPEC.md) |
 
 ---
 
-## Still deferred (post–Phase 104)
+## Still deferred (post–Phase 105)
 
 - Multi-language clients
 - Chaos-mesh / cargo-fuzz corpus CI
 - Full multi-broker 2PC coordinator / full KIP-890 abortable surface
 - Multi-broker session affinity / durable sessions / byte-identical response cache
 - Full KRaft epoch state machine / remote-log epochs
-- Control batches for empty AddPartitions without data
 - Full Kafka broker catalog / KRaft DynamicBrokerConfig
 - Graceful sweeper shutdown / join on server stop
 - Multi-broker BROKER config fan-out (Phase 103 is local validation only)

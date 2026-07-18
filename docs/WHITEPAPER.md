@@ -192,7 +192,8 @@ Admin: list / describe / delete groups, delete offsets, lag metrics.
 Native Volant fetch remains **committed-only**. Kafka Fetch isolation is real for
 the MVP. EndTxn COMMIT/ABORT control batches are on the partition log (Phase 89);
 crash≡abort of open write-through also appends ABORT control batches (Phase 98).
-Empty AddPartitions-only partitions still omit control markers.
+Empty AddPartitions-only partitions also get control markers (Phase 105;
+control-only — no fake soft data ranges).
 
 ### Leader epochs (Phase 87)
 
@@ -240,7 +241,7 @@ flexible (KIP-482) coverage for the APIs modern clients negotiate most often
 |-------|----------|---------------|
 | Produce / Fetch / Metadata | TopicId, flex framing | Produce/Metadata **0–13**; Fetch **0–18** (Kafka max) |
 | Groups / offsets | Join–Leave, commit/fetch | Coordinator-driven; GroupType always `classic` |
-| Txn wire | Init / Add* / End / TxnOffsetCommit | Write-through + soft markers; EndTxn + crash-promote control batches (Phase 89/98); prepared 2PC MVP (Phase 90) + prepared/open timeout (Phase 92/93) + TRANSACTION_ABORTABLE subset (Phase 94) + max timeout clamp (Phase 96) + background sweeper (Phase 97/101) + soft-marker GC (Phase 104) |
+| Txn wire | Init / Add* / End / TxnOffsetCommit | Write-through + soft markers; EndTxn + crash-promote control batches (Phase 89/98) including empty AddPartitions (Phase 105); prepared 2PC MVP (Phase 90) + prepared/open timeout (Phase 92/93) + TRANSACTION_ABORTABLE subset (Phase 94) + max timeout clamp (Phase 96) + background sweeper (Phase 97/101) + soft-marker GC (Phase 104) |
 | Admin / configs / ACLs | CreateTopics, CreatePartitions, ACLs | CreatePartitions max **3**; ACL admin **0–3** (User resource v3); LITERAL only |
 | Meta / auth | ApiVersions, FindCoordinator, SASL | ApiVersions **0–5** (Kafka max); SASL PLAIN/SCRAM |
 
@@ -294,7 +295,7 @@ Volant deliberately does **not** claim production Kafka parity. Open gaps:
 
 1. Multi-language clients (Rust only)
 2. Dynamic membership / Raft metadata quorum
-3. Multi-broker 2PC; control batches for empty AddPartitions-only partitions
+3. Multi-broker 2PC (empty AddPartitions control batches closed by Phase 105)
 4. Full Kafka API surface beyond advertised keys; multi-broker session affinity / durable sessions
 5. Full KRaft epoch state machine (durable history is MVP)
 6. Kafka cooperative-sticky assignor **protocol** parity (native JoinGroup revoke list exists)

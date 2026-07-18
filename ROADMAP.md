@@ -2248,13 +2248,14 @@ Binding: **[docs/PHASE98_SPEC.md](./docs/PHASE98_SPEC.md)**.
 - [x] `load_txn_markers`: promote open→aborted **+** ABORT control per written partition
 - [x] Epoch resolution: stored → producer_state best-effort → skip control
 - [x] Idempotent: second reload with empty open does not re-append
-- [x] Empty open (no write-through) invents no control batch
+- [x] Empty open (no write-through) invents no control batch (Phase 98; empty
+      AddPartitions membership control → **closed by Phase 105**)
 - [x] EndTxn path unchanged; isolation rules unchanged
 - [x] Integration tests (`phase98_crash_abort_control`)
 
-**Honest limitations:** no control for empty AddPartitions-only; pre-98 open
-files without epoch and without producer_state may still lack control; rare
-partial mid-append re-append; coordinator_epoch always 0; no multi-broker
+**Honest limitations:** empty AddPartitions-only control → **closed by Phase 105**;
+pre-98 open files without epoch and without producer_state may still lack control;
+rare partial mid-append re-append; coordinator_epoch always 0; no multi-broker
 marker consensus; no historical reconstruction of pre-98 crash-aborts.
 
 **Still deferred:** multi-lang clients, cargo-fuzz corpus CI, multi-broker 2PC /
@@ -2289,7 +2290,8 @@ broker catalog / KRaft DynamicBrokerConfig.
 **Still deferred:** multi-lang clients, cargo-fuzz corpus CI, multi-broker 2PC /
 session affinity / durable sessions, durable dynamic broker config file →
 **closed by Phase 100**, marker compaction/GC → **closed by Phase 104**, graceful sweeper enable on
-0→>0 interval → **closed by Phase 101**, empty-AddPartitions control markers.
+0→>0 interval → **closed by Phase 101**, empty-AddPartitions control markers →
+**closed by Phase 105**.
 
 ---
 
@@ -2315,10 +2317,11 @@ Alter write → **closed by Phase 102**; sweeper task spawn at boot with interva
 → **closed by Phase 101**; no multi-broker fan-out / full Kafka catalog / KRaft.
 
 **Still deferred:** multi-lang clients, cargo-fuzz corpus CI, multi-broker 2PC /
-session affinity / durable sessions, marker compaction/GC → **closed by Phase 104**, graceful sweeper
-enable on 0→>0 interval → **closed by Phase 101**, empty-AddPartitions control
-markers, validate BROKER resource name against `node_id` → **closed by Phase 103**,
-sparse durable file (env re-apply after DELETE) → **closed by Phase 102**.
+session affinity / durable sessions, marker compaction/GC → **closed by Phase 104**,
+graceful sweeper enable on 0→>0 interval → **closed by Phase 101**,
+empty-AddPartitions control markers → **closed by Phase 105**, validate BROKER
+resource name against `node_id` → **closed by Phase 103**, sparse durable file
+(env re-apply after DELETE) → **closed by Phase 102**.
 
 ---
 
@@ -2342,9 +2345,10 @@ duplicate `start_background_tasks` still spawns duplicate tasks; six BROKER
 knobs only; resource name still ignored → **closed by Phase 103**.
 
 **Still deferred:** multi-lang clients, cargo-fuzz corpus CI, multi-broker 2PC /
-session affinity / durable sessions, marker compaction/GC → **closed by Phase 104**, empty-AddPartitions
-control markers, validate BROKER resource name against `node_id` → **closed by Phase 103**,
-sparse durable file (env re-apply after DELETE) → **closed by Phase 102**, graceful sweeper
+session affinity / durable sessions, marker compaction/GC → **closed by Phase 104**,
+empty-AddPartitions control markers → **closed by Phase 105**, validate BROKER
+resource name against `node_id` → **closed by Phase 103**, sparse durable file
+(env re-apply after DELETE) → **closed by Phase 102**, graceful sweeper
 shutdown / join on stop.
 
 ---
@@ -2368,9 +2372,10 @@ restart; legacy Phase 100 full snapshots pin keys until DELETE; no multi-broker
 fan-out / full Kafka catalog; BROKER name still ignored → **closed by Phase 103**.
 
 **Still deferred:** multi-lang clients, cargo-fuzz corpus CI, multi-broker 2PC /
-session affinity / durable sessions, marker compaction/GC → **closed by Phase 104**, empty-AddPartitions
-control markers, validate BROKER resource name against `node_id` → **closed by Phase 103**,
-graceful sweeper shutdown / join on stop.
+session affinity / durable sessions, marker compaction/GC → **closed by Phase 104**,
+empty-AddPartitions control markers → **closed by Phase 105**, validate BROKER
+resource name against `node_id` → **closed by Phase 103**, graceful sweeper
+shutdown / join on stop.
 
 ---
 
@@ -2393,8 +2398,8 @@ name still accepted for client convenience; six knobs / sparse durable unchanged
 
 **Still deferred:** multi-lang clients, cargo-fuzz corpus CI, multi-broker 2PC /
 session affinity / durable sessions, marker compaction/GC → **closed by Phase 104**,
-empty-AddPartitions control markers, multi-broker BROKER config fan-out, graceful
-sweeper shutdown / join on stop.
+empty-AddPartitions control markers → **closed by Phase 105**, multi-broker
+BROKER config fan-out, graceful sweeper shutdown / join on stop.
 
 ---
 
@@ -2417,8 +2422,33 @@ Binding: **[docs/PHASE104_SPEC.md](./docs/PHASE104_SPEC.md)**.
 control-batch rewrite; single-node marker store.
 
 **Still deferred:** multi-lang clients, cargo-fuzz corpus CI, multi-broker 2PC /
-session affinity / durable sessions, empty-AddPartitions control markers,
-multi-broker BROKER config fan-out, graceful sweeper shutdown / join on stop.
+session affinity / durable sessions, empty-AddPartitions control markers →
+**closed by Phase 105**, multi-broker BROKER config fan-out, graceful sweeper
+shutdown / join on stop.
+
+---
+
+### Phase 105 — Control batches for empty AddPartitions (MVP) ✅
+
+**Goal:** Track AddPartitionsToTxn membership even without produce; on EndTxn
+commit/abort and crash≡abort open promote, append Kafka control batches for
+empty partitions too (control-only — no fake soft data ranges).
+
+Binding: **[docs/PHASE105_SPEC.md](./docs/PHASE105_SPEC.md)**.
+
+- [x] `OpenTxn.added` membership + `record_txn_added_partitions`
+- [x] Persist `open_added` under `__txn_markers`; prepared snapshot carries `added`
+- [x] `append_txn_control_markers` = written ∪ added (dedup)
+- [x] Soft abort remains written-only (empty → control only)
+- [x] Crash promote extends Phase 98 for `open_added`
+- [x] Integration tests (`phase105_empty_add_partitions_control`)
+
+**Honest limitations:** pre-105 snapshots lack `open_added`; native produce
+without AddPartitions still relies on written ranges; no multi-broker consensus.
+
+**Still deferred:** multi-lang clients, cargo-fuzz corpus CI, multi-broker 2PC /
+session affinity / durable sessions, multi-broker BROKER config fan-out,
+graceful sweeper shutdown / join on stop.
 
 ---
 
@@ -2445,18 +2475,18 @@ multi-broker BROKER config fan-out, graceful sweeper shutdown / join on stop.
 | Storage | Page cache + OS | Explicit mmap + optional io_uring/O_DIRECT |
 | Stream processing | Kafka Streams / ksqlDB | In-process `volant-stream` operators |
 | Ops model | ZooKeeper/KRaft + heavy footprint | Single binary → small static ISR quorum |
-| Protocol | Kafka wire protocol | Native binary first; optional Kafka shim (`--kafka-listen`, Phases 23–104) |
+| Protocol | Kafka wire protocol | Native binary first; optional Kafka shim (`--kafka-listen`, Phases 23–105) |
 | Goal | Full ecosystem | Subset that is fast, small, and correct |
 
 Volant is **not** a drop-in Kafka replacement. It prioritizes a clean core; the
-optional Kafka wire shim is **shipped** (Phases 23–104) — see
+optional Kafka wire shim is **shipped** (Phases 23–105) — see
 [docs/KAFKA_COMPAT.md](./docs/KAFKA_COMPAT.md).
 
 ---
 
 ## Suggested implementation order (PRs)
 
-Phases **0–104 are shipped**. Historical PR order for the core:
+Phases **0–105 are shipped**. Historical PR order for the core:
 
 1. Phase 1 segment format + unit tests  
 2. Phase 1 recovery + retention  
@@ -2469,7 +2499,7 @@ Phases **0–104 are shipped**. Historical PR order for the core:
 9. Phase 6 replication prototype (2–3 nodes) ✅  
 10. Phase 7 metrics, TLS, packaging ✅  
 11. Phases 8–22 (redirect, groups, configs, txns, mTLS, ACLs, SCRAM) ✅  
-12. Phases 23–104 (Kafka wire shim surface + marker GC) ✅  
+12. Phases 23–105 (Kafka wire shim surface + marker GC + empty-AddPartitions control) ✅  
 
 ---
 
@@ -2510,16 +2540,17 @@ cargo run -p volant-bench --release
 cargo test --workspace
 ```
 
-**Status (post–Phase 104):** core broker, ops (metrics / TLS / auth / SCRAM /
+**Status (post–Phase 105):** core broker, ops (metrics / TLS / auth / SCRAM /
 ACLs / Helm), and the Kafka wire shim are **shipped** (Fetch 0–18 Kafka max;
 ACL admin 0–3 with User resource; soft-marker `READ_COMMITTED` with **marker GC**
 on DeleteRecords/retention/load; durable OFLE history; Fetch DivergingEpoch +
 sessions with omit-unchanged incremental + idle TTL/max; Kafka control batches
-on EndTxn **and** crash≡abort open promote; prepared 2PC MVP; prepared + open
-txn timeouts + broker max timeout clamp; background txn/session sweeper + richer
-expiry metrics (always-spawn; 0→>0 without restart); BROKER Describe/AlterConfigs
-with **sparse** durable restart restore and resource name empty-or-local-`node_id`).
+on EndTxn **and** crash≡abort open promote **including empty AddPartitions**;
+prepared 2PC MVP; prepared + open txn timeouts + broker max timeout clamp;
+background txn/session sweeper + richer expiry metrics (always-spawn; 0→>0
+without restart); BROKER Describe/AlterConfigs with **sparse** durable restart
+restore and resource name empty-or-local-`node_id`).
 Still deferred: multi-language clients, full chaos-mesh suites, cargo-fuzz corpus
-CI, multi-broker session affinity, multi-broker 2PC, empty-AddPartitions control
-markers, multi-broker BROKER config fan-out, graceful sweeper join on stop.
+CI, multi-broker session affinity, multi-broker 2PC, multi-broker BROKER config
+fan-out, graceful sweeper join on stop.
 Details: [docs/KAFKA_COMPAT.md](./docs/KAFKA_COMPAT.md), [docs/ops.md](./docs/ops.md).

@@ -25,7 +25,7 @@
 - Multi-lang clients, cargo-fuzz CI
 - Omit-unchanged fetch session cache → **closed by Phase 91 (MVP)**
 - Writing control batches for partitions that were AddPartitionsToTxn'd but never
-  produced to (MVP: only partitions with write-through ranges)
+  produced to → **closed by Phase 105** (membership tracked; control on EndTxn/crash)
 - Reconstructing missing control batches for crash≡abort of open txns that never
   reached EndTxn → **closed by Phase 98** (open promote also appends ABORT control)
 
@@ -90,7 +90,7 @@ Control batches are **never compressed**.
 
 ## Honest limitations
 
-- Control markers only for partitions with write-through data (not empty AddPartitions)
+- Control markers for empty AddPartitions → **closed by Phase 105**
 - Crash≡abort control batches closed by **Phase 98** (pre-98 gap: soft markers only)
 - Fetch re-encode still omits producer metadata on **data** batches
 - Coordinator epoch always 0; no transaction log / multi-broker marker consensus

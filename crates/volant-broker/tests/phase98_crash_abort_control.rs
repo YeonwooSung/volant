@@ -239,10 +239,14 @@ fn unit_crash_reload_appends_abort_control() {
     let _ = std::fs::remove_dir_all(&dir);
 }
 
-/// Empty AddPartitions-only (no write-through) still produces no control batch
-/// on crash promote (open list has no ranges to promote).
+/// begin_txn only (no AddPartitions membership, no write-through) still produces
+/// no control batch on crash promote — nothing was registered on the txn.
+///
+/// Phase 105 covers the AddPartitions-membership path (control for empty added
+/// partitions) in `phase105_empty_add_partitions_control.rs`. This test remains
+/// the guard for "open with zero membership invents nothing."
 #[test]
-fn unit_add_partitions_only_no_control_on_crash() {
+fn unit_begin_only_no_control_on_crash() {
     let dir = temp_dir("p98", "add-only");
     {
         let broker = Broker::new(StorageConfig {
@@ -252,8 +256,8 @@ fn unit_add_partitions_only_no_control_on_crash() {
         broker.create_topic("t", 1).unwrap();
         let (pid, epoch) = broker.init_producer_id_with_txn("txn-empty");
         assert_eq!(broker.begin_txn(pid, epoch), 0);
-        // No buffer_txn_produce — open markers file has empty open list (or
-        // no written ranges). Crash ≡ nothing to promote.
+        // No record_txn_added_partitions, no buffer_txn_produce — open markers
+        // file has empty open + open_added. Crash ≡ nothing to promote.
     }
     let broker = Broker::new(StorageConfig {
         data_dir: dir.clone(),
@@ -270,7 +274,7 @@ fn unit_add_partitions_only_no_control_on_crash() {
         .unwrap();
     assert!(
         recs.iter().all(|r| !is_txn_control_record(r)),
-        "empty AddPartitions/open without writes must not invent control batches"
+        "begin_txn without AddPartitions/writes must not invent control batches"
     );
     let _ = std::fs::remove_dir_all(&dir);
 }

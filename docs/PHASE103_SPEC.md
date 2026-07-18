@@ -19,7 +19,7 @@
 - Multi-broker config broadcast / proxy to other node ids
 - Full Kafka DynamicBrokerConfig / KRaft catalog
 - Marker GC / DeleteRecords
-- Empty AddPartitions control markers
+- Empty AddPartitions control markers → **closed by Phase 105**
 - Graceful sweeper join on stop
 - Multi-lang clients / fuzz CI / multi-broker 2PC
 
@@ -99,6 +99,6 @@ Helper: `broker_resource_name_matches(node_id, name)` in
 
 - Marker compaction / GC with DeleteRecords → **shipped as Phase 104**
 - Graceful sweeper shutdown / join on server stop
-- Empty-AddPartitions control markers
+- Empty-AddPartitions control markers → **closed by Phase 105**
 - Multi-broker config broadcast / multi-broker 2PC
 - Multi-lang clients / cargo-fuzz corpus CI

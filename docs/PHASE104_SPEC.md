@@ -21,7 +21,7 @@
 - Rewriting / compacting Kafka control batches on the data log
 - Truncating partially-overlapping markers (keep whole marker if any overlap)
 - Multi-broker marker consensus / fan-out
-- Empty AddPartitions control markers
+- Empty AddPartitions control markers → **closed by Phase 105**
 - Graceful sweeper join on stop
 - Multi-lang clients / fuzz CI / multi-broker 2PC
 
@@ -109,6 +109,6 @@ for tests/ops.
 ## Phase 105 ideas
 
 - Graceful sweeper shutdown / join on server stop
-- Empty-AddPartitions control markers
+- Empty-AddPartitions control markers → **closed by Phase 105**
 - Multi-broker config fan-out / multi-broker 2PC
 - Multi-lang clients / cargo-fuzz corpus CI

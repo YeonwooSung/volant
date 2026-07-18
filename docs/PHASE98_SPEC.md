@@ -13,7 +13,8 @@
    control batch (soft abort remains).
 3. Isolation unchanged: READ_COMMITTED filters aborted data; control batches
    visible under RU/RC per Phase 89; native committed-only hides control markers.
-4. Empty AddPartitions-only (no write-through ranges) still no control batch.
+4. Empty AddPartitions-only (no write-through ranges) still no control batch in
+   Phase 98 → **closed by Phase 105** (membership + `open_added` persistence).
 5. **Idempotent reload:** only append when promoting open→aborted; open list is
    cleared after promotion so a second restart does not re-append forever.
 6. Tests (`phase98_*.rs`) + living docs honesty.
@@ -22,7 +23,7 @@
 
 - Multi-broker marker consensus
 - Multi-lang / fuzz CI
-- Control batches for empty AddPartitions without data
+- Control batches for empty AddPartitions without data → **closed by Phase 105**
 - Full KRaft txn log
 - Reconstructing control batches for pre-existing aborted soft markers that
   never got EndTxn control frames before Phase 98 shipped
@@ -90,7 +91,7 @@ After step 4, a subsequent restart sees empty open → no re-append.
 | Crash with open write-through | Soft promote open→aborted **+** ABORT control per written partition |
 | Second restart after promote | Soft markers only reload; **no** extra control batches |
 | EndTxn abort / commit | Unchanged (Phase 89 dual-write on finalize) |
-| Empty open (AddPartitions only, no produce) | Nothing to promote; no control batch |
+| Empty open (AddPartitions only, no produce) | Phase 98: nothing; **Phase 105**: ABORT control via `open_added` |
 | Pre-98 open snapshot, pid still in producer_state | Soft abort + ABORT control (best-effort epoch) |
 | Pre-98 open snapshot, pid unknown | Soft abort only (no control batch) |
 | Fetch RU/RC | Control batches visible; aborted data filtered under RC |
@@ -102,13 +103,14 @@ After step 4, a subsequent restart sees empty open → no re-append.
    aborted list non-empty; READ_COMMITTED hides data, shows control
 2. Second reload does not duplicate control markers
 3. EndTxn abort/commit paths unchanged (single control per finalize)
-4. Empty open (no written ranges) invents no control batch
+4. Empty open (no written ranges) invents no control batch in Phase 98;
+   empty **AddPartitions membership** control closed by **Phase 105**
 5. Legacy open markers without epoch still recover via producer_state when possible
 6. `cargo test` green for phase86 + phase89 + phase98 + prior broker phase tests
 
 ## Honest limitations
 
-- Control markers only for partitions with write-through data (not empty AddPartitions)
+- Control markers for empty AddPartitions → **closed by Phase 105**
 - Pre-98 open files without epoch and without producer_state may still lack control batches
 - Partial crash mid-control-append before open list is cleared could theoretically
   re-append on next restart (MVP; rare; soft markers remain correct)
@@ -118,8 +120,8 @@ After step 4, a subsequent restart sees empty open → no re-append.
 
 ## Phase 99 ideas
 
-- Control batches for empty AddPartitions (coordinator-only partitions)
-- Marker compaction / GC with DeleteRecords
+- Control batches for empty AddPartitions (coordinator-only partitions) → **closed by Phase 105**
+- Marker compaction / GC with DeleteRecords → **closed by Phase 104**
 - Stronger crash-promote idempotency (e.g. promote flag / content-hash before append)
 - Admin / DescribeConfigs for txn timeout + sweep knobs → **closed by Phase 99**
 - Multi-broker marker consensus / KRaft-shaped txn log

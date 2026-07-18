@@ -187,11 +187,28 @@ struct StoredTxnRange {
     end_offset: u64,
 }
 
+/// Durable AddPartitions membership without write-through data (Phase 105).
+///
+/// Persisted so crash≡abort can still append ABORT control batches for empty
+/// added partitions. Never promoted to soft aborted ranges (nothing to filter).
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+struct StoredAddedPartition {
+    producer_id: u64,
+    /// Producer epoch at add time. Absent on malformed/legacy entries.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    producer_epoch: Option<u16>,
+    topic: String,
+    partition: u32,
+}
+
 /// On-disk soft marker snapshot under `{data_dir}/__txn_markers/state.json`.
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 struct TxnMarkersFile {
     #[serde(default)]
     open: Vec<StoredTxnRange>,
+    /// Phase 105: AddPartitions membership with no written ranges yet.
+    #[serde(default)]
+    open_added: Vec<StoredAddedPartition>,
     #[serde(default)]
     aborted: Vec<StoredTxnRange>,
 }
@@ -200,7 +217,8 @@ struct TxnMarkersFile {
 ///
 /// In-flight ranges are also mirrored under `{data_dir}/__txn_markers` so a
 /// crash promotes them to aborted (crash ≡ abort) and Phase 98 appends ABORT
-/// control batches using the stored epoch.
+/// control batches using the stored epoch. Phase 105 also persists empty
+/// AddPartitions membership (`open_added`) for control-only crash promote.
 #[derive(Debug, Default, Clone)]
 struct OpenTxn {
     /// Unix epoch milliseconds when this open txn was created (Phase 93).
@@ -210,6 +228,10 @@ struct OpenTxn {
     opened_at_ms: i64,
     /// Producer epoch at begin (Phase 98; persisted on open marker ranges).
     producer_epoch: u16,
+    /// Partitions registered via AddPartitionsToTxn (Phase 105), including
+    /// those that never received write-through produces. Used for control
+    /// batches on EndTxn / crash; does **not** create soft abort ranges.
+    added: Vec<(String, u32)>,
     /// Log ranges written while the txn is open (write-through).
     written: Vec<TxnWrittenRange>,
     /// Sequences accepted inside this txn (not yet committed to `partitions`).
@@ -267,6 +289,9 @@ struct StoredPreparedTxn {
     /// Unix ms when prepared; `0` / missing → treated as load-time (Phase 92).
     #[serde(default)]
     prepared_at_ms: i64,
+    /// Phase 105: AddPartitions membership (may be empty-only).
+    #[serde(default)]
+    added: Vec<(String, u32)>,
     #[serde(default)]
     written: Vec<StoredPreparedWritten>,
     #[serde(default)]
@@ -1226,6 +1251,39 @@ impl Broker {
             return 0;
         }
         self.begin_txn(producer_id, producer_epoch)
+    }
+
+    /// Record partitions successfully added via AddPartitionsToTxn (Phase 105).
+    ///
+    /// Membership is tracked even when no produce follows, so EndTxn and
+    /// crash≡abort can append Kafka control batches for those partitions.
+    /// Soft abort markers are **not** created for empty (no write-through)
+    /// partitions. Idempotent: re-adding the same (topic, partition) is a no-op.
+    ///
+    /// Returns protocol error code (`0` = ok). Caller must already have opened
+    /// the txn via [`Self::ensure_txn_open`] / [`Self::begin_txn`].
+    pub fn record_txn_added_partitions(
+        &self,
+        producer_id: u64,
+        partitions: &[(String, u32)],
+    ) -> u16 {
+        if partitions.is_empty() {
+            return 0;
+        }
+        {
+            let mut open = self.open_txns.lock();
+            let Some(txn) = open.get_mut(&producer_id) else {
+                return ErrorCode::InvalidTxnState as u16;
+            };
+            for (topic, part) in partitions {
+                let key = (topic.clone(), *part);
+                if !txn.added.iter().any(|(t, p)| t == topic && p == part) {
+                    txn.added.push(key);
+                }
+            }
+        }
+        self.persist_txn_markers();
+        0
     }
 
     /// Whether this producer currently has an open (non-prepared) transaction.
@@ -2191,6 +2249,7 @@ impl Broker {
                     open: OpenTxn {
                         opened_at_ms: 0, // not used once prepared
                         producer_epoch: s.producer_epoch,
+                        added: s.added,
                         written,
                         pending,
                         deferred_offsets: s.deferred_offsets,
@@ -2240,6 +2299,7 @@ impl Broker {
                     producer_epoch: prep.producer_epoch,
                     commit: prep.commit,
                     prepared_at_ms: prep.prepared_at_ms,
+                    added: prep.open.added.clone(),
                     written,
                     pending,
                     deferred_offsets: prep.open.deferred_offsets.clone(),
@@ -2279,8 +2339,9 @@ impl Broker {
         self.persist_txn_markers();
     }
 
-    /// Append one Kafka-style control marker per partition that had write-through
-    /// ranges (Phase 89 dual-write with soft markers).
+    /// Append one Kafka-style control marker per partition that participated in
+    /// the txn (Phase 89 dual-write with soft markers; Phase 105 includes empty
+    /// AddPartitions membership with no write-through data).
     fn append_txn_control_markers(
         &self,
         producer_id: u64,
@@ -2300,6 +2361,18 @@ impl Broker {
             let topic = TopicName::new(r.topic.clone());
             let _ = self.produce_one(&topic, PartitionId(r.partition), msg);
             let _ = self.flush(&topic, PartitionId(r.partition));
+        }
+        // Phase 105: control-only for AddPartitions membership without data.
+        for (topic_name, partition) in &txn.added {
+            let key = (topic_name.clone(), *partition);
+            if seen.contains_key(&key) {
+                continue;
+            }
+            seen.insert(key, ());
+            let msg = txn_control_message(marker_type, producer_id, producer_epoch);
+            let topic = TopicName::new(topic_name.clone());
+            let _ = self.produce_one(&topic, PartitionId(*partition), msg);
+            let _ = self.flush(&topic, PartitionId(*partition));
         }
     }
 
@@ -2385,6 +2458,9 @@ impl Broker {
     /// restarts: only the open list is promoted (and then cleared on persist),
     /// so a second load sees empty `open` and does not re-append.
     ///
+    /// Phase 105: empty AddPartitions membership (`open_added`) also gets
+    /// ABORT control batches (no soft markers — nothing to filter).
+    ///
     /// Phase 104: after load, drop aborted markers fully below each partition's
     /// current log start (self-heal after crash / older files).
     fn load_txn_markers(&self) {
@@ -2410,6 +2486,8 @@ impl Broker {
                     });
             }
             // Crash recovery: open ranges → aborted soft markers.
+            // open_added (Phase 105 empty membership) is intentionally omitted:
+            // control-only; no soft range to promote.
             for m in &file.open {
                 aborted
                     .entry((m.topic.clone(), m.partition))
@@ -2421,9 +2499,10 @@ impl Broker {
                     });
             }
         }
-        // Phase 98: dual-write ABORT control batches for crash-promoted opens.
-        if !file.open.is_empty() {
-            self.append_crash_abort_control_markers(&file.open);
+        // Phase 98/105: dual-write ABORT control for crash-promoted opens
+        // (written ranges + empty AddPartitions membership).
+        if !file.open.is_empty() || !file.open_added.is_empty() {
+            self.append_crash_abort_control_markers(&file.open, &file.open_added);
         }
         // Phase 104: drop markers entirely below current log start.
         let dropped = self.gc_stale_aborted_markers_all();
@@ -2435,15 +2514,20 @@ impl Broker {
         }
     }
 
-    /// Append ABORT control markers for open ranges promoted on crash recovery
-    /// (Phase 98). One marker per (producer_id, topic, partition).
+    /// Append ABORT control markers for open ranges / empty membership promoted
+    /// on crash recovery (Phase 98 + Phase 105). One marker per
+    /// (producer_id, topic, partition).
     ///
     /// Epoch resolution order:
     /// 1. `producer_epoch` stored on the open marker (Phase 98 snapshots)
     /// 2. Live producer state epoch (best-effort for pre-98 files)
-    /// 3. Skip control batch (soft abort still applied; honesty gap)
-    fn append_crash_abort_control_markers(&self, open: &[StoredTxnRange]) {
-        // Group written ranges by producer_id; track epoch per pid.
+    /// 3. Skip control batch (soft abort still applied for written ranges)
+    fn append_crash_abort_control_markers(
+        &self,
+        open: &[StoredTxnRange],
+        open_added: &[StoredAddedPartition],
+    ) {
+        // Group written ranges + empty membership by producer_id; track epoch.
         let mut by_pid: HashMap<u64, (Option<u16>, OpenTxn)> = HashMap::new();
         for m in open {
             let entry = by_pid.entry(m.producer_id).or_insert_with(|| {
@@ -2466,6 +2550,24 @@ impl Broker {
                 base_sequence: 0,
                 count: 0,
             });
+        }
+        for m in open_added {
+            let entry = by_pid.entry(m.producer_id).or_insert_with(|| {
+                (
+                    m.producer_epoch,
+                    OpenTxn {
+                        producer_epoch: m.producer_epoch.unwrap_or(0),
+                        ..OpenTxn::default()
+                    },
+                )
+            });
+            if entry.0.is_none() {
+                entry.0 = m.producer_epoch;
+            }
+            let key = (m.topic.clone(), m.partition);
+            if !entry.1.added.iter().any(|(t, p)| t == &key.0 && *p == key.1) {
+                entry.1.added.push(key);
+            }
         }
         for (pid, (stored_epoch, txn)) in by_pid {
             let epoch = match stored_epoch {
@@ -2503,6 +2605,23 @@ impl Broker {
                         partition: r.partition,
                         first_offset: r.first_offset,
                         end_offset: r.end_offset,
+                    });
+                }
+                // Phase 105: empty membership only — skip partitions that already
+                // have write-through ranges (those are covered by `open`).
+                for (topic, part) in &txn.added {
+                    let has_written = txn
+                        .written
+                        .iter()
+                        .any(|r| r.topic == *topic && r.partition == *part);
+                    if has_written {
+                        continue;
+                    }
+                    file.open_added.push(StoredAddedPartition {
+                        producer_id: pid,
+                        producer_epoch: Some(txn.producer_epoch),
+                        topic: topic.clone(),
+                        partition: *part,
                     });
                 }
             }
@@ -4618,6 +4737,10 @@ fn topics_from_open(txn: &OpenTxn) -> Vec<(String, Vec<i32>)> {
             .push(b.partition as i32);
     }
     for (topic, part) in txn.pending.keys() {
+        map.entry(topic.clone()).or_default().push(*part as i32);
+    }
+    // Phase 105: include empty AddPartitions membership.
+    for (topic, part) in &txn.added {
         map.entry(topic.clone()).or_default().push(*part as i32);
     }
     let mut topics: Vec<(String, Vec<i32>)> = map

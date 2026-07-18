@@ -351,6 +351,9 @@ fn write_add_partitions_flat_response(
     let cluster_denied = cluster_write_denied(broker, principal);
     let open_err = open_txn_error(broker, txn.producer_id, txn.producer_epoch, cluster_denied);
 
+    // Phase 105: record successful membership for control batches (even with no produce).
+    let mut ok_parts: Vec<(String, u32)> = Vec::new();
+
     out.put_i32(0); // throttle
     if flex {
         put_compact_array_len(out, txn.topics.len());
@@ -366,13 +369,17 @@ fn write_add_partitions_flat_response(
         }
         for &partition in &t.partitions {
             out.put_i32(partition);
-            out.put_i16(partition_error_for_add(
+            let err = partition_error_for_add(
                 broker,
                 principal,
                 cluster_denied,
                 open_err,
                 &t.name,
-            ));
+            );
+            out.put_i16(err);
+            if err == 0 && partition >= 0 {
+                ok_parts.push((t.name.clone(), partition as u32));
+            }
             if flex {
                 put_empty_tag_buffer(out);
             }
@@ -383,6 +390,9 @@ fn write_add_partitions_flat_response(
     }
     if flex {
         put_empty_tag_buffer(out);
+    }
+    if !ok_parts.is_empty() {
+        let _ = broker.record_txn_added_partitions(txn.producer_id, &ok_parts);
     }
 }
 
@@ -451,24 +461,33 @@ fn encode_add_partitions_batch(
     for txn in &txns {
         put_compact_string(out, &txn.txn_id);
         let open_err = open_txn_error(broker, txn.producer_id, txn.producer_epoch, cluster_denied);
+        // Phase 105: record successful membership for control batches.
+        let mut ok_parts: Vec<(String, u32)> = Vec::new();
         put_compact_array_len(out, txn.topics.len());
         for t in &txn.topics {
             put_compact_string(out, &t.name);
             put_compact_array_len(out, t.partitions.len());
             for &partition in &t.partitions {
                 out.put_i32(partition);
-                out.put_i16(partition_error_for_add(
+                let err = partition_error_for_add(
                     broker,
                     principal,
                     cluster_denied,
                     open_err,
                     &t.name,
-                ));
+                );
+                out.put_i16(err);
+                if err == 0 && partition >= 0 {
+                    ok_parts.push((t.name.clone(), partition as u32));
+                }
                 put_empty_tag_buffer(out);
             }
             put_empty_tag_buffer(out);
         }
         put_empty_tag_buffer(out);
+        if !ok_parts.is_empty() {
+            let _ = broker.record_txn_added_partitions(txn.producer_id, &ok_parts);
+        }
     }
     put_empty_tag_buffer(out);
 }
