@@ -50,7 +50,8 @@ shim: [KAFKA_COMPAT.md](./KAFKA_COMPAT.md).
 | Abort | Soft markers hide ranges (native + READ_COMMITTED); data stays on log for READ_UNCOMMITTED |
 | Deferred offsets | Txn offset commits apply on commit only |
 | Crash | Open write-through ranges ≡ abort (persisted `__txn_markers`) |
-| READ_COMMITTED | MVP: LSO filtering + aborted list (soft markers, not control batches) |
+| READ_COMMITTED | MVP: LSO filtering + aborted list (soft markers SoT) |
+| Control batches (Phase 89) | EndTxn COMMIT/ABORT magic-2 control RecordBatches on log |
 
 ## Security (19–22)
 
@@ -91,7 +92,8 @@ workers.
 
 - Multi-language clients deferred  
 - No Raft metadata / dynamic membership  
-- No Kafka control batches on the data log (soft markers only)  
+- No control batch for crash≡abort without EndTxn; no real 2PC  
+
 - No real 2PC / prepared transactions  
 - Fetch sessions not durable / multi-broker sticky; no omit-unchanged cache  
 - ACL store is single-node file (no consensus)  

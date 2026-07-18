@@ -1,8 +1,8 @@
 # Kafka compatibility matrix
 
 **Living document** for the optional Kafka wire shim (`--kafka-listen`).
-Ship history: Phases **23–87** (git HEAD product). Binding deep dives:
-`PHASE23_SPEC.md` … `PHASE87_SPEC.md`. Overview: [WHITEPAPER.md](./WHITEPAPER.md).
+Ship history: Phases **23–89** (git HEAD product). Binding deep dives:
+`PHASE23_SPEC.md` … `PHASE89_SPEC.md`. Overview: [WHITEPAPER.md](./WHITEPAPER.md).
 Semantic rows below describe **shipped** behavior.
 
 ## Enable
@@ -72,6 +72,7 @@ From `SUPPORTED_APIS` in `crates/volant-broker/src/kafka/mod.rs`:
 | READ_COMMITTED | 86 | Write-through txn + soft abort markers; true LSO; Fetch isolation filtering |
 | Leader epochs | 87 | Durable OffsetForLeaderEpoch history MVP; Metadata live leader_epoch |
 | Fetch sessions / DivergingEpoch | 88 | Process-local sessions (create/forgotten/invalid); DivergingEpoch tag 0 on truncation |
+| Control batches | 89 | EndTxn COMMIT/ABORT control RecordBatches on partition log (dual-write with soft markers) |
 
 ## Semantic honesty (open)
 
@@ -79,7 +80,7 @@ These are **current** product facts, not temporary docs lag:
 
 | Area | Limitation |
 |------|------------|
-| Transactions | **Write-through** (Phase 86): data on log immediately; soft abort markers (not Kafka control batches); LSO may be `<` HWM while open; READ_COMMITTED filters aborted + caps at LSO; READ_UNCOMMITTED sees unstable/aborted; TxnOffsetCommit still deferred until EndTxn; markers in `__txn_markers` (crash ≡ abort open ranges) |
+| Transactions | **Write-through** (Phase 86) + **control batches** (Phase 89): data on log immediately; soft markers still SoT for LSO/aborted list/crash recovery; EndTxn appends Kafka-style COMMIT/ABORT control batches (magic 2 attrs 0x30) per written partition; crash≡abort of open txn may lack control batch; TxnOffsetCommit still deferred until EndTxn |
 | 2PC | InitProducerId v6 flags parsed **and ignored**; OngoingTxn* always -1 |
 | Epochs | **Durable history MVP** (Phase 87): `{data_dir}/__leader_epochs`; prior epochs return transition end offsets; Metadata advertises live epoch; not a full KRaft epoch state machine; Fetch **DivergingEpoch** on truncation (Phase 88) |
 | TopicId | Deterministic UUID from Volant id (`volant` + zeros + u32), not KRaft random |

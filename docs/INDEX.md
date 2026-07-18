@@ -31,7 +31,7 @@ Start here. Prefer living docs over individual phase ship records.
 
 | Document | Purpose |
 |----------|---------|
-| [history/PHASE_HISTORY.md](./history/PHASE_HISTORY.md) | One-line index for phases 0–88 |
+| [history/PHASE_HISTORY.md](./history/PHASE_HISTORY.md) | One-line index for phases 0–89 |
 | [PHASE7_SPEC.md](./PHASE7_SPEC.md) … [PHASE88_SPEC.md](./PHASE88_SPEC.md) | Per-phase ship records (deep dive) |
 | [history/archive/](./history/archive/) | Implementation plans & reviews (archaeology) |
 
@@ -52,17 +52,17 @@ Start here. Prefer living docs over individual phase ship records.
 | Protocol implementer | PHASE1–6 binding specs |
 | Roadmap / deferred | ROADMAP end sections |
 
-## Compaction note (2026-07-18, post–Phase 88 ship)
+## Compaction note (2026-07-18, post–Phase 89 ship)
 
-Living docs match **git HEAD product** (`SUPPORTED_APIS`, last feature commit Phase **88**):
+Living docs match **git HEAD product** (`SUPPORTED_APIS`, last feature commit Phase **89**):
 
-- **Status ceiling:** Phases **0–88**; Kafka shim **23–88** (**38** keys)
+- **Status ceiling:** Phases **0–89**; Kafka shim **23–89** (**38** keys)
 - **Kafka SoT:** [KAFKA_COMPAT.md](./KAFKA_COMPAT.md) — matrix + semantic honesty
 - **WHITEPAPER:** architecture + positioning; no full API matrix
-- **Binding core:** PHASE1–6; **ship records:** PHASE7–88 via [PHASE_HISTORY](./history/PHASE_HISTORY.md)
+- **Binding core:** PHASE1–6; **ship records:** PHASE7–89 via [PHASE_HISTORY](./history/PHASE_HISTORY.md)
 - **README / ops:** compact bands + ops table (not per-phase diaries)
-- **Txn honesty (shipped):** write-through + soft markers; true LSO; READ_COMMITTED MVP
+- **Txn honesty (shipped):** write-through + soft markers + EndTxn control batches (Phase 89)
 - **Epoch honesty (shipped):** durable OFLE history MVP; Metadata live leader_epoch; Fetch DivergingEpoch
 - **Fetch sessions (shipped MVP):** process-local create/forgotten/errors; full data always
-- **Still deferred (product):** multi-lang, chaos/fuzz corpus CI, Kafka control batches on
-  data log, real 2PC, omit-unchanged session cache / multi-broker affinity
+- **Still deferred (product):** multi-lang, chaos/fuzz corpus CI, real 2PC,
+  omit-unchanged session cache / multi-broker affinity

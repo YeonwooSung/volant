@@ -1,6 +1,6 @@
 # Phase history index
 
-Ship records for **phases 0–88**. Binding core contracts are
+Ship records for **phases 0–89**. Binding core contracts are
 **[PHASE1_SPEC](../PHASE1_SPEC.md)–[PHASE6_SPEC](../PHASE6_SPEC.md)**. Living
 docs for day-to-day reading: [ops](../ops.md), [consistency](../consistency.md),
 [tuning](../tuning.md), [KAFKA_COMPAT](../KAFKA_COMPAT.md),
@@ -130,14 +130,15 @@ docs for day-to-day reading: [ops](../ops.md), [consistency](../consistency.md),
 | 86 | ✅ | Write-through txn + soft-marker READ_COMMITTED (true LSO, aborted list MVP) | [PHASE86_SPEC.md](../PHASE86_SPEC.md) |
 | 87 | ✅ | Durable OffsetForLeaderEpoch history MVP + Metadata live leader_epoch | [PHASE87_SPEC.md](../PHASE87_SPEC.md) |
 | 88 | ✅ | Fetch DivergingEpoch + real fetch sessions (MVP) | [PHASE88_SPEC.md](../PHASE88_SPEC.md) |
+| 89 | ✅ | Kafka control batches on the data log (COMMIT/ABORT dual-write) | [PHASE89_SPEC.md](../PHASE89_SPEC.md) |
 
 ---
 
-## Still deferred (post–Phase 88)
+## Still deferred (post–Phase 89)
 
 - Multi-language clients
 - Chaos-mesh / cargo-fuzz corpus CI
-- Kafka control batches on the data log (soft markers only today)
 - Real 2PC / prepared transaction state
 - Omit-unchanged incremental fetch cache / multi-broker session affinity
 - Full KRaft epoch state machine / remote-log epochs
+- Control batches for empty AddPartitions / crash open-txn without EndTxn

@@ -6,7 +6,7 @@
 |---|---|
 | Version | 0.1.0 (Apache-2.0) |
 | Language | Rust 1.75+ |
-| Status | Phases 0–87 landed (product / git HEAD) |
+| Status | Phases 0–89 landed (product / git HEAD) |
 | Date | 2026-07-18 |
 
 ---
@@ -21,7 +21,10 @@ one CLI, Prometheus metrics, and optional multi-node ISR replication. A
 wire-protocol shim** reuses the same storage, groups, and security model for
 interop. The shim advertises **ApiVersions 0–5** and **Fetch 0–18** at Apache
 Kafka wire max for those keys, with empty feature tags and
-write-through transactions with soft READ_COMMITTED markers (Phase 86)—not full Kafka control-batch parity—durable OffsetForLeaderEpoch history (Phase 87 MVP), and Fetch DivergingEpoch + process-local fetch sessions (Phase 88 MVP).
+write-through transactions with soft READ_COMMITTED markers (Phase 86) and
+Kafka-style COMMIT/ABORT control batches on EndTxn (Phase 89), durable
+OffsetForLeaderEpoch history (Phase 87 MVP), and Fetch DivergingEpoch +
+process-local fetch sessions (Phase 88 MVP).
 
 Volant is **not** a drop-in Apache Kafka replacement. It prioritizes sequential
 I/O, explicit complexity, and honest non-parity (especially around
@@ -171,7 +174,7 @@ Admin: list / describe / delete groups, delete offsets, lag metrics.
 | Multi-partition atomic produce | **Write-through** to log; LSO holds until EndTxn |
 | Deferred offset commits | Applied only on commit |
 | Crash of open txn | ≡ **abort** (open ranges → soft markers via `__txn_markers`) |
-| Control markers | Soft markers only (not Kafka control batches on the data log) |
+| Control markers | Soft markers (isolation SoT) + Kafka control batches on EndTxn (Phase 89) |
 | `READ_COMMITTED` / LSO | **Yes (MVP)** — LSO may be `<` HWM; aborted filtered; aborted list non-empty |
 | `READ_UNCOMMITTED` | Sees unstable + aborted-on-log data |
 | Real 2PC / prepared transactions | **No** (Kafka wire fields ignored) |
@@ -232,7 +235,7 @@ flexible (KIP-482) coverage for the APIs modern clients negotiate most often
 **Auth on Kafka port:** SASL or principal `kafka-anonymous` (+ ACLs). Shared-token
 Auth applies only on the native `--listen` port.
 
-**Highlights (post–Phase 88):** deterministic TopicId UUIDs; KIP-951
+**Highlights (post–Phase 89):** deterministic TopicId UUIDs; KIP-951
 CurrentLeader on leader errors + Produce NodeEndpoints v10+ / Fetch
 NodeEndpoints v16+; KIP-890 txn max versions with ignored 2PC; FindCoordinator
 0–6 / AddOffsetsToTxn 0–4 without `TRANSACTION_ABORTABLE`; ApiVersions 0–5 with
@@ -272,7 +275,7 @@ Volant deliberately does **not** claim production Kafka parity. Open gaps:
 
 1. Multi-language clients (Rust only)
 2. Dynamic membership / Raft metadata quorum
-3. Kafka control batches on the data log; real 2PC / prepared transactions
+3. Real 2PC / prepared transactions; control batches for crash-without-EndTxn
 4. Full Kafka API surface beyond advertised keys; omit-unchanged fetch session cache / multi-broker affinity
 5. Full KRaft epoch state machine (durable history is MVP)
 6. Kafka cooperative-sticky assignor **protocol** parity (native JoinGroup revoke list exists)
@@ -335,7 +338,7 @@ cargo run -p volant-server -- \
 | [tuning.md](./tuning.md) | Performance tuning |
 | [KAFKA_COMPAT.md](./KAFKA_COMPAT.md) | Current Kafka API matrix + honesty |
 | [features.md](./features.md) | Native features (post-core) |
-| [history/PHASE_HISTORY.md](./history/PHASE_HISTORY.md) | Phase 0–87 one-line index |
+| [history/PHASE_HISTORY.md](./history/PHASE_HISTORY.md) | Phase 0–89 one-line index |
 | [PHASE1_SPEC.md](./PHASE1_SPEC.md)–[PHASE6_SPEC.md](./PHASE6_SPEC.md) | Binding core specs |
 | [../ROADMAP.md](../ROADMAP.md) | Full roadmap + deferred work |
 | [../README.md](../README.md) | Quick start |

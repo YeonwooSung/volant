@@ -1998,8 +1998,32 @@ always full record data (no omit-unchanged); no session TTL/eviction metrics;
 DivergingEpoch from local history only.
 
 **Still deferred:** multi-lang clients, cargo-fuzz corpus CI, Kafka control
-batches on the data log, real 2PC, omit-unchanged incremental caching,
-multi-broker session affinity.
+batches on the data log (closed by **Phase 89**), real 2PC, omit-unchanged
+incremental caching, multi-broker session affinity.
+
+---
+
+### Phase 89 — Kafka control batches on the data log (MVP) ✅
+
+**Goal:** On EndTxn commit/abort (and fence), append Kafka-style magic-2
+**control RecordBatch**(es) (COMMIT/ABORT) to each partition with write-through
+ranges, dual-written with Phase 86 soft markers.
+
+Binding: **[docs/PHASE89_SPEC.md](./docs/PHASE89_SPEC.md)**.
+
+- [x] Control marker Volant records + Fetch v4+ control batch re-encode
+- [x] EndTxn commit → COMMIT; abort/fence → ABORT per written partition
+- [x] Soft markers remain SoT for LSO / aborted list / crash recovery
+- [x] READ_COMMITTED includes control batches; filters aborted app data
+- [x] MessageSet Fetch omits control; native fetch hides control markers
+- [x] Integration tests (`phase89_control_batches`)
+
+**Honest limitations:** no control batch for crash≡abort without EndTxn; no
+markers for AddPartitions-only partitions; coordinator_epoch always 0; no
+multi-broker txn log / 2PC.
+
+**Still deferred:** multi-lang clients, cargo-fuzz corpus CI, real 2PC,
+omit-unchanged fetch cache, multi-broker session affinity.
 
 ---
 
@@ -2026,18 +2050,18 @@ multi-broker session affinity.
 | Storage | Page cache + OS | Explicit mmap + optional io_uring/O_DIRECT |
 | Stream processing | Kafka Streams / ksqlDB | In-process `volant-stream` operators |
 | Ops model | ZooKeeper/KRaft + heavy footprint | Single binary → small static ISR quorum |
-| Protocol | Kafka wire protocol | Native binary first; optional Kafka shim (`--kafka-listen`, Phases 23–88) |
+| Protocol | Kafka wire protocol | Native binary first; optional Kafka shim (`--kafka-listen`, Phases 23–89) |
 | Goal | Full ecosystem | Subset that is fast, small, and correct |
 
 Volant is **not** a drop-in Kafka replacement. It prioritizes a clean core; the
-optional Kafka wire shim is **shipped** (Phases 23–88) — see
+optional Kafka wire shim is **shipped** (Phases 23–89) — see
 [docs/KAFKA_COMPAT.md](./docs/KAFKA_COMPAT.md).
 
 ---
 
 ## Suggested implementation order (PRs)
 
-Phases **0–88 are shipped**. Historical PR order for the core:
+Phases **0–89 are shipped**. Historical PR order for the core:
 
 1. Phase 1 segment format + unit tests  
 2. Phase 1 recovery + retention  
@@ -2050,7 +2074,7 @@ Phases **0–88 are shipped**. Historical PR order for the core:
 9. Phase 6 replication prototype (2–3 nodes) ✅  
 10. Phase 7 metrics, TLS, packaging ✅  
 11. Phases 8–22 (redirect, groups, configs, txns, mTLS, ACLs, SCRAM) ✅  
-12. Phases 23–88 (Kafka wire shim surface) ✅  
+12. Phases 23–89 (Kafka wire shim surface) ✅  
 
 ---
 
@@ -2091,11 +2115,10 @@ cargo run -p volant-bench --release
 cargo test --workspace
 ```
 
-**Status (post–Phase 88):** core broker, ops (metrics / TLS / auth / SCRAM /
+**Status (post–Phase 89):** core broker, ops (metrics / TLS / auth / SCRAM /
 ACLs / Helm), and the Kafka wire shim are **shipped** (Fetch 0–18 Kafka max;
 ACL admin 0–3 with User resource; soft-marker `READ_COMMITTED`; durable OFLE
-history; Fetch DivergingEpoch + process-local fetch sessions MVP). Still
+history; Fetch DivergingEpoch + sessions; Kafka control batches on EndTxn). Still
 deferred: multi-language clients, full chaos-mesh suites, cargo-fuzz corpus CI,
-Kafka control batches on the data log, real 2PC / prepared transactions,
-omit-unchanged session cache. Details:
+real 2PC / prepared transactions, omit-unchanged session cache. Details:
 [docs/KAFKA_COMPAT.md](./docs/KAFKA_COMPAT.md), [docs/ops.md](./docs/ops.md).

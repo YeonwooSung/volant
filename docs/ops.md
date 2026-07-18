@@ -143,7 +143,8 @@ volant-server \
   env `zstd` maps to lz4 for Fetch v0–3. Log storage remains uncompressed.
 - **Topic config keys** (Describe/AlterConfigs): `retention.ms`, `retention.bytes`,
   `segment.bytes`, `cleanup.policy` (`delete`|`compact`).
-- **Transactions / isolation:** write-through + soft abort markers (Phase 86);
+- **Transactions / isolation:** write-through + soft abort markers (Phase 86) +
+  EndTxn control batches (Phase 89);
   `READ_COMMITTED` caps at LSO and filters aborted; `READ_UNCOMMITTED` sees all.
   Crash promotes open ranges to aborted via `__txn_markers`.
 - **Leader epochs:** durable history under `{data_dir}/__leader_epochs` (Phase 87);
@@ -234,7 +235,7 @@ specs. Ops-critical notes only:
 | Groups | list / describe / delete-offsets; static membership `group_instance_id` |
 | Topic configs | `retention.ms` / `retention.bytes` / `segment.bytes` / `cleanup.policy` |
 | DeleteRecords | Truncates sealed segments; no follower fan-out |
-| Transactions (shipped) | **Write-through + soft markers** (Phase 86): LSO/aborted filtering; crash ≡ abort open ranges; not Kafka control batches |
+| Transactions (shipped) | **Write-through + soft markers** (Phase 86) + **control batches** on EndTxn (Phase 89); LSO/aborted filtering; crash ≡ abort open ranges |
 | mTLS | Feature `tls`; `--tls-client-ca` / optional `--tls-client-allow` |
 | ACLs | `--acl-enable`; durable `__acls/acls.json`; User resource is Kafka admin store-only |
 | Compaction | `cleanup.policy=compact` on **sealed** segments; empty value = tombstone |
@@ -260,7 +261,7 @@ curl -s -H "Authorization: Bearer $VOLANT_METRICS_TOKEN" \
 
 - Multi-language clients
 - Full chaos-mesh suites / cargo-fuzz **corpus CI** (scaffold under `fuzz/` only)
-- Kafka control batches on the data log / real 2PC / prepared transactions
+- Real 2PC / prepared transactions
 - Omit-unchanged fetch session cache; multi-broker session affinity
 
 Full list: [ROADMAP.md](../ROADMAP.md).

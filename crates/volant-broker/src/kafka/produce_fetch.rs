@@ -10,8 +10,10 @@ use crate::acl::{AclOperation, ResourceType};
 use crate::broker::{Broker, IdempotentCheck};
 
 use super::codec::{
-    decode_produce_batches, encode_message_set, encode_message_set_compressed, encode_record_batch,
-    encode_record_batch_compressed, get_bytes, get_compact_array_len, get_compact_bytes,
+    decode_produce_batches, encode_control_record_batch, encode_message_set,
+    encode_message_set_compressed, encode_record_batch, encode_record_batch_compressed,
+    get_bytes, get_compact_array_len, get_compact_bytes, is_txn_control_record,
+    parse_txn_control_record,
     get_compact_nullable_string, get_compact_string, get_nullable_string, get_string,
     put_bytes, put_compact_array_len, put_compact_bytes, put_compact_nullable_string,
     put_compact_string, put_empty_tag_buffer, put_nullable_string, put_string, put_unsigned_varint,
@@ -1266,35 +1268,82 @@ pub(crate) fn encode_fetch(broker: &Broker, src: &mut impl Buf, out: &mut BytesM
 /// Encode partition records for a Fetch response.
 ///
 /// Phase 32: v4 RecordBatch compression. Phase 33: v0–3 MessageSet wrapper compression.
+/// Phase 89: txn control markers re-encode as Kafka control RecordBatches (v4+);
+/// MessageSet path omits control markers (magic-2 only).
 pub(crate) fn encode_fetch_record_set(records: &[volant_core::Record], version: i16) -> BytesMut {
     if records.is_empty() {
         return BytesMut::new();
     }
     let codec = fetch_compression_codec();
     if version < 4 {
-        // MessageSet path (Phase 33).
-        if codec == CompressionCodec::None {
-            return encode_message_set(records);
+        // MessageSet path (Phase 33): control frames are magic-2 only — drop them.
+        let data: Vec<volant_core::Record> = records
+            .iter()
+            .filter(|r| !is_txn_control_record(r))
+            .cloned()
+            .collect();
+        if data.is_empty() {
+            return BytesMut::new();
         }
-        return match encode_message_set_compressed(records, codec) {
+        if codec == CompressionCodec::None {
+            return encode_message_set(&data);
+        }
+        return match encode_message_set_compressed(&data, codec) {
             Ok(set) => set,
             Err(e) => {
                 debug!(error = %e, ?codec, "message set fetch compression failed; plain");
-                encode_message_set(records)
+                encode_message_set(&data)
             }
         };
     }
-    // RecordBatch path (Phase 32).
-    if codec == CompressionCodec::None {
-        return encode_record_batch(records);
-    }
-    match encode_record_batch_compressed(records, codec) {
-        Ok(batch) => batch,
-        Err(e) => {
-            debug!(error = %e, ?codec, "fetch compression failed; falling back to plain");
-            encode_record_batch(records)
+    // RecordBatch path (Phase 32/89): interleave data batches + control batches.
+    encode_fetch_record_batches(records, codec)
+}
+
+/// Encode Fetch v4+ records as contiguous RecordBatches, emitting a control
+/// batch for each Phase 89 txn control marker.
+fn encode_fetch_record_batches(
+    records: &[volant_core::Record],
+    codec: CompressionCodec,
+) -> BytesMut {
+    let mut out = BytesMut::new();
+    let mut data: Vec<volant_core::Record> = Vec::new();
+    let flush_data = |data: &mut Vec<volant_core::Record>, out: &mut BytesMut| {
+        if data.is_empty() {
+            return;
+        }
+        let batch = if codec == CompressionCodec::None {
+            encode_record_batch(data)
+        } else {
+            match encode_record_batch_compressed(data, codec) {
+                Ok(b) => b,
+                Err(e) => {
+                    debug!(error = %e, ?codec, "fetch compression failed; falling back to plain");
+                    encode_record_batch(data)
+                }
+            }
+        };
+        out.extend_from_slice(&batch);
+        data.clear();
+    };
+    for r in records {
+        if let Some(ctrl) = parse_txn_control_record(r) {
+            flush_data(&mut data, &mut out);
+            let batch = encode_control_record_batch(
+                r.offset.raw() as i64,
+                ctrl.producer_id,
+                ctrl.producer_epoch,
+                ctrl.marker_type,
+                ctrl.coordinator_epoch,
+                r.timestamp_ms,
+            );
+            out.extend_from_slice(&batch);
+        } else {
+            data.push(r.clone());
         }
     }
+    flush_data(&mut data, &mut out);
+    out
 }
 
 /// OffsetForLeaderEpoch (API key 23) classic v0–3 / flexible v4 — Phase 39 / 63 / 87.

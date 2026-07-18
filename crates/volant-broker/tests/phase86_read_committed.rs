@@ -236,7 +236,19 @@ async fn abort_fills_aborted_list_and_filters_read_committed() {
     assert!(hwm_c >= 1);
     assert_eq!(lso_c, hwm_c);
     assert!(aborted_c >= 1, "expected aborted_transactions, got {aborted_c}");
-    assert!(rec_c.as_ref().map(|b| b.is_empty()).unwrap_or(true));
+    // Phase 89: aborted *data* is filtered; ABORT control batch may still appear.
+    if let Some(bytes) = rec_c.as_ref() {
+        if !bytes.is_empty() {
+            let attrs = volant_broker::kafka::codec::peek_record_batch_attributes(bytes)
+                .map(|(a, _)| a)
+                .unwrap_or(0);
+            assert_eq!(
+                attrs & volant_broker::kafka::codec::RECORD_BATCH_ATTR_CONTROL,
+                volant_broker::kafka::codec::RECORD_BATCH_ATTR_CONTROL,
+                "READ_COMMITTED after abort must not return app data batches"
+            );
+        }
+    }
 
     let (hwm_u, lso_u, aborted_u, rec_u) = fetch_v4(&addr, 11, "gone", 0).await;
     assert_eq!(hwm_u, hwm_c);

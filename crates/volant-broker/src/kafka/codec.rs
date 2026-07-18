@@ -614,6 +614,217 @@ fn decode_default_record(src: &mut impl Buf, first_timestamp: i64) -> Result<Mes
     })
 }
 
+/// Kafka RecordBatch attributes bit: transactional (bit 4).
+pub const RECORD_BATCH_ATTR_TRANSACTIONAL: i16 = 0x10;
+/// Kafka RecordBatch attributes bit: control batch (bit 5).
+pub const RECORD_BATCH_ATTR_CONTROL: i16 = 0x20;
+/// Combined attributes for transactional control markers (Phase 89).
+pub const RECORD_BATCH_ATTR_TXN_CONTROL: i16 =
+    RECORD_BATCH_ATTR_TRANSACTIONAL | RECORD_BATCH_ATTR_CONTROL;
+
+/// Kafka control record type (key field after version).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[repr(i16)]
+pub enum ControlMarkerType {
+    /// Abort marker.
+    Abort = 0,
+    /// Commit marker.
+    Commit = 1,
+}
+
+impl ControlMarkerType {
+    /// Parse from wire type integer.
+    pub fn from_i16(v: i16) -> Option<Self> {
+        match v {
+            0 => Some(Self::Abort),
+            1 => Some(Self::Commit),
+            _ => None,
+        }
+    }
+}
+
+/// Header name identifying a Volant-stored txn control marker (Phase 89).
+pub const TXN_CONTROL_HEADER: &str = "volant.control";
+/// Header value for [`TXN_CONTROL_HEADER`].
+pub const TXN_CONTROL_HEADER_VALUE: &[u8] = b"txn_marker";
+/// Header carrying producer id (i64 big-endian) for control re-encode.
+pub const TXN_CONTROL_PID_HEADER: &str = "volant.txn.pid";
+/// Header carrying producer epoch (i16 big-endian) for control re-encode.
+pub const TXN_CONTROL_EPOCH_HEADER: &str = "volant.txn.epoch";
+/// Header carrying marker name (`abort` / `commit`).
+pub const TXN_CONTROL_MARKER_HEADER: &str = "volant.txn.marker";
+
+/// Whether a stored Volant record is a Phase 89 txn control marker.
+pub fn is_txn_control_record(r: &Record) -> bool {
+    r.headers.iter().any(|(k, v)| {
+        k == TXN_CONTROL_HEADER && v.as_ref() == TXN_CONTROL_HEADER_VALUE
+    })
+}
+
+/// Parsed txn control marker from a Volant record (Phase 89).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct TxnControlMarker {
+    /// COMMIT or ABORT.
+    pub marker_type: ControlMarkerType,
+    /// Producer id for the control batch header.
+    pub producer_id: i64,
+    /// Producer epoch for the control batch header.
+    pub producer_epoch: i16,
+    /// Coordinator epoch (MVP always 0 on encode).
+    pub coordinator_epoch: i32,
+}
+
+/// Parse a Volant record as a txn control marker, if applicable.
+pub fn parse_txn_control_record(r: &Record) -> Option<TxnControlMarker> {
+    if !is_txn_control_record(r) {
+        return None;
+    }
+    let key = r.key.as_ref()?;
+    if key.len() < 4 {
+        return None;
+    }
+    let marker_type = ControlMarkerType::from_i16(i16::from_be_bytes([key[2], key[3]]))?;
+    let mut producer_id = -1i64;
+    let mut producer_epoch = -1i16;
+    let mut coordinator_epoch = 0i32;
+    for (k, v) in &r.headers {
+        if k == TXN_CONTROL_PID_HEADER && v.len() >= 8 {
+            producer_id = i64::from_be_bytes(v[..8].try_into().ok()?);
+        } else if k == TXN_CONTROL_EPOCH_HEADER && v.len() >= 2 {
+            producer_epoch = i16::from_be_bytes(v[..2].try_into().ok()?);
+        }
+    }
+    if r.value.len() >= 6 {
+        coordinator_epoch = i32::from_be_bytes(r.value[2..6].try_into().ok()?);
+    }
+    Some(TxnControlMarker {
+        marker_type,
+        producer_id,
+        producer_epoch,
+        coordinator_epoch,
+    })
+}
+
+/// Build a Volant [`Message`] representing a Kafka txn control marker (Phase 89).
+pub fn txn_control_message(
+    marker_type: ControlMarkerType,
+    producer_id: u64,
+    producer_epoch: u16,
+) -> Message {
+    let mut key = BytesMut::with_capacity(4);
+    key.put_i16(0); // control key version
+    key.put_i16(marker_type as i16);
+    let mut value = BytesMut::with_capacity(6);
+    value.put_i16(0); // control value version
+    value.put_i32(0); // coordinator_epoch MVP
+    let mut pid = BytesMut::with_capacity(8);
+    pid.put_i64(producer_id as i64);
+    let mut epoch = BytesMut::with_capacity(2);
+    epoch.put_i16(producer_epoch as i16);
+    let marker_name: &'static [u8] = match marker_type {
+        ControlMarkerType::Abort => b"abort",
+        ControlMarkerType::Commit => b"commit",
+    };
+    Message {
+        key: Some(key.freeze()),
+        value: value.freeze(),
+        timestamp_ms: Some(
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|d| d.as_millis() as i64)
+                .unwrap_or(0),
+        ),
+        headers: vec![
+            (
+                TXN_CONTROL_HEADER.to_owned(),
+                Bytes::from_static(TXN_CONTROL_HEADER_VALUE),
+            ),
+            (TXN_CONTROL_PID_HEADER.to_owned(), pid.freeze()),
+            (TXN_CONTROL_EPOCH_HEADER.to_owned(), epoch.freeze()),
+            (
+                TXN_CONTROL_MARKER_HEADER.to_owned(),
+                Bytes::from_static(marker_name),
+            ),
+        ],
+    }
+}
+
+/// Encode a single Kafka control RecordBatch (magic 2, Phase 89).
+///
+/// Attributes = TRANSACTIONAL | CONTROL. One control record; uncompressed.
+pub fn encode_control_record_batch(
+    base_offset: i64,
+    producer_id: i64,
+    producer_epoch: i16,
+    marker_type: ControlMarkerType,
+    coordinator_epoch: i32,
+    timestamp_ms: i64,
+) -> BytesMut {
+    // Control record body (no length prefix yet).
+    let mut rec_body = BytesMut::new();
+    rec_body.put_i8(0); // record attributes
+    write_varint(&mut rec_body, 0); // timestamp_delta
+    write_varint(&mut rec_body, 0); // offset_delta
+    // key: version + type
+    write_varint(&mut rec_body, 4);
+    rec_body.put_i16(0);
+    rec_body.put_i16(marker_type as i16);
+    // value: version + coordinator_epoch
+    write_varint(&mut rec_body, 6);
+    rec_body.put_i16(0);
+    rec_body.put_i32(coordinator_epoch);
+    write_varint(&mut rec_body, 0); // header count
+
+    let mut records_buf = BytesMut::new();
+    write_varint(&mut records_buf, rec_body.len() as i32);
+    records_buf.extend_from_slice(&rec_body);
+
+    let mut crc_payload = BytesMut::new();
+    crc_payload.put_i16(RECORD_BATCH_ATTR_TXN_CONTROL);
+    crc_payload.put_i32(0); // last_offset_delta
+    crc_payload.put_i64(timestamp_ms);
+    crc_payload.put_i64(timestamp_ms); // max_timestamp
+    crc_payload.put_i64(producer_id);
+    crc_payload.put_i16(producer_epoch);
+    crc_payload.put_i32(-1); // base_sequence
+    crc_payload.put_i32(1); // records_count
+    crc_payload.extend_from_slice(&records_buf);
+
+    let crc = crc32c::crc32c(&crc_payload);
+    let batch_length = (4 + 1 + 4 + crc_payload.len()) as i32;
+
+    let mut out = BytesMut::new();
+    out.put_i64(base_offset);
+    out.put_i32(batch_length);
+    out.put_i32(-1); // partitionLeaderEpoch
+    out.put_i8(2); // magic
+    out.put_u32(crc);
+    out.extend_from_slice(&crc_payload);
+    out
+}
+
+/// Inspect RecordBatch attributes at the start of a magic-2 batch buffer.
+///
+/// Returns `(attributes, base_offset)` when the buffer starts with a complete
+/// enough header; `None` if truncated or not magic 2.
+pub fn peek_record_batch_attributes(data: &[u8]) -> Option<(i16, i64)> {
+    if data.len() < 21 {
+        return None;
+    }
+    let base_offset = i64::from_be_bytes(data[0..8].try_into().ok()?);
+    let magic = data[16] as i8;
+    if magic != 2 {
+        return None;
+    }
+    // body: partitionLeaderEpoch(4) + magic(1) + crc(4) + attributes(2)
+    // attributes start at offset 8 (base) + 4 (len) + 4 + 1 + 4 = 21
+    if data.len() < 23 {
+        return None;
+    }
+    let attributes = i16::from_be_bytes([data[21], data[22]]);
+    Some((attributes, base_offset))
+}
+
 /// Encode records as a single Kafka RecordBatch (magic 2, no compression).
 ///
 /// Used when Fetch compression is disabled or as a fallback.

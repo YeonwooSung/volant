@@ -30,6 +30,9 @@ use crate::producer_state::{
     partition_key, parse_partition_key, ProducerStateFile, ProducerStateStore, StoredBatch,
     StoredProducer,
 };
+use crate::kafka::codec::{
+    txn_control_message, ControlMarkerType, is_txn_control_record,
+};
 use crate::kafka::fetch_session::FetchSessionManager;
 use crate::leader_epoch::{
     self, end_offset_for, ensure_entry, EpochStart, LeaderEpochStore, LeaderEpochsFile,
@@ -539,6 +542,7 @@ impl Broker {
             if let Some(&existing) = txn_ids.get(transactional_id) {
                 let mut state = self.producer_state.write();
                 if let Some(prod) = state.get_mut(&existing) {
+                    let old_epoch = prod.epoch;
                     prod.epoch = prod.epoch.wrapping_add(1);
                     if prod.epoch == 0 {
                         prod.epoch = 1;
@@ -550,9 +554,16 @@ impl Broker {
                     drop(state);
                     // Fence: open write-through ranges become aborted (Phase 86).
                     // Drop the open_txns lock before record_aborted (persist re-locks).
+                    // Control markers use the fenced producer's epoch (Phase 89).
                     let fenced = self.open_txns.lock().remove(&existing);
                     if let Some(txn) = fenced {
                         self.record_aborted_from_txn(existing, &txn);
+                        self.append_txn_control_markers(
+                            existing,
+                            old_epoch,
+                            ControlMarkerType::Abort,
+                            &txn,
+                        );
                     }
                     let _ = self.persist_producer_state();
                     return (existing, epoch);
@@ -955,12 +966,15 @@ impl Broker {
         IdempotentCheck::Accept { base_offset }
     }
 
-    /// Commit or abort an open transaction (Phase 18/86).
+    /// Commit or abort an open transaction (Phase 18/86/89).
     ///
     /// On commit, written ranges become stable (sequences finalized) and deferred
     /// offsets are applied. On abort, soft markers cover written ranges so
     /// READ_COMMITTED / native fetch hide them; data remains on the log for
     /// READ_UNCOMMITTED.
+    ///
+    /// Phase 89: dual-write Kafka-style control markers (COMMIT/ABORT) onto each
+    /// partition that had write-through ranges.
     ///
     /// `offsets` entries are `(group_id, topic, partition, offset, metadata)`.
     pub fn end_txn(
@@ -990,6 +1004,13 @@ impl Broker {
         if !committed {
             // Abort: soft-mark written ranges; sequences stay at last committed.
             self.record_aborted_from_txn(producer_id, &txn);
+            // Phase 89: durable ABORT control batches on participating partitions.
+            self.append_txn_control_markers(
+                producer_id,
+                producer_epoch,
+                ControlMarkerType::Abort,
+                &txn,
+            );
             return Ok((0, Vec::new()));
         }
 
@@ -1011,6 +1032,14 @@ impl Broker {
                 count: batch.count,
             });
         }
+
+        // Phase 89: durable COMMIT control batches before moving deferred_offsets.
+        self.append_txn_control_markers(
+            producer_id,
+            producer_epoch,
+            ControlMarkerType::Commit,
+            &txn,
+        );
 
         // Merge EndTxn trailer offsets with any TxnOffsetCommit-buffered ones.
         let mut all_offsets = txn.deferred_offsets;
@@ -1123,6 +1152,30 @@ impl Broker {
             );
         }
         self.persist_txn_markers();
+    }
+
+    /// Append one Kafka-style control marker per partition that had write-through
+    /// ranges (Phase 89 dual-write with soft markers).
+    fn append_txn_control_markers(
+        &self,
+        producer_id: u64,
+        producer_epoch: u16,
+        marker_type: ControlMarkerType,
+        txn: &OpenTxn,
+    ) {
+        // One marker per (topic, partition), not per batch.
+        let mut seen = HashMap::<(String, u32), ()>::new();
+        for r in &txn.written {
+            let key = (r.topic.clone(), r.partition);
+            if seen.contains_key(&key) {
+                continue;
+            }
+            seen.insert(key.clone(), ());
+            let msg = txn_control_message(marker_type, producer_id, producer_epoch);
+            let topic = TopicName::new(r.topic.clone());
+            let _ = self.produce_one(&topic, PartitionId(r.partition), msg);
+            let _ = self.flush(&topic, PartitionId(r.partition));
+        }
     }
 
     fn push_aborted_marker(&self, topic: &str, partition: u32, marker: AbortedTxnMarker) {
@@ -2370,17 +2423,26 @@ impl Broker {
 
         match isolation {
             FetchIsolation::ReadUncommitted => {
-                // All records up to HWM (already capped).
+                // All records up to HWM (already capped), including control markers.
             }
             FetchIsolation::ReadCommitted => {
                 let lso = self.last_stable_offset(tname, p);
                 records.retain(|r| {
                     let off = r.offset.raw();
+                    // Control markers are not application data ranges; include them
+                    // so Fetch re-encodes real COMMIT/ABORT frames (Phase 89).
+                    if is_txn_control_record(r) {
+                        return off < lso;
+                    }
                     off < lso && !self.is_aborted_offset(tname, p, off)
                 });
             }
             FetchIsolation::CommittedOnly => {
+                // Native consumers: hide open, aborted, and control markers.
                 records.retain(|r| {
+                    if is_txn_control_record(r) {
+                        return false;
+                    }
                     let off = r.offset.raw();
                     !self.is_unstable_offset(tname, p, off)
                         && !self.is_aborted_offset(tname, p, off)

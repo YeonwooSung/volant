@@ -335,10 +335,19 @@ async fn fetch_read_committed_after_txn_abort_empty() {
         let _first = fs.get_i64();
     }
     let records = get_bytes(&mut fs).unwrap();
-    assert!(
-        records.as_ref().map(|b| b.is_empty()).unwrap_or(true),
-        "READ_COMMITTED must filter aborted ranges"
-    );
+    // Phase 86/89: aborted *data* filtered; Phase 89 may leave ABORT control batch.
+    if let Some(bytes) = records.as_ref() {
+        if !bytes.is_empty() {
+            let attrs = volant_broker::kafka::codec::peek_record_batch_attributes(bytes)
+                .map(|(a, _)| a)
+                .unwrap_or(0);
+            assert_eq!(
+                attrs & volant_broker::kafka::codec::RECORD_BATCH_ATTR_CONTROL,
+                volant_broker::kafka::codec::RECORD_BATCH_ATTR_CONTROL,
+                "READ_COMMITTED must not return aborted application data"
+            );
+        }
+    }
 
     server.abort();
     let _ = std::fs::remove_dir_all(&dir);
