@@ -46,7 +46,7 @@ When `acks=all`, if `|ISR| < min_insync_replicas`, the leader rejects the produc
 
 ### What Volant does **not** guarantee (Phase 6+)
 
-- Exactly-once produce/consume end-to-end (Kafka control-batch wire on the data log still deferred; Phase **86** soft-marker `READ_COMMITTED` MVP is shipped)
+- Exactly-once produce/consume end-to-end (Kafka control-batch wire on EndTxn + crash promote shipped as Phase **89**/**98** MVP; soft markers remain isolation SoT; not full EOS)
 - Durable in-flight txn recovery that resumes open transactions (open txn crash ≡ **abort** via `__txn_markers`; write-through ranges are not rolled forward)
 - Linearizability of metadata during controller failover (brief windows of stale Metadata)
 - Durability if `min_insync_replicas=1` and that sole replica dies after ack
@@ -65,7 +65,7 @@ When `acks=all`, if `|ISR| < min_insync_replicas`, the leader rejects the produc
 | Open timeout (Phase 93) | Lazy auto-abort of open write-through txns after client/broker timeout; soft + ABORT control markers |
 | Max timeout clamp (Phase 96) | Broker max (default 15m); Init over-max → **50**; effective open/prepared timeouts clamped |
 | Background sweeper (Phase 97) | Periodic open/prepared + idle session expiry (default 1s); lazy paths remain; expiry counters |
-| Crash with open writes | Open ranges promoted to aborted on reload |
+| Crash with open writes | Open ranges promoted to aborted on reload + ABORT control batches (Phase 98) |
 | Crash with prepared | Prepared reloaded from `__txn_prepared` (survives; complete, re-init abort, or timeout) |
 
 ### Leader epochs (Phase 87)

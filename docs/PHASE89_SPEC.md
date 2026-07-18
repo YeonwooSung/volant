@@ -27,7 +27,7 @@
 - Writing control batches for partitions that were AddPartitionsToTxn'd but never
   produced to (MVP: only partitions with write-through ranges)
 - Reconstructing missing control batches for crash≡abort of open txns that never
-  reached EndTxn (soft markers still promote open → aborted)
+  reached EndTxn → **closed by Phase 98** (open promote also appends ABORT control)
 
 ## Design choice: dual-write (soft + control)
 
@@ -72,7 +72,7 @@ Control batches are **never compressed**.
 | EndTxn **commit** | Soft: drop open ranges; append COMMIT control marker per written partition |
 | EndTxn **abort** | Soft abort marker + append ABORT control marker per written partition |
 | Fence (InitProducerId) | Open ranges → soft aborted + ABORT control markers (best-effort) |
-| Crash open write-through | Soft promote open→aborted; **no** synthetic control batch (honest gap) |
+| Crash open write-through | Soft promote open→aborted; **Phase 98** also appends ABORT control batches |
 | Fetch READ_COMMITTED | Cap LSO; filter aborted data; **include** control markers as control batches |
 | Fetch READ_UNCOMMITTED | All data + control markers up to HWM |
 | Fetch MessageSet (v0–3) | Control markers omitted from record set |
@@ -91,8 +91,8 @@ Control batches are **never compressed**.
 ## Honest limitations
 
 - Control markers only for partitions with write-through data (not empty AddPartitions)
-- Crash≡abort of open txn may lack control batch (soft markers cover filtering)
+- Crash≡abort control batches closed by **Phase 98** (pre-98 gap: soft markers only)
 - Fetch re-encode still omits producer metadata on **data** batches
 - Coordinator epoch always 0; no transaction log / multi-broker marker consensus
-- 2PC / prepared txn still absent
+- 2PC / prepared txn still absent (closed later by Phase 90 MVP)
 - Aborted soft markers still not compacted with log deletes

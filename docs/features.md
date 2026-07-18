@@ -49,9 +49,9 @@ shim: [KAFKA_COMPAT.md](./KAFKA_COMPAT.md).
 | Write-through (Phase 86) | Txn produces append immediately; LSO holds until EndTxn |
 | Abort | Soft markers hide ranges (native + READ_COMMITTED); data stays on log for READ_UNCOMMITTED |
 | Deferred offsets | Txn offset commits apply on commit only |
-| Crash | Open write-through ranges ≡ abort (persisted `__txn_markers`) |
+| Crash | Open write-through ranges ≡ abort (persisted `__txn_markers`) + ABORT control batches (Phase 98) |
 | READ_COMMITTED | MVP: LSO filtering + aborted list (soft markers SoT) |
-| Control batches (Phase 89) | EndTxn COMMIT/ABORT magic-2 control RecordBatches on log |
+| Control batches (Phase 89/98) | EndTxn COMMIT/ABORT + crash-promote ABORT magic-2 control RecordBatches on log |
 | Prepared 2PC MVP (Phase 90) | Enable2Pc prepare→complete EndTxn; KeepPreparedTxn + OngoingTxn*; `__txn_prepared` |
 | Prepared timeout (Phase 92) | Lazy auto-abort after timeout (default 60s; `VOLANT_PREPARED_TXN_TIMEOUT_MS`; `0` disables) |
 | Open txn timeout (Phase 93) | Honor InitProducerId `transaction_timeout_ms` (or broker default `VOLANT_OPEN_TXN_TIMEOUT_MS`, 60s; effective `0` disables); lazy auto-abort |

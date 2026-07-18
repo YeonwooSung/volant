@@ -22,10 +22,10 @@ wire-protocol shim** reuses the same storage, groups, and security model for
 interop. The shim advertises **ApiVersions 0–5** and **Fetch 0–18** at Apache
 Kafka wire max for those keys, with empty feature tags and
 write-through transactions with soft READ_COMMITTED markers (Phase 86) and
-Kafka-style COMMIT/ABORT control batches on EndTxn (Phase 89), prepared 2PC MVP
-(Phase 90) with prepared timeout auto-abort (Phase 92), open-txn timeout
-(Phase 93), broker max timeout clamp (Phase 96), background txn/session
-sweeper + expiry metrics (Phase 97), durable
+Kafka-style COMMIT/ABORT control batches on EndTxn (Phase 89) and crash≡abort
+open promote (Phase 98), prepared 2PC MVP (Phase 90) with prepared timeout
+auto-abort (Phase 92), open-txn timeout (Phase 93), broker max timeout clamp
+(Phase 96), background txn/session sweeper + expiry metrics (Phase 97), durable
 OffsetForLeaderEpoch history (Phase 87 MVP), Fetch DivergingEpoch +
 process-local fetch sessions (Phase 88 MVP), omit-unchanged incremental
 session responses (Phase 91 MVP), and session idle TTL / max concurrent
@@ -178,8 +178,8 @@ Admin: list / describe / delete groups, delete offsets, lag metrics.
 | transactional_id fencing | Yes |
 | Multi-partition atomic produce | **Write-through** to log; LSO holds until EndTxn |
 | Deferred offset commits | Applied only on commit |
-| Crash of open txn | ≡ **abort** (open ranges → soft markers via `__txn_markers`) |
-| Control markers | Soft markers (isolation SoT) + Kafka control batches on EndTxn (Phase 89) |
+| Crash of open txn | ≡ **abort** (open ranges → soft markers via `__txn_markers` + ABORT control batches, Phase 98) |
+| Control markers | Soft markers (isolation SoT) + Kafka control batches on EndTxn (Phase 89) and crash promote (Phase 98) |
 | `READ_COMMITTED` / LSO | **Yes (MVP)** — LSO may be `<` HWM; aborted filtered; aborted list non-empty |
 | `READ_UNCOMMITTED` | Sees unstable + aborted-on-log data |
 | Real 2PC / prepared transactions | **MVP** (Phase 90; single-node prepare/complete; prepared timeout Phase 92; not full KIP-890/939) |
@@ -189,7 +189,8 @@ Admin: list / describe / delete groups, delete offsets, lag metrics.
 
 Native Volant fetch remains **committed-only**. Kafka Fetch isolation is real for
 the MVP. EndTxn COMMIT/ABORT control batches are on the partition log (Phase 89);
-synthetic control batches for crash≡abort of open txns without EndTxn remain deferred.
+crash≡abort of open write-through also appends ABORT control batches (Phase 98).
+Empty AddPartitions-only partitions still omit control markers.
 
 ### Leader epochs (Phase 87)
 
@@ -237,26 +238,27 @@ flexible (KIP-482) coverage for the APIs modern clients negotiate most often
 |-------|----------|---------------|
 | Produce / Fetch / Metadata | TopicId, flex framing | Produce/Metadata **0–13**; Fetch **0–18** (Kafka max) |
 | Groups / offsets | Join–Leave, commit/fetch | Coordinator-driven; GroupType always `classic` |
-| Txn wire | Init / Add* / End / TxnOffsetCommit | Write-through + soft markers; prepared 2PC MVP (Phase 90) + prepared/open timeout (Phase 92/93) + TRANSACTION_ABORTABLE subset (Phase 94) + max timeout clamp (Phase 96) + background sweeper (Phase 97) |
+| Txn wire | Init / Add* / End / TxnOffsetCommit | Write-through + soft markers; EndTxn + crash-promote control batches (Phase 89/98); prepared 2PC MVP (Phase 90) + prepared/open timeout (Phase 92/93) + TRANSACTION_ABORTABLE subset (Phase 94) + max timeout clamp (Phase 96) + background sweeper (Phase 97) |
 | Admin / configs / ACLs | CreateTopics, CreatePartitions, ACLs | CreatePartitions max **3**; ACL admin **0–3** (User resource v3); LITERAL only |
 | Meta / auth | ApiVersions, FindCoordinator, SASL | ApiVersions **0–5** (Kafka max); SASL PLAIN/SCRAM |
 
 **Auth on Kafka port:** SASL or principal `kafka-anonymous` (+ ACLs). Shared-token
 Auth applies only on the native `--listen` port.
 
-**Highlights (post–Phase 90–97):** deterministic TopicId UUIDs; KIP-951
+**Highlights (post–Phase 90–98):** deterministic TopicId UUIDs; KIP-951
 CurrentLeader on leader errors + Produce NodeEndpoints v10+ / Fetch
 NodeEndpoints v16+; KIP-890 txn max versions + prepared 2PC MVP (Phase 90) +
 prepared/open timeout auto-abort (Phase 92/93) + broker max timeout clamp
 (Phase 96; default 15m; Init **50**) + background sweeper + expiry metrics
-(Phase 97) + honest `TRANSACTION_ABORTABLE`
-(123) after timeout on Produce/EndTxn/Add*/TxnOffsetCommit (Phase 94;
-FindCoordinator never); ApiVersions 0–5 with empty feature tags and ignored
-v5 ClusterId/NodeId (never `REBOOTSTRAP_REQUIRED`); Fetch **0–18** (Kafka max)
-with DivergingEpoch + omit-unchanged sessions + idle TTL/max (Phase 88/91/95); ACL admin **0–3**
-(User resource storage only); write-through txn + soft READ_COMMITTED
-(LSO/aborted); durable OffsetForLeaderEpoch history MVP + Metadata live
-leader_epoch; compression codecs gzip/snappy/lz4/zstd on the wire.
+(Phase 97) + crash≡abort ABORT control batches (Phase 98) + honest
+`TRANSACTION_ABORTABLE` (123) after timeout on Produce/EndTxn/Add*/TxnOffsetCommit
+(Phase 94; FindCoordinator never); ApiVersions 0–5 with empty feature tags and
+ignored v5 ClusterId/NodeId (never `REBOOTSTRAP_REQUIRED`); Fetch **0–18**
+(Kafka max) with DivergingEpoch + omit-unchanged sessions + idle TTL/max
+(Phase 88/91/95); ACL admin **0–3** (User resource storage only); write-through
+txn + soft READ_COMMITTED (LSO/aborted); durable OffsetForLeaderEpoch history
+MVP + Metadata live leader_epoch; compression codecs gzip/snappy/lz4/zstd on
+the wire.
 
 ---
 
@@ -289,7 +291,7 @@ Volant deliberately does **not** claim production Kafka parity. Open gaps:
 
 1. Multi-language clients (Rust only)
 2. Dynamic membership / Raft metadata quorum
-3. Multi-broker 2PC; synthetic control batches for crash-without-EndTxn
+3. Multi-broker 2PC; control batches for empty AddPartitions-only partitions
 4. Full Kafka API surface beyond advertised keys; multi-broker session affinity / durable sessions
 5. Full KRaft epoch state machine (durable history is MVP)
 6. Kafka cooperative-sticky assignor **protocol** parity (native JoinGroup revoke list exists)

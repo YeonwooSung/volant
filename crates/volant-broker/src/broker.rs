@@ -166,9 +166,17 @@ struct AbortedTxnMarker {
 }
 
 /// Durable txn marker range (Phase 86 soft control markers).
+///
+/// Phase 98: open ranges optionally carry `producer_epoch` so crash recovery can
+/// re-encode ABORT control RecordBatches. Pre-Phase-98 snapshots omit the field
+/// (`None`); recovery then best-effort looks up live producer state, else soft-aborts
+/// only (no synthetic control batch).
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 struct StoredTxnRange {
     producer_id: u64,
+    /// Producer epoch at write time (open ranges; Phase 98). Absent on old files.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    producer_epoch: Option<u16>,
     topic: String,
     partition: u32,
     first_offset: u64,
@@ -187,7 +195,8 @@ struct TxnMarkersFile {
 /// Open transaction state (Phase 18 write-through + Phase 86 markers).
 ///
 /// In-flight ranges are also mirrored under `{data_dir}/__txn_markers` so a
-/// crash promotes them to aborted (crash ≡ abort).
+/// crash promotes them to aborted (crash ≡ abort) and Phase 98 appends ABORT
+/// control batches using the stored epoch.
 #[derive(Debug, Default, Clone)]
 struct OpenTxn {
     /// Unix epoch milliseconds when this open txn was created (Phase 93).
@@ -195,6 +204,8 @@ struct OpenTxn {
     /// Set by `begin_txn` / `ensure_txn_open` (first open). Not reset by produce.
     /// Memory-only — open crash ≡ abort via `__txn_markers` without needing this.
     opened_at_ms: i64,
+    /// Producer epoch at begin (Phase 98; persisted on open marker ranges).
+    producer_epoch: u16,
     /// Log ranges written while the txn is open (write-through).
     written: Vec<TxnWrittenRange>,
     /// Sequences accepted inside this txn (not yet committed to `partitions`).
@@ -1043,6 +1054,7 @@ impl Broker {
             producer_id,
             OpenTxn {
                 opened_at_ms: unix_now_ms(),
+                producer_epoch,
                 ..OpenTxn::default()
             },
         );
@@ -2047,6 +2059,7 @@ impl Broker {
                     prepared_at_ms,
                     open: OpenTxn {
                         opened_at_ms: 0, // not used once prepared
+                        producer_epoch: s.producer_epoch,
                         written,
                         pending,
                         deferred_offsets: s.deferred_offsets,
@@ -2172,6 +2185,11 @@ impl Broker {
     }
 
     /// Load soft markers; promote any stored open ranges to aborted (crash ≡ abort).
+    ///
+    /// Phase 98: when promoting open → aborted, also append ABORT control
+    /// RecordBatches (same dual-write as EndTxn abort). Idempotent across
+    /// restarts: only the open list is promoted (and then cleared on persist),
+    /// so a second load sees empty `open` and does not re-append.
     fn load_txn_markers(&self) {
         let path = self.txn_markers_path();
         let Ok(bytes) = fs::read(&path) else {
@@ -2182,9 +2200,9 @@ impl Broker {
         };
         {
             let mut aborted = self.aborted_txns.lock();
-            for m in file.aborted {
+            for m in &file.aborted {
                 aborted
-                    .entry((m.topic, m.partition))
+                    .entry((m.topic.clone(), m.partition))
                     .or_default()
                     .push(AbortedTxnMarker {
                         producer_id: m.producer_id,
@@ -2192,10 +2210,10 @@ impl Broker {
                         end_offset: m.end_offset,
                     });
             }
-            // Crash recovery: open ranges → aborted.
-            for m in file.open {
+            // Crash recovery: open ranges → aborted soft markers.
+            for m in &file.open {
                 aborted
-                    .entry((m.topic, m.partition))
+                    .entry((m.topic.clone(), m.partition))
                     .or_default()
                     .push(AbortedTxnMarker {
                         producer_id: m.producer_id,
@@ -2204,8 +2222,63 @@ impl Broker {
                     });
             }
         }
+        // Phase 98: dual-write ABORT control batches for crash-promoted opens.
+        if !file.open.is_empty() {
+            self.append_crash_abort_control_markers(&file.open);
+        }
         // Persist cleaned state (no open ranges after recovery).
         self.persist_txn_markers();
+    }
+
+    /// Append ABORT control markers for open ranges promoted on crash recovery
+    /// (Phase 98). One marker per (producer_id, topic, partition).
+    ///
+    /// Epoch resolution order:
+    /// 1. `producer_epoch` stored on the open marker (Phase 98 snapshots)
+    /// 2. Live producer state epoch (best-effort for pre-98 files)
+    /// 3. Skip control batch (soft abort still applied; honesty gap)
+    fn append_crash_abort_control_markers(&self, open: &[StoredTxnRange]) {
+        // Group written ranges by producer_id; track epoch per pid.
+        let mut by_pid: HashMap<u64, (Option<u16>, OpenTxn)> = HashMap::new();
+        for m in open {
+            let entry = by_pid.entry(m.producer_id).or_insert_with(|| {
+                (
+                    m.producer_epoch,
+                    OpenTxn {
+                        producer_epoch: m.producer_epoch.unwrap_or(0),
+                        ..OpenTxn::default()
+                    },
+                )
+            });
+            if entry.0.is_none() {
+                entry.0 = m.producer_epoch;
+            }
+            entry.1.written.push(TxnWrittenRange {
+                topic: m.topic.clone(),
+                partition: m.partition,
+                first_offset: m.first_offset,
+                end_offset: m.end_offset,
+                base_sequence: 0,
+                count: 0,
+            });
+        }
+        for (pid, (stored_epoch, txn)) in by_pid {
+            let epoch = match stored_epoch {
+                Some(e) => e,
+                None => {
+                    // Pre-Phase-98 snapshot: best-effort from producer state.
+                    let state = self.producer_state.read();
+                    match state.get(&pid).map(|p| p.epoch) {
+                        Some(e) => e,
+                        None => {
+                            // Cannot encode a honest control batch without epoch.
+                            continue;
+                        }
+                    }
+                }
+            };
+            self.append_txn_control_markers(pid, epoch, ControlMarkerType::Abort, &txn);
+        }
     }
 
     fn persist_txn_markers(&self) {
@@ -2220,6 +2293,7 @@ impl Broker {
                 for r in &txn.written {
                     file.open.push(StoredTxnRange {
                         producer_id: pid,
+                        producer_epoch: Some(txn.producer_epoch),
                         topic: r.topic.clone(),
                         partition: r.partition,
                         first_offset: r.first_offset,
@@ -2234,6 +2308,7 @@ impl Broker {
                 for m in list {
                     file.aborted.push(StoredTxnRange {
                         producer_id: m.producer_id,
+                        producer_epoch: None,
                         topic: topic.clone(),
                         partition: *part,
                         first_offset: m.first_offset,

@@ -52,17 +52,17 @@ Start here. Prefer living docs over individual phase ship records.
 | Protocol implementer | PHASE1–6 binding specs |
 | Roadmap / deferred | ROADMAP end sections |
 
-## Compaction note (2026-07-18, post–Phase 96 ship)
+## Compaction note (2026-07-18, post–Phase 98 ship)
 
-Living docs match **git HEAD product** (`SUPPORTED_APIS`, last feature commit Phase **95**):
+Living docs match **git HEAD product** (`SUPPORTED_APIS`, last feature commit Phase **98**):
 
-- **Status ceiling:** Phases **0–97**; Kafka shim **23–97** (**38** keys)
+- **Status ceiling:** Phases **0–98**; Kafka shim **23–98**
 - **Kafka SoT:** [KAFKA_COMPAT.md](./KAFKA_COMPAT.md) — matrix + semantic honesty
 - **WHITEPAPER:** architecture + positioning; no full API matrix
-- **Binding core:** PHASE1–6; **ship records:** PHASE7–95 via [PHASE_HISTORY](./history/PHASE_HISTORY.md)
+- **Binding core:** PHASE1–6; **ship records:** PHASE7–98 via [PHASE_HISTORY](./history/PHASE_HISTORY.md)
 - **README / ops:** compact bands + ops table (not per-phase diaries)
-- **Txn honesty (shipped):** write-through + soft markers + EndTxn control batches (Phase 89) + prepared 2PC MVP (Phase 90) + prepared/open timeout (Phase 92/93) + TRANSACTION_ABORTABLE honest subset after timeout (Phase 94) + transaction max timeout clamp (Phase 96; default 15m; Init **50** over-max)
+- **Txn honesty (shipped):** write-through + soft markers + EndTxn control batches (Phase 89) + crash-promote ABORT control (Phase 98) + prepared 2PC MVP (Phase 90) + prepared/open timeout (Phase 92/93) + TRANSACTION_ABORTABLE honest subset after timeout (Phase 94) + transaction max timeout clamp (Phase 96; default 15m; Init **50** over-max) + background sweeper (Phase 97)
 - **Epoch honesty (shipped):** durable OFLE history MVP; Metadata live leader_epoch; Fetch DivergingEpoch
-- **Fetch sessions (shipped MVP):** process-local create/forgotten/errors; omit-unchanged empty-topics incremental (Phase 91); idle TTL + max/LRU (Phase 95)
+- **Fetch sessions (shipped MVP):** process-local create/forgotten/errors; omit-unchanged empty-topics incremental (Phase 91); idle TTL + max/LRU (Phase 95); background idle sweep (Phase 97)
 - **Still deferred (product):** multi-lang, chaos/fuzz corpus CI, multi-broker 2PC /
-  multi-broker session affinity / full KIP-890
+  multi-broker session affinity / full KIP-890; empty-AddPartitions control markers

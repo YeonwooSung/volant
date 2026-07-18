@@ -156,10 +156,10 @@ volant-server \
   clamp (Phase 96, default **15m** / `VOLANT_TRANSACTION_MAX_TIMEOUT_MS`;
   `0` = no max; Init over-max → **50**; effective open/prepared clamped) +
   background sweeper (Phase 97, default **1s** / `VOLANT_SWEEP_INTERVAL_MS`;
-  `0` = lazy only);
+  `0` = lazy only) + crash-promote ABORT control batches (Phase 98);
   `READ_COMMITTED` caps at LSO and filters aborted; `READ_UNCOMMITTED` sees all.
-  Open crash≡abort via `__txn_markers`; prepared durable under `__txn_prepared`
-  until complete or timeout.
+  Open crash≡abort via `__txn_markers` (soft + ABORT control); prepared durable
+  under `__txn_prepared` until complete or timeout.
 - **Leader epochs:** durable history under `{data_dir}/__leader_epochs` (Phase 87);
   OffsetForLeaderEpoch returns prior-epoch end offsets; Metadata advertises live
   epoch. Not a full KRaft epoch state machine.
@@ -176,7 +176,7 @@ volant-server \
   Kafka **User** resource type (stored as `ResourceType::User`; not used on the
   produce/fetch authorize path; no SCRAM-admin gating).
 
-Deep dives: [PHASE23_SPEC.md](./PHASE23_SPEC.md) … [PHASE97_SPEC.md](./PHASE97_SPEC.md).
+Deep dives: [PHASE23_SPEC.md](./PHASE23_SPEC.md) … [PHASE98_SPEC.md](./PHASE98_SPEC.md).
 
 ## TLS (Phase 7 listen + Phase 9 verification / inter-broker)
 

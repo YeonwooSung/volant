@@ -42,8 +42,8 @@
 | ListOffsets isolation=1 latest | Return LSO (not HWM) when open txn holds LSO back |
 | ListOffsets isolation=0 latest | HWM (unchanged) |
 | Native `Broker::fetch` | Committed-only: hide open ranges + aborted ranges |
-| Crash with open write-through | Open ranges recovered as **aborted** (crash ≡ abort) via `__txn_markers` |
-| Control batches on log | **Not written** — soft markers only |
+| Crash with open write-through | Open ranges recovered as **aborted** (crash ≡ abort) via `__txn_markers` (+ ABORT control batches in **Phase 98**) |
+| Control batches on log | Soft markers only in Phase 86; EndTxn control in **Phase 89**; crash-promote control in **Phase 98** |
 
 ### Fetch partition response (v4+)
 
@@ -75,9 +75,10 @@ Empty aborted list when isolation is READ_UNCOMMITTED or no overlapping aborts.
 
 ## Honest limitations
 
-- Soft markers, not Kafka control batches on the data log
+- Soft markers were isolation SoT at ship; Kafka control batches added later
+  (EndTxn: **Phase 89**; crash open promote: **Phase 98**)
 - Fetch re-encode omits transactional attributes / producer id on batches
 - Aborted markers retained in memory + JSON file (not compacted with log deletes)
 - Single-node coordinator; no cross-broker marker consensus
-- 2PC / prepared txn still absent
+- 2PC / prepared txn still absent at Phase 86 ship (closed by Phase 90 MVP)
 - DeleteRecords may leave stale aborted markers until process restart bounds

@@ -2019,13 +2019,14 @@ Binding: **[docs/PHASE89_SPEC.md](./docs/PHASE89_SPEC.md)**.
 - [x] MessageSet Fetch omits control; native fetch hides control markers
 - [x] Integration tests (`phase89_control_batches`)
 
-**Honest limitations:** no control batch for crash≡abort without EndTxn; no
-markers for AddPartitions-only partitions; coordinator_epoch always 0; no
-multi-broker txn log / 2PC.
+**Honest limitations:** no control batch for crash≡abort without EndTxn
+(closed by **Phase 98**); no markers for AddPartitions-only partitions;
+coordinator_epoch always 0; no multi-broker txn log / 2PC.
 
 **Still deferred:** multi-lang clients, cargo-fuzz corpus CI, real 2PC
 (closed by **Phase 90** MVP), omit-unchanged fetch cache (closed by
-**Phase 91**), multi-broker session affinity.
+**Phase 91**), multi-broker session affinity, crash≡abort control batches
+(closed by **Phase 98**).
 
 ---
 
@@ -2229,7 +2230,36 @@ config surface.
 
 **Still deferred:** multi-lang clients, cargo-fuzz corpus CI, multi-broker 2PC /
 session affinity / durable sessions, Admin timeout/sweep config surface,
-graceful sweeper shutdown.
+graceful sweeper shutdown; crash≡abort control batches → **closed by Phase 98**.
+
+---
+
+### Phase 98 — Control batches for crash≡abort open txns (MVP) ✅
+
+**Goal:** When crash recovery promotes stored open write-through ranges to
+aborted soft markers, also append Kafka-style **ABORT control RecordBatch**(es)
+(Phase 89 dual-write), using durable `producer_epoch` on open marker ranges.
+Idempotent across restarts (only promote open→aborted once).
+
+Binding: **[docs/PHASE98_SPEC.md](./docs/PHASE98_SPEC.md)**.
+
+- [x] `__txn_markers` open ranges store optional `producer_epoch`
+- [x] `OpenTxn.producer_epoch` set at begin; persisted on open markers
+- [x] `load_txn_markers`: promote open→aborted **+** ABORT control per written partition
+- [x] Epoch resolution: stored → producer_state best-effort → skip control
+- [x] Idempotent: second reload with empty open does not re-append
+- [x] Empty open (no write-through) invents no control batch
+- [x] EndTxn path unchanged; isolation rules unchanged
+- [x] Integration tests (`phase98_crash_abort_control`)
+
+**Honest limitations:** no control for empty AddPartitions-only; pre-98 open
+files without epoch and without producer_state may still lack control; rare
+partial mid-append re-append; coordinator_epoch always 0; no multi-broker
+marker consensus; no historical reconstruction of pre-98 crash-aborts.
+
+**Still deferred:** multi-lang clients, cargo-fuzz corpus CI, multi-broker 2PC /
+session affinity / durable sessions, Admin timeout/sweep config surface,
+graceful sweeper shutdown, empty-AddPartitions control markers, marker GC.
 
 ---
 
@@ -2256,11 +2286,11 @@ graceful sweeper shutdown.
 | Storage | Page cache + OS | Explicit mmap + optional io_uring/O_DIRECT |
 | Stream processing | Kafka Streams / ksqlDB | In-process `volant-stream` operators |
 | Ops model | ZooKeeper/KRaft + heavy footprint | Single binary → small static ISR quorum |
-| Protocol | Kafka wire protocol | Native binary first; optional Kafka shim (`--kafka-listen`, Phases 23–97) |
+| Protocol | Kafka wire protocol | Native binary first; optional Kafka shim (`--kafka-listen`, Phases 23–98) |
 | Goal | Full ecosystem | Subset that is fast, small, and correct |
 
 Volant is **not** a drop-in Kafka replacement. It prioritizes a clean core; the
-optional Kafka wire shim is **shipped** (Phases 23–97) — see
+optional Kafka wire shim is **shipped** (Phases 23–98) — see
 [docs/KAFKA_COMPAT.md](./docs/KAFKA_COMPAT.md).
 
 ---
@@ -2280,7 +2310,7 @@ Phases **0–91 are shipped**. Historical PR order for the core:
 9. Phase 6 replication prototype (2–3 nodes) ✅  
 10. Phase 7 metrics, TLS, packaging ✅  
 11. Phases 8–22 (redirect, groups, configs, txns, mTLS, ACLs, SCRAM) ✅  
-12. Phases 23–97 (Kafka wire shim surface) ✅  
+12. Phases 23–98 (Kafka wire shim surface) ✅  
 
 ---
 
@@ -2321,13 +2351,14 @@ cargo run -p volant-bench --release
 cargo test --workspace
 ```
 
-**Status (post–Phase 97):** core broker, ops (metrics / TLS / auth / SCRAM /
+**Status (post–Phase 98):** core broker, ops (metrics / TLS / auth / SCRAM /
 ACLs / Helm), and the Kafka wire shim are **shipped** (Fetch 0–18 Kafka max;
 ACL admin 0–3 with User resource; soft-marker `READ_COMMITTED`; durable OFLE
 history; Fetch DivergingEpoch + sessions with omit-unchanged incremental +
-idle TTL/max; Kafka control batches on EndTxn; prepared 2PC MVP; prepared +
-open txn timeouts + broker max timeout clamp; background txn/session sweeper
-+ richer expiry metrics). Still deferred: multi-language clients, full
-chaos-mesh suites, cargo-fuzz corpus CI, multi-broker session affinity,
-multi-broker 2PC.
+idle TTL/max; Kafka control batches on EndTxn **and** crash≡abort open promote;
+prepared 2PC MVP; prepared + open txn timeouts + broker max timeout clamp;
+background txn/session sweeper + richer expiry metrics). Still deferred:
+multi-language clients, full chaos-mesh suites, cargo-fuzz corpus CI,
+multi-broker session affinity, multi-broker 2PC, empty-AddPartitions control
+markers.
 Details: [docs/KAFKA_COMPAT.md](./docs/KAFKA_COMPAT.md), [docs/ops.md](./docs/ops.md).
