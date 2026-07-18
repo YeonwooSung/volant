@@ -19,7 +19,7 @@
 ## Non-goals
 
 - Multi-broker 2PC / sessions / multi-lang / fuzz CI
-- Non-controller auto-death from alive-set diffs
+- Non-controller auto-death from alive-set diffs → **closed by Phase 110**
 - Straddle marker clip
 - Graceful in-flight request completion (connections are aborted, not drained
   to idle EOF)
@@ -120,7 +120,7 @@ before the abort; abort is belt-and-suspenders.
 
 ## Still deferred after this
 
-- Non-controller auto-death from alive-set diffs
+- Non-controller auto-death from alive-set diffs → **closed by Phase 110**
 - Straddle marker clip
 - Multi-broker 2PC / multi-lang / fuzz CI
 - Multi-broker BROKER config fan-out

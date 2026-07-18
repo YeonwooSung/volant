@@ -149,12 +149,12 @@ static ISR). Later work is summarized by band — full chronicle in
 
 **Kafka ceilings (code SoT):** ApiVersions **0–5**, Fetch **0–18**, Produce/Metadata
 **0–13**, ACL admin **0–3** (User resource v3, store-only); Fetch isolation
-READ_COMMITTED MVP (Phase 86) + soft-marker GC on DeleteRecords/retention/load (Phase 104); durable OffsetForLeaderEpoch history (Phase 87); Fetch DivergingEpoch + real fetch sessions MVP (Phase 88); Kafka control batches on EndTxn (Phase 89), crash≡abort open promote (Phase 98), and empty AddPartitions membership (Phase 105); prepared 2PC MVP (Phase 90); omit-unchanged incremental sessions (Phase 91); prepared timeout auto-abort (Phase 92); open-txn timeout (Phase 93); fetch session idle TTL + max/LRU (Phase 95); transaction max timeout clamp (Phase 96); background txn/session sweeper + metrics (Phase 97; always-spawn / 0→>0 live Phase 101; graceful shutdown/join Phase 106); BROKER Describe/AlterConfigs for txn/session/sweep knobs (Phase 99) with **sparse** durable restart restore (Phase 100/102) and resource name empty-or-`node_id` (Phase 103; parallel test isolation Phase 107); follower-death ISR shrink + HWM recompute so rolling-restart `acks=all` does not time out (Phase 108); accept-loop drain + single-flight `start_background_tasks` (Phase 109).
+READ_COMMITTED MVP (Phase 86) + soft-marker GC on DeleteRecords/retention/load (Phase 104); durable OffsetForLeaderEpoch history (Phase 87); Fetch DivergingEpoch + real fetch sessions MVP (Phase 88); Kafka control batches on EndTxn (Phase 89), crash≡abort open promote (Phase 98), and empty AddPartitions membership (Phase 105); prepared 2PC MVP (Phase 90); omit-unchanged incremental sessions (Phase 91); prepared timeout auto-abort (Phase 92); open-txn timeout (Phase 93); fetch session idle TTL + max/LRU (Phase 95); transaction max timeout clamp (Phase 96); background txn/session sweeper + metrics (Phase 97; always-spawn / 0→>0 live Phase 101; graceful shutdown/join Phase 106); BROKER Describe/AlterConfigs for txn/session/sweep knobs (Phase 99) with **sparse** durable restart restore (Phase 100/102) and resource name empty-or-`node_id` (Phase 103; parallel test isolation Phase 107); follower-death ISR shrink + HWM recompute so rolling-restart `acks=all` does not time out (Phase 108); accept-loop drain + single-flight `start_background_tasks` (Phase 109); non-controller alive-set auto-death (Phase 110).
 Matrix + honesty: [docs/KAFKA_COMPAT.md](./docs/KAFKA_COMPAT.md).
 
 **Still deferred:** multi-language clients, chaos-mesh / cargo-fuzz corpus CI,
 multi-broker 2PC parity, multi-broker session affinity, multi-broker BROKER
-config fan-out, non-controller alive-set auto-death, straddle marker clip.
+config fan-out, straddle marker clip.
 
 ### Networked client (library)
 

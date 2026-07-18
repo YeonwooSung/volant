@@ -97,4 +97,4 @@ Contract preserved:
 - Straddle marker clip
 - Multi-broker 2PC / sessions / multi-lang / fuzz CI
 - Multi-broker BROKER config fan-out
-- Non-controller auto-death from heartbeat alive-set diffs
+- Non-controller auto-death from heartbeat alive-set diffs → **closed by Phase 110**

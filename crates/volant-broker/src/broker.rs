@@ -4699,16 +4699,20 @@ impl Broker {
     }
 
     /// Expire sessions / membership (called periodically).
+    ///
+    /// Phase 110: **every** observer (not only the controller) runs
+    /// [`Self::on_broker_death`] for newly expired peers so local ISR shrink +
+    /// HWM recompute happen without waiting for a ClusterState pull. The
+    /// controller path inside `on_broker_death` still owns durable assignment
+    /// updates / generation bumps.
     pub fn tick_cluster(&self) {
         let Some(cluster) = &self.cluster else {
             return;
         };
         cluster.membership.write().touch_self();
         let dead = cluster.membership.write().expire();
-        if cluster.membership.read().is_controller() {
-            for d in dead {
-                let _ = self.on_broker_death(d);
-            }
+        for d in dead {
+            let _ = self.on_broker_death(d);
         }
     }
 
@@ -4717,6 +4721,66 @@ impl Broker {
         if let Some(cluster) = &self.cluster {
             cluster.membership.write().heartbeat(peer_id);
         }
+    }
+
+    /// Live broker ids from local membership (sorted). Empty when single-node.
+    pub fn live_brokers(&self) -> Vec<u32> {
+        match &self.cluster {
+            None => vec![self.node_id],
+            Some(c) => c.membership.read().live_brokers(),
+        }
+    }
+
+    /// Local partition ISR (may differ from assignment until ClusterState pull).
+    pub fn local_partition_isr(
+        &self,
+        topic: &TopicName,
+        partition: PartitionId,
+    ) -> Result<Vec<u32>> {
+        let topics = self.topics.read();
+        let t = topics
+            .get(topic)
+            .ok_or_else(|| Error::NotFound(format!("topic {}", topic.as_str())))?;
+        let part = t
+            .partitions
+            .get(&partition)
+            .ok_or_else(|| Error::NotFound(format!("partition {partition}")))?;
+        Ok(part.isr.clone())
+    }
+
+    /// Reconcile local membership against the controller's `alive_brokers`
+    /// set from a HeartbeatBroker response (Phase 110).
+    ///
+    /// Brokers previously considered live but **missing** from `alive` are
+    /// treated as dead via [`Self::on_broker_death`] (local ISR shrink + HWM
+    /// on every observer; durable assignment only if this node is controller).
+    /// Peers listed in `alive` are marked live.
+    ///
+    /// Non-controllers call this on every successful controller heartbeat so
+    /// they do not wait for a generation-bumped ClusterState pull to drop a
+    /// dead follower from local ISR (unblocks `acks=all`).
+    pub fn apply_controller_alive_set(&self, alive: &[u32]) -> Result<()> {
+        let Some(cluster) = &self.cluster else {
+            return Ok(());
+        };
+        let alive_set: std::collections::HashSet<u32> =
+            alive.iter().copied().collect();
+        let prev_live = cluster.membership.read().live_brokers();
+        let missing: Vec<u32> = prev_live
+            .into_iter()
+            .filter(|id| *id != self.node_id && !alive_set.contains(id))
+            .collect();
+        for dead_id in missing {
+            self.on_broker_death(dead_id)?;
+        }
+        {
+            let mut m = cluster.membership.write();
+            for &id in alive {
+                m.heartbeat(id);
+            }
+            m.touch_self();
+        }
+        Ok(())
     }
 
     /// Shared cluster state for background tasks.

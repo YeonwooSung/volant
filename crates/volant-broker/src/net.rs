@@ -625,10 +625,12 @@ async fn heartbeat_to_controller(broker: &Broker) -> Result<()> {
             alive_brokers,
             ..
         } => {
+            // Phase 110: diff controller alive-set → on_broker_death for gaps
+            // (local ISR shrink) before refreshing live peers.
+            broker.apply_controller_alive_set(&alive_brokers)?;
+            // Ensure the peer we reached (reported controller) stays live even
+            // if a stale response omitted it from alive_brokers.
             broker.note_peer_live(controller_id);
-            for id in &alive_brokers {
-                broker.note_peer_live(*id);
-            }
             // Pull ClusterState if generation advanced.
             if generation > broker.generation() {
                 let cs_req = Request::ClusterState {
