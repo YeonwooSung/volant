@@ -91,13 +91,14 @@ fn parse_alter_error(src: &mut impl Buf) -> i16 {
     code
 }
 
-async fn setup() -> (
+async fn setup(label: &str) -> (
     std::path::PathBuf,
     Arc<Broker>,
     String,
     tokio::task::JoinHandle<()>,
 ) {
-    let dir = temp_dir("p103", "name");
+    // Distinct labels + common::temp_dir seq keep parallel cases isolated.
+    let dir = temp_dir("p103", label);
     let broker = Arc::new(Broker::new(StorageConfig {
         data_dir: dir.clone(),
         ..StorageConfig::default()
@@ -109,7 +110,7 @@ async fn setup() -> (
 
 #[tokio::test]
 async fn describe_name_matching_node_id_succeeds() {
-    let (dir, broker, addr, server) = setup().await;
+    let (dir, broker, addr, server) = setup("desc-match").await;
     let node = broker.node_id().to_string();
     let resp = rpc(
         &addr,
@@ -133,7 +134,7 @@ async fn describe_name_matching_node_id_succeeds() {
 
 #[tokio::test]
 async fn describe_empty_name_succeeds() {
-    let (dir, _broker, addr, server) = setup().await;
+    let (dir, _broker, addr, server) = setup("desc-empty").await;
     let resp = rpc(
         &addr,
         encode_request(
@@ -156,7 +157,7 @@ async fn describe_empty_name_succeeds() {
 
 #[tokio::test]
 async fn describe_wrong_name_invalid_request() {
-    let (dir, _broker, addr, server) = setup().await;
+    let (dir, _broker, addr, server) = setup("desc-wrong").await;
     for bad in ["1", "999", "00", "broker-0", " 0"] {
         let resp = rpc(
             &addr,
@@ -181,7 +182,7 @@ async fn describe_wrong_name_invalid_request() {
 
 #[tokio::test]
 async fn alter_name_matching_and_empty_succeed() {
-    let (dir, broker, addr, server) = setup().await;
+    let (dir, broker, addr, server) = setup("alter-match").await;
     let node = broker.node_id().to_string();
 
     // Alter with matching node_id.
@@ -216,7 +217,7 @@ async fn alter_name_matching_and_empty_succeed() {
 
 #[tokio::test]
 async fn alter_and_incremental_wrong_name_invalid_request() {
-    let (dir, broker, addr, server) = setup().await;
+    let (dir, broker, addr, server) = setup("alter-wrong").await;
     let before = broker.transaction_max_timeout_ms();
 
     let body = alter_resource_body(
@@ -264,7 +265,7 @@ async fn alter_and_incremental_wrong_name_invalid_request() {
 
 #[tokio::test]
 async fn topic_resources_unchanged() {
-    let (dir, broker, addr, server) = setup().await;
+    let (dir, broker, addr, server) = setup("topic-ok").await;
     broker.create_topic("p103-topic", 1).unwrap();
 
     // Describe TOPIC still works.
@@ -306,7 +307,7 @@ async fn topic_resources_unchanged() {
 
 #[tokio::test]
 async fn regression_alter_known_knob() {
-    let (dir, broker, addr, server) = setup().await;
+    let (dir, broker, addr, server) = setup("alter-knob").await;
     let body = alter_resource_body(
         RES_BROKER,
         "0",

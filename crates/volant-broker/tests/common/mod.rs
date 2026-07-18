@@ -9,6 +9,7 @@
 //! ```
 
 use std::path::PathBuf;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 use std::time::{SystemTime, UNIX_EPOCH};
 
@@ -18,18 +19,38 @@ use tokio::net::{TcpListener, TcpStream};
 use volant_broker::{serve_kafka_listener, Broker};
 use volant_storage::StorageConfig;
 
+/// Monotonic counter so parallel tests never share a data dir.
+///
+/// macOS `SystemTime` often returns the same `as_nanos()` for back-to-back
+/// calls (coarse clock). Phase 103 flaked when every test used the same
+/// prefix/label and collided on pid+nanos, then one test's `remove_dir_all`
+/// wiped another's catalog/config mid-flight (ENOENT / AlterConfigs `-1`).
+static TEMP_DIR_SEQ: AtomicU64 = AtomicU64::new(0);
+
 /// Unique temp data directory for a phase test (`prefix` e.g. `"p76"`, `label` e.g. `"toc"`).
 pub fn temp_dir(prefix: &str, label: &str) -> PathBuf {
     let nanos = SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .unwrap()
         .as_nanos();
+    let seq = TEMP_DIR_SEQ.fetch_add(1, Ordering::Relaxed);
+    // Include thread id + seq so parallel cargo-test threads cannot collide
+    // even when SystemTime resolution is coarser than call rate.
+    let tid = {
+        let s = format!("{:?}", std::thread::current().id());
+        s.chars()
+            .filter(|c| c.is_ascii_alphanumeric())
+            .collect::<String>()
+    };
     let dir = std::env::temp_dir().join(format!(
-        "volant-{prefix}-{label}-{}-{}",
+        "volant-{prefix}-{label}-{}-{}-{}-{}",
         std::process::id(),
-        nanos
+        nanos,
+        tid,
+        seq
     ));
-    let _ = std::fs::remove_dir_all(&dir);
+    // Do not remove_dir_all here: a colliding path would clobber a live peer
+    // test. Paths are unique via seq; create only.
     std::fs::create_dir_all(&dir).unwrap();
     dir
 }

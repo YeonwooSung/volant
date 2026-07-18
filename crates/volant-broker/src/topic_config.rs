@@ -167,6 +167,13 @@ impl TopicConfigStore {
 
     /// Persist config (atomic replace).
     pub fn save(&self, topic: &str, cfg: &TopicConfig) -> Result<()> {
+        // Re-ensure parent exists (defense vs external delete / test isolation).
+        fs::create_dir_all(&self.dir).map_err(|e| {
+            Error::Storage(format!(
+                "create topic config dir {}: {e}",
+                self.dir.display()
+            ))
+        })?;
         let path = self.path_for(topic);
         let tmp = path.with_extension("json.tmp");
         let json = serde_json::to_string_pretty(cfg)

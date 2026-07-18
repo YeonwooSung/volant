@@ -18,7 +18,7 @@
 - Multi-broker 2PC / sessions / multi-lang / fuzz CI
 - Draining in-flight client connections / metrics / Kafka accept loops
 - Preventing duplicate `start_background_tasks` (still possible if called twice)
-- Phase 103 parallel flake (fix if cheap; not this phase)
+- Phase 103 parallel flake → **closed by Phase 107**
 - Straddle marker clip / full Kafka broker catalog
 
 ## Design (honest MVP)

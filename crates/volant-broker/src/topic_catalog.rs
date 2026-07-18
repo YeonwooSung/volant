@@ -79,6 +79,13 @@ impl TopicCatalogStore {
     /// Atomically persist snapshot (write temp + rename).
     pub fn save(&self, state: &TopicCatalogFile) -> Result<()> {
         let parent = self.path.parent().unwrap_or_else(|| Path::new("."));
+        // Re-ensure parent exists (defense vs external delete / test isolation).
+        fs::create_dir_all(parent).map_err(|e| {
+            Error::Storage(format!(
+                "create topic catalog dir {}: {e}",
+                parent.display()
+            ))
+        })?;
         let tmp = parent.join("catalog.json.tmp");
         let json = serde_json::to_string_pretty(state)
             .map_err(|e| Error::Storage(format!("encode topic catalog: {e}")))?;

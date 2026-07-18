@@ -148,10 +148,11 @@ docs for day-to-day reading: [ops](../ops.md), [consistency](../consistency.md),
 | 104 | ✅ | Aborted soft-marker GC with DeleteRecords / retention / load (MVP) | [PHASE104_SPEC.md](../PHASE104_SPEC.md) |
 | 105 | ✅ | Control batches for empty AddPartitions (MVP) | [PHASE105_SPEC.md](../PHASE105_SPEC.md) |
 | 106 | ✅ | Graceful background task shutdown / join on server stop (MVP) | [PHASE106_SPEC.md](../PHASE106_SPEC.md) |
+| 107 | ✅ | Stabilize phase103 parallel test flake (unique temp dirs; catalog/config parent recreate) | [PHASE107_SPEC.md](../PHASE107_SPEC.md) |
 
 ---
 
-## Still deferred (post–Phase 106)
+## Still deferred (post–Phase 107)
 
 - Multi-language clients
 - Chaos-mesh / cargo-fuzz corpus CI
@@ -161,3 +162,4 @@ docs for day-to-day reading: [ops](../ops.md), [consistency](../consistency.md),
 - Full Kafka broker catalog / KRaft DynamicBrokerConfig
 - Drain native / Kafka / metrics accept loops on shutdown (bg tasks closed by Phase 106)
 - Multi-broker BROKER config fan-out (Phase 103 is local validation only)
+- Single-flight / idempotent `start_background_tasks` (Phase 106 deferred)
