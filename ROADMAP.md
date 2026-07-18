@@ -2467,12 +2467,14 @@ Binding: **[docs/PHASE106_SPEC.md](./docs/PHASE106_SPEC.md)**.
 - [x] Phase 97/101 tests call explicit shutdown; Phase 101 0→>0 preserved
 - [x] Integration tests (`phase106_background_shutdown`)
 
-**Honest limitations:** native/Kafka/metrics accept loops not drained; duplicate
-`start_background_tasks` still possible; timeout aborts stragglers.
+**Honest limitations:** native/Kafka/metrics accept loops not drained at ship
+time → **closed by Phase 109**; duplicate `start_background_tasks` → **closed by
+Phase 109**; timeout aborts stragglers.
 
 **Still deferred:** multi-lang clients, cargo-fuzz corpus CI, multi-broker 2PC /
-session affinity / durable sessions, multi-broker BROKER config fan-out,
-accept-loop drain on shutdown; phase103 parallel flake → **closed by Phase 107**.
+session affinity / durable sessions, multi-broker BROKER config fan-out;
+phase103 parallel flake → **closed by Phase 107**; accept-loop drain +
+single-flight → **closed by Phase 109**.
 
 ---
 
@@ -2494,8 +2496,8 @@ common are unchanged; product code paths unchanged aside from defensive parent
 recreate on topic catalog/config save.
 
 **Still deferred:** multi-lang clients, cargo-fuzz corpus CI, multi-broker 2PC /
-session affinity / durable sessions, multi-broker BROKER config fan-out,
-accept-loop drain on shutdown, single-flight `start_background_tasks`;
+session affinity / durable sessions, multi-broker BROKER config fan-out;
+accept-loop drain + single-flight → **closed by Phase 109**;
 phase8 follower-down produce timeout → **closed by Phase 108**.
 
 ---
@@ -2520,8 +2522,34 @@ ClusterState to learn remote deaths (no alive-set diff auto-mark); lag-based
 ISR shrink threshold unchanged.
 
 **Still deferred:** multi-lang clients, cargo-fuzz corpus CI, multi-broker 2PC /
+session affinity / durable sessions, multi-broker BROKER config fan-out;
+accept-loop drain + single-flight → **closed by Phase 109**.
+
+---
+
+### Phase 109 — Accept-loop drain + single-flight background tasks (MVP) ✅
+
+**Goal:** Stop double-spawning background loops when `start_background_tasks` is
+called twice, and drain native / Kafka / metrics accept loops (plus connection
+tasks) on shutdown so SIGTERM/ctrl_c does not leave fire-and-forget accepts.
+
+Binding: **[docs/PHASE109_SPEC.md](./docs/PHASE109_SPEC.md)**.
+
+- [x] Per-broker `AtomicBool` single-flight: first spawn wins; later no-op handle
+- [x] Native `serve_listener_until` + connection abort drain (≤2s)
+- [x] Kafka `serve_kafka_listener_until` + same drain pattern
+- [x] Metrics `run_metrics_server_until` + same drain pattern
+- [x] `volant-server` aborts side listeners after primary return; TLS uses full
+      `shutdown_signal` + connection drain
+- [x] Phase 101 always-spawn + Phase 106 join timeout preserved
+- [x] Integration tests (`phase109_shutdown_drain`)
+
+**Honest limitations:** connections aborted (not half-closed); no-op second
+handle cannot stop first-flight tasks; multi-broker 2PC still deferred.
+
+**Still deferred:** multi-lang clients, cargo-fuzz corpus CI, multi-broker 2PC /
 session affinity / durable sessions, multi-broker BROKER config fan-out,
-accept-loop drain on shutdown, single-flight `start_background_tasks`.
+non-controller alive-set auto-death, straddle marker clip.
 
 ---
 
@@ -2548,18 +2576,18 @@ accept-loop drain on shutdown, single-flight `start_background_tasks`.
 | Storage | Page cache + OS | Explicit mmap + optional io_uring/O_DIRECT |
 | Stream processing | Kafka Streams / ksqlDB | In-process `volant-stream` operators |
 | Ops model | ZooKeeper/KRaft + heavy footprint | Single binary → small static ISR quorum |
-| Protocol | Kafka wire protocol | Native binary first; optional Kafka shim (`--kafka-listen`, Phases 23–108) |
+| Protocol | Kafka wire protocol | Native binary first; optional Kafka shim (`--kafka-listen`, Phases 23–109) |
 | Goal | Full ecosystem | Subset that is fast, small, and correct |
 
 Volant is **not** a drop-in Kafka replacement. It prioritizes a clean core; the
-optional Kafka wire shim is **shipped** (Phases 23–108) — see
+optional Kafka wire shim is **shipped** (Phases 23–109) — see
 [docs/KAFKA_COMPAT.md](./docs/KAFKA_COMPAT.md).
 
 ---
 
 ## Suggested implementation order (PRs)
 
-Phases **0–107 are shipped**. Historical PR order for the core:
+Phases **0–109 are shipped**. Historical PR order for the core:
 
 1. Phase 1 segment format + unit tests  
 2. Phase 1 recovery + retention  
@@ -2572,7 +2600,7 @@ Phases **0–107 are shipped**. Historical PR order for the core:
 9. Phase 6 replication prototype (2–3 nodes) ✅  
 10. Phase 7 metrics, TLS, packaging ✅  
 11. Phases 8–22 (redirect, groups, configs, txns, mTLS, ACLs, SCRAM) ✅  
-12. Phases 23–108 (Kafka wire shim + marker GC + empty-AddPartitions control + bg shutdown join + phase103 flake fix + follower-death ISR) ✅  
+12. Phases 23–109 (Kafka wire shim + marker GC + empty-AddPartitions control + bg shutdown join + phase103 flake fix + follower-death ISR + accept drain / single-flight bg) ✅  
 
 ---
 
@@ -2613,7 +2641,7 @@ cargo run -p volant-bench --release
 cargo test --workspace
 ```
 
-**Status (post–Phase 108):** core broker, ops (metrics / TLS / auth / SCRAM /
+**Status (post–Phase 109):** core broker, ops (metrics / TLS / auth / SCRAM /
 ACLs / Helm), and the Kafka wire shim are **shipped** (Fetch 0–18 Kafka max;
 ACL admin 0–3 with User resource; soft-marker `READ_COMMITTED` with **marker GC**
 on DeleteRecords/retention/load; durable OFLE history; Fetch DivergingEpoch +
@@ -2621,11 +2649,12 @@ sessions with omit-unchanged incremental + idle TTL/max; Kafka control batches
 on EndTxn **and** crash≡abort open promote **including empty AddPartitions**;
 prepared 2PC MVP; prepared + open txn timeouts + broker max timeout clamp;
 background txn/session sweeper + richer expiry metrics (always-spawn; 0→>0
-without restart; **graceful shutdown/join** Phase 106); BROKER Describe/AlterConfigs
+without restart; **graceful shutdown/join** Phase 106; **accept-loop drain +
+single-flight bg** Phase 109); BROKER Describe/AlterConfigs
 with **sparse** durable restart restore and resource name empty-or-local-`node_id`
 (Phase 103; **parallel test isolation** Phase 107); **follower-death ISR shrink +
 HWM recompute** Phase 108).
 Still deferred: multi-language clients, full chaos-mesh suites, cargo-fuzz corpus
 CI, multi-broker session affinity, multi-broker 2PC, multi-broker BROKER config
-fan-out, accept-loop drain on shutdown, single-flight `start_background_tasks`.
+fan-out, non-controller alive-set auto-death, straddle marker clip.
 Details: [docs/KAFKA_COMPAT.md](./docs/KAFKA_COMPAT.md), [docs/ops.md](./docs/ops.md).

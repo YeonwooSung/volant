@@ -24,10 +24,17 @@ use crate::replica::run_follower_loops;
 /// Default max wait when joining background tasks after stop is signaled.
 const BG_SHUTDOWN_TIMEOUT: Duration = Duration::from_secs(5);
 
+/// Bounded wait when aborting in-flight accept-loop connection tasks (Phase 109).
+const CONN_DRAIN_TIMEOUT: Duration = Duration::from_secs(2);
+
 /// Handle for broker background tasks (group expiry, retention, sweeper, cluster).
 ///
 /// Returned by [`start_background_tasks`]. Call [`BackgroundTasks::shutdown`] to
 /// signal stop and join; dropping signals stop and aborts remaining tasks.
+///
+/// A no-op handle (from a second [`start_background_tasks`] call on the same
+/// broker) has an empty task set; its shutdown/abort/Drop are safe no-ops and
+/// do **not** stop the already-running first-flight tasks.
 #[must_use = "call BackgroundTasks::shutdown to stop and join background tasks"]
 pub struct BackgroundTasks {
     stop_tx: watch::Sender<bool>,
@@ -39,9 +46,14 @@ impl BackgroundTasks {
     ///
     /// Loops observe the stop flag via `tokio::select!`, so joins normally
     /// complete well under the timeout. On timeout, remaining tasks are aborted.
+    ///
+    /// No-op when this handle owns no tasks (duplicate [`start_background_tasks`]).
     pub async fn shutdown(mut self) {
         let _ = self.stop_tx.send(true);
         let handles = std::mem::take(&mut self.handles);
+        if handles.is_empty() {
+            return;
+        }
         let aborts: Vec<_> = handles.iter().map(|h| h.abort_handle()).collect();
         let join_all = async {
             for h in handles {
@@ -63,6 +75,8 @@ impl BackgroundTasks {
     }
 
     /// Signal stop and abort all tasks without awaiting (tests / best-effort drop).
+    ///
+    /// No-op when this handle owns no tasks (duplicate [`start_background_tasks`]).
     pub fn abort(mut self) {
         let _ = self.stop_tx.send(true);
         for h in std::mem::take(&mut self.handles) {
@@ -91,49 +105,103 @@ pub async fn run_server(addr: SocketAddr, broker: Arc<Broker>) -> Result<()> {
 
 /// Accept loop over an already-bound listener (useful for port-0 e2e tests).
 ///
-/// Starts background tasks and joins them when the accept loop exits or a
-/// process shutdown signal (`ctrl_c` / SIGTERM on Unix) is received.
+/// Starts background tasks (single-flight) and joins them when the accept loop
+/// exits or a process shutdown signal (`ctrl_c` / SIGTERM on Unix) is received.
+/// In-flight connection tasks are aborted with a bounded drain timeout (Phase 109).
 pub async fn serve_listener(listener: TcpListener, broker: Arc<Broker>) -> Result<()> {
+    serve_listener_until(listener, broker, shutdown_signal()).await
+}
+
+/// Like [`serve_listener`], but stops when `shutdown` completes (Phase 109).
+///
+/// Useful for tests and coordinated multi-listener shutdown without relying on
+/// process signals.
+pub async fn serve_listener_until<F>(
+    listener: TcpListener,
+    broker: Arc<Broker>,
+    shutdown: F,
+) -> Result<()>
+where
+    F: std::future::Future<Output = ()>,
+{
     if let Ok(local) = listener.local_addr() {
         broker.set_advertised(local.ip().to_string(), local.port());
         info!(%local, "volant broker accept loop started");
     }
 
     let bg = start_background_tasks(Arc::clone(&broker));
-    let result = tokio::select! {
-        r = accept_loop(listener, Arc::clone(&broker)) => r,
-        _ = shutdown_signal() => {
-            info!("shutdown signal received; draining background tasks");
-            Ok(())
-        }
-    };
+    let result = accept_loop(listener, Arc::clone(&broker), shutdown).await;
     bg.shutdown().await;
     result
 }
 
-async fn accept_loop(listener: TcpListener, broker: Arc<Broker>) -> Result<()> {
+async fn accept_loop<F>(listener: TcpListener, broker: Arc<Broker>, shutdown: F) -> Result<()>
+where
+    F: std::future::Future<Output = ()>,
+{
+    tokio::pin!(shutdown);
+    let mut conns: Vec<JoinHandle<()>> = Vec::new();
     loop {
-        match listener.accept().await {
-            Ok((stream, peer)) => {
-                broker.metrics().record_connection();
-                debug!(%peer, "accepted connection");
-                let b = Arc::clone(&broker);
-                tokio::spawn(async move {
-                    if let Err(e) = handle_connection(stream, b).await {
-                        debug!(%peer, error = %e, "connection closed");
-                    }
-                });
+        conns.retain(|h| !h.is_finished());
+        tokio::select! {
+            _ = &mut shutdown => {
+                info!("shutdown signal received; draining native accept loop");
+                break;
             }
-            Err(e) => {
-                error!(error = %e, "accept failed");
-                return Err(Error::Io(e));
+            acc = listener.accept() => {
+                match acc {
+                    Ok((stream, peer)) => {
+                        broker.metrics().record_connection();
+                        debug!(%peer, "accepted connection");
+                        let b = Arc::clone(&broker);
+                        conns.push(tokio::spawn(async move {
+                            if let Err(e) = handle_connection(stream, b).await {
+                                debug!(%peer, error = %e, "connection closed");
+                            }
+                        }));
+                    }
+                    Err(e) => {
+                        error!(error = %e, "accept failed");
+                        drain_connection_tasks(conns).await;
+                        return Err(Error::Io(e));
+                    }
+                }
             }
         }
+    }
+    drain_connection_tasks(conns).await;
+    Ok(())
+}
+
+/// Abort in-flight connection tasks and await them (bounded).
+async fn drain_connection_tasks(handles: Vec<JoinHandle<()>>) {
+    if handles.is_empty() {
+        return;
+    }
+    for h in &handles {
+        h.abort();
+    }
+    let join_all = async {
+        for h in handles {
+            let _ = h.await;
+        }
+    };
+    if tokio::time::timeout(CONN_DRAIN_TIMEOUT, join_all)
+        .await
+        .is_err()
+    {
+        warn!(
+            timeout_ms = CONN_DRAIN_TIMEOUT.as_millis() as u64,
+            "connection drain timed out"
+        );
     }
 }
 
 /// Process-level stop: Ctrl-C, and on Unix also SIGTERM.
-async fn shutdown_signal() {
+///
+/// Public so Kafka/metrics accept loops and the TLS server path can share the
+/// same signal set (Phase 109).
+pub async fn shutdown_signal() {
     let ctrl_c = tokio::signal::ctrl_c();
     #[cfg(unix)]
     {
@@ -159,27 +227,67 @@ async fn shutdown_signal() {
 
 /// Serve Prometheus metrics over plain HTTP `GET /metrics`.
 ///
-/// Binds `addr` and serves until the accept loop fails. Intended to run as a
-/// background task alongside the broker accept loop.
+/// Binds `addr` and serves until the accept loop fails or a process shutdown
+/// signal arrives (Phase 109). Intended to run as a background task alongside
+/// the broker accept loop.
 pub async fn run_metrics_server(addr: SocketAddr, broker: Arc<Broker>) -> Result<()> {
+    run_metrics_server_until(addr, broker, shutdown_signal()).await
+}
+
+/// Like [`run_metrics_server`], but stops when `shutdown` completes (Phase 109).
+pub async fn run_metrics_server_until<F>(
+    addr: SocketAddr,
+    broker: Arc<Broker>,
+    shutdown: F,
+) -> Result<()>
+where
+    F: std::future::Future<Output = ()>,
+{
     let listener = TcpListener::bind(addr).await?;
     let local = listener.local_addr()?;
     info!(%local, "volant metrics listening");
+    metrics_accept_loop(listener, broker, shutdown).await
+}
+
+async fn metrics_accept_loop<F>(
+    listener: TcpListener,
+    broker: Arc<Broker>,
+    shutdown: F,
+) -> Result<()>
+where
+    F: std::future::Future<Output = ()>,
+{
+    tokio::pin!(shutdown);
+    let mut conns: Vec<JoinHandle<()>> = Vec::new();
     loop {
-        let (mut stream, peer) = match listener.accept().await {
-            Ok(c) => c,
-            Err(e) => {
-                error!(error = %e, "metrics accept failed");
-                return Err(Error::Io(e));
+        conns.retain(|h| !h.is_finished());
+        tokio::select! {
+            _ = &mut shutdown => {
+                info!("shutdown signal received; draining metrics accept loop");
+                break;
             }
-        };
-        let b = Arc::clone(&broker);
-        tokio::spawn(async move {
-            if let Err(e) = serve_metrics_connection(&mut stream, &b).await {
-                debug!(%peer, error = %e, "metrics connection closed");
+            acc = listener.accept() => {
+                match acc {
+                    Ok((stream, peer)) => {
+                        let b = Arc::clone(&broker);
+                        conns.push(tokio::spawn(async move {
+                            let mut stream = stream;
+                            if let Err(e) = serve_metrics_connection(&mut stream, &b).await {
+                                debug!(%peer, error = %e, "metrics connection closed");
+                            }
+                        }));
+                    }
+                    Err(e) => {
+                        error!(error = %e, "metrics accept failed");
+                        drain_connection_tasks(conns).await;
+                        return Err(Error::Io(e));
+                    }
+                }
             }
-        });
+        }
     }
+    drain_connection_tasks(conns).await;
+    Ok(())
 }
 
 async fn serve_metrics_connection(stream: &mut TcpStream, broker: &Broker) -> Result<()> {
@@ -346,10 +454,26 @@ fn broker_metrics_text(broker: &Broker) -> String {
 /// Start group expiry, retention, txn/session sweep, cluster heartbeat, and
 /// follower replication tasks.
 ///
+/// # Single-flight (Phase 109)
+///
+/// Only the **first** call per [`Broker`] spawns tasks. Subsequent calls return
+/// a no-op [`BackgroundTasks`] whose [`BackgroundTasks::shutdown`] /
+/// [`BackgroundTasks::abort`] / `Drop` do nothing to the already-running set.
+/// Holders of the first handle remain responsible for shutdown.
+///
 /// Returns a [`BackgroundTasks`] handle. Call [`BackgroundTasks::shutdown`] to
 /// signal stop and join (Phase 106). Phase 101 always-spawn + 0-pause for the
 /// sweeper is preserved.
 pub fn start_background_tasks(broker: Arc<Broker>) -> BackgroundTasks {
+    if !broker.claim_background_tasks() {
+        // No-op handle: empty task set. stop channel already true so Drop is quiet.
+        let (stop_tx, _) = watch::channel(true);
+        return BackgroundTasks {
+            stop_tx,
+            handles: Vec::new(),
+        };
+    }
+
     let (stop_tx, _) = watch::channel(false);
     let mut handles = Vec::new();
 

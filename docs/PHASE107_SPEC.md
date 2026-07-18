@@ -10,9 +10,8 @@
 
 ## Non-goals
 
-- Drain native/Kafka/metrics accept loops on shutdown
-- Single-flight / idempotent `start_background_tasks` (still deferred; cheap
-  follow-up, not required for this flake)
+- Drain native/Kafka/metrics accept loops on shutdown → **closed by Phase 109**
+- Single-flight / idempotent `start_background_tasks` → **closed by Phase 109**
 - Straddle marker clip / multi-broker 2PC / sessions / multi-lang / fuzz CI
 - Full rewrite of every unit-test `temp_dir` helper outside integration common
 
@@ -78,7 +77,7 @@ No `serial_test` / forced single-thread for this binary.
 ## Still deferred
 
 - Accept-loop drain (native / Kafka / metrics)
-- Duplicate `start_background_tasks` single-flight guard
+- Duplicate `start_background_tasks` single-flight guard → **closed by Phase 109**
 - Straddle marker clip
 - Multi-broker 2PC / sessions / multi-lang / fuzz CI
 - Multi-broker BROKER config fan-out

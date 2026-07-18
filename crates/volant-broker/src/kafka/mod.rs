@@ -38,7 +38,7 @@ mod wire;
 /// SASL PLAIN + SCRAM-SHA-256/512 state machine (Phases 30 / 34).
 pub mod sasl;
 
-pub use handler::serve_kafka_listener;
+pub use handler::{serve_kafka_listener, serve_kafka_listener_until};
 
 /// Kafka principal used for ACL checks on the shim port (no SASL).
 pub const KAFKA_ANONYMOUS_PRINCIPAL: &str = "kafka-anonymous";

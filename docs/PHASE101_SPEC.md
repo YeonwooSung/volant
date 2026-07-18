@@ -86,7 +86,7 @@ start_background_tasks:
 
 - Fire-and-forget tokio task (no join on shutdown) → **closed by Phase 106**
 - Single-node wall clock; no multi-broker coordinated expiry
-- Calling `start_background_tasks` twice still spawns duplicate bg tasks
+- Calling `start_background_tasks` twice still spawns duplicate bg tasks → **closed by Phase 109**
   (same as group expiry / retention; not fixed here)
 - Idle session sweep only (LRU still lazy-on-create)
 - Six BROKER knobs only; resource name still ignored → **closed by Phase 103**

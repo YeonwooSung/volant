@@ -1,6 +1,6 @@
 # Phase history index
 
-Ship records for **phases 0–106**. Binding core contracts are
+Ship records for **phases 0–109**. Binding core contracts are
 **[PHASE1_SPEC](../PHASE1_SPEC.md)–[PHASE6_SPEC](../PHASE6_SPEC.md)**. Living
 docs for day-to-day reading: [ops](../ops.md), [consistency](../consistency.md),
 [tuning](../tuning.md), [KAFKA_COMPAT](../KAFKA_COMPAT.md),
@@ -150,10 +150,11 @@ docs for day-to-day reading: [ops](../ops.md), [consistency](../consistency.md),
 | 106 | ✅ | Graceful background task shutdown / join on server stop (MVP) | [PHASE106_SPEC.md](../PHASE106_SPEC.md) |
 | 107 | ✅ | Stabilize phase103 parallel test flake (unique temp dirs; catalog/config parent recreate) | [PHASE107_SPEC.md](../PHASE107_SPEC.md) |
 | 108 | ✅ | Fix rolling restart produce timeout when follower down (ISR shrink + HWM on death) | [PHASE108_SPEC.md](../PHASE108_SPEC.md) |
+| 109 | ✅ | Accept-loop drain + single-flight `start_background_tasks` (MVP) | [PHASE109_SPEC.md](../PHASE109_SPEC.md) |
 
 ---
 
-## Still deferred (post–Phase 108)
+## Still deferred (post–Phase 109)
 
 - Multi-language clients
 - Chaos-mesh / cargo-fuzz corpus CI
@@ -161,6 +162,8 @@ docs for day-to-day reading: [ops](../ops.md), [consistency](../consistency.md),
 - Multi-broker session affinity / durable sessions / byte-identical response cache
 - Full KRaft epoch state machine / remote-log epochs
 - Full Kafka broker catalog / KRaft DynamicBrokerConfig
-- Drain native / Kafka / metrics accept loops on shutdown (bg tasks closed by Phase 106)
+- Drain native / Kafka / metrics accept loops on shutdown → **closed by Phase 109**
 - Multi-broker BROKER config fan-out (Phase 103 is local validation only)
-- Single-flight / idempotent `start_background_tasks` (Phase 106 deferred)
+- Single-flight / idempotent `start_background_tasks` → **closed by Phase 109**
+- Non-controller auto-death from alive-set diffs
+- Straddle marker clip

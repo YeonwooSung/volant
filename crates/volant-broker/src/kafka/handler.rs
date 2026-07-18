@@ -44,28 +44,78 @@ impl KafkaConnState {
     }
 }
 
-/// Accept Kafka-protocol connections until the listener fails fatally.
+/// Accept Kafka-protocol connections until the listener fails fatally or a
+/// process shutdown signal arrives (Phase 109).
+///
+/// In-flight connection tasks are aborted with a bounded drain timeout.
 pub async fn serve_kafka_listener(listener: TcpListener, broker: Arc<Broker>) -> Result<()> {
+    serve_kafka_listener_until(listener, broker, crate::net::shutdown_signal()).await
+}
+
+/// Like [`serve_kafka_listener`], but stops when `shutdown` completes (Phase 109).
+pub async fn serve_kafka_listener_until<F>(
+    listener: TcpListener,
+    broker: Arc<Broker>,
+    shutdown: F,
+) -> Result<()>
+where
+    F: std::future::Future<Output = ()>,
+{
     if let Ok(local) = listener.local_addr() {
         info!(%local, "volant kafka shim listening");
     }
+    tokio::pin!(shutdown);
+    let mut conns: Vec<tokio::task::JoinHandle<()>> = Vec::new();
     loop {
-        match listener.accept().await {
-            Ok((stream, peer)) => {
-                broker.metrics().record_connection();
-                debug!(%peer, "kafka connection accepted");
-                let b = Arc::clone(&broker);
-                tokio::spawn(async move {
-                    if let Err(e) = handle_kafka_connection(stream, b).await {
-                        debug!(%peer, error = %e, "kafka connection closed");
-                    }
-                });
+        conns.retain(|h| !h.is_finished());
+        tokio::select! {
+            _ = &mut shutdown => {
+                info!("shutdown signal received; draining kafka accept loop");
+                break;
             }
-            Err(e) => {
-                error!(error = %e, "kafka accept failed");
-                return Err(Error::Io(e));
+            acc = listener.accept() => {
+                match acc {
+                    Ok((stream, peer)) => {
+                        broker.metrics().record_connection();
+                        debug!(%peer, "kafka connection accepted");
+                        let b = Arc::clone(&broker);
+                        conns.push(tokio::spawn(async move {
+                            if let Err(e) = handle_kafka_connection(stream, b).await {
+                                debug!(%peer, error = %e, "kafka connection closed");
+                            }
+                        }));
+                    }
+                    Err(e) => {
+                        error!(error = %e, "kafka accept failed");
+                        drain_kafka_conns(conns).await;
+                        return Err(Error::Io(e));
+                    }
+                }
             }
         }
+    }
+    drain_kafka_conns(conns).await;
+    Ok(())
+}
+
+/// Bounded connection abort (mirrors native/metrics drain in `net.rs`).
+async fn drain_kafka_conns(handles: Vec<tokio::task::JoinHandle<()>>) {
+    if handles.is_empty() {
+        return;
+    }
+    for h in &handles {
+        h.abort();
+    }
+    let join_all = async {
+        for h in handles {
+            let _ = h.await;
+        }
+    };
+    if tokio::time::timeout(std::time::Duration::from_secs(2), join_all)
+        .await
+        .is_err()
+    {
+        tracing::warn!("kafka connection drain timed out");
     }
 }
 

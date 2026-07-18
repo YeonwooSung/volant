@@ -8,7 +8,7 @@
 use std::collections::{HashMap, HashSet};
 use std::fs;
 use std::path::PathBuf;
-use std::sync::atomic::{AtomicU32, AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
 use std::sync::Arc;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
@@ -475,6 +475,10 @@ pub struct Broker {
     leader_epoch_store: LeaderEpochStore,
     /// Process-local Fetch sessions (Phase 88 + 91 omit + Phase 95 TTL/max).
     fetch_sessions: FetchSessionManager,
+    /// Phase 109: single-flight guard for [`crate::net::start_background_tasks`].
+    ///
+    /// First claim wins; subsequent `start_background_tasks` calls return a no-op handle.
+    bg_tasks_started: AtomicBool,
 }
 
 impl Broker {
@@ -537,6 +541,7 @@ impl Broker {
             leader_epochs: RwLock::new(HashMap::new()),
             leader_epoch_store,
             fetch_sessions: FetchSessionManager::new(),
+            bg_tasks_started: AtomicBool::new(false),
         };
         broker
             .reload_single_node_topics()
@@ -635,6 +640,7 @@ impl Broker {
             leader_epochs: RwLock::new(HashMap::new()),
             leader_epoch_store,
             fetch_sessions: FetchSessionManager::new(),
+            bg_tasks_started: AtomicBool::new(false),
         };
         // Open local partitions from persisted assignment.
         broker.apply_local_assignment()?;
@@ -651,6 +657,15 @@ impl Broker {
     /// Process-local Fetch session manager (Phase 88 + 91 + 95).
     pub fn fetch_sessions(&self) -> &FetchSessionManager {
         &self.fetch_sessions
+    }
+
+    /// Phase 109: claim exclusive right to spawn background tasks.
+    ///
+    /// Returns `true` on the first claim (caller should spawn). Subsequent
+    /// claims return `false` so [`crate::net::start_background_tasks`] can
+    /// return a no-op handle.
+    pub(crate) fn claim_background_tasks(&self) -> bool {
+        !self.bg_tasks_started.swap(true, Ordering::SeqCst)
     }
 
     /// Current fetch-session idle TTL in milliseconds (Phase 95). `0` disables.

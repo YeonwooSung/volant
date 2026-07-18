@@ -359,17 +359,21 @@ async fn async_main(args: Args) -> Result<()> {
         info!("metrics endpoint authentication enabled");
     }
 
+    // Phase 109: hold accept-loop handles so SIGTERM/ctrl_c drain is joined
+    // (or aborted) after the primary native/TLS server returns.
+    let mut side_handles: Vec<tokio::task::JoinHandle<()>> = Vec::new();
+
     if let Some(metrics_addr) = &args.metrics_addr {
         let maddr: SocketAddr = metrics_addr
             .parse()
             .with_context(|| format!("invalid --metrics-addr: {metrics_addr}"))?;
         let b = Arc::clone(&broker);
         let metrics_auth = broker.metrics_token().is_some();
-        tokio::spawn(async move {
+        side_handles.push(tokio::spawn(async move {
             if let Err(e) = run_metrics_server(maddr, b).await {
                 tracing::error!(error = %e, "metrics server exited");
             }
-        });
+        }));
         info!(%maddr, metrics_auth, "metrics endpoint enabled");
     } else if args.metrics_token.is_some() {
         info!("--metrics-token set but --metrics-addr unset; metrics auth unused");
@@ -383,11 +387,11 @@ async fn async_main(args: Args) -> Result<()> {
             .await
             .with_context(|| format!("bind --kafka-listen {kaddr}"))?;
         let b = Arc::clone(&broker);
-        tokio::spawn(async move {
+        side_handles.push(tokio::spawn(async move {
             if let Err(e) = serve_kafka_listener(listener, b).await {
                 tracing::error!(error = %e, "kafka shim server exited");
             }
-        });
+        }));
         info!(%kaddr, "kafka wire protocol shim enabled (Phase 23–30)");
     }
 
@@ -400,10 +404,20 @@ async fn async_main(args: Args) -> Result<()> {
 
     #[cfg(feature = "tls")]
     if let Some(setup) = tls_setup {
-        return tls::run_tls_server(addr, broker, setup).await;
+        let result = tls::run_tls_server(addr, broker, setup).await;
+        // Side listeners also select on the same process signals; abort any
+        // stragglers so process exit is not delayed by a stuck accept.
+        for h in side_handles {
+            h.abort();
+        }
+        return result;
     }
 
-    run_server(addr, broker).await.map_err(Into::into)
+    let result = run_server(addr, broker).await.map_err(Into::into);
+    for h in side_handles {
+        h.abort();
+    }
+    result
 }
 
 /// Optional TLS accept path (feature `tls`).
@@ -423,7 +437,7 @@ mod tls {
     use tokio::net::TcpListener;
     use tokio_rustls::TlsAcceptor;
     use tracing::{debug, error, info};
-    use volant_broker::{start_background_tasks, Broker};
+    use volant_broker::{shutdown_signal, start_background_tasks, Broker};
     use volant_core::Error;
     use volant_protocol::{Frame, Response};
 
@@ -524,48 +538,66 @@ mod tls {
         let local = listener.local_addr()?;
         broker.set_advertised(local.ip().to_string(), local.port());
         info!(%local, mtls = setup.mtls, "volant broker listening (TLS)");
-        // Phase 106: join bg tasks on accept exit / shutdown signal.
+        // Phase 106/109: join bg tasks + drain connections on accept exit / signal.
         let bg = start_background_tasks(Arc::clone(&broker));
 
         let setup = Arc::new(setup);
         let accept_result = async {
+            let mut conns: Vec<tokio::task::JoinHandle<()>> = Vec::new();
+            let stop = shutdown_signal();
+            tokio::pin!(stop);
             loop {
-                match listener.accept().await {
-                    Ok((stream, peer)) => {
-                        broker.metrics().record_connection();
-                        debug!(%peer, "accepted TLS connection");
-                        let b = Arc::clone(&broker);
-                        let setup = Arc::clone(&setup);
-                        tokio::spawn(async move {
-                            match setup.acceptor.accept(stream).await {
-                                Ok(tls_stream) => {
-                                    if let Err(e) =
-                                        handle_tls_connection(tls_stream, b, &setup).await
-                                    {
-                                        debug!(%peer, error = %e, "TLS connection closed");
-                                    }
-                                }
-                                Err(e) => {
-                                    debug!(%peer, error = %e, "TLS handshake failed");
-                                }
-                            }
-                        });
+                conns.retain(|h| !h.is_finished());
+                tokio::select! {
+                    _ = &mut stop => {
+                        info!("shutdown signal received; draining TLS accept loop");
+                        for h in &conns {
+                            h.abort();
+                        }
+                        for h in conns {
+                            let _ = h.await;
+                        }
+                        return Ok(());
                     }
-                    Err(e) => {
-                        error!(error = %e, "TLS accept failed");
-                        return Err(Error::Io(e).into());
+                    acc = listener.accept() => {
+                        match acc {
+                            Ok((stream, peer)) => {
+                                broker.metrics().record_connection();
+                                debug!(%peer, "accepted TLS connection");
+                                let b = Arc::clone(&broker);
+                                let setup = Arc::clone(&setup);
+                                conns.push(tokio::spawn(async move {
+                                    match setup.acceptor.accept(stream).await {
+                                        Ok(tls_stream) => {
+                                            if let Err(e) =
+                                                handle_tls_connection(tls_stream, b, &setup).await
+                                            {
+                                                debug!(%peer, error = %e, "TLS connection closed");
+                                            }
+                                        }
+                                        Err(e) => {
+                                            debug!(%peer, error = %e, "TLS handshake failed");
+                                        }
+                                    }
+                                }));
+                            }
+                            Err(e) => {
+                                error!(error = %e, "TLS accept failed");
+                                for h in &conns {
+                                    h.abort();
+                                }
+                                for h in conns {
+                                    let _ = h.await;
+                                }
+                                return Err(Error::Io(e).into());
+                            }
+                        }
                     }
                 }
             }
         };
 
-        let result = tokio::select! {
-            r = accept_result => r,
-            _ = tokio::signal::ctrl_c() => {
-                info!("shutdown signal received; draining background tasks (TLS)");
-                Ok(())
-            }
-        };
+        let result = accept_result.await;
         bg.shutdown().await;
         result
     }

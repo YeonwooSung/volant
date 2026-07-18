@@ -69,9 +69,10 @@ pub use broker_config::{
     KEY_SWEEP_INTERVAL_MS, KEY_TRANSACTION_MAX_TIMEOUT_MS,
 };
 pub use leader_epoch::{EpochStart, LeaderEpochStore, LeaderEpochsFile};
-pub use kafka::serve_kafka_listener;
+pub use kafka::{serve_kafka_listener, serve_kafka_listener_until};
 pub use metrics::Metrics;
 pub use net::{
-    run_metrics_server, run_server, serve_listener, start_background_tasks, BackgroundTasks,
+    run_metrics_server, run_metrics_server_until, run_server, serve_listener, serve_listener_until,
+    shutdown_signal, start_background_tasks, BackgroundTasks,
 };
 pub use offset_store::{OffsetStore, StoredOffset, OFFSET_UNKNOWN};

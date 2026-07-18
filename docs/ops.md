@@ -11,7 +11,7 @@
 | `--log-format` | | `text` | `text` or `json` |
 | `--auth-token` | `VOLANT_AUTH_TOKEN` | *unset* | Shared-token auth (native port only) |
 | `--scram-user USER:PASS` | | *unset* | Upsert SCRAM user at startup (repeatable; Phase 22) |
-| `--kafka-listen` | | *disabled* | Kafka wire protocol shim (Phases 23–101) |
+| `--kafka-listen` | | *disabled* | Kafka wire protocol shim (Phases 23–109) |
 | `--tls-cert` / `--tls-key` | | *unset* | Server TLS (feature `tls`) |
 | `--tls-peer-insecure` | | `true` | Skip inter-broker cert verify (lab) |
 | `--tls-ca` | | *unset* | CA PEM for inter-broker peer verify |
@@ -302,17 +302,18 @@ curl -s -H "Authorization: Bearer $VOLANT_METRICS_TOKEN" \
 - Full multi-broker 2PC / full KIP-890 abortable surface
 - Multi-broker session affinity / durable sessions
 - Byte-identical Kafka compressed response cache (omit is HWM+LSO based)
-- Accept-loop drain on shutdown (background tasks join closed by Phase 106)
+- Accept-loop drain + single-flight background tasks → **closed by Phase 109** (bg join: Phase 106)
 
 Full list: [ROADMAP.md](../ROADMAP.md).
 
 ## Shipped (not gaps)
 
-Kafka wire shim **Phases 23–108** (ApiVersions **0–5**, Fetch **0–18**, ACL admin
+Kafka wire shim **Phases 23–109** (ApiVersions **0–5**, Fetch **0–18**, ACL admin
 **0–3** User resource, prepared 2PC MVP + prepared/open timeout + max clamp,
 TRANSACTION_ABORTABLE honest subset after timeout, omit-unchanged sessions,
 session idle TTL + max/LRU, background txn/session sweeper + expiry metrics
-(always-spawn / 0→>0 live; graceful shutdown/join Phase 106), BROKER
+(always-spawn / 0→>0 live; graceful shutdown/join Phase 106; accept-loop drain +
+single-flight bg Phase 109), BROKER
 Describe/AlterConfigs + durable restart restore, empty-AddPartitions control
 batches, ~38 keys; **ISR shrink on follower death** Phase 108), SCRAM-SHA-256/512,
 SASL PLAIN/SCRAM — see [KAFKA_COMPAT.md](./KAFKA_COMPAT.md).

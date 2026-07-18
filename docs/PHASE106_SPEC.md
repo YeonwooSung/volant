@@ -16,8 +16,8 @@
 ## Non-goals
 
 - Multi-broker 2PC / sessions / multi-lang / fuzz CI
-- Draining in-flight client connections / metrics / Kafka accept loops
-- Preventing duplicate `start_background_tasks` (still possible if called twice)
+- Draining in-flight client connections / metrics / Kafka accept loops → **closed by Phase 109** (abort drain)
+- Preventing duplicate `start_background_tasks` → **closed by Phase 109**
 - Phase 103 parallel flake → **closed by Phase 107**
 - Straddle marker clip / full Kafka broker catalog
 
@@ -97,11 +97,10 @@ No new crates (`tokio::sync::watch` only; workspace already has `tokio` full).
 
 ## Honest limitations
 
-- Connection accept loops (native / Kafka / metrics) are not drained; only the
-  periodic background tasks from `start_background_tasks`
-- Calling `start_background_tasks` twice still spawns duplicate tasks
+- Connection accept loops (native / Kafka / metrics) drain → **closed by Phase 109**
+- Calling `start_background_tasks` twice → **closed by Phase 109** (single-flight)
 - Shutdown timeout aborts stragglers (does not wait forever)
-- TLS path uses `ctrl_c` only (plaintext also watches SIGTERM on Unix)
+- TLS path SIGTERM + connection drain → **closed by Phase 109**
 - Single-node wall clock; no multi-broker coordinated expiry
 
 ## Test plan
@@ -113,9 +112,10 @@ No new crates (`tokio::sync::watch` only; workspace already has `tokio` full).
 3. After `shutdown`, aged open txn is **not** background-expired; lazy still works
 4. `0→>0` before shutdown still enables expire (Phase 101 regression)
 
-## Phase 107 ideas
+## Later phases
 
-- Drain native / Kafka / metrics accept loops on shutdown
-- Single-flight guard against duplicate `start_background_tasks`
+- Drain native / Kafka / metrics accept loops on shutdown → **closed by Phase 109**
+- Single-flight guard against duplicate `start_background_tasks` → **closed by Phase 109**
+- Phase 103 parallel flake → **closed by Phase 107**
 - Multi-broker 2PC / sessions / multi-lang / fuzz CI
 - Straddle marker clip / control-batch log GC

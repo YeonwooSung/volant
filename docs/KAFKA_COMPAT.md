@@ -86,6 +86,7 @@ From `SUPPORTED_APIS` in `crates/volant-broker/src/kafka/mod.rs`:
 | Durable broker config | 100 | Full snapshot of six knobs under `{data_dir}/__broker_config/state.json`; load after env; DELETE rewrites file |
 | Graceful sweeper enable | 101 | Always spawn sweeper task; `0` pauses; `0→>0` via setter/Alter enables without process restart |
 | Background shutdown join | 106 | `BackgroundTasks` stop+join for group/retention/sweeper/cluster loops; server drains on exit/signal |
+| Accept drain + single-flight bg | 109 | Native/Kafka/metrics accept loops select shutdown + abort connections (bounded); `start_background_tasks` single-flight per broker |
 | Soft-marker GC | 104 | DeleteRecords / retention / load drop aborted soft markers with `end_offset <= log_start`; persist `__txn_markers`; metric `volant_aborted_markers_gc_total` |
 | Empty-AddPartitions control | 105 | AddPartitions membership tracked; EndTxn + crash promote append control for empty partitions (no fake soft ranges) |
 

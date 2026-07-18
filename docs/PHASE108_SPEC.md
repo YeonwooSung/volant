@@ -12,8 +12,8 @@
 
 ## Non-goals
 
-- Accept-loop drain (native / Kafka / metrics)
-- Single-flight / idempotent `start_background_tasks`
+- Accept-loop drain (native / Kafka / metrics) → **closed by Phase 109**
+- Single-flight / idempotent `start_background_tasks` → **closed by Phase 109**
 - Straddle marker clip
 - Multi-broker 2PC / sessions / multi-lang / fuzz CI
 - Auto-mark peers dead from heartbeat `alive_brokers` gaps (still controller
@@ -93,8 +93,7 @@ Contract preserved:
 
 ## Still deferred
 
-- Accept-loop drain (native / Kafka / metrics)
-- Duplicate `start_background_tasks` single-flight guard
+- Accept-loop drain + single-flight `start_background_tasks` → **closed by Phase 109**
 - Straddle marker clip
 - Multi-broker 2PC / sessions / multi-lang / fuzz CI
 - Multi-broker BROKER config fan-out
