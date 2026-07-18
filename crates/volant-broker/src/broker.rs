@@ -4250,12 +4250,17 @@ impl Broker {
     }
 
     /// Open/update local partitions from current assignment.
+    ///
+    /// After overlaying leader/ISR from the assignment, recomputes HWM on
+    /// partitions this node leads so ISR shrink (follower death) unblocks
+    /// `acks=all` waiters when ClusterState is applied (Phase 108).
     fn apply_local_assignment(&self) -> Result<()> {
         let Some(cluster) = &self.cluster else {
             return Ok(());
         };
         let asg = cluster.assignment.read().clone();
         let mut topics = self.topics.write();
+        let mut hwm_changed = false;
         for (name, ta) in &asg.topics {
             let tname = TopicName::new(name.clone());
             let topic = topics.entry(tname.clone()).or_insert_with(|| Topic {
@@ -4274,6 +4279,21 @@ impl Broker {
                     pa.isr.clone(),
                     pa.leader_epoch,
                 )?;
+                if let Some(part) = topic.partitions.get_mut(&PartitionId(*pid)) {
+                    if part.is_leader(self.node_id) {
+                        let before = part.committed_hwm;
+                        // Drop LEO entries for brokers no longer in ISR.
+                        part.follower_leo.retain(|id, _| part.isr.contains(id));
+                        if part.isr.len() <= 1 {
+                            part.catch_up_hwm();
+                        } else {
+                            part.recompute_hwm(self.node_id);
+                        }
+                        if part.committed_hwm != before {
+                            hwm_changed = true;
+                        }
+                    }
+                }
             }
             // Overlay durable topic config onto local partition logs.
             if let Ok(cfg) = self.topic_configs.load(name) {
@@ -4290,16 +4310,60 @@ impl Broker {
         if max_id + 1 > cur {
             self.next_topic_id.store(max_id + 1, Ordering::SeqCst);
         }
+        drop(topics);
+        if hwm_changed {
+            self.hwm_cvar.notify_all();
+        }
         Ok(())
     }
 
-    /// Handle a dead broker: elect new leaders from ISR.
+    /// Remove `dead_id` from every local partition ISR and advance HWM when we lead.
+    ///
+    /// Called from [`Self::on_broker_death`] on **every** node that observes the death
+    /// (not only the controller). Without this, `acks=all` waits forever for a dead
+    /// follower's LEO because HWM = min(ISR LEOs) still includes the stale member
+    /// (Phase 108).
+    fn shrink_local_isr_for_dead(&self, dead_id: u32) {
+        let mut topics = self.topics.write();
+        let mut any = false;
+        for t in topics.values_mut() {
+            for part in t.partitions.values_mut() {
+                let before = part.isr.len();
+                part.isr.retain(|id| *id != dead_id);
+                part.follower_leo.remove(&dead_id);
+                if part.isr.len() == before {
+                    continue;
+                }
+                any = true;
+                if part.is_leader(self.node_id) {
+                    if part.isr.len() <= 1 {
+                        part.catch_up_hwm();
+                    } else {
+                        part.recompute_hwm(self.node_id);
+                    }
+                }
+            }
+        }
+        drop(topics);
+        if any {
+            self.hwm_cvar.notify_all();
+        }
+    }
+
+    /// Handle a dead broker: shrink ISR, elect new leaders from remaining ISR.
+    ///
+    /// Every observer removes the dead broker from **local** partition ISR and
+    /// recomputes HWM (unblocks `acks=all`). The controller additionally updates
+    /// the durable assignment (including pure ISR shrink — generation bump) so
+    /// peers learn via ClusterState pull.
     pub fn on_broker_death(&self, dead_id: u32) -> Result<()> {
         let Some(cluster) = &self.cluster else {
             return Ok(());
         };
         // Mark dead first so controller_id recomputes (lowest remaining live id).
         cluster.membership.write().mark_dead(dead_id);
+        // Local ISR shrink on every observer (leader may not be controller).
+        self.shrink_local_isr_for_dead(dead_id);
         if !cluster.membership.read().is_controller() {
             return Ok(());
         }
@@ -4312,29 +4376,37 @@ impl Broker {
             let mut asg = cluster.assignment.write();
             for ta in asg.topics.values_mut() {
                 for (pid, pa) in ta.partitions.iter_mut() {
-                    // Shrink ISR.
+                    // Shrink ISR; restore previous if no live member remains.
+                    let isr_before = pa.isr.clone();
                     pa.isr.retain(|id| live.contains(id));
                     if pa.isr.is_empty() {
                         // No live ISR — keep last known, hope for recovery.
+                        pa.isr = isr_before;
                         continue;
+                    }
+                    if pa.isr.len() != isr_before.len() {
+                        // Pure follower death must bump generation (Phase 108).
+                        changed = true;
                     }
                     if pa.leader == dead_id || !live.contains(&pa.leader) {
                         if let Some(new_leader) = elect_leader(&pa.replicas, &pa.isr, &live) {
-                            pa.leader = new_leader;
-                            let new_epoch = pa.leader_epoch.saturating_add(1);
-                            pa.leader_epoch = new_epoch;
-                            if !pa.isr.contains(&new_leader) {
-                                pa.isr.push(new_leader);
+                            if pa.leader != new_leader {
+                                pa.leader = new_leader;
+                                let new_epoch = pa.leader_epoch.saturating_add(1);
+                                pa.leader_epoch = new_epoch;
+                                if !pa.isr.contains(&new_leader) {
+                                    pa.isr.push(new_leader);
+                                }
+                                let start = self
+                                    .topics
+                                    .read()
+                                    .get(&TopicName::new(ta.name.as_str()))
+                                    .and_then(|t| t.partitions.get(&PartitionId(*pid)))
+                                    .map(|p| p.leo())
+                                    .unwrap_or(0);
+                                epoch_bumps.push((ta.name.clone(), *pid, new_epoch, start));
+                                changed = true;
                             }
-                            let start = self
-                                .topics
-                                .read()
-                                .get(&TopicName::new(ta.name.as_str()))
-                                .and_then(|t| t.partitions.get(&PartitionId(*pid)))
-                                .map(|p| p.leo())
-                                .unwrap_or(0);
-                            epoch_bumps.push((ta.name.clone(), *pid, new_epoch, start));
-                            changed = true;
                         }
                     }
                 }

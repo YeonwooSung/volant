@@ -308,11 +308,11 @@ Full list: [ROADMAP.md](../ROADMAP.md).
 
 ## Shipped (not gaps)
 
-Kafka wire shim **Phases 23–106** (ApiVersions **0–5**, Fetch **0–18**, ACL admin
+Kafka wire shim **Phases 23–108** (ApiVersions **0–5**, Fetch **0–18**, ACL admin
 **0–3** User resource, prepared 2PC MVP + prepared/open timeout + max clamp,
 TRANSACTION_ABORTABLE honest subset after timeout, omit-unchanged sessions,
 session idle TTL + max/LRU, background txn/session sweeper + expiry metrics
 (always-spawn / 0→>0 live; graceful shutdown/join Phase 106), BROKER
 Describe/AlterConfigs + durable restart restore, empty-AddPartitions control
-batches, ~38 keys), SCRAM-SHA-256/512, SASL PLAIN/SCRAM — see
-[KAFKA_COMPAT.md](./KAFKA_COMPAT.md).
+batches, ~38 keys; **ISR shrink on follower death** Phase 108), SCRAM-SHA-256/512,
+SASL PLAIN/SCRAM — see [KAFKA_COMPAT.md](./KAFKA_COMPAT.md).

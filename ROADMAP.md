@@ -2495,6 +2495,32 @@ recreate on topic catalog/config save.
 
 **Still deferred:** multi-lang clients, cargo-fuzz corpus CI, multi-broker 2PC /
 session affinity / durable sessions, multi-broker BROKER config fan-out,
+accept-loop drain on shutdown, single-flight `start_background_tasks`;
+phase8 follower-down produce timeout → **closed by Phase 108**.
+
+---
+
+### Phase 108 — Fix rolling restart produce timeout when follower down (MVP) ✅
+
+**Goal:** `acks=all` produce while a non-leader follower is dead must not
+REQUEST_TIMED_OUT when remaining `|ISR| >= min.insync.replicas`. Shrink local
+ISR on death observation, bump assignment generation on pure ISR shrink, and
+recompute HWM so waiters unblock.
+
+Binding: **[docs/PHASE108_SPEC.md](./docs/PHASE108_SPEC.md)**.
+
+- [x] Root-cause: pure follower death did not apply ISR shrink / HWM recompute
+- [x] Every death observer: local ISR drop + HWM recompute + notify
+- [x] Controller: generation bump on ISR-only shrink; empty-ISR restore last known
+- [x] `apply_local_assignment` recomputes HWM for local leaders
+- [x] Multi-run green: `phase8_redirect_restart` + `cluster_failover` smoke
+
+**Honest limitations:** non-controller still relies on `on_broker_death` /
+ClusterState to learn remote deaths (no alive-set diff auto-mark); lag-based
+ISR shrink threshold unchanged.
+
+**Still deferred:** multi-lang clients, cargo-fuzz corpus CI, multi-broker 2PC /
+session affinity / durable sessions, multi-broker BROKER config fan-out,
 accept-loop drain on shutdown, single-flight `start_background_tasks`.
 
 ---
@@ -2522,11 +2548,11 @@ accept-loop drain on shutdown, single-flight `start_background_tasks`.
 | Storage | Page cache + OS | Explicit mmap + optional io_uring/O_DIRECT |
 | Stream processing | Kafka Streams / ksqlDB | In-process `volant-stream` operators |
 | Ops model | ZooKeeper/KRaft + heavy footprint | Single binary → small static ISR quorum |
-| Protocol | Kafka wire protocol | Native binary first; optional Kafka shim (`--kafka-listen`, Phases 23–107) |
+| Protocol | Kafka wire protocol | Native binary first; optional Kafka shim (`--kafka-listen`, Phases 23–108) |
 | Goal | Full ecosystem | Subset that is fast, small, and correct |
 
 Volant is **not** a drop-in Kafka replacement. It prioritizes a clean core; the
-optional Kafka wire shim is **shipped** (Phases 23–107) — see
+optional Kafka wire shim is **shipped** (Phases 23–108) — see
 [docs/KAFKA_COMPAT.md](./docs/KAFKA_COMPAT.md).
 
 ---
@@ -2546,7 +2572,7 @@ Phases **0–107 are shipped**. Historical PR order for the core:
 9. Phase 6 replication prototype (2–3 nodes) ✅  
 10. Phase 7 metrics, TLS, packaging ✅  
 11. Phases 8–22 (redirect, groups, configs, txns, mTLS, ACLs, SCRAM) ✅  
-12. Phases 23–107 (Kafka wire shim + marker GC + empty-AddPartitions control + bg shutdown join + phase103 parallel flake fix) ✅  
+12. Phases 23–108 (Kafka wire shim + marker GC + empty-AddPartitions control + bg shutdown join + phase103 flake fix + follower-death ISR) ✅  
 
 ---
 
@@ -2587,7 +2613,7 @@ cargo run -p volant-bench --release
 cargo test --workspace
 ```
 
-**Status (post–Phase 107):** core broker, ops (metrics / TLS / auth / SCRAM /
+**Status (post–Phase 108):** core broker, ops (metrics / TLS / auth / SCRAM /
 ACLs / Helm), and the Kafka wire shim are **shipped** (Fetch 0–18 Kafka max;
 ACL admin 0–3 with User resource; soft-marker `READ_COMMITTED` with **marker GC**
 on DeleteRecords/retention/load; durable OFLE history; Fetch DivergingEpoch +
@@ -2597,7 +2623,8 @@ prepared 2PC MVP; prepared + open txn timeouts + broker max timeout clamp;
 background txn/session sweeper + richer expiry metrics (always-spawn; 0→>0
 without restart; **graceful shutdown/join** Phase 106); BROKER Describe/AlterConfigs
 with **sparse** durable restart restore and resource name empty-or-local-`node_id`
-(Phase 103; **parallel test isolation** Phase 107)).
+(Phase 103; **parallel test isolation** Phase 107); **follower-death ISR shrink +
+HWM recompute** Phase 108).
 Still deferred: multi-language clients, full chaos-mesh suites, cargo-fuzz corpus
 CI, multi-broker session affinity, multi-broker 2PC, multi-broker BROKER config
 fan-out, accept-loop drain on shutdown, single-flight `start_background_tasks`.

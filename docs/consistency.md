@@ -88,5 +88,13 @@ Without `--cluster-config`, the broker runs as a single node:
 - Prefer `acks=all` and `min_insync_replicas >= 2` for multi-node deployments
 - Rolling restart: restart followers first; restart the controller carefully (next-lowest id takes over)
 - After failover, clients should refresh Metadata on `NotLeaderForPartition`
+- **Follower death (Phase 108):** every node that observes a broker death removes
+  that id from local partition ISR and recomputes HWM when it leads. The
+  controller also shrinks the durable assignment and bumps generation (including
+  pure ISR shrink with no leader change) so peers learn via ClusterState.
+  `acks=all` then waits only on the **remaining live** ISR — it no longer
+  REQUEST_TIMED_OUT solely because a dead follower still held a stale LEO in
+  the ISR set. If `|ISR|` falls below `min_insync_replicas`, produce is still
+  rejected with `NotEnoughReplicas`.
 
 See [PHASE6_SPEC.md](./PHASE6_SPEC.md) for wire protocol and configuration details.
