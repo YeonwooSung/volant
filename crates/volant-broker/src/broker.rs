@@ -395,6 +395,16 @@ pub struct Broker {
     /// - InitProducerId with client timeout **> max** → error **50**
     /// - Effective open/prepared timeouts are clamped to ≤ max
     transaction_max_timeout_ms: AtomicU64,
+    /// Background open/prepared/session sweep interval (Phase 97).
+    ///
+    /// Default `1_000` ms; override via `VOLANT_SWEEP_INTERVAL_MS` or
+    /// [`Broker::set_sweep_interval_ms`]. `0` disables the background sweeper
+    /// (lazy expire paths still run).
+    sweep_interval_ms: AtomicU64,
+    /// Open txns auto-aborted by timeout (lazy + background; Phase 97).
+    open_txns_expired_total: AtomicU64,
+    /// Prepared txns auto-aborted by timeout (lazy + background; Phase 97).
+    prepared_txns_expired_total: AtomicU64,
     /// PIDs whose open/prepared txn was auto-aborted by timeout and still need
     /// client abort acknowledgment (Phase 94 / KIP-890 TRANSACTION_ABORTABLE).
     ///
@@ -470,6 +480,9 @@ impl Broker {
             prepared_txn_timeout_ms: AtomicU64::new(default_prepared_txn_timeout_ms()),
             open_txn_timeout_ms: AtomicU64::new(default_open_txn_timeout_ms()),
             transaction_max_timeout_ms: AtomicU64::new(default_transaction_max_timeout_ms()),
+            sweep_interval_ms: AtomicU64::new(default_sweep_interval_ms()),
+            open_txns_expired_total: AtomicU64::new(0),
+            prepared_txns_expired_total: AtomicU64::new(0),
             abortable_producers: Mutex::new(HashSet::new()),
             aborted_txns: Mutex::new(HashMap::new()),
             producer_store,
@@ -560,6 +573,9 @@ impl Broker {
             prepared_txn_timeout_ms: AtomicU64::new(default_prepared_txn_timeout_ms()),
             open_txn_timeout_ms: AtomicU64::new(default_open_txn_timeout_ms()),
             transaction_max_timeout_ms: AtomicU64::new(default_transaction_max_timeout_ms()),
+            sweep_interval_ms: AtomicU64::new(default_sweep_interval_ms()),
+            open_txns_expired_total: AtomicU64::new(0),
+            prepared_txns_expired_total: AtomicU64::new(0),
             abortable_producers: Mutex::new(HashSet::new()),
             aborted_txns: Mutex::new(HashMap::new()),
             producer_store,
@@ -739,6 +755,50 @@ impl Broker {
     pub fn set_transaction_max_timeout_ms(&self, timeout_ms: u64) {
         self.transaction_max_timeout_ms
             .store(timeout_ms, Ordering::Relaxed);
+    }
+
+    /// Background sweep interval in milliseconds (Phase 97).
+    ///
+    /// `0` means the background sweeper is disabled (lazy expire remains).
+    pub fn sweep_interval_ms(&self) -> u64 {
+        self.sweep_interval_ms.load(Ordering::Relaxed)
+    }
+
+    /// Override background sweep interval (Phase 97). `0` disables background.
+    pub fn set_sweep_interval_ms(&self, interval_ms: u64) {
+        self.sweep_interval_ms.store(interval_ms, Ordering::Relaxed);
+    }
+
+    /// Live open (non-prepared) transaction count (Phase 97 gauge).
+    pub fn open_txn_count(&self) -> usize {
+        self.open_txns.lock().len()
+    }
+
+    /// Live prepared transaction count (Phase 97 gauge).
+    pub fn prepared_txn_count(&self) -> usize {
+        self.prepared_txns.lock().len()
+    }
+
+    /// Total open txns auto-aborted by timeout (lazy + background; Phase 97).
+    pub fn open_txns_expired_total(&self) -> u64 {
+        self.open_txns_expired_total.load(Ordering::Relaxed)
+    }
+
+    /// Total prepared txns auto-aborted by timeout (lazy + background; Phase 97).
+    pub fn prepared_txns_expired_total(&self) -> u64 {
+        self.prepared_txns_expired_total.load(Ordering::Relaxed)
+    }
+
+    /// Run one open/prepared timeout expiry + idle fetch-session eviction
+    /// (Phase 97).
+    ///
+    /// Used by the background sweeper and tests. Lazy API paths still call
+    /// [`Self::expire_timed_out_txns`] independently. Returns
+    /// `(open_aborted, prepared_aborted, sessions_idle_evicted)`.
+    pub fn sweep_timeouts(&self) -> (usize, usize, usize) {
+        let (open_n, prep_n) = self.expire_timed_out_txns();
+        let idle_n = self.fetch_sessions.evict_idle_now();
+        (open_n, prep_n, idle_n)
     }
 
     /// InitProducerId with Phase 90 2PC options (Enable2Pc / KeepPreparedTxn)
@@ -1724,8 +1784,8 @@ impl Broker {
 
     /// Lazy expiry of timed-out open **and** prepared txns (Phase 92/93).
     ///
-    /// Called at the start of txn/LSO paths so isolation advances without a
-    /// background sweeper. Returns `(open_aborted, prepared_aborted)`.
+    /// Called at the start of txn/LSO paths and by the Phase 97 background
+    /// sweeper. Returns `(open_aborted, prepared_aborted)`.
     pub fn expire_timed_out_txns(&self) -> (usize, usize) {
         let open_n = self.expire_timed_out_open_txns();
         let prep_n = self.expire_timed_out_prepared_txns();
@@ -1825,6 +1885,8 @@ impl Broker {
         }
         if n > 0 {
             self.persist_txn_markers();
+            self.open_txns_expired_total
+                .fetch_add(n as u64, Ordering::Relaxed);
         }
         n
     }
@@ -1872,6 +1934,8 @@ impl Broker {
         }
         if n > 0 {
             self.persist_prepared_txns();
+            self.prepared_txns_expired_total
+                .fetch_add(n as u64, Ordering::Relaxed);
         }
         n
     }
@@ -4239,6 +4303,16 @@ fn default_transaction_max_timeout_ms() -> u64 {
         .ok()
         .and_then(|s| s.parse::<u64>().ok())
         .unwrap_or(900_000)
+}
+
+/// Default background sweep interval from env or 1s (Phase 97).
+///
+/// Env value `0` disables the background sweeper (lazy expire remains).
+fn default_sweep_interval_ms() -> u64 {
+    std::env::var("VOLANT_SWEEP_INTERVAL_MS")
+        .ok()
+        .and_then(|s| s.parse::<u64>().ok())
+        .unwrap_or(1_000)
 }
 
 fn topics_from_open(txn: &OpenTxn) -> Vec<(String, Vec<i32>)> {

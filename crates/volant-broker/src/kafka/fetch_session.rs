@@ -103,6 +103,8 @@ pub struct FetchSessionManager {
     max_sessions: AtomicUsize,
     /// Total sessions removed by idle TTL or LRU pressure.
     evicted_total: AtomicU64,
+    /// Sessions removed by idle TTL only (Phase 97; subset of `evicted_total`).
+    idle_evicted_total: AtomicU64,
 }
 
 impl Default for FetchSessionManager {
@@ -125,6 +127,7 @@ impl FetchSessionManager {
             idle_timeout_ms: AtomicU64::new(idle_timeout_ms),
             max_sessions: AtomicUsize::new(max_sessions),
             evicted_total: AtomicU64::new(0),
+            idle_evicted_total: AtomicU64::new(0),
         }
     }
 
@@ -156,6 +159,27 @@ impl FetchSessionManager {
     /// Total idle + LRU evictions since process start.
     pub fn evicted_total(&self) -> u64 {
         self.evicted_total.load(Ordering::Relaxed)
+    }
+
+    /// Idle-TTL evictions only (Phase 97; subset of [`Self::evicted_total`]).
+    pub fn idle_evicted_total(&self) -> u64 {
+        self.idle_evicted_total.load(Ordering::Relaxed)
+    }
+
+    /// Evict idle sessions using the current wall clock (Phase 97 sweeper).
+    ///
+    /// Same path as lazy idle eviction on create / begin_incremental.
+    /// Returns the number of sessions removed.
+    pub fn evict_idle_now(&self) -> usize {
+        self.evict_idle_at(now_ms())
+    }
+
+    /// Evict idle sessions at an explicit timestamp (tests / sweeper).
+    pub fn evict_idle_at(&self, now_ms: i64) -> usize {
+        let mut guard = self.sessions.lock();
+        let before = guard.len();
+        self.evict_idle_locked(&mut guard, now_ms);
+        before.saturating_sub(guard.len())
     }
 
     fn alloc_id(&self) -> i32 {
@@ -366,6 +390,7 @@ impl FetchSessionManager {
         let removed = before.saturating_sub(sessions.len()) as u64;
         if removed > 0 {
             self.evicted_total.fetch_add(removed, Ordering::Relaxed);
+            self.idle_evicted_total.fetch_add(removed, Ordering::Relaxed);
         }
     }
 

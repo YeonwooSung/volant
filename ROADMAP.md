@@ -2202,8 +2202,34 @@ timeout ≤ 0 as broker-default (not full Kafka `> 0` validation); no
 DescribeConfigs surface for the knobs.
 
 **Still deferred:** multi-lang clients, cargo-fuzz corpus CI, multi-broker 2PC /
-session affinity / durable sessions, background txn/session sweeper / richer
-metrics, Admin timeout config surface.
+session affinity / durable sessions, Admin timeout config surface; background
+txn/session sweeper / richer metrics → **closed by Phase 97**.
+
+---
+
+### Phase 97 — Background txn + session sweeper with metrics (MVP) ✅
+
+**Goal:** Periodic background expiry of timed-out open/prepared transactions and
+idle fetch sessions (same paths as lazy expire), plus richer Prometheus counters
+and gauges. Lazy paths remain correct without the sweeper.
+
+Binding: **[docs/PHASE97_SPEC.md](./docs/PHASE97_SPEC.md)**.
+
+- [x] Default sweep interval **1000 ms**; `VOLANT_SWEEP_INTERVAL_MS` + setter; `0` disables
+- [x] Background task in `start_background_tasks` (server entry)
+- [x] `Broker::sweep_timeouts()` → open + prepared expire + idle session eviction
+- [x] Counters: open/prepared expired; fetch sessions idle-evicted
+- [x] Gauges: open_txns, prepared_txns, fetch_sessions_active
+- [x] Lazy expire paths unchanged
+- [x] Integration tests (`phase97_background_sweeper`)
+
+**Honest limitations:** single-node wall clock; fire-and-forget tokio task (no
+join on drop); idle session sweep only (LRU still lazy-on-create); no Admin
+config surface.
+
+**Still deferred:** multi-lang clients, cargo-fuzz corpus CI, multi-broker 2PC /
+session affinity / durable sessions, Admin timeout/sweep config surface,
+graceful sweeper shutdown.
 
 ---
 
@@ -2230,11 +2256,11 @@ metrics, Admin timeout config surface.
 | Storage | Page cache + OS | Explicit mmap + optional io_uring/O_DIRECT |
 | Stream processing | Kafka Streams / ksqlDB | In-process `volant-stream` operators |
 | Ops model | ZooKeeper/KRaft + heavy footprint | Single binary → small static ISR quorum |
-| Protocol | Kafka wire protocol | Native binary first; optional Kafka shim (`--kafka-listen`, Phases 23–96) |
+| Protocol | Kafka wire protocol | Native binary first; optional Kafka shim (`--kafka-listen`, Phases 23–97) |
 | Goal | Full ecosystem | Subset that is fast, small, and correct |
 
 Volant is **not** a drop-in Kafka replacement. It prioritizes a clean core; the
-optional Kafka wire shim is **shipped** (Phases 23–96) — see
+optional Kafka wire shim is **shipped** (Phases 23–97) — see
 [docs/KAFKA_COMPAT.md](./docs/KAFKA_COMPAT.md).
 
 ---
@@ -2254,7 +2280,7 @@ Phases **0–91 are shipped**. Historical PR order for the core:
 9. Phase 6 replication prototype (2–3 nodes) ✅  
 10. Phase 7 metrics, TLS, packaging ✅  
 11. Phases 8–22 (redirect, groups, configs, txns, mTLS, ACLs, SCRAM) ✅  
-12. Phases 23–96 (Kafka wire shim surface) ✅  
+12. Phases 23–97 (Kafka wire shim surface) ✅  
 
 ---
 
@@ -2295,12 +2321,13 @@ cargo run -p volant-bench --release
 cargo test --workspace
 ```
 
-**Status (post–Phase 96):** core broker, ops (metrics / TLS / auth / SCRAM /
+**Status (post–Phase 97):** core broker, ops (metrics / TLS / auth / SCRAM /
 ACLs / Helm), and the Kafka wire shim are **shipped** (Fetch 0–18 Kafka max;
 ACL admin 0–3 with User resource; soft-marker `READ_COMMITTED`; durable OFLE
 history; Fetch DivergingEpoch + sessions with omit-unchanged incremental +
 idle TTL/max; Kafka control batches on EndTxn; prepared 2PC MVP; prepared +
-open txn timeouts + broker max timeout clamp). Still deferred: multi-language
-clients, full chaos-mesh suites, cargo-fuzz corpus CI, multi-broker session
-affinity, multi-broker 2PC, background txn sweeper.
+open txn timeouts + broker max timeout clamp; background txn/session sweeper
++ richer expiry metrics). Still deferred: multi-language clients, full
+chaos-mesh suites, cargo-fuzz corpus CI, multi-broker session affinity,
+multi-broker 2PC.
 Details: [docs/KAFKA_COMPAT.md](./docs/KAFKA_COMPAT.md), [docs/ops.md](./docs/ops.md).

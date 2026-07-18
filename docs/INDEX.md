@@ -56,7 +56,7 @@ Start here. Prefer living docs over individual phase ship records.
 
 Living docs match **git HEAD product** (`SUPPORTED_APIS`, last feature commit Phase **95**):
 
-- **Status ceiling:** Phases **0–95**; Kafka shim **23–95** (**38** keys)
+- **Status ceiling:** Phases **0–97**; Kafka shim **23–97** (**38** keys)
 - **Kafka SoT:** [KAFKA_COMPAT.md](./KAFKA_COMPAT.md) — matrix + semantic honesty
 - **WHITEPAPER:** architecture + positioning; no full API matrix
 - **Binding core:** PHASE1–6; **ship records:** PHASE7–95 via [PHASE_HISTORY](./history/PHASE_HISTORY.md)

@@ -197,10 +197,45 @@ fn broker_metrics_text(broker: &Broker) -> String {
         "volant_fetch_sessions_evicted_total {}\n",
         sessions.evicted_total()
     ));
+    // Phase 97: idle-only session counter + open/prepared txn gauges/counters.
+    text.push_str(
+        "# HELP volant_fetch_sessions_idle_evicted_total Idle TTL fetch session evictions\n",
+    );
+    text.push_str("# TYPE volant_fetch_sessions_idle_evicted_total counter\n");
+    text.push_str(&format!(
+        "volant_fetch_sessions_idle_evicted_total {}\n",
+        sessions.idle_evicted_total()
+    ));
+    text.push_str("# HELP volant_open_txns Live open (non-prepared) transactions\n");
+    text.push_str("# TYPE volant_open_txns gauge\n");
+    text.push_str(&format!("volant_open_txns {}\n", broker.open_txn_count()));
+    text.push_str("# HELP volant_prepared_txns Live prepared (2PC) transactions\n");
+    text.push_str("# TYPE volant_prepared_txns gauge\n");
+    text.push_str(&format!(
+        "volant_prepared_txns {}\n",
+        broker.prepared_txn_count()
+    ));
+    text.push_str(
+        "# HELP volant_open_txns_expired_total Open txns auto-aborted by timeout\n",
+    );
+    text.push_str("# TYPE volant_open_txns_expired_total counter\n");
+    text.push_str(&format!(
+        "volant_open_txns_expired_total {}\n",
+        broker.open_txns_expired_total()
+    ));
+    text.push_str(
+        "# HELP volant_prepared_txns_expired_total Prepared txns auto-aborted by timeout\n",
+    );
+    text.push_str("# TYPE volant_prepared_txns_expired_total counter\n");
+    text.push_str(&format!(
+        "volant_prepared_txns_expired_total {}\n",
+        broker.prepared_txns_expired_total()
+    ));
     text
 }
 
-/// Start group expiry, retention, cluster heartbeat, and follower replication tasks.
+/// Start group expiry, retention, txn/session sweep, cluster heartbeat, and
+/// follower replication tasks.
 pub fn start_background_tasks(broker: Arc<Broker>) {
     // Periodic session expiry for consumer groups.
     {
@@ -224,6 +259,37 @@ pub fn start_background_tasks(broker: Arc<Broker>) {
                 interval.tick().await;
                 if let Err(e) = b.apply_retention_all() {
                     debug!(error = %e, "apply_retention_all failed");
+                }
+            }
+        });
+    }
+
+    // Phase 97: open/prepared txn timeout + idle fetch-session sweep.
+    // Interval 0 at spawn time skips the task; runtime 0 pauses work.
+    if broker.sweep_interval_ms() > 0 {
+        let b = Arc::clone(&broker);
+        tokio::spawn(async move {
+            loop {
+                let ms = b.sweep_interval_ms();
+                if ms == 0 {
+                    // Disabled at runtime: poll occasionally so a later enable
+                    // is observed without spinning.
+                    tokio::time::sleep(Duration::from_millis(200)).await;
+                    continue;
+                }
+                tokio::time::sleep(Duration::from_millis(ms)).await;
+                // Re-check after sleep in case interval was set to 0 mid-wait.
+                if b.sweep_interval_ms() == 0 {
+                    continue;
+                }
+                let (open_n, prep_n, idle_n) = b.sweep_timeouts();
+                if open_n > 0 || prep_n > 0 || idle_n > 0 {
+                    debug!(
+                        open_aborted = open_n,
+                        prepared_aborted = prep_n,
+                        sessions_idle_evicted = idle_n,
+                        "background timeout sweep"
+                    );
                 }
             }
         });

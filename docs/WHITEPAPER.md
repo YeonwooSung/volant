@@ -24,7 +24,8 @@ Kafka wire max for those keys, with empty feature tags and
 write-through transactions with soft READ_COMMITTED markers (Phase 86) and
 Kafka-style COMMIT/ABORT control batches on EndTxn (Phase 89), prepared 2PC MVP
 (Phase 90) with prepared timeout auto-abort (Phase 92), open-txn timeout
-(Phase 93), broker max timeout clamp (Phase 96), durable
+(Phase 93), broker max timeout clamp (Phase 96), background txn/session
+sweeper + expiry metrics (Phase 97), durable
 OffsetForLeaderEpoch history (Phase 87 MVP), Fetch DivergingEpoch +
 process-local fetch sessions (Phase 88 MVP), omit-unchanged incremental
 session responses (Phase 91 MVP), and session idle TTL / max concurrent
@@ -182,8 +183,9 @@ Admin: list / describe / delete groups, delete offsets, lag metrics.
 | `READ_COMMITTED` / LSO | **Yes (MVP)** — LSO may be `<` HWM; aborted filtered; aborted list non-empty |
 | `READ_UNCOMMITTED` | Sees unstable + aborted-on-log data |
 | Real 2PC / prepared transactions | **MVP** (Phase 90; single-node prepare/complete; prepared timeout Phase 92; not full KIP-890/939) |
-| Open txn timeout | **Yes (MVP)** (Phase 93; InitProducerId `transaction_timeout_ms` or broker default; lazy auto-abort) |
+| Open txn timeout | **Yes (MVP)** (Phase 93; InitProducerId `transaction_timeout_ms` or broker default; lazy + background auto-abort) |
 | Transaction max timeout | **Yes (MVP)** (Phase 96; default 15m; Init over-max → **50**; effective open/prepared clamp) |
+| Background sweeper | **Yes (MVP)** (Phase 97; default 1s; open/prepared + idle sessions; `0` = lazy only) |
 
 Native Volant fetch remains **committed-only**. Kafka Fetch isolation is real for
 the MVP. EndTxn COMMIT/ABORT control batches are on the partition log (Phase 89);
@@ -198,7 +200,7 @@ synthetic control batches for crash≡abort of open txns without EndTxn remain d
 | Metadata `leader_epoch` | Live partition epoch |
 | Full KRaft epoch state machine | **No** |
 | Fetch DivergingEpoch | **Yes (MVP)** — tag 0 + OFFSET_OUT_OF_RANGE on truncation |
-| Real fetch sessions | **Yes (MVP)** — process-local; omit-unchanged on empty-topics incremental (Phase 91); idle TTL + max/LRU (Phase 95); no multi-broker stickiness |
+| Real fetch sessions | **Yes (MVP)** — process-local; omit-unchanged on empty-topics incremental (Phase 91); idle TTL + max/LRU (Phase 95); idle background-swept (Phase 97); no multi-broker stickiness |
 
 ---
 
@@ -235,18 +237,19 @@ flexible (KIP-482) coverage for the APIs modern clients negotiate most often
 |-------|----------|---------------|
 | Produce / Fetch / Metadata | TopicId, flex framing | Produce/Metadata **0–13**; Fetch **0–18** (Kafka max) |
 | Groups / offsets | Join–Leave, commit/fetch | Coordinator-driven; GroupType always `classic` |
-| Txn wire | Init / Add* / End / TxnOffsetCommit | Write-through + soft markers; prepared 2PC MVP (Phase 90) + prepared/open timeout (Phase 92/93) + TRANSACTION_ABORTABLE subset (Phase 94) + max timeout clamp (Phase 96) |
+| Txn wire | Init / Add* / End / TxnOffsetCommit | Write-through + soft markers; prepared 2PC MVP (Phase 90) + prepared/open timeout (Phase 92/93) + TRANSACTION_ABORTABLE subset (Phase 94) + max timeout clamp (Phase 96) + background sweeper (Phase 97) |
 | Admin / configs / ACLs | CreateTopics, CreatePartitions, ACLs | CreatePartitions max **3**; ACL admin **0–3** (User resource v3); LITERAL only |
 | Meta / auth | ApiVersions, FindCoordinator, SASL | ApiVersions **0–5** (Kafka max); SASL PLAIN/SCRAM |
 
 **Auth on Kafka port:** SASL or principal `kafka-anonymous` (+ ACLs). Shared-token
 Auth applies only on the native `--listen` port.
 
-**Highlights (post–Phase 90–96):** deterministic TopicId UUIDs; KIP-951
+**Highlights (post–Phase 90–97):** deterministic TopicId UUIDs; KIP-951
 CurrentLeader on leader errors + Produce NodeEndpoints v10+ / Fetch
 NodeEndpoints v16+; KIP-890 txn max versions + prepared 2PC MVP (Phase 90) +
 prepared/open timeout auto-abort (Phase 92/93) + broker max timeout clamp
-(Phase 96; default 15m; Init **50**) + honest `TRANSACTION_ABORTABLE`
+(Phase 96; default 15m; Init **50**) + background sweeper + expiry metrics
+(Phase 97) + honest `TRANSACTION_ABORTABLE`
 (123) after timeout on Produce/EndTxn/Add*/TxnOffsetCommit (Phase 94;
 FindCoordinator never); ApiVersions 0–5 with empty feature tags and ignored
 v5 ClusterId/NodeId (never `REBOOTSTRAP_REQUIRED`); Fetch **0–18** (Kafka max)

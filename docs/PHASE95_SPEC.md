@@ -107,8 +107,8 @@ Exposed on the existing Prometheus text endpoint (appended from session manager)
 ## Honest limitations
 
 - Process-local only (lost on restart; not multi-broker sticky)
-- Lazy eviction only (no background sweeper; idle sessions may linger until
-  the next create/incremental on *any* session path)
+- Lazy eviction only at ship (background idle sweep → **closed by Phase 97**;
+  idle sessions may still linger until create/incremental *or* the sweeper)
 - LRU uses `last_activity_ms` only (not byte size / partition count)
 - No Kafka `max.incremental.fetch.session.cache.slots` dynamic config API
 - Clock is single-node wall time (unix ms)
@@ -126,17 +126,17 @@ Unit tests in `fetch_session.rs` with explicit timestamps (no sleep).
 
 ## Deferred (Phase 96+)
 
-- Background session sweeper
+- Background session sweeper → **closed by Phase 97 (MVP)**
 - Multi-broker session affinity / durable sessions
 - Byte-level response cache / compressed batch reuse
-- Session metrics labels (eviction reason: idle vs lru)
+- Session metrics labels (eviction reason: idle vs lru) → **partial (idle counter in Phase 97)**
 - Multi-lang clients; cargo-fuzz corpus CI
-- Background txn sweeper
+- Background txn sweeper → **closed by Phase 97 (MVP)**
 - `transaction.max.timeout.ms` clamp → **closed by Phase 96 (MVP)**
 
 ## Phase 96 ideas
 
-- Background txn + session sweeper (periodic, not only lazy)
+- Background txn + session sweeper (periodic, not only lazy) → **closed by Phase 97**
 - `transaction.max.timeout.ms` broker clamp for InitProducerId → **closed by Phase 96**
 - Multi-broker session affinity / sticky routing hints
 - Byte-identical / compressed response cache beyond HWM+LSO omit

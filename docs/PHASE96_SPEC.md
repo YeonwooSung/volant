@@ -124,7 +124,7 @@ operator-lowered max and oversize stored state remain safe.
 
 ## Honest limitations
 
-- Lazy expiry only (no background sweeper)
+- Lazy expiry only at ship (background sweeper → **closed by Phase 97**)
 - Single-node clock; no multi-broker coordinated max
 - Volant still accepts client timeout ≤ 0 as "broker default" (not full Kafka
   `txnTimeoutMs > 0` validation)
@@ -133,8 +133,8 @@ operator-lowered max and oversize stored state remain safe.
 
 ## Phase 97 ideas
 
-- Background txn + session sweeper (periodic, not only lazy)
-- Metrics: open/prepared expired counts; Init reject counters
+- Background txn + session sweeper (periodic, not only lazy) → **closed by Phase 97**
+- Metrics: open/prepared expired counts; Init reject counters → **partial (expired counters + gauges in Phase 97)**
 - Admin/DescribeConfigs surface for timeout knobs
 - Mid-txn abortable signals beyond timeout-only (Phase 94 stretch)
 - Multi-broker 2PC / session affinity

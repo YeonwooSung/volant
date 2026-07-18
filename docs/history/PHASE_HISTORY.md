@@ -138,10 +138,11 @@ docs for day-to-day reading: [ops](../ops.md), [consistency](../consistency.md),
 | 94 | ✅ | TRANSACTION_ABORTABLE (123) honest subset after timeout auto-abort | [PHASE94_SPEC.md](../PHASE94_SPEC.md) |
 | 95 | ✅ | Fetch session idle TTL + max concurrent sessions (lazy LRU) | [PHASE95_SPEC.md](../PHASE95_SPEC.md) |
 | 96 | ✅ | Broker `transaction.max.timeout.ms` clamp (Init reject 50 + effective clamp) | [PHASE96_SPEC.md](../PHASE96_SPEC.md) |
+| 97 | ✅ | Background txn + session sweeper with metrics (MVP) | [PHASE97_SPEC.md](../PHASE97_SPEC.md) |
 
 ---
 
-## Still deferred (post–Phase 96)
+## Still deferred (post–Phase 97)
 
 - Multi-language clients
 - Chaos-mesh / cargo-fuzz corpus CI
@@ -149,4 +150,5 @@ docs for day-to-day reading: [ops](../ops.md), [consistency](../consistency.md),
 - Multi-broker session affinity / durable sessions / byte-identical response cache
 - Full KRaft epoch state machine / remote-log epochs
 - Control batches for empty AddPartitions / crash open-txn without EndTxn
-- Background txn/session sweeper / richer metrics
+- Admin/DescribeConfigs for timeout + sweep knobs
+- Graceful sweeper shutdown / join

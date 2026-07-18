@@ -11,7 +11,7 @@
 | `--log-format` | | `text` | `text` or `json` |
 | `--auth-token` | `VOLANT_AUTH_TOKEN` | *unset* | Shared-token auth (native port only) |
 | `--scram-user USER:PASS` | | *unset* | Upsert SCRAM user at startup (repeatable; Phase 22) |
-| `--kafka-listen` | | *disabled* | Kafka wire protocol shim (Phases 23–95) |
+| `--kafka-listen` | | *disabled* | Kafka wire protocol shim (Phases 23–97) |
 | `--tls-cert` / `--tls-key` | | *unset* | Server TLS (feature `tls`) |
 | `--tls-peer-insecure` | | `true` | Skip inter-broker cert verify (lab) |
 | `--tls-ca` | | *unset* | CA PEM for inter-broker peer verify |
@@ -38,6 +38,9 @@ Key series (prefix `volant_`):
 - `volant_connections_accepted_total`
 - `volant_topics` / `volant_partitions` (gauges)
 - `volant_fetch_sessions_active` / `volant_fetch_sessions_evicted_total` (Phase 95)
+- `volant_fetch_sessions_idle_evicted_total` (Phase 97 idle-only subset)
+- `volant_open_txns` / `volant_prepared_txns` (Phase 97 gauges)
+- `volant_open_txns_expired_total` / `volant_prepared_txns_expired_total` (Phase 97)
 - `volant_build_info{version=...}`
 
 Bind metrics to localhost in production; do not expose publicly without a proxy ACL.
@@ -151,7 +154,9 @@ volant-server \
   InitProducerId `transaction_timeout_ms` or default 60s /
   `VOLANT_OPEN_TXN_TIMEOUT_MS`; effective `0` disables) + broker max timeout
   clamp (Phase 96, default **15m** / `VOLANT_TRANSACTION_MAX_TIMEOUT_MS`;
-  `0` = no max; Init over-max → **50**; effective open/prepared clamped);
+  `0` = no max; Init over-max → **50**; effective open/prepared clamped) +
+  background sweeper (Phase 97, default **1s** / `VOLANT_SWEEP_INTERVAL_MS`;
+  `0` = lazy only);
   `READ_COMMITTED` caps at LSO and filters aborted; `READ_UNCOMMITTED` sees all.
   Open crash≡abort via `__txn_markers`; prepared durable under `__txn_prepared`
   until complete or timeout.
@@ -164,13 +169,14 @@ volant-server \
   **omits** partitions when HWM+LSO unchanged and records empty (Phase 91);
   idle TTL (default 60s / `VOLANT_FETCH_SESSION_IDLE_MS`; `0` disables) + max
   concurrent sessions (default 1000 / `VOLANT_FETCH_SESSION_MAX`; `0` = unlimited;
-  LRU eviction at cap) (Phase 95). Sessions are not durable or multi-broker sticky.
+  LRU eviction at cap) (Phase 95); idle also background-swept (Phase 97). Sessions
+  are not durable or multi-broker sticky.
 - **ACLs:** Kafka ACL admin maps to Volant Phase 20/21 ACLs (LITERAL only;
   CreateAcls enables enforcement). Describe/Create/DeleteAcls **0–3**: v3 accepts
   Kafka **User** resource type (stored as `ResourceType::User`; not used on the
   produce/fetch authorize path; no SCRAM-admin gating).
 
-Deep dives: [PHASE23_SPEC.md](./PHASE23_SPEC.md) … [PHASE96_SPEC.md](./PHASE96_SPEC.md).
+Deep dives: [PHASE23_SPEC.md](./PHASE23_SPEC.md) … [PHASE97_SPEC.md](./PHASE97_SPEC.md).
 
 ## TLS (Phase 7 listen + Phase 9 verification / inter-broker)
 
@@ -247,7 +253,7 @@ specs. Ops-critical notes only:
 | Groups | list / describe / delete-offsets; static membership `group_instance_id` |
 | Topic configs | `retention.ms` / `retention.bytes` / `segment.bytes` / `cleanup.policy` |
 | DeleteRecords | Truncates sealed segments; no follower fan-out |
-| Transactions (shipped) | **Write-through + soft markers** (Phase 86) + **control batches** on EndTxn finalize (Phase 89) + **prepared 2PC MVP** (Phase 90) + **prepared timeout** (Phase 92, default 60s / `VOLANT_PREPARED_TXN_TIMEOUT_MS`) + **open timeout** (Phase 93, InitProducerId / `VOLANT_OPEN_TXN_TIMEOUT_MS`) + **max timeout clamp** (Phase 96, default 15m / `VOLANT_TRANSACTION_MAX_TIMEOUT_MS`; Init **50** over-max); LSO/aborted filtering; open crash≡abort; prepared durable under `__txn_prepared` until complete or timeout |
+| Transactions (shipped) | **Write-through + soft markers** (Phase 86) + **control batches** on EndTxn finalize (Phase 89) + **prepared 2PC MVP** (Phase 90) + **prepared timeout** (Phase 92, default 60s / `VOLANT_PREPARED_TXN_TIMEOUT_MS`) + **open timeout** (Phase 93, InitProducerId / `VOLANT_OPEN_TXN_TIMEOUT_MS`) + **max timeout clamp** (Phase 96, default 15m / `VOLANT_TRANSACTION_MAX_TIMEOUT_MS`; Init **50** over-max) + **background sweeper** (Phase 97, default 1s / `VOLANT_SWEEP_INTERVAL_MS`; `0` = lazy only); LSO/aborted filtering; open crash≡abort; prepared durable under `__txn_prepared` until complete or timeout |
 | mTLS | Feature `tls`; `--tls-client-ca` / optional `--tls-client-allow` |
 | ACLs | `--acl-enable`; durable `__acls/acls.json`; User resource is Kafka admin store-only |
 | Compaction | `cleanup.policy=compact` on **sealed** segments; empty value = tombstone |
@@ -281,8 +287,9 @@ Full list: [ROADMAP.md](../ROADMAP.md).
 
 ## Shipped (not gaps)
 
-Kafka wire shim **Phases 23–95** (ApiVersions **0–5**, Fetch **0–18**, ACL admin
+Kafka wire shim **Phases 23–97** (ApiVersions **0–5**, Fetch **0–18**, ACL admin
 **0–3** User resource, prepared 2PC MVP + prepared/open timeout + max clamp,
 TRANSACTION_ABORTABLE honest subset after timeout, omit-unchanged sessions,
-session idle TTL + max/LRU, ~38 keys), SCRAM-SHA-256/512, SASL PLAIN/SCRAM — see
+session idle TTL + max/LRU, background txn/session sweeper + expiry metrics,
+~38 keys), SCRAM-SHA-256/512, SASL PLAIN/SCRAM — see
 [KAFKA_COMPAT.md](./KAFKA_COMPAT.md).
