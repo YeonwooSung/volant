@@ -748,6 +748,7 @@ pub(crate) fn encode_fetch(broker: &Broker, src: &mut impl Buf, out: &mut BytesM
     //             tags (v12+; NodeEndpoints tag 0 on v16+ when CurrentLeader set)
     // Phase 88: real fetch sessions + DivergingEpoch (tag 0) on truncation.
     // Phase 91: omit-unchanged on empty-topics incremental (last HWM/LSO cache).
+    // Phase 95: idle TTL + max sessions (lazy LRU) on create / begin_incremental.
     // v14: wire-identical to v13 (OffsetMovedToTieredStorage never emitted).
     // v15: top-level ReplicaId dropped; ReplicaState is tagged (ignored).
     // v16: NodeEndpoints top-level tag (KIP-951) on leader errors.

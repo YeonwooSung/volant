@@ -24,7 +24,7 @@ From `SUPPORTED_APIS` in `crates/volant-broker/src/kafka/mod.rs`:
 | Key | API | Versions | Notes |
 |----:|-----|----------|-------|
 | 0 | Produce | 0–13 | Classic 0–8; flex v9+; TopicId v13; KIP-951 CurrentLeader v10+; txn 123 after timeout (Phase 94) |
-| 1 | Fetch | 0–18 | Classic 0–11; flex v12–18; TopicId v13+; isolation LSO/aborted (Phase 86); ReplicaState v15+ ignore; NodeEndpoints v16+; CurrentLeader tag v12+; DivergingEpoch + sessions (Phase 88); omit-unchanged incremental (Phase 91) |
+| 1 | Fetch | 0–18 | Classic 0–11; flex v12–18; TopicId v13+; isolation LSO/aborted (Phase 86); ReplicaState v15+ ignore; NodeEndpoints v16+; CurrentLeader tag v12+; DivergingEpoch + sessions (Phase 88); omit-unchanged incremental (Phase 91); session idle TTL + max/LRU (Phase 95) |
 | 2 | ListOffsets | 0–11 | Flex v6+; specials v7–11; READ_COMMITTED latest = LSO (Phase 86) |
 | 3 | Metadata | 0–13 | Flex v9+; TopicId v10–13; top-level ErrorCode v13; live leader_epoch (Phase 87) |
 | 8 | OffsetCommit | 0–10 | Flex v8+; TopicId v10 |
@@ -78,6 +78,7 @@ From `SUPPORTED_APIS` in `crates/volant-broker/src/kafka/mod.rs`:
 | Prepared timeout | 92 | Lazy auto-abort of prepared txns after configurable timeout (default 60s) |
 | Open txn timeout | 93 | Honor InitProducerId `transaction_timeout_ms` (or broker default) for open write-through txns; lazy auto-abort |
 | TRANSACTION_ABORTABLE | 94 | Honest subset: emit 123 after open/prepared timeout on Produce/EndTxn/Add*/TxnOffsetCommit; FindCoordinator never |
+| Fetch session TTL / max | 95 | Idle TTL (default 60s) + max concurrent sessions (default 1000, LRU); lazy eviction; process-local |
 
 ## Semantic honesty (open)
 
@@ -90,7 +91,7 @@ These are **current** product facts, not temporary docs lag:
 | Epochs | **Durable history MVP** (Phase 87): `{data_dir}/__leader_epochs`; prior epochs return transition end offsets; Metadata advertises live epoch; not a full KRaft epoch state machine; Fetch **DivergingEpoch** on truncation (Phase 88) |
 | TopicId | Deterministic UUID from Volant id (`volant` + zeros + u32), not KRaft random |
 | Groups | Coordinator-driven assignment; GroupType always `classic`; states Stable/Empty |
-| Fetch sessions | **Real MVP** (Phase 88 + **91**): process-local create/merge/forgotten; empty-topics re-fetch; errors 70/71; **omit-unchanged** when HWM+LSO unchanged and records empty; lost on restart; not multi-broker sticky |
+| Fetch sessions | **Real MVP** (Phase 88 + **91** + **95**): process-local create/merge/forgotten; empty-topics re-fetch; errors 70/71; **omit-unchanged** when HWM+LSO unchanged and records empty; **idle TTL** (default 60s / `VOLANT_FETCH_SESSION_IDLE_MS`) + **max sessions** (default 1000 / `VOLANT_FETCH_SESSION_MAX`, LRU at cap); lost on restart; not multi-broker sticky |
 | Preferred replica | Always -1 |
 | CreateTopics | Replica assignment arrays ignored; configs response often null |
 | Storage | Log stores uncompressed Volant records; Fetch re-encodes |

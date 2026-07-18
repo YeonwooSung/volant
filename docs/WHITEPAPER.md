@@ -26,8 +26,9 @@ Kafka-style COMMIT/ABORT control batches on EndTxn (Phase 89), prepared 2PC MVP
 (Phase 90) with prepared timeout auto-abort (Phase 92), open-txn timeout
 (Phase 93), durable
 OffsetForLeaderEpoch history (Phase 87 MVP), Fetch DivergingEpoch +
-process-local fetch sessions (Phase 88 MVP), and omit-unchanged incremental
-session responses (Phase 91 MVP).
+process-local fetch sessions (Phase 88 MVP), omit-unchanged incremental
+session responses (Phase 91 MVP), and session idle TTL / max concurrent
+sessions with lazy LRU eviction (Phase 95 MVP).
 
 Volant is **not** a drop-in Apache Kafka replacement. It prioritizes sequential
 I/O, explicit complexity, and honest non-parity (especially around
@@ -196,7 +197,7 @@ synthetic control batches for crash≡abort of open txns without EndTxn remain d
 | Metadata `leader_epoch` | Live partition epoch |
 | Full KRaft epoch state machine | **No** |
 | Fetch DivergingEpoch | **Yes (MVP)** — tag 0 + OFFSET_OUT_OF_RANGE on truncation |
-| Real fetch sessions | **Yes (MVP)** — process-local; omit-unchanged on empty-topics incremental (Phase 91); no multi-broker stickiness |
+| Real fetch sessions | **Yes (MVP)** — process-local; omit-unchanged on empty-topics incremental (Phase 91); idle TTL + max/LRU (Phase 95); no multi-broker stickiness |
 
 ---
 
@@ -240,14 +241,14 @@ flexible (KIP-482) coverage for the APIs modern clients negotiate most often
 **Auth on Kafka port:** SASL or principal `kafka-anonymous` (+ ACLs). Shared-token
 Auth applies only on the native `--listen` port.
 
-**Highlights (post–Phase 90–94):** deterministic TopicId UUIDs; KIP-951
+**Highlights (post–Phase 90–95):** deterministic TopicId UUIDs; KIP-951
 CurrentLeader on leader errors + Produce NodeEndpoints v10+ / Fetch
 NodeEndpoints v16+; KIP-890 txn max versions + prepared 2PC MVP (Phase 90) +
 prepared/open timeout auto-abort (Phase 92/93) + honest `TRANSACTION_ABORTABLE`
 (123) after timeout on Produce/EndTxn/Add*/TxnOffsetCommit (Phase 94;
 FindCoordinator never); ApiVersions 0–5 with empty feature tags and ignored
 v5 ClusterId/NodeId (never `REBOOTSTRAP_REQUIRED`); Fetch **0–18** (Kafka max)
-with DivergingEpoch + omit-unchanged sessions (Phase 88/91); ACL admin **0–3**
+with DivergingEpoch + omit-unchanged sessions + idle TTL/max (Phase 88/91/95); ACL admin **0–3**
 (User resource storage only); write-through txn + soft READ_COMMITTED
 (LSO/aborted); durable OffsetForLeaderEpoch history MVP + Metadata live
 leader_epoch; compression codecs gzip/snappy/lz4/zstd on the wire.

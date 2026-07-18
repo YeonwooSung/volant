@@ -1,11 +1,12 @@
-//! In-memory Fetch session state (Phase 88 + Phase 91 omit-unchanged MVP).
+//! In-memory Fetch session state (Phase 88 + 91 omit-unchanged + Phase 95 limits).
 //!
 //! Process-local only: not durable, not shared across brokers. Tracks topic
-//! partitions, last-seen fetch params, and last-returned HWM/LSO so empty-topics
-//! incremental Fetch can omit partitions with no new data.
+//! partitions, last-seen fetch params, last-returned HWM/LSO (Phase 91), and
+//! idle TTL / max concurrent sessions with lazy LRU eviction (Phase 95).
 
 use std::collections::HashMap;
-use std::sync::atomic::{AtomicI32, Ordering};
+use std::sync::atomic::{AtomicI32, AtomicU64, AtomicUsize, Ordering};
+use std::time::{SystemTime, UNIX_EPOCH};
 
 use parking_lot::Mutex;
 
@@ -15,6 +16,11 @@ use super::topic_id::TopicWireId;
 pub const INITIAL_EPOCH: i32 = 0;
 /// Kafka `FetchSession.FINAL_EPOCH` — close session; no new session.
 pub const FINAL_EPOCH: i32 = -1;
+
+/// Default idle TTL for process-local fetch sessions (Phase 95).
+pub const DEFAULT_IDLE_TIMEOUT_MS: u64 = 60_000;
+/// Default max concurrent process-local fetch sessions (Phase 95).
+pub const DEFAULT_MAX_SESSIONS: usize = 1000;
 
 /// Cached partition fetch parameters inside a session.
 #[derive(Debug, Clone)]
@@ -82,13 +88,21 @@ pub struct FetchSession {
     pub epoch: i32,
     /// Topics keyed by a stable map key (name, or `id:<hex>` for unknown UUID).
     pub topics: HashMap<String, SessionTopic>,
+    /// Last successful session Fetch activity (unix ms; Phase 95).
+    pub last_activity_ms: i64,
 }
 
-/// Process-local session table.
+/// Process-local session table with idle TTL + max concurrent (Phase 95).
 #[derive(Debug)]
 pub struct FetchSessionManager {
     sessions: Mutex<HashMap<i32, FetchSession>>,
     next_id: AtomicI32,
+    /// Idle TTL in ms; `0` disables idle eviction.
+    idle_timeout_ms: AtomicU64,
+    /// Max concurrent sessions; `0` = unlimited.
+    max_sessions: AtomicUsize,
+    /// Total sessions removed by idle TTL or LRU pressure.
+    evicted_total: AtomicU64,
 }
 
 impl Default for FetchSessionManager {
@@ -98,12 +112,50 @@ impl Default for FetchSessionManager {
 }
 
 impl FetchSessionManager {
-    /// Empty manager; session ids start at 1.
+    /// Manager with defaults from env (`VOLANT_FETCH_SESSION_*`) or Phase 95 defaults.
     pub fn new() -> Self {
+        Self::with_limits(default_idle_timeout_ms(), default_max_sessions())
+    }
+
+    /// Manager with explicit limits (tests).
+    pub fn with_limits(idle_timeout_ms: u64, max_sessions: usize) -> Self {
         Self {
             sessions: Mutex::new(HashMap::new()),
             next_id: AtomicI32::new(1),
+            idle_timeout_ms: AtomicU64::new(idle_timeout_ms),
+            max_sessions: AtomicUsize::new(max_sessions),
+            evicted_total: AtomicU64::new(0),
         }
+    }
+
+    /// Current idle timeout in milliseconds (`0` = disabled).
+    pub fn idle_timeout_ms(&self) -> u64 {
+        self.idle_timeout_ms.load(Ordering::Relaxed)
+    }
+
+    /// Override idle timeout (`0` disables idle eviction).
+    pub fn set_idle_timeout_ms(&self, ms: u64) {
+        self.idle_timeout_ms.store(ms, Ordering::Relaxed);
+    }
+
+    /// Current max concurrent sessions (`0` = unlimited).
+    pub fn max_sessions(&self) -> usize {
+        self.max_sessions.load(Ordering::Relaxed)
+    }
+
+    /// Override max concurrent sessions (`0` = unlimited).
+    pub fn set_max_sessions(&self, max: usize) {
+        self.max_sessions.store(max, Ordering::Relaxed);
+    }
+
+    /// Live session count (after any prior eviction on this manager).
+    pub fn active_count(&self) -> usize {
+        self.sessions.lock().len()
+    }
+
+    /// Total idle + LRU evictions since process start.
+    pub fn evicted_total(&self) -> u64 {
+        self.evicted_total.load(Ordering::Relaxed)
     }
 
     fn alloc_id(&self) -> i32 {
@@ -137,7 +189,7 @@ impl FetchSessionManager {
         }
     }
 
-    /// Close a session (no-op for id 0 / missing).
+    /// Close a session (no-op for id 0 / missing). Not counted as eviction.
     pub fn close(&self, session_id: i32) {
         if session_id != 0 {
             self.sessions.lock().remove(&session_id);
@@ -145,13 +197,24 @@ impl FetchSessionManager {
     }
 
     /// Create a new session with `expected_epoch = 1`. Returns assigned id.
+    ///
+    /// Lazy-evicts idle sessions, then LRU-evicts if at max capacity.
     pub fn create(&self, topics: HashMap<String, SessionTopic>) -> i32 {
+        self.create_at(topics, now_ms())
+    }
+
+    /// Create with an explicit timestamp (unit tests).
+    pub fn create_at(&self, topics: HashMap<String, SessionTopic>, now_ms: i64) -> i32 {
+        let mut guard = self.sessions.lock();
+        self.evict_idle_locked(&mut guard, now_ms);
+        self.evict_lru_if_full_locked(&mut guard);
         let id = self.alloc_id();
-        self.sessions.lock().insert(
+        guard.insert(
             id,
             FetchSession {
                 epoch: 1,
                 topics,
+                last_activity_ms: now_ms,
             },
         );
         id
@@ -159,9 +222,21 @@ impl FetchSessionManager {
 
     /// Validate incremental request epoch and advance expected epoch.
     ///
-    /// Returns `Ok(())` or Kafka top-level error code (70 / 71).
+    /// Lazy-evicts idle sessions first. Returns `Ok(())` or Kafka top-level
+    /// error code (70 / 71). Touches activity on success.
     pub fn begin_incremental(&self, session_id: i32, epoch: i32) -> Result<(), i16> {
+        self.begin_incremental_at(session_id, epoch, now_ms())
+    }
+
+    /// Incremental begin with explicit timestamp (unit tests).
+    pub fn begin_incremental_at(
+        &self,
+        session_id: i32,
+        epoch: i32,
+        now_ms: i64,
+    ) -> Result<(), i16> {
         let mut guard = self.sessions.lock();
+        self.evict_idle_locked(&mut guard, now_ms);
         let Some(session) = guard.get_mut(&session_id) else {
             return Err(70); // FETCH_SESSION_ID_NOT_FOUND
         };
@@ -169,6 +244,7 @@ impl FetchSessionManager {
             return Err(71); // INVALID_FETCH_SESSION_EPOCH
         }
         session.epoch = next_epoch(epoch);
+        session.last_activity_ms = now_ms;
         Ok(())
     }
 
@@ -277,6 +353,38 @@ impl FetchSessionManager {
         part.last_hwm = Some(hwm);
         part.last_lso = Some(lso);
     }
+
+    /// Drop idle sessions under the lock. Counts each removal as an eviction.
+    fn evict_idle_locked(&self, sessions: &mut HashMap<i32, FetchSession>, now_ms: i64) {
+        let idle_ms = self.idle_timeout_ms.load(Ordering::Relaxed);
+        if idle_ms == 0 {
+            return;
+        }
+        let idle_ms_i = idle_ms as i64;
+        let before = sessions.len();
+        sessions.retain(|_, s| now_ms.saturating_sub(s.last_activity_ms) <= idle_ms_i);
+        let removed = before.saturating_sub(sessions.len()) as u64;
+        if removed > 0 {
+            self.evicted_total.fetch_add(removed, Ordering::Relaxed);
+        }
+    }
+
+    /// If at max capacity, remove one LRU session. Counts as eviction.
+    fn evict_lru_if_full_locked(&self, sessions: &mut HashMap<i32, FetchSession>) {
+        let max = self.max_sessions.load(Ordering::Relaxed);
+        if max == 0 || sessions.len() < max {
+            return;
+        }
+        // Pick lowest last_activity_ms; ties → lowest session id (deterministic).
+        let victim = sessions
+            .iter()
+            .min_by_key(|(id, s)| (s.last_activity_ms, *id))
+            .map(|(id, _)| *id);
+        if let Some(id) = victim {
+            sessions.remove(&id);
+            self.evicted_total.fetch_add(1, Ordering::Relaxed);
+        }
+    }
 }
 
 /// Next session epoch after a successful request (Kafka `FetchSession.nextEpoch`).
@@ -288,6 +396,29 @@ pub fn next_epoch(prev: i32) -> i32 {
     } else {
         prev + 1
     }
+}
+
+fn now_ms() -> i64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|d| d.as_millis() as i64)
+        .unwrap_or(0)
+}
+
+/// Default idle TTL from env or 60s (Phase 95).
+pub fn default_idle_timeout_ms() -> u64 {
+    std::env::var("VOLANT_FETCH_SESSION_IDLE_MS")
+        .ok()
+        .and_then(|s| s.parse::<u64>().ok())
+        .unwrap_or(DEFAULT_IDLE_TIMEOUT_MS)
+}
+
+/// Default max sessions from env or 1000 (Phase 95).
+pub fn default_max_sessions() -> usize {
+    std::env::var("VOLANT_FETCH_SESSION_MAX")
+        .ok()
+        .and_then(|s| s.parse::<usize>().ok())
+        .unwrap_or(DEFAULT_MAX_SESSIONS)
 }
 
 // Minimal hex encode without extra crate dependency — use a tiny helper.
@@ -313,17 +444,17 @@ mod tests {
 
     #[test]
     fn create_and_incremental_epoch() {
-        let mgr = FetchSessionManager::new();
-        let id = mgr.create(HashMap::new());
+        let mgr = FetchSessionManager::with_limits(0, 0); // no TTL / no max
+        let id = mgr.create_at(HashMap::new(), 1_000);
         assert!(id > 0);
-        assert!(mgr.begin_incremental(id, 1).is_ok());
-        assert!(mgr.begin_incremental(id, 2).is_ok());
+        assert!(mgr.begin_incremental_at(id, 1, 1_100).is_ok());
+        assert!(mgr.begin_incremental_at(id, 2, 1_200).is_ok());
         // wrong epoch
-        assert_eq!(mgr.begin_incremental(id, 2), Err(71));
+        assert_eq!(mgr.begin_incremental_at(id, 2, 1_300), Err(71));
         // unknown
-        assert_eq!(mgr.begin_incremental(id + 99, 1), Err(70));
+        assert_eq!(mgr.begin_incremental_at(id + 99, 1, 1_400), Err(70));
         mgr.close(id);
-        assert_eq!(mgr.begin_incremental(id, 3), Err(70));
+        assert_eq!(mgr.begin_incremental_at(id, 3, 1_500), Err(70));
     }
 
     #[test]
@@ -349,7 +480,7 @@ mod tests {
 
     #[test]
     fn note_returned_and_merge_preserves_cache() {
-        let mgr = FetchSessionManager::new();
+        let mgr = FetchSessionManager::with_limits(0, 0);
         let mut topics = HashMap::new();
         let mut parts = HashMap::new();
         parts.insert(0, part(0));
@@ -361,7 +492,7 @@ mod tests {
                 partitions: parts,
             },
         );
-        let id = mgr.create(topics);
+        let id = mgr.create_at(topics, 1_000);
         mgr.note_returned(id, "t", 0, 5, 5);
         let snap = mgr.snapshot_topics(id);
         assert_eq!(snap["t"].partitions[&0].last_hwm, Some(5));
@@ -383,5 +514,44 @@ mod tests {
         let snap = mgr.snapshot_topics(id);
         assert_eq!(snap["t"].partitions[&0].fetch_offset, 5);
         assert_eq!(snap["t"].partitions[&0].last_hwm, Some(5));
+    }
+
+    #[test]
+    fn idle_ttl_evicts_then_incremental_is_70() {
+        let mgr = FetchSessionManager::with_limits(100, 0); // 100ms idle
+        let id = mgr.create_at(HashMap::new(), 1_000);
+        assert_eq!(mgr.active_count(), 1);
+        // Still within TTL
+        assert!(mgr.begin_incremental_at(id, 1, 1_050).is_ok());
+        // Past idle (last activity 1050, now 1200, idle 100)
+        assert_eq!(mgr.begin_incremental_at(id, 2, 1_200), Err(70));
+        assert_eq!(mgr.active_count(), 0);
+        assert!(mgr.evicted_total() >= 1);
+    }
+
+    #[test]
+    fn max_sessions_evicts_lru() {
+        let mgr = FetchSessionManager::with_limits(0, 2); // no idle, max 2
+        let a = mgr.create_at(HashMap::new(), 1_000);
+        let b = mgr.create_at(HashMap::new(), 1_100);
+        assert_eq!(mgr.active_count(), 2);
+        // Touch B so A is LRU
+        assert!(mgr.begin_incremental_at(b, 1, 1_200).is_ok());
+        let c = mgr.create_at(HashMap::new(), 1_300);
+        assert_eq!(mgr.active_count(), 2);
+        // A was LRU-evicted
+        assert_eq!(mgr.begin_incremental_at(a, 1, 1_400), Err(70));
+        // B and C still live
+        assert!(mgr.begin_incremental_at(b, 2, 1_500).is_ok());
+        assert!(mgr.begin_incremental_at(c, 1, 1_600).is_ok());
+        assert!(mgr.evicted_total() >= 1);
+    }
+
+    #[test]
+    fn idle_disabled_with_zero() {
+        let mgr = FetchSessionManager::with_limits(0, 0);
+        let id = mgr.create_at(HashMap::new(), 1_000);
+        // Far in the future; still alive when TTL disabled
+        assert!(mgr.begin_incremental_at(id, 1, 9_999_999).is_ok());
     }
 }

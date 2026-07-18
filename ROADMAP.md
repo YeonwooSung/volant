@@ -1994,13 +1994,13 @@ Binding: **[docs/PHASE88_SPEC.md](./docs/PHASE88_SPEC.md)**.
 - [x] Integration tests (`phase88_fetch_sessions_diverging`)
 
 **Honest limitations:** sessions process-local (not durable / multi-broker);
-omit-unchanged closed by **Phase 91**; no session TTL/eviction metrics;
+omit-unchanged closed by **Phase 91**; session TTL/max closed by **Phase 95**;
 DivergingEpoch from local history only.
 
 **Still deferred:** multi-lang clients, cargo-fuzz corpus CI, Kafka control
 batches on the data log (closed by **Phase 89**), real 2PC (closed by
-**Phase 90**), omit-unchanged (closed by **Phase 91**), multi-broker session
-affinity.
+**Phase 90**), omit-unchanged (closed by **Phase 91**), session TTL/max
+(closed by **Phase 95**), multi-broker session affinity.
 
 ---
 
@@ -2073,11 +2073,12 @@ Binding: **[docs/PHASE91_SPEC.md](./docs/PHASE91_SPEC.md)**.
 
 **Honest limitations:** process-local only; HWM+LSO+empty-records omit (not
 byte-identical Kafka compressed response cache); partial-topic incremental
-always returns those partitions; no session TTL / multi-broker affinity.
+always returns those partitions; session TTL/max closed by **Phase 95**;
+no multi-broker affinity.
 
 **Still deferred:** multi-lang clients, cargo-fuzz corpus CI, multi-broker
-session affinity / durable sessions, multi-broker 2PC, session TTL / max
-sessions / metrics. Prepared timeout closed by **Phase 92**.
+session affinity / durable sessions, multi-broker 2PC. Session TTL / max
+sessions closed by **Phase 95**. Prepared timeout closed by **Phase 92**.
 
 ---
 
@@ -2099,8 +2100,8 @@ then (closed by Phase 93); lazy only (no background sweeper); single-node clock;
 TRANSACTION_ABORTABLE closed by Phase 94.
 
 **Still deferred at Phase 92 ship:** multi-lang clients, cargo-fuzz corpus CI,
-multi-broker 2PC / session affinity, session TTL, open-txn timeout → Phase 93,
-TRANSACTION_ABORTABLE → Phase 94.
+multi-broker 2PC / session affinity, session TTL → Phase 95, open-txn timeout →
+Phase 93, TRANSACTION_ABORTABLE → Phase 94.
 
 ---
 
@@ -2126,8 +2127,8 @@ no TRANSACTION_ABORTABLE; no `transaction.max.timeout.ms` clamp; open
 `opened_at_ms` is memory-only (crash already aborts open ranges).
 
 **Still deferred:** multi-lang clients, cargo-fuzz corpus CI, multi-broker 2PC /
-session affinity, session TTL, TRANSACTION_ABORTABLE → **closed by Phase 94**
-(honest subset), background txn sweeper / metrics.
+session affinity, session TTL → **closed by Phase 95**, TRANSACTION_ABORTABLE →
+**closed by Phase 94** (honest subset), background txn sweeper / metrics.
 
 ---
 
@@ -2150,8 +2151,33 @@ Binding: **[docs/PHASE94_SPEC.md](./docs/PHASE94_SPEC.md)**.
 memory-only abortable set; no FindCoordinator 123; not full KIP-890 surface.
 
 **Still deferred:** multi-lang clients, cargo-fuzz corpus CI, multi-broker 2PC /
-session affinity, session TTL, background txn sweeper / metrics,
-`transaction.max.timeout.ms` clamp.
+session affinity, session TTL → **closed by Phase 95**, background txn sweeper /
+metrics, `transaction.max.timeout.ms` clamp.
+
+---
+
+### Phase 95 — Fetch session TTL / max sessions (MVP) ✅
+
+**Goal:** Close the session lifecycle gaps left by Phase 88/91: **idle TTL**
+eviction and a **max concurrent sessions** cap with lazy LRU pressure, without
+a background thread.
+
+Binding: **[docs/PHASE95_SPEC.md](./docs/PHASE95_SPEC.md)**.
+
+- [x] Idle TTL default **60s**; `VOLANT_FETCH_SESSION_IDLE_MS` + setter; `0` disables
+- [x] Max sessions default **1000**; `VOLANT_FETCH_SESSION_MAX` + setter; `0` = unlimited
+- [x] Lazy idle eviction on create / begin_incremental; touch `last_activity` on success
+- [x] At cap: **LRU-evict** oldest idle session (create always succeeds)
+- [x] Evicted session next incremental → **70**; omit-unchanged preserved
+- [x] Cheap metrics: `volant_fetch_sessions_active` / `_evicted_total`
+- [x] Integration tests (`phase95_fetch_session_limits`)
+
+**Honest limitations:** process-local only; lazy only (no background sweeper);
+LRU by `last_activity_ms` only; not multi-broker sticky.
+
+**Still deferred:** multi-lang clients, cargo-fuzz corpus CI, multi-broker 2PC /
+session affinity / durable sessions, byte-identical response cache, background
+txn/session sweeper, `transaction.max.timeout.ms` clamp.
 
 ---
 

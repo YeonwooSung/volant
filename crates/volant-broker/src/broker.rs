@@ -407,7 +407,7 @@ pub struct Broker {
     leader_epochs: RwLock<HashMap<(String, u32), Vec<EpochStart>>>,
     /// Durable leader-epoch store under `data_dir/__leader_epochs` (Phase 87).
     leader_epoch_store: LeaderEpochStore,
-    /// Process-local Fetch sessions (Phase 88 + 91 omit-unchanged MVP).
+    /// Process-local Fetch sessions (Phase 88 + 91 omit + Phase 95 TTL/max).
     fetch_sessions: FetchSessionManager,
 }
 
@@ -566,9 +566,29 @@ impl Broker {
         Ok(broker)
     }
 
-    /// Process-local Fetch session manager (Phase 88 + 91).
+    /// Process-local Fetch session manager (Phase 88 + 91 + 95).
     pub fn fetch_sessions(&self) -> &FetchSessionManager {
         &self.fetch_sessions
+    }
+
+    /// Current fetch-session idle TTL in milliseconds (Phase 95). `0` disables.
+    pub fn fetch_session_idle_ms(&self) -> u64 {
+        self.fetch_sessions.idle_timeout_ms()
+    }
+
+    /// Override fetch-session idle TTL (Phase 95). `0` disables idle eviction.
+    pub fn set_fetch_session_idle_ms(&self, ms: u64) {
+        self.fetch_sessions.set_idle_timeout_ms(ms);
+    }
+
+    /// Current max concurrent fetch sessions (Phase 95). `0` = unlimited.
+    pub fn fetch_session_max(&self) -> usize {
+        self.fetch_sessions.max_sessions()
+    }
+
+    /// Override max concurrent fetch sessions (Phase 95). `0` = unlimited.
+    pub fn set_fetch_session_max(&self, max: usize) {
+        self.fetch_sessions.set_max_sessions(max);
     }
 
     /// Shared metrics registry.

@@ -81,7 +81,7 @@ workers.
 | Metadata | Live `leader_epoch` (not always `-1`) |
 | Advance | Explicit bump / multi-node failover best-effort |
 
-## Fetch DivergingEpoch + sessions (Phase 88 + 91)
+## Fetch DivergingEpoch + sessions (Phase 88 + 91 + 95)
 
 | Feature | Behavior |
 |---------|----------|
@@ -90,7 +90,9 @@ workers.
 | Sessions | Process-local create / merge / forgotten / FINAL close |
 | Incremental | Empty topics re-fetches session set |
 | Omit-unchanged (91) | Empty-topics incremental omits partition when HWM+LSO unchanged and records empty |
-| Errors | 70 session id not found; 71 invalid session epoch |
+| Idle TTL (95) | Default 60s (`VOLANT_FETCH_SESSION_IDLE_MS`; `0` disables); lazy on create/incremental |
+| Max sessions (95) | Default 1000 (`VOLANT_FETCH_SESSION_MAX`; `0` unlimited); LRU-evict at cap |
+| Errors | 70 session id not found (incl. after TTL/LRU); 71 invalid session epoch |
 
 ## Open limitations (native)
 
@@ -99,7 +101,7 @@ workers.
 - No control batch for crash≡abort without EndTxn  
 - Prepared 2PC is single-node MVP (no multi-broker txn log); prepared timeout yes (Phase 92); open-txn timeout yes (Phase 93); TRANSACTION_ABORTABLE honest subset after timeout (Phase 94; FindCoordinator never)  
 
-- Fetch sessions not durable / multi-broker sticky; omit cache is HWM+LSO only (not byte-identical Kafka response cache)  
+- Fetch sessions not durable / multi-broker sticky; omit cache is HWM+LSO only (not byte-identical Kafka response cache); idle TTL + max/LRU yes (Phase 95)  
 - ACL store is single-node file (no consensus)  
 - DeleteRecords does not fan out to cluster followers  
 - Compaction simpler than Kafka (no tombstone retention window)  

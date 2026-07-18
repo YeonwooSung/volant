@@ -136,15 +136,16 @@ docs for day-to-day reading: [ops](../ops.md), [consistency](../consistency.md),
 | 92 | ✅ | Prepared transaction timeout / auto-abort (MVP) | [PHASE92_SPEC.md](../PHASE92_SPEC.md) |
 | 93 | ✅ | Open transaction timeout (InitProducerId / broker default; lazy auto-abort) | [PHASE93_SPEC.md](../PHASE93_SPEC.md) |
 | 94 | ✅ | TRANSACTION_ABORTABLE (123) honest subset after timeout auto-abort | [PHASE94_SPEC.md](../PHASE94_SPEC.md) |
+| 95 | ✅ | Fetch session idle TTL + max concurrent sessions (lazy LRU) | [PHASE95_SPEC.md](../PHASE95_SPEC.md) |
 
 ---
 
-## Still deferred (post–Phase 94)
+## Still deferred (post–Phase 95)
 
 - Multi-language clients
 - Chaos-mesh / cargo-fuzz corpus CI
 - Full multi-broker 2PC coordinator / full KIP-890 abortable surface
-- Multi-broker session affinity / session TTL / byte-identical response cache
+- Multi-broker session affinity / durable sessions / byte-identical response cache
 - Full KRaft epoch state machine / remote-log epochs
 - Control batches for empty AddPartitions / crash open-txn without EndTxn
-- Background txn sweeper / metrics; `transaction.max.timeout.ms` clamp
+- Background txn/session sweeper / richer metrics; `transaction.max.timeout.ms` clamp

@@ -174,13 +174,30 @@ fn metrics_token_ok(request: &str, expected: &str) -> bool {
 fn broker_metrics_text(broker: &Broker) -> String {
     let metrics: Arc<Metrics> = broker.metrics();
     let lag = broker.consumer_lag_snapshots();
-    metrics.render_prometheus(
+    let mut text = metrics.render_prometheus(
         broker.topic_count(),
         broker.partition_count_total(),
         broker.messages_coalesced(),
         env!("CARGO_PKG_VERSION"),
         &lag,
-    )
+    );
+    // Phase 95: process-local fetch session gauges/counters (cheap stretch).
+    let sessions = broker.fetch_sessions();
+    text.push_str("# HELP volant_fetch_sessions_active Live process-local fetch sessions\n");
+    text.push_str("# TYPE volant_fetch_sessions_active gauge\n");
+    text.push_str(&format!(
+        "volant_fetch_sessions_active {}\n",
+        sessions.active_count()
+    ));
+    text.push_str(
+        "# HELP volant_fetch_sessions_evicted_total Idle TTL + LRU fetch session evictions\n",
+    );
+    text.push_str("# TYPE volant_fetch_sessions_evicted_total counter\n");
+    text.push_str(&format!(
+        "volant_fetch_sessions_evicted_total {}\n",
+        sessions.evicted_total()
+    ));
+    text
 }
 
 /// Start group expiry, retention, cluster heartbeat, and follower replication tasks.

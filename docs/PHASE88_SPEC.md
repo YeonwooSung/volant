@@ -95,7 +95,7 @@ throttling, no tiered-storage divergence).
 
 - Sessions are **process-local** (lost on restart; not sticky across brokers)
 - Always return full record data for included partitions (no omit-unchanged)
-- No max session count / eviction policy beyond simple HashMap
+- No max session count / eviction policy beyond simple HashMap → **closed by Phase 95 (MVP)**
 - DivergingEpoch only from durable history + fetch_offset comparison (no
   replica log-truncation RPC path)
 - SnapshotId / PreferredReadReplica still unused (-1)
@@ -113,6 +113,6 @@ throttling, no tiered-storage divergence).
 ## Deferred (Phase 89+)
 
 - Omit-unchanged incremental responses / response size caps → **closed by Phase 91 (MVP)**
-- Session TTL / max concurrent sessions / metrics
+- Session TTL / max concurrent sessions / metrics → **closed by Phase 95 (MVP)**
 - Multi-broker session affinity
 - SnapshotId; Kafka control batches; real 2PC; multi-lang; fuzz CI

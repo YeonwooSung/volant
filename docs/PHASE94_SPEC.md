@@ -117,5 +117,5 @@ No ApiVersions / max-version changes.
 - `transaction.max.timeout.ms` broker clamp
 - Mid-txn abortable signals (e.g. produce failure forces abortable while open)
 - Multi-broker prepared / open replication
-- Session TTL / max sessions
+- Session TTL / max sessions → **closed by Phase 95 (MVP)**
 - Multi-lang clients / cargo-fuzz corpus CI

@@ -20,7 +20,7 @@
 
 - Byte-identical Kafka response caching of compressed record sets
 - Multi-broker session affinity / durable / replicated sessions
-- Session TTL, max concurrent sessions, eviction metrics
+- Session TTL, max concurrent sessions, eviction metrics → **closed by Phase 95 (MVP)**
 - Multi-lang clients, cargo-fuzz corpus CI
 - Full multi-broker 2PC / prepared timeout (unless already shipped)
 - SnapshotId / PreferredReadReplica changes
@@ -117,7 +117,7 @@ including when the response body omits all partitions.
 - Process-local sessions only (lost on restart; not multi-broker sticky)
 - Not byte-identical to Kafka’s cached compressed response reuse
 - Omit uses HWM+LSO+empty-records, not a full response fingerprint
-- No max session count / TTL / metrics
+- No max session count / TTL / metrics → **closed by Phase 95 (MVP)**
 - Partial-topic incremental always returns those partitions (no omit on that path)
 - PreferredReadReplica still -1; SnapshotId unused
 
@@ -132,7 +132,7 @@ including when the response body omits all partitions.
 
 ## Deferred (Phase 92+)
 
-- Session TTL / max sessions / metrics
+- Session TTL / max sessions / metrics → **closed by Phase 95 (MVP)**
 - Multi-broker session affinity
 - Byte-level response cache / compressed batch reuse
 - Prepared timeout / multi-broker 2PC / TRANSACTION_ABORTABLE
