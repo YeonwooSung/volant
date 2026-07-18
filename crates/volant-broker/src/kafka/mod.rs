@@ -111,6 +111,9 @@ pub enum KafkaErrorCode {
     InvalidProducerEpoch = 47,
     /// Invalid transaction state.
     InvalidTxnState = 48,
+    /// Client transaction timeout exceeds broker max (Phase 96 /
+    /// `transaction.max.timeout.ms`). Kafka `INVALID_TRANSACTION_TIMEOUT`.
+    InvalidTransactionTimeout = 50,
     /// Unsupported SASL mechanism.
     UnsupportedSaslMechanism = 33,
     /// SASL authentication failed.

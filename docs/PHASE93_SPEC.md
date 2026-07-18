@@ -138,7 +138,7 @@ Empty still reports `0` / `0`.
   API/LSO path runs — Fetch LSO path covers the common consumer case
 - Single-node clock; no multi-broker coordinated expiry
 - No `TRANSACTION_ABORTABLE` error code surface
-- No Kafka `transaction.max.timeout.ms` clamp / coordinator config surface
+- No Kafka `transaction.max.timeout.ms` clamp / coordinator config surface → **closed by Phase 96 (MVP clamp)**
 - Open `opened_at_ms` is memory-only (crash already aborts open ranges)
 - Does not re-time open clock on produce; only begin/ensure-open
 
@@ -146,7 +146,7 @@ Empty still reports `0` / `0`.
 
 - `TRANSACTION_ABORTABLE` where Kafka emits it → **shipped Phase 94 (honest subset)**
 - Background txn sweeper / metrics (expired open + prepared counts)
-- `transaction.max.timeout.ms` broker clamp
+- `transaction.max.timeout.ms` broker clamp → **closed by Phase 96**
 - Multi-broker prepared / open replication
 - Session TTL / max sessions
 - Multi-lang clients / cargo-fuzz corpus CI

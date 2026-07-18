@@ -131,12 +131,13 @@ Unit tests in `fetch_session.rs` with explicit timestamps (no sleep).
 - Byte-level response cache / compressed batch reuse
 - Session metrics labels (eviction reason: idle vs lru)
 - Multi-lang clients; cargo-fuzz corpus CI
-- Background txn sweeper / `transaction.max.timeout.ms` clamp
+- Background txn sweeper
+- `transaction.max.timeout.ms` clamp → **closed by Phase 96 (MVP)**
 
 ## Phase 96 ideas
 
 - Background txn + session sweeper (periodic, not only lazy)
-- `transaction.max.timeout.ms` broker clamp for InitProducerId
+- `transaction.max.timeout.ms` broker clamp for InitProducerId → **closed by Phase 96**
 - Multi-broker session affinity / sticky routing hints
 - Byte-identical / compressed response cache beyond HWM+LSO omit
 - Eviction-reason metric labels; session size-weighted LRU

@@ -79,6 +79,7 @@ From `SUPPORTED_APIS` in `crates/volant-broker/src/kafka/mod.rs`:
 | Open txn timeout | 93 | Honor InitProducerId `transaction_timeout_ms` (or broker default) for open write-through txns; lazy auto-abort |
 | TRANSACTION_ABORTABLE | 94 | Honest subset: emit 123 after open/prepared timeout on Produce/EndTxn/Add*/TxnOffsetCommit; FindCoordinator never |
 | Fetch session TTL / max | 95 | Idle TTL (default 60s) + max concurrent sessions (default 1000, LRU); lazy eviction; process-local |
+| Transaction max timeout | 96 | Broker max (default 15m / `VOLANT_TRANSACTION_MAX_TIMEOUT_MS`); InitProducerId rejects over-max with **50**; effective open/prepared clamp |
 
 ## Semantic honesty (open)
 
@@ -86,8 +87,8 @@ These are **current** product facts, not temporary docs lag:
 
 | Area | Limitation |
 |------|------------|
-| Transactions | **Write-through** (Phase 86) + **control batches** (Phase 89) + **prepared 2PC MVP** (Phase 90) + **prepared timeout** (Phase 92) + **open timeout** (Phase 93) + **TRANSACTION_ABORTABLE subset** (Phase 94): data on log immediately; soft markers still SoT for LSO/aborted list; open crash≡abort; prepared survives restart under `__txn_prepared` until complete or timeout auto-abort; EndTxn control batches on finalize; open-txn honors InitProducerId `transaction_timeout_ms` (or `VOLANT_OPEN_TXN_TIMEOUT_MS` default 60s); after timeout auto-abort Produce/EndTxn/Add*/TxnOffsetCommit may return **123** until EndTxn clears |
-| 2PC | **MVP** (Phase 90/92/94): Enable2Pc → first EndTxn prepares; second matching EndTxn finalizes; KeepPreparedTxn + OngoingTxn*; prepared timeout auto-abort (default 60s, env `VOLANT_PREPARED_TXN_TIMEOUT_MS`); timeout → abortable mark → Kafka **123** (Phase 94); not full KIP-890/939 / multi-broker |
+| Transactions | **Write-through** (Phase 86) + **control batches** (Phase 89) + **prepared 2PC MVP** (Phase 90) + **prepared timeout** (Phase 92) + **open timeout** (Phase 93) + **TRANSACTION_ABORTABLE subset** (Phase 94) + **max timeout clamp** (Phase 96): data on log immediately; soft markers still SoT for LSO/aborted list; open crash≡abort; prepared survives restart under `__txn_prepared` until complete or timeout auto-abort; EndTxn control batches on finalize; open-txn honors InitProducerId `transaction_timeout_ms` (or `VOLANT_OPEN_TXN_TIMEOUT_MS` default 60s); broker max default **15m** (`VOLANT_TRANSACTION_MAX_TIMEOUT_MS`; `0` = no max) rejects over-max Init with **50** and clamps effective open/prepared; after timeout auto-abort Produce/EndTxn/Add*/TxnOffsetCommit may return **123** until EndTxn clears |
+| 2PC | **MVP** (Phase 90/92/94/96): Enable2Pc → first EndTxn prepares; second matching EndTxn finalizes; KeepPreparedTxn + OngoingTxn*; prepared timeout auto-abort (default 60s, env `VOLANT_PREPARED_TXN_TIMEOUT_MS`, clamped by max); timeout → abortable mark → Kafka **123** (Phase 94); not full KIP-890/939 / multi-broker |
 | Epochs | **Durable history MVP** (Phase 87): `{data_dir}/__leader_epochs`; prior epochs return transition end offsets; Metadata advertises live epoch; not a full KRaft epoch state machine; Fetch **DivergingEpoch** on truncation (Phase 88) |
 | TopicId | Deterministic UUID from Volant id (`volant` + zeros + u32), not KRaft random |
 | Groups | Coordinator-driven assignment; GroupType always `classic`; states Stable/Empty |

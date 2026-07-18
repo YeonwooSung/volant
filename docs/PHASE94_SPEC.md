@@ -114,7 +114,7 @@ No ApiVersions / max-version changes.
 ## Phase 95 ideas
 
 - Background txn sweeper + metrics (expired open/prepared/abortable counts)
-- `transaction.max.timeout.ms` broker clamp
+- `transaction.max.timeout.ms` broker clamp → **closed by Phase 96**
 - Mid-txn abortable signals (e.g. produce failure forces abortable while open)
 - Multi-broker prepared / open replication
 - Session TTL / max sessions → **closed by Phase 95 (MVP)**

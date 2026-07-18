@@ -173,6 +173,7 @@ pub(crate) fn encode_init_producer_id(
     };
     // transaction_timeout_ms — honored for open (non-prepared) txns (Phase 93).
     // Prepared-txn timeout remains broker-level (Phase 92: VOLANT_PREPARED_TXN_TIMEOUT_MS).
+    // Phase 96: client timeout > broker max → INVALID_TRANSACTION_TIMEOUT (50).
     let mut transaction_timeout_ms: i32 = 0;
     if src.remaining() >= 4 {
         transaction_timeout_ms = src.get_i32();
@@ -221,6 +222,11 @@ pub(crate) fn encode_init_producer_id(
         keep_prepared,
         transaction_timeout_ms,
     );
+    if r.error_code != 0 {
+        // Phase 96: INVALID_TRANSACTION_TIMEOUT (50) etc. — no pid allocated.
+        write_body(out, r.error_code, -1, -1, -1, -1);
+        return;
+    }
     write_body(
         out,
         KafkaErrorCode::None.as_i16(),

@@ -271,9 +271,13 @@ struct PreparedTxnsFile {
 /// Result of InitProducerId including v6 OngoingTxn* (Phase 90).
 #[derive(Debug, Clone, Copy)]
 pub struct InitProducerIdResult {
-    /// Allocated / resumed producer id.
+    /// Kafka wire error code (`0` = ok). Phase 96 may return **50**
+    /// (`INVALID_TRANSACTION_TIMEOUT`) when the client timeout exceeds the
+    /// broker max.
+    pub error_code: i16,
+    /// Allocated / resumed producer id (undefined when `error_code != 0`).
     pub producer_id: u64,
-    /// Producer epoch.
+    /// Producer epoch (undefined when `error_code != 0`).
     pub epoch: u16,
     /// Prepared txn producer id, or `-1` if none.
     pub ongoing_txn_producer_id: i64,
@@ -381,6 +385,16 @@ pub struct Broker {
     /// `VOLANT_OPEN_TXN_TIMEOUT_MS` or [`Broker::set_open_txn_timeout_ms`].
     /// `0` disables open auto-abort for producers without a client timeout.
     open_txn_timeout_ms: AtomicU64,
+    /// Broker maximum transaction timeout (Phase 96 / Kafka
+    /// `transaction.max.timeout.ms`).
+    ///
+    /// Default `900_000` ms (15 minutes); override via
+    /// `VOLANT_TRANSACTION_MAX_TIMEOUT_MS` or
+    /// [`Broker::set_transaction_max_timeout_ms`]. `0` disables the max
+    /// (no clamp, no InitProducerId reject). When `> 0`:
+    /// - InitProducerId with client timeout **> max** → error **50**
+    /// - Effective open/prepared timeouts are clamped to ≤ max
+    transaction_max_timeout_ms: AtomicU64,
     /// PIDs whose open/prepared txn was auto-aborted by timeout and still need
     /// client abort acknowledgment (Phase 94 / KIP-890 TRANSACTION_ABORTABLE).
     ///
@@ -455,6 +469,7 @@ impl Broker {
             prepared_txns: Mutex::new(HashMap::new()),
             prepared_txn_timeout_ms: AtomicU64::new(default_prepared_txn_timeout_ms()),
             open_txn_timeout_ms: AtomicU64::new(default_open_txn_timeout_ms()),
+            transaction_max_timeout_ms: AtomicU64::new(default_transaction_max_timeout_ms()),
             abortable_producers: Mutex::new(HashSet::new()),
             aborted_txns: Mutex::new(HashMap::new()),
             producer_store,
@@ -544,6 +559,7 @@ impl Broker {
             prepared_txns: Mutex::new(HashMap::new()),
             prepared_txn_timeout_ms: AtomicU64::new(default_prepared_txn_timeout_ms()),
             open_txn_timeout_ms: AtomicU64::new(default_open_txn_timeout_ms()),
+            transaction_max_timeout_ms: AtomicU64::new(default_transaction_max_timeout_ms()),
             abortable_producers: Mutex::new(HashSet::new()),
             aborted_txns: Mutex::new(HashMap::new()),
             producer_store,
@@ -712,6 +728,19 @@ impl Broker {
             .store(timeout_ms, Ordering::Relaxed);
     }
 
+    /// Current broker max transaction timeout in milliseconds (Phase 96).
+    ///
+    /// `0` means no max (clamp + InitProducerId over-max reject disabled).
+    pub fn transaction_max_timeout_ms(&self) -> u64 {
+        self.transaction_max_timeout_ms.load(Ordering::Relaxed)
+    }
+
+    /// Override broker max transaction timeout (Phase 96). `0` disables the max.
+    pub fn set_transaction_max_timeout_ms(&self, timeout_ms: u64) {
+        self.transaction_max_timeout_ms
+            .store(timeout_ms, Ordering::Relaxed);
+    }
+
     /// InitProducerId with Phase 90 2PC options (Enable2Pc / KeepPreparedTxn)
     /// and Phase 93 open-txn timeout.
     ///
@@ -726,6 +755,10 @@ impl Broker {
     /// `transaction_timeout_ms` (Phase 93): when **> 0**, stored as the
     /// producer open-txn timeout; when **≤ 0**, the producer uses the broker
     /// default (`open_txn_timeout_ms` / `VOLANT_OPEN_TXN_TIMEOUT_MS`).
+    ///
+    /// Phase 96: when broker max > 0 and client timeout **exceeds** max,
+    /// returns `error_code = 50` (`INVALID_TRANSACTION_TIMEOUT`) without
+    /// mutating producer state (Kafka-honest reject).
     ///
     /// Phase 92/93: timed-out prepared and open txns are auto-aborted before
     /// KeepPrepared / fence handling.
@@ -742,6 +775,17 @@ impl Broker {
         } else {
             0
         };
+        // Phase 96: Kafka-honest reject when client timeout exceeds broker max.
+        let max = self.transaction_max_timeout_ms.load(Ordering::Relaxed);
+        if max > 0 && client_timeout > max {
+            return InitProducerIdResult {
+                error_code: 50, // INVALID_TRANSACTION_TIMEOUT
+                producer_id: 0,
+                epoch: 0,
+                ongoing_txn_producer_id: -1,
+                ongoing_txn_producer_epoch: -1,
+            };
+        }
         if transactional_id.is_empty() {
             let id = self.next_producer_id.fetch_add(1, Ordering::Relaxed);
             let epoch = 0u16;
@@ -758,6 +802,7 @@ impl Broker {
             );
             let _ = self.persist_producer_state();
             return InitProducerIdResult {
+                error_code: 0,
                 producer_id: id,
                 epoch,
                 ongoing_txn_producer_id: -1,
@@ -817,6 +862,7 @@ impl Broker {
                 self.clear_txn_abortable(pid);
                 let _ = self.persist_producer_state();
                 return InitProducerIdResult {
+                    error_code: 0,
                     producer_id: pid,
                     epoch,
                     ongoing_txn_producer_id: ongoing_pid,
@@ -870,6 +916,7 @@ impl Broker {
                 self.clear_txn_abortable(existing);
                 let _ = self.persist_producer_state();
                 return InitProducerIdResult {
+                    error_code: 0,
                     producer_id: existing,
                     epoch,
                     ongoing_txn_producer_id: -1,
@@ -895,6 +942,7 @@ impl Broker {
         drop(txn_ids);
         let _ = self.persist_producer_state();
         InitProducerIdResult {
+            error_code: 0,
             producer_id: id,
             epoch,
             ongoing_txn_producer_id: -1,
@@ -1064,7 +1112,8 @@ impl Broker {
                     "PrepareAbort"
                 };
                 let topics = topics_from_open(&prep.open);
-                let timeout_ms = self.prepared_txn_timeout_ms() as i32;
+                // Phase 96: report effective (clamped) prepared timeout.
+                let timeout_ms = self.effective_prepared_txn_timeout_ms() as i32;
                 return Some((
                     state.to_string(),
                     timeout_ms,
@@ -1683,34 +1732,59 @@ impl Broker {
         (open_n, prep_n)
     }
 
-    /// Effective open-txn timeout for a producer (Phase 93).
+    /// Clamp a positive timeout to the broker max (Phase 96).
     ///
-    /// Positive client timeout wins; otherwise broker default. `0` = disabled.
-    fn effective_open_txn_timeout_ms(&self, prod: &ProducerEpochState) -> u64 {
-        if prod.transaction_timeout_ms > 0 {
-            prod.transaction_timeout_ms
+    /// `0` (disabled) is never raised or lowered. When max is `0`, no clamp.
+    fn clamp_txn_timeout_ms(&self, timeout_ms: u64) -> u64 {
+        if timeout_ms == 0 {
+            return 0;
+        }
+        let max = self.transaction_max_timeout_ms.load(Ordering::Relaxed);
+        if max > 0 && timeout_ms > max {
+            max
         } else {
-            self.open_txn_timeout_ms.load(Ordering::Relaxed)
+            timeout_ms
         }
     }
 
+    /// Effective open-txn timeout for a producer (Phase 93 + 96 clamp).
+    ///
+    /// Positive client timeout wins; otherwise broker default. Then clamped to
+    /// [`Self::transaction_max_timeout_ms`] when max > 0. `0` = disabled.
+    fn effective_open_txn_timeout_ms(&self, prod: &ProducerEpochState) -> u64 {
+        let raw = if prod.transaction_timeout_ms > 0 {
+            prod.transaction_timeout_ms
+        } else {
+            self.open_txn_timeout_ms.load(Ordering::Relaxed)
+        };
+        self.clamp_txn_timeout_ms(raw)
+    }
+
+    /// Effective prepared-txn timeout (Phase 92 + 96 clamp).
+    ///
+    /// Configured prepared timeout, clamped to broker max when max > 0.
+    /// `0` = disabled.
+    fn effective_prepared_txn_timeout_ms(&self) -> u64 {
+        self.clamp_txn_timeout_ms(self.prepared_txn_timeout_ms.load(Ordering::Relaxed))
+    }
+
     /// Auto-abort open (non-prepared) transactions older than their effective
-    /// timeout (Phase 93).
+    /// timeout (Phase 93 + 96 clamp).
     ///
     /// Returns the number of open txns aborted. Same effect as EndTxn(abort):
     /// soft markers + ABORT control batches; deferred offsets dropped.
     pub fn expire_timed_out_open_txns(&self) -> usize {
         let now = unix_now_ms();
-        let broker_default = self.open_txn_timeout_ms.load(Ordering::Relaxed);
         let expired: Vec<(u64, u16, OpenTxn)> = {
             let mut open = self.open_txns.lock();
             if open.is_empty() {
                 return 0;
             }
             let prods = self.producer_state.read();
+            let broker_default = self.open_txn_timeout_ms.load(Ordering::Relaxed);
             let mut keys: Vec<u64> = Vec::new();
             for (&pid, txn) in open.iter() {
-                let timeout = prods
+                let raw = prods
                     .get(&pid)
                     .map(|p| {
                         if p.transaction_timeout_ms > 0 {
@@ -1720,6 +1794,7 @@ impl Broker {
                         }
                     })
                     .unwrap_or(broker_default);
+                let timeout = self.clamp_txn_timeout_ms(raw);
                 if timeout == 0 {
                     continue;
                 }
@@ -1754,13 +1829,15 @@ impl Broker {
         n
     }
 
-    /// Auto-abort prepared transactions older than the configured timeout (Phase 92).
+    /// Auto-abort prepared transactions older than the effective timeout
+    /// (Phase 92 + 96 clamp).
     ///
-    /// Returns the number of prepared txns aborted. No-op when timeout is `0`
-    /// (disabled) or the prepared map is empty. Same finalize path as
-    /// KeepPreparedTxn=false force-abort. Phase 94 marks abortable producers.
+    /// Returns the number of prepared txns aborted. No-op when effective
+    /// timeout is `0` (disabled) or the prepared map is empty. Same finalize
+    /// path as KeepPreparedTxn=false force-abort. Phase 94 marks abortable
+    /// producers.
     pub fn expire_timed_out_prepared_txns(&self) -> usize {
-        let timeout_ms = self.prepared_txn_timeout_ms.load(Ordering::Relaxed);
+        let timeout_ms = self.effective_prepared_txn_timeout_ms();
         if timeout_ms == 0 {
             return 0;
         }
@@ -4151,6 +4228,17 @@ fn default_open_txn_timeout_ms() -> u64 {
         .ok()
         .and_then(|s| s.parse::<u64>().ok())
         .unwrap_or(60_000)
+}
+
+/// Default broker max transaction timeout from env or 15 minutes (Phase 96).
+///
+/// Matches Kafka `transaction.max.timeout.ms` default (900_000 ms). Env value
+/// `0` is honored as "no max".
+fn default_transaction_max_timeout_ms() -> u64 {
+    std::env::var("VOLANT_TRANSACTION_MAX_TIMEOUT_MS")
+        .ok()
+        .and_then(|s| s.parse::<u64>().ok())
+        .unwrap_or(900_000)
 }
 
 fn topics_from_open(txn: &OpenTxn) -> Vec<(String, Vec<i32>)> {

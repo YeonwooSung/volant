@@ -149,10 +149,12 @@ volant-server \
   prepared timeout auto-abort (Phase 92, default 60s,
   `VOLANT_PREPARED_TXN_TIMEOUT_MS`; `0` disables) + open-txn timeout (Phase 93,
   InitProducerId `transaction_timeout_ms` or default 60s /
-  `VOLANT_OPEN_TXN_TIMEOUT_MS`; effective `0` disables); `READ_COMMITTED` caps
-  at LSO and filters aborted; `READ_UNCOMMITTED` sees all. Open crash≡abort via
-  `__txn_markers`; prepared durable under `__txn_prepared` until complete or
-  timeout.
+  `VOLANT_OPEN_TXN_TIMEOUT_MS`; effective `0` disables) + broker max timeout
+  clamp (Phase 96, default **15m** / `VOLANT_TRANSACTION_MAX_TIMEOUT_MS`;
+  `0` = no max; Init over-max → **50**; effective open/prepared clamped);
+  `READ_COMMITTED` caps at LSO and filters aborted; `READ_UNCOMMITTED` sees all.
+  Open crash≡abort via `__txn_markers`; prepared durable under `__txn_prepared`
+  until complete or timeout.
 - **Leader epochs:** durable history under `{data_dir}/__leader_epochs` (Phase 87);
   OffsetForLeaderEpoch returns prior-epoch end offsets; Metadata advertises live
   epoch. Not a full KRaft epoch state machine.
@@ -168,7 +170,7 @@ volant-server \
   Kafka **User** resource type (stored as `ResourceType::User`; not used on the
   produce/fetch authorize path; no SCRAM-admin gating).
 
-Deep dives: [PHASE23_SPEC.md](./PHASE23_SPEC.md) … [PHASE95_SPEC.md](./PHASE95_SPEC.md).
+Deep dives: [PHASE23_SPEC.md](./PHASE23_SPEC.md) … [PHASE96_SPEC.md](./PHASE96_SPEC.md).
 
 ## TLS (Phase 7 listen + Phase 9 verification / inter-broker)
 
@@ -245,7 +247,7 @@ specs. Ops-critical notes only:
 | Groups | list / describe / delete-offsets; static membership `group_instance_id` |
 | Topic configs | `retention.ms` / `retention.bytes` / `segment.bytes` / `cleanup.policy` |
 | DeleteRecords | Truncates sealed segments; no follower fan-out |
-| Transactions (shipped) | **Write-through + soft markers** (Phase 86) + **control batches** on EndTxn finalize (Phase 89) + **prepared 2PC MVP** (Phase 90) + **prepared timeout** (Phase 92, default 60s / `VOLANT_PREPARED_TXN_TIMEOUT_MS`) + **open timeout** (Phase 93, InitProducerId / `VOLANT_OPEN_TXN_TIMEOUT_MS`); LSO/aborted filtering; open crash≡abort; prepared durable under `__txn_prepared` until complete or timeout |
+| Transactions (shipped) | **Write-through + soft markers** (Phase 86) + **control batches** on EndTxn finalize (Phase 89) + **prepared 2PC MVP** (Phase 90) + **prepared timeout** (Phase 92, default 60s / `VOLANT_PREPARED_TXN_TIMEOUT_MS`) + **open timeout** (Phase 93, InitProducerId / `VOLANT_OPEN_TXN_TIMEOUT_MS`) + **max timeout clamp** (Phase 96, default 15m / `VOLANT_TRANSACTION_MAX_TIMEOUT_MS`; Init **50** over-max); LSO/aborted filtering; open crash≡abort; prepared durable under `__txn_prepared` until complete or timeout |
 | mTLS | Feature `tls`; `--tls-client-ca` / optional `--tls-client-allow` |
 | ACLs | `--acl-enable`; durable `__acls/acls.json`; User resource is Kafka admin store-only |
 | Compaction | `cleanup.policy=compact` on **sealed** segments; empty value = tombstone |
@@ -280,7 +282,7 @@ Full list: [ROADMAP.md](../ROADMAP.md).
 ## Shipped (not gaps)
 
 Kafka wire shim **Phases 23–95** (ApiVersions **0–5**, Fetch **0–18**, ACL admin
-**0–3** User resource, prepared 2PC MVP + prepared/open timeout,
+**0–3** User resource, prepared 2PC MVP + prepared/open timeout + max clamp,
 TRANSACTION_ABORTABLE honest subset after timeout, omit-unchanged sessions,
 session idle TTL + max/LRU, ~38 keys), SCRAM-SHA-256/512, SASL PLAIN/SCRAM — see
 [KAFKA_COMPAT.md](./KAFKA_COMPAT.md).

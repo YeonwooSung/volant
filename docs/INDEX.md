@@ -52,7 +52,7 @@ Start here. Prefer living docs over individual phase ship records.
 | Protocol implementer | PHASE1–6 binding specs |
 | Roadmap / deferred | ROADMAP end sections |
 
-## Compaction note (2026-07-18, post–Phase 95 ship)
+## Compaction note (2026-07-18, post–Phase 96 ship)
 
 Living docs match **git HEAD product** (`SUPPORTED_APIS`, last feature commit Phase **95**):
 
@@ -61,7 +61,7 @@ Living docs match **git HEAD product** (`SUPPORTED_APIS`, last feature commit Ph
 - **WHITEPAPER:** architecture + positioning; no full API matrix
 - **Binding core:** PHASE1–6; **ship records:** PHASE7–95 via [PHASE_HISTORY](./history/PHASE_HISTORY.md)
 - **README / ops:** compact bands + ops table (not per-phase diaries)
-- **Txn honesty (shipped):** write-through + soft markers + EndTxn control batches (Phase 89) + prepared 2PC MVP (Phase 90) + prepared/open timeout (Phase 92/93) + TRANSACTION_ABORTABLE honest subset after timeout (Phase 94)
+- **Txn honesty (shipped):** write-through + soft markers + EndTxn control batches (Phase 89) + prepared 2PC MVP (Phase 90) + prepared/open timeout (Phase 92/93) + TRANSACTION_ABORTABLE honest subset after timeout (Phase 94) + transaction max timeout clamp (Phase 96; default 15m; Init **50** over-max)
 - **Epoch honesty (shipped):** durable OFLE history MVP; Metadata live leader_epoch; Fetch DivergingEpoch
 - **Fetch sessions (shipped MVP):** process-local create/forgotten/errors; omit-unchanged empty-topics incremental (Phase 91); idle TTL + max/LRU (Phase 95)
 - **Still deferred (product):** multi-lang, chaos/fuzz corpus CI, multi-broker 2PC /

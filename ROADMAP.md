@@ -2175,9 +2175,35 @@ Binding: **[docs/PHASE95_SPEC.md](./docs/PHASE95_SPEC.md)**.
 **Honest limitations:** process-local only; lazy only (no background sweeper);
 LRU by `last_activity_ms` only; not multi-broker sticky.
 
+**Still deferred at Phase 95 ship:** multi-lang clients, cargo-fuzz corpus CI,
+multi-broker 2PC / session affinity / durable sessions, byte-identical response
+cache, background txn/session sweeper; `transaction.max.timeout.ms` clamp →
+**closed by Phase 96**.
+
+---
+
+### Phase 96 — Broker `transaction.max.timeout.ms` clamp (MVP) ✅
+
+**Goal:** Cap client and broker open/prepared transaction timeouts with a
+Kafka-ish broker maximum (default **15 minutes**), reject InitProducerId when
+the client requests more than the max, and clamp effective open/prepared clocks.
+
+Binding: **[docs/PHASE96_SPEC.md](./docs/PHASE96_SPEC.md)**.
+
+- [x] Default max **900_000 ms** (15m); `VOLANT_TRANSACTION_MAX_TIMEOUT_MS` + setter
+- [x] `0` = no max (disable clamp + Init reject)
+- [x] InitProducerId client timeout **> max** → Kafka **50** (`INVALID_TRANSACTION_TIMEOUT`)
+- [x] Effective open + prepared timeouts clamped when max > 0
+- [x] Expire / Describe use clamped values; below-max paths unchanged
+- [x] Integration tests (`phase96_transaction_max_timeout`)
+
+**Honest limitations:** lazy only; single-node; Volant still accepts client
+timeout ≤ 0 as broker-default (not full Kafka `> 0` validation); no
+DescribeConfigs surface for the knobs.
+
 **Still deferred:** multi-lang clients, cargo-fuzz corpus CI, multi-broker 2PC /
-session affinity / durable sessions, byte-identical response cache, background
-txn/session sweeper, `transaction.max.timeout.ms` clamp.
+session affinity / durable sessions, background txn/session sweeper / richer
+metrics, Admin timeout config surface.
 
 ---
 
@@ -2204,11 +2230,11 @@ txn/session sweeper, `transaction.max.timeout.ms` clamp.
 | Storage | Page cache + OS | Explicit mmap + optional io_uring/O_DIRECT |
 | Stream processing | Kafka Streams / ksqlDB | In-process `volant-stream` operators |
 | Ops model | ZooKeeper/KRaft + heavy footprint | Single binary → small static ISR quorum |
-| Protocol | Kafka wire protocol | Native binary first; optional Kafka shim (`--kafka-listen`, Phases 23–94) |
+| Protocol | Kafka wire protocol | Native binary first; optional Kafka shim (`--kafka-listen`, Phases 23–96) |
 | Goal | Full ecosystem | Subset that is fast, small, and correct |
 
 Volant is **not** a drop-in Kafka replacement. It prioritizes a clean core; the
-optional Kafka wire shim is **shipped** (Phases 23–93) — see
+optional Kafka wire shim is **shipped** (Phases 23–96) — see
 [docs/KAFKA_COMPAT.md](./docs/KAFKA_COMPAT.md).
 
 ---
@@ -2228,7 +2254,7 @@ Phases **0–91 are shipped**. Historical PR order for the core:
 9. Phase 6 replication prototype (2–3 nodes) ✅  
 10. Phase 7 metrics, TLS, packaging ✅  
 11. Phases 8–22 (redirect, groups, configs, txns, mTLS, ACLs, SCRAM) ✅  
-12. Phases 23–93 (Kafka wire shim surface) ✅  
+12. Phases 23–96 (Kafka wire shim surface) ✅  
 
 ---
 
@@ -2269,11 +2295,12 @@ cargo run -p volant-bench --release
 cargo test --workspace
 ```
 
-**Status (post–Phase 93):** core broker, ops (metrics / TLS / auth / SCRAM /
+**Status (post–Phase 96):** core broker, ops (metrics / TLS / auth / SCRAM /
 ACLs / Helm), and the Kafka wire shim are **shipped** (Fetch 0–18 Kafka max;
 ACL admin 0–3 with User resource; soft-marker `READ_COMMITTED`; durable OFLE
-history; Fetch DivergingEpoch + sessions with omit-unchanged incremental;
-Kafka control batches on EndTxn; prepared 2PC MVP; prepared + open txn
-timeouts). Still deferred: multi-language clients, full chaos-mesh suites,
-cargo-fuzz corpus CI, multi-broker session affinity, multi-broker 2PC.
+history; Fetch DivergingEpoch + sessions with omit-unchanged incremental +
+idle TTL/max; Kafka control batches on EndTxn; prepared 2PC MVP; prepared +
+open txn timeouts + broker max timeout clamp). Still deferred: multi-language
+clients, full chaos-mesh suites, cargo-fuzz corpus CI, multi-broker session
+affinity, multi-broker 2PC, background txn sweeper.
 Details: [docs/KAFKA_COMPAT.md](./docs/KAFKA_COMPAT.md), [docs/ops.md](./docs/ops.md).

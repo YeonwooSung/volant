@@ -55,6 +55,7 @@ shim: [KAFKA_COMPAT.md](./KAFKA_COMPAT.md).
 | Prepared 2PC MVP (Phase 90) | Enable2Pc prepare→complete EndTxn; KeepPreparedTxn + OngoingTxn*; `__txn_prepared` |
 | Prepared timeout (Phase 92) | Lazy auto-abort after timeout (default 60s; `VOLANT_PREPARED_TXN_TIMEOUT_MS`; `0` disables) |
 | Open txn timeout (Phase 93) | Honor InitProducerId `transaction_timeout_ms` (or broker default `VOLANT_OPEN_TXN_TIMEOUT_MS`, 60s; effective `0` disables); lazy auto-abort |
+| Transaction max timeout (Phase 96) | Broker max default **15m** (`VOLANT_TRANSACTION_MAX_TIMEOUT_MS`; `0` = no max); Init over-max → **50**; effective open/prepared clamped |
 
 ## Security (19–22)
 
@@ -99,7 +100,7 @@ workers.
 - Multi-language clients deferred  
 - No Raft metadata / dynamic membership  
 - No control batch for crash≡abort without EndTxn  
-- Prepared 2PC is single-node MVP (no multi-broker txn log); prepared timeout yes (Phase 92); open-txn timeout yes (Phase 93); TRANSACTION_ABORTABLE honest subset after timeout (Phase 94; FindCoordinator never)  
+- Prepared 2PC is single-node MVP (no multi-broker txn log); prepared timeout yes (Phase 92); open-txn timeout yes (Phase 93); TRANSACTION_ABORTABLE honest subset after timeout (Phase 94; FindCoordinator never); transaction max timeout clamp yes (Phase 96; default 15m; Init **50** over-max)  
 
 - Fetch sessions not durable / multi-broker sticky; omit cache is HWM+LSO only (not byte-identical Kafka response cache); idle TTL + max/LRU yes (Phase 95)  
 - ACL store is single-node file (no consensus)  
