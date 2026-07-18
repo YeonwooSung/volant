@@ -7,7 +7,9 @@ use std::time::Duration;
 use bytes::BytesMut;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::{TcpListener, TcpStream};
-use tracing::{debug, error, info, info_span, Instrument};
+use tokio::sync::watch;
+use tokio::task::JoinHandle;
+use tracing::{debug, error, info, info_span, warn, Instrument};
 use volant_core::{Error, Message, MessageBatch, Offset, PartitionId, Result, TopicName};
 use volant_protocol::codec::{decode_frame, encode_frame};
 use volant_protocol::{
@@ -19,7 +21,66 @@ use crate::broker::Broker;
 use crate::metrics::Metrics;
 use crate::replica::run_follower_loops;
 
-/// Bind and serve until the accept loop fails fatally.
+/// Default max wait when joining background tasks after stop is signaled.
+const BG_SHUTDOWN_TIMEOUT: Duration = Duration::from_secs(5);
+
+/// Handle for broker background tasks (group expiry, retention, sweeper, cluster).
+///
+/// Returned by [`start_background_tasks`]. Call [`BackgroundTasks::shutdown`] to
+/// signal stop and join; dropping signals stop and aborts remaining tasks.
+#[must_use = "call BackgroundTasks::shutdown to stop and join background tasks"]
+pub struct BackgroundTasks {
+    stop_tx: watch::Sender<bool>,
+    handles: Vec<JoinHandle<()>>,
+}
+
+impl BackgroundTasks {
+    /// Signal stop and await all background tasks (bounded by a short timeout).
+    ///
+    /// Loops observe the stop flag via `tokio::select!`, so joins normally
+    /// complete well under the timeout. On timeout, remaining tasks are aborted.
+    pub async fn shutdown(mut self) {
+        let _ = self.stop_tx.send(true);
+        let handles = std::mem::take(&mut self.handles);
+        let aborts: Vec<_> = handles.iter().map(|h| h.abort_handle()).collect();
+        let join_all = async {
+            for h in handles {
+                let _ = h.await;
+            }
+        };
+        if tokio::time::timeout(BG_SHUTDOWN_TIMEOUT, join_all)
+            .await
+            .is_err()
+        {
+            warn!(
+                timeout_ms = BG_SHUTDOWN_TIMEOUT.as_millis() as u64,
+                "background task shutdown timed out; aborting remaining tasks"
+            );
+            for a in aborts {
+                a.abort();
+            }
+        }
+    }
+
+    /// Signal stop and abort all tasks without awaiting (tests / best-effort drop).
+    pub fn abort(mut self) {
+        let _ = self.stop_tx.send(true);
+        for h in std::mem::take(&mut self.handles) {
+            h.abort();
+        }
+    }
+}
+
+impl Drop for BackgroundTasks {
+    fn drop(&mut self) {
+        let _ = self.stop_tx.send(true);
+        for h in self.handles.drain(..) {
+            h.abort();
+        }
+    }
+}
+
+/// Bind and serve until the accept loop fails fatally or a shutdown signal arrives.
 pub async fn run_server(addr: SocketAddr, broker: Arc<Broker>) -> Result<()> {
     let listener = TcpListener::bind(addr).await?;
     let local = listener.local_addr()?;
@@ -29,14 +90,28 @@ pub async fn run_server(addr: SocketAddr, broker: Arc<Broker>) -> Result<()> {
 }
 
 /// Accept loop over an already-bound listener (useful for port-0 e2e tests).
+///
+/// Starts background tasks and joins them when the accept loop exits or a
+/// process shutdown signal (`ctrl_c` / SIGTERM on Unix) is received.
 pub async fn serve_listener(listener: TcpListener, broker: Arc<Broker>) -> Result<()> {
     if let Ok(local) = listener.local_addr() {
         broker.set_advertised(local.ip().to_string(), local.port());
         info!(%local, "volant broker accept loop started");
     }
 
-    start_background_tasks(Arc::clone(&broker));
+    let bg = start_background_tasks(Arc::clone(&broker));
+    let result = tokio::select! {
+        r = accept_loop(listener, Arc::clone(&broker)) => r,
+        _ = shutdown_signal() => {
+            info!("shutdown signal received; draining background tasks");
+            Ok(())
+        }
+    };
+    bg.shutdown().await;
+    result
+}
 
+async fn accept_loop(listener: TcpListener, broker: Arc<Broker>) -> Result<()> {
     loop {
         match listener.accept().await {
             Ok((stream, peer)) => {
@@ -54,6 +129,31 @@ pub async fn serve_listener(listener: TcpListener, broker: Arc<Broker>) -> Resul
                 return Err(Error::Io(e));
             }
         }
+    }
+}
+
+/// Process-level stop: Ctrl-C, and on Unix also SIGTERM.
+async fn shutdown_signal() {
+    let ctrl_c = tokio::signal::ctrl_c();
+    #[cfg(unix)]
+    {
+        let mut sigterm = match tokio::signal::unix::signal(
+            tokio::signal::unix::SignalKind::terminate(),
+        ) {
+            Ok(s) => s,
+            Err(_) => {
+                let _ = ctrl_c.await;
+                return;
+            }
+        };
+        tokio::select! {
+            _ = ctrl_c => {}
+            _ = sigterm.recv() => {}
+        }
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = ctrl_c.await;
     }
 }
 
@@ -245,32 +345,49 @@ fn broker_metrics_text(broker: &Broker) -> String {
 
 /// Start group expiry, retention, txn/session sweep, cluster heartbeat, and
 /// follower replication tasks.
-pub fn start_background_tasks(broker: Arc<Broker>) {
+///
+/// Returns a [`BackgroundTasks`] handle. Call [`BackgroundTasks::shutdown`] to
+/// signal stop and join (Phase 106). Phase 101 always-spawn + 0-pause for the
+/// sweeper is preserved.
+pub fn start_background_tasks(broker: Arc<Broker>) -> BackgroundTasks {
+    let (stop_tx, _) = watch::channel(false);
+    let mut handles = Vec::new();
+
     // Periodic session expiry for consumer groups.
     {
         let b = Arc::clone(&broker);
-        tokio::spawn(async move {
+        let mut stop_rx = stop_tx.subscribe();
+        handles.push(tokio::spawn(async move {
             let mut interval = tokio::time::interval(Duration::from_millis(500));
             loop {
-                interval.tick().await;
-                b.groups()
-                    .expire_sessions(|topic| b.partition_count_opt(topic));
+                tokio::select! {
+                    _ = stop_rx.changed() => break,
+                    _ = interval.tick() => {
+                        b.groups()
+                            .expire_sessions(|topic| b.partition_count_opt(topic));
+                    }
+                }
             }
-        });
+        }));
     }
 
     // Periodic retention (Phase 13).
     {
         let b = Arc::clone(&broker);
-        tokio::spawn(async move {
+        let mut stop_rx = stop_tx.subscribe();
+        handles.push(tokio::spawn(async move {
             let mut interval = tokio::time::interval(Duration::from_secs(5));
             loop {
-                interval.tick().await;
-                if let Err(e) = b.apply_retention_all() {
-                    debug!(error = %e, "apply_retention_all failed");
+                tokio::select! {
+                    _ = stop_rx.changed() => break,
+                    _ = interval.tick() => {
+                        if let Err(e) = b.apply_retention_all() {
+                            debug!(error = %e, "apply_retention_all failed");
+                        }
+                    }
                 }
             }
-        });
+        }));
     }
 
     // Phase 97 + 101: open/prepared txn timeout + idle fetch-session sweep.
@@ -278,50 +395,63 @@ pub fn start_background_tasks(broker: Arc<Broker>) {
     // Interval 0 pauses work (200ms poll); >0 sleeps then sweep_timeouts.
     {
         let b = Arc::clone(&broker);
-        tokio::spawn(async move {
+        let mut stop_rx = stop_tx.subscribe();
+        handles.push(tokio::spawn(async move {
             loop {
                 let ms = b.sweep_interval_ms();
                 if ms == 0 {
                     // Paused: poll occasionally so a later enable is observed
                     // without spinning (Phase 101: works from boot with 0 too).
-                    tokio::time::sleep(Duration::from_millis(200)).await;
-                    continue;
+                    tokio::select! {
+                        _ = stop_rx.changed() => break,
+                        _ = tokio::time::sleep(Duration::from_millis(200)) => continue,
+                    }
                 }
-                tokio::time::sleep(Duration::from_millis(ms)).await;
-                // Re-check after sleep in case interval was set to 0 mid-wait.
-                if b.sweep_interval_ms() == 0 {
-                    continue;
-                }
-                let (open_n, prep_n, idle_n) = b.sweep_timeouts();
-                if open_n > 0 || prep_n > 0 || idle_n > 0 {
-                    debug!(
-                        open_aborted = open_n,
-                        prepared_aborted = prep_n,
-                        sessions_idle_evicted = idle_n,
-                        "background timeout sweep"
-                    );
+                tokio::select! {
+                    _ = stop_rx.changed() => break,
+                    _ = tokio::time::sleep(Duration::from_millis(ms)) => {
+                        // Re-check after sleep in case interval was set to 0 mid-wait.
+                        if b.sweep_interval_ms() == 0 {
+                            continue;
+                        }
+                        let (open_n, prep_n, idle_n) = b.sweep_timeouts();
+                        if open_n > 0 || prep_n > 0 || idle_n > 0 {
+                            debug!(
+                                open_aborted = open_n,
+                                prepared_aborted = prep_n,
+                                sessions_idle_evicted = idle_n,
+                                "background timeout sweep"
+                            );
+                        }
+                    }
                 }
             }
-        });
+        }));
     }
 
     if broker.cluster_config().is_some() {
         // Membership tick + controller expiry.
         {
             let b = Arc::clone(&broker);
-            tokio::spawn(async move {
+            let mut stop_rx = stop_tx.subscribe();
+            handles.push(tokio::spawn(async move {
                 let mut interval = tokio::time::interval(Duration::from_millis(500));
                 loop {
-                    interval.tick().await;
-                    b.tick_cluster();
+                    tokio::select! {
+                        _ = stop_rx.changed() => break,
+                        _ = interval.tick() => {
+                            b.tick_cluster();
+                        }
+                    }
                 }
-            });
+            }));
         }
 
         // Heartbeat to controller (non-controller brokers).
         {
             let b = Arc::clone(&broker);
-            tokio::spawn(async move {
+            let mut stop_rx = stop_tx.subscribe();
+            handles.push(tokio::spawn(async move {
                 let session = b
                     .cluster_config()
                     .map(|c| c.session_timeout_ms)
@@ -329,17 +459,23 @@ pub fn start_background_tasks(broker: Arc<Broker>) {
                 let period = Duration::from_millis(u64::from(session / 3).max(100));
                 let mut interval = tokio::time::interval(period);
                 loop {
-                    interval.tick().await;
-                    if let Err(e) = heartbeat_to_controller(&b).await {
-                        debug!(error = %e, "controller heartbeat failed");
+                    tokio::select! {
+                        _ = stop_rx.changed() => break,
+                        _ = interval.tick() => {
+                            if let Err(e) = heartbeat_to_controller(&b).await {
+                                debug!(error = %e, "controller heartbeat failed");
+                            }
+                        }
                     }
                 }
-            });
+            }));
         }
 
         // Follower ReplicaFetch loops.
-        run_follower_loops(broker);
+        handles.push(run_follower_loops(broker, stop_tx.subscribe()));
     }
+
+    BackgroundTasks { stop_tx, handles }
 }
 
 async fn heartbeat_to_controller(broker: &Broker) -> Result<()> {

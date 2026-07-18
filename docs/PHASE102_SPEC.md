@@ -19,7 +19,7 @@
 - Full Kafka DynamicBrokerConfig / KRaft metadata quorum
 - BROKER name = `node_id` validation → **closed by Phase 103**
 - Marker GC / DeleteRecords → **closed by Phase 104** / empty-AddPartitions control markers → **closed by Phase 105**
-- Graceful sweeper join on stop
+- Graceful sweeper join on stop → **closed by Phase 106**
 - Multi-broker config broadcast / multi-broker 2PC / sessions
 - Multi-lang clients / fuzz CI
 - Auto-migrating pre–Phase 102 full-snapshot files down to “truly altered”
@@ -121,7 +121,7 @@ request. DELETE of a key unfreezes env for that key going forward.
 ## Phase 103 ideas
 
 - Validate BROKER resource name against `node_id` → **closed by Phase 103**
-- Graceful sweeper shutdown / join on server stop
+- Graceful sweeper shutdown / join on server stop → **closed by Phase 106**
 - Marker compaction / GC with DeleteRecords
 - Empty-AddPartitions control markers → **closed by Phase 105**
 - Multi-broker config broadcast / multi-broker 2PC

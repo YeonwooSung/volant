@@ -168,8 +168,9 @@ volant-server \
   `VOLANT_OPEN_TXN_TIMEOUT_MS`; effective `0` disables) + broker max timeout
   clamp (Phase 96, default **15m** / `VOLANT_TRANSACTION_MAX_TIMEOUT_MS`;
   `0` = no max; Init over-max → **50**; effective open/prepared clamped) +
-  background sweeper (Phase 97/101, default **1s** / `VOLANT_SWEEP_INTERVAL_MS`;
-  `0` = pause bg / lazy only; always-spawn so 0→>0 live without restart) +
+  background sweeper (Phase 97/101/106, default **1s** / `VOLANT_SWEEP_INTERVAL_MS`;
+  `0` = pause bg / lazy only; always-spawn so 0→>0 live without restart;
+  graceful shutdown/join on server stop) +
   crash-promote ABORT control batches (Phase 98) + **empty AddPartitions control**
   (Phase 105: membership + control-only; no fake soft ranges) + **aborted
   soft-marker GC** (Phase 104: DeleteRecords / retention / load drop markers with
@@ -272,7 +273,7 @@ specs. Ops-critical notes only:
 | Topic configs | `retention.ms` / `retention.bytes` / `segment.bytes` / `cleanup.policy` |
 | Broker configs (Phase 99–102) | BROKER Describe/Alter: `transaction.max.timeout.ms` + `volant.*` open/prepared/session/sweep; **sparse** durable under `__broker_config/state.json` (only altered keys; DELETE unfreezes env) |
 | DeleteRecords | Truncates sealed segments; no follower fan-out; **GC aborted soft markers** fully below new log start (Phase 104) |
-| Transactions (shipped) | **Write-through + soft markers** (Phase 86) + **control batches** on EndTxn finalize (Phase 89) + **empty AddPartitions control** (Phase 105) + **prepared 2PC MVP** (Phase 90) + **prepared timeout** (Phase 92, default 60s / `VOLANT_PREPARED_TXN_TIMEOUT_MS`) + **open timeout** (Phase 93, InitProducerId / `VOLANT_OPEN_TXN_TIMEOUT_MS`) + **max timeout clamp** (Phase 96, default 15m / `VOLANT_TRANSACTION_MAX_TIMEOUT_MS`; Init **50** over-max) + **background sweeper** (Phase 97/101, default 1s / `VOLANT_SWEEP_INTERVAL_MS`; `0` = pause bg; always-spawn so 0→>0 without restart) + **BROKER config surface** (Phase 99) + **sparse durable restart** (Phase 100/102) + **BROKER name vs `node_id`** (Phase 103) + **marker GC** (Phase 104); LSO/aborted filtering; open crash≡abort; prepared durable under `__txn_prepared` until complete or timeout; soft markers GC'd when `end_offset <= log_start` |
+| Transactions (shipped) | **Write-through + soft markers** (Phase 86) + **control batches** on EndTxn finalize (Phase 89) + **empty AddPartitions control** (Phase 105) + **prepared 2PC MVP** (Phase 90) + **prepared timeout** (Phase 92, default 60s / `VOLANT_PREPARED_TXN_TIMEOUT_MS`) + **open timeout** (Phase 93, InitProducerId / `VOLANT_OPEN_TXN_TIMEOUT_MS`) + **max timeout clamp** (Phase 96, default 15m / `VOLANT_TRANSACTION_MAX_TIMEOUT_MS`; Init **50** over-max) + **background sweeper** (Phase 97/101/106, default 1s / `VOLANT_SWEEP_INTERVAL_MS`; `0` = pause bg; always-spawn so 0→>0 without restart; graceful shutdown/join) + **BROKER config surface** (Phase 99) + **sparse durable restart** (Phase 100/102) + **BROKER name vs `node_id`** (Phase 103) + **marker GC** (Phase 104); LSO/aborted filtering; open crash≡abort; prepared durable under `__txn_prepared` until complete or timeout; soft markers GC'd when `end_offset <= log_start` |
 | mTLS | Feature `tls`; `--tls-client-ca` / optional `--tls-client-allow` |
 | ACLs | `--acl-enable`; durable `__acls/acls.json`; User resource is Kafka admin store-only |
 | Compaction | `cleanup.policy=compact` on **sealed** segments; empty value = tombstone |
@@ -301,15 +302,17 @@ curl -s -H "Authorization: Bearer $VOLANT_METRICS_TOKEN" \
 - Full multi-broker 2PC / full KIP-890 abortable surface
 - Multi-broker session affinity / durable sessions
 - Byte-identical Kafka compressed response cache (omit is HWM+LSO based)
+- Accept-loop drain on shutdown (background tasks join closed by Phase 106)
 
 Full list: [ROADMAP.md](../ROADMAP.md).
 
 ## Shipped (not gaps)
 
-Kafka wire shim **Phases 23–105** (ApiVersions **0–5**, Fetch **0–18**, ACL admin
+Kafka wire shim **Phases 23–106** (ApiVersions **0–5**, Fetch **0–18**, ACL admin
 **0–3** User resource, prepared 2PC MVP + prepared/open timeout + max clamp,
 TRANSACTION_ABORTABLE honest subset after timeout, omit-unchanged sessions,
 session idle TTL + max/LRU, background txn/session sweeper + expiry metrics
-(always-spawn / 0→>0 live), BROKER Describe/AlterConfigs + durable restart
-restore, empty-AddPartitions control batches, ~38 keys), SCRAM-SHA-256/512,
-SASL PLAIN/SCRAM — see [KAFKA_COMPAT.md](./KAFKA_COMPAT.md).
+(always-spawn / 0→>0 live; graceful shutdown/join Phase 106), BROKER
+Describe/AlterConfigs + durable restart restore, empty-AddPartitions control
+batches, ~38 keys), SCRAM-SHA-256/512, SASL PLAIN/SCRAM — see
+[KAFKA_COMPAT.md](./KAFKA_COMPAT.md).

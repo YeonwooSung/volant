@@ -13,7 +13,8 @@
    - Gauges: open_txns, prepared_txns, fetch_sessions_active (sessions already)
 3. Lazy expire paths **remain** — correctness does not depend on the sweeper.
 4. Start sweeper from `start_background_tasks` (server entry); no special
-   Drop/join (fire-and-forget tokio task, same as group expiry / retention).
+   Drop/join — fire-and-forget at ship time; **closed by Phase 106**
+   (`BackgroundTasks` stop+join).
 5. Tests (`phase97_*.rs`) + living docs / ROADMAP.
 
 ## Non-goals
@@ -110,7 +111,7 @@ per aborted txn.
 ## Honest limitations
 
 - Single-node wall clock; no multi-broker coordinated expiry
-- Fire-and-forget tokio task (no join on shutdown)
+- Fire-and-forget tokio task (no join on shutdown) → **closed by Phase 106**
 - Interval re-read each loop; task always spawned (Phase 101 closed the
   boot-with-0 gap where no task existed for later `0→>0`)
 - Idle session sweep only (LRU still lazy-on-create)
@@ -133,6 +134,6 @@ per aborted txn.
 - Sweep-run / duration histograms; eviction-reason labels
 - Admin/DescribeConfigs for timeout + sweep knobs → **closed by Phase 99**
 - Mid-txn abortable signals beyond timeout-only
-- Graceful sweeper shutdown / join on server stop
+- Graceful sweeper shutdown / join on server stop → **closed by Phase 106**
 - Multi-broker 2PC / session affinity
 - Multi-lang clients / cargo-fuzz corpus CI

@@ -16,7 +16,7 @@
 
 ## Non-goals
 
-- Graceful sweeper shutdown / join on server stop (still fire-and-forget)
+- Graceful sweeper shutdown / join on server stop → **closed by Phase 106**
 - Multi-broker coordinated clocks / multi-broker 2PC
 - Multi-lang clients / fuzz CI
 - Sparse durable config → **closed by Phase 102** / BROKER name=`node_id` validation → **closed by Phase 103**
@@ -84,7 +84,7 @@ start_background_tasks:
 
 ## Honest limitations
 
-- Fire-and-forget tokio task (no join on shutdown) — still deferred
+- Fire-and-forget tokio task (no join on shutdown) → **closed by Phase 106**
 - Single-node wall clock; no multi-broker coordinated expiry
 - Calling `start_background_tasks` twice still spawns duplicate bg tasks
   (same as group expiry / retention; not fixed here)
@@ -102,7 +102,7 @@ start_background_tasks:
 
 ## Phase 102 ideas
 
-- Graceful sweeper shutdown / join on server stop
+- Graceful sweeper shutdown / join on server stop → **closed by Phase 106**
 - Validate BROKER resource name against `node_id` → **closed by Phase 103**
 - Sparse durable file (only keys differing from product default) → **closed by Phase 102**
 - Marker compaction / GC with DeleteRecords

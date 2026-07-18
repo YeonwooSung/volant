@@ -20,7 +20,7 @@
 - Full Kafka DynamicBrokerConfig / KRaft catalog
 - Marker GC / DeleteRecords
 - Empty AddPartitions control markers → **closed by Phase 105**
-- Graceful sweeper join on stop
+- Graceful sweeper join on stop → **closed by Phase 106**
 - Multi-lang clients / fuzz CI / multi-broker 2PC
 
 ## Problem (Phase 99–102 honesty gap)
@@ -81,7 +81,7 @@ Helper: `broker_resource_name_matches(node_id, name)` in
 - Single process validation only (no fan-out to other brokers)
 - Empty name accepted for client convenience (not Kafka multi-broker strictness)
 - Six knobs only; sparse durable overlay unchanged (Phase 102)
-- No graceful sweeper join / multi-broker 2PC
+- No graceful sweeper join → **closed by Phase 106** / multi-broker 2PC
 - Marker compaction/GC with DeleteRecords → **closed by Phase 104**
 
 ## Test plan
@@ -98,7 +98,7 @@ Helper: `broker_resource_name_matches(node_id, name)` in
 ## Phase 104 ideas
 
 - Marker compaction / GC with DeleteRecords → **shipped as Phase 104**
-- Graceful sweeper shutdown / join on server stop
+- Graceful sweeper shutdown / join on server stop → **closed by Phase 106**
 - Empty-AddPartitions control markers → **closed by Phase 105**
 - Multi-broker config broadcast / multi-broker 2PC
 - Multi-lang clients / cargo-fuzz corpus CI

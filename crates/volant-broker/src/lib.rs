@@ -71,5 +71,7 @@ pub use broker_config::{
 pub use leader_epoch::{EpochStart, LeaderEpochStore, LeaderEpochsFile};
 pub use kafka::serve_kafka_listener;
 pub use metrics::Metrics;
-pub use net::{run_metrics_server, run_server, serve_listener, start_background_tasks};
+pub use net::{
+    run_metrics_server, run_server, serve_listener, start_background_tasks, BackgroundTasks,
+};
 pub use offset_store::{OffsetStore, StoredOffset, OFFSET_UNKNOWN};

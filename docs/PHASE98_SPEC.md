@@ -125,4 +125,4 @@ After step 4, a subsequent restart sees empty open → no re-append.
 - Stronger crash-promote idempotency (e.g. promote flag / content-hash before append)
 - Admin / DescribeConfigs for txn timeout + sweep knobs → **closed by Phase 99**
 - Multi-broker marker consensus / KRaft-shaped txn log
-- Graceful sweeper shutdown
+- Graceful sweeper shutdown → **closed by Phase 106**

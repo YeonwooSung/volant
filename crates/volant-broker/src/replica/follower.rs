@@ -3,6 +3,8 @@
 use std::sync::Arc;
 use std::time::Duration;
 
+use tokio::sync::watch;
+use tokio::task::JoinHandle;
 use tracing::{debug, warn};
 use volant_core::{Message, Offset, PartitionId, Record, TopicName};
 use volant_protocol::{ErrorCode, FetchRecord, Request, Response};
@@ -11,7 +13,12 @@ use crate::broker::Broker;
 use crate::net::inter_broker_rpc;
 
 /// Spawn a task that periodically ReplicaFetches for all local follower partitions.
-pub fn run_follower_loops(broker: Arc<Broker>) {
+///
+/// Observes `stop_rx` (Phase 106) and exits cleanly when stop is signaled.
+pub fn run_follower_loops(
+    broker: Arc<Broker>,
+    mut stop_rx: watch::Receiver<bool>,
+) -> JoinHandle<()> {
     tokio::spawn(async move {
         let interval = broker
             .cluster_config()
@@ -21,25 +28,30 @@ pub fn run_follower_loops(broker: Arc<Broker>) {
             .unwrap_or(Duration::from_millis(200));
         let mut ticker = tokio::time::interval(interval);
         loop {
-            ticker.tick().await;
-            if broker.cluster_config().is_none() {
-                continue;
-            }
-            let targets = broker.follower_targets();
-            for (topic, partition, leader_id, from_offset) in targets {
-                if let Err(e) = fetch_once(&broker, &topic, partition, leader_id, from_offset).await
-                {
-                    debug!(
-                        topic = %topic,
-                        partition,
-                        leader_id,
-                        error = %e,
-                        "replica fetch failed"
-                    );
+            tokio::select! {
+                _ = stop_rx.changed() => break,
+                _ = ticker.tick() => {
+                    if broker.cluster_config().is_none() {
+                        continue;
+                    }
+                    let targets = broker.follower_targets();
+                    for (topic, partition, leader_id, from_offset) in targets {
+                        if let Err(e) =
+                            fetch_once(&broker, &topic, partition, leader_id, from_offset).await
+                        {
+                            debug!(
+                                topic = %topic,
+                                partition,
+                                leader_id,
+                                error = %e,
+                                "replica fetch failed"
+                            );
+                        }
+                    }
                 }
             }
         }
-    });
+    })
 }
 
 async fn fetch_once(

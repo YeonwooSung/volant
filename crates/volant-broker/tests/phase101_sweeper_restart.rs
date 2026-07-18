@@ -190,7 +190,7 @@ async fn phase101_zero_to_positive_via_setter() {
     broker.set_sweep_interval_ms(0);
     broker.create_topic("events", 1).unwrap();
     let (addr, server) = boot_kafka(Arc::clone(&broker)).await;
-    start_background_tasks(Arc::clone(&broker));
+    let bg = start_background_tasks(Arc::clone(&broker));
 
     let (pid, _epoch) =
         open_write_through(&broker, &addr, "txn-enable", "events", 100, b"stale").await;
@@ -231,6 +231,7 @@ async fn phase101_zero_to_positive_via_setter() {
         .unwrap_or(0);
     assert_eq!(hwm, lso, "LSO released after background open abort");
 
+    bg.shutdown().await;
     server.abort();
     let _ = std::fs::remove_dir_all(&dir);
 }
@@ -246,7 +247,7 @@ async fn phase101_zero_to_positive_via_alter_configs() {
     broker.set_sweep_interval_ms(0);
     broker.create_topic("events", 1).unwrap();
     let (addr, server) = boot_kafka(Arc::clone(&broker)).await;
-    start_background_tasks(Arc::clone(&broker));
+    let bg = start_background_tasks(Arc::clone(&broker));
 
     let (pid, _epoch) =
         open_write_through(&broker, &addr, "txn-alter", "events", 100, b"stale").await;
@@ -281,6 +282,7 @@ async fn phase101_zero_to_positive_via_alter_configs() {
     );
     assert!(broker.is_txn_abortable(pid as u64));
 
+    bg.shutdown().await;
     server.abort();
     let _ = std::fs::remove_dir_all(&dir);
 }
@@ -296,7 +298,7 @@ async fn phase101_positive_to_zero_pauses() {
     broker.set_sweep_interval_ms(50);
     broker.create_topic("events", 1).unwrap();
     let (addr, server) = boot_kafka(Arc::clone(&broker)).await;
-    start_background_tasks(Arc::clone(&broker));
+    let bg = start_background_tasks(Arc::clone(&broker));
 
     // Pause before creating the aged txn so the sweeper cannot race.
     broker.set_sweep_interval_ms(0);
@@ -322,6 +324,7 @@ async fn phase101_positive_to_zero_pauses() {
     assert_eq!(broker.open_txn_count(), 0);
     assert_eq!(broker.open_txns_expired_total(), expired_before + 1);
 
+    bg.shutdown().await;
     server.abort();
     let _ = std::fs::remove_dir_all(&dir);
 }

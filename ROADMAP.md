@@ -2225,12 +2225,12 @@ Binding: **[docs/PHASE97_SPEC.md](./docs/PHASE97_SPEC.md)**.
 - [x] Integration tests (`phase97_background_sweeper`)
 
 **Honest limitations:** single-node wall clock; fire-and-forget tokio task (no
-join on drop); idle session sweep only (LRU still lazy-on-create); Admin config
-surface → **closed by Phase 99**.
+join on drop) → **closed by Phase 106**; idle session sweep only (LRU still
+lazy-on-create); Admin config surface → **closed by Phase 99**.
 
 **Still deferred:** multi-lang clients, cargo-fuzz corpus CI, multi-broker 2PC /
-session affinity / durable sessions, graceful sweeper shutdown; crash≡abort
-control batches → **closed by Phase 98**.
+session affinity / durable sessions, graceful sweeper shutdown → **closed by
+Phase 106**; crash≡abort control batches → **closed by Phase 98**.
 
 ---
 
@@ -2340,16 +2340,16 @@ Binding: **[docs/PHASE101_SPEC.md](./docs/PHASE101_SPEC.md)**.
 - [x] Metrics / `sweep_timeouts` semantics unchanged
 - [x] Integration tests (`phase101_sweeper_restart`)
 
-**Honest limitations:** fire-and-forget (no join on stop); single-node clock;
-duplicate `start_background_tasks` still spawns duplicate tasks; six BROKER
-knobs only; resource name still ignored → **closed by Phase 103**.
+**Honest limitations:** fire-and-forget (no join on stop) → **closed by Phase 106**;
+single-node clock; duplicate `start_background_tasks` still spawns duplicate tasks;
+six BROKER knobs only; resource name still ignored → **closed by Phase 103**.
 
 **Still deferred:** multi-lang clients, cargo-fuzz corpus CI, multi-broker 2PC /
 session affinity / durable sessions, marker compaction/GC → **closed by Phase 104**,
 empty-AddPartitions control markers → **closed by Phase 105**, validate BROKER
 resource name against `node_id` → **closed by Phase 103**, sparse durable file
 (env re-apply after DELETE) → **closed by Phase 102**, graceful sweeper
-shutdown / join on stop.
+shutdown / join on stop → **closed by Phase 106**.
 
 ---
 
@@ -2375,7 +2375,7 @@ fan-out / full Kafka catalog; BROKER name still ignored → **closed by Phase 10
 session affinity / durable sessions, marker compaction/GC → **closed by Phase 104**,
 empty-AddPartitions control markers → **closed by Phase 105**, validate BROKER
 resource name against `node_id` → **closed by Phase 103**, graceful sweeper
-shutdown / join on stop.
+shutdown / join on stop → **closed by Phase 106**.
 
 ---
 
@@ -2399,7 +2399,7 @@ name still accepted for client convenience; six knobs / sparse durable unchanged
 **Still deferred:** multi-lang clients, cargo-fuzz corpus CI, multi-broker 2PC /
 session affinity / durable sessions, marker compaction/GC → **closed by Phase 104**,
 empty-AddPartitions control markers → **closed by Phase 105**, multi-broker
-BROKER config fan-out, graceful sweeper shutdown / join on stop.
+BROKER config fan-out, graceful sweeper shutdown / join on stop → **closed by Phase 106**.
 
 ---
 
@@ -2424,7 +2424,7 @@ control-batch rewrite; single-node marker store.
 **Still deferred:** multi-lang clients, cargo-fuzz corpus CI, multi-broker 2PC /
 session affinity / durable sessions, empty-AddPartitions control markers →
 **closed by Phase 105**, multi-broker BROKER config fan-out, graceful sweeper
-shutdown / join on stop.
+shutdown / join on stop → **closed by Phase 106**.
 
 ---
 
@@ -2448,7 +2448,31 @@ without AddPartitions still relies on written ranges; no multi-broker consensus.
 
 **Still deferred:** multi-lang clients, cargo-fuzz corpus CI, multi-broker 2PC /
 session affinity / durable sessions, multi-broker BROKER config fan-out,
-graceful sweeper shutdown / join on stop.
+graceful sweeper shutdown / join on stop → **closed by Phase 106**.
+
+---
+
+### Phase 106 — Graceful background task shutdown / join (MVP) ✅
+
+**Goal:** Stop and join group-expiry, retention, txn/session sweeper, and
+cluster background loops on server stop so in-flight sweeps do not race drop
+and tests/ops can drain cleanly. Phase 101 always-spawn + 0-pause preserved.
+
+Binding: **[docs/PHASE106_SPEC.md](./docs/PHASE106_SPEC.md)**.
+
+- [x] `start_background_tasks` → `BackgroundTasks` (`watch` stop + `JoinHandle`s)
+- [x] All loops observe stop via `tokio::select!` and exit cleanly
+- [x] `BackgroundTasks::shutdown` signals stop + joins (5s timeout, then abort)
+- [x] `serve_listener` / `run_server` / TLS path drain bg on exit or signal
+- [x] Phase 97/101 tests call explicit shutdown; Phase 101 0→>0 preserved
+- [x] Integration tests (`phase106_background_shutdown`)
+
+**Honest limitations:** native/Kafka/metrics accept loops not drained; duplicate
+`start_background_tasks` still possible; timeout aborts stragglers.
+
+**Still deferred:** multi-lang clients, cargo-fuzz corpus CI, multi-broker 2PC /
+session affinity / durable sessions, multi-broker BROKER config fan-out,
+accept-loop drain on shutdown.
 
 ---
 
@@ -2475,18 +2499,18 @@ graceful sweeper shutdown / join on stop.
 | Storage | Page cache + OS | Explicit mmap + optional io_uring/O_DIRECT |
 | Stream processing | Kafka Streams / ksqlDB | In-process `volant-stream` operators |
 | Ops model | ZooKeeper/KRaft + heavy footprint | Single binary → small static ISR quorum |
-| Protocol | Kafka wire protocol | Native binary first; optional Kafka shim (`--kafka-listen`, Phases 23–105) |
+| Protocol | Kafka wire protocol | Native binary first; optional Kafka shim (`--kafka-listen`, Phases 23–106) |
 | Goal | Full ecosystem | Subset that is fast, small, and correct |
 
 Volant is **not** a drop-in Kafka replacement. It prioritizes a clean core; the
-optional Kafka wire shim is **shipped** (Phases 23–105) — see
+optional Kafka wire shim is **shipped** (Phases 23–106) — see
 [docs/KAFKA_COMPAT.md](./docs/KAFKA_COMPAT.md).
 
 ---
 
 ## Suggested implementation order (PRs)
 
-Phases **0–105 are shipped**. Historical PR order for the core:
+Phases **0–106 are shipped**. Historical PR order for the core:
 
 1. Phase 1 segment format + unit tests  
 2. Phase 1 recovery + retention  
@@ -2499,7 +2523,7 @@ Phases **0–105 are shipped**. Historical PR order for the core:
 9. Phase 6 replication prototype (2–3 nodes) ✅  
 10. Phase 7 metrics, TLS, packaging ✅  
 11. Phases 8–22 (redirect, groups, configs, txns, mTLS, ACLs, SCRAM) ✅  
-12. Phases 23–105 (Kafka wire shim surface + marker GC + empty-AddPartitions control) ✅  
+12. Phases 23–106 (Kafka wire shim + marker GC + empty-AddPartitions control + bg shutdown join) ✅  
 
 ---
 
@@ -2540,7 +2564,7 @@ cargo run -p volant-bench --release
 cargo test --workspace
 ```
 
-**Status (post–Phase 105):** core broker, ops (metrics / TLS / auth / SCRAM /
+**Status (post–Phase 106):** core broker, ops (metrics / TLS / auth / SCRAM /
 ACLs / Helm), and the Kafka wire shim are **shipped** (Fetch 0–18 Kafka max;
 ACL admin 0–3 with User resource; soft-marker `READ_COMMITTED` with **marker GC**
 on DeleteRecords/retention/load; durable OFLE history; Fetch DivergingEpoch +
@@ -2548,9 +2572,9 @@ sessions with omit-unchanged incremental + idle TTL/max; Kafka control batches
 on EndTxn **and** crash≡abort open promote **including empty AddPartitions**;
 prepared 2PC MVP; prepared + open txn timeouts + broker max timeout clamp;
 background txn/session sweeper + richer expiry metrics (always-spawn; 0→>0
-without restart); BROKER Describe/AlterConfigs with **sparse** durable restart
-restore and resource name empty-or-local-`node_id`).
+without restart; **graceful shutdown/join** Phase 106); BROKER Describe/AlterConfigs
+with **sparse** durable restart restore and resource name empty-or-local-`node_id`).
 Still deferred: multi-language clients, full chaos-mesh suites, cargo-fuzz corpus
 CI, multi-broker session affinity, multi-broker 2PC, multi-broker BROKER config
-fan-out, graceful sweeper join on stop.
+fan-out, accept-loop drain on shutdown.
 Details: [docs/KAFKA_COMPAT.md](./docs/KAFKA_COMPAT.md), [docs/ops.md](./docs/ops.md).

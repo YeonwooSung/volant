@@ -807,17 +807,19 @@ impl Broker {
             .store(timeout_ms, Ordering::Relaxed);
     }
 
-    /// Background sweep interval in milliseconds (Phase 97/101).
+    /// Background sweep interval in milliseconds (Phase 97/101/106).
     ///
     /// `0` pauses the background sweeper (lazy expire remains). The task is
     /// always spawned from [`crate::net::start_background_tasks`] so a later
-    /// `0 → >0` transition takes effect without process restart.
+    /// `0 → >0` transition takes effect without process restart. Shutdown via
+    /// [`crate::BackgroundTasks::shutdown`] stops the loop cleanly.
     pub fn sweep_interval_ms(&self) -> u64 {
         self.sweep_interval_ms.load(Ordering::Relaxed)
     }
 
-    /// Override background sweep interval (Phase 97/101). `0` pauses background
-    /// work; `>0` enables/resumes on the next poll cycle without restart.
+    /// Override background sweep interval (Phase 97/101/106). `0` pauses
+    /// background work; `>0` enables/resumes on the next poll cycle without
+    /// restart (until [`crate::BackgroundTasks::shutdown`]).
     pub fn set_sweep_interval_ms(&self, interval_ms: u64) {
         self.sweep_interval_ms.store(interval_ms, Ordering::Relaxed);
     }

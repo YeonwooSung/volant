@@ -22,7 +22,7 @@
 - Truncating partially-overlapping markers (keep whole marker if any overlap)
 - Multi-broker marker consensus / fan-out
 - Empty AddPartitions control markers → **closed by Phase 105**
-- Graceful sweeper join on stop
+- Graceful sweeper join on stop → **closed by Phase 106**
 - Multi-lang clients / fuzz CI / multi-broker 2PC
 
 ## Problem (Phase 86 honesty gap)
@@ -108,7 +108,7 @@ for tests/ops.
 
 ## Phase 105 ideas
 
-- Graceful sweeper shutdown / join on server stop
+- Graceful sweeper shutdown / join on server stop → **closed by Phase 106**
 - Empty-AddPartitions control markers → **closed by Phase 105**
 - Multi-broker config fan-out / multi-broker 2PC
 - Multi-lang clients / cargo-fuzz corpus CI

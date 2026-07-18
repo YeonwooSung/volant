@@ -17,7 +17,7 @@
 
 - Multi-broker marker consensus / KRaft txn log
 - Multi-lang clients / cargo-fuzz CI
-- Graceful sweeper join on stop
+- Graceful sweeper join on stop → **closed by Phase 106**
 - Multi-broker BROKER config fan-out
 - Reconstructing control batches for historical empty membership that predate
   Phase 105 (no `open_added` on disk)
@@ -154,7 +154,7 @@ Phase 98: `unit_begin_only_no_control_on_crash` keeps the zero-membership guard.
 
 ## Phase 106 ideas
 
-- Graceful sweeper shutdown / join on server stop
+- Graceful sweeper shutdown / join on server stop → **closed by Phase 106**
 - Multi-broker 2PC / sessions / multi-lang / fuzz CI
 - Stronger crash-promote idempotency (content-hash before append)
 - Control-batch log GC with DeleteRecords (optional; clients rarely need it)
