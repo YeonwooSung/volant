@@ -31,8 +31,8 @@ Start here. Prefer living docs over individual phase ship records.
 
 | Document | Purpose |
 |----------|---------|
-| [history/PHASE_HISTORY.md](./history/PHASE_HISTORY.md) | One-line index for phases 0–91 |
-| [PHASE7_SPEC.md](./PHASE7_SPEC.md) … [PHASE91_SPEC.md](./PHASE91_SPEC.md) | Per-phase ship records (deep dive) |
+| [history/PHASE_HISTORY.md](./history/PHASE_HISTORY.md) | One-line index for phases 0–92 |
+| [PHASE7_SPEC.md](./PHASE7_SPEC.md) … [PHASE92_SPEC.md](./PHASE92_SPEC.md) | Per-phase ship records (deep dive) |
 | [history/archive/](./history/archive/) | Implementation plans & reviews (archaeology) |
 
 ## Config samples
@@ -52,17 +52,17 @@ Start here. Prefer living docs over individual phase ship records.
 | Protocol implementer | PHASE1–6 binding specs |
 | Roadmap / deferred | ROADMAP end sections |
 
-## Compaction note (2026-07-18, post–Phase 91 ship)
+## Compaction note (2026-07-18, post–Phase 92 ship)
 
-Living docs match **git HEAD product** (`SUPPORTED_APIS`, last feature commit Phase **91**):
+Living docs match **git HEAD product** (`SUPPORTED_APIS`, last feature commit Phase **92**):
 
-- **Status ceiling:** Phases **0–91**; Kafka shim **23–91** (**38** keys)
+- **Status ceiling:** Phases **0–92**; Kafka shim **23–92** (**38** keys)
 - **Kafka SoT:** [KAFKA_COMPAT.md](./KAFKA_COMPAT.md) — matrix + semantic honesty
 - **WHITEPAPER:** architecture + positioning; no full API matrix
-- **Binding core:** PHASE1–6; **ship records:** PHASE7–91 via [PHASE_HISTORY](./history/PHASE_HISTORY.md)
+- **Binding core:** PHASE1–6; **ship records:** PHASE7–92 via [PHASE_HISTORY](./history/PHASE_HISTORY.md)
 - **README / ops:** compact bands + ops table (not per-phase diaries)
-- **Txn honesty (shipped):** write-through + soft markers + EndTxn control batches (Phase 89) + prepared 2PC MVP (Phase 90)
+- **Txn honesty (shipped):** write-through + soft markers + EndTxn control batches (Phase 89) + prepared 2PC MVP (Phase 90) + prepared timeout auto-abort (Phase 92)
 - **Epoch honesty (shipped):** durable OFLE history MVP; Metadata live leader_epoch; Fetch DivergingEpoch
 - **Fetch sessions (shipped MVP):** process-local create/forgotten/errors; omit-unchanged empty-topics incremental (Phase 91)
 - **Still deferred (product):** multi-lang, chaos/fuzz corpus CI, multi-broker 2PC /
-  multi-broker session affinity
+  multi-broker session affinity, open-txn timeout

@@ -2047,13 +2047,13 @@ Binding: **[docs/PHASE90_SPEC.md](./docs/PHASE90_SPEC.md)**.
 - [x] Integration tests (`phase90_prepared_txns`)
 
 **Honest limitations:** not full KIP-890/939 parity; no multi-broker txn log;
-no TRANSACTION_ABORTABLE; no prepared timeout; KeepPreparedTxn does not keep
-ordinary open (non-prepared) txns; resume pid/epoch fields still ignored for
-allocation.
+no TRANSACTION_ABORTABLE; KeepPreparedTxn does not keep ordinary open
+(non-prepared) txns; resume pid/epoch fields still ignored for allocation.
+Prepared timeout closed by **Phase 92**.
 
 **Still deferred:** multi-lang clients, cargo-fuzz corpus CI, multi-broker
-session affinity, full KRaft epoch SM, prepared timeout / multi-broker 2PC
-coordinator. Omit-unchanged closed by **Phase 91**.
+session affinity, full KRaft epoch SM, multi-broker 2PC coordinator.
+Omit-unchanged closed by **Phase 91**; prepared timeout by **Phase 92**.
 
 ---
 
@@ -2076,8 +2076,30 @@ byte-identical Kafka compressed response cache); partial-topic incremental
 always returns those partitions; no session TTL / multi-broker affinity.
 
 **Still deferred:** multi-lang clients, cargo-fuzz corpus CI, multi-broker
-session affinity / durable sessions, prepared timeout / multi-broker 2PC,
-session TTL / max sessions / metrics.
+session affinity / durable sessions, multi-broker 2PC, session TTL / max
+sessions / metrics. Prepared timeout closed by **Phase 92**.
+
+---
+
+### Phase 92 — Prepared transaction timeout / auto-abort (MVP) ✅
+
+**Goal:** Prevent prepared (2PC phase-1) transactions from pinning LSO forever
+by tracking `prepared_at_ms` and auto-aborting after a configurable timeout.
+
+Binding: **[docs/PHASE92_SPEC.md](./docs/PHASE92_SPEC.md)**.
+
+- [x] Durable `prepared_at_ms` on prepare + `__txn_prepared` snapshot
+- [x] Default timeout **60s**; `VOLANT_PREPARED_TXN_TIMEOUT_MS` + setter; `0` disables
+- [x] Lazy auto-abort (= force-abort: soft markers + ABORT control batches)
+- [x] Sweep on InitProducerId / EndTxn / List/Describe / produce guards / LSO
+- [x] Integration tests (`phase92_prepared_timeout`)
+
+**Honest limitations:** open (non-prepared) txns still have no timeout;
+InitProducerId `transaction_timeout_ms` still ignored for open txns; lazy only
+(no background sweeper); single-node clock; no TRANSACTION_ABORTABLE.
+
+**Still deferred:** multi-lang clients, cargo-fuzz corpus CI, multi-broker 2PC /
+session affinity, session TTL, open-txn timeout, TRANSACTION_ABORTABLE.
 
 ---
 

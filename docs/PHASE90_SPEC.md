@@ -138,13 +138,13 @@ Control batches are written only on **finalize** (second EndTxn), not on prepare
 - No separate PrepareTxn API; completion only via matching second EndTxn
 - KeepPreparedTxn does not preserve ordinary open (non-prepared) txns
 - Coordinator epoch always 0; single-node prepared store only
-- No timeout-based prepared expiry
+- No timeout-based prepared expiry → **closed by Phase 92 (MVP)**
 - Resume pid/epoch fields on InitProducerId v3–6 still ignored for allocation
   (KeepPreparedTxn path reuses existing identity without consulting resume fields)
 
-## Phase 91 ideas
+## Phase 91 / 92 follow-ups
 
-- Prepared timeout / auto-abort
+- Prepared timeout / auto-abort → **closed by Phase 92 (MVP)**
 - TRANSACTION_ABORTABLE where Kafka emits it
 - Multi-broker prepared replication
 - Omit-unchanged fetch session cache → **closed by Phase 91 (MVP)**

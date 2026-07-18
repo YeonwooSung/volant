@@ -61,8 +61,9 @@ When `acks=all`, if `|ISR| < min_insync_replicas`, the leader rejects the produc
 | EndTxn abort (non-2PC) | Soft abort markers hide ranges under `READ_COMMITTED` / native committed-only fetch |
 | EndTxn #1 with Enable2Pc | Moves open → Prepared (PrepareCommit/Abort); LSO still held; no markers yet |
 | EndTxn #2 matching decision | Finalize commit/abort (soft + control markers) |
+| Prepared timeout (Phase 92) | Lazy auto-abort after configured timeout (default 60s); soft + ABORT control markers |
 | Crash with open writes | Open ranges promoted to aborted on reload |
-| Crash with prepared | Prepared reloaded from `__txn_prepared` (survives; must complete or re-init abort) |
+| Crash with prepared | Prepared reloaded from `__txn_prepared` (survives; complete, re-init abort, or timeout) |
 
 ### Leader epochs (Phase 87)
 

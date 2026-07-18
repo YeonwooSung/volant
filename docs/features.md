@@ -53,6 +53,7 @@ shim: [KAFKA_COMPAT.md](./KAFKA_COMPAT.md).
 | READ_COMMITTED | MVP: LSO filtering + aborted list (soft markers SoT) |
 | Control batches (Phase 89) | EndTxn COMMIT/ABORT magic-2 control RecordBatches on log |
 | Prepared 2PC MVP (Phase 90) | Enable2Pc prepare→complete EndTxn; KeepPreparedTxn + OngoingTxn*; `__txn_prepared` |
+| Prepared timeout (Phase 92) | Lazy auto-abort after timeout (default 60s; `VOLANT_PREPARED_TXN_TIMEOUT_MS`; `0` disables) |
 
 ## Security (19–22)
 
@@ -95,7 +96,8 @@ workers.
 - Multi-language clients deferred  
 - No Raft metadata / dynamic membership  
 - No control batch for crash≡abort without EndTxn  
-- Prepared 2PC is single-node MVP (no multi-broker txn log / TRANSACTION_ABORTABLE / timeout)  
+- Prepared 2PC is single-node MVP (no multi-broker txn log / TRANSACTION_ABORTABLE); prepared timeout yes (Phase 92); open-txn timeout still absent  
+
 - Fetch sessions not durable / multi-broker sticky; omit cache is HWM+LSO only (not byte-identical Kafka response cache)  
 - ACL store is single-node file (no consensus)  
 - DeleteRecords does not fan out to cluster followers  

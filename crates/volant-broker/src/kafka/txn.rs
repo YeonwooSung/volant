@@ -171,7 +171,8 @@ pub(crate) fn encode_init_producer_id(
             return;
         }
     };
-    // transaction_timeout_ms — ignored (no Kafka txn coordinator timeout).
+    // transaction_timeout_ms — still ignored for open txns (Phase 29/62 honesty).
+    // Prepared-txn timeout is broker-level (Phase 92: VOLANT_PREPARED_TXN_TIMEOUT_MS).
     if src.remaining() >= 4 {
         let _timeout = src.get_i32();
     }

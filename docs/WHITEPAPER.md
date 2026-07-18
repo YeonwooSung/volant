@@ -6,7 +6,7 @@
 |---|---|
 | Version | 0.1.0 (Apache-2.0) |
 | Language | Rust 1.75+ |
-| Status | Phases 0–91 landed (product / git HEAD) |
+| Status | Phases 0–92 landed (product / git HEAD) |
 | Date | 2026-07-18 |
 
 ---
@@ -22,7 +22,8 @@ wire-protocol shim** reuses the same storage, groups, and security model for
 interop. The shim advertises **ApiVersions 0–5** and **Fetch 0–18** at Apache
 Kafka wire max for those keys, with empty feature tags and
 write-through transactions with soft READ_COMMITTED markers (Phase 86) and
-Kafka-style COMMIT/ABORT control batches on EndTxn (Phase 89), prepared 2PC MVP (Phase 90), durable
+Kafka-style COMMIT/ABORT control batches on EndTxn (Phase 89), prepared 2PC MVP
+(Phase 90) with prepared timeout auto-abort (Phase 92), durable
 OffsetForLeaderEpoch history (Phase 87 MVP), Fetch DivergingEpoch +
 process-local fetch sessions (Phase 88 MVP), and omit-unchanged incremental
 session responses (Phase 91 MVP).
@@ -178,7 +179,7 @@ Admin: list / describe / delete groups, delete offsets, lag metrics.
 | Control markers | Soft markers (isolation SoT) + Kafka control batches on EndTxn (Phase 89) |
 | `READ_COMMITTED` / LSO | **Yes (MVP)** — LSO may be `<` HWM; aborted filtered; aborted list non-empty |
 | `READ_UNCOMMITTED` | Sees unstable + aborted-on-log data |
-| Real 2PC / prepared transactions | **MVP** (Phase 90; single-node prepare/complete; not full KIP-890/939) |
+| Real 2PC / prepared transactions | **MVP** (Phase 90; single-node prepare/complete; prepared timeout Phase 92; not full KIP-890/939) |
 
 Native Volant fetch remains **committed-only**. Kafka Fetch isolation is real for
 the MVP; Kafka control-batch wire bytes on the partition log remain deferred.
@@ -229,20 +230,21 @@ flexible (KIP-482) coverage for the APIs modern clients negotiate most often
 |-------|----------|---------------|
 | Produce / Fetch / Metadata | TopicId, flex framing | Produce/Metadata **0–13**; Fetch **0–18** (Kafka max) |
 | Groups / offsets | Join–Leave, commit/fetch | Coordinator-driven; GroupType always `classic` |
-| Txn wire | Init / Add* / End / TxnOffsetCommit | Write-through + soft markers; prepared 2PC MVP (Phase 90) |
+| Txn wire | Init / Add* / End / TxnOffsetCommit | Write-through + soft markers; prepared 2PC MVP (Phase 90) + prepared timeout (Phase 92) |
 | Admin / configs / ACLs | CreateTopics, CreatePartitions, ACLs | CreatePartitions max **3**; ACL admin **0–3** (User resource v3); LITERAL only |
 | Meta / auth | ApiVersions, FindCoordinator, SASL | ApiVersions **0–5** (Kafka max); SASL PLAIN/SCRAM |
 
 **Auth on Kafka port:** SASL or principal `kafka-anonymous` (+ ACLs). Shared-token
 Auth applies only on the native `--listen` port.
 
-**Highlights (post–Phase 90/91):** deterministic TopicId UUIDs; KIP-951
+**Highlights (post–Phase 90/91/92):** deterministic TopicId UUIDs; KIP-951
 CurrentLeader on leader errors + Produce NodeEndpoints v10+ / Fetch
-NodeEndpoints v16+; KIP-890 txn max versions + prepared 2PC MVP (Phase 90); FindCoordinator
-0–6 / AddOffsetsToTxn 0–4 without `TRANSACTION_ABORTABLE`; ApiVersions 0–5 with
-empty feature tags and ignored v5 ClusterId/NodeId (never `REBOOTSTRAP_REQUIRED`);
-Fetch **0–18** (Kafka max) with DivergingEpoch + omit-unchanged sessions (Phase 88/91);
-ACL admin **0–3** (User resource storage only); write-through txn + soft
+NodeEndpoints v16+; KIP-890 txn max versions + prepared 2PC MVP (Phase 90) +
+prepared timeout auto-abort (Phase 92); FindCoordinator 0–6 / AddOffsetsToTxn
+0–4 without `TRANSACTION_ABORTABLE`; ApiVersions 0–5 with empty feature tags and
+ignored v5 ClusterId/NodeId (never `REBOOTSTRAP_REQUIRED`); Fetch **0–18**
+(Kafka max) with DivergingEpoch + omit-unchanged sessions (Phase 88/91); ACL
+admin **0–3** (User resource storage only); write-through txn + soft
 READ_COMMITTED (LSO/aborted); durable OffsetForLeaderEpoch history MVP + Metadata
 live leader_epoch; compression codecs gzip/snappy/lz4/zstd on the wire.
 
@@ -277,7 +279,7 @@ Volant deliberately does **not** claim production Kafka parity. Open gaps:
 
 1. Multi-language clients (Rust only)
 2. Dynamic membership / Raft metadata quorum
-3. Multi-broker 2PC / prepared timeout; control batches for crash-without-EndTxn
+3. Multi-broker 2PC / open-txn timeout; control batches for crash-without-EndTxn
 4. Full Kafka API surface beyond advertised keys; multi-broker session affinity / durable sessions
 5. Full KRaft epoch state machine (durable history is MVP)
 6. Kafka cooperative-sticky assignor **protocol** parity (native JoinGroup revoke list exists)
@@ -340,7 +342,7 @@ cargo run -p volant-server -- \
 | [tuning.md](./tuning.md) | Performance tuning |
 | [KAFKA_COMPAT.md](./KAFKA_COMPAT.md) | Current Kafka API matrix + honesty |
 | [features.md](./features.md) | Native features (post-core) |
-| [history/PHASE_HISTORY.md](./history/PHASE_HISTORY.md) | Phase 0–91 one-line index |
+| [history/PHASE_HISTORY.md](./history/PHASE_HISTORY.md) | Phase 0–92 one-line index |
 | [PHASE1_SPEC.md](./PHASE1_SPEC.md)–[PHASE6_SPEC.md](./PHASE6_SPEC.md) | Binding core specs |
 | [../ROADMAP.md](../ROADMAP.md) | Full roadmap + deferred work |
 | [../README.md](../README.md) | Quick start |
