@@ -439,9 +439,10 @@ fn broker_metrics_text(broker: &Broker) -> String {
         "volant_prepared_txns_expired_total {}\n",
         broker.prepared_txns_expired_total()
     ));
-    // Phase 104: soft abort markers dropped after log prefix delete / retention.
+    // Phase 104: soft abort markers fully dropped after log prefix delete /
+    // retention / load. Phase 111 straddling clips do not increment this.
     text.push_str(
-        "# HELP volant_aborted_markers_gc_total Soft abort markers GC'd (below log start)\n",
+        "# HELP volant_aborted_markers_gc_total Soft abort markers fully GC'd (below log start)\n",
     );
     text.push_str("# TYPE volant_aborted_markers_gc_total counter\n");
     text.push_str(&format!(

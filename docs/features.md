@@ -35,7 +35,7 @@ shim: [KAFKA_COMPAT.md](./KAFKA_COMPAT.md).
 | Group admin | list / describe / delete-offsets; static membership |
 | Topic configs | `retention.ms` / `retention.bytes` / `segment.bytes` |
 | Topic catalog | Survives single-node restart |
-| DeleteRecords | Truncate sealed segments before offset; GC aborted soft markers below new log start (Phase 104) |
+| DeleteRecords | Truncate sealed segments before offset; GC/clip aborted soft markers vs new log start (Phase 104/111) |
 | CreatePartitions | Grow partition count (cannot shrink) |
 | ListOffsets | Earliest / latest (+ Kafka specials on shim) |
 | Compaction | `cleanup.policy=compact` on sealed segments |
@@ -51,7 +51,7 @@ shim: [KAFKA_COMPAT.md](./KAFKA_COMPAT.md).
 | Deferred offsets | Txn offset commits apply on commit only |
 | Crash | Open write-through ranges ≡ abort (persisted `__txn_markers`) + ABORT control batches (Phase 98) |
 | READ_COMMITTED | MVP: LSO filtering + aborted list (soft markers SoT) |
-| Soft-marker GC (Phase 104) | DeleteRecords / retention / load drop markers with `end_offset <= log_start`; persist `__txn_markers` |
+| Soft-marker GC (Phase 104/111) | Drop markers with `end_offset <= log_start`; clip straddlers to `first_offset = log_start`; persist `__txn_markers` |
 | Control batches (Phase 89/98/105) | EndTxn COMMIT/ABORT + crash-promote ABORT magic-2 control RecordBatches on log; empty AddPartitions membership included (control-only) |
 | Prepared 2PC MVP (Phase 90) | Enable2Pc prepare→complete EndTxn; KeepPreparedTxn + OngoingTxn*; `__txn_prepared` |
 | Prepared timeout (Phase 92) | Lazy auto-abort after timeout (default 60s; `VOLANT_PREPARED_TXN_TIMEOUT_MS`; `0` disables) |

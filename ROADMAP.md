@@ -2548,7 +2548,7 @@ handle cannot stop first-flight tasks; multi-broker 2PC still deferred.
 
 **Still deferred:** multi-lang clients, cargo-fuzz corpus CI, multi-broker 2PC /
 session affinity / durable sessions, multi-broker BROKER config fan-out,
-non-controller alive-set auto-death → **closed by Phase 110**, straddle marker clip.
+non-controller alive-set auto-death → **closed by Phase 110**, straddle marker clip → **closed by Phase 111**.
 
 ---
 
@@ -2571,7 +2571,30 @@ assignment/Metadata ISR may lag until ClusterState; rejoin/ISR expand unchanged.
 
 **Still deferred:** multi-lang clients, cargo-fuzz corpus CI, multi-broker 2PC /
 session affinity / durable sessions, multi-broker BROKER config fan-out,
-straddle marker clip.
+straddle marker clip → **closed by Phase 111**.
+
+---
+
+### Phase 111 — Clip straddling soft abort markers to log_start (MVP) ✅
+
+**Goal:** When log start advances into a soft abort marker range, clip
+`first_offset` to the live `log_start` (keep `end_offset`) so durable
+`__txn_markers` / memory no longer hold an obsolete prefix. Fully-below
+markers still drop (Phase 104); fully-live markers unchanged.
+
+Binding: **[docs/PHASE111_SPEC.md](./docs/PHASE111_SPEC.md)**.
+
+- [x] GC path clips straddlers (`first_offset < log_start < end_offset`)
+- [x] Persist `__txn_markers` on clip or drop; drop counter unchanged on clip
+- [x] DeleteRecords / retention / load self-heal share the same rule
+- [x] Integration tests (`phase111_straddle_marker_clip`)
+- [x] Phase 104 full-drop / retain regressions remain green
+
+**Honest limitations:** whole-segment DeleteRecords only; control batches on
+the log are not rewritten; no dedicated clip metric; single-node marker store.
+
+**Still deferred:** multi-lang clients, cargo-fuzz corpus CI, multi-broker 2PC /
+session affinity / durable sessions, multi-broker BROKER config fan-out.
 
 ---
 
@@ -2602,14 +2625,14 @@ straddle marker clip.
 | Goal | Full ecosystem | Subset that is fast, small, and correct |
 
 Volant is **not** a drop-in Kafka replacement. It prioritizes a clean core; the
-optional Kafka wire shim is **shipped** (Phases 23–109; cluster ISR death 108/110) — see
+optional Kafka wire shim is **shipped** (Phases 23–109; cluster ISR death 108/110; marker clip 111) — see
 [docs/KAFKA_COMPAT.md](./docs/KAFKA_COMPAT.md).
 
 ---
 
 ## Suggested implementation order (PRs)
 
-Phases **0–110 are shipped**. Historical PR order for the core:
+Phases **0–111 are shipped**. Historical PR order for the core:
 
 1. Phase 1 segment format + unit tests  
 2. Phase 1 recovery + retention  
@@ -2622,7 +2645,7 @@ Phases **0–110 are shipped**. Historical PR order for the core:
 9. Phase 6 replication prototype (2–3 nodes) ✅  
 10. Phase 7 metrics, TLS, packaging ✅  
 11. Phases 8–22 (redirect, groups, configs, txns, mTLS, ACLs, SCRAM) ✅  
-12. Phases 23–110 (Kafka wire shim + marker GC + empty-AddPartitions control + bg shutdown join + phase103 flake fix + follower-death ISR + accept drain / single-flight bg + non-controller alive-set death) ✅  
+12. Phases 23–111 (Kafka wire shim + marker GC/clip + empty-AddPartitions control + bg shutdown join + phase103 flake fix + follower-death ISR + accept drain / single-flight bg + non-controller alive-set death + straddle marker clip) ✅  
 
 ---
 
@@ -2663,10 +2686,10 @@ cargo run -p volant-bench --release
 cargo test --workspace
 ```
 
-**Status (post–Phase 110):** core broker, ops (metrics / TLS / auth / SCRAM /
+**Status (post–Phase 111):** core broker, ops (metrics / TLS / auth / SCRAM /
 ACLs / Helm), and the Kafka wire shim are **shipped** (Fetch 0–18 Kafka max;
-ACL admin 0–3 with User resource; soft-marker `READ_COMMITTED` with **marker GC**
-on DeleteRecords/retention/load; durable OFLE history; Fetch DivergingEpoch +
+ACL admin 0–3 with User resource; soft-marker `READ_COMMITTED` with **marker GC/clip**
+on DeleteRecords/retention/load (Phase 104/111); durable OFLE history; Fetch DivergingEpoch +
 sessions with omit-unchanged incremental + idle TTL/max; Kafka control batches
 on EndTxn **and** crash≡abort open promote **including empty AddPartitions**;
 prepared 2PC MVP; prepared + open txn timeouts + broker max timeout clamp;
@@ -2675,8 +2698,8 @@ without restart; **graceful shutdown/join** Phase 106; **accept-loop drain +
 single-flight bg** Phase 109); BROKER Describe/AlterConfigs
 with **sparse** durable restart restore and resource name empty-or-local-`node_id`
 (Phase 103; **parallel test isolation** Phase 107); **follower-death ISR shrink +
-HWM recompute** Phase 108; **non-controller alive-set auto-death** Phase 110).
+HWM recompute** Phase 108; **non-controller alive-set auto-death** Phase 110; **straddle soft-marker clip** Phase 111).
 Still deferred: multi-language clients, full chaos-mesh suites, cargo-fuzz corpus
 CI, multi-broker session affinity, multi-broker 2PC, multi-broker BROKER config
-fan-out, straddle marker clip.
+fan-out.
 Details: [docs/KAFKA_COMPAT.md](./docs/KAFKA_COMPAT.md), [docs/ops.md](./docs/ops.md).

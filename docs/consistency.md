@@ -65,7 +65,7 @@ When `acks=all`, if `|ISR| < min_insync_replicas`, the leader rejects the produc
 | Open timeout (Phase 93) | Lazy auto-abort of open write-through txns after client/broker timeout; soft + ABORT control markers |
 | Max timeout clamp (Phase 96) | Broker max (default 15m); Init over-max → **50**; effective open/prepared timeouts clamped |
 | Background sweeper (Phase 97/101) | Periodic open/prepared + idle session expiry (default 1s); `0` pauses; always-spawn so 0→>0 live; lazy paths remain; expiry counters |
-| Soft-marker GC (Phase 104) | DeleteRecords / retention / load drop markers with `end_offset <= log_start`; partial overlaps retained |
+| Soft-marker GC (Phase 104/111) | DeleteRecords / retention / load drop markers with `end_offset <= log_start`; straddle clips `first_offset = log_start` |
 | Crash with open writes | Open ranges promoted to aborted on reload + ABORT control batches (Phase 98) |
 | Crash with prepared | Prepared reloaded from `__txn_prepared` (survives; complete, re-init abort, or timeout) |
 

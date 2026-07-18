@@ -20,6 +20,7 @@
 
 - Rewriting / compacting Kafka control batches on the data log
 - Truncating partially-overlapping markers (keep whole marker if any overlap)
+  → **closed by Phase 111** (clip `first_offset = log_start` on straddle)
 - Multi-broker marker consensus / fan-out
 - Empty AddPartitions control markers → **closed by Phase 105**
 - Graceful sweeper join on stop → **closed by Phase 106**
@@ -91,6 +92,7 @@ for tests/ops.
 - Whole-segment DeleteRecords only (Phase 14) — GC advances only when log start
   actually moves past `end_offset`
 - Partially overlapping markers are **not** truncated to the live prefix
+  → **closed by Phase 111** (straddle clip to `log_start`)
 - Control batches on the log are **not** rewritten or GC’d
 - Single-node marker store; no multi-broker replication of GC
 - Retention GC is opportunistic (same 5s background path as Phase 13)
@@ -106,9 +108,10 @@ for tests/ops.
 5. Partial overlap / progressive delete retains when `end > log_start`
 6. Kafka Fetch READ_COMMITTED aborted list clears after GC; new abort listed
 
-## Phase 105 ideas
+## Follow-on (closed later)
 
 - Graceful sweeper shutdown / join on server stop → **closed by Phase 106**
 - Empty-AddPartitions control markers → **closed by Phase 105**
+- Straddle / partial-overlap marker clip → **closed by Phase 111**
 - Multi-broker config fan-out / multi-broker 2PC
 - Multi-lang clients / cargo-fuzz corpus CI

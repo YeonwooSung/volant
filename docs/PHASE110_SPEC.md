@@ -17,7 +17,7 @@
 - Changing controller election (still lowest live id)
 - Lag-based ISR shrink threshold changes
 - Multi-broker 2PC / sessions / multi-lang / fuzz CI
-- Straddle marker clip
+- Straddle marker clip → **closed by Phase 111**
 - Multi-broker BROKER config fan-out
 - Gossip-style peer-to-peer heartbeats (controller remains membership SoT)
 
@@ -95,7 +95,7 @@ durable assignment + generation inside `on_broker_death`.
 
 ## Still deferred after this
 
-- Straddle marker clip
+- Straddle marker clip → **closed by Phase 111**
 - Multi-broker 2PC / multi-lang / fuzz CI
 - Multi-broker BROKER config fan-out
 - Multi-broker session affinity

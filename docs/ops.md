@@ -173,8 +173,9 @@ volant-server \
   graceful shutdown/join on server stop) +
   crash-promote ABORT control batches (Phase 98) + **empty AddPartitions control**
   (Phase 105: membership + control-only; no fake soft ranges) + **aborted
-  soft-marker GC** (Phase 104: DeleteRecords / retention / load drop markers with
-  `end_offset <= log_start`; metric `volant_aborted_markers_gc_total`);
+  soft-marker GC** (Phase 104/111: DeleteRecords / retention / load drop markers with
+  `end_offset <= log_start` and clip straddlers to `first_offset = log_start`;
+  drop metric `volant_aborted_markers_gc_total`);
   `READ_COMMITTED` caps at LSO and filters aborted; `READ_UNCOMMITTED` sees all.
   Open crash≡abort via `__txn_markers` (soft + ABORT control; empty membership
   via `open_added`); prepared durable under `__txn_prepared` until complete or
@@ -272,8 +273,8 @@ specs. Ops-critical notes only:
 | Groups | list / describe / delete-offsets; static membership `group_instance_id` |
 | Topic configs | `retention.ms` / `retention.bytes` / `segment.bytes` / `cleanup.policy` |
 | Broker configs (Phase 99–102) | BROKER Describe/Alter: `transaction.max.timeout.ms` + `volant.*` open/prepared/session/sweep; **sparse** durable under `__broker_config/state.json` (only altered keys; DELETE unfreezes env) |
-| DeleteRecords | Truncates sealed segments; no follower fan-out; **GC aborted soft markers** fully below new log start (Phase 104) |
-| Transactions (shipped) | **Write-through + soft markers** (Phase 86) + **control batches** on EndTxn finalize (Phase 89) + **empty AddPartitions control** (Phase 105) + **prepared 2PC MVP** (Phase 90) + **prepared timeout** (Phase 92, default 60s / `VOLANT_PREPARED_TXN_TIMEOUT_MS`) + **open timeout** (Phase 93, InitProducerId / `VOLANT_OPEN_TXN_TIMEOUT_MS`) + **max timeout clamp** (Phase 96, default 15m / `VOLANT_TRANSACTION_MAX_TIMEOUT_MS`; Init **50** over-max) + **background sweeper** (Phase 97/101/106, default 1s / `VOLANT_SWEEP_INTERVAL_MS`; `0` = pause bg; always-spawn so 0→>0 without restart; graceful shutdown/join) + **BROKER config surface** (Phase 99) + **sparse durable restart** (Phase 100/102) + **BROKER name vs `node_id`** (Phase 103) + **marker GC** (Phase 104); LSO/aborted filtering; open crash≡abort; prepared durable under `__txn_prepared` until complete or timeout; soft markers GC'd when `end_offset <= log_start` |
+| DeleteRecords | Truncates sealed segments; no follower fan-out; **GC/clip aborted soft markers** vs new log start (Phase 104/111) |
+| Transactions (shipped) | **Write-through + soft markers** (Phase 86) + **control batches** on EndTxn finalize (Phase 89) + **empty AddPartitions control** (Phase 105) + **prepared 2PC MVP** (Phase 90) + **prepared timeout** (Phase 92, default 60s / `VOLANT_PREPARED_TXN_TIMEOUT_MS`) + **open timeout** (Phase 93, InitProducerId / `VOLANT_OPEN_TXN_TIMEOUT_MS`) + **max timeout clamp** (Phase 96, default 15m / `VOLANT_TRANSACTION_MAX_TIMEOUT_MS`; Init **50** over-max) + **background sweeper** (Phase 97/101/106, default 1s / `VOLANT_SWEEP_INTERVAL_MS`; `0` = pause bg; always-spawn so 0→>0 without restart; graceful shutdown/join) + **BROKER config surface** (Phase 99) + **sparse durable restart** (Phase 100/102) + **BROKER name vs `node_id`** (Phase 103) + **marker GC/clip** (Phase 104/111); LSO/aborted filtering; open crash≡abort; prepared durable under `__txn_prepared` until complete or timeout; soft markers GC'd when `end_offset <= log_start`; straddlers clip `first_offset = log_start` (Phase 111) |
 | mTLS | Feature `tls`; `--tls-client-ca` / optional `--tls-client-allow` |
 | ACLs | `--acl-enable`; durable `__acls/acls.json`; User resource is Kafka admin store-only |
 | Compaction | `cleanup.policy=compact` on **sealed** segments; empty value = tombstone |

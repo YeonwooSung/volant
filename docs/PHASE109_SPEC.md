@@ -106,7 +106,8 @@ before the abort; abort is belt-and-suspenders.
 - No-op second `BackgroundTasks` cannot stop first-flight tasks
 - Metrics/Kafka side tasks aborted after primary return (not soft-joined with
   shared timeout beyond their own signal select)
-- Multi-broker 2PC / alive-set auto-death / straddle clip still deferred
+- Multi-broker 2PC still deferred; alive-set auto-death → **closed by Phase 110**;
+  straddle clip → **closed by Phase 111**
 
 ## Test plan
 

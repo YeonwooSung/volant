@@ -455,7 +455,8 @@ pub struct Broker {
     abortable_producers: Mutex<HashSet<u64>>,
     /// Soft abort markers for READ_COMMITTED (Phase 86): `(topic, partition) → markers`.
     aborted_txns: Mutex<HashMap<(String, u32), Vec<AbortedTxnMarker>>>,
-    /// Soft abort markers dropped by DeleteRecords / retention / load GC (Phase 104).
+    /// Soft abort markers fully dropped by DeleteRecords / retention / load GC
+    /// (Phase 104). Clips of straddling markers (Phase 111) do **not** increment.
     aborted_markers_gc_total: AtomicU64,
     /// Durable producer state store under `data_dir/__producer_state` (Phase 11).
     producer_store: ProducerStateStore,
@@ -958,8 +959,10 @@ impl Broker {
         self.prepared_txns_expired_total.load(Ordering::Relaxed)
     }
 
-    /// Soft abort markers dropped because their range was entirely below log
-    /// start after DeleteRecords / retention / load GC (Phase 104).
+    /// Soft abort markers fully dropped because their range was entirely below
+    /// log start after DeleteRecords / retention / load GC (Phase 104).
+    ///
+    /// Phase 111 straddling clips do **not** increment this counter.
     pub fn aborted_markers_gc_total(&self) -> u64 {
         self.aborted_markers_gc_total.load(Ordering::Relaxed)
     }
@@ -971,6 +974,26 @@ impl Broker {
             .get(&(topic.to_owned(), partition))
             .map(|v| v.len())
             .unwrap_or(0)
+    }
+
+    /// Soft abort marker ranges for a partition (Phase 111 tests).
+    ///
+    /// Returns `(producer_id, first_offset, end_offset)` sorted by first_offset.
+    pub fn aborted_marker_ranges(
+        &self,
+        topic: &str,
+        partition: u32,
+    ) -> Vec<(u64, u64, u64)> {
+        let aborted = self.aborted_txns.lock();
+        let Some(list) = aborted.get(&(topic.to_owned(), partition)) else {
+            return Vec::new();
+        };
+        let mut out: Vec<(u64, u64, u64)> = list
+            .iter()
+            .map(|m| (m.producer_id, m.first_offset, m.end_offset))
+            .collect();
+        out.sort_by_key(|e| e.1);
+        out
     }
 
     /// Run one open/prepared timeout expiry + idle fetch-session eviction
@@ -2401,12 +2424,16 @@ impl Broker {
             .push(marker);
     }
 
-    /// Drop aborted soft markers whose range is entirely below `log_start` (Phase 104).
+    /// GC / clip aborted soft markers against `log_start` (Phase 104 + 111).
     ///
-    /// Markers cover `[first_offset, end_offset)`. A marker is GC'd when
-    /// `end_offset <= log_start` (no overlap with the live log prefix). Markers
-    /// that still overlap live offsets are retained unchanged (not truncated).
-    /// Returns the number of markers removed from memory.
+    /// Markers cover `[first_offset, end_offset)`:
+    /// - `end_offset <= log_start` → **drop** (Phase 104; no live overlap)
+    /// - `first_offset < log_start < end_offset` → **clip** `first_offset =
+    ///   log_start` (Phase 111; obsolete prefix no longer on the log)
+    /// - `first_offset >= log_start` → unchanged
+    ///
+    /// Returns the number of markers **mutated** (dropped + clipped). The GC
+    /// counter advances for **drops only** (Phase 104 semantics preserved).
     fn gc_aborted_markers_below(&self, topic: &str, partition: u32, log_start: u64) -> usize {
         let key = (topic.to_owned(), partition);
         let mut aborted = self.aborted_txns.lock();
@@ -2416,6 +2443,13 @@ impl Broker {
         let before = list.len();
         list.retain(|m| m.end_offset > log_start);
         let dropped = before - list.len();
+        let mut clipped = 0usize;
+        for m in list.iter_mut() {
+            if m.first_offset < log_start {
+                m.first_offset = log_start;
+                clipped += 1;
+            }
+        }
         if list.is_empty() {
             aborted.remove(&key);
         }
@@ -2423,20 +2457,22 @@ impl Broker {
             self.aborted_markers_gc_total
                 .fetch_add(dropped as u64, Ordering::Relaxed);
         }
-        dropped
+        dropped + clipped
     }
 
-    /// GC markers for one partition and persist `__txn_markers` when any dropped.
+    /// GC / clip markers for one partition and persist `__txn_markers` when any
+    /// drop or clip occurred (Phase 104 + 111).
     fn gc_and_persist_aborted_markers(&self, topic: &str, partition: u32, log_start: u64) {
         if self.gc_aborted_markers_below(topic, partition, log_start) > 0 {
             self.persist_txn_markers();
         }
     }
 
-    /// GC markers fully below each partition's current log start (Phase 104).
+    /// GC / clip markers against each partition's current log start
+    /// (Phase 104 + 111).
     ///
     /// Used after retention and on load (self-heal). Persists once if anything
-    /// was dropped.
+    /// was dropped or clipped. Return value is total mutations (drops + clips).
     fn gc_stale_aborted_markers_all(&self) -> usize {
         // Snapshot log starts under the topics read lock, then GC without it
         // (aborted_txns is a separate lock; avoid holding both).
@@ -2478,8 +2514,8 @@ impl Broker {
     /// Phase 105: empty AddPartitions membership (`open_added`) also gets
     /// ABORT control batches (no soft markers — nothing to filter).
     ///
-    /// Phase 104: after load, drop aborted markers fully below each partition's
-    /// current log start (self-heal after crash / older files).
+    /// Phase 104/111: after load, drop markers fully below each partition's
+    /// current log start and clip straddlers (self-heal after crash / older files).
     fn load_txn_markers(&self) {
         let path = self.txn_markers_path();
         let Ok(bytes) = fs::read(&path) else {
@@ -2521,12 +2557,13 @@ impl Broker {
         if !file.open.is_empty() || !file.open_added.is_empty() {
             self.append_crash_abort_control_markers(&file.open, &file.open_added);
         }
-        // Phase 104: drop markers entirely below current log start.
-        let dropped = self.gc_stale_aborted_markers_all();
-        // Persist cleaned state (no open ranges after recovery; GC applied).
-        // gc_stale already persists when dropped > 0; always persist once after
+        // Phase 104/111: drop markers entirely below current log start; clip
+        // straddlers so first_offset is not below live log.
+        let mutated = self.gc_stale_aborted_markers_all();
+        // Persist cleaned state (no open ranges after recovery; GC/clip applied).
+        // gc_stale already persists when mutated > 0; always persist once after
         // load so open→aborted promotion is durable even with zero GC.
-        if dropped == 0 {
+        if mutated == 0 {
             self.persist_txn_markers();
         }
     }
@@ -3378,9 +3415,10 @@ impl Broker {
     /// Drops whole sealed segments only. Returns `(low_watermark, error_code)`.
     /// Leader-only in cluster mode; followers are not notified.
     ///
-    /// Phase 104: after a successful truncate, drop aborted soft markers for
-    /// this partition whose range is entirely below the new log start
-    /// (`end_offset <= low_watermark`) and persist `__txn_markers`.
+    /// Phase 104/111: after a successful truncate, drop aborted soft markers
+    /// fully below the new log start (`end_offset <= low_watermark`) and clip
+    /// straddlers (`first_offset = log_start` when the range still overlaps
+    /// live offsets); persist `__txn_markers` when any change occurs.
     pub fn delete_records(
         &self,
         topic: &str,
@@ -3406,7 +3444,7 @@ impl Broker {
                 .delete_records(Offset::new(before_offset))?
                 .raw()
         };
-        // Phase 104: GC soft markers fully in the deleted prefix.
+        // Phase 104/111: GC / clip soft markers vs new log start.
         self.gc_and_persist_aborted_markers(topic, partition, low);
         Ok((low, 0))
     }
@@ -3527,8 +3565,8 @@ impl Broker {
 
     /// Run retention on all local partition logs (Phase 13 background task).
     ///
-    /// Phase 104: after retention advances log starts, GC aborted soft markers
-    /// fully below each partition's new log start and persist when needed.
+    /// Phase 104/111: after retention advances log starts, drop/clip aborted
+    /// soft markers vs each partition's new log start and persist when needed.
     pub fn apply_retention_all(&self) -> Result<()> {
         {
             let mut topics = self.topics.write();

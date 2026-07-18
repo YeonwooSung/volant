@@ -1,6 +1,6 @@
 # Phase history index
 
-Ship records for **phases 0–110**. Binding core contracts are
+Ship records for **phases 0–111**. Binding core contracts are
 **[PHASE1_SPEC](../PHASE1_SPEC.md)–[PHASE6_SPEC](../PHASE6_SPEC.md)**. Living
 docs for day-to-day reading: [ops](../ops.md), [consistency](../consistency.md),
 [tuning](../tuning.md), [KAFKA_COMPAT](../KAFKA_COMPAT.md),
@@ -152,10 +152,11 @@ docs for day-to-day reading: [ops](../ops.md), [consistency](../consistency.md),
 | 108 | ✅ | Fix rolling restart produce timeout when follower down (ISR shrink + HWM on death) | [PHASE108_SPEC.md](../PHASE108_SPEC.md) |
 | 109 | ✅ | Accept-loop drain + single-flight `start_background_tasks` (MVP) | [PHASE109_SPEC.md](../PHASE109_SPEC.md) |
 | 110 | ✅ | Non-controller auto-death from heartbeat alive-set diffs (MVP) | [PHASE110_SPEC.md](../PHASE110_SPEC.md) |
+| 111 | ✅ | Clip straddling soft abort markers to log_start (MVP) | [PHASE111_SPEC.md](../PHASE111_SPEC.md) |
 
 ---
 
-## Still deferred (post–Phase 110)
+## Still deferred (post–Phase 111)
 
 - Multi-language clients
 - Chaos-mesh / cargo-fuzz corpus CI
@@ -167,4 +168,4 @@ docs for day-to-day reading: [ops](../ops.md), [consistency](../consistency.md),
 - Multi-broker BROKER config fan-out (Phase 103 is local validation only)
 - Single-flight / idempotent `start_background_tasks` → **closed by Phase 109**
 - Non-controller auto-death from alive-set diffs → **closed by Phase 110**
-- Straddle marker clip
+- Straddle marker clip → **closed by Phase 111**
