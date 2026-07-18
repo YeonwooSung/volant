@@ -52,6 +52,7 @@ shim: [KAFKA_COMPAT.md](./KAFKA_COMPAT.md).
 | Crash | Open write-through ranges ≡ abort (persisted `__txn_markers`) |
 | READ_COMMITTED | MVP: LSO filtering + aborted list (soft markers SoT) |
 | Control batches (Phase 89) | EndTxn COMMIT/ABORT magic-2 control RecordBatches on log |
+| Prepared 2PC MVP (Phase 90) | Enable2Pc prepare→complete EndTxn; KeepPreparedTxn + OngoingTxn*; `__txn_prepared` |
 
 ## Security (19–22)
 
@@ -92,9 +93,8 @@ workers.
 
 - Multi-language clients deferred  
 - No Raft metadata / dynamic membership  
-- No control batch for crash≡abort without EndTxn; no real 2PC  
-
-- No real 2PC / prepared transactions  
+- No control batch for crash≡abort without EndTxn  
+- Prepared 2PC is single-node MVP (no multi-broker txn log / TRANSACTION_ABORTABLE / timeout)  
 - Fetch sessions not durable / multi-broker sticky; no omit-unchanged cache  
 - ACL store is single-node file (no consensus)  
 - DeleteRecords does not fan out to cluster followers  

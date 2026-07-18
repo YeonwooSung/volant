@@ -2022,8 +2022,37 @@ Binding: **[docs/PHASE89_SPEC.md](./docs/PHASE89_SPEC.md)**.
 markers for AddPartitions-only partitions; coordinator_epoch always 0; no
 multi-broker txn log / 2PC.
 
-**Still deferred:** multi-lang clients, cargo-fuzz corpus CI, real 2PC,
-omit-unchanged fetch cache, multi-broker session affinity.
+**Still deferred:** multi-lang clients, cargo-fuzz corpus CI, real 2PC
+(closed by **Phase 90** MVP), omit-unchanged fetch cache, multi-broker session
+affinity.
+
+---
+
+### Phase 90 — Real 2PC / prepared transactions (MVP) ✅
+
+**Goal:** Honest prepared-transaction state for InitProducerId v6 Enable2Pc /
+KeepPreparedTxn and a two-phase EndTxn path, with durable prepared recovery and
+non-default OngoingTxn* when prepared.
+
+Binding: **[docs/PHASE90_SPEC.md](./docs/PHASE90_SPEC.md)**.
+
+- [x] Enable2Pc marks producer; first EndTxn → Prepared (PrepareCommit/Abort)
+- [x] Second EndTxn with matching decision finalizes (soft + control markers)
+- [x] KeepPreparedTxn=true returns OngoingTxn* = prepared pid/epoch (no fence)
+- [x] KeepPreparedTxn=false force-aborts prepared then fences
+- [x] Durable `{data_dir}/__txn_prepared/state.json` (prepared survives crash)
+- [x] LSO / unstable includes prepared ranges; Describe/List show Prepare*
+- [x] Non-2PC EndTxn remains one-shot finalize
+- [x] Integration tests (`phase90_prepared_txns`)
+
+**Honest limitations:** not full KIP-890/939 parity; no multi-broker txn log;
+no TRANSACTION_ABORTABLE; no prepared timeout; KeepPreparedTxn does not keep
+ordinary open (non-prepared) txns; resume pid/epoch fields still ignored for
+allocation.
+
+**Still deferred:** multi-lang clients, cargo-fuzz corpus CI, omit-unchanged
+fetch session cache, multi-broker session affinity, full KRaft epoch SM,
+prepared timeout / multi-broker 2PC coordinator.
 
 ---
 
@@ -2050,18 +2079,18 @@ omit-unchanged fetch cache, multi-broker session affinity.
 | Storage | Page cache + OS | Explicit mmap + optional io_uring/O_DIRECT |
 | Stream processing | Kafka Streams / ksqlDB | In-process `volant-stream` operators |
 | Ops model | ZooKeeper/KRaft + heavy footprint | Single binary → small static ISR quorum |
-| Protocol | Kafka wire protocol | Native binary first; optional Kafka shim (`--kafka-listen`, Phases 23–89) |
+| Protocol | Kafka wire protocol | Native binary first; optional Kafka shim (`--kafka-listen`, Phases 23–90) |
 | Goal | Full ecosystem | Subset that is fast, small, and correct |
 
 Volant is **not** a drop-in Kafka replacement. It prioritizes a clean core; the
-optional Kafka wire shim is **shipped** (Phases 23–89) — see
+optional Kafka wire shim is **shipped** (Phases 23–90) — see
 [docs/KAFKA_COMPAT.md](./docs/KAFKA_COMPAT.md).
 
 ---
 
 ## Suggested implementation order (PRs)
 
-Phases **0–89 are shipped**. Historical PR order for the core:
+Phases **0–90 are shipped**. Historical PR order for the core:
 
 1. Phase 1 segment format + unit tests  
 2. Phase 1 recovery + retention  
@@ -2074,7 +2103,7 @@ Phases **0–89 are shipped**. Historical PR order for the core:
 9. Phase 6 replication prototype (2–3 nodes) ✅  
 10. Phase 7 metrics, TLS, packaging ✅  
 11. Phases 8–22 (redirect, groups, configs, txns, mTLS, ACLs, SCRAM) ✅  
-12. Phases 23–89 (Kafka wire shim surface) ✅  
+12. Phases 23–90 (Kafka wire shim surface) ✅  
 
 ---
 
@@ -2115,10 +2144,10 @@ cargo run -p volant-bench --release
 cargo test --workspace
 ```
 
-**Status (post–Phase 89):** core broker, ops (metrics / TLS / auth / SCRAM /
+**Status (post–Phase 90):** core broker, ops (metrics / TLS / auth / SCRAM /
 ACLs / Helm), and the Kafka wire shim are **shipped** (Fetch 0–18 Kafka max;
 ACL admin 0–3 with User resource; soft-marker `READ_COMMITTED`; durable OFLE
-history; Fetch DivergingEpoch + sessions; Kafka control batches on EndTxn). Still
-deferred: multi-language clients, full chaos-mesh suites, cargo-fuzz corpus CI,
-real 2PC / prepared transactions, omit-unchanged session cache. Details:
-[docs/KAFKA_COMPAT.md](./docs/KAFKA_COMPAT.md), [docs/ops.md](./docs/ops.md).
+history; Fetch DivergingEpoch + sessions; Kafka control batches on EndTxn;
+prepared 2PC MVP). Still deferred: multi-language clients, full chaos-mesh
+suites, cargo-fuzz corpus CI, omit-unchanged session cache, multi-broker 2PC.
+Details: [docs/KAFKA_COMPAT.md](./docs/KAFKA_COMPAT.md), [docs/ops.md](./docs/ops.md).

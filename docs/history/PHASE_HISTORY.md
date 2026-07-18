@@ -1,6 +1,6 @@
 # Phase history index
 
-Ship records for **phases 0–89**. Binding core contracts are
+Ship records for **phases 0–90**. Binding core contracts are
 **[PHASE1_SPEC](../PHASE1_SPEC.md)–[PHASE6_SPEC](../PHASE6_SPEC.md)**. Living
 docs for day-to-day reading: [ops](../ops.md), [consistency](../consistency.md),
 [tuning](../tuning.md), [KAFKA_COMPAT](../KAFKA_COMPAT.md),
@@ -118,7 +118,7 @@ docs for day-to-day reading: [ops](../ops.md), [consistency](../consistency.md),
 | 74 | ✅ | ListOffsets v7–11 — MAX_TIMESTAMP, EARLIEST_LOCAL, tiered specials | [PHASE74_SPEC.md](../PHASE74_SPEC.md) |
 | 75 | ✅ | KIP-890-era txn max versions (Init/AddPartitions/EndTxn/TxnOffsetCommit ≤5) | [PHASE75_SPEC.md](../PHASE75_SPEC.md) |
 | 76 | ✅ | TxnOffsetCommit v6 TopicId — UUID topics, buffers until EndTxn | [PHASE76_SPEC.md](../PHASE76_SPEC.md) |
-| 77 | ✅ | InitProducerId v6 — Enable2Pc/KeepPreparedTxn parsed+ignored; no real 2PC | [PHASE77_SPEC.md](../PHASE77_SPEC.md) |
+| 77 | ✅ | InitProducerId v6 — Enable2Pc/KeepPreparedTxn wire (prepared state in Phase 90) | [PHASE77_SPEC.md](../PHASE77_SPEC.md) |
 | 78 | ✅ | KIP-951 CurrentLeader / NodeEndpoints on Produce/Fetch leader errors | [PHASE78_SPEC.md](../PHASE78_SPEC.md) |
 | 79 | ✅ | Group admin version bumps — List 0–5, Describe 0–6, Delete 0–3 | [PHASE79_SPEC.md](../PHASE79_SPEC.md) |
 | 80 | ✅ | CreatePartitions v3 — wire-identical to v2; no KIP-599 quotas | [PHASE80_SPEC.md](../PHASE80_SPEC.md) |
@@ -131,14 +131,15 @@ docs for day-to-day reading: [ops](../ops.md), [consistency](../consistency.md),
 | 87 | ✅ | Durable OffsetForLeaderEpoch history MVP + Metadata live leader_epoch | [PHASE87_SPEC.md](../PHASE87_SPEC.md) |
 | 88 | ✅ | Fetch DivergingEpoch + real fetch sessions (MVP) | [PHASE88_SPEC.md](../PHASE88_SPEC.md) |
 | 89 | ✅ | Kafka control batches on the data log (COMMIT/ABORT dual-write) | [PHASE89_SPEC.md](../PHASE89_SPEC.md) |
+| 90 | ✅ | Real 2PC / prepared transactions MVP (Enable2Pc, OngoingTxn*, durable prepare) | [PHASE90_SPEC.md](../PHASE90_SPEC.md) |
 
 ---
 
-## Still deferred (post–Phase 89)
+## Still deferred (post–Phase 90)
 
 - Multi-language clients
 - Chaos-mesh / cargo-fuzz corpus CI
-- Real 2PC / prepared transaction state
+- Full multi-broker 2PC coordinator / prepared timeout / TRANSACTION_ABORTABLE
 - Omit-unchanged incremental fetch cache / multi-broker session affinity
 - Full KRaft epoch state machine / remote-log epochs
 - Control batches for empty AddPartitions / crash open-txn without EndTxn

@@ -82,11 +82,13 @@ open txns). Clients that inspect OngoingTxn* see "no prepared txn".
 5. phase77 + phase75/62/47 green after max-version updates
 6. ROADMAP / README / ops honesty
 
-## Honest limitations
+## Honest limitations (at ship; partially closed later)
 
-- No real 2PC / prepared transactions
-- OngoingTxn* always -1 (never surfaces open buffer-until-commit txns)
-- Enable2Pc / KeepPreparedTxn ignored
-- Resume pid/epoch still ignored (always re-allocate)
-- AddPartitions / EndTxn / AddOffsets maxes unchanged
-- No control-marker READ_COMMITTED
+- At Phase 77 ship: no real 2PC / prepared transactions; OngoingTxn* always -1;
+  Enable2Pc / KeepPreparedTxn ignored
+- **Superseded by Phase 90:** prepared state + non-default OngoingTxn* when
+  prepared; Enable2Pc/KeepPreparedTxn honored (see [PHASE90_SPEC.md](./PHASE90_SPEC.md))
+- OngoingTxn* still does **not** surface ordinary open (non-prepared) txns
+- Resume pid/epoch still ignored (always re-allocate; KeepPrepared reuses identity)
+- AddPartitions / EndTxn / AddOffsets maxes unchanged by this phase
+- No control-marker READ_COMMITTED (later Phase 86/89)

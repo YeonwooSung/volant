@@ -116,7 +116,7 @@ fn open_txn_error(broker: &Broker, producer_id: u64, producer_epoch: u16, cluste
 
 // ─── InitProducerId ──────────────────────────────────────────────────────────
 
-/// InitProducerId (API key 22) classic v0–1 / flexible v2–6 — Phase 29 / 62 / 75 / 77.
+/// InitProducerId (API key 22) classic v0–1 / flexible v2–6 — Phase 29 / 62 / 75 / 77 / 90.
 pub(crate) fn encode_init_producer_id(
     broker: &Broker,
     src: &mut impl Buf,
@@ -124,32 +124,33 @@ pub(crate) fn encode_init_producer_id(
     version: i16,
     principal: &str,
 ) {
-    // Resume fields (v3+) and Enable2Pc/KeepPreparedTxn (v6) are parsed and
-    // discarded — always allocate via init_producer_id_with_txn. v6 response
-    // OngoingTxn* is always -1 (no prepared/2PC state).
+    // Resume fields (v3+) still ignored for allocation. v6 Enable2Pc /
+    // KeepPreparedTxn drive Phase 90 prepared-txn state; OngoingTxn* echoes
+    // prepared pid/epoch when present.
     let flex = version >= 2;
     let v6 = version >= 6;
 
-    let write_body = |out: &mut BytesMut, err: i16, pid: i64, epoch: i16| {
-        out.put_i32(0); // throttle
-        out.put_i16(err);
-        out.put_i64(pid);
-        out.put_i16(epoch);
-        if v6 {
-            // OngoingTxnProducerId / OngoingTxnProducerEpoch (KIP-890 / KIP-939).
-            // Honest: Volant has no prepared/2PC transactions.
-            out.put_i64(-1);
-            out.put_i16(-1);
-        }
-        if flex {
-            put_empty_tag_buffer(out);
-        }
-    };
+    let write_body =
+        |out: &mut BytesMut, err: i16, pid: i64, epoch: i16, ongoing_pid: i64, ongoing_epoch: i16| {
+            out.put_i32(0); // throttle
+            out.put_i16(err);
+            out.put_i64(pid);
+            out.put_i16(epoch);
+            if v6 {
+                out.put_i64(ongoing_pid);
+                out.put_i16(ongoing_epoch);
+            }
+            if flex {
+                put_empty_tag_buffer(out);
+            }
+        };
 
     if cluster_write_denied(broker, principal) {
         write_body(
             out,
             KafkaErrorCode::ClusterAuthorizationFailed.as_i16(),
+            -1,
+            -1,
             -1,
             -1,
         );
@@ -159,7 +160,14 @@ pub(crate) fn encode_init_producer_id(
     let txn_id = match wire::read_nullable_string(src, flex) {
         Ok(v) => v.unwrap_or_default(),
         Err(_) => {
-            write_body(out, KafkaErrorCode::InvalidRequest.as_i16(), -1, -1);
+            write_body(
+                out,
+                KafkaErrorCode::InvalidRequest.as_i16(),
+                -1,
+                -1,
+                -1,
+                -1,
+            );
             return;
         }
     };
@@ -170,31 +178,49 @@ pub(crate) fn encode_init_producer_id(
     // v3+: ProducerId + ProducerEpoch resume fields (explicitly skipped).
     if version >= 3 {
         if src.remaining() < 8 + 2 {
-            write_body(out, KafkaErrorCode::InvalidRequest.as_i16(), -1, -1);
+            write_body(
+                out,
+                KafkaErrorCode::InvalidRequest.as_i16(),
+                -1,
+                -1,
+                -1,
+                -1,
+            );
             return;
         }
         let _resume_pid = src.get_i64();
         let _resume_epoch = src.get_i16();
     }
-    // v6+: Enable2Pc + KeepPreparedTxn (parsed, ignored — no real 2PC).
+    // v6+: Enable2Pc + KeepPreparedTxn (Phase 90 prepared-txn MVP).
+    let mut enable_2pc = false;
+    let mut keep_prepared = false;
     if v6 {
         if src.remaining() < 2 {
-            write_body(out, KafkaErrorCode::InvalidRequest.as_i16(), -1, -1);
+            write_body(
+                out,
+                KafkaErrorCode::InvalidRequest.as_i16(),
+                -1,
+                -1,
+                -1,
+                -1,
+            );
             return;
         }
-        let _enable_2pc = src.get_u8() != 0;
-        let _keep_prepared = src.get_u8() != 0;
+        enable_2pc = src.get_u8() != 0;
+        keep_prepared = src.get_u8() != 0;
     }
     if flex {
         let _ = skip_tag_buffer(src);
     }
 
-    let (pid, epoch) = broker.init_producer_id_with_txn(&txn_id);
+    let r = broker.init_producer_id_with_opts(&txn_id, enable_2pc, keep_prepared);
     write_body(
         out,
         KafkaErrorCode::None.as_i16(),
-        pid as i64,
-        epoch as i16,
+        r.producer_id as i64,
+        r.epoch as i16,
+        r.ongoing_txn_producer_id,
+        r.ongoing_txn_producer_epoch,
     );
 }
 

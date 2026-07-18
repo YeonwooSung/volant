@@ -98,7 +98,7 @@ async fn init_producer_id_v6_ongoing_txn_minus_one() {
         let epoch = src.get_i16();
         assert!(pid > 0, "allocated pid");
         assert!(epoch >= 0);
-        // OngoingTxn* always -1 (no prepared/2PC).
+        // No prepared txn yet → OngoingTxn* is -1 (Phase 90 surfaces prepared only).
         assert_eq!(src.get_i64(), -1, "OngoingTxnProducerId enable2pc={enable_2pc}");
         assert_eq!(src.get_i16(), -1, "OngoingTxnProducerEpoch");
         skip_tag_buffer(&mut src).unwrap();

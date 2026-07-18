@@ -29,6 +29,9 @@ pub struct StoredProducer {
     /// Transactional id when non-empty (Phase 18); empty = plain idempotent.
     #[serde(default)]
     pub transactional_id: String,
+    /// Two-phase commit enabled for this producer (Phase 90; InitProducerId v6).
+    #[serde(default)]
+    pub enable_2pc: bool,
     /// Keyed as `"{topic}:{partition}"`.
     pub partitions: HashMap<String, StoredBatch>,
 }
@@ -172,6 +175,7 @@ mod tests {
             StoredProducer {
                 epoch: 0,
                 transactional_id: String::new(),
+                enable_2pc: false,
                 partitions: parts,
             },
         );

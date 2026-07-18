@@ -12,7 +12,7 @@
 //! OffsetForLeaderEpoch v4, DeleteRecords v2, ACL admin 0–3 (User resource v3),
 //! SaslAuthenticate v2, DescribeCluster 0–2, ListTransactions 0–2,
 //! DescribeTransactions v0, DescribeProducers v0, KIP-890-era txn max versions
-//! (InitProducerId 0–6 OngoingTxn wire, AddPartitionsToTxn/EndTxn 0–5,
+//! (InitProducerId 0–6 OngoingTxn + prepared 2PC MVP Phase 90, AddPartitions/EndTxn 0–5,
 //! AddOffsetsToTxn 0–4 wire-identical v3/v4, TxnOffsetCommit 0–6 TopicId),
 //! CreatePartitions 0–3 (v3 = v2 wire; no KIP-599).
 //! See `docs/PHASE23_SPEC.md` … `docs/PHASE88_SPEC.md`.

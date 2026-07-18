@@ -52,14 +52,17 @@ When `acks=all`, if `|ISR| < min_insync_replicas`, the leader rejects the produc
 - Durability if `min_insync_replicas=1` and that sole replica dies after ack
 - Full KRaft leader-epoch state machine (Phase **87** durable OFLE history is a soft JSON MVP)
 
-### Transactions (Phase 86 write-through)
+### Transactions (Phase 86 write-through + Phase 90 prepared MVP)
 
 | Mode | Behavior |
 |------|----------|
 | Open txn produce | Appends to the log immediately; HWM advances; LSO held at first unstable offset |
-| EndTxn commit | Ranges become stable; LSO catches HWM when no other open txn |
-| EndTxn abort | Soft abort markers hide ranges under `READ_COMMITTED` / native committed-only fetch |
+| EndTxn commit (non-2PC) | Ranges become stable; LSO catches HWM when no other open/prepared txn |
+| EndTxn abort (non-2PC) | Soft abort markers hide ranges under `READ_COMMITTED` / native committed-only fetch |
+| EndTxn #1 with Enable2Pc | Moves open → Prepared (PrepareCommit/Abort); LSO still held; no markers yet |
+| EndTxn #2 matching decision | Finalize commit/abort (soft + control markers) |
 | Crash with open writes | Open ranges promoted to aborted on reload |
+| Crash with prepared | Prepared reloaded from `__txn_prepared` (survives; must complete or re-init abort) |
 
 ### Leader epochs (Phase 87)
 

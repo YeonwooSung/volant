@@ -123,7 +123,7 @@ struct IdempotentBatchState {
     base_offset: u64,
 }
 
-/// In-memory state for one producer id (Phase 10/18).
+/// In-memory state for one producer id (Phase 10/18/90).
 #[derive(Debug)]
 struct ProducerEpochState {
     epoch: u16,
@@ -131,6 +131,8 @@ struct ProducerEpochState {
     transactional: bool,
     /// Transactional id (empty if not transactional).
     transactional_id: String,
+    /// Two-phase commit enabled (Phase 90; InitProducerId v6 Enable2Pc).
+    enable_2pc: bool,
     /// Per (topic, partition) last **committed** batch.
     partitions: HashMap<(String, u32), IdempotentBatchState>,
 }
@@ -184,7 +186,7 @@ struct TxnMarkersFile {
 ///
 /// In-flight ranges are also mirrored under `{data_dir}/__txn_markers` so a
 /// crash promotes them to aborted (crash ≡ abort).
-#[derive(Debug, Default)]
+#[derive(Debug, Default, Clone)]
 struct OpenTxn {
     /// Log ranges written while the txn is open (write-through).
     written: Vec<TxnWrittenRange>,
@@ -193,6 +195,77 @@ struct OpenTxn {
     /// Deferred consumer offsets (Phase 18 EndTxn trailer + Phase 31 TxnOffsetCommit).
     /// Each entry: `(group_id, topic, partition, offset, metadata)`.
     deferred_offsets: Vec<(String, String, u32, u64, String)>,
+}
+
+/// Prepared (2PC phase-1) transaction (Phase 90).
+///
+/// Survives crash via `{data_dir}/__txn_prepared/state.json`. Finalize with a
+/// matching second EndTxn, or abort via InitProducerId KeepPreparedTxn=false.
+#[derive(Debug, Clone)]
+struct PreparedTxn {
+    transactional_id: String,
+    producer_id: u64,
+    producer_epoch: u16,
+    /// True = PrepareCommit; false = PrepareAbort.
+    commit: bool,
+    open: OpenTxn,
+}
+
+/// Durable written range inside a prepared txn snapshot.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct StoredPreparedWritten {
+    topic: String,
+    partition: u32,
+    first_offset: u64,
+    end_offset: u64,
+    base_sequence: i32,
+    count: u32,
+}
+
+/// Durable pending sequence inside a prepared txn snapshot.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct StoredPreparedPending {
+    topic: String,
+    partition: u32,
+    base_sequence: i32,
+    count: u32,
+    base_offset: u64,
+}
+
+/// One prepared txn on disk (Phase 90).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct StoredPreparedTxn {
+    transactional_id: String,
+    producer_id: u64,
+    producer_epoch: u16,
+    commit: bool,
+    #[serde(default)]
+    written: Vec<StoredPreparedWritten>,
+    #[serde(default)]
+    pending: Vec<StoredPreparedPending>,
+    /// `(group_id, topic, partition, offset, metadata)`.
+    #[serde(default)]
+    deferred_offsets: Vec<(String, String, u32, u64, String)>,
+}
+
+/// On-disk prepared txn snapshot under `{data_dir}/__txn_prepared/state.json`.
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+struct PreparedTxnsFile {
+    #[serde(default)]
+    prepared: Vec<StoredPreparedTxn>,
+}
+
+/// Result of InitProducerId including v6 OngoingTxn* (Phase 90).
+#[derive(Debug, Clone, Copy)]
+pub struct InitProducerIdResult {
+    /// Allocated / resumed producer id.
+    pub producer_id: u64,
+    /// Producer epoch.
+    pub epoch: u16,
+    /// Prepared txn producer id, or `-1` if none.
+    pub ongoing_txn_producer_id: i64,
+    /// Prepared txn epoch, or `-1` if none.
+    pub ongoing_txn_producer_epoch: i16,
 }
 
 /// Isolation policy for partition fetches (Phase 86).
@@ -281,6 +354,8 @@ pub struct Broker {
     transactional_ids: RwLock<HashMap<String, u64>>,
     /// Open transactions keyed by producer_id (Phase 18/86).
     open_txns: Mutex<HashMap<u64, OpenTxn>>,
+    /// Prepared (2PC) transactions keyed by transactional_id (Phase 90).
+    prepared_txns: Mutex<HashMap<String, PreparedTxn>>,
     /// Soft abort markers for READ_COMMITTED (Phase 86): `(topic, partition) → markers`.
     aborted_txns: Mutex<HashMap<(String, u32), Vec<AbortedTxnMarker>>>,
     /// Durable producer state store under `data_dir/__producer_state` (Phase 11).
@@ -344,6 +419,7 @@ impl Broker {
             producer_state: RwLock::new(producers),
             transactional_ids: RwLock::new(txn_ids),
             open_txns: Mutex::new(HashMap::new()),
+            prepared_txns: Mutex::new(HashMap::new()),
             aborted_txns: Mutex::new(HashMap::new()),
             producer_store,
             topic_configs,
@@ -359,6 +435,7 @@ impl Broker {
             .reload_single_node_topics()
             .expect("failed to reload single-node topic catalog");
         broker.load_txn_markers();
+        broker.load_prepared_txns();
         broker.load_leader_epochs();
         broker.seed_missing_leader_epochs();
         broker
@@ -427,6 +504,7 @@ impl Broker {
             producer_state: RwLock::new(producers),
             transactional_ids: RwLock::new(txn_ids),
             open_txns: Mutex::new(HashMap::new()),
+            prepared_txns: Mutex::new(HashMap::new()),
             aborted_txns: Mutex::new(HashMap::new()),
             producer_store,
             topic_configs,
@@ -441,6 +519,7 @@ impl Broker {
         // Open local partitions from persisted assignment.
         broker.apply_local_assignment()?;
         broker.load_txn_markers();
+        broker.load_prepared_txns();
         broker.load_leader_epochs();
         broker.seed_missing_leader_epochs();
         Ok(broker)
@@ -529,82 +608,187 @@ impl Broker {
     ///
     /// State is persisted under `data_dir/__producer_state` (Phase 11).
     pub fn init_producer_id(&self) -> (u64, u16) {
-        self.init_producer_id_with_txn("")
+        let r = self.init_producer_id_with_opts("", false, false);
+        (r.producer_id, r.epoch)
     }
 
     /// Allocate (or fence) a producer id, optionally transactional (Phase 18).
     ///
     /// Non-empty `transactional_id` fences any prior owner of that id by bumping
-    /// epoch and clearing open transactions / sequences.
+    /// epoch and clearing open transactions / sequences. Does not enable 2PC
+    /// (use [`Self::init_producer_id_with_opts`] for InitProducerId v6).
     pub fn init_producer_id_with_txn(&self, transactional_id: &str) -> (u64, u16) {
-        if !transactional_id.is_empty() {
-            let mut txn_ids = self.transactional_ids.write();
-            if let Some(&existing) = txn_ids.get(transactional_id) {
-                let mut state = self.producer_state.write();
-                if let Some(prod) = state.get_mut(&existing) {
-                    let old_epoch = prod.epoch;
-                    prod.epoch = prod.epoch.wrapping_add(1);
-                    if prod.epoch == 0 {
-                        prod.epoch = 1;
-                    }
-                    prod.partitions.clear();
-                    prod.transactional = true;
-                    prod.transactional_id = transactional_id.to_owned();
-                    let epoch = prod.epoch;
-                    drop(state);
-                    // Fence: open write-through ranges become aborted (Phase 86).
-                    // Drop the open_txns lock before record_aborted (persist re-locks).
-                    // Control markers use the fenced producer's epoch (Phase 89).
-                    let fenced = self.open_txns.lock().remove(&existing);
-                    if let Some(txn) = fenced {
-                        self.record_aborted_from_txn(existing, &txn);
-                        self.append_txn_control_markers(
-                            existing,
-                            old_epoch,
-                            ControlMarkerType::Abort,
-                            &txn,
-                        );
-                    }
-                    let _ = self.persist_producer_state();
-                    return (existing, epoch);
-                }
-            }
-            // Allocate new PID for this transactional id.
+        let r = self.init_producer_id_with_opts(transactional_id, false, false);
+        (r.producer_id, r.epoch)
+    }
+
+    /// InitProducerId with Phase 90 2PC options (Enable2Pc / KeepPreparedTxn).
+    ///
+    /// When a prepared txn exists for `transactional_id`:
+    /// - `keep_prepared=true`: preserve it, return OngoingTxn* = prepared pid/epoch,
+    ///   and **do not** fence (same producer identity).
+    /// - `keep_prepared=false`: force-abort prepared, then fence as usual.
+    ///
+    /// `enable_2pc=true` marks the producer so the first EndTxn prepares rather
+    /// than one-shot finalizing.
+    pub fn init_producer_id_with_opts(
+        &self,
+        transactional_id: &str,
+        enable_2pc: bool,
+        keep_prepared: bool,
+    ) -> InitProducerIdResult {
+        if transactional_id.is_empty() {
             let id = self.next_producer_id.fetch_add(1, Ordering::Relaxed);
             let epoch = 0u16;
             self.producer_state.write().insert(
                 id,
                 ProducerEpochState {
                     epoch,
-                    transactional: true,
-                    transactional_id: transactional_id.to_owned(),
+                    transactional: false,
+                    transactional_id: String::new(),
+                    enable_2pc: false,
                     partitions: HashMap::new(),
                 },
             );
-            txn_ids.insert(transactional_id.to_owned(), id);
-            drop(txn_ids);
             let _ = self.persist_producer_state();
-            return (id, epoch);
+            return InitProducerIdResult {
+                producer_id: id,
+                epoch,
+                ongoing_txn_producer_id: -1,
+                ongoing_txn_producer_epoch: -1,
+            };
         }
 
+        // Prepared path: KeepPreparedTxn reuses identity without fencing.
+        if keep_prepared {
+            let prepared = self.prepared_txns.lock();
+            if let Some(prep) = prepared.get(transactional_id) {
+                let pid = prep.producer_id;
+                let epoch = prep.producer_epoch;
+                let ongoing_pid = prep.producer_id as i64;
+                let ongoing_epoch = prep.producer_epoch as i16;
+                drop(prepared);
+                // Ensure producer state reflects enable_2pc + identity.
+                {
+                    let mut state = self.producer_state.write();
+                    if let Some(prod) = state.get_mut(&pid) {
+                        prod.transactional = true;
+                        prod.transactional_id = transactional_id.to_owned();
+                        prod.epoch = epoch;
+                        if enable_2pc {
+                            prod.enable_2pc = true;
+                        }
+                    } else {
+                        state.insert(
+                            pid,
+                            ProducerEpochState {
+                                epoch,
+                                transactional: true,
+                                transactional_id: transactional_id.to_owned(),
+                                enable_2pc,
+                                partitions: HashMap::new(),
+                            },
+                        );
+                    }
+                }
+                self.transactional_ids
+                    .write()
+                    .insert(transactional_id.to_owned(), pid);
+                // Open non-prepared txn for this pid is still fenced/aborted.
+                let fenced = self.open_txns.lock().remove(&pid);
+                if let Some(txn) = fenced {
+                    self.record_aborted_from_txn(pid, &txn);
+                    self.append_txn_control_markers(
+                        pid,
+                        epoch,
+                        ControlMarkerType::Abort,
+                        &txn,
+                    );
+                }
+                let _ = self.persist_producer_state();
+                return InitProducerIdResult {
+                    producer_id: pid,
+                    epoch,
+                    ongoing_txn_producer_id: ongoing_pid,
+                    ongoing_txn_producer_epoch: ongoing_epoch,
+                };
+            }
+        } else {
+            // Drop prepared (force abort) before normal fence/allocate.
+            // Release the prepared_txns lock before force_abort (it re-locks to persist).
+            let dropped = self.prepared_txns.lock().remove(transactional_id);
+            if let Some(prep) = dropped {
+                self.force_abort_prepared(prep);
+            }
+        }
+
+        let mut txn_ids = self.transactional_ids.write();
+        if let Some(&existing) = txn_ids.get(transactional_id) {
+            let mut state = self.producer_state.write();
+            if let Some(prod) = state.get_mut(&existing) {
+                let old_epoch = prod.epoch;
+                prod.epoch = prod.epoch.wrapping_add(1);
+                if prod.epoch == 0 {
+                    prod.epoch = 1;
+                }
+                prod.partitions.clear();
+                prod.transactional = true;
+                prod.transactional_id = transactional_id.to_owned();
+                if enable_2pc {
+                    prod.enable_2pc = true;
+                }
+                // Keep enable_2pc sticky if already set, unless caller is not
+                // using v6 — still allow sticky true from prior Init.
+                let epoch = prod.epoch;
+                drop(state);
+                // Fence: open write-through ranges become aborted (Phase 86).
+                let fenced = self.open_txns.lock().remove(&existing);
+                if let Some(txn) = fenced {
+                    self.record_aborted_from_txn(existing, &txn);
+                    self.append_txn_control_markers(
+                        existing,
+                        old_epoch,
+                        ControlMarkerType::Abort,
+                        &txn,
+                    );
+                }
+                let _ = self.persist_producer_state();
+                return InitProducerIdResult {
+                    producer_id: existing,
+                    epoch,
+                    ongoing_txn_producer_id: -1,
+                    ongoing_txn_producer_epoch: -1,
+                };
+            }
+        }
+        // Allocate new PID for this transactional id.
         let id = self.next_producer_id.fetch_add(1, Ordering::Relaxed);
         let epoch = 0u16;
         self.producer_state.write().insert(
             id,
             ProducerEpochState {
                 epoch,
-                transactional: false,
-                transactional_id: String::new(),
+                transactional: true,
+                transactional_id: transactional_id.to_owned(),
+                enable_2pc,
                 partitions: HashMap::new(),
             },
         );
+        txn_ids.insert(transactional_id.to_owned(), id);
+        drop(txn_ids);
         let _ = self.persist_producer_state();
-        (id, epoch)
+        InitProducerIdResult {
+            producer_id: id,
+            epoch,
+            ongoing_txn_producer_id: -1,
+            ongoing_txn_producer_epoch: -1,
+        }
     }
 
     /// Begin a transaction for a transactional producer (Phase 18).
     ///
-    /// Returns protocol error code (`0` = ok).
+    /// Returns protocol error code (`0` = ok). Rejects when a prepared txn
+    /// exists for this producer (Phase 90).
     pub fn begin_txn(&self, producer_id: u64, producer_epoch: u16) -> u16 {
         let state = self.producer_state.read();
         let Some(prod) = state.get(&producer_id) else {
@@ -616,7 +800,11 @@ impl Broker {
         if !prod.transactional {
             return ErrorCode::InvalidTxnState as u16;
         }
+        let txn_id = prod.transactional_id.clone();
         drop(state);
+        if !txn_id.is_empty() && self.prepared_txns.lock().contains_key(&txn_id) {
+            return ErrorCode::InvalidTxnState as u16;
+        }
         let mut open = self.open_txns.lock();
         if open.contains_key(&producer_id) {
             return ErrorCode::InvalidTxnState as u16;
@@ -630,7 +818,7 @@ impl Broker {
     /// If one is already open for this PID+epoch, returns success. Otherwise
     /// begins a new transaction (Kafka has no separate BeginTxn API).
     pub fn ensure_txn_open(&self, producer_id: u64, producer_epoch: u16) -> u16 {
-        {
+        let txn_id = {
             let state = self.producer_state.read();
             let Some(prod) = state.get(&producer_id) else {
                 return ErrorCode::UnknownProducerId as u16;
@@ -641,6 +829,10 @@ impl Broker {
             if !prod.transactional {
                 return ErrorCode::InvalidTxnState as u16;
             }
+            prod.transactional_id.clone()
+        };
+        if !txn_id.is_empty() && self.prepared_txns.lock().contains_key(&txn_id) {
+            return ErrorCode::InvalidTxnState as u16;
         }
         if self.has_open_txn(producer_id) {
             return 0;
@@ -648,19 +840,19 @@ impl Broker {
         self.begin_txn(producer_id, producer_epoch)
     }
 
-    /// Whether this producer currently has an open transaction.
+    /// Whether this producer currently has an open (non-prepared) transaction.
     pub fn has_open_txn(&self, producer_id: u64) -> bool {
         self.open_txns.lock().contains_key(&producer_id)
     }
 
-    /// List open transactions for ListTransactions (Phase 65).
+    /// List open + prepared transactions for ListTransactions (Phase 65/90).
     ///
-    /// Returns `(transactional_id, producer_id, state)` where state is always
-    /// `"Ongoing"` (open write-through txn in memory + markers).
+    /// State is `"Ongoing"`, `"PrepareCommit"`, or `"PrepareAbort"`.
     pub fn list_open_transactions(&self) -> Vec<(String, u64, String)> {
         let open = self.open_txns.lock();
+        let prepared = self.prepared_txns.lock();
         let prods = self.producer_state.read();
-        let mut out = Vec::with_capacity(open.len());
+        let mut out = Vec::with_capacity(open.len() + prepared.len());
         for &pid in open.keys() {
             let Some(prod) = prods.get(&pid) else {
                 continue;
@@ -670,15 +862,29 @@ impl Broker {
             }
             out.push((prod.transactional_id.clone(), pid, "Ongoing".to_string()));
         }
+        for prep in prepared.values() {
+            let state = if prep.commit {
+                "PrepareCommit"
+            } else {
+                "PrepareAbort"
+            };
+            out.push((
+                prep.transactional_id.clone(),
+                prep.producer_id,
+                state.to_string(),
+            ));
+        }
         out.sort_by(|a, b| a.0.cmp(&b.0));
         out
     }
 
-    /// Describe one transactional id for DescribeTransactions (Phase 66).
+    /// Describe one transactional id for DescribeTransactions (Phase 66/90).
     ///
     /// Returns `None` when the transactional id is unknown. When known:
-    /// - state `"Ongoing"` if an open txn exists, else `"Empty"`
-    /// - topics/partitions from write-through ranges + pending keys (open txn only)
+    /// - `"PrepareCommit"` / `"PrepareAbort"` if prepared (Phase 90)
+    /// - `"Ongoing"` if an open txn exists
+    /// - else `"Empty"`
+    /// - topics/partitions from write-through ranges + pending keys
     /// - timeout/start times are `0` (not tracked)
     pub fn describe_transaction(
         &self,
@@ -703,27 +909,30 @@ impl Broker {
         let epoch = prod.epoch;
         drop(prods);
 
+        // Prepared takes precedence over open (they should be mutually exclusive).
+        {
+            let prepared = self.prepared_txns.lock();
+            if let Some(prep) = prepared.get(transactional_id) {
+                let state = if prep.commit {
+                    "PrepareCommit"
+                } else {
+                    "PrepareAbort"
+                };
+                let topics = topics_from_open(&prep.open);
+                return Some((
+                    state.to_string(),
+                    0,
+                    0,
+                    prep.producer_id,
+                    prep.producer_epoch,
+                    topics,
+                ));
+            }
+        }
+
         let open = self.open_txns.lock();
         if let Some(txn) = open.get(&pid) {
-            // Group partitions from write-through ranges + pending keys.
-            let mut map: HashMap<String, Vec<i32>> = HashMap::new();
-            for b in &txn.written {
-                map.entry(b.topic.clone())
-                    .or_default()
-                    .push(b.partition as i32);
-            }
-            for (topic, part) in txn.pending.keys() {
-                map.entry(topic.clone()).or_default().push(*part as i32);
-            }
-            let mut topics: Vec<(String, Vec<i32>)> = map
-                .into_iter()
-                .map(|(t, mut parts)| {
-                    parts.sort_unstable();
-                    parts.dedup();
-                    (t, parts)
-                })
-                .collect();
-            topics.sort_by(|a, b| a.0.cmp(&b.0));
+            let topics = topics_from_open(txn);
             Some(("Ongoing".to_string(), 0, 0, pid, epoch, topics))
         } else {
             Some(("Empty".to_string(), 0, 0, pid, epoch, Vec::new()))
@@ -744,6 +953,7 @@ impl Broker {
         let key = (topic.to_owned(), partition);
         let prods = self.producer_state.read();
         let open = self.open_txns.lock();
+        let prepared = self.prepared_txns.lock();
         let mut out = Vec::new();
         for (&pid, prod) in prods.iter() {
             let mut last_seq = -1i32;
@@ -767,6 +977,26 @@ impl Broker {
                 {
                     in_scope = true;
                     txn_start = first as i64;
+                }
+            }
+            // Phase 90: prepared ranges also count as in-txn.
+            if let Some(prep) = prepared.values().find(|p| p.producer_id == pid) {
+                if let Some(st) = prep.open.pending.get(&key) {
+                    last_seq = st.base_sequence.saturating_add(st.count as i32).saturating_sub(1);
+                    in_scope = true;
+                }
+                if let Some(first) = prep
+                    .open
+                    .written
+                    .iter()
+                    .filter(|b| b.topic == topic && b.partition == partition)
+                    .map(|b| b.first_offset)
+                    .min()
+                {
+                    in_scope = true;
+                    if txn_start < 0 || (first as i64) < txn_start {
+                        txn_start = first as i64;
+                    }
                 }
             }
             if in_scope {
@@ -804,7 +1034,7 @@ impl Broker {
         producer_epoch: u16,
         offsets: &[(String, String, u32, u64, String)],
     ) -> u16 {
-        {
+        let txn_id = {
             let state = self.producer_state.read();
             let Some(prod) = state.get(&producer_id) else {
                 return ErrorCode::UnknownProducerId as u16;
@@ -815,6 +1045,10 @@ impl Broker {
             if !prod.transactional {
                 return ErrorCode::InvalidTxnState as u16;
             }
+            prod.transactional_id.clone()
+        };
+        if !txn_id.is_empty() && self.prepared_txns.lock().contains_key(&txn_id) {
+            return ErrorCode::InvalidTxnState as u16;
         }
         let mut open = self.open_txns.lock();
         let Some(txn) = open.get_mut(&producer_id) else {
@@ -853,7 +1087,7 @@ impl Broker {
                 error_code: ErrorCode::InvalidArg as u16,
             };
         }
-        {
+        let txn_id = {
             let state = self.producer_state.read();
             let Some(prod) = state.get(&producer_id) else {
                 return IdempotentCheck::Reject {
@@ -870,6 +1104,12 @@ impl Broker {
                     error_code: ErrorCode::InvalidTxnState as u16,
                 };
             }
+            prod.transactional_id.clone()
+        };
+        if !txn_id.is_empty() && self.prepared_txns.lock().contains_key(&txn_id) {
+            return IdempotentCheck::Reject {
+                error_code: ErrorCode::InvalidTxnState as u16,
+            };
         }
         // Sequence check under the open-txn lock, then append outside it.
         let key = (topic.to_owned(), partition);
@@ -966,7 +1206,7 @@ impl Broker {
         IdempotentCheck::Accept { base_offset }
     }
 
-    /// Commit or abort an open transaction (Phase 18/86/89).
+    /// Commit or abort an open transaction (Phase 18/86/89/90).
     ///
     /// On commit, written ranges become stable (sequences finalized) and deferred
     /// offsets are applied. On abort, soft markers cover written ranges so
@@ -974,7 +1214,11 @@ impl Broker {
     /// READ_UNCOMMITTED.
     ///
     /// Phase 89: dual-write Kafka-style control markers (COMMIT/ABORT) onto each
-    /// partition that had write-through ranges.
+    /// partition that had write-through ranges (on **finalize** only).
+    ///
+    /// Phase 90: when the producer has `enable_2pc`, the first EndTxn moves the
+    /// open txn to **Prepared** (no markers yet). A second EndTxn with the same
+    /// decision finalizes. Prepared txns also complete via this path.
     ///
     /// `offsets` entries are `(group_id, topic, partition, offset, metadata)`.
     pub fn end_txn(
@@ -984,7 +1228,7 @@ impl Broker {
         committed: bool,
         offsets: &[(String, String, u32, u64, String)],
     ) -> Result<(u16, Vec<TxnCommitResult>)> {
-        {
+        let (enable_2pc, transactional_id) = {
             let state = self.producer_state.read();
             let Some(prod) = state.get(&producer_id) else {
                 return Ok((ErrorCode::UnknownProducerId as u16, Vec::new()));
@@ -992,7 +1236,36 @@ impl Broker {
             if prod.epoch != producer_epoch {
                 return Ok((ErrorCode::InvalidProducerEpoch as u16, Vec::new()));
             }
+            (prod.enable_2pc, prod.transactional_id.clone())
+        };
+
+        // Phase 90: finalize an existing prepared txn (second EndTxn).
+        if !transactional_id.is_empty() {
+            let mut prepared = self.prepared_txns.lock();
+            if let Some(prep) = prepared.get(&transactional_id) {
+                if prep.producer_id != producer_id {
+                    return Ok((ErrorCode::InvalidTxnState as u16, Vec::new()));
+                }
+                if prep.producer_epoch != producer_epoch {
+                    return Ok((ErrorCode::InvalidProducerEpoch as u16, Vec::new()));
+                }
+                if prep.commit != committed {
+                    return Ok((ErrorCode::InvalidTxnState as u16, Vec::new()));
+                }
+                let prep = prepared.remove(&transactional_id).expect("just checked");
+                drop(prepared);
+                let results = self.finalize_txn(
+                    producer_id,
+                    producer_epoch,
+                    committed,
+                    prep.open,
+                    offsets,
+                )?;
+                self.persist_prepared_txns();
+                return Ok((0, results));
+            }
         }
+
         let txn = {
             let mut open = self.open_txns.lock();
             match open.remove(&producer_id) {
@@ -1001,17 +1274,52 @@ impl Broker {
             }
         };
 
+        // Phase 90: first EndTxn on a 2PC producer → prepare (durable).
+        if enable_2pc && !transactional_id.is_empty() {
+            let prep = PreparedTxn {
+                transactional_id: transactional_id.clone(),
+                producer_id,
+                producer_epoch,
+                commit: committed,
+                open: txn,
+            };
+            self.prepared_txns
+                .lock()
+                .insert(transactional_id, prep);
+            // Open ranges leave open markers; prepared holds LSO via prepared map.
+            self.persist_txn_markers();
+            self.persist_prepared_txns();
+            return Ok((0, Vec::new()));
+        }
+
+        let results = self.finalize_txn(
+            producer_id,
+            producer_epoch,
+            committed,
+            txn,
+            offsets,
+        )?;
+        Ok((0, results))
+    }
+
+    /// Finalize commit/abort for an open or prepared txn body.
+    fn finalize_txn(
+        &self,
+        producer_id: u64,
+        producer_epoch: u16,
+        committed: bool,
+        txn: OpenTxn,
+        offsets: &[(String, String, u32, u64, String)],
+    ) -> Result<Vec<TxnCommitResult>> {
         if !committed {
-            // Abort: soft-mark written ranges; sequences stay at last committed.
             self.record_aborted_from_txn(producer_id, &txn);
-            // Phase 89: durable ABORT control batches on participating partitions.
             self.append_txn_control_markers(
                 producer_id,
                 producer_epoch,
                 ControlMarkerType::Abort,
                 &txn,
             );
-            return Ok((0, Vec::new()));
+            return Ok(Vec::new());
         }
 
         let mut results = Vec::with_capacity(txn.written.len());
@@ -1033,7 +1341,6 @@ impl Broker {
             });
         }
 
-        // Phase 89: durable COMMIT control batches before moving deferred_offsets.
         self.append_txn_control_markers(
             producer_id,
             producer_epoch,
@@ -1041,7 +1348,6 @@ impl Broker {
             &txn,
         );
 
-        // Merge EndTxn trailer offsets with any TxnOffsetCommit-buffered ones.
         let mut all_offsets = txn.deferred_offsets;
         for o in offsets {
             all_offsets.push(o.clone());
@@ -1056,23 +1362,35 @@ impl Broker {
         }
 
         self.persist_txn_markers();
-        Ok((0, results))
+        Ok(results)
     }
 
-    /// Last stable offset for a partition (Phase 86).
+    /// Last stable offset for a partition (Phase 86/90).
     ///
-    /// Equal to HWM when no open write-through ranges exist; otherwise the
-    /// minimum first offset among open transactional writes on the partition.
+    /// Equal to HWM when no open/prepared write-through ranges exist; otherwise
+    /// the minimum first offset among open **and prepared** transactional writes.
     pub fn last_stable_offset(&self, topic: &str, partition: u32) -> u64 {
         let hwm = self
             .high_watermark(&TopicName::new(topic), PartitionId(partition))
             .unwrap_or(0);
-        let open = self.open_txns.lock();
         let mut lso = hwm;
-        for txn in open.values() {
-            for r in &txn.written {
-                if r.topic == topic && r.partition == partition {
-                    lso = lso.min(r.first_offset);
+        {
+            let open = self.open_txns.lock();
+            for txn in open.values() {
+                for r in &txn.written {
+                    if r.topic == topic && r.partition == partition {
+                        lso = lso.min(r.first_offset);
+                    }
+                }
+            }
+        }
+        {
+            let prepared = self.prepared_txns.lock();
+            for prep in prepared.values() {
+                for r in &prep.open.written {
+                    if r.topic == topic && r.partition == partition {
+                        lso = lso.min(r.first_offset);
+                    }
                 }
             }
         }
@@ -1113,21 +1431,161 @@ impl Broker {
             .any(|m| offset >= m.first_offset && offset < m.end_offset)
     }
 
-    /// Whether `offset` is still unstable (open write-through txn).
+    /// Whether `offset` is still unstable (open or prepared write-through txn).
     pub fn is_unstable_offset(&self, topic: &str, partition: u32, offset: u64) -> bool {
-        let open = self.open_txns.lock();
-        for txn in open.values() {
-            for r in &txn.written {
-                if r.topic == topic
-                    && r.partition == partition
-                    && offset >= r.first_offset
-                    && offset < r.end_offset
-                {
-                    return true;
+        {
+            let open = self.open_txns.lock();
+            for txn in open.values() {
+                for r in &txn.written {
+                    if r.topic == topic
+                        && r.partition == partition
+                        && offset >= r.first_offset
+                        && offset < r.end_offset
+                    {
+                        return true;
+                    }
+                }
+            }
+        }
+        {
+            let prepared = self.prepared_txns.lock();
+            for prep in prepared.values() {
+                for r in &prep.open.written {
+                    if r.topic == topic
+                        && r.partition == partition
+                        && offset >= r.first_offset
+                        && offset < r.end_offset
+                    {
+                        return true;
+                    }
                 }
             }
         }
         false
+    }
+
+    /// Force-abort a prepared txn (InitProducerId KeepPreparedTxn=false).
+    fn force_abort_prepared(&self, prep: PreparedTxn) {
+        self.record_aborted_from_txn(prep.producer_id, &prep.open);
+        self.append_txn_control_markers(
+            prep.producer_id,
+            prep.producer_epoch,
+            ControlMarkerType::Abort,
+            &prep.open,
+        );
+        self.persist_prepared_txns();
+    }
+
+    fn prepared_txns_path(&self) -> PathBuf {
+        self.storage
+            .data_dir
+            .join("__txn_prepared")
+            .join("state.json")
+    }
+
+    /// Load durable prepared transactions (Phase 90). Prepared **survives** crash.
+    fn load_prepared_txns(&self) {
+        let path = self.prepared_txns_path();
+        let Ok(bytes) = fs::read(&path) else {
+            return;
+        };
+        let Ok(file) = serde_json::from_slice::<PreparedTxnsFile>(&bytes) else {
+            return;
+        };
+        let mut map = self.prepared_txns.lock();
+        for s in file.prepared {
+            let mut pending = HashMap::new();
+            for p in s.pending {
+                pending.insert(
+                    (p.topic, p.partition),
+                    IdempotentBatchState {
+                        base_sequence: p.base_sequence,
+                        count: p.count,
+                        base_offset: p.base_offset,
+                    },
+                );
+            }
+            let written = s
+                .written
+                .into_iter()
+                .map(|w| TxnWrittenRange {
+                    topic: w.topic,
+                    partition: w.partition,
+                    first_offset: w.first_offset,
+                    end_offset: w.end_offset,
+                    base_sequence: w.base_sequence,
+                    count: w.count,
+                })
+                .collect();
+            map.insert(
+                s.transactional_id.clone(),
+                PreparedTxn {
+                    transactional_id: s.transactional_id,
+                    producer_id: s.producer_id,
+                    producer_epoch: s.producer_epoch,
+                    commit: s.commit,
+                    open: OpenTxn {
+                        written,
+                        pending,
+                        deferred_offsets: s.deferred_offsets,
+                    },
+                },
+            );
+        }
+    }
+
+    fn persist_prepared_txns(&self) {
+        let path = self.prepared_txns_path();
+        if let Some(parent) = path.parent() {
+            let _ = fs::create_dir_all(parent);
+        }
+        let mut file = PreparedTxnsFile::default();
+        {
+            let prepared = self.prepared_txns.lock();
+            for prep in prepared.values() {
+                let written = prep
+                    .open
+                    .written
+                    .iter()
+                    .map(|w| StoredPreparedWritten {
+                        topic: w.topic.clone(),
+                        partition: w.partition,
+                        first_offset: w.first_offset,
+                        end_offset: w.end_offset,
+                        base_sequence: w.base_sequence,
+                        count: w.count,
+                    })
+                    .collect();
+                let pending = prep
+                    .open
+                    .pending
+                    .iter()
+                    .map(|((topic, part), st)| StoredPreparedPending {
+                        topic: topic.clone(),
+                        partition: *part,
+                        base_sequence: st.base_sequence,
+                        count: st.count,
+                        base_offset: st.base_offset,
+                    })
+                    .collect();
+                file.prepared.push(StoredPreparedTxn {
+                    transactional_id: prep.transactional_id.clone(),
+                    producer_id: prep.producer_id,
+                    producer_epoch: prep.producer_epoch,
+                    commit: prep.commit,
+                    written,
+                    pending,
+                    deferred_offsets: prep.open.deferred_offsets.clone(),
+                });
+            }
+        }
+        let Ok(bytes) = serde_json::to_vec_pretty(&file) else {
+            return;
+        };
+        let tmp = path.with_extension("json.tmp");
+        if fs::write(&tmp, &bytes).is_ok() {
+            let _ = fs::rename(tmp, path);
+        }
     }
 
     fn record_aborted_from_txn(&self, producer_id: u64, txn: &OpenTxn) {
@@ -1397,6 +1855,7 @@ impl Broker {
                 StoredProducer {
                     epoch: prod.epoch,
                     transactional_id: prod.transactional_id.clone(),
+                    enable_2pc: prod.enable_2pc,
                     partitions,
                 },
             );
@@ -3278,11 +3737,35 @@ fn load_producer_maps(
                 epoch: prod.epoch,
                 transactional,
                 transactional_id: prod.transactional_id,
+                enable_2pc: prod.enable_2pc,
                 partitions,
             },
         );
     }
     (next, map, txn_ids)
+}
+
+/// Collect topic → partitions from an open/prepared txn body.
+fn topics_from_open(txn: &OpenTxn) -> Vec<(String, Vec<i32>)> {
+    let mut map: HashMap<String, Vec<i32>> = HashMap::new();
+    for b in &txn.written {
+        map.entry(b.topic.clone())
+            .or_default()
+            .push(b.partition as i32);
+    }
+    for (topic, part) in txn.pending.keys() {
+        map.entry(topic.clone()).or_default().push(*part as i32);
+    }
+    let mut topics: Vec<(String, Vec<i32>)> = map
+        .into_iter()
+        .map(|(t, mut parts)| {
+            parts.sort_unstable();
+            parts.dedup();
+            (t, parts)
+        })
+        .collect();
+    topics.sort_by(|a, b| a.0.cmp(&b.0));
+    topics
 }
 
 /// Kafka-compatible murmur2 hash (seed `0x9747b28c`).

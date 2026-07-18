@@ -11,7 +11,7 @@
 | `--log-format` | | `text` | `text` or `json` |
 | `--auth-token` | `VOLANT_AUTH_TOKEN` | *unset* | Shared-token auth (native port only) |
 | `--scram-user USER:PASS` | | *unset* | Upsert SCRAM user at startup (repeatable; Phase 22) |
-| `--kafka-listen` | | *disabled* | Kafka wire protocol shim (Phases 23–89) |
+| `--kafka-listen` | | *disabled* | Kafka wire protocol shim (Phases 23–90) |
 | `--tls-cert` / `--tls-key` | | *unset* | Server TLS (feature `tls`) |
 | `--tls-peer-insecure` | | `true` | Skip inter-broker cert verify (lab) |
 | `--tls-ca` | | *unset* | CA PEM for inter-broker peer verify |
@@ -116,7 +116,7 @@ Notes:
 
 Optional second socket speaking Kafka framing (classic + flexible). Native
 Volant protocol remains on `--listen`. API versions and honesty notes live in
-**[KAFKA_COMPAT.md](./KAFKA_COMPAT.md)** (source of truth; Phases 23–89).
+**[KAFKA_COMPAT.md](./KAFKA_COMPAT.md)** (source of truth; Phases 23–90).
 
 ### Enable
 
@@ -144,9 +144,9 @@ volant-server \
 - **Topic config keys** (Describe/AlterConfigs): `retention.ms`, `retention.bytes`,
   `segment.bytes`, `cleanup.policy` (`delete`|`compact`).
 - **Transactions / isolation:** write-through + soft abort markers (Phase 86) +
-  EndTxn control batches (Phase 89);
+  EndTxn control batches on finalize (Phase 89) + prepared 2PC MVP (Phase 90);
   `READ_COMMITTED` caps at LSO and filters aborted; `READ_UNCOMMITTED` sees all.
-  Crash promotes open ranges to aborted via `__txn_markers`.
+  Open crash≡abort via `__txn_markers`; prepared durable under `__txn_prepared`.
 - **Leader epochs:** durable history under `{data_dir}/__leader_epochs` (Phase 87);
   OffsetForLeaderEpoch returns prior-epoch end offsets; Metadata advertises live
   epoch. Not a full KRaft epoch state machine.
@@ -235,7 +235,7 @@ specs. Ops-critical notes only:
 | Groups | list / describe / delete-offsets; static membership `group_instance_id` |
 | Topic configs | `retention.ms` / `retention.bytes` / `segment.bytes` / `cleanup.policy` |
 | DeleteRecords | Truncates sealed segments; no follower fan-out |
-| Transactions (shipped) | **Write-through + soft markers** (Phase 86) + **control batches** on EndTxn (Phase 89); LSO/aborted filtering; crash ≡ abort open ranges |
+| Transactions (shipped) | **Write-through + soft markers** (Phase 86) + **control batches** on EndTxn finalize (Phase 89) + **prepared 2PC MVP** (Phase 90); LSO/aborted filtering; open crash≡abort; prepared durable under `__txn_prepared` |
 | mTLS | Feature `tls`; `--tls-client-ca` / optional `--tls-client-allow` |
 | ACLs | `--acl-enable`; durable `__acls/acls.json`; User resource is Kafka admin store-only |
 | Compaction | `cleanup.policy=compact` on **sealed** segments; empty value = tombstone |
@@ -261,13 +261,13 @@ curl -s -H "Authorization: Bearer $VOLANT_METRICS_TOKEN" \
 
 - Multi-language clients
 - Full chaos-mesh suites / cargo-fuzz **corpus CI** (scaffold under `fuzz/` only)
-- Real 2PC / prepared transactions
+- Full multi-broker 2PC / prepared timeout / TRANSACTION_ABORTABLE
 - Omit-unchanged fetch session cache; multi-broker session affinity
 
 Full list: [ROADMAP.md](../ROADMAP.md).
 
 ## Shipped (not gaps)
 
-Kafka wire shim **Phases 23–89** (ApiVersions **0–5**, Fetch **0–18**, ACL admin
-**0–3** User resource, ~38 keys), SCRAM-SHA-256/512, SASL PLAIN/SCRAM — see
-[KAFKA_COMPAT.md](./KAFKA_COMPAT.md).
+Kafka wire shim **Phases 23–90** (ApiVersions **0–5**, Fetch **0–18**, ACL admin
+**0–3** User resource, prepared 2PC MVP, ~38 keys), SCRAM-SHA-256/512, SASL
+PLAIN/SCRAM — see [KAFKA_COMPAT.md](./KAFKA_COMPAT.md).

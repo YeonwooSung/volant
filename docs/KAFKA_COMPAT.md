@@ -1,8 +1,8 @@
 # Kafka compatibility matrix
 
 **Living document** for the optional Kafka wire shim (`--kafka-listen`).
-Ship history: Phases **23–89** (git HEAD product). Binding deep dives:
-`PHASE23_SPEC.md` … `PHASE89_SPEC.md`. Overview: [WHITEPAPER.md](./WHITEPAPER.md).
+Ship history: Phases **23–90** (git HEAD product). Binding deep dives:
+`PHASE23_SPEC.md` … `PHASE90_SPEC.md`. Overview: [WHITEPAPER.md](./WHITEPAPER.md).
 Semantic rows below describe **shipped** behavior.
 
 ## Enable
@@ -41,7 +41,7 @@ From `SUPPORTED_APIS` in `crates/volant-broker/src/kafka/mod.rs`:
 | 19 | CreateTopics | 0–7 | Flex v5+; TopicId response v7 |
 | 20 | DeleteTopics | 0–6 | Flex v4+; ErrorMessage v5; TopicId v6 |
 | 21 | DeleteRecords | 0–2 | Flex v2 |
-| 22 | InitProducerId | 0–6 | Flex v2+; v6 Enable2Pc ignored; OngoingTxn* = -1 |
+| 22 | InitProducerId | 0–6 | Flex v2+; v6 Enable2Pc/KeepPreparedTxn (Phase 90 prepared MVP); OngoingTxn* when prepared |
 | 23 | OffsetForLeaderEpoch | 0–4 | Flex v4; durable epoch history MVP (Phase 87); prior epochs → transition end |
 | 24 | AddPartitionsToTxn | 0–5 | Flex v3; batch v4–5 |
 | 25 | AddOffsetsToTxn | 0–4 | Flex v3+; v4 = v3 wire (no TRANSACTION_ABORTABLE) |
@@ -73,6 +73,7 @@ From `SUPPORTED_APIS` in `crates/volant-broker/src/kafka/mod.rs`:
 | Leader epochs | 87 | Durable OffsetForLeaderEpoch history MVP; Metadata live leader_epoch |
 | Fetch sessions / DivergingEpoch | 88 | Process-local sessions (create/forgotten/invalid); DivergingEpoch tag 0 on truncation |
 | Control batches | 89 | EndTxn COMMIT/ABORT control RecordBatches on partition log (dual-write with soft markers) |
+| Prepared 2PC MVP | 90 | Enable2Pc prepare-then-complete EndTxn; KeepPreparedTxn + OngoingTxn*; durable `__txn_prepared` |
 
 ## Semantic honesty (open)
 
@@ -80,8 +81,8 @@ These are **current** product facts, not temporary docs lag:
 
 | Area | Limitation |
 |------|------------|
-| Transactions | **Write-through** (Phase 86) + **control batches** (Phase 89): data on log immediately; soft markers still SoT for LSO/aborted list/crash recovery; EndTxn appends Kafka-style COMMIT/ABORT control batches (magic 2 attrs 0x30) per written partition; crash≡abort of open txn may lack control batch; TxnOffsetCommit still deferred until EndTxn |
-| 2PC | InitProducerId v6 flags parsed **and ignored**; OngoingTxn* always -1 |
+| Transactions | **Write-through** (Phase 86) + **control batches** (Phase 89) + **prepared 2PC MVP** (Phase 90): data on log immediately; soft markers still SoT for LSO/aborted list; open crash≡abort; prepared survives restart under `__txn_prepared`; EndTxn control batches on finalize; TxnOffsetCommit deferred until complete commit |
+| 2PC | **MVP** (Phase 90): Enable2Pc → first EndTxn prepares; second matching EndTxn finalizes; KeepPreparedTxn + OngoingTxn* for prepared; not full KIP-890/939 / multi-broker |
 | Epochs | **Durable history MVP** (Phase 87): `{data_dir}/__leader_epochs`; prior epochs return transition end offsets; Metadata advertises live epoch; not a full KRaft epoch state machine; Fetch **DivergingEpoch** on truncation (Phase 88) |
 | TopicId | Deterministic UUID from Volant id (`volant` + zeros + u32), not KRaft random |
 | Groups | Coordinator-driven assignment; GroupType always `classic`; states Stable/Empty |
