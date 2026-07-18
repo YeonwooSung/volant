@@ -1,6 +1,6 @@
 # Phase history index
 
-Ship records for **phases 0–101**. Binding core contracts are
+Ship records for **phases 0–102**. Binding core contracts are
 **[PHASE1_SPEC](../PHASE1_SPEC.md)–[PHASE6_SPEC](../PHASE6_SPEC.md)**. Living
 docs for day-to-day reading: [ops](../ops.md), [consistency](../consistency.md),
 [tuning](../tuning.md), [KAFKA_COMPAT](../KAFKA_COMPAT.md),
@@ -143,10 +143,11 @@ docs for day-to-day reading: [ops](../ops.md), [consistency](../consistency.md),
 | 99 | ✅ | DescribeConfigs/Alter BROKER for txn/session/sweep knobs (MVP) | [PHASE99_SPEC.md](../PHASE99_SPEC.md) |
 | 100 | ✅ | Durable dynamic broker config file (MVP; six Phase 99 knobs) | [PHASE100_SPEC.md](../PHASE100_SPEC.md) |
 | 101 | ✅ | Graceful sweeper enable on 0→>0 interval without process restart | [PHASE101_SPEC.md](../PHASE101_SPEC.md) |
+| 102 | ✅ | Sparse durable broker config (only altered keys; env re-applies after DELETE) | [PHASE102_SPEC.md](../PHASE102_SPEC.md) |
 
 ---
 
-## Still deferred (post–Phase 101)
+## Still deferred (post–Phase 102)
 
 - Multi-language clients
 - Chaos-mesh / cargo-fuzz corpus CI
@@ -158,4 +159,3 @@ docs for day-to-day reading: [ops](../ops.md), [consistency](../consistency.md),
 - Graceful sweeper shutdown / join on server stop
 - Marker compaction / GC with DeleteRecords
 - Validate BROKER resource name against `node_id`
-- Sparse durable broker config (env re-apply after DELETE)

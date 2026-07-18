@@ -1267,10 +1267,10 @@ pub(crate) fn volant_broker_topic_config_validate(entries: &[(String, String)]) 
     crate::topic_config::TopicConfig::from_entries(entries).map(|_| ()).map_err(|e| e.to_string())
 }
 
-/// AlterConfigs / IncrementalAlter for BROKER resources (Phase 99–100).
+/// AlterConfigs / IncrementalAlter for BROKER resources (Phase 99–102).
 ///
-/// Successful non-validate_only applies update durable snapshot under
-/// `{data_dir}/__broker_config/state.json`.
+/// Successful non-validate_only merges a sparse durable overlay under
+/// `{data_dir}/__broker_config/state.json` (only altered keys).
 fn alter_broker_resource(
     broker: &Broker,
     principal: &str,

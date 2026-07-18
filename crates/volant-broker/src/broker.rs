@@ -518,7 +518,7 @@ impl Broker {
         broker.expire_timed_out_txns();
         broker.load_leader_epochs();
         broker.seed_missing_leader_epochs();
-        // Phase 100: durable BROKER knobs after env defaults (product → env → file).
+        // Phase 100–102: sparse durable BROKER knobs after env (product → env → file keys).
         broker
             .load_durable_broker_config()
             .expect("failed to load durable broker config");
@@ -614,7 +614,7 @@ impl Broker {
         broker.expire_timed_out_txns();
         broker.load_leader_epochs();
         broker.seed_missing_leader_epochs();
-        // Phase 100: durable BROKER knobs after env defaults (product → env → file).
+        // Phase 100–102: sparse durable BROKER knobs after env (product → env → file keys).
         broker.load_durable_broker_config()?;
         Ok(broker)
     }
@@ -794,7 +794,8 @@ impl Broker {
     }
 
     /// Current broker-level config entries for Kafka DescribeConfigs BROKER
-    /// (Phase 99–100). Values are live knobs (env → durable file → setters/alter).
+    /// (Phase 99–102). Values are live knobs (product → env → sparse durable →
+    /// setters/alter).
     pub fn describe_broker_configs(&self) -> Vec<(String, String)> {
         vec![
             (
@@ -826,19 +827,21 @@ impl Broker {
 
     /// Apply broker-level config updates (Phase 99 Alter / IncrementalAlter).
     ///
-    /// Empty value restores the **product** default for that key (not env).
+    /// Empty value restores the **product** default for that key live (not env).
     /// Unknown keys → [`Error::InvalidArgument`].
     ///
-    /// Phase 100: on success, persists a full snapshot of all six knobs under
-    /// `{data_dir}/__broker_config/state.json` (survives restart). Direct
-    /// `set_*` setters remain process-local only.
+    /// Phase 100–102: on success, merges a **sparse** durable overlay under
+    /// `{data_dir}/__broker_config/state.json` — only keys present in `entries`
+    /// are written (SET) or removed (DELETE/empty). Keys never altered are not
+    /// frozen, so env still applies for them on restart. Direct `set_*` setters
+    /// remain process-local only.
     pub fn alter_broker_configs(&self, entries: &[(String, String)]) -> Result<()> {
         broker_config::validate_entries(entries)?;
         for (k, v) in entries {
             let val = broker_config::resolve_value(k, v)?;
             self.apply_broker_config_value(k, val)?;
         }
-        self.persist_broker_config()
+        self.persist_broker_config_sparse(entries)
     }
 
     /// Apply a single known broker config key (no persist).
@@ -863,8 +866,9 @@ impl Broker {
         Ok(())
     }
 
-    /// Load durable BROKER knobs from `{data_dir}/__broker_config/state.json`
-    /// (Phase 100). Applied **after** product default + env at construction.
+    /// Load sparse durable BROKER knobs from `{data_dir}/__broker_config/state.json`
+    /// (Phase 100–102). Applied **after** product default + env at construction;
+    /// only keys present in the file override.
     fn load_durable_broker_config(&self) -> Result<()> {
         let store = broker_config::BrokerConfigStore::open(&self.storage.data_dir)?;
         let Some(file) = store.load()? else {
@@ -879,12 +883,13 @@ impl Broker {
         Ok(())
     }
 
-    /// Persist full snapshot of the six live knobs (Phase 100).
-    fn persist_broker_config(&self) -> Result<()> {
+    /// Merge sparse durable overlay for the altered entries (Phase 102).
+    ///
+    /// SET writes/updates only those keys; DELETE/empty removes them. Empty
+    /// overlay removes the file so env can re-apply on next restart.
+    fn persist_broker_config_sparse(&self, entries: &[(String, String)]) -> Result<()> {
         let store = broker_config::BrokerConfigStore::open(&self.storage.data_dir)?;
-        let entries = self.describe_broker_configs();
-        let file = broker_config::BrokerConfigFile::from_entries(&entries)?;
-        store.save(&file)
+        store.merge_alter(entries)
     }
 
     /// Live open (non-prepared) transaction count (Phase 97 gauge).

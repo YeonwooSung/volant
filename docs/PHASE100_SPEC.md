@@ -6,10 +6,14 @@
    AlterConfigs / IncrementalAlterConfigs survive process restart.
 2. On `Broker::new` / `with_cluster`: after env-at-construction defaults, load
    the durable file and apply setters so live getters match last Alter.
-3. On successful non-`validate_only` Alter / IncrementalAlter: write a full
-   snapshot of the six knobs (atomic temp + rename).
+3. On successful non-`validate_only` Alter / IncrementalAlter: write durable
+   knobs under `state.json` (atomic temp + rename).
+   **Phase 100 wrote a full snapshot of all six knobs; Phase 102 switches to a
+   sparse overlay (only altered keys).**
 4. DELETE / empty Alter value restores **product** default **and** updates the
    durable file (so restart does not re-apply a prior altered value).
+   **Phase 102 additionally removes the key from the sparse file so env can
+   re-apply on restart.**
 5. Tests (`phase100_*.rs`) + living docs honesty.
 
 ## Non-goals
@@ -71,11 +75,13 @@ Notes:
 
 - Env is only applied at construction (same as Phase 99). Changing env after
   start does not affect a running process.
-- Once any successful Alter writes the file, the file holds a **full snapshot**
-  of all six live values. On next restart the file overrides env for every key
-  present in `configs` (normally all six).
-- DELETE restores the **product** default into the live knob (not env), then
-  the full snapshot is rewritten so the product default is what reloads.
+- **Phase 100 (original):** once any successful Alter wrote the file, the file
+  held a **full snapshot** of all six live values, overriding env for every key.
+  **Closed by Phase 102:** sparse overlay — only keys present in `configs`
+  (explicitly altered) override env; untouched keys keep product→env.
+- DELETE restores the **product** default into the live knob (not env).
+  **Phase 100** rewrote product default into the full snapshot; **Phase 102**
+  removes the key from the sparse file so env can re-apply on restart.
 - Direct `Broker::set_*` setters remain process-local only (no auto-persist).
   Kafka Alter paths call `alter_broker_configs`, which persists.
 
@@ -83,8 +89,8 @@ Notes:
 
 | API | Persist? |
 |-----|----------|
-| AlterConfigs BROKER (non-validate_only, success) | Yes — full snapshot after apply |
-| IncrementalAlterConfigs BROKER SET/DELETE (success) | Yes |
+| AlterConfigs BROKER (non-validate_only, success) | Yes — Phase 100 full snapshot; **Phase 102 sparse merge** |
+| IncrementalAlterConfigs BROKER SET/DELETE (success) | Yes (same) |
 | validate_only | No |
 | Unknown key / InvalidConfig | No mutation, no write |
 | TOPIC Alter | Unchanged (topic store) |
@@ -119,6 +125,7 @@ Unchanged from Phase 99 (Cluster Describe / Alter).
 - Six knobs only (not full Kafka broker catalog)
 - Single-node; resource name still ignored
 - Full snapshot overrides env for all keys once any Alter has written the file
+  → **closed by Phase 102** (sparse overlay)
 - Direct setters do not persist (by design for this MVP)
 - Sweeper task spawn at boot with interval `0` → **closed by Phase 101**
   (always spawn; `0` pauses; `0→>0` live)
@@ -139,7 +146,7 @@ Unchanged from Phase 99 (Cluster Describe / Alter).
 
 - Graceful sweeper enable when interval transitions `0 → >0` without process restart → **closed by Phase 101**
 - Validate BROKER resource name against `node_id`
-- Sparse durable file (only keys differing from product default) so env re-applies after DELETE
+- Sparse durable file (only keys differing from product default) so env re-applies after DELETE → **closed by Phase 102**
 - Marker compaction / GC with DeleteRecords
 - Multi-broker config broadcast
 - Multi-lang clients / cargo-fuzz corpus CI

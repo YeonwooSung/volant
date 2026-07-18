@@ -75,7 +75,9 @@ Preferred MVP includes write (SET/DELETE already exist for topics).
 
 **Persistence (Phase 99):** process-local only via setters. **Phase 100** adds
 durable `{data_dir}/__broker_config/state.json` on successful Alter /
-IncrementalAlter (see [PHASE100_SPEC.md](./PHASE100_SPEC.md)).
+IncrementalAlter; **Phase 102** makes that file a **sparse** overlay (only
+explicitly altered keys; DELETE removes the key so env re-applies on restart).
+See [PHASE100_SPEC.md](./PHASE100_SPEC.md) and [PHASE102_SPEC.md](./PHASE102_SPEC.md).
 
 **Background sweeper note:** changing `volant.sweep.interval.ms` updates the
 Atomic read by the running loop; setting `0` stops further sweeps on the next
@@ -124,6 +126,7 @@ via `start_background_tasks` (existing Phase 97 honesty).
 ## Phase 100 ideas
 
 - Durable dynamic broker config file + restart restore → **closed by Phase 100**
+- Sparse durable overlay (env re-apply after DELETE) → **closed by Phase 102**
 - Validate broker resource name against `node_id`
 - Graceful sweeper enable when interval transitions 0 → >0 without process restart → **closed by Phase 101**
 - Marker compaction / GC with DeleteRecords

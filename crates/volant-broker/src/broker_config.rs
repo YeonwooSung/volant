@@ -1,10 +1,13 @@
-//! Broker-level config keys for Kafka Describe/AlterConfigs (Phase 99–100).
+//! Broker-level config keys for Kafka Describe/AlterConfigs (Phase 99–102).
 //!
 //! Phase 99: process-local knobs via Describe/Alter on BROKER resources.
-//! Phase 100: durable snapshot under `{data_dir}/__broker_config/state.json`.
+//! Phase 100: durable file under `{data_dir}/__broker_config/state.json`.
+//! Phase 102: **sparse** durable overlay — only keys explicitly altered are
+//! written; DELETE removes the key so env can re-apply on next restart.
 //!
-//! Precedence (load): product default → env at construction → durable file →
-//! runtime alter. Not a full Kafka DynamicBrokerConfig surface.
+//! Precedence (load): product default → env at construction → sparse durable
+//! file (keys present only) → runtime alter. Not a full Kafka
+//! DynamicBrokerConfig surface.
 
 use std::collections::HashMap;
 use std::fs::{self, File, OpenOptions};
@@ -141,13 +144,17 @@ pub fn resolve_value(key: &str, value: &str) -> Result<u64> {
     parse_u64(value, key)
 }
 
-/// On-disk durable broker config snapshot (Phase 100).
+/// On-disk durable broker config overlay (Phase 100 file; Phase 102 sparse).
+///
+/// `configs` holds **only** keys that were explicitly SET via Alter /
+/// IncrementalAlter. Missing keys are not frozen — load leaves product→env.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct BrokerConfigFile {
     /// Schema version (currently 1).
     #[serde(default = "default_file_version")]
     pub version: u32,
-    /// Wire-name → value for known knobs. Unknown keys ignored on load.
+    /// Wire-name → value for **explicitly altered** knobs. Unknown keys ignored
+    /// on load. Empty map ≡ no durable overlay.
     #[serde(default)]
     pub configs: HashMap<String, u64>,
 }
@@ -166,19 +173,15 @@ impl Default for BrokerConfigFile {
 }
 
 impl BrokerConfigFile {
-    /// Build a full snapshot from describe-style `(key, decimal_string)` pairs.
+    /// Build a sparse overlay from `(key, decimal_string)` pairs.
+    ///
+    /// Unknown keys skipped. Empty values omit the key (same as DELETE on an
+    /// empty map). Prefer [`Self::apply_alter`] when merging into an existing
+    /// overlay.
     pub fn from_entries(entries: &[(String, String)]) -> Result<Self> {
-        let mut configs = HashMap::new();
-        for (k, v) in entries {
-            if !is_known_key(k) {
-                continue;
-            }
-            configs.insert(k.clone(), parse_u64(v, k)?);
-        }
-        Ok(Self {
-            version: BROKER_CONFIG_FILE_VERSION,
-            configs,
-        })
+        let mut file = Self::default();
+        file.apply_alter(entries)?;
+        Ok(file)
     }
 
     /// Build from live u64 values keyed by wire name.
@@ -194,11 +197,37 @@ impl BrokerConfigFile {
             configs,
         }
     }
+
+    /// Merge Alter / IncrementalAlter entries into this sparse overlay (Phase 102).
+    ///
+    /// - Non-empty value → SET key in map
+    /// - Empty / whitespace value → DELETE key from map (env may re-apply next boot)
+    /// - Unknown keys skipped (caller should validate first)
+    pub fn apply_alter(&mut self, entries: &[(String, String)]) -> Result<()> {
+        self.version = BROKER_CONFIG_FILE_VERSION;
+        for (k, v) in entries {
+            if !is_known_key(k) {
+                continue;
+            }
+            if v.trim().is_empty() {
+                self.configs.remove(k);
+            } else {
+                self.configs.insert(k.clone(), parse_u64(v, k)?);
+            }
+        }
+        Ok(())
+    }
+
+    /// Whether the overlay has no durable keys.
+    pub fn is_empty(&self) -> bool {
+        self.configs.is_empty()
+    }
 }
 
-/// File-backed durable broker config store (Phase 100).
+/// File-backed durable broker config store (Phase 100–102).
 ///
 /// Layout: `{data_dir}/__broker_config/state.json` (atomic replace on write).
+/// Phase 102: sparse overlay; empty configs → file removed.
 #[derive(Debug)]
 pub struct BrokerConfigStore {
     path: PathBuf,
@@ -224,7 +253,7 @@ impl BrokerConfigStore {
         &self.path
     }
 
-    /// Load snapshot; `None` if file missing or empty.
+    /// Load sparse overlay; `None` if file missing or empty.
     pub fn load(&self) -> Result<Option<BrokerConfigFile>> {
         if !self.path.exists() {
             return Ok(None);
@@ -245,11 +274,17 @@ impl BrokerConfigStore {
         let file: BrokerConfigFile = serde_json::from_str(&buf).map_err(|e| {
             Error::Storage(format!("parse broker config: {e}"))
         })?;
+        if file.configs.is_empty() {
+            return Ok(None);
+        }
         Ok(Some(file))
     }
 
-    /// Atomically persist snapshot (write temp + fsync + rename).
+    /// Atomically persist sparse overlay (write temp + fsync + rename).
     pub fn save(&self, state: &BrokerConfigFile) -> Result<()> {
+        if state.configs.is_empty() {
+            return self.clear();
+        }
         let parent = self.path.parent().unwrap_or_else(|| Path::new("."));
         fs::create_dir_all(parent).map_err(|e| {
             Error::Storage(format!(
@@ -277,6 +312,31 @@ impl BrokerConfigStore {
             Error::Storage(format!("rename broker config: {e}"))
         })?;
         Ok(())
+    }
+
+    /// Remove durable file if present (empty overlay / all keys deleted).
+    pub fn clear(&self) -> Result<()> {
+        if self.path.exists() {
+            fs::remove_file(&self.path).map_err(|e| {
+                Error::Storage(format!(
+                    "remove broker config {}: {e}",
+                    self.path.display()
+                ))
+            })?;
+        }
+        // Best-effort remove leftover tmp.
+        if let Some(parent) = self.path.parent() {
+            let tmp = parent.join("state.json.tmp");
+            let _ = fs::remove_file(tmp);
+        }
+        Ok(())
+    }
+
+    /// Load-or-default, apply alter entries, save or clear (Phase 102).
+    pub fn merge_alter(&self, entries: &[(String, String)]) -> Result<()> {
+        let mut file = self.load()?.unwrap_or_default();
+        file.apply_alter(entries)?;
+        self.save(&file)
     }
 }
 
@@ -331,5 +391,45 @@ mod tests {
         let file = BrokerConfigFile::from_entries(&entries).unwrap();
         assert_eq!(file.configs.len(), 1);
         assert_eq!(file.configs.get(KEY_OPEN_TXN_TIMEOUT_MS), Some(&7_000));
+    }
+
+    #[test]
+    fn apply_alter_sparse_set_and_delete() {
+        let mut file = BrokerConfigFile::default();
+        file.apply_alter(&[(KEY_SWEEP_INTERVAL_MS.into(), "50".into())])
+            .unwrap();
+        assert_eq!(file.configs.len(), 1);
+        assert_eq!(file.configs.get(KEY_SWEEP_INTERVAL_MS), Some(&50));
+
+        // SET another key — still sparse (not full six)
+        file.apply_alter(&[(KEY_OPEN_TXN_TIMEOUT_MS.into(), "7000".into())])
+            .unwrap();
+        assert_eq!(file.configs.len(), 2);
+
+        // DELETE first key
+        file.apply_alter(&[(KEY_SWEEP_INTERVAL_MS.into(), "".into())])
+            .unwrap();
+        assert_eq!(file.configs.len(), 1);
+        assert!(!file.configs.contains_key(KEY_SWEEP_INTERVAL_MS));
+        assert_eq!(file.configs.get(KEY_OPEN_TXN_TIMEOUT_MS), Some(&7_000));
+    }
+
+    #[test]
+    fn merge_alter_clears_file_when_empty() {
+        let dir = temp_dir();
+        let store = BrokerConfigStore::open(&dir).unwrap();
+        store
+            .merge_alter(&[(KEY_SWEEP_INTERVAL_MS.into(), "77".into())])
+            .unwrap();
+        assert!(store.path().exists());
+        let loaded = store.load().unwrap().unwrap();
+        assert_eq!(loaded.configs.len(), 1);
+
+        store
+            .merge_alter(&[(KEY_SWEEP_INTERVAL_MS.into(), "".into())])
+            .unwrap();
+        assert!(!store.path().exists(), "empty overlay removes state.json");
+        assert!(store.load().unwrap().is_none());
+        let _ = fs::remove_dir_all(&dir);
     }
 }

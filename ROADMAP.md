@@ -2304,20 +2304,21 @@ Binding: **[docs/PHASE100_SPEC.md](./docs/PHASE100_SPEC.md)**.
 - [x] Path `{data_dir}/__broker_config/state.json` (atomic write)
 - [x] Precedence: product default → env → durable file → runtime alter
 - [x] Full snapshot persist on successful non-validate_only Alter / Incremental
+  (Phase 100; **Phase 102** switches to sparse overlay)
 - [x] DELETE / empty Alter restores product default **and** rewrites durable file
 - [x] Direct `set_*` setters remain process-local (no auto-persist)
 - [x] TOPIC configs unchanged
 - [x] Integration tests (`phase100_broker_config_durable`)
 
 **Honest limitations:** six knobs only; full snapshot overrides env after any
-Alter write; sweeper task spawn at boot with interval 0 → **closed by Phase 101**;
-no multi-broker fan-out / full Kafka catalog / KRaft.
+Alter write → **closed by Phase 102**; sweeper task spawn at boot with interval 0
+→ **closed by Phase 101**; no multi-broker fan-out / full Kafka catalog / KRaft.
 
 **Still deferred:** multi-lang clients, cargo-fuzz corpus CI, multi-broker 2PC /
 session affinity / durable sessions, marker compaction/GC, graceful sweeper
 enable on 0→>0 interval → **closed by Phase 101**, empty-AddPartitions control
 markers, validate BROKER resource name against `node_id`, sparse durable file
-(env re-apply after DELETE).
+(env re-apply after DELETE) → **closed by Phase 102**.
 
 ---
 
@@ -2343,7 +2344,33 @@ knobs only; resource name still ignored.
 **Still deferred:** multi-lang clients, cargo-fuzz corpus CI, multi-broker 2PC /
 session affinity / durable sessions, marker compaction/GC, empty-AddPartitions
 control markers, validate BROKER resource name against `node_id`, sparse durable
-file (env re-apply after DELETE), graceful sweeper shutdown / join on stop.
+file (env re-apply after DELETE) → **closed by Phase 102**, graceful sweeper
+shutdown / join on stop.
+
+---
+
+### Phase 102 — Sparse durable broker config (MVP) ✅
+
+**Goal:** Persist only explicitly altered BROKER knobs (sparse overlay) so
+untouched keys keep product→env on restart; DELETE removes the key from the
+file so env can re-apply.
+
+Binding: **[docs/PHASE102_SPEC.md](./docs/PHASE102_SPEC.md)**.
+
+- [x] Sparse merge on Alter SET (only key K written)
+- [x] DELETE / empty removes key from durable file; empty overlay clears file
+- [x] Load: product → env → sparse file keys only
+- [x] validate_only / direct `set_*` / TOPIC unchanged
+- [x] Integration tests (`phase102_sparse_broker_config`)
+
+**Honest limitations:** six knobs only; live DELETE still product default until
+restart; legacy Phase 100 full snapshots pin keys until DELETE; no multi-broker
+fan-out / full Kafka catalog; BROKER name still ignored.
+
+**Still deferred:** multi-lang clients, cargo-fuzz corpus CI, multi-broker 2PC /
+session affinity / durable sessions, marker compaction/GC, empty-AddPartitions
+control markers, validate BROKER resource name against `node_id`, graceful
+sweeper shutdown / join on stop.
 
 ---
 
@@ -2370,18 +2397,18 @@ file (env re-apply after DELETE), graceful sweeper shutdown / join on stop.
 | Storage | Page cache + OS | Explicit mmap + optional io_uring/O_DIRECT |
 | Stream processing | Kafka Streams / ksqlDB | In-process `volant-stream` operators |
 | Ops model | ZooKeeper/KRaft + heavy footprint | Single binary → small static ISR quorum |
-| Protocol | Kafka wire protocol | Native binary first; optional Kafka shim (`--kafka-listen`, Phases 23–101) |
+| Protocol | Kafka wire protocol | Native binary first; optional Kafka shim (`--kafka-listen`, Phases 23–102) |
 | Goal | Full ecosystem | Subset that is fast, small, and correct |
 
 Volant is **not** a drop-in Kafka replacement. It prioritizes a clean core; the
-optional Kafka wire shim is **shipped** (Phases 23–101) — see
+optional Kafka wire shim is **shipped** (Phases 23–102) — see
 [docs/KAFKA_COMPAT.md](./docs/KAFKA_COMPAT.md).
 
 ---
 
 ## Suggested implementation order (PRs)
 
-Phases **0–101 are shipped**. Historical PR order for the core:
+Phases **0–102 are shipped**. Historical PR order for the core:
 
 1. Phase 1 segment format + unit tests  
 2. Phase 1 recovery + retention  
@@ -2394,7 +2421,7 @@ Phases **0–101 are shipped**. Historical PR order for the core:
 9. Phase 6 replication prototype (2–3 nodes) ✅  
 10. Phase 7 metrics, TLS, packaging ✅  
 11. Phases 8–22 (redirect, groups, configs, txns, mTLS, ACLs, SCRAM) ✅  
-12. Phases 23–101 (Kafka wire shim surface) ✅  
+12. Phases 23–102 (Kafka wire shim surface) ✅  
 
 ---
 
@@ -2435,16 +2462,16 @@ cargo run -p volant-bench --release
 cargo test --workspace
 ```
 
-**Status (post–Phase 101):** core broker, ops (metrics / TLS / auth / SCRAM /
+**Status (post–Phase 102):** core broker, ops (metrics / TLS / auth / SCRAM /
 ACLs / Helm), and the Kafka wire shim are **shipped** (Fetch 0–18 Kafka max;
 ACL admin 0–3 with User resource; soft-marker `READ_COMMITTED`; durable OFLE
 history; Fetch DivergingEpoch + sessions with omit-unchanged incremental +
 idle TTL/max; Kafka control batches on EndTxn **and** crash≡abort open promote;
 prepared 2PC MVP; prepared + open txn timeouts + broker max timeout clamp;
 background txn/session sweeper + richer expiry metrics (always-spawn;
-0→>0 without restart); BROKER Describe/AlterConfigs with durable restart
-restore). Still deferred: multi-language clients, full chaos-mesh suites,
+0→>0 without restart); BROKER Describe/AlterConfigs with **sparse** durable
+restart restore). Still deferred: multi-language clients, full chaos-mesh suites,
 cargo-fuzz corpus CI, multi-broker session affinity, multi-broker 2PC,
-empty-AddPartitions control markers, marker GC, sparse durable config,
-BROKER name=`node_id`, graceful sweeper join on stop.
+empty-AddPartitions control markers, marker GC, BROKER name=`node_id`,
+graceful sweeper join on stop.
 Details: [docs/KAFKA_COMPAT.md](./docs/KAFKA_COMPAT.md), [docs/ops.md](./docs/ops.md).

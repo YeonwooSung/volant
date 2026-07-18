@@ -19,7 +19,7 @@
 - Graceful sweeper shutdown / join on server stop (still fire-and-forget)
 - Multi-broker coordinated clocks / multi-broker 2PC
 - Multi-lang clients / fuzz CI
-- Sparse durable config / BROKER name=`node_id` validation
+- Sparse durable config → **closed by Phase 102** / BROKER name=`node_id` validation
 - Marker GC / empty-AddPartitions control markers
 - Full Kafka broker catalog
 
@@ -70,7 +70,7 @@ start_background_tasks:
 | Env `VOLANT_SWEEP_INTERVAL_MS` | At construction |
 | Durable file (Phase 100) | After env |
 | `Broker::set_sweep_interval_ms` | Process-local Atomic (no auto-persist) |
-| Alter / IncrementalAlter BROKER | Live + durable snapshot (Phase 99–100) |
+| Alter / IncrementalAlter BROKER | Live + sparse durable overlay (Phase 99–102) |
 | **`0`** | **Pause** background work (lazy remains) |
 
 ## Exit criteria
@@ -104,7 +104,7 @@ start_background_tasks:
 
 - Graceful sweeper shutdown / join on server stop
 - Validate BROKER resource name against `node_id`
-- Sparse durable file (only keys differing from product default)
+- Sparse durable file (only keys differing from product default) → **closed by Phase 102**
 - Marker compaction / GC with DeleteRecords
 - Multi-broker config broadcast / multi-broker 2PC
 - Multi-lang clients / cargo-fuzz corpus CI

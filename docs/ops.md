@@ -147,16 +147,17 @@ volant-server \
   env `zstd` maps to lz4 for Fetch v0–3. Log storage remains uncompressed.
 - **Topic config keys** (Describe/AlterConfigs TOPIC): `retention.ms`,
   `retention.bytes`, `segment.bytes`, `cleanup.policy` (`delete`|`compact`).
-- **Broker config keys** (Describe/AlterConfigs BROKER, Phase 99–100):
+- **Broker config keys** (Describe/AlterConfigs BROKER, Phase 99–102):
   `transaction.max.timeout.ms` (Kafka name),
   `volant.open.transaction.timeout.ms`,
   `volant.prepared.transaction.timeout.ms`,
   `volant.fetch.session.idle.ms`, `volant.fetch.session.max`,
-  `volant.sweep.interval.ms`. Precedence: product default → env → durable
-  `{data_dir}/__broker_config/state.json` → runtime alter. Alter/Incremental
-  SET/DELETE map to the same setters; successful non-validate_only writes a
-  full snapshot (atomic); DELETE restores product defaults **and** updates the
-  file so restart does not re-apply a prior alter.
+  `volant.sweep.interval.ms`. Precedence: product default → env → **sparse**
+  durable `{data_dir}/__broker_config/state.json` (only keys present) → runtime
+  alter. Alter/Incremental SET/DELETE map to the same setters; successful
+  non-validate_only **merges only altered keys** (atomic); DELETE restores
+  product defaults live **and removes the key from the file** so env can
+  re-apply on restart (Phase 102).
 - **Transactions / isolation:** write-through + soft abort markers (Phase 86) +
   EndTxn control batches on finalize (Phase 89) + prepared 2PC MVP (Phase 90) +
   prepared timeout auto-abort (Phase 92, default 60s,
@@ -263,9 +264,9 @@ specs. Ops-critical notes only:
 | Consumer lag | Metrics + `volant group lag` |
 | Groups | list / describe / delete-offsets; static membership `group_instance_id` |
 | Topic configs | `retention.ms` / `retention.bytes` / `segment.bytes` / `cleanup.policy` |
-| Broker configs (Phase 99–100) | BROKER Describe/Alter: `transaction.max.timeout.ms` + `volant.*` open/prepared/session/sweep; durable under `__broker_config/state.json` |
+| Broker configs (Phase 99–102) | BROKER Describe/Alter: `transaction.max.timeout.ms` + `volant.*` open/prepared/session/sweep; **sparse** durable under `__broker_config/state.json` (only altered keys; DELETE unfreezes env) |
 | DeleteRecords | Truncates sealed segments; no follower fan-out |
-| Transactions (shipped) | **Write-through + soft markers** (Phase 86) + **control batches** on EndTxn finalize (Phase 89) + **prepared 2PC MVP** (Phase 90) + **prepared timeout** (Phase 92, default 60s / `VOLANT_PREPARED_TXN_TIMEOUT_MS`) + **open timeout** (Phase 93, InitProducerId / `VOLANT_OPEN_TXN_TIMEOUT_MS`) + **max timeout clamp** (Phase 96, default 15m / `VOLANT_TRANSACTION_MAX_TIMEOUT_MS`; Init **50** over-max) + **background sweeper** (Phase 97/101, default 1s / `VOLANT_SWEEP_INTERVAL_MS`; `0` = pause bg; always-spawn so 0→>0 without restart) + **BROKER config surface** (Phase 99) + **durable restart** (Phase 100); LSO/aborted filtering; open crash≡abort; prepared durable under `__txn_prepared` until complete or timeout |
+| Transactions (shipped) | **Write-through + soft markers** (Phase 86) + **control batches** on EndTxn finalize (Phase 89) + **prepared 2PC MVP** (Phase 90) + **prepared timeout** (Phase 92, default 60s / `VOLANT_PREPARED_TXN_TIMEOUT_MS`) + **open timeout** (Phase 93, InitProducerId / `VOLANT_OPEN_TXN_TIMEOUT_MS`) + **max timeout clamp** (Phase 96, default 15m / `VOLANT_TRANSACTION_MAX_TIMEOUT_MS`; Init **50** over-max) + **background sweeper** (Phase 97/101, default 1s / `VOLANT_SWEEP_INTERVAL_MS`; `0` = pause bg; always-spawn so 0→>0 without restart) + **BROKER config surface** (Phase 99) + **sparse durable restart** (Phase 100/102); LSO/aborted filtering; open crash≡abort; prepared durable under `__txn_prepared` until complete or timeout |
 | mTLS | Feature `tls`; `--tls-client-ca` / optional `--tls-client-allow` |
 | ACLs | `--acl-enable`; durable `__acls/acls.json`; User resource is Kafka admin store-only |
 | Compaction | `cleanup.policy=compact` on **sealed** segments; empty value = tombstone |

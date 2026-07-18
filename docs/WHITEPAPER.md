@@ -6,7 +6,7 @@
 |---|---|
 | Version | 0.1.0 (Apache-2.0) |
 | Language | Rust 1.75+ |
-| Status | Phases 0–92 landed (product / git HEAD) |
+| Status | Phases 0–102 landed (product / git HEAD) |
 | Date | 2026-07-18 |
 
 ---
@@ -26,7 +26,8 @@ Kafka-style COMMIT/ABORT control batches on EndTxn (Phase 89) and crash≡abort
 open promote (Phase 98), prepared 2PC MVP (Phase 90) with prepared timeout
 auto-abort (Phase 92), open-txn timeout (Phase 93), broker max timeout clamp
 (Phase 96), background txn/session sweeper + expiry metrics (Phase 97; always-spawn
-/ 0→>0 live Phase 101), durable OffsetForLeaderEpoch history (Phase 87 MVP),
+/ 0→>0 live Phase 101), BROKER Describe/AlterConfigs with sparse durable restart
+(Phase 99–102), durable OffsetForLeaderEpoch history (Phase 87 MVP),
 Fetch DivergingEpoch + process-local fetch sessions (Phase 88 MVP),
 omit-unchanged incremental session responses (Phase 91 MVP), and session idle
 TTL / max concurrent sessions with lazy LRU eviction (Phase 95 MVP).
@@ -252,7 +253,8 @@ prepared/open timeout auto-abort (Phase 92/93) + broker max timeout clamp
 (Phase 96; default 15m; Init **50**) + background sweeper + expiry metrics
 (Phase 97/101) + crash≡abort ABORT control batches (Phase 98) + honest
 `TRANSACTION_ABORTABLE` (123) after timeout on Produce/EndTxn/Add*/TxnOffsetCommit
-(Phase 94; FindCoordinator never); ApiVersions 0–5 with empty feature tags and
+(Phase 94; FindCoordinator never); BROKER Describe/AlterConfigs sparse durable
+(Phase 99–102); ApiVersions 0–5 with empty feature tags and
 ignored v5 ClusterId/NodeId (never `REBOOTSTRAP_REQUIRED`); Fetch **0–18**
 (Kafka max) with DivergingEpoch + omit-unchanged sessions + idle TTL/max
 (Phase 88/91/95); ACL admin **0–3** (User resource storage only); write-through
