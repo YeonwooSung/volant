@@ -346,7 +346,7 @@ Binding: **[docs/PHASE7_SPEC.md](./docs/PHASE7_SPEC.md)**. Ops runbook: **[docs/
 - [ ] Kafka protocol compatibility shim — **deferred**
 - [ ] Full chaos mesh (partition loss, disk full, slow disk) — **deferred** (protocol chaos only)
 - [ ] SCRAM / full SASL — **deferred** (mTLS identity mapping: **Phase 19**)
-- [ ] Security audit with `cargo fuzz` corpus CI — **deferred** (deterministic chaos tests ship now)
+- [ ] Security audit with `cargo fuzz` corpus CI — **deferred** as full audit/long campaigns; deterministic chaos + **corpus smoke CI MVP closed by Phase 112**
 
 **Honest limitations (Phase 7):** Metrics endpoint auth deferred then closed by **Phase 21** (`--metrics-token`). Inter-broker TLS was deferred to Phase 9 (now available when server TLS is enabled).
 
@@ -381,7 +381,9 @@ Binding: **[docs/PHASE9_SPEC.md](./docs/PHASE9_SPEC.md)**.
 - [x] `fuzz/` cargo-fuzz targets (`decode_frame`, `decode_request`) + expanded deterministic chaos tests
 - [x] Docs: ops.md, deploy README, ROADMAP honesty
 
-**Still deferred:** Kafka shim, multi-lang clients, SCRAM, mTLS identity, full cargo-fuzz corpus CI.
+**Still deferred:** Kafka shim, multi-lang clients, SCRAM, mTLS identity;
+full cargo-fuzz corpus CI → **closed (MVP) by Phase 112** (seed smoke + CI;
+long campaigns still deferred).
 
 ---
 
@@ -2546,9 +2548,10 @@ Binding: **[docs/PHASE109_SPEC.md](./docs/PHASE109_SPEC.md)**.
 **Honest limitations:** connections aborted (not half-closed); no-op second
 handle cannot stop first-flight tasks; multi-broker 2PC still deferred.
 
-**Still deferred:** multi-lang clients, cargo-fuzz corpus CI, multi-broker 2PC /
-session affinity / durable sessions, multi-broker BROKER config fan-out,
-non-controller alive-set auto-death → **closed by Phase 110**, straddle marker clip → **closed by Phase 111**.
+**Still deferred:** multi-lang clients, cargo-fuzz corpus CI → **closed (MVP) by
+Phase 112**, multi-broker 2PC / session affinity / durable sessions,
+multi-broker BROKER config fan-out, non-controller alive-set auto-death →
+**closed by Phase 110**, straddle marker clip → **closed by Phase 111**.
 
 ---
 
@@ -2569,9 +2572,9 @@ Binding: **[docs/PHASE110_SPEC.md](./docs/PHASE110_SPEC.md)**.
 **Honest limitations:** controller remains membership SoT (no peer gossip);
 assignment/Metadata ISR may lag until ClusterState; rejoin/ISR expand unchanged.
 
-**Still deferred:** multi-lang clients, cargo-fuzz corpus CI, multi-broker 2PC /
-session affinity / durable sessions, multi-broker BROKER config fan-out,
-straddle marker clip → **closed by Phase 111**.
+**Still deferred:** multi-lang clients, cargo-fuzz corpus CI → **closed (MVP) by
+Phase 112**, multi-broker 2PC / session affinity / durable sessions,
+multi-broker BROKER config fan-out, straddle marker clip → **closed by Phase 111**.
 
 ---
 
@@ -2593,8 +2596,35 @@ Binding: **[docs/PHASE111_SPEC.md](./docs/PHASE111_SPEC.md)**.
 **Honest limitations:** whole-segment DeleteRecords only; control batches on
 the log are not rewritten; no dedicated clip metric; single-node marker store.
 
-**Still deferred:** multi-lang clients, cargo-fuzz corpus CI, multi-broker 2PC /
-session affinity / durable sessions, multi-broker BROKER config fan-out.
+**Still deferred:** multi-lang clients, cargo-fuzz corpus CI → **closed (MVP) by
+Phase 112**, multi-broker 2PC / session affinity / durable sessions,
+multi-broker BROKER config fan-out; long fuzz campaigns / chaos-mesh remain open.
+
+---
+
+### Phase 112 — cargo-fuzz corpus smoke + CI (MVP) ✅
+
+**Goal:** Close the long-deferred “cargo-fuzz corpus CI” gap with a practical
+MVP: checked-in seed corpus, deterministic unit-test seed replay (same decode
+paths as `fuzz/` targets), GitHub Actions workflow, and a short optional local
+`cargo fuzz` helper. No multi-hour CI campaigns.
+
+Binding: **[docs/PHASE112_SPEC.md](./docs/PHASE112_SPEC.md)**.
+
+- [x] Inventory `fuzz/` targets + protocol chaos unit tests
+- [x] Seed corpus under `fuzz/corpus/{decode_frame,decode_request}/`
+- [x] `corpus_smoke_decode_paths` in `volant-protocol` (built-in + on-disk seeds)
+- [x] `.github/workflows/ci.yml` — workspace tests + explicit corpus smoke
+- [x] `scripts/fuzz_corpus_smoke.sh` + `fuzz/README.md` (CI vs local paths)
+- [x] Living docs / ROADMAP honesty
+
+**Honest limitations:** seed replay only on CI (no libFuzzer mutation loop);
+native protocol only; not a security audit; chaos-mesh / multi-hour campaigns
+still deferred.
+
+**Still deferred:** multi-lang clients, chaos-mesh / long fuzz campaigns,
+multi-broker 2PC / session affinity / durable sessions, multi-broker BROKER
+config fan-out, Kafka wire fuzz targets.
 
 ---
 
@@ -2625,14 +2655,15 @@ session affinity / durable sessions, multi-broker BROKER config fan-out.
 | Goal | Full ecosystem | Subset that is fast, small, and correct |
 
 Volant is **not** a drop-in Kafka replacement. It prioritizes a clean core; the
-optional Kafka wire shim is **shipped** (Phases 23–109; cluster ISR death 108/110; marker clip 111) — see
+optional Kafka wire shim is **shipped** (Phases 23–109; cluster ISR death 108/110;
+marker clip 111; fuzz corpus smoke CI 112) — see
 [docs/KAFKA_COMPAT.md](./docs/KAFKA_COMPAT.md).
 
 ---
 
 ## Suggested implementation order (PRs)
 
-Phases **0–111 are shipped**. Historical PR order for the core:
+Phases **0–112 are shipped**. Historical PR order for the core:
 
 1. Phase 1 segment format + unit tests  
 2. Phase 1 recovery + retention  
@@ -2646,6 +2677,7 @@ Phases **0–111 are shipped**. Historical PR order for the core:
 10. Phase 7 metrics, TLS, packaging ✅  
 11. Phases 8–22 (redirect, groups, configs, txns, mTLS, ACLs, SCRAM) ✅  
 12. Phases 23–111 (Kafka wire shim + marker GC/clip + empty-AddPartitions control + bg shutdown join + phase103 flake fix + follower-death ISR + accept drain / single-flight bg + non-controller alive-set death + straddle marker clip) ✅  
+13. Phase 112 (cargo-fuzz corpus smoke + CI MVP) ✅  
 
 ---
 
@@ -2686,7 +2718,7 @@ cargo run -p volant-bench --release
 cargo test --workspace
 ```
 
-**Status (post–Phase 111):** core broker, ops (metrics / TLS / auth / SCRAM /
+**Status (post–Phase 112):** core broker, ops (metrics / TLS / auth / SCRAM /
 ACLs / Helm), and the Kafka wire shim are **shipped** (Fetch 0–18 Kafka max;
 ACL admin 0–3 with User resource; soft-marker `READ_COMMITTED` with **marker GC/clip**
 on DeleteRecords/retention/load (Phase 104/111); durable OFLE history; Fetch DivergingEpoch +
@@ -2698,8 +2730,9 @@ without restart; **graceful shutdown/join** Phase 106; **accept-loop drain +
 single-flight bg** Phase 109); BROKER Describe/AlterConfigs
 with **sparse** durable restart restore and resource name empty-or-local-`node_id`
 (Phase 103; **parallel test isolation** Phase 107); **follower-death ISR shrink +
-HWM recompute** Phase 108; **non-controller alive-set auto-death** Phase 110; **straddle soft-marker clip** Phase 111).
-Still deferred: multi-language clients, full chaos-mesh suites, cargo-fuzz corpus
-CI, multi-broker session affinity, multi-broker 2PC, multi-broker BROKER config
-fan-out.
+HWM recompute** Phase 108; **non-controller alive-set auto-death** Phase 110; **straddle soft-marker clip** Phase 111;
+**cargo-fuzz corpus smoke + CI MVP** Phase 112).
+Still deferred: multi-language clients, full chaos-mesh suites / long fuzz
+campaigns, multi-broker session affinity, multi-broker 2PC, multi-broker BROKER
+config fan-out.
 Details: [docs/KAFKA_COMPAT.md](./docs/KAFKA_COMPAT.md), [docs/ops.md](./docs/ops.md).

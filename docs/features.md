@@ -16,7 +16,7 @@ shim: [KAFKA_COMPAT.md](./KAFKA_COMPAT.md).
 | Inter-broker TLS | On by default when server TLS enabled (Phase 9) |
 | Leader redirect | Client refreshes Metadata + reconnects on `NotLeaderForPartition` |
 | Deploy | Docker, compose, systemd, Helm (single or multi-node) |
-| Fuzz scaffold | `fuzz/` targets for frame/request decode |
+| Fuzz scaffold | `fuzz/` targets for frame/request decode; corpus smoke + CI (Phase 112) |
 
 ## Reliability (10–11)
 
@@ -101,6 +101,7 @@ workers.
 ## Open limitations (native)
 
 - Multi-language clients deferred  
+- Long fuzz campaigns / chaos-mesh deferred (corpus smoke CI MVP: Phase 112)  
 - No Raft metadata / dynamic membership  
 - Crash≡abort control batches yes (Phase 98); empty AddPartitions control yes (Phase 105)  
 - Prepared 2PC is single-node MVP (no multi-broker txn log); prepared timeout yes (Phase 92); open-txn timeout yes (Phase 93); TRANSACTION_ABORTABLE honest subset after timeout (Phase 94; FindCoordinator never); transaction max timeout clamp yes (Phase 96; default 15m; Init **50** over-max) 

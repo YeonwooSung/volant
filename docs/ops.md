@@ -255,10 +255,30 @@ Deploys a StatefulSet, headless Service, and ConfigMap `cluster.toml`
 (`node-id = ordinal + 1`). Single-node Deployment remains the default
 (`cluster.enabled=false`).
 
-## Protocol fuzz (optional)
+## Protocol fuzz + corpus smoke (Phase 9 / 112)
 
-Deterministic chaos tests always run with `cargo test -p volant-protocol`.
-Optional nightly: see [fuzz/README.md](../fuzz/README.md).
+Deterministic chaos tests always run with `cargo test -p volant-protocol`
+(`chaos_decode_does_not_panic`, `chaos_frame_decode_extended`).
+
+**Phase 112 CI path (stable, no nightly):**
+
+```bash
+cargo test --workspace --all-targets
+cargo test -p volant-protocol corpus_smoke
+# or
+./scripts/fuzz_corpus_smoke.sh test
+```
+
+Seed corpus: `fuzz/corpus/{decode_frame,decode_request}/`. GitHub Actions:
+[`.github/workflows/ci.yml`](../.github/workflows/ci.yml).
+
+**Optional local cargo-fuzz** (nightly; short capped runs only):
+
+```bash
+FUZZ_SMOKE_RUNS=200 ./scripts/fuzz_corpus_smoke.sh fuzz
+```
+
+Details: [fuzz/README.md](../fuzz/README.md), [PHASE112_SPEC.md](./PHASE112_SPEC.md).
 
 ## Native features after core (Phases 8–22)
 
@@ -299,12 +319,14 @@ curl -s -H "Authorization: Bearer $VOLANT_METRICS_TOKEN" \
 ## Still deferred
 
 - Multi-language clients
-- Full chaos-mesh suites / cargo-fuzz **corpus CI** (scaffold under `fuzz/` only)
+- Full chaos-mesh suites / long fuzz campaigns (corpus **smoke CI MVP** → **closed by Phase 112**)
 - Full multi-broker 2PC / full KIP-890 abortable surface
 - Multi-broker session affinity / durable sessions
 - Byte-identical Kafka compressed response cache (omit is HWM+LSO based)
 - Accept-loop drain + single-flight background tasks → **closed by Phase 109** (bg join: Phase 106)
 - Non-controller alive-set auto-death → **closed by Phase 110**
+- Straddle soft-marker clip → **closed by Phase 111**
+- cargo-fuzz corpus smoke + CI MVP → **closed by Phase 112**
 
 Full list: [ROADMAP.md](../ROADMAP.md).
 

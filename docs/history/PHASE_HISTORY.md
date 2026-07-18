@@ -153,13 +153,14 @@ docs for day-to-day reading: [ops](../ops.md), [consistency](../consistency.md),
 | 109 | ✅ | Accept-loop drain + single-flight `start_background_tasks` (MVP) | [PHASE109_SPEC.md](../PHASE109_SPEC.md) |
 | 110 | ✅ | Non-controller auto-death from heartbeat alive-set diffs (MVP) | [PHASE110_SPEC.md](../PHASE110_SPEC.md) |
 | 111 | ✅ | Clip straddling soft abort markers to log_start (MVP) | [PHASE111_SPEC.md](../PHASE111_SPEC.md) |
+| 112 | ✅ | cargo-fuzz corpus smoke + CI (MVP) | [PHASE112_SPEC.md](../PHASE112_SPEC.md) |
 
 ---
 
-## Still deferred (post–Phase 111)
+## Still deferred (post–Phase 112)
 
 - Multi-language clients
-- Chaos-mesh / cargo-fuzz corpus CI
+- Chaos-mesh / long fuzz campaigns (corpus **smoke CI** → **closed by Phase 112**)
 - Full multi-broker 2PC coordinator / full KIP-890 abortable surface
 - Multi-broker session affinity / durable sessions / byte-identical response cache
 - Full KRaft epoch state machine / remote-log epochs
@@ -169,3 +170,4 @@ docs for day-to-day reading: [ops](../ops.md), [consistency](../consistency.md),
 - Single-flight / idempotent `start_background_tasks` → **closed by Phase 109**
 - Non-controller auto-death from alive-set diffs → **closed by Phase 110**
 - Straddle marker clip → **closed by Phase 111**
+- cargo-fuzz corpus smoke + CI MVP → **closed by Phase 112**

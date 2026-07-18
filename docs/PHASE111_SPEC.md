@@ -21,7 +21,7 @@
 - Splitting one marker into multiple markers
 - Multi-broker marker consensus / fan-out
 - Separate clip metric (optional later; not required for MVP)
-- Multi-lang clients / fuzz CI / multi-broker 2PC
+- Multi-lang clients / multi-broker 2PC (fuzz corpus CI → Phase 112)
 
 ## Problem (Phase 104 honesty gap)
 
@@ -111,7 +111,8 @@ Regression: `phase104_marker_gc` remains green (full drop / retain / load heal).
 
 ## Still deferred after this
 
-- Multi-broker 2PC / multi-lang / fuzz CI
+- Multi-broker 2PC / multi-lang (fuzz corpus CI → **closed by Phase 112**)
 - Multi-broker BROKER config fan-out
 - Session affinity / durable sessions
 - Control-batch log rewrite / compaction
+- Chaos-mesh / long fuzz campaigns

@@ -3108,4 +3108,187 @@ mod tests {
             let _ = crate::codec::decode_frame(&mut buf);
         }
     }
+
+    /// Phase 112: deterministic corpus smoke — same decode paths as `fuzz/`
+    /// targets (`decode_frame`, `decode_request`). Must never panic.
+    ///
+    /// Loads seed files under `{workspace}/fuzz/corpus/{target}/` when present,
+    /// and always exercises a built-in seed set so CI stays green without
+    /// cargo-fuzz / nightly.
+    #[test]
+    fn corpus_smoke_decode_paths() {
+        use crate::codec::{checksum, encode_frame, decode_frame};
+        use crate::frame::{Frame, FrameHeader, FRAME_MAGIC, PROTOCOL_VERSION};
+        use std::path::PathBuf;
+
+        // Mirror fuzz_targets/decode_frame.rs
+        fn smoke_frame(data: &[u8]) {
+            let mut buf = BytesMut::from(data);
+            let _ = decode_frame(&mut buf);
+            let _ = decode_frame(&mut buf);
+        }
+
+        // Mirror fuzz_targets/decode_request.rs
+        fn smoke_request(data: &[u8]) {
+            if data.is_empty() {
+                return;
+            }
+            let opcode = u16::from_le_bytes([data[0], data.get(1).copied().unwrap_or(0)]);
+            let payload = if data.len() > 2 { &data[2..] } else { &[] };
+            let _ = decode_request(opcode, payload);
+            let _ = decode_response(opcode, payload);
+        }
+
+        // Built-in seeds (always run; keep in sync with fuzz/corpus/*).
+        let mut frame_seeds: Vec<Vec<u8>> = vec![
+            vec![],
+            b"V\x01\x00".to_vec(),
+            vec![0u8; 16],
+            {
+                // wrong version
+                let mut v = vec![0u8; 16];
+                v[0] = FRAME_MAGIC;
+                v[1] = 0xFF;
+                v
+            },
+            {
+                let payload = bytes::Bytes::from_static(b"");
+                let frame = Frame {
+                    header: FrameHeader {
+                        version: PROTOCOL_VERSION,
+                        opcode: 4,
+                        correlation_id: 7,
+                        payload_len: 0,
+                        checksum: checksum(&payload),
+                    },
+                    payload,
+                };
+                let mut buf = BytesMut::new();
+                encode_frame(&frame, &mut buf).unwrap();
+                buf.to_vec()
+            },
+            {
+                let payload = bytes::Bytes::from_static(b"ping");
+                let frame = Frame {
+                    header: FrameHeader {
+                        version: PROTOCOL_VERSION,
+                        opcode: 1,
+                        correlation_id: 42,
+                        payload_len: payload.len() as u32,
+                        checksum: checksum(&payload),
+                    },
+                    payload,
+                };
+                let mut buf = BytesMut::new();
+                encode_frame(&frame, &mut buf).unwrap();
+                buf.to_vec()
+            },
+            {
+                // max-size claim, truncated body
+                let mut v = vec![0u8; 16];
+                v[0] = FRAME_MAGIC;
+                v[1] = PROTOCOL_VERSION;
+                v[8..12].copy_from_slice(&0x0100_0000u32.to_be_bytes()); // 16 MiB claim
+                v
+            },
+            {
+                let payload = bytes::Bytes::from_static(b"ok");
+                let frame = Frame {
+                    header: FrameHeader {
+                        version: PROTOCOL_VERSION,
+                        opcode: 1,
+                        correlation_id: 1,
+                        payload_len: payload.len() as u32,
+                        checksum: checksum(&payload),
+                    },
+                    payload,
+                };
+                let mut buf = BytesMut::new();
+                encode_frame(&frame, &mut buf).unwrap();
+                buf.extend_from_slice(&[0xDE, 0xAD, 0xBE, 0xEF]);
+                buf.to_vec()
+            },
+            {
+                let mut v = vec![FRAME_MAGIC];
+                v.extend(0u8..64);
+                v
+            },
+        ];
+
+        let mut request_seeds: Vec<Vec<u8>> = vec![
+            vec![],
+            vec![0x01],
+            1u16.to_le_bytes().to_vec(),
+            2u16.to_le_bytes().to_vec(),
+            {
+                let mut v = 0xFFFFu16.to_le_bytes().to_vec();
+                v.extend_from_slice(&[0u8; 8]);
+                v
+            },
+            {
+                let mut v = 1u16.to_le_bytes().to_vec();
+                v.extend_from_slice(&100u16.to_le_bytes());
+                v.extend_from_slice(b"ab");
+                v
+            },
+            vec![0xff; 64],
+            vec![0u8; 256],
+            {
+                // length-prefixed "flexible-ish" fields
+                let mut v = 3u16.to_le_bytes().to_vec();
+                v.extend_from_slice(&5u16.to_le_bytes());
+                v.extend_from_slice(b"topic");
+                v.extend_from_slice(&3u32.to_le_bytes());
+                v.extend_from_slice(&0u16.to_le_bytes());
+                v
+            },
+            {
+                let mut v = 1u16.to_le_bytes().to_vec();
+                v.extend_from_slice(&0xFFFFu16.to_le_bytes());
+                v.push(b'x');
+                v
+            },
+        ];
+
+        // Load on-disk corpus when present (workspace root = two levels above crate).
+        let workspace = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("../..")
+            .canonicalize()
+            .ok();
+        if let Some(root) = workspace {
+            for (subdir, sink) in [
+                ("fuzz/corpus/decode_frame", &mut frame_seeds),
+                ("fuzz/corpus/decode_request", &mut request_seeds),
+            ] {
+                let dir = root.join(subdir);
+                if let Ok(entries) = std::fs::read_dir(&dir) {
+                    for ent in entries.flatten() {
+                        let path = ent.path();
+                        if path.is_file() {
+                            if let Ok(bytes) = std::fs::read(&path) {
+                                sink.push(bytes);
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        assert!(
+            !frame_seeds.is_empty() && !request_seeds.is_empty(),
+            "corpus smoke requires built-in seeds"
+        );
+
+        for seed in &frame_seeds {
+            smoke_frame(seed);
+        }
+        for seed in &request_seeds {
+            smoke_request(seed);
+        }
+
+        // Explicit MAX_PAYLOAD+1 rejection still non-panicking.
+        let huge = vec![0u8; MAX_PAYLOAD + 1];
+        assert!(decode_request(1, &huge).is_err());
+        assert!(decode_response(1, &huge).is_err());
+    }
 }
