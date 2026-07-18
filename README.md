@@ -9,7 +9,7 @@ Volant is a resource-efficient alternative to Apache Kafka, built for:
 - **Streaming processing** — first-class operators (`map`, `filter`, windows) without a heavy runtime
 - **Small footprint** — native binary, predictable memory, simple operations
 
-> Status: **Phases 0–102 landed** — durable log, clustering, security, stream
+> Status: **Phases 0–103 landed** — durable log, clustering, security, stream
 > operators, and a broad optional Kafka wire shim (classic + flexible;
 > ApiVersions 0–5; Fetch 0–18; ACL admin 0–3; TRANSACTION_ABORTABLE subset;
 > fetch session TTL/max; broker Describe/AlterConfigs for txn/session/sweep
@@ -144,16 +144,16 @@ static ISR). Later work is summarized by band — full chronicle in
 | Ops / packaging | 7–9 | Metrics, token auth, TLS, Helm multi-node, client leader redirect |
 | Native reliability | 10–17 | Idempotence, sticky/cooperative groups, topic configs, compaction |
 | Txns & security | 18–22, **86** | Write-through txns + soft READ_COMMITTED (LSO/aborted); mTLS, ACLs, SCRAM |
-| Kafka wire shim | 23–102 | Optional `--kafka-listen`; classic + flexible; **~38** keys; prepared 2PC (**90**) + timeouts (**92**/open **93**/max **96**); omit-unchanged sessions (**91**); session TTL/max (**95**); bg sweeper + metrics (**97**/always-spawn **101**); crash≡abort control batches (**98**); broker Describe/AlterConfigs knobs (**99**) + sparse durable restart (**100**/ **102**) |
+| Kafka wire shim | 23–103 | Optional `--kafka-listen`; classic + flexible; **~38** keys; prepared 2PC (**90**) + timeouts (**92**/open **93**/max **96**); omit-unchanged sessions (**91**); session TTL/max (**95**); bg sweeper + metrics (**97**/always-spawn **101**); crash≡abort control batches (**98**); broker Describe/AlterConfigs knobs (**99**) + sparse durable restart (**100**/ **102**) + name vs `node_id` (**103**) |
 
 **Kafka ceilings (code SoT):** ApiVersions **0–5**, Fetch **0–18**, Produce/Metadata
 **0–13**, ACL admin **0–3** (User resource v3, store-only); Fetch isolation
-READ_COMMITTED MVP (Phase 86); durable OffsetForLeaderEpoch history (Phase 87); Fetch DivergingEpoch + real fetch sessions MVP (Phase 88); Kafka control batches on EndTxn (Phase 89) and crash≡abort open promote (Phase 98); prepared 2PC MVP (Phase 90); omit-unchanged incremental sessions (Phase 91); prepared timeout auto-abort (Phase 92); open-txn timeout (Phase 93); fetch session idle TTL + max/LRU (Phase 95); transaction max timeout clamp (Phase 96); background txn/session sweeper + metrics (Phase 97; always-spawn / 0→>0 live Phase 101); BROKER Describe/AlterConfigs for txn/session/sweep knobs (Phase 99) with **sparse** durable restart restore (Phase 100/102).
+READ_COMMITTED MVP (Phase 86); durable OffsetForLeaderEpoch history (Phase 87); Fetch DivergingEpoch + real fetch sessions MVP (Phase 88); Kafka control batches on EndTxn (Phase 89) and crash≡abort open promote (Phase 98); prepared 2PC MVP (Phase 90); omit-unchanged incremental sessions (Phase 91); prepared timeout auto-abort (Phase 92); open-txn timeout (Phase 93); fetch session idle TTL + max/LRU (Phase 95); transaction max timeout clamp (Phase 96); background txn/session sweeper + metrics (Phase 97; always-spawn / 0→>0 live Phase 101); BROKER Describe/AlterConfigs for txn/session/sweep knobs (Phase 99) with **sparse** durable restart restore (Phase 100/102) and resource name empty-or-`node_id` (Phase 103).
 Matrix + honesty: [docs/KAFKA_COMPAT.md](./docs/KAFKA_COMPAT.md).
 
 **Still deferred:** multi-language clients, chaos-mesh / cargo-fuzz corpus CI,
 multi-broker 2PC parity, multi-broker session affinity, empty-AddPartitions
-control markers, marker GC, BROKER name=`node_id`, graceful sweeper join on stop.
+control markers, marker GC, multi-broker BROKER config fan-out, graceful sweeper join on stop.
 
 ### Networked client (library)
 

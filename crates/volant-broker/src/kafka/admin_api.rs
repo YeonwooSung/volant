@@ -756,6 +756,21 @@ fn unsupported_config_resource_msg() -> &'static str {
     "only TOPIC and BROKER resources supported"
 }
 
+/// Phase 103: BROKER resource name is accepted when empty (cluster-default style)
+/// or equal to this process's `node_id` as a decimal string.
+///
+/// Other non-empty names are rejected with `INVALID_REQUEST` — local validation
+/// only (no multi-broker fan-out).
+fn broker_resource_name_matches(node_id: u32, name: &str) -> bool {
+    name.is_empty() || name == node_id.to_string()
+}
+
+fn invalid_broker_resource_name_msg(node_id: u32) -> String {
+    format!(
+        "BROKER resource name must be empty or \"{node_id}\" (this broker's node_id)"
+    )
+}
+
 pub(crate) fn encode_describe_configs(
     broker: &Broker,
     src: &mut impl Buf,
@@ -897,6 +912,19 @@ pub(crate) fn encode_describe_configs(
 
         if r.rtype == RES_BROKER {
             // Phase 99: BROKER resource — txn/session/sweep knobs.
+            // Phase 103: name must be empty or this broker's node_id decimal.
+            if !broker_resource_name_matches(broker.node_id(), &r.name) {
+                let msg = invalid_broker_resource_name_msg(broker.node_id());
+                write_header(
+                    out,
+                    KafkaErrorCode::InvalidRequest,
+                    Some(&msg),
+                    r.rtype,
+                    &r.name,
+                );
+                write_empty_configs(out);
+                continue;
+            }
             if broker.acls().is_enabled()
                 && !broker.acls().authorize(
                     Some(principal),
@@ -1211,7 +1239,17 @@ pub(crate) fn encode_alter_configs(
     }
     for r in resources {
         let (code, msg): (i16, Option<String>) = match r.rtype {
-            RES_BROKER => alter_broker_resource(broker, principal, &r.entries, validate_only),
+            RES_BROKER => {
+                // Phase 103: name must be empty or this broker's node_id decimal.
+                if !broker_resource_name_matches(broker.node_id(), &r.name) {
+                    (
+                        KafkaErrorCode::InvalidRequest.as_i16(),
+                        Some(invalid_broker_resource_name_msg(broker.node_id())),
+                    )
+                } else {
+                    alter_broker_resource(broker, principal, &r.entries, validate_only)
+                }
+            }
             RES_TOPIC => {
                 if broker.acls().is_enabled()
                     && !broker.acls().authorize(
@@ -1499,7 +1537,17 @@ pub(crate) fn encode_incremental_alter_configs(
             (KafkaErrorCode::InvalidConfig.as_i16(), Some(msg))
         } else {
             match r.rtype {
-                RES_BROKER => alter_broker_resource(broker, principal, &r.entries, validate_only),
+                RES_BROKER => {
+                    // Phase 103: name must be empty or this broker's node_id decimal.
+                    if !broker_resource_name_matches(broker.node_id(), &r.name) {
+                        (
+                            KafkaErrorCode::InvalidRequest.as_i16(),
+                            Some(invalid_broker_resource_name_msg(broker.node_id())),
+                        )
+                    } else {
+                        alter_broker_resource(broker, principal, &r.entries, validate_only)
+                    }
+                }
                 RES_TOPIC => {
                     if broker.acls().is_enabled()
                         && !broker.acls().authorize(

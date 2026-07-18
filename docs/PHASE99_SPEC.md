@@ -41,7 +41,7 @@ has a clean Kafka broker name.
 | Field | Value |
 |-------|-------|
 | Kafka `ConfigResource.Type` | **BROKER = 4** |
-| Resource name | Any string accepted (single-node MVP; typically broker id as decimal). Name is **not** validated against `node_id`. |
+| Resource name | Empty **or** this broker's `node_id` decimal string (Phase 103; single-node default `"0"`). Other names → `INVALID_REQUEST`. |
 | ConfigSource (v1+) | **DYNAMIC_BROKER_CONFIG = 2** (runtime-mutable process knobs) |
 | ConfigType (v3+) | **LONG = 5** for all six keys |
 | is_default (v0) | `1` when current value equals **product** default (table above); env-at-startup does not change product default for this flag |
@@ -105,7 +105,7 @@ via `start_background_tasks` (existing Phase 97 honesty).
 
 ## Honest limitations
 
-- Single-node; resource name ignored
+- Single-node; resource name validated against local `node_id` only → **closed by Phase 103** (still no multi-broker fan-out)
 - Non-durable dynamic broker config → **closed by Phase 100** (six knobs only)
 - Six knobs only (not full Kafka broker config catalog)
 - Empty synonyms; no synonym layering
@@ -127,7 +127,7 @@ via `start_background_tasks` (existing Phase 97 honesty).
 
 - Durable dynamic broker config file + restart restore → **closed by Phase 100**
 - Sparse durable overlay (env re-apply after DELETE) → **closed by Phase 102**
-- Validate broker resource name against `node_id`
+- Validate broker resource name against `node_id` → **closed by Phase 103**
 - Graceful sweeper enable when interval transitions 0 → >0 without process restart → **closed by Phase 101**
 - Marker compaction / GC with DeleteRecords
 - Multi-broker config broadcast

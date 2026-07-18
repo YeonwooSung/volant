@@ -186,7 +186,7 @@ async fn setter_then_describe_reflects() {
     let (addr, server) = boot_kafka(Arc::clone(&broker)).await;
     let resp = rpc(
         &addr,
-        encode_request(32, 0, 2, Some("c"), &describe_broker_body("1")),
+        encode_request(32, 0, 2, Some("c"), &describe_broker_body("0")),
     )
     .await;
     let mut src = resp.freeze();

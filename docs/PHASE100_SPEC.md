@@ -123,7 +123,7 @@ Unchanged from Phase 99 (Cluster Describe / Alter).
 ## Honest limitations
 
 - Six knobs only (not full Kafka broker catalog)
-- Single-node; resource name still ignored
+- Single-node; resource name still ignored → **closed by Phase 103** (local `node_id` check)
 - Full snapshot overrides env for all keys once any Alter has written the file
   → **closed by Phase 102** (sparse overlay)
 - Direct setters do not persist (by design for this MVP)
@@ -145,7 +145,7 @@ Unchanged from Phase 99 (Cluster Describe / Alter).
 ## Phase 101 ideas
 
 - Graceful sweeper enable when interval transitions `0 → >0` without process restart → **closed by Phase 101**
-- Validate BROKER resource name against `node_id`
+- Validate BROKER resource name against `node_id` → **closed by Phase 103**
 - Sparse durable file (only keys differing from product default) so env re-applies after DELETE → **closed by Phase 102**
 - Marker compaction / GC with DeleteRecords
 - Multi-broker config broadcast

@@ -27,7 +27,7 @@ open promote (Phase 98), prepared 2PC MVP (Phase 90) with prepared timeout
 auto-abort (Phase 92), open-txn timeout (Phase 93), broker max timeout clamp
 (Phase 96), background txn/session sweeper + expiry metrics (Phase 97; always-spawn
 / 0→>0 live Phase 101), BROKER Describe/AlterConfigs with sparse durable restart
-(Phase 99–102), durable OffsetForLeaderEpoch history (Phase 87 MVP),
+and name vs local `node_id` (Phase 99–103), durable OffsetForLeaderEpoch history (Phase 87 MVP),
 Fetch DivergingEpoch + process-local fetch sessions (Phase 88 MVP),
 omit-unchanged incremental session responses (Phase 91 MVP), and session idle
 TTL / max concurrent sessions with lazy LRU eviction (Phase 95 MVP).

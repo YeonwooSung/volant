@@ -147,12 +147,14 @@ volant-server \
   env `zstd` maps to lz4 for Fetch v0–3. Log storage remains uncompressed.
 - **Topic config keys** (Describe/AlterConfigs TOPIC): `retention.ms`,
   `retention.bytes`, `segment.bytes`, `cleanup.policy` (`delete`|`compact`).
-- **Broker config keys** (Describe/AlterConfigs BROKER, Phase 99–102):
+- **Broker config keys** (Describe/AlterConfigs BROKER, Phase 99–103):
   `transaction.max.timeout.ms` (Kafka name),
   `volant.open.transaction.timeout.ms`,
   `volant.prepared.transaction.timeout.ms`,
   `volant.fetch.session.idle.ms`, `volant.fetch.session.max`,
-  `volant.sweep.interval.ms`. Precedence: product default → env → **sparse**
+  `volant.sweep.interval.ms`. Resource **name** must be empty or this broker's
+  `node_id` decimal (default `"0"`); other names → `INVALID_REQUEST` (42)
+  (Phase 103; local only). Precedence: product default → env → **sparse**
   durable `{data_dir}/__broker_config/state.json` (only keys present) → runtime
   alter. Alter/Incremental SET/DELETE map to the same setters; successful
   non-validate_only **merges only altered keys** (atomic); DELETE restores
@@ -266,7 +268,7 @@ specs. Ops-critical notes only:
 | Topic configs | `retention.ms` / `retention.bytes` / `segment.bytes` / `cleanup.policy` |
 | Broker configs (Phase 99–102) | BROKER Describe/Alter: `transaction.max.timeout.ms` + `volant.*` open/prepared/session/sweep; **sparse** durable under `__broker_config/state.json` (only altered keys; DELETE unfreezes env) |
 | DeleteRecords | Truncates sealed segments; no follower fan-out |
-| Transactions (shipped) | **Write-through + soft markers** (Phase 86) + **control batches** on EndTxn finalize (Phase 89) + **prepared 2PC MVP** (Phase 90) + **prepared timeout** (Phase 92, default 60s / `VOLANT_PREPARED_TXN_TIMEOUT_MS`) + **open timeout** (Phase 93, InitProducerId / `VOLANT_OPEN_TXN_TIMEOUT_MS`) + **max timeout clamp** (Phase 96, default 15m / `VOLANT_TRANSACTION_MAX_TIMEOUT_MS`; Init **50** over-max) + **background sweeper** (Phase 97/101, default 1s / `VOLANT_SWEEP_INTERVAL_MS`; `0` = pause bg; always-spawn so 0→>0 without restart) + **BROKER config surface** (Phase 99) + **sparse durable restart** (Phase 100/102); LSO/aborted filtering; open crash≡abort; prepared durable under `__txn_prepared` until complete or timeout |
+| Transactions (shipped) | **Write-through + soft markers** (Phase 86) + **control batches** on EndTxn finalize (Phase 89) + **prepared 2PC MVP** (Phase 90) + **prepared timeout** (Phase 92, default 60s / `VOLANT_PREPARED_TXN_TIMEOUT_MS`) + **open timeout** (Phase 93, InitProducerId / `VOLANT_OPEN_TXN_TIMEOUT_MS`) + **max timeout clamp** (Phase 96, default 15m / `VOLANT_TRANSACTION_MAX_TIMEOUT_MS`; Init **50** over-max) + **background sweeper** (Phase 97/101, default 1s / `VOLANT_SWEEP_INTERVAL_MS`; `0` = pause bg; always-spawn so 0→>0 without restart) + **BROKER config surface** (Phase 99) + **sparse durable restart** (Phase 100/102) + **BROKER name vs `node_id`** (Phase 103); LSO/aborted filtering; open crash≡abort; prepared durable under `__txn_prepared` until complete or timeout |
 | mTLS | Feature `tls`; `--tls-client-ca` / optional `--tls-client-allow` |
 | ACLs | `--acl-enable`; durable `__acls/acls.json`; User resource is Kafka admin store-only |
 | Compaction | `cleanup.policy=compact` on **sealed** segments; empty value = tombstone |

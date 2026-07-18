@@ -17,7 +17,7 @@
 ## Non-goals
 
 - Full Kafka DynamicBrokerConfig / KRaft metadata quorum
-- BROKER name = `node_id` validation
+- BROKER name = `node_id` validation → **closed by Phase 103**
 - Marker GC / DeleteRecords / empty-AddPartitions control markers
 - Graceful sweeper join on stop
 - Multi-broker config broadcast / multi-broker 2PC / sessions
@@ -100,7 +100,7 @@ request. DELETE of a key unfreezes env for that key going forward.
 
 ## Honest limitations
 
-- Six knobs only; single-node; resource name still ignored
+- Six knobs only; single-node; resource name still ignored → **closed by Phase 103**
 - DELETE live value is still **product** default (not env) until restart —
   same Phase 99/100 live semantics
 - Direct setters do not persist
@@ -120,7 +120,7 @@ request. DELETE of a key unfreezes env for that key going forward.
 
 ## Phase 103 ideas
 
-- Validate BROKER resource name against `node_id`
+- Validate BROKER resource name against `node_id` → **closed by Phase 103**
 - Graceful sweeper shutdown / join on server stop
 - Marker compaction / GC with DeleteRecords
 - Empty-AddPartitions control markers
