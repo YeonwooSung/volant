@@ -123,7 +123,7 @@ docs for day-to-day reading: [ops](../ops.md), [consistency](../consistency.md),
 | 79 | ✅ | Group admin version bumps — List 0–5, Describe 0–6, Delete 0–3 | [PHASE79_SPEC.md](../PHASE79_SPEC.md) |
 | 80 | ✅ | CreatePartitions v3 — wire-identical to v2; no KIP-599 quotas | [PHASE80_SPEC.md](../PHASE80_SPEC.md) |
 | 81 | ✅ | FindCoordinator v5–6 — wire-identical to v4 batch; no TRANSACTION_ABORTABLE / share key_type | [PHASE81_SPEC.md](../PHASE81_SPEC.md) |
-| 82 | ✅ | AddOffsetsToTxn v4 — wire-identical to v3; no TRANSACTION_ABORTABLE | [PHASE82_SPEC.md](../PHASE82_SPEC.md) |
+| 82 | ✅ | AddOffsetsToTxn v4 — wire-identical to v3; 123 emission deferred → Phase 94 | [PHASE82_SPEC.md](../PHASE82_SPEC.md) |
 | 83 | ✅ | ApiVersions v4–5 — Kafka max; empty feature tags; v5 ClusterId/NodeId ignored | [PHASE83_SPEC.md](../PHASE83_SPEC.md) |
 | 84 | ✅ | Fetch v14–18 — Kafka max; ReplicaState ignore; NodeEndpoints v16+ | [PHASE84_SPEC.md](../PHASE84_SPEC.md) |
 | 85 | ✅ | ACL admin v3 — User resource type; Describe/Create/DeleteAcls 0–3 Kafka max | [PHASE85_SPEC.md](../PHASE85_SPEC.md) |
@@ -135,14 +135,16 @@ docs for day-to-day reading: [ops](../ops.md), [consistency](../consistency.md),
 | 91 | ✅ | Omit-unchanged incremental fetch session responses (MVP) | [PHASE91_SPEC.md](../PHASE91_SPEC.md) |
 | 92 | ✅ | Prepared transaction timeout / auto-abort (MVP) | [PHASE92_SPEC.md](../PHASE92_SPEC.md) |
 | 93 | ✅ | Open transaction timeout (InitProducerId / broker default; lazy auto-abort) | [PHASE93_SPEC.md](../PHASE93_SPEC.md) |
+| 94 | ✅ | TRANSACTION_ABORTABLE (123) honest subset after timeout auto-abort | [PHASE94_SPEC.md](../PHASE94_SPEC.md) |
 
 ---
 
-## Still deferred (post–Phase 93)
+## Still deferred (post–Phase 94)
 
 - Multi-language clients
 - Chaos-mesh / cargo-fuzz corpus CI
-- Full multi-broker 2PC coordinator / TRANSACTION_ABORTABLE
+- Full multi-broker 2PC coordinator / full KIP-890 abortable surface
 - Multi-broker session affinity / session TTL / byte-identical response cache
 - Full KRaft epoch state machine / remote-log epochs
 - Control batches for empty AddPartitions / crash open-txn without EndTxn
+- Background txn sweeper / metrics; `transaction.max.timeout.ms` clamp

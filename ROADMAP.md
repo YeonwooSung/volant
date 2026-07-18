@@ -2094,13 +2094,13 @@ Binding: **[docs/PHASE92_SPEC.md](./docs/PHASE92_SPEC.md)**.
 - [x] Sweep on InitProducerId / EndTxn / List/Describe / produce guards / LSO
 - [x] Integration tests (`phase92_prepared_timeout`)
 
-**Honest limitations:** open (non-prepared) txns still have no timeout;
-InitProducerId `transaction_timeout_ms` still ignored for open txns; lazy only
-(no background sweeper); single-node clock; no TRANSACTION_ABORTABLE.
+**Honest limitations (at ship):** open (non-prepared) txns still had no timeout
+then (closed by Phase 93); lazy only (no background sweeper); single-node clock;
+TRANSACTION_ABORTABLE closed by Phase 94.
 
-**Still deferred:** multi-lang clients, cargo-fuzz corpus CI, multi-broker 2PC /
-session affinity, session TTL, open-txn timeout → **closed by Phase 93**,
-TRANSACTION_ABORTABLE.
+**Still deferred at Phase 92 ship:** multi-lang clients, cargo-fuzz corpus CI,
+multi-broker 2PC / session affinity, session TTL, open-txn timeout → Phase 93,
+TRANSACTION_ABORTABLE → Phase 94.
 
 ---
 
@@ -2126,8 +2126,32 @@ no TRANSACTION_ABORTABLE; no `transaction.max.timeout.ms` clamp; open
 `opened_at_ms` is memory-only (crash already aborts open ranges).
 
 **Still deferred:** multi-lang clients, cargo-fuzz corpus CI, multi-broker 2PC /
-session affinity, session TTL, TRANSACTION_ABORTABLE, background txn sweeper /
-metrics.
+session affinity, session TTL, TRANSACTION_ABORTABLE → **closed by Phase 94**
+(honest subset), background txn sweeper / metrics.
+
+---
+
+### Phase 94 — TRANSACTION_ABORTABLE emission (honest subset) ✅
+
+**Goal:** Emit Kafka error **TRANSACTION_ABORTABLE (123)** after open/prepared
+timeout auto-abort on the APIs Volant can honestly support, without claiming
+full KIP-890 multi-broker parity.
+
+Binding: **[docs/PHASE94_SPEC.md](./docs/PHASE94_SPEC.md)**.
+
+- [x] Protocol `ErrorCode::TransactionAbortable = 24` → Kafka **123**
+- [x] Abortable producer set marked on open/prepared timeout expiry
+- [x] Produce / EndTxn / AddPartitions / AddOffsets / TxnOffsetCommit emit 123
+- [x] EndTxn clears mark; never-opened stays InvalidTxnState (48)
+- [x] FindCoordinator never emits 123
+- [x] Integration tests (`phase94_transaction_abortable`)
+
+**Honest limitations:** timeout-only mark (not mid-txn partition failures);
+memory-only abortable set; no FindCoordinator 123; not full KIP-890 surface.
+
+**Still deferred:** multi-lang clients, cargo-fuzz corpus CI, multi-broker 2PC /
+session affinity, session TTL, background txn sweeper / metrics,
+`transaction.max.timeout.ms` clamp.
 
 ---
 
@@ -2154,7 +2178,7 @@ metrics.
 | Storage | Page cache + OS | Explicit mmap + optional io_uring/O_DIRECT |
 | Stream processing | Kafka Streams / ksqlDB | In-process `volant-stream` operators |
 | Ops model | ZooKeeper/KRaft + heavy footprint | Single binary → small static ISR quorum |
-| Protocol | Kafka wire protocol | Native binary first; optional Kafka shim (`--kafka-listen`, Phases 23–93) |
+| Protocol | Kafka wire protocol | Native binary first; optional Kafka shim (`--kafka-listen`, Phases 23–94) |
 | Goal | Full ecosystem | Subset that is fast, small, and correct |
 
 Volant is **not** a drop-in Kafka replacement. It prioritizes a clean core; the

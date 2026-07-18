@@ -268,7 +268,7 @@ curl -s -H "Authorization: Bearer $VOLANT_METRICS_TOKEN" \
 
 - Multi-language clients
 - Full chaos-mesh suites / cargo-fuzz **corpus CI** (scaffold under `fuzz/` only)
-- Full multi-broker 2PC / TRANSACTION_ABORTABLE
+- Full multi-broker 2PC / full KIP-890 abortable surface
 - Multi-broker session affinity; session TTL / max sessions / metrics
 - Byte-identical Kafka compressed response cache (omit is HWM+LSO based)
 
@@ -276,7 +276,8 @@ Full list: [ROADMAP.md](../ROADMAP.md).
 
 ## Shipped (not gaps)
 
-Kafka wire shim **Phases 23–93** (ApiVersions **0–5**, Fetch **0–18**, ACL admin
-**0–3** User resource, prepared 2PC MVP + prepared timeout, omit-unchanged
-sessions, ~38 keys), SCRAM-SHA-256/512, SASL PLAIN/SCRAM — see
+Kafka wire shim **Phases 23–94** (ApiVersions **0–5**, Fetch **0–18**, ACL admin
+**0–3** User resource, prepared 2PC MVP + prepared/open timeout,
+TRANSACTION_ABORTABLE honest subset after timeout, omit-unchanged sessions,
+~38 keys), SCRAM-SHA-256/512, SASL PLAIN/SCRAM — see
 [KAFKA_COMPAT.md](./KAFKA_COMPAT.md).

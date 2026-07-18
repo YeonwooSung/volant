@@ -1,8 +1,8 @@
 # Kafka compatibility matrix
 
 **Living document** for the optional Kafka wire shim (`--kafka-listen`).
-Ship history: Phases **23–93** (git HEAD product). Binding deep dives:
-`PHASE23_SPEC.md` … `PHASE93_SPEC.md`. Overview: [WHITEPAPER.md](./WHITEPAPER.md).
+Ship history: Phases **23–94** (git HEAD product). Binding deep dives:
+`PHASE23_SPEC.md` … `PHASE94_SPEC.md`. Overview: [WHITEPAPER.md](./WHITEPAPER.md).
 Semantic rows below describe **shipped** behavior.
 
 ## Enable
@@ -23,13 +23,13 @@ From `SUPPORTED_APIS` in `crates/volant-broker/src/kafka/mod.rs`:
 
 | Key | API | Versions | Notes |
 |----:|-----|----------|-------|
-| 0 | Produce | 0–13 | Classic 0–8; flex v9+; TopicId v13; KIP-951 CurrentLeader v10+ |
+| 0 | Produce | 0–13 | Classic 0–8; flex v9+; TopicId v13; KIP-951 CurrentLeader v10+; txn 123 after timeout (Phase 94) |
 | 1 | Fetch | 0–18 | Classic 0–11; flex v12–18; TopicId v13+; isolation LSO/aborted (Phase 86); ReplicaState v15+ ignore; NodeEndpoints v16+; CurrentLeader tag v12+; DivergingEpoch + sessions (Phase 88); omit-unchanged incremental (Phase 91) |
 | 2 | ListOffsets | 0–11 | Flex v6+; specials v7–11; READ_COMMITTED latest = LSO (Phase 86) |
 | 3 | Metadata | 0–13 | Flex v9+; TopicId v10–13; top-level ErrorCode v13; live leader_epoch (Phase 87) |
 | 8 | OffsetCommit | 0–10 | Flex v8+; TopicId v10 |
 | 9 | OffsetFetch | 0–10 | Flex v6+; multi-group v8; TopicId v10 |
-| 10 | FindCoordinator | 0–6 | Flex v3; batch v4–6; no share key_type; no TRANSACTION_ABORTABLE |
+| 10 | FindCoordinator | 0–6 | Flex v3; batch v4–6; no share key_type; never TRANSACTION_ABORTABLE |
 | 11 | JoinGroup | 0–9 | Flex v6+; ProtocolType/Reason/SkipAssignment v7–9 |
 | 12 | Heartbeat | 0–4 | Flex v4 |
 | 13 | LeaveGroup | 0–5 | Flex v4+; Reason v5 |
@@ -43,10 +43,10 @@ From `SUPPORTED_APIS` in `crates/volant-broker/src/kafka/mod.rs`:
 | 21 | DeleteRecords | 0–2 | Flex v2 |
 | 22 | InitProducerId | 0–6 | Flex v2+; v6 Enable2Pc/KeepPreparedTxn (Phase 90 prepared MVP); OngoingTxn* when prepared |
 | 23 | OffsetForLeaderEpoch | 0–4 | Flex v4; durable epoch history MVP (Phase 87); prior epochs → transition end |
-| 24 | AddPartitionsToTxn | 0–5 | Flex v3; batch v4–5 |
-| 25 | AddOffsetsToTxn | 0–4 | Flex v3+; v4 = v3 wire (no TRANSACTION_ABORTABLE) |
-| 26 | EndTxn | 0–5 | Flex v3+; v5 pid/epoch echo |
-| 28 | TxnOffsetCommit | 0–6 | Flex v3+; TopicId v6 |
+| 24 | AddPartitionsToTxn | 0–5 | Flex v3; batch v4–5; 123 after timeout (Phase 94) |
+| 25 | AddOffsetsToTxn | 0–4 | Flex v3+; v4 = v3 wire; may emit TRANSACTION_ABORTABLE (123) after timeout (Phase 94) |
+| 26 | EndTxn | 0–5 | Flex v3+; v5 pid/epoch echo; 123 after timeout auto-abort (Phase 94) |
+| 28 | TxnOffsetCommit | 0–6 | Flex v3+; TopicId v6; 123 after timeout when no open (Phase 94) |
 | 29–31 | ACL admin | 0–3 | Flex v2+; User resource v3; LITERAL only |
 | 32 | DescribeConfigs | 0–4 | Flex v4; topic keys |
 | 33 | AlterConfigs | 0–2 | Flex v2 |
@@ -77,6 +77,7 @@ From `SUPPORTED_APIS` in `crates/volant-broker/src/kafka/mod.rs`:
 | Omit-unchanged sessions | 91 | Empty-topics incremental omits partitions when HWM+LSO unchanged and records empty |
 | Prepared timeout | 92 | Lazy auto-abort of prepared txns after configurable timeout (default 60s) |
 | Open txn timeout | 93 | Honor InitProducerId `transaction_timeout_ms` (or broker default) for open write-through txns; lazy auto-abort |
+| TRANSACTION_ABORTABLE | 94 | Honest subset: emit 123 after open/prepared timeout on Produce/EndTxn/Add*/TxnOffsetCommit; FindCoordinator never |
 
 ## Semantic honesty (open)
 
@@ -84,8 +85,8 @@ These are **current** product facts, not temporary docs lag:
 
 | Area | Limitation |
 |------|------------|
-| Transactions | **Write-through** (Phase 86) + **control batches** (Phase 89) + **prepared 2PC MVP** (Phase 90) + **prepared timeout** (Phase 92) + **open timeout** (Phase 93): data on log immediately; soft markers still SoT for LSO/aborted list; open crash≡abort; prepared survives restart under `__txn_prepared` until complete or timeout auto-abort; EndTxn control batches on finalize; open-txn honors InitProducerId `transaction_timeout_ms` (or `VOLANT_OPEN_TXN_TIMEOUT_MS` default 60s) |
-| 2PC | **MVP** (Phase 90/92): Enable2Pc → first EndTxn prepares; second matching EndTxn finalizes; KeepPreparedTxn + OngoingTxn*; prepared timeout auto-abort (default 60s, env `VOLANT_PREPARED_TXN_TIMEOUT_MS`); not full KIP-890/939 / multi-broker |
+| Transactions | **Write-through** (Phase 86) + **control batches** (Phase 89) + **prepared 2PC MVP** (Phase 90) + **prepared timeout** (Phase 92) + **open timeout** (Phase 93) + **TRANSACTION_ABORTABLE subset** (Phase 94): data on log immediately; soft markers still SoT for LSO/aborted list; open crash≡abort; prepared survives restart under `__txn_prepared` until complete or timeout auto-abort; EndTxn control batches on finalize; open-txn honors InitProducerId `transaction_timeout_ms` (or `VOLANT_OPEN_TXN_TIMEOUT_MS` default 60s); after timeout auto-abort Produce/EndTxn/Add*/TxnOffsetCommit may return **123** until EndTxn clears |
+| 2PC | **MVP** (Phase 90/92/94): Enable2Pc → first EndTxn prepares; second matching EndTxn finalizes; KeepPreparedTxn + OngoingTxn*; prepared timeout auto-abort (default 60s, env `VOLANT_PREPARED_TXN_TIMEOUT_MS`); timeout → abortable mark → Kafka **123** (Phase 94); not full KIP-890/939 / multi-broker |
 | Epochs | **Durable history MVP** (Phase 87): `{data_dir}/__leader_epochs`; prior epochs return transition end offsets; Metadata advertises live epoch; not a full KRaft epoch state machine; Fetch **DivergingEpoch** on truncation (Phase 88) |
 | TopicId | Deterministic UUID from Volant id (`volant` + zeros + u32), not KRaft random |
 | Groups | Coordinator-driven assignment; GroupType always `classic`; states Stable/Empty |

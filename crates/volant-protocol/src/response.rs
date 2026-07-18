@@ -171,6 +171,11 @@ pub enum ErrorCode {
     InvalidTxnState = 22,
     /// Principal not authorized for the operation (Phase 20).
     AuthorizationFailed = 23,
+    /// Transaction must be aborted by the client (Phase 94 / KIP-890).
+    ///
+    /// Mapped to Kafka `TRANSACTION_ABORTABLE` (123). Used after open/prepared
+    /// timeout auto-abort so clients clean up local txn state.
+    TransactionAbortable = 24,
 }
 
 impl ErrorCode {
@@ -200,6 +205,7 @@ impl ErrorCode {
             21 => Self::UnknownProducerId,
             22 => Self::InvalidTxnState,
             23 => Self::AuthorizationFailed,
+            24 => Self::TransactionAbortable,
             _ => Self::Unknown,
         }
     }

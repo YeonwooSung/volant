@@ -9,12 +9,13 @@ Volant is a resource-efficient alternative to Apache Kafka, built for:
 - **Streaming processing** — first-class operators (`map`, `filter`, windows) without a heavy runtime
 - **Small footprint** — native binary, predictable memory, simple operations
 
-> Status: **Phases 0–92 landed** — durable log, clustering, security, stream
+> Status: **Phases 0–94 landed** — durable log, clustering, security, stream
 > operators, and a broad optional Kafka wire shim (classic + flexible;
-> ApiVersions 0–5; Fetch 0–18; ACL admin 0–3). Single-node mode (no `--cluster-config`) preserves the
-> simple path. Start with the [whitepaper](./docs/WHITEPAPER.md) and
-> [docs index](./docs/INDEX.md); also [ROADMAP.md](./ROADMAP.md),
-> [ops](./docs/ops.md), [deploy/](./deploy/), [consistency](./docs/consistency.md).
+> ApiVersions 0–5; Fetch 0–18; ACL admin 0–3; TRANSACTION_ABORTABLE subset).
+> Single-node mode (no `--cluster-config`) preserves the simple path. Start
+> with the [whitepaper](./docs/WHITEPAPER.md) and [docs index](./docs/INDEX.md);
+> also [ROADMAP.md](./ROADMAP.md), [ops](./docs/ops.md), [deploy/](./deploy/),
+> [consistency](./docs/consistency.md).
 
 ---
 
@@ -41,7 +42,7 @@ volant/
 │   ├── consistency.md    # HWM / ISR / acks
 │   ├── tuning.md         # Performance / I/O guide
 │   ├── PHASE1–6_SPEC.md  # Binding core specs
-│   ├── PHASE7–91_SPEC.md # Ship records (see history/)
+│   ├── PHASE7–94_SPEC.md # Ship records (see history/)
 │   └── history/          # Phase index + archived plans/reviews
 ├── deploy/               # Dockerfile, compose, systemd, Helm chart
 ├── ROADMAP.md

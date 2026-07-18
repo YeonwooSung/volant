@@ -129,7 +129,11 @@ pub enum KafkaErrorCode {
     TransactionalIdNotFound = 105,
     /// Unsupported endpoint type (DescribeCluster v1+).
     UnsupportedEndpointType = 115,
-    /// Transaction abortable (KIP-890); defined for honesty, not yet emitted.
+    /// Transaction abortable (KIP-890 / Phase 94 honest subset).
+    ///
+    /// Emitted after open/prepared timeout auto-abort on produce, EndTxn,
+    /// AddPartitionsToTxn, AddOffsetsToTxn, and TxnOffsetCommit when the
+    /// producer is still in the abortable set. Not emitted on FindCoordinator.
     TransactionAbortable = 123,
 }
 
@@ -144,7 +148,7 @@ pub(crate) fn map_group_error(volant: u16) -> i16 {
     }
 }
 
-/// Map Volant idempotent/txn error codes to Kafka wire codes (Phase 29).
+/// Map Volant idempotent/txn error codes to Kafka wire codes (Phase 29/94).
 pub(crate) fn map_idempotent_error(volant: u16) -> i16 {
     match volant {
         // volant_protocol::ErrorCode values
@@ -152,6 +156,7 @@ pub(crate) fn map_idempotent_error(volant: u16) -> i16 {
         20 => KafkaErrorCode::OutOfOrderSequenceNumber.as_i16(),
         21 => KafkaErrorCode::UnknownProducerId.as_i16(),
         22 => KafkaErrorCode::InvalidTxnState.as_i16(),
+        24 => KafkaErrorCode::TransactionAbortable.as_i16(),
         _ => KafkaErrorCode::Unknown.as_i16(),
     }
 }

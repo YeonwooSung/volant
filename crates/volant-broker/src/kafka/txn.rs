@@ -471,8 +471,9 @@ fn encode_add_partitions_batch(
 
 /// AddOffsetsToTxn (API 25) classic v0–2 / flexible v3–4.
 ///
-/// Phase 82: v4 is wire-identical to v3 (KIP-890 may return
-/// TRANSACTION_ABORTABLE — Volant never emits it; buffer-until-commit only).
+/// Phase 82: v4 is wire-identical to v3.
+/// Phase 94: may return TRANSACTION_ABORTABLE (123) when the producer is in
+/// the timeout-abortable set (`ensure_txn_open` → map_idempotent_error).
 pub(crate) fn encode_add_offsets_to_txn(
     broker: &Broker,
     src: &mut impl Buf,

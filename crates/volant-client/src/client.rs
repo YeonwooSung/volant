@@ -1403,6 +1403,7 @@ fn error_from_code(code: u16, message: impl Into<String>) -> Error {
         | ErrorCode::OutOfOrderSequence
         | ErrorCode::UnknownProducerId
         | ErrorCode::InvalidTxnState
+        | ErrorCode::TransactionAbortable
         | ErrorCode::AuthorizationFailed => Error::Protocol(message),
         ErrorCode::Ok | ErrorCode::Unknown => Error::Protocol(message),
     }

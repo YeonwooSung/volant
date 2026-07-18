@@ -97,7 +97,7 @@ workers.
 - Multi-language clients deferred  
 - No Raft metadata / dynamic membership  
 - No control batch for crash≡abort without EndTxn  
-- Prepared 2PC is single-node MVP (no multi-broker txn log / TRANSACTION_ABORTABLE); prepared timeout yes (Phase 92); open-txn timeout yes (Phase 93)  
+- Prepared 2PC is single-node MVP (no multi-broker txn log); prepared timeout yes (Phase 92); open-txn timeout yes (Phase 93); TRANSACTION_ABORTABLE honest subset after timeout (Phase 94; FindCoordinator never)  
 
 - Fetch sessions not durable / multi-broker sticky; omit cache is HWM+LSO only (not byte-identical Kafka response cache)  
 - ACL store is single-node file (no consensus)  

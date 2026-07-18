@@ -5,7 +5,7 @@
 //! [`Broker::produce`] accepts a [`MessageBatch`] and treats the whole batch as
 //! one critical section under the topics write lock.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::fs;
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicU32, AtomicU64, Ordering};
@@ -381,6 +381,14 @@ pub struct Broker {
     /// `VOLANT_OPEN_TXN_TIMEOUT_MS` or [`Broker::set_open_txn_timeout_ms`].
     /// `0` disables open auto-abort for producers without a client timeout.
     open_txn_timeout_ms: AtomicU64,
+    /// PIDs whose open/prepared txn was auto-aborted by timeout and still need
+    /// client abort acknowledgment (Phase 94 / KIP-890 TRANSACTION_ABORTABLE).
+    ///
+    /// Marked on open/prepared timeout expiry. Subsequent produce / EndTxn /
+    /// AddPartitions / AddOffsets / TxnOffsetCommit return
+    /// [`ErrorCode::TransactionAbortable`] until EndTxn observes the flag
+    /// (clears it) or InitProducerId fences the producer.
+    abortable_producers: Mutex<HashSet<u64>>,
     /// Soft abort markers for READ_COMMITTED (Phase 86): `(topic, partition) → markers`.
     aborted_txns: Mutex<HashMap<(String, u32), Vec<AbortedTxnMarker>>>,
     /// Durable producer state store under `data_dir/__producer_state` (Phase 11).
@@ -447,6 +455,7 @@ impl Broker {
             prepared_txns: Mutex::new(HashMap::new()),
             prepared_txn_timeout_ms: AtomicU64::new(default_prepared_txn_timeout_ms()),
             open_txn_timeout_ms: AtomicU64::new(default_open_txn_timeout_ms()),
+            abortable_producers: Mutex::new(HashSet::new()),
             aborted_txns: Mutex::new(HashMap::new()),
             producer_store,
             topic_configs,
@@ -535,6 +544,7 @@ impl Broker {
             prepared_txns: Mutex::new(HashMap::new()),
             prepared_txn_timeout_ms: AtomicU64::new(default_prepared_txn_timeout_ms()),
             open_txn_timeout_ms: AtomicU64::new(default_open_txn_timeout_ms()),
+            abortable_producers: Mutex::new(HashSet::new()),
             aborted_txns: Mutex::new(HashMap::new()),
             producer_store,
             topic_configs,
@@ -783,6 +793,8 @@ impl Broker {
                         &txn,
                     );
                 }
+                // Phase 94: fence / KeepPrepared clears abortable (new client epoch path).
+                self.clear_txn_abortable(pid);
                 let _ = self.persist_producer_state();
                 return InitProducerIdResult {
                     producer_id: pid,
@@ -796,7 +808,10 @@ impl Broker {
             // Release the prepared_txns lock before force_abort (it re-locks to persist).
             let dropped = self.prepared_txns.lock().remove(transactional_id);
             if let Some(prep) = dropped {
+                let pid = prep.producer_id;
                 self.force_abort_prepared(prep);
+                // Intentional force-abort is not a timeout abortable signal.
+                self.clear_txn_abortable(pid);
             }
         }
 
@@ -831,6 +846,8 @@ impl Broker {
                         &txn,
                     );
                 }
+                // Phase 94: epoch fence clears abortable for the new identity.
+                self.clear_txn_abortable(existing);
                 let _ = self.persist_producer_state();
                 return InitProducerIdResult {
                     producer_id: existing,
@@ -869,6 +886,7 @@ impl Broker {
     ///
     /// Returns protocol error code (`0` = ok). Rejects when a prepared txn
     /// exists for this producer (Phase 90). Sets `opened_at_ms` (Phase 93).
+    /// Phase 94: producers in the abortable set must EndTxn first.
     pub fn begin_txn(&self, producer_id: u64, producer_epoch: u16) -> u16 {
         self.expire_timed_out_txns();
         let state = self.producer_state.read();
@@ -883,6 +901,9 @@ impl Broker {
         }
         let txn_id = prod.transactional_id.clone();
         drop(state);
+        if self.is_txn_abortable(producer_id) {
+            return ErrorCode::TransactionAbortable as u16;
+        }
         if !txn_id.is_empty() && self.prepared_txns.lock().contains_key(&txn_id) {
             return ErrorCode::InvalidTxnState as u16;
         }
@@ -904,7 +925,10 @@ impl Broker {
     ///
     /// If one is already open for this PID+epoch, returns success. Otherwise
     /// begins a new transaction (Kafka has no separate BeginTxn API).
-    /// Phase 93: times out aged open txns first; a timed-out open is recreated.
+    /// Phase 93: times out aged open txns first.
+    /// Phase 94: if the open was just timed out (abortable set), returns
+    /// [`ErrorCode::TransactionAbortable`] instead of silently opening a new
+    /// txn — client must EndTxn first (AddOffsets/AddPartitions emit 123).
     pub fn ensure_txn_open(&self, producer_id: u64, producer_epoch: u16) -> u16 {
         // begin_txn also expires; call once here for the prepared/open check path.
         self.expire_timed_out_txns();
@@ -921,6 +945,9 @@ impl Broker {
             }
             prod.transactional_id.clone()
         };
+        if self.is_txn_abortable(producer_id) {
+            return ErrorCode::TransactionAbortable as u16;
+        }
         if !txn_id.is_empty() && self.prepared_txns.lock().contains_key(&txn_id) {
             return ErrorCode::InvalidTxnState as u16;
         }
@@ -1135,6 +1162,7 @@ impl Broker {
     /// Buffer consumer offsets to apply on commit (Phase 31 TxnOffsetCommit).
     ///
     /// Entries: `(group_id, topic, partition, offset, metadata)`.
+    /// Phase 94: no open + abortable set → [`ErrorCode::TransactionAbortable`].
     pub fn buffer_txn_offsets(
         &self,
         producer_id: u64,
@@ -1160,7 +1188,11 @@ impl Broker {
         }
         let mut open = self.open_txns.lock();
         let Some(txn) = open.get_mut(&producer_id) else {
-            return ErrorCode::InvalidTxnState as u16;
+            return if self.is_txn_abortable(producer_id) {
+                ErrorCode::TransactionAbortable as u16
+            } else {
+                ErrorCode::InvalidTxnState as u16
+            };
         };
         txn.deferred_offsets.extend(offsets.iter().cloned());
         0
@@ -1225,8 +1257,14 @@ impl Broker {
         {
             let open = self.open_txns.lock();
             let Some(txn) = open.get(&producer_id) else {
+                // Phase 94: timeout auto-abort → TRANSACTION_ABORTABLE; else InvalidTxnState.
+                let code = if self.is_txn_abortable(producer_id) {
+                    ErrorCode::TransactionAbortable as u16
+                } else {
+                    ErrorCode::InvalidTxnState as u16
+                };
                 return IdempotentCheck::Reject {
-                    error_code: ErrorCode::InvalidTxnState as u16,
+                    error_code: code,
                 };
             };
             let last = txn.pending.get(&key).cloned().or_else(|| {
@@ -1278,7 +1316,7 @@ impl Broker {
 
         let mut open = self.open_txns.lock();
         let Some(txn) = open.get_mut(&producer_id) else {
-            // Raced with EndTxn/fence after append — treat as aborted range.
+            // Raced with EndTxn/fence/timeout after append — treat as aborted range.
             drop(open);
             self.push_aborted_marker(
                 topic,
@@ -1290,8 +1328,13 @@ impl Broker {
                 },
             );
             self.persist_txn_markers();
+            let code = if self.is_txn_abortable(producer_id) {
+                ErrorCode::TransactionAbortable as u16
+            } else {
+                ErrorCode::InvalidTxnState as u16
+            };
             return IdempotentCheck::Reject {
-                error_code: ErrorCode::InvalidTxnState as u16,
+                error_code: code,
             };
         };
         txn.written.push(TxnWrittenRange {
@@ -1332,6 +1375,11 @@ impl Broker {
     /// Phase 92/93: timed-out prepared and open txns are auto-aborted before
     /// finalize/prepare.
     ///
+    /// Phase 94: when no open/prepared remains and the producer is in the
+    /// abortable set (timeout auto-abort), returns
+    /// [`ErrorCode::TransactionAbortable`] and clears the flag so a subsequent
+    /// begin/ensure can open a new txn.
+    ///
     /// `offsets` entries are `(group_id, topic, partition, offset, metadata)`.
     pub fn end_txn(
         &self,
@@ -1367,6 +1415,8 @@ impl Broker {
                 }
                 let prep = prepared.remove(&transactional_id).expect("just checked");
                 drop(prepared);
+                // Completing a live prepare clears any stale abortable mark.
+                self.clear_txn_abortable(producer_id);
                 let results = self.finalize_txn(
                     producer_id,
                     producer_epoch,
@@ -1383,9 +1433,17 @@ impl Broker {
             let mut open = self.open_txns.lock();
             match open.remove(&producer_id) {
                 Some(t) => t,
-                None => return Ok((ErrorCode::InvalidTxnState as u16, Vec::new())),
+                None => {
+                    // Phase 94: timeout already aborted → TRANSACTION_ABORTABLE.
+                    if self.take_txn_abortable(producer_id) {
+                        return Ok((ErrorCode::TransactionAbortable as u16, Vec::new()));
+                    }
+                    return Ok((ErrorCode::InvalidTxnState as u16, Vec::new()));
+                }
             }
         };
+        // Successful open finalize also clears abortable (defensive).
+        self.clear_txn_abortable(producer_id);
 
         // Phase 90: first EndTxn on a 2PC producer → prepare (durable).
         if enable_2pc && !transactional_id.is_empty() {
@@ -1667,6 +1725,8 @@ impl Broker {
         for (pid, epoch, txn) in expired {
             self.record_aborted_from_txn(pid, &txn);
             self.append_txn_control_markers(pid, epoch, ControlMarkerType::Abort, &txn);
+            // Phase 94: client must observe TRANSACTION_ABORTABLE until EndTxn.
+            self.mark_txn_abortable(pid);
         }
         if n > 0 {
             self.persist_txn_markers();
@@ -1678,7 +1738,7 @@ impl Broker {
     ///
     /// Returns the number of prepared txns aborted. No-op when timeout is `0`
     /// (disabled) or the prepared map is empty. Same finalize path as
-    /// KeepPreparedTxn=false force-abort.
+    /// KeepPreparedTxn=false force-abort. Phase 94 marks abortable producers.
     pub fn expire_timed_out_prepared_txns(&self) -> usize {
         let timeout_ms = self.prepared_txn_timeout_ms.load(Ordering::Relaxed);
         if timeout_ms == 0 {
@@ -1711,11 +1771,32 @@ impl Broker {
                 ControlMarkerType::Abort,
                 &prep.open,
             );
+            self.mark_txn_abortable(prep.producer_id);
         }
         if n > 0 {
             self.persist_prepared_txns();
         }
         n
+    }
+
+    /// Whether this producer is in the Phase 94 abortable set (timeout auto-abort).
+    pub fn is_txn_abortable(&self, producer_id: u64) -> bool {
+        self.abortable_producers.lock().contains(&producer_id)
+    }
+
+    /// Mark producer as needing client abort acknowledgment (Phase 94).
+    fn mark_txn_abortable(&self, producer_id: u64) {
+        self.abortable_producers.lock().insert(producer_id);
+    }
+
+    /// Clear abortable mark without returning whether it was set (Phase 94).
+    fn clear_txn_abortable(&self, producer_id: u64) {
+        self.abortable_producers.lock().remove(&producer_id);
+    }
+
+    /// Clear and return whether the producer was abortable (Phase 94 EndTxn path).
+    fn take_txn_abortable(&self, producer_id: u64) -> bool {
+        self.abortable_producers.lock().remove(&producer_id)
     }
 
     /// Backdate a prepared txn's `prepared_at_ms` for tests (Phase 92).

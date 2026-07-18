@@ -1031,7 +1031,7 @@ pub(crate) fn encode_find_coordinator(broker: &Broker, src: &mut impl Buf, out: 
     //   v1–2: key + key_type; response throttle + error_message
     //   v3: compact key + key_type + tags; compact host/error_message + tags
     //   v4: key_type + compact CoordinatorKeys batch → Coordinators array
-    //   v5: wire-identical to v4 (KIP-890 TRANSACTION_ABORTABLE — never emitted)
+    //   v5: wire-identical to v4 (KIP-890 TRANSACTION_ABORTABLE — FindCoordinator never emits 123)
     //   v6: wire-identical to v4/v5 (KIP-932 share key_type 2 rejected)
     let flexible = version >= 3;
     let snap = broker.metadata(None);

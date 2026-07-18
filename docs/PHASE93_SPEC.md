@@ -144,7 +144,7 @@ Empty still reports `0` / `0`.
 
 ## Phase 94 ideas
 
-- `TRANSACTION_ABORTABLE` where Kafka emits it
+- `TRANSACTION_ABORTABLE` where Kafka emits it → **shipped Phase 94 (honest subset)**
 - Background txn sweeper / metrics (expired open + prepared counts)
 - `transaction.max.timeout.ms` broker clamp
 - Multi-broker prepared / open replication

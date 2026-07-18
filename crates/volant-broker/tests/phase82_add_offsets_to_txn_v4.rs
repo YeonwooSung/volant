@@ -1,4 +1,7 @@
-//! Phase 82: AddOffsetsToTxn v4 (wire-identical to v3; KIP-890 TRANSACTION_ABORTABLE never emitted).
+//! Phase 82: AddOffsetsToTxn v4 (wire-identical to v3).
+//!
+//! Phase 94 may emit TRANSACTION_ABORTABLE (123) after timeout auto-abort;
+//! these tests still assert unknown/success paths never return 123.
 
 #[path = "common/mod.rs"]
 mod common;
