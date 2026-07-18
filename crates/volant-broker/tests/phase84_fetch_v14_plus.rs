@@ -123,7 +123,10 @@ fn assert_fetch_success_header(src: &mut Bytes, corr: i32, session: i32) {
     skip_tag_buffer(src).unwrap(); // response header v1
     assert_eq!(src.get_i32(), 0); // throttle
     assert_eq!(src.get_i16(), 0); // top error
-    assert_eq!(src.get_i32(), session);
+    // Phase 88: FINAL session_epoch (-1) closes / does not create a session → id 0.
+    // Callers that pass a non-zero request session with FINAL should expect 0.
+    let _ = session;
+    assert_eq!(src.get_i32(), 0);
 }
 
 #[tokio::test]

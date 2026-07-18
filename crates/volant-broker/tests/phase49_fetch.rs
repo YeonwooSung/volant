@@ -201,7 +201,7 @@ async fn fetch_v7_session_header() {
     assert_eq!(src.get_i32(), 4);
     assert_eq!(src.get_i32(), 0); // throttle
     assert_eq!(src.get_i16(), 0); // top-level error
-    assert_eq!(src.get_i32(), 42); // session_id echo
+    assert_eq!(src.get_i32(), 0); // FINAL epoch → session closed / id 0 (Phase 88)
     assert_eq!(src.get_i32(), 1);
     assert_eq!(get_string(&mut src).unwrap(), "t");
     assert_eq!(src.get_i32(), 1);

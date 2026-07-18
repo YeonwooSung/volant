@@ -131,7 +131,7 @@ async fn fetch_v13_by_topic_id() {
 
     assert_eq!(src.get_i32(), 0); // throttle
     assert_eq!(src.get_i16(), 0); // top error
-    assert_eq!(src.get_i32(), 9); // session echo
+    assert_eq!(src.get_i32(), 0); // FINAL epoch → session id 0 (Phase 88)
     let n_topics = get_compact_array_len(&mut src).unwrap().unwrap();
     assert_eq!(n_topics, 1);
     let resp_uuid = get_uuid(&mut src).unwrap();

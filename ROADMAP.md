@@ -1948,7 +1948,8 @@ not compacted with DeleteRecords; single-node coordinator; no 2PC.
 
 **Still deferred:** multi-lang clients, cargo-fuzz corpus CI, Kafka control
 batches on the data log, real 2PC / prepared transaction state, real fetch
-sessions / DivergingEpoch. Durable OFLE history closed by **Phase 87**.
+sessions / DivergingEpoch. Durable OFLE history closed by **Phase 87**;
+Fetch sessions / DivergingEpoch closed by **Phase 88**.
 
 ---
 
@@ -1968,10 +1969,37 @@ Binding: **[docs/PHASE87_SPEC.md](./docs/PHASE87_SPEC.md)**.
 - [x] Integration tests (`phase87_leader_epoch_history`)
 
 **Honest limitations:** JSON MVP (not KRaft epoch SM); multi-node start offset
-best-effort from local LEO; no Fetch DivergingEpoch; no real fetch sessions.
+best-effort from local LEO; no Fetch DivergingEpoch; no real fetch sessions
+(closed by **Phase 88**).
+
+**Still deferred (pre-88):** multi-lang clients, cargo-fuzz corpus CI, Kafka
+control batches on the data log, real 2PC.
+
+---
+
+### Phase 88 — Fetch DivergingEpoch + real fetch sessions (MVP) ✅
+
+**Goal:** Close the two related Fetch gaps left by Phase 87: emit
+**DivergingEpoch** (tag 0) when the client's `last_fetched_epoch` /
+`fetch_offset` indicates truncation vs durable history, and maintain
+**process-local fetch sessions** (create, forgotten, invalid epoch/id,
+empty-topics re-fetch).
+
+Binding: **[docs/PHASE88_SPEC.md](./docs/PHASE88_SPEC.md)**.
+
+- [x] Fetch v12+: DivergingEpoch tag 0 + OFFSET_OUT_OF_RANGE on truncation
+- [x] Process-local sessions: create (id=0/epoch=0), merge, forgotten, close FINAL
+- [x] Incremental empty-topics re-fetch of session partitions (full data always)
+- [x] Session errors 70 / 71; FINAL → response session id 0
+- [x] Integration tests (`phase88_fetch_sessions_diverging`)
+
+**Honest limitations:** sessions process-local (not durable / multi-broker);
+always full record data (no omit-unchanged); no session TTL/eviction metrics;
+DivergingEpoch from local history only.
 
 **Still deferred:** multi-lang clients, cargo-fuzz corpus CI, Kafka control
-batches on the data log, real 2PC, real fetch sessions / DivergingEpoch.
+batches on the data log, real 2PC, omit-unchanged incremental caching,
+multi-broker session affinity.
 
 ---
 
@@ -1998,18 +2026,18 @@ batches on the data log, real 2PC, real fetch sessions / DivergingEpoch.
 | Storage | Page cache + OS | Explicit mmap + optional io_uring/O_DIRECT |
 | Stream processing | Kafka Streams / ksqlDB | In-process `volant-stream` operators |
 | Ops model | ZooKeeper/KRaft + heavy footprint | Single binary → small static ISR quorum |
-| Protocol | Kafka wire protocol | Native binary first; optional Kafka shim (`--kafka-listen`, Phases 23–87) |
+| Protocol | Kafka wire protocol | Native binary first; optional Kafka shim (`--kafka-listen`, Phases 23–88) |
 | Goal | Full ecosystem | Subset that is fast, small, and correct |
 
 Volant is **not** a drop-in Kafka replacement. It prioritizes a clean core; the
-optional Kafka wire shim is **shipped** (Phases 23–87) — see
+optional Kafka wire shim is **shipped** (Phases 23–88) — see
 [docs/KAFKA_COMPAT.md](./docs/KAFKA_COMPAT.md).
 
 ---
 
 ## Suggested implementation order (PRs)
 
-Phases **0–87 are shipped**. Historical PR order for the core:
+Phases **0–88 are shipped**. Historical PR order for the core:
 
 1. Phase 1 segment format + unit tests  
 2. Phase 1 recovery + retention  
@@ -2022,7 +2050,7 @@ Phases **0–87 are shipped**. Historical PR order for the core:
 9. Phase 6 replication prototype (2–3 nodes) ✅  
 10. Phase 7 metrics, TLS, packaging ✅  
 11. Phases 8–22 (redirect, groups, configs, txns, mTLS, ACLs, SCRAM) ✅  
-12. Phases 23–87 (Kafka wire shim surface) ✅  
+12. Phases 23–88 (Kafka wire shim surface) ✅  
 
 ---
 
@@ -2063,10 +2091,11 @@ cargo run -p volant-bench --release
 cargo test --workspace
 ```
 
-**Status (post–Phase 87):** core broker, ops (metrics / TLS / auth / SCRAM /
+**Status (post–Phase 88):** core broker, ops (metrics / TLS / auth / SCRAM /
 ACLs / Helm), and the Kafka wire shim are **shipped** (Fetch 0–18 Kafka max;
 ACL admin 0–3 with User resource; soft-marker `READ_COMMITTED`; durable OFLE
-history MVP). Still deferred: multi-language clients, full chaos-mesh suites,
-cargo-fuzz corpus CI, Kafka control batches on the data log, real 2PC /
-prepared transactions, real fetch sessions / DivergingEpoch. Details:
+history; Fetch DivergingEpoch + process-local fetch sessions MVP). Still
+deferred: multi-language clients, full chaos-mesh suites, cargo-fuzz corpus CI,
+Kafka control batches on the data log, real 2PC / prepared transactions,
+omit-unchanged session cache. Details:
 [docs/KAFKA_COMPAT.md](./docs/KAFKA_COMPAT.md), [docs/ops.md](./docs/ops.md).

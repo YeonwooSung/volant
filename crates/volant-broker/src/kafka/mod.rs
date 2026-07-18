@@ -1,10 +1,11 @@
-//! Kafka wire protocol shim (Phases 23–85).
+//! Kafka wire protocol shim (Phases 23–88).
 //!
 //! Classic framing plus flexible APIs (KIP-482): ApiVersions v3–5 (header
 //! stays v0; empty feature tags; v5 ClusterId/NodeId ignored), Metadata
 //! v9–13 (TopicId; v13 top-level ErrorCode), FindCoordinator v3–6 (batch v4+;
 //! v5–6 wire-identical; no share-group key type), Produce v9–13 (TopicId v13; KIP-951 tags),
-//! Fetch v12–18 (TopicId v13+; ReplicaState v15+; NodeEndpoints v16+; CurrentLeader tag),
+//! Fetch v12–18 (TopicId v13+; ReplicaState v15+; NodeEndpoints v16+; CurrentLeader tag;
+//! DivergingEpoch tag 0 + real fetch sessions MVP Phase 88),
 //! CreateTopics v5–7 / DeleteTopics v4–6 (TopicId), group/offset/admin/config/txn
 //! flex (ListGroups 0–5 States/Types filter, DescribeGroups 0–6 ErrorMessage,
 //! DeleteGroups 0–3 ErrorMessage), ListOffsets v6–11 (max-timestamp / local / tiered specials),
@@ -14,12 +15,14 @@
 //! (InitProducerId 0–6 OngoingTxn wire, AddPartitionsToTxn/EndTxn 0–5,
 //! AddOffsetsToTxn 0–4 wire-identical v3/v4, TxnOffsetCommit 0–6 TopicId),
 //! CreatePartitions 0–3 (v3 = v2 wire; no KIP-599).
-//! See `docs/PHASE23_SPEC.md` … `docs/PHASE85_SPEC.md`.
+//! See `docs/PHASE23_SPEC.md` … `docs/PHASE88_SPEC.md`.
 
 /// Kafka wire primitives, MessageSet (magic 0/1), and RecordBatch (magic 2).
 pub mod codec;
 /// Compression codecs (gzip / snappy / lz4 / zstd); Fetch codec env.
 pub mod compress;
+/// In-memory Fetch session state (Phase 88).
+pub mod fetch_session;
 mod handler;
 /// Shared TopicId / topic-name wire identity helpers.
 mod topic_id;
@@ -96,6 +99,10 @@ pub enum KafkaErrorCode {
     NonEmptyGroup = 68,
     /// Group id not found (DeleteGroups).
     GroupIdNotFound = 69,
+    /// Fetch session id not found (Fetch v7+ sessions).
+    FetchSessionIdNotFound = 70,
+    /// Invalid fetch session epoch (Fetch v7+ sessions).
+    InvalidFetchSessionEpoch = 71,
     /// Invalid config.
     InvalidConfig = 40,
     /// Out of order sequence number (idempotent produce).

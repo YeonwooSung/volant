@@ -21,7 +21,7 @@ one CLI, Prometheus metrics, and optional multi-node ISR replication. A
 wire-protocol shim** reuses the same storage, groups, and security model for
 interop. The shim advertises **ApiVersions 0–5** and **Fetch 0–18** at Apache
 Kafka wire max for those keys, with empty feature tags and
-write-through transactions with soft READ_COMMITTED markers (Phase 86)—not full Kafka control-batch parity—and durable OffsetForLeaderEpoch history (Phase 87 MVP).
+write-through transactions with soft READ_COMMITTED markers (Phase 86)—not full Kafka control-batch parity—durable OffsetForLeaderEpoch history (Phase 87 MVP), and Fetch DivergingEpoch + process-local fetch sessions (Phase 88 MVP).
 
 Volant is **not** a drop-in Apache Kafka replacement. It prioritizes sequential
 I/O, explicit complexity, and honest non-parity (especially around
@@ -187,7 +187,8 @@ the MVP; Kafka control-batch wire bytes on the partition log remain deferred.
 | OffsetForLeaderEpoch prior epochs | Transition end offset (not always HWM) |
 | Metadata `leader_epoch` | Live partition epoch |
 | Full KRaft epoch state machine | **No** |
-| Fetch DivergingEpoch | **No** (deferred) |
+| Fetch DivergingEpoch | **Yes (MVP)** — tag 0 + OFFSET_OUT_OF_RANGE on truncation |
+| Real fetch sessions | **Yes (MVP)** — process-local; full data always; no multi-broker stickiness |
 
 ---
 
@@ -231,7 +232,7 @@ flexible (KIP-482) coverage for the APIs modern clients negotiate most often
 **Auth on Kafka port:** SASL or principal `kafka-anonymous` (+ ACLs). Shared-token
 Auth applies only on the native `--listen` port.
 
-**Highlights (post–Phase 87):** deterministic TopicId UUIDs; KIP-951
+**Highlights (post–Phase 88):** deterministic TopicId UUIDs; KIP-951
 CurrentLeader on leader errors + Produce NodeEndpoints v10+ / Fetch
 NodeEndpoints v16+; KIP-890 txn max versions with ignored 2PC; FindCoordinator
 0–6 / AddOffsetsToTxn 0–4 without `TRANSACTION_ABORTABLE`; ApiVersions 0–5 with
@@ -272,8 +273,8 @@ Volant deliberately does **not** claim production Kafka parity. Open gaps:
 1. Multi-language clients (Rust only)
 2. Dynamic membership / Raft metadata quorum
 3. Kafka control batches on the data log; real 2PC / prepared transactions
-4. Full Kafka API surface beyond advertised keys; real fetch sessions / DivergingEpoch
-5. Durable leader-epoch history (eligible epochs map to HWM)
+4. Full Kafka API surface beyond advertised keys; omit-unchanged fetch session cache / multi-broker affinity
+5. Full KRaft epoch state machine (durable history is MVP)
 6. Kafka cooperative-sticky assignor **protocol** parity (native JoinGroup revoke list exists)
 7. Stream state durability and distributed stream topology (`MemoryStore` only)
 8. Full chaos-mesh / cargo-fuzz **corpus CI** (`fuzz/` scaffold only)

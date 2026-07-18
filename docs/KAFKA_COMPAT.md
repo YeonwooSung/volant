@@ -24,7 +24,7 @@ From `SUPPORTED_APIS` in `crates/volant-broker/src/kafka/mod.rs`:
 | Key | API | Versions | Notes |
 |----:|-----|----------|-------|
 | 0 | Produce | 0–13 | Classic 0–8; flex v9+; TopicId v13; KIP-951 CurrentLeader v10+ |
-| 1 | Fetch | 0–18 | Classic 0–11; flex v12–18; TopicId v13+; isolation LSO/aborted (Phase 86); ReplicaState v15+ ignore; NodeEndpoints v16+; CurrentLeader tag v12+ |
+| 1 | Fetch | 0–18 | Classic 0–11; flex v12–18; TopicId v13+; isolation LSO/aborted (Phase 86); ReplicaState v15+ ignore; NodeEndpoints v16+; CurrentLeader tag v12+; DivergingEpoch + real sessions MVP (Phase 88) |
 | 2 | ListOffsets | 0–11 | Flex v6+; specials v7–11; READ_COMMITTED latest = LSO (Phase 86) |
 | 3 | Metadata | 0–13 | Flex v9+; TopicId v10–13; top-level ErrorCode v13; live leader_epoch (Phase 87) |
 | 8 | OffsetCommit | 0–10 | Flex v8+; TopicId v10 |
@@ -71,6 +71,7 @@ From `SUPPORTED_APIS` in `crates/volant-broker/src/kafka/mod.rs`:
 | TopicId / modern | 67–85 | UUID topics, ListOffsets specials, KIP-890, KIP-951, group admin, CreatePartitions v3, FindCoordinator v5–6, AddOffsetsToTxn v4, ApiVersions 0–5, Fetch 0–18, ACL admin User resource v3 |
 | READ_COMMITTED | 86 | Write-through txn + soft abort markers; true LSO; Fetch isolation filtering |
 | Leader epochs | 87 | Durable OffsetForLeaderEpoch history MVP; Metadata live leader_epoch |
+| Fetch sessions / DivergingEpoch | 88 | Process-local sessions (create/forgotten/invalid); DivergingEpoch tag 0 on truncation |
 
 ## Semantic honesty (open)
 
@@ -80,10 +81,10 @@ These are **current** product facts, not temporary docs lag:
 |------|------------|
 | Transactions | **Write-through** (Phase 86): data on log immediately; soft abort markers (not Kafka control batches); LSO may be `<` HWM while open; READ_COMMITTED filters aborted + caps at LSO; READ_UNCOMMITTED sees unstable/aborted; TxnOffsetCommit still deferred until EndTxn; markers in `__txn_markers` (crash ≡ abort open ranges) |
 | 2PC | InitProducerId v6 flags parsed **and ignored**; OngoingTxn* always -1 |
-| Epochs | **Durable history MVP** (Phase 87): `{data_dir}/__leader_epochs`; prior epochs return transition end offsets; Metadata advertises live epoch; not a full KRaft epoch state machine; no Fetch DivergingEpoch |
+| Epochs | **Durable history MVP** (Phase 87): `{data_dir}/__leader_epochs`; prior epochs return transition end offsets; Metadata advertises live epoch; not a full KRaft epoch state machine; Fetch **DivergingEpoch** on truncation (Phase 88) |
 | TopicId | Deterministic UUID from Volant id (`volant` + zeros + u32), not KRaft random |
 | Groups | Coordinator-driven assignment; GroupType always `classic`; states Stable/Empty |
-| Fetch sessions | Session header accepted; no real incremental sessions |
+| Fetch sessions | **Real MVP** (Phase 88): process-local create/merge/forgotten; empty-topics re-fetch; errors 70/71; always full record data (no omit-unchanged); lost on restart |
 | Preferred replica | Always -1 |
 | CreateTopics | Replica assignment arrays ignored; configs response often null |
 | Storage | Log stores uncompressed Volant records; Fetch re-encodes |

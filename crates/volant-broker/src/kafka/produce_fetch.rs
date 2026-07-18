@@ -12,7 +12,7 @@ use crate::broker::{Broker, IdempotentCheck};
 use super::codec::{
     decode_produce_batches, encode_message_set, encode_message_set_compressed, encode_record_batch,
     encode_record_batch_compressed, get_bytes, get_compact_array_len, get_compact_bytes,
-    get_compact_nullable_string, get_compact_string, get_nullable_string, get_string, get_uuid,
+    get_compact_nullable_string, get_compact_string, get_nullable_string, get_string,
     put_bytes, put_compact_array_len, put_compact_bytes, put_compact_nullable_string,
     put_compact_string, put_empty_tag_buffer, put_nullable_string, put_string, put_unsigned_varint,
     skip_tag_buffer,
@@ -73,6 +73,28 @@ fn put_single_tag(out: &mut BytesMut, tag: u32, value: &[u8]) {
     put_unsigned_varint(out, tag);
     put_unsigned_varint(out, value.len() as u32);
     out.extend_from_slice(value);
+}
+
+/// Write a multi-tag TAG_BUFFER (tags must be sorted ascending by id).
+fn put_tags(out: &mut BytesMut, tags: &[(u32, BytesMut)]) {
+    if tags.is_empty() {
+        put_empty_tag_buffer(out);
+        return;
+    }
+    put_unsigned_varint(out, tags.len() as u32);
+    for (tag, value) in tags {
+        put_unsigned_varint(out, *tag);
+        put_unsigned_varint(out, value.len() as u32);
+        out.extend_from_slice(value);
+    }
+}
+
+/// Encode EpochEndOffset body for DivergingEpoch (tag 0): epoch + end_offset.
+fn encode_diverging_epoch(epoch: i32, end_offset: i64) -> BytesMut {
+    let mut body = BytesMut::with_capacity(12);
+    body.put_i32(epoch);
+    body.put_i64(end_offset);
+    body
 }
 
 /// Produce/Fetch NodeEndpoints entry for one broker.
@@ -571,21 +593,31 @@ pub(crate) fn map_produce_ack_error(err: u16) -> i16 {
 }
 
 /// Write Fetch response header before topic array (classic v0–11 / flexible v12).
-pub(crate) fn put_fetch_response_header(out: &mut BytesMut, version: i16, session_id: i32) {
+pub(crate) fn put_fetch_response_header(
+    out: &mut BytesMut,
+    version: i16,
+    error: i16,
+    session_id: i32,
+) {
     // throttle (v1+), top-level error + session_id (v7+)
     if version >= 1 {
         out.put_i32(0);
     }
     if version >= 7 {
-        out.put_i16(KafkaErrorCode::None.as_i16());
+        out.put_i16(error);
         out.put_i32(session_id);
     }
 }
 
 /// Empty Fetch response (no topics) with correct classic/flexible framing.
-pub(crate) fn put_fetch_empty_response(out: &mut BytesMut, version: i16, session_id: i32) {
+pub(crate) fn put_fetch_empty_response(
+    out: &mut BytesMut,
+    version: i16,
+    error: i16,
+    session_id: i32,
+) {
     let flexible = version >= 12;
-    put_fetch_response_header(out, version, session_id);
+    put_fetch_response_header(out, version, error, session_id);
     if flexible {
         put_compact_array_len(out, 0);
         put_empty_tag_buffer(out);
@@ -599,7 +631,7 @@ pub(crate) fn put_fetch_empty_response(out: &mut BytesMut, version: i16, session
 /// Order: index, error, hwm, lso (v4+), log_start (v5+), aborted[] (v4+),
 /// preferred_read_replica (v11+), records, TAG_BUFFER (v12+).
 ///
-/// v12+: optional CurrentLeader as **tag 1** (tag 0 is DivergingEpoch, unused).
+/// v12+: optional **DivergingEpoch tag 0** and **CurrentLeader tag 1**.
 ///
 /// Phase 86: `lso` may be `< hwm` while a write-through txn is open;
 /// `aborted` is `(producer_id, first_offset)` for soft abort markers.
@@ -624,10 +656,12 @@ pub(crate) fn put_fetch_partition_response(
         &[],
         records,
         current_leader,
+        None,
     );
 }
 
-/// Full Fetch partition response with explicit LSO + aborted list (Phase 86).
+/// Full Fetch partition response with explicit LSO + aborted list (Phase 86)
+/// and optional DivergingEpoch (Phase 88).
 pub(crate) fn put_fetch_partition_response_full(
     out: &mut BytesMut,
     version: i16,
@@ -639,16 +673,20 @@ pub(crate) fn put_fetch_partition_response_full(
     aborted: &[(i64, i64)],
     records: &[u8],
     current_leader: Option<(i32, i32)>,
+    diverging_epoch: Option<(i32, i64)>,
 ) {
     let flexible = version >= 12;
+    // For DivergingEpoch (OFFSET_OUT_OF_RANGE), still emit real hwm/lso/log_start
+    // so clients can truncate and continue; other errors keep -1 for lso/log_start.
+    let keep_offsets = error == 0 || diverging_epoch.is_some();
     out.put_i32(partition);
     out.put_i16(error);
     out.put_i64(hwm);
     if version >= 4 {
-        out.put_i64(if error == 0 { lso } else { -1 });
+        out.put_i64(if keep_offsets { lso } else { -1 });
     }
     if version >= 5 {
-        out.put_i64(if error == 0 { log_start } else { -1 });
+        out.put_i64(if keep_offsets { log_start } else { -1 });
     }
     if version >= 4 {
         if flexible {
@@ -671,13 +709,16 @@ pub(crate) fn put_fetch_partition_response_full(
     }
     if flexible {
         put_compact_bytes(out, Some(records));
-        if let Some((lid, lep)) = current_leader {
-            // Tag 1 = CurrentLeader (tag 0 would be DivergingEpoch).
-            let body = encode_leader_id_and_epoch(lid, lep);
-            put_single_tag(out, 1, &body);
-        } else {
-            put_empty_tag_buffer(out);
+        let mut tags: Vec<(u32, BytesMut)> = Vec::new();
+        if let Some((epoch, end)) = diverging_epoch {
+            // Tag 0 = DivergingEpoch (Phase 88).
+            tags.push((0, encode_diverging_epoch(epoch, end)));
         }
+        if let Some((lid, lep)) = current_leader {
+            // Tag 1 = CurrentLeader (Phase 78).
+            tags.push((1, encode_leader_id_and_epoch(lid, lep)));
+        }
+        put_tags(out, &tags);
     } else {
         put_bytes(out, Some(records));
     }
@@ -699,18 +740,24 @@ pub(crate) fn encode_fetch(broker: &Broker, src: &mut impl Buf, out: &mut BytesM
     //   response: throttle (v1+), error+session_id (v7+),
     //             topics[{ name ≤v12 | TopicId v13+, partitions[{…}]}],
     //             tags (v12+; NodeEndpoints tag 0 on v16+ when CurrentLeader set)
+    // Phase 88: real fetch sessions + DivergingEpoch (tag 0) on truncation.
     // v14: wire-identical to v13 (OffsetMovedToTieredStorage never emitted).
     // v15: top-level ReplicaId dropped; ReplicaState is tagged (ignored).
     // v16: NodeEndpoints top-level tag (KIP-951) on leader errors.
     // v17–18: request-only tagged fields; response framing unchanged from v16.
+    use super::fetch_session::{
+        FetchSessionManager, SessionPartition, SessionTopic, FINAL_EPOCH, INITIAL_EPOCH,
+    };
+    use super::topic_id::TopicWireId;
+    use std::collections::HashMap;
+
     let flexible = version >= 12;
     let use_topic_id = version >= 13;
-    let mut kip951_leaders: Vec<i32> = Vec::new();
 
     // ReplicaId is a top-level field only through v14 (KIP-903 / Kafka v15+).
     let header_need = if version <= 14 { 4 + 4 + 4 } else { 4 + 4 };
     if src.remaining() < header_need {
-        put_fetch_empty_response(out, version, 0);
+        put_fetch_empty_response(out, version, 0, 0);
         return;
     }
     if version <= 14 {
@@ -720,7 +767,7 @@ pub(crate) fn encode_fetch(broker: &Broker, src: &mut impl Buf, out: &mut BytesM
     let _min_bytes = src.get_i32();
     if version >= 3 {
         if src.remaining() < 4 {
-            put_fetch_empty_response(out, version, 0);
+            put_fetch_empty_response(out, version, 0, 0);
             return;
         }
         let _max_bytes = src.get_i32();
@@ -729,91 +776,70 @@ pub(crate) fn encode_fetch(broker: &Broker, src: &mut impl Buf, out: &mut BytesM
     let mut isolation = 0u8;
     if version >= 4 {
         if src.remaining() < 1 {
-            put_fetch_empty_response(out, version, 0);
+            put_fetch_empty_response(out, version, 0, 0);
             return;
         }
         isolation = src.get_u8();
         if isolation > 1 {
-            put_fetch_empty_response(out, version, 0);
+            put_fetch_empty_response(out, version, 0, 0);
             return;
         }
     }
     let read_committed = isolation == 1;
 
-    // v7+: incremental fetch session fields (no real session; always full response).
-    let mut session_id = 0i32;
+    // v7+: fetch session fields (Phase 88: real process-local sessions).
+    let mut req_session_id = 0i32;
+    let mut req_session_epoch = FINAL_EPOCH;
     if version >= 7 {
         if src.remaining() < 4 + 4 {
-            put_fetch_empty_response(out, version, 0);
+            put_fetch_empty_response(out, version, 0, 0);
             return;
         }
-        session_id = src.get_i32();
-        let _session_epoch = src.get_i32();
-        // Echo non-zero session_id; 0 means "not part of a session".
+        req_session_id = src.get_i32();
+        req_session_epoch = src.get_i32();
     }
 
+    // --- Parse topics ---
     let topic_count = if flexible {
         match get_compact_array_len(src) {
             Ok(Some(n)) => n as i32,
             Ok(None) | Err(_) => {
-                put_fetch_empty_response(out, version, session_id);
+                put_fetch_empty_response(out, version, 0, 0);
                 return;
             }
         }
     } else {
         if src.remaining() < 4 {
-            put_fetch_empty_response(out, version, session_id);
+            put_fetch_empty_response(out, version, 0, 0);
             return;
         }
         src.get_i32()
     };
 
-    put_fetch_response_header(out, version, session_id);
-    if flexible {
-        put_compact_array_len(out, topic_count.max(0) as usize);
-    } else {
-        out.put_i32(topic_count.max(0));
-    }
+    let mut req_topics: HashMap<String, SessionTopic> = HashMap::new();
+    // Preserve request order for response when topics non-empty.
+    let mut req_topic_order: Vec<String> = Vec::new();
 
     for _ in 0..topic_count.max(0) {
-        // v13+: TopicId UUID; ≤v12: topic name string.
         let resolved = match topic_id::read_and_resolve(broker, src, flexible, use_topic_id) {
             Ok(r) => r,
             Err(_) => break,
         };
-        topic_id::write_wire_id(out, flexible, &resolved.wire);
-        let topic_name = resolved.name_or_empty().to_string();
-        let unknown_topic_id = resolved.is_unknown();
-
+        let key = FetchSessionManager::topic_key(&resolved.wire, resolved.name_or_empty());
         let part_count = if flexible {
             match get_compact_array_len(src) {
                 Ok(Some(n)) => n as i32,
-                Ok(None) | Err(_) => {
-                    if flexible {
-                        put_compact_array_len(out, 0);
-                        put_empty_tag_buffer(out);
-                    } else {
-                        out.put_i32(0);
-                    }
-                    break;
-                }
+                Ok(None) | Err(_) => break,
             }
         } else {
             if src.remaining() < 4 {
-                out.put_i32(0);
                 break;
             }
             src.get_i32()
         };
-        if flexible {
-            put_compact_array_len(out, part_count.max(0) as usize);
-        } else {
-            out.put_i32(part_count.max(0));
-        }
 
+        let mut partitions = HashMap::new();
         for _ in 0..part_count.max(0) {
-            // partition + optional current_leader_epoch + fetch_offset
-            // + last_fetched_epoch (v12+) + optional log_start_offset + partition_max_bytes
             let need = 4
                 + if version >= 9 { 4 } else { 0 }
                 + 8
@@ -830,18 +856,205 @@ pub(crate) fn encode_fetch(broker: &Broker, src: &mut impl Buf, out: &mut BytesM
                 -1
             };
             let fetch_offset = src.get_i64();
-            if version >= 12 {
-                let _last_fetched_epoch = src.get_i32(); // ignored (no diverging-epoch tags)
-            }
+            let last_fetched_epoch = if version >= 12 {
+                src.get_i32()
+            } else {
+                -1
+            };
             if version >= 5 {
-                let _follower_log_start = src.get_i64(); // ignored (consumer path)
+                let _follower_log_start = src.get_i64();
             }
             let max_bytes = src.get_i32().max(0) as usize;
             if flexible {
-                // Partition tags: ReplicaDirectoryId (v17+ tag 0), HighWatermark
-                // (v18+ tag 1) — parse-ignore via skip.
                 let _ = skip_tag_buffer(src);
             }
+            partitions.insert(
+                partition,
+                SessionPartition {
+                    fetch_offset,
+                    current_leader_epoch,
+                    last_fetched_epoch,
+                    max_bytes,
+                },
+            );
+        }
+        if flexible {
+            let _ = skip_tag_buffer(src); // topic request tags
+        }
+        if !req_topics.contains_key(&key) {
+            req_topic_order.push(key.clone());
+        }
+        let entry = req_topics.entry(key).or_insert_with(|| SessionTopic {
+            wire: resolved.wire.clone(),
+            name: resolved.name_or_empty().to_string(),
+            partitions: HashMap::new(),
+        });
+        entry.wire = resolved.wire;
+        if let Some(n) = resolved.name {
+            entry.name = n;
+        }
+        entry.partitions.extend(partitions);
+    }
+
+    // --- Parse forgotten_topics_data (v7+) ---
+    let mut forgotten: Vec<(String, Vec<i32>)> = Vec::new();
+    if version >= 7 {
+        if flexible {
+            if let Ok(Some(n)) = get_compact_array_len(src) {
+                for _ in 0..n {
+                    let resolved = match topic_id::read_and_resolve(broker, src, true, use_topic_id)
+                    {
+                        Ok(r) => r,
+                        Err(_) => break,
+                    };
+                    let key =
+                        FetchSessionManager::topic_key(&resolved.wire, resolved.name_or_empty());
+                    let mut parts = Vec::new();
+                    if let Ok(Some(pn)) = get_compact_array_len(src) {
+                        for _ in 0..pn {
+                            if src.remaining() < 4 {
+                                break;
+                            }
+                            parts.push(src.get_i32());
+                        }
+                    }
+                    let _ = skip_tag_buffer(src);
+                    forgotten.push((key, parts));
+                }
+            }
+        } else if src.remaining() >= 4 {
+            let n = src.get_i32();
+            for _ in 0..n.max(0) {
+                let name = match get_string(src) {
+                    Ok(s) => s,
+                    Err(_) => break,
+                };
+                let mut parts = Vec::new();
+                if src.remaining() < 4 {
+                    break;
+                }
+                let pn = src.get_i32();
+                for _ in 0..pn.max(0) {
+                    if src.remaining() < 4 {
+                        break;
+                    }
+                    parts.push(src.get_i32());
+                }
+                forgotten.push((name, parts));
+            }
+        }
+    }
+    // v11+: rack_id (ignored — preferred_read_replica always -1).
+    if version >= 11 {
+        if flexible {
+            let _ = get_compact_string(src);
+        } else {
+            let _ = get_string(src);
+        }
+    }
+    if flexible {
+        // Request top-level tags: ClusterId (v12+ tag 0), ReplicaState (v15+ tag 1).
+        let _ = skip_tag_buffer(src);
+    }
+
+    // --- Session handling (v7+) ---
+    let sessions = broker.fetch_sessions();
+    let mut resp_session_id = 0i32;
+    let mut top_error = KafkaErrorCode::None.as_i16();
+    // Topics to actually fetch/respond (order + content).
+    let (fetch_topics, fetch_order) = if version < 7 {
+        (req_topics, req_topic_order)
+    } else if req_session_epoch == FINAL_EPOCH {
+        // Close any existing session; full fetch; no new session.
+        sessions.close(req_session_id);
+        resp_session_id = 0;
+        (req_topics, req_topic_order)
+    } else if req_session_id == 0 || req_session_epoch == INITIAL_EPOCH {
+        // Full fetch + create session from request partitions.
+        // If client sent a non-zero id with INITIAL, close the old first.
+        if req_session_id != 0 {
+            sessions.close(req_session_id);
+        }
+        let mut fetch_topics = req_topics.clone();
+        let mut fetch_order = req_topic_order.clone();
+        // Apply forgotten against the new session set before create.
+        for (key, parts) in &forgotten {
+            if parts.is_empty() {
+                fetch_topics.remove(key);
+                continue;
+            }
+            if let Some(t) = fetch_topics.get_mut(key) {
+                for p in parts {
+                    t.partitions.remove(p);
+                }
+                if t.partitions.is_empty() {
+                    fetch_topics.remove(key);
+                }
+            }
+        }
+        fetch_order.retain(|k| fetch_topics.contains_key(k));
+        resp_session_id = sessions.create(fetch_topics.clone());
+        (fetch_topics, fetch_order)
+    } else {
+        // Incremental: validate session + epoch.
+        match sessions.begin_incremental(req_session_id, req_session_epoch) {
+            Ok(()) => {
+                resp_session_id = req_session_id;
+                sessions.merge_topics(req_session_id, &req_topics);
+                sessions.forget(req_session_id, &forgotten);
+                if req_topics.is_empty() {
+                    // Empty topics → re-fetch entire session set.
+                    let fetch_topics = sessions.snapshot_topics(req_session_id);
+                    let mut fetch_order: Vec<String> = fetch_topics.keys().cloned().collect();
+                    fetch_order.sort(); // stable deterministic order
+                    (fetch_topics, fetch_order)
+                } else {
+                    (req_topics, req_topic_order)
+                }
+            }
+            Err(code) => {
+                top_error = code;
+                resp_session_id = req_session_id;
+                // Empty responses on session error.
+                put_fetch_empty_response(out, version, top_error, resp_session_id);
+                return;
+            }
+        }
+    };
+
+    // --- Encode responses ---
+    let mut kip951_leaders: Vec<i32> = Vec::new();
+    put_fetch_response_header(out, version, top_error, resp_session_id);
+    if flexible {
+        put_compact_array_len(out, fetch_order.len());
+    } else {
+        out.put_i32(fetch_order.len() as i32);
+    }
+
+    for key in &fetch_order {
+        let Some(topic) = fetch_topics.get(key) else {
+            continue;
+        };
+        topic_id::write_wire_id(out, flexible, &topic.wire);
+        let topic_name = topic.name.clone();
+        let unknown_topic_id = matches!(topic.wire, TopicWireId::Uuid(_)) && topic_name.is_empty();
+
+        let mut part_ids: Vec<i32> = topic.partitions.keys().copied().collect();
+        part_ids.sort_unstable();
+        if flexible {
+            put_compact_array_len(out, part_ids.len());
+        } else {
+            out.put_i32(part_ids.len() as i32);
+        }
+
+        for partition in part_ids {
+            let Some(part_req) = topic.partitions.get(&partition) else {
+                continue;
+            };
+            let current_leader_epoch = part_req.current_leader_epoch;
+            let fetch_offset = part_req.fetch_offset;
+            let last_fetched_epoch = part_req.last_fetched_epoch;
+            let max_bytes = part_req.max_bytes;
 
             if unknown_topic_id {
                 put_fetch_partition_response(
@@ -851,7 +1064,9 @@ pub(crate) fn encode_fetch(broker: &Broker, src: &mut impl Buf, out: &mut BytesM
                     KafkaErrorCode::UnknownTopicId.as_i16(),
                     -1,
                     -1,
-                    &[], None);
+                    &[],
+                    None,
+                );
                 continue;
             }
 
@@ -870,7 +1085,9 @@ pub(crate) fn encode_fetch(broker: &Broker, src: &mut impl Buf, out: &mut BytesM
                     KafkaErrorCode::TopicAuthorizationFailed.as_i16(),
                     -1,
                     -1,
-                    &[], None);
+                    &[],
+                    None,
+                );
                 continue;
             }
 
@@ -893,7 +1110,9 @@ pub(crate) fn encode_fetch(broker: &Broker, src: &mut impl Buf, out: &mut BytesM
                         KafkaErrorCode::UnknownLeaderEpoch.as_i16(),
                         -1,
                         -1,
-                        &[], None);
+                        &[],
+                        None,
+                    );
                     continue;
                 }
                 if current_epoch >= 0 && current_leader_epoch < current_epoch {
@@ -912,6 +1131,35 @@ pub(crate) fn encode_fetch(broker: &Broker, src: &mut impl Buf, out: &mut BytesM
                         leader,
                     );
                     continue;
+                }
+            }
+
+            // Phase 88: DivergingEpoch when last_fetched_epoch indicates truncation.
+            if version >= 12 && last_fetched_epoch != -1 {
+                if let Some((found_epoch, end_offset)) =
+                    broker.offset_for_leader_epoch(&topic_name, partition as u32, last_fetched_epoch)
+                {
+                    if fetch_offset > end_offset {
+                        let hwm = part_meta.map(|p| p.hwm as i64).unwrap_or(end_offset);
+                        let lso =
+                            broker.last_stable_offset(name.as_str(), partition as u32) as i64;
+                        let log_start =
+                            produce_log_start_offset(broker, &topic_name, partition as u32);
+                        put_fetch_partition_response_full(
+                            out,
+                            version,
+                            partition,
+                            KafkaErrorCode::OffsetOutOfRange.as_i16(),
+                            hwm,
+                            if version >= 4 { lso } else { hwm },
+                            log_start,
+                            &[],
+                            &[],
+                            None,
+                            Some((found_epoch, end_offset)),
+                        );
+                        continue;
+                    }
                 }
             }
 
@@ -944,7 +1192,6 @@ pub(crate) fn encode_fetch(broker: &Broker, src: &mut impl Buf, out: &mut BytesM
                     let lso = broker.last_stable_offset(name.as_str(), partition as u32) as i64;
                     let log_start =
                         produce_log_start_offset(broker, &topic_name, partition as u32);
-                    // Phase 86: aborted list for READ_COMMITTED when soft markers apply.
                     let aborted_pairs: Vec<(i64, i64)> = if read_committed && version >= 4 {
                         broker
                             .aborted_transactions_for_fetch(
@@ -959,7 +1206,6 @@ pub(crate) fn encode_fetch(broker: &Broker, src: &mut impl Buf, out: &mut BytesM
                     } else {
                         Vec::new()
                     };
-                    // Phase 32: v4+ RecordBatch (may be compressed); v0–3 MessageSet.
                     let set = encode_fetch_record_set(&selected, version);
                     put_fetch_partition_response_full(
                         out,
@@ -971,6 +1217,7 @@ pub(crate) fn encode_fetch(broker: &Broker, src: &mut impl Buf, out: &mut BytesM
                         log_start,
                         &aborted_pairs,
                         &set,
+                        None,
                         None,
                     );
                 }
@@ -994,65 +1241,18 @@ pub(crate) fn encode_fetch(broker: &Broker, src: &mut impl Buf, out: &mut BytesM
                         KafkaErrorCode::Unknown.as_i16(),
                         -1,
                         -1,
-                        &[], None);
+                        &[],
+                        None,
+                    );
                 }
             }
         }
         if flexible {
             put_empty_tag_buffer(out); // topic response tags
-            let _ = skip_tag_buffer(src); // topic request tags
         }
     }
 
-    // v7+: forgotten_topics_data (parse and ignore — no incremental sessions).
-    if version >= 7 {
-        if flexible {
-            if let Ok(Some(n)) = get_compact_array_len(src) {
-                for _ in 0..n {
-                    if use_topic_id {
-                        let _ = get_uuid(src);
-                    } else {
-                        let _ = get_compact_string(src);
-                    }
-                    if let Ok(Some(pn)) = get_compact_array_len(src) {
-                        for _ in 0..pn {
-                            if src.remaining() < 4 {
-                                break;
-                            }
-                            let _ = src.get_i32();
-                        }
-                    }
-                    let _ = skip_tag_buffer(src);
-                }
-            }
-        } else if src.remaining() >= 4 {
-            let forgotten = src.get_i32();
-            for _ in 0..forgotten.max(0) {
-                let _ = get_string(src);
-                if src.remaining() < 4 {
-                    break;
-                }
-                let n = src.get_i32();
-                for _ in 0..n.max(0) {
-                    if src.remaining() < 4 {
-                        break;
-                    }
-                    let _ = src.get_i32();
-                }
-            }
-        }
-    }
-    // v11+: rack_id (ignored — preferred_read_replica always -1).
-    if version >= 11 {
-        if flexible {
-            let _ = get_compact_string(src);
-        } else {
-            let _ = get_string(src);
-        }
-    }
     if flexible {
-        // Request top-level tags: ClusterId (v12+ tag 0), ReplicaState (v15+ tag 1).
-        let _ = skip_tag_buffer(src);
         // Response top-level: NodeEndpoints (tag 0) on v16+ when any CurrentLeader.
         if version >= 16 && !kip951_leaders.is_empty() {
             let endpoints = node_endpoints_for_leaders(broker, &kip951_leaders);

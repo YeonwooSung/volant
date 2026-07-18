@@ -148,13 +148,16 @@ volant-server \
   Crash promotes open ranges to aborted via `__txn_markers`.
 - **Leader epochs:** durable history under `{data_dir}/__leader_epochs` (Phase 87);
   OffsetForLeaderEpoch returns prior-epoch end offsets; Metadata advertises live
-  epoch. Not a full KRaft epoch state machine; no Fetch DivergingEpoch yet.
+  epoch. Not a full KRaft epoch state machine.
+- **Fetch DivergingEpoch / sessions (Phase 88):** truncation → OFFSET_OUT_OF_RANGE
+  + DivergingEpoch tag 0 from history; process-local fetch sessions (create /
+  forgotten / errors 70–71). Sessions are not durable or multi-broker sticky.
 - **ACLs:** Kafka ACL admin maps to Volant Phase 20/21 ACLs (LITERAL only;
   CreateAcls enables enforcement). Describe/Create/DeleteAcls **0–3**: v3 accepts
   Kafka **User** resource type (stored as `ResourceType::User`; not used on the
   produce/fetch authorize path; no SCRAM-admin gating).
 
-Deep dives: [PHASE23_SPEC.md](./PHASE23_SPEC.md) … [PHASE87_SPEC.md](./PHASE87_SPEC.md).
+Deep dives: [PHASE23_SPEC.md](./PHASE23_SPEC.md) … [PHASE88_SPEC.md](./PHASE88_SPEC.md).
 
 ## TLS (Phase 7 listen + Phase 9 verification / inter-broker)
 
@@ -258,7 +261,7 @@ curl -s -H "Authorization: Bearer $VOLANT_METRICS_TOKEN" \
 - Multi-language clients
 - Full chaos-mesh suites / cargo-fuzz **corpus CI** (scaffold under `fuzz/` only)
 - Kafka control batches on the data log / real 2PC / prepared transactions
-- Durable leader-epoch history; real fetch sessions
+- Omit-unchanged fetch session cache; multi-broker session affinity
 
 Full list: [ROADMAP.md](../ROADMAP.md).
 

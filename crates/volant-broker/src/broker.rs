@@ -30,6 +30,7 @@ use crate::producer_state::{
     partition_key, parse_partition_key, ProducerStateFile, ProducerStateStore, StoredBatch,
     StoredProducer,
 };
+use crate::kafka::fetch_session::FetchSessionManager;
 use crate::leader_epoch::{
     self, end_offset_for, ensure_entry, EpochStart, LeaderEpochStore, LeaderEpochsFile,
 };
@@ -295,6 +296,8 @@ pub struct Broker {
     leader_epochs: RwLock<HashMap<(String, u32), Vec<EpochStart>>>,
     /// Durable leader-epoch store under `data_dir/__leader_epochs` (Phase 87).
     leader_epoch_store: LeaderEpochStore,
+    /// Process-local Fetch sessions (Phase 88 MVP).
+    fetch_sessions: FetchSessionManager,
 }
 
 impl Broker {
@@ -347,6 +350,7 @@ impl Broker {
             scram,
             leader_epochs: RwLock::new(HashMap::new()),
             leader_epoch_store,
+            fetch_sessions: FetchSessionManager::new(),
         };
         broker
             .reload_single_node_topics()
@@ -429,6 +433,7 @@ impl Broker {
             scram,
             leader_epochs: RwLock::new(HashMap::new()),
             leader_epoch_store,
+            fetch_sessions: FetchSessionManager::new(),
         };
         // Open local partitions from persisted assignment.
         broker.apply_local_assignment()?;
@@ -436,6 +441,11 @@ impl Broker {
         broker.load_leader_epochs();
         broker.seed_missing_leader_epochs();
         Ok(broker)
+    }
+
+    /// Process-local Fetch session manager (Phase 88).
+    pub fn fetch_sessions(&self) -> &FetchSessionManager {
+        &self.fetch_sessions
     }
 
     /// Shared metrics registry.

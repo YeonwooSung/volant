@@ -148,7 +148,7 @@ async fn fetch_v12_flexible_roundtrip() {
 
     assert_eq!(src.get_i32(), 0); // throttle
     assert_eq!(src.get_i16(), 0); // top error
-    assert_eq!(src.get_i32(), 7); // session echo
+    assert_eq!(src.get_i32(), 0); // FINAL epoch → session id 0 (Phase 88)
     let n_topics = get_compact_array_len(&mut src).unwrap().unwrap();
     assert_eq!(n_topics, 1);
     assert_eq!(get_compact_string(&mut src).unwrap(), "orders");

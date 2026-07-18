@@ -126,7 +126,7 @@ Atomic write (temp + rename), same pattern as producer state / txn markers.
 
 ## Deferred (Phase 88+)
 
-- Fetch DivergingEpoch tagged field
-- Real fetch sessions
+- Fetch DivergingEpoch tagged field → **closed by Phase 88**
+- Real fetch sessions → **closed by Phase 88 (MVP)**
 - Kafka control batches on data log / real 2PC
 - Multi-lang clients / cargo-fuzz corpus CI

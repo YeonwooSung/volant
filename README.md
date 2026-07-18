@@ -145,12 +145,12 @@ static ISR). Later work is summarized by band — full chronicle in
 
 **Kafka ceilings (code SoT):** ApiVersions **0–5**, Fetch **0–18**, Produce/Metadata
 **0–13**, ACL admin **0–3** (User resource v3, store-only); Fetch isolation
-READ_COMMITTED MVP (Phase 86); durable OffsetForLeaderEpoch history (Phase 87).
+READ_COMMITTED MVP (Phase 86); durable OffsetForLeaderEpoch history (Phase 87); Fetch DivergingEpoch + real fetch sessions MVP (Phase 88).
 Matrix + honesty: [docs/KAFKA_COMPAT.md](./docs/KAFKA_COMPAT.md).
 
 **Still deferred:** multi-language clients, chaos-mesh / cargo-fuzz corpus CI,
 Kafka control batches on the data log, real 2PC / prepared transactions, real
-fetch sessions / DivergingEpoch.
+omit-unchanged session cache / multi-broker session affinity.
 
 ### Networked client (library)
 
