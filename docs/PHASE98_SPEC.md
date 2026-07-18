@@ -121,6 +121,6 @@ After step 4, a subsequent restart sees empty open → no re-append.
 - Control batches for empty AddPartitions (coordinator-only partitions)
 - Marker compaction / GC with DeleteRecords
 - Stronger crash-promote idempotency (e.g. promote flag / content-hash before append)
-- Admin / DescribeConfigs for txn timeout + sweep knobs
+- Admin / DescribeConfigs for txn timeout + sweep knobs → **closed by Phase 99**
 - Multi-broker marker consensus / KRaft-shaped txn log
 - Graceful sweeper shutdown

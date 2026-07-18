@@ -2199,12 +2199,12 @@ Binding: **[docs/PHASE96_SPEC.md](./docs/PHASE96_SPEC.md)**.
 - [x] Integration tests (`phase96_transaction_max_timeout`)
 
 **Honest limitations:** lazy only; single-node; Volant still accepts client
-timeout ≤ 0 as broker-default (not full Kafka `> 0` validation); no
-DescribeConfigs surface for the knobs.
+timeout ≤ 0 as broker-default (not full Kafka `> 0` validation); DescribeConfigs
+surface for knobs → **closed by Phase 99**.
 
 **Still deferred:** multi-lang clients, cargo-fuzz corpus CI, multi-broker 2PC /
-session affinity / durable sessions, Admin timeout config surface; background
-txn/session sweeper / richer metrics → **closed by Phase 97**.
+session affinity / durable sessions; background txn/session sweeper / richer
+metrics → **closed by Phase 97**.
 
 ---
 
@@ -2225,12 +2225,12 @@ Binding: **[docs/PHASE97_SPEC.md](./docs/PHASE97_SPEC.md)**.
 - [x] Integration tests (`phase97_background_sweeper`)
 
 **Honest limitations:** single-node wall clock; fire-and-forget tokio task (no
-join on drop); idle session sweep only (LRU still lazy-on-create); no Admin
-config surface.
+join on drop); idle session sweep only (LRU still lazy-on-create); Admin config
+surface → **closed by Phase 99**.
 
 **Still deferred:** multi-lang clients, cargo-fuzz corpus CI, multi-broker 2PC /
-session affinity / durable sessions, Admin timeout/sweep config surface,
-graceful sweeper shutdown; crash≡abort control batches → **closed by Phase 98**.
+session affinity / durable sessions, graceful sweeper shutdown; crash≡abort
+control batches → **closed by Phase 98**.
 
 ---
 
@@ -2258,8 +2258,38 @@ partial mid-append re-append; coordinator_epoch always 0; no multi-broker
 marker consensus; no historical reconstruction of pre-98 crash-aborts.
 
 **Still deferred:** multi-lang clients, cargo-fuzz corpus CI, multi-broker 2PC /
-session affinity / durable sessions, Admin timeout/sweep config surface,
-graceful sweeper shutdown, empty-AddPartitions control markers, marker GC.
+session affinity / durable sessions, marker GC; Admin/DescribeConfigs for
+timeout + sweep knobs → **closed by Phase 99**.
+
+---
+
+### Phase 99 — DescribeConfigs (broker) for txn/session/sweep knobs (MVP) ✅
+
+**Goal:** Expose process-local open/prepared/max txn timeouts, fetch-session
+idle/max, and sweep interval via Kafka **DescribeConfigs** on **BROKER**
+resources; support **AlterConfigs** / **IncrementalAlterConfigs** SET/DELETE
+through the same setters as env overrides.
+
+Binding: **[docs/PHASE99_SPEC.md](./docs/PHASE99_SPEC.md)**.
+
+- [x] BROKER resource type (4) on DescribeConfigs 0–4
+- [x] Config keys: `transaction.max.timeout.ms` + five `volant.*` knobs
+- [x] Values from live Broker getters; product defaults documented
+- [x] AlterConfigs + IncrementalAlterConfigs SET/DELETE (process-local, non-durable)
+- [x] Unknown key → InvalidConfig; other resource types still InvalidRequest
+- [x] Cluster Describe/Alter ACL when enabled
+- [x] TOPIC configs unchanged
+- [x] Integration tests (`phase99_broker_configs`)
+
+**Honest limitations:** single-node (resource name ignored); non-durable; six
+knobs only; empty synonyms; sweeper task spawn still tied to
+`start_background_tasks` initial interval; no BROKER_LOGGER / full Kafka
+broker catalog / KRaft DynamicBrokerConfig.
+
+**Still deferred:** multi-lang clients, cargo-fuzz corpus CI, multi-broker 2PC /
+session affinity / durable sessions, durable dynamic broker config file,
+marker compaction/GC, graceful sweeper restart on 0→>0 interval,
+empty-AddPartitions control markers.
 
 ---
 

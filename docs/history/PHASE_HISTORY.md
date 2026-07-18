@@ -1,6 +1,6 @@
 # Phase history index
 
-Ship records for **phases 0–98**. Binding core contracts are
+Ship records for **phases 0–99**. Binding core contracts are
 **[PHASE1_SPEC](../PHASE1_SPEC.md)–[PHASE6_SPEC](../PHASE6_SPEC.md)**. Living
 docs for day-to-day reading: [ops](../ops.md), [consistency](../consistency.md),
 [tuning](../tuning.md), [KAFKA_COMPAT](../KAFKA_COMPAT.md),
@@ -140,10 +140,11 @@ docs for day-to-day reading: [ops](../ops.md), [consistency](../consistency.md),
 | 96 | ✅ | Broker `transaction.max.timeout.ms` clamp (Init reject 50 + effective clamp) | [PHASE96_SPEC.md](../PHASE96_SPEC.md) |
 | 97 | ✅ | Background txn + session sweeper with metrics (MVP) | [PHASE97_SPEC.md](../PHASE97_SPEC.md) |
 | 98 | ✅ | Control batches for crash≡abort open write-through txns (MVP) | [PHASE98_SPEC.md](../PHASE98_SPEC.md) |
+| 99 | ✅ | DescribeConfigs/Alter BROKER for txn/session/sweep knobs (MVP) | [PHASE99_SPEC.md](../PHASE99_SPEC.md) |
 
 ---
 
-## Still deferred (post–Phase 98)
+## Still deferred (post–Phase 99)
 
 - Multi-language clients
 - Chaos-mesh / cargo-fuzz corpus CI
@@ -151,6 +152,6 @@ docs for day-to-day reading: [ops](../ops.md), [consistency](../consistency.md),
 - Multi-broker session affinity / durable sessions / byte-identical response cache
 - Full KRaft epoch state machine / remote-log epochs
 - Control batches for empty AddPartitions without data
-- Admin/DescribeConfigs for timeout + sweep knobs
-- Graceful sweeper shutdown / join
+- Durable dynamic broker config file / full Kafka broker catalog
+- Graceful sweeper shutdown / join / restart on 0→>0 interval
 - Marker compaction / GC with DeleteRecords

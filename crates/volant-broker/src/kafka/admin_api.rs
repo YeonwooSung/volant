@@ -719,8 +719,15 @@ pub(crate) fn encode_create_partitions(
     }
 }
 
+/// Kafka `ConfigResource.Type`: TOPIC.
+const RES_TOPIC: i8 = 2;
+/// Kafka `ConfigResource.Type`: BROKER (Phase 99).
+const RES_BROKER: i8 = 4;
+
 /// Kafka `DescribeConfigsResponse.ConfigSource` ids (classic).
 const CFG_SRC_TOPIC: i8 = 1;
+/// DYNAMIC_BROKER_CONFIG — runtime-mutable process knobs (Phase 99).
+const CFG_SRC_DYNAMIC_BROKER: i8 = 2;
 const CFG_SRC_DEFAULT: i8 = 5;
 /// Kafka `DescribeConfigsResponse.ConfigType` ids.
 const CFG_TYPE_STRING: i8 = 2;
@@ -729,6 +736,8 @@ const CFG_TYPE_LONG: i8 = 5;
 pub(crate) fn config_type_for_key(key: &str) -> i8 {
     match key {
         "retention.ms" | "retention.bytes" | "segment.bytes" => CFG_TYPE_LONG,
+        // Phase 99 broker knobs are all integer ms / counts.
+        k if crate::broker_config::is_known_key(k) => CFG_TYPE_LONG,
         _ => CFG_TYPE_STRING,
     }
 }
@@ -739,8 +748,12 @@ pub(crate) fn config_documentation(key: &str) -> Option<&'static str> {
         "retention.bytes" => Some("Log retention size in bytes"),
         "segment.bytes" => Some("Segment roll size in bytes"),
         "cleanup.policy" => Some("delete | compact"),
-        _ => None,
+        other => crate::broker_config::documentation(other),
     }
+}
+
+fn unsupported_config_resource_msg() -> &'static str {
+    "only TOPIC and BROKER resources supported"
 }
 
 pub(crate) fn encode_describe_configs(
@@ -882,11 +895,91 @@ pub(crate) fn encode_describe_configs(
             }
         };
 
-        if r.rtype != 2 {
+        if r.rtype == RES_BROKER {
+            // Phase 99: BROKER resource — txn/session/sweep knobs.
+            if broker.acls().is_enabled()
+                && !broker.acls().authorize(
+                    Some(principal),
+                    ResourceType::Cluster,
+                    CLUSTER_RESOURCE,
+                    AclOperation::Describe,
+                )
+            {
+                write_header(
+                    out,
+                    KafkaErrorCode::ClusterAuthorizationFailed,
+                    None,
+                    r.rtype,
+                    &r.name,
+                );
+                write_empty_configs(out);
+                continue;
+            }
+            let mut entries = broker.describe_broker_configs();
+            if let Some(filter) = &r.keys {
+                entries.retain(|(k, _)| filter.iter().any(|f| f == k));
+            }
+            write_header(out, KafkaErrorCode::None, None, r.rtype, &r.name);
+            if flexible {
+                put_compact_array_len(out, entries.len());
+            } else {
+                out.put_i32(entries.len() as i32);
+            }
+            for (k, v) in entries {
+                let product_default = crate::broker_config::product_default(&k)
+                    .map(|d| d.to_string())
+                    .unwrap_or_default();
+                let is_default = v == product_default;
+                if flexible {
+                    put_compact_string(out, &k);
+                    put_compact_nullable_string(out, Some(&v));
+                } else {
+                    put_string(out, &k);
+                    put_nullable_string(out, Some(&v));
+                }
+                out.put_u8(0); // read_only
+                if version == 0 {
+                    out.put_u8(if is_default { 1 } else { 0 });
+                } else {
+                    // Runtime-mutable process knobs → DYNAMIC_BROKER_CONFIG.
+                    out.put_i8(CFG_SRC_DYNAMIC_BROKER);
+                }
+                out.put_u8(0); // is_sensitive
+                if version >= 1 {
+                    if flexible {
+                        put_compact_array_len(out, 0);
+                    } else {
+                        out.put_i32(0);
+                    }
+                }
+                if version >= 3 {
+                    out.put_i8(config_type_for_key(&k));
+                    let doc = if include_docs {
+                        config_documentation(&k)
+                    } else {
+                        None
+                    };
+                    if flexible {
+                        put_compact_nullable_string(out, doc);
+                    } else {
+                        put_nullable_string(out, doc);
+                    }
+                }
+                if flexible {
+                    put_empty_tag_buffer(out);
+                }
+            }
+            if flexible {
+                put_empty_tag_buffer(out);
+            }
+            continue;
+        }
+
+        if r.rtype != RES_TOPIC {
             write_header(
                 out,
                 KafkaErrorCode::InvalidRequest,
-                Some("only TOPIC resources supported"),
+                Some(unsupported_config_resource_msg()),
                 r.rtype,
                 &r.name,
             );
@@ -1117,37 +1210,41 @@ pub(crate) fn encode_alter_configs(
         out.put_i32(resources.len() as i32);
     }
     for r in resources {
-        let (code, msg): (i16, Option<String>) = if r.rtype != 2 {
-            (
-                KafkaErrorCode::InvalidRequest.as_i16(),
-                Some("only TOPIC resources supported".into()),
-            )
-        } else if broker.acls().is_enabled()
-            && !broker.acls().authorize(
-                Some(principal),
-                ResourceType::Topic,
-                &r.name,
-                AclOperation::Alter,
-            )
-        {
-            (KafkaErrorCode::TopicAuthorizationFailed.as_i16(), None)
-        } else if validate_only {
-            match volant_broker_topic_config_validate(&r.entries) {
-                Ok(()) => (KafkaErrorCode::None.as_i16(), None),
-                Err(msg) => (KafkaErrorCode::InvalidConfig.as_i16(), Some(msg)),
-            }
-        } else {
-            match broker.alter_configs(&r.name, &r.entries) {
-                Ok(_) => (KafkaErrorCode::None.as_i16(), None),
-                Err(Error::NotFound(_)) => (
-                    KafkaErrorCode::UnknownTopicOrPartition.as_i16(),
-                    Some("topic not found".into()),
-                ),
-                Err(Error::InvalidArgument(msg)) => {
-                    (KafkaErrorCode::InvalidConfig.as_i16(), Some(msg))
+        let (code, msg): (i16, Option<String>) = match r.rtype {
+            RES_BROKER => alter_broker_resource(broker, principal, &r.entries, validate_only),
+            RES_TOPIC => {
+                if broker.acls().is_enabled()
+                    && !broker.acls().authorize(
+                        Some(principal),
+                        ResourceType::Topic,
+                        &r.name,
+                        AclOperation::Alter,
+                    )
+                {
+                    (KafkaErrorCode::TopicAuthorizationFailed.as_i16(), None)
+                } else if validate_only {
+                    match volant_broker_topic_config_validate(&r.entries) {
+                        Ok(()) => (KafkaErrorCode::None.as_i16(), None),
+                        Err(msg) => (KafkaErrorCode::InvalidConfig.as_i16(), Some(msg)),
+                    }
+                } else {
+                    match broker.alter_configs(&r.name, &r.entries) {
+                        Ok(_) => (KafkaErrorCode::None.as_i16(), None),
+                        Err(Error::NotFound(_)) => (
+                            KafkaErrorCode::UnknownTopicOrPartition.as_i16(),
+                            Some("topic not found".into()),
+                        ),
+                        Err(Error::InvalidArgument(msg)) => {
+                            (KafkaErrorCode::InvalidConfig.as_i16(), Some(msg))
+                        }
+                        Err(_) => (KafkaErrorCode::Unknown.as_i16(), None),
+                    }
                 }
-                Err(_) => (KafkaErrorCode::Unknown.as_i16(), None),
             }
+            _ => (
+                KafkaErrorCode::InvalidRequest.as_i16(),
+                Some(unsupported_config_resource_msg().into()),
+            ),
         };
         out.put_i16(code);
         if flexible {
@@ -1168,6 +1265,41 @@ pub(crate) fn encode_alter_configs(
 
 pub(crate) fn volant_broker_topic_config_validate(entries: &[(String, String)]) -> std::result::Result<(), String> {
     crate::topic_config::TopicConfig::from_entries(entries).map(|_| ()).map_err(|e| e.to_string())
+}
+
+/// AlterConfigs / IncrementalAlter for BROKER resources (Phase 99).
+fn alter_broker_resource(
+    broker: &Broker,
+    principal: &str,
+    entries: &[(String, String)],
+    validate_only: bool,
+) -> (i16, Option<String>) {
+    if broker.acls().is_enabled()
+        && !broker.acls().authorize(
+            Some(principal),
+            ResourceType::Cluster,
+            CLUSTER_RESOURCE,
+            AclOperation::Alter,
+        )
+    {
+        return (KafkaErrorCode::ClusterAuthorizationFailed.as_i16(), None);
+    }
+    if validate_only {
+        return match crate::broker_config::validate_entries(entries) {
+            Ok(()) => (KafkaErrorCode::None.as_i16(), None),
+            Err(Error::InvalidArgument(msg)) => {
+                (KafkaErrorCode::InvalidConfig.as_i16(), Some(msg))
+            }
+            Err(e) => (KafkaErrorCode::InvalidConfig.as_i16(), Some(e.to_string())),
+        };
+    }
+    match broker.alter_broker_configs(entries) {
+        Ok(()) => (KafkaErrorCode::None.as_i16(), None),
+        Err(Error::InvalidArgument(msg)) => {
+            (KafkaErrorCode::InvalidConfig.as_i16(), Some(msg))
+        }
+        Err(e) => (KafkaErrorCode::Unknown.as_i16(), Some(e.to_string())),
+    }
 }
 
 /// IncrementalAlterConfigs (API 44) classic v0 + flexible v1.
@@ -1247,7 +1379,7 @@ pub(crate) fn encode_incremental_alter_configs(
                                 OP_DELETE => entries.push((key, String::new())),
                                 2 | 3 => {
                                     parse_err = Some(
-                                        "APPEND/SUBTRACT not supported (no list-typed topic configs)"
+                                        "APPEND/SUBTRACT not supported (no list-typed configs)"
                                             .into(),
                                     );
                                 }
@@ -1331,7 +1463,7 @@ pub(crate) fn encode_incremental_alter_configs(
                     OP_DELETE => entries.push((key, String::new())),
                     2 | 3 => {
                         parse_err = Some(
-                            "APPEND/SUBTRACT not supported (no list-typed topic configs)".into(),
+                            "APPEND/SUBTRACT not supported (no list-typed configs)".into(),
                         );
                     }
                     other => {
@@ -1360,38 +1492,44 @@ pub(crate) fn encode_incremental_alter_configs(
         out.put_i32(resources.len() as i32);
     }
     for r in resources {
-        let (code, msg): (i16, Option<String>) = if r.rtype != 2 {
-            (
-                KafkaErrorCode::InvalidRequest.as_i16(),
-                Some("only TOPIC resources supported".into()),
-            )
-        } else if broker.acls().is_enabled()
-            && !broker.acls().authorize(
-                Some(principal),
-                ResourceType::Topic,
-                &r.name,
-                AclOperation::Alter,
-            )
-        {
-            (KafkaErrorCode::TopicAuthorizationFailed.as_i16(), None)
-        } else if let Some(msg) = r.parse_err {
+        let (code, msg): (i16, Option<String>) = if let Some(msg) = r.parse_err {
             (KafkaErrorCode::InvalidConfig.as_i16(), Some(msg))
-        } else if validate_only {
-            match volant_broker_topic_config_validate(&r.entries) {
-                Ok(()) => (KafkaErrorCode::None.as_i16(), None),
-                Err(msg) => (KafkaErrorCode::InvalidConfig.as_i16(), Some(msg)),
-            }
         } else {
-            match broker.alter_configs(&r.name, &r.entries) {
-                Ok(_) => (KafkaErrorCode::None.as_i16(), None),
-                Err(Error::NotFound(_)) => (
-                    KafkaErrorCode::UnknownTopicOrPartition.as_i16(),
-                    Some("topic not found".into()),
-                ),
-                Err(Error::InvalidArgument(msg)) => {
-                    (KafkaErrorCode::InvalidConfig.as_i16(), Some(msg))
+            match r.rtype {
+                RES_BROKER => alter_broker_resource(broker, principal, &r.entries, validate_only),
+                RES_TOPIC => {
+                    if broker.acls().is_enabled()
+                        && !broker.acls().authorize(
+                            Some(principal),
+                            ResourceType::Topic,
+                            &r.name,
+                            AclOperation::Alter,
+                        )
+                    {
+                        (KafkaErrorCode::TopicAuthorizationFailed.as_i16(), None)
+                    } else if validate_only {
+                        match volant_broker_topic_config_validate(&r.entries) {
+                            Ok(()) => (KafkaErrorCode::None.as_i16(), None),
+                            Err(msg) => (KafkaErrorCode::InvalidConfig.as_i16(), Some(msg)),
+                        }
+                    } else {
+                        match broker.alter_configs(&r.name, &r.entries) {
+                            Ok(_) => (KafkaErrorCode::None.as_i16(), None),
+                            Err(Error::NotFound(_)) => (
+                                KafkaErrorCode::UnknownTopicOrPartition.as_i16(),
+                                Some("topic not found".into()),
+                            ),
+                            Err(Error::InvalidArgument(msg)) => {
+                                (KafkaErrorCode::InvalidConfig.as_i16(), Some(msg))
+                            }
+                            Err(_) => (KafkaErrorCode::Unknown.as_i16(), None),
+                        }
+                    }
                 }
-                Err(_) => (KafkaErrorCode::Unknown.as_i16(), None),
+                _ => (
+                    KafkaErrorCode::InvalidRequest.as_i16(),
+                    Some(unsupported_config_resource_msg().into()),
+                ),
             }
         };
         out.put_i16(code);

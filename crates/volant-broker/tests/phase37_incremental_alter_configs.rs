@@ -202,10 +202,10 @@ async fn non_topic_and_acl_denied() {
         .unwrap();
     let (addr, server) = boot_kafka(Arc::clone(&broker)).await;
 
-    // BROKER resource
+    // Unsupported resource type (BROKER_LOGGER); BROKER is Phase 99.
     let mut body = BytesMut::new();
     body.put_i32(1);
-    body.put_i8(4); // BROKER
+    body.put_i8(8); // BROKER_LOGGER
     put_string(&mut body, "1");
     body.put_i32(1);
     put_string(&mut body, "log.retention.ms");

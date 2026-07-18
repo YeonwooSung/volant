@@ -37,6 +37,10 @@ use crate::kafka::fetch_session::FetchSessionManager;
 use crate::leader_epoch::{
     self, end_offset_for, ensure_entry, EpochStart, LeaderEpochStore, LeaderEpochsFile,
 };
+use crate::broker_config::{
+    self, KEY_FETCH_SESSION_IDLE_MS, KEY_FETCH_SESSION_MAX, KEY_OPEN_TXN_TIMEOUT_MS,
+    KEY_PREPARED_TXN_TIMEOUT_MS, KEY_SWEEP_INTERVAL_MS, KEY_TRANSACTION_MAX_TIMEOUT_MS,
+};
 use crate::topic::Topic;
 use crate::topic_catalog::{CatalogTopic, TopicCatalogFile, TopicCatalogStore};
 use crate::topic_config::{TopicConfig, TopicConfigStore};
@@ -778,6 +782,66 @@ impl Broker {
     /// Override background sweep interval (Phase 97). `0` disables background.
     pub fn set_sweep_interval_ms(&self, interval_ms: u64) {
         self.sweep_interval_ms.store(interval_ms, Ordering::Relaxed);
+    }
+
+    /// Current broker-level config entries for Kafka DescribeConfigs BROKER
+    /// (Phase 99). Values are live process knobs (env/setters).
+    pub fn describe_broker_configs(&self) -> Vec<(String, String)> {
+        vec![
+            (
+                KEY_TRANSACTION_MAX_TIMEOUT_MS.into(),
+                self.transaction_max_timeout_ms().to_string(),
+            ),
+            (
+                KEY_OPEN_TXN_TIMEOUT_MS.into(),
+                self.open_txn_timeout_ms().to_string(),
+            ),
+            (
+                KEY_PREPARED_TXN_TIMEOUT_MS.into(),
+                self.prepared_txn_timeout_ms().to_string(),
+            ),
+            (
+                KEY_FETCH_SESSION_IDLE_MS.into(),
+                self.fetch_session_idle_ms().to_string(),
+            ),
+            (
+                KEY_FETCH_SESSION_MAX.into(),
+                self.fetch_session_max().to_string(),
+            ),
+            (
+                KEY_SWEEP_INTERVAL_MS.into(),
+                self.sweep_interval_ms().to_string(),
+            ),
+        ]
+    }
+
+    /// Apply broker-level config updates (Phase 99 Alter / IncrementalAlter).
+    ///
+    /// Empty value restores the **product** default for that key (not env).
+    /// Unknown keys → [`Error::InvalidArgument`]. Process-local only (not durable).
+    pub fn alter_broker_configs(&self, entries: &[(String, String)]) -> Result<()> {
+        broker_config::validate_entries(entries)?;
+        for (k, v) in entries {
+            let val = broker_config::resolve_value(k, v)?;
+            match k.as_str() {
+                KEY_TRANSACTION_MAX_TIMEOUT_MS => self.set_transaction_max_timeout_ms(val),
+                KEY_OPEN_TXN_TIMEOUT_MS => self.set_open_txn_timeout_ms(val),
+                KEY_PREPARED_TXN_TIMEOUT_MS => self.set_prepared_txn_timeout_ms(val),
+                KEY_FETCH_SESSION_IDLE_MS => self.set_fetch_session_idle_ms(val),
+                KEY_FETCH_SESSION_MAX => {
+                    // Cap absurd values to usize::MAX on 32-bit; normal paths fit.
+                    let max = usize::try_from(val).unwrap_or(usize::MAX);
+                    self.set_fetch_session_max(max);
+                }
+                KEY_SWEEP_INTERVAL_MS => self.set_sweep_interval_ms(val),
+                _ => {
+                    return Err(Error::InvalidArgument(format!(
+                        "unknown broker config key: {k}"
+                    )));
+                }
+            }
+        }
+        Ok(())
     }
 
     /// Live open (non-prepared) transaction count (Phase 97 gauge).

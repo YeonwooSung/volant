@@ -135,7 +135,7 @@ operator-lowered max and oversize stored state remain safe.
 
 - Background txn + session sweeper (periodic, not only lazy) → **closed by Phase 97**
 - Metrics: open/prepared expired counts; Init reject counters → **partial (expired counters + gauges in Phase 97)**
-- Admin/DescribeConfigs surface for timeout knobs
+- Admin/DescribeConfigs surface for timeout knobs → **closed by Phase 99**
 - Mid-txn abortable signals beyond timeout-only (Phase 94 stretch)
 - Multi-broker 2PC / session affinity
 - Multi-lang clients / cargo-fuzz corpus CI

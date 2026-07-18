@@ -145,8 +145,15 @@ volant-server \
   snappy/lz4 MessageSet). Fetch re-encodes with `VOLANT_KAFKA_FETCH_COMPRESSION`
   (default **lz4**; `none`/`gzip`/`snappy`/`lz4`/`zstd`). MessageSet has no zstd —
   env `zstd` maps to lz4 for Fetch v0–3. Log storage remains uncompressed.
-- **Topic config keys** (Describe/AlterConfigs): `retention.ms`, `retention.bytes`,
-  `segment.bytes`, `cleanup.policy` (`delete`|`compact`).
+- **Topic config keys** (Describe/AlterConfigs TOPIC): `retention.ms`,
+  `retention.bytes`, `segment.bytes`, `cleanup.policy` (`delete`|`compact`).
+- **Broker config keys** (Describe/AlterConfigs BROKER, Phase 99; process-local):
+  `transaction.max.timeout.ms` (Kafka name),
+  `volant.open.transaction.timeout.ms`,
+  `volant.prepared.transaction.timeout.ms`,
+  `volant.fetch.session.idle.ms`, `volant.fetch.session.max`,
+  `volant.sweep.interval.ms`. Alter/Incremental SET/DELETE map to the same
+  setters as env overrides; DELETE restores product defaults; not durable.
 - **Transactions / isolation:** write-through + soft abort markers (Phase 86) +
   EndTxn control batches on finalize (Phase 89) + prepared 2PC MVP (Phase 90) +
   prepared timeout auto-abort (Phase 92, default 60s,
@@ -176,7 +183,7 @@ volant-server \
   Kafka **User** resource type (stored as `ResourceType::User`; not used on the
   produce/fetch authorize path; no SCRAM-admin gating).
 
-Deep dives: [PHASE23_SPEC.md](./PHASE23_SPEC.md) … [PHASE98_SPEC.md](./PHASE98_SPEC.md).
+Deep dives: [PHASE23_SPEC.md](./PHASE23_SPEC.md) … [PHASE99_SPEC.md](./PHASE99_SPEC.md).
 
 ## TLS (Phase 7 listen + Phase 9 verification / inter-broker)
 
@@ -252,8 +259,9 @@ specs. Ops-critical notes only:
 | Consumer lag | Metrics + `volant group lag` |
 | Groups | list / describe / delete-offsets; static membership `group_instance_id` |
 | Topic configs | `retention.ms` / `retention.bytes` / `segment.bytes` / `cleanup.policy` |
+| Broker configs (Phase 99) | BROKER Describe/Alter: `transaction.max.timeout.ms` + `volant.*` open/prepared/session/sweep; process-local |
 | DeleteRecords | Truncates sealed segments; no follower fan-out |
-| Transactions (shipped) | **Write-through + soft markers** (Phase 86) + **control batches** on EndTxn finalize (Phase 89) + **prepared 2PC MVP** (Phase 90) + **prepared timeout** (Phase 92, default 60s / `VOLANT_PREPARED_TXN_TIMEOUT_MS`) + **open timeout** (Phase 93, InitProducerId / `VOLANT_OPEN_TXN_TIMEOUT_MS`) + **max timeout clamp** (Phase 96, default 15m / `VOLANT_TRANSACTION_MAX_TIMEOUT_MS`; Init **50** over-max) + **background sweeper** (Phase 97, default 1s / `VOLANT_SWEEP_INTERVAL_MS`; `0` = lazy only); LSO/aborted filtering; open crash≡abort; prepared durable under `__txn_prepared` until complete or timeout |
+| Transactions (shipped) | **Write-through + soft markers** (Phase 86) + **control batches** on EndTxn finalize (Phase 89) + **prepared 2PC MVP** (Phase 90) + **prepared timeout** (Phase 92, default 60s / `VOLANT_PREPARED_TXN_TIMEOUT_MS`) + **open timeout** (Phase 93, InitProducerId / `VOLANT_OPEN_TXN_TIMEOUT_MS`) + **max timeout clamp** (Phase 96, default 15m / `VOLANT_TRANSACTION_MAX_TIMEOUT_MS`; Init **50** over-max) + **background sweeper** (Phase 97, default 1s / `VOLANT_SWEEP_INTERVAL_MS`; `0` = lazy only) + **BROKER config surface** (Phase 99); LSO/aborted filtering; open crash≡abort; prepared durable under `__txn_prepared` until complete or timeout |
 | mTLS | Feature `tls`; `--tls-client-ca` / optional `--tls-client-allow` |
 | ACLs | `--acl-enable`; durable `__acls/acls.json`; User resource is Kafka admin store-only |
 | Compaction | `cleanup.policy=compact` on **sealed** segments; empty value = tombstone |

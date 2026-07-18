@@ -17,6 +17,8 @@
 pub mod acl;
 pub mod assignor;
 pub mod broker;
+/// Broker-level Kafka Describe/AlterConfigs keys (Phase 99).
+pub mod broker_config;
 pub mod cluster;
 pub mod group;
 /// Kafka wire protocol shim (Phase 23 MVP).
@@ -58,6 +60,12 @@ pub use topic_catalog::{CatalogTopic, TopicCatalogFile, TopicCatalogStore};
 pub use topic_config::{
     TopicConfig, TopicConfigStore, KEY_CLEANUP_POLICY, KEY_RETENTION_BYTES, KEY_RETENTION_MS,
     KEY_SEGMENT_BYTES,
+};
+pub use broker_config::{
+    BROKER_CONFIG_KEYS, DEFAULT_OPEN_TXN_TIMEOUT_MS, DEFAULT_PREPARED_TXN_TIMEOUT_MS,
+    DEFAULT_SWEEP_INTERVAL_MS, DEFAULT_TRANSACTION_MAX_TIMEOUT_MS, KEY_FETCH_SESSION_IDLE_MS,
+    KEY_FETCH_SESSION_MAX, KEY_OPEN_TXN_TIMEOUT_MS, KEY_PREPARED_TXN_TIMEOUT_MS,
+    KEY_SWEEP_INTERVAL_MS, KEY_TRANSACTION_MAX_TIMEOUT_MS,
 };
 pub use leader_epoch::{EpochStart, LeaderEpochStore, LeaderEpochsFile};
 pub use kafka::serve_kafka_listener;

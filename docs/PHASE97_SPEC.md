@@ -130,7 +130,7 @@ per aborted txn.
 ## Phase 98 ideas
 
 - Sweep-run / duration histograms; eviction-reason labels
-- Admin/DescribeConfigs for timeout + sweep knobs
+- Admin/DescribeConfigs for timeout + sweep knobs → **closed by Phase 99**
 - Mid-txn abortable signals beyond timeout-only
 - Graceful sweeper shutdown / join on server stop
 - Multi-broker 2PC / session affinity
