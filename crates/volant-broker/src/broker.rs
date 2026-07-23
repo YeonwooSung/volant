@@ -14,6 +14,7 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use parking_lot::{Condvar, Mutex, RwLock};
 use serde::{Deserialize, Serialize};
+use tracing::warn;
 use volant_core::{
     Error, Message, MessageBatch, Offset, PartitionId, Record, Result, TopicId, TopicName,
 };
@@ -480,6 +481,20 @@ pub struct Broker {
     ///
     /// First claim wins; subsequent `start_background_tasks` calls return a no-op handle.
     bg_tasks_started: AtomicBool,
+    /// Controller BROKER-config generation (Phase 113). Bumped on successful cluster Alter.
+    config_generation: AtomicU64,
+    /// Last applied BROKER-config generation on this node (Phase 113 push/pull).
+    applied_config_generation: AtomicU64,
+    /// Controller ACL generation (Phase 113). Bumped on successful Create/Delete Acls.
+    acl_generation: AtomicU64,
+    /// Last applied ACL generation on this node (Phase 113 push/pull).
+    applied_acl_generation: AtomicU64,
+    /// DeleteRecords fan-out RPC failures (Phase 113; real fan-out in later PR).
+    delete_records_fanout_errors_total: AtomicU64,
+    /// BROKER config push RPC failures (Phase 113).
+    cluster_config_push_errors_total: AtomicU64,
+    /// ACL snapshot push RPC failures (Phase 113).
+    cluster_acl_push_errors_total: AtomicU64,
 }
 
 impl Broker {
@@ -543,6 +558,13 @@ impl Broker {
             leader_epoch_store,
             fetch_sessions: FetchSessionManager::new(),
             bg_tasks_started: AtomicBool::new(false),
+            config_generation: AtomicU64::new(0),
+            applied_config_generation: AtomicU64::new(0),
+            acl_generation: AtomicU64::new(0),
+            applied_acl_generation: AtomicU64::new(0),
+            delete_records_fanout_errors_total: AtomicU64::new(0),
+            cluster_config_push_errors_total: AtomicU64::new(0),
+            cluster_acl_push_errors_total: AtomicU64::new(0),
         };
         broker
             .reload_single_node_topics()
@@ -642,6 +664,13 @@ impl Broker {
             leader_epoch_store,
             fetch_sessions: FetchSessionManager::new(),
             bg_tasks_started: AtomicBool::new(false),
+            config_generation: AtomicU64::new(0),
+            applied_config_generation: AtomicU64::new(0),
+            acl_generation: AtomicU64::new(0),
+            applied_acl_generation: AtomicU64::new(0),
+            delete_records_fanout_errors_total: AtomicU64::new(0),
+            cluster_config_push_errors_total: AtomicU64::new(0),
+            cluster_acl_push_errors_total: AtomicU64::new(0),
         };
         // Open local partitions from persisted assignment.
         broker.apply_local_assignment()?;
@@ -667,6 +696,281 @@ impl Broker {
     /// return a no-op handle.
     pub(crate) fn claim_background_tasks(&self) -> bool {
         !self.bg_tasks_started.swap(true, Ordering::SeqCst)
+    }
+
+    // --- Phase 113 cluster admin generations (fan-out behavior lands in later PRs) ---
+
+    /// Controller (or local) BROKER-config generation.
+    pub fn config_generation(&self) -> u64 {
+        self.config_generation.load(Ordering::Relaxed)
+    }
+
+    /// Last applied BROKER-config generation on this node.
+    pub fn applied_config_generation(&self) -> u64 {
+        self.applied_config_generation.load(Ordering::Relaxed)
+    }
+
+    /// Controller (or local) ACL generation.
+    pub fn acl_generation(&self) -> u64 {
+        self.acl_generation.load(Ordering::Relaxed)
+    }
+
+    /// Last applied ACL generation on this node.
+    pub fn applied_acl_generation(&self) -> u64 {
+        self.applied_acl_generation.load(Ordering::Relaxed)
+    }
+
+    /// DeleteRecords fan-out error counter (Phase 113).
+    pub fn delete_records_fanout_errors_total(&self) -> u64 {
+        self.delete_records_fanout_errors_total
+            .load(Ordering::Relaxed)
+    }
+
+    /// Increment DeleteRecords fan-out error counter (Phase 113).
+    pub fn note_delete_records_fanout_error(&self) {
+        self.delete_records_fanout_errors_total
+            .fetch_add(1, Ordering::Relaxed);
+    }
+
+    /// BROKER config push error counter (Phase 113).
+    pub fn cluster_config_push_errors_total(&self) -> u64 {
+        self.cluster_config_push_errors_total.load(Ordering::Relaxed)
+    }
+
+    /// ACL snapshot push error counter (Phase 113).
+    pub fn cluster_acl_push_errors_total(&self) -> u64 {
+        self.cluster_acl_push_errors_total.load(Ordering::Relaxed)
+    }
+
+    /// Peer targets for DeleteRecords fan-out: `(broker_id, addr, leader_epoch)`.
+    ///
+    /// Empty in single-node mode or when this node is not the partition leader /
+    /// does not know the partition. Phase 113 PR2.
+    pub fn delete_records_fanout_peers(
+        &self,
+        topic: &str,
+        partition: u32,
+    ) -> Vec<(u32, String, i32)> {
+        if self.cluster.is_none() {
+            return Vec::new();
+        }
+        let name = TopicName::new(topic);
+        let topics = self.topics.read();
+        let Some(t) = topics.get(&name) else {
+            return Vec::new();
+        };
+        let Some(part) = t.partitions.get(&PartitionId(partition)) else {
+            return Vec::new();
+        };
+        if !part.is_leader(self.node_id) {
+            return Vec::new();
+        }
+        let epoch = part.leader_epoch as i32;
+        let mut out = Vec::new();
+        for &id in &part.replicas {
+            if id == self.node_id {
+                continue;
+            }
+            if let Some(addr) = self.broker_addr(id) {
+                out.push((id, addr, epoch));
+            }
+        }
+        out
+    }
+
+    /// Apply inter-broker `ReplicaDeleteRecords` (Phase 113 PR2).
+    ///
+    /// Truncates local log prefix (whole sealed segments) and runs Phase 104/111
+    /// soft-marker GC/clip. Rejects stale leader epochs when `leader_epoch >= 0`
+    /// and local epoch is higher ([`ErrorCode::InvalidProducerEpoch`] as fenced).
+    ///
+    /// Returns `(error_code, low_watermark)`.
+    pub fn handle_replica_delete_records(
+        &self,
+        topic: &str,
+        partition: u32,
+        before_offset: u64,
+        leader_epoch: i32,
+    ) -> (u16, u64) {
+        let name = TopicName::new(topic);
+        let low = {
+            let mut topics = self.topics.write();
+            let Some(t) = topics.get_mut(&name) else {
+                return (ErrorCode::NotFound as u16, 0);
+            };
+            let Some(part) = t.partitions.get_mut(&PartitionId(partition)) else {
+                return (ErrorCode::NotFound as u16, 0);
+            };
+            // Stale leader: request epoch older than local → refuse truncate.
+            if leader_epoch >= 0 {
+                let req_epoch = leader_epoch as u32;
+                if part.leader_epoch > req_epoch {
+                    return (
+                        ErrorCode::InvalidProducerEpoch as u16,
+                        part.log.log_start_offset().raw(),
+                    );
+                }
+            }
+            match part.log.delete_records(Offset::new(before_offset)) {
+                Ok(off) => off.raw(),
+                Err(e) => {
+                    warn!(
+                        topic,
+                        partition,
+                        before_offset,
+                        error = %e,
+                        "replica delete_records failed"
+                    );
+                    return (ErrorCode::Storage as u16, part.log.log_start_offset().raw());
+                }
+            }
+        };
+        self.gc_and_persist_aborted_markers(topic, partition, low);
+        (0, low)
+    }
+
+    /// Peers for BROKER config fan-out: live brokers except self (Phase 113 PR3).
+    pub fn cluster_broker_config_fanout_peers(&self) -> Vec<(u32, String)> {
+        let Some(c) = &self.cluster else {
+            return Vec::new();
+        };
+        let live = c.membership.read().live_brokers();
+        let mut out = Vec::new();
+        for id in live {
+            if id == self.node_id {
+                continue;
+            }
+            if let Some(addr) = self.broker_addr(id) {
+                out.push((id, addr));
+            }
+        }
+        out
+    }
+
+    /// Increment BROKER config push error counter (Phase 113).
+    pub fn note_cluster_config_push_error(&self) {
+        self.cluster_config_push_errors_total
+            .fetch_add(1, Ordering::Relaxed);
+    }
+
+    /// Apply inter-broker `ClusterBrokerConfig` (Phase 113 PR3).
+    ///
+    /// Ignores stale/equal generations (`generation <= applied`). On accept:
+    /// apply knobs + sparse durable merge, then record `applied_config_generation`.
+    /// Returns `(error_code, applied_generation)`.
+    pub fn handle_cluster_broker_config(
+        &self,
+        generation: u64,
+        entries: &[(String, String)],
+    ) -> (u16, u64) {
+        let applied = self.applied_config_generation.load(Ordering::SeqCst);
+        if generation <= applied {
+            return (0, applied);
+        }
+        if let Err(e) = self.apply_and_persist_broker_configs(entries) {
+            warn!(
+                generation,
+                error = %e,
+                "cluster broker config apply failed"
+            );
+            return (ErrorCode::InvalidArg as u16, applied);
+        }
+        self.applied_config_generation
+            .store(generation, Ordering::SeqCst);
+        (0, generation)
+    }
+
+    /// Peers for ACL snapshot fan-out: live brokers except self (Phase 113 PR4).
+    pub fn cluster_acl_fanout_peers(&self) -> Vec<(u32, String)> {
+        // Same membership set as BROKER config fan-out.
+        self.cluster_broker_config_fanout_peers()
+    }
+
+    /// Increment ACL snapshot push error counter (Phase 113).
+    pub fn note_cluster_acl_push_error(&self) {
+        self.cluster_acl_push_errors_total
+            .fetch_add(1, Ordering::Relaxed);
+    }
+
+    /// Apply inter-broker `ClusterAclSnapshot` (Phase 113 PR4).
+    ///
+    /// Ignores stale/equal generations. On accept: install snapshot + persist
+    /// local `__acls`, then record `applied_acl_generation`.
+    pub fn handle_cluster_acl_snapshot(
+        &self,
+        generation: u64,
+        snapshot: &[u8],
+    ) -> (u16, u64) {
+        let applied = self.applied_acl_generation.load(Ordering::SeqCst);
+        if generation <= applied {
+            return (0, applied);
+        }
+        let snap = match crate::acl::AclState::decode_snapshot_bytes(snapshot) {
+            Ok(s) => s,
+            Err(e) => {
+                warn!(generation, error = %e, "cluster acl snapshot decode failed");
+                return (ErrorCode::InvalidArg as u16, applied);
+            }
+        };
+        if let Err(e) = self.acls.install_snapshot(&snap) {
+            warn!(generation, error = %e, "cluster acl snapshot install failed");
+            return (ErrorCode::Storage as u16, applied);
+        }
+        self.applied_acl_generation
+            .store(generation, Ordering::SeqCst);
+        (0, generation)
+    }
+
+    /// Create ACL entries with cluster controller gate (Phase 113 PR4).
+    ///
+    /// Returns `Some(generation)` for fan-out when running in cluster mode.
+    pub fn create_acls_admin(
+        &self,
+        entries: Vec<crate::acl::AclEntry>,
+    ) -> Result<Option<u64>> {
+        if self.cluster.is_some() && !self.is_controller() {
+            return Err(Error::InvalidArgument("not controller".into()));
+        }
+        self.acls.create(entries)?;
+        Ok(self.bump_acl_generation_if_cluster())
+    }
+
+    /// Delete ACL entries with cluster controller gate (Phase 113 PR4).
+    ///
+    /// Returns `(removed_count, optional generation for fan-out)`.
+    pub fn delete_acls_admin(
+        &self,
+        entries: &[crate::acl::AclEntry],
+    ) -> Result<(usize, Option<u64>)> {
+        if self.cluster.is_some() && !self.is_controller() {
+            return Err(Error::InvalidArgument("not controller".into()));
+        }
+        let n = self.acls.delete(entries)?;
+        // Only bump generation when something changed (or always for consistency
+        // of "mutate happened"? Always bump so empty delete still is controller-
+        // only with no-op fan-out of same snapshot — skip bump when n==0).
+        let gen = if n > 0 {
+            self.bump_acl_generation_if_cluster()
+        } else {
+            None
+        };
+        Ok((n, gen))
+    }
+
+    fn bump_acl_generation_if_cluster(&self) -> Option<u64> {
+        if self.cluster.is_none() {
+            return None;
+        }
+        let gen = self.acl_generation.fetch_add(1, Ordering::SeqCst) + 1;
+        self.applied_acl_generation
+            .store(gen, Ordering::SeqCst);
+        Some(gen)
+    }
+
+    /// JSON snapshot bytes for inter-broker ACL push (Phase 113).
+    pub fn acl_snapshot_wire_bytes(&self) -> Result<bytes::Bytes> {
+        let v = self.acls.encode_snapshot_bytes()?;
+        Ok(bytes::Bytes::from(v))
     }
 
     /// Current fetch-session idle TTL in milliseconds (Phase 95). `0` disables.
@@ -882,7 +1186,28 @@ impl Broker {
     /// are written (SET) or removed (DELETE/empty). Keys never altered are not
     /// frozen, so env still applies for them on restart. Direct `set_*` setters
     /// remain process-local only.
-    pub fn alter_broker_configs(&self, entries: &[(String, String)]) -> Result<()> {
+    ///
+    /// Phase 113: in cluster mode only the **controller** may alter; others get
+    /// [`Error::InvalidArgument`] `"not controller"`. On controller success,
+    /// returns `Some(generation)` for inter-broker fan-out; single-node returns
+    /// `None`.
+    pub fn alter_broker_configs(&self, entries: &[(String, String)]) -> Result<Option<u64>> {
+        if self.cluster.is_some() && !self.is_controller() {
+            return Err(Error::InvalidArgument("not controller".into()));
+        }
+        self.apply_and_persist_broker_configs(entries)?;
+        if self.cluster.is_some() {
+            let gen = self.config_generation.fetch_add(1, Ordering::SeqCst) + 1;
+            self.applied_config_generation
+                .store(gen, Ordering::SeqCst);
+            Ok(Some(gen))
+        } else {
+            Ok(None)
+        }
+    }
+
+    /// Apply + sparse-persist BROKER knobs without controller / generation gates.
+    fn apply_and_persist_broker_configs(&self, entries: &[(String, String)]) -> Result<()> {
         broker_config::validate_entries(entries)?;
         for (k, v) in entries {
             let val = broker_config::resolve_value(k, v)?;
@@ -3413,12 +3738,17 @@ impl Broker {
     /// Delete records before `before_offset` on a partition (Phase 14).
     ///
     /// Drops whole sealed segments only. Returns `(low_watermark, error_code)`.
-    /// Leader-only in cluster mode; followers are not notified.
+    /// Leader-only in cluster mode.
     ///
     /// Phase 104/111: after a successful truncate, drop aborted soft markers
     /// fully below the new log start (`end_offset <= low_watermark`) and clip
     /// straddlers (`first_offset = log_start` when the range still overlaps
     /// live offsets); persist `__txn_markers` when any change occurs.
+    ///
+    /// Phase 113: this method only mutates the **local** log. Cluster fan-out to
+    /// other replicas is best-effort via [`crate::net::fanout_delete_records`]
+    /// (native + Kafka request handlers), not here — so in-process unit tests
+    /// remain single-node.
     pub fn delete_records(
         &self,
         topic: &str,

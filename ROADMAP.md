@@ -2624,7 +2624,38 @@ still deferred.
 
 **Still deferred:** multi-lang clients, chaos-mesh / long fuzz campaigns,
 multi-broker 2PC / session affinity / durable sessions, multi-broker BROKER
-config fan-out, Kafka wire fuzz targets.
+config fan-out → **closed by Phase 113**, Kafka wire fuzz targets.
+
+---
+
+### Phase 113 — Cluster admin fan-out (MVP) ✅
+
+**Goal:** Make cluster-scoped admin ops reach every relevant replica instead of
+silently applying only on the node that handled the client request.
+
+Binding: **[docs/PHASE113_SPEC.md](./docs/PHASE113_SPEC.md)**.
+
+- [x] Inter-broker opcodes 70–75 (`ReplicaDeleteRecords`, `ClusterBrokerConfig`,
+      `ClusterAclSnapshot`) + encode/decode + dispatch
+- [x] **DeleteRecords** best-effort fan-out from partition leader to other replicas
+      (Phase 104/111 GC/clip on peers; client success independent of fan-out errors)
+- [x] **BROKER** Describe/Alter: controller-only Alter in cluster mode; generationed
+      push of the six Phase 99 knobs; sparse durable on each peer
+- [x] **ACL** Create/Delete: controller-only in cluster mode; generationed full
+      snapshot push; peers install + persist `__acls`
+- [x] Metrics: fan-out error counters + config/acl generation gauges
+- [x] Tests: `phase113_delete_records_fanout`, `phase113_broker_config_fanout`,
+      `phase113_acl_fanout`
+- [x] Living docs honesty
+
+**Honest limitations:** DeleteRecords fan-out is best-effort (no durable pending
+queue); BROKER knobs are homogeneous (not per-broker overrides); ACL/config rely
+on controller liveness (brief lag on failover); inter-broker admin RPCs are not
+ACL-gated (shared-token / TLS only); multi-broker 2PC still deferred.
+
+**Still deferred:** multi-lang clients, chaos-mesh / long fuzz campaigns,
+multi-broker 2PC / session affinity / durable sessions, Kafka wire fuzz targets,
+dynamic membership / Raft metadata, full Kafka broker catalog.
 
 ---
 
@@ -2656,14 +2687,14 @@ config fan-out, Kafka wire fuzz targets.
 
 Volant is **not** a drop-in Kafka replacement. It prioritizes a clean core; the
 optional Kafka wire shim is **shipped** (Phases 23–109; cluster ISR death 108/110;
-marker clip 111; fuzz corpus smoke CI 112) — see
+marker clip 111; fuzz corpus smoke CI 112; cluster admin fan-out 113) — see
 [docs/KAFKA_COMPAT.md](./docs/KAFKA_COMPAT.md).
 
 ---
 
 ## Suggested implementation order (PRs)
 
-Phases **0–112 are shipped**. Historical PR order for the core:
+Phases **0–113 are shipped**. Historical PR order for the core:
 
 1. Phase 1 segment format + unit tests  
 2. Phase 1 recovery + retention  
@@ -2678,6 +2709,7 @@ Phases **0–112 are shipped**. Historical PR order for the core:
 11. Phases 8–22 (redirect, groups, configs, txns, mTLS, ACLs, SCRAM) ✅  
 12. Phases 23–111 (Kafka wire shim + marker GC/clip + empty-AddPartitions control + bg shutdown join + phase103 flake fix + follower-death ISR + accept drain / single-flight bg + non-controller alive-set death + straddle marker clip) ✅  
 13. Phase 112 (cargo-fuzz corpus smoke + CI MVP) ✅  
+14. Phase 113 (cluster admin fan-out: DeleteRecords + BROKER config + ACL snapshot) ✅  
 
 ---
 
@@ -2718,7 +2750,7 @@ cargo run -p volant-bench --release
 cargo test --workspace
 ```
 
-**Status (post–Phase 112):** core broker, ops (metrics / TLS / auth / SCRAM /
+**Status (post–Phase 113):** core broker, ops (metrics / TLS / auth / SCRAM /
 ACLs / Helm), and the Kafka wire shim are **shipped** (Fetch 0–18 Kafka max;
 ACL admin 0–3 with User resource; soft-marker `READ_COMMITTED` with **marker GC/clip**
 on DeleteRecords/retention/load (Phase 104/111); durable OFLE history; Fetch DivergingEpoch +
@@ -2731,8 +2763,9 @@ single-flight bg** Phase 109); BROKER Describe/AlterConfigs
 with **sparse** durable restart restore and resource name empty-or-local-`node_id`
 (Phase 103; **parallel test isolation** Phase 107); **follower-death ISR shrink +
 HWM recompute** Phase 108; **non-controller alive-set auto-death** Phase 110; **straddle soft-marker clip** Phase 111;
-**cargo-fuzz corpus smoke + CI MVP** Phase 112).
+**cargo-fuzz corpus smoke + CI MVP** Phase 112; **cluster admin fan-out** Phase 113
+(DeleteRecords best-effort replica truncate; controller-only BROKER config + ACL
+snapshot push)).
 Still deferred: multi-language clients, full chaos-mesh suites / long fuzz
-campaigns, multi-broker session affinity, multi-broker 2PC, multi-broker BROKER
-config fan-out.
+campaigns, multi-broker session affinity, multi-broker 2PC.
 Details: [docs/KAFKA_COMPAT.md](./docs/KAFKA_COMPAT.md), [docs/ops.md](./docs/ops.md).

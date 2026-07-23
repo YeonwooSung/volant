@@ -154,10 +154,11 @@ docs for day-to-day reading: [ops](../ops.md), [consistency](../consistency.md),
 | 110 | ✅ | Non-controller auto-death from heartbeat alive-set diffs (MVP) | [PHASE110_SPEC.md](../PHASE110_SPEC.md) |
 | 111 | ✅ | Clip straddling soft abort markers to log_start (MVP) | [PHASE111_SPEC.md](../PHASE111_SPEC.md) |
 | 112 | ✅ | cargo-fuzz corpus smoke + CI (MVP) | [PHASE112_SPEC.md](../PHASE112_SPEC.md) |
+| 113 | ✅ | Cluster admin fan-out MVP (DeleteRecords + BROKER config + ACL snapshot) | [PHASE113_SPEC.md](../PHASE113_SPEC.md) |
 
 ---
 
-## Still deferred (post–Phase 112)
+## Still deferred (post–Phase 113)
 
 - Multi-language clients
 - Chaos-mesh / long fuzz campaigns (corpus **smoke CI** → **closed by Phase 112**)
@@ -166,8 +167,12 @@ docs for day-to-day reading: [ops](../ops.md), [consistency](../consistency.md),
 - Full KRaft epoch state machine / remote-log epochs
 - Full Kafka broker catalog / KRaft DynamicBrokerConfig
 - Drain native / Kafka / metrics accept loops on shutdown → **closed by Phase 109**
-- Multi-broker BROKER config fan-out (Phase 103 is local validation only)
+- Multi-broker BROKER config fan-out → **closed by Phase 113** (controller push; homogeneous knobs)
+- DeleteRecords follower fan-out → **closed by Phase 113** (best-effort)
+- Cluster ACL snapshot fan-out → **closed by Phase 113** (controller SoT; not Raft consensus)
 - Single-flight / idempotent `start_background_tasks` → **closed by Phase 109**
 - Non-controller auto-death from alive-set diffs → **closed by Phase 110**
 - Straddle marker clip → **closed by Phase 111**
 - cargo-fuzz corpus smoke + CI MVP → **closed by Phase 112**
+- Durable pending DeleteRecords queue for down replicas
+- Per-broker BROKER config overrides / multi-master ACL merge

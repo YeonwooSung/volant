@@ -99,5 +99,14 @@ Without `--cluster-config`, the broker runs as a single node:
   REQUEST_TIMED_OUT solely because a dead follower still held a stale LEO in
   the ISR set. If `|ISR|` falls below `min_insync_replicas`, produce is still
   rejected with `NotEnoughReplicas`.
+- **Cluster admin fan-out (Phase 113):**
+  - **DeleteRecords:** only the partition **leader** accepts the client RPC;
+    after local truncate it best-effort RPCs other replicas. Peer failure does
+    not fail the client; log starts may briefly diverge until retry or re-issue.
+  - **BROKER config / ACL mutate:** controller is SoT; non-controllers return
+    `NotController`. Successful controller mutates push generationed state to
+    live peers (config knobs or full ACL snapshot). Describe / authorize use
+    each node's local applied state after push.
 
 See [PHASE6_SPEC.md](./PHASE6_SPEC.md) for wire protocol and configuration details.
+Admin fan-out detail: [PHASE113_SPEC.md](./PHASE113_SPEC.md).

@@ -592,6 +592,37 @@ impl AclState {
         self.inner.read().list(principal, resource_type, resource)
     }
 
+    /// Current durable snapshot (enabled flag + entries). Super-users are not
+    /// included (process-local flags only).
+    pub fn snapshot(&self) -> AclSnapshot {
+        self.inner.read().snapshot()
+    }
+
+    /// Replace entries + enabled from a snapshot and persist (Phase 113).
+    ///
+    /// Does not change super-users or auth principal.
+    pub fn install_snapshot(&self, snap: &AclSnapshot) -> Result<()> {
+        let mut a = self.inner.write();
+        a.apply_snapshot(snap);
+        self.persist(&a)
+    }
+
+    /// JSON-encode the current snapshot for inter-broker wire (Phase 113).
+    pub fn encode_snapshot_bytes(&self) -> Result<Vec<u8>> {
+        let snap = self.snapshot();
+        serde_json::to_vec(&snap)
+            .map_err(|e| Error::Storage(format!("encode acl snapshot: {e}")))
+    }
+
+    /// Decode a snapshot from inter-broker wire bytes (Phase 113).
+    pub fn decode_snapshot_bytes(bytes: &[u8]) -> Result<AclSnapshot> {
+        if bytes.is_empty() {
+            return Ok(AclSnapshot::default());
+        }
+        serde_json::from_slice(bytes)
+            .map_err(|e| Error::Storage(format!("decode acl snapshot: {e}")))
+    }
+
     /// Durable store path if configured.
     pub fn store_path(&self) -> Option<PathBuf> {
         self.store.as_ref().map(|s| s.path().to_path_buf())

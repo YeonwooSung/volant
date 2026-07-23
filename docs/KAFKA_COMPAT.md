@@ -40,20 +40,20 @@ From `SUPPORTED_APIS` in `crates/volant-broker/src/kafka/mod.rs`:
 | 18 | ApiVersions | 0–5 | Flex v3–5; header always v0; empty feature tags; v5 ClusterId/NodeId ignored |
 | 19 | CreateTopics | 0–7 | Flex v5+; TopicId response v7 |
 | 20 | DeleteTopics | 0–6 | Flex v4+; ErrorMessage v5; TopicId v6 |
-| 21 | DeleteRecords | 0–2 | Flex v2; GC/clip aborted soft markers vs log start (Phase 104/111) |
+| 21 | DeleteRecords | 0–2 | Flex v2; GC/clip aborted soft markers vs log start (Phase 104/111); best-effort replica fan-out (Phase 113) |
 | 22 | InitProducerId | 0–6 | Flex v2+; v6 Enable2Pc/KeepPreparedTxn (Phase 90 prepared MVP); OngoingTxn* when prepared |
 | 23 | OffsetForLeaderEpoch | 0–4 | Flex v4; durable epoch history MVP (Phase 87); prior epochs → transition end |
 | 24 | AddPartitionsToTxn | 0–5 | Flex v3; batch v4–5; 123 after timeout (Phase 94) |
 | 25 | AddOffsetsToTxn | 0–4 | Flex v3+; v4 = v3 wire; may emit TRANSACTION_ABORTABLE (123) after timeout (Phase 94) |
 | 26 | EndTxn | 0–5 | Flex v3+; v5 pid/epoch echo; 123 after timeout auto-abort (Phase 94) |
 | 28 | TxnOffsetCommit | 0–6 | Flex v3+; TopicId v6; 123 after timeout when no open (Phase 94) |
-| 29–31 | ACL admin | 0–3 | Flex v2+; User resource v3; LITERAL only |
-| 32 | DescribeConfigs | 0–4 | Flex v4; TOPIC + BROKER (Phase 99–103; name empty or local `node_id`; sparse durable) |
-| 33 | AlterConfigs | 0–2 | Flex v2; TOPIC + BROKER SET (empty = product default; name check Phase 103; sparse durable Phase 100/102) |
+| 29–31 | ACL admin | 0–3 | Flex v2+; User resource v3; LITERAL only; cluster Create/Delete **controller-only** + snapshot fan-out (Phase 113; **41** NotController) |
+| 32 | DescribeConfigs | 0–4 | Flex v4; TOPIC + BROKER (Phase 99–103; name empty or local `node_id`; sparse durable; cluster effective values after Phase 113 push) |
+| 33 | AlterConfigs | 0–2 | Flex v2; TOPIC + BROKER SET (empty = product default; name check Phase 103; sparse durable Phase 100/102; BROKER cluster Alter **controller-only** Phase 113 → **41**) |
 | 36 | SaslAuthenticate | 0–2 | Flex v2 |
 | 37 | CreatePartitions | 0–3 | Flex v2+; v3 = v2 wire (no KIP-599 quota) |
 | 42 | DeleteGroups | 0–3 | Flex v2; ErrorMessage v3 |
-| 44 | IncrementalAlterConfigs | 0–1 | SET/DELETE only; TOPIC + BROKER (Phase 99–103 name check + sparse durable) |
+| 44 | IncrementalAlterConfigs | 0–1 | SET/DELETE only; TOPIC + BROKER (Phase 99–103 name check + sparse durable; BROKER cluster Alter controller-only Phase 113) |
 | 47 | OffsetDelete | 0 | Classic only |
 | 60 | DescribeCluster | 0–2 | Always flex; IsFenced always false |
 | 61 | DescribeProducers | 0 | Always flex |
@@ -106,7 +106,9 @@ These are **current** product facts, not temporary docs lag:
 | CreateTopics | Replica assignment arrays ignored; configs response often null |
 | Storage | Log stores uncompressed Volant records; Fetch re-encodes |
 | Auth | Kafka port: SASL or `kafka-anonymous`; no shared-token on Kafka port |
-| ACLs | LITERAL only; host always `*`; User resource (v3) stored only (no SCRAM-admin gating); no TransactionalId/DelegationToken; no cluster ACL consensus |
+| ACLs | LITERAL only; host always `*`; User resource (v3) stored only (no SCRAM-admin gating); no TransactionalId/DelegationToken; cluster Create/Delete are **controller-only** with generationed snapshot fan-out (Phase 113) — not Raft multi-master consensus |
+| BROKER config (cluster) | Alter / IncrementalAlter for the six Phase 99 knobs: **controller-only** (Kafka **41** NotController elsewhere); push to live peers; Describe on any node returns **local** effective values after apply |
+| DeleteRecords (cluster) | Leader-only client path; best-effort inter-broker truncate of other replicas (Phase 113); fan-out failure does not fail the client |
 | KIP-951 | CurrentLeader on leader errors; Produce NodeEndpoints v10+; Fetch NodeEndpoints v16+; empty tags on success |
 | ApiVersions features | Empty SupportedFeatures / FinalizedFeatures / ZkMigrationReady tags; no REBOOTSTRAP_REQUIRED |
 | Missing APIs | Large Kafka surface still unsupported (GSSAPI, OAUTH, broker configs, …) |

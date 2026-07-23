@@ -433,6 +433,41 @@ pub fn encode_request(req: &Request) -> Result<Bytes> {
         Request::ListScramUsers => {
             // Empty payload.
         }
+        Request::ReplicaDeleteRecords {
+            topic,
+            partition,
+            before_offset,
+            leader_epoch,
+        } => {
+            put_string(&mut dst, topic)?;
+            dst.put_u32_le(*partition);
+            dst.put_u64_le(*before_offset);
+            dst.put_i32_le(*leader_epoch);
+        }
+        Request::ClusterBrokerConfig {
+            generation,
+            entries,
+        } => {
+            dst.put_u64_le(*generation);
+            if entries.len() > u16::MAX as usize {
+                return Err(Error::Protocol(format!(
+                    "cluster broker config entry count too large: {}",
+                    entries.len()
+                )));
+            }
+            dst.put_u16_le(entries.len() as u16);
+            for (k, v) in entries {
+                put_string(&mut dst, k)?;
+                put_string(&mut dst, v)?;
+            }
+        }
+        Request::ClusterAclSnapshot {
+            generation,
+            snapshot,
+        } => {
+            dst.put_u64_le(*generation);
+            put_bytes(&mut dst, snapshot);
+        }
     }
     finish_payload(dst)
 }
@@ -872,6 +907,46 @@ pub fn decode_request(opcode: u16, payload: &[u8]) -> Result<Request> {
             username: get_string(&mut src)?,
         }),
         RequestOpcode::ListScramUsers => Ok(Request::ListScramUsers),
+        RequestOpcode::ReplicaDeleteRecords => {
+            let topic = get_string(&mut src)?;
+            if src.remaining() < 4 + 8 + 4 {
+                return Err(Error::Protocol("truncated replica delete records".into()));
+            }
+            Ok(Request::ReplicaDeleteRecords {
+                topic,
+                partition: src.get_u32_le(),
+                before_offset: src.get_u64_le(),
+                leader_epoch: src.get_i32_le(),
+            })
+        }
+        RequestOpcode::ClusterBrokerConfig => {
+            if src.remaining() < 8 + 2 {
+                return Err(Error::Protocol("truncated cluster broker config header".into()));
+            }
+            let generation = src.get_u64_le();
+            let n = src.get_u16_le() as usize;
+            let mut entries = Vec::with_capacity(n);
+            for _ in 0..n {
+                let k = get_string(&mut src)?;
+                let v = get_string(&mut src)?;
+                entries.push((k, v));
+            }
+            Ok(Request::ClusterBrokerConfig {
+                generation,
+                entries,
+            })
+        }
+        RequestOpcode::ClusterAclSnapshot => {
+            if src.remaining() < 8 {
+                return Err(Error::Protocol("truncated cluster acl snapshot generation".into()));
+            }
+            let generation = src.get_u64_le();
+            let snapshot = get_bytes(&mut src)?;
+            Ok(Request::ClusterAclSnapshot {
+                generation,
+                snapshot,
+            })
+        }
     }
 }
 
@@ -1241,6 +1316,27 @@ pub fn encode_response(resp: &Response) -> Result<Bytes> {
             for u in usernames {
                 put_string(&mut dst, u)?;
             }
+        }
+        Response::ReplicaDeleteRecords {
+            error_code,
+            low_watermark,
+        } => {
+            dst.put_u16_le(*error_code);
+            dst.put_u64_le(*low_watermark);
+        }
+        Response::ClusterBrokerConfig {
+            error_code,
+            applied_generation,
+        } => {
+            dst.put_u16_le(*error_code);
+            dst.put_u64_le(*applied_generation);
+        }
+        Response::ClusterAclSnapshot {
+            error_code,
+            applied_generation,
+        } => {
+            dst.put_u16_le(*error_code);
+            dst.put_u64_le(*applied_generation);
         }
         Response::Error { code, message } => {
             dst.put_u16_le(*code);
@@ -1968,6 +2064,33 @@ pub fn decode_response(opcode: u16, payload: &[u8]) -> Result<Response> {
             Ok(Response::ListScramUsers {
                 error_code,
                 usernames,
+            })
+        }
+        ResponseOpcode::ReplicaDeleteRecords => {
+            if src.remaining() < 2 + 8 {
+                return Err(Error::Protocol("truncated replica delete records response".into()));
+            }
+            Ok(Response::ReplicaDeleteRecords {
+                error_code: src.get_u16_le(),
+                low_watermark: src.get_u64_le(),
+            })
+        }
+        ResponseOpcode::ClusterBrokerConfig => {
+            if src.remaining() < 2 + 8 {
+                return Err(Error::Protocol("truncated cluster broker config response".into()));
+            }
+            Ok(Response::ClusterBrokerConfig {
+                error_code: src.get_u16_le(),
+                applied_generation: src.get_u64_le(),
+            })
+        }
+        ResponseOpcode::ClusterAclSnapshot => {
+            if src.remaining() < 2 + 8 {
+                return Err(Error::Protocol("truncated cluster acl snapshot response".into()));
+            }
+            Ok(Response::ClusterAclSnapshot {
+                error_code: src.get_u16_le(),
+                applied_generation: src.get_u64_le(),
             })
         }
         ResponseOpcode::Error => {
@@ -3290,5 +3413,114 @@ mod tests {
         let huge = vec![0u8; MAX_PAYLOAD + 1];
         assert!(decode_request(1, &huge).is_err());
         assert!(decode_response(1, &huge).is_err());
+    }
+
+    #[test]
+    fn phase113_replica_delete_records_roundtrip() {
+        let req = Request::ReplicaDeleteRecords {
+            topic: "events".into(),
+            partition: 2,
+            before_offset: 100,
+            leader_epoch: 7,
+        };
+        let bytes = encode_request(&req).unwrap();
+        assert_eq!(req.opcode(), RequestOpcode::ReplicaDeleteRecords as u16);
+        assert_eq!(
+            decode_request(RequestOpcode::ReplicaDeleteRecords as u16, &bytes).unwrap(),
+            req
+        );
+
+        let resp = Response::ReplicaDeleteRecords {
+            error_code: 0,
+            low_watermark: 96,
+        };
+        let rb = encode_response(&resp).unwrap();
+        assert_eq!(resp.opcode(), ResponseOpcode::ReplicaDeleteRecords as u16);
+        assert_eq!(
+            decode_response(ResponseOpcode::ReplicaDeleteRecords as u16, &rb).unwrap(),
+            resp
+        );
+    }
+
+    #[test]
+    fn phase113_cluster_broker_config_roundtrip() {
+        let req = Request::ClusterBrokerConfig {
+            generation: 42,
+            entries: vec![
+                ("transaction.max.timeout.ms".into(), "120000".into()),
+                ("volant.sweep.interval.ms".into(), "".into()), // DELETE
+            ],
+        };
+        let bytes = encode_request(&req).unwrap();
+        assert_eq!(req.opcode(), RequestOpcode::ClusterBrokerConfig as u16);
+        assert_eq!(
+            decode_request(RequestOpcode::ClusterBrokerConfig as u16, &bytes).unwrap(),
+            req
+        );
+
+        // Empty entries is valid.
+        let empty = Request::ClusterBrokerConfig {
+            generation: 1,
+            entries: vec![],
+        };
+        let b = encode_request(&empty).unwrap();
+        assert_eq!(
+            decode_request(RequestOpcode::ClusterBrokerConfig as u16, &b).unwrap(),
+            empty
+        );
+
+        let resp = Response::ClusterBrokerConfig {
+            error_code: 0,
+            applied_generation: 42,
+        };
+        let rb = encode_response(&resp).unwrap();
+        assert_eq!(
+            decode_response(ResponseOpcode::ClusterBrokerConfig as u16, &rb).unwrap(),
+            resp
+        );
+    }
+
+    #[test]
+    fn phase113_cluster_acl_snapshot_roundtrip() {
+        let req = Request::ClusterAclSnapshot {
+            generation: 9,
+            snapshot: Bytes::from_static(br#"{"version":1,"entries":[]}"#),
+        };
+        let bytes = encode_request(&req).unwrap();
+        assert_eq!(req.opcode(), RequestOpcode::ClusterAclSnapshot as u16);
+        assert_eq!(
+            decode_request(RequestOpcode::ClusterAclSnapshot as u16, &bytes).unwrap(),
+            req
+        );
+
+        let empty_snap = Request::ClusterAclSnapshot {
+            generation: 0,
+            snapshot: Bytes::new(),
+        };
+        let b = encode_request(&empty_snap).unwrap();
+        assert_eq!(
+            decode_request(RequestOpcode::ClusterAclSnapshot as u16, &b).unwrap(),
+            empty_snap
+        );
+
+        let resp = Response::ClusterAclSnapshot {
+            error_code: 0,
+            applied_generation: 9,
+        };
+        let rb = encode_response(&resp).unwrap();
+        assert_eq!(
+            decode_response(ResponseOpcode::ClusterAclSnapshot as u16, &rb).unwrap(),
+            resp
+        );
+    }
+
+    #[test]
+    fn phase113_truncated_bodies_error() {
+        assert!(decode_request(RequestOpcode::ReplicaDeleteRecords as u16, &[]).is_err());
+        assert!(decode_request(RequestOpcode::ClusterBrokerConfig as u16, &[]).is_err());
+        assert!(decode_request(RequestOpcode::ClusterAclSnapshot as u16, &[]).is_err());
+        assert!(decode_response(ResponseOpcode::ReplicaDeleteRecords as u16, &[]).is_err());
+        assert!(decode_response(ResponseOpcode::ClusterBrokerConfig as u16, &[0]).is_err());
+        assert!(decode_response(ResponseOpcode::ClusterAclSnapshot as u16, &[0, 0]).is_err());
     }
 }

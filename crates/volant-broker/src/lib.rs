@@ -72,6 +72,7 @@ pub use leader_epoch::{EpochStart, LeaderEpochStore, LeaderEpochsFile};
 pub use kafka::{serve_kafka_listener, serve_kafka_listener_until};
 pub use metrics::Metrics;
 pub use net::{
+    fanout_cluster_acl_snapshot, fanout_cluster_broker_config, fanout_delete_records,
     run_metrics_server, run_metrics_server_until, run_server, serve_listener, serve_listener_until,
     shutdown_signal, start_background_tasks, BackgroundTasks,
 };

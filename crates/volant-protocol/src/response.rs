@@ -72,6 +72,12 @@ pub enum ResponseOpcode {
     DeleteScramUser = 67,
     /// List SCRAM users result (Phase 22).
     ListScramUsers = 69,
+    /// Replica DeleteRecords fan-out result (Phase 113).
+    ReplicaDeleteRecords = 71,
+    /// Cluster BROKER config push result (Phase 113).
+    ClusterBrokerConfig = 73,
+    /// Cluster ACL snapshot push result (Phase 113).
+    ClusterAclSnapshot = 75,
     /// Error response.
     Error = 0xFFFF,
 }
@@ -113,6 +119,9 @@ impl ResponseOpcode {
             65 => Self::CreateScramUser,
             67 => Self::DeleteScramUser,
             69 => Self::ListScramUsers,
+            71 => Self::ReplicaDeleteRecords,
+            73 => Self::ClusterBrokerConfig,
+            75 => Self::ClusterAclSnapshot,
             0xFFFF => Self::Error,
             _ => return None,
         })
@@ -640,6 +649,27 @@ pub enum Response {
         /// Registered usernames.
         usernames: Vec<String>,
     },
+    /// Replica DeleteRecords fan-out result (Phase 113).
+    ReplicaDeleteRecords {
+        /// 0 = ok; 13 = not leader; 19 = fenced epoch (when implemented).
+        error_code: u16,
+        /// Local log start after truncate attempt.
+        low_watermark: u64,
+    },
+    /// Cluster BROKER config push result (Phase 113).
+    ClusterBrokerConfig {
+        /// 0 = ok; non-zero on reject / apply failure.
+        error_code: u16,
+        /// Generation applied on the peer (`0` if rejected as stale).
+        applied_generation: u64,
+    },
+    /// Cluster ACL snapshot push result (Phase 113).
+    ClusterAclSnapshot {
+        /// 0 = ok; non-zero on reject / apply failure.
+        error_code: u16,
+        /// Generation applied on the peer (`0` if rejected as stale).
+        applied_generation: u64,
+    },
     /// Error response.
     Error {
         /// Error code.
@@ -710,6 +740,9 @@ impl Response {
             Self::CreateScramUser { .. } => ResponseOpcode::CreateScramUser as u16,
             Self::DeleteScramUser { .. } => ResponseOpcode::DeleteScramUser as u16,
             Self::ListScramUsers { .. } => ResponseOpcode::ListScramUsers as u16,
+            Self::ReplicaDeleteRecords { .. } => ResponseOpcode::ReplicaDeleteRecords as u16,
+            Self::ClusterBrokerConfig { .. } => ResponseOpcode::ClusterBrokerConfig as u16,
+            Self::ClusterAclSnapshot { .. } => ResponseOpcode::ClusterAclSnapshot as u16,
             Self::Error { .. } => ResponseOpcode::Error as u16,
         }
     }

@@ -72,6 +72,12 @@ pub enum RequestOpcode {
     DeleteScramUser = 66,
     /// List SCRAM usernames (Phase 22).
     ListScramUsers = 68,
+    /// Leader → replica DeleteRecords fan-out (Phase 113).
+    ReplicaDeleteRecords = 70,
+    /// Controller → peer BROKER config push (Phase 113).
+    ClusterBrokerConfig = 72,
+    /// Controller → peer ACL snapshot push (Phase 113).
+    ClusterAclSnapshot = 74,
 }
 
 impl RequestOpcode {
@@ -111,6 +117,9 @@ impl RequestOpcode {
             64 => Self::CreateScramUser,
             66 => Self::DeleteScramUser,
             68 => Self::ListScramUsers,
+            70 => Self::ReplicaDeleteRecords,
+            72 => Self::ClusterBrokerConfig,
+            74 => Self::ClusterAclSnapshot,
             _ => return None,
         })
     }
@@ -440,6 +449,34 @@ pub enum Request {
     },
     /// List SCRAM usernames (Phase 22).
     ListScramUsers,
+    /// Leader → replica DeleteRecords fan-out (Phase 113).
+    ReplicaDeleteRecords {
+        /// Topic name.
+        topic: String,
+        /// Partition id.
+        partition: u32,
+        /// Drop sealed segments entirely before this offset.
+        before_offset: u64,
+        /// Leader epoch at the time of truncate (`-1` if unknown).
+        leader_epoch: i32,
+    },
+    /// Controller → peer BROKER config push (Phase 113).
+    ///
+    /// Empty value string = DELETE / restore product default (same as
+    /// IncrementalAlterConfigs DELETE).
+    ClusterBrokerConfig {
+        /// Controller config generation for this push.
+        generation: u64,
+        /// Sparse key/value overlay entries.
+        entries: Vec<(String, String)>,
+    },
+    /// Controller → peer ACL snapshot push (Phase 113).
+    ClusterAclSnapshot {
+        /// Controller ACL generation for this push.
+        generation: u64,
+        /// Versioned snapshot bytes (typically JSON matching `__acls/acls.json`).
+        snapshot: Bytes,
+    },
 }
 
 impl Request {
@@ -479,6 +516,9 @@ impl Request {
             Self::CreateScramUser { .. } => RequestOpcode::CreateScramUser as u16,
             Self::DeleteScramUser { .. } => RequestOpcode::DeleteScramUser as u16,
             Self::ListScramUsers => RequestOpcode::ListScramUsers as u16,
+            Self::ReplicaDeleteRecords { .. } => RequestOpcode::ReplicaDeleteRecords as u16,
+            Self::ClusterBrokerConfig { .. } => RequestOpcode::ClusterBrokerConfig as u16,
+            Self::ClusterAclSnapshot { .. } => RequestOpcode::ClusterAclSnapshot as u16,
         }
     }
 }

@@ -1121,18 +1121,20 @@ pub(crate) fn encode_describe_configs(
     }
 }
 
+/// Encode AlterConfigs response. Returns BROKER fan-out jobs `(generation, entries)`.
 pub(crate) fn encode_alter_configs(
     broker: &Broker,
     src: &mut impl Buf,
     out: &mut BytesMut,
     version: i16,
     principal: &str,
-) {
+) -> Vec<(u64, Vec<(String, String)>)> {
     // AlterConfigs classic v0–1 + flexible v2:
     //   request: resources[{type, name, configs[{name, value}]}], validate_only
     //   response: throttle (all versions), responses[{error, error_message, type, name}]
     // Phase 46: leading throttle (Kafka has throttle on v0+).
     let flexible = version >= 2;
+    let mut fanouts: Vec<(u64, Vec<(String, String)>)> = Vec::new();
     struct Res {
         rtype: i8,
         name: String,
@@ -1189,7 +1191,7 @@ pub(crate) fn encode_alter_configs(
         if src.remaining() < 4 {
             out.put_i32(0); // throttle
             out.put_i32(0);
-            return;
+            return fanouts;
         }
         let n = src.get_i32();
         for _ in 0..n.max(0) {
@@ -1247,7 +1249,12 @@ pub(crate) fn encode_alter_configs(
                         Some(invalid_broker_resource_name_msg(broker.node_id())),
                     )
                 } else {
-                    alter_broker_resource(broker, principal, &r.entries, validate_only)
+                    let (code, msg, fanout) =
+                        alter_broker_resource(broker, principal, &r.entries, validate_only);
+                    if let Some(job) = fanout {
+                        fanouts.push(job);
+                    }
+                    (code, msg)
                 }
             }
             RES_TOPIC => {
@@ -1299,22 +1306,27 @@ pub(crate) fn encode_alter_configs(
     if flexible {
         put_empty_tag_buffer(out);
     }
+    fanouts
 }
 
 pub(crate) fn volant_broker_topic_config_validate(entries: &[(String, String)]) -> std::result::Result<(), String> {
     crate::topic_config::TopicConfig::from_entries(entries).map(|_| ()).map_err(|e| e.to_string())
 }
 
-/// AlterConfigs / IncrementalAlter for BROKER resources (Phase 99–102).
+/// AlterConfigs / IncrementalAlter for BROKER resources (Phase 99–102 + 113).
 ///
 /// Successful non-validate_only merges a sparse durable overlay under
 /// `{data_dir}/__broker_config/state.json` (only altered keys).
+///
+/// Phase 113: cluster mode requires the **controller**; returns Kafka
+/// `NOT_CONTROLLER` (41) otherwise. On controller success, the third tuple
+/// element is `(generation, entries)` for inter-broker fan-out.
 fn alter_broker_resource(
     broker: &Broker,
     principal: &str,
     entries: &[(String, String)],
     validate_only: bool,
-) -> (i16, Option<String>) {
+) -> (i16, Option<String>, Option<(u64, Vec<(String, String)>)>) {
     if broker.acls().is_enabled()
         && !broker.acls().authorize(
             Some(principal),
@@ -1323,23 +1335,56 @@ fn alter_broker_resource(
             AclOperation::Alter,
         )
     {
-        return (KafkaErrorCode::ClusterAuthorizationFailed.as_i16(), None);
+        return (
+            KafkaErrorCode::ClusterAuthorizationFailed.as_i16(),
+            None,
+            None,
+        );
+    }
+    // Phase 113: cluster BROKER alter is controller-only (before name checks on
+    // non-controller would still reject with NotController for the right op).
+    if !validate_only
+        && broker.cluster_config().is_some()
+        && !broker.is_controller()
+    {
+        return (
+            KafkaErrorCode::NotController.as_i16(),
+            Some(format!(
+                "not controller; controller_id={}",
+                broker.controller_id()
+            )),
+            None,
+        );
     }
     if validate_only {
         return match crate::broker_config::validate_entries(entries) {
-            Ok(()) => (KafkaErrorCode::None.as_i16(), None),
+            Ok(()) => (KafkaErrorCode::None.as_i16(), None, None),
             Err(Error::InvalidArgument(msg)) => {
-                (KafkaErrorCode::InvalidConfig.as_i16(), Some(msg))
+                (KafkaErrorCode::InvalidConfig.as_i16(), Some(msg), None)
             }
-            Err(e) => (KafkaErrorCode::InvalidConfig.as_i16(), Some(e.to_string())),
+            Err(e) => (
+                KafkaErrorCode::InvalidConfig.as_i16(),
+                Some(e.to_string()),
+                None,
+            ),
         };
     }
     match broker.alter_broker_configs(entries) {
-        Ok(()) => (KafkaErrorCode::None.as_i16(), None),
+        Ok(Some(gen)) => (
+            KafkaErrorCode::None.as_i16(),
+            None,
+            Some((gen, entries.to_vec())),
+        ),
+        Ok(None) => (KafkaErrorCode::None.as_i16(), None, None),
+        Err(Error::InvalidArgument(msg)) if msg.starts_with("not controller") => (
+            KafkaErrorCode::NotController.as_i16(),
+            Some(msg),
+            None,
+        ),
         Err(Error::InvalidArgument(msg)) => {
-            (KafkaErrorCode::InvalidConfig.as_i16(), Some(msg))
+            (KafkaErrorCode::InvalidConfig.as_i16(), Some(msg), None)
         }
-        Err(e) => (KafkaErrorCode::Unknown.as_i16(), Some(e.to_string())),
+        Err(e) => (KafkaErrorCode::Unknown.as_i16(), Some(e.to_string()), None),
     }
 }
 
@@ -1347,14 +1392,16 @@ fn alter_broker_resource(
 ///
 /// Kafka `ConfigOperation`: 0=SET, 1=DELETE, 2=APPEND, 3=SUBTRACT.
 /// Volant topic configs only support SET and DELETE (clear via empty value).
+/// Encode IncrementalAlterConfigs response. Returns BROKER fan-out jobs.
 pub(crate) fn encode_incremental_alter_configs(
     broker: &Broker,
     src: &mut impl Buf,
     out: &mut BytesMut,
     version: i16,
     principal: &str,
-) {
+) -> Vec<(u64, Vec<(String, String)>)> {
     let flexible = version >= 1;
+    let mut fanouts: Vec<(u64, Vec<(String, String)>)> = Vec::new();
     /// Kafka ConfigOperation::Set.
     const OP_SET: i8 = 0;
     /// Kafka ConfigOperation::Delete.
@@ -1452,7 +1499,7 @@ pub(crate) fn encode_incremental_alter_configs(
         if src.remaining() < 4 {
             out.put_i32(0); // throttle
             out.put_i32(0);
-            return;
+            return fanouts;
         }
         let n = src.get_i32();
         for _ in 0..n.max(0) {
@@ -1545,7 +1592,12 @@ pub(crate) fn encode_incremental_alter_configs(
                             Some(invalid_broker_resource_name_msg(broker.node_id())),
                         )
                     } else {
-                        alter_broker_resource(broker, principal, &r.entries, validate_only)
+                        let (code, msg, fanout) =
+                            alter_broker_resource(broker, principal, &r.entries, validate_only);
+                        if let Some(job) = fanout {
+                            fanouts.push(job);
+                        }
+                        (code, msg)
                     }
                 }
                 RES_TOPIC => {
@@ -1598,6 +1650,7 @@ pub(crate) fn encode_incremental_alter_configs(
     if flexible {
         put_empty_tag_buffer(out);
     }
+    fanouts
 }
 
 // ---------------------------------------------------------------------------

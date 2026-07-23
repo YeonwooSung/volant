@@ -449,6 +449,59 @@ fn broker_metrics_text(broker: &Broker) -> String {
         "volant_aborted_markers_gc_total {}\n",
         broker.aborted_markers_gc_total()
     ));
+    // Phase 113: DeleteRecords inter-broker fan-out failures (best-effort).
+    text.push_str(
+        "# HELP volant_delete_records_fanout_errors_total DeleteRecords replica fan-out failures\n",
+    );
+    text.push_str("# TYPE volant_delete_records_fanout_errors_total counter\n");
+    text.push_str(&format!(
+        "volant_delete_records_fanout_errors_total {}\n",
+        broker.delete_records_fanout_errors_total()
+    ));
+    text.push_str(
+        "# HELP volant_cluster_config_push_errors_total BROKER config fan-out failures\n",
+    );
+    text.push_str("# TYPE volant_cluster_config_push_errors_total counter\n");
+    text.push_str(&format!(
+        "volant_cluster_config_push_errors_total {}\n",
+        broker.cluster_config_push_errors_total()
+    ));
+    text.push_str("# HELP volant_config_generation Controller BROKER config generation\n");
+    text.push_str("# TYPE volant_config_generation gauge\n");
+    text.push_str(&format!(
+        "volant_config_generation {}\n",
+        broker.config_generation()
+    ));
+    text.push_str(
+        "# HELP volant_applied_config_generation Last applied BROKER config generation\n",
+    );
+    text.push_str("# TYPE volant_applied_config_generation gauge\n");
+    text.push_str(&format!(
+        "volant_applied_config_generation {}\n",
+        broker.applied_config_generation()
+    ));
+    text.push_str(
+        "# HELP volant_cluster_acl_push_errors_total ACL snapshot fan-out failures\n",
+    );
+    text.push_str("# TYPE volant_cluster_acl_push_errors_total counter\n");
+    text.push_str(&format!(
+        "volant_cluster_acl_push_errors_total {}\n",
+        broker.cluster_acl_push_errors_total()
+    ));
+    text.push_str("# HELP volant_acl_generation Controller ACL generation\n");
+    text.push_str("# TYPE volant_acl_generation gauge\n");
+    text.push_str(&format!(
+        "volant_acl_generation {}\n",
+        broker.acl_generation()
+    ));
+    text.push_str(
+        "# HELP volant_applied_acl_generation Last applied ACL generation\n",
+    );
+    text.push_str("# TYPE volant_applied_acl_generation gauge\n");
+    text.push_str(&format!(
+        "volant_applied_acl_generation {}\n",
+        broker.applied_acl_generation()
+    ));
     text
 }
 
@@ -654,6 +707,202 @@ async fn heartbeat_to_controller(broker: &Broker) -> Result<()> {
         other => Err(Error::Protocol(format!(
             "unexpected heartbeat response: {other:?}"
         ))),
+    }
+}
+
+/// Best-effort ACL snapshot fan-out to live peers (Phase 113 PR4).
+///
+/// Called after a successful **controller** ACL mutate. Loads the current
+/// durable snapshot from the controller and pushes it with `generation`.
+/// Failures increment [`Broker::cluster_acl_push_errors_total`].
+pub async fn fanout_cluster_acl_snapshot(broker: &Broker, generation: u64) {
+    let peers = broker.cluster_acl_fanout_peers();
+    if peers.is_empty() {
+        return;
+    }
+    let snapshot = match broker.acl_snapshot_wire_bytes() {
+        Ok(b) => b,
+        Err(e) => {
+            warn!(generation, error = %e, "acl snapshot encode for fan-out failed");
+            broker.note_cluster_acl_push_error();
+            return;
+        }
+    };
+    let req = Request::ClusterAclSnapshot {
+        generation,
+        snapshot,
+    };
+    for (peer_id, addr) in peers {
+        match inter_broker_rpc(broker, &addr, &req).await {
+            Ok(Response::ClusterAclSnapshot {
+                error_code: 0,
+                ..
+            }) => {}
+            Ok(Response::ClusterAclSnapshot {
+                error_code,
+                applied_generation,
+            }) => {
+                warn!(
+                    peer_id,
+                    %addr,
+                    error_code,
+                    applied_generation,
+                    generation,
+                    "cluster acl fan-out peer error"
+                );
+                broker.note_cluster_acl_push_error();
+            }
+            Ok(other) => {
+                warn!(
+                    peer_id,
+                    %addr,
+                    ?other,
+                    generation,
+                    "cluster acl fan-out unexpected response"
+                );
+                broker.note_cluster_acl_push_error();
+            }
+            Err(e) => {
+                warn!(
+                    peer_id,
+                    %addr,
+                    error = %e,
+                    generation,
+                    "cluster acl fan-out rpc failed"
+                );
+                broker.note_cluster_acl_push_error();
+            }
+        }
+    }
+}
+
+/// Best-effort BROKER config fan-out to live peers (Phase 113 PR3).
+///
+/// Called after a successful **controller** [`Broker::alter_broker_configs`].
+/// Failures increment [`Broker::cluster_config_push_errors_total`] and never
+/// fail the client path. No-op when there are no peers.
+pub async fn fanout_cluster_broker_config(
+    broker: &Broker,
+    generation: u64,
+    entries: &[(String, String)],
+) {
+    let peers = broker.cluster_broker_config_fanout_peers();
+    if peers.is_empty() {
+        return;
+    }
+    let req = Request::ClusterBrokerConfig {
+        generation,
+        entries: entries.to_vec(),
+    };
+    for (peer_id, addr) in peers {
+        match inter_broker_rpc(broker, &addr, &req).await {
+            Ok(Response::ClusterBrokerConfig {
+                error_code: 0,
+                ..
+            }) => {}
+            Ok(Response::ClusterBrokerConfig {
+                error_code,
+                applied_generation,
+            }) => {
+                warn!(
+                    peer_id,
+                    %addr,
+                    error_code,
+                    applied_generation,
+                    generation,
+                    "cluster broker config fan-out peer error"
+                );
+                broker.note_cluster_config_push_error();
+            }
+            Ok(other) => {
+                warn!(
+                    peer_id,
+                    %addr,
+                    ?other,
+                    generation,
+                    "cluster broker config fan-out unexpected response"
+                );
+                broker.note_cluster_config_push_error();
+            }
+            Err(e) => {
+                warn!(
+                    peer_id,
+                    %addr,
+                    error = %e,
+                    generation,
+                    "cluster broker config fan-out rpc failed"
+                );
+                broker.note_cluster_config_push_error();
+            }
+        }
+    }
+}
+
+/// Best-effort DeleteRecords fan-out to other replicas (Phase 113 PR2).
+///
+/// One synchronous attempt per peer after a successful **leader** local truncate.
+/// Failures increment [`Broker::delete_records_fanout_errors_total`] and never
+/// fail the client path. No-op in single-node mode.
+pub async fn fanout_delete_records(
+    broker: &Broker,
+    topic: &str,
+    partition: u32,
+    before_offset: u64,
+) {
+    let peers = broker.delete_records_fanout_peers(topic, partition);
+    if peers.is_empty() {
+        return;
+    }
+    for (replica_id, addr, leader_epoch) in peers {
+        let req = Request::ReplicaDeleteRecords {
+            topic: topic.to_owned(),
+            partition,
+            before_offset,
+            leader_epoch,
+        };
+        match inter_broker_rpc(broker, &addr, &req).await {
+            Ok(Response::ReplicaDeleteRecords {
+                error_code: 0,
+                ..
+            }) => {}
+            Ok(Response::ReplicaDeleteRecords {
+                error_code,
+                low_watermark,
+            }) => {
+                warn!(
+                    replica_id,
+                    %addr,
+                    error_code,
+                    low_watermark,
+                    topic,
+                    partition,
+                    "delete records fan-out peer error"
+                );
+                broker.note_delete_records_fanout_error();
+            }
+            Ok(other) => {
+                warn!(
+                    replica_id,
+                    %addr,
+                    ?other,
+                    topic,
+                    partition,
+                    "delete records fan-out unexpected response"
+                );
+                broker.note_delete_records_fanout_error();
+            }
+            Err(e) => {
+                warn!(
+                    replica_id,
+                    %addr,
+                    error = %e,
+                    topic,
+                    partition,
+                    "delete records fan-out rpc failed"
+                );
+                broker.note_delete_records_fanout_error();
+            }
+        }
     }
 }
 
@@ -1132,6 +1381,9 @@ fn authorize_request(
         Request::ReplicaFetch { .. }
         | Request::HeartbeatBroker { .. }
         | Request::ClusterState { .. }
+        | Request::ReplicaDeleteRecords { .. }
+        | Request::ClusterBrokerConfig { .. }
+        | Request::ClusterAclSnapshot { .. }
         | Request::Auth { .. }
         | Request::ScramFirst { .. }
         | Request::ScramFinal { .. } => return None,
@@ -1209,6 +1461,9 @@ fn authorize_request(
         Request::ReplicaFetch { .. }
         | Request::HeartbeatBroker { .. }
         | Request::ClusterState { .. }
+        | Request::ReplicaDeleteRecords { .. }
+        | Request::ClusterBrokerConfig { .. }
+        | Request::ClusterAclSnapshot { .. }
         | Request::Auth { .. }
         | Request::ScramFirst { .. }
         | Request::ScramFinal { .. } => true,
@@ -1284,7 +1539,10 @@ fn record_response_metrics(broker: &Broker, resp: &Response) {
         | Response::ScramFinal { error_code, .. }
         | Response::CreateScramUser { error_code }
         | Response::DeleteScramUser { error_code }
-        | Response::ListScramUsers { error_code, .. } => {
+        | Response::ListScramUsers { error_code, .. }
+        | Response::ReplicaDeleteRecords { error_code, .. }
+        | Response::ClusterBrokerConfig { error_code, .. }
+        | Response::ClusterAclSnapshot { error_code, .. } => {
             if *error_code != 0 {
                 m.record_error(*error_code);
             }
@@ -1779,6 +2037,46 @@ async fn handle_request(broker: &Broker, req: Request) -> Result<Response> {
                 topics,
             })
         }
+        // Phase 113 PR1: decode + dispatch stubs (real fan-out in PR2–PR4).
+        Request::ReplicaDeleteRecords {
+            topic,
+            partition,
+            before_offset,
+            leader_epoch,
+        } => {
+            let (error_code, low_watermark) = broker.handle_replica_delete_records(
+                &topic,
+                partition,
+                before_offset,
+                leader_epoch,
+            );
+            Ok(Response::ReplicaDeleteRecords {
+                error_code,
+                low_watermark,
+            })
+        }
+        Request::ClusterBrokerConfig {
+            generation,
+            entries,
+        } => {
+            let (error_code, applied_generation) =
+                broker.handle_cluster_broker_config(generation, &entries);
+            Ok(Response::ClusterBrokerConfig {
+                error_code,
+                applied_generation,
+            })
+        }
+        Request::ClusterAclSnapshot {
+            generation,
+            snapshot,
+        } => {
+            let (error_code, applied_generation) =
+                broker.handle_cluster_acl_snapshot(generation, &snapshot);
+            Ok(Response::ClusterAclSnapshot {
+                error_code,
+                applied_generation,
+            })
+        }
         Request::InitProducerId { transactional_id } => {
             let (producer_id, epoch) =
                 broker.init_producer_id_with_txn(&transactional_id);
@@ -1927,12 +2225,18 @@ async fn handle_request(broker: &Broker, req: Request) -> Result<Response> {
             partition,
             before_offset,
         } => match broker.delete_records(&topic, partition, before_offset) {
-            Ok((low_watermark, error_code)) => Ok(Response::DeleteRecords {
-                error_code,
-                topic,
-                partition,
-                low_watermark,
-            }),
+            Ok((low_watermark, error_code)) => {
+                // Phase 113: best-effort fan-out after local leader success.
+                if error_code == 0 {
+                    fanout_delete_records(broker, &topic, partition, before_offset).await;
+                }
+                Ok(Response::DeleteRecords {
+                    error_code,
+                    topic,
+                    partition,
+                    low_watermark,
+                })
+            }
             Err(Error::NotFound(_)) => Ok(Response::DeleteRecords {
                 error_code: ErrorCode::NotFound as u16,
                 topic,
@@ -1995,8 +2299,18 @@ async fn handle_request(broker: &Broker, req: Request) -> Result<Response> {
         }
         Request::CreateAcls { entries } => {
             match wire_to_acl_entries(&entries) {
-                Ok(parsed) => match broker.acls().create(parsed) {
-                    Ok(()) => Ok(Response::CreateAcls { error_code: 0 }),
+                Ok(parsed) => match broker.create_acls_admin(parsed) {
+                    Ok(gen) => {
+                        if let Some(g) = gen {
+                            fanout_cluster_acl_snapshot(broker, g).await;
+                        }
+                        Ok(Response::CreateAcls { error_code: 0 })
+                    }
+                    Err(Error::InvalidArgument(m)) if m.starts_with("not controller") => {
+                        Ok(Response::CreateAcls {
+                            error_code: ErrorCode::NotController as u16,
+                        })
+                    }
                     Err(_) => Ok(Response::CreateAcls {
                         error_code: ErrorCode::Storage as u16,
                     }),
@@ -2008,11 +2322,22 @@ async fn handle_request(broker: &Broker, req: Request) -> Result<Response> {
         }
         Request::DeleteAcls { entries } => {
             match wire_to_acl_entries(&entries) {
-                Ok(parsed) => match broker.acls().delete(&parsed) {
-                    Ok(removed) => Ok(Response::DeleteAcls {
-                        error_code: 0,
-                        removed: removed as u32,
-                    }),
+                Ok(parsed) => match broker.delete_acls_admin(&parsed) {
+                    Ok((removed, gen)) => {
+                        if let Some(g) = gen {
+                            fanout_cluster_acl_snapshot(broker, g).await;
+                        }
+                        Ok(Response::DeleteAcls {
+                            error_code: 0,
+                            removed: removed as u32,
+                        })
+                    }
+                    Err(Error::InvalidArgument(m)) if m.starts_with("not controller") => {
+                        Ok(Response::DeleteAcls {
+                            error_code: ErrorCode::NotController as u16,
+                            removed: 0,
+                        })
+                    }
                     Err(_) => Ok(Response::DeleteAcls {
                         error_code: ErrorCode::Storage as u16,
                         removed: 0,

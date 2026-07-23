@@ -301,7 +301,7 @@ Volant deliberately does **not** claim production Kafka parity. Open gaps:
 6. Kafka cooperative-sticky assignor **protocol** parity (native JoinGroup revoke list exists)
 7. Stream state durability and distributed stream topology (`MemoryStore` only)
 8. Full chaos-mesh / long fuzz campaigns (corpus smoke CI MVP → Phase 112; `fuzz/` seeds + deterministic replay)
-9. ACL consensus across cluster nodes; DeleteRecords does not fan out to followers
+9. Full Raft multi-master ACL consensus (Phase **113** is controller SoT + snapshot fan-out, not consensus); DeleteRecords fan-out is best-effort (Phase **113**)
 10. Helm chart has no `--kafka-listen` surface; version **0.1.0** MVP readiness
 
 ### What is solid today

@@ -98,6 +98,14 @@ workers.
 | Max sessions (95) | Default 1000 (`VOLANT_FETCH_SESSION_MAX`; `0` unlimited); LRU-evict at cap |
 | Errors | 70 session id not found (incl. after TTL/LRU); 71 invalid session epoch |
 
+## Cluster admin fan-out (Phase 113)
+
+| Feature | Behavior |
+|---------|----------|
+| DeleteRecords fan-out | Partition **leader** truncates locally, then best-effort `ReplicaDeleteRecords` to other replicas (soft-marker GC/clip on peers). Client success does not wait on peer RPC success. Metric `volant_delete_records_fanout_errors_total` |
+| BROKER config fan-out | Cluster **controller-only** Alter / IncrementalAlter for the six Phase 99 knobs; generationed push to live peers; sparse durable on each node. Non-controller → `NotController` / Kafka **41** |
+| ACL snapshot fan-out | Cluster **controller-only** Create/Delete Acls; generationed full snapshot push; peers install + persist `__acls`. List/authorize remain local after apply |
+
 ## Open limitations (native)
 
 - Multi-language clients deferred  
@@ -107,8 +115,8 @@ workers.
 - Prepared 2PC is single-node MVP (no multi-broker txn log); prepared timeout yes (Phase 92); open-txn timeout yes (Phase 93); TRANSACTION_ABORTABLE honest subset after timeout (Phase 94; FindCoordinator never); transaction max timeout clamp yes (Phase 96; default 15m; Init **50** over-max) 
 
 - Fetch sessions not durable / multi-broker sticky; omit cache is HWM+LSO only (not byte-identical Kafka response cache); idle TTL + max/LRU yes (Phase 95)  
-- ACL store is single-node file (no consensus)  
-- DeleteRecords does not fan out to cluster followers  
+- ACL / BROKER admin SoT is the **controller** (Phase 113 push), not Raft consensus; brief lag on controller failover  
+- DeleteRecords fan-out is **best-effort** (no durable pending truncate for down replicas)  
 - Compaction simpler than Kafka (no tombstone retention window)  
 - Inter-broker not ACL-gated; uses shared-token when configured  
 

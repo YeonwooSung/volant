@@ -147,19 +147,22 @@ volant-server \
   env `zstd` maps to lz4 for Fetch v0–3. Log storage remains uncompressed.
 - **Topic config keys** (Describe/AlterConfigs TOPIC): `retention.ms`,
   `retention.bytes`, `segment.bytes`, `cleanup.policy` (`delete`|`compact`).
-- **Broker config keys** (Describe/AlterConfigs BROKER, Phase 99–103):
+- **Broker config keys** (Describe/AlterConfigs BROKER, Phase 99–103 + **113**):
   `transaction.max.timeout.ms` (Kafka name),
   `volant.open.transaction.timeout.ms`,
   `volant.prepared.transaction.timeout.ms`,
   `volant.fetch.session.idle.ms`, `volant.fetch.session.max`,
   `volant.sweep.interval.ms`. Resource **name** must be empty or this broker's
   `node_id` decimal (default `"0"`); other names → `INVALID_REQUEST` (42)
-  (Phase 103; local only). Precedence: product default → env → **sparse**
+  (Phase 103). Precedence: product default → env → **sparse**
   durable `{data_dir}/__broker_config/state.json` (only keys present) → runtime
   alter. Alter/Incremental SET/DELETE map to the same setters; successful
   non-validate_only **merges only altered keys** (atomic); DELETE restores
   product defaults live **and removes the key from the file** so env can
-  re-apply on restart (Phase 102).
+  re-apply on restart (Phase 102). **Cluster mode (Phase 113):** BROKER Alter is
+  **controller-only** (Kafka **41** / native NotController on other brokers);
+  controller pushes generationed knobs to live peers. Target the controller
+  (lowest live broker id / DescribeCluster) for cluster-wide knobs.
 - **Transactions / isolation:** write-through + soft abort markers (Phase 86) +
   EndTxn control batches on finalize (Phase 89) + prepared 2PC MVP (Phase 90) +
   prepared timeout auto-abort (Phase 92, default 60s,
@@ -292,11 +295,11 @@ specs. Ops-critical notes only:
 | Consumer lag | Metrics + `volant group lag` |
 | Groups | list / describe / delete-offsets; static membership `group_instance_id` |
 | Topic configs | `retention.ms` / `retention.bytes` / `segment.bytes` / `cleanup.policy` |
-| Broker configs (Phase 99–102) | BROKER Describe/Alter: `transaction.max.timeout.ms` + `volant.*` open/prepared/session/sweep; **sparse** durable under `__broker_config/state.json` (only altered keys; DELETE unfreezes env) |
-| DeleteRecords | Truncates sealed segments; no follower fan-out; **GC/clip aborted soft markers** vs new log start (Phase 104/111) |
+| Broker configs (Phase 99–102 + 113) | BROKER Describe/Alter: `transaction.max.timeout.ms` + `volant.*` open/prepared/session/sweep; **sparse** durable under `__broker_config/state.json`; **cluster:** controller-only Alter + fan-out to live peers (Phase 113) |
+| DeleteRecords | Truncates sealed segments; **best-effort fan-out** to other replicas (Phase 113); **GC/clip aborted soft markers** vs new log start (Phase 104/111) |
 | Transactions (shipped) | **Write-through + soft markers** (Phase 86) + **control batches** on EndTxn finalize (Phase 89) + **empty AddPartitions control** (Phase 105) + **prepared 2PC MVP** (Phase 90) + **prepared timeout** (Phase 92, default 60s / `VOLANT_PREPARED_TXN_TIMEOUT_MS`) + **open timeout** (Phase 93, InitProducerId / `VOLANT_OPEN_TXN_TIMEOUT_MS`) + **max timeout clamp** (Phase 96, default 15m / `VOLANT_TRANSACTION_MAX_TIMEOUT_MS`; Init **50** over-max) + **background sweeper** (Phase 97/101/106, default 1s / `VOLANT_SWEEP_INTERVAL_MS`; `0` = pause bg; always-spawn so 0→>0 without restart; graceful shutdown/join) + **BROKER config surface** (Phase 99) + **sparse durable restart** (Phase 100/102) + **BROKER name vs `node_id`** (Phase 103) + **marker GC/clip** (Phase 104/111); LSO/aborted filtering; open crash≡abort; prepared durable under `__txn_prepared` until complete or timeout; soft markers GC'd when `end_offset <= log_start`; straddlers clip `first_offset = log_start` (Phase 111) |
 | mTLS | Feature `tls`; `--tls-client-ca` / optional `--tls-client-allow` |
-| ACLs | `--acl-enable`; durable `__acls/acls.json`; User resource is Kafka admin store-only |
+| ACLs | `--acl-enable`; durable `__acls/acls.json`; User resource is Kafka admin store-only; **cluster:** Create/Delete controller-only + snapshot fan-out (Phase 113) |
 | Compaction | `cleanup.policy=compact` on **sealed** segments; empty value = tombstone |
 
 CLI examples: [features.md](./features.md), [../README.md](../README.md).
@@ -327,6 +330,7 @@ curl -s -H "Authorization: Bearer $VOLANT_METRICS_TOKEN" \
 - Non-controller alive-set auto-death → **closed by Phase 110**
 - Straddle soft-marker clip → **closed by Phase 111**
 - cargo-fuzz corpus smoke + CI MVP → **closed by Phase 112**
+- Cluster admin fan-out (DeleteRecords / BROKER config / ACL snapshot) → **closed by Phase 113**
 
 Full list: [ROADMAP.md](../ROADMAP.md).
 
@@ -340,5 +344,5 @@ session idle TTL + max/LRU, background txn/session sweeper + expiry metrics
 single-flight bg Phase 109), BROKER
 Describe/AlterConfigs + durable restart restore, empty-AddPartitions control
 batches, ~38 keys; **ISR shrink on follower death** Phase 108 + **non-controller
-alive-set auto-death** Phase 110), SCRAM-SHA-256/512,
+alive-set auto-death** Phase 110; **cluster admin fan-out** Phase 113), SCRAM-SHA-256/512,
 SASL PLAIN/SCRAM — see [KAFKA_COMPAT.md](./KAFKA_COMPAT.md).

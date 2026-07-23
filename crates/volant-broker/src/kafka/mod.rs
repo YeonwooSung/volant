@@ -105,6 +105,8 @@ pub enum KafkaErrorCode {
     InvalidFetchSessionEpoch = 71,
     /// Invalid config.
     InvalidConfig = 40,
+    /// Not controller for this request (Phase 113 cluster admin).
+    NotController = 41,
     /// Out of order sequence number (idempotent produce).
     OutOfOrderSequenceNumber = 45,
     /// Invalid producer epoch.

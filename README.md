@@ -9,13 +9,12 @@ Volant is a resource-efficient alternative to Apache Kafka, built for:
 - **Streaming processing** — first-class operators (`map`, `filter`, windows) without a heavy runtime
 - **Small footprint** — native binary, predictable memory, simple operations
 
-> Status: **Phases 0–106 landed** — durable log, clustering, security, stream
-> operators, and a broad optional Kafka wire shim (classic + flexible;
+> Status: **Phases 0–113 landed** — durable log, clustering, security, stream
+> operators, a broad optional Kafka wire shim (classic + flexible;
 > ApiVersions 0–5; Fetch 0–18; ACL admin 0–3; TRANSACTION_ABORTABLE subset;
-> fetch session TTL/max; broker Describe/AlterConfigs for txn/session/sweep
-> knobs with **sparse** durable restart restore; sweeper always-spawn 0→>0 without restart;
-> aborted soft-marker GC on DeleteRecords; graceful bg task shutdown/join).
-> Single-node mode (no `--cluster-config`) preserves the simple path.
+> fetch session TTL/max; broker Describe/AlterConfigs with sparse durable restore;
+> cluster admin fan-out for DeleteRecords / BROKER config / ACLs), and fuzz corpus
+> smoke CI. Single-node mode (no `--cluster-config`) preserves the simple path.
 > Start with the [whitepaper](./docs/WHITEPAPER.md) and
 > [docs index](./docs/INDEX.md); also [ROADMAP.md](./ROADMAP.md),
 > [ops](./docs/ops.md), [deploy/](./deploy/), [consistency](./docs/consistency.md).
@@ -45,7 +44,7 @@ volant/
 │   ├── consistency.md    # HWM / ISR / acks
 │   ├── tuning.md         # Performance / I/O guide
 │   ├── PHASE1–6_SPEC.md  # Binding core specs
-│   ├── PHASE7–94_SPEC.md # Ship records (see history/)
+│   ├── PHASE7–113_SPEC.md # Ship records (see history/)
 │   └── history/          # Phase index + archived plans/reviews
 ├── deploy/               # Dockerfile, compose, systemd, Helm chart
 ├── ROADMAP.md
@@ -149,12 +148,13 @@ static ISR). Later work is summarized by band — full chronicle in
 
 **Kafka ceilings (code SoT):** ApiVersions **0–5**, Fetch **0–18**, Produce/Metadata
 **0–13**, ACL admin **0–3** (User resource v3, store-only); Fetch isolation
-READ_COMMITTED MVP (Phase 86) + soft-marker GC/clip on DeleteRecords/retention/load (Phase 104/111); durable OffsetForLeaderEpoch history (Phase 87); Fetch DivergingEpoch + real fetch sessions MVP (Phase 88); Kafka control batches on EndTxn (Phase 89), crash≡abort open promote (Phase 98), and empty AddPartitions membership (Phase 105); prepared 2PC MVP (Phase 90); omit-unchanged incremental sessions (Phase 91); prepared timeout auto-abort (Phase 92); open-txn timeout (Phase 93); fetch session idle TTL + max/LRU (Phase 95); transaction max timeout clamp (Phase 96); background txn/session sweeper + metrics (Phase 97; always-spawn / 0→>0 live Phase 101; graceful shutdown/join Phase 106); BROKER Describe/AlterConfigs for txn/session/sweep knobs (Phase 99) with **sparse** durable restart restore (Phase 100/102) and resource name empty-or-`node_id` (Phase 103; parallel test isolation Phase 107); follower-death ISR shrink + HWM recompute so rolling-restart `acks=all` does not time out (Phase 108); accept-loop drain + single-flight `start_background_tasks` (Phase 109); non-controller alive-set auto-death (Phase 110); straddle soft-marker clip (Phase 111).
+READ_COMMITTED MVP (Phase 86) + soft-marker GC/clip on DeleteRecords/retention/load (Phase 104/111); durable OffsetForLeaderEpoch history (Phase 87); Fetch DivergingEpoch + real fetch sessions MVP (Phase 88); Kafka control batches on EndTxn (Phase 89), crash≡abort open promote (Phase 98), and empty AddPartitions membership (Phase 105); prepared 2PC MVP (Phase 90); omit-unchanged incremental sessions (Phase 91); prepared timeout auto-abort (Phase 92); open-txn timeout (Phase 93); fetch session idle TTL + max/LRU (Phase 95); transaction max timeout clamp (Phase 96); background txn/session sweeper + metrics (Phase 97; always-spawn / 0→>0 live Phase 101; graceful shutdown/join Phase 106); BROKER Describe/AlterConfigs for txn/session/sweep knobs (Phase 99) with **sparse** durable restart restore (Phase 100/102) and resource name empty-or-`node_id` (Phase 103; parallel test isolation Phase 107); follower-death ISR shrink + HWM recompute so rolling-restart `acks=all` does not time out (Phase 108); accept-loop drain + single-flight `start_background_tasks` (Phase 109); non-controller alive-set auto-death (Phase 110); straddle soft-marker clip (Phase 111); cluster admin fan-out — DeleteRecords best-effort replica truncate, controller-only BROKER config + ACL snapshot push (Phase 113).
 Matrix + honesty: [docs/KAFKA_COMPAT.md](./docs/KAFKA_COMPAT.md).
 
 **Still deferred:** multi-language clients, chaos-mesh / long fuzz campaigns
 (corpus smoke CI MVP → **Phase 112**), multi-broker 2PC parity, multi-broker
-session affinity, multi-broker BROKER config fan-out.
+session affinity. Cluster admin fan-out (DeleteRecords / BROKER config / ACL
+snapshot) → **Phase 113**.
 
 ### Networked client (library)
 

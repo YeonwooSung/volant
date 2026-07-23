@@ -44,17 +44,22 @@ const KAFKA_PATTERN_LITERAL: i8 = 3;
 /// Kafka cluster resource name advertised on the wire.
 const KAFKA_CLUSTER_NAME: &str = "kafka-cluster";
 
+/// Encode Kafka DeleteRecords response.
+///
+/// Returns successful leader truncates as `(topic, partition, before_offset)` so
+/// the async accept path can best-effort fan out (Phase 113).
 pub(crate) fn encode_delete_records(
     broker: &Broker,
     src: &mut impl Buf,
     out: &mut BytesMut,
     version: i16,
     principal: &str,
-) {
+) -> Vec<(String, u32, u64)> {
     // DeleteRecords classic v0–1 / flexible v2:
     //   topics[{ name, partitions[{ partition, offset }]}], timeout_ms
     // Response: throttle, topics[{ name, partitions[{ partition, low_watermark, error }]}]
     let flex = version >= 2;
+    let mut fanouts: Vec<(String, u32, u64)> = Vec::new();
 
     let empty = |out: &mut BytesMut| {
         out.put_i32(0); // throttle
@@ -82,7 +87,7 @@ pub(crate) fn encode_delete_records(
             Ok(None) => 0,
             Err(_) => {
                 empty(out);
-                return;
+                return fanouts;
             }
         };
         for _ in 0..topic_count {
@@ -116,7 +121,7 @@ pub(crate) fn encode_delete_records(
     } else {
         if src.remaining() < 4 {
             empty(out);
-            return;
+            return fanouts;
         }
         let topic_count = src.get_i32();
         for _ in 0..topic_count.max(0) {
@@ -195,6 +200,14 @@ pub(crate) fn encode_delete_records(
                         KafkaErrorCode::Unknown.as_i16()
                     };
                     out.put_i16(kerr);
+                    // Phase 113: schedule fan-out only after local leader success.
+                    if err == 0 {
+                        fanouts.push((
+                            t.name.clone(),
+                            p.partition as u32,
+                            p.offset as u64,
+                        ));
+                    }
                 }
                 Err(Error::NotFound(_)) => {
                     out.put_i64(0);
@@ -216,6 +229,7 @@ pub(crate) fn encode_delete_records(
     if flex {
         put_empty_tag_buffer(out);
     }
+    fanouts
 }
 
 pub(crate) fn encode_describe_acls(
@@ -319,13 +333,15 @@ pub(crate) fn encode_describe_acls(
     }
 }
 
+/// Encode CreateAcls. Returns ACL generation for fan-out when the controller
+/// successfully mutates (Phase 113).
 pub(crate) fn encode_create_acls(
     broker: &Broker,
     src: &mut impl Buf,
     out: &mut BytesMut,
     version: i16,
     principal: &str,
-) {
+) -> Option<u64> {
     // CreateAcls classic v0–1 / flexible v2–3 (Kafka max): creations[] →
     // throttle + results[]. v3 wire-identical to v2; User resource type ok.
     let flex = version >= 2;
@@ -346,18 +362,54 @@ pub(crate) fn encode_create_acls(
             Ok(None) => 0,
             Err(_) => {
                 empty(out);
-                return;
+                return None;
             }
         }
     } else {
         if src.remaining() < 4 {
             empty(out);
-            return;
+            return None;
         }
         src.get_i32()
     };
 
     out.put_i32(0); // throttle
+
+    // Phase 113: cluster ACL mutate is controller-only.
+    if broker.cluster_config().is_some() && !broker.is_controller() {
+        if flex {
+            put_compact_array_len(out, n.max(0) as usize);
+        } else {
+            out.put_i32(n.max(0));
+        }
+        for _ in 0..n.max(0) {
+            let _ = parse_acl_creation(src, version, flex);
+            out.put_i16(KafkaErrorCode::NotController.as_i16());
+            if flex {
+                put_compact_nullable_string(
+                    out,
+                    Some(&format!(
+                        "not controller; controller_id={}",
+                        broker.controller_id()
+                    )),
+                );
+                put_empty_tag_buffer(out);
+            } else {
+                put_nullable_string(
+                    out,
+                    Some(&format!(
+                        "not controller; controller_id={}",
+                        broker.controller_id()
+                    )),
+                );
+            }
+        }
+        if flex {
+            let _ = skip_tag_buffer(src);
+            put_empty_tag_buffer(out);
+        }
+        return None;
+    }
 
     if broker.acls().is_enabled()
         && !broker.acls().authorize(
@@ -386,7 +438,7 @@ pub(crate) fn encode_create_acls(
             let _ = skip_tag_buffer(src);
             put_empty_tag_buffer(out);
         }
-        return;
+        return None;
     }
 
     struct CreationResult {
@@ -417,12 +469,24 @@ pub(crate) fn encode_create_acls(
         let _ = skip_tag_buffer(src);
     }
 
+    let mut fanout_gen: Option<u64> = None;
     if !to_create.is_empty() {
-        if let Err(_) = broker.acls().create(to_create) {
-            for r in results.iter_mut() {
-                if r.error == KafkaErrorCode::None.as_i16() {
-                    r.error = KafkaErrorCode::Unknown.as_i16();
-                    r.message = Some("failed to persist ACLs".into());
+        match broker.create_acls_admin(to_create) {
+            Ok(gen) => fanout_gen = gen,
+            Err(Error::InvalidArgument(m)) if m.starts_with("not controller") => {
+                for r in results.iter_mut() {
+                    if r.error == KafkaErrorCode::None.as_i16() {
+                        r.error = KafkaErrorCode::NotController.as_i16();
+                        r.message = Some(m.clone());
+                    }
+                }
+            }
+            Err(_) => {
+                for r in results.iter_mut() {
+                    if r.error == KafkaErrorCode::None.as_i16() {
+                        r.error = KafkaErrorCode::Unknown.as_i16();
+                        r.message = Some("failed to persist ACLs".into());
+                    }
                 }
             }
         }
@@ -445,15 +509,18 @@ pub(crate) fn encode_create_acls(
     if flex {
         put_empty_tag_buffer(out);
     }
+    fanout_gen
 }
 
+/// Encode DeleteAcls. Returns ACL generation for fan-out when the controller
+/// successfully removes at least one binding (Phase 113).
 pub(crate) fn encode_delete_acls(
     broker: &Broker,
     src: &mut impl Buf,
     out: &mut BytesMut,
     version: i16,
     principal: &str,
-) {
+) -> Option<u64> {
     // DeleteAcls classic v0–1 / flexible v2–3 (Kafka max): filters[] →
     // throttle + filter_results[]. v3 wire-identical to v2; User resource ok.
     let flex = version >= 2;
@@ -474,18 +541,48 @@ pub(crate) fn encode_delete_acls(
             Ok(None) => 0,
             Err(_) => {
                 empty(out);
-                return;
+                return None;
             }
         }
     } else {
         if src.remaining() < 4 {
             empty(out);
-            return;
+            return None;
         }
         src.get_i32()
     };
 
     out.put_i32(0); // throttle
+
+    // Phase 113: cluster ACL mutate is controller-only.
+    if broker.cluster_config().is_some() && !broker.is_controller() {
+        if flex {
+            put_compact_array_len(out, n.max(0) as usize);
+        } else {
+            out.put_i32(n.max(0));
+        }
+        let msg = format!(
+            "not controller; controller_id={}",
+            broker.controller_id()
+        );
+        for _ in 0..n.max(0) {
+            let _ = parse_acl_filter(src, version, flex);
+            out.put_i16(KafkaErrorCode::NotController.as_i16());
+            if flex {
+                put_compact_nullable_string(out, Some(&msg));
+                put_compact_array_len(out, 0);
+                put_empty_tag_buffer(out);
+            } else {
+                put_nullable_string(out, Some(&msg));
+                out.put_i32(0);
+            }
+        }
+        if flex {
+            let _ = skip_tag_buffer(src);
+            put_empty_tag_buffer(out);
+        }
+        return None;
+    }
 
     if broker.acls().is_enabled()
         && !broker.acls().authorize(
@@ -516,9 +613,10 @@ pub(crate) fn encode_delete_acls(
             let _ = skip_tag_buffer(src);
             put_empty_tag_buffer(out);
         }
-        return;
+        return None;
     }
 
+    let mut fanout_gen: Option<u64> = None;
     if flex {
         put_compact_array_len(out, n.max(0) as usize);
     } else {
@@ -541,8 +639,11 @@ pub(crate) fn encode_delete_acls(
             }
         };
         let matched = filter_acl_entries(broker, &filter);
-        match broker.acls().delete(&matched) {
-            Ok(_) => {
+        match broker.delete_acls_admin(&matched) {
+            Ok((_n, gen)) => {
+                if let Some(g) = gen {
+                    fanout_gen = Some(g);
+                }
                 out.put_i16(KafkaErrorCode::None.as_i16());
                 if flex {
                     put_compact_nullable_string(out, None);
@@ -587,6 +688,17 @@ pub(crate) fn encode_delete_acls(
                     put_empty_tag_buffer(out);
                 }
             }
+            Err(Error::InvalidArgument(m)) if m.starts_with("not controller") => {
+                out.put_i16(KafkaErrorCode::NotController.as_i16());
+                if flex {
+                    put_compact_nullable_string(out, Some(&m));
+                    put_compact_array_len(out, 0);
+                    put_empty_tag_buffer(out);
+                } else {
+                    put_nullable_string(out, Some(&m));
+                    out.put_i32(0);
+                }
+            }
             Err(_) => {
                 out.put_i16(KafkaErrorCode::Unknown.as_i16());
                 if flex {
@@ -604,6 +716,7 @@ pub(crate) fn encode_delete_acls(
         let _ = skip_tag_buffer(src);
         put_empty_tag_buffer(out);
     }
+    fanout_gen
 }
 
 /// Parsed Kafka ACL filter (Describe/Delete).

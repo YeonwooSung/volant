@@ -140,7 +140,7 @@ async fn handle_kafka_connection(mut stream: TcpStream, broker: Arc<Broker>) -> 
     }
 }
 
-fn dispatch_kafka(broker: &Broker, body: bytes::Bytes, conn: &mut KafkaConnState) -> BytesMut {
+fn dispatch_kafka(broker: &Arc<Broker>, body: bytes::Bytes, conn: &mut KafkaConnState) -> BytesMut {
     let mut src = body;
     let hdr = match decode_request_header(&mut src) {
         Ok(h) => h,
@@ -377,7 +377,20 @@ fn dispatch_kafka(broker: &Broker, body: bytes::Bytes, conn: &mut KafkaConnState
                     debug!(error = %e, "delete records flexible header tag buffer");
                 }
             }
-            acl_api::encode_delete_records(broker, &mut src, &mut out, hdr.api_version, principal);
+            let fanouts = acl_api::encode_delete_records(
+                broker.as_ref(),
+                &mut src,
+                &mut out,
+                hdr.api_version,
+                principal,
+            );
+            // Phase 113: best-effort fan-out (fire-and-forget; client already answered).
+            for (topic, partition, before_offset) in fanouts {
+                let b = Arc::clone(broker);
+                tokio::spawn(async move {
+                    crate::net::fanout_delete_records(&b, &topic, partition, before_offset).await;
+                });
+            }
         }
         Some(ApiKey::DescribeAcls) if (0..=3).contains(&hdr.api_version) => {
             if hdr.api_version >= 2 {
@@ -393,7 +406,18 @@ fn dispatch_kafka(broker: &Broker, body: bytes::Bytes, conn: &mut KafkaConnState
                     debug!(error = %e, "create acls flexible header tag buffer");
                 }
             }
-            acl_api::encode_create_acls(broker, &mut src, &mut out, hdr.api_version, principal);
+            if let Some(gen) = acl_api::encode_create_acls(
+                broker,
+                &mut src,
+                &mut out,
+                hdr.api_version,
+                principal,
+            ) {
+                let b = Arc::clone(broker);
+                tokio::spawn(async move {
+                    crate::net::fanout_cluster_acl_snapshot(&b, gen).await;
+                });
+            }
         }
         Some(ApiKey::DeleteAcls) if (0..=3).contains(&hdr.api_version) => {
             if hdr.api_version >= 2 {
@@ -401,7 +425,18 @@ fn dispatch_kafka(broker: &Broker, body: bytes::Bytes, conn: &mut KafkaConnState
                     debug!(error = %e, "delete acls flexible header tag buffer");
                 }
             }
-            acl_api::encode_delete_acls(broker, &mut src, &mut out, hdr.api_version, principal);
+            if let Some(gen) = acl_api::encode_delete_acls(
+                broker,
+                &mut src,
+                &mut out,
+                hdr.api_version,
+                principal,
+            ) {
+                let b = Arc::clone(broker);
+                tokio::spawn(async move {
+                    crate::net::fanout_cluster_acl_snapshot(&b, gen).await;
+                });
+            }
         }
         Some(ApiKey::FindCoordinator) if (0..=6).contains(&hdr.api_version) => {
             if hdr.api_version >= 3 {
@@ -540,7 +575,20 @@ fn dispatch_kafka(broker: &Broker, body: bytes::Bytes, conn: &mut KafkaConnState
                     debug!(error = %e, "alter configs flexible header tag buffer");
                 }
             }
-            admin_api::encode_alter_configs(broker, &mut src, &mut out, hdr.api_version, principal);
+            let fanouts = admin_api::encode_alter_configs(
+                broker,
+                &mut src,
+                &mut out,
+                hdr.api_version,
+                principal,
+            );
+            // Phase 113: best-effort BROKER config fan-out after controller Alter.
+            for (generation, entries) in fanouts {
+                let b = Arc::clone(broker);
+                tokio::spawn(async move {
+                    crate::net::fanout_cluster_broker_config(&b, generation, &entries).await;
+                });
+            }
         }
         Some(ApiKey::IncrementalAlterConfigs) if (0..=1).contains(&hdr.api_version) => {
             if hdr.api_version >= 1 {
@@ -548,7 +596,19 @@ fn dispatch_kafka(broker: &Broker, body: bytes::Bytes, conn: &mut KafkaConnState
                     debug!(error = %e, "incremental alter configs flexible header tag buffer");
                 }
             }
-            admin_api::encode_incremental_alter_configs(broker, &mut src, &mut out, hdr.api_version, principal);
+            let fanouts = admin_api::encode_incremental_alter_configs(
+                broker,
+                &mut src,
+                &mut out,
+                hdr.api_version,
+                principal,
+            );
+            for (generation, entries) in fanouts {
+                let b = Arc::clone(broker);
+                tokio::spawn(async move {
+                    crate::net::fanout_cluster_broker_config(&b, generation, &entries).await;
+                });
+            }
         }
         Some(ApiKey::InitProducerId) if (0..=6).contains(&hdr.api_version) => {
             if hdr.api_version >= 2 {
