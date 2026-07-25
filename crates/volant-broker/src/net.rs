@@ -465,6 +465,23 @@ fn broker_metrics_text(broker: &Broker) -> String {
         "volant_txn_forward_errors_total {}\n",
         broker.txn_forward_errors_total()
     ));
+    // Phase 124: durable Init-owner registry restore / persist.
+    text.push_str(
+        "# HELP volant_txn_coordinator_registry_restored Txn coordinator registry map entries restored at last open\n",
+    );
+    text.push_str("# TYPE volant_txn_coordinator_registry_restored gauge\n");
+    text.push_str(&format!(
+        "volant_txn_coordinator_registry_restored {}\n",
+        broker.txn_coordinator_registry_restored()
+    ));
+    text.push_str(
+        "# HELP volant_txn_coordinator_registry_persist_errors_total Durable txn coordinator registry snapshot write failures\n",
+    );
+    text.push_str("# TYPE volant_txn_coordinator_registry_persist_errors_total counter\n");
+    text.push_str(&format!(
+        "volant_txn_coordinator_registry_persist_errors_total {}\n",
+        broker.txn_coordinator_registry_persist_errors_total()
+    ));
     text.push_str("# HELP volant_open_txns Live open (non-prepared) transactions\n");
     text.push_str("# TYPE volant_open_txns gauge\n");
     text.push_str(&format!("volant_open_txns {}\n", broker.open_txn_count()));

@@ -2950,7 +2950,38 @@ not bulk-transferred; bounded outbox may still drop under extreme backlog.
 full KIP-890/939 / `__transaction_state`, Kafka wire fuzz targets, dynamic
 membership / Raft, full Kafka broker catalog, consensus truncate journal /
 controller SoT pending set, per-broker BROKER config overrides, time-based ISR
-lag / preferred replica / shared session registry.
+lag / preferred replica / shared session registry;
+txn coordinator registry durability → **closed by Phase 124**.
+
+---
+
+### Phase 124 — Durable txn coordinator registry (MVP) ✅
+
+**Goal:** Persist the Phase 120–122 Init-owner / txn coordinator registry under
+`{data_dir}/__txn_coordinator` so broker restart restores known
+`(transactional_id → coordinator)` / `(producer_id → coordinator)` mappings and
+transparent EndTxn / AddOffsets / TxnOffsetCommit forward + sticky FindCoordinator
+override keep working without re-Init or open fan-out.
+
+Binding: **[docs/PHASE124_SPEC.md](./docs/PHASE124_SPEC.md)**.
+
+- [x] Durable snapshot `{data_dir}/__txn_coordinator/state.json` (atomic write)
+- [x] Load on `Broker::new` / `with_cluster`; restore `by_id` + `by_pid` maps
+- [x] Persist on `note_txn_coordinator` (Init / open fan-out / re-Init overwrite)
+- [x] Metrics: `volant_txn_coordinator_registry_restored` + `…_persist_errors_total`
+- [x] Tests: `phase124_durable_txn_coordinator` (single-node reload + peer reload + forward after peer restart)
+- [x] Living docs honesty
+
+**Honest limitations:** not full KIP-890/939 / `__transaction_state`; not a
+controller/Raft shared registry; stale completed-txn entries may linger until
+re-Init overwrite (no GC MVP); Init owner process loss still loses producer SoT;
+crash mid-rename may lose last mutation.
+
+**Still deferred:** multi-lang clients, chaos-mesh / long fuzz campaigns,
+full KIP-890/939 / `__transaction_state`, Kafka wire fuzz targets, dynamic
+membership / Raft, full Kafka broker catalog, consensus truncate journal /
+controller SoT pending set, per-broker BROKER config overrides, time-based ISR
+lag / preferred replica / shared session registry, registry GC/TTL.
 
 ---
 
@@ -2989,7 +3020,7 @@ marker clip 111; fuzz corpus smoke CI 112; cluster admin fan-out 113) — see
 
 ## Suggested implementation order (PRs)
 
-Phases **0–121 are shipped**. Historical PR order for the core:
+Phases **0–124 are shipped**. Historical PR order for the core:
 
 1. Phase 1 segment format + unit tests  
 2. Phase 1 recovery + retention  
@@ -3015,6 +3046,7 @@ Phases **0–121 are shipped**. Historical PR order for the core:
 22. Phase 121 (sticky FindCoordinator MVP) ✅  
 23. Phase 122 (AddOffsets / TxnOffsetCommit forward MVP) ✅  
 24. Phase 123 (DeleteRecords outbox leadership handoff MVP) ✅  
+25. Phase 124 (durable txn coordinator registry MVP) ✅  
 
 ---
 
@@ -3055,7 +3087,7 @@ cargo run -p volant-bench --release
 cargo test --workspace
 ```
 
-**Status (post–Phase 123):** core broker, ops (metrics / TLS / auth / SCRAM /
+**Status (post–Phase 124):** core broker, ops (metrics / TLS / auth / SCRAM /
 ACLs / Helm), and the Kafka wire shim are **shipped** (Fetch 0–18 Kafka max;
 ACL admin 0–3 with User resource; soft-marker `READ_COMMITTED` with **marker GC/clip**
 on DeleteRecords/retention/load (Phase 104/111); durable OFLE history; Fetch DivergingEpoch +
@@ -3081,7 +3113,8 @@ controller cluster prepared index — not full KIP-890 / `__transaction_state`);
 retry for offline peers) + **leadership handoff reconcile** Phase 123 (new leader
 rebuilds from local `log_start` — still not a consensus truncate log);
 **ACL/BROKER admin catch-up** Phase 117; sticky FindCoordinator Phase 121;
-txn EndTxn/AddOffsets/TxnOffsetCommit forward Phases 120/122).
+txn EndTxn/AddOffsets/TxnOffsetCommit forward Phases 120/122;
+**durable Init-owner registry** Phase 124 (`__txn_coordinator`)).
 Still deferred: multi-language clients, full chaos-mesh suites / long fuzz
 campaigns, preferred-replica / shared session store, full KIP-890/939.
 Details: [docs/KAFKA_COMPAT.md](./docs/KAFKA_COMPAT.md), [docs/ops.md](./docs/ops.md).

@@ -165,10 +165,11 @@ docs for day-to-day reading: [ops](../ops.md), [consistency](../consistency.md),
 | 121 | ✅ | Sticky FindCoordinator assignment MVP (murmur2 static ring + Init-owner override) | [PHASE121_SPEC.md](../PHASE121_SPEC.md) |
 | 122 | ✅ | Transparent AddOffsetsToTxn / TxnOffsetCommit forward MVP (reuse KafkaTxnForward 84/85) | [PHASE122_SPEC.md](../PHASE122_SPEC.md) |
 | 123 | ✅ | DeleteRecords outbox leadership handoff MVP (new leader reconcile from log_start) | [PHASE123_SPEC.md](../PHASE123_SPEC.md) |
+| 124 | ✅ | Durable txn coordinator registry MVP (per-broker `__txn_coordinator`; restart restore for forward/FC) | [PHASE124_SPEC.md](../PHASE124_SPEC.md) |
 
 ---
 
-## Still deferred (post–Phase 123)
+## Still deferred (post–Phase 124)
 
 - Multi-language clients
 - Chaos-mesh / long fuzz campaigns (corpus **smoke CI** → **closed by Phase 112**)
@@ -195,6 +196,7 @@ docs for day-to-day reading: [ops](../ops.md), [consistency](../consistency.md),
 - Hash-based sticky FindCoordinator → **closed by Phase 121**
 - Transparent AddOffsetsToTxn / TxnOffsetCommit forward → **closed by Phase 122**
 - Outbox handoff on leadership change → **closed by Phase 123** (new leader reconcile from log_start; not consensus truncate log)
+- Durable Init-owner txn coordinator registry → **closed by Phase 124** (local `__txn_coordinator`; not `__transaction_state`)
 - Per-broker BROKER config overrides / multi-master ACL merge
 - Time-based ISR lag / preferred replica
 - Consensus truncate log / controller SoT DeleteRecords journal

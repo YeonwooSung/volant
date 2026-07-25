@@ -161,7 +161,7 @@ outbox → **Phase 116**; ACL/BROKER catch-up → **Phase 117**; ISR rejoin/lag
 shrink → **Phase 118**; multi-broker session handoff → **Phase 119**; transparent
 EndTxn forward → **Phase 120**. Sticky FindCoordinator → **Phase 121**. AddOffsets /
 TxnOffsetCommit forward → **Phase 122**. DeleteRecords outbox leadership handoff →
-**Phase 123**.
+**Phase 123**. Durable txn coordinator registry → **Phase 124**.
 
 ### Networked client (library)
 

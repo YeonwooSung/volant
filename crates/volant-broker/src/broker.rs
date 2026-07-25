@@ -44,6 +44,7 @@ use crate::broker_config::{
 };
 use crate::cluster_admin::{ClusterAdminFile, ClusterAdminStore};
 use crate::delete_records_outbox::DeleteRecordsOutbox;
+use crate::txn_coordinator_registry::TxnCoordinatorRegistry;
 use crate::topic::Topic;
 use crate::topic_catalog::{CatalogTopic, TopicCatalogFile, TopicCatalogStore};
 use crate::topic_config::{TopicConfig, TopicConfigStore};
@@ -518,10 +519,8 @@ pub struct Broker {
     isr_expand_total: AtomicU64,
     /// Phase 118: ISR membership removals (death or lag shrink).
     isr_shrink_total: AtomicU64,
-    /// Phase 120: transactional_id → txn coordinator node id (Init owner).
-    txn_coordinator_by_id: RwLock<HashMap<String, u32>>,
-    /// Phase 120: producer_id → txn coordinator node id.
-    txn_coordinator_by_pid: RwLock<HashMap<u64, u32>>,
+    /// Phase 120/124: durable Init-owner txn coordinator registry.
+    txn_coordinator_registry: TxnCoordinatorRegistry,
     /// Phase 120: successful transparent EndTxn (txn) forwards.
     txn_forward_total: AtomicU64,
     /// Phase 120: failed transparent txn forward attempts.
@@ -616,6 +615,8 @@ impl Broker {
         let fetch_sessions = FetchSessionManager::open(&storage.data_dir);
         // Phase 116: durable DeleteRecords outbox (empty in single-node use).
         let delete_records_outbox = DeleteRecordsOutbox::open(&storage.data_dir);
+        // Phase 124: durable Init-owner txn coordinator registry.
+        let txn_coordinator_registry = TxnCoordinatorRegistry::open(&storage.data_dir);
         let broker = Self {
             storage,
             topics: RwLock::new(HashMap::new()),
@@ -672,8 +673,7 @@ impl Broker {
             cluster_admin_catchup_errors_total: AtomicU64::new(0),
             isr_expand_total: AtomicU64::new(0),
             isr_shrink_total: AtomicU64::new(0),
-            txn_coordinator_by_id: RwLock::new(HashMap::new()),
-            txn_coordinator_by_pid: RwLock::new(HashMap::new()),
+            txn_coordinator_registry,
             txn_forward_total: AtomicU64::new(0),
             txn_forward_errors_total: AtomicU64::new(0),
         };
@@ -746,6 +746,8 @@ impl Broker {
         let fetch_sessions = FetchSessionManager::open_with_owner(&storage.data_dir, node_id);
         // Phase 116: durable DeleteRecords outbox under data_dir.
         let delete_records_outbox = DeleteRecordsOutbox::open(&storage.data_dir);
+        // Phase 124: durable Init-owner txn coordinator registry.
+        let txn_coordinator_registry = TxnCoordinatorRegistry::open(&storage.data_dir);
         let broker = Self {
             storage,
             topics: RwLock::new(HashMap::new()),
@@ -802,8 +804,7 @@ impl Broker {
             cluster_admin_catchup_errors_total: AtomicU64::new(0),
             isr_expand_total: AtomicU64::new(0),
             isr_shrink_total: AtomicU64::new(0),
-            txn_coordinator_by_id: RwLock::new(HashMap::new()),
-            txn_coordinator_by_pid: RwLock::new(HashMap::new()),
+            txn_coordinator_registry,
             txn_forward_total: AtomicU64::new(0),
             txn_forward_errors_total: AtomicU64::new(0),
         };
@@ -1293,40 +1294,46 @@ impl Broker {
         }
     }
 
-    /// Phase 120: register txn coordinator (Init owner) for forward resolution.
+    /// Phase 120/124: register txn coordinator (Init owner) for forward resolution.
+    ///
+    /// Persists under `{data_dir}/__txn_coordinator` when the registry is durable.
     pub fn note_txn_coordinator(
         &self,
         transactional_id: &str,
         producer_id: u64,
         coordinator_node_id: u32,
     ) {
-        if coordinator_node_id == 0 {
-            return;
-        }
-        if !transactional_id.is_empty() {
-            self.txn_coordinator_by_id
-                .write()
-                .insert(transactional_id.to_owned(), coordinator_node_id);
-        }
-        self.txn_coordinator_by_pid
-            .write()
-            .insert(producer_id, coordinator_node_id);
+        self.txn_coordinator_registry
+            .note(transactional_id, producer_id, coordinator_node_id);
+    }
+
+    /// Phase 124: durable txn coordinator registry (Init-owner map).
+    pub fn txn_coordinator_registry(&self) -> &TxnCoordinatorRegistry {
+        &self.txn_coordinator_registry
+    }
+
+    /// Phase 124: entries restored from disk at last open.
+    pub fn txn_coordinator_registry_restored(&self) -> u64 {
+        self.txn_coordinator_registry.restored()
+    }
+
+    /// Phase 124: durable registry persist failures.
+    pub fn txn_coordinator_registry_persist_errors_total(&self) -> u64 {
+        self.txn_coordinator_registry.persist_errors_total()
     }
 
     /// Phase 120: resolve txn coordinator node id for EndTxn forward.
     ///
-    /// Lookup order: transactional_id map → producer_id map → cluster prepared
-    /// index `coordinator_node_id`.
+    /// Lookup order: transactional_id map → cluster prepared index
+    /// `coordinator_node_id` → producer_id map (durable registry, Phase 124).
     pub fn resolve_txn_coordinator(
         &self,
         transactional_id: &str,
         producer_id: Option<u64>,
     ) -> Option<u32> {
         if !transactional_id.is_empty() {
-            if let Some(&id) = self.txn_coordinator_by_id.read().get(transactional_id) {
-                if id != 0 {
-                    return Some(id);
-                }
+            if let Some(id) = self.txn_coordinator_registry.resolve_by_id(transactional_id) {
+                return Some(id);
             }
             if let Some(entry) = self.cluster_prepared_index.lock().get(transactional_id) {
                 if entry.coordinator_node_id != 0 {
@@ -1335,10 +1342,8 @@ impl Broker {
             }
         }
         if let Some(pid) = producer_id {
-            if let Some(&id) = self.txn_coordinator_by_pid.read().get(&pid) {
-                if id != 0 {
-                    return Some(id);
-                }
+            if let Some(id) = self.txn_coordinator_registry.resolve_by_pid(pid) {
+                return Some(id);
             }
         }
         None

@@ -117,7 +117,7 @@ workers.
 | BROKER config fan-out | Cluster **controller-only** Alter / IncrementalAlter for the six Phase 99 knobs; generationed push to live peers; sparse durable on each node. Non-controller → `NotController` / Kafka **41**. **Phase 117:** durable gens + heartbeat lag re-push (full effective knobs) so offline peers converge on rejoin |
 | ACL snapshot fan-out | Cluster **controller-only** Create/Delete Acls; generationed full snapshot push; peers install + persist `__acls`. List/authorize remain local after apply. **Phase 117:** same catch-up path on rejoin / controller restart |
 
-## Multi-broker 2PC (Phase 114 MVP) + txn forward (Phase 120/122) + sticky FindCoordinator (Phase 121)
+## Multi-broker 2PC (Phase 114 MVP) + txn forward (Phase 120/122) + sticky FindCoordinator (Phase 121) + durable registry (Phase 124)
 
 | Feature | Behavior |
 |---------|----------|
@@ -127,6 +127,7 @@ workers.
 | EndTxn forward | Non-coordinator Kafka EndTxn transparent-forwards via opcodes 84/85 (`KafkaTxnForward`) when coordinator is known (no dual prepare) |
 | AddOffsets / TxnOffsetCommit forward | Phase 122: same 84/85 path; non-coordinator always forwards when owner known so deferred offsets buffer only on coordinator (no dual-commit) |
 | Sticky FindCoordinator | Group/txn keys → murmur2 over sorted configured broker ids; next live if preferred dead; known transactional_id → Init owner (overrides hash) |
+| Durable Init-owner registry (Phase 124) | `{data_dir}/__txn_coordinator/state.json`; restart restores by_id/by_pid; not cluster SoT / not full `__transaction_state` |
 | Durable prepared | Local `__txn_prepared/state.json` on each participant + controller `__txn_prepared/cluster.json` index (identity/decision only) |
 | Fence | Init KeepPreparedTxn=false aborts local; peers force-abort via complete with `commit=false` even if prepared was PrepareCommit |
 | Metrics | `volant_txn_2pc_fanout_errors_total`, `volant_cluster_prepared_txns`, `volant_txn_forward_total` / `_errors_total` (25/26/28) |
@@ -139,7 +140,8 @@ workers.
 - ISR rejoin/lag shrink yes (Phase 118; offset lag only; Metadata may lag when leader ≠ controller)  
 - Crash≡abort control batches yes (Phase 98); empty AddPartitions control yes (Phase 105)  
 - Prepared 2PC multi-broker MVP yes (Phase 114; **not** full KIP-890/939 / `__transaction_state` topic); prepared timeout yes (Phase 92); open-txn timeout yes (Phase 93); TRANSACTION_ABORTABLE honest subset after timeout (Phase 94; FindCoordinator never); transaction max timeout clamp yes (Phase 96; default 15m; Init **50** over-max)  
-- Transparent EndTxn + AddOffsets + TxnOffsetCommit forward yes (Phase 120/122; Init-owner registry + inter-broker); sticky FindCoordinator yes (Phase 121; murmur2 + registry override); pin Init still recommended if client skips FindCoordinator  
+- Transparent EndTxn + AddOffsets + TxnOffsetCommit forward yes (Phase 120/122; Init-owner registry + inter-broker); sticky FindCoordinator yes (Phase 121; murmur2 + registry override); pin Init still recommended if client skips FindCoordinator
+- Durable Init-owner registry yes (Phase 124; local `__txn_coordinator`; stale completed entries may linger until re-Init)  
 
 - Fetch sessions durable local (Phase 115) + multi-broker forward MVP (Phase 119); omit cache is HWM+LSO only (not byte-identical Kafka response cache); idle TTL + max/LRU yes (Phase 95); not preferred-replica / not shared session store  
 - ACL / BROKER admin SoT is the **controller** (Phase 113 push + Phase 117 durable gens / rejoin catch-up), not Raft consensus; brief lag until heartbeat catch-up is honest  

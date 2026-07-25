@@ -22,6 +22,8 @@ pub mod broker_config;
 pub mod cluster;
 /// Durable DeleteRecords pending-truncate outbox (Phase 116).
 pub mod delete_records_outbox;
+/// Durable Init-owner txn coordinator registry (Phase 124).
+pub mod txn_coordinator_registry;
 /// Durable cluster admin generations (Phase 117).
 pub mod cluster_admin;
 pub mod group;
@@ -79,6 +81,10 @@ pub use metrics::Metrics;
 pub use delete_records_outbox::{
     DeleteRecordsOutbox, OutboxEntry, DEFAULT_MAX_ENTRIES as DELETE_RECORDS_OUTBOX_MAX_ENTRIES,
     OUTBOX_DIR as DELETE_RECORDS_OUTBOX_DIR, OUTBOX_FILE as DELETE_RECORDS_OUTBOX_FILE,
+};
+pub use txn_coordinator_registry::{
+    TxnCoordinatorEntry, TxnCoordinatorFile, TxnCoordinatorRegistry,
+    TXN_COORDINATOR_DIR, TXN_COORDINATOR_FILE, TXN_COORDINATOR_FILE_VERSION,
 };
 pub use cluster_admin::{
     ClusterAdminFile, ClusterAdminStore, CLUSTER_ADMIN_DIR, CLUSTER_ADMIN_FILE,
