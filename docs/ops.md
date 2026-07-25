@@ -339,6 +339,7 @@ curl -s -H "Authorization: Bearer $VOLANT_METRICS_TOKEN" \
 - Cluster admin fan-out (DeleteRecords / BROKER config / ACL snapshot) → **closed by Phase 113**
 - Controller failover / rejoin ACL+BROKER catch-up → **closed by Phase 117**
 - Durable DeleteRecords outbox for offline replicas → **closed by Phase 116**
+- ISR rejoin + lag-based shrink → **closed by Phase 118**
 - Transparent EndTxn forward to txn coordinator when client lands on a random leader
 
 Full list: [ROADMAP.md](../ROADMAP.md).
@@ -353,5 +354,6 @@ session idle TTL + max/LRU, background txn/session sweeper + expiry metrics
 single-flight bg Phase 109), BROKER
 Describe/AlterConfigs + durable restart restore, empty-AddPartitions control
 batches, ~38 keys; **ISR shrink on follower death** Phase 108 + **non-controller
-alive-set auto-death** Phase 110; **cluster admin fan-out** Phase 113), SCRAM-SHA-256/512,
+alive-set auto-death** Phase 110 + **ISR rejoin + lag shrink** Phase 118;
+**cluster admin fan-out** Phase 113), SCRAM-SHA-256/512,
 SASL PLAIN/SCRAM — see [KAFKA_COMPAT.md](./KAFKA_COMPAT.md).

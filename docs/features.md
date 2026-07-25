@@ -99,6 +99,15 @@ workers.
 | Max sessions (95) | Default 1000 (`VOLANT_FETCH_SESSION_MAX`; `0` unlimited); LRU-evict at cap |
 | Errors | 70 session id not found (incl. after TTL/LRU); 71 invalid session epoch |
 
+## Cluster ISR (Phase 6 + 108/110/118)
+
+| Feature | Behavior |
+|---------|----------|
+| Death shrink | Follower death → local ISR drop + HWM recompute on every observer (Phase 108); non-controllers also via alive-set / expire (Phase 110) |
+| Lag shrink | On `ReplicaFetch`, in-ISR members with lag > `replica_lag_max_messages` leave ISR even if alive (Phase 118) |
+| Rejoin | Recovering follower re-enters when fetch LEO ≥ HWM and lag ≤ `replica_lag_max_messages` (Phase 118) |
+| Metrics | `volant_isr_expand_total`, `volant_isr_shrink_total` |
+
 ## Cluster admin fan-out (Phase 113)
 
 | Feature | Behavior |
@@ -122,6 +131,7 @@ workers.
 - Multi-language clients deferred  
 - Long fuzz campaigns / chaos-mesh deferred (corpus smoke CI MVP: Phase 112)  
 - No Raft metadata / dynamic membership  
+- ISR rejoin/lag shrink yes (Phase 118; offset lag only; Metadata may lag when leader ≠ controller)  
 - Crash≡abort control batches yes (Phase 98); empty AddPartitions control yes (Phase 105)  
 - Prepared 2PC multi-broker MVP yes (Phase 114; **not** full KIP-890/939 / `__transaction_state` topic); prepared timeout yes (Phase 92); open-txn timeout yes (Phase 93); TRANSACTION_ABORTABLE honest subset after timeout (Phase 94; FindCoordinator never); transaction max timeout clamp yes (Phase 96; default 15m; Init **50** over-max)  
 - Clients should pin Init/Begin/EndTxn to the coordinator broker that allocated the producer (no transparent EndTxn forward yet)  

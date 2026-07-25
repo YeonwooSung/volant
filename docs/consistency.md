@@ -109,6 +109,14 @@ Without `--cluster-config`, the broker runs as a single node:
   REQUEST_TIMED_OUT solely because a dead follower still held a stale LEO in
   the ISR set. If `|ISR|` falls below `min_insync_replicas`, produce is still
   rejected with `NotEnoughReplicas`.
+- **ISR rejoin + lag shrink (Phase 118):** on leader `ReplicaFetch`, members
+  with `leader_leo - leo > replica_lag_max_messages` leave the ISR even if
+  still membership-alive. A previously removed replica re-enters when its
+  fetch LEO is ≥ committed HWM **and** lag ≤ that threshold. ClusterState
+  apply on the leader preserves still-caught-up local rejoin members so a
+  controller assignment that still lists a shrunk set does not undo rejoin.
+  Produce/HWM use **leader-local** ISR; Metadata ISR on non-leaders may lag.
+  Metrics: `volant_isr_expand_total` / `volant_isr_shrink_total`.
 - **Cluster admin fan-out (Phase 113 + 116):**
   - **DeleteRecords:** only the partition **leader** accepts the client RPC;
     after local truncate it best-effort RPCs other replicas. Peer failure does
@@ -134,4 +142,5 @@ See [PHASE6_SPEC.md](./PHASE6_SPEC.md) for wire protocol and configuration detai
 Admin fan-out detail: [PHASE113_SPEC.md](./PHASE113_SPEC.md).
 DeleteRecords outbox: [PHASE116_SPEC.md](./PHASE116_SPEC.md).
 Admin catch-up: [PHASE117_SPEC.md](./PHASE117_SPEC.md).
+ISR rejoin + lag shrink: [PHASE118_SPEC.md](./PHASE118_SPEC.md).
 Multi-broker 2PC detail: [PHASE114_SPEC.md](./PHASE114_SPEC.md).

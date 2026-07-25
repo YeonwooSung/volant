@@ -74,6 +74,97 @@ pub fn shrink_isr(
     out
 }
 
+/// Whether a replica is eligible to (re)join the ISR (Phase 118).
+///
+/// Requires membership in the replica set, lag ≤ `max_lag` vs leader LEO, and
+/// LEO ≥ committed HWM so rejoin cannot pin HWM to a pre-commit frontier.
+pub fn isr_rejoin_eligible(
+    replica_id: u32,
+    replicas: &[u32],
+    leader_leo: u64,
+    replica_leo: u64,
+    committed_hwm: u64,
+    max_lag: u64,
+) -> bool {
+    if !replicas.contains(&replica_id) {
+        return false;
+    }
+    let lag = leader_leo.saturating_sub(replica_leo);
+    lag <= max_lag && replica_leo >= committed_hwm
+}
+
+/// Add `replica_id` to ISR when eligible (Phase 118 rejoin).
+///
+/// Leader is always present first. Idempotent if already in `isr`.
+pub fn expand_isr(
+    leader: u32,
+    isr: &[u32],
+    replicas: &[u32],
+    replica_id: u32,
+    leader_leo: u64,
+    replica_leo: u64,
+    committed_hwm: u64,
+    max_lag: u64,
+) -> Vec<u32> {
+    let mut out: Vec<u32> = Vec::with_capacity(isr.len() + 1);
+    out.push(leader);
+    for &id in isr {
+        if id != leader && !out.contains(&id) {
+            out.push(id);
+        }
+    }
+    if replica_id != leader
+        && !out.contains(&replica_id)
+        && isr_rejoin_eligible(
+            replica_id,
+            replicas,
+            leader_leo,
+            replica_leo,
+            committed_hwm,
+            max_lag,
+        )
+    {
+        out.push(replica_id);
+    }
+    out
+}
+
+/// Full ISR reconcile after observing a follower LEO (Phase 118).
+///
+/// 1. Lag-shrink current members.
+/// 2. Rejoin `fetching_replica` when eligible (LEO ≥ HWM and lag ≤ max).
+/// 3. Ensure leader remains in the set.
+pub fn reconcile_isr(
+    leader: u32,
+    isr: &[u32],
+    replicas: &[u32],
+    leader_leo: u64,
+    committed_hwm: u64,
+    max_lag: u64,
+    fetching_replica: Option<(u32, u64)>,
+    leo_of: impl Fn(u32) -> u64,
+) -> Vec<u32> {
+    let shrunk = shrink_isr(leader, isr, leader_leo, max_lag, &leo_of);
+    let mut out = if let Some((rid, rleo)) = fetching_replica {
+        expand_isr(
+            leader,
+            &shrunk,
+            replicas,
+            rid,
+            leader_leo,
+            rleo,
+            committed_hwm,
+            max_lag,
+        )
+    } else {
+        shrunk
+    };
+    if !out.contains(&leader) {
+        out.insert(0, leader);
+    }
+    out
+}
+
 /// Elect a new leader from ISR ∩ live, preferring the first live replica in the
 /// replica list order.
 pub fn elect_leader(replicas: &[u32], isr: &[u32], live: &[u32]) -> Option<u32> {
@@ -136,6 +227,52 @@ mod tests {
             _ => 0,
         });
         assert_eq!(shrunk, vec![1, 2]);
+    }
+
+    #[test]
+    fn isr_rejoin_requires_hwm_and_lag() {
+        let replicas = vec![1u32, 2, 3];
+        // lag 5 ≤ 10 but LEO 90 < HWM 95 → not eligible
+        assert!(!isr_rejoin_eligible(3, &replicas, 100, 90, 95, 10));
+        // lag 5 ≤ 10 and LEO ≥ HWM → eligible
+        assert!(isr_rejoin_eligible(3, &replicas, 100, 95, 95, 10));
+        // lag 20 > 10 → not eligible even if ≥ HWM
+        assert!(!isr_rejoin_eligible(3, &replicas, 100, 80, 80, 10));
+        // not in replica set
+        assert!(!isr_rejoin_eligible(9, &replicas, 100, 100, 100, 10));
+    }
+
+    #[test]
+    fn reconcile_rejoin_after_shrink() {
+        let replicas = vec![1u32, 2, 3];
+        // 3 was out of ISR; fetches at HWM with small lag → rejoin
+        let isr = vec![1u32, 2];
+        let out = reconcile_isr(1, &isr, &replicas, 100, 90, 10, Some((3, 95)), |id| {
+            match id {
+                1 => 100,
+                2 => 98,
+                3 => 95,
+                _ => 0,
+            }
+        });
+        assert!(out.contains(&3), "rejoin: {out:?}");
+        assert!(out.contains(&1) && out.contains(&2));
+    }
+
+    #[test]
+    fn reconcile_lag_shrink_alive_slow() {
+        let replicas = vec![1u32, 2, 3];
+        let isr = vec![1u32, 2, 3];
+        // 3 lag 50 > 10; fetch from 2 triggers full reconcile
+        let out = reconcile_isr(1, &isr, &replicas, 100, 50, 10, Some((2, 98)), |id| {
+            match id {
+                1 => 100,
+                2 => 98,
+                3 => 50,
+                _ => 0,
+            }
+        });
+        assert_eq!(out, vec![1, 2]);
     }
 
     #[test]

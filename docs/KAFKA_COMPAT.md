@@ -104,6 +104,7 @@ These are **current** product facts, not temporary docs lag:
 | Groups | Coordinator-driven assignment; GroupType always `classic`; states Stable/Empty |
 | Fetch sessions | **Real MVP** (Phase 88 + **91** + **95** + **97** + **99** + **100** + **102** + **103** + **115**): create/merge/forgotten; empty-topics re-fetch; errors 70/71; **omit-unchanged** when HWM+LSO unchanged and records empty; **idle TTL** (default 60s / `VOLANT_FETCH_SESSION_IDLE_MS`) + **max sessions** (default 1000 / `VOLANT_FETCH_SESSION_MAX`, LRU at cap); idle also background-swept (Phase 97); knobs on BROKER Describe/Alter (Phase 99) with **sparse** durable restart (Phase 100/102) and name vs `node_id` (Phase 103); **session table durable** under `{data_dir}/__fetch_sessions` (Phase 115) so same-node restart restores id/epoch/omit cache within idle TTL; **not** multi-broker sticky / no inter-broker session handoff |
 | Preferred replica | Always -1 |
+| ISR / HWM (cluster) | Kafka-style static ISR (Phase 6): death shrink + HWM recompute (Phase 108/110); **rejoin** when ReplicaFetch LEO ≥ HWM and lag ≤ `replica_lag_max_messages`; lag-shrink of slow-but-alive members (Phase 118); Metadata ISR may lag when leader ≠ controller |
 | CreateTopics | Replica assignment arrays ignored; configs response often null |
 | Storage | Log stores uncompressed Volant records; Fetch re-encodes |
 | Auth | Kafka port: SASL or `kafka-anonymous`; no shared-token on Kafka port |

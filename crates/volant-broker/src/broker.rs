@@ -22,8 +22,8 @@ use volant_protocol::{ClusterTopicState, ErrorCode, FetchRecord};
 use volant_storage::StorageConfig;
 
 use crate::cluster::{
-    assign_replicas, elect_leader, load_assignment, save_assignment, shrink_isr, AssignmentSnapshot,
-    ClusterConfig, Membership, PartitionAssignment, TopicAssignment,
+    assign_replicas, elect_leader, load_assignment, reconcile_isr, save_assignment, shrink_isr,
+    AssignmentSnapshot, ClusterConfig, Membership, PartitionAssignment, TopicAssignment,
 };
 use crate::group::GroupCoordinator;
 use crate::metrics::Metrics;
@@ -507,6 +507,10 @@ pub struct Broker {
     cluster_admin_catchup_success_total: AtomicU64,
     /// Phase 117: admin catch-up RPC / apply failures.
     cluster_admin_catchup_errors_total: AtomicU64,
+    /// Phase 118: ISR membership expansions (rejoin / catch-up).
+    isr_expand_total: AtomicU64,
+    /// Phase 118: ISR membership removals (death or lag shrink).
+    isr_shrink_total: AtomicU64,
 }
 
 /// Controller-side multi-broker prepared index entry (Phase 114).
@@ -645,6 +649,8 @@ impl Broker {
             delete_records_outbox,
             cluster_admin_catchup_success_total: AtomicU64::new(0),
             cluster_admin_catchup_errors_total: AtomicU64::new(0),
+            isr_expand_total: AtomicU64::new(0),
+            isr_shrink_total: AtomicU64::new(0),
         };
         broker
             .reload_single_node_topics()
@@ -767,6 +773,8 @@ impl Broker {
             delete_records_outbox,
             cluster_admin_catchup_success_total: AtomicU64::new(0),
             cluster_admin_catchup_errors_total: AtomicU64::new(0),
+            isr_expand_total: AtomicU64::new(0),
+            isr_shrink_total: AtomicU64::new(0),
         };
         // Open local partitions from persisted assignment.
         broker.apply_local_assignment()?;
@@ -919,6 +927,39 @@ impl Broker {
     pub fn note_cluster_admin_catchup_error(&self) {
         self.cluster_admin_catchup_errors_total
             .fetch_add(1, Ordering::Relaxed);
+    }
+
+    /// ISR expand counter (Phase 118).
+    pub fn isr_expand_total(&self) -> u64 {
+        self.isr_expand_total.load(Ordering::Relaxed)
+    }
+
+    /// ISR shrink counter (Phase 118).
+    pub fn isr_shrink_total(&self) -> u64 {
+        self.isr_shrink_total.load(Ordering::Relaxed)
+    }
+
+    fn note_isr_delta(&self, before: &[u32], after: &[u32]) {
+        let mut expand = 0u64;
+        let mut shrink = 0u64;
+        for &id in after {
+            if !before.contains(&id) {
+                expand += 1;
+            }
+        }
+        for &id in before {
+            if !after.contains(&id) {
+                shrink += 1;
+            }
+        }
+        if expand > 0 {
+            self.isr_expand_total
+                .fetch_add(expand, Ordering::Relaxed);
+        }
+        if shrink > 0 {
+            self.isr_shrink_total
+                .fetch_add(shrink, Ordering::Relaxed);
+        }
     }
 
     /// Whether a peer's applied gens lag controller SoT (Phase 117).
@@ -5154,34 +5195,37 @@ impl Broker {
             // Update follower LEO (they request from their current LEO).
             part.follower_leo.insert(replica_id, from_offset);
 
-            // ISR shrink / grow based on lag.
+            // Phase 118: lag-based shrink + catch-up rejoin (LEO ≥ HWM, lag ≤ max).
             if let Some(cluster) = &self.cluster {
                 let max_lag = cluster.config.replica_lag_max_messages;
                 let leader_leo = part.leo();
+                let committed_hwm = part.committed_hwm;
                 let leo_map = part.follower_leo.clone();
-                let new_isr = shrink_isr(part.leader, &part.isr, leader_leo, max_lag, |id| {
-                    if id == part.leader {
-                        leader_leo
-                    } else {
-                        *leo_map.get(&id).unwrap_or(&0)
-                    }
-                });
-                // Re-add follower if caught up and in replicas.
-                let mut isr = new_isr;
-                if part.replicas.contains(&replica_id) && !isr.contains(&replica_id) {
-                    let lag = leader_leo.saturating_sub(from_offset);
-                    if lag <= max_lag {
-                        isr.push(replica_id);
-                    }
-                }
-                // Ensure leader is in ISR.
-                if !isr.contains(&part.leader) {
-                    isr.insert(0, part.leader);
+                let replicas = part.replicas.clone();
+                let old_isr = part.isr.clone();
+                let isr = reconcile_isr(
+                    part.leader,
+                    &old_isr,
+                    &replicas,
+                    leader_leo,
+                    committed_hwm,
+                    max_lag,
+                    Some((replica_id, from_offset)),
+                    |id| {
+                        if id == part.leader {
+                            leader_leo
+                        } else {
+                            *leo_map.get(&id).unwrap_or(&0)
+                        }
+                    },
+                );
+                if isr != old_isr {
+                    self.note_isr_delta(&old_isr, &isr);
                 }
                 part.isr = isr;
                 part.recompute_hwm(self.node_id);
 
-                // Persist ISR change into assignment.
+                // Persist ISR change into assignment (generation bump so peers pull).
                 {
                     let mut asg = cluster.assignment.write();
                     if let Some(ta) = asg.topics.get_mut(topic) {
@@ -5328,11 +5372,22 @@ impl Broker {
     /// After overlaying leader/ISR from the assignment, recomputes HWM on
     /// partitions this node leads so ISR shrink (follower death) unblocks
     /// `acks=all` waiters when ClusterState is applied (Phase 108).
+    ///
+    /// Phase 118: when we lead, preserve previous local ISR members that are
+    /// still in-sync (live, lag ≤ max, LEO ≥ HWM) so a controller assignment
+    /// that still lists a death-shrunk set does not undo a leader-local rejoin.
     fn apply_local_assignment(&self) -> Result<()> {
         let Some(cluster) = &self.cluster else {
             return Ok(());
         };
         let asg = cluster.assignment.read().clone();
+        let max_lag = cluster.config.replica_lag_max_messages;
+        let live: HashSet<u32> = cluster
+            .membership
+            .read()
+            .live_brokers()
+            .into_iter()
+            .collect();
         let mut topics = self.topics.write();
         let mut hwm_changed = false;
         for (name, ta) in &asg.topics {
@@ -5344,6 +5399,10 @@ impl Broker {
             });
             topic.id = TopicId(ta.topic_id);
             for (pid, pa) in &ta.partitions {
+                // Snapshot leader-local ISR / LEO before assignment overwrite.
+                let prev = topic.partitions.get(&PartitionId(*pid)).map(|p| {
+                    (p.isr.clone(), p.follower_leo.clone(), p.committed_hwm)
+                });
                 topic.ensure_partition(
                     PartitionId(*pid),
                     &self.storage,
@@ -5356,6 +5415,46 @@ impl Broker {
                 if let Some(part) = topic.partitions.get_mut(&PartitionId(*pid)) {
                     if part.is_leader(self.node_id) {
                         let before = part.committed_hwm;
+                        if let Some((prev_isr, prev_leo, prev_hwm)) = prev {
+                            // Restore LEO observations for candidates we may keep.
+                            for (id, leo) in &prev_leo {
+                                part.follower_leo.entry(*id).or_insert(*leo);
+                            }
+                            let leader_leo = part.leo();
+                            let hwm = part.committed_hwm.max(prev_hwm);
+                            let mut isr = part.isr.clone();
+                            for &id in &prev_isr {
+                                if isr.contains(&id) || id == part.leader {
+                                    continue;
+                                }
+                                if !part.replicas.contains(&id) || !live.contains(&id) {
+                                    continue;
+                                }
+                                let leo = *part.follower_leo.get(&id).unwrap_or(&0);
+                                let lag = leader_leo.saturating_sub(leo);
+                                if lag <= max_lag && leo >= hwm {
+                                    isr.push(id);
+                                }
+                            }
+                            let leo_map = part.follower_leo.clone();
+                            let reconciled = shrink_isr(
+                                part.leader,
+                                &isr,
+                                leader_leo,
+                                max_lag,
+                                |id| {
+                                    if id == part.leader {
+                                        leader_leo
+                                    } else {
+                                        *leo_map.get(&id).unwrap_or(&0)
+                                    }
+                                },
+                            );
+                            if reconciled != part.isr {
+                                self.note_isr_delta(&part.isr, &reconciled);
+                                part.isr = reconciled;
+                            }
+                        }
                         // Drop LEO entries for brokers no longer in ISR.
                         part.follower_leo.retain(|id, _| part.isr.contains(id));
                         if part.isr.len() <= 1 {
@@ -5396,10 +5495,11 @@ impl Broker {
     /// Called from [`Self::on_broker_death`] on **every** node that observes the death
     /// (not only the controller). Without this, `acks=all` waits forever for a dead
     /// follower's LEO because HWM = min(ISR LEOs) still includes the stale member
-    /// (Phase 108).
+    /// (Phase 108). Phase 118 also increments `isr_shrink_total` per removal.
     fn shrink_local_isr_for_dead(&self, dead_id: u32) {
         let mut topics = self.topics.write();
         let mut any = false;
+        let mut shrink_n = 0u64;
         for t in topics.values_mut() {
             for part in t.partitions.values_mut() {
                 let before = part.isr.len();
@@ -5408,6 +5508,7 @@ impl Broker {
                 if part.isr.len() == before {
                     continue;
                 }
+                shrink_n += 1;
                 any = true;
                 if part.is_leader(self.node_id) {
                     if part.isr.len() <= 1 {
@@ -5419,6 +5520,10 @@ impl Broker {
             }
         }
         drop(topics);
+        if shrink_n > 0 {
+            self.isr_shrink_total
+                .fetch_add(shrink_n, Ordering::Relaxed);
+        }
         if any {
             self.hwm_cvar.notify_all();
         }

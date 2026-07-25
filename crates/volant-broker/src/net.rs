@@ -594,6 +594,23 @@ fn broker_metrics_text(broker: &Broker) -> String {
         "volant_cluster_admin_catchup_errors_total {}\n",
         broker.cluster_admin_catchup_errors_total()
     ));
+    // Phase 118: ISR expand / shrink.
+    text.push_str(
+        "# HELP volant_isr_expand_total ISR membership expansions (rejoin / catch-up)\n",
+    );
+    text.push_str("# TYPE volant_isr_expand_total counter\n");
+    text.push_str(&format!(
+        "volant_isr_expand_total {}\n",
+        broker.isr_expand_total()
+    ));
+    text.push_str(
+        "# HELP volant_isr_shrink_total ISR membership removals (death or lag)\n",
+    );
+    text.push_str("# TYPE volant_isr_shrink_total counter\n");
+    text.push_str(&format!(
+        "volant_isr_shrink_total {}\n",
+        broker.isr_shrink_total()
+    ));
     text
 }
 

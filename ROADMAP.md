@@ -2570,7 +2570,8 @@ Binding: **[docs/PHASE110_SPEC.md](./docs/PHASE110_SPEC.md)**.
 - [x] Integration tests (`phase110_alive_set_death`)
 
 **Honest limitations:** controller remains membership SoT (no peer gossip);
-assignment/Metadata ISR may lag until ClusterState; rejoin/ISR expand unchanged.
+assignment/Metadata ISR may lag until ClusterState; rejoin/ISR expand →
+**closed by Phase 118**.
 
 **Still deferred:** multi-lang clients, cargo-fuzz corpus CI → **closed (MVP) by
 Phase 112**, multi-broker 2PC / session affinity / durable sessions,
@@ -2772,7 +2773,36 @@ its durable gen; inter-broker admin RPCs still not ACL-gated.
 multi-broker session handoff, full KIP-890/939 / `__transaction_state`, Kafka
 wire fuzz targets, dynamic membership / Raft, full Kafka broker catalog,
 transparent EndTxn forward, outbox handoff on leadership change, per-broker
-BROKER config overrides.
+BROKER config overrides,
+ISR rejoin / lag-based shrink → **closed by Phase 118**.
+
+---
+
+### Phase 118 — ISR rejoin + lag-based shrink (MVP) ✅
+
+**Goal:** After Phase 108/110 death shrink, a recovering follower that
+ReplicaFetches up to the leader (LEO ≥ HWM and lag ≤ `replica_lag_max_messages`)
+re-expands the ISR; slow-but-alive followers exceeding the lag threshold are
+dropped from ISR with metrics.
+
+Binding: **[docs/PHASE118_SPEC.md](./docs/PHASE118_SPEC.md)**.
+
+- [x] `reconcile_isr` / rejoin when LEO ≥ HWM and lag ≤ `replica_lag_max_messages`
+- [x] Lag-based shrink of in-ISR members on ReplicaFetch (same Phase 6 knob)
+- [x] ClusterState apply preserves leader-local caught-up rejoin members
+- [x] Metrics: `volant_isr_expand_total` / `volant_isr_shrink_total`
+- [x] Tests: `phase118_isr_rejoin` (death→rejoin, lag shrink, preserve, single-node)
+- [x] Living docs honesty
+
+**Honest limitations:** static membership; offset lag only (no time-based lag);
+no preferred replica; controller durable assignment / Metadata ISR may lag when
+the partition leader is not the controller (produce/HWM uses leader-local ISR).
+
+**Still deferred:** multi-lang clients, chaos-mesh / long fuzz campaigns,
+multi-broker session handoff, full KIP-890/939 / `__transaction_state`, Kafka
+wire fuzz targets, dynamic membership / Raft, full Kafka broker catalog,
+transparent EndTxn forward, outbox handoff on leadership change, per-broker
+BROKER config overrides, time-based ISR lag / preferred replica.
 
 ---
 
@@ -2811,7 +2841,7 @@ marker clip 111; fuzz corpus smoke CI 112; cluster admin fan-out 113) — see
 
 ## Suggested implementation order (PRs)
 
-Phases **0–117 are shipped**. Historical PR order for the core:
+Phases **0–118 are shipped**. Historical PR order for the core:
 
 1. Phase 1 segment format + unit tests  
 2. Phase 1 recovery + retention  
@@ -2831,6 +2861,7 @@ Phases **0–117 are shipped**. Historical PR order for the core:
 16. Phase 115 (durable local fetch sessions MVP) ✅  
 17. Phase 116 (durable DeleteRecords outbox for offline replicas MVP) ✅  
 18. Phase 117 (controller failover catch-up for ACL + BROKER config MVP) ✅  
+19. Phase 118 (ISR rejoin + lag-based shrink MVP) ✅  
 
 ---
 
@@ -2871,7 +2902,7 @@ cargo run -p volant-bench --release
 cargo test --workspace
 ```
 
-**Status (post–Phase 116):** core broker, ops (metrics / TLS / auth / SCRAM /
+**Status (post–Phase 118):** core broker, ops (metrics / TLS / auth / SCRAM /
 ACLs / Helm), and the Kafka wire shim are **shipped** (Fetch 0–18 Kafka max;
 ACL admin 0–3 with User resource; soft-marker `READ_COMMITTED` with **marker GC/clip**
 on DeleteRecords/retention/load (Phase 104/111); durable OFLE history; Fetch DivergingEpoch +
@@ -2885,14 +2916,16 @@ without restart; **graceful shutdown/join** Phase 106; **accept-loop drain +
 single-flight bg** Phase 109); BROKER Describe/AlterConfigs
 with **sparse** durable restart restore and resource name empty-or-local-`node_id`
 (Phase 103; **parallel test isolation** Phase 107); **follower-death ISR shrink +
-HWM recompute** Phase 108; **non-controller alive-set auto-death** Phase 110; **straddle soft-marker clip** Phase 111;
+HWM recompute** Phase 108; **non-controller alive-set auto-death** Phase 110;
+**ISR rejoin + lag-based shrink** Phase 118; **straddle soft-marker clip** Phase 111;
 **cargo-fuzz corpus smoke + CI MVP** Phase 112; **cluster admin fan-out** Phase 113
 (DeleteRecords best-effort replica truncate; controller-only BROKER config + ACL
 snapshot push); **multi-broker 2PC MVP** Phase 114 (inter-broker prepare/complete;
 controller cluster prepared index — not full KIP-890 / `__transaction_state`);
 **durable fetch sessions** Phase 115 (`__fetch_sessions`; not multi-broker sticky);
 **durable DeleteRecords outbox** Phase 116 (`__delete_records_outbox`; at-least-once
-retry for offline peers — not a consensus truncate log)).
+retry for offline peers — not a consensus truncate log);
+**ACL/BROKER admin catch-up** Phase 117).
 Still deferred: multi-language clients, full chaos-mesh suites / long fuzz
 campaigns, multi-broker session handoff, full KIP-890/939.
 Details: [docs/KAFKA_COMPAT.md](./docs/KAFKA_COMPAT.md), [docs/ops.md](./docs/ops.md).
