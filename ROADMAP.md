@@ -2742,6 +2742,36 @@ SoT); leadership change does not transfer the old leader’s pending set; bounde
 multi-broker session handoff, full KIP-890/939 / `__transaction_state`, Kafka
 wire fuzz targets, dynamic membership / Raft, full Kafka broker catalog,
 transparent EndTxn forward, outbox handoff on leadership change, per-broker
+BROKER config overrides,
+controller failover ACL/config permanent drift → **closed by Phase 117**.
+
+---
+
+### Phase 117 — Controller failover catch-up for ACL + BROKER config (MVP) ✅
+
+**Goal:** After peer rejoin, controller restart, or brief controller change,
+brokers converge on generationed ACL snapshot + BROKER knobs instead of silent
+permanent drift when a Phase 113 push was missed.
+
+Binding: **[docs/PHASE117_SPEC.md](./docs/PHASE117_SPEC.md)**.
+
+- [x] Durable admin generations `{data_dir}/__cluster_admin/state.json`
+- [x] `HeartbeatBroker` applied-config/acl generation piggyback (backward compatible)
+- [x] Controller lag-driven re-push via opcodes 72–75 (full effective BROKER + ACL snapshot)
+- [x] Metrics: `volant_cluster_admin_catchup_success_total` /
+      `volant_cluster_admin_catchup_errors_total` (+ existing gen gauges)
+- [x] Tests: `phase117_admin_catchup` (offline rejoin config+ACL, controller restart gens)
+- [x] Living docs honesty
+
+**Honest limitations:** still not Raft (brief lag until heartbeat + catch-up RPC);
+catch-up BROKER body is full effective six knobs (may expand peer sparse overlay);
+a new controller that never received prior pushes may re-push stale local state at
+its durable gen; inter-broker admin RPCs still not ACL-gated.
+
+**Still deferred:** multi-lang clients, chaos-mesh / long fuzz campaigns,
+multi-broker session handoff, full KIP-890/939 / `__transaction_state`, Kafka
+wire fuzz targets, dynamic membership / Raft, full Kafka broker catalog,
+transparent EndTxn forward, outbox handoff on leadership change, per-broker
 BROKER config overrides.
 
 ---
@@ -2781,7 +2811,7 @@ marker clip 111; fuzz corpus smoke CI 112; cluster admin fan-out 113) — see
 
 ## Suggested implementation order (PRs)
 
-Phases **0–116 are shipped**. Historical PR order for the core:
+Phases **0–117 are shipped**. Historical PR order for the core:
 
 1. Phase 1 segment format + unit tests  
 2. Phase 1 recovery + retention  
@@ -2800,6 +2830,7 @@ Phases **0–116 are shipped**. Historical PR order for the core:
 15. Phase 114 (multi-broker Enable2Pc prepare/complete MVP) ✅  
 16. Phase 115 (durable local fetch sessions MVP) ✅  
 17. Phase 116 (durable DeleteRecords outbox for offline replicas MVP) ✅  
+18. Phase 117 (controller failover catch-up for ACL + BROKER config MVP) ✅  
 
 ---
 

@@ -1,6 +1,6 @@
 # Phase history index
 
-Ship records for **phases 0–116**. Binding core contracts are
+Ship records for **phases 0–117**. Binding core contracts are
 **[PHASE1_SPEC](../PHASE1_SPEC.md)–[PHASE6_SPEC](../PHASE6_SPEC.md)**. Living
 docs for day-to-day reading: [ops](../ops.md), [consistency](../consistency.md),
 [tuning](../tuning.md), [KAFKA_COMPAT](../KAFKA_COMPAT.md),
@@ -158,10 +158,11 @@ docs for day-to-day reading: [ops](../ops.md), [consistency](../consistency.md),
 | 114 | ✅ | Multi-broker 2PC / KIP-890-ish MVP (Enable2Pc prepare/complete across leaders) | [PHASE114_SPEC.md](../PHASE114_SPEC.md) |
 | 115 | ✅ | Durable fetch sessions MVP (per-broker `__fetch_sessions`; restart restore; not multi-broker sticky) | [PHASE115_SPEC.md](../PHASE115_SPEC.md) |
 | 116 | ✅ | Durable DeleteRecords outbox for offline replicas (leader-local pending + live drain) | [PHASE116_SPEC.md](../PHASE116_SPEC.md) |
+| 117 | ✅ | Controller failover catch-up for ACL + BROKER config (durable gens + heartbeat re-push) | [PHASE117_SPEC.md](../PHASE117_SPEC.md) |
 
 ---
 
-## Still deferred (post–Phase 116)
+## Still deferred (post–Phase 117)
 
 - Multi-language clients
 - Chaos-mesh / long fuzz campaigns (corpus **smoke CI** → **closed by Phase 112**)
@@ -175,6 +176,7 @@ docs for day-to-day reading: [ops](../ops.md), [consistency](../consistency.md),
 - DeleteRecords follower fan-out → **closed by Phase 113** (best-effort)
 - Durable pending DeleteRecords for offline replicas → **closed by Phase 116** (leader outbox + retry)
 - Cluster ACL snapshot fan-out → **closed by Phase 113** (controller SoT; not Raft consensus)
+- Controller failover / rejoin catch-up for ACL + BROKER config → **closed by Phase 117** (durable gens + heartbeat lag re-push; not Raft)
 - Single-flight / idempotent `start_background_tasks` → **closed by Phase 109**
 - Non-controller auto-death from alive-set diffs → **closed by Phase 110**
 - Straddle marker clip → **closed by Phase 111**

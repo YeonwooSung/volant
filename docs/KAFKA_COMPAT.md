@@ -107,8 +107,8 @@ These are **current** product facts, not temporary docs lag:
 | CreateTopics | Replica assignment arrays ignored; configs response often null |
 | Storage | Log stores uncompressed Volant records; Fetch re-encodes |
 | Auth | Kafka port: SASL or `kafka-anonymous`; no shared-token on Kafka port |
-| ACLs | LITERAL only; host always `*`; User resource (v3) stored only (no SCRAM-admin gating); no TransactionalId/DelegationToken; cluster Create/Delete are **controller-only** with generationed snapshot fan-out (Phase 113) — not Raft multi-master consensus |
-| BROKER config (cluster) | Alter / IncrementalAlter for the six Phase 99 knobs: **controller-only** (Kafka **41** NotController elsewhere); push to live peers; Describe on any node returns **local** effective values after apply |
+| ACLs | LITERAL only; host always `*`; User resource (v3) stored only (no SCRAM-admin gating); no TransactionalId/DelegationToken; cluster Create/Delete are **controller-only** with generationed snapshot fan-out (Phase 113) + durable-gen rejoin catch-up (Phase 117) — not Raft multi-master consensus |
+| BROKER config (cluster) | Alter / IncrementalAlter for the six Phase 99 knobs: **controller-only** (Kafka **41** NotController elsewhere); push to live peers; Describe on any node returns **local** effective values after apply; offline peers catch up on heartbeat re-push (Phase 117; not Raft) |
 | DeleteRecords (cluster) | Leader-only client path; best-effort inter-broker truncate of other replicas (Phase 113); fan-out failure does not fail the client; failed peers recorded in leader-local durable outbox and retried when live (Phase 116; not consensus / no leadership handoff of pending set) |
 | KIP-951 | CurrentLeader on leader errors; Produce NodeEndpoints v10+; Fetch NodeEndpoints v16+; empty tags on success |
 | ApiVersions features | Empty SupportedFeatures / FinalizedFeatures / ZkMigrationReady tags; no REBOOTSTRAP_REQUIRED |

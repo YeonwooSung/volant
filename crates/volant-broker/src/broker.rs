@@ -42,6 +42,7 @@ use crate::broker_config::{
     self, KEY_FETCH_SESSION_IDLE_MS, KEY_FETCH_SESSION_MAX, KEY_OPEN_TXN_TIMEOUT_MS,
     KEY_PREPARED_TXN_TIMEOUT_MS, KEY_SWEEP_INTERVAL_MS, KEY_TRANSACTION_MAX_TIMEOUT_MS,
 };
+use crate::cluster_admin::{ClusterAdminFile, ClusterAdminStore};
 use crate::delete_records_outbox::DeleteRecordsOutbox;
 use crate::topic::Topic;
 use crate::topic_catalog::{CatalogTopic, TopicCatalogFile, TopicCatalogStore};
@@ -502,6 +503,10 @@ pub struct Broker {
     cluster_prepared_index: Mutex<HashMap<String, ClusterPreparedEntry>>,
     /// Durable pending DeleteRecords truncates for offline/failed peers (Phase 116).
     delete_records_outbox: DeleteRecordsOutbox,
+    /// Phase 117: successful admin catch-up RPC applies (config and/or ACL).
+    cluster_admin_catchup_success_total: AtomicU64,
+    /// Phase 117: admin catch-up RPC / apply failures.
+    cluster_admin_catchup_errors_total: AtomicU64,
 }
 
 /// Controller-side multi-broker prepared index entry (Phase 114).
@@ -638,6 +643,8 @@ impl Broker {
             txn_2pc_fanout_errors_total: AtomicU64::new(0),
             cluster_prepared_index: Mutex::new(HashMap::new()),
             delete_records_outbox,
+            cluster_admin_catchup_success_total: AtomicU64::new(0),
+            cluster_admin_catchup_errors_total: AtomicU64::new(0),
         };
         broker
             .reload_single_node_topics()
@@ -652,6 +659,10 @@ impl Broker {
         broker
             .load_durable_broker_config()
             .expect("failed to load durable broker config");
+        // Phase 117: durable admin generations (config/ACL).
+        broker
+            .load_cluster_admin_gens()
+            .expect("failed to load cluster admin generations");
         // Phase 115: re-apply idle TTL after durable config may have changed knobs.
         let _ = broker.fetch_sessions.evict_idle_now();
         broker
@@ -754,6 +765,8 @@ impl Broker {
             txn_2pc_fanout_errors_total: AtomicU64::new(0),
             cluster_prepared_index: Mutex::new(HashMap::new()),
             delete_records_outbox,
+            cluster_admin_catchup_success_total: AtomicU64::new(0),
+            cluster_admin_catchup_errors_total: AtomicU64::new(0),
         };
         // Open local partitions from persisted assignment.
         broker.apply_local_assignment()?;
@@ -765,6 +778,8 @@ impl Broker {
         broker.seed_missing_leader_epochs();
         // Phase 100–102: sparse durable BROKER knobs after env (product → env → file keys).
         broker.load_durable_broker_config()?;
+        // Phase 117: durable admin generations (config/ACL).
+        broker.load_cluster_admin_gens()?;
         // Phase 115: re-apply idle TTL after durable config may have changed knobs.
         let _ = broker.fetch_sessions.evict_idle_now();
         Ok(broker)
@@ -880,6 +895,78 @@ impl Broker {
     /// ACL snapshot push error counter (Phase 113).
     pub fn cluster_acl_push_errors_total(&self) -> u64 {
         self.cluster_acl_push_errors_total.load(Ordering::Relaxed)
+    }
+
+    /// Admin catch-up success counter (Phase 117).
+    pub fn cluster_admin_catchup_success_total(&self) -> u64 {
+        self.cluster_admin_catchup_success_total
+            .load(Ordering::Relaxed)
+    }
+
+    /// Admin catch-up error counter (Phase 117).
+    pub fn cluster_admin_catchup_errors_total(&self) -> u64 {
+        self.cluster_admin_catchup_errors_total
+            .load(Ordering::Relaxed)
+    }
+
+    /// Increment admin catch-up success counter (Phase 117).
+    pub fn note_cluster_admin_catchup_success(&self) {
+        self.cluster_admin_catchup_success_total
+            .fetch_add(1, Ordering::Relaxed);
+    }
+
+    /// Increment admin catch-up error counter (Phase 117).
+    pub fn note_cluster_admin_catchup_error(&self) {
+        self.cluster_admin_catchup_errors_total
+            .fetch_add(1, Ordering::Relaxed);
+    }
+
+    /// Whether a peer's applied gens lag controller SoT (Phase 117).
+    pub fn peer_admin_gens_lag(
+        &self,
+        peer_applied_config: u64,
+        peer_applied_acl: u64,
+    ) -> (bool, bool) {
+        let need_config =
+            self.config_generation() > 0 && peer_applied_config < self.config_generation();
+        let need_acl = self.acl_generation() > 0 && peer_applied_acl < self.acl_generation();
+        (need_config, need_acl)
+    }
+
+    /// Load durable admin generations from `{data_dir}/__cluster_admin` (Phase 117).
+    fn load_cluster_admin_gens(&self) -> Result<()> {
+        let store = ClusterAdminStore::open(&self.storage.data_dir)?;
+        let file = store.load()?;
+        self.config_generation
+            .store(file.config_generation, Ordering::SeqCst);
+        self.applied_config_generation
+            .store(file.applied_config_generation, Ordering::SeqCst);
+        self.acl_generation
+            .store(file.acl_generation, Ordering::SeqCst);
+        self.applied_acl_generation
+            .store(file.applied_acl_generation, Ordering::SeqCst);
+        Ok(())
+    }
+
+    /// Persist current admin generation atomics (Phase 117).
+    pub fn persist_cluster_admin_gens(&self) {
+        let file = ClusterAdminFile {
+            version: crate::cluster_admin::CLUSTER_ADMIN_FILE_VERSION,
+            config_generation: self.config_generation.load(Ordering::SeqCst),
+            applied_config_generation: self.applied_config_generation.load(Ordering::SeqCst),
+            acl_generation: self.acl_generation.load(Ordering::SeqCst),
+            applied_acl_generation: self.applied_acl_generation.load(Ordering::SeqCst),
+        };
+        match ClusterAdminStore::open(&self.storage.data_dir) {
+            Ok(store) => {
+                if let Err(e) = store.save(&file) {
+                    warn!(error = %e, "persist cluster admin generations failed");
+                }
+            }
+            Err(e) => {
+                warn!(error = %e, "open cluster admin store failed");
+            }
+        }
     }
 
     /// Peer targets for DeleteRecords fan-out: `(broker_id, addr, leader_epoch)`.
@@ -1396,6 +1483,13 @@ impl Broker {
         }
         self.applied_config_generation
             .store(generation, Ordering::SeqCst);
+        // Mirror SoT gen so a later promote can re-push at the correct generation.
+        let cur = self.config_generation.load(Ordering::SeqCst);
+        if generation > cur {
+            self.config_generation
+                .store(generation, Ordering::SeqCst);
+        }
+        self.persist_cluster_admin_gens();
         (0, generation)
     }
 
@@ -1437,6 +1531,11 @@ impl Broker {
         }
         self.applied_acl_generation
             .store(generation, Ordering::SeqCst);
+        let cur = self.acl_generation.load(Ordering::SeqCst);
+        if generation > cur {
+            self.acl_generation.store(generation, Ordering::SeqCst);
+        }
+        self.persist_cluster_admin_gens();
         (0, generation)
     }
 
@@ -1483,6 +1582,7 @@ impl Broker {
         let gen = self.acl_generation.fetch_add(1, Ordering::SeqCst) + 1;
         self.applied_acl_generation
             .store(gen, Ordering::SeqCst);
+        self.persist_cluster_admin_gens();
         Some(gen)
     }
 
@@ -1719,6 +1819,7 @@ impl Broker {
             let gen = self.config_generation.fetch_add(1, Ordering::SeqCst) + 1;
             self.applied_config_generation
                 .store(gen, Ordering::SeqCst);
+            self.persist_cluster_admin_gens();
             Ok(Some(gen))
         } else {
             Ok(None)

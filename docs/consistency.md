@@ -120,6 +120,11 @@ Without `--cluster-config`, the broker runs as a single node:
     `NotController`. Successful controller mutates push generationed state to
     live peers (config knobs or full ACL snapshot). Describe / authorize use
     each node's local applied state after push.
+  - **Admin catch-up (Phase 117):** generations are durable under
+    `{data_dir}/__cluster_admin`. Non-controllers piggyback applied gens on
+    `HeartbeatBroker`; when the controller sees lag it re-pushes opcodes 72–75
+    (full effective BROKER knobs + full ACL snapshot). Brief lag until the next
+    successful heartbeat + catch-up RPC is still allowed; not Raft.
 - **Multi-broker 2PC (Phase 114):** Enable2Pc prepare/complete is coordinated
   over inter-broker RPC (opcodes 76–81). Pin Init/Begin/EndTxn to the broker
   that allocated the producer; produce still targets partition leaders after
@@ -128,4 +133,5 @@ Without `--cluster-config`, the broker runs as a single node:
 See [PHASE6_SPEC.md](./PHASE6_SPEC.md) for wire protocol and configuration details.
 Admin fan-out detail: [PHASE113_SPEC.md](./PHASE113_SPEC.md).
 DeleteRecords outbox: [PHASE116_SPEC.md](./PHASE116_SPEC.md).
+Admin catch-up: [PHASE117_SPEC.md](./PHASE117_SPEC.md).
 Multi-broker 2PC detail: [PHASE114_SPEC.md](./PHASE114_SPEC.md).

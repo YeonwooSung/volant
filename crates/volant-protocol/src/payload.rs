@@ -293,10 +293,15 @@ pub fn encode_request(req: &Request) -> Result<Bytes> {
             broker_id,
             controller_id_known,
             generation,
+            applied_config_generation,
+            applied_acl_generation,
         } => {
             dst.put_u32_le(*broker_id);
             dst.put_u32_le(*controller_id_known);
             dst.put_u32_le(*generation);
+            // Phase 117: applied admin generations (backward-compatible trailer).
+            dst.put_u64_le(*applied_config_generation);
+            dst.put_u64_le(*applied_acl_generation);
         }
         Request::ClusterState { known_generation } => {
             dst.put_u32_le(*known_generation);
@@ -723,10 +728,21 @@ pub fn decode_request(opcode: u16, payload: &[u8]) -> Result<Request> {
             if src.remaining() < 4 + 4 + 4 {
                 return Err(Error::Protocol("truncated heartbeat broker".into()));
             }
+            let broker_id = src.get_u32_le();
+            let controller_id_known = src.get_u32_le();
+            let generation = src.get_u32_le();
+            // Phase 117 trailer (optional for older peers).
+            let (applied_config_generation, applied_acl_generation) = if src.remaining() >= 16 {
+                (src.get_u64_le(), src.get_u64_le())
+            } else {
+                (0, 0)
+            };
             Ok(Request::HeartbeatBroker {
-                broker_id: src.get_u32_le(),
-                controller_id_known: src.get_u32_le(),
-                generation: src.get_u32_le(),
+                broker_id,
+                controller_id_known,
+                generation,
+                applied_config_generation,
+                applied_acl_generation,
             })
         }
         RequestOpcode::ClusterState => {
@@ -3076,11 +3092,30 @@ mod tests {
             broker_id: 2,
             controller_id_known: 1,
             generation: 5,
+            applied_config_generation: 3,
+            applied_acl_generation: 2,
         };
         let b = encode_request(&req).unwrap();
         assert_eq!(
             decode_request(RequestOpcode::HeartbeatBroker as u16, &b).unwrap(),
             req
+        );
+        // Older peers without Phase 117 trailer still decode (applied gens = 0).
+        let mut legacy = bytes::BytesMut::new();
+        legacy.put_u32_le(2);
+        legacy.put_u32_le(1);
+        legacy.put_u32_le(5);
+        let legacy_req =
+            decode_request(RequestOpcode::HeartbeatBroker as u16, &legacy).unwrap();
+        assert_eq!(
+            legacy_req,
+            Request::HeartbeatBroker {
+                broker_id: 2,
+                controller_id_known: 1,
+                generation: 5,
+                applied_config_generation: 0,
+                applied_acl_generation: 0,
+            }
         );
 
         let resp = Response::HeartbeatBroker {

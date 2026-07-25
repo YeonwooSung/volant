@@ -577,6 +577,23 @@ fn broker_metrics_text(broker: &Broker) -> String {
         "volant_applied_acl_generation {}\n",
         broker.applied_acl_generation()
     ));
+    // Phase 117: admin catch-up counters.
+    text.push_str(
+        "# HELP volant_cluster_admin_catchup_success_total Successful ACL/config catch-up RPCs\n",
+    );
+    text.push_str("# TYPE volant_cluster_admin_catchup_success_total counter\n");
+    text.push_str(&format!(
+        "volant_cluster_admin_catchup_success_total {}\n",
+        broker.cluster_admin_catchup_success_total()
+    ));
+    text.push_str(
+        "# HELP volant_cluster_admin_catchup_errors_total Failed ACL/config catch-up RPCs\n",
+    );
+    text.push_str("# TYPE volant_cluster_admin_catchup_errors_total counter\n");
+    text.push_str(&format!(
+        "volant_cluster_admin_catchup_errors_total {}\n",
+        broker.cluster_admin_catchup_errors_total()
+    ));
     text
 }
 
@@ -765,6 +782,9 @@ async fn heartbeat_to_controller(broker: &Broker) -> Result<()> {
         broker_id: broker.node_id(),
         controller_id_known: controller,
         generation: broker.generation(),
+        // Phase 117: report applied admin gens so controller can catch up lag.
+        applied_config_generation: broker.applied_config_generation(),
+        applied_acl_generation: broker.applied_acl_generation(),
     };
     let resp = inter_broker_rpc(broker, &addr, &req).await?;
     match resp {
@@ -802,6 +822,141 @@ async fn heartbeat_to_controller(broker: &Broker) -> Result<()> {
         other => Err(Error::Protocol(format!(
             "unexpected heartbeat response: {other:?}"
         ))),
+    }
+}
+
+/// Phase 117: re-push controller ACL + BROKER config SoT to one lagging peer.
+///
+/// Uses Phase 113 opcodes. Increments catch-up success/error metrics. No-op when
+/// this node is not the controller or when neither domain lags.
+pub async fn catch_up_peer_admin_state(
+    broker: &Broker,
+    peer_id: u32,
+    peer_addr: &str,
+    peer_applied_config: u64,
+    peer_applied_acl: u64,
+) {
+    if !broker.is_controller() {
+        return;
+    }
+    let (need_config, need_acl) =
+        broker.peer_admin_gens_lag(peer_applied_config, peer_applied_acl);
+    if !need_config && !need_acl {
+        return;
+    }
+
+    if need_config {
+        let generation = broker.config_generation();
+        let entries = broker.describe_broker_configs();
+        let req = Request::ClusterBrokerConfig {
+            generation,
+            entries,
+        };
+        match inter_broker_rpc(broker, peer_addr, &req).await {
+            Ok(Response::ClusterBrokerConfig {
+                error_code: 0,
+                ..
+            }) => {
+                broker.note_cluster_admin_catchup_success();
+            }
+            Ok(Response::ClusterBrokerConfig {
+                error_code,
+                applied_generation,
+            }) => {
+                warn!(
+                    peer_id,
+                    %peer_addr,
+                    error_code,
+                    applied_generation,
+                    generation,
+                    "admin config catch-up peer error"
+                );
+                broker.note_cluster_admin_catchup_error();
+            }
+            Ok(other) => {
+                warn!(
+                    peer_id,
+                    %peer_addr,
+                    ?other,
+                    generation,
+                    "admin config catch-up unexpected response"
+                );
+                broker.note_cluster_admin_catchup_error();
+            }
+            Err(e) => {
+                warn!(
+                    peer_id,
+                    %peer_addr,
+                    error = %e,
+                    generation,
+                    "admin config catch-up rpc failed"
+                );
+                broker.note_cluster_admin_catchup_error();
+            }
+        }
+    }
+
+    if need_acl {
+        let generation = broker.acl_generation();
+        let snapshot = match broker.acl_snapshot_wire_bytes() {
+            Ok(b) => b,
+            Err(e) => {
+                warn!(
+                    peer_id,
+                    generation,
+                    error = %e,
+                    "admin acl catch-up encode failed"
+                );
+                broker.note_cluster_admin_catchup_error();
+                return;
+            }
+        };
+        let req = Request::ClusterAclSnapshot {
+            generation,
+            snapshot,
+        };
+        match inter_broker_rpc(broker, peer_addr, &req).await {
+            Ok(Response::ClusterAclSnapshot {
+                error_code: 0,
+                ..
+            }) => {
+                broker.note_cluster_admin_catchup_success();
+            }
+            Ok(Response::ClusterAclSnapshot {
+                error_code,
+                applied_generation,
+            }) => {
+                warn!(
+                    peer_id,
+                    %peer_addr,
+                    error_code,
+                    applied_generation,
+                    generation,
+                    "admin acl catch-up peer error"
+                );
+                broker.note_cluster_admin_catchup_error();
+            }
+            Ok(other) => {
+                warn!(
+                    peer_id,
+                    %peer_addr,
+                    ?other,
+                    generation,
+                    "admin acl catch-up unexpected response"
+                );
+                broker.note_cluster_admin_catchup_error();
+            }
+            Err(e) => {
+                warn!(
+                    peer_id,
+                    %peer_addr,
+                    error = %e,
+                    generation,
+                    "admin acl catch-up rpc failed"
+                );
+                broker.note_cluster_admin_catchup_error();
+            }
+        }
     }
 }
 
@@ -2487,9 +2642,32 @@ async fn handle_request(broker: &Broker, req: Request) -> Result<Response> {
             broker_id,
             controller_id_known,
             generation,
+            applied_config_generation,
+            applied_acl_generation,
         } => {
             let (error_code, controller_id, generation, alive_brokers) =
                 broker.handle_heartbeat_broker(broker_id, controller_id_known, generation);
+            // Phase 117: if we are controller and peer lags on ACL/config gens,
+            // re-push SoT state (covers offline miss + rejoin).
+            if error_code == 0
+                && broker.is_controller()
+                && broker_id != broker.node_id()
+            {
+                let (need_cfg, need_acl) =
+                    broker.peer_admin_gens_lag(applied_config_generation, applied_acl_generation);
+                if need_cfg || need_acl {
+                    if let Some(addr) = broker.broker_addr(broker_id) {
+                        catch_up_peer_admin_state(
+                            broker,
+                            broker_id,
+                            &addr,
+                            applied_config_generation,
+                            applied_acl_generation,
+                        )
+                        .await;
+                    }
+                }
+            }
             Ok(Response::HeartbeatBroker {
                 error_code,
                 controller_id,

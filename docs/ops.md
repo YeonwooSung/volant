@@ -160,9 +160,11 @@ volant-server \
   alter. Alter/Incremental SET/DELETE map to the same setters; successful
   non-validate_only **merges only altered keys** (atomic); DELETE restores
   product defaults live **and removes the key from the file** so env can
-  re-apply on restart (Phase 102). **Cluster mode (Phase 113):** BROKER Alter is
+  re-apply on restart (Phase 102). **Cluster mode (Phase 113 + 117):** BROKER Alter is
   **controller-only** (Kafka **41** / native NotController on other brokers);
-  controller pushes generationed knobs to live peers. Target the controller
+  controller pushes generationed knobs to live peers. Peers that miss a push
+  (offline) catch up on heartbeat via controller re-push; generations live under
+  `{data_dir}/__cluster_admin`. Target the controller
   (lowest live broker id / DescribeCluster) for cluster-wide knobs.
 - **Transactions / isolation:** write-through + soft abort markers (Phase 86) +
   EndTxn control batches on finalize (Phase 89) + prepared 2PC MVP (Phase 90) +
@@ -299,11 +301,11 @@ specs. Ops-critical notes only:
 | Consumer lag | Metrics + `volant group lag` |
 | Groups | list / describe / delete-offsets; static membership `group_instance_id` |
 | Topic configs | `retention.ms` / `retention.bytes` / `segment.bytes` / `cleanup.policy` |
-| Broker configs (Phase 99–102 + 113) | BROKER Describe/Alter: `transaction.max.timeout.ms` + `volant.*` open/prepared/session/sweep; **sparse** durable under `__broker_config/state.json`; **cluster:** controller-only Alter + fan-out to live peers (Phase 113) |
+| Broker configs (Phase 99–102 + 113 + 117) | BROKER Describe/Alter: `transaction.max.timeout.ms` + `volant.*` open/prepared/session/sweep; **sparse** durable under `__broker_config/state.json`; **cluster:** controller-only Alter + fan-out to live peers (Phase 113); **catch-up** on rejoin via durable gens + heartbeat re-push (Phase 117; `__cluster_admin`) |
 | DeleteRecords | Truncates sealed segments; **best-effort fan-out** to other replicas (Phase 113) + **durable leader outbox retry** for offline/failed peers (`__delete_records_outbox`, Phase 116); **GC/clip aborted soft markers** vs new log start (Phase 104/111) |
 | Transactions (shipped) | **Write-through + soft markers** (Phase 86) + **control batches** on EndTxn finalize (Phase 89) + **empty AddPartitions control** (Phase 105) + **prepared 2PC MVP** (Phase 90) + **multi-broker Enable2Pc** (Phase 114: open/prepare/complete fan-out; controller `__txn_prepared/cluster.json`) + **prepared timeout** (Phase 92, default 60s / `VOLANT_PREPARED_TXN_TIMEOUT_MS`) + **open timeout** (Phase 93, InitProducerId / `VOLANT_OPEN_TXN_TIMEOUT_MS`) + **max timeout clamp** (Phase 96, default 15m / `VOLANT_TRANSACTION_MAX_TIMEOUT_MS`; Init **50** over-max) + **background sweeper** (Phase 97/101/106, default 1s / `VOLANT_SWEEP_INTERVAL_MS`; `0` = pause bg; always-spawn so 0→>0 without restart; graceful shutdown/join) + **BROKER config surface** (Phase 99) + **sparse durable restart** (Phase 100/102) + **BROKER name vs `node_id`** (Phase 103) + **marker GC/clip** (Phase 104/111); LSO/aborted filtering; open crash≡abort; prepared durable under `__txn_prepared` until complete or timeout; soft markers GC'd when `end_offset <= log_start`; straddlers clip `first_offset = log_start` (Phase 111). **Ops:** pin Init/Begin/EndTxn to the broker that owns the producer (typically first bootstrap / controller); produce still goes to partition leaders |
 | mTLS | Feature `tls`; `--tls-client-ca` / optional `--tls-client-allow` |
-| ACLs | `--acl-enable`; durable `__acls/acls.json`; User resource is Kafka admin store-only; **cluster:** Create/Delete controller-only + snapshot fan-out (Phase 113) |
+| ACLs | `--acl-enable`; durable `__acls/acls.json`; User resource is Kafka admin store-only; **cluster:** Create/Delete controller-only + snapshot fan-out (Phase 113) + rejoin catch-up (Phase 117) |
 | Compaction | `cleanup.policy=compact` on **sealed** segments; empty value = tombstone |
 
 CLI examples: [features.md](./features.md), [../README.md](../README.md).
@@ -335,6 +337,7 @@ curl -s -H "Authorization: Bearer $VOLANT_METRICS_TOKEN" \
 - Straddle soft-marker clip → **closed by Phase 111**
 - cargo-fuzz corpus smoke + CI MVP → **closed by Phase 112**
 - Cluster admin fan-out (DeleteRecords / BROKER config / ACL snapshot) → **closed by Phase 113**
+- Controller failover / rejoin ACL+BROKER catch-up → **closed by Phase 117**
 - Durable DeleteRecords outbox for offline replicas → **closed by Phase 116**
 - Transparent EndTxn forward to txn coordinator when client lands on a random leader
 

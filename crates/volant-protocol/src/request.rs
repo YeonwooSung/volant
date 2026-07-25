@@ -322,6 +322,14 @@ pub enum Request {
         controller_id_known: u32,
         /// Last known cluster generation.
         generation: u32,
+        /// Last applied BROKER-config generation on the sender (Phase 117).
+        ///
+        /// Older peers omit this on the wire; decoders default to `0`.
+        applied_config_generation: u64,
+        /// Last applied ACL generation on the sender (Phase 117).
+        ///
+        /// Older peers omit this on the wire; decoders default to `0`.
+        applied_acl_generation: u64,
     },
     /// Request full cluster assignment snapshot.
     ClusterState {
