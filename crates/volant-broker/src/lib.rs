@@ -52,8 +52,9 @@ pub use scram::{
 };
 pub use assignor::{range_assign, range_assign_multi, sticky_assign, sticky_assign_multi};
 pub use broker::{
-    murmur2, partition_for_key, Broker, ClusterState, IdempotentCheck, InterBrokerTls,
-    MetadataSnapshot, PartitionMetadata, TopicMetadata, Txn2pcFanout, TxnCommitResult,
+    murmur2, partition_for_key, sticky_coordinator_id, Broker, ClusterState, IdempotentCheck,
+    InterBrokerTls, MetadataSnapshot, PartitionMetadata, TopicMetadata, Txn2pcFanout,
+    TxnCommitResult,
 };
 pub use cluster::{BrokerEndpoint, ClusterConfig};
 pub use group::{

@@ -1244,6 +1244,55 @@ impl Broker {
         None
     }
 
+    /// Phase 121: resolve FindCoordinator endpoint for a group or transactional key.
+    ///
+    /// Lookup order:
+    /// 1. Single-node / no cluster → this broker's advertised address.
+    /// 2. Transaction key with known Init owner (Phase 120 registry) → that owner.
+    /// 3. Sticky murmur2 over sorted **configured** broker ids; skip dead members
+    ///    by walking the static ring to the next live broker.
+    ///
+    /// `key_type`: `0` = group, `1` = transaction (same as Kafka wire).
+    pub fn resolve_find_coordinator(
+        &self,
+        key: &str,
+        key_type: i8,
+    ) -> (u32, String, u16) {
+        let host = self.advertised_host.read().clone();
+        let port = self.advertised_port.load(Ordering::Relaxed) as u16;
+        let Some(cluster) = &self.cluster else {
+            return (self.node_id, host, port);
+        };
+
+        // Known transactional_id → Init-owner registry overrides sticky hash.
+        if key_type == 1 && !key.is_empty() {
+            if let Some(owner) = self.resolve_txn_coordinator(key, None) {
+                if let Some(ep) = self.coordinator_endpoint(owner) {
+                    return ep;
+                }
+            }
+        }
+
+        let ring = cluster.config.broker_ids();
+        let live = cluster.membership.read().live_brokers();
+        let chosen = sticky_coordinator_id(key.as_bytes(), &ring, &live)
+            .unwrap_or(self.node_id);
+        self.coordinator_endpoint(chosen)
+            .unwrap_or((self.node_id, host, port))
+    }
+
+    /// Host/port for a coordinator node id (self uses advertised).
+    fn coordinator_endpoint(&self, node_id: u32) -> Option<(u32, String, u16)> {
+        if node_id == self.node_id {
+            let host = self.advertised_host.read().clone();
+            let port = self.advertised_port.load(Ordering::Relaxed) as u16;
+            return Some((node_id, host, port));
+        }
+        let cluster = self.cluster.as_ref()?;
+        let b = cluster.config.broker(node_id)?;
+        Some((b.id, b.host.clone(), b.port))
+    }
+
     /// Phase 120: Init registration fan-out (producer + coordinator, no open).
     pub fn txn_2pc_init_register_fanout(
         &self,
@@ -6259,6 +6308,28 @@ pub fn partition_for_key(key: &[u8], num_partitions: u32) -> u32 {
     (murmur2(key) & 0x7fff_ffff) % num_partitions
 }
 
+/// Phase 121: sticky coordinator id for a FindCoordinator key.
+///
+/// Preferred target is `ring[(murmur2(key) & 0x7fff_ffff) % ring.len()]`.
+/// If that id is not in `live`, walk the static ring forward for the next live
+/// member. Returns `None` when both ring and live are empty.
+pub fn sticky_coordinator_id(key: &[u8], ring: &[u32], live: &[u32]) -> Option<u32> {
+    if live.is_empty() {
+        return ring.first().copied();
+    }
+    if ring.is_empty() {
+        return live.first().copied();
+    }
+    let preferred = (murmur2(key) & 0x7fff_ffff) as usize % ring.len();
+    for i in 0..ring.len() {
+        let id = ring[(preferred + i) % ring.len()];
+        if live.binary_search(&id).is_ok() || live.contains(&id) {
+            return Some(id);
+        }
+    }
+    live.first().copied()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -6268,6 +6339,77 @@ mod tests {
         let h = murmur2(b"hello");
         assert_ne!(h, 0);
         assert_eq!(h, murmur2(b"hello"));
+    }
+
+    #[test]
+    fn sticky_coordinator_id_stable_and_failover() {
+        let ring = [1u32, 2, 3];
+        let live = [1u32, 2, 3];
+        let a = sticky_coordinator_id(b"txn-a", &ring, &live).unwrap();
+        let a2 = sticky_coordinator_id(b"txn-a", &ring, &live).unwrap();
+        assert_eq!(a, a2);
+        assert!(ring.contains(&a));
+
+        // Preferred dead → next live on ring.
+        let preferred = sticky_coordinator_id(b"sticky-key", &ring, &live).unwrap();
+        let live_without: Vec<u32> = ring.iter().copied().filter(|id| *id != preferred).collect();
+        let failover = sticky_coordinator_id(b"sticky-key", &ring, &live_without).unwrap();
+        assert_ne!(failover, preferred);
+        assert!(live_without.contains(&failover));
+
+        // Revive preferred → back.
+        let back = sticky_coordinator_id(b"sticky-key", &ring, &live).unwrap();
+        assert_eq!(back, preferred);
+    }
+
+    #[test]
+    fn resolve_find_coordinator_registry_overrides_hash() {
+        use crate::cluster::BrokerEndpoint;
+        let dir = std::env::temp_dir().join(format!(
+            "volant-p121-unit-{}-{}",
+            std::process::id(),
+            uuid::Uuid::new_v4()
+        ));
+        let _ = fs::create_dir_all(&dir);
+        let cfg = ClusterConfig {
+            default_replication_factor: 3,
+            min_insync_replicas: 2,
+            session_timeout_ms: 2000,
+            replica_fetch_max_wait_ms: 50,
+            replica_fetch_max_bytes: 1_048_576,
+            replica_lag_max_messages: 10_000,
+            brokers: (1..=3)
+                .map(|id| BrokerEndpoint {
+                    id,
+                    host: "127.0.0.1".into(),
+                    port: 9000 + id as u16,
+                    rack: None,
+                })
+                .collect(),
+        };
+        let broker = Broker::with_cluster(
+            StorageConfig {
+                data_dir: dir.clone(),
+                ..StorageConfig::default()
+            },
+            1,
+            cfg,
+        )
+        .unwrap();
+        broker.set_advertised("127.0.0.1", 9001);
+
+        let sticky = broker.resolve_find_coordinator("txn-override", 1).0;
+        // Force registry owner to a different live node when possible.
+        let owner = if sticky == 2 { 3 } else { 2 };
+        broker.note_txn_coordinator("txn-override", 99, owner);
+        let (id, _, _) = broker.resolve_find_coordinator("txn-override", 1);
+        assert_eq!(id, owner);
+
+        // Group keys ignore txn registry.
+        let (g, _, _) = broker.resolve_find_coordinator("txn-override", 0);
+        assert_eq!(g, sticky_coordinator_id(b"txn-override", &[1, 2, 3], &[1, 2, 3]).unwrap());
+
+        let _ = fs::remove_dir_all(&dir);
     }
 
     #[test]

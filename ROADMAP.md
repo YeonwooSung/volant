@@ -2831,6 +2831,7 @@ ids unchanged; large responses bounded by native `MAX_PAYLOAD`.
 full KIP-890/939 / `__transaction_state`, Kafka wire fuzz targets, dynamic
 membership / Raft, full Kafka broker catalog,
 transparent EndTxn forward → **closed by Phase 120**,
+sticky FindCoordinator → **closed by Phase 121**,
 outbox handoff on leadership change, per-broker BROKER config overrides,
 time-based ISR lag / preferred replica / shared session registry.
 
@@ -2854,9 +2855,37 @@ Binding: **[docs/PHASE120_SPEC.md](./docs/PHASE120_SPEC.md)**.
 - [x] Living docs honesty
 
 **Honest limitations:** not full KIP-890/939 / `__transaction_state`; coordinator
-discovery is Init-owner registry (not Raft / not hash FindCoordinator); AddOffsets /
-TxnOffsetCommit / full Init re-home still prefer client pin; FindCoordinator wire
-unchanged (first metadata broker).
+discovery is Init-owner registry (not Raft); AddOffsets / TxnOffsetCommit / full
+Init re-home still prefer client pin when skipping FindCoordinator.
+FindCoordinator sticky hash → **closed by Phase 121**.
+
+**Still deferred:** multi-lang clients, chaos-mesh / long fuzz campaigns,
+full KIP-890/939 / `__transaction_state`, Kafka wire fuzz targets, dynamic
+membership / Raft, full Kafka broker catalog, outbox handoff on leadership change,
+per-broker BROKER config overrides, time-based ISR lag / preferred replica /
+shared session registry, remaining txn API forward (AddOffsets / TxnOffsetCommit).
+
+---
+
+### Phase 121 — Sticky FindCoordinator assignment (MVP) ✅
+
+**Goal:** Map group_id / transactional_id stably to a live broker via consistent
+hash over static membership (not always first metadata broker); known
+transactional_id returns Phase 120 Init owner.
+
+Binding: **[docs/PHASE121_SPEC.md](./docs/PHASE121_SPEC.md)**.
+
+- [x] Sticky murmur2 over sorted configured broker ids + next-live failover
+- [x] Init-owner registry overrides hash for known transactional_id
+- [x] Kafka FindCoordinator v0–6 per-key resolve (group + transaction)
+- [x] Tests: `phase121_sticky_find_coordinator` (stability, spread, dead-node,
+      registry override, Phase 120 EndTxn interaction, single-node)
+- [x] Living docs honesty
+
+**Honest limitations:** not full KIP-890/939 / `__transaction_state`; static
+membership only; group state not migrated on death failover; Init on non-sticky
+broker still allowed (registry then overrides FindCoordinator); native protocol
+has no FindCoordinator API.
 
 **Still deferred:** multi-lang clients, chaos-mesh / long fuzz campaigns,
 full KIP-890/939 / `__transaction_state`, Kafka wire fuzz targets, dynamic
@@ -2901,7 +2930,7 @@ marker clip 111; fuzz corpus smoke CI 112; cluster admin fan-out 113) — see
 
 ## Suggested implementation order (PRs)
 
-Phases **0–118 are shipped**. Historical PR order for the core:
+Phases **0–121 are shipped**. Historical PR order for the core:
 
 1. Phase 1 segment format + unit tests  
 2. Phase 1 recovery + retention  

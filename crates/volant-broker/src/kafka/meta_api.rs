@@ -1033,15 +1033,8 @@ pub(crate) fn encode_find_coordinator(broker: &Broker, src: &mut impl Buf, out: 
     //   v4: key_type + compact CoordinatorKeys batch → Coordinators array
     //   v5: wire-identical to v4 (KIP-890 TRANSACTION_ABORTABLE — FindCoordinator never emits 123)
     //   v6: wire-identical to v4/v5 (KIP-932 share key_type 2 rejected)
+    // Phase 121: sticky murmur2 over static membership (+ Init-owner override for txn).
     let flexible = version >= 3;
-    let snap = broker.metadata(None);
-    let (id, host, port) = snap
-        .brokers
-        .first()
-        .cloned()
-        .unwrap_or((snap.node_id, snap.host.clone(), snap.port));
-    let node_id = id as i32;
-    let port_i32 = i32::from(port);
 
     if version >= 4 {
         // v4–6 request: KeyType + CoordinatorKeys (compact) + tags
@@ -1050,7 +1043,7 @@ pub(crate) fn encode_find_coordinator(broker: &Broker, src: &mut impl Buf, out: 
             return;
         }
         let key_type = src.get_i8();
-        // 0 = group, 1 = transaction — both resolve to this broker.
+        // 0 = group, 1 = transaction — sticky resolve (Phase 121).
         // 2 = share (KIP-932) — not supported; reject with InvalidRequest.
         if key_type != 0 && key_type != 1 {
             write_find_coordinator_v4_error(out, &[], "unsupported key_type");
@@ -1074,10 +1067,11 @@ pub(crate) fn encode_find_coordinator(broker: &Broker, src: &mut impl Buf, out: 
         out.put_i32(0); // throttle
         put_compact_array_len(out, keys.len());
         for key in &keys {
+            let (id, host, port) = broker.resolve_find_coordinator(key, key_type);
             put_compact_string(out, key);
-            out.put_i32(node_id);
+            out.put_i32(id as i32);
             put_compact_string(out, &host);
-            out.put_i32(port_i32);
+            out.put_i32(i32::from(port));
             out.put_i16(KafkaErrorCode::None.as_i16());
             put_compact_nullable_string(out, None); // error_message
             put_empty_tag_buffer(out);
@@ -1092,7 +1086,7 @@ pub(crate) fn encode_find_coordinator(broker: &Broker, src: &mut impl Buf, out: 
     } else {
         get_string(src)
     };
-    let _key = match key_result {
+    let key = match key_result {
         Ok(g) => g,
         Err(_) => {
             write_find_coordinator_error(
@@ -1106,6 +1100,8 @@ pub(crate) fn encode_find_coordinator(broker: &Broker, src: &mut impl Buf, out: 
         }
     };
 
+    // v0 has no key_type; treat as group (0) for sticky resolve.
+    let mut key_type: i8 = 0;
     if version >= 1 {
         if src.remaining() < 1 {
             write_find_coordinator_error(
@@ -1117,8 +1113,8 @@ pub(crate) fn encode_find_coordinator(broker: &Broker, src: &mut impl Buf, out: 
             );
             return;
         }
-        let key_type = src.get_i8();
-        // 0 = group, 1 = transaction — both resolve to this broker.
+        key_type = src.get_i8();
+        // 0 = group, 1 = transaction — sticky resolve (Phase 121).
         if key_type != 0 && key_type != 1 {
             write_find_coordinator_error(
                 out,
@@ -1133,6 +1129,10 @@ pub(crate) fn encode_find_coordinator(broker: &Broker, src: &mut impl Buf, out: 
     if flexible {
         let _ = skip_tag_buffer(src);
     }
+
+    let (id, host, port) = broker.resolve_find_coordinator(&key, key_type);
+    let node_id = id as i32;
+    let port_i32 = i32::from(port);
 
     if version >= 1 {
         out.put_i32(0); // throttle_time_ms
