@@ -1,6 +1,6 @@
 # Phase history index
 
-Ship records for **phases 0–123**. Binding core contracts are
+Ship records for **phases 0–125**. Binding core contracts are
 **[PHASE1_SPEC](../PHASE1_SPEC.md)–[PHASE6_SPEC](../PHASE6_SPEC.md)**. Living
 docs for day-to-day reading: [ops](../ops.md), [consistency](../consistency.md),
 [tuning](../tuning.md), [KAFKA_COMPAT](../KAFKA_COMPAT.md),
@@ -166,10 +166,11 @@ docs for day-to-day reading: [ops](../ops.md), [consistency](../consistency.md),
 | 122 | ✅ | Transparent AddOffsetsToTxn / TxnOffsetCommit forward MVP (reuse KafkaTxnForward 84/85) | [PHASE122_SPEC.md](../PHASE122_SPEC.md) |
 | 123 | ✅ | DeleteRecords outbox leadership handoff MVP (new leader reconcile from log_start) | [PHASE123_SPEC.md](../PHASE123_SPEC.md) |
 | 124 | ✅ | Durable txn coordinator registry MVP (per-broker `__txn_coordinator`; restart restore for forward/FC) | [PHASE124_SPEC.md](../PHASE124_SPEC.md) |
+| 125 | ✅ | Time-based ISR lag shrink MVP (last-caught-up + `replica_lag_max_ms`; rejoin still Phase 118) | [PHASE125_SPEC.md](../PHASE125_SPEC.md) |
 
 ---
 
-## Still deferred (post–Phase 124)
+## Still deferred (post–Phase 125)
 
 - Multi-language clients
 - Chaos-mesh / long fuzz campaigns (corpus **smoke CI** → **closed by Phase 112**)
@@ -197,6 +198,7 @@ docs for day-to-day reading: [ops](../ops.md), [consistency](../consistency.md),
 - Transparent AddOffsetsToTxn / TxnOffsetCommit forward → **closed by Phase 122**
 - Outbox handoff on leadership change → **closed by Phase 123** (new leader reconcile from log_start; not consensus truncate log)
 - Durable Init-owner txn coordinator registry → **closed by Phase 124** (local `__txn_coordinator`; not `__transaction_state`)
+- Time-based ISR lag shrink → **closed by Phase 125** (last-caught-up + `replica_lag_max_ms`; not full Kafka replica.lag.time.max.ms)
 - Per-broker BROKER config overrides / multi-master ACL merge
-- Time-based ISR lag / preferred replica
+- Preferred replica
 - Consensus truncate log / controller SoT DeleteRecords journal

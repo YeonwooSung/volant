@@ -43,6 +43,7 @@ fn cluster_config(ports: [u16; 3]) -> ClusterConfig {
         replica_fetch_max_wait_ms: 50,
         replica_fetch_max_bytes: 1_048_576,
         replica_lag_max_messages: 10_000,
+        replica_lag_max_ms: 30_000,
         brokers: (1..=3)
             .map(|id| BrokerEndpoint {
                 id,
@@ -224,6 +225,7 @@ async fn peer_restart_reloads_durable_acls() {
         replica_fetch_max_wait_ms: 50,
         replica_fetch_max_bytes: 1_048_576,
         replica_lag_max_messages: 10_000,
+        replica_lag_max_ms: 30_000,
         brokers: vec![
             BrokerEndpoint {
                 id: 1,
@@ -326,6 +328,7 @@ async fn delete_acls_fans_out() {
         replica_fetch_max_wait_ms: 50,
         replica_fetch_max_bytes: 1_048_576,
         replica_lag_max_messages: 10_000,
+        replica_lag_max_ms: 30_000,
         brokers: vec![
             BrokerEndpoint {
                 id: 1,

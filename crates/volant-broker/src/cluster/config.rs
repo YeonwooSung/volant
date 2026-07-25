@@ -41,6 +41,11 @@ pub struct ClusterConfig {
     /// Max LEO lag before a follower is removed from ISR.
     #[serde(default = "default_lag")]
     pub replica_lag_max_messages: u64,
+    /// Max age (ms) of a follower's last caught-up observation before time-based
+    /// ISR shrink (Phase 125). `0` disables time shrink. Default 30s (Kafka-like).
+    /// Effective value may also be overridden by `VOLANT_REPLICA_LAG_MAX_MS`.
+    #[serde(default = "default_lag_ms")]
+    pub replica_lag_max_ms: u64,
     /// Static broker membership.
     pub brokers: Vec<BrokerEndpoint>,
 }
@@ -63,6 +68,9 @@ fn default_fetch_bytes() -> u32 {
 fn default_lag() -> u64 {
     10_000
 }
+fn default_lag_ms() -> u64 {
+    30_000
+}
 
 impl Default for ClusterConfig {
     fn default() -> Self {
@@ -73,6 +81,7 @@ impl Default for ClusterConfig {
             replica_fetch_max_wait_ms: default_fetch_wait(),
             replica_fetch_max_bytes: default_fetch_bytes(),
             replica_lag_max_messages: default_lag(),
+            replica_lag_max_ms: default_lag_ms(),
             brokers: vec![],
         }
     }
@@ -169,5 +178,20 @@ port = 9094
         assert_eq!(cfg.brokers.len(), 3);
         assert_eq!(cfg.session_timeout_ms, 3000);
         assert_eq!(cfg.broker_ids(), vec![1, 2, 3]);
+        assert_eq!(cfg.replica_lag_max_messages, 10_000);
+        assert_eq!(cfg.replica_lag_max_ms, 30_000);
+    }
+
+    #[test]
+    fn parse_replica_lag_max_ms() {
+        let raw = r#"
+replica_lag_max_ms = 100
+[[brokers]]
+id = 1
+host = "127.0.0.1"
+port = 9092
+"#;
+        let cfg = ClusterConfig::parse(raw).unwrap();
+        assert_eq!(cfg.replica_lag_max_ms, 100);
     }
 }

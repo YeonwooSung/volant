@@ -671,6 +671,15 @@ fn broker_metrics_text(broker: &Broker) -> String {
         "volant_isr_shrink_total {}\n",
         broker.isr_shrink_total()
     ));
+    // Phase 125: time-based ISR shrink.
+    text.push_str(
+        "# HELP volant_isr_time_shrink_total ISR removals due to time-based lag\n",
+    );
+    text.push_str("# TYPE volant_isr_time_shrink_total counter\n");
+    text.push_str(&format!(
+        "volant_isr_time_shrink_total {}\n",
+        broker.isr_time_shrink_total()
+    ));
     text
 }
 

@@ -10,7 +10,7 @@ use std::fs;
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
 use std::sync::Arc;
-use std::time::{Duration, SystemTime, UNIX_EPOCH};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use parking_lot::{Condvar, Mutex, RwLock};
 use serde::{Deserialize, Serialize};
@@ -23,7 +23,8 @@ use volant_storage::StorageConfig;
 
 use crate::cluster::{
     assign_replicas, elect_leader, load_assignment, reconcile_isr, save_assignment, shrink_isr,
-    AssignmentSnapshot, ClusterConfig, Membership, PartitionAssignment, TopicAssignment,
+    shrink_isr_by_time, AssignmentSnapshot, ClusterConfig, Membership, PartitionAssignment,
+    TopicAssignment,
 };
 use crate::group::GroupCoordinator;
 use crate::metrics::Metrics;
@@ -519,6 +520,8 @@ pub struct Broker {
     isr_expand_total: AtomicU64,
     /// Phase 118: ISR membership removals (death or lag shrink).
     isr_shrink_total: AtomicU64,
+    /// Phase 125: ISR removals attributed to time-based lag.
+    isr_time_shrink_total: AtomicU64,
     /// Phase 120/124: durable Init-owner txn coordinator registry.
     txn_coordinator_registry: TxnCoordinatorRegistry,
     /// Phase 120: successful transparent EndTxn (txn) forwards.
@@ -673,6 +676,7 @@ impl Broker {
             cluster_admin_catchup_errors_total: AtomicU64::new(0),
             isr_expand_total: AtomicU64::new(0),
             isr_shrink_total: AtomicU64::new(0),
+            isr_time_shrink_total: AtomicU64::new(0),
             txn_coordinator_registry,
             txn_forward_total: AtomicU64::new(0),
             txn_forward_errors_total: AtomicU64::new(0),
@@ -804,6 +808,7 @@ impl Broker {
             cluster_admin_catchup_errors_total: AtomicU64::new(0),
             isr_expand_total: AtomicU64::new(0),
             isr_shrink_total: AtomicU64::new(0),
+            isr_time_shrink_total: AtomicU64::new(0),
             txn_coordinator_registry,
             txn_forward_total: AtomicU64::new(0),
             txn_forward_errors_total: AtomicU64::new(0),
@@ -1060,6 +1065,24 @@ impl Broker {
         self.isr_shrink_total.load(Ordering::Relaxed)
     }
 
+    /// ISR time-lag shrink counter (Phase 125).
+    pub fn isr_time_shrink_total(&self) -> u64 {
+        self.isr_time_shrink_total.load(Ordering::Relaxed)
+    }
+
+    /// Effective `replica_lag_max_ms` with optional `VOLANT_REPLICA_LAG_MAX_MS` override.
+    pub fn effective_replica_lag_max_ms(&self) -> u64 {
+        if let Ok(s) = std::env::var("VOLANT_REPLICA_LAG_MAX_MS") {
+            if let Ok(v) = s.parse::<u64>() {
+                return v;
+            }
+        }
+        self.cluster
+            .as_ref()
+            .map(|c| c.config.replica_lag_max_ms)
+            .unwrap_or(0)
+    }
+
     fn note_isr_delta(&self, before: &[u32], after: &[u32]) {
         let mut expand = 0u64;
         let mut shrink = 0u64;
@@ -1080,6 +1103,13 @@ impl Broker {
         if shrink > 0 {
             self.isr_shrink_total
                 .fetch_add(shrink, Ordering::Relaxed);
+        }
+    }
+
+    fn note_isr_time_shrink(&self, n: u64) {
+        if n > 0 {
+            self.isr_time_shrink_total
+                .fetch_add(n, Ordering::Relaxed);
         }
     }
 
@@ -5486,21 +5516,31 @@ impl Broker {
             // Update follower LEO (they request from their current LEO).
             part.follower_leo.insert(replica_id, from_offset);
 
-            // Phase 118: lag-based shrink + catch-up rejoin (LEO ≥ HWM, lag ≤ max).
+            // Phase 118/125: offset + time lag shrink + catch-up rejoin.
             if let Some(cluster) = &self.cluster {
                 let max_lag = cluster.config.replica_lag_max_messages;
+                let max_lag_ms = self.effective_replica_lag_max_ms();
                 let leader_leo = part.leo();
+                // Stamp last-caught-up when lag is within the message threshold.
+                if leader_leo.saturating_sub(from_offset) <= max_lag {
+                    part.follower_caught_up_at
+                        .insert(replica_id, Instant::now());
+                }
                 let committed_hwm = part.committed_hwm;
                 let leo_map = part.follower_leo.clone();
+                let caught_map = part.follower_caught_up_at.clone();
                 let replicas = part.replicas.clone();
                 let old_isr = part.isr.clone();
-                let isr = reconcile_isr(
+                let now = Instant::now();
+                let (isr, time_n) = reconcile_isr(
                     part.leader,
                     &old_isr,
                     &replicas,
                     leader_leo,
                     committed_hwm,
                     max_lag,
+                    max_lag_ms,
+                    now,
                     Some((replica_id, from_offset)),
                     |id| {
                         if id == part.leader {
@@ -5509,10 +5549,21 @@ impl Broker {
                             *leo_map.get(&id).unwrap_or(&0)
                         }
                     },
+                    |id| caught_map.get(&id).copied(),
                 );
                 if isr != old_isr {
                     self.note_isr_delta(&old_isr, &isr);
+                    // Fresh stamp for any newly expanded members.
+                    for &id in &isr {
+                        if !old_isr.contains(&id) && id != part.leader {
+                            part.follower_caught_up_at.insert(id, Instant::now());
+                        }
+                    }
+                    // Drop stamps for members that left.
+                    part.follower_caught_up_at
+                        .retain(|id, _| isr.contains(id) || *id == part.leader);
                 }
+                self.note_isr_time_shrink(time_n);
                 part.isr = isr;
                 part.recompute_hwm(self.node_id);
 
@@ -5673,6 +5724,7 @@ impl Broker {
         };
         let asg = cluster.assignment.read().clone();
         let max_lag = cluster.config.replica_lag_max_messages;
+        let max_lag_ms = self.effective_replica_lag_max_ms();
         let live: HashSet<u32> = cluster
             .membership
             .read()
@@ -5690,9 +5742,14 @@ impl Broker {
             });
             topic.id = TopicId(ta.topic_id);
             for (pid, pa) in &ta.partitions {
-                // Snapshot leader-local ISR / LEO before assignment overwrite.
+                // Snapshot leader-local ISR / LEO / caught-up before assignment overwrite.
                 let prev = topic.partitions.get(&PartitionId(*pid)).map(|p| {
-                    (p.isr.clone(), p.follower_leo.clone(), p.committed_hwm)
+                    (
+                        p.isr.clone(),
+                        p.follower_leo.clone(),
+                        p.follower_caught_up_at.clone(),
+                        p.committed_hwm,
+                    )
                 });
                 topic.ensure_partition(
                     PartitionId(*pid),
@@ -5706,10 +5763,13 @@ impl Broker {
                 if let Some(part) = topic.partitions.get_mut(&PartitionId(*pid)) {
                     if part.is_leader(self.node_id) {
                         let before = part.committed_hwm;
-                        if let Some((prev_isr, prev_leo, prev_hwm)) = prev {
-                            // Restore LEO observations for candidates we may keep.
+                        if let Some((prev_isr, prev_leo, prev_caught, prev_hwm)) = prev {
+                            // Restore LEO / caught-up observations for candidates we may keep.
                             for (id, leo) in &prev_leo {
                                 part.follower_leo.entry(*id).or_insert(*leo);
+                            }
+                            for (id, at) in &prev_caught {
+                                part.follower_caught_up_at.entry(*id).or_insert(*at);
                             }
                             let leader_leo = part.leo();
                             let hwm = part.committed_hwm.max(prev_hwm);
@@ -5728,7 +5788,8 @@ impl Broker {
                                 }
                             }
                             let leo_map = part.follower_leo.clone();
-                            let reconciled = shrink_isr(
+                            let caught_map = part.follower_caught_up_at.clone();
+                            let after_offset = shrink_isr(
                                 part.leader,
                                 &isr,
                                 leader_leo,
@@ -5741,13 +5802,30 @@ impl Broker {
                                     }
                                 },
                             );
+                            let now = Instant::now();
+                            let reconciled = shrink_isr_by_time(
+                                part.leader,
+                                &after_offset,
+                                max_lag_ms,
+                                now,
+                                |id| caught_map.get(&id).copied(),
+                            );
+                            let mut time_n = 0u64;
+                            for &id in &after_offset {
+                                if id != part.leader && !reconciled.contains(&id) {
+                                    time_n += 1;
+                                }
+                            }
                             if reconciled != part.isr {
                                 self.note_isr_delta(&part.isr, &reconciled);
                                 part.isr = reconciled;
                             }
+                            self.note_isr_time_shrink(time_n);
                         }
-                        // Drop LEO entries for brokers no longer in ISR.
+                        // Drop LEO / caught-up entries for brokers no longer in ISR.
                         part.follower_leo.retain(|id, _| part.isr.contains(id));
+                        part.follower_caught_up_at
+                            .retain(|id, _| part.isr.contains(id));
                         if part.isr.len() <= 1 {
                             part.catch_up_hwm();
                         } else {
@@ -5796,6 +5874,7 @@ impl Broker {
                 let before = part.isr.len();
                 part.isr.retain(|id| *id != dead_id);
                 part.follower_leo.remove(&dead_id);
+                part.follower_caught_up_at.remove(&dead_id);
                 if part.isr.len() == before {
                     continue;
                 }
@@ -6132,6 +6211,9 @@ impl Broker {
     }
 
     /// Force-set follower LEO and recompute HWM (unit tests).
+    ///
+    /// Also stamps last-caught-up when lag ≤ `replica_lag_max_messages` so Phase
+    /// 125 time-lag tests can control the clock via sleep after a fresh stamp.
     pub fn test_set_follower_leo(
         &self,
         topic: &TopicName,
@@ -6148,8 +6230,43 @@ impl Broker {
             .get_mut(&partition)
             .ok_or_else(|| Error::NotFound(format!("partition {partition}")))?;
         part.follower_leo.insert(replica_id, leo);
+        let max_lag = self
+            .cluster
+            .as_ref()
+            .map(|c| c.config.replica_lag_max_messages)
+            .unwrap_or(u64::MAX);
+        let leader_leo = part.leo();
+        if leader_leo.saturating_sub(leo) <= max_lag {
+            part.follower_caught_up_at
+                .insert(replica_id, Instant::now());
+        }
         part.recompute_hwm(self.node_id);
         self.hwm_cvar.notify_all();
+        Ok(())
+    }
+
+    /// Force last-caught-up timestamp age for tests (Phase 125).
+    ///
+    /// Sets `follower_caught_up_at[replica_id] = now - age_ms`.
+    pub fn test_set_follower_caught_up_age_ms(
+        &self,
+        topic: &TopicName,
+        partition: PartitionId,
+        replica_id: u32,
+        age_ms: u64,
+    ) -> Result<()> {
+        let mut topics = self.topics.write();
+        let t = topics
+            .get_mut(topic)
+            .ok_or_else(|| Error::NotFound(format!("topic {}", topic.as_str())))?;
+        let part = t
+            .partitions
+            .get_mut(&partition)
+            .ok_or_else(|| Error::NotFound(format!("partition {partition}")))?;
+        let at = Instant::now()
+            .checked_sub(Duration::from_millis(age_ms))
+            .unwrap_or_else(Instant::now);
+        part.follower_caught_up_at.insert(replica_id, at);
         Ok(())
     }
 
@@ -6483,6 +6600,7 @@ mod tests {
             replica_fetch_max_wait_ms: 50,
             replica_fetch_max_bytes: 1_048_576,
             replica_lag_max_messages: 10_000,
+            replica_lag_max_ms: 30_000,
             brokers: (1..=3)
                 .map(|id| BrokerEndpoint {
                     id,

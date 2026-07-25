@@ -2980,8 +2980,38 @@ crash mid-rename may lose last mutation.
 **Still deferred:** multi-lang clients, chaos-mesh / long fuzz campaigns,
 full KIP-890/939 / `__transaction_state`, Kafka wire fuzz targets, dynamic
 membership / Raft, full Kafka broker catalog, consensus truncate journal /
-controller SoT pending set, per-broker BROKER config overrides, time-based ISR
-lag / preferred replica / shared session registry, registry GC/TTL.
+controller SoT pending set, per-broker BROKER config overrides,
+time-based ISR lag → **closed by Phase 125**, preferred replica / shared
+session registry, registry GC/TTL.
+
+---
+
+### Phase 125 — Time-based ISR lag shrink (MVP) ✅
+
+**Goal:** Alongside Phase 118 offset lag, shrink live but slow ISR members
+whose last caught-up observation is older than a configurable max duration
+(`replica_lag_max_ms`), without blocking honest rejoin once LEO ≥ HWM and
+message lag ≤ threshold.
+
+Binding: **[docs/PHASE125_SPEC.md](./docs/PHASE125_SPEC.md)**.
+
+- [x] `replica_lag_max_ms` in `cluster.toml` (default 30_000; `0` disables) + `VOLANT_REPLICA_LAG_MAX_MS`
+- [x] Per-follower last-caught-up stamps; `shrink_isr_by_time` + `reconcile_isr` time step
+- [x] ReplicaFetch / leader ClusterState apply wire-up
+- [x] Metrics: `volant_isr_time_shrink_total` (+ existing expand/shrink)
+- [x] Tests: `phase125_isr_time_lag` (time shrink, rejoin, message-lag interaction, disabled, single-node)
+- [x] Living docs honesty
+
+**Honest limitations:** not full Kafka `replica.lag.time.max.ms` parity; lazy
+evaluation on reconcile only (no dedicated ISR timer); monotonic process-local
+`Instant`; static membership; preferred-replica still deferred; Metadata ISR may
+lag when leader ≠ controller.
+
+**Still deferred:** multi-lang clients, chaos-mesh / long fuzz campaigns,
+full KIP-890/939 / `__transaction_state`, Kafka wire fuzz targets, dynamic
+membership / Raft, full Kafka broker catalog, consensus truncate journal /
+controller SoT pending set, per-broker BROKER config overrides, preferred
+replica / shared session registry, registry GC/TTL.
 
 ---
 
@@ -3020,7 +3050,7 @@ marker clip 111; fuzz corpus smoke CI 112; cluster admin fan-out 113) — see
 
 ## Suggested implementation order (PRs)
 
-Phases **0–124 are shipped**. Historical PR order for the core:
+Phases **0–125 are shipped**. Historical PR order for the core:
 
 1. Phase 1 segment format + unit tests  
 2. Phase 1 recovery + retention  
@@ -3047,6 +3077,7 @@ Phases **0–124 are shipped**. Historical PR order for the core:
 23. Phase 122 (AddOffsets / TxnOffsetCommit forward MVP) ✅  
 24. Phase 123 (DeleteRecords outbox leadership handoff MVP) ✅  
 25. Phase 124 (durable txn coordinator registry MVP) ✅  
+26. Phase 125 (time-based ISR lag shrink MVP) ✅  
 
 ---
 
@@ -3087,7 +3118,7 @@ cargo run -p volant-bench --release
 cargo test --workspace
 ```
 
-**Status (post–Phase 124):** core broker, ops (metrics / TLS / auth / SCRAM /
+**Status (post–Phase 125):** core broker, ops (metrics / TLS / auth / SCRAM /
 ACLs / Helm), and the Kafka wire shim are **shipped** (Fetch 0–18 Kafka max;
 ACL admin 0–3 with User resource; soft-marker `READ_COMMITTED` with **marker GC/clip**
 on DeleteRecords/retention/load (Phase 104/111); durable OFLE history; Fetch DivergingEpoch +
@@ -3102,7 +3133,8 @@ single-flight bg** Phase 109); BROKER Describe/AlterConfigs
 with **sparse** durable restart restore and resource name empty-or-local-`node_id`
 (Phase 103; **parallel test isolation** Phase 107); **follower-death ISR shrink +
 HWM recompute** Phase 108; **non-controller alive-set auto-death** Phase 110;
-**ISR rejoin + lag-based shrink** Phase 118; **straddle soft-marker clip** Phase 111;
+**ISR rejoin + lag-based shrink** Phase 118 + **time-based ISR lag** Phase 125;
+**straddle soft-marker clip** Phase 111;
 **cargo-fuzz corpus smoke + CI MVP** Phase 112; **cluster admin fan-out** Phase 113
 (DeleteRecords best-effort replica truncate; controller-only BROKER config + ACL
 snapshot push); **multi-broker 2PC MVP** Phase 114 (inter-broker prepare/complete;

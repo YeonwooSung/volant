@@ -100,14 +100,15 @@ workers.
 | Multi-broker (119) | Cluster session_id encodes owner; peer miss → transparent inter-broker Fetch forward |
 | Errors | 70 session id not found (incl. after TTL/LRU / dead owner); 71 invalid session epoch |
 
-## Cluster ISR (Phase 6 + 108/110/118)
+## Cluster ISR (Phase 6 + 108/110/118/125)
 
 | Feature | Behavior |
 |---------|----------|
 | Death shrink | Follower death → local ISR drop + HWM recompute on every observer (Phase 108); non-controllers also via alive-set / expire (Phase 110) |
 | Lag shrink | On `ReplicaFetch`, in-ISR members with lag > `replica_lag_max_messages` leave ISR even if alive (Phase 118) |
-| Rejoin | Recovering follower re-enters when fetch LEO ≥ HWM and lag ≤ `replica_lag_max_messages` (Phase 118) |
-| Metrics | `volant_isr_expand_total`, `volant_isr_shrink_total` |
+| Time lag shrink | On `ReplicaFetch` / leader apply, members whose last caught-up stamp is older than `replica_lag_max_ms` (default 30s; `0` off) leave ISR even if message lag is within threshold (Phase 125) |
+| Rejoin | Recovering follower re-enters when fetch LEO ≥ HWM and lag ≤ `replica_lag_max_messages` (Phase 118); time lag does not block rejoin once caught up |
+| Metrics | `volant_isr_expand_total`, `volant_isr_shrink_total`, `volant_isr_time_shrink_total` |
 
 ## Cluster admin fan-out (Phase 113)
 
@@ -137,7 +138,7 @@ workers.
 - Multi-language clients deferred  
 - Long fuzz campaigns / chaos-mesh deferred (corpus smoke CI MVP: Phase 112)  
 - No Raft metadata / dynamic membership  
-- ISR rejoin/lag shrink yes (Phase 118; offset lag only; Metadata may lag when leader ≠ controller)  
+- ISR rejoin/lag shrink yes (Phase 118 offset + Phase 125 time lag via `replica_lag_max_ms`; Metadata may lag when leader ≠ controller; not full Kafka replica.lag.time.max.ms)  
 - Crash≡abort control batches yes (Phase 98); empty AddPartitions control yes (Phase 105)  
 - Prepared 2PC multi-broker MVP yes (Phase 114; **not** full KIP-890/939 / `__transaction_state` topic); prepared timeout yes (Phase 92); open-txn timeout yes (Phase 93); TRANSACTION_ABORTABLE honest subset after timeout (Phase 94; FindCoordinator never); transaction max timeout clamp yes (Phase 96; default 15m; Init **50** over-max)  
 - Transparent EndTxn + AddOffsets + TxnOffsetCommit forward yes (Phase 120/122; Init-owner registry + inter-broker); sticky FindCoordinator yes (Phase 121; murmur2 + registry override); pin Init still recommended if client skips FindCoordinator

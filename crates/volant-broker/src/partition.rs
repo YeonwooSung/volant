@@ -1,6 +1,7 @@
 //! Single partition handle with replica metadata.
 
 use std::collections::HashMap;
+use std::time::Instant;
 
 use volant_core::PartitionId;
 use volant_storage::PartitionLog;
@@ -24,6 +25,9 @@ pub struct Partition {
     pub committed_hwm: u64,
     /// Follower LEOs observed by the leader (`replica_id → LEO`).
     pub follower_leo: HashMap<u32, u64>,
+    /// Last time a follower was observed with lag ≤ `replica_lag_max_messages`
+    /// (Phase 125 time-based ISR shrink).
+    pub follower_caught_up_at: HashMap<u32, Instant>,
 }
 
 impl Partition {
@@ -38,6 +42,7 @@ impl Partition {
             leader_epoch: 0,
             committed_hwm: 0,
             follower_leo: HashMap::new(),
+            follower_caught_up_at: HashMap::new(),
         }
     }
 

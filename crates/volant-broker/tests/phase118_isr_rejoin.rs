@@ -33,6 +33,7 @@ fn cluster_config(session_timeout_ms: u32, lag_max: u64) -> ClusterConfig {
         replica_fetch_max_wait_ms: 50,
         replica_fetch_max_bytes: 1_048_576,
         replica_lag_max_messages: lag_max,
+        replica_lag_max_ms: 30_000,
         brokers: vec![
             BrokerEndpoint {
                 id: 1,

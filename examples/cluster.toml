@@ -7,6 +7,7 @@ session_timeout_ms = 3000
 replica_fetch_max_wait_ms = 500
 replica_fetch_max_bytes = 1048576
 replica_lag_max_messages = 10000
+replica_lag_max_ms = 30000
 
 [[brokers]]
 id = 1

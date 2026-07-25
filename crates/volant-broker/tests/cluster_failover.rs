@@ -49,6 +49,7 @@ async fn three_node_acks_all_survives_leader_kill() {
         replica_fetch_max_wait_ms: 50,
         replica_fetch_max_bytes: 1_048_576,
         replica_lag_max_messages: 10_000,
+        replica_lag_max_ms: 30_000,
         brokers: vec![
             BrokerEndpoint {
                 id: 1,
@@ -300,6 +301,7 @@ async fn follower_rejects_produce() {
         replica_fetch_max_wait_ms: 50,
         replica_fetch_max_bytes: 1_048_576,
         replica_lag_max_messages: 10_000,
+        replica_lag_max_ms: 30_000,
         brokers: vec![
             BrokerEndpoint {
                 id: 1,

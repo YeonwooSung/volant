@@ -7,7 +7,7 @@ pub mod state;
 
 pub use assignment::{
     assign_replicas, compute_hwm, elect_leader, expand_isr, isr_rejoin_eligible, reconcile_isr,
-    shrink_isr, topic_hash,
+    shrink_isr, shrink_isr_by_time, topic_hash,
 };
 pub use config::{BrokerEndpoint, ClusterConfig};
 pub use membership::Membership;
