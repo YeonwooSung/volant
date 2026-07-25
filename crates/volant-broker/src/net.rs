@@ -475,6 +475,47 @@ fn broker_metrics_text(broker: &Broker) -> String {
         "volant_delete_records_fanout_errors_total {}\n",
         broker.delete_records_fanout_errors_total()
     ));
+    // Phase 116: durable DeleteRecords outbox for offline / failed peers.
+    text.push_str(
+        "# HELP volant_delete_records_outbox_depth Pending DeleteRecords truncates for peers\n",
+    );
+    text.push_str("# TYPE volant_delete_records_outbox_depth gauge\n");
+    text.push_str(&format!(
+        "volant_delete_records_outbox_depth {}\n",
+        broker.delete_records_outbox_depth()
+    ));
+    text.push_str(
+        "# HELP volant_delete_records_outbox_enqueued_total DeleteRecords outbox enqueues\n",
+    );
+    text.push_str("# TYPE volant_delete_records_outbox_enqueued_total counter\n");
+    text.push_str(&format!(
+        "volant_delete_records_outbox_enqueued_total {}\n",
+        broker.delete_records_outbox_enqueued_total()
+    ));
+    text.push_str(
+        "# HELP volant_delete_records_outbox_retry_success_total Successful outbox drains\n",
+    );
+    text.push_str("# TYPE volant_delete_records_outbox_retry_success_total counter\n");
+    text.push_str(&format!(
+        "volant_delete_records_outbox_retry_success_total {}\n",
+        broker.delete_records_outbox_retry_success_total()
+    ));
+    text.push_str(
+        "# HELP volant_delete_records_outbox_retry_errors_total Failed outbox drain RPCs\n",
+    );
+    text.push_str("# TYPE volant_delete_records_outbox_retry_errors_total counter\n");
+    text.push_str(&format!(
+        "volant_delete_records_outbox_retry_errors_total {}\n",
+        broker.delete_records_outbox_retry_errors_total()
+    ));
+    text.push_str(
+        "# HELP volant_delete_records_outbox_drops_total Outbox enqueues dropped at capacity\n",
+    );
+    text.push_str("# TYPE volant_delete_records_outbox_drops_total counter\n");
+    text.push_str(&format!(
+        "volant_delete_records_outbox_drops_total {}\n",
+        broker.delete_records_outbox_drops_total()
+    ));
     text.push_str(
         "# HELP volant_cluster_config_push_errors_total BROKER config fan-out failures\n",
     );
@@ -683,6 +724,26 @@ pub fn start_background_tasks(broker: Arc<Broker>) -> BackgroundTasks {
             }));
         }
 
+        // Phase 116: drain durable DeleteRecords outbox for live peers.
+        {
+            let b = Arc::clone(&broker);
+            let mut stop_rx = stop_tx.subscribe();
+            handles.push(tokio::spawn(async move {
+                let mut interval = tokio::time::interval(Duration::from_millis(500));
+                loop {
+                    tokio::select! {
+                        _ = stop_rx.changed() => break,
+                        _ = interval.tick() => {
+                            if b.delete_records_outbox_depth() == 0 {
+                                continue;
+                            }
+                            drain_delete_records_outbox(&b).await;
+                        }
+                    }
+                }
+            }));
+        }
+
         // Follower ReplicaFetch loops.
         handles.push(run_follower_loops(broker, stop_tx.subscribe()));
     }
@@ -872,11 +933,12 @@ pub async fn fanout_cluster_broker_config(
     }
 }
 
-/// Best-effort DeleteRecords fan-out to other replicas (Phase 113 PR2).
+/// Best-effort DeleteRecords fan-out to other replicas (Phase 113 PR2 + Phase 116).
 ///
 /// One synchronous attempt per peer after a successful **leader** local truncate.
-/// Failures increment [`Broker::delete_records_fanout_errors_total`] and never
-/// fail the client path. No-op in single-node mode.
+/// Failures increment [`Broker::delete_records_fanout_errors_total`], enqueue a
+/// durable outbox entry (Phase 116), and never fail the client path.
+/// No-op in single-node mode.
 pub async fn fanout_delete_records(
     broker: &Broker,
     topic: &str,
@@ -898,7 +960,14 @@ pub async fn fanout_delete_records(
             Ok(Response::ReplicaDeleteRecords {
                 error_code: 0,
                 ..
-            }) => {}
+            }) => {
+                // Clear any prior pending for this peer/tp (idempotent success).
+                broker.delete_records_outbox().drop_entry(
+                    replica_id,
+                    topic,
+                    partition,
+                );
+            }
             Ok(Response::ReplicaDeleteRecords {
                 error_code,
                 low_watermark,
@@ -913,6 +982,22 @@ pub async fn fanout_delete_records(
                     "delete records fan-out peer error"
                 );
                 broker.note_delete_records_fanout_error();
+                // Stale epoch fence: do not keep retrying with old epoch.
+                if error_code == ErrorCode::InvalidProducerEpoch as u16 {
+                    broker.delete_records_outbox().drop_entry(
+                        replica_id,
+                        topic,
+                        partition,
+                    );
+                } else {
+                    broker.enqueue_delete_records_outbox(
+                        replica_id,
+                        topic,
+                        partition,
+                        before_offset,
+                        leader_epoch,
+                    );
+                }
             }
             Ok(other) => {
                 warn!(
@@ -924,6 +1009,13 @@ pub async fn fanout_delete_records(
                     "delete records fan-out unexpected response"
                 );
                 broker.note_delete_records_fanout_error();
+                broker.enqueue_delete_records_outbox(
+                    replica_id,
+                    topic,
+                    partition,
+                    before_offset,
+                    leader_epoch,
+                );
             }
             Err(e) => {
                 warn!(
@@ -935,6 +1027,103 @@ pub async fn fanout_delete_records(
                     "delete records fan-out rpc failed"
                 );
                 broker.note_delete_records_fanout_error();
+                broker.enqueue_delete_records_outbox(
+                    replica_id,
+                    topic,
+                    partition,
+                    before_offset,
+                    leader_epoch,
+                );
+            }
+        }
+    }
+}
+
+/// Drain durable DeleteRecords outbox for currently live peers (Phase 116).
+///
+/// At-least-once retry of `ReplicaDeleteRecords`. Success removes the entry;
+/// transport / peer errors leave it and increment retry-error metrics.
+/// No-op when the outbox is empty or the broker is single-node with no pending.
+pub async fn drain_delete_records_outbox(broker: &Broker) {
+    let pending = broker.delete_records_outbox_pending_live();
+    if pending.is_empty() {
+        return;
+    }
+    for entry in pending {
+        let Some(addr) = broker.broker_addr(entry.replica_id) else {
+            continue;
+        };
+        let req = Request::ReplicaDeleteRecords {
+            topic: entry.topic.clone(),
+            partition: entry.partition,
+            before_offset: entry.before_offset,
+            leader_epoch: entry.leader_epoch,
+        };
+        match inter_broker_rpc(broker, &addr, &req).await {
+            Ok(Response::ReplicaDeleteRecords {
+                error_code: 0,
+                ..
+            }) => {
+                broker.delete_records_outbox().note_retry_success(
+                    entry.replica_id,
+                    &entry.topic,
+                    entry.partition,
+                    entry.before_offset,
+                );
+            }
+            Ok(Response::ReplicaDeleteRecords {
+                error_code,
+                low_watermark,
+            }) => {
+                if error_code == ErrorCode::InvalidProducerEpoch as u16 {
+                    // Stale epoch — drop; operator / new leader re-issue covers it.
+                    broker.delete_records_outbox().drop_entry(
+                        entry.replica_id,
+                        &entry.topic,
+                        entry.partition,
+                    );
+                    warn!(
+                        replica_id = entry.replica_id,
+                        topic = %entry.topic,
+                        partition = entry.partition,
+                        error_code,
+                        low_watermark,
+                        "delete records outbox drain fenced; dropping entry"
+                    );
+                } else {
+                    warn!(
+                        replica_id = entry.replica_id,
+                        %addr,
+                        error_code,
+                        low_watermark,
+                        topic = %entry.topic,
+                        partition = entry.partition,
+                        "delete records outbox drain peer error"
+                    );
+                    broker.delete_records_outbox().note_retry_error();
+                }
+            }
+            Ok(other) => {
+                warn!(
+                    replica_id = entry.replica_id,
+                    %addr,
+                    ?other,
+                    topic = %entry.topic,
+                    partition = entry.partition,
+                    "delete records outbox drain unexpected response"
+                );
+                broker.delete_records_outbox().note_retry_error();
+            }
+            Err(e) => {
+                debug!(
+                    replica_id = entry.replica_id,
+                    %addr,
+                    error = %e,
+                    topic = %entry.topic,
+                    partition = entry.partition,
+                    "delete records outbox drain rpc failed"
+                );
+                broker.delete_records_outbox().note_retry_error();
             }
         }
     }

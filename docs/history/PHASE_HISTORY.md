@@ -1,6 +1,6 @@
 # Phase history index
 
-Ship records for **phases 0–115**. Binding core contracts are
+Ship records for **phases 0–116**. Binding core contracts are
 **[PHASE1_SPEC](../PHASE1_SPEC.md)–[PHASE6_SPEC](../PHASE6_SPEC.md)**. Living
 docs for day-to-day reading: [ops](../ops.md), [consistency](../consistency.md),
 [tuning](../tuning.md), [KAFKA_COMPAT](../KAFKA_COMPAT.md),
@@ -157,10 +157,11 @@ docs for day-to-day reading: [ops](../ops.md), [consistency](../consistency.md),
 | 113 | ✅ | Cluster admin fan-out MVP (DeleteRecords + BROKER config + ACL snapshot) | [PHASE113_SPEC.md](../PHASE113_SPEC.md) |
 | 114 | ✅ | Multi-broker 2PC / KIP-890-ish MVP (Enable2Pc prepare/complete across leaders) | [PHASE114_SPEC.md](../PHASE114_SPEC.md) |
 | 115 | ✅ | Durable fetch sessions MVP (per-broker `__fetch_sessions`; restart restore; not multi-broker sticky) | [PHASE115_SPEC.md](../PHASE115_SPEC.md) |
+| 116 | ✅ | Durable DeleteRecords outbox for offline replicas (leader-local pending + live drain) | [PHASE116_SPEC.md](../PHASE116_SPEC.md) |
 
 ---
 
-## Still deferred (post–Phase 115)
+## Still deferred (post–Phase 116)
 
 - Multi-language clients
 - Chaos-mesh / long fuzz campaigns (corpus **smoke CI** → **closed by Phase 112**)
@@ -172,6 +173,7 @@ docs for day-to-day reading: [ops](../ops.md), [consistency](../consistency.md),
 - Drain native / Kafka / metrics accept loops on shutdown → **closed by Phase 109**
 - Multi-broker BROKER config fan-out → **closed by Phase 113** (controller push; homogeneous knobs)
 - DeleteRecords follower fan-out → **closed by Phase 113** (best-effort)
+- Durable pending DeleteRecords for offline replicas → **closed by Phase 116** (leader outbox + retry)
 - Cluster ACL snapshot fan-out → **closed by Phase 113** (controller SoT; not Raft consensus)
 - Single-flight / idempotent `start_background_tasks` → **closed by Phase 109**
 - Non-controller auto-death from alive-set diffs → **closed by Phase 110**
@@ -180,5 +182,5 @@ docs for day-to-day reading: [ops](../ops.md), [consistency](../consistency.md),
 - Multi-broker Enable2Pc prepare/complete fan-out → **closed by Phase 114**
 - Durable local fetch sessions → **closed by Phase 115**
 - Transparent EndTxn forward to txn coordinator
-- Durable pending DeleteRecords queue for down replicas
+- Outbox handoff on leadership change / consensus truncate log
 - Per-broker BROKER config overrides / multi-master ACL merge

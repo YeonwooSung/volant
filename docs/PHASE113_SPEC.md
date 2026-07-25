@@ -409,7 +409,8 @@ for cluster control-plane code.
 - Multi-broker **2PC** / full KIP-890 abortable surface → **closed by Phase 114 (MVP)**; full KIP-890/939 still deferred
 - Multi-broker session affinity / durable fetch sessions  
 - Dynamic membership / Raft metadata  
-- Durable pending DeleteRecords queue for down replicas  
+- Durable pending DeleteRecords queue for down replicas → **closed by Phase 116**  
+
 - Per-broker BROKER config overrides  
 - Inter-broker RPC ACL gating  
 - Long fuzz / chaos-mesh / multi-lang clients  

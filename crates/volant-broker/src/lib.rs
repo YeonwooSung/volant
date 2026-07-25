@@ -20,6 +20,8 @@ pub mod broker;
 /// Broker-level Kafka Describe/AlterConfigs keys + durable store (Phase 99–100).
 pub mod broker_config;
 pub mod cluster;
+/// Durable DeleteRecords pending-truncate outbox (Phase 116).
+pub mod delete_records_outbox;
 pub mod group;
 /// Kafka wire protocol shim (Phase 23 MVP).
 pub mod kafka;
@@ -71,10 +73,15 @@ pub use broker_config::{
 pub use leader_epoch::{EpochStart, LeaderEpochStore, LeaderEpochsFile};
 pub use kafka::{serve_kafka_listener, serve_kafka_listener_until};
 pub use metrics::Metrics;
+pub use delete_records_outbox::{
+    DeleteRecordsOutbox, OutboxEntry, DEFAULT_MAX_ENTRIES as DELETE_RECORDS_OUTBOX_MAX_ENTRIES,
+    OUTBOX_DIR as DELETE_RECORDS_OUTBOX_DIR, OUTBOX_FILE as DELETE_RECORDS_OUTBOX_FILE,
+};
 pub use net::{
-    fanout_cluster_acl_snapshot, fanout_cluster_broker_config, fanout_delete_records,
-    fanout_txn_participant_complete, fanout_txn_participant_open, fanout_txn_participant_prepare,
-    run_metrics_server, run_metrics_server_until, run_server, run_txn_2pc_fanout, serve_listener,
-    serve_listener_until, shutdown_signal, start_background_tasks, BackgroundTasks,
+    drain_delete_records_outbox, fanout_cluster_acl_snapshot, fanout_cluster_broker_config,
+    fanout_delete_records, fanout_txn_participant_complete, fanout_txn_participant_open,
+    fanout_txn_participant_prepare, run_metrics_server, run_metrics_server_until, run_server,
+    run_txn_2pc_fanout, serve_listener, serve_listener_until, shutdown_signal,
+    start_background_tasks, BackgroundTasks,
 };
 pub use offset_store::{OffsetStore, StoredOffset, OFFSET_UNKNOWN};

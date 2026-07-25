@@ -103,7 +103,7 @@ workers.
 
 | Feature | Behavior |
 |---------|----------|
-| DeleteRecords fan-out | Partition **leader** truncates locally, then best-effort `ReplicaDeleteRecords` to other replicas (soft-marker GC/clip on peers). Client success does not wait on peer RPC success. Metric `volant_delete_records_fanout_errors_total` |
+| DeleteRecords fan-out | Partition **leader** truncates locally, then best-effort `ReplicaDeleteRecords` to other replicas (soft-marker GC/clip on peers). Client success does not wait on peer RPC success. Metric `volant_delete_records_fanout_errors_total`. **Phase 116:** failed peers are enqueued under `{data_dir}/__delete_records_outbox` and retried when live (at-least-once; leader-local only) |
 | BROKER config fan-out | Cluster **controller-only** Alter / IncrementalAlter for the six Phase 99 knobs; generationed push to live peers; sparse durable on each node. Non-controller → `NotController` / Kafka **41** |
 | ACL snapshot fan-out | Cluster **controller-only** Create/Delete Acls; generationed full snapshot push; peers install + persist `__acls`. List/authorize remain local after apply |
 
@@ -127,7 +127,8 @@ workers.
 - Clients should pin Init/Begin/EndTxn to the coordinator broker that allocated the producer (no transparent EndTxn forward yet)  
 - Fetch sessions not durable / multi-broker sticky; omit cache is HWM+LSO only (not byte-identical Kafka response cache); idle TTL + max/LRU yes (Phase 95)  
 - ACL / BROKER admin SoT is the **controller** (Phase 113 push), not Raft consensus; brief lag on controller failover  
-- DeleteRecords fan-out is **best-effort** (no durable pending truncate for down replicas)  
+- DeleteRecords fan-out is **best-effort** for the client path; offline peers get **durable leader outbox retry** (Phase 116) — not a consensus truncate log / no outbox handoff on leadership change  
+
 - Compaction simpler than Kafka (no tombstone retention window)  
 - Inter-broker not ACL-gated; uses shared-token when configured  
 

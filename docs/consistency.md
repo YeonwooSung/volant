@@ -109,10 +109,13 @@ Without `--cluster-config`, the broker runs as a single node:
   REQUEST_TIMED_OUT solely because a dead follower still held a stale LEO in
   the ISR set. If `|ISR|` falls below `min_insync_replicas`, produce is still
   rejected with `NotEnoughReplicas`.
-- **Cluster admin fan-out (Phase 113):**
+- **Cluster admin fan-out (Phase 113 + 116):**
   - **DeleteRecords:** only the partition **leader** accepts the client RPC;
     after local truncate it best-effort RPCs other replicas. Peer failure does
-    not fail the client; log starts may briefly diverge until retry or re-issue.
+    not fail the client. Failed targets are recorded in a **leader-local durable
+    outbox** (`__delete_records_outbox`, Phase 116) and retried at-least-once
+    when the peer is live again — not a consensus truncate log; leadership
+    change does not transfer the old leader’s pending set.
   - **BROKER config / ACL mutate:** controller is SoT; non-controllers return
     `NotController`. Successful controller mutates push generationed state to
     live peers (config knobs or full ACL snapshot). Describe / authorize use
@@ -124,4 +127,5 @@ Without `--cluster-config`, the broker runs as a single node:
 
 See [PHASE6_SPEC.md](./PHASE6_SPEC.md) for wire protocol and configuration details.
 Admin fan-out detail: [PHASE113_SPEC.md](./PHASE113_SPEC.md).
+DeleteRecords outbox: [PHASE116_SPEC.md](./PHASE116_SPEC.md).
 Multi-broker 2PC detail: [PHASE114_SPEC.md](./PHASE114_SPEC.md).

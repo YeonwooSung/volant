@@ -2648,10 +2648,11 @@ Binding: **[docs/PHASE113_SPEC.md](./docs/PHASE113_SPEC.md)**.
       `phase113_acl_fanout`
 - [x] Living docs honesty
 
-**Honest limitations:** DeleteRecords fan-out is best-effort (no durable pending
-queue); BROKER knobs are homogeneous (not per-broker overrides); ACL/config rely
-on controller liveness (brief lag on failover); inter-broker admin RPCs are not
-ACL-gated (shared-token / TLS only); multi-broker 2PC → **closed by Phase 114**.
+**Honest limitations (at Phase 113 ship):** DeleteRecords fan-out is best-effort
+(no durable pending queue → **closed by Phase 116**); BROKER knobs are
+homogeneous (not per-broker overrides); ACL/config rely on controller liveness
+(brief lag on failover); inter-broker admin RPCs are not ACL-gated (shared-token /
+TLS only); multi-broker 2PC → **closed by Phase 114**.
 
 **Still deferred (at Phase 113 ship):** multi-lang clients, chaos-mesh / long fuzz
 campaigns, multi-broker 2PC / session affinity / durable sessions, Kafka wire
@@ -2712,7 +2713,36 @@ not a Kafka shared consumer-session store; pin Fetch to session-owner broker.
 multi-broker session handoff / affinity routing, full KIP-890/939 /
 `__transaction_state`, Kafka wire fuzz targets, dynamic membership / Raft
 metadata, full Kafka broker catalog, transparent EndTxn forward, byte-identical
-response cache, debounced session persist.
+response cache, debounced session persist,
+durable pending DeleteRecords for offline replicas → **closed by Phase 116**.
+
+---
+
+### Phase 116 — Durable DeleteRecords outbox for offline replicas (MVP) ✅
+
+**Goal:** When DeleteRecords fan-out fails (offline / flaky peer), remember the
+pending truncate on the leader under `{data_dir}/__delete_records_outbox` and
+retry via `ReplicaDeleteRecords` so peer log starts catch up after the peer
+returns. Client success remains independent of fan-out (Phase 113).
+
+Binding: **[docs/PHASE116_SPEC.md](./docs/PHASE116_SPEC.md)**.
+
+- [x] Durable outbox snapshot `{data_dir}/__delete_records_outbox/state.json`
+- [x] Enqueue on Phase 113 fan-out failure (merge max `before_offset` per peer/tp)
+- [x] Background drain for live peers (~500ms) + explicit `drain_delete_records_outbox`
+- [x] Metrics: depth, enqueued, retry success/errors, capacity drops
+- [x] Tests: `phase116_delete_records_outbox` (offline catch-up, enqueue, drain, unit)
+- [x] Living docs honesty
+
+**Honest limitations:** leader-local outbox only (not consensus / not controller
+SoT); leadership change does not transfer the old leader’s pending set; bounded
+10k keys; whole-segment truncate only; not multi-DC.
+
+**Still deferred:** multi-lang clients, chaos-mesh / long fuzz campaigns,
+multi-broker session handoff, full KIP-890/939 / `__transaction_state`, Kafka
+wire fuzz targets, dynamic membership / Raft, full Kafka broker catalog,
+transparent EndTxn forward, outbox handoff on leadership change, per-broker
+BROKER config overrides.
 
 ---
 
@@ -2751,7 +2781,7 @@ marker clip 111; fuzz corpus smoke CI 112; cluster admin fan-out 113) — see
 
 ## Suggested implementation order (PRs)
 
-Phases **0–115 are shipped**. Historical PR order for the core:
+Phases **0–116 are shipped**. Historical PR order for the core:
 
 1. Phase 1 segment format + unit tests  
 2. Phase 1 recovery + retention  
@@ -2769,6 +2799,7 @@ Phases **0–115 are shipped**. Historical PR order for the core:
 14. Phase 113 (cluster admin fan-out: DeleteRecords + BROKER config + ACL snapshot) ✅  
 15. Phase 114 (multi-broker Enable2Pc prepare/complete MVP) ✅  
 16. Phase 115 (durable local fetch sessions MVP) ✅  
+17. Phase 116 (durable DeleteRecords outbox for offline replicas MVP) ✅  
 
 ---
 
@@ -2809,7 +2840,7 @@ cargo run -p volant-bench --release
 cargo test --workspace
 ```
 
-**Status (post–Phase 115):** core broker, ops (metrics / TLS / auth / SCRAM /
+**Status (post–Phase 116):** core broker, ops (metrics / TLS / auth / SCRAM /
 ACLs / Helm), and the Kafka wire shim are **shipped** (Fetch 0–18 Kafka max;
 ACL admin 0–3 with User resource; soft-marker `READ_COMMITTED` with **marker GC/clip**
 on DeleteRecords/retention/load (Phase 104/111); durable OFLE history; Fetch DivergingEpoch +
@@ -2828,7 +2859,9 @@ HWM recompute** Phase 108; **non-controller alive-set auto-death** Phase 110; **
 (DeleteRecords best-effort replica truncate; controller-only BROKER config + ACL
 snapshot push); **multi-broker 2PC MVP** Phase 114 (inter-broker prepare/complete;
 controller cluster prepared index — not full KIP-890 / `__transaction_state`);
-**durable fetch sessions** Phase 115 (`__fetch_sessions`; not multi-broker sticky)).
+**durable fetch sessions** Phase 115 (`__fetch_sessions`; not multi-broker sticky);
+**durable DeleteRecords outbox** Phase 116 (`__delete_records_outbox`; at-least-once
+retry for offline peers — not a consensus truncate log)).
 Still deferred: multi-language clients, full chaos-mesh suites / long fuzz
 campaigns, multi-broker session handoff, full KIP-890/939.
 Details: [docs/KAFKA_COMPAT.md](./docs/KAFKA_COMPAT.md), [docs/ops.md](./docs/ops.md).

@@ -42,6 +42,7 @@ use crate::broker_config::{
     self, KEY_FETCH_SESSION_IDLE_MS, KEY_FETCH_SESSION_MAX, KEY_OPEN_TXN_TIMEOUT_MS,
     KEY_PREPARED_TXN_TIMEOUT_MS, KEY_SWEEP_INTERVAL_MS, KEY_TRANSACTION_MAX_TIMEOUT_MS,
 };
+use crate::delete_records_outbox::DeleteRecordsOutbox;
 use crate::topic::Topic;
 use crate::topic_catalog::{CatalogTopic, TopicCatalogFile, TopicCatalogStore};
 use crate::topic_config::{TopicConfig, TopicConfigStore};
@@ -499,6 +500,8 @@ pub struct Broker {
     txn_2pc_fanout_errors_total: AtomicU64,
     /// Controller cluster prepared index (Phase 114); identity + decision only.
     cluster_prepared_index: Mutex<HashMap<String, ClusterPreparedEntry>>,
+    /// Durable pending DeleteRecords truncates for offline/failed peers (Phase 116).
+    delete_records_outbox: DeleteRecordsOutbox,
 }
 
 /// Controller-side multi-broker prepared index entry (Phase 114).
@@ -583,6 +586,8 @@ impl Broker {
             .expect("failed to open leader epoch store");
         // Phase 115: durable fetch sessions under data_dir/__fetch_sessions.
         let fetch_sessions = FetchSessionManager::open(&storage.data_dir);
+        // Phase 116: durable DeleteRecords outbox (empty in single-node use).
+        let delete_records_outbox = DeleteRecordsOutbox::open(&storage.data_dir);
         let broker = Self {
             storage,
             topics: RwLock::new(HashMap::new()),
@@ -632,6 +637,7 @@ impl Broker {
             cluster_acl_push_errors_total: AtomicU64::new(0),
             txn_2pc_fanout_errors_total: AtomicU64::new(0),
             cluster_prepared_index: Mutex::new(HashMap::new()),
+            delete_records_outbox,
         };
         broker
             .reload_single_node_topics()
@@ -696,6 +702,8 @@ impl Broker {
             .expect("failed to open leader epoch store");
         // Phase 115: durable fetch sessions under data_dir/__fetch_sessions.
         let fetch_sessions = FetchSessionManager::open(&storage.data_dir);
+        // Phase 116: durable DeleteRecords outbox under data_dir.
+        let delete_records_outbox = DeleteRecordsOutbox::open(&storage.data_dir);
         let broker = Self {
             storage,
             topics: RwLock::new(HashMap::new()),
@@ -745,6 +753,7 @@ impl Broker {
             cluster_acl_push_errors_total: AtomicU64::new(0),
             txn_2pc_fanout_errors_total: AtomicU64::new(0),
             cluster_prepared_index: Mutex::new(HashMap::new()),
+            delete_records_outbox,
         };
         // Open local partitions from persisted assignment.
         broker.apply_local_assignment()?;
@@ -807,6 +816,60 @@ impl Broker {
     pub fn note_delete_records_fanout_error(&self) {
         self.delete_records_fanout_errors_total
             .fetch_add(1, Ordering::Relaxed);
+    }
+
+    /// Durable DeleteRecords outbox (Phase 116).
+    pub fn delete_records_outbox(&self) -> &DeleteRecordsOutbox {
+        &self.delete_records_outbox
+    }
+
+    /// Pending outbox depth (Phase 116).
+    pub fn delete_records_outbox_depth(&self) -> u64 {
+        self.delete_records_outbox.depth()
+    }
+
+    /// Outbox enqueue counter (Phase 116).
+    pub fn delete_records_outbox_enqueued_total(&self) -> u64 {
+        self.delete_records_outbox.enqueued_total()
+    }
+
+    /// Outbox retry success counter (Phase 116).
+    pub fn delete_records_outbox_retry_success_total(&self) -> u64 {
+        self.delete_records_outbox.retry_success_total()
+    }
+
+    /// Outbox retry error counter (Phase 116).
+    pub fn delete_records_outbox_retry_errors_total(&self) -> u64 {
+        self.delete_records_outbox.retry_errors_total()
+    }
+
+    /// Outbox capacity-drop counter (Phase 116).
+    pub fn delete_records_outbox_drops_total(&self) -> u64 {
+        self.delete_records_outbox.drops_total()
+    }
+
+    /// Enqueue a pending peer truncate after fan-out failure (Phase 116).
+    pub fn enqueue_delete_records_outbox(
+        &self,
+        replica_id: u32,
+        topic: &str,
+        partition: u32,
+        before_offset: u64,
+        leader_epoch: i32,
+    ) {
+        let _ = self.delete_records_outbox.enqueue(
+            replica_id,
+            topic,
+            partition,
+            before_offset,
+            leader_epoch,
+        );
+    }
+
+    /// Pending outbox entries for currently live peers (Phase 116 drain).
+    pub fn delete_records_outbox_pending_live(&self) -> Vec<crate::delete_records_outbox::OutboxEntry> {
+        let live = self.live_brokers();
+        self.delete_records_outbox.pending_for_replicas(&live)
     }
 
     /// BROKER config push error counter (Phase 113).
