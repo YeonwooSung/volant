@@ -511,6 +511,14 @@ pub struct Broker {
     isr_expand_total: AtomicU64,
     /// Phase 118: ISR membership removals (death or lag shrink).
     isr_shrink_total: AtomicU64,
+    /// Phase 120: transactional_id → txn coordinator node id (Init owner).
+    txn_coordinator_by_id: RwLock<HashMap<String, u32>>,
+    /// Phase 120: producer_id → txn coordinator node id.
+    txn_coordinator_by_pid: RwLock<HashMap<u64, u32>>,
+    /// Phase 120: successful transparent EndTxn (txn) forwards.
+    txn_forward_total: AtomicU64,
+    /// Phase 120: failed transparent txn forward attempts.
+    txn_forward_errors_total: AtomicU64,
 }
 
 /// Controller-side multi-broker prepared index entry (Phase 114).
@@ -547,6 +555,10 @@ pub enum Txn2pcFanout {
         producer_epoch: u16,
         /// Enable2Pc flag.
         enable_2pc: bool,
+        /// Txn coordinator (Init owner) node id (Phase 120).
+        coordinator_node_id: u32,
+        /// When false, peers register producer + coordinator only (no open).
+        install_open: bool,
     },
     /// Strict prepare fan-out after local prepare.
     Prepare {
@@ -651,6 +663,10 @@ impl Broker {
             cluster_admin_catchup_errors_total: AtomicU64::new(0),
             isr_expand_total: AtomicU64::new(0),
             isr_shrink_total: AtomicU64::new(0),
+            txn_coordinator_by_id: RwLock::new(HashMap::new()),
+            txn_coordinator_by_pid: RwLock::new(HashMap::new()),
+            txn_forward_total: AtomicU64::new(0),
+            txn_forward_errors_total: AtomicU64::new(0),
         };
         broker
             .reload_single_node_topics()
@@ -775,6 +791,10 @@ impl Broker {
             cluster_admin_catchup_errors_total: AtomicU64::new(0),
             isr_expand_total: AtomicU64::new(0),
             isr_shrink_total: AtomicU64::new(0),
+            txn_coordinator_by_id: RwLock::new(HashMap::new()),
+            txn_coordinator_by_pid: RwLock::new(HashMap::new()),
+            txn_forward_total: AtomicU64::new(0),
+            txn_forward_errors_total: AtomicU64::new(0),
         };
         // Open local partitions from persisted assignment.
         broker.apply_local_assignment()?;
@@ -1161,24 +1181,124 @@ impl Broker {
         if !prod.transactional || prod.transactional_id.is_empty() {
             return Txn2pcFanout::None;
         }
+        // Self is the Init/open coordinator for this fan-out.
+        self.note_txn_coordinator(&prod.transactional_id, producer_id, self.node_id);
         Txn2pcFanout::Open {
             transactional_id: prod.transactional_id.clone(),
             producer_id,
             producer_epoch: prod.epoch,
             enable_2pc: prod.enable_2pc,
+            coordinator_node_id: self.node_id,
+            install_open: true,
         }
     }
 
-    /// Apply inter-broker `TxnParticipantOpen` (Phase 114).
+    /// Phase 120: register txn coordinator (Init owner) for forward resolution.
+    pub fn note_txn_coordinator(
+        &self,
+        transactional_id: &str,
+        producer_id: u64,
+        coordinator_node_id: u32,
+    ) {
+        if coordinator_node_id == 0 {
+            return;
+        }
+        if !transactional_id.is_empty() {
+            self.txn_coordinator_by_id
+                .write()
+                .insert(transactional_id.to_owned(), coordinator_node_id);
+        }
+        self.txn_coordinator_by_pid
+            .write()
+            .insert(producer_id, coordinator_node_id);
+    }
+
+    /// Phase 120: resolve txn coordinator node id for EndTxn forward.
     ///
-    /// Installs producer state + empty open txn so remote partition leaders can
-    /// accept write-through produce. Idempotent for matching pid/epoch.
+    /// Lookup order: transactional_id map → producer_id map → cluster prepared
+    /// index `coordinator_node_id`.
+    pub fn resolve_txn_coordinator(
+        &self,
+        transactional_id: &str,
+        producer_id: Option<u64>,
+    ) -> Option<u32> {
+        if !transactional_id.is_empty() {
+            if let Some(&id) = self.txn_coordinator_by_id.read().get(transactional_id) {
+                if id != 0 {
+                    return Some(id);
+                }
+            }
+            if let Some(entry) = self.cluster_prepared_index.lock().get(transactional_id) {
+                if entry.coordinator_node_id != 0 {
+                    return Some(entry.coordinator_node_id);
+                }
+            }
+        }
+        if let Some(pid) = producer_id {
+            if let Some(&id) = self.txn_coordinator_by_pid.read().get(&pid) {
+                if id != 0 {
+                    return Some(id);
+                }
+            }
+        }
+        None
+    }
+
+    /// Phase 120: Init registration fan-out (producer + coordinator, no open).
+    pub fn txn_2pc_init_register_fanout(
+        &self,
+        transactional_id: &str,
+        producer_id: u64,
+        producer_epoch: u16,
+        enable_2pc: bool,
+    ) -> Txn2pcFanout {
+        if self.cluster.is_none() || transactional_id.is_empty() {
+            return Txn2pcFanout::None;
+        }
+        self.note_txn_coordinator(transactional_id, producer_id, self.node_id);
+        Txn2pcFanout::Open {
+            transactional_id: transactional_id.to_owned(),
+            producer_id,
+            producer_epoch,
+            enable_2pc,
+            coordinator_node_id: self.node_id,
+            install_open: false,
+        }
+    }
+
+    /// Successful transparent txn forwards (Phase 120).
+    pub fn txn_forward_total(&self) -> u64 {
+        self.txn_forward_total.load(Ordering::Relaxed)
+    }
+
+    /// Failed transparent txn forward attempts (Phase 120).
+    pub fn txn_forward_errors_total(&self) -> u64 {
+        self.txn_forward_errors_total.load(Ordering::Relaxed)
+    }
+
+    /// Record a successful multi-broker txn forward (Phase 120).
+    pub fn record_txn_forward_ok(&self) {
+        self.txn_forward_total.fetch_add(1, Ordering::Relaxed);
+    }
+
+    /// Record a failed multi-broker txn forward (Phase 120).
+    pub fn record_txn_forward_error(&self) {
+        self.txn_forward_errors_total.fetch_add(1, Ordering::Relaxed);
+    }
+
+    /// Apply inter-broker `TxnParticipantOpen` (Phase 114 + Phase 120).
+    ///
+    /// Installs producer state and optionally empty open txn so remote partition
+    /// leaders can accept write-through produce. Idempotent for matching pid/epoch.
+    /// Registers txn coordinator for EndTxn forward (Phase 120).
     pub fn handle_txn_participant_open(
         &self,
         transactional_id: &str,
         producer_id: u64,
         producer_epoch: u16,
         enable_2pc: bool,
+        coordinator_node_id: u32,
+        install_open: bool,
     ) -> u16 {
         {
             let mut state = self.producer_state.write();
@@ -1212,23 +1332,35 @@ impl Broker {
                 .write()
                 .insert(transactional_id.to_owned(), producer_id);
         }
+        // Phase 120: learn Init owner for transparent EndTxn forward.
+        let coord = if coordinator_node_id != 0 {
+            coordinator_node_id
+        } else {
+            // Legacy peers: treat the sender as unknown; keep prior mapping if any.
+            0
+        };
+        if coord != 0 {
+            self.note_txn_coordinator(transactional_id, producer_id, coord);
+        }
         // Ensure open txn exists (empty) for write-through on this leader.
-        let already_prepared = !transactional_id.is_empty()
-            && self.prepared_txns.lock().contains_key(transactional_id);
-        {
-            let mut open = self.open_txns.lock();
-            if let Some(txn) = open.get_mut(&producer_id) {
-                // Already open — keep existing written ranges; refresh epoch.
-                txn.producer_epoch = producer_epoch;
-            } else if !already_prepared {
-                open.insert(
-                    producer_id,
-                    OpenTxn {
-                        opened_at_ms: unix_now_ms(),
-                        producer_epoch,
-                        ..OpenTxn::default()
-                    },
-                );
+        if install_open {
+            let already_prepared = !transactional_id.is_empty()
+                && self.prepared_txns.lock().contains_key(transactional_id);
+            {
+                let mut open = self.open_txns.lock();
+                if let Some(txn) = open.get_mut(&producer_id) {
+                    // Already open — keep existing written ranges; refresh epoch.
+                    txn.producer_epoch = producer_epoch;
+                } else if !already_prepared {
+                    open.insert(
+                        producer_id,
+                        OpenTxn {
+                            opened_at_ms: unix_now_ms(),
+                            producer_epoch,
+                            ..OpenTxn::default()
+                        },
+                    );
+                }
             }
         }
         let _ = self.persist_producer_state();
@@ -2113,6 +2245,7 @@ impl Broker {
                 }
                 // Phase 94: fence / KeepPrepared clears abortable (new client epoch path).
                 self.clear_txn_abortable(pid);
+                self.note_txn_coordinator(transactional_id, pid, self.node_id);
                 let _ = self.persist_producer_state();
                 return InitProducerIdResult {
                     error_code: 0,
@@ -2167,6 +2300,8 @@ impl Broker {
                 }
                 // Phase 94: epoch fence clears abortable for the new identity.
                 self.clear_txn_abortable(existing);
+                // Phase 120: this broker remains/becomes Init owner for the txn id.
+                self.note_txn_coordinator(transactional_id, existing, self.node_id);
                 let _ = self.persist_producer_state();
                 return InitProducerIdResult {
                     error_code: 0,
@@ -2193,6 +2328,8 @@ impl Broker {
         );
         txn_ids.insert(transactional_id.to_owned(), id);
         drop(txn_ids);
+        // Phase 120: this broker is the Init owner / txn coordinator.
+        self.note_txn_coordinator(transactional_id, id, self.node_id);
         let _ = self.persist_producer_state();
         InitProducerIdResult {
             error_code: 0,

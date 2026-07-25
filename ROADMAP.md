@@ -2829,9 +2829,40 @@ ids unchanged; large responses bounded by native `MAX_PAYLOAD`.
 
 **Still deferred:** multi-lang clients, chaos-mesh / long fuzz campaigns,
 full KIP-890/939 / `__transaction_state`, Kafka wire fuzz targets, dynamic
-membership / Raft, full Kafka broker catalog, transparent EndTxn forward,
+membership / Raft, full Kafka broker catalog,
+transparent EndTxn forward → **closed by Phase 120**,
 outbox handoff on leadership change, per-broker BROKER config overrides,
 time-based ISR lag / preferred replica / shared session registry.
+
+---
+
+### Phase 120 — Transparent EndTxn / txn RPC forward (MVP) ✅
+
+**Goal:** When a client sends EndTxn to a non-coordinator broker, transparent
+inter-broker forward to the Init-owner coordinator so Enable2Pc prepare/complete
+and classic one-shot succeed without permanent broken state.
+
+Binding: **[docs/PHASE120_SPEC.md](./docs/PHASE120_SPEC.md)**.
+
+- [x] Native opcodes 84/85 `KafkaTxnForward` (Kafka API key + body proxy)
+- [x] Txn coordinator registry (Init owner) + `TxnParticipantOpen` trailer
+      (`coordinator_node_id`, `install_open`)
+- [x] Init registration fan-out (`install_open=false`) + open fan-out carries owner
+- [x] Kafka EndTxn path: non-coordinator → forward (no dual prepare)
+- [x] Metrics: `volant_txn_forward_total` / `_errors_total`
+- [x] Tests: `phase120_endtxn_forward` (2PC + classic + fence + single-node)
+- [x] Living docs honesty
+
+**Honest limitations:** not full KIP-890/939 / `__transaction_state`; coordinator
+discovery is Init-owner registry (not Raft / not hash FindCoordinator); AddOffsets /
+TxnOffsetCommit / full Init re-home still prefer client pin; FindCoordinator wire
+unchanged (first metadata broker).
+
+**Still deferred:** multi-lang clients, chaos-mesh / long fuzz campaigns,
+full KIP-890/939 / `__transaction_state`, Kafka wire fuzz targets, dynamic
+membership / Raft, full Kafka broker catalog, outbox handoff on leadership change,
+per-broker BROKER config overrides, time-based ISR lag / preferred replica /
+shared session registry, remaining txn API forward (AddOffsets / TxnOffsetCommit).
 
 ---
 

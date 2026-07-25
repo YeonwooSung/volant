@@ -117,13 +117,16 @@ fn open_txn_error(broker: &Broker, producer_id: u64, producer_epoch: u16, cluste
 // ─── InitProducerId ──────────────────────────────────────────────────────────
 
 /// InitProducerId (API key 22) classic v0–1 / flexible v2–6 — Phase 29 / 62 / 75 / 77 / 90.
+///
+/// Returns optional Init registration fan-out (Phase 120) so peers learn the
+/// txn coordinator without installing open state.
 pub(crate) fn encode_init_producer_id(
     broker: &Broker,
     src: &mut impl Buf,
     out: &mut BytesMut,
     version: i16,
     principal: &str,
-) {
+) -> Option<crate::broker::Txn2pcFanout> {
     // Resume fields (v3+) still ignored for allocation. v6 Enable2Pc /
     // KeepPreparedTxn drive Phase 90 prepared-txn state; OngoingTxn* echoes
     // prepared pid/epoch when present.
@@ -154,7 +157,7 @@ pub(crate) fn encode_init_producer_id(
             -1,
             -1,
         );
-        return;
+        return None;
     }
 
     let txn_id = match wire::read_nullable_string(src, flex) {
@@ -168,7 +171,7 @@ pub(crate) fn encode_init_producer_id(
                 -1,
                 -1,
             );
-            return;
+            return None;
         }
     };
     // transaction_timeout_ms — honored for open (non-prepared) txns (Phase 93).
@@ -189,7 +192,7 @@ pub(crate) fn encode_init_producer_id(
                 -1,
                 -1,
             );
-            return;
+            return None;
         }
         let _resume_pid = src.get_i64();
         let _resume_epoch = src.get_i16();
@@ -207,7 +210,7 @@ pub(crate) fn encode_init_producer_id(
                 -1,
                 -1,
             );
-            return;
+            return None;
         }
         enable_2pc = src.get_u8() != 0;
         keep_prepared = src.get_u8() != 0;
@@ -225,7 +228,7 @@ pub(crate) fn encode_init_producer_id(
     if r.error_code != 0 {
         // Phase 96: INVALID_TRANSACTION_TIMEOUT (50) etc. — no pid allocated.
         write_body(out, r.error_code, -1, -1, -1, -1);
-        return;
+        return None;
     }
     write_body(
         out,
@@ -235,6 +238,21 @@ pub(crate) fn encode_init_producer_id(
         r.ongoing_txn_producer_id,
         r.ongoing_txn_producer_epoch,
     );
+    // Phase 120: register Init owner on live peers (no open install).
+    if !txn_id.is_empty() {
+        let fanout = broker.txn_2pc_init_register_fanout(
+            &txn_id,
+            r.producer_id,
+            r.epoch,
+            enable_2pc,
+        );
+        match fanout {
+            crate::broker::Txn2pcFanout::None => None,
+            other => Some(other),
+        }
+    } else {
+        None
+    }
 }
 
 // ─── AddPartitionsToTxn ──────────────────────────────────────────────────────

@@ -86,6 +86,8 @@ pub enum RequestOpcode {
     TxnParticipantComplete = 80,
     /// Non-owner → session owner: proxy Kafka Fetch body (Phase 119).
     KafkaFetchForward = 82,
+    /// Non-coordinator → txn coordinator: proxy Kafka txn API body (Phase 120).
+    KafkaTxnForward = 84,
 }
 
 impl RequestOpcode {
@@ -132,6 +134,7 @@ impl RequestOpcode {
             78 => Self::TxnParticipantPrepare,
             80 => Self::TxnParticipantComplete,
             82 => Self::KafkaFetchForward,
+            84 => Self::KafkaTxnForward,
             _ => return None,
         })
     }
@@ -507,6 +510,11 @@ pub enum Request {
         producer_epoch: u16,
         /// Whether Enable2Pc is set for this producer.
         enable_2pc: bool,
+        /// Node id of the txn coordinator (Init owner). `0` = unknown (Phase 120).
+        coordinator_node_id: u32,
+        /// When true, install empty open txn (Begin/AddPartitions). When false,
+        /// only register producer + coordinator (Init registration fan-out).
+        install_open: bool,
     },
     /// Coordinator → peer: prepare local open ranges (Phase 114).
     TxnParticipantPrepare {
@@ -537,6 +545,17 @@ pub enum Request {
         /// ACL principal to apply on the owner (may be anonymous).
         principal: String,
         /// Kafka Fetch request body (after the Kafka request header).
+        body: Bytes,
+    },
+    /// Non-coordinator → txn coordinator: proxy a Kafka txn API body (Phase 120).
+    KafkaTxnForward {
+        /// Kafka API key (e.g. 26 = EndTxn).
+        api_key: i16,
+        /// Kafka API version.
+        api_version: i16,
+        /// ACL principal to apply on the coordinator (may be anonymous).
+        principal: String,
+        /// Kafka request body (after the Kafka request header).
         body: Bytes,
     },
 }
@@ -585,6 +604,7 @@ impl Request {
             Self::TxnParticipantPrepare { .. } => RequestOpcode::TxnParticipantPrepare as u16,
             Self::TxnParticipantComplete { .. } => RequestOpcode::TxnParticipantComplete as u16,
             Self::KafkaFetchForward { .. } => RequestOpcode::KafkaFetchForward as u16,
+            Self::KafkaTxnForward { .. } => RequestOpcode::KafkaTxnForward as u16,
         }
     }
 }

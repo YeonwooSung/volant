@@ -494,34 +494,46 @@ async fn dispatch_kafka(
                     debug!(error = %e, "end txn flexible header tag buffer");
                 }
             }
-            // Snapshot header framing so we can rewrite body if prepare fan-out fails.
-            let body_start = out.len();
-            if let Some(fanout) =
-                txn::encode_end_txn(broker, &mut src, &mut out, hdr.api_version, principal)
+            // Phase 120: transparent forward when this node is not the txn coordinator.
+            if let Some(body) = crate::net::maybe_forward_kafka_end_txn(
+                broker.as_ref(),
+                hdr.api_version,
+                principal,
+                src.as_ref(),
+            )
+            .await
             {
-                use crate::broker::Txn2pcFanout;
-                match &fanout {
-                    Txn2pcFanout::Prepare {
-                        transactional_id, ..
-                    } => {
-                        if !crate::net::run_txn_2pc_fanout(broker.as_ref(), &fanout).await {
-                            broker.rollback_local_prepare(transactional_id);
-                            // Rewrite body as Unknown after response header.
-                            out.truncate(body_start);
-                            out.put_i32(0); // throttle
-                            out.put_i16(KafkaErrorCode::Unknown.as_i16());
-                            if hdr.api_version >= 5 {
-                                out.put_i64(-1);
-                                out.put_i16(-1);
-                            }
-                            if hdr.api_version >= 3 {
-                                put_empty_tag_buffer(&mut out);
+                out.extend_from_slice(&body);
+            } else {
+                // Snapshot header framing so we can rewrite body if prepare fan-out fails.
+                let body_start = out.len();
+                if let Some(fanout) =
+                    txn::encode_end_txn(broker, &mut src, &mut out, hdr.api_version, principal)
+                {
+                    use crate::broker::Txn2pcFanout;
+                    match &fanout {
+                        Txn2pcFanout::Prepare {
+                            transactional_id, ..
+                        } => {
+                            if !crate::net::run_txn_2pc_fanout(broker.as_ref(), &fanout).await {
+                                broker.rollback_local_prepare(transactional_id);
+                                // Rewrite body as Unknown after response header.
+                                out.truncate(body_start);
+                                out.put_i32(0); // throttle
+                                out.put_i16(KafkaErrorCode::Unknown.as_i16());
+                                if hdr.api_version >= 5 {
+                                    out.put_i64(-1);
+                                    out.put_i16(-1);
+                                }
+                                if hdr.api_version >= 3 {
+                                    put_empty_tag_buffer(&mut out);
+                                }
                             }
                         }
-                    }
-                    Txn2pcFanout::None => {}
-                    _ => {
-                        let _ = crate::net::run_txn_2pc_fanout(broker.as_ref(), &fanout).await;
+                        Txn2pcFanout::None => {}
+                        _ => {
+                            let _ = crate::net::run_txn_2pc_fanout(broker.as_ref(), &fanout).await;
+                        }
                     }
                 }
             }
@@ -672,7 +684,12 @@ async fn dispatch_kafka(
                     debug!(error = %e, "init producer id flexible header tag buffer");
                 }
             }
-            txn::encode_init_producer_id(broker, &mut src, &mut out, hdr.api_version, principal);
+            // Phase 120: successful transactional Init → register coordinator on peers.
+            if let Some(fanout) =
+                txn::encode_init_producer_id(broker, &mut src, &mut out, hdr.api_version, principal)
+            {
+                let _ = crate::net::run_txn_2pc_fanout(broker.as_ref(), &fanout).await;
+            }
         }
         Some(ApiKey::OffsetForLeaderEpoch) if (0..=4).contains(&hdr.api_version) => {
             if hdr.api_version >= 4 {

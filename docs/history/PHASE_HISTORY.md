@@ -161,10 +161,11 @@ docs for day-to-day reading: [ops](../ops.md), [consistency](../consistency.md),
 | 117 | ✅ | Controller failover catch-up for ACL + BROKER config (durable gens + heartbeat re-push) | [PHASE117_SPEC.md](../PHASE117_SPEC.md) |
 | 118 | ✅ | ISR rejoin + lag-based shrink (ReplicaFetch catch-up re-expand; metrics) | [PHASE118_SPEC.md](../PHASE118_SPEC.md) |
 | 119 | ✅ | Multi-broker fetch session handoff MVP (owner-encoded id + transparent forward) | [PHASE119_SPEC.md](../PHASE119_SPEC.md) |
+| 120 | ✅ | Transparent EndTxn / txn RPC forward MVP (coordinator registry + KafkaTxnForward) | [PHASE120_SPEC.md](../PHASE120_SPEC.md) |
 
 ---
 
-## Still deferred (post–Phase 119)
+## Still deferred (post–Phase 120)
 
 - Multi-language clients
 - Chaos-mesh / long fuzz campaigns (corpus **smoke CI** → **closed by Phase 112**)
@@ -187,7 +188,7 @@ docs for day-to-day reading: [ops](../ops.md), [consistency](../consistency.md),
 - Multi-broker Enable2Pc prepare/complete fan-out → **closed by Phase 114**
 - Durable local fetch sessions → **closed by Phase 115**
 - Multi-broker fetch session forward (owner-encoded id) → **closed by Phase 119**
-- Transparent EndTxn forward to txn coordinator
+- Transparent EndTxn forward to txn coordinator → **closed by Phase 120** (AddOffsets / TxnOffsetCommit forward still open)
 - Outbox handoff on leadership change / consensus truncate log
 - Per-broker BROKER config overrides / multi-master ACL merge
 - Time-based ISR lag / preferred replica

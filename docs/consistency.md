@@ -134,10 +134,13 @@ Without `--cluster-config`, the broker runs as a single node:
     `HeartbeatBroker`; when the controller sees lag it re-pushes opcodes 72–75
     (full effective BROKER knobs + full ACL snapshot). Brief lag until the next
     successful heartbeat + catch-up RPC is still allowed; not Raft.
-- **Multi-broker 2PC (Phase 114):** Enable2Pc prepare/complete is coordinated
-  over inter-broker RPC (opcodes 76–81). Pin Init/Begin/EndTxn to the broker
-  that allocated the producer; produce still targets partition leaders after
-  open fan-out. Not a Kafka `__transaction_state` topic / full KIP-890.
+- **Multi-broker 2PC (Phase 114 + 120):** Enable2Pc prepare/complete is coordinated
+  over inter-broker RPC (opcodes 76–81). Init owner is the txn coordinator;
+  produce still targets partition leaders after open fan-out. **Phase 120:**
+  Kafka EndTxn to a non-coordinator transparent-forwards to the Init owner
+  (opcodes 84/85) so clients/LBs need not pin EndTxn; only the coordinator runs
+  local prepare/complete (no dual prepare). Not a Kafka `__transaction_state`
+  topic / full KIP-890.
 
 See [PHASE6_SPEC.md](./PHASE6_SPEC.md) for wire protocol and configuration details.
 Admin fan-out detail: [PHASE113_SPEC.md](./PHASE113_SPEC.md).
@@ -145,3 +148,4 @@ DeleteRecords outbox: [PHASE116_SPEC.md](./PHASE116_SPEC.md).
 Admin catch-up: [PHASE117_SPEC.md](./PHASE117_SPEC.md).
 ISR rejoin + lag shrink: [PHASE118_SPEC.md](./PHASE118_SPEC.md).
 Multi-broker 2PC detail: [PHASE114_SPEC.md](./PHASE114_SPEC.md).
+EndTxn forward: [PHASE120_SPEC.md](./PHASE120_SPEC.md).

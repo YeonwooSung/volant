@@ -448,6 +448,23 @@ fn broker_metrics_text(broker: &Broker) -> String {
         "volant_fetch_session_forward_errors_total {}\n",
         sessions.forward_errors_total()
     ));
+    // Phase 120: multi-broker EndTxn / txn forward.
+    text.push_str(
+        "# HELP volant_txn_forward_total Successful Kafka EndTxn (txn) forwards to coordinator\n",
+    );
+    text.push_str("# TYPE volant_txn_forward_total counter\n");
+    text.push_str(&format!(
+        "volant_txn_forward_total {}\n",
+        broker.txn_forward_total()
+    ));
+    text.push_str(
+        "# HELP volant_txn_forward_errors_total Failed Kafka EndTxn (txn) forward attempts\n",
+    );
+    text.push_str("# TYPE volant_txn_forward_errors_total counter\n");
+    text.push_str(&format!(
+        "volant_txn_forward_errors_total {}\n",
+        broker.txn_forward_errors_total()
+    ));
     text.push_str("# HELP volant_open_txns Live open (non-prepared) transactions\n");
     text.push_str("# TYPE volant_open_txns gauge\n");
     text.push_str(&format!("volant_open_txns {}\n", broker.open_txn_count()));
@@ -1335,6 +1352,8 @@ pub async fn run_txn_2pc_fanout(broker: &Broker, fanout: &Txn2pcFanout) -> bool 
             producer_id,
             producer_epoch,
             enable_2pc,
+            coordinator_node_id,
+            install_open,
         } => {
             fanout_txn_participant_open(
                 broker,
@@ -1342,6 +1361,8 @@ pub async fn run_txn_2pc_fanout(broker: &Broker, fanout: &Txn2pcFanout) -> bool 
                 *producer_id,
                 *producer_epoch,
                 *enable_2pc,
+                *coordinator_node_id,
+                *install_open,
             )
             .await;
             true
@@ -1379,13 +1400,15 @@ pub async fn run_txn_2pc_fanout(broker: &Broker, fanout: &Txn2pcFanout) -> bool 
     }
 }
 
-/// Best-effort open fan-out (Phase 114).
+/// Best-effort open fan-out (Phase 114 + Phase 120 coordinator trailer).
 pub async fn fanout_txn_participant_open(
     broker: &Broker,
     transactional_id: &str,
     producer_id: u64,
     producer_epoch: u16,
     enable_2pc: bool,
+    coordinator_node_id: u32,
+    install_open: bool,
 ) {
     let peers = broker.txn_2pc_fanout_peers();
     if peers.is_empty() {
@@ -1396,6 +1419,8 @@ pub async fn fanout_txn_participant_open(
         producer_id,
         producer_epoch,
         enable_2pc,
+        coordinator_node_id,
+        install_open,
     };
     for (peer_id, addr) in peers {
         match inter_broker_rpc(broker, &addr, &req).await {
@@ -1554,6 +1579,112 @@ pub async fn fanout_txn_participant_complete(
         }
     }
     ok
+}
+
+/// Phase 120: peek EndTxn request body for transactional_id + producer_id.
+///
+/// `version` is the Kafka EndTxn API version (0–5). Returns `None` on truncated body.
+pub fn peek_end_txn_ids(version: i16, body: &[u8]) -> Option<(String, u64)> {
+    use bytes::Buf;
+    use crate::kafka::wire;
+    let flex = version >= 3;
+    let mut src = body;
+    let txn_id = wire::read_string(&mut src, flex).ok()?;
+    if src.remaining() < 8 + 2 + 1 {
+        return None;
+    }
+    let producer_id = src.get_i64() as u64;
+    Some((txn_id, producer_id))
+}
+
+/// Phase 120: write a minimal EndTxn error response body (no response header).
+fn put_end_txn_error_response(out: &mut bytes::BytesMut, version: i16, err: i16) {
+    use bytes::BufMut;
+    use crate::kafka::codec::put_empty_tag_buffer;
+    let flex = version >= 3;
+    out.put_i32(0); // throttle
+    out.put_i16(err);
+    if version >= 5 {
+        out.put_i64(-1);
+        out.put_i16(-1);
+    }
+    if flex {
+        put_empty_tag_buffer(out);
+    }
+}
+
+/// Phase 120: if EndTxn should be served by the txn coordinator, forward the
+/// Kafka body and return the coordinator's response body. `None` = handle locally.
+///
+/// Never re-forwards on the coordinator (caller is the Kafka client path only).
+pub async fn maybe_forward_kafka_end_txn(
+    broker: &Broker,
+    api_version: i16,
+    principal: &str,
+    end_txn_body: &[u8],
+) -> Option<Bytes> {
+    use bytes::BytesMut;
+
+    if broker.cluster_config().is_none() {
+        return None;
+    }
+    let (txn_id, producer_id) = peek_end_txn_ids(api_version, end_txn_body)?;
+    let Some(coord) = broker.resolve_txn_coordinator(&txn_id, Some(producer_id)) else {
+        return None;
+    };
+    if coord == broker.node_id() {
+        return None;
+    }
+    let Some(addr) = broker.broker_addr(coord) else {
+        broker.record_txn_forward_error();
+        let mut out = BytesMut::new();
+        // UnknownProducerId (59) — honest when coordinator unreachable.
+        put_end_txn_error_response(&mut out, api_version, 59);
+        return Some(out.freeze());
+    };
+
+    let req = Request::KafkaTxnForward {
+        api_key: 26, // EndTxn
+        api_version,
+        principal: principal.to_owned(),
+        body: Bytes::copy_from_slice(end_txn_body),
+    };
+    match inter_broker_rpc(broker, &addr, &req).await {
+        Ok(Response::KafkaTxnForward {
+            error_code: 0,
+            body,
+        }) => {
+            broker.record_txn_forward_ok();
+            Some(body)
+        }
+        Ok(Response::KafkaTxnForward { error_code, .. }) => {
+            tracing::debug!(
+                coord,
+                error_code,
+                %txn_id,
+                producer_id,
+                "kafka endtxn forward peer error"
+            );
+            broker.record_txn_forward_error();
+            let mut out = BytesMut::new();
+            put_end_txn_error_response(&mut out, api_version, 59);
+            Some(out.freeze())
+        }
+        Ok(other) => {
+            tracing::debug!(coord, ?other, %txn_id, "kafka endtxn forward unexpected");
+            broker.record_txn_forward_error();
+            let mut out = BytesMut::new();
+            put_end_txn_error_response(&mut out, api_version, 59);
+            Some(out.freeze())
+        }
+        Err(e) => {
+            tracing::debug!(coord, error = %e, %txn_id, "kafka endtxn forward rpc failed");
+            broker.record_txn_forward_error();
+            let mut out = BytesMut::new();
+            put_end_txn_error_response(&mut out, api_version, 59);
+            Some(out.freeze())
+        }
+    }
 }
 
 /// Phase 119: if this Fetch should be served by a peer session owner, forward
@@ -2117,6 +2248,7 @@ fn authorize_request(
         | Request::TxnParticipantPrepare { .. }
         | Request::TxnParticipantComplete { .. }
         | Request::KafkaFetchForward { .. }
+        | Request::KafkaTxnForward { .. }
         | Request::Auth { .. }
         | Request::ScramFirst { .. }
         | Request::ScramFinal { .. } => return None,
@@ -2201,6 +2333,7 @@ fn authorize_request(
         | Request::TxnParticipantPrepare { .. }
         | Request::TxnParticipantComplete { .. }
         | Request::KafkaFetchForward { .. }
+        | Request::KafkaTxnForward { .. }
         | Request::Auth { .. }
         | Request::ScramFirst { .. }
         | Request::ScramFinal { .. } => true,
@@ -2283,7 +2416,8 @@ fn record_response_metrics(broker: &Broker, resp: &Response) {
         | Response::TxnParticipantOpen { error_code }
         | Response::TxnParticipantPrepare { error_code }
         | Response::TxnParticipantComplete { error_code }
-        | Response::KafkaFetchForward { error_code, .. } => {
+        | Response::KafkaFetchForward { error_code, .. }
+        | Response::KafkaTxnForward { error_code, .. } => {
             if *error_code != 0 {
                 m.record_error(*error_code);
             }
@@ -2844,6 +2978,16 @@ async fn handle_request(broker: &Broker, req: Request) -> Result<Response> {
         Request::InitProducerId { transactional_id } => {
             let (producer_id, epoch) =
                 broker.init_producer_id_with_txn(&transactional_id);
+            // Phase 120: register Init owner on peers (no open).
+            if !transactional_id.is_empty() {
+                let fanout = broker.txn_2pc_init_register_fanout(
+                    &transactional_id,
+                    producer_id,
+                    epoch,
+                    false,
+                );
+                let _ = run_txn_2pc_fanout(broker, &fanout).await;
+            }
             Ok(Response::InitProducerId {
                 producer_id,
                 epoch,
@@ -2915,12 +3059,16 @@ async fn handle_request(broker: &Broker, req: Request) -> Result<Response> {
             producer_id,
             producer_epoch,
             enable_2pc,
+            coordinator_node_id,
+            install_open,
         } => {
             let error_code = broker.handle_txn_participant_open(
                 &transactional_id,
                 producer_id,
                 producer_epoch,
                 enable_2pc,
+                coordinator_node_id,
+                install_open,
             );
             Ok(Response::TxnParticipantOpen { error_code })
         }
@@ -2968,6 +3116,51 @@ async fn handle_request(broker: &Broker, req: Request) -> Result<Response> {
                 &principal,
             );
             Ok(Response::KafkaFetchForward {
+                error_code: 0,
+                body: out.freeze(),
+            })
+        }
+        Request::KafkaTxnForward {
+            api_key,
+            api_version,
+            principal,
+            body,
+        } => {
+            // Phase 120: coordinator-side local encode only (never re-forward).
+            // MVP: EndTxn (26) with full 2PC fan-out.
+            if api_key != 26 {
+                return Ok(Response::KafkaTxnForward {
+                    error_code: ErrorCode::InvalidArg as u16,
+                    body: Bytes::new(),
+                });
+            }
+            let mut src = body;
+            let mut out = BytesMut::new();
+            if let Some(fanout) = crate::kafka::txn::encode_end_txn(
+                broker,
+                &mut src,
+                &mut out,
+                api_version,
+                &principal,
+            ) {
+                use crate::broker::Txn2pcFanout;
+                match &fanout {
+                    Txn2pcFanout::Prepare {
+                        transactional_id, ..
+                    } => {
+                        if !run_txn_2pc_fanout(broker, &fanout).await {
+                            broker.rollback_local_prepare(transactional_id);
+                            out.clear();
+                            put_end_txn_error_response(&mut out, api_version, -1); // Unknown
+                        }
+                    }
+                    Txn2pcFanout::None => {}
+                    _ => {
+                        let _ = run_txn_2pc_fanout(broker, &fanout).await;
+                    }
+                }
+            }
+            Ok(Response::KafkaTxnForward {
                 error_code: 0,
                 body: out.freeze(),
             })

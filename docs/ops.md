@@ -41,6 +41,7 @@ Key series (prefix `volant_`):
 - `volant_fetch_sessions_idle_evicted_total` (Phase 97 idle-only subset)
 - `volant_fetch_sessions_restored` / `volant_fetch_sessions_persist_errors_total` (Phase 115 durable)
 - `volant_fetch_session_forward_total` / `volant_fetch_session_forward_errors_total` (Phase 119 multi-broker handoff)
+- `volant_txn_forward_total` / `volant_txn_forward_errors_total` (Phase 120 EndTxn forward)
 - `volant_open_txns` / `volant_prepared_txns` (Phase 97 gauges)
 - `volant_open_txns_expired_total` / `volant_prepared_txns_expired_total` (Phase 97)
 - `volant_build_info{version=...}`
@@ -307,7 +308,7 @@ specs. Ops-critical notes only:
 | Topic configs | `retention.ms` / `retention.bytes` / `segment.bytes` / `cleanup.policy` |
 | Broker configs (Phase 99–102 + 113 + 117) | BROKER Describe/Alter: `transaction.max.timeout.ms` + `volant.*` open/prepared/session/sweep; **sparse** durable under `__broker_config/state.json`; **cluster:** controller-only Alter + fan-out to live peers (Phase 113); **catch-up** on rejoin via durable gens + heartbeat re-push (Phase 117; `__cluster_admin`) |
 | DeleteRecords | Truncates sealed segments; **best-effort fan-out** to other replicas (Phase 113) + **durable leader outbox retry** for offline/failed peers (`__delete_records_outbox`, Phase 116); **GC/clip aborted soft markers** vs new log start (Phase 104/111) |
-| Transactions (shipped) | **Write-through + soft markers** (Phase 86) + **control batches** on EndTxn finalize (Phase 89) + **empty AddPartitions control** (Phase 105) + **prepared 2PC MVP** (Phase 90) + **multi-broker Enable2Pc** (Phase 114: open/prepare/complete fan-out; controller `__txn_prepared/cluster.json`) + **prepared timeout** (Phase 92, default 60s / `VOLANT_PREPARED_TXN_TIMEOUT_MS`) + **open timeout** (Phase 93, InitProducerId / `VOLANT_OPEN_TXN_TIMEOUT_MS`) + **max timeout clamp** (Phase 96, default 15m / `VOLANT_TRANSACTION_MAX_TIMEOUT_MS`; Init **50** over-max) + **background sweeper** (Phase 97/101/106, default 1s / `VOLANT_SWEEP_INTERVAL_MS`; `0` = pause bg; always-spawn so 0→>0 without restart; graceful shutdown/join) + **BROKER config surface** (Phase 99) + **sparse durable restart** (Phase 100/102) + **BROKER name vs `node_id`** (Phase 103) + **marker GC/clip** (Phase 104/111); LSO/aborted filtering; open crash≡abort; prepared durable under `__txn_prepared` until complete or timeout; soft markers GC'd when `end_offset <= log_start`; straddlers clip `first_offset = log_start` (Phase 111). **Ops:** pin Init/Begin/EndTxn to the broker that owns the producer (typically first bootstrap / controller); produce still goes to partition leaders |
+| Transactions (shipped) | **Write-through + soft markers** (Phase 86) + **control batches** on EndTxn finalize (Phase 89) + **empty AddPartitions control** (Phase 105) + **prepared 2PC MVP** (Phase 90) + **multi-broker Enable2Pc** (Phase 114: open/prepare/complete fan-out; controller `__txn_prepared/cluster.json`) + **EndTxn transparent forward** (Phase 120: Init-owner registry; non-coordinator Kafka EndTxn → opcodes 84/85) + **prepared timeout** (Phase 92, default 60s / `VOLANT_PREPARED_TXN_TIMEOUT_MS`) + **open timeout** (Phase 93, InitProducerId / `VOLANT_OPEN_TXN_TIMEOUT_MS`) + **max timeout clamp** (Phase 96, default 15m / `VOLANT_TRANSACTION_MAX_TIMEOUT_MS`; Init **50** over-max) + **background sweeper** (Phase 97/101/106, default 1s / `VOLANT_SWEEP_INTERVAL_MS`; `0` = pause bg; always-spawn so 0→>0 without restart; graceful shutdown/join) + **BROKER config surface** (Phase 99) + **sparse durable restart** (Phase 100/102) + **BROKER name vs `node_id`** (Phase 103) + **marker GC/clip** (Phase 104/111); LSO/aborted filtering; open crash≡abort; prepared durable under `__txn_prepared` until complete or timeout; soft markers GC'd when `end_offset <= log_start`; straddlers clip `first_offset = log_start` (Phase 111). **Ops:** pin **Init** to a stable broker (FindCoordinator / first bootstrap); EndTxn may hit any live broker once registration/open fan-out landed; produce still goes to partition leaders; AddOffsets/TxnOffsetCommit still prefer coordinator |
 | mTLS | Feature `tls`; `--tls-client-ca` / optional `--tls-client-allow` |
 | ACLs | `--acl-enable`; durable `__acls/acls.json`; User resource is Kafka admin store-only; **cluster:** Create/Delete controller-only + snapshot fan-out (Phase 113) + rejoin catch-up (Phase 117) |
 | Compaction | `cleanup.policy=compact` on **sealed** segments; empty value = tombstone |
@@ -344,7 +345,7 @@ curl -s -H "Authorization: Bearer $VOLANT_METRICS_TOKEN" \
 - Controller failover / rejoin ACL+BROKER catch-up → **closed by Phase 117**
 - Durable DeleteRecords outbox for offline replicas → **closed by Phase 116**
 - ISR rejoin + lag-based shrink → **closed by Phase 118**
-- Transparent EndTxn forward to txn coordinator when client lands on a random leader
+- Transparent EndTxn forward to txn coordinator → **closed by Phase 120** (remaining txn APIs may still need pin)
 
 Full list: [ROADMAP.md](../ROADMAP.md).
 

@@ -478,11 +478,16 @@ pub fn encode_request(req: &Request) -> Result<Bytes> {
             producer_id,
             producer_epoch,
             enable_2pc,
+            coordinator_node_id,
+            install_open,
         } => {
             put_string(&mut dst, transactional_id)?;
             dst.put_u64_le(*producer_id);
             dst.put_u16_le(*producer_epoch);
             dst.put_u8(if *enable_2pc { 1 } else { 0 });
+            // Phase 120 trailer (always written by current brokers).
+            dst.put_u32_le(*coordinator_node_id);
+            dst.put_u8(if *install_open { 1 } else { 0 });
         }
         Request::TxnParticipantPrepare {
             transactional_id,
@@ -511,6 +516,17 @@ pub fn encode_request(req: &Request) -> Result<Bytes> {
             principal,
             body,
         } => {
+            dst.put_i16_le(*api_version);
+            put_string(&mut dst, principal)?;
+            put_bytes(&mut dst, body);
+        }
+        Request::KafkaTxnForward {
+            api_key,
+            api_version,
+            principal,
+            body,
+        } => {
+            dst.put_i16_le(*api_key);
             dst.put_i16_le(*api_version);
             put_string(&mut dst, principal)?;
             put_bytes(&mut dst, body);
@@ -1013,11 +1029,24 @@ pub fn decode_request(opcode: u16, payload: &[u8]) -> Result<Request> {
             let producer_id = src.get_u64_le();
             let producer_epoch = src.get_u16_le();
             let enable_2pc = src.get_u8() != 0;
+            // Phase 120 trailer: coordinator_node_id u32 + install_open u8.
+            // Legacy peers omit the trailer → coordinator unknown, install open.
+            let (coordinator_node_id, install_open) = if src.remaining() >= 5 {
+                let c = src.get_u32_le();
+                let install = src.get_u8() != 0;
+                (c, install)
+            } else if src.remaining() >= 4 {
+                (src.get_u32_le(), true)
+            } else {
+                (0, true)
+            };
             Ok(Request::TxnParticipantOpen {
                 transactional_id,
                 producer_id,
                 producer_epoch,
                 enable_2pc,
+                coordinator_node_id,
+                install_open,
             })
         }
         RequestOpcode::TxnParticipantPrepare => {
@@ -1058,6 +1087,21 @@ pub fn decode_request(opcode: u16, payload: &[u8]) -> Result<Request> {
             let principal = get_string(&mut src)?;
             let body = get_bytes(&mut src)?;
             Ok(Request::KafkaFetchForward {
+                api_version,
+                principal,
+                body,
+            })
+        }
+        RequestOpcode::KafkaTxnForward => {
+            if src.remaining() < 4 {
+                return Err(Error::Protocol("truncated kafka txn forward header".into()));
+            }
+            let api_key = src.get_i16_le();
+            let api_version = src.get_i16_le();
+            let principal = get_string(&mut src)?;
+            let body = get_bytes(&mut src)?;
+            Ok(Request::KafkaTxnForward {
+                api_key,
                 api_version,
                 principal,
                 body,
@@ -1464,6 +1508,10 @@ pub fn encode_response(resp: &Response) -> Result<Bytes> {
             dst.put_u16_le(*error_code);
         }
         Response::KafkaFetchForward { error_code, body } => {
+            dst.put_u16_le(*error_code);
+            put_bytes(&mut dst, body);
+        }
+        Response::KafkaTxnForward { error_code, body } => {
             dst.put_u16_le(*error_code);
             put_bytes(&mut dst, body);
         }
@@ -2259,6 +2307,16 @@ pub fn decode_response(opcode: u16, payload: &[u8]) -> Result<Response> {
             let error_code = src.get_u16_le();
             let body = get_bytes(&mut src)?;
             Ok(Response::KafkaFetchForward { error_code, body })
+        }
+        ResponseOpcode::KafkaTxnForward => {
+            if src.remaining() < 2 {
+                return Err(Error::Protocol(
+                    "truncated kafka txn forward response".into(),
+                ));
+            }
+            let error_code = src.get_u16_le();
+            let body = get_bytes(&mut src)?;
+            Ok(Response::KafkaTxnForward { error_code, body })
         }
         ResponseOpcode::Error => {
             if src.remaining() < 2 {
@@ -3717,6 +3775,8 @@ mod tests {
             producer_id: 7,
             producer_epoch: 1,
             enable_2pc: true,
+            coordinator_node_id: 1,
+            install_open: true,
         };
         let b = encode_request(&open).unwrap();
         assert_eq!(open.opcode(), RequestOpcode::TxnParticipantOpen as u16);
@@ -3769,5 +3829,54 @@ mod tests {
 
         assert!(decode_request(RequestOpcode::TxnParticipantOpen as u16, &[]).is_err());
         assert!(decode_response(ResponseOpcode::TxnParticipantPrepare as u16, &[]).is_err());
+    }
+
+    #[test]
+    fn phase120_kafka_txn_forward_roundtrip() {
+        let req = Request::KafkaTxnForward {
+            api_key: 26,
+            api_version: 0,
+            principal: "alice".into(),
+            body: Bytes::from_static(b"endtxn-body"),
+        };
+        let b = encode_request(&req).unwrap();
+        assert_eq!(req.opcode(), RequestOpcode::KafkaTxnForward as u16);
+        assert_eq!(
+            decode_request(RequestOpcode::KafkaTxnForward as u16, &b).unwrap(),
+            req
+        );
+        let resp = Response::KafkaTxnForward {
+            error_code: 0,
+            body: Bytes::from_static(b"resp"),
+        };
+        let rb = encode_response(&resp).unwrap();
+        assert_eq!(
+            decode_response(ResponseOpcode::KafkaTxnForward as u16, &rb).unwrap(),
+            resp
+        );
+        assert!(decode_request(RequestOpcode::KafkaTxnForward as u16, &[]).is_err());
+        assert!(decode_response(ResponseOpcode::KafkaTxnForward as u16, &[]).is_err());
+
+        // Legacy open body (no Phase 120 trailer) still decodes with defaults.
+        let mut legacy = BytesMut::new();
+        put_string(&mut legacy, "t").unwrap();
+        legacy.put_u64_le(9);
+        legacy.put_u16_le(2);
+        legacy.put_u8(1);
+        let decoded =
+            decode_request(RequestOpcode::TxnParticipantOpen as u16, &legacy.freeze()).unwrap();
+        match decoded {
+            Request::TxnParticipantOpen {
+                coordinator_node_id,
+                install_open,
+                enable_2pc,
+                ..
+            } => {
+                assert_eq!(coordinator_node_id, 0);
+                assert!(install_open);
+                assert!(enable_2pc);
+            }
+            other => panic!("unexpected {other:?}"),
+        }
     }
 }
