@@ -550,6 +550,15 @@ fn broker_metrics_text(broker: &Broker) -> String {
         "volant_delete_records_outbox_drops_total {}\n",
         broker.delete_records_outbox_drops_total()
     ));
+    // Phase 123: leadership handoff reconcile from local log_start.
+    text.push_str(
+        "# HELP volant_delete_records_outbox_reconcile_total DeleteRecords outbox leadership reconciles\n",
+    );
+    text.push_str("# TYPE volant_delete_records_outbox_reconcile_total counter\n");
+    text.push_str(&format!(
+        "volant_delete_records_outbox_reconcile_total {}\n",
+        broker.delete_records_outbox_reconcile_total()
+    ));
     text.push_str(
         "# HELP volant_cluster_config_push_errors_total BROKER config fan-out failures\n",
     );
@@ -792,7 +801,8 @@ pub fn start_background_tasks(broker: Arc<Broker>) -> BackgroundTasks {
             }));
         }
 
-        // Phase 116: drain durable DeleteRecords outbox for live peers.
+        // Phase 116 + 123: reconcile outbox from local log_start (leadership
+        // handoff), then drain durable entries for live peers.
         {
             let b = Arc::clone(&broker);
             let mut stop_rx = stop_tx.subscribe();
@@ -802,6 +812,9 @@ pub fn start_background_tasks(broker: Arc<Broker>) -> BackgroundTasks {
                     tokio::select! {
                         _ = stop_rx.changed() => break,
                         _ = interval.tick() => {
+                            // Phase 123: rebuild pending truncates when we lead
+                            // with an advanced log_start (covers leadership change).
+                            let _ = b.reconcile_delete_records_outbox();
                             if b.delete_records_outbox_depth() == 0 {
                                 continue;
                             }
@@ -1245,10 +1258,12 @@ pub async fn fanout_delete_records(
     }
 }
 
-/// Drain durable DeleteRecords outbox for currently live peers (Phase 116).
+/// Drain durable DeleteRecords outbox for currently live peers (Phase 116 + 123).
 ///
 /// At-least-once retry of `ReplicaDeleteRecords`. Success removes the entry;
 /// transport / peer errors leave it and increment retry-error metrics.
+/// When this node still leads the partition, the RPC uses the **current**
+/// local leader epoch (Phase 123) so an epoch bump does not self-fence.
 /// No-op when the outbox is empty or the broker is single-node with no pending.
 pub async fn drain_delete_records_outbox(broker: &Broker) {
     let pending = broker.delete_records_outbox_pending_live();
@@ -1259,11 +1274,15 @@ pub async fn drain_delete_records_outbox(broker: &Broker) {
         let Some(addr) = broker.broker_addr(entry.replica_id) else {
             continue;
         };
+        // Phase 123: prefer current epoch while we still lead this TP.
+        let leader_epoch = broker
+            .led_partition_epoch(&entry.topic, entry.partition)
+            .unwrap_or(entry.leader_epoch);
         let req = Request::ReplicaDeleteRecords {
             topic: entry.topic.clone(),
             partition: entry.partition,
             before_offset: entry.before_offset,
-            leader_epoch: entry.leader_epoch,
+            leader_epoch,
         };
         match inter_broker_rpc(broker, &addr, &req).await {
             Ok(Response::ReplicaDeleteRecords {
@@ -1282,7 +1301,7 @@ pub async fn drain_delete_records_outbox(broker: &Broker) {
                 low_watermark,
             }) => {
                 if error_code == ErrorCode::InvalidProducerEpoch as u16 {
-                    // Stale epoch — drop; operator / new leader re-issue covers it.
+                    // Stale epoch — drop; Phase 123 new-leader reconcile re-creates.
                     broker.delete_records_outbox().drop_entry(
                         entry.replica_id,
                         &entry.topic,

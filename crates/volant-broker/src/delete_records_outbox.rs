@@ -1,4 +1,4 @@
-//! Durable DeleteRecords pending-truncate outbox (Phase 116).
+//! Durable DeleteRecords pending-truncate outbox (Phase 116 + 123).
 //!
 //! Layout: `{data_dir}/__delete_records_outbox/state.json` (atomic replace on write).
 //!
@@ -6,6 +6,11 @@
 //! Phase 113 best-effort `ReplicaDeleteRecords` fails. A background drain
 //! retries live peers at-least-once. Peer apply remains idempotent (log start
 //! only advances).
+//!
+//! Phase 123: after leadership change, the new leader **reconciles** pending
+//! targets from its local `log_start` (see
+//! [`crate::Broker::reconcile_delete_records_outbox`]) so offline peers still
+//! catch up without transferring the old leader's outbox file.
 
 use std::collections::HashMap;
 use std::fs::{self, File, OpenOptions};

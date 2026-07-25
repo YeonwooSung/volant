@@ -503,6 +503,13 @@ pub struct Broker {
     cluster_prepared_index: Mutex<HashMap<String, ClusterPreparedEntry>>,
     /// Durable pending DeleteRecords truncates for offline/failed peers (Phase 116).
     delete_records_outbox: DeleteRecordsOutbox,
+    /// Phase 123: last successful outbox reconcile per led partition
+    /// `(topic, partition) → (leader_epoch, log_start)`.
+    ///
+    /// In-memory only; process restart re-reconciles (idempotent).
+    delete_records_outbox_last_reconcile: Mutex<HashMap<(String, u32), (u32, u64)>>,
+    /// Phase 123: partition reconcile passes that advanced last_reconcile.
+    delete_records_outbox_reconcile_total: AtomicU64,
     /// Phase 117: successful admin catch-up RPC applies (config and/or ACL).
     cluster_admin_catchup_success_total: AtomicU64,
     /// Phase 117: admin catch-up RPC / apply failures.
@@ -659,6 +666,8 @@ impl Broker {
             txn_2pc_fanout_errors_total: AtomicU64::new(0),
             cluster_prepared_index: Mutex::new(HashMap::new()),
             delete_records_outbox,
+            delete_records_outbox_last_reconcile: Mutex::new(HashMap::new()),
+            delete_records_outbox_reconcile_total: AtomicU64::new(0),
             cluster_admin_catchup_success_total: AtomicU64::new(0),
             cluster_admin_catchup_errors_total: AtomicU64::new(0),
             isr_expand_total: AtomicU64::new(0),
@@ -787,6 +796,8 @@ impl Broker {
             txn_2pc_fanout_errors_total: AtomicU64::new(0),
             cluster_prepared_index: Mutex::new(HashMap::new()),
             delete_records_outbox,
+            delete_records_outbox_last_reconcile: Mutex::new(HashMap::new()),
+            delete_records_outbox_reconcile_total: AtomicU64::new(0),
             cluster_admin_catchup_success_total: AtomicU64::new(0),
             cluster_admin_catchup_errors_total: AtomicU64::new(0),
             isr_expand_total: AtomicU64::new(0),
@@ -913,6 +924,95 @@ impl Broker {
     pub fn delete_records_outbox_pending_live(&self) -> Vec<crate::delete_records_outbox::OutboxEntry> {
         let live = self.live_brokers();
         self.delete_records_outbox.pending_for_replicas(&live)
+    }
+
+    /// Phase 123: partition reconcile passes that advanced last_reconcile.
+    pub fn delete_records_outbox_reconcile_total(&self) -> u64 {
+        self.delete_records_outbox_reconcile_total
+            .load(Ordering::Relaxed)
+    }
+
+    /// Rebuild pending DeleteRecords outbox entries from local log starts
+    /// for partitions this node leads (Phase 123 leadership handoff MVP).
+    ///
+    /// For each led partition with `log_start > 0`, enqueue
+    /// `ReplicaDeleteRecords` targets for every assigned peer at
+    /// `(before_offset = log_start, leader_epoch = current)` unless this
+    /// `(epoch, log_start)` was already reconciled. Returns the number of
+    /// partition passes that advanced `last_reconcile`.
+    ///
+    /// No-op in single-node mode. Safe to call repeatedly; peer apply is
+    /// idempotent (log start only advances).
+    pub fn reconcile_delete_records_outbox(&self) -> u64 {
+        if self.cluster.is_none() {
+            return 0;
+        }
+        // Collect led partitions + targets without holding the outbox lock.
+        let targets: Vec<(String, u32, u64, i32, Vec<u32>)> = {
+            let topics = self.topics.read();
+            let mut out = Vec::new();
+            for (name, t) in topics.iter() {
+                for (pid, part) in &t.partitions {
+                    if !part.is_leader(self.node_id) {
+                        continue;
+                    }
+                    let log_start = part.log.log_start_offset().raw();
+                    if log_start == 0 {
+                        continue;
+                    }
+                    let epoch = part.leader_epoch;
+                    let peers: Vec<u32> = part
+                        .replicas
+                        .iter()
+                        .copied()
+                        .filter(|id| *id != self.node_id && self.broker_addr(*id).is_some())
+                        .collect();
+                    if peers.is_empty() {
+                        continue;
+                    }
+                    out.push((name.as_str().to_owned(), pid.0, log_start, epoch as i32, peers));
+                }
+            }
+            out
+        };
+
+        let mut advanced = 0u64;
+        let mut last = self.delete_records_outbox_last_reconcile.lock();
+        for (topic, partition, log_start, epoch, peers) in targets {
+            let key = (topic.clone(), partition);
+            let epoch_u = epoch as u32;
+            if last.get(&key) == Some(&(epoch_u, log_start)) {
+                continue;
+            }
+            for peer in peers {
+                let _ = self.delete_records_outbox.enqueue(
+                    peer,
+                    &topic,
+                    partition,
+                    log_start,
+                    epoch,
+                );
+            }
+            last.insert(key, (epoch_u, log_start));
+            advanced += 1;
+            self.delete_records_outbox_reconcile_total
+                .fetch_add(1, Ordering::Relaxed);
+        }
+        advanced
+    }
+
+    /// Current leader epoch for a partition if this node leads it (Phase 123 drain).
+    ///
+    /// Returns `None` when the partition is unknown or this node is not leader.
+    pub fn led_partition_epoch(&self, topic: &str, partition: u32) -> Option<i32> {
+        let name = TopicName::new(topic);
+        let topics = self.topics.read();
+        let part = topics.get(&name)?.partitions.get(&PartitionId(partition))?;
+        if part.is_leader(self.node_id) {
+            Some(part.leader_epoch as i32)
+        } else {
+            None
+        }
     }
 
     /// BROKER config push error counter (Phase 113).

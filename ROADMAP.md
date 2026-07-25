@@ -2736,7 +2736,7 @@ Binding: **[docs/PHASE116_SPEC.md](./docs/PHASE116_SPEC.md)**.
 - [x] Living docs honesty
 
 **Honest limitations:** leader-local outbox only (not consensus / not controller
-SoT); leadership change does not transfer the old leader’s pending set; bounded
+SoT); leadership change handoff → **Phase 123** (new leader reconcile); bounded
 10k keys; whole-segment truncate only; not multi-DC.
 
 **Still deferred:** multi-lang clients, chaos-mesh / long fuzz campaigns,
@@ -2919,9 +2919,38 @@ on sticky coordinator / after FindCoordinator.
 
 **Still deferred:** multi-lang clients, chaos-mesh / long fuzz campaigns,
 full KIP-890/939 / `__transaction_state`, Kafka wire fuzz targets, dynamic
-membership / Raft, full Kafka broker catalog, outbox handoff on leadership change,
+membership / Raft, full Kafka broker catalog,
 per-broker BROKER config overrides, time-based ISR lag / preferred replica /
-shared session registry.
+shared session registry. (Outbox leadership handoff → **Phase 123**.)
+
+---
+
+### Phase 123 — DeleteRecords outbox leadership handoff (MVP) ✅
+
+**Goal:** When the partition leader that held a durable DeleteRecords outbox is
+demoted or dies, pending truncates for offline peers are **not permanently lost**.
+The new leader rebuilds pending targets from its local `log_start` and retries via
+existing `ReplicaDeleteRecords` drain.
+
+Binding: **[docs/PHASE123_SPEC.md](./docs/PHASE123_SPEC.md)**.
+
+- [x] `Broker::reconcile_delete_records_outbox` from local log_start + current epoch
+- [x] In-memory last_reconcile dedup per `(topic, partition) → (epoch, log_start)`
+- [x] Background loop: reconcile then drain (~500ms cluster mode)
+- [x] Drain stamps current epoch when still leader (avoid self-fence)
+- [x] Metric: `volant_delete_records_outbox_reconcile_total`
+- [x] Tests: `phase123_delete_records_outbox_handoff` (handoff + idempotent + single-node)
+- [x] Living docs honesty
+
+**Honest limitations:** not a consensus truncate log; new leader must already hold
+the advanced log start (was online during DeleteRecords); demoted leader outbox is
+not bulk-transferred; bounded outbox may still drop under extreme backlog.
+
+**Still deferred:** multi-lang clients, chaos-mesh / long fuzz campaigns,
+full KIP-890/939 / `__transaction_state`, Kafka wire fuzz targets, dynamic
+membership / Raft, full Kafka broker catalog, consensus truncate journal /
+controller SoT pending set, per-broker BROKER config overrides, time-based ISR
+lag / preferred replica / shared session registry.
 
 ---
 
@@ -2982,7 +3011,10 @@ Phases **0–121 are shipped**. Historical PR order for the core:
 18. Phase 117 (controller failover catch-up for ACL + BROKER config MVP) ✅  
 19. Phase 118 (ISR rejoin + lag-based shrink MVP) ✅  
 20. Phase 119 (multi-broker fetch session handoff MVP) ✅  
- 
+21. Phase 120 (transparent EndTxn forward MVP) ✅  
+22. Phase 121 (sticky FindCoordinator MVP) ✅  
+23. Phase 122 (AddOffsets / TxnOffsetCommit forward MVP) ✅  
+24. Phase 123 (DeleteRecords outbox leadership handoff MVP) ✅  
 
 ---
 
@@ -3023,7 +3055,7 @@ cargo run -p volant-bench --release
 cargo test --workspace
 ```
 
-**Status (post–Phase 119):** core broker, ops (metrics / TLS / auth / SCRAM /
+**Status (post–Phase 123):** core broker, ops (metrics / TLS / auth / SCRAM /
 ACLs / Helm), and the Kafka wire shim are **shipped** (Fetch 0–18 Kafka max;
 ACL admin 0–3 with User resource; soft-marker `READ_COMMITTED` with **marker GC/clip**
 on DeleteRecords/retention/load (Phase 104/111); durable OFLE history; Fetch DivergingEpoch +
@@ -3046,8 +3078,10 @@ controller cluster prepared index — not full KIP-890 / `__transaction_state`);
 **durable fetch sessions** Phase 115 (`__fetch_sessions`);
 **multi-broker session handoff** Phase 119 (owner-encoded id + transparent forward);
 **durable DeleteRecords outbox** Phase 116 (`__delete_records_outbox`; at-least-once
-retry for offline peers — not a consensus truncate log);
-**ACL/BROKER admin catch-up** Phase 117).
+retry for offline peers) + **leadership handoff reconcile** Phase 123 (new leader
+rebuilds from local `log_start` — still not a consensus truncate log);
+**ACL/BROKER admin catch-up** Phase 117; sticky FindCoordinator Phase 121;
+txn EndTxn/AddOffsets/TxnOffsetCommit forward Phases 120/122).
 Still deferred: multi-language clients, full chaos-mesh suites / long fuzz
 campaigns, preferred-replica / shared session store, full KIP-890/939.
 Details: [docs/KAFKA_COMPAT.md](./docs/KAFKA_COMPAT.md), [docs/ops.md](./docs/ops.md).

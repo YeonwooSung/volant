@@ -118,13 +118,16 @@ Without `--cluster-config`, the broker runs as a single node:
   controller assignment that still lists a shrunk set does not undo rejoin.
   Produce/HWM use **leader-local** ISR; Metadata ISR on non-leaders may lag.
   Metrics: `volant_isr_expand_total` / `volant_isr_shrink_total`.
-- **Cluster admin fan-out (Phase 113 + 116):**
+- **Cluster admin fan-out (Phase 113 + 116 + 123):**
   - **DeleteRecords:** only the partition **leader** accepts the client RPC;
     after local truncate it best-effort RPCs other replicas. Peer failure does
     not fail the client. Failed targets are recorded in a **leader-local durable
     outbox** (`__delete_records_outbox`, Phase 116) and retried at-least-once
-    when the peer is live again — not a consensus truncate log; leadership
-    change does not transfer the old leader’s pending set.
+    when the peer is live again. **Phase 123:** on leadership change the new
+    leader **reconciles** pending targets from its local `log_start` (current
+    epoch) so offline peers still catch up when the old leader’s outbox is
+    orphaned — still not a consensus truncate log (new leader must already have
+    applied the truncate).
   - **BROKER config / ACL mutate:** controller is SoT; non-controllers return
     `NotController`. Successful controller mutates push generationed state to
     live peers (config knobs or full ACL snapshot). Describe / authorize use
@@ -149,6 +152,7 @@ Without `--cluster-config`, the broker runs as a single node:
 See [PHASE6_SPEC.md](./PHASE6_SPEC.md) for wire protocol and configuration details.
 Admin fan-out detail: [PHASE113_SPEC.md](./PHASE113_SPEC.md).
 DeleteRecords outbox: [PHASE116_SPEC.md](./PHASE116_SPEC.md).
+DeleteRecords outbox leadership handoff: [PHASE123_SPEC.md](./PHASE123_SPEC.md).
 Admin catch-up: [PHASE117_SPEC.md](./PHASE117_SPEC.md).
 ISR rejoin + lag shrink: [PHASE118_SPEC.md](./PHASE118_SPEC.md).
 Multi-broker 2PC detail: [PHASE114_SPEC.md](./PHASE114_SPEC.md).

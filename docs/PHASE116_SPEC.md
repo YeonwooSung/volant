@@ -202,7 +202,7 @@ Harness: same multi-broker pattern as Phase 113.
 - Multi-lang clients / chaos-mesh / long fuzz  
 - Transparent EndTxn forward  
 - Per-broker BROKER config overrides  
-- Outbox handoff on leadership change (stretch)  
+- Outbox handoff on leadership change → **closed by Phase 123**
 
 ---
 
