@@ -1,17 +1,19 @@
-//! Fetch session state (Phase 88 + 91 omit-unchanged + Phase 95 limits + Phase 115 durable).
+//! Fetch session state (Phase 88 + 91 omit-unchanged + Phase 95 limits + Phase 115 durable
+//! + Phase 119 multi-broker owner encoding / handoff).
 //!
 //! Tracks topic partitions, last-seen fetch params, last-returned HWM/LSO (Phase 91),
 //! idle TTL / max concurrent sessions with lazy LRU eviction (Phase 95), and optional
 //! durability under `{data_dir}/__fetch_sessions/state.json` (Phase 115).
 //!
-//! Sessions are **per-broker / per-data_dir** — not replicated across brokers and not
-//! multi-broker sticky. Multi-broker handoff is deferred (see PHASE115_SPEC).
+//! Sessions remain **owned by one broker**. In cluster mode, `session_id` embeds the
+//! owner `node_id` so a peer can transparent-forward Kafka Fetch (Phase 119). Single-node
+//! keeps sequential ids.
 
 use std::collections::HashMap;
 use std::fs::{self, File, OpenOptions};
 use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicI32, AtomicU64, AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicI32, AtomicU32, AtomicU64, AtomicUsize, Ordering};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use parking_lot::Mutex;
@@ -35,6 +37,42 @@ pub const FETCH_SESSIONS_DIR: &str = "__fetch_sessions";
 pub const FETCH_SESSIONS_FILE: &str = "state.json";
 /// File format version (Phase 115).
 pub const FETCH_SESSIONS_FILE_VERSION: u32 = 1;
+
+/// Bit shift for owner `node_id` inside cluster `session_id` (Phase 119).
+pub const SESSION_OWNER_SHIFT: u32 = 19;
+/// Local counter mask (19 bits) for cluster `session_id` (Phase 119).
+pub const SESSION_LOCAL_MASK: i32 = (1 << SESSION_OWNER_SHIFT) - 1; // 0x7FFFF
+/// Owner `node_id` mask (12 bits) — supports ids 1..4095.
+pub const SESSION_OWNER_MASK: u32 = 0xFFF;
+
+/// Encode a cluster-mode session id from owner broker and local counter.
+pub fn encode_session_id(owner_node_id: u32, local: i32) -> i32 {
+    debug_assert!(local > 0 && local <= SESSION_LOCAL_MASK);
+    let owner = (owner_node_id & SESSION_OWNER_MASK) as i32;
+    (owner << SESSION_OWNER_SHIFT) | (local & SESSION_LOCAL_MASK)
+}
+
+/// Extract owner broker id from a cluster-encoded session id (`None` if unencoded).
+pub fn decode_session_owner(session_id: i32) -> Option<u32> {
+    if session_id <= 0 {
+        return None;
+    }
+    let owner = (session_id as u32) >> SESSION_OWNER_SHIFT;
+    if owner == 0 {
+        None
+    } else {
+        Some(owner)
+    }
+}
+
+/// Local counter portion of a session id (full id when unencoded).
+pub fn session_local_part(session_id: i32) -> i32 {
+    if decode_session_owner(session_id).is_some() {
+        session_id & SESSION_LOCAL_MASK
+    } else {
+        session_id
+    }
+}
 
 /// Cached partition fetch parameters inside a session.
 #[derive(Debug, Clone)]
@@ -107,10 +145,11 @@ pub struct FetchSession {
 }
 
 /// Fetch session table with idle TTL + max concurrent (Phase 95) + optional
-/// durability (Phase 115).
+/// durability (Phase 115) + cluster owner encoding (Phase 119).
 #[derive(Debug)]
 pub struct FetchSessionManager {
     sessions: Mutex<HashMap<i32, FetchSession>>,
+    /// Next **local** counter (not necessarily the full session_id).
     next_id: AtomicI32,
     /// Idle TTL in ms; `0` disables idle eviction.
     idle_timeout_ms: AtomicU64,
@@ -126,6 +165,12 @@ pub struct FetchSessionManager {
     restored: AtomicU64,
     /// Failed durable write attempts (Phase 115).
     persist_errors_total: AtomicU64,
+    /// Cluster owner node id for session_id encoding; `0` = sequential (single-node).
+    owner_node_id: AtomicU32,
+    /// Successful multi-broker Fetch forwards initiated by this broker (Phase 119).
+    forward_total: AtomicU64,
+    /// Failed multi-broker Fetch forward attempts (Phase 119).
+    forward_errors_total: AtomicU64,
 }
 
 impl Default for FetchSessionManager {
@@ -144,6 +189,15 @@ impl FetchSessionManager {
 
     /// Manager with explicit limits and no durable path (unit tests).
     pub fn with_limits(idle_timeout_ms: u64, max_sessions: usize) -> Self {
+        Self::with_limits_and_owner(idle_timeout_ms, max_sessions, 0)
+    }
+
+    /// Manager with limits and optional cluster owner encoding (Phase 119 tests).
+    pub fn with_limits_and_owner(
+        idle_timeout_ms: u64,
+        max_sessions: usize,
+        owner_node_id: u32,
+    ) -> Self {
         Self {
             sessions: Mutex::new(HashMap::new()),
             next_id: AtomicI32::new(1),
@@ -154,6 +208,9 @@ impl FetchSessionManager {
             durable_path: None,
             restored: AtomicU64::new(0),
             persist_errors_total: AtomicU64::new(0),
+            owner_node_id: AtomicU32::new(owner_node_id),
+            forward_total: AtomicU64::new(0),
+            forward_errors_total: AtomicU64::new(0),
         }
     }
 
@@ -161,10 +218,16 @@ impl FetchSessionManager {
     ///
     /// Loads existing sessions, applying idle TTL at load time (Phase 115).
     pub fn open(data_dir: impl AsRef<Path>) -> Self {
-        Self::open_with_limits(
+        Self::open_with_owner(data_dir, 0)
+    }
+
+    /// Open durable sessions with cluster owner encoding (Phase 119).
+    pub fn open_with_owner(data_dir: impl AsRef<Path>, owner_node_id: u32) -> Self {
+        Self::open_with_limits_and_owner(
             data_dir,
             default_idle_timeout_ms(),
             default_max_sessions(),
+            owner_node_id,
         )
     }
 
@@ -174,12 +237,58 @@ impl FetchSessionManager {
         idle_timeout_ms: u64,
         max_sessions: usize,
     ) -> Self {
-        let mut mgr = Self::with_limits(idle_timeout_ms, max_sessions);
+        Self::open_with_limits_and_owner(data_dir, idle_timeout_ms, max_sessions, 0)
+    }
+
+    /// Open durable sessions with limits + owner encoding (Phase 119).
+    pub fn open_with_limits_and_owner(
+        data_dir: impl AsRef<Path>,
+        idle_timeout_ms: u64,
+        max_sessions: usize,
+        owner_node_id: u32,
+    ) -> Self {
+        let mut mgr = Self::with_limits_and_owner(idle_timeout_ms, max_sessions, owner_node_id);
         let dir = data_dir.as_ref().join(FETCH_SESSIONS_DIR);
         let _ = fs::create_dir_all(&dir);
         mgr.durable_path = Some(dir.join(FETCH_SESSIONS_FILE));
         mgr.load_from_disk_at(now_ms());
         mgr
+    }
+
+    /// Cluster owner node id used for session_id encoding (`0` = sequential).
+    pub fn owner_node_id(&self) -> u32 {
+        self.owner_node_id.load(Ordering::Relaxed)
+    }
+
+    /// Set cluster owner for subsequent allocations (Phase 119). Prefer
+    /// [`Self::open_with_owner`] at boot so restored `next_id` is consistent.
+    pub fn set_owner_node_id(&self, owner_node_id: u32) {
+        self.owner_node_id.store(owner_node_id, Ordering::Relaxed);
+    }
+
+    /// Whether a live session exists for `session_id` (after prior evictions on ops).
+    pub fn contains(&self, session_id: i32) -> bool {
+        self.sessions.lock().contains_key(&session_id)
+    }
+
+    /// Successful transparent Fetch forwards from this broker (Phase 119).
+    pub fn forward_total(&self) -> u64 {
+        self.forward_total.load(Ordering::Relaxed)
+    }
+
+    /// Failed transparent Fetch forward attempts (Phase 119).
+    pub fn forward_errors_total(&self) -> u64 {
+        self.forward_errors_total.load(Ordering::Relaxed)
+    }
+
+    /// Record a successful multi-broker Fetch forward (Phase 119).
+    pub fn record_forward_ok(&self) {
+        self.forward_total.fetch_add(1, Ordering::Relaxed);
+    }
+
+    /// Record a failed multi-broker Fetch forward (Phase 119).
+    pub fn record_forward_error(&self) {
+        self.forward_errors_total.fetch_add(1, Ordering::Relaxed);
     }
 
     /// Current idle timeout in milliseconds (`0` = disabled).
@@ -253,15 +362,20 @@ impl FetchSessionManager {
     }
 
     fn alloc_id(&self) -> i32 {
-        // Skip 0 (INVALID_SESSION_ID). Wrap into positive range if needed.
+        let owner = self.owner_node_id.load(Ordering::Relaxed);
+        // Skip 0 (INVALID_SESSION_ID). Wrap into positive / local range if needed.
         loop {
-            let id = self.next_id.fetch_add(1, Ordering::Relaxed);
-            if id > 0 {
-                return id;
+            let local = self.next_id.fetch_add(1, Ordering::Relaxed);
+            if owner == 0 {
+                if local > 0 {
+                    return local;
+                }
+            } else if local > 0 && local <= SESSION_LOCAL_MASK {
+                return encode_session_id(owner, local);
             }
-            // Overflow / non-positive: reset and retry.
+            // Overflow / non-positive / past local mask: reset and retry.
             let _ = self.next_id.compare_exchange(
-                id.wrapping_add(1),
+                local.wrapping_add(1),
                 1,
                 Ordering::Relaxed,
                 Ordering::Relaxed,
@@ -515,13 +629,13 @@ impl FetchSessionManager {
         let idle_ms_i = idle_ms as i64;
         let mut loaded: HashMap<i32, FetchSession> = HashMap::new();
         let mut idle_dropped = 0u64;
-        let mut max_id = 0i32;
+        let mut max_local = 0i32;
 
         for s in file.sessions {
             if s.id <= 0 {
                 continue;
             }
-            max_id = max_id.max(s.id);
+            max_local = max_local.max(session_local_part(s.id));
             if idle_ms > 0 && now_ms.saturating_sub(s.last_activity_ms) > idle_ms_i {
                 idle_dropped += 1;
                 continue;
@@ -537,7 +651,15 @@ impl FetchSessionManager {
                 .fetch_add(idle_dropped, Ordering::Relaxed);
         }
 
-        let next = file.next_id.max(max_id.saturating_add(1)).max(1);
+        // `next_id` is the local counter (Phase 119); file may store local or legacy full id.
+        let file_local = session_local_part(file.next_id).max(1);
+        let mut next = file_local.max(max_local.saturating_add(1)).max(1);
+        if self.owner_node_id.load(Ordering::Relaxed) > 0 && next > SESSION_LOCAL_MASK {
+            next = max_local.saturating_add(1).max(1);
+            if next > SESSION_LOCAL_MASK {
+                next = 1;
+            }
+        }
         self.next_id.store(next, Ordering::Relaxed);
         self.restored
             .store(loaded.len() as u64, Ordering::Relaxed);
@@ -1031,5 +1153,24 @@ mod tests {
         assert!(second > first);
         assert_ne!(second, first);
         let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn owner_encode_decode_roundtrip() {
+        let id = encode_session_id(2, 7);
+        assert_eq!(decode_session_owner(id), Some(2));
+        assert_eq!(session_local_part(id), 7);
+        assert_eq!(decode_session_owner(3), None); // sequential / unencoded
+        assert_eq!(decode_session_owner(0), None);
+    }
+
+    #[test]
+    fn cluster_alloc_embeds_owner() {
+        let mgr = FetchSessionManager::with_limits_and_owner(0, 0, 3);
+        let id = mgr.create_at(HashMap::new(), 1_000);
+        assert_eq!(decode_session_owner(id), Some(3));
+        assert!(session_local_part(id) > 0);
+        assert!(mgr.contains(id));
+        assert!(mgr.begin_incremental_at(id, 1, 1_100).is_ok());
     }
 }

@@ -24,7 +24,7 @@ From `SUPPORTED_APIS` in `crates/volant-broker/src/kafka/mod.rs`:
 | Key | API | Versions | Notes |
 |----:|-----|----------|-------|
 | 0 | Produce | 0–13 | Classic 0–8; flex v9+; TopicId v13; KIP-951 CurrentLeader v10+; txn 123 after timeout (Phase 94) |
-| 1 | Fetch | 0–18 | Classic 0–11; flex v12–18; TopicId v13+; isolation LSO/aborted (Phase 86); ReplicaState v15+ ignore; NodeEndpoints v16+; CurrentLeader tag v12+; DivergingEpoch + sessions (Phase 88); omit-unchanged incremental (Phase 91); session idle TTL + max/LRU (Phase 95); durable local sessions (Phase 115) |
+| 1 | Fetch | 0–18 | Classic 0–11; flex v12–18; TopicId v13+; isolation LSO/aborted (Phase 86); ReplicaState v15+ ignore; NodeEndpoints v16+; CurrentLeader tag v12+; DivergingEpoch + sessions (Phase 88); omit-unchanged incremental (Phase 91); session idle TTL + max/LRU (Phase 95); durable local sessions (Phase 115); multi-broker session forward (Phase 119) |
 | 2 | ListOffsets | 0–11 | Flex v6+; specials v7–11; READ_COMMITTED latest = LSO (Phase 86) |
 | 3 | Metadata | 0–13 | Flex v9+; TopicId v10–13; top-level ErrorCode v13; live leader_epoch (Phase 87) |
 | 8 | OffsetCommit | 0–10 | Flex v8+; TopicId v10 |
@@ -79,7 +79,8 @@ From `SUPPORTED_APIS` in `crates/volant-broker/src/kafka/mod.rs`:
 | Open txn timeout | 93 | Honor InitProducerId `transaction_timeout_ms` (or broker default) for open write-through txns; lazy auto-abort |
 | TRANSACTION_ABORTABLE | 94 | Honest subset: emit 123 after open/prepared timeout on Produce/EndTxn/Add*/TxnOffsetCommit; FindCoordinator never |
 | Fetch session TTL / max | 95 | Idle TTL (default 60s) + max concurrent sessions (default 1000, LRU); lazy eviction |
-| Durable fetch sessions | 115 | Per-broker `{data_dir}/__fetch_sessions`; restart restores session_id/epoch/omit cache within idle TTL; not multi-broker sticky |
+| Durable fetch sessions | 115 | Per-broker `{data_dir}/__fetch_sessions`; restart restores session_id/epoch/omit cache within idle TTL |
+| Multi-broker session handoff | 119 | Owner-encoded session_id + transparent Kafka Fetch forward (opcode 82/83); omit/epoch SoT remains owner; dead owner ⇒ 70 |
 | Transaction max timeout | 96 | Broker max (default 15m / `VOLANT_TRANSACTION_MAX_TIMEOUT_MS`); InitProducerId rejects over-max with **50**; effective open/prepared clamp |
 | Background sweeper + metrics | 97 | Periodic open/prepared/session idle expiry (default 1s / `VOLANT_SWEEP_INTERVAL_MS`; `0` pauses bg); lazy paths remain; expired counters + open/prepared gauges |
 | Crash≡abort control | 98 | Open→aborted promote appends ABORT control batches (dual-write) |
@@ -102,7 +103,7 @@ These are **current** product facts, not temporary docs lag:
 | Epochs | **Durable history MVP** (Phase 87): `{data_dir}/__leader_epochs`; prior epochs return transition end offsets; Metadata advertises live epoch; not a full KRaft epoch state machine; Fetch **DivergingEpoch** on truncation (Phase 88) |
 | TopicId | Deterministic UUID from Volant id (`volant` + zeros + u32), not KRaft random |
 | Groups | Coordinator-driven assignment; GroupType always `classic`; states Stable/Empty |
-| Fetch sessions | **Real MVP** (Phase 88 + **91** + **95** + **97** + **99** + **100** + **102** + **103** + **115**): create/merge/forgotten; empty-topics re-fetch; errors 70/71; **omit-unchanged** when HWM+LSO unchanged and records empty; **idle TTL** (default 60s / `VOLANT_FETCH_SESSION_IDLE_MS`) + **max sessions** (default 1000 / `VOLANT_FETCH_SESSION_MAX`, LRU at cap); idle also background-swept (Phase 97); knobs on BROKER Describe/Alter (Phase 99) with **sparse** durable restart (Phase 100/102) and name vs `node_id` (Phase 103); **session table durable** under `{data_dir}/__fetch_sessions` (Phase 115) so same-node restart restores id/epoch/omit cache within idle TTL; **not** multi-broker sticky / no inter-broker session handoff |
+| Fetch sessions | **Real MVP** (Phase 88 + **91** + **95** + **97** + **99** + **100** + **102** + **103** + **115** + **119**): create/merge/forgotten; empty-topics re-fetch; errors 70/71; **omit-unchanged** when HWM+LSO unchanged and records empty; **idle TTL** (default 60s / `VOLANT_FETCH_SESSION_IDLE_MS`) + **max sessions** (default 1000 / `VOLANT_FETCH_SESSION_MAX`, LRU at cap); idle also background-swept (Phase 97); knobs on BROKER Describe/Alter (Phase 99) with **sparse** durable restart (Phase 100/102) and name vs `node_id` (Phase 103); **session table durable** under `{data_dir}/__fetch_sessions` (Phase 115); **multi-broker handoff** (Phase 119): cluster session_id embeds owner; non-owner transparent-forwards Fetch to owner over inter-broker (no dual epoch); unreachable owner ⇒ **70**; not preferred-replica / not a shared session store |
 | Preferred replica | Always -1 |
 | ISR / HWM (cluster) | Kafka-style static ISR (Phase 6): death shrink + HWM recompute (Phase 108/110); **rejoin** when ReplicaFetch LEO ≥ HWM and lag ≤ `replica_lag_max_messages`; lag-shrink of slow-but-alive members (Phase 118); Metadata ISR may lag when leader ≠ controller |
 | CreateTopics | Replica assignment arrays ignored; configs response often null |

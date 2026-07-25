@@ -506,6 +506,15 @@ pub fn encode_request(req: &Request) -> Result<Bytes> {
             dst.put_u16_le(*producer_epoch);
             dst.put_u8(if *commit { 1 } else { 0 });
         }
+        Request::KafkaFetchForward {
+            api_version,
+            principal,
+            body,
+        } => {
+            dst.put_i16_le(*api_version);
+            put_string(&mut dst, principal)?;
+            put_bytes(&mut dst, body);
+        }
     }
     finish_payload(dst)
 }
@@ -1041,6 +1050,19 @@ pub fn decode_request(opcode: u16, payload: &[u8]) -> Result<Request> {
                 commit,
             })
         }
+        RequestOpcode::KafkaFetchForward => {
+            if src.remaining() < 2 {
+                return Err(Error::Protocol("truncated kafka fetch forward version".into()));
+            }
+            let api_version = src.get_i16_le();
+            let principal = get_string(&mut src)?;
+            let body = get_bytes(&mut src)?;
+            Ok(Request::KafkaFetchForward {
+                api_version,
+                principal,
+                body,
+            })
+        }
     }
 }
 
@@ -1440,6 +1462,10 @@ pub fn encode_response(resp: &Response) -> Result<Bytes> {
         }
         Response::TxnParticipantComplete { error_code } => {
             dst.put_u16_le(*error_code);
+        }
+        Response::KafkaFetchForward { error_code, body } => {
+            dst.put_u16_le(*error_code);
+            put_bytes(&mut dst, body);
         }
         Response::Error { code, message } => {
             dst.put_u16_le(*code);
@@ -2223,6 +2249,16 @@ pub fn decode_response(opcode: u16, payload: &[u8]) -> Result<Response> {
             Ok(Response::TxnParticipantComplete {
                 error_code: src.get_u16_le(),
             })
+        }
+        ResponseOpcode::KafkaFetchForward => {
+            if src.remaining() < 2 {
+                return Err(Error::Protocol(
+                    "truncated kafka fetch forward response".into(),
+                ));
+            }
+            let error_code = src.get_u16_le();
+            let body = get_bytes(&mut src)?;
+            Ok(Response::KafkaFetchForward { error_code, body })
         }
         ResponseOpcode::Error => {
             if src.remaining() < 2 {

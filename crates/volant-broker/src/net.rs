@@ -4,7 +4,7 @@ use std::net::SocketAddr;
 use std::sync::Arc;
 use std::time::Duration;
 
-use bytes::BytesMut;
+use bytes::{Bytes, BytesMut};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::{TcpListener, TcpStream};
 use tokio::sync::watch;
@@ -430,6 +430,23 @@ fn broker_metrics_text(broker: &Broker) -> String {
     text.push_str(&format!(
         "volant_fetch_sessions_persist_errors_total {}\n",
         sessions.persist_errors_total()
+    ));
+    // Phase 119: multi-broker session forward.
+    text.push_str(
+        "# HELP volant_fetch_session_forward_total Successful Kafka Fetch session forwards to owner\n",
+    );
+    text.push_str("# TYPE volant_fetch_session_forward_total counter\n");
+    text.push_str(&format!(
+        "volant_fetch_session_forward_total {}\n",
+        sessions.forward_total()
+    ));
+    text.push_str(
+        "# HELP volant_fetch_session_forward_errors_total Failed Kafka Fetch session forward attempts\n",
+    );
+    text.push_str("# TYPE volant_fetch_session_forward_errors_total counter\n");
+    text.push_str(&format!(
+        "volant_fetch_session_forward_errors_total {}\n",
+        sessions.forward_errors_total()
     ));
     text.push_str("# HELP volant_open_txns Live open (non-prepared) transactions\n");
     text.push_str("# TYPE volant_open_txns gauge\n");
@@ -1539,6 +1556,85 @@ pub async fn fanout_txn_participant_complete(
     ok
 }
 
+/// Phase 119: if this Fetch should be served by a peer session owner, forward
+/// the Kafka body and return the owner's response body. `None` = handle locally.
+///
+/// Never re-forwards on the owner (caller is the Kafka client path only).
+pub async fn maybe_forward_kafka_fetch(
+    broker: &Broker,
+    api_version: i16,
+    principal: &str,
+    fetch_body: &[u8],
+) -> Option<Bytes> {
+    use crate::kafka::fetch_session::{decode_session_owner, INITIAL_EPOCH};
+    use crate::kafka::produce_fetch::{peek_fetch_session, put_fetch_empty_response};
+    use bytes::BytesMut;
+
+    if broker.cluster_config().is_none() || api_version < 7 {
+        return None;
+    }
+    let (session_id, session_epoch) = peek_fetch_session(api_version, fetch_body)?;
+    // Create path stays local.
+    if session_id == 0 || session_epoch == INITIAL_EPOCH {
+        return None;
+    }
+    // Local hit (or owner-local miss → 70 via encode_fetch).
+    if broker.fetch_sessions().contains(session_id) {
+        return None;
+    }
+    let owner = decode_session_owner(session_id)?;
+    if owner == broker.node_id() {
+        return None;
+    }
+    let Some(addr) = broker.broker_addr(owner) else {
+        broker.fetch_sessions().record_forward_error();
+        let mut out = BytesMut::new();
+        put_fetch_empty_response(&mut out, api_version, 70, session_id);
+        return Some(out.freeze());
+    };
+
+    let req = Request::KafkaFetchForward {
+        api_version,
+        principal: principal.to_owned(),
+        body: Bytes::copy_from_slice(fetch_body),
+    };
+    match inter_broker_rpc(broker, &addr, &req).await {
+        Ok(Response::KafkaFetchForward {
+            error_code: 0,
+            body,
+        }) => {
+            broker.fetch_sessions().record_forward_ok();
+            Some(body)
+        }
+        Ok(Response::KafkaFetchForward { error_code, .. }) => {
+            tracing::debug!(
+                owner,
+                error_code,
+                session_id,
+                "kafka fetch forward peer error"
+            );
+            broker.fetch_sessions().record_forward_error();
+            let mut out = BytesMut::new();
+            put_fetch_empty_response(&mut out, api_version, 70, session_id);
+            Some(out.freeze())
+        }
+        Ok(other) => {
+            tracing::debug!(owner, ?other, session_id, "kafka fetch forward unexpected");
+            broker.fetch_sessions().record_forward_error();
+            let mut out = BytesMut::new();
+            put_fetch_empty_response(&mut out, api_version, 70, session_id);
+            Some(out.freeze())
+        }
+        Err(e) => {
+            tracing::debug!(owner, error = %e, session_id, "kafka fetch forward rpc failed");
+            broker.fetch_sessions().record_forward_error();
+            let mut out = BytesMut::new();
+            put_fetch_empty_response(&mut out, api_version, 70, session_id);
+            Some(out.freeze())
+        }
+    }
+}
+
 /// Inter-broker RPC over a short-lived connection (plain TCP or optional TLS).
 ///
 /// When the local broker has an auth token configured, sends Auth first.
@@ -2020,6 +2116,7 @@ fn authorize_request(
         | Request::TxnParticipantOpen { .. }
         | Request::TxnParticipantPrepare { .. }
         | Request::TxnParticipantComplete { .. }
+        | Request::KafkaFetchForward { .. }
         | Request::Auth { .. }
         | Request::ScramFirst { .. }
         | Request::ScramFinal { .. } => return None,
@@ -2103,6 +2200,7 @@ fn authorize_request(
         | Request::TxnParticipantOpen { .. }
         | Request::TxnParticipantPrepare { .. }
         | Request::TxnParticipantComplete { .. }
+        | Request::KafkaFetchForward { .. }
         | Request::Auth { .. }
         | Request::ScramFirst { .. }
         | Request::ScramFinal { .. } => true,
@@ -2184,7 +2282,8 @@ fn record_response_metrics(broker: &Broker, resp: &Response) {
         | Response::ClusterAclSnapshot { error_code, .. }
         | Response::TxnParticipantOpen { error_code }
         | Response::TxnParticipantPrepare { error_code }
-        | Response::TxnParticipantComplete { error_code } => {
+        | Response::TxnParticipantComplete { error_code }
+        | Response::KafkaFetchForward { error_code, .. } => {
             if *error_code != 0 {
                 m.record_error(*error_code);
             }
@@ -2852,6 +2951,26 @@ async fn handle_request(broker: &Broker, req: Request) -> Result<Response> {
                 commit,
             );
             Ok(Response::TxnParticipantComplete { error_code })
+        }
+        Request::KafkaFetchForward {
+            api_version,
+            principal,
+            body,
+        } => {
+            // Phase 119: owner-side local encode only (never re-forward).
+            let mut src = body;
+            let mut out = BytesMut::new();
+            crate::kafka::produce_fetch::encode_fetch(
+                broker,
+                &mut src,
+                &mut out,
+                api_version,
+                &principal,
+            );
+            Ok(Response::KafkaFetchForward {
+                error_code: 0,
+                body: out.freeze(),
+            })
         }
         Request::DescribeGroup { group_id } => {
             match broker.groups().describe_group(&group_id) {

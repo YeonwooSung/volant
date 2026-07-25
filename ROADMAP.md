@@ -2799,10 +2799,39 @@ no preferred replica; controller durable assignment / Metadata ISR may lag when
 the partition leader is not the controller (produce/HWM uses leader-local ISR).
 
 **Still deferred:** multi-lang clients, chaos-mesh / long fuzz campaigns,
-multi-broker session handoff, full KIP-890/939 / `__transaction_state`, Kafka
-wire fuzz targets, dynamic membership / Raft, full Kafka broker catalog,
-transparent EndTxn forward, outbox handoff on leadership change, per-broker
-BROKER config overrides, time-based ISR lag / preferred replica.
+multi-broker session handoff → **closed by Phase 119**, full KIP-890/939 /
+`__transaction_state`, Kafka wire fuzz targets, dynamic membership / Raft,
+full Kafka broker catalog, transparent EndTxn forward, outbox handoff on
+leadership change, per-broker BROKER config overrides, time-based ISR lag /
+preferred replica.
+
+---
+
+### Phase 119 — Multi-broker fetch session handoff / affinity (MVP) ✅
+
+**Goal:** A Fetch session opened on broker A remains usable when the client
+(or LB) hits broker B: cluster `session_id` embeds the owner; non-owner
+transparent-forwards the Kafka Fetch body over inter-broker RPC so epoch and
+omit-unchanged stay correct on the single owner SoT.
+
+Binding: **[docs/PHASE119_SPEC.md](./docs/PHASE119_SPEC.md)**.
+
+- [x] Owner-encoded session_id in cluster mode (`node_id << 19 | local`)
+- [x] Native opcodes 82/83 `KafkaFetchForward` (request/response bodies)
+- [x] Kafka shim: foreign-owner miss → forward; owner encode_fetch local only
+- [x] Metrics: `volant_fetch_session_forward_total` / `_errors_total`
+- [x] Tests: `phase119_fetch_session_handoff` (forward + omit, epoch 71, FINAL, single-node)
+- [x] Living docs honesty
+
+**Honest limitations:** not preferred-replica; not a controller-replicated
+session store (owner death ⇒ 70); forward adds one RTT; single-node sequential
+ids unchanged; large responses bounded by native `MAX_PAYLOAD`.
+
+**Still deferred:** multi-lang clients, chaos-mesh / long fuzz campaigns,
+full KIP-890/939 / `__transaction_state`, Kafka wire fuzz targets, dynamic
+membership / Raft, full Kafka broker catalog, transparent EndTxn forward,
+outbox handoff on leadership change, per-broker BROKER config overrides,
+time-based ISR lag / preferred replica / shared session registry.
 
 ---
 
@@ -2862,6 +2891,8 @@ Phases **0–118 are shipped**. Historical PR order for the core:
 17. Phase 116 (durable DeleteRecords outbox for offline replicas MVP) ✅  
 18. Phase 117 (controller failover catch-up for ACL + BROKER config MVP) ✅  
 19. Phase 118 (ISR rejoin + lag-based shrink MVP) ✅  
+20. Phase 119 (multi-broker fetch session handoff MVP) ✅  
+ 
 
 ---
 
@@ -2902,7 +2933,7 @@ cargo run -p volant-bench --release
 cargo test --workspace
 ```
 
-**Status (post–Phase 118):** core broker, ops (metrics / TLS / auth / SCRAM /
+**Status (post–Phase 119):** core broker, ops (metrics / TLS / auth / SCRAM /
 ACLs / Helm), and the Kafka wire shim are **shipped** (Fetch 0–18 Kafka max;
 ACL admin 0–3 with User resource; soft-marker `READ_COMMITTED` with **marker GC/clip**
 on DeleteRecords/retention/load (Phase 104/111); durable OFLE history; Fetch DivergingEpoch +
@@ -2922,10 +2953,11 @@ HWM recompute** Phase 108; **non-controller alive-set auto-death** Phase 110;
 (DeleteRecords best-effort replica truncate; controller-only BROKER config + ACL
 snapshot push); **multi-broker 2PC MVP** Phase 114 (inter-broker prepare/complete;
 controller cluster prepared index — not full KIP-890 / `__transaction_state`);
-**durable fetch sessions** Phase 115 (`__fetch_sessions`; not multi-broker sticky);
+**durable fetch sessions** Phase 115 (`__fetch_sessions`);
+**multi-broker session handoff** Phase 119 (owner-encoded id + transparent forward);
 **durable DeleteRecords outbox** Phase 116 (`__delete_records_outbox`; at-least-once
 retry for offline peers — not a consensus truncate log);
 **ACL/BROKER admin catch-up** Phase 117).
 Still deferred: multi-language clients, full chaos-mesh suites / long fuzz
-campaigns, multi-broker session handoff, full KIP-890/939.
+campaigns, preferred-replica / shared session store, full KIP-890/939.
 Details: [docs/KAFKA_COMPAT.md](./docs/KAFKA_COMPAT.md), [docs/ops.md](./docs/ops.md).

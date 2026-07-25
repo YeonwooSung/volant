@@ -594,6 +594,43 @@ pub(crate) fn map_produce_ack_error(err: u16) -> i16 {
     }
 }
 
+/// Peek Fetch v7+ `session_id` / `session_epoch` without consuming `src` (Phase 119).
+///
+/// Returns `None` when the header is truncated or version &lt; 7.
+pub(crate) fn peek_fetch_session(version: i16, src: &[u8]) -> Option<(i32, i32)> {
+    if version < 7 {
+        return None;
+    }
+    let mut cur = src;
+    // replica_id (≤v14), max_wait, min_bytes
+    let need = if version <= 14 { 12 } else { 8 };
+    if cur.len() < need {
+        return None;
+    }
+    if version <= 14 {
+        cur = &cur[4..]; // replica
+    }
+    cur = &cur[8..]; // max_wait + min_bytes
+    if version >= 3 {
+        if cur.len() < 4 {
+            return None;
+        }
+        cur = &cur[4..]; // max_bytes
+    }
+    if version >= 4 {
+        if cur.is_empty() {
+            return None;
+        }
+        cur = &cur[1..]; // isolation
+    }
+    if cur.len() < 8 {
+        return None;
+    }
+    let session_id = i32::from_be_bytes([cur[0], cur[1], cur[2], cur[3]]);
+    let session_epoch = i32::from_be_bytes([cur[4], cur[5], cur[6], cur[7]]);
+    Some((session_id, session_epoch))
+}
+
 /// Write Fetch response header before topic array (classic v0–11 / flexible v12).
 pub(crate) fn put_fetch_response_header(
     out: &mut BytesMut,

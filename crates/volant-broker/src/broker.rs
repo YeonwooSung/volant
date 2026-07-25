@@ -477,7 +477,7 @@ pub struct Broker {
     leader_epochs: RwLock<HashMap<(String, u32), Vec<EpochStart>>>,
     /// Durable leader-epoch store under `data_dir/__leader_epochs` (Phase 87).
     leader_epoch_store: LeaderEpochStore,
-    /// Fetch sessions (Phase 88 + 91 omit + Phase 95 TTL/max + Phase 115 durable).
+    /// Fetch sessions (Phase 88 + 91 omit + Phase 95 TTL/max + Phase 115 durable + Phase 119 handoff).
     fetch_sessions: FetchSessionManager,
     /// Phase 109: single-flight guard for [`crate::net::start_background_tasks`].
     ///
@@ -717,8 +717,8 @@ impl Broker {
             .expect("failed to open SCRAM store");
         let leader_epoch_store = LeaderEpochStore::open(&storage.data_dir)
             .expect("failed to open leader epoch store");
-        // Phase 115: durable fetch sessions under data_dir/__fetch_sessions.
-        let fetch_sessions = FetchSessionManager::open(&storage.data_dir);
+        // Phase 115/119: durable fetch sessions; cluster owner-encoded session ids.
+        let fetch_sessions = FetchSessionManager::open_with_owner(&storage.data_dir, node_id);
         // Phase 116: durable DeleteRecords outbox under data_dir.
         let delete_records_outbox = DeleteRecordsOutbox::open(&storage.data_dir);
         let broker = Self {

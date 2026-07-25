@@ -21,7 +21,7 @@
 pub mod codec;
 /// Compression codecs (gzip / snappy / lz4 / zstd); Fetch codec env.
 pub mod compress;
-/// Fetch session state (Phase 88 + 91 omit + Phase 95 limits + Phase 115 durable).
+/// Fetch session state (Phase 88 + 91 omit + Phase 95 limits + Phase 115 durable + Phase 119).
 pub mod fetch_session;
 mod handler;
 /// Shared TopicId / topic-name wire identity helpers.
@@ -29,7 +29,8 @@ mod topic_id;
 /// Transaction API handlers (Init / Add* / End / TxnOffsetCommit).
 mod txn;
 mod meta_api;
-mod produce_fetch;
+/// Produce / Fetch / ListOffsets / OffsetForLeaderEpoch Kafka wire handlers.
+pub(crate) mod produce_fetch;
 mod group_api;
 mod admin_api;
 mod acl_api;

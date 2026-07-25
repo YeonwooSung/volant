@@ -40,6 +40,7 @@ Key series (prefix `volant_`):
 - `volant_fetch_sessions_active` / `volant_fetch_sessions_evicted_total` (Phase 95)
 - `volant_fetch_sessions_idle_evicted_total` (Phase 97 idle-only subset)
 - `volant_fetch_sessions_restored` / `volant_fetch_sessions_persist_errors_total` (Phase 115 durable)
+- `volant_fetch_session_forward_total` / `volant_fetch_session_forward_errors_total` (Phase 119 multi-broker handoff)
 - `volant_open_txns` / `volant_prepared_txns` (Phase 97 gauges)
 - `volant_open_txns_expired_total` / `volant_prepared_txns_expired_total` (Phase 97)
 - `volant_build_info{version=...}`
@@ -198,8 +199,11 @@ volant-server \
   LRU eviction at cap) (Phase 95); idle also background-swept (Phase 97).
   **Durable per-broker** under `{data_dir}/__fetch_sessions/state.json` (Phase 115):
   restart on the same data_dir restores session_id / epoch / omit cache within idle
-  TTL. **Not** multi-broker sticky — pin Fetch connections (or LB stickiness) to the
-  broker that created the session; wrong broker ⇒ **70**.
+  TTL. **Multi-broker handoff MVP (Phase 119):** cluster session_ids embed the owner
+  `node_id`; a peer that lacks the session transparent-forwards the Kafka Fetch body
+  to the owner over inter-broker RPC (opcode 82/83) so epoch + omit-unchanged stay
+  correct. Owner death / unreachable ⇒ **70**. Sticky routing still preferred for
+  latency (one extra RTT on forward).
 - **ACLs:** Kafka ACL admin maps to Volant Phase 20/21 ACLs (LITERAL only;
   CreateAcls enables enforcement). Describe/Create/DeleteAcls **0–3**: v3 accepts
   Kafka **User** resource type (stored as `ResourceType::User`; not used on the

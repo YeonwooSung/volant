@@ -84,6 +84,8 @@ pub enum RequestOpcode {
     TxnParticipantPrepare = 78,
     /// Coordinator → peer: finalize prepared/open ranges (Phase 114).
     TxnParticipantComplete = 80,
+    /// Non-owner → session owner: proxy Kafka Fetch body (Phase 119).
+    KafkaFetchForward = 82,
 }
 
 impl RequestOpcode {
@@ -129,6 +131,7 @@ impl RequestOpcode {
             76 => Self::TxnParticipantOpen,
             78 => Self::TxnParticipantPrepare,
             80 => Self::TxnParticipantComplete,
+            82 => Self::KafkaFetchForward,
             _ => return None,
         })
     }
@@ -527,6 +530,15 @@ pub enum Request {
         /// True = commit finalize; false = abort finalize.
         commit: bool,
     },
+    /// Non-owner → session owner: proxy a Kafka Fetch request body (Phase 119).
+    KafkaFetchForward {
+        /// Kafka Fetch API version.
+        api_version: i16,
+        /// ACL principal to apply on the owner (may be anonymous).
+        principal: String,
+        /// Kafka Fetch request body (after the Kafka request header).
+        body: Bytes,
+    },
 }
 
 impl Request {
@@ -572,6 +584,7 @@ impl Request {
             Self::TxnParticipantOpen { .. } => RequestOpcode::TxnParticipantOpen as u16,
             Self::TxnParticipantPrepare { .. } => RequestOpcode::TxnParticipantPrepare as u16,
             Self::TxnParticipantComplete { .. } => RequestOpcode::TxnParticipantComplete as u16,
+            Self::KafkaFetchForward { .. } => RequestOpcode::KafkaFetchForward as u16,
         }
     }
 }

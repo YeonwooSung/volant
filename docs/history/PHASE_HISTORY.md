@@ -160,15 +160,16 @@ docs for day-to-day reading: [ops](../ops.md), [consistency](../consistency.md),
 | 116 | ✅ | Durable DeleteRecords outbox for offline replicas (leader-local pending + live drain) | [PHASE116_SPEC.md](../PHASE116_SPEC.md) |
 | 117 | ✅ | Controller failover catch-up for ACL + BROKER config (durable gens + heartbeat re-push) | [PHASE117_SPEC.md](../PHASE117_SPEC.md) |
 | 118 | ✅ | ISR rejoin + lag-based shrink (ReplicaFetch catch-up re-expand; metrics) | [PHASE118_SPEC.md](../PHASE118_SPEC.md) |
+| 119 | ✅ | Multi-broker fetch session handoff MVP (owner-encoded id + transparent forward) | [PHASE119_SPEC.md](../PHASE119_SPEC.md) |
 
 ---
 
-## Still deferred (post–Phase 118)
+## Still deferred (post–Phase 119)
 
 - Multi-language clients
 - Chaos-mesh / long fuzz campaigns (corpus **smoke CI** → **closed by Phase 112**)
 - Full KIP-890/939 / Kafka `__transaction_state` topic (multi-broker Enable2Pc MVP → **closed by Phase 114**)
-- Multi-broker session handoff / affinity routing (durable **local** sessions → **closed by Phase 115**)
+- Multi-broker session handoff / affinity routing (durable **local** → **115**; owner forward MVP → **closed by Phase 119**; preferred-replica / shared store still open)
 - Byte-identical response cache beyond HWM+LSO omit
 - Full KRaft epoch state machine / remote-log epochs
 - Full Kafka broker catalog / KRaft DynamicBrokerConfig
@@ -185,6 +186,7 @@ docs for day-to-day reading: [ops](../ops.md), [consistency](../consistency.md),
 - cargo-fuzz corpus smoke + CI MVP → **closed by Phase 112**
 - Multi-broker Enable2Pc prepare/complete fan-out → **closed by Phase 114**
 - Durable local fetch sessions → **closed by Phase 115**
+- Multi-broker fetch session forward (owner-encoded id) → **closed by Phase 119**
 - Transparent EndTxn forward to txn coordinator
 - Outbox handoff on leadership change / consensus truncate log
 - Per-broker BROKER config overrides / multi-master ACL merge

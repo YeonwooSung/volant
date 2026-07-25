@@ -86,18 +86,19 @@ workers.
 | Metadata | Live `leader_epoch` (not always `-1`) |
 | Advance | Explicit bump / multi-node failover best-effort |
 
-## Fetch DivergingEpoch + sessions (Phase 88 + 91 + 95)
+## Fetch DivergingEpoch + sessions (Phase 88 + 91 + 95 + 115 + 119)
 
 | Feature | Behavior |
 |---------|----------|
 | DivergingEpoch | Fetch v12+ tag 0 when `last_fetched_epoch` + `fetch_offset` past epoch end |
 | Partition error | `OFFSET_OUT_OF_RANGE` with empty records; HWM/LSO still filled |
-| Sessions | Process-local create / merge / forgotten / FINAL close |
+| Sessions | Owner-local create / merge / forgotten / FINAL close; durable under `__fetch_sessions` (115) |
 | Incremental | Empty topics re-fetches session set |
 | Omit-unchanged (91) | Empty-topics incremental omits partition when HWM+LSO unchanged and records empty |
 | Idle TTL (95) | Default 60s (`VOLANT_FETCH_SESSION_IDLE_MS`; `0` disables); lazy on create/incremental |
 | Max sessions (95) | Default 1000 (`VOLANT_FETCH_SESSION_MAX`; `0` unlimited); LRU-evict at cap |
-| Errors | 70 session id not found (incl. after TTL/LRU); 71 invalid session epoch |
+| Multi-broker (119) | Cluster session_id encodes owner; peer miss → transparent inter-broker Fetch forward |
+| Errors | 70 session id not found (incl. after TTL/LRU / dead owner); 71 invalid session epoch |
 
 ## Cluster ISR (Phase 6 + 108/110/118)
 
@@ -135,7 +136,7 @@ workers.
 - Crash≡abort control batches yes (Phase 98); empty AddPartitions control yes (Phase 105)  
 - Prepared 2PC multi-broker MVP yes (Phase 114; **not** full KIP-890/939 / `__transaction_state` topic); prepared timeout yes (Phase 92); open-txn timeout yes (Phase 93); TRANSACTION_ABORTABLE honest subset after timeout (Phase 94; FindCoordinator never); transaction max timeout clamp yes (Phase 96; default 15m; Init **50** over-max)  
 - Clients should pin Init/Begin/EndTxn to the coordinator broker that allocated the producer (no transparent EndTxn forward yet)  
-- Fetch sessions not durable / multi-broker sticky; omit cache is HWM+LSO only (not byte-identical Kafka response cache); idle TTL + max/LRU yes (Phase 95)  
+- Fetch sessions durable local (Phase 115) + multi-broker forward MVP (Phase 119); omit cache is HWM+LSO only (not byte-identical Kafka response cache); idle TTL + max/LRU yes (Phase 95); not preferred-replica / not shared session store  
 - ACL / BROKER admin SoT is the **controller** (Phase 113 push + Phase 117 durable gens / rejoin catch-up), not Raft consensus; brief lag until heartbeat catch-up is honest  
 
 - DeleteRecords fan-out is **best-effort** for the client path; offline peers get **durable leader outbox retry** (Phase 116) — not a consensus truncate log / no outbox handoff on leadership change  

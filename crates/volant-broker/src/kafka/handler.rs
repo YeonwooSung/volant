@@ -349,7 +349,19 @@ async fn dispatch_kafka(
                     debug!(error = %e, "fetch flexible header tag buffer");
                 }
             }
-            produce_fetch::encode_fetch(broker, &mut src, &mut out, hdr.api_version, principal);
+            // Phase 119: transparent forward when session lives on a peer.
+            if let Some(body) = crate::net::maybe_forward_kafka_fetch(
+                broker.as_ref(),
+                hdr.api_version,
+                principal,
+                src.as_ref(),
+            )
+            .await
+            {
+                out.extend_from_slice(&body);
+            } else {
+                produce_fetch::encode_fetch(broker, &mut src, &mut out, hdr.api_version, principal);
+            }
         }
         Some(ApiKey::ListOffsets) if (0..=11).contains(&hdr.api_version) => {
             if hdr.api_version >= 6 {

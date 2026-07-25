@@ -76,14 +76,15 @@ Per-partition `(epoch, start_offset)` history under `{data_dir}/__leader_epochs`
 OffsetForLeaderEpoch returns transition end offsets for prior epochs; Metadata
 advertises the live leader epoch.
 
-### Fetch sessions (Phase 88–95 + 115)
+### Fetch sessions (Phase 88–95 + 115 + 119)
 
 Incremental Fetch sessions (session_id / epoch / omit-unchanged HWM+LSO cache)
-are **per-broker** and **durable under** `{data_dir}/__fetch_sessions` (Phase 115).
-Same-node restart restores live sessions within idle TTL. Sessions are **not**
-replicated or handed off across brokers — a client that lands on a different
-broker gets **FETCH_SESSION_ID_NOT_FOUND (70)** and must full-fetch recreate.
-Pin Fetch TCP (or LB stickiness) to the session-owner broker.
+are **owned by one broker** and **durable under** `{data_dir}/__fetch_sessions`
+(Phase 115). Same-node restart restores live sessions within idle TTL.
+**Phase 119:** cluster session_ids encode the owner; a non-owner that receives
+an incremental Fetch transparent-forwards to the owner (single SoT for epoch /
+omit cache). Unreachable owner ⇒ **70**. Not a replicated session table / not
+preferred-replica.
 
 ## Single-node mode
 

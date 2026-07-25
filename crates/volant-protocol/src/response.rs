@@ -84,6 +84,8 @@ pub enum ResponseOpcode {
     TxnParticipantPrepare = 79,
     /// Txn participant complete result (Phase 114).
     TxnParticipantComplete = 81,
+    /// Kafka Fetch forward result (Phase 119).
+    KafkaFetchForward = 83,
     /// Error response.
     Error = 0xFFFF,
 }
@@ -131,6 +133,7 @@ impl ResponseOpcode {
             77 => Self::TxnParticipantOpen,
             79 => Self::TxnParticipantPrepare,
             81 => Self::TxnParticipantComplete,
+            83 => Self::KafkaFetchForward,
             0xFFFF => Self::Error,
             _ => return None,
         })
@@ -694,6 +697,13 @@ pub enum Response {
         /// 0 = ok.
         error_code: u16,
     },
+    /// Kafka Fetch forward result (Phase 119).
+    KafkaFetchForward {
+        /// 0 = ok; non-zero = peer could not serve (caller maps to session 70).
+        error_code: u16,
+        /// Kafka Fetch response body (after the Kafka response header).
+        body: Bytes,
+    },
     /// Error response.
     Error {
         /// Error code.
@@ -770,6 +780,7 @@ impl Response {
             Self::TxnParticipantOpen { .. } => ResponseOpcode::TxnParticipantOpen as u16,
             Self::TxnParticipantPrepare { .. } => ResponseOpcode::TxnParticipantPrepare as u16,
             Self::TxnParticipantComplete { .. } => ResponseOpcode::TxnParticipantComplete as u16,
+            Self::KafkaFetchForward { .. } => ResponseOpcode::KafkaFetchForward as u16,
             Self::Error { .. } => ResponseOpcode::Error as u16,
         }
     }
