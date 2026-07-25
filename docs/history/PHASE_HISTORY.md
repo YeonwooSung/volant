@@ -1,6 +1,6 @@
 # Phase history index
 
-Ship records for **phases 0–118**. Binding core contracts are
+Ship records for **phases 0–122**. Binding core contracts are
 **[PHASE1_SPEC](../PHASE1_SPEC.md)–[PHASE6_SPEC](../PHASE6_SPEC.md)**. Living
 docs for day-to-day reading: [ops](../ops.md), [consistency](../consistency.md),
 [tuning](../tuning.md), [KAFKA_COMPAT](../KAFKA_COMPAT.md),
@@ -163,10 +163,11 @@ docs for day-to-day reading: [ops](../ops.md), [consistency](../consistency.md),
 | 119 | ✅ | Multi-broker fetch session handoff MVP (owner-encoded id + transparent forward) | [PHASE119_SPEC.md](../PHASE119_SPEC.md) |
 | 120 | ✅ | Transparent EndTxn / txn RPC forward MVP (coordinator registry + KafkaTxnForward) | [PHASE120_SPEC.md](../PHASE120_SPEC.md) |
 | 121 | ✅ | Sticky FindCoordinator assignment MVP (murmur2 static ring + Init-owner override) | [PHASE121_SPEC.md](../PHASE121_SPEC.md) |
+| 122 | ✅ | Transparent AddOffsetsToTxn / TxnOffsetCommit forward MVP (reuse KafkaTxnForward 84/85) | [PHASE122_SPEC.md](../PHASE122_SPEC.md) |
 
 ---
 
-## Still deferred (post–Phase 121)
+## Still deferred (post–Phase 122)
 
 - Multi-language clients
 - Chaos-mesh / long fuzz campaigns (corpus **smoke CI** → **closed by Phase 112**)
@@ -189,8 +190,9 @@ docs for day-to-day reading: [ops](../ops.md), [consistency](../consistency.md),
 - Multi-broker Enable2Pc prepare/complete fan-out → **closed by Phase 114**
 - Durable local fetch sessions → **closed by Phase 115**
 - Multi-broker fetch session forward (owner-encoded id) → **closed by Phase 119**
-- Transparent EndTxn forward to txn coordinator → **closed by Phase 120** (AddOffsets / TxnOffsetCommit forward still open)
+- Transparent EndTxn forward to txn coordinator → **closed by Phase 120**
 - Hash-based sticky FindCoordinator → **closed by Phase 121**
+- Transparent AddOffsetsToTxn / TxnOffsetCommit forward → **closed by Phase 122**
 - Outbox handoff on leadership change / consensus truncate log
 - Per-broker BROKER config overrides / multi-master ACL merge
 - Time-based ISR lag / preferred replica

@@ -448,9 +448,9 @@ fn broker_metrics_text(broker: &Broker) -> String {
         "volant_fetch_session_forward_errors_total {}\n",
         sessions.forward_errors_total()
     ));
-    // Phase 120: multi-broker EndTxn / txn forward.
+    // Phase 120/122: multi-broker EndTxn / AddOffsets / TxnOffsetCommit forward.
     text.push_str(
-        "# HELP volant_txn_forward_total Successful Kafka EndTxn (txn) forwards to coordinator\n",
+        "# HELP volant_txn_forward_total Successful Kafka txn API forwards to coordinator (EndTxn/AddOffsets/TxnOffsetCommit)\n",
     );
     text.push_str("# TYPE volant_txn_forward_total counter\n");
     text.push_str(&format!(
@@ -458,7 +458,7 @@ fn broker_metrics_text(broker: &Broker) -> String {
         broker.txn_forward_total()
     ));
     text.push_str(
-        "# HELP volant_txn_forward_errors_total Failed Kafka EndTxn (txn) forward attempts\n",
+        "# HELP volant_txn_forward_errors_total Failed Kafka txn API forward attempts\n",
     );
     text.push_str("# TYPE volant_txn_forward_errors_total counter\n");
     text.push_str(&format!(
@@ -1597,7 +1597,40 @@ pub fn peek_end_txn_ids(version: i16, body: &[u8]) -> Option<(String, u64)> {
     Some((txn_id, producer_id))
 }
 
-/// Phase 120: write a minimal EndTxn error response body (no response header).
+/// Phase 122: peek AddOffsetsToTxn body for transactional_id + producer_id.
+///
+/// Wire: txn_id, producer_id, producer_epoch, group_id (classic 0–2 / flex 3–4).
+pub fn peek_add_offsets_to_txn_ids(version: i16, body: &[u8]) -> Option<(String, u64)> {
+    use bytes::Buf;
+    use crate::kafka::wire;
+    let flex = version >= 3;
+    let mut src = body;
+    let txn_id = wire::read_string(&mut src, flex).ok()?;
+    if src.remaining() < 8 + 2 {
+        return None;
+    }
+    let producer_id = src.get_i64() as u64;
+    Some((txn_id, producer_id))
+}
+
+/// Phase 122: peek TxnOffsetCommit body for transactional_id + producer_id.
+///
+/// Wire: txn_id, group_id, producer_id, producer_epoch, … (classic 0–2 / flex 3–6).
+pub fn peek_txn_offset_commit_ids(version: i16, body: &[u8]) -> Option<(String, u64)> {
+    use bytes::Buf;
+    use crate::kafka::wire;
+    let flex = version >= 3;
+    let mut src = body;
+    let txn_id = wire::read_string(&mut src, flex).ok()?;
+    let _group_id = wire::read_string(&mut src, flex).ok()?;
+    if src.remaining() < 8 + 2 {
+        return None;
+    }
+    let producer_id = src.get_i64() as u64;
+    Some((txn_id, producer_id))
+}
+
+/// Phase 120/122: minimal Kafka txn API error response bodies (no response header).
 fn put_end_txn_error_response(out: &mut bytes::BytesMut, version: i16, err: i16) {
     use bytes::BufMut;
     use crate::kafka::codec::put_empty_tag_buffer;
@@ -1613,22 +1646,70 @@ fn put_end_txn_error_response(out: &mut bytes::BytesMut, version: i16, err: i16)
     }
 }
 
-/// Phase 120: if EndTxn should be served by the txn coordinator, forward the
-/// Kafka body and return the coordinator's response body. `None` = handle locally.
+fn put_add_offsets_error_response(out: &mut bytes::BytesMut, version: i16, err: i16) {
+    use bytes::BufMut;
+    use crate::kafka::codec::put_empty_tag_buffer;
+    let flex = version >= 3;
+    out.put_i32(0); // throttle
+    out.put_i16(err);
+    if flex {
+        put_empty_tag_buffer(out);
+    }
+}
+
+fn put_txn_offset_commit_empty_response(out: &mut bytes::BytesMut, version: i16) {
+    use bytes::BufMut;
+    use crate::kafka::codec::{put_compact_array_len, put_empty_tag_buffer};
+    let flex = version >= 3;
+    out.put_i32(0); // throttle
+    if flex {
+        put_compact_array_len(out, 0);
+        put_empty_tag_buffer(out);
+    } else {
+        out.put_i32(0); // empty topics
+    }
+}
+
+/// Build an honest client-facing body when txn forward fails (peer/RPC).
+fn put_txn_forward_error_body(
+    out: &mut bytes::BytesMut,
+    api_key: i16,
+    api_version: i16,
+) {
+    // UnknownProducerId (59) for simple error-code APIs; TxnOffsetCommit has no
+    // top-level error — empty topics (no silent local buffer).
+    match api_key {
+        25 => put_add_offsets_error_response(out, api_version, 59),
+        28 => put_txn_offset_commit_empty_response(out, api_version),
+        // 26 EndTxn (default)
+        _ => put_end_txn_error_response(out, api_version, 59),
+    }
+}
+
+/// Phase 120/122: if a Kafka txn API should be served by the Init-owner
+/// coordinator, forward the body and return the coordinator response.
+/// `None` = handle locally (no cluster, registry miss, or self is coordinator).
 ///
+/// Supported `api_key`: 25 AddOffsetsToTxn, 26 EndTxn, 28 TxnOffsetCommit.
 /// Never re-forwards on the coordinator (caller is the Kafka client path only).
-pub async fn maybe_forward_kafka_end_txn(
+pub async fn maybe_forward_kafka_txn(
     broker: &Broker,
+    api_key: i16,
     api_version: i16,
     principal: &str,
-    end_txn_body: &[u8],
+    body: &[u8],
 ) -> Option<Bytes> {
     use bytes::BytesMut;
 
     if broker.cluster_config().is_none() {
         return None;
     }
-    let (txn_id, producer_id) = peek_end_txn_ids(api_version, end_txn_body)?;
+    let (txn_id, producer_id) = match api_key {
+        25 => peek_add_offsets_to_txn_ids(api_version, body)?,
+        26 => peek_end_txn_ids(api_version, body)?,
+        28 => peek_txn_offset_commit_ids(api_version, body)?,
+        _ => return None,
+    };
     let Some(coord) = broker.resolve_txn_coordinator(&txn_id, Some(producer_id)) else {
         return None;
     };
@@ -1638,16 +1719,15 @@ pub async fn maybe_forward_kafka_end_txn(
     let Some(addr) = broker.broker_addr(coord) else {
         broker.record_txn_forward_error();
         let mut out = BytesMut::new();
-        // UnknownProducerId (59) — honest when coordinator unreachable.
-        put_end_txn_error_response(&mut out, api_version, 59);
+        put_txn_forward_error_body(&mut out, api_key, api_version);
         return Some(out.freeze());
     };
 
     let req = Request::KafkaTxnForward {
-        api_key: 26, // EndTxn
+        api_key,
         api_version,
         principal: principal.to_owned(),
-        body: Bytes::copy_from_slice(end_txn_body),
+        body: Bytes::copy_from_slice(body),
     };
     match inter_broker_rpc(broker, &addr, &req).await {
         Ok(Response::KafkaTxnForward {
@@ -1661,30 +1741,53 @@ pub async fn maybe_forward_kafka_end_txn(
             tracing::debug!(
                 coord,
                 error_code,
+                api_key,
                 %txn_id,
                 producer_id,
-                "kafka endtxn forward peer error"
+                "kafka txn forward peer error"
             );
             broker.record_txn_forward_error();
             let mut out = BytesMut::new();
-            put_end_txn_error_response(&mut out, api_version, 59);
+            put_txn_forward_error_body(&mut out, api_key, api_version);
             Some(out.freeze())
         }
         Ok(other) => {
-            tracing::debug!(coord, ?other, %txn_id, "kafka endtxn forward unexpected");
+            tracing::debug!(
+                coord,
+                ?other,
+                api_key,
+                %txn_id,
+                "kafka txn forward unexpected response"
+            );
             broker.record_txn_forward_error();
             let mut out = BytesMut::new();
-            put_end_txn_error_response(&mut out, api_version, 59);
+            put_txn_forward_error_body(&mut out, api_key, api_version);
             Some(out.freeze())
         }
         Err(e) => {
-            tracing::debug!(coord, error = %e, %txn_id, "kafka endtxn forward rpc failed");
+            tracing::debug!(
+                coord,
+                error = %e,
+                api_key,
+                %txn_id,
+                "kafka txn forward rpc failed"
+            );
             broker.record_txn_forward_error();
             let mut out = BytesMut::new();
-            put_end_txn_error_response(&mut out, api_version, 59);
+            put_txn_forward_error_body(&mut out, api_key, api_version);
             Some(out.freeze())
         }
     }
+}
+
+/// Phase 120: EndTxn-only wrapper around [`maybe_forward_kafka_txn`].
+pub async fn maybe_forward_kafka_end_txn(
+    broker: &Broker,
+    api_version: i16,
+    principal: &str,
+    end_txn_body: &[u8],
+) -> Option<Bytes> {
+    maybe_forward_kafka_txn(broker, 26, api_version, principal, end_txn_body).await
 }
 
 /// Phase 119: if this Fetch should be served by a peer session owner, forward
@@ -3126,38 +3229,60 @@ async fn handle_request(broker: &Broker, req: Request) -> Result<Response> {
             principal,
             body,
         } => {
-            // Phase 120: coordinator-side local encode only (never re-forward).
-            // MVP: EndTxn (26) with full 2PC fan-out.
-            if api_key != 26 {
-                return Ok(Response::KafkaTxnForward {
-                    error_code: ErrorCode::InvalidArg as u16,
-                    body: Bytes::new(),
-                });
-            }
+            // Phase 120/122: coordinator-side local encode only (never re-forward).
+            // api_key: 25 AddOffsetsToTxn, 26 EndTxn (+ 2PC fan-out), 28 TxnOffsetCommit.
             let mut src = body;
             let mut out = BytesMut::new();
-            if let Some(fanout) = crate::kafka::txn::encode_end_txn(
-                broker,
-                &mut src,
-                &mut out,
-                api_version,
-                &principal,
-            ) {
-                use crate::broker::Txn2pcFanout;
-                match &fanout {
-                    Txn2pcFanout::Prepare {
-                        transactional_id, ..
-                    } => {
-                        if !run_txn_2pc_fanout(broker, &fanout).await {
-                            broker.rollback_local_prepare(transactional_id);
-                            out.clear();
-                            put_end_txn_error_response(&mut out, api_version, -1); // Unknown
+            match api_key {
+                25 => {
+                    crate::kafka::txn::encode_add_offsets_to_txn(
+                        broker,
+                        &mut src,
+                        &mut out,
+                        api_version,
+                        &principal,
+                    );
+                }
+                26 => {
+                    if let Some(fanout) = crate::kafka::txn::encode_end_txn(
+                        broker,
+                        &mut src,
+                        &mut out,
+                        api_version,
+                        &principal,
+                    ) {
+                        use crate::broker::Txn2pcFanout;
+                        match &fanout {
+                            Txn2pcFanout::Prepare {
+                                transactional_id, ..
+                            } => {
+                                if !run_txn_2pc_fanout(broker, &fanout).await {
+                                    broker.rollback_local_prepare(transactional_id);
+                                    out.clear();
+                                    put_end_txn_error_response(&mut out, api_version, -1); // Unknown
+                                }
+                            }
+                            Txn2pcFanout::None => {}
+                            _ => {
+                                let _ = run_txn_2pc_fanout(broker, &fanout).await;
+                            }
                         }
                     }
-                    Txn2pcFanout::None => {}
-                    _ => {
-                        let _ = run_txn_2pc_fanout(broker, &fanout).await;
-                    }
+                }
+                28 => {
+                    crate::kafka::txn::encode_txn_offset_commit(
+                        broker,
+                        &mut src,
+                        &mut out,
+                        api_version,
+                        &principal,
+                    );
+                }
+                _ => {
+                    return Ok(Response::KafkaTxnForward {
+                        error_code: ErrorCode::InvalidArg as u16,
+                        body: Bytes::new(),
+                    });
                 }
             }
             Ok(Response::KafkaTxnForward {

@@ -2855,15 +2855,16 @@ Binding: **[docs/PHASE120_SPEC.md](./docs/PHASE120_SPEC.md)**.
 - [x] Living docs honesty
 
 **Honest limitations:** not full KIP-890/939 / `__transaction_state`; coordinator
-discovery is Init-owner registry (not Raft); AddOffsets / TxnOffsetCommit / full
-Init re-home still prefer client pin when skipping FindCoordinator.
+discovery is Init-owner registry (not Raft); full Init re-home still prefer
+client pin when skipping FindCoordinator.
 FindCoordinator sticky hash → **closed by Phase 121**.
+AddOffsets / TxnOffsetCommit forward → **closed by Phase 122**.
 
 **Still deferred:** multi-lang clients, chaos-mesh / long fuzz campaigns,
 full KIP-890/939 / `__transaction_state`, Kafka wire fuzz targets, dynamic
 membership / Raft, full Kafka broker catalog, outbox handoff on leadership change,
 per-broker BROKER config overrides, time-based ISR lag / preferred replica /
-shared session registry, remaining txn API forward (AddOffsets / TxnOffsetCommit).
+shared session registry (AddOffsets / TxnOffsetCommit forward closed by Phase 122).
 
 ---
 
@@ -2891,7 +2892,36 @@ has no FindCoordinator API.
 full KIP-890/939 / `__transaction_state`, Kafka wire fuzz targets, dynamic
 membership / Raft, full Kafka broker catalog, outbox handoff on leadership change,
 per-broker BROKER config overrides, time-based ISR lag / preferred replica /
-shared session registry, remaining txn API forward (AddOffsets / TxnOffsetCommit).
+shared session registry; AddOffsets / TxnOffsetCommit forward → **closed by Phase 122**.
+
+---
+
+### Phase 122 — Transparent AddOffsetsToTxn / TxnOffsetCommit forward (MVP) ✅
+
+**Goal:** When a client sends AddOffsetsToTxn or TxnOffsetCommit to a
+non-coordinator broker, transparent inter-broker forward to the Init-owner
+coordinator so deferred offsets buffer only on the coordinator SoT (no dual-commit).
+
+Binding: **[docs/PHASE122_SPEC.md](./docs/PHASE122_SPEC.md)**.
+
+- [x] Reuse native opcodes 84/85 `KafkaTxnForward` for Kafka API keys 25 + 28
+- [x] Peek transactional_id / producer_id; resolve Init-owner registry
+- [x] Non-coordinator client path always forwards when owner known (no local buffer)
+- [x] Coordinator handler dispatches AddOffsets / TxnOffsetCommit / EndTxn
+- [x] Metrics: `volant_txn_forward_*` cover 25/26/28
+- [x] Tests: `phase122_txn_offset_forward` (multi-node forward + EndTxn apply + single-node)
+- [x] Living docs honesty
+
+**Honest limitations:** not full KIP-890/939 / `__transaction_state`; registry miss
+still local-path (honest error); TxnOffsetCommit forward-failure body is empty
+topics; native has no separate AddOffsets/TxnOffsetCommit RPCs; Init still best
+on sticky coordinator / after FindCoordinator.
+
+**Still deferred:** multi-lang clients, chaos-mesh / long fuzz campaigns,
+full KIP-890/939 / `__transaction_state`, Kafka wire fuzz targets, dynamic
+membership / Raft, full Kafka broker catalog, outbox handoff on leadership change,
+per-broker BROKER config overrides, time-based ISR lag / preferred replica /
+shared session registry.
 
 ---
 

@@ -486,7 +486,26 @@ async fn dispatch_kafka(
                     debug!(error = %e, "add offsets to txn flexible header tag buffer");
                 }
             }
-            txn::encode_add_offsets_to_txn(broker, &mut src, &mut out, hdr.api_version, principal);
+            // Phase 122: transparent forward when this node is not the txn coordinator.
+            if let Some(body) = crate::net::maybe_forward_kafka_txn(
+                broker.as_ref(),
+                25, // AddOffsetsToTxn
+                hdr.api_version,
+                principal,
+                src.as_ref(),
+            )
+            .await
+            {
+                out.extend_from_slice(&body);
+            } else {
+                txn::encode_add_offsets_to_txn(
+                    broker,
+                    &mut src,
+                    &mut out,
+                    hdr.api_version,
+                    principal,
+                );
+            }
         }
         Some(ApiKey::EndTxn) if (0..=5).contains(&hdr.api_version) => {
             if hdr.api_version >= 3 {
@@ -495,8 +514,9 @@ async fn dispatch_kafka(
                 }
             }
             // Phase 120: transparent forward when this node is not the txn coordinator.
-            if let Some(body) = crate::net::maybe_forward_kafka_end_txn(
+            if let Some(body) = crate::net::maybe_forward_kafka_txn(
                 broker.as_ref(),
+                26, // EndTxn
                 hdr.api_version,
                 principal,
                 src.as_ref(),
@@ -544,7 +564,26 @@ async fn dispatch_kafka(
                     debug!(error = %e, "txn offset commit flexible header tag buffer");
                 }
             }
-            txn::encode_txn_offset_commit(broker, &mut src, &mut out, hdr.api_version, principal);
+            // Phase 122: transparent forward when this node is not the txn coordinator.
+            if let Some(body) = crate::net::maybe_forward_kafka_txn(
+                broker.as_ref(),
+                28, // TxnOffsetCommit
+                hdr.api_version,
+                principal,
+                src.as_ref(),
+            )
+            .await
+            {
+                out.extend_from_slice(&body);
+            } else {
+                txn::encode_txn_offset_commit(
+                    broker,
+                    &mut src,
+                    &mut out,
+                    hdr.api_version,
+                    principal,
+                );
+            }
         }
         Some(ApiKey::JoinGroup) if (0..=9).contains(&hdr.api_version) => {
             if hdr.api_version >= 6 {

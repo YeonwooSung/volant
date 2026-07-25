@@ -241,7 +241,7 @@ flexible (KIP-482) coverage for the APIs modern clients negotiate most often
 |-------|----------|---------------|
 | Produce / Fetch / Metadata | TopicId, flex framing | Produce/Metadata **0–13**; Fetch **0–18** (Kafka max) |
 | Groups / offsets | Join–Leave, commit/fetch | Coordinator-driven; GroupType always `classic` |
-| Txn wire | Init / Add* / End / TxnOffsetCommit | Write-through + soft markers; EndTxn + crash-promote control batches (Phase 89/98) including empty AddPartitions (Phase 105); prepared 2PC MVP (Phase 90) + prepared/open timeout (Phase 92/93) + TRANSACTION_ABORTABLE subset (Phase 94) + max timeout clamp (Phase 96) + background sweeper (Phase 97/101/106) + soft-marker GC/clip (Phase 104/111) |
+| Txn wire | Init / Add* / End / TxnOffsetCommit | Write-through + soft markers; EndTxn + crash-promote control batches (Phase 89/98) including empty AddPartitions (Phase 105); prepared 2PC MVP (Phase 90) + prepared/open timeout (Phase 92/93) + TRANSACTION_ABORTABLE subset (Phase 94) + max timeout clamp (Phase 96) + background sweeper (Phase 97/101/106) + soft-marker GC/clip (Phase 104/111); multi-broker EndTxn/AddOffsets/TxnOffsetCommit forward + sticky FindCoordinator (Phase 120–122) |
 | Admin / configs / ACLs | CreateTopics, CreatePartitions, ACLs | CreatePartitions max **3**; ACL admin **0–3** (User resource v3); LITERAL only |
 | Meta / auth | ApiVersions, FindCoordinator, SASL | ApiVersions **0–5** (Kafka max); SASL PLAIN/SCRAM |
 
