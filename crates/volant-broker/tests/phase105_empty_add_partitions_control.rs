@@ -388,7 +388,7 @@ fn unit_produce_without_explicit_add_still_control() {
     let (pid, epoch) = broker.init_producer_id_with_txn("txn-po");
     assert_eq!(broker.begin_txn(pid, epoch), 0);
     let _ = broker.buffer_txn_produce(pid, epoch, "t", 0, 0, vec![Message::from_value("x")]);
-    let (code, _) = broker.end_txn(pid, epoch, false, &[]).unwrap();
+    let (code, _, _) = broker.end_txn(pid, epoch, false, &[]).unwrap();
     assert_eq!(code, 0);
 
     let recs = broker

@@ -68,6 +68,7 @@ When `acks=all`, if `|ISR| < min_insync_replicas`, the leader rejects the produc
 | Soft-marker GC (Phase 104/111) | DeleteRecords / retention / load drop markers with `end_offset <= log_start`; straddle clips `first_offset = log_start` |
 | Crash with open writes | Open ranges promoted to aborted on reload + ABORT control batches (Phase 98) |
 | Crash with prepared | Prepared reloaded from `__txn_prepared` (survives; complete, re-init abort, or timeout) |
+| Multi-broker Enable2Pc (Phase 114) | Coordinator fans out open/prepare/complete to live peers; each leader holds local prepared ranges + LSO; controller stores durable cluster prepared index (`__txn_prepared/cluster.json`); prepare is **strict** for live peers (rollback local prepare on fan-out failure); fence complete with `commit=false` force-aborts peer PrepareCommit |
 
 ### Leader epochs (Phase 87)
 
@@ -107,6 +108,11 @@ Without `--cluster-config`, the broker runs as a single node:
     `NotController`. Successful controller mutates push generationed state to
     live peers (config knobs or full ACL snapshot). Describe / authorize use
     each node's local applied state after push.
+- **Multi-broker 2PC (Phase 114):** Enable2Pc prepare/complete is coordinated
+  over inter-broker RPC (opcodes 76–81). Pin Init/Begin/EndTxn to the broker
+  that allocated the producer; produce still targets partition leaders after
+  open fan-out. Not a Kafka `__transaction_state` topic / full KIP-890.
 
 See [PHASE6_SPEC.md](./PHASE6_SPEC.md) for wire protocol and configuration details.
 Admin fan-out detail: [PHASE113_SPEC.md](./PHASE113_SPEC.md).
+Multi-broker 2PC detail: [PHASE114_SPEC.md](./PHASE114_SPEC.md).

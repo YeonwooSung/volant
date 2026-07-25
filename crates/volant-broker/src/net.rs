@@ -17,7 +17,7 @@ use volant_protocol::{
     Frame, OffsetFetchEntry, PartitionInfo, Request, Response, TopicInfo,
 };
 
-use crate::broker::Broker;
+use crate::broker::{Broker, Txn2pcFanout};
 use crate::metrics::Metrics;
 use crate::replica::run_follower_loops;
 
@@ -488,6 +488,23 @@ fn broker_metrics_text(broker: &Broker) -> String {
         "volant_cluster_acl_push_errors_total {}\n",
         broker.cluster_acl_push_errors_total()
     ));
+    // Phase 114: multi-broker 2PC fan-out failures + controller prepared index.
+    text.push_str(
+        "# HELP volant_txn_2pc_fanout_errors_total Multi-broker 2PC prepare/complete/open fan-out failures\n",
+    );
+    text.push_str("# TYPE volant_txn_2pc_fanout_errors_total counter\n");
+    text.push_str(&format!(
+        "volant_txn_2pc_fanout_errors_total {}\n",
+        broker.txn_2pc_fanout_errors_total()
+    ));
+    text.push_str(
+        "# HELP volant_cluster_prepared_txns Controller cluster prepared index size\n",
+    );
+    text.push_str("# TYPE volant_cluster_prepared_txns gauge\n");
+    text.push_str(&format!(
+        "volant_cluster_prepared_txns {}\n",
+        broker.cluster_prepared_txn_count()
+    ));
     text.push_str("# HELP volant_acl_generation Controller ACL generation\n");
     text.push_str("# TYPE volant_acl_generation gauge\n");
     text.push_str(&format!(
@@ -904,6 +921,244 @@ pub async fn fanout_delete_records(
             }
         }
     }
+}
+
+/// Run multi-broker 2PC fan-out indicated by [`Txn2pcFanout`] (Phase 114).
+///
+/// - **Open**: best-effort (metric++ on failure; does not fail the client).
+/// - **Prepare**: strict for live peers; returns `false` if any peer fails
+///   (caller should [`Broker::rollback_local_prepare`]).
+/// - **Complete**: strict for live peers; returns `false` on failure (client
+///   already local-finalized — metric++ and log; re-issue may be needed).
+///
+/// Returns `true` when all required peer RPCs succeeded (or there were no peers).
+pub async fn run_txn_2pc_fanout(broker: &Broker, fanout: &Txn2pcFanout) -> bool {
+    match fanout {
+        Txn2pcFanout::None => true,
+        Txn2pcFanout::Open {
+            transactional_id,
+            producer_id,
+            producer_epoch,
+            enable_2pc,
+        } => {
+            fanout_txn_participant_open(
+                broker,
+                transactional_id,
+                *producer_id,
+                *producer_epoch,
+                *enable_2pc,
+            )
+            .await;
+            true
+        }
+        Txn2pcFanout::Prepare {
+            transactional_id,
+            producer_id,
+            producer_epoch,
+            commit,
+        } => {
+            fanout_txn_participant_prepare(
+                broker,
+                transactional_id,
+                *producer_id,
+                *producer_epoch,
+                *commit,
+            )
+            .await
+        }
+        Txn2pcFanout::Complete {
+            transactional_id,
+            producer_id,
+            producer_epoch,
+            commit,
+        } => {
+            fanout_txn_participant_complete(
+                broker,
+                transactional_id,
+                *producer_id,
+                *producer_epoch,
+                *commit,
+            )
+            .await
+        }
+    }
+}
+
+/// Best-effort open fan-out (Phase 114).
+pub async fn fanout_txn_participant_open(
+    broker: &Broker,
+    transactional_id: &str,
+    producer_id: u64,
+    producer_epoch: u16,
+    enable_2pc: bool,
+) {
+    let peers = broker.txn_2pc_fanout_peers();
+    if peers.is_empty() {
+        return;
+    }
+    let req = Request::TxnParticipantOpen {
+        transactional_id: transactional_id.to_owned(),
+        producer_id,
+        producer_epoch,
+        enable_2pc,
+    };
+    for (peer_id, addr) in peers {
+        match inter_broker_rpc(broker, &addr, &req).await {
+            Ok(Response::TxnParticipantOpen { error_code: 0 }) => {}
+            Ok(Response::TxnParticipantOpen { error_code }) => {
+                warn!(
+                    peer_id,
+                    %addr,
+                    error_code,
+                    producer_id,
+                    "txn open fan-out peer error"
+                );
+                broker.note_txn_2pc_fanout_error();
+            }
+            Ok(other) => {
+                warn!(
+                    peer_id,
+                    %addr,
+                    ?other,
+                    producer_id,
+                    "txn open fan-out unexpected response"
+                );
+                broker.note_txn_2pc_fanout_error();
+            }
+            Err(e) => {
+                warn!(
+                    peer_id,
+                    %addr,
+                    error = %e,
+                    producer_id,
+                    "txn open fan-out rpc failed"
+                );
+                broker.note_txn_2pc_fanout_error();
+            }
+        }
+    }
+}
+
+/// Strict prepare fan-out (Phase 114). Returns `true` if all live peers OK.
+pub async fn fanout_txn_participant_prepare(
+    broker: &Broker,
+    transactional_id: &str,
+    producer_id: u64,
+    producer_epoch: u16,
+    commit: bool,
+) -> bool {
+    let peers = broker.txn_2pc_fanout_peers();
+    if peers.is_empty() {
+        return true;
+    }
+    let req = Request::TxnParticipantPrepare {
+        transactional_id: transactional_id.to_owned(),
+        producer_id,
+        producer_epoch,
+        commit,
+    };
+    let mut ok = true;
+    for (peer_id, addr) in peers {
+        match inter_broker_rpc(broker, &addr, &req).await {
+            Ok(Response::TxnParticipantPrepare { error_code: 0 }) => {}
+            Ok(Response::TxnParticipantPrepare { error_code }) => {
+                warn!(
+                    peer_id,
+                    %addr,
+                    error_code,
+                    producer_id,
+                    transactional_id,
+                    "txn prepare fan-out peer error"
+                );
+                broker.note_txn_2pc_fanout_error();
+                ok = false;
+            }
+            Ok(other) => {
+                warn!(
+                    peer_id,
+                    %addr,
+                    ?other,
+                    producer_id,
+                    "txn prepare fan-out unexpected response"
+                );
+                broker.note_txn_2pc_fanout_error();
+                ok = false;
+            }
+            Err(e) => {
+                warn!(
+                    peer_id,
+                    %addr,
+                    error = %e,
+                    producer_id,
+                    "txn prepare fan-out rpc failed"
+                );
+                broker.note_txn_2pc_fanout_error();
+                ok = false;
+            }
+        }
+    }
+    ok
+}
+
+/// Strict complete fan-out (Phase 114). Returns `true` if all live peers OK.
+pub async fn fanout_txn_participant_complete(
+    broker: &Broker,
+    transactional_id: &str,
+    producer_id: u64,
+    producer_epoch: u16,
+    commit: bool,
+) -> bool {
+    let peers = broker.txn_2pc_fanout_peers();
+    if peers.is_empty() {
+        return true;
+    }
+    let req = Request::TxnParticipantComplete {
+        transactional_id: transactional_id.to_owned(),
+        producer_id,
+        producer_epoch,
+        commit,
+    };
+    let mut ok = true;
+    for (peer_id, addr) in peers {
+        match inter_broker_rpc(broker, &addr, &req).await {
+            Ok(Response::TxnParticipantComplete { error_code: 0 }) => {}
+            Ok(Response::TxnParticipantComplete { error_code }) => {
+                warn!(
+                    peer_id,
+                    %addr,
+                    error_code,
+                    producer_id,
+                    transactional_id,
+                    "txn complete fan-out peer error"
+                );
+                broker.note_txn_2pc_fanout_error();
+                ok = false;
+            }
+            Ok(other) => {
+                warn!(
+                    peer_id,
+                    %addr,
+                    ?other,
+                    producer_id,
+                    "txn complete fan-out unexpected response"
+                );
+                broker.note_txn_2pc_fanout_error();
+                ok = false;
+            }
+            Err(e) => {
+                warn!(
+                    peer_id,
+                    %addr,
+                    error = %e,
+                    producer_id,
+                    "txn complete fan-out rpc failed"
+                );
+                broker.note_txn_2pc_fanout_error();
+                ok = false;
+            }
+        }
+    }
+    ok
 }
 
 /// Inter-broker RPC over a short-lived connection (plain TCP or optional TLS).
@@ -1384,6 +1639,9 @@ fn authorize_request(
         | Request::ReplicaDeleteRecords { .. }
         | Request::ClusterBrokerConfig { .. }
         | Request::ClusterAclSnapshot { .. }
+        | Request::TxnParticipantOpen { .. }
+        | Request::TxnParticipantPrepare { .. }
+        | Request::TxnParticipantComplete { .. }
         | Request::Auth { .. }
         | Request::ScramFirst { .. }
         | Request::ScramFinal { .. } => return None,
@@ -1464,6 +1722,9 @@ fn authorize_request(
         | Request::ReplicaDeleteRecords { .. }
         | Request::ClusterBrokerConfig { .. }
         | Request::ClusterAclSnapshot { .. }
+        | Request::TxnParticipantOpen { .. }
+        | Request::TxnParticipantPrepare { .. }
+        | Request::TxnParticipantComplete { .. }
         | Request::Auth { .. }
         | Request::ScramFirst { .. }
         | Request::ScramFinal { .. } => true,
@@ -1542,7 +1803,10 @@ fn record_response_metrics(broker: &Broker, resp: &Response) {
         | Response::ListScramUsers { error_code, .. }
         | Response::ReplicaDeleteRecords { error_code, .. }
         | Response::ClusterBrokerConfig { error_code, .. }
-        | Response::ClusterAclSnapshot { error_code, .. } => {
+        | Response::ClusterAclSnapshot { error_code, .. }
+        | Response::TxnParticipantOpen { error_code }
+        | Response::TxnParticipantPrepare { error_code }
+        | Response::TxnParticipantComplete { error_code } => {
             if *error_code != 0 {
                 m.record_error(*error_code);
             }
@@ -2091,6 +2355,10 @@ async fn handle_request(broker: &Broker, req: Request) -> Result<Response> {
             producer_epoch,
         } => {
             let error_code = broker.begin_txn(producer_id, producer_epoch);
+            if error_code == 0 {
+                let fanout = broker.txn_2pc_open_fanout(producer_id);
+                let _ = run_txn_2pc_fanout(broker, &fanout).await;
+            }
             Ok(Response::BeginTxn { error_code })
         }
         Request::EndTxn {
@@ -2111,8 +2379,24 @@ async fn handle_request(broker: &Broker, req: Request) -> Result<Response> {
                     )
                 })
                 .collect();
-            let (error_code, results) =
+            let (mut error_code, results, fanout) =
                 broker.end_txn(producer_id, producer_epoch, committed, &offset_tuples)?;
+            if error_code == 0 {
+                match &fanout {
+                    Txn2pcFanout::Prepare {
+                        transactional_id, ..
+                    } => {
+                        if !run_txn_2pc_fanout(broker, &fanout).await {
+                            broker.rollback_local_prepare(transactional_id);
+                            error_code = ErrorCode::Unknown as u16;
+                        }
+                    }
+                    Txn2pcFanout::None => {}
+                    _ => {
+                        let _ = run_txn_2pc_fanout(broker, &fanout).await;
+                    }
+                }
+            }
             Ok(Response::EndTxn {
                 error_code,
                 results: results
@@ -2125,6 +2409,48 @@ async fn handle_request(broker: &Broker, req: Request) -> Result<Response> {
                     })
                     .collect(),
             })
+        }
+        Request::TxnParticipantOpen {
+            transactional_id,
+            producer_id,
+            producer_epoch,
+            enable_2pc,
+        } => {
+            let error_code = broker.handle_txn_participant_open(
+                &transactional_id,
+                producer_id,
+                producer_epoch,
+                enable_2pc,
+            );
+            Ok(Response::TxnParticipantOpen { error_code })
+        }
+        Request::TxnParticipantPrepare {
+            transactional_id,
+            producer_id,
+            producer_epoch,
+            commit,
+        } => {
+            let error_code = broker.handle_txn_participant_prepare(
+                &transactional_id,
+                producer_id,
+                producer_epoch,
+                commit,
+            );
+            Ok(Response::TxnParticipantPrepare { error_code })
+        }
+        Request::TxnParticipantComplete {
+            transactional_id,
+            producer_id,
+            producer_epoch,
+            commit,
+        } => {
+            let error_code = broker.handle_txn_participant_complete(
+                &transactional_id,
+                producer_id,
+                producer_epoch,
+                commit,
+            );
+            Ok(Response::TxnParticipantComplete { error_code })
         }
         Request::DescribeGroup { group_id } => {
             match broker.groups().describe_group(&group_id) {

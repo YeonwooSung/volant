@@ -301,7 +301,7 @@ async fn unit_write_through_and_lso() {
         .unwrap()
         .is_empty());
 
-    let (code, results) = broker.end_txn(pid, epoch, true, &[]).unwrap();
+    let (code, results, _) = broker.end_txn(pid, epoch, true, &[]).unwrap();
     assert_eq!(code, 0);
     assert_eq!(results.len(), 1);
     assert_eq!(results[0].base_offset, 0);

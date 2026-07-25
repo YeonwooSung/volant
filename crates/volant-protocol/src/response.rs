@@ -78,6 +78,12 @@ pub enum ResponseOpcode {
     ClusterBrokerConfig = 73,
     /// Cluster ACL snapshot push result (Phase 113).
     ClusterAclSnapshot = 75,
+    /// Txn participant open result (Phase 114).
+    TxnParticipantOpen = 77,
+    /// Txn participant prepare result (Phase 114).
+    TxnParticipantPrepare = 79,
+    /// Txn participant complete result (Phase 114).
+    TxnParticipantComplete = 81,
     /// Error response.
     Error = 0xFFFF,
 }
@@ -122,6 +128,9 @@ impl ResponseOpcode {
             71 => Self::ReplicaDeleteRecords,
             73 => Self::ClusterBrokerConfig,
             75 => Self::ClusterAclSnapshot,
+            77 => Self::TxnParticipantOpen,
+            79 => Self::TxnParticipantPrepare,
+            81 => Self::TxnParticipantComplete,
             0xFFFF => Self::Error,
             _ => return None,
         })
@@ -670,6 +679,21 @@ pub enum Response {
         /// Generation applied on the peer (`0` if rejected as stale).
         applied_generation: u64,
     },
+    /// Txn participant open result (Phase 114).
+    TxnParticipantOpen {
+        /// 0 = ok.
+        error_code: u16,
+    },
+    /// Txn participant prepare result (Phase 114).
+    TxnParticipantPrepare {
+        /// 0 = ok.
+        error_code: u16,
+    },
+    /// Txn participant complete result (Phase 114).
+    TxnParticipantComplete {
+        /// 0 = ok.
+        error_code: u16,
+    },
     /// Error response.
     Error {
         /// Error code.
@@ -743,6 +767,9 @@ impl Response {
             Self::ReplicaDeleteRecords { .. } => ResponseOpcode::ReplicaDeleteRecords as u16,
             Self::ClusterBrokerConfig { .. } => ResponseOpcode::ClusterBrokerConfig as u16,
             Self::ClusterAclSnapshot { .. } => ResponseOpcode::ClusterAclSnapshot as u16,
+            Self::TxnParticipantOpen { .. } => ResponseOpcode::TxnParticipantOpen as u16,
+            Self::TxnParticipantPrepare { .. } => ResponseOpcode::TxnParticipantPrepare as u16,
+            Self::TxnParticipantComplete { .. } => ResponseOpcode::TxnParticipantComplete as u16,
             Self::Error { .. } => ResponseOpcode::Error as u16,
         }
     }

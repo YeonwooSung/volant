@@ -1,6 +1,6 @@
 # Phase history index
 
-Ship records for **phases 0–111**. Binding core contracts are
+Ship records for **phases 0–114**. Binding core contracts are
 **[PHASE1_SPEC](../PHASE1_SPEC.md)–[PHASE6_SPEC](../PHASE6_SPEC.md)**. Living
 docs for day-to-day reading: [ops](../ops.md), [consistency](../consistency.md),
 [tuning](../tuning.md), [KAFKA_COMPAT](../KAFKA_COMPAT.md),
@@ -155,14 +155,15 @@ docs for day-to-day reading: [ops](../ops.md), [consistency](../consistency.md),
 | 111 | ✅ | Clip straddling soft abort markers to log_start (MVP) | [PHASE111_SPEC.md](../PHASE111_SPEC.md) |
 | 112 | ✅ | cargo-fuzz corpus smoke + CI (MVP) | [PHASE112_SPEC.md](../PHASE112_SPEC.md) |
 | 113 | ✅ | Cluster admin fan-out MVP (DeleteRecords + BROKER config + ACL snapshot) | [PHASE113_SPEC.md](../PHASE113_SPEC.md) |
+| 114 | ✅ | Multi-broker 2PC / KIP-890-ish MVP (Enable2Pc prepare/complete across leaders) | [PHASE114_SPEC.md](../PHASE114_SPEC.md) |
 
 ---
 
-## Still deferred (post–Phase 113)
+## Still deferred (post–Phase 114)
 
 - Multi-language clients
 - Chaos-mesh / long fuzz campaigns (corpus **smoke CI** → **closed by Phase 112**)
-- Full multi-broker 2PC coordinator / full KIP-890 abortable surface
+- Full KIP-890/939 / Kafka `__transaction_state` topic (multi-broker Enable2Pc MVP → **closed by Phase 114**)
 - Multi-broker session affinity / durable sessions / byte-identical response cache
 - Full KRaft epoch state machine / remote-log epochs
 - Full Kafka broker catalog / KRaft DynamicBrokerConfig
@@ -174,5 +175,7 @@ docs for day-to-day reading: [ops](../ops.md), [consistency](../consistency.md),
 - Non-controller auto-death from alive-set diffs → **closed by Phase 110**
 - Straddle marker clip → **closed by Phase 111**
 - cargo-fuzz corpus smoke + CI MVP → **closed by Phase 112**
+- Multi-broker Enable2Pc prepare/complete fan-out → **closed by Phase 114**
+- Transparent EndTxn forward to txn coordinator
 - Durable pending DeleteRecords queue for down replicas
 - Per-broker BROKER config overrides / multi-master ACL merge

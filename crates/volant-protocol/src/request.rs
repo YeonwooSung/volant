@@ -78,6 +78,12 @@ pub enum RequestOpcode {
     ClusterBrokerConfig = 72,
     /// Controller → peer ACL snapshot push (Phase 113).
     ClusterAclSnapshot = 74,
+    /// Coordinator → peer: install producer + open txn (Phase 114 multi-broker 2PC).
+    TxnParticipantOpen = 76,
+    /// Coordinator → peer: prepare local open ranges (Phase 114).
+    TxnParticipantPrepare = 78,
+    /// Coordinator → peer: finalize prepared/open ranges (Phase 114).
+    TxnParticipantComplete = 80,
 }
 
 impl RequestOpcode {
@@ -120,6 +126,9 @@ impl RequestOpcode {
             70 => Self::ReplicaDeleteRecords,
             72 => Self::ClusterBrokerConfig,
             74 => Self::ClusterAclSnapshot,
+            76 => Self::TxnParticipantOpen,
+            78 => Self::TxnParticipantPrepare,
+            80 => Self::TxnParticipantComplete,
             _ => return None,
         })
     }
@@ -477,6 +486,39 @@ pub enum Request {
         /// Versioned snapshot bytes (typically JSON matching `__acls/acls.json`).
         snapshot: Bytes,
     },
+    /// Coordinator → peer: install producer + open txn (Phase 114).
+    TxnParticipantOpen {
+        /// Transactional id.
+        transactional_id: String,
+        /// Producer id.
+        producer_id: u64,
+        /// Producer epoch.
+        producer_epoch: u16,
+        /// Whether Enable2Pc is set for this producer.
+        enable_2pc: bool,
+    },
+    /// Coordinator → peer: prepare local open ranges (Phase 114).
+    TxnParticipantPrepare {
+        /// Transactional id.
+        transactional_id: String,
+        /// Producer id.
+        producer_id: u64,
+        /// Producer epoch.
+        producer_epoch: u16,
+        /// True = PrepareCommit; false = PrepareAbort.
+        commit: bool,
+    },
+    /// Coordinator → peer: finalize prepared (or open) ranges (Phase 114).
+    TxnParticipantComplete {
+        /// Transactional id.
+        transactional_id: String,
+        /// Producer id.
+        producer_id: u64,
+        /// Producer epoch.
+        producer_epoch: u16,
+        /// True = commit finalize; false = abort finalize.
+        commit: bool,
+    },
 }
 
 impl Request {
@@ -519,6 +561,9 @@ impl Request {
             Self::ReplicaDeleteRecords { .. } => RequestOpcode::ReplicaDeleteRecords as u16,
             Self::ClusterBrokerConfig { .. } => RequestOpcode::ClusterBrokerConfig as u16,
             Self::ClusterAclSnapshot { .. } => RequestOpcode::ClusterAclSnapshot as u16,
+            Self::TxnParticipantOpen { .. } => RequestOpcode::TxnParticipantOpen as u16,
+            Self::TxnParticipantPrepare { .. } => RequestOpcode::TxnParticipantPrepare as u16,
+            Self::TxnParticipantComplete { .. } => RequestOpcode::TxnParticipantComplete as u16,
         }
     }
 }

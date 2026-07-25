@@ -240,17 +240,20 @@ pub(crate) fn encode_init_producer_id(
 // ─── AddPartitionsToTxn ──────────────────────────────────────────────────────
 
 /// AddPartitionsToTxn (API 24) classic v0–2 / flexible v3 / batch v4–5.
+///
+/// Returns optional multi-broker open fan-out (Phase 114) when at least one
+/// partition was added successfully.
 pub(crate) fn encode_add_partitions_to_txn(
     broker: &Broker,
     src: &mut impl Buf,
     out: &mut BytesMut,
     version: i16,
     principal: &str,
-) {
+) -> Option<crate::broker::Txn2pcFanout> {
     if version >= 4 {
-        encode_add_partitions_batch(broker, src, out, principal);
+        encode_add_partitions_batch(broker, src, out, principal)
     } else {
-        encode_add_partitions_flat(broker, src, out, version, principal);
+        encode_add_partitions_flat(broker, src, out, version, principal)
     }
 }
 
@@ -261,7 +264,7 @@ fn encode_add_partitions_flat(
     out: &mut BytesMut,
     version: i16,
     principal: &str,
-) {
+) -> Option<crate::broker::Txn2pcFanout> {
     let flex = version >= 3;
 
     let empty_resp = |out: &mut BytesMut| {
@@ -278,12 +281,12 @@ fn encode_add_partitions_flat(
         Ok(t) => t,
         Err(_) => {
             empty_resp(out);
-            return;
+            return None;
         }
     };
     if src.remaining() < 8 + 2 {
         empty_resp(out);
-        return;
+        return None;
     }
     let producer_id = src.get_i64() as u64;
     let producer_epoch = src.get_i16() as u16;
@@ -292,7 +295,7 @@ fn encode_add_partitions_flat(
         Some(t) => t,
         None => {
             empty_resp(out);
-            return;
+            return None;
         }
     };
     if flex {
@@ -305,7 +308,7 @@ fn encode_add_partitions_flat(
         producer_epoch,
         topics,
     };
-    write_add_partitions_flat_response(broker, out, principal, flex, &txn);
+    write_add_partitions_flat_response(broker, out, principal, flex, &txn)
 }
 
 /// Parse topics[{name, partitions[]}] classic or flexible. Fail-closed → None.
@@ -347,7 +350,7 @@ fn write_add_partitions_flat_response(
     principal: &str,
     flex: bool,
     txn: &AddPartitionsTxn,
-) {
+) -> Option<crate::broker::Txn2pcFanout> {
     let cluster_denied = cluster_write_denied(broker, principal);
     let open_err = open_txn_error(broker, txn.producer_id, txn.producer_epoch, cluster_denied);
 
@@ -393,7 +396,9 @@ fn write_add_partitions_flat_response(
     }
     if !ok_parts.is_empty() {
         let _ = broker.record_txn_added_partitions(txn.producer_id, &ok_parts);
+        return open_fanout_after_add(broker, txn.producer_id, 0);
     }
+    None
 }
 
 /// v4–5 batch: Transactions[] with VerifyOnly (parsed, ignored — always add path).
@@ -402,7 +407,7 @@ fn encode_add_partitions_batch(
     src: &mut impl Buf,
     out: &mut BytesMut,
     principal: &str,
-) {
+) -> Option<crate::broker::Txn2pcFanout> {
     let empty_resp = |out: &mut BytesMut| {
         out.put_i32(0);
         out.put_i16(KafkaErrorCode::InvalidRequest.as_i16());
@@ -415,7 +420,7 @@ fn encode_add_partitions_batch(
         Ok(None) => 0,
         Err(_) => {
             empty_resp(out);
-            return;
+            return None;
         }
     };
 
@@ -425,12 +430,12 @@ fn encode_add_partitions_batch(
             Ok(t) => t,
             Err(_) => {
                 empty_resp(out);
-                return;
+                return None;
             }
         };
         if src.remaining() < 8 + 2 + 1 {
             empty_resp(out);
-            return;
+            return None;
         }
         let producer_id = src.get_i64() as u64;
         let producer_epoch = src.get_i16() as u16;
@@ -440,7 +445,7 @@ fn encode_add_partitions_batch(
             Some(t) => t,
             None => {
                 empty_resp(out);
-                return;
+                return None;
             }
         };
         let _ = skip_tag_buffer(src); // transaction tags
@@ -454,6 +459,7 @@ fn encode_add_partitions_batch(
     let _ = skip_tag_buffer(src); // request top-level tags
 
     let cluster_denied = cluster_write_denied(broker, principal);
+    let mut fanout_pid: Option<u64> = None;
 
     out.put_i32(0); // throttle
     out.put_i16(KafkaErrorCode::None.as_i16()); // top-level error
@@ -487,9 +493,11 @@ fn encode_add_partitions_batch(
         put_empty_tag_buffer(out);
         if !ok_parts.is_empty() {
             let _ = broker.record_txn_added_partitions(txn.producer_id, &ok_parts);
+            fanout_pid = Some(txn.producer_id);
         }
     }
     put_empty_tag_buffer(out);
+    fanout_pid.and_then(|pid| open_fanout_after_add(broker, pid, 0))
 }
 
 // ─── AddOffsetsToTxn ─────────────────────────────────────────────────────────
@@ -566,14 +574,17 @@ pub(crate) fn encode_add_offsets_to_txn(
 
 // ─── EndTxn ──────────────────────────────────────────────────────────────────
 
-/// EndTxn (API 26) classic v0–2 / flexible v3–5 — Phase 47 / 62 / 75.
+/// EndTxn (API 26) classic v0–2 / flexible v3–5 — Phase 47 / 62 / 75 / 114.
+///
+/// Returns optional multi-broker 2PC fan-out for the Kafka dispatch path to await
+/// (Phase 114). Caller must run fan-out before considering prepare durable.
 pub(crate) fn encode_end_txn(
     broker: &Broker,
     src: &mut impl Buf,
     out: &mut BytesMut,
     version: i16,
     principal: &str,
-) {
+) -> Option<crate::broker::Txn2pcFanout> {
     let flex = version >= 3;
 
     let write_resp = |out: &mut BytesMut, err: i16, pid: i64, epoch: i16| {
@@ -593,12 +604,12 @@ pub(crate) fn encode_end_txn(
         Ok(t) => t,
         Err(_) => {
             write_resp(out, KafkaErrorCode::InvalidRequest.as_i16(), -1, -1);
-            return;
+            return None;
         }
     };
     if src.remaining() < 8 + 2 + 1 {
         write_resp(out, KafkaErrorCode::InvalidRequest.as_i16(), -1, -1);
-        return;
+        return None;
     }
     let producer_id_i64 = src.get_i64();
     let producer_epoch_i16 = src.get_i16();
@@ -616,11 +627,11 @@ pub(crate) fn encode_end_txn(
             producer_id_i64,
             producer_epoch_i16,
         );
-        return;
+        return None;
     }
 
     match broker.end_txn(producer_id, producer_epoch, committed, &[]) {
-        Ok((err, _results)) => {
+        Ok((err, _results, fanout)) => {
             write_resp(
                 out,
                 if err == 0 {
@@ -631,6 +642,11 @@ pub(crate) fn encode_end_txn(
                 producer_id_i64,
                 producer_epoch_i16,
             );
+            if err == 0 {
+                Some(fanout)
+            } else {
+                None
+            }
         }
         Err(_) => {
             write_resp(
@@ -639,7 +655,25 @@ pub(crate) fn encode_end_txn(
                 producer_id_i64,
                 producer_epoch_i16,
             );
+            None
         }
+    }
+}
+
+/// After a successful AddPartitions / ensure open, return open fan-out for
+/// multi-broker 2PC (Phase 114).
+pub(crate) fn open_fanout_after_add(
+    broker: &Broker,
+    producer_id: u64,
+    open_err: i16,
+) -> Option<crate::broker::Txn2pcFanout> {
+    if open_err != 0 {
+        return None;
+    }
+    let fanout = broker.txn_2pc_open_fanout(producer_id);
+    match fanout {
+        crate::broker::Txn2pcFanout::None => None,
+        other => Some(other),
     }
 }
 

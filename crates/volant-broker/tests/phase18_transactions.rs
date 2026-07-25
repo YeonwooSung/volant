@@ -269,7 +269,7 @@ fn broker_unit_txn_buffer_abort() {
         volant_broker::IdempotentCheck::Accept { .. } => {}
         other => panic!("unexpected {other:?}"),
     }
-    let (code, results) = broker.end_txn(pid, epoch, false, &[]).unwrap();
+    let (code, results, _) = broker.end_txn(pid, epoch, false, &[]).unwrap();
     assert_eq!(code, 0);
     assert!(results.is_empty());
     let recs = broker

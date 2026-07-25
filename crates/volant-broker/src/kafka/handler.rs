@@ -126,7 +126,7 @@ async fn handle_kafka_connection(mut stream: TcpStream, broker: Arc<Broker>) -> 
         loop {
             match try_decode_request(&mut buf)? {
                 Some(body) => {
-                    let response = dispatch_kafka(&broker, body, &mut conn);
+                    let response = dispatch_kafka(&broker, body, &mut conn).await;
                     let frame = encode_response_frame(&response);
                     stream.write_all(&frame).await?;
                 }
@@ -140,7 +140,11 @@ async fn handle_kafka_connection(mut stream: TcpStream, broker: Arc<Broker>) -> 
     }
 }
 
-fn dispatch_kafka(broker: &Arc<Broker>, body: bytes::Bytes, conn: &mut KafkaConnState) -> BytesMut {
+async fn dispatch_kafka(
+    broker: &Arc<Broker>,
+    body: bytes::Bytes,
+    conn: &mut KafkaConnState,
+) -> BytesMut {
     let mut src = body;
     let hdr = match decode_request_header(&mut src) {
         Ok(h) => h,
@@ -452,7 +456,17 @@ fn dispatch_kafka(broker: &Arc<Broker>, body: bytes::Bytes, conn: &mut KafkaConn
                     debug!(error = %e, "add partitions to txn flexible header tag buffer");
                 }
             }
-            txn::encode_add_partitions_to_txn(broker, &mut src, &mut out, hdr.api_version, principal);
+            if let Some(fanout) = txn::encode_add_partitions_to_txn(
+                broker,
+                &mut src,
+                &mut out,
+                hdr.api_version,
+                principal,
+            ) {
+                // Phase 114: best-effort open fan-out so partition leaders can
+                // accept write-through produce (await so tests see ready peers).
+                let _ = crate::net::run_txn_2pc_fanout(broker.as_ref(), &fanout).await;
+            }
         }
         Some(ApiKey::AddOffsetsToTxn) if (0..=4).contains(&hdr.api_version) => {
             if hdr.api_version >= 3 {
@@ -468,7 +482,37 @@ fn dispatch_kafka(broker: &Arc<Broker>, body: bytes::Bytes, conn: &mut KafkaConn
                     debug!(error = %e, "end txn flexible header tag buffer");
                 }
             }
-            txn::encode_end_txn(broker, &mut src, &mut out, hdr.api_version, principal);
+            // Snapshot header framing so we can rewrite body if prepare fan-out fails.
+            let body_start = out.len();
+            if let Some(fanout) =
+                txn::encode_end_txn(broker, &mut src, &mut out, hdr.api_version, principal)
+            {
+                use crate::broker::Txn2pcFanout;
+                match &fanout {
+                    Txn2pcFanout::Prepare {
+                        transactional_id, ..
+                    } => {
+                        if !crate::net::run_txn_2pc_fanout(broker.as_ref(), &fanout).await {
+                            broker.rollback_local_prepare(transactional_id);
+                            // Rewrite body as Unknown after response header.
+                            out.truncate(body_start);
+                            out.put_i32(0); // throttle
+                            out.put_i16(KafkaErrorCode::Unknown.as_i16());
+                            if hdr.api_version >= 5 {
+                                out.put_i64(-1);
+                                out.put_i16(-1);
+                            }
+                            if hdr.api_version >= 3 {
+                                put_empty_tag_buffer(&mut out);
+                            }
+                        }
+                    }
+                    Txn2pcFanout::None => {}
+                    _ => {
+                        let _ = crate::net::run_txn_2pc_fanout(broker.as_ref(), &fanout).await;
+                    }
+                }
+            }
         }
         Some(ApiKey::TxnOffsetCommit) if (0..=6).contains(&hdr.api_version) => {
             if hdr.api_version >= 3 {

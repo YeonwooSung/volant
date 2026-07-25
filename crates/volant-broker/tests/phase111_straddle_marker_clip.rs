@@ -62,7 +62,7 @@ fn abort_wide_range(broker: &Broker, topic: &str, txn_id: &str, n: i32) -> (u64,
             other => panic!("unexpected produce: {other:?}"),
         }
     }
-    let (code, _) = broker.end_txn(pid, epoch, false, &[]).unwrap();
+    let (code, _, _) = broker.end_txn(pid, epoch, false, &[]).unwrap();
     assert_eq!(code, 0);
     let end = first + n as u64;
     (pid, first, end)

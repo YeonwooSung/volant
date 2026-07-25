@@ -49,7 +49,7 @@ pub use scram::{
 pub use assignor::{range_assign, range_assign_multi, sticky_assign, sticky_assign_multi};
 pub use broker::{
     murmur2, partition_for_key, Broker, ClusterState, IdempotentCheck, InterBrokerTls,
-    MetadataSnapshot, PartitionMetadata, TopicMetadata, TxnCommitResult,
+    MetadataSnapshot, PartitionMetadata, TopicMetadata, Txn2pcFanout, TxnCommitResult,
 };
 pub use cluster::{BrokerEndpoint, ClusterConfig};
 pub use group::{
@@ -73,7 +73,8 @@ pub use kafka::{serve_kafka_listener, serve_kafka_listener_until};
 pub use metrics::Metrics;
 pub use net::{
     fanout_cluster_acl_snapshot, fanout_cluster_broker_config, fanout_delete_records,
-    run_metrics_server, run_metrics_server_until, run_server, serve_listener, serve_listener_until,
-    shutdown_signal, start_background_tasks, BackgroundTasks,
+    fanout_txn_participant_complete, fanout_txn_participant_open, fanout_txn_participant_prepare,
+    run_metrics_server, run_metrics_server_until, run_server, run_txn_2pc_fanout, serve_listener,
+    serve_listener_until, shutdown_signal, start_background_tasks, BackgroundTasks,
 };
 pub use offset_store::{OffsetStore, StoredOffset, OFFSET_UNKNOWN};

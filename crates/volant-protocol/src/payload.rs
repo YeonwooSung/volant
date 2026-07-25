@@ -468,6 +468,39 @@ pub fn encode_request(req: &Request) -> Result<Bytes> {
             dst.put_u64_le(*generation);
             put_bytes(&mut dst, snapshot);
         }
+        Request::TxnParticipantOpen {
+            transactional_id,
+            producer_id,
+            producer_epoch,
+            enable_2pc,
+        } => {
+            put_string(&mut dst, transactional_id)?;
+            dst.put_u64_le(*producer_id);
+            dst.put_u16_le(*producer_epoch);
+            dst.put_u8(if *enable_2pc { 1 } else { 0 });
+        }
+        Request::TxnParticipantPrepare {
+            transactional_id,
+            producer_id,
+            producer_epoch,
+            commit,
+        } => {
+            put_string(&mut dst, transactional_id)?;
+            dst.put_u64_le(*producer_id);
+            dst.put_u16_le(*producer_epoch);
+            dst.put_u8(if *commit { 1 } else { 0 });
+        }
+        Request::TxnParticipantComplete {
+            transactional_id,
+            producer_id,
+            producer_epoch,
+            commit,
+        } => {
+            put_string(&mut dst, transactional_id)?;
+            dst.put_u64_le(*producer_id);
+            dst.put_u16_le(*producer_epoch);
+            dst.put_u8(if *commit { 1 } else { 0 });
+        }
     }
     finish_payload(dst)
 }
@@ -947,6 +980,51 @@ pub fn decode_request(opcode: u16, payload: &[u8]) -> Result<Request> {
                 snapshot,
             })
         }
+        RequestOpcode::TxnParticipantOpen => {
+            let transactional_id = get_string(&mut src)?;
+            if src.remaining() < 8 + 2 + 1 {
+                return Err(Error::Protocol("truncated txn participant open".into()));
+            }
+            let producer_id = src.get_u64_le();
+            let producer_epoch = src.get_u16_le();
+            let enable_2pc = src.get_u8() != 0;
+            Ok(Request::TxnParticipantOpen {
+                transactional_id,
+                producer_id,
+                producer_epoch,
+                enable_2pc,
+            })
+        }
+        RequestOpcode::TxnParticipantPrepare => {
+            let transactional_id = get_string(&mut src)?;
+            if src.remaining() < 8 + 2 + 1 {
+                return Err(Error::Protocol("truncated txn participant prepare".into()));
+            }
+            let producer_id = src.get_u64_le();
+            let producer_epoch = src.get_u16_le();
+            let commit = src.get_u8() != 0;
+            Ok(Request::TxnParticipantPrepare {
+                transactional_id,
+                producer_id,
+                producer_epoch,
+                commit,
+            })
+        }
+        RequestOpcode::TxnParticipantComplete => {
+            let transactional_id = get_string(&mut src)?;
+            if src.remaining() < 8 + 2 + 1 {
+                return Err(Error::Protocol("truncated txn participant complete".into()));
+            }
+            let producer_id = src.get_u64_le();
+            let producer_epoch = src.get_u16_le();
+            let commit = src.get_u8() != 0;
+            Ok(Request::TxnParticipantComplete {
+                transactional_id,
+                producer_id,
+                producer_epoch,
+                commit,
+            })
+        }
     }
 }
 
@@ -1337,6 +1415,15 @@ pub fn encode_response(resp: &Response) -> Result<Bytes> {
         } => {
             dst.put_u16_le(*error_code);
             dst.put_u64_le(*applied_generation);
+        }
+        Response::TxnParticipantOpen { error_code } => {
+            dst.put_u16_le(*error_code);
+        }
+        Response::TxnParticipantPrepare { error_code } => {
+            dst.put_u16_le(*error_code);
+        }
+        Response::TxnParticipantComplete { error_code } => {
+            dst.put_u16_le(*error_code);
         }
         Response::Error { code, message } => {
             dst.put_u16_le(*code);
@@ -2091,6 +2178,34 @@ pub fn decode_response(opcode: u16, payload: &[u8]) -> Result<Response> {
             Ok(Response::ClusterAclSnapshot {
                 error_code: src.get_u16_le(),
                 applied_generation: src.get_u64_le(),
+            })
+        }
+        ResponseOpcode::TxnParticipantOpen => {
+            if src.remaining() < 2 {
+                return Err(Error::Protocol("truncated txn participant open response".into()));
+            }
+            Ok(Response::TxnParticipantOpen {
+                error_code: src.get_u16_le(),
+            })
+        }
+        ResponseOpcode::TxnParticipantPrepare => {
+            if src.remaining() < 2 {
+                return Err(Error::Protocol(
+                    "truncated txn participant prepare response".into(),
+                ));
+            }
+            Ok(Response::TxnParticipantPrepare {
+                error_code: src.get_u16_le(),
+            })
+        }
+        ResponseOpcode::TxnParticipantComplete => {
+            if src.remaining() < 2 {
+                return Err(Error::Protocol(
+                    "truncated txn participant complete response".into(),
+                ));
+            }
+            Ok(Response::TxnParticipantComplete {
+                error_code: src.get_u16_le(),
             })
         }
         ResponseOpcode::Error => {
@@ -3522,5 +3637,66 @@ mod tests {
         assert!(decode_response(ResponseOpcode::ReplicaDeleteRecords as u16, &[]).is_err());
         assert!(decode_response(ResponseOpcode::ClusterBrokerConfig as u16, &[0]).is_err());
         assert!(decode_response(ResponseOpcode::ClusterAclSnapshot as u16, &[0, 0]).is_err());
+    }
+
+    #[test]
+    fn phase114_txn_participant_opcodes_roundtrip() {
+        let open = Request::TxnParticipantOpen {
+            transactional_id: "app-1".into(),
+            producer_id: 7,
+            producer_epoch: 1,
+            enable_2pc: true,
+        };
+        let b = encode_request(&open).unwrap();
+        assert_eq!(open.opcode(), RequestOpcode::TxnParticipantOpen as u16);
+        assert_eq!(
+            decode_request(RequestOpcode::TxnParticipantOpen as u16, &b).unwrap(),
+            open
+        );
+        let or = Response::TxnParticipantOpen { error_code: 0 };
+        let orb = encode_response(&or).unwrap();
+        assert_eq!(
+            decode_response(ResponseOpcode::TxnParticipantOpen as u16, &orb).unwrap(),
+            or
+        );
+
+        let prep = Request::TxnParticipantPrepare {
+            transactional_id: "app-1".into(),
+            producer_id: 7,
+            producer_epoch: 1,
+            commit: true,
+        };
+        let pb = encode_request(&prep).unwrap();
+        assert_eq!(
+            decode_request(RequestOpcode::TxnParticipantPrepare as u16, &pb).unwrap(),
+            prep
+        );
+        let pr = Response::TxnParticipantPrepare { error_code: 22 };
+        let prb = encode_response(&pr).unwrap();
+        assert_eq!(
+            decode_response(ResponseOpcode::TxnParticipantPrepare as u16, &prb).unwrap(),
+            pr
+        );
+
+        let done = Request::TxnParticipantComplete {
+            transactional_id: "app-1".into(),
+            producer_id: 7,
+            producer_epoch: 1,
+            commit: false,
+        };
+        let db = encode_request(&done).unwrap();
+        assert_eq!(
+            decode_request(RequestOpcode::TxnParticipantComplete as u16, &db).unwrap(),
+            done
+        );
+        let dr = Response::TxnParticipantComplete { error_code: 0 };
+        let drb = encode_response(&dr).unwrap();
+        assert_eq!(
+            decode_response(ResponseOpcode::TxnParticipantComplete as u16, &drb).unwrap(),
+            dr
+        );
+
+        assert!(decode_request(RequestOpcode::TxnParticipantOpen as u16, &[]).is_err());
+        assert!(decode_response(ResponseOpcode::TxnParticipantPrepare as u16, &[]).is_err());
     }
 }

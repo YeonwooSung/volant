@@ -2651,11 +2651,40 @@ Binding: **[docs/PHASE113_SPEC.md](./docs/PHASE113_SPEC.md)**.
 **Honest limitations:** DeleteRecords fan-out is best-effort (no durable pending
 queue); BROKER knobs are homogeneous (not per-broker overrides); ACL/config rely
 on controller liveness (brief lag on failover); inter-broker admin RPCs are not
-ACL-gated (shared-token / TLS only); multi-broker 2PC still deferred.
+ACL-gated (shared-token / TLS only); multi-broker 2PC → **closed by Phase 114**.
+
+**Still deferred (at Phase 113 ship):** multi-lang clients, chaos-mesh / long fuzz
+campaigns, multi-broker 2PC / session affinity / durable sessions, Kafka wire
+fuzz targets, dynamic membership / Raft metadata, full Kafka broker catalog.
+
+---
+
+### Phase 114 — Multi-broker 2PC / KIP-890-ish MVP ✅
+
+**Goal:** Coordinate Enable2Pc prepare/commit across partition leaders on
+different brokers; durable controller prepared index; fence cluster-wide.
+
+Binding: **[docs/PHASE114_SPEC.md](./docs/PHASE114_SPEC.md)**.
+
+- [x] Inter-broker opcodes 76–81 (`TxnParticipantOpen` / `Prepare` / `Complete`)
+- [x] Open fan-out after BeginTxn / AddPartitions (best-effort)
+- [x] Strict prepare + complete fan-out for Enable2Pc EndTxn (native + Kafka)
+- [x] Local `__txn_prepared` + controller `__txn_prepared/cluster.json` index
+- [x] Fence: complete with `commit=false` force-aborts peer PrepareCommit
+- [x] Metrics: `volant_txn_2pc_fanout_errors_total`, `volant_cluster_prepared_txns`
+- [x] Tests: `phase114_multi_broker_2pc` (happy path + fence + single-node)
+- [x] Living docs honesty
+
+**Honest limitations:** not full KIP-890/939; no Kafka `__transaction_state`
+topic; open fan-out best-effort for down peers; prepare strict for **live** peers
+only; clients should pin Init/Begin/EndTxn to the coordinator broker (no
+transparent forward); controller failover may drop cluster index until next
+prepare; inter-broker 2PC RPCs not ACL-gated.
 
 **Still deferred:** multi-lang clients, chaos-mesh / long fuzz campaigns,
-multi-broker 2PC / session affinity / durable sessions, Kafka wire fuzz targets,
-dynamic membership / Raft metadata, full Kafka broker catalog.
+multi-broker session affinity / durable sessions, full KIP-890/939 /
+`__transaction_state`, Kafka wire fuzz targets, dynamic membership / Raft
+metadata, full Kafka broker catalog, transparent EndTxn forward.
 
 ---
 
@@ -2694,7 +2723,7 @@ marker clip 111; fuzz corpus smoke CI 112; cluster admin fan-out 113) — see
 
 ## Suggested implementation order (PRs)
 
-Phases **0–113 are shipped**. Historical PR order for the core:
+Phases **0–114 are shipped**. Historical PR order for the core:
 
 1. Phase 1 segment format + unit tests  
 2. Phase 1 recovery + retention  
@@ -2710,6 +2739,7 @@ Phases **0–113 are shipped**. Historical PR order for the core:
 12. Phases 23–111 (Kafka wire shim + marker GC/clip + empty-AddPartitions control + bg shutdown join + phase103 flake fix + follower-death ISR + accept drain / single-flight bg + non-controller alive-set death + straddle marker clip) ✅  
 13. Phase 112 (cargo-fuzz corpus smoke + CI MVP) ✅  
 14. Phase 113 (cluster admin fan-out: DeleteRecords + BROKER config + ACL snapshot) ✅  
+15. Phase 114 (multi-broker Enable2Pc prepare/complete MVP) ✅  
 
 ---
 
@@ -2750,13 +2780,14 @@ cargo run -p volant-bench --release
 cargo test --workspace
 ```
 
-**Status (post–Phase 113):** core broker, ops (metrics / TLS / auth / SCRAM /
+**Status (post–Phase 114):** core broker, ops (metrics / TLS / auth / SCRAM /
 ACLs / Helm), and the Kafka wire shim are **shipped** (Fetch 0–18 Kafka max;
 ACL admin 0–3 with User resource; soft-marker `READ_COMMITTED` with **marker GC/clip**
 on DeleteRecords/retention/load (Phase 104/111); durable OFLE history; Fetch DivergingEpoch +
 sessions with omit-unchanged incremental + idle TTL/max; Kafka control batches
 on EndTxn **and** crash≡abort open promote **including empty AddPartitions**;
-prepared 2PC MVP; prepared + open txn timeouts + broker max timeout clamp;
+prepared 2PC MVP + **multi-broker Enable2Pc** (Phase 114); prepared + open txn
+timeouts + broker max timeout clamp;
 background txn/session sweeper + richer expiry metrics (always-spawn; 0→>0
 without restart; **graceful shutdown/join** Phase 106; **accept-loop drain +
 single-flight bg** Phase 109); BROKER Describe/AlterConfigs
@@ -2765,7 +2796,8 @@ with **sparse** durable restart restore and resource name empty-or-local-`node_i
 HWM recompute** Phase 108; **non-controller alive-set auto-death** Phase 110; **straddle soft-marker clip** Phase 111;
 **cargo-fuzz corpus smoke + CI MVP** Phase 112; **cluster admin fan-out** Phase 113
 (DeleteRecords best-effort replica truncate; controller-only BROKER config + ACL
-snapshot push)).
+snapshot push); **multi-broker 2PC MVP** Phase 114 (inter-broker prepare/complete;
+controller cluster prepared index — not full KIP-890 / `__transaction_state`)).
 Still deferred: multi-language clients, full chaos-mesh suites / long fuzz
-campaigns, multi-broker session affinity, multi-broker 2PC.
+campaigns, multi-broker session affinity, full KIP-890/939.
 Details: [docs/KAFKA_COMPAT.md](./docs/KAFKA_COMPAT.md), [docs/ops.md](./docs/ops.md).

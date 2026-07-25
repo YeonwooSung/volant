@@ -495,6 +495,69 @@ pub struct Broker {
     cluster_config_push_errors_total: AtomicU64,
     /// ACL snapshot push RPC failures (Phase 113).
     cluster_acl_push_errors_total: AtomicU64,
+    /// Multi-broker 2PC fan-out RPC failures (Phase 114).
+    txn_2pc_fanout_errors_total: AtomicU64,
+    /// Controller cluster prepared index (Phase 114); identity + decision only.
+    cluster_prepared_index: Mutex<HashMap<String, ClusterPreparedEntry>>,
+}
+
+/// Controller-side multi-broker prepared index entry (Phase 114).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct ClusterPreparedEntry {
+    transactional_id: String,
+    producer_id: u64,
+    producer_epoch: u16,
+    commit: bool,
+    prepared_at_ms: i64,
+    coordinator_node_id: u32,
+}
+
+/// On-disk controller prepared index under `{data_dir}/__txn_prepared/cluster.json`.
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+struct ClusterPreparedFile {
+    #[serde(default)]
+    prepared: Vec<ClusterPreparedEntry>,
+}
+
+/// Phase 114: what inter-broker fan-out the net/Kafka layer should run after a
+/// successful local Begin/End/Init path.
+#[derive(Debug, Clone)]
+pub enum Txn2pcFanout {
+    /// No cluster fan-out (single-node or non-2PC).
+    None,
+    /// Push producer open state to live peers.
+    Open {
+        /// Transactional id.
+        transactional_id: String,
+        /// Producer id.
+        producer_id: u64,
+        /// Producer epoch.
+        producer_epoch: u16,
+        /// Enable2Pc flag.
+        enable_2pc: bool,
+    },
+    /// Strict prepare fan-out after local prepare.
+    Prepare {
+        /// Transactional id.
+        transactional_id: String,
+        /// Producer id.
+        producer_id: u64,
+        /// Producer epoch.
+        producer_epoch: u16,
+        /// PrepareCommit vs PrepareAbort.
+        commit: bool,
+    },
+    /// Complete (or fence-abort) fan-out after local finalize.
+    Complete {
+        /// Transactional id.
+        transactional_id: String,
+        /// Producer id.
+        producer_id: u64,
+        /// Producer epoch.
+        producer_epoch: u16,
+        /// Commit vs abort finalize.
+        commit: bool,
+    },
 }
 
 impl Broker {
@@ -565,12 +628,15 @@ impl Broker {
             delete_records_fanout_errors_total: AtomicU64::new(0),
             cluster_config_push_errors_total: AtomicU64::new(0),
             cluster_acl_push_errors_total: AtomicU64::new(0),
+            txn_2pc_fanout_errors_total: AtomicU64::new(0),
+            cluster_prepared_index: Mutex::new(HashMap::new()),
         };
         broker
             .reload_single_node_topics()
             .expect("failed to reload single-node topic catalog");
         broker.load_txn_markers();
         broker.load_prepared_txns();
+        broker.load_cluster_prepared_index();
         broker.expire_timed_out_txns();
         broker.load_leader_epochs();
         broker.seed_missing_leader_epochs();
@@ -671,11 +737,14 @@ impl Broker {
             delete_records_fanout_errors_total: AtomicU64::new(0),
             cluster_config_push_errors_total: AtomicU64::new(0),
             cluster_acl_push_errors_total: AtomicU64::new(0),
+            txn_2pc_fanout_errors_total: AtomicU64::new(0),
+            cluster_prepared_index: Mutex::new(HashMap::new()),
         };
         // Open local partitions from persisted assignment.
         broker.apply_local_assignment()?;
         broker.load_txn_markers();
         broker.load_prepared_txns();
+        broker.load_cluster_prepared_index();
         broker.expire_timed_out_txns();
         broker.load_leader_epochs();
         broker.seed_missing_leader_epochs();
@@ -851,6 +920,385 @@ impl Broker {
     pub fn note_cluster_config_push_error(&self) {
         self.cluster_config_push_errors_total
             .fetch_add(1, Ordering::Relaxed);
+    }
+
+    // --- Phase 114 multi-broker 2PC ---
+
+    /// Multi-broker 2PC fan-out error counter (Phase 114).
+    pub fn txn_2pc_fanout_errors_total(&self) -> u64 {
+        self.txn_2pc_fanout_errors_total.load(Ordering::Relaxed)
+    }
+
+    /// Increment multi-broker 2PC fan-out error counter (Phase 114).
+    pub fn note_txn_2pc_fanout_error(&self) {
+        self.txn_2pc_fanout_errors_total
+            .fetch_add(1, Ordering::Relaxed);
+    }
+
+    /// Controller cluster prepared index size (Phase 114 gauge).
+    pub fn cluster_prepared_txn_count(&self) -> usize {
+        self.cluster_prepared_index.lock().len()
+    }
+
+    /// Live peers for multi-broker 2PC fan-out (all live except self).
+    pub fn txn_2pc_fanout_peers(&self) -> Vec<(u32, String)> {
+        self.cluster_broker_config_fanout_peers()
+    }
+
+    /// Whether multi-broker 2PC fan-out applies (cluster mode).
+    pub fn txn_2pc_cluster_enabled(&self) -> bool {
+        self.cluster.is_some()
+    }
+
+    /// Build an open fan-out payload for a producer that just began/ensured open.
+    pub fn txn_2pc_open_fanout(&self, producer_id: u64) -> Txn2pcFanout {
+        if self.cluster.is_none() {
+            return Txn2pcFanout::None;
+        }
+        let state = self.producer_state.read();
+        let Some(prod) = state.get(&producer_id) else {
+            return Txn2pcFanout::None;
+        };
+        if !prod.transactional || prod.transactional_id.is_empty() {
+            return Txn2pcFanout::None;
+        }
+        Txn2pcFanout::Open {
+            transactional_id: prod.transactional_id.clone(),
+            producer_id,
+            producer_epoch: prod.epoch,
+            enable_2pc: prod.enable_2pc,
+        }
+    }
+
+    /// Apply inter-broker `TxnParticipantOpen` (Phase 114).
+    ///
+    /// Installs producer state + empty open txn so remote partition leaders can
+    /// accept write-through produce. Idempotent for matching pid/epoch.
+    pub fn handle_txn_participant_open(
+        &self,
+        transactional_id: &str,
+        producer_id: u64,
+        producer_epoch: u16,
+        enable_2pc: bool,
+    ) -> u16 {
+        {
+            let mut state = self.producer_state.write();
+            if let Some(prod) = state.get_mut(&producer_id) {
+                if prod.epoch > producer_epoch {
+                    return ErrorCode::InvalidProducerEpoch as u16;
+                }
+                // Accept equal or newer epoch from coordinator fan-out.
+                prod.epoch = producer_epoch;
+                prod.transactional = true;
+                prod.transactional_id = transactional_id.to_owned();
+                if enable_2pc {
+                    prod.enable_2pc = true;
+                }
+            } else {
+                state.insert(
+                    producer_id,
+                    ProducerEpochState {
+                        epoch: producer_epoch,
+                        transactional: true,
+                        transactional_id: transactional_id.to_owned(),
+                        enable_2pc,
+                        transaction_timeout_ms: 0,
+                        partitions: HashMap::new(),
+                    },
+                );
+            }
+        }
+        if !transactional_id.is_empty() {
+            self.transactional_ids
+                .write()
+                .insert(transactional_id.to_owned(), producer_id);
+        }
+        // Ensure open txn exists (empty) for write-through on this leader.
+        let already_prepared = !transactional_id.is_empty()
+            && self.prepared_txns.lock().contains_key(transactional_id);
+        {
+            let mut open = self.open_txns.lock();
+            if let Some(txn) = open.get_mut(&producer_id) {
+                // Already open — keep existing written ranges; refresh epoch.
+                txn.producer_epoch = producer_epoch;
+            } else if !already_prepared {
+                open.insert(
+                    producer_id,
+                    OpenTxn {
+                        opened_at_ms: unix_now_ms(),
+                        producer_epoch,
+                        ..OpenTxn::default()
+                    },
+                );
+            }
+        }
+        let _ = self.persist_producer_state();
+        0
+    }
+
+    /// Apply inter-broker `TxnParticipantPrepare` (Phase 114).
+    ///
+    /// Moves local open ranges for this pid into prepared (or no-ops if none).
+    /// Controller also upserts the cluster prepared index.
+    pub fn handle_txn_participant_prepare(
+        &self,
+        transactional_id: &str,
+        producer_id: u64,
+        producer_epoch: u16,
+        commit: bool,
+    ) -> u16 {
+        if transactional_id.is_empty() {
+            return ErrorCode::InvalidArg as u16;
+        }
+        // Already prepared with matching decision → idempotent OK.
+        {
+            let prepared = self.prepared_txns.lock();
+            if let Some(prep) = prepared.get(transactional_id) {
+                if prep.producer_id != producer_id {
+                    return ErrorCode::InvalidTxnState as u16;
+                }
+                if prep.producer_epoch != producer_epoch {
+                    return ErrorCode::InvalidProducerEpoch as u16;
+                }
+                if prep.commit != commit {
+                    return ErrorCode::InvalidTxnState as u16;
+                }
+                // Still ensure cluster index if we are controller.
+                drop(prepared);
+                self.upsert_cluster_prepared_index(
+                    transactional_id,
+                    producer_id,
+                    producer_epoch,
+                    commit,
+                );
+                return 0;
+            }
+        }
+
+        let txn = {
+            let mut open = self.open_txns.lock();
+            open.remove(&producer_id)
+        };
+        if let Some(txn) = txn {
+            if txn.producer_epoch != 0 && txn.producer_epoch != producer_epoch {
+                // Epoch mismatch on open body — put back and reject.
+                self.open_txns.lock().insert(producer_id, txn);
+                return ErrorCode::InvalidProducerEpoch as u16;
+            }
+            // Validate producer epoch if known.
+            {
+                let state = self.producer_state.read();
+                if let Some(prod) = state.get(&producer_id) {
+                    if prod.epoch != producer_epoch {
+                        // Put open back.
+                        self.open_txns.lock().insert(producer_id, txn);
+                        return ErrorCode::InvalidProducerEpoch as u16;
+                    }
+                }
+            }
+            let prep = PreparedTxn {
+                transactional_id: transactional_id.to_owned(),
+                producer_id,
+                producer_epoch,
+                commit,
+                prepared_at_ms: unix_now_ms(),
+                open: txn,
+            };
+            self.prepared_txns
+                .lock()
+                .insert(transactional_id.to_owned(), prep);
+            self.persist_txn_markers();
+            self.persist_prepared_txns();
+        } else {
+            // No local open ranges — still OK (empty participant). Ensure
+            // producer is known for complete/fence later when needed.
+            let state = self.producer_state.read();
+            if let Some(prod) = state.get(&producer_id) {
+                if prod.epoch != producer_epoch {
+                    return ErrorCode::InvalidProducerEpoch as u16;
+                }
+            }
+        }
+        self.upsert_cluster_prepared_index(
+            transactional_id,
+            producer_id,
+            producer_epoch,
+            commit,
+        );
+        0
+    }
+
+    /// Apply inter-broker `TxnParticipantComplete` (Phase 114).
+    ///
+    /// Finalizes local prepared (or open fallback) for this txn and clears the
+    /// controller cluster index entry when present.
+    ///
+    /// **Fence note:** `commit=false` force-aborts prepared even when the
+    /// prepared decision was PrepareCommit (InitProducerId KeepPreparedTxn=false
+    /// cluster fan-out). Client EndTxn decision mismatch is rejected **locally**
+    /// before fan-out, so peers only see matching completes or fence aborts.
+    pub fn handle_txn_participant_complete(
+        &self,
+        transactional_id: &str,
+        producer_id: u64,
+        producer_epoch: u16,
+        commit: bool,
+    ) -> u16 {
+        if !transactional_id.is_empty() {
+            let prep = {
+                let mut prepared = self.prepared_txns.lock();
+                prepared.remove(transactional_id)
+            };
+            if let Some(prep) = prep {
+                if prep.producer_id != producer_id {
+                    // Put back — wrong identity.
+                    self.prepared_txns
+                        .lock()
+                        .insert(transactional_id.to_owned(), prep);
+                    return ErrorCode::InvalidTxnState as u16;
+                }
+                if prep.producer_epoch != producer_epoch {
+                    self.prepared_txns
+                        .lock()
+                        .insert(transactional_id.to_owned(), prep);
+                    return ErrorCode::InvalidProducerEpoch as u16;
+                }
+                if prep.commit != commit {
+                    if commit {
+                        // Commit complete against PrepareAbort — reject.
+                        self.prepared_txns
+                            .lock()
+                            .insert(transactional_id.to_owned(), prep);
+                        return ErrorCode::InvalidTxnState as u16;
+                    }
+                    // commit=false with PrepareCommit → force-abort (fence).
+                    self.force_abort_prepared(prep);
+                    self.clear_cluster_prepared_index(transactional_id);
+                    return 0;
+                }
+                let _ = self.finalize_txn(
+                    producer_id,
+                    producer_epoch,
+                    commit,
+                    prep.open,
+                    &[],
+                );
+                self.persist_prepared_txns();
+                self.clear_cluster_prepared_index(transactional_id);
+                return 0;
+            }
+        }
+        // Fallback: open (non-prepared) ranges — fence abort path may hit peers
+        // that never prepared.
+        let txn = {
+            let mut open = self.open_txns.lock();
+            open.remove(&producer_id)
+        };
+        if let Some(txn) = txn {
+            let _ = self.finalize_txn(producer_id, producer_epoch, commit, txn, &[]);
+        }
+        self.clear_cluster_prepared_index(transactional_id);
+        0
+    }
+
+    fn cluster_prepared_index_path(&self) -> PathBuf {
+        self.storage
+            .data_dir
+            .join("__txn_prepared")
+            .join("cluster.json")
+    }
+
+    fn load_cluster_prepared_index(&self) {
+        // Only meaningful on controller, but load if file exists (restart race).
+        let path = self.cluster_prepared_index_path();
+        let Ok(bytes) = fs::read(&path) else {
+            return;
+        };
+        let Ok(file) = serde_json::from_slice::<ClusterPreparedFile>(&bytes) else {
+            return;
+        };
+        let mut map = self.cluster_prepared_index.lock();
+        for e in file.prepared {
+            map.insert(e.transactional_id.clone(), e);
+        }
+    }
+
+    fn persist_cluster_prepared_index(&self) {
+        // Controllers own the durable index; non-controllers may hold a soft copy.
+        let path = self.cluster_prepared_index_path();
+        if let Some(parent) = path.parent() {
+            let _ = fs::create_dir_all(parent);
+        }
+        let mut file = ClusterPreparedFile::default();
+        {
+            let map = self.cluster_prepared_index.lock();
+            file.prepared = map.values().cloned().collect();
+        }
+        let Ok(bytes) = serde_json::to_vec_pretty(&file) else {
+            return;
+        };
+        let tmp = path.with_extension("json.tmp");
+        if fs::write(&tmp, &bytes).is_ok() {
+            let _ = fs::rename(tmp, path);
+        }
+    }
+
+    fn upsert_cluster_prepared_index(
+        &self,
+        transactional_id: &str,
+        producer_id: u64,
+        producer_epoch: u16,
+        commit: bool,
+    ) {
+        // Persist on controller only (SoT). Peers skip durable cluster index.
+        if self.cluster.is_some() && !self.is_controller() {
+            return;
+        }
+        let entry = ClusterPreparedEntry {
+            transactional_id: transactional_id.to_owned(),
+            producer_id,
+            producer_epoch,
+            commit,
+            prepared_at_ms: unix_now_ms(),
+            coordinator_node_id: self.node_id,
+        };
+        self.cluster_prepared_index
+            .lock()
+            .insert(transactional_id.to_owned(), entry);
+        self.persist_cluster_prepared_index();
+    }
+
+    fn clear_cluster_prepared_index(&self, transactional_id: &str) {
+        if transactional_id.is_empty() {
+            return;
+        }
+        let removed = self.cluster_prepared_index.lock().remove(transactional_id);
+        if removed.is_some() {
+            self.persist_cluster_prepared_index();
+        } else if self.cluster.is_some() && self.is_controller() {
+            // Still rewrite so a stale file cannot resurrect the entry after
+            // peers completed while controller had no local entry.
+            self.persist_cluster_prepared_index();
+        }
+    }
+
+    /// Roll back a just-local prepare if cluster fan-out failed (Phase 114).
+    ///
+    /// Moves prepared back to open when possible so the client can retry EndTxn.
+    pub fn rollback_local_prepare(&self, transactional_id: &str) {
+        let prep = {
+            let mut prepared = self.prepared_txns.lock();
+            prepared.remove(transactional_id)
+        };
+        if let Some(prep) = prep {
+            let pid = prep.producer_id;
+            let mut open = self.open_txns.lock();
+            open.insert(pid, prep.open);
+            drop(open);
+            self.persist_prepared_txns();
+            self.persist_txn_markers();
+            self.clear_cluster_prepared_index(transactional_id);
+        }
     }
 
     /// Apply inter-broker `ClusterBrokerConfig` (Phase 113 PR3).
@@ -2076,21 +2524,33 @@ impl Broker {
     /// begin/ensure can open a new txn.
     ///
     /// `offsets` entries are `(group_id, topic, partition, offset, metadata)`.
+    ///
+    /// Returns `(error_code, commit_results, cluster_fanout)`. Callers in cluster
+    /// mode must run [`Txn2pcFanout`] via inter-broker RPC after a `0` error
+    /// (Phase 114). On prepare fan-out failure, call [`Self::rollback_local_prepare`].
     pub fn end_txn(
         &self,
         producer_id: u64,
         producer_epoch: u16,
         committed: bool,
         offsets: &[(String, String, u32, u64, String)],
-    ) -> Result<(u16, Vec<TxnCommitResult>)> {
+    ) -> Result<(u16, Vec<TxnCommitResult>, Txn2pcFanout)> {
         self.expire_timed_out_txns();
         let (enable_2pc, transactional_id) = {
             let state = self.producer_state.read();
             let Some(prod) = state.get(&producer_id) else {
-                return Ok((ErrorCode::UnknownProducerId as u16, Vec::new()));
+                return Ok((
+                    ErrorCode::UnknownProducerId as u16,
+                    Vec::new(),
+                    Txn2pcFanout::None,
+                ));
             };
             if prod.epoch != producer_epoch {
-                return Ok((ErrorCode::InvalidProducerEpoch as u16, Vec::new()));
+                return Ok((
+                    ErrorCode::InvalidProducerEpoch as u16,
+                    Vec::new(),
+                    Txn2pcFanout::None,
+                ));
             }
             (prod.enable_2pc, prod.transactional_id.clone())
         };
@@ -2100,13 +2560,25 @@ impl Broker {
             let mut prepared = self.prepared_txns.lock();
             if let Some(prep) = prepared.get(&transactional_id) {
                 if prep.producer_id != producer_id {
-                    return Ok((ErrorCode::InvalidTxnState as u16, Vec::new()));
+                    return Ok((
+                        ErrorCode::InvalidTxnState as u16,
+                        Vec::new(),
+                        Txn2pcFanout::None,
+                    ));
                 }
                 if prep.producer_epoch != producer_epoch {
-                    return Ok((ErrorCode::InvalidProducerEpoch as u16, Vec::new()));
+                    return Ok((
+                        ErrorCode::InvalidProducerEpoch as u16,
+                        Vec::new(),
+                        Txn2pcFanout::None,
+                    ));
                 }
                 if prep.commit != committed {
-                    return Ok((ErrorCode::InvalidTxnState as u16, Vec::new()));
+                    return Ok((
+                        ErrorCode::InvalidTxnState as u16,
+                        Vec::new(),
+                        Txn2pcFanout::None,
+                    ));
                 }
                 let prep = prepared.remove(&transactional_id).expect("just checked");
                 drop(prepared);
@@ -2120,7 +2592,18 @@ impl Broker {
                     offsets,
                 )?;
                 self.persist_prepared_txns();
-                return Ok((0, results));
+                self.clear_cluster_prepared_index(&transactional_id);
+                let fanout = if self.cluster.is_some() {
+                    Txn2pcFanout::Complete {
+                        transactional_id,
+                        producer_id,
+                        producer_epoch,
+                        commit: committed,
+                    }
+                } else {
+                    Txn2pcFanout::None
+                };
+                return Ok((0, results, fanout));
             }
         }
 
@@ -2131,9 +2614,17 @@ impl Broker {
                 None => {
                     // Phase 94: timeout already aborted → TRANSACTION_ABORTABLE.
                     if self.take_txn_abortable(producer_id) {
-                        return Ok((ErrorCode::TransactionAbortable as u16, Vec::new()));
+                        return Ok((
+                            ErrorCode::TransactionAbortable as u16,
+                            Vec::new(),
+                            Txn2pcFanout::None,
+                        ));
                     }
-                    return Ok((ErrorCode::InvalidTxnState as u16, Vec::new()));
+                    return Ok((
+                        ErrorCode::InvalidTxnState as u16,
+                        Vec::new(),
+                        Txn2pcFanout::None,
+                    ));
                 }
             }
         };
@@ -2152,11 +2643,27 @@ impl Broker {
             };
             self.prepared_txns
                 .lock()
-                .insert(transactional_id, prep);
+                .insert(transactional_id.clone(), prep);
             // Open ranges leave open markers; prepared holds LSO via prepared map.
             self.persist_txn_markers();
             self.persist_prepared_txns();
-            return Ok((0, Vec::new()));
+            self.upsert_cluster_prepared_index(
+                &transactional_id,
+                producer_id,
+                producer_epoch,
+                committed,
+            );
+            let fanout = if self.cluster.is_some() {
+                Txn2pcFanout::Prepare {
+                    transactional_id,
+                    producer_id,
+                    producer_epoch,
+                    commit: committed,
+                }
+            } else {
+                Txn2pcFanout::None
+            };
+            return Ok((0, Vec::new(), fanout));
         }
 
         let results = self.finalize_txn(
@@ -2166,7 +2673,19 @@ impl Broker {
             txn,
             offsets,
         )?;
-        Ok((0, results))
+        // Non-2PC one-shot: still fan out complete so peers that held open
+        // ranges (from open fan-out) finalize consistently in cluster mode.
+        let fanout = if self.cluster.is_some() && !transactional_id.is_empty() {
+            Txn2pcFanout::Complete {
+                transactional_id,
+                producer_id,
+                producer_epoch,
+                commit: committed,
+            }
+        } else {
+            Txn2pcFanout::None
+        };
+        Ok((0, results, fanout))
     }
 
     /// Finalize commit/abort for an open or prepared txn body.

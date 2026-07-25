@@ -61,7 +61,7 @@ fn abort_one_range(broker: &Broker, topic: &str, txn_id: &str) -> (u64, u64, u64
         IdempotentCheck::Accept { base_offset } => base_offset,
         other => panic!("unexpected produce: {other:?}"),
     };
-    let (code, _) = broker.end_txn(pid, epoch, false, &[]).unwrap();
+    let (code, _, _) = broker.end_txn(pid, epoch, false, &[]).unwrap();
     assert_eq!(code, 0);
     // Marker end is exclusive; control batch may sit at/after end.
     let end = first + 1;
@@ -280,7 +280,7 @@ fn overlapping_marker_retained_when_partially_live() {
             other => panic!("unexpected {other:?}"),
         }
     }
-    let (code, _) = broker.end_txn(pid, epoch, false, &[]).unwrap();
+    let (code, _, _) = broker.end_txn(pid, epoch, false, &[]).unwrap();
     assert_eq!(code, 0);
     let end = first + 3;
     assert!(broker.aborted_marker_count("ov", 0) >= 1);

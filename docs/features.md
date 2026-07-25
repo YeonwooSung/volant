@@ -106,14 +106,24 @@ workers.
 | BROKER config fan-out | Cluster **controller-only** Alter / IncrementalAlter for the six Phase 99 knobs; generationed push to live peers; sparse durable on each node. Non-controller → `NotController` / Kafka **41** |
 | ACL snapshot fan-out | Cluster **controller-only** Create/Delete Acls; generationed full snapshot push; peers install + persist `__acls`. List/authorize remain local after apply |
 
+## Multi-broker 2PC (Phase 114 MVP)
+
+| Feature | Behavior |
+|---------|----------|
+| Open fan-out | After BeginTxn / successful AddPartitions, coordinator best-effort installs producer + empty open on live peers so partition leaders accept write-through |
+| Prepare / complete | Enable2Pc first EndTxn prepares locally then **strict** fan-out `TxnParticipantPrepare`; second EndTxn finalizes + `TxnParticipantComplete`. Non-2PC one-shot EndTxn also completes peers' open ranges |
+| Durable prepared | Local `__txn_prepared/state.json` on each participant + controller `__txn_prepared/cluster.json` index (identity/decision only) |
+| Fence | Init KeepPreparedTxn=false aborts local; peers force-abort via complete with `commit=false` even if prepared was PrepareCommit |
+| Metrics | `volant_txn_2pc_fanout_errors_total`, `volant_cluster_prepared_txns` |
+
 ## Open limitations (native)
 
 - Multi-language clients deferred  
 - Long fuzz campaigns / chaos-mesh deferred (corpus smoke CI MVP: Phase 112)  
 - No Raft metadata / dynamic membership  
 - Crash≡abort control batches yes (Phase 98); empty AddPartitions control yes (Phase 105)  
-- Prepared 2PC is single-node MVP (no multi-broker txn log); prepared timeout yes (Phase 92); open-txn timeout yes (Phase 93); TRANSACTION_ABORTABLE honest subset after timeout (Phase 94; FindCoordinator never); transaction max timeout clamp yes (Phase 96; default 15m; Init **50** over-max) 
-
+- Prepared 2PC multi-broker MVP yes (Phase 114; **not** full KIP-890/939 / `__transaction_state` topic); prepared timeout yes (Phase 92); open-txn timeout yes (Phase 93); TRANSACTION_ABORTABLE honest subset after timeout (Phase 94; FindCoordinator never); transaction max timeout clamp yes (Phase 96; default 15m; Init **50** over-max)  
+- Clients should pin Init/Begin/EndTxn to the coordinator broker that allocated the producer (no transparent EndTxn forward yet)  
 - Fetch sessions not durable / multi-broker sticky; omit cache is HWM+LSO only (not byte-identical Kafka response cache); idle TTL + max/LRU yes (Phase 95)  
 - ACL / BROKER admin SoT is the **controller** (Phase 113 push), not Raft consensus; brief lag on controller failover  
 - DeleteRecords fan-out is **best-effort** (no durable pending truncate for down replicas)  

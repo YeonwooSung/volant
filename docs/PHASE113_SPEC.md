@@ -406,7 +406,7 @@ for cluster control-plane code.
 
 ## Still deferred after Phase 113
 
-- Multi-broker **2PC** / full KIP-890 abortable surface → **Phase 114 candidate**  
+- Multi-broker **2PC** / full KIP-890 abortable surface → **closed by Phase 114 (MVP)**; full KIP-890/939 still deferred
 - Multi-broker session affinity / durable fetch sessions  
 - Dynamic membership / Raft metadata  
 - Durable pending DeleteRecords queue for down replicas  
