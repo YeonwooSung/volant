@@ -475,7 +475,7 @@ pub struct Broker {
     leader_epochs: RwLock<HashMap<(String, u32), Vec<EpochStart>>>,
     /// Durable leader-epoch store under `data_dir/__leader_epochs` (Phase 87).
     leader_epoch_store: LeaderEpochStore,
-    /// Process-local Fetch sessions (Phase 88 + 91 omit + Phase 95 TTL/max).
+    /// Fetch sessions (Phase 88 + 91 omit + Phase 95 TTL/max + Phase 115 durable).
     fetch_sessions: FetchSessionManager,
     /// Phase 109: single-flight guard for [`crate::net::start_background_tasks`].
     ///
@@ -581,6 +581,8 @@ impl Broker {
             .expect("failed to open SCRAM store");
         let leader_epoch_store = LeaderEpochStore::open(&storage.data_dir)
             .expect("failed to open leader epoch store");
+        // Phase 115: durable fetch sessions under data_dir/__fetch_sessions.
+        let fetch_sessions = FetchSessionManager::open(&storage.data_dir);
         let broker = Self {
             storage,
             topics: RwLock::new(HashMap::new()),
@@ -619,7 +621,7 @@ impl Broker {
             scram,
             leader_epochs: RwLock::new(HashMap::new()),
             leader_epoch_store,
-            fetch_sessions: FetchSessionManager::new(),
+            fetch_sessions,
             bg_tasks_started: AtomicBool::new(false),
             config_generation: AtomicU64::new(0),
             applied_config_generation: AtomicU64::new(0),
@@ -644,6 +646,8 @@ impl Broker {
         broker
             .load_durable_broker_config()
             .expect("failed to load durable broker config");
+        // Phase 115: re-apply idle TTL after durable config may have changed knobs.
+        let _ = broker.fetch_sessions.evict_idle_now();
         broker
     }
 
@@ -690,6 +694,8 @@ impl Broker {
             .expect("failed to open SCRAM store");
         let leader_epoch_store = LeaderEpochStore::open(&storage.data_dir)
             .expect("failed to open leader epoch store");
+        // Phase 115: durable fetch sessions under data_dir/__fetch_sessions.
+        let fetch_sessions = FetchSessionManager::open(&storage.data_dir);
         let broker = Self {
             storage,
             topics: RwLock::new(HashMap::new()),
@@ -728,7 +734,7 @@ impl Broker {
             scram,
             leader_epochs: RwLock::new(HashMap::new()),
             leader_epoch_store,
-            fetch_sessions: FetchSessionManager::new(),
+            fetch_sessions,
             bg_tasks_started: AtomicBool::new(false),
             config_generation: AtomicU64::new(0),
             applied_config_generation: AtomicU64::new(0),
@@ -750,10 +756,12 @@ impl Broker {
         broker.seed_missing_leader_epochs();
         // Phase 100–102: sparse durable BROKER knobs after env (product → env → file keys).
         broker.load_durable_broker_config()?;
+        // Phase 115: re-apply idle TTL after durable config may have changed knobs.
+        let _ = broker.fetch_sessions.evict_idle_now();
         Ok(broker)
     }
 
-    /// Process-local Fetch session manager (Phase 88 + 91 + 95).
+    /// Fetch session manager (Phase 88 + 91 + 95 + durable Phase 115).
     pub fn fetch_sessions(&self) -> &FetchSessionManager {
         &self.fetch_sessions
     }

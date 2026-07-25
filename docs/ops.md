@@ -39,6 +39,7 @@ Key series (prefix `volant_`):
 - `volant_topics` / `volant_partitions` (gauges)
 - `volant_fetch_sessions_active` / `volant_fetch_sessions_evicted_total` (Phase 95)
 - `volant_fetch_sessions_idle_evicted_total` (Phase 97 idle-only subset)
+- `volant_fetch_sessions_restored` / `volant_fetch_sessions_persist_errors_total` (Phase 115 durable)
 - `volant_open_txns` / `volant_prepared_txns` (Phase 97 gauges)
 - `volant_open_txns_expired_total` / `volant_prepared_txns_expired_total` (Phase 97)
 - `volant_build_info{version=...}`
@@ -186,14 +187,17 @@ volant-server \
 - **Leader epochs:** durable history under `{data_dir}/__leader_epochs` (Phase 87);
   OffsetForLeaderEpoch returns prior-epoch end offsets; Metadata advertises live
   epoch. Not a full KRaft epoch state machine.
-- **Fetch DivergingEpoch / sessions (Phase 88 + 91 + 95):** truncation →
-  OFFSET_OUT_OF_RANGE + DivergingEpoch tag 0 from history; process-local fetch
-  sessions (create / forgotten / errors 70–71); empty-topics incremental
+- **Fetch DivergingEpoch / sessions (Phase 88 + 91 + 95 + 115):** truncation →
+  OFFSET_OUT_OF_RANGE + DivergingEpoch tag 0 from history; fetch sessions
+  (create / forgotten / errors 70–71); empty-topics incremental
   **omits** partitions when HWM+LSO unchanged and records empty (Phase 91);
   idle TTL (default 60s / `VOLANT_FETCH_SESSION_IDLE_MS`; `0` disables) + max
   concurrent sessions (default 1000 / `VOLANT_FETCH_SESSION_MAX`; `0` = unlimited;
-  LRU eviction at cap) (Phase 95); idle also background-swept (Phase 97). Sessions
-  are not durable or multi-broker sticky.
+  LRU eviction at cap) (Phase 95); idle also background-swept (Phase 97).
+  **Durable per-broker** under `{data_dir}/__fetch_sessions/state.json` (Phase 115):
+  restart on the same data_dir restores session_id / epoch / omit cache within idle
+  TTL. **Not** multi-broker sticky — pin Fetch connections (or LB stickiness) to the
+  broker that created the session; wrong broker ⇒ **70**.
 - **ACLs:** Kafka ACL admin maps to Volant Phase 20/21 ACLs (LITERAL only;
   CreateAcls enables enforcement). Describe/Create/DeleteAcls **0–3**: v3 accepts
   Kafka **User** resource type (stored as `ResourceType::User`; not used on the

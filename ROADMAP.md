@@ -2681,10 +2681,38 @@ only; clients should pin Init/Begin/EndTxn to the coordinator broker (no
 transparent forward); controller failover may drop cluster index until next
 prepare; inter-broker 2PC RPCs not ACL-gated.
 
-**Still deferred:** multi-lang clients, chaos-mesh / long fuzz campaigns,
-multi-broker session affinity / durable sessions, full KIP-890/939 /
+**Still deferred (at Phase 114 ship):** multi-lang clients, chaos-mesh / long fuzz
+campaigns, multi-broker session affinity / durable sessions, full KIP-890/939 /
 `__transaction_state`, Kafka wire fuzz targets, dynamic membership / Raft
 metadata, full Kafka broker catalog, transparent EndTxn forward.
+
+---
+
+### Phase 115 — Durable fetch sessions (MVP) ✅
+
+**Goal:** Persist Fetch session_id → partition state (epoch, omit HWM/LSO cache)
+under `{data_dir}/__fetch_sessions` so a broker restart on the same data_dir
+restores incremental sessions within idle TTL. Multi-broker handoff deferred
+(sticky-by-convention).
+
+Binding: **[docs/PHASE115_SPEC.md](./docs/PHASE115_SPEC.md)**.
+
+- [x] Durable snapshot `{data_dir}/__fetch_sessions/state.json` (atomic write)
+- [x] Load on `Broker::new` / `with_cluster` with idle-TTL filter
+- [x] Persist on create / incremental / merge / forget / note_returned / close / evict
+- [x] Metrics: `volant_fetch_sessions_restored`, `volant_fetch_sessions_persist_errors_total`
+- [x] Tests: `phase115_durable_fetch_sessions` + unit roundtrip / idle load filter
+- [x] Living docs honesty (not multi-broker sticky)
+
+**Honest limitations:** per-broker local only (not replicated / no handoff);
+wrong broker ⇒ **70**; full snapshot + fsync on mutation (debounce deferred);
+not a Kafka shared consumer-session store; pin Fetch to session-owner broker.
+
+**Still deferred:** multi-lang clients, chaos-mesh / long fuzz campaigns,
+multi-broker session handoff / affinity routing, full KIP-890/939 /
+`__transaction_state`, Kafka wire fuzz targets, dynamic membership / Raft
+metadata, full Kafka broker catalog, transparent EndTxn forward, byte-identical
+response cache, debounced session persist.
 
 ---
 
@@ -2723,7 +2751,7 @@ marker clip 111; fuzz corpus smoke CI 112; cluster admin fan-out 113) — see
 
 ## Suggested implementation order (PRs)
 
-Phases **0–114 are shipped**. Historical PR order for the core:
+Phases **0–115 are shipped**. Historical PR order for the core:
 
 1. Phase 1 segment format + unit tests  
 2. Phase 1 recovery + retention  
@@ -2740,6 +2768,7 @@ Phases **0–114 are shipped**. Historical PR order for the core:
 13. Phase 112 (cargo-fuzz corpus smoke + CI MVP) ✅  
 14. Phase 113 (cluster admin fan-out: DeleteRecords + BROKER config + ACL snapshot) ✅  
 15. Phase 114 (multi-broker Enable2Pc prepare/complete MVP) ✅  
+16. Phase 115 (durable local fetch sessions MVP) ✅  
 
 ---
 
@@ -2780,11 +2809,12 @@ cargo run -p volant-bench --release
 cargo test --workspace
 ```
 
-**Status (post–Phase 114):** core broker, ops (metrics / TLS / auth / SCRAM /
+**Status (post–Phase 115):** core broker, ops (metrics / TLS / auth / SCRAM /
 ACLs / Helm), and the Kafka wire shim are **shipped** (Fetch 0–18 Kafka max;
 ACL admin 0–3 with User resource; soft-marker `READ_COMMITTED` with **marker GC/clip**
 on DeleteRecords/retention/load (Phase 104/111); durable OFLE history; Fetch DivergingEpoch +
-sessions with omit-unchanged incremental + idle TTL/max; Kafka control batches
+sessions with omit-unchanged incremental + idle TTL/max + **durable local restore**
+(Phase 115); Kafka control batches
 on EndTxn **and** crash≡abort open promote **including empty AddPartitions**;
 prepared 2PC MVP + **multi-broker Enable2Pc** (Phase 114); prepared + open txn
 timeouts + broker max timeout clamp;
@@ -2797,7 +2827,8 @@ HWM recompute** Phase 108; **non-controller alive-set auto-death** Phase 110; **
 **cargo-fuzz corpus smoke + CI MVP** Phase 112; **cluster admin fan-out** Phase 113
 (DeleteRecords best-effort replica truncate; controller-only BROKER config + ACL
 snapshot push); **multi-broker 2PC MVP** Phase 114 (inter-broker prepare/complete;
-controller cluster prepared index — not full KIP-890 / `__transaction_state`)).
+controller cluster prepared index — not full KIP-890 / `__transaction_state`);
+**durable fetch sessions** Phase 115 (`__fetch_sessions`; not multi-broker sticky)).
 Still deferred: multi-language clients, full chaos-mesh suites / long fuzz
-campaigns, multi-broker session affinity, full KIP-890/939.
+campaigns, multi-broker session handoff, full KIP-890/939.
 Details: [docs/KAFKA_COMPAT.md](./docs/KAFKA_COMPAT.md), [docs/ops.md](./docs/ops.md).

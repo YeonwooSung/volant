@@ -9,11 +9,11 @@ Volant is a resource-efficient alternative to Apache Kafka, built for:
 - **Streaming processing** — first-class operators (`map`, `filter`, windows) without a heavy runtime
 - **Small footprint** — native binary, predictable memory, simple operations
 
-> Status: **Phases 0–113 landed** — durable log, clustering, security, stream
+> Status: **Phases 0–115 landed** — durable log, clustering, security, stream
 > operators, a broad optional Kafka wire shim (classic + flexible;
 > ApiVersions 0–5; Fetch 0–18; ACL admin 0–3; TRANSACTION_ABORTABLE subset;
-> fetch session TTL/max; broker Describe/AlterConfigs with sparse durable restore;
-> cluster admin fan-out for DeleteRecords / BROKER config / ACLs), and fuzz corpus
+> fetch session TTL/max + durable local sessions; broker Describe/AlterConfigs with sparse durable restore;
+> multi-broker 2PC MVP; cluster admin fan-out for DeleteRecords / BROKER config / ACLs), and fuzz corpus
 > smoke CI. Single-node mode (no `--cluster-config`) preserves the simple path.
 > Start with the [whitepaper](./docs/WHITEPAPER.md) and
 > [docs index](./docs/INDEX.md); also [ROADMAP.md](./ROADMAP.md),
@@ -148,13 +148,13 @@ static ISR). Later work is summarized by band — full chronicle in
 
 **Kafka ceilings (code SoT):** ApiVersions **0–5**, Fetch **0–18**, Produce/Metadata
 **0–13**, ACL admin **0–3** (User resource v3, store-only); Fetch isolation
-READ_COMMITTED MVP (Phase 86) + soft-marker GC/clip on DeleteRecords/retention/load (Phase 104/111); durable OffsetForLeaderEpoch history (Phase 87); Fetch DivergingEpoch + real fetch sessions MVP (Phase 88); Kafka control batches on EndTxn (Phase 89), crash≡abort open promote (Phase 98), and empty AddPartitions membership (Phase 105); prepared 2PC MVP (Phase 90); omit-unchanged incremental sessions (Phase 91); prepared timeout auto-abort (Phase 92); open-txn timeout (Phase 93); fetch session idle TTL + max/LRU (Phase 95); transaction max timeout clamp (Phase 96); background txn/session sweeper + metrics (Phase 97; always-spawn / 0→>0 live Phase 101; graceful shutdown/join Phase 106); BROKER Describe/AlterConfigs for txn/session/sweep knobs (Phase 99) with **sparse** durable restart restore (Phase 100/102) and resource name empty-or-`node_id` (Phase 103; parallel test isolation Phase 107); follower-death ISR shrink + HWM recompute so rolling-restart `acks=all` does not time out (Phase 108); accept-loop drain + single-flight `start_background_tasks` (Phase 109); non-controller alive-set auto-death (Phase 110); straddle soft-marker clip (Phase 111); cluster admin fan-out — DeleteRecords best-effort replica truncate, controller-only BROKER config + ACL snapshot push (Phase 113).
+READ_COMMITTED MVP (Phase 86) + soft-marker GC/clip on DeleteRecords/retention/load (Phase 104/111); durable OffsetForLeaderEpoch history (Phase 87); Fetch DivergingEpoch + real fetch sessions MVP (Phase 88); Kafka control batches on EndTxn (Phase 89), crash≡abort open promote (Phase 98), and empty AddPartitions membership (Phase 105); prepared 2PC MVP (Phase 90); omit-unchanged incremental sessions (Phase 91); prepared timeout auto-abort (Phase 92); open-txn timeout (Phase 93); fetch session idle TTL + max/LRU (Phase 95); transaction max timeout clamp (Phase 96); background txn/session sweeper + metrics (Phase 97; always-spawn / 0→>0 live Phase 101; graceful shutdown/join Phase 106); BROKER Describe/AlterConfigs for txn/session/sweep knobs (Phase 99) with **sparse** durable restart restore (Phase 100/102) and resource name empty-or-`node_id` (Phase 103; parallel test isolation Phase 107); follower-death ISR shrink + HWM recompute so rolling-restart `acks=all` does not time out (Phase 108); accept-loop drain + single-flight `start_background_tasks` (Phase 109); non-controller alive-set auto-death (Phase 110); straddle soft-marker clip (Phase 111); cluster admin fan-out — DeleteRecords best-effort replica truncate, controller-only BROKER config + ACL snapshot push (Phase 113); multi-broker Enable2Pc prepare/complete (Phase 114); durable local fetch sessions under `__fetch_sessions` (Phase 115; not multi-broker sticky).
 Matrix + honesty: [docs/KAFKA_COMPAT.md](./docs/KAFKA_COMPAT.md).
 
 **Still deferred:** multi-language clients, chaos-mesh / long fuzz campaigns
-(corpus smoke CI MVP → **Phase 112**), multi-broker 2PC parity, multi-broker
-session affinity. Cluster admin fan-out (DeleteRecords / BROKER config / ACL
-snapshot) → **Phase 113**.
+(corpus smoke CI MVP → **Phase 112**), multi-broker session handoff (durable
+local sessions → **Phase 115**), full KIP-890/939. Cluster admin fan-out →
+**Phase 113**; multi-broker Enable2Pc MVP → **Phase 114**.
 
 ### Networked client (library)
 

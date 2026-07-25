@@ -59,6 +59,7 @@ shim: [KAFKA_COMPAT.md](./KAFKA_COMPAT.md).
 | Transaction max timeout (Phase 96) | Broker max default **15m** (`VOLANT_TRANSACTION_MAX_TIMEOUT_MS`; `0` = no max); Init over-max → **50**; effective open/prepared clamped |
 | Background sweeper (Phase 97/101/106) | Periodic open/prepared + idle session expiry (default 1s / `VOLANT_SWEEP_INTERVAL_MS`); `0` pauses bg; always-spawn so 0→>0 without restart; graceful shutdown/join on stop; lazy paths remain |
 | BROKER config (Phase 99–103) | Describe/Alter txn/session/sweep knobs; **sparse** durable under `__broker_config/state.json` (only altered keys; DELETE unfreezes env); resource name must be empty or local `node_id` decimal (Phase 103) |
+| Durable fetch sessions (Phase 115) | `{data_dir}/__fetch_sessions/state.json`; restart restores session_id/epoch/omit cache within idle TTL; **not** multi-broker sticky |
 
 ## Security (19–22)
 

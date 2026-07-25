@@ -1,14 +1,21 @@
-//! In-memory Fetch session state (Phase 88 + 91 omit-unchanged + Phase 95 limits).
+//! Fetch session state (Phase 88 + 91 omit-unchanged + Phase 95 limits + Phase 115 durable).
 //!
-//! Process-local only: not durable, not shared across brokers. Tracks topic
-//! partitions, last-seen fetch params, last-returned HWM/LSO (Phase 91), and
-//! idle TTL / max concurrent sessions with lazy LRU eviction (Phase 95).
+//! Tracks topic partitions, last-seen fetch params, last-returned HWM/LSO (Phase 91),
+//! idle TTL / max concurrent sessions with lazy LRU eviction (Phase 95), and optional
+//! durability under `{data_dir}/__fetch_sessions/state.json` (Phase 115).
+//!
+//! Sessions are **per-broker / per-data_dir** — not replicated across brokers and not
+//! multi-broker sticky. Multi-broker handoff is deferred (see PHASE115_SPEC).
 
 use std::collections::HashMap;
+use std::fs::{self, File, OpenOptions};
+use std::io::{Read, Write};
+use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicI32, AtomicU64, AtomicUsize, Ordering};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use parking_lot::Mutex;
+use serde::{Deserialize, Serialize};
 
 use super::topic_id::TopicWireId;
 
@@ -17,10 +24,17 @@ pub const INITIAL_EPOCH: i32 = 0;
 /// Kafka `FetchSession.FINAL_EPOCH` — close session; no new session.
 pub const FINAL_EPOCH: i32 = -1;
 
-/// Default idle TTL for process-local fetch sessions (Phase 95).
+/// Default idle TTL for fetch sessions (Phase 95).
 pub const DEFAULT_IDLE_TIMEOUT_MS: u64 = 60_000;
-/// Default max concurrent process-local fetch sessions (Phase 95).
+/// Default max concurrent fetch sessions (Phase 95).
 pub const DEFAULT_MAX_SESSIONS: usize = 1000;
+
+/// On-disk directory name under `data_dir` (Phase 115).
+pub const FETCH_SESSIONS_DIR: &str = "__fetch_sessions";
+/// On-disk snapshot file name (Phase 115).
+pub const FETCH_SESSIONS_FILE: &str = "state.json";
+/// File format version (Phase 115).
+pub const FETCH_SESSIONS_FILE_VERSION: u32 = 1;
 
 /// Cached partition fetch parameters inside a session.
 #[derive(Debug, Clone)]
@@ -92,7 +106,8 @@ pub struct FetchSession {
     pub last_activity_ms: i64,
 }
 
-/// Process-local session table with idle TTL + max concurrent (Phase 95).
+/// Fetch session table with idle TTL + max concurrent (Phase 95) + optional
+/// durability (Phase 115).
 #[derive(Debug)]
 pub struct FetchSessionManager {
     sessions: Mutex<HashMap<i32, FetchSession>>,
@@ -105,6 +120,12 @@ pub struct FetchSessionManager {
     evicted_total: AtomicU64,
     /// Sessions removed by idle TTL only (Phase 97; subset of `evicted_total`).
     idle_evicted_total: AtomicU64,
+    /// Optional durable snapshot path (Phase 115).
+    durable_path: Option<PathBuf>,
+    /// Sessions restored from disk at last open (Phase 115).
+    restored: AtomicU64,
+    /// Failed durable write attempts (Phase 115).
+    persist_errors_total: AtomicU64,
 }
 
 impl Default for FetchSessionManager {
@@ -114,12 +135,14 @@ impl Default for FetchSessionManager {
 }
 
 impl FetchSessionManager {
-    /// Manager with defaults from env (`VOLANT_FETCH_SESSION_*`) or Phase 95 defaults.
+    /// Manager with defaults from env (`VOLANT_FETCH_SESSION_*`) — **no durability**.
+    ///
+    /// Prefer [`Self::open`] for production brokers with a `data_dir`.
     pub fn new() -> Self {
         Self::with_limits(default_idle_timeout_ms(), default_max_sessions())
     }
 
-    /// Manager with explicit limits (tests).
+    /// Manager with explicit limits and no durable path (unit tests).
     pub fn with_limits(idle_timeout_ms: u64, max_sessions: usize) -> Self {
         Self {
             sessions: Mutex::new(HashMap::new()),
@@ -128,7 +151,35 @@ impl FetchSessionManager {
             max_sessions: AtomicUsize::new(max_sessions),
             evicted_total: AtomicU64::new(0),
             idle_evicted_total: AtomicU64::new(0),
+            durable_path: None,
+            restored: AtomicU64::new(0),
+            persist_errors_total: AtomicU64::new(0),
         }
+    }
+
+    /// Open (or create) a durable session table under `data_dir/__fetch_sessions`.
+    ///
+    /// Loads existing sessions, applying idle TTL at load time (Phase 115).
+    pub fn open(data_dir: impl AsRef<Path>) -> Self {
+        Self::open_with_limits(
+            data_dir,
+            default_idle_timeout_ms(),
+            default_max_sessions(),
+        )
+    }
+
+    /// Open durable sessions with explicit idle/max limits (tests / controlled boot).
+    pub fn open_with_limits(
+        data_dir: impl AsRef<Path>,
+        idle_timeout_ms: u64,
+        max_sessions: usize,
+    ) -> Self {
+        let mut mgr = Self::with_limits(idle_timeout_ms, max_sessions);
+        let dir = data_dir.as_ref().join(FETCH_SESSIONS_DIR);
+        let _ = fs::create_dir_all(&dir);
+        mgr.durable_path = Some(dir.join(FETCH_SESSIONS_FILE));
+        mgr.load_from_disk_at(now_ms());
+        mgr
     }
 
     /// Current idle timeout in milliseconds (`0` = disabled).
@@ -166,6 +217,21 @@ impl FetchSessionManager {
         self.idle_evicted_total.load(Ordering::Relaxed)
     }
 
+    /// Sessions restored from durable snapshot at open (Phase 115).
+    pub fn restored(&self) -> u64 {
+        self.restored.load(Ordering::Relaxed)
+    }
+
+    /// Durable persist failures (Phase 115).
+    pub fn persist_errors_total(&self) -> u64 {
+        self.persist_errors_total.load(Ordering::Relaxed)
+    }
+
+    /// Whether this manager writes a durable snapshot (Phase 115).
+    pub fn is_durable(&self) -> bool {
+        self.durable_path.is_some()
+    }
+
     /// Evict idle sessions using the current wall clock (Phase 97 sweeper).
     ///
     /// Same path as lazy idle eviction on create / begin_incremental.
@@ -179,7 +245,11 @@ impl FetchSessionManager {
         let mut guard = self.sessions.lock();
         let before = guard.len();
         self.evict_idle_locked(&mut guard, now_ms);
-        before.saturating_sub(guard.len())
+        let removed = before.saturating_sub(guard.len());
+        if removed > 0 {
+            self.persist_locked(&guard);
+        }
+        removed
     }
 
     fn alloc_id(&self) -> i32 {
@@ -216,7 +286,10 @@ impl FetchSessionManager {
     /// Close a session (no-op for id 0 / missing). Not counted as eviction.
     pub fn close(&self, session_id: i32) {
         if session_id != 0 {
-            self.sessions.lock().remove(&session_id);
+            let mut guard = self.sessions.lock();
+            if guard.remove(&session_id).is_some() {
+                self.persist_locked(&guard);
+            }
         }
     }
 
@@ -241,6 +314,7 @@ impl FetchSessionManager {
                 last_activity_ms: now_ms,
             },
         );
+        self.persist_locked(&guard);
         id
     }
 
@@ -260,15 +334,25 @@ impl FetchSessionManager {
         now_ms: i64,
     ) -> Result<(), i16> {
         let mut guard = self.sessions.lock();
+        let before = guard.len();
         self.evict_idle_locked(&mut guard, now_ms);
+        let idle_removed = guard.len() != before;
         let Some(session) = guard.get_mut(&session_id) else {
+            if idle_removed {
+                self.persist_locked(&guard);
+            }
             return Err(70); // FETCH_SESSION_ID_NOT_FOUND
         };
         if session.epoch != epoch {
+            // Idle removals still need a durable snapshot.
+            if idle_removed {
+                self.persist_locked(&guard);
+            }
             return Err(71); // INVALID_FETCH_SESSION_EPOCH
         }
         session.epoch = next_epoch(epoch);
         session.last_activity_ms = now_ms;
+        self.persist_locked(&guard);
         Ok(())
     }
 
@@ -310,6 +394,7 @@ impl FetchSessionManager {
                 entry.partitions.insert(*pid, merged);
             }
         }
+        self.persist_locked(&guard);
     }
 
     /// Apply forgotten_topics_data removals.
@@ -339,6 +424,7 @@ impl FetchSessionManager {
                 session.topics.remove(key);
             }
         }
+        self.persist_locked(&guard);
     }
 
     /// Snapshot topics currently in the session (for empty-topics incremental).
@@ -376,6 +462,7 @@ impl FetchSessionManager {
         };
         part.last_hwm = Some(hwm);
         part.last_lso = Some(lso);
+        self.persist_locked(&guard);
     }
 
     /// Drop idle sessions under the lock. Counts each removal as an eviction.
@@ -408,6 +495,70 @@ impl FetchSessionManager {
         if let Some(id) = victim {
             sessions.remove(&id);
             self.evicted_total.fetch_add(1, Ordering::Relaxed);
+        }
+    }
+
+    /// Load durable snapshot; filter idle; set `restored` (Phase 115).
+    fn load_from_disk_at(&self, now_ms: i64) {
+        let Some(path) = self.durable_path.as_ref() else {
+            return;
+        };
+        let file = match load_file(path) {
+            Some(f) => f,
+            None => {
+                self.restored.store(0, Ordering::Relaxed);
+                return;
+            }
+        };
+
+        let idle_ms = self.idle_timeout_ms.load(Ordering::Relaxed);
+        let idle_ms_i = idle_ms as i64;
+        let mut loaded: HashMap<i32, FetchSession> = HashMap::new();
+        let mut idle_dropped = 0u64;
+        let mut max_id = 0i32;
+
+        for s in file.sessions {
+            if s.id <= 0 {
+                continue;
+            }
+            max_id = max_id.max(s.id);
+            if idle_ms > 0 && now_ms.saturating_sub(s.last_activity_ms) > idle_ms_i {
+                idle_dropped += 1;
+                continue;
+            }
+            if let Some(session) = stored_to_session(s) {
+                loaded.insert(session.0, session.1);
+            }
+        }
+
+        if idle_dropped > 0 {
+            self.evicted_total.fetch_add(idle_dropped, Ordering::Relaxed);
+            self.idle_evicted_total
+                .fetch_add(idle_dropped, Ordering::Relaxed);
+        }
+
+        let next = file.next_id.max(max_id.saturating_add(1)).max(1);
+        self.next_id.store(next, Ordering::Relaxed);
+        self.restored
+            .store(loaded.len() as u64, Ordering::Relaxed);
+
+        let mut guard = self.sessions.lock();
+        *guard = loaded;
+        // Rewrite if we dropped idle entries so disk matches RAM.
+        if idle_dropped > 0 {
+            self.persist_locked(&guard);
+        }
+    }
+
+    /// Persist full snapshot (atomic temp + rename + fsync). No-op without path.
+    fn persist_locked(&self, sessions: &HashMap<i32, FetchSession>) {
+        let Some(path) = self.durable_path.as_ref() else {
+            return;
+        };
+        let next_id = self.next_id.load(Ordering::Relaxed);
+        let file = snapshot_file(sessions, next_id);
+        if save_file(path, &file).is_err() {
+            self.persist_errors_total.fetch_add(1, Ordering::Relaxed);
         }
     }
 }
@@ -446,7 +597,197 @@ pub fn default_max_sessions() -> usize {
         .unwrap_or(DEFAULT_MAX_SESSIONS)
 }
 
-// Minimal hex encode without extra crate dependency — use a tiny helper.
+// --- Phase 115 durable file format ---
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct StoredFetchSessionsFile {
+    #[serde(default = "default_file_version")]
+    version: u32,
+    #[serde(default = "default_next_id")]
+    next_id: i32,
+    #[serde(default)]
+    sessions: Vec<StoredFetchSession>,
+}
+
+fn default_file_version() -> u32 {
+    FETCH_SESSIONS_FILE_VERSION
+}
+
+fn default_next_id() -> i32 {
+    1
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct StoredFetchSession {
+    id: i32,
+    epoch: i32,
+    last_activity_ms: i64,
+    #[serde(default)]
+    topics: Vec<StoredSessionTopic>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct StoredSessionTopic {
+    key: String,
+    /// `"name"` or `"uuid"`.
+    wire_kind: String,
+    #[serde(default)]
+    wire_name: Option<String>,
+    #[serde(default)]
+    wire_uuid_hex: Option<String>,
+    #[serde(default)]
+    name: String,
+    #[serde(default)]
+    partitions: Vec<StoredSessionPartition>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct StoredSessionPartition {
+    id: i32,
+    fetch_offset: i64,
+    current_leader_epoch: i32,
+    last_fetched_epoch: i32,
+    max_bytes: usize,
+    #[serde(default)]
+    last_hwm: Option<i64>,
+    #[serde(default)]
+    last_lso: Option<i64>,
+}
+
+fn snapshot_file(sessions: &HashMap<i32, FetchSession>, next_id: i32) -> StoredFetchSessionsFile {
+    let mut out = Vec::with_capacity(sessions.len());
+    let mut ids: Vec<i32> = sessions.keys().copied().collect();
+    ids.sort_unstable();
+    for id in ids {
+        let Some(s) = sessions.get(&id) else {
+            continue;
+        };
+        let mut topics: Vec<StoredSessionTopic> = s
+            .topics
+            .iter()
+            .map(|(key, t)| {
+                let (wire_kind, wire_name, wire_uuid_hex) = match &t.wire {
+                    TopicWireId::Name(n) => ("name".to_owned(), Some(n.clone()), None),
+                    TopicWireId::Uuid(u) => {
+                        ("uuid".to_owned(), None, Some(hex::encode(u)))
+                    }
+                };
+                let mut partitions: Vec<StoredSessionPartition> = t
+                    .partitions
+                    .iter()
+                    .map(|(pid, p)| StoredSessionPartition {
+                        id: *pid,
+                        fetch_offset: p.fetch_offset,
+                        current_leader_epoch: p.current_leader_epoch,
+                        last_fetched_epoch: p.last_fetched_epoch,
+                        max_bytes: p.max_bytes,
+                        last_hwm: p.last_hwm,
+                        last_lso: p.last_lso,
+                    })
+                    .collect();
+                partitions.sort_by_key(|p| p.id);
+                StoredSessionTopic {
+                    key: key.clone(),
+                    wire_kind,
+                    wire_name,
+                    wire_uuid_hex,
+                    name: t.name.clone(),
+                    partitions,
+                }
+            })
+            .collect();
+        topics.sort_by(|a, b| a.key.cmp(&b.key));
+        out.push(StoredFetchSession {
+            id,
+            epoch: s.epoch,
+            last_activity_ms: s.last_activity_ms,
+            topics,
+        });
+    }
+    StoredFetchSessionsFile {
+        version: FETCH_SESSIONS_FILE_VERSION,
+        next_id,
+        sessions: out,
+    }
+}
+
+fn stored_to_session(s: StoredFetchSession) -> Option<(i32, FetchSession)> {
+    let mut topics = HashMap::new();
+    for t in s.topics {
+        let wire = match t.wire_kind.as_str() {
+            "uuid" => {
+                let hex = t.wire_uuid_hex.as_deref().unwrap_or("");
+                let bytes = hex::decode_16(hex)?;
+                TopicWireId::Uuid(bytes)
+            }
+            _ => TopicWireId::Name(t.wire_name.unwrap_or_else(|| t.name.clone())),
+        };
+        let mut partitions = HashMap::new();
+        for p in t.partitions {
+            partitions.insert(
+                p.id,
+                SessionPartition {
+                    fetch_offset: p.fetch_offset,
+                    current_leader_epoch: p.current_leader_epoch,
+                    last_fetched_epoch: p.last_fetched_epoch,
+                    max_bytes: p.max_bytes,
+                    last_hwm: p.last_hwm,
+                    last_lso: p.last_lso,
+                },
+            );
+        }
+        topics.insert(
+            t.key,
+            SessionTopic {
+                wire,
+                name: t.name,
+                partitions,
+            },
+        );
+    }
+    Some((
+        s.id,
+        FetchSession {
+            epoch: s.epoch,
+            topics,
+            last_activity_ms: s.last_activity_ms,
+        },
+    ))
+}
+
+fn load_file(path: &Path) -> Option<StoredFetchSessionsFile> {
+    if !path.exists() {
+        return None;
+    }
+    let mut f = File::open(path).ok()?;
+    let mut buf = String::new();
+    f.read_to_string(&mut buf).ok()?;
+    if buf.trim().is_empty() {
+        return None;
+    }
+    serde_json::from_str(&buf).ok()
+}
+
+fn save_file(path: &Path, state: &StoredFetchSessionsFile) -> Result<(), ()> {
+    let parent = path.parent().unwrap_or_else(|| Path::new("."));
+    let _ = fs::create_dir_all(parent);
+    let tmp = parent.join(format!("{}.tmp", FETCH_SESSIONS_FILE));
+    let json = serde_json::to_string_pretty(state).map_err(|_| ())?;
+    {
+        let mut f = OpenOptions::new()
+            .create(true)
+            .write(true)
+            .truncate(true)
+            .open(&tmp)
+            .map_err(|_| ())?;
+        f.write_all(json.as_bytes()).map_err(|_| ())?;
+        f.sync_all().map_err(|_| ())?;
+    }
+    fs::rename(&tmp, path).map_err(|_| ())?;
+    Ok(())
+}
+
+/// Minimal hex encode/decode without extra crate dependency.
 mod hex {
     pub fn encode(bytes: &[u8; 16]) -> String {
         const HEX: &[u8; 16] = b"0123456789abcdef";
@@ -457,6 +798,29 @@ mod hex {
         }
         s
     }
+
+    pub fn decode_16(s: &str) -> Option<[u8; 16]> {
+        if s.len() != 32 {
+            return None;
+        }
+        let mut out = [0u8; 16];
+        let bytes = s.as_bytes();
+        for i in 0..16 {
+            let hi = from_hex(bytes[i * 2])?;
+            let lo = from_hex(bytes[i * 2 + 1])?;
+            out[i] = (hi << 4) | lo;
+        }
+        Some(out)
+    }
+
+    fn from_hex(c: u8) -> Option<u8> {
+        match c {
+            b'0'..=b'9' => Some(c - b'0'),
+            b'a'..=b'f' => Some(c - b'a' + 10),
+            b'A'..=b'F' => Some(c - b'A' + 10),
+            _ => None,
+        }
+    }
 }
 
 #[cfg(test)]
@@ -465,6 +829,35 @@ mod tests {
 
     fn part(offset: i64) -> SessionPartition {
         SessionPartition::new(offset, -1, -1, 1_000_000)
+    }
+
+    fn topic_map(name: &str, offset: i64) -> HashMap<String, SessionTopic> {
+        let mut topics = HashMap::new();
+        let mut parts = HashMap::new();
+        parts.insert(0, part(offset));
+        topics.insert(
+            name.into(),
+            SessionTopic {
+                wire: TopicWireId::Name(name.into()),
+                name: name.into(),
+                partitions: parts,
+            },
+        );
+        topics
+    }
+
+    fn temp_data_dir() -> PathBuf {
+        let nanos = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let dir = std::env::temp_dir().join(format!(
+            "volant-fsess-{}-{}",
+            std::process::id(),
+            nanos
+        ));
+        let _ = fs::create_dir_all(&dir);
+        dir
     }
 
     #[test]
@@ -506,36 +899,14 @@ mod tests {
     #[test]
     fn note_returned_and_merge_preserves_cache() {
         let mgr = FetchSessionManager::with_limits(0, 0);
-        let mut topics = HashMap::new();
-        let mut parts = HashMap::new();
-        parts.insert(0, part(0));
-        topics.insert(
-            "t".into(),
-            SessionTopic {
-                wire: TopicWireId::Name("t".into()),
-                name: "t".into(),
-                partitions: parts,
-            },
-        );
-        let id = mgr.create_at(topics, 1_000);
+        let id = mgr.create_at(topic_map("t", 0), 1_000);
         mgr.note_returned(id, "t", 0, 5, 5);
         let snap = mgr.snapshot_topics(id);
         assert_eq!(snap["t"].partitions[&0].last_hwm, Some(5));
         assert_eq!(snap["t"].partitions[&0].last_lso, Some(5));
 
         // Merge with new fetch offset; cache preserved.
-        let mut upd = HashMap::new();
-        let mut uparts = HashMap::new();
-        uparts.insert(0, part(5));
-        upd.insert(
-            "t".into(),
-            SessionTopic {
-                wire: TopicWireId::Name("t".into()),
-                name: "t".into(),
-                partitions: uparts,
-            },
-        );
-        mgr.merge_topics(id, &upd);
+        mgr.merge_topics(id, &topic_map("t", 5));
         let snap = mgr.snapshot_topics(id);
         assert_eq!(snap["t"].partitions[&0].fetch_offset, 5);
         assert_eq!(snap["t"].partitions[&0].last_hwm, Some(5));
@@ -578,5 +949,87 @@ mod tests {
         let id = mgr.create_at(HashMap::new(), 1_000);
         // Far in the future; still alive when TTL disabled
         assert!(mgr.begin_incremental_at(id, 1, 9_999_999).is_ok());
+    }
+
+    #[test]
+    fn durable_roundtrip_restores_epoch_and_omit_cache() {
+        let dir = temp_data_dir();
+        let id = {
+            // idle=0 so artificial timestamps are not filtered on reopen.
+            let mgr = FetchSessionManager::open_with_limits(&dir, 0, 0);
+            let id = mgr.create_at(topic_map("orders", 1), 1_000);
+            mgr.note_returned(id, "orders", 0, 7, 7);
+            assert!(mgr.begin_incremental_at(id, 1, 1_100).is_ok());
+            // expected epoch now 2
+            assert_eq!(mgr.active_count(), 1);
+            assert!(mgr.is_durable());
+            id
+        };
+
+        let mgr2 = FetchSessionManager::open_with_limits(&dir, 0, 0);
+        assert_eq!(mgr2.restored(), 1);
+        assert_eq!(mgr2.active_count(), 1);
+        // Epoch advanced to 2 after first incremental
+        assert!(mgr2.begin_incremental_at(id, 2, 2_000).is_ok());
+        let snap = mgr2.snapshot_topics(id);
+        assert_eq!(snap["orders"].partitions[&0].last_hwm, Some(7));
+        assert_eq!(snap["orders"].partitions[&0].last_lso, Some(7));
+        assert_eq!(snap["orders"].partitions[&0].fetch_offset, 1);
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn durable_close_not_restored() {
+        let dir = temp_data_dir();
+        {
+            let mgr = FetchSessionManager::open_with_limits(&dir, 0, 0);
+            let id = mgr.create_at(topic_map("t", 0), 1_000);
+            mgr.close(id);
+            assert_eq!(mgr.active_count(), 0);
+        }
+        let mgr2 = FetchSessionManager::open_with_limits(&dir, 0, 0);
+        assert_eq!(mgr2.restored(), 0);
+        assert_eq!(mgr2.active_count(), 0);
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn durable_idle_filtered_on_load() {
+        let dir = temp_data_dir();
+        {
+            let mgr = FetchSessionManager::open_with_limits(&dir, 0, 0);
+            let id = mgr.create_at(topic_map("t", 0), 1_000);
+            assert!(id > 0);
+            assert_eq!(mgr.active_count(), 1);
+            assert_eq!(mgr.persist_errors_total(), 0, "persist failed");
+        }
+        let path = dir.join(FETCH_SESSIONS_DIR).join(FETCH_SESSIONS_FILE);
+        assert!(path.is_file(), "missing snapshot at {}", path.display());
+        let raw = std::fs::read_to_string(&path).unwrap();
+        assert!(!raw.is_empty(), "empty file");
+        let mut file = load_file(&path).expect("file");
+        assert_eq!(file.sessions.len(), 1, "raw={raw}");
+        file.sessions[0].last_activity_ms = 1; // ancient
+        save_file(&path, &file).unwrap();
+
+        // Default product idle 60s; activity ms=1 is far past → not restored.
+        let mgr3 = FetchSessionManager::open(&dir);
+        assert_eq!(mgr3.restored(), 0);
+        assert_eq!(mgr3.active_count(), 0);
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn next_id_continues_after_restore() {
+        let dir = temp_data_dir();
+        let first = {
+            let mgr = FetchSessionManager::open_with_limits(&dir, 0, 0);
+            mgr.create_at(HashMap::new(), 1_000)
+        };
+        let mgr2 = FetchSessionManager::open_with_limits(&dir, 0, 0);
+        let second = mgr2.create_at(HashMap::new(), 2_000);
+        assert!(second > first);
+        assert_ne!(second, first);
+        let _ = fs::remove_dir_all(&dir);
     }
 }

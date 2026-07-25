@@ -389,9 +389,9 @@ fn broker_metrics_text(broker: &Broker) -> String {
         env!("CARGO_PKG_VERSION"),
         &lag,
     );
-    // Phase 95: process-local fetch session gauges/counters (cheap stretch).
+    // Phase 95/97/115: fetch session gauges/counters.
     let sessions = broker.fetch_sessions();
-    text.push_str("# HELP volant_fetch_sessions_active Live process-local fetch sessions\n");
+    text.push_str("# HELP volant_fetch_sessions_active Live fetch sessions (this broker)\n");
     text.push_str("# TYPE volant_fetch_sessions_active gauge\n");
     text.push_str(&format!(
         "volant_fetch_sessions_active {}\n",
@@ -413,6 +413,23 @@ fn broker_metrics_text(broker: &Broker) -> String {
     text.push_str(&format!(
         "volant_fetch_sessions_idle_evicted_total {}\n",
         sessions.idle_evicted_total()
+    ));
+    // Phase 115: durable restore + persist errors.
+    text.push_str(
+        "# HELP volant_fetch_sessions_restored Sessions restored from disk at last broker open\n",
+    );
+    text.push_str("# TYPE volant_fetch_sessions_restored gauge\n");
+    text.push_str(&format!(
+        "volant_fetch_sessions_restored {}\n",
+        sessions.restored()
+    ));
+    text.push_str(
+        "# HELP volant_fetch_sessions_persist_errors_total Durable session snapshot write failures\n",
+    );
+    text.push_str("# TYPE volant_fetch_sessions_persist_errors_total counter\n");
+    text.push_str(&format!(
+        "volant_fetch_sessions_persist_errors_total {}\n",
+        sessions.persist_errors_total()
     ));
     text.push_str("# HELP volant_open_txns Live open (non-prepared) transactions\n");
     text.push_str("# TYPE volant_open_txns gauge\n");

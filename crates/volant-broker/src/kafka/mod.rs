@@ -21,7 +21,7 @@
 pub mod codec;
 /// Compression codecs (gzip / snappy / lz4 / zstd); Fetch codec env.
 pub mod compress;
-/// In-memory Fetch session state (Phase 88 + 91 omit-unchanged).
+/// Fetch session state (Phase 88 + 91 omit + Phase 95 limits + Phase 115 durable).
 pub mod fetch_session;
 mod handler;
 /// Shared TopicId / topic-name wire identity helpers.
