@@ -1,15 +1,15 @@
-//! Controller SoT DeleteRecords truncate journal (Phase 129).
+//! Multi-controller truncate journal (Phase 129 + majority consensus Phase 130).
 //!
 //! Layout: `{data_dir}/__truncate_journal/state.json`
 //!
 //! Records the **desired log start** (delete-before offset) per
-//! `(topic, partition)` with max-merge semantics. The **controller** is the
-//! source of truth; leaders note after local DeleteRecords; peers receive
-//! generationed snapshot pushes. New leaders reconcile outbox targets as
-//! `max(local log_start, journal watermark)` so a leader that never applied
-//! the truncate can still drive peer catch-up.
+//! `(topic, partition)` with max-merge semantics. Phase 130: any broker can
+//! durable-note; a proposer waits for a **majority** of configured brokers to
+//! ack the note (Raft-style commit rule), then best-effort snapshot-pushes
+//! remaining peers. New leaders reconcile as
+//! `max(local log_start, journal watermark)`.
 //!
-//! Not Raft / not multi-master merge of concurrent controllers.
+//! Not full Raft log replication / leader election (openraft KRaft still deferred).
 
 use std::collections::HashMap;
 use std::fs::{self, File, OpenOptions};
@@ -85,6 +85,10 @@ pub struct TruncateJournal {
     note_total: AtomicU64,
     push_apply_total: AtomicU64,
     persist_errors_total: AtomicU64,
+    /// Phase 130: successful majority commits.
+    consensus_success_total: AtomicU64,
+    /// Phase 130: proposals that failed to reach majority.
+    consensus_fail_total: AtomicU64,
 }
 
 impl TruncateJournal {
@@ -120,6 +124,8 @@ impl TruncateJournal {
             note_total: AtomicU64::new(0),
             push_apply_total: AtomicU64::new(0),
             persist_errors_total: AtomicU64::new(0),
+            consensus_success_total: AtomicU64::new(0),
+            consensus_fail_total: AtomicU64::new(0),
         }
     }
 
@@ -146,6 +152,29 @@ impl TruncateJournal {
     /// Durable persist failure count.
     pub fn persist_errors_total(&self) -> u64 {
         self.persist_errors_total.load(Ordering::Relaxed)
+    }
+
+    /// Phase 130: majority consensus successes.
+    pub fn consensus_success_total(&self) -> u64 {
+        self.consensus_success_total.load(Ordering::Relaxed)
+    }
+
+    /// Phase 130: majority consensus failures.
+    pub fn consensus_fail_total(&self) -> u64 {
+        self.consensus_fail_total.load(Ordering::Relaxed)
+    }
+
+    pub(crate) fn note_consensus_success(&self) {
+        self.consensus_success_total.fetch_add(1, Ordering::Relaxed);
+    }
+
+    pub(crate) fn note_consensus_fail(&self) {
+        self.consensus_fail_total.fetch_add(1, Ordering::Relaxed);
+    }
+
+    /// Raft-style majority of `n` configured members (`n/2 + 1`).
+    pub fn majority(n: usize) -> usize {
+        n / 2 + 1
     }
 
     /// Number of watermarks.
@@ -215,30 +244,54 @@ impl TruncateJournal {
         Bytes::from(json)
     }
 
-    /// Apply a controller push snapshot if `generation >= applied`.
+    /// Apply a peer/controller push snapshot (Phase 129/130).
     ///
-    /// Replaces local map with max-merge of snapshot (snapshot is SoT for keys
-    /// present; we install the whole map from the snapshot for honesty).
+    /// **Max-merges** entries into the local map (multi-controller safe) and
+    /// advances generation to `max(local, push)`. Ignores strictly older
+    /// generations only when they carry no newer watermarks — still merges
+    /// entry maxes so a lagging push cannot shrink state.
     pub fn apply_push(&self, generation: u64, snapshot: &[u8]) -> Result<(), String> {
-        let applied = self.applied_generation.load(Ordering::Relaxed);
-        if generation < applied {
-            // Stale push — ignore.
-            return Ok(());
-        }
         let file: TruncateJournalFile =
             serde_json::from_slice(snapshot).map_err(|e| format!("parse journal snapshot: {e}"))?;
-        let mut map = HashMap::new();
-        for e in file.entries {
-            if e.before_offset == 0 || e.topic.is_empty() {
-                continue;
+        let mut changed = false;
+        {
+            let mut map = self.entries.write();
+            for e in file.entries {
+                if e.before_offset == 0 || e.topic.is_empty() {
+                    continue;
+                }
+                let key = (e.topic.clone(), e.partition);
+                map.entry(key)
+                    .and_modify(|cur| {
+                        if e.before_offset > cur.before_offset {
+                            *cur = e.clone();
+                            changed = true;
+                        } else if e.before_offset == cur.before_offset
+                            && e.leader_epoch > cur.leader_epoch
+                        {
+                            cur.leader_epoch = e.leader_epoch;
+                            changed = true;
+                        }
+                    })
+                    .or_insert_with(|| {
+                        changed = true;
+                        e
+                    });
             }
-            map.insert((e.topic.clone(), e.partition), e);
         }
-        *self.entries.write() = map;
-        self.generation.store(generation, Ordering::SeqCst);
-        self.applied_generation.store(generation, Ordering::SeqCst);
-        self.push_apply_total.fetch_add(1, Ordering::Relaxed);
-        self.persist();
+        let cur_gen = self.generation.load(Ordering::Relaxed);
+        if generation > cur_gen {
+            self.generation.store(generation, Ordering::SeqCst);
+            changed = true;
+        }
+        let cur_applied = self.applied_generation.load(Ordering::Relaxed);
+        if generation > cur_applied {
+            self.applied_generation.store(generation, Ordering::SeqCst);
+        }
+        if changed {
+            self.push_apply_total.fetch_add(1, Ordering::Relaxed);
+            self.persist();
+        }
         Ok(())
     }
 

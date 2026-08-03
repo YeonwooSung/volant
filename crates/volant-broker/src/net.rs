@@ -20,6 +20,7 @@ use volant_protocol::{
 use crate::broker::{Broker, Txn2pcFanout};
 use crate::metrics::Metrics;
 use crate::replica::run_follower_loops;
+use crate::truncate_journal::TruncateJournal;
 
 /// Default max wait when joining background tasks after stop is signaled.
 const BG_SHUTDOWN_TIMEOUT: Duration = Duration::from_secs(5);
@@ -715,6 +716,22 @@ fn broker_metrics_text(broker: &Broker) -> String {
         "volant_truncate_journal_entries {}\n",
         broker.truncate_journal().entry_count()
     ));
+    text.push_str(
+        "# HELP volant_truncate_journal_consensus_success_total Majority journal commits\n",
+    );
+    text.push_str("# TYPE volant_truncate_journal_consensus_success_total counter\n");
+    text.push_str(&format!(
+        "volant_truncate_journal_consensus_success_total {}\n",
+        broker.truncate_journal_consensus_success_total()
+    ));
+    text.push_str(
+        "# HELP volant_truncate_journal_consensus_fail_total Journal proposals without majority\n",
+    );
+    text.push_str("# TYPE volant_truncate_journal_consensus_fail_total counter\n");
+    text.push_str(&format!(
+        "volant_truncate_journal_consensus_fail_total {}\n",
+        broker.truncate_journal_consensus_fail_total()
+    ));
     text
 }
 
@@ -1220,9 +1237,15 @@ pub async fn fanout_cluster_broker_config(
 /// durable outbox entry (Phase 116), and never fail the client path.
 /// No-op in single-node mode.
 ///
-/// Phase 129: also notes the truncate watermark on the controller journal
-/// (best-effort) before peer ReplicaDeleteRecords.
-/// Phase 129: note truncate watermark on the controller and push snapshot to peers.
+/// Phase 129/130: multi-controller majority note + best-effort push.
+///
+/// 1. Durable **local** note (counts as 1 ack).
+/// 2. Parallel `TruncateJournalNote` to all other **configured** live peers.
+/// 3. If acks ≥ majority(configured N) → consensus success metric.
+/// 4. Always **best-effort** `TruncateJournalPush` snapshot to remaining live
+///    peers (catch up nodes that missed the note).
+///
+/// Never fails the client DeleteRecords path. Not full Raft log/leader election.
 pub async fn fanout_truncate_journal_note(
     broker: &Broker,
     topic: &str,
@@ -1233,17 +1256,25 @@ pub async fn fanout_truncate_journal_note(
     if broker.cluster_config().is_none() {
         return;
     }
-    let gen = if broker.is_controller() {
-        broker.controller_note_truncate_journal(topic, partition, before_offset, leader_epoch)
-    } else {
-        // Note on remote controller.
-        let cid = broker.controller_id();
-        if cid == 0 {
-            return;
-        }
-        let Some(addr) = broker.broker_addr(cid) else {
-            return;
-        };
+    let n = broker.cluster_member_count();
+    let need = TruncateJournal::majority(n);
+
+    // 1) Local durable note (proposer).
+    let local_gen =
+        broker.local_note_truncate_journal(topic, partition, before_offset, leader_epoch);
+    let mut acks = 1usize;
+
+    // 2) Replicate note to every other live peer (multi-controller).
+    let peers: Vec<(u32, String)> = broker
+        .live_brokers()
+        .into_iter()
+        .filter(|id| *id != broker.node_id())
+        .filter_map(|id| broker.broker_addr(id).map(|a| (id, a)))
+        .collect();
+
+    let mut max_gen = local_gen;
+    // Sequential RPC keeps inter_broker simple (no extra Send bounds).
+    for (peer_id, addr) in peers {
         let req = Request::TruncateJournalNote {
             topic: topic.to_owned(),
             partition,
@@ -1255,36 +1286,70 @@ pub async fn fanout_truncate_journal_note(
                 error_code: 0,
                 generation,
             }) => {
-                // Mirror watermark locally so this leader can reconcile even
-                // before push lands.
-                let _ = broker.truncate_journal().note(
-                    topic,
-                    partition,
-                    before_offset,
-                    leader_epoch,
-                    false,
+                acks += 1;
+                if generation > max_gen {
+                    max_gen = generation;
+                }
+            }
+            Ok(Response::TruncateJournalNote { error_code, .. }) => {
+                warn!(
+                    peer_id,
+                    error_code, topic, partition, "truncate journal note peer error"
                 );
-                generation
             }
             Ok(other) => {
-                warn!(?other, topic, partition, "truncate journal note failed");
-                return;
+                warn!(peer_id, ?other, topic, partition, "truncate journal note unexpected");
             }
             Err(e) => {
-                warn!(error = %e, topic, partition, "truncate journal note rpc failed");
-                return;
+                warn!(
+                    peer_id,
+                    error = %e,
+                    topic,
+                    partition,
+                    "truncate journal note rpc failed"
+                );
             }
         }
-    };
-    fanout_truncate_journal_push(broker, gen).await;
+    }
+
+    if acks >= need {
+        broker.truncate_journal().note_consensus_success();
+        debug!(
+            acks,
+            need,
+            n,
+            topic,
+            partition,
+            before_offset,
+            "truncate journal majority consensus ok"
+        );
+    } else {
+        broker.truncate_journal().note_consensus_fail();
+        warn!(
+            acks,
+            need,
+            n,
+            topic,
+            partition,
+            before_offset,
+            "truncate journal majority consensus failed (best-effort state retained)"
+        );
+    }
+
+    // 4) Best-effort snapshot push to all live peers (including those that acked note).
+    fanout_truncate_journal_push(broker, max_gen.max(local_gen)).await;
 }
 
-/// Phase 129: push full truncate journal snapshot from controller to live peers.
+/// Phase 129/130: best-effort push full truncate journal snapshot to live peers.
+///
+/// Any broker may push (multi-controller); receivers max-merge. Failures are
+/// logged only — never fail the client path.
 pub async fn fanout_truncate_journal_push(broker: &Broker, generation: u64) {
-    if !broker.is_controller() || broker.cluster_config().is_none() {
+    if broker.cluster_config().is_none() {
         return;
     }
     let snapshot = broker.truncate_journal().snapshot_bytes();
+    let gen = generation.max(broker.truncate_journal_generation());
     let peers: Vec<(u32, String)> = broker
         .live_brokers()
         .into_iter()
@@ -1293,7 +1358,7 @@ pub async fn fanout_truncate_journal_push(broker: &Broker, generation: u64) {
         .collect();
     for (peer_id, addr) in peers {
         let req = Request::TruncateJournalPush {
-            generation,
+            generation: gen,
             snapshot: snapshot.clone(),
         };
         match inter_broker_rpc(broker, &addr, &req).await {

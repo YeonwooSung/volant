@@ -1,6 +1,6 @@
 # Phase history index
 
-Ship records for **phases 0–129**. Binding core contracts are
+Ship records for **phases 0–130**. Binding core contracts are
 **[PHASE1_SPEC](../PHASE1_SPEC.md)–[PHASE6_SPEC](../PHASE6_SPEC.md)**. Living
 docs for day-to-day reading: [ops](../ops.md), [consistency](../consistency.md),
 [tuning](../tuning.md), [KAFKA_COMPAT](../KAFKA_COMPAT.md),
@@ -171,10 +171,11 @@ docs for day-to-day reading: [ops](../ops.md), [consistency](../consistency.md),
 | 127 | ✅ | Txn coordinator registry TTL GC MVP (last-touch + `VOLANT_TXN_COORDINATOR_TTL_MS`; sweeper hook) | [PHASE127_SPEC.md](../PHASE127_SPEC.md) |
 | 128 | ✅ | BROKER Describe/Alter for txn coordinator registry TTL (`volant.txn.coordinator.registry.ttl.ms`) | [PHASE128_SPEC.md](../PHASE128_SPEC.md) |
 | 129 | ✅ | Controller SoT DeleteRecords truncate journal MVP (note/push + reconcile max watermark) | [PHASE129_SPEC.md](../PHASE129_SPEC.md) |
+| 130 | ✅ | Multi-controller majority consensus for truncate journal (Raft-style commit; best-effort push) | [PHASE130_SPEC.md](../PHASE130_SPEC.md) |
 
 ---
 
-## Still deferred (post–Phase 129)
+## Still deferred (post–Phase 130)
 
 - Multi-language clients
 - Chaos-mesh / long fuzz campaigns (corpus **smoke CI** → **closed by Phase 112**)

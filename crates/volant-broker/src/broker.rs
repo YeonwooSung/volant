@@ -962,19 +962,38 @@ impl Broker {
         &self.truncate_journal
     }
 
-    /// Phase 129: journal generation (controller SoT or last applied).
+    /// Phase 129/130: journal generation (local after note/push).
     pub fn truncate_journal_generation(&self) -> u64 {
         self.truncate_journal.generation()
     }
 
-    /// Phase 129: last applied journal push generation.
+    /// Phase 129/130: last applied journal push generation.
     pub fn truncate_journal_applied_generation(&self) -> u64 {
         self.truncate_journal.applied_generation()
     }
 
-    /// Phase 129: controller path — merge watermark + bump generation.
+    /// Phase 130: majority consensus success count.
+    pub fn truncate_journal_consensus_success_total(&self) -> u64 {
+        self.truncate_journal.consensus_success_total()
+    }
+
+    /// Phase 130: majority consensus failure count.
+    pub fn truncate_journal_consensus_fail_total(&self) -> u64 {
+        self.truncate_journal.consensus_fail_total()
+    }
+
+    /// Configured cluster size for majority (static membership).
+    pub fn cluster_member_count(&self) -> usize {
+        self.cluster
+            .as_ref()
+            .map(|c| c.config.brokers.len().max(1))
+            .unwrap_or(1)
+    }
+
+    /// Durable local note + generation bump (any broker; Phase 130 multi-controller).
     ///
-    /// Returns new generation. Callers fan-out push to live peers.
+    /// Returns new local generation. Prefer
+    /// [`crate::net::fanout_truncate_journal_note`] for majority consensus.
     pub fn controller_note_truncate_journal(
         &self,
         topic: &str,
@@ -986,7 +1005,18 @@ impl Broker {
             .note(topic, partition, before_offset, leader_epoch, true)
     }
 
-    /// Phase 129: apply controller journal snapshot push.
+    /// Alias: durable local note on any node (Phase 130).
+    pub fn local_note_truncate_journal(
+        &self,
+        topic: &str,
+        partition: u32,
+        before_offset: u64,
+        leader_epoch: i32,
+    ) -> u64 {
+        self.controller_note_truncate_journal(topic, partition, before_offset, leader_epoch)
+    }
+
+    /// Phase 129/130: apply journal snapshot push (max-merge).
     pub fn apply_truncate_journal_push(
         &self,
         generation: u64,
@@ -997,10 +1027,8 @@ impl Broker {
             .map_err(Error::InvalidArgument)
     }
 
-    /// Phase 129: handle inter-broker TruncateJournalNote (controller only).
-    ///
-    /// Non-controller → [`ErrorCode::NotController`]-shaped invalid argument
-    /// via error_code in response handler.
+    /// Phase 130: handle inter-broker TruncateJournalNote on **any** broker
+    /// (multi-controller durable replicate). Always merges + persists.
     pub fn handle_truncate_journal_note(
         &self,
         topic: &str,
@@ -1008,10 +1036,7 @@ impl Broker {
         before_offset: u64,
         leader_epoch: i32,
     ) -> (u16, u64) {
-        if self.cluster.is_some() && !self.is_controller() {
-            return (ErrorCode::NotController as u16, 0);
-        }
-        let gen = self.controller_note_truncate_journal(
+        let gen = self.local_note_truncate_journal(
             topic,
             partition,
             before_offset,
@@ -1020,7 +1045,7 @@ impl Broker {
         (0, gen)
     }
 
-    /// Phase 129: handle TruncateJournalPush on peer.
+    /// Phase 129/130: handle TruncateJournalPush on peer.
     pub fn handle_truncate_journal_push(
         &self,
         generation: u64,

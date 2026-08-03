@@ -62,10 +62,12 @@ reconcile_delete_records_outbox:
 
 ## Honest limitations
 
-- Not Raft; controller data_dir loss loses SoT until re-note
+- Phase 129 controller-centric SoT superseded for multi-writer by **Phase 130**
+  (majority multi-controller); best-effort note/push retained
 - Best-effort note/push (client path never waits)
 - No dedicated heartbeat journal catch-up (missed push → wait for next note/reconcile path)
 - Single-node unchanged (no cluster)
+- Full openraft/KRaft still deferred
 
 ## Exit criteria
 

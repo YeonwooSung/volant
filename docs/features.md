@@ -115,7 +115,7 @@ workers.
 
 | Feature | Behavior |
 |---------|----------|
-| DeleteRecords fan-out | Partition **leader** truncates locally, then best-effort `ReplicaDeleteRecords` to other replicas (soft-marker GC/clip on peers). Client success does not wait on peer RPC success. Metric `volant_delete_records_fanout_errors_total`. **Phase 116:** failed peers are enqueued under `{data_dir}/__delete_records_outbox` and retried when live (at-least-once). **Phase 123:** new leader reconciles pending truncates from local `log_start` after leadership change. **Phase 129:** controller SoT truncate journal (`__truncate_journal`); note/push after DeleteRecords; reconcile target = `max(local log_start, journal watermark)` |
+| DeleteRecords fan-out | Partition **leader** truncates locally, then best-effort `ReplicaDeleteRecords` to other replicas (soft-marker GC/clip on peers). Client success does not wait on peer RPC success. Metric `volant_delete_records_fanout_errors_total`. **Phase 116:** failed peers are enqueued under `{data_dir}/__delete_records_outbox` and retried when live (at-least-once). **Phase 123:** new leader reconciles pending truncates from local `log_start` after leadership change. **Phase 129/130:** truncate journal (`__truncate_journal`); multi-controller majority note (Raft-style) + best-effort push; reconcile = `max(local log_start, journal watermark)` |
 | BROKER config fan-out | Cluster **controller-only** Alter / IncrementalAlter for Phase 99 knobs **+** registry TTL (Phase 128; seven keys); generationed push to live peers; sparse durable on each node. Non-controller → `NotController` / Kafka **41**. **Phase 117:** durable gens + heartbeat lag re-push (full effective knobs) so offline peers converge on rejoin |
 | ACL snapshot fan-out | Cluster **controller-only** Create/Delete Acls; generationed full snapshot push; peers install + persist `__acls`. List/authorize remain local after apply. **Phase 117:** same catch-up path on rejoin / controller restart |
 
@@ -150,7 +150,7 @@ workers.
 - Fetch sessions durable local (Phase 115) + multi-broker forward MVP (Phase 119); omit cache is HWM+LSO only (not byte-identical Kafka response cache); idle TTL + max/LRU yes (Phase 95); PreferredReadReplica MVP yes (Phase 126; not full selector/throttling); not shared session store  
 - ACL / BROKER admin SoT is the **controller** (Phase 113 push + Phase 117 durable gens / rejoin catch-up), not Raft consensus; brief lag until heartbeat catch-up is honest  
 
-- DeleteRecords fan-out is **best-effort** for the client path; offline peers get **durable leader outbox retry** (Phase 116) + **new-leader reconcile** (Phase 123/129: `max(local log_start, controller journal watermark)`) — controller SoT journal MVP (Phase 129; not Raft)  
+- DeleteRecords fan-out is **best-effort** for the client path; offline peers get **durable leader outbox retry** (Phase 116) + **new-leader reconcile** (Phase 123/129: `max(local log_start, controller journal watermark)`) — multi-controller majority journal MVP (Phase 130; not full Raft log)  
 
 - Compaction simpler than Kafka (no tombstone retention window)  
 - Inter-broker not ACL-gated; uses shared-token when configured  
