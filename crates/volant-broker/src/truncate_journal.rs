@@ -18,7 +18,7 @@ use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 
 use bytes::Bytes;
-use parking_lot::RwLock;
+use parking_lot::{Mutex, RwLock};
 use serde::{Deserialize, Serialize};
 use tracing::warn;
 
@@ -78,7 +78,12 @@ pub struct TruncateJournal {
     path: PathBuf,
     /// Map key → entry (max-merge).
     entries: RwLock<HashMap<EntryKey, TruncateJournalEntry>>,
+    /// Serializes durable snapshot writes (unique tmp + rename).
+    persist_lock: Mutex<()>,
     /// Controller / last known generation.
+    ///
+    /// **Weak / process-local** counter (not a Raft commit index). Peers may
+    /// diverge; correctness relies on max-merge of watermarks.
     generation: AtomicU64,
     /// Last applied push generation on this peer.
     applied_generation: AtomicU64,
@@ -119,6 +124,7 @@ impl TruncateJournal {
         Self {
             path,
             entries: RwLock::new(map),
+            persist_lock: Mutex::new(()),
             generation: AtomicU64::new(file.generation),
             applied_generation: AtomicU64::new(file.generation),
             note_total: AtomicU64::new(0),
@@ -247,9 +253,8 @@ impl TruncateJournal {
     /// Apply a peer/controller push snapshot (Phase 129/130).
     ///
     /// **Max-merges** entries into the local map (multi-controller safe) and
-    /// advances generation to `max(local, push)`. Ignores strictly older
-    /// generations only when they carry no newer watermarks — still merges
-    /// entry maxes so a lagging push cannot shrink state.
+    /// advances generation to `max(local, push)`. Always merges entry maxes
+    /// even for older push generations so a lagging push cannot shrink state.
     pub fn apply_push(&self, generation: u64, snapshot: &[u8]) -> Result<(), String> {
         let file: TruncateJournalFile =
             serde_json::from_slice(snapshot).map_err(|e| format!("parse journal snapshot: {e}"))?;
@@ -315,6 +320,9 @@ impl TruncateJournal {
     }
 
     fn persist(&self) {
+        // Serialize durability so concurrent multi-controller notes cannot
+        // interleave fixed-tmp writes or lose the last rename.
+        let _guard = self.persist_lock.lock();
         let file = self.to_file();
         if save_file(&self.path, &file).is_err() {
             self.persist_errors_total.fetch_add(1, Ordering::Relaxed);
@@ -339,7 +347,15 @@ fn load_file(path: &Path) -> Result<TruncateJournalFile, ()> {
 fn save_file(path: &Path, state: &TruncateJournalFile) -> Result<(), ()> {
     let parent = path.parent().unwrap_or_else(|| Path::new("."));
     let _ = fs::create_dir_all(parent);
-    let tmp = parent.join(format!("{TRUNCATE_JOURNAL_FILE}.tmp"));
+    // Unique tmp name (persist_lock is primary; unique name is defense in depth).
+    let nanos = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_nanos())
+        .unwrap_or(0);
+    let tmp = parent.join(format!(
+        "{TRUNCATE_JOURNAL_FILE}.{}-{nanos}.tmp",
+        std::process::id()
+    ));
     let json = serde_json::to_string_pretty(state).map_err(|_| ())?;
     {
         let mut f = OpenOptions::new()

@@ -101,10 +101,11 @@ fn non_controller_accepts_journal_note() {
     b1.create_topic("t", 1).unwrap();
     propagate(&[&b1, &b2, &b3], "t");
 
-    // Node 2 is rarely controller (lowest live id = 1).
-    assert!(!b2.is_controller() || b2.is_controller()); // may be controller if 1 dead
+    // Lowest live id is controller (node 1).
+    assert!(b1.is_controller());
+    assert!(!b2.is_controller());
     let (err, gen) = b2.handle_truncate_journal_note("t", 0, 50, 1);
-    assert_eq!(err, 0, "any broker must accept note");
+    assert_eq!(err, 0, "non-controller must accept multi-controller note");
     assert!(gen >= 1);
     assert_eq!(b2.truncate_journal().watermark("t", 0), Some(50));
 }
@@ -257,21 +258,16 @@ async fn majority_with_one_peer_down() {
         tokio::time::sleep(Duration::from_millis(15)).await;
     }
 
-    // Mark node 3 not live? membership may still list it until expire.
-    // Majority needs 2 of 3 configured. Local + b2 note ack = 2.
+    // Configured N=3 → need majority 2. Local durable note + successful note
+    // to b2 = 2 acks even if b3 is down / not contacted successfully.
     let before_ok = b1.truncate_journal_consensus_success_total();
-    let before_fail = b1.truncate_journal_consensus_fail_total();
     fanout_truncate_journal_note(&b1, "d", 0, 11, 0).await;
 
-    // Either majority (if only 2 live counted for membership) or fail if
-    // live_brokers still includes 3 and RPC fails. Configured N=3, need=2.
-    // Local + one successful peer note → success.
     assert!(
-        b1.truncate_journal_consensus_success_total() > before_ok
-            || b1.truncate_journal_consensus_fail_total() > before_fail,
-        "should record consensus outcome"
+        b1.truncate_journal_consensus_success_total() > before_ok,
+        "1 of 3 down must still reach majority with local + one live peer"
     );
-    // Local state always retained (best-effort).
+    // Local + peer state retained (best-effort push).
     assert_eq!(b1.truncate_journal().watermark("d", 0), Some(11));
     assert_eq!(b2.truncate_journal().watermark("d", 0), Some(11));
 

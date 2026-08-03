@@ -88,9 +88,9 @@ pub enum RequestOpcode {
     KafkaFetchForward = 82,
     /// Non-coordinator → txn coordinator: proxy Kafka txn API body (Phase 120).
     KafkaTxnForward = 84,
-    /// Leader → controller: record DeleteRecords truncate watermark (Phase 129).
+    /// Multi-controller durable note of DeleteRecords truncate watermark (Phase 129/130).
     TruncateJournalNote = 86,
-    /// Controller → peer: full truncate journal snapshot push (Phase 129).
+    /// Best-effort full truncate journal snapshot push (Phase 129/130).
     TruncateJournalPush = 88,
 }
 

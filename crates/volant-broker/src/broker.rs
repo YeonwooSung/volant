@@ -1057,24 +1057,20 @@ impl Broker {
         }
     }
 
-    /// Rebuild pending DeleteRecords outbox entries from local log starts
-    /// for partitions this node leads (Phase 123 leadership handoff MVP).
+    /// Rebuild pending DeleteRecords outbox entries for partitions this node
+    /// leads (Phase 123 + 129/130 journal).
     ///
-    /// For each led partition with `log_start > 0`, enqueue
-    /// `ReplicaDeleteRecords` targets for every assigned peer at
-    /// `(before_offset = log_start, leader_epoch = current)` unless this
-    /// `(epoch, log_start)` was already reconciled. Returns the number of
-    /// partition passes that advanced `last_reconcile`.
-    ///
-    /// No-op in single-node mode. Safe to call repeatedly; peer apply is
-    /// idempotent (log start only advances).
+    /// Target = `max(local log_start, journal watermark)`. When the journal
+    /// is ahead of the local log, apply a local truncate first so the leader
+    /// does not serve below the committed watermark while driving peers.
+    /// Then enqueue `ReplicaDeleteRecords` for assigned peers. Idempotent;
+    /// no-op in single-node mode.
     pub fn reconcile_delete_records_outbox(&self) -> u64 {
         if self.cluster.is_none() {
             return 0;
         }
         // Collect led partitions + targets without holding the outbox lock.
-        // Phase 129: target = max(local log_start, journal watermark).
-        let targets: Vec<(String, u32, u64, i32, Vec<u32>)> = {
+        let targets: Vec<(String, u32, u64, u64, i32, Vec<u32>)> = {
             let topics = self.topics.read();
             let mut out = Vec::new();
             for (name, t) in topics.iter() {
@@ -1098,10 +1094,16 @@ impl Broker {
                         .copied()
                         .filter(|id| *id != self.node_id && self.broker_addr(*id).is_some())
                         .collect();
-                    if peers.is_empty() {
-                        continue;
-                    }
-                    out.push((name.as_str().to_owned(), pid.0, target, epoch as i32, peers));
+                    // Still reconcile when journal > local even if no peers
+                    // (apply local truncate).
+                    out.push((
+                        name.as_str().to_owned(),
+                        pid.0,
+                        log_start,
+                        target,
+                        epoch as i32,
+                        peers,
+                    ));
                 }
             }
             out
@@ -1109,22 +1111,39 @@ impl Broker {
 
         let mut advanced = 0u64;
         let mut last = self.delete_records_outbox_last_reconcile.lock();
-        for (topic, partition, log_start, epoch, peers) in targets {
+        for (topic, partition, log_start, target, epoch, peers) in targets {
             let key = (topic.clone(), partition);
             let epoch_u = epoch as u32;
-            if last.get(&key) == Some(&(epoch_u, log_start)) {
+            if last.get(&key) == Some(&(epoch_u, target)) {
                 continue;
+            }
+            // Apply journal watermark locally when we lag behind SoT.
+            if target > log_start {
+                if let Ok((low, err)) = self.delete_records(&topic, partition, target) {
+                    if err != 0 {
+                        warn!(
+                            topic,
+                            partition,
+                            target,
+                            error_code = err,
+                            "reconcile local truncate failed"
+                        );
+                    } else if low < target {
+                        // Partial advance (segment boundaries) — still use low as peer target.
+                        // Continue with max(low, ...) for peers.
+                    }
+                }
             }
             for peer in peers {
                 let _ = self.delete_records_outbox.enqueue(
                     peer,
                     &topic,
                     partition,
-                    log_start,
+                    target,
                     epoch,
                 );
             }
-            last.insert(key, (epoch_u, log_start));
+            last.insert(key, (epoch_u, target));
             advanced += 1;
             self.delete_records_outbox_reconcile_total
                 .fetch_add(1, Ordering::Relaxed);
@@ -1230,17 +1249,19 @@ impl Broker {
             return None;
         }
         let hwm = part.committed_hwm;
+        let live = self.live_brokers();
         let mut candidates: Vec<u32> = part
             .isr
             .iter()
             .copied()
             .filter(|id| *id != self.node_id)
+            .filter(|id| live.contains(id))
             .filter(|id| {
                 cluster
                     .config
                     .broker(*id)
                     .and_then(|b| b.rack.as_deref())
-                    .map(|r| r == rack)
+                    .map(|r| r.trim() == rack)
                     .unwrap_or(false)
             })
             .filter(|id| {

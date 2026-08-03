@@ -2119,12 +2119,30 @@ pub async fn maybe_forward_kafka_fetch(
     }
 }
 
+/// Default inter-broker RPC budget (connect + auth + request).
+const INTER_BROKER_RPC_TIMEOUT: Duration = Duration::from_secs(5);
+
 /// Inter-broker RPC over a short-lived connection (plain TCP or optional TLS).
 ///
 /// When the local broker has an auth token configured, sends Auth first.
 /// When [`Broker::inter_broker_tls`] is set (and the `tls` feature is enabled),
 /// the connection is upgraded to TLS before the RPC.
+///
+/// Bounded by [`INTER_BROKER_RPC_TIMEOUT`] so a black-holed peer cannot stall
+/// client paths that await fan-out (e.g. DeleteRecords journal note).
 pub async fn inter_broker_rpc(broker: &Broker, addr: &str, req: &Request) -> Result<Response> {
+    match tokio::time::timeout(INTER_BROKER_RPC_TIMEOUT, inter_broker_rpc_inner(broker, addr, req))
+        .await
+    {
+        Ok(r) => r,
+        Err(_) => Err(Error::Protocol(format!(
+            "inter-broker rpc to {addr} timed out after {}ms",
+            INTER_BROKER_RPC_TIMEOUT.as_millis()
+        ))),
+    }
+}
+
+async fn inter_broker_rpc_inner(broker: &Broker, addr: &str, req: &Request) -> Result<Response> {
     let tcp = TcpStream::connect(addr).await?;
 
     #[cfg(feature = "tls")]
@@ -3670,9 +3688,15 @@ async fn handle_request(broker: &Broker, req: Request) -> Result<Response> {
             before_offset,
         } => match broker.delete_records(&topic, partition, before_offset) {
             Ok((low_watermark, error_code)) => {
-                // Phase 113: best-effort fan-out after local leader success.
+                // Phase 113/129/130: best-effort fan-out after local success.
+                // Overall budget + per-RPC timeout so black-holed peers cannot
+                // hang the client path indefinitely.
                 if error_code == 0 {
-                    fanout_delete_records(broker, &topic, partition, before_offset).await;
+                    let _ = tokio::time::timeout(
+                        Duration::from_secs(15),
+                        fanout_delete_records(broker, &topic, partition, before_offset),
+                    )
+                    .await;
                 }
                 Ok(Response::DeleteRecords {
                     error_code,

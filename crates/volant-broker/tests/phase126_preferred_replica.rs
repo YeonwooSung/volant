@@ -662,3 +662,64 @@ async fn metadata_emits_broker_rack() {
 
     s.abort();
 }
+
+/// Follower Fetch (replica_id >= 0) must not get PreferredReadReplica redirect.
+#[tokio::test]
+async fn follower_fetch_no_preferred_redirect() {
+    let base = unique_dir("follower-rid");
+    let _g = Guard(base.clone());
+    let broker = Arc::new(Broker::new(StorageConfig {
+        data_dir: base.join("n1"),
+        flush_every_n: 1,
+        ..StorageConfig::default()
+    }));
+    broker.create_topic("t", 1).unwrap();
+    let batch = encode_record_batch(&sample_records(b"x"));
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = format!("127.0.0.1:{}", listener.local_addr().unwrap().port());
+    let b = Arc::clone(&broker);
+    let server = tokio::spawn(async move {
+        serve_kafka_listener(listener, b).await.ok();
+    });
+    tokio::time::sleep(Duration::from_millis(20)).await;
+
+    let _ = kafka_rpc(
+        &addr,
+        encode_request(0, 8, 2, Some("p"), &produce_body_v3("t", &batch)),
+    )
+    .await;
+
+    // Fetch v11 with replica_id = 1 (follower) and a rack string.
+    let mut body = BytesMut::new();
+    body.put_i32(1); // replica_id >= 0 → follower
+    body.put_i32(0);
+    body.put_i32(1);
+    body.put_i32(1_048_576);
+    body.put_u8(0);
+    body.put_i32(0);
+    body.put_i32(-1);
+    body.put_i32(1);
+    put_string(&mut body, "t");
+    body.put_i32(1);
+    body.put_i32(0);
+    body.put_i32(-1);
+    body.put_i64(0);
+    body.put_i64(-1);
+    body.put_i32(1_000_000);
+    body.put_i32(0);
+    put_string(&mut body, "rack-a");
+
+    let resp = kafka_rpc(
+        &addr,
+        encode_request(1, 11, 5, Some("c"), &body),
+    )
+    .await;
+    let mut src = resp.freeze();
+    assert_eq!(src.get_i32(), 5);
+    let (_err, _hwm, preferred, rec_len) = parse_fetch_v11_preferred(src);
+    assert_eq!(preferred, -1, "follower fetch must not redirect");
+    // Records may or may not be empty depending on HWM; preferred is the assert.
+
+    let _ = rec_len;
+    server.abort();
+}

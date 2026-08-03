@@ -807,13 +807,19 @@ pub(crate) fn encode_fetch(broker: &Broker, src: &mut impl Buf, out: &mut BytesM
     let use_topic_id = version >= 13;
 
     // ReplicaId is a top-level field only through v14 (KIP-903 / Kafka v15+).
+    // Consumer fetches use replica_id < 0; followers use >= 0. Preferred
+    // redirect (Phase 126) only applies to consumer fetches.
     let header_need = if version <= 14 { 4 + 4 + 4 } else { 4 + 4 };
     if src.remaining() < header_need {
         put_fetch_empty_response(out, version, 0, 0);
         return;
     }
+    // Default -1 = consumer. v15+ drops top-level ReplicaId (ReplicaState tag
+    // still ignored); follower rack+ReplicaState preferred redirect remains a
+    // known limitation until ReplicaState is parsed.
+    let mut replica_id = -1i32;
     if version <= 14 {
-        let _replica_id = src.get_i32();
+        replica_id = src.get_i32();
     }
     let _max_wait = src.get_i32();
     let _min_bytes = src.get_i32();
@@ -1212,8 +1218,9 @@ pub(crate) fn encode_fetch(broker: &Broker, src: &mut impl Buf, out: &mut BytesM
                 }
             }
 
-            // Phase 126: PreferredReadReplica redirect (leader only; empty records).
-            if version >= 11 {
+            // Phase 126: PreferredReadReplica redirect (consumer Fetch only;
+            // empty records). replica_id >= 0 ⇒ follower — never redirect.
+            if version >= 11 && replica_id < 0 {
                 if let Some(pref) = broker.select_preferred_read_replica(
                     &name,
                     PartitionId(partition as u32),

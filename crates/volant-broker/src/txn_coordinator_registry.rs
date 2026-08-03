@@ -165,6 +165,10 @@ impl TxnCoordinatorRegistry {
     /// Register or overwrite Init owner for a transactional id and/or pid.
     ///
     /// `coordinator_node_id == 0` is ignored (unknown / legacy trailer).
+    ///
+    /// Map and last-touch timestamps are updated under the same write-lock
+    /// scopes so concurrent `expire_stale` cannot observe a key without a
+    /// timestamp (and drop it as "age 0").
     pub fn note(
         &self,
         transactional_id: &str,
@@ -176,17 +180,18 @@ impl TxnCoordinatorRegistry {
         }
         let now = now_ms();
         if !transactional_id.is_empty() {
-            self.by_id
-                .write()
-                .insert(transactional_id.to_owned(), coordinator_node_id);
-            self.id_last_ms
-                .write()
-                .insert(transactional_id.to_owned(), now);
+            // Hold both locks for the id path (consistent acquire order).
+            let mut by_id = self.by_id.write();
+            let mut id_last = self.id_last_ms.write();
+            by_id.insert(transactional_id.to_owned(), coordinator_node_id);
+            id_last.insert(transactional_id.to_owned(), now);
         }
-        self.by_pid
-            .write()
-            .insert(producer_id, coordinator_node_id);
-        self.pid_last_ms.write().insert(producer_id, now);
+        {
+            let mut by_pid = self.by_pid.write();
+            let mut pid_last = self.pid_last_ms.write();
+            by_pid.insert(producer_id, coordinator_node_id);
+            pid_last.insert(producer_id, now);
+        }
         self.persist();
     }
 
@@ -225,9 +230,10 @@ impl TxnCoordinatorRegistry {
         {
             let mut by_id = self.by_id.write();
             let mut last = self.id_last_ms.write();
+            // Missing last_ms ⇒ treat as "just written" (never age-0 delete).
             let stale: Vec<String> = by_id
                 .keys()
-                .filter(|k| last.get(*k).copied().unwrap_or(0) <= cutoff)
+                .filter(|k| matches!(last.get(*k), Some(&t) if t <= cutoff))
                 .cloned()
                 .collect();
             for k in stale {
@@ -243,7 +249,7 @@ impl TxnCoordinatorRegistry {
             let mut last = self.pid_last_ms.write();
             let stale: Vec<u64> = by_pid
                 .keys()
-                .filter(|k| last.get(*k).copied().unwrap_or(0) <= cutoff)
+                .filter(|k| matches!(last.get(*k), Some(&t) if t <= cutoff))
                 .copied()
                 .collect();
             for k in stale {
