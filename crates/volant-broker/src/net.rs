@@ -1235,7 +1235,8 @@ pub async fn fanout_cluster_broker_config(
 /// 1. Durable **local** note (counts as 1 ack).
 /// 2. **Parallel** `TruncateJournalNote` to all other live peers (`JoinSet`).
 /// 3. If acks ≥ majority(configured N) → consensus success metric.
-/// 4. Always **best-effort** parallel `TruncateJournalPush` snapshot.
+/// 4. Best-effort **parallel** `TruncateJournalPush` only to peers that did
+///    **not** durable-ack the note (skip already-caught-up ackers).
 ///
 /// Never fails the client DeleteRecords path. Not full Raft log/leader election.
 pub async fn fanout_truncate_journal_note(
@@ -1263,6 +1264,7 @@ pub async fn fanout_truncate_journal_note(
         .filter(|id| *id != broker.node_id())
         .filter_map(|id| broker.broker_addr(id).map(|a| (id, a)))
         .collect();
+    let peer_ids: Vec<u32> = peers.iter().map(|(id, _)| *id).collect();
 
     let auth = broker.auth_token();
     let tls = broker.inter_broker_tls();
@@ -1283,13 +1285,15 @@ pub async fn fanout_truncate_journal_note(
     }
 
     let mut max_gen = local_gen;
+    let mut note_acked: std::collections::HashSet<u32> = std::collections::HashSet::new();
     while let Some(joined) = set.join_next().await {
         match joined {
-            Ok((_peer_id, Ok(Response::TruncateJournalNote {
+            Ok((peer_id, Ok(Response::TruncateJournalNote {
                 error_code: 0,
                 generation,
             }))) => {
                 acks += 1;
+                note_acked.insert(peer_id);
                 if generation > max_gen {
                     max_gen = generation;
                 }
@@ -1342,26 +1346,41 @@ pub async fn fanout_truncate_journal_note(
         );
     }
 
-    // 4) Best-effort parallel snapshot push.
-    fanout_truncate_journal_push(broker, max_gen.max(local_gen)).await;
+    // 4) Push only to peers that missed the note (already have durable watermark).
+    let push_peers: Vec<(u32, String)> = peer_ids
+        .into_iter()
+        .filter(|id| !note_acked.contains(id))
+        .filter_map(|id| broker.broker_addr(id).map(|a| (id, a)))
+        .collect();
+    fanout_truncate_journal_push_to(broker, max_gen.max(local_gen), push_peers).await;
 }
 
-/// Phase 129/130: best-effort **parallel** push of full truncate journal snapshot.
-///
-/// Any broker may push (multi-controller); receivers max-merge. Failures are
-/// logged only — never fail the client path.
+/// Phase 129/130: best-effort **parallel** push of full truncate journal snapshot
+/// to all live peers (excluding self).
 pub async fn fanout_truncate_journal_push(broker: &Broker, generation: u64) {
     if broker.cluster_config().is_none() {
         return;
     }
-    let snapshot = broker.truncate_journal().snapshot_bytes();
-    let gen = generation.max(broker.truncate_journal_generation());
     let peers: Vec<(u32, String)> = broker
         .live_brokers()
         .into_iter()
         .filter(|id| *id != broker.node_id())
         .filter_map(|id| broker.broker_addr(id).map(|a| (id, a)))
         .collect();
+    fanout_truncate_journal_push_to(broker, generation, peers).await;
+}
+
+/// Best-effort parallel push to an explicit peer list (skip already-noted peers).
+async fn fanout_truncate_journal_push_to(
+    broker: &Broker,
+    generation: u64,
+    peers: Vec<(u32, String)>,
+) {
+    if peers.is_empty() {
+        return;
+    }
+    let snapshot = broker.truncate_journal().snapshot_bytes();
+    let gen = generation.max(broker.truncate_journal_generation());
     let auth = broker.auth_token();
     let tls = broker.inter_broker_tls();
     let mut set = tokio::task::JoinSet::new();
@@ -1396,19 +1415,18 @@ pub async fn fanout_truncate_journal_push(broker: &Broker, generation: u64) {
     }
 }
 
-/// Best-effort DeleteRecords fan-out to other replicas (Phase 113/116 + 129).
+/// Best-effort DeleteRecords fan-out to other replicas (Phase 113/116 + 129/130).
 ///
-/// After a successful **leader** local truncate: notes the watermark on the
-/// controller journal (Phase 129), then one attempt of `ReplicaDeleteRecords`
-/// per peer with outbox enqueue on failure (Phase 116). Never fails the client.
-/// No-op peer list in single-node mode.
+/// After a successful **leader** local truncate: multi-controller journal note
+/// (majority + selective push), then **parallel** `ReplicaDeleteRecords` to
+/// peers with outbox enqueue on failure. Never fails the client.
 pub async fn fanout_delete_records(
     broker: &Broker,
     topic: &str,
     partition: u32,
     before_offset: u64,
 ) {
-    // Phase 129: controller SoT journal note (best-effort; never fails client).
+    // Phase 129/130: journal note (best-effort; never fails client).
     if broker.cluster_config().is_some() {
         let epoch = broker
             .led_partition_epoch(topic, partition)
@@ -1419,6 +1437,9 @@ pub async fn fanout_delete_records(
     if peers.is_empty() {
         return;
     }
+    let auth = broker.auth_token();
+    let tls = broker.inter_broker_tls();
+    let mut set = tokio::task::JoinSet::new();
     for (replica_id, addr, leader_epoch) in peers {
         let req = Request::ReplicaDeleteRecords {
             topic: topic.to_owned(),
@@ -1426,22 +1447,29 @@ pub async fn fanout_delete_records(
             before_offset,
             leader_epoch,
         };
-        match inter_broker_rpc(broker, &addr, &req).await {
-            Ok(Response::ReplicaDeleteRecords {
+        let auth = auth.clone();
+        let tls = tls.clone();
+        set.spawn(async move {
+            let res = inter_broker_rpc_owned(&addr, &req, auth, tls).await;
+            (replica_id, addr, leader_epoch, res)
+        });
+    }
+    while let Some(joined) = set.join_next().await {
+        match joined {
+            Ok((replica_id, _addr, _epoch, Ok(Response::ReplicaDeleteRecords {
                 error_code: 0,
                 ..
-            }) => {
-                // Clear any prior pending for this peer/tp (idempotent success).
+            }))) => {
                 broker.delete_records_outbox().drop_entry(
                     replica_id,
                     topic,
                     partition,
                 );
             }
-            Ok(Response::ReplicaDeleteRecords {
+            Ok((replica_id, addr, leader_epoch, Ok(Response::ReplicaDeleteRecords {
                 error_code,
                 low_watermark,
-            }) => {
+            }))) => {
                 warn!(
                     replica_id,
                     %addr,
@@ -1452,7 +1480,6 @@ pub async fn fanout_delete_records(
                     "delete records fan-out peer error"
                 );
                 broker.note_delete_records_fanout_error();
-                // Stale epoch fence: do not keep retrying with old epoch.
                 if error_code == ErrorCode::InvalidProducerEpoch as u16 {
                     broker.delete_records_outbox().drop_entry(
                         replica_id,
@@ -1469,7 +1496,7 @@ pub async fn fanout_delete_records(
                     );
                 }
             }
-            Ok(other) => {
+            Ok((replica_id, addr, leader_epoch, Ok(other))) => {
                 warn!(
                     replica_id,
                     %addr,
@@ -1487,7 +1514,7 @@ pub async fn fanout_delete_records(
                     leader_epoch,
                 );
             }
-            Err(e) => {
+            Ok((replica_id, addr, leader_epoch, Err(e))) => {
                 warn!(
                     replica_id,
                     %addr,
@@ -1505,14 +1532,18 @@ pub async fn fanout_delete_records(
                     leader_epoch,
                 );
             }
+            Err(e) => {
+                warn!(error = %e, topic, partition, "delete records fan-out join error");
+                broker.note_delete_records_fanout_error();
+            }
         }
     }
 }
 
 /// Drain durable DeleteRecords outbox for currently live peers (Phase 116 + 123).
 ///
-/// At-least-once retry of `ReplicaDeleteRecords`. Success removes the entry;
-/// transport / peer errors leave it and increment retry-error metrics.
+/// **Parallel** at-least-once retry of `ReplicaDeleteRecords`. Success removes
+/// the entry; transport / peer errors leave it and increment retry-error metrics.
 /// When this node still leads the partition, the RPC uses the **current**
 /// local leader epoch (Phase 123) so an epoch bump does not self-fence.
 /// No-op when the outbox is empty or the broker is single-node with no pending.
@@ -1521,6 +1552,9 @@ pub async fn drain_delete_records_outbox(broker: &Broker) {
     if pending.is_empty() {
         return;
     }
+    let auth = broker.auth_token();
+    let tls = broker.inter_broker_tls();
+    let mut set = tokio::task::JoinSet::new();
     for entry in pending {
         let Some(addr) = broker.broker_addr(entry.replica_id) else {
             continue;
@@ -1535,70 +1569,83 @@ pub async fn drain_delete_records_outbox(broker: &Broker) {
             before_offset: entry.before_offset,
             leader_epoch,
         };
-        match inter_broker_rpc(broker, &addr, &req).await {
-            Ok(Response::ReplicaDeleteRecords {
+        let auth = auth.clone();
+        let tls = tls.clone();
+        let replica_id = entry.replica_id;
+        let topic = entry.topic.clone();
+        let partition = entry.partition;
+        let before_offset = entry.before_offset;
+        set.spawn(async move {
+            let res = inter_broker_rpc_owned(&addr, &req, auth, tls).await;
+            (replica_id, topic, partition, before_offset, leader_epoch, res)
+        });
+    }
+    while let Some(joined) = set.join_next().await {
+        match joined {
+            Ok((replica_id, topic, partition, before_offset, _epoch, Ok(Response::ReplicaDeleteRecords {
                 error_code: 0,
                 ..
-            }) => {
+            }))) => {
                 broker.delete_records_outbox().note_retry_success(
-                    entry.replica_id,
-                    &entry.topic,
-                    entry.partition,
-                    entry.before_offset,
+                    replica_id,
+                    &topic,
+                    partition,
+                    before_offset,
                 );
             }
-            Ok(Response::ReplicaDeleteRecords {
+            Ok((replica_id, topic, partition, _before, _epoch, Ok(Response::ReplicaDeleteRecords {
                 error_code,
                 low_watermark,
-            }) => {
+            }))) => {
                 if error_code == ErrorCode::InvalidProducerEpoch as u16 {
                     // Stale epoch — drop; Phase 123 new-leader reconcile re-creates.
                     broker.delete_records_outbox().drop_entry(
-                        entry.replica_id,
-                        &entry.topic,
-                        entry.partition,
+                        replica_id,
+                        &topic,
+                        partition,
                     );
                     warn!(
-                        replica_id = entry.replica_id,
-                        topic = %entry.topic,
-                        partition = entry.partition,
+                        replica_id,
+                        topic = %topic,
+                        partition,
                         error_code,
                         low_watermark,
                         "delete records outbox drain fenced; dropping entry"
                     );
                 } else {
                     warn!(
-                        replica_id = entry.replica_id,
-                        %addr,
+                        replica_id,
                         error_code,
                         low_watermark,
-                        topic = %entry.topic,
-                        partition = entry.partition,
+                        topic = %topic,
+                        partition,
                         "delete records outbox drain peer error"
                     );
                     broker.delete_records_outbox().note_retry_error();
                 }
             }
-            Ok(other) => {
+            Ok((replica_id, topic, partition, _before, _epoch, Ok(other))) => {
                 warn!(
-                    replica_id = entry.replica_id,
-                    %addr,
+                    replica_id,
                     ?other,
-                    topic = %entry.topic,
-                    partition = entry.partition,
+                    topic = %topic,
+                    partition,
                     "delete records outbox drain unexpected response"
                 );
                 broker.delete_records_outbox().note_retry_error();
             }
-            Err(e) => {
+            Ok((replica_id, topic, partition, _before, _epoch, Err(e))) => {
                 debug!(
-                    replica_id = entry.replica_id,
-                    %addr,
+                    replica_id,
                     error = %e,
-                    topic = %entry.topic,
-                    partition = entry.partition,
+                    topic = %topic,
+                    partition,
                     "delete records outbox drain rpc failed"
                 );
+                broker.delete_records_outbox().note_retry_error();
+            }
+            Err(e) => {
+                warn!(error = %e, "delete records outbox drain join error");
                 broker.delete_records_outbox().note_retry_error();
             }
         }
