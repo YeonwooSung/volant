@@ -3843,6 +3843,65 @@ mod tests {
     }
 
     #[test]
+    fn phase129_truncate_journal_opcodes_roundtrip() {
+        let note = Request::TruncateJournalNote {
+            topic: "events".into(),
+            partition: 3,
+            before_offset: 128,
+            leader_epoch: 2,
+        };
+        let nb = encode_request(&note).unwrap();
+        assert_eq!(note.opcode(), RequestOpcode::TruncateJournalNote as u16);
+        assert_eq!(
+            decode_request(RequestOpcode::TruncateJournalNote as u16, &nb).unwrap(),
+            note
+        );
+        let nr = Response::TruncateJournalNote {
+            error_code: 0,
+            generation: 42,
+        };
+        let nrb = encode_response(&nr).unwrap();
+        assert_eq!(
+            decode_response(ResponseOpcode::TruncateJournalNote as u16, &nrb).unwrap(),
+            nr
+        );
+
+        let push = Request::TruncateJournalPush {
+            generation: 7,
+            snapshot: Bytes::from_static(b"{\"version\":1}"),
+        };
+        let pb = encode_request(&push).unwrap();
+        assert_eq!(push.opcode(), RequestOpcode::TruncateJournalPush as u16);
+        assert_eq!(
+            decode_request(RequestOpcode::TruncateJournalPush as u16, &pb).unwrap(),
+            push
+        );
+        let empty_push = Request::TruncateJournalPush {
+            generation: 0,
+            snapshot: Bytes::new(),
+        };
+        let epb = encode_request(&empty_push).unwrap();
+        assert_eq!(
+            decode_request(RequestOpcode::TruncateJournalPush as u16, &epb).unwrap(),
+            empty_push
+        );
+
+        let pr = Response::TruncateJournalPush { error_code: 14 };
+        let prb = encode_response(&pr).unwrap();
+        assert_eq!(
+            decode_response(ResponseOpcode::TruncateJournalPush as u16, &prb).unwrap(),
+            pr
+        );
+
+        // Truncated bodies.
+        assert!(decode_request(RequestOpcode::TruncateJournalNote as u16, &[]).is_err());
+        assert!(decode_request(RequestOpcode::TruncateJournalPush as u16, &[]).is_err());
+        assert!(decode_response(ResponseOpcode::TruncateJournalNote as u16, &[]).is_err());
+        assert!(decode_response(ResponseOpcode::TruncateJournalNote as u16, &[0, 0]).is_err());
+        assert!(decode_response(ResponseOpcode::TruncateJournalPush as u16, &[]).is_err());
+    }
+
+    #[test]
     fn phase114_txn_participant_opcodes_roundtrip() {
         let open = Request::TxnParticipantOpen {
             transactional_id: "app-1".into(),

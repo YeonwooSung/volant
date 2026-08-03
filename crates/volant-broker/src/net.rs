@@ -1230,20 +1230,12 @@ pub async fn fanout_cluster_broker_config(
     }
 }
 
-/// Best-effort DeleteRecords fan-out to other replicas (Phase 113 PR2 + Phase 116).
-///
-/// One synchronous attempt per peer after a successful **leader** local truncate.
-/// Failures increment [`Broker::delete_records_fanout_errors_total`], enqueue a
-/// durable outbox entry (Phase 116), and never fail the client path.
-/// No-op in single-node mode.
-///
 /// Phase 129/130: multi-controller majority note + best-effort push.
 ///
 /// 1. Durable **local** note (counts as 1 ack).
-/// 2. Parallel `TruncateJournalNote` to all other **configured** live peers.
+/// 2. **Parallel** `TruncateJournalNote` to all other live peers (`JoinSet`).
 /// 3. If acks ≥ majority(configured N) → consensus success metric.
-/// 4. Always **best-effort** `TruncateJournalPush` snapshot to remaining live
-///    peers (catch up nodes that missed the note).
+/// 4. Always **best-effort** parallel `TruncateJournalPush` snapshot.
 ///
 /// Never fails the client DeleteRecords path. Not full Raft log/leader election.
 pub async fn fanout_truncate_journal_note(
@@ -1264,7 +1256,7 @@ pub async fn fanout_truncate_journal_note(
         broker.local_note_truncate_journal(topic, partition, before_offset, leader_epoch);
     let mut acks = 1usize;
 
-    // 2) Replicate note to every other live peer (multi-controller).
+    // 2) Parallel note to every other live peer (multi-controller).
     let peers: Vec<(u32, String)> = broker
         .live_brokers()
         .into_iter()
@@ -1272,8 +1264,9 @@ pub async fn fanout_truncate_journal_note(
         .filter_map(|id| broker.broker_addr(id).map(|a| (id, a)))
         .collect();
 
-    let mut max_gen = local_gen;
-    // Sequential RPC keeps inter_broker simple (no extra Send bounds).
+    let auth = broker.auth_token();
+    let tls = broker.inter_broker_tls();
+    let mut set = tokio::task::JoinSet::new();
     for (peer_id, addr) in peers {
         let req = Request::TruncateJournalNote {
             topic: topic.to_owned(),
@@ -1281,26 +1274,36 @@ pub async fn fanout_truncate_journal_note(
             before_offset,
             leader_epoch,
         };
-        match inter_broker_rpc(broker, &addr, &req).await {
-            Ok(Response::TruncateJournalNote {
+        let auth = auth.clone();
+        let tls = tls.clone();
+        set.spawn(async move {
+            let res = inter_broker_rpc_owned(&addr, &req, auth, tls).await;
+            (peer_id, res)
+        });
+    }
+
+    let mut max_gen = local_gen;
+    while let Some(joined) = set.join_next().await {
+        match joined {
+            Ok((_peer_id, Ok(Response::TruncateJournalNote {
                 error_code: 0,
                 generation,
-            }) => {
+            }))) => {
                 acks += 1;
                 if generation > max_gen {
                     max_gen = generation;
                 }
             }
-            Ok(Response::TruncateJournalNote { error_code, .. }) => {
+            Ok((peer_id, Ok(Response::TruncateJournalNote { error_code, .. }))) => {
                 warn!(
                     peer_id,
                     error_code, topic, partition, "truncate journal note peer error"
                 );
             }
-            Ok(other) => {
+            Ok((peer_id, Ok(other))) => {
                 warn!(peer_id, ?other, topic, partition, "truncate journal note unexpected");
             }
-            Err(e) => {
+            Ok((peer_id, Err(e))) => {
                 warn!(
                     peer_id,
                     error = %e,
@@ -1308,6 +1311,9 @@ pub async fn fanout_truncate_journal_note(
                     partition,
                     "truncate journal note rpc failed"
                 );
+            }
+            Err(e) => {
+                warn!(error = %e, topic, partition, "truncate journal note join error");
             }
         }
     }
@@ -1336,11 +1342,11 @@ pub async fn fanout_truncate_journal_note(
         );
     }
 
-    // 4) Best-effort snapshot push to all live peers (including those that acked note).
+    // 4) Best-effort parallel snapshot push.
     fanout_truncate_journal_push(broker, max_gen.max(local_gen)).await;
 }
 
-/// Phase 129/130: best-effort push full truncate journal snapshot to live peers.
+/// Phase 129/130: best-effort **parallel** push of full truncate journal snapshot.
 ///
 /// Any broker may push (multi-controller); receivers max-merge. Failures are
 /// logged only — never fail the client path.
@@ -1356,21 +1362,35 @@ pub async fn fanout_truncate_journal_push(broker: &Broker, generation: u64) {
         .filter(|id| *id != broker.node_id())
         .filter_map(|id| broker.broker_addr(id).map(|a| (id, a)))
         .collect();
+    let auth = broker.auth_token();
+    let tls = broker.inter_broker_tls();
+    let mut set = tokio::task::JoinSet::new();
     for (peer_id, addr) in peers {
         let req = Request::TruncateJournalPush {
             generation: gen,
             snapshot: snapshot.clone(),
         };
-        match inter_broker_rpc(broker, &addr, &req).await {
-            Ok(Response::TruncateJournalPush { error_code: 0 }) => {}
-            Ok(Response::TruncateJournalPush { error_code }) => {
+        let auth = auth.clone();
+        let tls = tls.clone();
+        set.spawn(async move {
+            let res = inter_broker_rpc_owned(&addr, &req, auth, tls).await;
+            (peer_id, res)
+        });
+    }
+    while let Some(joined) = set.join_next().await {
+        match joined {
+            Ok((_, Ok(Response::TruncateJournalPush { error_code: 0 }))) => {}
+            Ok((peer_id, Ok(Response::TruncateJournalPush { error_code }))) => {
                 warn!(peer_id, error_code, "truncate journal push peer error");
             }
-            Ok(other) => {
+            Ok((peer_id, Ok(other))) => {
                 warn!(peer_id, ?other, "truncate journal push unexpected response");
             }
-            Err(e) => {
+            Ok((peer_id, Err(e))) => {
                 warn!(peer_id, error = %e, "truncate journal push rpc failed");
+            }
+            Err(e) => {
+                warn!(error = %e, "truncate journal push join error");
             }
         }
     }
@@ -2131,8 +2151,27 @@ const INTER_BROKER_RPC_TIMEOUT: Duration = Duration::from_secs(5);
 /// Bounded by [`INTER_BROKER_RPC_TIMEOUT`] so a black-holed peer cannot stall
 /// client paths that await fan-out (e.g. DeleteRecords journal note).
 pub async fn inter_broker_rpc(broker: &Broker, addr: &str, req: &Request) -> Result<Response> {
-    match tokio::time::timeout(INTER_BROKER_RPC_TIMEOUT, inter_broker_rpc_inner(broker, addr, req))
-        .await
+    inter_broker_rpc_owned(
+        addr,
+        req,
+        broker.auth_token(),
+        broker.inter_broker_tls(),
+    )
+    .await
+}
+
+/// Owned-credentials RPC (Send-safe for parallel `JoinSet` fan-out).
+async fn inter_broker_rpc_owned(
+    addr: &str,
+    req: &Request,
+    auth_token: Option<String>,
+    inter_broker_tls: Option<crate::broker::InterBrokerTls>,
+) -> Result<Response> {
+    match tokio::time::timeout(
+        INTER_BROKER_RPC_TIMEOUT,
+        inter_broker_rpc_inner(addr, req, auth_token, inter_broker_tls),
+    )
+    .await
     {
         Ok(r) => r,
         Err(_) => Err(Error::Protocol(format!(
@@ -2142,17 +2181,22 @@ pub async fn inter_broker_rpc(broker: &Broker, addr: &str, req: &Request) -> Res
     }
 }
 
-async fn inter_broker_rpc_inner(broker: &Broker, addr: &str, req: &Request) -> Result<Response> {
+async fn inter_broker_rpc_inner(
+    addr: &str,
+    req: &Request,
+    auth_token: Option<String>,
+    inter_broker_tls: Option<crate::broker::InterBrokerTls>,
+) -> Result<Response> {
     let tcp = TcpStream::connect(addr).await?;
 
     #[cfg(feature = "tls")]
-    if let Some(tls_cfg) = broker.inter_broker_tls() {
+    if let Some(tls_cfg) = inter_broker_tls {
         let mut stream = connect_inter_broker_tls(tcp, addr, &tls_cfg).await?;
-        return inter_broker_rpc_on(broker, &mut stream, req).await;
+        return inter_broker_rpc_on(&mut stream, req, auth_token).await;
     }
 
     #[cfg(not(feature = "tls"))]
-    if broker.inter_broker_tls().is_some() {
+    if inter_broker_tls.is_some() {
         return Err(Error::InvalidArgument(
             "inter-broker TLS configured but volant-broker was built without `--features tls`"
                 .into(),
@@ -2160,14 +2204,18 @@ async fn inter_broker_rpc_inner(broker: &Broker, addr: &str, req: &Request) -> R
     }
 
     let mut stream = tcp;
-    inter_broker_rpc_on(broker, &mut stream, req).await
+    inter_broker_rpc_on(&mut stream, req, auth_token).await
 }
 
-async fn inter_broker_rpc_on<S>(broker: &Broker, stream: &mut S, req: &Request) -> Result<Response>
+async fn inter_broker_rpc_on<S>(
+    stream: &mut S,
+    req: &Request,
+    auth_token: Option<String>,
+) -> Result<Response>
 where
     S: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin,
 {
-    if let Some(token) = broker.auth_token() {
+    if let Some(token) = auth_token {
         let auth = Request::Auth { token };
         let frame = pack_request(0, &auth)?;
         let mut out = BytesMut::new();
