@@ -1,4 +1,4 @@
-//! Inter-broker RPC timeout (5s default) and DeleteRecords fan-out budget (15s).
+//! Inter-broker RPC timeout (5s default) and DeleteRecords fan-out budget (20s).
 
 use std::sync::Arc;
 use std::time::{Duration, Instant};
@@ -32,7 +32,7 @@ impl Drop for Guard {
 #[test]
 fn default_timeout_constants() {
     assert_eq!(DEFAULT_INTER_BROKER_RPC_TIMEOUT_MS, 5_000);
-    assert_eq!(DEFAULT_DELETE_RECORDS_FANOUT_BUDGET_MS, 15_000);
+    assert_eq!(DEFAULT_DELETE_RECORDS_FANOUT_BUDGET_MS, 20_000);
 }
 
 /// Connecting to a black-hole address must fail within ~timeout, not hang.

@@ -16,7 +16,7 @@ use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{SystemTime, UNIX_EPOCH};
 
-use parking_lot::RwLock;
+use parking_lot::{Mutex, RwLock};
 use serde::{Deserialize, Serialize};
 use tracing::warn;
 
@@ -87,6 +87,8 @@ pub struct TxnCoordinatorRegistry {
     by_pid: RwLock<HashMap<u64, u32>>,
     id_last_ms: RwLock<HashMap<String, u64>>,
     pid_last_ms: RwLock<HashMap<u64, u64>>,
+    /// Serializes durable snapshot writes (unique tmp + rename).
+    persist_lock: Mutex<()>,
     restored: AtomicU64,
     persist_errors_total: AtomicU64,
     /// Entries removed by TTL GC (Phase 127).
@@ -108,6 +110,7 @@ impl TxnCoordinatorRegistry {
             by_pid: RwLock::new(HashMap::new()),
             id_last_ms: RwLock::new(HashMap::new()),
             pid_last_ms: RwLock::new(HashMap::new()),
+            persist_lock: Mutex::new(()),
             restored: AtomicU64::new(0),
             persist_errors_total: AtomicU64::new(0),
             gc_total: AtomicU64::new(0),
@@ -126,6 +129,7 @@ impl TxnCoordinatorRegistry {
             by_pid: RwLock::new(loaded.by_pid),
             id_last_ms: RwLock::new(loaded.id_last_ms),
             pid_last_ms: RwLock::new(loaded.pid_last_ms),
+            persist_lock: Mutex::new(()),
             restored: AtomicU64::new(loaded.restored),
             persist_errors_total: AtomicU64::new(0),
             gc_total: AtomicU64::new(0),
@@ -325,6 +329,9 @@ impl TxnCoordinatorRegistry {
         let Some(path) = &self.path else {
             return;
         };
+        // Serialize durability so concurrent note/expire cannot interleave
+        // fixed-tmp writes or lose the last rename with a stale snapshot.
+        let _guard = self.persist_lock.lock();
         let file = TxnCoordinatorFile {
             version: TXN_COORDINATOR_FILE_VERSION,
             by_id: self.by_id.read().clone(),
@@ -408,9 +415,17 @@ fn load_file(path: &Path) -> Result<TxnCoordinatorFile, ()> {
 fn save_file(path: &Path, state: &TxnCoordinatorFile) -> Result<(), ()> {
     let parent = path.parent().unwrap_or_else(|| Path::new("."));
     let _ = fs::create_dir_all(parent);
-    let tmp = parent.join(format!("{}.tmp", TXN_COORDINATOR_FILE));
+    // Unique tmp name (persist_lock is primary; unique name is defense in depth).
+    let nanos = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|d| d.as_nanos())
+        .unwrap_or(0);
+    let tmp = parent.join(format!(
+        "{TXN_COORDINATOR_FILE}.{}-{nanos}.tmp",
+        std::process::id()
+    ));
     let json = serde_json::to_string_pretty(state).map_err(|_| ())?;
-    {
+    let write_result = (|| {
         let mut f = OpenOptions::new()
             .create(true)
             .write(true)
@@ -419,9 +434,14 @@ fn save_file(path: &Path, state: &TxnCoordinatorFile) -> Result<(), ()> {
             .map_err(|_| ())?;
         f.write_all(json.as_bytes()).map_err(|_| ())?;
         f.sync_all().map_err(|_| ())?;
+        fs::rename(&tmp, path).map_err(|_| ())?;
+        Ok(())
+    })();
+    if write_result.is_err() {
+        // Best-effort cleanup so failed writes do not leak unique tmp files.
+        let _ = fs::remove_file(&tmp);
     }
-    fs::rename(&tmp, path).map_err(|_| ())?;
-    Ok(())
+    write_result
 }
 
 fn now_ms() -> u64 {
@@ -579,6 +599,110 @@ mod tests {
         assert_eq!(r.resolve_by_pid(99), Some(3));
         // Fresh timestamps → not immediately GC'd with 24h TTL.
         assert_eq!(r.expire_stale(DEFAULT_TXN_COORDINATOR_TTL_MS, now_ms()), 0);
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    /// Concurrent note + expire must not panic and durable state stays consistent.
+    #[test]
+    fn concurrent_note_and_expire_stays_consistent() {
+        use std::sync::Arc;
+        use std::thread;
+
+        let dir = temp_dir();
+        let _ = fs::remove_dir_all(&dir);
+        let reg = Arc::new(TxnCoordinatorRegistry::open(&dir));
+
+        // Long-lived seeds that expire_stale with a moderate TTL must keep.
+        for i in 0..10u64 {
+            reg.note(&format!("keep-{i}"), 1000 + i, 1);
+        }
+
+        let mut handles = Vec::new();
+        // Writers: note fresh keys and occasionally call expire with a large TTL
+        // so concurrent persist() is exercised without wiping live notes.
+        for t in 0..4 {
+            let reg = Arc::clone(&reg);
+            handles.push(thread::spawn(move || {
+                for i in 0..50u64 {
+                    let id = format!("t{t}-n{i}");
+                    reg.note(&id, (t as u64) * 1000 + i, (t as u32) + 1);
+                    // TTL far larger than wall-clock age → no live removals.
+                    let _ = reg.expire_stale(DEFAULT_TXN_COORDINATOR_TTL_MS, now_ms());
+                }
+            }));
+        }
+        // GC thread: insert intentionally stale rows and expire them so expire
+        // paths that do remove + persist race with note() persists.
+        {
+            let reg = Arc::clone(&reg);
+            handles.push(thread::spawn(move || {
+                for i in 0..40u64 {
+                    let stale_id = format!("gc-stale-{i}");
+                    reg.note(&stale_id, 50_000 + i, 9);
+                    reg.test_set_id_last_ms(&stale_id, 1);
+                    reg.test_set_pid_last_ms(50_000 + i, 1);
+                    let _ = reg.expire_stale(60_000, 1_000_000);
+                }
+            }));
+        }
+
+        for h in handles {
+            h.join().expect("worker panic");
+        }
+
+        // Fresh notes and keep-* seeds must still be present in memory.
+        assert!(reg.id_count() >= 10, "id_count={}", reg.id_count());
+        assert!(reg.pid_count() >= 10, "pid_count={}", reg.pid_count());
+        assert_eq!(reg.resolve_by_id("keep-0"), Some(1));
+        // Stale GC keys should be gone.
+        assert!(reg.resolve_by_id("gc-stale-0").is_none());
+
+        // Reload from disk: last durable snapshot must be valid + coherent.
+        let reloaded = TxnCoordinatorRegistry::open(&dir);
+        assert!(reloaded.id_count() > 0);
+        assert!(reloaded.pid_count() > 0);
+        // keep-* may or may not survive if last snapshot raced with GC of
+        // only stale keys — but keys that resolve must be non-zero coords.
+        for e in reloaded.list() {
+            assert_ne!(e.coordinator_node_id, 0);
+            if !e.transactional_id.is_empty() {
+                assert_eq!(
+                    reloaded.resolve_by_id(&e.transactional_id),
+                    Some(e.coordinator_node_id)
+                );
+            }
+            if e.producer_id != 0 {
+                assert_eq!(
+                    reloaded.resolve_by_pid(e.producer_id),
+                    Some(e.coordinator_node_id)
+                );
+            }
+        }
+        // Final on-disk file is readable (not truncated by racing tmp writes).
+        let path = dir.join(TXN_COORDINATOR_DIR).join(TXN_COORDINATOR_FILE);
+        let raw = fs::read_to_string(&path).expect("state.json readable");
+        let parsed: TxnCoordinatorFile =
+            serde_json::from_str(&raw).expect("state.json valid JSON");
+        assert_eq!(parsed.version, TXN_COORDINATOR_FILE_VERSION);
+        // No leftover unique tmp files after successful concurrent persists.
+        let leftover_tmps: Vec<_> = fs::read_dir(dir.join(TXN_COORDINATOR_DIR))
+            .unwrap()
+            .filter_map(|e| e.ok())
+            .filter(|e| {
+                e.file_name()
+                    .to_string_lossy()
+                    .ends_with(".tmp")
+            })
+            .collect();
+        assert!(
+            leftover_tmps.is_empty(),
+            "leaked tmp files: {:?}",
+            leftover_tmps
+                .iter()
+                .map(|e| e.file_name())
+                .collect::<Vec<_>>()
+        );
+
         let _ = fs::remove_dir_all(&dir);
     }
 }

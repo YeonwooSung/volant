@@ -284,14 +284,12 @@ impl TruncateJournal {
                     });
             }
         }
-        let cur_gen = self.generation.load(Ordering::Relaxed);
-        if generation > cur_gen {
-            self.generation.store(generation, Ordering::SeqCst);
+        // Atomic max: concurrent local note(..., bump=true) may fetch_add between
+        // a load and store; never let apply_push regress generation.
+        let gen_advanced = atomic_fetch_max(&self.generation, generation);
+        let _applied_advanced = atomic_fetch_max(&self.applied_generation, generation);
+        if gen_advanced {
             changed = true;
-        }
-        let cur_applied = self.applied_generation.load(Ordering::Relaxed);
-        if generation > cur_applied {
-            self.applied_generation.store(generation, Ordering::SeqCst);
         }
         if changed {
             self.push_apply_total.fetch_add(1, Ordering::Relaxed);
@@ -331,6 +329,20 @@ impl TruncateJournal {
     }
 }
 
+/// Atomically set `atom` to `max(atom, value)`. Returns true if the value increased.
+fn atomic_fetch_max(atom: &AtomicU64, value: u64) -> bool {
+    let mut cur = atom.load(Ordering::Relaxed);
+    loop {
+        if value <= cur {
+            return false;
+        }
+        match atom.compare_exchange_weak(cur, value, Ordering::SeqCst, Ordering::Relaxed) {
+            Ok(_) => return true,
+            Err(observed) => cur = observed,
+        }
+    }
+}
+
 fn load_file(path: &Path) -> Result<TruncateJournalFile, ()> {
     if !path.exists() {
         return Ok(TruncateJournalFile::default());
@@ -356,19 +368,26 @@ fn save_file(path: &Path, state: &TruncateJournalFile) -> Result<(), ()> {
         "{TRUNCATE_JOURNAL_FILE}.{}-{nanos}.tmp",
         std::process::id()
     ));
-    let json = serde_json::to_string_pretty(state).map_err(|_| ())?;
-    {
-        let mut f = OpenOptions::new()
-            .create(true)
-            .write(true)
-            .truncate(true)
-            .open(&tmp)
-            .map_err(|_| ())?;
-        f.write_all(json.as_bytes()).map_err(|_| ())?;
-        f.sync_all().map_err(|_| ())?;
+    let result = (|| {
+        let json = serde_json::to_string_pretty(state).map_err(|_| ())?;
+        {
+            let mut f = OpenOptions::new()
+                .create(true)
+                .write(true)
+                .truncate(true)
+                .open(&tmp)
+                .map_err(|_| ())?;
+            f.write_all(json.as_bytes()).map_err(|_| ())?;
+            f.sync_all().map_err(|_| ())?;
+        }
+        fs::rename(&tmp, path).map_err(|_| ())?;
+        Ok(())
+    })();
+    if result.is_err() {
+        // Best-effort: do not leave unique tmp files after failed write/rename.
+        let _ = fs::remove_file(&tmp);
     }
-    fs::rename(&tmp, path).map_err(|_| ())?;
-    Ok(())
+    result
 }
 
 #[cfg(test)]
@@ -417,6 +436,55 @@ mod tests {
         dst.apply_push(gen, &snap).unwrap();
         assert_eq!(dst.watermark("a", 0), Some(42));
         assert_eq!(dst.applied_generation(), gen);
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    /// Local notes can bump generation ahead of a lagging peer push; apply_push
+    /// must max-merge entries without regressing generation.
+    #[test]
+    fn apply_push_gen_does_not_regress_under_higher_local() {
+        let dir = temp();
+        let _ = fs::remove_dir_all(&dir);
+        let j = TruncateJournal::open(&dir);
+
+        // Bump local generation high via several notes.
+        j.note("t", 0, 10, 1, true);
+        j.note("t", 0, 20, 2, true);
+        j.note("t", 0, 30, 3, true);
+        let high_gen = j.generation();
+        assert!(high_gen >= 3, "expected gen >= 3 after three bumps, got {high_gen}");
+        assert_eq!(j.watermark("t", 0), Some(30));
+
+        // Lagging push: lower generation, partial/stale entry maxes + a new key.
+        let stale = TruncateJournalFile {
+            version: TRUNCATE_JOURNAL_FILE_VERSION,
+            generation: 1,
+            entries: vec![
+                TruncateJournalEntry {
+                    topic: "t".into(),
+                    partition: 0,
+                    before_offset: 15, // lower than local 30
+                    leader_epoch: 1,
+                },
+                TruncateJournalEntry {
+                    topic: "t".into(),
+                    partition: 1,
+                    before_offset: 100,
+                    leader_epoch: 1,
+                },
+            ],
+        };
+        let snap = serde_json::to_vec(&stale).unwrap();
+        j.apply_push(1, &snap).unwrap();
+
+        // Generation must not regress below the high local value.
+        assert_eq!(j.generation(), high_gen);
+        // applied_generation is max-merged with push gen (notes do not bump it).
+        assert_eq!(j.applied_generation(), 1);
+        // Entries still max-merge.
+        assert_eq!(j.watermark("t", 0), Some(30)); // local max kept
+        assert_eq!(j.watermark("t", 1), Some(100)); // new entry merged
+
         let _ = fs::remove_dir_all(&dir);
     }
 }

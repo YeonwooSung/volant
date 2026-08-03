@@ -171,7 +171,7 @@ docs for day-to-day reading: [ops](../ops.md), [consistency](../consistency.md),
 | 127 | ✅ | Txn coordinator registry TTL GC MVP (last-touch + `VOLANT_TXN_COORDINATOR_TTL_MS`; sweeper hook) | [PHASE127_SPEC.md](../PHASE127_SPEC.md) |
 | 128 | ✅ | BROKER Describe/Alter for txn coordinator registry TTL (`volant.txn.coordinator.registry.ttl.ms`) | [PHASE128_SPEC.md](../PHASE128_SPEC.md) |
 | 129 | ✅ | Controller SoT DeleteRecords truncate journal MVP (note/push + reconcile max watermark) | [PHASE129_SPEC.md](../PHASE129_SPEC.md) |
-| 130 | ✅ | Multi-controller majority consensus for truncate journal (Raft-style commit; best-effort push) | [PHASE130_SPEC.md](../PHASE130_SPEC.md) |
+| 130 | ✅ | Multi-controller majority consensus for truncate journal (Raft-style commit; always full-snapshot push) | [PHASE130_SPEC.md](../PHASE130_SPEC.md) |
 
 ---
 

@@ -1028,7 +1028,15 @@ impl Broker {
     }
 
     /// Phase 130: handle inter-broker TruncateJournalNote on **any** broker
-    /// (multi-controller durable replicate). Always merges + persists.
+    /// (multi-controller durable replicate). Max-merges + persists when valid.
+    ///
+    /// - Empty `topic` → [`ErrorCode::InvalidArg`], generation unchanged.
+    /// - `before_offset == 0` → no-op success (journal ignores zero watermarks).
+    /// - Stale `leader_epoch` notes still merge (max-merge never shrinks
+    ///   watermarks); local reconcile applies epoch fencing on truncate.
+    ///
+    /// Production deployments should enable ACL/auth on this path — notes are
+    /// otherwise only lightly validated here.
     pub fn handle_truncate_journal_note(
         &self,
         topic: &str,
@@ -1036,6 +1044,13 @@ impl Broker {
         before_offset: u64,
         leader_epoch: i32,
     ) -> (u16, u64) {
+        if topic.is_empty() {
+            return (
+                ErrorCode::InvalidArg as u16,
+                self.truncate_journal.generation(),
+            );
+        }
+        // before_offset == 0: local note is a no-op; return success + current gen.
         let gen = self.local_note_truncate_journal(
             topic,
             partition,
@@ -1063,12 +1078,35 @@ impl Broker {
     /// Target = `max(local log_start, journal watermark)`. When the journal
     /// is ahead of the local log, apply a local truncate first so the leader
     /// does not serve below the committed watermark while driving peers.
-    /// Then enqueue `ReplicaDeleteRecords` for assigned peers. Idempotent;
-    /// no-op in single-node mode.
+    /// Peers are always enqueued at the desired journal `target` (SoT).
+    ///
+    /// **Progress / freeze fix:** `last_reconcile` is set to `(epoch, target)`
+    /// only when local log is known `>= target` after the attempt. Partial
+    /// segment advances (`low < target`), errors, or epoch fence skips leave
+    /// `last_reconcile` unchanged so the next tick retries local truncate.
+    /// The return value counts partitions processed this pass (not skipped by
+    /// the fully-reconciled early-continue); `delete_records_outbox_reconcile_total`
+    /// increments only when `last_reconcile` advances.
+    ///
+    /// **Epoch fencing:** if the journal entry has `leader_epoch >= 0` and this
+    /// node's local leader epoch is **strictly less**, skip local truncate this
+    /// tick (stale leader view) but still enqueue peers with `target`.
+    /// Only partitions this node leads are considered (local apply is
+    /// leader-only via [`Self::delete_records`]).
+    ///
+    /// Idempotent once local is at target; no-op in single-node mode.
     pub fn reconcile_delete_records_outbox(&self) -> u64 {
         if self.cluster.is_none() {
             return 0;
         }
+        // Journal epoch stamps for local-apply fencing (topic, partition) → epoch.
+        let journal_epochs: HashMap<(String, u32), i32> = self
+            .truncate_journal
+            .list()
+            .into_iter()
+            .map(|e| ((e.topic, e.partition), e.leader_epoch))
+            .collect();
+
         // Collect led partitions + targets without holding the outbox lock.
         let targets: Vec<(String, u32, u64, u64, i32, Vec<u32>)> = {
             let topics = self.topics.read();
@@ -1114,26 +1152,75 @@ impl Broker {
         for (topic, partition, log_start, target, epoch, peers) in targets {
             let key = (topic.clone(), partition);
             let epoch_u = epoch as u32;
+            // Fully reconciled to this (epoch, target) — skip until target/epoch changes.
             if last.get(&key) == Some(&(epoch_u, target)) {
                 continue;
             }
-            // Apply journal watermark locally when we lag behind SoT.
+
+            // Local apply only when journal/desired watermark is ahead of log_start.
+            // `local_at_target` starts true when we already meet the watermark.
+            let mut local_at_target = log_start >= target;
             if target > log_start {
-                if let Ok((low, err)) = self.delete_records(&topic, partition, target) {
-                    if err != 0 {
-                        warn!(
-                            topic,
-                            partition,
-                            target,
-                            error_code = err,
-                            "reconcile local truncate failed"
-                        );
-                    } else if low < target {
-                        // Partial advance (segment boundaries) — still use low as peer target.
-                        // Continue with max(low, ...) for peers.
+                let journal_epoch = journal_epochs
+                    .get(&(topic.clone(), partition))
+                    .copied()
+                    .unwrap_or(-1);
+                // Journal stamped by a newer leader than our local view: do not
+                // truncate locally this tick (stale leader), but still drive peers.
+                let fenced = journal_epoch >= 0 && epoch_u < journal_epoch as u32;
+                if fenced {
+                    warn!(
+                        topic,
+                        partition,
+                        target,
+                        local_epoch = epoch_u,
+                        journal_epoch,
+                        "reconcile skip local truncate: journal epoch fences local leader"
+                    );
+                } else {
+                    match self.delete_records(&topic, partition, target) {
+                        Ok((low, err)) => {
+                            if err != 0 {
+                                warn!(
+                                    topic,
+                                    partition,
+                                    target,
+                                    error_code = err,
+                                    "reconcile local truncate failed"
+                                );
+                                // Leave local_at_target false — retry next tick.
+                            } else {
+                                // Achieved local watermark (segment-boundary clamp).
+                                let achieved = low.max(log_start);
+                                local_at_target = achieved >= target;
+                                if !local_at_target {
+                                    // Partial advance — peers still get full target SoT;
+                                    // do not mark last_reconcile so we retry locally.
+                                    warn!(
+                                        topic,
+                                        partition,
+                                        target,
+                                        achieved,
+                                        "reconcile local truncate partial; will retry"
+                                    );
+                                }
+                            }
+                        }
+                        Err(e) => {
+                            warn!(
+                                topic,
+                                partition,
+                                target,
+                                error = %e,
+                                "reconcile local truncate error"
+                            );
+                        }
                     }
                 }
             }
+
+            // Always enqueue the desired journal watermark for peers (SoT).
+            // While local lags, leader keeps retrying; outbox max-merges duplicates.
             for peer in peers {
                 let _ = self.delete_records_outbox.enqueue(
                     peer,
@@ -1143,10 +1230,14 @@ impl Broker {
                     epoch,
                 );
             }
-            last.insert(key, (epoch_u, target));
+
+            // Only freeze progress (last_reconcile) when local log is at target.
+            if local_at_target {
+                last.insert(key, (epoch_u, target));
+                self.delete_records_outbox_reconcile_total
+                    .fetch_add(1, Ordering::Relaxed);
+            }
             advanced += 1;
-            self.delete_records_outbox_reconcile_total
-                .fetch_add(1, Ordering::Relaxed);
         }
         advanced
     }

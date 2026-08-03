@@ -12,7 +12,7 @@ use volant_broker::broker_config::{
     DEFAULT_OPEN_TXN_TIMEOUT_MS, DEFAULT_PREPARED_TXN_TIMEOUT_MS, DEFAULT_SWEEP_INTERVAL_MS,
     DEFAULT_TRANSACTION_MAX_TIMEOUT_MS, KEY_FETCH_SESSION_IDLE_MS, KEY_FETCH_SESSION_MAX,
     KEY_OPEN_TXN_TIMEOUT_MS, KEY_PREPARED_TXN_TIMEOUT_MS, KEY_SWEEP_INTERVAL_MS,
-    KEY_TRANSACTION_MAX_TIMEOUT_MS,
+    KEY_TRANSACTION_MAX_TIMEOUT_MS, KEY_TXN_COORDINATOR_TTL_MS,
 };
 use volant_broker::kafka::codec::{
     encode_request, get_nullable_string, get_string, put_nullable_string, put_string,
@@ -128,6 +128,10 @@ async fn describe_broker_defaults() {
     assert_eq!(
         map.get(KEY_SWEEP_INTERVAL_MS),
         Some(&broker.sweep_interval_ms().to_string())
+    );
+    assert!(
+        map.contains_key(KEY_TXN_COORDINATOR_TTL_MS),
+        "Phase 128 registry TTL must appear among broker configs"
     );
     assert_eq!(map.len(), 7); // six Phase 99 knobs + Phase 128 registry TTL
 

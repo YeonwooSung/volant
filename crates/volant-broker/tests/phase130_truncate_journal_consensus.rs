@@ -275,6 +275,62 @@ async fn majority_with_one_peer_down() {
     s2.abort();
 }
 
+/// Only proposer live (N=3 configured, peers never started): acks=1 < majority=2
+/// → consensus_fail increments; local durable note still retained.
+#[tokio::test]
+async fn majority_fail_only_proposer_live() {
+    let base = unique_dir("maj-solo");
+    let _g = Guard(base.clone());
+
+    let (l1, p1) = bind().await;
+    // Peers never listen — RPCs fail; only local ack counts.
+    let p2 = p1.saturating_add(100).max(32000);
+    let p3 = p2.saturating_add(1);
+    let cfg = cluster_config([p1, p2, p3]);
+    let b1 = {
+        let b = Broker::with_cluster(
+            StorageConfig {
+                data_dir: base.join("n1"),
+                flush_every_n: 1,
+                ..StorageConfig::default()
+            },
+            1,
+            cfg,
+        )
+        .unwrap();
+        b.set_advertised("127.0.0.1", p1);
+        Arc::new(b)
+    };
+    let _bg1 = start_background_tasks(Arc::clone(&b1));
+    let s1 = {
+        let b = Arc::clone(&b1);
+        tokio::spawn(async move {
+            serve_listener(l1, b).await.ok();
+        })
+    };
+    tokio::time::sleep(Duration::from_millis(30)).await;
+
+    b1.create_topic("solo", 1).unwrap();
+
+    let before_fail = b1.truncate_journal_consensus_fail_total();
+    let before_ok = b1.truncate_journal_consensus_success_total();
+    fanout_truncate_journal_note(&b1, "solo", 0, 42, 0).await;
+
+    assert!(
+        b1.truncate_journal_consensus_fail_total() > before_fail,
+        "N=3 with only proposer live must fail majority (acks=1 < need=2)"
+    );
+    assert_eq!(
+        b1.truncate_journal_consensus_success_total(),
+        before_ok,
+        "solo proposer must not count as consensus success"
+    );
+    // Best-effort local state retained even when consensus fails.
+    assert_eq!(b1.truncate_journal().watermark("solo", 0), Some(42));
+
+    s1.abort();
+}
+
 #[test]
 fn push_max_merge_does_not_shrink() {
     let base = unique_dir("merge");

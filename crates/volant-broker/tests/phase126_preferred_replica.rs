@@ -136,8 +136,18 @@ fn produce_body_v3(topic: &str, batch: &[u8]) -> BytesMut {
 }
 
 fn fetch_body_v11(topic: &str, fetch_offset: i64, rack: Option<&str>) -> BytesMut {
+    fetch_body_v11_with_replica(topic, fetch_offset, -1, rack)
+}
+
+/// Fetch v11 body with explicit `replica_id` (consumer = -1; follower ≥ 0).
+fn fetch_body_v11_with_replica(
+    topic: &str,
+    fetch_offset: i64,
+    replica_id: i32,
+    rack: Option<&str>,
+) -> BytesMut {
     let mut body = BytesMut::new();
-    body.put_i32(-1); // replica
+    body.put_i32(replica_id);
     body.put_i32(0); // max_wait
     body.put_i32(1); // min_bytes
     body.put_i32(1_048_576); // max_bytes
@@ -479,9 +489,11 @@ async fn follower_serves_fetch_after_redirect() {
     let (l1, p1) = bind_port0().await;
     let (l2, p2) = bind_port0().await;
     let (l3, p3) = bind_port0().await;
+    // All same rack so any leader placement has an eligible same-rack follower
+    // after catch_up_isr (never vacuous on preferred = None).
     let cfg = cluster_config_racks(
         [p1, p2, p3],
-        [Some("r1"), Some("r1"), Some("r2")],
+        [Some("r1"), Some("r1"), Some("r1")],
     );
 
     let mk = |id: u32, dir: PathBuf| {
@@ -532,17 +544,8 @@ async fn follower_serves_fetch_after_redirect() {
         _ => panic!(),
     };
 
-    // Produce on leader and replicate bytes to followers via produce path
-    // (followers get local logs from create; for in-process tests append on each
-    // local log by producing only on leader then reading LEO — use native produce
-    // and then copy via test LEO only sets LEO, not data. For follower serve we
-    // need data on follower: use produce on leader then manual? In cluster mode
-    // each node has local partition only if replica. Followers have empty log
-    // unless ReplicaFetch fills them.
-    //
-    // MVP honesty: follower fetch_kafka serves local log. Without real
-    // replication of bytes, follower returns empty. Still assert preferred id
-    // and that follower Fetch does not error (error=0).
+    // Produce on leader. Follower logs may be empty without ReplicaFetch byte
+    // replication; still assert preferred redirect + follower Fetch error=0.
     let mut batch = MessageBatch::default();
     batch.messages.push(Message::from_value("data"));
     let (_, err) = leader
@@ -551,49 +554,49 @@ async fn follower_serves_fetch_after_redirect() {
     assert_eq!(err, 0);
     catch_up_isr(&leader, "fs");
 
-    let pref = leader
-        .select_preferred_read_replica(&topic, PartitionId(0), Some("r1"))
-        .or_else(|| leader.select_preferred_read_replica(&topic, PartitionId(0), Some("r2")));
-    // At least one same-rack peer exists for two of the three leader placements.
-    if let Some(pref_id) = pref {
-        let leader_addr = format!(
-            "127.0.0.1:{}",
-            [p1, p2, p3][(leader_id - 1) as usize]
-        );
-        let rack = leader.broker_rack(pref_id).unwrap();
-        let resp = kafka_rpc(
-            &leader_addr,
-            encode_request(
-                1,
-                11,
-                5,
-                Some("c"),
-                &fetch_body_v11("fs", 0, Some(rack.as_str())),
-            ),
-        )
-        .await;
-        let mut src = resp.freeze();
-        assert_eq!(src.get_i32(), 5);
-        let (_e, _h, preferred, rec_len) = parse_fetch_v11_preferred(src);
-        assert_eq!(preferred, pref_id as i32);
-        assert_eq!(rec_len, 0);
+    let pref = leader.select_preferred_read_replica(&topic, PartitionId(0), Some("r1"));
+    assert!(
+        pref.is_some(),
+        "setup must yield preferred replica (same-rack ISR follower LEO≥HWM); leader={leader_id}"
+    );
+    let pref_id = pref.unwrap();
 
-        // Fetch preferred broker: no NotLeader error on consumer path.
-        let pref_addr = format!(
-            "127.0.0.1:{}",
-            [p1, p2, p3][(pref_id - 1) as usize]
-        );
-        let resp2 = kafka_rpc(
-            &pref_addr,
-            encode_request(1, 11, 6, Some("c"), &fetch_body_v11("fs", 0, None)),
-        )
-        .await;
-        let mut src2 = resp2.freeze();
-        assert_eq!(src2.get_i32(), 6);
-        let (part_err, _h2, preferred2, _) = parse_fetch_v11_preferred(src2);
-        assert_eq!(part_err, 0);
-        assert_eq!(preferred2, -1);
-    }
+    let leader_addr = format!(
+        "127.0.0.1:{}",
+        [p1, p2, p3][(leader_id - 1) as usize]
+    );
+    let resp = kafka_rpc(
+        &leader_addr,
+        encode_request(
+            1,
+            11,
+            5,
+            Some("c"),
+            &fetch_body_v11("fs", 0, Some("r1")),
+        ),
+    )
+    .await;
+    let mut src = resp.freeze();
+    assert_eq!(src.get_i32(), 5);
+    let (_e, _h, preferred, rec_len) = parse_fetch_v11_preferred(src);
+    assert_eq!(preferred, pref_id as i32);
+    assert_eq!(rec_len, 0);
+
+    // Fetch preferred broker: no NotLeader error on consumer path.
+    let pref_addr = format!(
+        "127.0.0.1:{}",
+        [p1, p2, p3][(pref_id - 1) as usize]
+    );
+    let resp2 = kafka_rpc(
+        &pref_addr,
+        encode_request(1, 11, 6, Some("c"), &fetch_body_v11("fs", 0, None)),
+    )
+    .await;
+    let mut src2 = resp2.freeze();
+    assert_eq!(src2.get_i32(), 6);
+    let (part_err, _h2, preferred2, _) = parse_fetch_v11_preferred(src2);
+    assert_eq!(part_err, 0);
+    assert_eq!(preferred2, -1);
 
     s1.abort();
     s2.abort();
@@ -663,63 +666,139 @@ async fn metadata_emits_broker_rack() {
     s.abort();
 }
 
-/// Follower Fetch (replica_id >= 0) must not get PreferredReadReplica redirect.
+/// Follower Fetch (replica_id >= 0) must not get PreferredReadReplica redirect
+/// even when a same-rack ISR follower is eligible for consumer redirect.
+///
+/// Proves the `replica_id < 0` gate: consumer path gets preferred != -1 first,
+/// then the same layout with replica_id >= 0 yields preferred == -1.
 #[tokio::test]
 async fn follower_fetch_no_preferred_redirect() {
     let base = unique_dir("follower-rid");
     let _g = Guard(base.clone());
-    let broker = Arc::new(Broker::new(StorageConfig {
-        data_dir: base.join("n1"),
-        flush_every_n: 1,
-        ..StorageConfig::default()
-    }));
-    broker.create_topic("t", 1).unwrap();
-    let batch = encode_record_batch(&sample_records(b"x"));
-    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
-    let addr = format!("127.0.0.1:{}", listener.local_addr().unwrap().port());
-    let b = Arc::clone(&broker);
-    let server = tokio::spawn(async move {
-        serve_kafka_listener(listener, b).await.ok();
-    });
-    tokio::time::sleep(Duration::from_millis(20)).await;
 
-    let _ = kafka_rpc(
-        &addr,
-        encode_request(0, 8, 2, Some("p"), &produce_body_v3("t", &batch)),
+    let (l1, p1) = bind_port0().await;
+    let (l2, p2) = bind_port0().await;
+    let (l3, p3) = bind_port0().await;
+    // All same rack ⇒ any leader has eligible same-rack followers after catch-up.
+    let cfg = cluster_config_racks(
+        [p1, p2, p3],
+        [Some("rack-a"), Some("rack-a"), Some("rack-a")],
+    );
+
+    let mk = |id: u32, dir: PathBuf| {
+        let storage = StorageConfig {
+            data_dir: dir,
+            flush_every_n: 1,
+            ..StorageConfig::default()
+        };
+        let b = Broker::with_cluster(storage, id, cfg.clone()).unwrap();
+        b.set_advertised("127.0.0.1", [p1, p2, p3][(id - 1) as usize]);
+        Arc::new(b)
+    };
+    let b1 = mk(1, base.join("n1"));
+    let b2 = mk(2, base.join("n2"));
+    let b3 = mk(3, base.join("n3"));
+    let _bg1 = start_background_tasks(Arc::clone(&b1));
+    let _bg2 = start_background_tasks(Arc::clone(&b2));
+    let _bg3 = start_background_tasks(Arc::clone(&b3));
+
+    let s1 = {
+        let b = Arc::clone(&b1);
+        tokio::spawn(async move {
+            serve_kafka_listener(l1, b).await.ok();
+        })
+    };
+    let s2 = {
+        let b = Arc::clone(&b2);
+        tokio::spawn(async move {
+            serve_kafka_listener(l2, b).await.ok();
+        })
+    };
+    let s3 = {
+        let b = Arc::clone(&b3);
+        tokio::spawn(async move {
+            serve_kafka_listener(l3, b).await.ok();
+        })
+    };
+    tokio::time::sleep(Duration::from_millis(30)).await;
+
+    b1.create_topic("t", 1).unwrap();
+    propagate(&[&b1, &b2, &b3], "t").await;
+    let topic = TopicName::new("t");
+    let leader_id = b1.metadata(None).topics[0].partitions[0].leader;
+    let leader = match leader_id {
+        1 => Arc::clone(&b1),
+        2 => Arc::clone(&b2),
+        3 => Arc::clone(&b3),
+        _ => panic!("bad leader"),
+    };
+    let leader_addr = format!(
+        "127.0.0.1:{}",
+        [p1, p2, p3][(leader_id - 1) as usize]
+    );
+
+    let mut batch = MessageBatch::default();
+    batch.messages.push(Message::from_value("x"));
+    let (_, err) = leader
+        .produce_with_acks(&topic, PartitionId(0), batch, 1, None)
+        .unwrap();
+    assert_eq!(err, 0);
+    catch_up_isr(&leader, "t");
+
+    // Sanity: preferred selection is eligible on this layout.
+    let expected = leader
+        .select_preferred_read_replica(&topic, PartitionId(0), Some("rack-a"));
+    assert!(
+        expected.is_some(),
+        "same-rack cluster after catch_up must have preferred replica; leader={leader_id}"
+    );
+
+    // 1) Consumer fetch (replica_id = -1) → PreferredReadReplica redirect.
+    let resp_consumer = kafka_rpc(
+        &leader_addr,
+        encode_request(
+            1,
+            11,
+            5,
+            Some("c"),
+            &fetch_body_v11_with_replica("t", 0, -1, Some("rack-a")),
+        ),
     )
     .await;
-
-    // Fetch v11 with replica_id = 1 (follower) and a rack string.
-    let mut body = BytesMut::new();
-    body.put_i32(1); // replica_id >= 0 → follower
-    body.put_i32(0);
-    body.put_i32(1);
-    body.put_i32(1_048_576);
-    body.put_u8(0);
-    body.put_i32(0);
-    body.put_i32(-1);
-    body.put_i32(1);
-    put_string(&mut body, "t");
-    body.put_i32(1);
-    body.put_i32(0);
-    body.put_i32(-1);
-    body.put_i64(0);
-    body.put_i64(-1);
-    body.put_i32(1_000_000);
-    body.put_i32(0);
-    put_string(&mut body, "rack-a");
-
-    let resp = kafka_rpc(
-        &addr,
-        encode_request(1, 11, 5, Some("c"), &body),
-    )
-    .await;
-    let mut src = resp.freeze();
+    let mut src = resp_consumer.freeze();
     assert_eq!(src.get_i32(), 5);
-    let (_err, _hwm, preferred, rec_len) = parse_fetch_v11_preferred(src);
-    assert_eq!(preferred, -1, "follower fetch must not redirect");
-    // Records may or may not be empty depending on HWM; preferred is the assert.
+    let (_err, hwm, preferred_consumer, rec_len) = parse_fetch_v11_preferred(src);
+    assert!(hwm > 0);
+    assert_ne!(
+        preferred_consumer, -1,
+        "consumer fetch must get preferred redirect when eligible"
+    );
+    assert_eq!(preferred_consumer, expected.unwrap() as i32);
+    assert_eq!(rec_len, 0, "redirect responses carry empty records");
 
-    let _ = rec_len;
-    server.abort();
+    // 2) Follower fetch (replica_id >= 0) on the same eligible layout → no redirect.
+    // Use a follower id that is not the leader so replica_fetch path is meaningful.
+    let follower_replica_id = if leader_id == 1 { 2i32 } else { 1i32 };
+    let resp_follower = kafka_rpc(
+        &leader_addr,
+        encode_request(
+            1,
+            11,
+            6,
+            Some("c"),
+            &fetch_body_v11_with_replica("t", 0, follower_replica_id, Some("rack-a")),
+        ),
+    )
+    .await;
+    let mut src2 = resp_follower.freeze();
+    assert_eq!(src2.get_i32(), 6);
+    let (_err2, _hwm2, preferred_follower, _) = parse_fetch_v11_preferred(src2);
+    assert_eq!(
+        preferred_follower, -1,
+        "follower fetch (replica_id >= 0) must not get PreferredReadReplica redirect"
+    );
+
+    s1.abort();
+    s2.abort();
+    s3.abort();
 }

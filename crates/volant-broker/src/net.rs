@@ -1230,13 +1230,14 @@ pub async fn fanout_cluster_broker_config(
     }
 }
 
-/// Phase 129/130: multi-controller majority note + best-effort push.
+/// Phase 129/130: multi-controller majority note + best-effort full-snapshot push.
 ///
 /// 1. Durable **local** note (counts as 1 ack).
 /// 2. **Parallel** `TruncateJournalNote` to all other live peers (`JoinSet`).
 /// 3. If acks ≥ majority(configured N) → consensus success metric.
-/// 4. Best-effort **parallel** `TruncateJournalPush` only to peers that did
-///    **not** durable-ack the note (skip already-caught-up ackers).
+/// 4. Best-effort **parallel** `TruncateJournalPush` to **all** live peers
+///    (full journal snapshot) so multi-key catch-up works even when a peer
+///    acked the single-key note.
 ///
 /// Never fails the client DeleteRecords path. Not full Raft log/leader election.
 pub async fn fanout_truncate_journal_note(
@@ -1285,15 +1286,13 @@ pub async fn fanout_truncate_journal_note(
     }
 
     let mut max_gen = local_gen;
-    let mut note_acked: std::collections::HashSet<u32> = std::collections::HashSet::new();
     while let Some(joined) = set.join_next().await {
         match joined {
-            Ok((peer_id, Ok(Response::TruncateJournalNote {
+            Ok((_peer_id, Ok(Response::TruncateJournalNote {
                 error_code: 0,
                 generation,
             }))) => {
                 acks += 1;
-                note_acked.insert(peer_id);
                 if generation > max_gen {
                     max_gen = generation;
                 }
@@ -1346,10 +1345,9 @@ pub async fn fanout_truncate_journal_note(
         );
     }
 
-    // 4) Push only to peers that missed the note (already have durable watermark).
+    // Always full-snapshot push to live peers so multi-key journal catch-up works.
     let push_peers: Vec<(u32, String)> = peer_ids
         .into_iter()
-        .filter(|id| !note_acked.contains(id))
         .filter_map(|id| broker.broker_addr(id).map(|a| (id, a)))
         .collect();
     fanout_truncate_journal_push_to(broker, max_gen.max(local_gen), push_peers).await;
@@ -1370,7 +1368,8 @@ pub async fn fanout_truncate_journal_push(broker: &Broker, generation: u64) {
     fanout_truncate_journal_push_to(broker, generation, peers).await;
 }
 
-/// Best-effort parallel push to an explicit peer list (skip already-noted peers).
+/// Best-effort parallel push of the full truncate journal snapshot to an
+/// explicit peer list.
 async fn fanout_truncate_journal_push_to(
     broker: &Broker,
     generation: u64,
@@ -1418,10 +1417,13 @@ async fn fanout_truncate_journal_push_to(
 /// Best-effort DeleteRecords fan-out to other replicas (Phase 113/116 + 129/130).
 ///
 /// After a successful **leader** local truncate: multi-controller journal note
-/// (majority + selective push), then **parallel** `ReplicaDeleteRecords` to
-/// peers with outbox enqueue on failure. Never fails the client.
+/// (majority + full-snapshot push), then **parallel** `ReplicaDeleteRecords` to
+/// peers. Peers are **pre-enqueued** on the durable outbox before the JoinSet
+/// so a budget abort or join failure cannot lose retry state; successful /
+/// fenced peers are `drop_entry`'d. Never fails the client.
 ///
-/// Enforced overall deadline: [`delete_records_fanout_budget`] (default **15s**).
+/// Enforced overall deadline: [`delete_records_fanout_budget`] (default **20s**,
+/// or at least `3 *` [`inter_broker_rpc_timeout`] `+ 2s` when env unset).
 /// Each peer RPC is still bounded by [`inter_broker_rpc_timeout`] (default **5s**).
 pub async fn fanout_delete_records(
     broker: &Broker,
@@ -1443,7 +1445,7 @@ pub async fn fanout_delete_records(
                 partition,
                 before_offset,
                 budget_ms = budget.as_millis() as u64,
-                "delete records fan-out overall budget exceeded; remaining peers left to outbox/reconcile"
+                "delete records fan-out overall budget exceeded; unfinished peers remain on outbox for drain/reconcile"
             );
         }
     }
@@ -1466,6 +1468,20 @@ async fn fanout_delete_records_inner(
     if peers.is_empty() {
         return;
     }
+
+    // Pre-enqueue all fan-out peers before spawning RPCs so budget abort /
+    // JoinError cannot lose outbox coverage (re-enqueue on later failure is
+    // idempotent).
+    for (replica_id, _addr, leader_epoch) in &peers {
+        broker.enqueue_delete_records_outbox(
+            *replica_id,
+            topic,
+            partition,
+            before_offset,
+            *leader_epoch,
+        );
+    }
+
     let auth = broker.auth_token();
     let tls = broker.inter_broker_tls();
     let mut set = tokio::task::JoinSet::new();
@@ -1516,6 +1532,7 @@ async fn fanout_delete_records_inner(
                         partition,
                     );
                 } else {
+                    // Already pre-enqueued; re-enqueue is idempotent / refreshes.
                     broker.enqueue_delete_records_outbox(
                         replica_id,
                         topic,
@@ -1561,6 +1578,7 @@ async fn fanout_delete_records_inner(
                     leader_epoch,
                 );
             }
+            // Pre-enqueued: JoinError has no replica_id; entry stays for drain.
             Err(e) => {
                 warn!(error = %e, topic, partition, "delete records fan-out join error");
                 broker.note_delete_records_fanout_error();
@@ -2222,11 +2240,13 @@ pub async fn maybe_forward_kafka_fetch(
 pub const DEFAULT_INTER_BROKER_RPC_TIMEOUT_MS: u64 = 5_000;
 
 /// Default overall budget for DeleteRecords peer fan-out (journal note + push
-/// + ReplicaDeleteRecords): **15 seconds**.
+/// + ReplicaDeleteRecords): **20 seconds** (≥ 3 × default 5s RPC + margin).
 ///
 /// Override with `VOLANT_DELETE_RECORDS_FANOUT_BUDGET_MS` (milliseconds; `0`
-/// raised to 1ms).
-pub const DEFAULT_DELETE_RECORDS_FANOUT_BUDGET_MS: u64 = 15_000;
+/// raised to 1ms). When the env is **unset**, the effective budget is
+/// `max(DEFAULT, 3 * inter_broker_rpc_timeout_ms + 2000)` so a raised per-RPC
+/// timeout still leaves room for all three phases.
+pub const DEFAULT_DELETE_RECORDS_FANOUT_BUDGET_MS: u64 = 20_000;
 
 fn env_duration_ms(var: &str, default_ms: u64) -> Duration {
     let ms = std::env::var(var)
@@ -2245,13 +2265,20 @@ pub fn inter_broker_rpc_timeout() -> Duration {
     )
 }
 
-/// Effective DeleteRecords fan-out overall budget (default 15s; env
-/// `VOLANT_DELETE_RECORDS_FANOUT_BUDGET_MS`).
+/// Effective DeleteRecords fan-out overall budget.
+///
+/// - Env `VOLANT_DELETE_RECORDS_FANOUT_BUDGET_MS` set → that value (min 1ms).
+/// - Else → `max(DEFAULT_DELETE_RECORDS_FANOUT_BUDGET_MS,
+///   3 * inter_broker_rpc_timeout_ms + 2000)`.
 pub fn delete_records_fanout_budget() -> Duration {
-    env_duration_ms(
-        "VOLANT_DELETE_RECORDS_FANOUT_BUDGET_MS",
-        DEFAULT_DELETE_RECORDS_FANOUT_BUDGET_MS,
-    )
+    if let Ok(s) = std::env::var("VOLANT_DELETE_RECORDS_FANOUT_BUDGET_MS") {
+        if let Ok(ms) = s.parse::<u64>() {
+            return Duration::from_millis(ms.max(1));
+        }
+    }
+    let rpc_ms = inter_broker_rpc_timeout().as_millis() as u64;
+    let floor = (3u64.saturating_mul(rpc_ms)).saturating_add(2_000);
+    Duration::from_millis(DEFAULT_DELETE_RECORDS_FANOUT_BUDGET_MS.max(floor).max(1))
 }
 
 /// Inter-broker RPC over a short-lived connection (plain TCP or optional TLS).
@@ -2769,6 +2796,9 @@ fn authorize_request(
     use crate::acl::{AclOperation, ResourceType, CLUSTER_RESOURCE};
 
     // Inter-broker traffic and auth handshakes are not ACL-gated.
+    // TruncateJournal* is *not* in this list: the journal survives leadership
+    // and is Cluster-Alter gated when ACLs are enabled (inter-broker auth
+    // principal still allowed).
     match req {
         Request::ReplicaFetch { .. }
         | Request::HeartbeatBroker { .. }
@@ -2776,8 +2806,6 @@ fn authorize_request(
         | Request::ReplicaDeleteRecords { .. }
         | Request::ClusterBrokerConfig { .. }
         | Request::ClusterAclSnapshot { .. }
-        | Request::TruncateJournalNote { .. }
-        | Request::TruncateJournalPush { .. }
         | Request::TxnParticipantOpen { .. }
         | Request::TxnParticipantPrepare { .. }
         | Request::TxnParticipantComplete { .. }
@@ -2857,14 +2885,19 @@ fn authorize_request(
         Request::ListScramUsers => {
             check(ResourceType::Cluster, CLUSTER_RESOURCE, AclOperation::Describe)
         }
+        // Journal RPCs survive leadership: require Cluster Alter, or allow the
+        // configured inter-broker auth principal (token Auth) so fan-out works.
+        Request::TruncateJournalNote { .. } | Request::TruncateJournalPush { .. } => {
+            let ib = broker.auth_principal_name();
+            principal.map(|p| p == ib.as_str()).unwrap_or(false)
+                || check(ResourceType::Cluster, CLUSTER_RESOURCE, AclOperation::Alter)
+        }
         Request::ReplicaFetch { .. }
         | Request::HeartbeatBroker { .. }
         | Request::ClusterState { .. }
         | Request::ReplicaDeleteRecords { .. }
         | Request::ClusterBrokerConfig { .. }
         | Request::ClusterAclSnapshot { .. }
-        | Request::TruncateJournalNote { .. }
-        | Request::TruncateJournalPush { .. }
         | Request::TxnParticipantOpen { .. }
         | Request::TxnParticipantPrepare { .. }
         | Request::TxnParticipantComplete { .. }
@@ -3850,7 +3883,7 @@ async fn handle_request(broker: &Broker, req: Request) -> Result<Response> {
         } => match broker.delete_records(&topic, partition, before_offset) {
             Ok((low_watermark, error_code)) => {
                 // Phase 113/129/130: best-effort fan-out after local success.
-                // Budget is enforced inside fanout_delete_records (default 15s
+                // Budget is enforced inside fanout_delete_records (default 20s
                 // overall; 5s per inter-broker RPC).
                 if error_code == 0 {
                     fanout_delete_records(broker, &topic, partition, before_offset).await;
