@@ -295,13 +295,15 @@ pub fn encode_request(req: &Request) -> Result<Bytes> {
             generation,
             applied_config_generation,
             applied_acl_generation,
+            applied_journal_generation,
         } => {
             dst.put_u32_le(*broker_id);
             dst.put_u32_le(*controller_id_known);
             dst.put_u32_le(*generation);
-            // Phase 117: applied admin generations (backward-compatible trailer).
+            // Phase 117/131: applied admin + journal gens (backward-compatible trailer).
             dst.put_u64_le(*applied_config_generation);
             dst.put_u64_le(*applied_acl_generation);
+            dst.put_u64_le(*applied_journal_generation);
         }
         Request::ClusterState { known_generation } => {
             dst.put_u32_le(*known_generation);
@@ -774,18 +776,23 @@ pub fn decode_request(opcode: u16, payload: &[u8]) -> Result<Request> {
             let broker_id = src.get_u32_le();
             let controller_id_known = src.get_u32_le();
             let generation = src.get_u32_le();
-            // Phase 117 trailer (optional for older peers).
-            let (applied_config_generation, applied_acl_generation) = if src.remaining() >= 16 {
-                (src.get_u64_le(), src.get_u64_le())
-            } else {
-                (0, 0)
-            };
+            // Phase 117/131 trailer (optional for older peers).
+            // 24 bytes: config + acl + journal; 16 bytes: config + acl only.
+            let (applied_config_generation, applied_acl_generation, applied_journal_generation) =
+                if src.remaining() >= 24 {
+                    (src.get_u64_le(), src.get_u64_le(), src.get_u64_le())
+                } else if src.remaining() >= 16 {
+                    (src.get_u64_le(), src.get_u64_le(), 0)
+                } else {
+                    (0, 0, 0)
+                };
             Ok(Request::HeartbeatBroker {
                 broker_id,
                 controller_id_known,
                 generation,
                 applied_config_generation,
                 applied_acl_generation,
+                applied_journal_generation,
             })
         }
         RequestOpcode::ClusterState => {
@@ -3262,6 +3269,7 @@ mod tests {
             generation: 5,
             applied_config_generation: 3,
             applied_acl_generation: 2,
+            applied_journal_generation: 9,
         };
         let b = encode_request(&req).unwrap();
         assert_eq!(
@@ -3283,6 +3291,27 @@ mod tests {
                 generation: 5,
                 applied_config_generation: 0,
                 applied_acl_generation: 0,
+                applied_journal_generation: 0,
+            }
+        );
+        // Phase 117-only trailer (16 bytes) defaults journal gen to 0.
+        let mut p117 = bytes::BytesMut::new();
+        p117.put_u32_le(2);
+        p117.put_u32_le(1);
+        p117.put_u32_le(5);
+        p117.put_u64_le(3);
+        p117.put_u64_le(2);
+        let p117_req =
+            decode_request(RequestOpcode::HeartbeatBroker as u16, &p117).unwrap();
+        assert_eq!(
+            p117_req,
+            Request::HeartbeatBroker {
+                broker_id: 2,
+                controller_id_known: 1,
+                generation: 5,
+                applied_config_generation: 3,
+                applied_acl_generation: 2,
+                applied_journal_generation: 0,
             }
         );
 

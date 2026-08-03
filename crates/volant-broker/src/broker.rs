@@ -982,6 +982,28 @@ impl Broker {
         self.truncate_journal.consensus_fail_total()
     }
 
+    /// Phase 131: successful truncate-journal rejoin catch-up pushes.
+    pub fn journal_catchup_success_total(&self) -> u64 {
+        self.truncate_journal.journal_catchup_success_total()
+    }
+
+    /// Phase 131: failed truncate-journal rejoin catch-up pushes.
+    pub fn journal_catchup_errors_total(&self) -> u64 {
+        self.truncate_journal.journal_catchup_errors_total()
+    }
+
+    /// Whether a peer's applied journal generation lags local journal SoT (Phase 131).
+    ///
+    /// True when this node has a newer journal generation (`local > peer_applied`)
+    /// and local state is non-empty (`local_gen > 0` or at least one watermark).
+    pub fn peer_journal_gen_lags(&self, peer_applied_journal: u64) -> bool {
+        let local_gen = self.truncate_journal_generation();
+        if local_gen <= peer_applied_journal {
+            return false;
+        }
+        local_gen > 0 || self.truncate_journal.entry_count() > 0
+    }
+
     /// Configured cluster size for majority (static membership).
     pub fn cluster_member_count(&self) -> usize {
         self.cluster

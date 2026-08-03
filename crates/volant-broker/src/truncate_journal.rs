@@ -115,6 +115,10 @@ pub struct TruncateJournal {
     consensus_success_total: AtomicU64,
     /// Phase 130: proposals that failed to reach majority.
     consensus_fail_total: AtomicU64,
+    /// Phase 131: successful heartbeat rejoin journal catch-up pushes.
+    journal_catchup_success_total: AtomicU64,
+    /// Phase 131: failed heartbeat rejoin journal catch-up pushes.
+    journal_catchup_errors_total: AtomicU64,
     /// Once-per-process warn when new keys are refused / skipped at cap.
     cap_warned: AtomicBool,
 }
@@ -161,6 +165,8 @@ impl TruncateJournal {
             persist_errors_total: AtomicU64::new(0),
             consensus_success_total: AtomicU64::new(0),
             consensus_fail_total: AtomicU64::new(0),
+            journal_catchup_success_total: AtomicU64::new(0),
+            journal_catchup_errors_total: AtomicU64::new(0),
             cap_warned: AtomicBool::new(false),
         }
     }
@@ -200,12 +206,32 @@ impl TruncateJournal {
         self.consensus_fail_total.load(Ordering::Relaxed)
     }
 
+    /// Phase 131: successful journal rejoin catch-up pushes.
+    pub fn journal_catchup_success_total(&self) -> u64 {
+        self.journal_catchup_success_total.load(Ordering::Relaxed)
+    }
+
+    /// Phase 131: failed journal rejoin catch-up pushes.
+    pub fn journal_catchup_errors_total(&self) -> u64 {
+        self.journal_catchup_errors_total.load(Ordering::Relaxed)
+    }
+
     pub(crate) fn note_consensus_success(&self) {
         self.consensus_success_total.fetch_add(1, Ordering::Relaxed);
     }
 
     pub(crate) fn note_consensus_fail(&self) {
         self.consensus_fail_total.fetch_add(1, Ordering::Relaxed);
+    }
+
+    pub(crate) fn note_journal_catchup_success(&self) {
+        self.journal_catchup_success_total
+            .fetch_add(1, Ordering::Relaxed);
+    }
+
+    pub(crate) fn note_journal_catchup_error(&self) {
+        self.journal_catchup_errors_total
+            .fetch_add(1, Ordering::Relaxed);
     }
 
     /// Raft-style majority of `n` configured members (`n/2 + 1`).

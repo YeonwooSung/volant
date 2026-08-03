@@ -342,6 +342,10 @@ pub enum Request {
         ///
         /// Older peers omit this on the wire; decoders default to `0`.
         applied_acl_generation: u64,
+        /// Last applied truncate-journal generation on the sender (Phase 131).
+        ///
+        /// Older peers omit this on the wire; decoders default to `0`.
+        applied_journal_generation: u64,
     },
     /// Request full cluster assignment snapshot.
     ClusterState {

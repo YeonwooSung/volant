@@ -3119,7 +3119,7 @@ catch-up MVP; controller disk loss loses SoT until re-note.
 Kafka wire fuzz, full openraft/KRaft dynamic membership (majority journal → Phase 130), full Kafka broker catalog,
 true multi-master ACL merge / heterogeneous per-broker overrides without
 controller, shared session store, full preferred selector, heartbeat journal
-re-push.
+re-push → **closed by Phase 131**.
 
 ---
 
@@ -3139,6 +3139,31 @@ Binding: **[docs/PHASE130_SPEC.md](./docs/PHASE130_SPEC.md)**.
 
 **Honest limitations:** not full Raft log/leader election; client does not wait
 for majority; static membership N.
+
+**Still deferred:** full openraft/KRaft / dynamic membership, multi-lang,
+chaos-mesh / long fuzz, full KIP-890/939, shared session store, full preferred
+selector, heterogeneous per-broker BROKER overrides without controller,
+heartbeat journal rejoin catch-up → **closed by Phase 131**.
+
+---
+
+### Phase 131 — Truncate journal rejoin catch-up (MVP) ✅
+
+**Goal:** Peers that miss Phase 129/130 journal note/push (offline, flaky RPC,
+restart) **converge** after rejoin via heartbeat lag detection + best-effort
+`TruncateJournalPush`, instead of permanent watermark drift until the next
+DeleteRecords.
+
+Binding: **[docs/PHASE131_SPEC.md](./docs/PHASE131_SPEC.md)**.
+
+- [x] `HeartbeatBroker` trailer `applied_journal_generation` (after config/ACL gens)
+- [x] Lag-driven full-snapshot `TruncateJournalPush` (opcode 88); multi-controller ok
+- [x] Metrics `volant_journal_catchup_success_total` / `_errors_total`
+- [x] Tests: `phase131_journal_catchup` + protocol trailer round-trips
+- [x] Living docs honesty
+
+**Honest limitations:** not Raft; brief lag until next successful heartbeat;
+controller-centric heartbeats; generation is process-local (not commit index).
 
 **Still deferred:** full openraft/KRaft / dynamic membership, multi-lang,
 chaos-mesh / long fuzz, full KIP-890/939, shared session store, full preferred
@@ -3181,7 +3206,7 @@ marker clip 111; fuzz corpus smoke CI 112; cluster admin fan-out 113) — see
 
 ## Suggested implementation order (PRs)
 
-Phases **0–130 are shipped**. Historical PR order for the core:
+Phases **0–131 are shipped**. Historical PR order for the core:
 
 1. Phase 1 segment format + unit tests  
 2. Phase 1 recovery + retention  
@@ -3214,6 +3239,7 @@ Phases **0–130 are shipped**. Historical PR order for the core:
 29. Phase 128 (BROKER config for registry TTL MVP) ✅  
 30. Phase 129 (controller SoT truncate journal MVP) ✅  
 31. Phase 130 (multi-controller majority journal consensus MVP) ✅  
+32. Phase 131 (truncate journal rejoin catch-up MVP) ✅  
 
 ---
 
@@ -3254,7 +3280,7 @@ cargo run -p volant-bench --release
 cargo test --workspace
 ```
 
-**Status (post–Phase 130):** core broker, ops (metrics / TLS / auth / SCRAM /
+**Status (post–Phase 131):** core broker, ops (metrics / TLS / auth / SCRAM /
 ACLs / Helm), and the Kafka wire shim are **shipped** (Fetch 0–18 Kafka max;
 ACL admin 0–3 with User resource; soft-marker `READ_COMMITTED` with **marker GC/clip**
 on DeleteRecords/retention/load (Phase 104/111); durable OFLE history; Fetch DivergingEpoch +
@@ -3285,7 +3311,7 @@ txn EndTxn/AddOffsets/TxnOffsetCommit forward Phases 120/122;
 **durable Init-owner registry** Phase 124 (`__txn_coordinator`);
 **PreferredReadReplica / rack-aware Fetch MVP** Phase 126 (Metadata rack;
 redirect when same-rack ISR peer LEO≥HWM);
-**txn coordinator registry TTL GC** Phase 127 + **BROKER config surface** Phase 128; **truncate journal** Phase 129 + **majority multi-controller consensus** Phase 130).
+**txn coordinator registry TTL GC** Phase 127 + **BROKER config surface** Phase 128; **truncate journal** Phase 129 + **majority multi-controller consensus** Phase 130 + **journal rejoin catch-up** Phase 131).
 Still deferred: multi-language clients, full chaos-mesh suites / long fuzz
 campaigns, shared session store / full preferred-replica selector, full
 KIP-890/939.

@@ -732,6 +732,23 @@ fn broker_metrics_text(broker: &Broker) -> String {
         "volant_truncate_journal_consensus_fail_total {}\n",
         broker.truncate_journal_consensus_fail_total()
     ));
+    // Phase 131: truncate journal rejoin catch-up.
+    text.push_str(
+        "# HELP volant_journal_catchup_success_total Successful truncate-journal catch-up pushes\n",
+    );
+    text.push_str("# TYPE volant_journal_catchup_success_total counter\n");
+    text.push_str(&format!(
+        "volant_journal_catchup_success_total {}\n",
+        broker.journal_catchup_success_total()
+    ));
+    text.push_str(
+        "# HELP volant_journal_catchup_errors_total Failed truncate-journal catch-up pushes\n",
+    );
+    text.push_str("# TYPE volant_journal_catchup_errors_total counter\n");
+    text.push_str(&format!(
+        "volant_journal_catchup_errors_total {}\n",
+        broker.journal_catchup_errors_total()
+    ));
     text
 }
 
@@ -927,6 +944,8 @@ async fn heartbeat_to_controller(broker: &Broker) -> Result<()> {
         // Phase 117: report applied admin gens so controller can catch up lag.
         applied_config_generation: broker.applied_config_generation(),
         applied_acl_generation: broker.applied_acl_generation(),
+        // Phase 131: report applied truncate-journal gen for rejoin catch-up.
+        applied_journal_generation: broker.truncate_journal_applied_generation(),
     };
     let resp = inter_broker_rpc(broker, &addr, &req).await?;
     match resp {
@@ -964,6 +983,71 @@ async fn heartbeat_to_controller(broker: &Broker) -> Result<()> {
         other => Err(Error::Protocol(format!(
             "unexpected heartbeat response: {other:?}"
         ))),
+    }
+}
+
+/// Phase 131: re-push full truncate journal snapshot to one lagging peer.
+///
+/// Any node with a newer journal may push (multi-controller). Uses opcode 88
+/// `TruncateJournalPush`. Increments journal catch-up success/error metrics.
+/// No-op when peer does not lag or local journal is empty.
+pub async fn catch_up_peer_truncate_journal(
+    broker: &Broker,
+    peer_id: u32,
+    peer_addr: &str,
+    peer_applied_journal: u64,
+) {
+    if !broker.peer_journal_gen_lags(peer_applied_journal) {
+        return;
+    }
+    let generation = broker.truncate_journal_generation();
+    let snapshot = broker.truncate_journal().snapshot_bytes();
+    let req = Request::TruncateJournalPush {
+        generation,
+        snapshot,
+    };
+    match inter_broker_rpc(broker, peer_addr, &req).await {
+        Ok(Response::TruncateJournalPush { error_code: 0 }) => {
+            broker.truncate_journal().note_journal_catchup_success();
+            debug!(
+                peer_id,
+                %peer_addr,
+                generation,
+                peer_applied_journal,
+                "truncate journal catch-up push ok"
+            );
+        }
+        Ok(Response::TruncateJournalPush { error_code }) => {
+            warn!(
+                peer_id,
+                %peer_addr,
+                error_code,
+                generation,
+                peer_applied_journal,
+                "truncate journal catch-up peer error"
+            );
+            broker.truncate_journal().note_journal_catchup_error();
+        }
+        Ok(other) => {
+            warn!(
+                peer_id,
+                %peer_addr,
+                ?other,
+                generation,
+                "truncate journal catch-up unexpected response"
+            );
+            broker.truncate_journal().note_journal_catchup_error();
+        }
+        Err(e) => {
+            warn!(
+                peer_id,
+                %peer_addr,
+                error = %e,
+                generation,
+                "truncate journal catch-up rpc failed"
+            );
+            broker.truncate_journal().note_journal_catchup_error();
+        }
     }
 }
 
@@ -3480,6 +3564,7 @@ async fn handle_request(broker: &Broker, req: Request) -> Result<Response> {
             generation,
             applied_config_generation,
             applied_acl_generation,
+            applied_journal_generation,
         } => {
             let (error_code, controller_id, generation, alive_brokers) =
                 broker.handle_heartbeat_broker(broker_id, controller_id_known, generation);
@@ -3502,6 +3587,24 @@ async fn handle_request(broker: &Broker, req: Request) -> Result<Response> {
                         )
                         .await;
                     }
+                }
+            }
+            // Phase 131: any node with a newer truncate journal re-pushes to a
+            // lagging peer (multi-controller; not controller-gated). No extra
+            // throttle — lag check alone is enough; retries on next heartbeat
+            // if apply fails.
+            if error_code == 0
+                && broker_id != broker.node_id()
+                && broker.peer_journal_gen_lags(applied_journal_generation)
+            {
+                if let Some(addr) = broker.broker_addr(broker_id) {
+                    catch_up_peer_truncate_journal(
+                        broker,
+                        broker_id,
+                        &addr,
+                        applied_journal_generation,
+                    )
+                    .await;
                 }
             }
             Ok(Response::HeartbeatBroker {
