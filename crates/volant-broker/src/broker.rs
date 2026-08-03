@@ -46,6 +46,7 @@ use crate::broker_config::{
 };
 use crate::cluster_admin::{ClusterAdminFile, ClusterAdminStore};
 use crate::delete_records_outbox::DeleteRecordsOutbox;
+use crate::truncate_journal::TruncateJournal;
 use crate::txn_coordinator_registry::TxnCoordinatorRegistry;
 use crate::topic::Topic;
 use crate::topic_catalog::{CatalogTopic, TopicCatalogFile, TopicCatalogStore};
@@ -511,6 +512,8 @@ pub struct Broker {
     cluster_prepared_index: Mutex<HashMap<String, ClusterPreparedEntry>>,
     /// Durable pending DeleteRecords truncates for offline/failed peers (Phase 116).
     delete_records_outbox: DeleteRecordsOutbox,
+    /// Phase 129: controller SoT truncate journal.
+    truncate_journal: TruncateJournal,
     /// Phase 123: last successful outbox reconcile per led partition
     /// `(topic, partition) → (leader_epoch, log_start)`.
     ///
@@ -626,6 +629,7 @@ impl Broker {
         let fetch_sessions = FetchSessionManager::open(&storage.data_dir);
         // Phase 116: durable DeleteRecords outbox (empty in single-node use).
         let delete_records_outbox = DeleteRecordsOutbox::open(&storage.data_dir);
+        let truncate_journal = TruncateJournal::open(&storage.data_dir);
         // Phase 124: durable Init-owner txn coordinator registry.
         let txn_coordinator_registry = TxnCoordinatorRegistry::open(&storage.data_dir);
         let broker = Self {
@@ -679,6 +683,7 @@ impl Broker {
             txn_2pc_fanout_errors_total: AtomicU64::new(0),
             cluster_prepared_index: Mutex::new(HashMap::new()),
             delete_records_outbox,
+            truncate_journal,
             delete_records_outbox_last_reconcile: Mutex::new(HashMap::new()),
             delete_records_outbox_reconcile_total: AtomicU64::new(0),
             cluster_admin_catchup_success_total: AtomicU64::new(0),
@@ -760,6 +765,7 @@ impl Broker {
         let fetch_sessions = FetchSessionManager::open_with_owner(&storage.data_dir, node_id);
         // Phase 116: durable DeleteRecords outbox under data_dir.
         let delete_records_outbox = DeleteRecordsOutbox::open(&storage.data_dir);
+        let truncate_journal = TruncateJournal::open(&storage.data_dir);
         // Phase 124: durable Init-owner txn coordinator registry.
         let txn_coordinator_registry = TxnCoordinatorRegistry::open(&storage.data_dir);
         let broker = Self {
@@ -813,6 +819,7 @@ impl Broker {
             txn_2pc_fanout_errors_total: AtomicU64::new(0),
             cluster_prepared_index: Mutex::new(HashMap::new()),
             delete_records_outbox,
+            truncate_journal,
             delete_records_outbox_last_reconcile: Mutex::new(HashMap::new()),
             delete_records_outbox_reconcile_total: AtomicU64::new(0),
             cluster_admin_catchup_success_total: AtomicU64::new(0),
@@ -950,6 +957,81 @@ impl Broker {
             .load(Ordering::Relaxed)
     }
 
+    /// Phase 129 truncate journal accessor.
+    pub fn truncate_journal(&self) -> &TruncateJournal {
+        &self.truncate_journal
+    }
+
+    /// Phase 129: journal generation (controller SoT or last applied).
+    pub fn truncate_journal_generation(&self) -> u64 {
+        self.truncate_journal.generation()
+    }
+
+    /// Phase 129: last applied journal push generation.
+    pub fn truncate_journal_applied_generation(&self) -> u64 {
+        self.truncate_journal.applied_generation()
+    }
+
+    /// Phase 129: controller path — merge watermark + bump generation.
+    ///
+    /// Returns new generation. Callers fan-out push to live peers.
+    pub fn controller_note_truncate_journal(
+        &self,
+        topic: &str,
+        partition: u32,
+        before_offset: u64,
+        leader_epoch: i32,
+    ) -> u64 {
+        self.truncate_journal
+            .note(topic, partition, before_offset, leader_epoch, true)
+    }
+
+    /// Phase 129: apply controller journal snapshot push.
+    pub fn apply_truncate_journal_push(
+        &self,
+        generation: u64,
+        snapshot: &[u8],
+    ) -> Result<()> {
+        self.truncate_journal
+            .apply_push(generation, snapshot)
+            .map_err(Error::InvalidArgument)
+    }
+
+    /// Phase 129: handle inter-broker TruncateJournalNote (controller only).
+    ///
+    /// Non-controller → [`ErrorCode::NotController`]-shaped invalid argument
+    /// via error_code in response handler.
+    pub fn handle_truncate_journal_note(
+        &self,
+        topic: &str,
+        partition: u32,
+        before_offset: u64,
+        leader_epoch: i32,
+    ) -> (u16, u64) {
+        if self.cluster.is_some() && !self.is_controller() {
+            return (ErrorCode::NotController as u16, 0);
+        }
+        let gen = self.controller_note_truncate_journal(
+            topic,
+            partition,
+            before_offset,
+            leader_epoch,
+        );
+        (0, gen)
+    }
+
+    /// Phase 129: handle TruncateJournalPush on peer.
+    pub fn handle_truncate_journal_push(
+        &self,
+        generation: u64,
+        snapshot: &[u8],
+    ) -> u16 {
+        match self.apply_truncate_journal_push(generation, snapshot) {
+            Ok(()) => 0,
+            Err(_) => ErrorCode::Storage as u16,
+        }
+    }
+
     /// Rebuild pending DeleteRecords outbox entries from local log starts
     /// for partitions this node leads (Phase 123 leadership handoff MVP).
     ///
@@ -966,6 +1048,7 @@ impl Broker {
             return 0;
         }
         // Collect led partitions + targets without holding the outbox lock.
+        // Phase 129: target = max(local log_start, journal watermark).
         let targets: Vec<(String, u32, u64, i32, Vec<u32>)> = {
             let topics = self.topics.read();
             let mut out = Vec::new();
@@ -975,7 +1058,12 @@ impl Broker {
                         continue;
                     }
                     let log_start = part.log.log_start_offset().raw();
-                    if log_start == 0 {
+                    let journal_wm = self
+                        .truncate_journal
+                        .watermark(name.as_str(), pid.0)
+                        .unwrap_or(0);
+                    let target = log_start.max(journal_wm);
+                    if target == 0 {
                         continue;
                     }
                     let epoch = part.leader_epoch;
@@ -988,7 +1076,7 @@ impl Broker {
                     if peers.is_empty() {
                         continue;
                     }
-                    out.push((name.as_str().to_owned(), pid.0, log_start, epoch as i32, peers));
+                    out.push((name.as_str().to_owned(), pid.0, target, epoch as i32, peers));
                 }
             }
             out

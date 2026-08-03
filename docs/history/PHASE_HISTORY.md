@@ -1,6 +1,6 @@
 # Phase history index
 
-Ship records for **phases 0–128**. Binding core contracts are
+Ship records for **phases 0–129**. Binding core contracts are
 **[PHASE1_SPEC](../PHASE1_SPEC.md)–[PHASE6_SPEC](../PHASE6_SPEC.md)**. Living
 docs for day-to-day reading: [ops](../ops.md), [consistency](../consistency.md),
 [tuning](../tuning.md), [KAFKA_COMPAT](../KAFKA_COMPAT.md),
@@ -170,10 +170,11 @@ docs for day-to-day reading: [ops](../ops.md), [consistency](../consistency.md),
 | 126 | ✅ | PreferredReadReplica / rack-aware Fetch MVP (KIP-392 subset; Metadata rack; LEO≥HWM ISR peer) | [PHASE126_SPEC.md](../PHASE126_SPEC.md) |
 | 127 | ✅ | Txn coordinator registry TTL GC MVP (last-touch + `VOLANT_TXN_COORDINATOR_TTL_MS`; sweeper hook) | [PHASE127_SPEC.md](../PHASE127_SPEC.md) |
 | 128 | ✅ | BROKER Describe/Alter for txn coordinator registry TTL (`volant.txn.coordinator.registry.ttl.ms`) | [PHASE128_SPEC.md](../PHASE128_SPEC.md) |
+| 129 | ✅ | Controller SoT DeleteRecords truncate journal MVP (note/push + reconcile max watermark) | [PHASE129_SPEC.md](../PHASE129_SPEC.md) |
 
 ---
 
-## Still deferred (post–Phase 128)
+## Still deferred (post–Phase 129)
 
 - Multi-language clients
 - Chaos-mesh / long fuzz campaigns (corpus **smoke CI** → **closed by Phase 112**)
@@ -206,5 +207,5 @@ docs for day-to-day reading: [ops](../ops.md), [consistency](../consistency.md),
 - Txn coordinator registry TTL GC → **closed by Phase 127** (default 24h; `0` disables; not eager EndTxn GC)
 - BROKER config for registry TTL → **closed by Phase 128** (`volant.txn.coordinator.registry.ttl.ms`; env still works; not full DynamicBrokerConfig)
 - Per-broker BROKER config overrides / multi-master ACL merge
-- Consensus truncate log / controller SoT DeleteRecords journal
+- Consensus truncate log / controller SoT DeleteRecords journal → **closed by Phase 129** (controller SoT journal MVP; not Raft)
 - Full Kafka preferred-replica selector / rack-aware partition assignment

@@ -3093,8 +3093,33 @@ env after start ignored without Alter; not full Kafka DynamicBrokerConfig.
 **Still deferred:** multi-lang clients, chaos-mesh / long fuzz campaigns,
 full KIP-890/939 / `__transaction_state`, Kafka wire fuzz targets, dynamic
 membership / Raft, full Kafka broker catalog, consensus truncate journal /
-controller SoT pending set, true per-broker heterogeneous BROKER overrides,
+controller SoT truncate journal → **closed by Phase 129**, true per-broker heterogeneous BROKER overrides,
 shared session registry, full preferred-replica selector parity.
+
+---
+
+### Phase 129 — Controller SoT DeleteRecords truncate journal (MVP) ✅
+
+**Goal:** Persist desired DeleteRecords log-start watermarks on the **controller**
+and push them to peers so a new leader that never applied the local truncate can
+still rebuild outbox targets (`max(local log_start, journal watermark)`).
+
+Binding: **[docs/PHASE129_SPEC.md](./docs/PHASE129_SPEC.md)**.
+
+- [x] Durable `__truncate_journal` max-merge map + generation
+- [x] Opcodes 86/87 note + 88/89 push; fan-out after DeleteRecords
+- [x] Reconcile uses journal watermark
+- [x] Tests: unit + `phase129_truncate_journal`
+- [x] Living docs honesty
+
+**Honest limitations:** not Raft; best-effort note/push; no heartbeat journal
+catch-up MVP; controller disk loss loses SoT until re-note.
+
+**Still deferred:** multi-lang, chaos-mesh / long fuzz, full KIP-890/939,
+Kafka wire fuzz, dynamic membership / Raft, full Kafka broker catalog,
+true multi-master ACL merge / heterogeneous per-broker overrides without
+controller, shared session store, full preferred selector, heartbeat journal
+re-push.
 
 ---
 
@@ -3133,7 +3158,7 @@ marker clip 111; fuzz corpus smoke CI 112; cluster admin fan-out 113) — see
 
 ## Suggested implementation order (PRs)
 
-Phases **0–128 are shipped**. Historical PR order for the core:
+Phases **0–129 are shipped**. Historical PR order for the core:
 
 1. Phase 1 segment format + unit tests  
 2. Phase 1 recovery + retention  
@@ -3164,6 +3189,7 @@ Phases **0–128 are shipped**. Historical PR order for the core:
 27. Phase 126 (PreferredReadReplica / rack-aware Fetch MVP) ✅  
 28. Phase 127 (txn coordinator registry TTL GC MVP) ✅  
 29. Phase 128 (BROKER config for registry TTL MVP) ✅  
+30. Phase 129 (controller SoT truncate journal MVP) ✅  
 
 ---
 
@@ -3204,7 +3230,7 @@ cargo run -p volant-bench --release
 cargo test --workspace
 ```
 
-**Status (post–Phase 128):** core broker, ops (metrics / TLS / auth / SCRAM /
+**Status (post–Phase 129):** core broker, ops (metrics / TLS / auth / SCRAM /
 ACLs / Helm), and the Kafka wire shim are **shipped** (Fetch 0–18 Kafka max;
 ACL admin 0–3 with User resource; soft-marker `READ_COMMITTED` with **marker GC/clip**
 on DeleteRecords/retention/load (Phase 104/111); durable OFLE history; Fetch DivergingEpoch +
@@ -3235,7 +3261,7 @@ txn EndTxn/AddOffsets/TxnOffsetCommit forward Phases 120/122;
 **durable Init-owner registry** Phase 124 (`__txn_coordinator`);
 **PreferredReadReplica / rack-aware Fetch MVP** Phase 126 (Metadata rack;
 redirect when same-rack ISR peer LEO≥HWM);
-**txn coordinator registry TTL GC** Phase 127 + **BROKER config surface** Phase 128 (`volant.txn.coordinator.registry.ttl.ms`)).
+**txn coordinator registry TTL GC** Phase 127 + **BROKER config surface** Phase 128; **truncate journal** Phase 129).
 Still deferred: multi-language clients, full chaos-mesh suites / long fuzz
 campaigns, shared session store / full preferred-replica selector, full
 KIP-890/939.

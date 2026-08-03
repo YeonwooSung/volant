@@ -22,6 +22,8 @@ pub mod broker_config;
 pub mod cluster;
 /// Durable DeleteRecords pending-truncate outbox (Phase 116).
 pub mod delete_records_outbox;
+/// Controller SoT DeleteRecords truncate journal (Phase 129).
+pub mod truncate_journal;
 /// Durable Init-owner txn coordinator registry (Phase 124).
 pub mod txn_coordinator_registry;
 /// Durable cluster admin generations (Phase 117).
@@ -82,6 +84,10 @@ pub use delete_records_outbox::{
     DeleteRecordsOutbox, OutboxEntry, DEFAULT_MAX_ENTRIES as DELETE_RECORDS_OUTBOX_MAX_ENTRIES,
     OUTBOX_DIR as DELETE_RECORDS_OUTBOX_DIR, OUTBOX_FILE as DELETE_RECORDS_OUTBOX_FILE,
 };
+pub use truncate_journal::{
+    TruncateJournal, TruncateJournalEntry, TruncateJournalFile, TRUNCATE_JOURNAL_DIR,
+    TRUNCATE_JOURNAL_FILE, TRUNCATE_JOURNAL_FILE_VERSION,
+};
 pub use txn_coordinator_registry::{
     effective_txn_coordinator_ttl_ms, TxnCoordinatorEntry, TxnCoordinatorFile,
     TxnCoordinatorRegistry, DEFAULT_TXN_COORDINATOR_TTL_MS, TXN_COORDINATOR_DIR,
@@ -93,7 +99,8 @@ pub use cluster_admin::{
 };
 pub use net::{
     catch_up_peer_admin_state, drain_delete_records_outbox, fanout_cluster_acl_snapshot,
-    fanout_cluster_broker_config, fanout_delete_records, fanout_txn_participant_complete,
+    fanout_cluster_broker_config, fanout_delete_records, fanout_truncate_journal_note,
+    fanout_truncate_journal_push, fanout_txn_participant_complete,
     fanout_txn_participant_open, fanout_txn_participant_prepare, run_metrics_server,
     run_metrics_server_until, run_server, run_txn_2pc_fanout, serve_listener,
     serve_listener_until, shutdown_signal, start_background_tasks, BackgroundTasks,

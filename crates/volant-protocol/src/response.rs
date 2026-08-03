@@ -88,6 +88,10 @@ pub enum ResponseOpcode {
     KafkaFetchForward = 83,
     /// Kafka txn API forward result (Phase 120).
     KafkaTxnForward = 85,
+    /// Truncate journal note result (Phase 129).
+    TruncateJournalNote = 87,
+    /// Truncate journal push result (Phase 129).
+    TruncateJournalPush = 89,
     /// Error response.
     Error = 0xFFFF,
 }
@@ -137,6 +141,8 @@ impl ResponseOpcode {
             81 => Self::TxnParticipantComplete,
             83 => Self::KafkaFetchForward,
             85 => Self::KafkaTxnForward,
+            87 => Self::TruncateJournalNote,
+            89 => Self::TruncateJournalPush,
             0xFFFF => Self::Error,
             _ => return None,
         })
@@ -714,6 +720,18 @@ pub enum Response {
         /// Kafka response body (after the Kafka response header).
         body: Bytes,
     },
+    /// Truncate journal note result (Phase 129).
+    TruncateJournalNote {
+        /// Protocol error code.
+        error_code: u16,
+        /// Controller journal generation after merge.
+        generation: u64,
+    },
+    /// Truncate journal push result (Phase 129).
+    TruncateJournalPush {
+        /// Protocol error code.
+        error_code: u16,
+    },
     /// Error response.
     Error {
         /// Error code.
@@ -792,6 +810,8 @@ impl Response {
             Self::TxnParticipantComplete { .. } => ResponseOpcode::TxnParticipantComplete as u16,
             Self::KafkaFetchForward { .. } => ResponseOpcode::KafkaFetchForward as u16,
             Self::KafkaTxnForward { .. } => ResponseOpcode::KafkaTxnForward as u16,
+            Self::TruncateJournalNote { .. } => ResponseOpcode::TruncateJournalNote as u16,
+            Self::TruncateJournalPush { .. } => ResponseOpcode::TruncateJournalPush as u16,
             Self::Error { .. } => ResponseOpcode::Error as u16,
         }
     }

@@ -531,6 +531,24 @@ pub fn encode_request(req: &Request) -> Result<Bytes> {
             put_string(&mut dst, principal)?;
             put_bytes(&mut dst, body);
         }
+        Request::TruncateJournalNote {
+            topic,
+            partition,
+            before_offset,
+            leader_epoch,
+        } => {
+            put_string(&mut dst, topic)?;
+            dst.put_u32_le(*partition);
+            dst.put_u64_le(*before_offset);
+            dst.put_i32_le(*leader_epoch);
+        }
+        Request::TruncateJournalPush {
+            generation,
+            snapshot,
+        } => {
+            dst.put_u64_le(*generation);
+            put_bytes(&mut dst, snapshot);
+        }
     }
     finish_payload(dst)
 }
@@ -1107,6 +1125,31 @@ pub fn decode_request(opcode: u16, payload: &[u8]) -> Result<Request> {
                 body,
             })
         }
+        RequestOpcode::TruncateJournalNote => {
+            let topic = get_string(&mut src)?;
+            if src.remaining() < 4 + 8 + 4 {
+                return Err(Error::Protocol("truncated truncate journal note".into()));
+            }
+            Ok(Request::TruncateJournalNote {
+                topic,
+                partition: src.get_u32_le(),
+                before_offset: src.get_u64_le(),
+                leader_epoch: src.get_i32_le(),
+            })
+        }
+        RequestOpcode::TruncateJournalPush => {
+            if src.remaining() < 8 {
+                return Err(Error::Protocol(
+                    "truncated truncate journal push generation".into(),
+                ));
+            }
+            let generation = src.get_u64_le();
+            let snapshot = get_bytes(&mut src)?;
+            Ok(Request::TruncateJournalPush {
+                generation,
+                snapshot,
+            })
+        }
     }
 }
 
@@ -1514,6 +1557,16 @@ pub fn encode_response(resp: &Response) -> Result<Bytes> {
         Response::KafkaTxnForward { error_code, body } => {
             dst.put_u16_le(*error_code);
             put_bytes(&mut dst, body);
+        }
+        Response::TruncateJournalNote {
+            error_code,
+            generation,
+        } => {
+            dst.put_u16_le(*error_code);
+            dst.put_u64_le(*generation);
+        }
+        Response::TruncateJournalPush { error_code } => {
+            dst.put_u16_le(*error_code);
         }
         Response::Error { code, message } => {
             dst.put_u16_le(*code);
@@ -2317,6 +2370,27 @@ pub fn decode_response(opcode: u16, payload: &[u8]) -> Result<Response> {
             let error_code = src.get_u16_le();
             let body = get_bytes(&mut src)?;
             Ok(Response::KafkaTxnForward { error_code, body })
+        }
+        ResponseOpcode::TruncateJournalNote => {
+            if src.remaining() < 2 + 8 {
+                return Err(Error::Protocol(
+                    "truncated truncate journal note response".into(),
+                ));
+            }
+            Ok(Response::TruncateJournalNote {
+                error_code: src.get_u16_le(),
+                generation: src.get_u64_le(),
+            })
+        }
+        ResponseOpcode::TruncateJournalPush => {
+            if src.remaining() < 2 {
+                return Err(Error::Protocol(
+                    "truncated truncate journal push response".into(),
+                ));
+            }
+            Ok(Response::TruncateJournalPush {
+                error_code: src.get_u16_le(),
+            })
         }
         ResponseOpcode::Error => {
             if src.remaining() < 2 {

@@ -698,6 +698,23 @@ fn broker_metrics_text(broker: &Broker) -> String {
         "volant_preferred_replica_redirect_total {}\n",
         broker.preferred_replica_redirect_total()
     ));
+    // Phase 129: truncate journal.
+    text.push_str(
+        "# HELP volant_truncate_journal_generation Controller/local truncate journal generation\n",
+    );
+    text.push_str("# TYPE volant_truncate_journal_generation gauge\n");
+    text.push_str(&format!(
+        "volant_truncate_journal_generation {}\n",
+        broker.truncate_journal_generation()
+    ));
+    text.push_str(
+        "# HELP volant_truncate_journal_entries Truncate journal watermark count\n",
+    );
+    text.push_str("# TYPE volant_truncate_journal_entries gauge\n");
+    text.push_str(&format!(
+        "volant_truncate_journal_entries {}\n",
+        broker.truncate_journal().entry_count()
+    ));
     text
 }
 
@@ -1202,12 +1219,117 @@ pub async fn fanout_cluster_broker_config(
 /// Failures increment [`Broker::delete_records_fanout_errors_total`], enqueue a
 /// durable outbox entry (Phase 116), and never fail the client path.
 /// No-op in single-node mode.
+///
+/// Phase 129: also notes the truncate watermark on the controller journal
+/// (best-effort) before peer ReplicaDeleteRecords.
+/// Phase 129: note truncate watermark on the controller and push snapshot to peers.
+pub async fn fanout_truncate_journal_note(
+    broker: &Broker,
+    topic: &str,
+    partition: u32,
+    before_offset: u64,
+    leader_epoch: i32,
+) {
+    if broker.cluster_config().is_none() {
+        return;
+    }
+    let gen = if broker.is_controller() {
+        broker.controller_note_truncate_journal(topic, partition, before_offset, leader_epoch)
+    } else {
+        // Note on remote controller.
+        let cid = broker.controller_id();
+        if cid == 0 {
+            return;
+        }
+        let Some(addr) = broker.broker_addr(cid) else {
+            return;
+        };
+        let req = Request::TruncateJournalNote {
+            topic: topic.to_owned(),
+            partition,
+            before_offset,
+            leader_epoch,
+        };
+        match inter_broker_rpc(broker, &addr, &req).await {
+            Ok(Response::TruncateJournalNote {
+                error_code: 0,
+                generation,
+            }) => {
+                // Mirror watermark locally so this leader can reconcile even
+                // before push lands.
+                let _ = broker.truncate_journal().note(
+                    topic,
+                    partition,
+                    before_offset,
+                    leader_epoch,
+                    false,
+                );
+                generation
+            }
+            Ok(other) => {
+                warn!(?other, topic, partition, "truncate journal note failed");
+                return;
+            }
+            Err(e) => {
+                warn!(error = %e, topic, partition, "truncate journal note rpc failed");
+                return;
+            }
+        }
+    };
+    fanout_truncate_journal_push(broker, gen).await;
+}
+
+/// Phase 129: push full truncate journal snapshot from controller to live peers.
+pub async fn fanout_truncate_journal_push(broker: &Broker, generation: u64) {
+    if !broker.is_controller() || broker.cluster_config().is_none() {
+        return;
+    }
+    let snapshot = broker.truncate_journal().snapshot_bytes();
+    let peers: Vec<(u32, String)> = broker
+        .live_brokers()
+        .into_iter()
+        .filter(|id| *id != broker.node_id())
+        .filter_map(|id| broker.broker_addr(id).map(|a| (id, a)))
+        .collect();
+    for (peer_id, addr) in peers {
+        let req = Request::TruncateJournalPush {
+            generation,
+            snapshot: snapshot.clone(),
+        };
+        match inter_broker_rpc(broker, &addr, &req).await {
+            Ok(Response::TruncateJournalPush { error_code: 0 }) => {}
+            Ok(Response::TruncateJournalPush { error_code }) => {
+                warn!(peer_id, error_code, "truncate journal push peer error");
+            }
+            Ok(other) => {
+                warn!(peer_id, ?other, "truncate journal push unexpected response");
+            }
+            Err(e) => {
+                warn!(peer_id, error = %e, "truncate journal push rpc failed");
+            }
+        }
+    }
+}
+
+/// Best-effort DeleteRecords fan-out to other replicas (Phase 113/116 + 129).
+///
+/// After a successful **leader** local truncate: notes the watermark on the
+/// controller journal (Phase 129), then one attempt of `ReplicaDeleteRecords`
+/// per peer with outbox enqueue on failure (Phase 116). Never fails the client.
+/// No-op peer list in single-node mode.
 pub async fn fanout_delete_records(
     broker: &Broker,
     topic: &str,
     partition: u32,
     before_offset: u64,
 ) {
+    // Phase 129: controller SoT journal note (best-effort; never fails client).
+    if broker.cluster_config().is_some() {
+        let epoch = broker
+            .led_partition_epoch(topic, partition)
+            .unwrap_or(-1);
+        fanout_truncate_journal_note(broker, topic, partition, before_offset, epoch).await;
+    }
     let peers = broker.delete_records_fanout_peers(topic, partition);
     if peers.is_empty() {
         return;
@@ -2410,6 +2532,8 @@ fn authorize_request(
         | Request::ReplicaDeleteRecords { .. }
         | Request::ClusterBrokerConfig { .. }
         | Request::ClusterAclSnapshot { .. }
+        | Request::TruncateJournalNote { .. }
+        | Request::TruncateJournalPush { .. }
         | Request::TxnParticipantOpen { .. }
         | Request::TxnParticipantPrepare { .. }
         | Request::TxnParticipantComplete { .. }
@@ -2495,6 +2619,8 @@ fn authorize_request(
         | Request::ReplicaDeleteRecords { .. }
         | Request::ClusterBrokerConfig { .. }
         | Request::ClusterAclSnapshot { .. }
+        | Request::TruncateJournalNote { .. }
+        | Request::TruncateJournalPush { .. }
         | Request::TxnParticipantOpen { .. }
         | Request::TxnParticipantPrepare { .. }
         | Request::TxnParticipantComplete { .. }
@@ -2583,7 +2709,9 @@ fn record_response_metrics(broker: &Broker, resp: &Response) {
         | Response::TxnParticipantPrepare { error_code }
         | Response::TxnParticipantComplete { error_code }
         | Response::KafkaFetchForward { error_code, .. }
-        | Response::KafkaTxnForward { error_code, .. } => {
+        | Response::KafkaTxnForward { error_code, .. }
+        | Response::TruncateJournalNote { error_code, .. }
+        | Response::TruncateJournalPush { error_code } => {
             if *error_code != 0 {
                 m.record_error(*error_code);
             }
@@ -3140,6 +3268,30 @@ async fn handle_request(broker: &Broker, req: Request) -> Result<Response> {
                 error_code,
                 applied_generation,
             })
+        }
+        Request::TruncateJournalNote {
+            topic,
+            partition,
+            before_offset,
+            leader_epoch,
+        } => {
+            let (error_code, generation) = broker.handle_truncate_journal_note(
+                &topic,
+                partition,
+                before_offset,
+                leader_epoch,
+            );
+            Ok(Response::TruncateJournalNote {
+                error_code,
+                generation,
+            })
+        }
+        Request::TruncateJournalPush {
+            generation,
+            snapshot,
+        } => {
+            let error_code = broker.handle_truncate_journal_push(generation, &snapshot);
+            Ok(Response::TruncateJournalPush { error_code })
         }
         Request::InitProducerId { transactional_id } => {
             let (producer_id, epoch) =

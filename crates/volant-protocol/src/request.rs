@@ -88,6 +88,10 @@ pub enum RequestOpcode {
     KafkaFetchForward = 82,
     /// Non-coordinator → txn coordinator: proxy Kafka txn API body (Phase 120).
     KafkaTxnForward = 84,
+    /// Leader → controller: record DeleteRecords truncate watermark (Phase 129).
+    TruncateJournalNote = 86,
+    /// Controller → peer: full truncate journal snapshot push (Phase 129).
+    TruncateJournalPush = 88,
 }
 
 impl RequestOpcode {
@@ -135,6 +139,8 @@ impl RequestOpcode {
             80 => Self::TxnParticipantComplete,
             82 => Self::KafkaFetchForward,
             84 => Self::KafkaTxnForward,
+            86 => Self::TruncateJournalNote,
+            88 => Self::TruncateJournalPush,
             _ => return None,
         })
     }
@@ -558,6 +564,24 @@ pub enum Request {
         /// Kafka request body (after the Kafka request header).
         body: Bytes,
     },
+    /// Leader → controller: record a truncate watermark (Phase 129).
+    TruncateJournalNote {
+        /// Topic name.
+        topic: String,
+        /// Partition id.
+        partition: u32,
+        /// Desired log start (delete-before offset).
+        before_offset: u64,
+        /// Leader epoch at truncate time (`-1` if unknown).
+        leader_epoch: i32,
+    },
+    /// Controller → peer: full truncate journal snapshot (Phase 129).
+    TruncateJournalPush {
+        /// Controller journal generation for this push.
+        generation: u64,
+        /// Versioned snapshot bytes (JSON matching `__truncate_journal/state.json`).
+        snapshot: Bytes,
+    },
 }
 
 impl Request {
@@ -605,6 +629,8 @@ impl Request {
             Self::TxnParticipantComplete { .. } => RequestOpcode::TxnParticipantComplete as u16,
             Self::KafkaFetchForward { .. } => RequestOpcode::KafkaFetchForward as u16,
             Self::KafkaTxnForward { .. } => RequestOpcode::KafkaTxnForward as u16,
+            Self::TruncateJournalNote { .. } => RequestOpcode::TruncateJournalNote as u16,
+            Self::TruncateJournalPush { .. } => RequestOpcode::TruncateJournalPush as u16,
         }
     }
 }
