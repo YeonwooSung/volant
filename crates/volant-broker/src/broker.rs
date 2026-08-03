@@ -522,6 +522,8 @@ pub struct Broker {
     isr_shrink_total: AtomicU64,
     /// Phase 125: ISR removals attributed to time-based lag.
     isr_time_shrink_total: AtomicU64,
+    /// Phase 126: Fetch preferred_read_replica redirects emitted.
+    preferred_replica_redirect_total: AtomicU64,
     /// Phase 120/124: durable Init-owner txn coordinator registry.
     txn_coordinator_registry: TxnCoordinatorRegistry,
     /// Phase 120: successful transparent EndTxn (txn) forwards.
@@ -677,6 +679,7 @@ impl Broker {
             isr_expand_total: AtomicU64::new(0),
             isr_shrink_total: AtomicU64::new(0),
             isr_time_shrink_total: AtomicU64::new(0),
+            preferred_replica_redirect_total: AtomicU64::new(0),
             txn_coordinator_registry,
             txn_forward_total: AtomicU64::new(0),
             txn_forward_errors_total: AtomicU64::new(0),
@@ -809,6 +812,7 @@ impl Broker {
             isr_expand_total: AtomicU64::new(0),
             isr_shrink_total: AtomicU64::new(0),
             isr_time_shrink_total: AtomicU64::new(0),
+            preferred_replica_redirect_total: AtomicU64::new(0),
             txn_coordinator_registry,
             txn_forward_total: AtomicU64::new(0),
             txn_forward_errors_total: AtomicU64::new(0),
@@ -1068,6 +1072,75 @@ impl Broker {
     /// ISR time-lag shrink counter (Phase 125).
     pub fn isr_time_shrink_total(&self) -> u64 {
         self.isr_time_shrink_total.load(Ordering::Relaxed)
+    }
+
+    /// Preferred-replica redirect counter (Phase 126).
+    pub fn preferred_replica_redirect_total(&self) -> u64 {
+        self.preferred_replica_redirect_total.load(Ordering::Relaxed)
+    }
+
+    /// Optional rack for a configured broker (cluster.toml); `None` single-node or unset.
+    pub fn broker_rack(&self, broker_id: u32) -> Option<String> {
+        self.cluster
+            .as_ref()?
+            .config
+            .broker(broker_id)
+            .and_then(|b| b.rack.clone())
+    }
+
+    /// Phase 126: select a preferred read replica for consumer Fetch (KIP-392 subset).
+    ///
+    /// Returns a **follower** broker id in the same rack as `client_rack` that is
+    /// currently in the local ISR with observed LEO ≥ HWM, when this node is the
+    /// partition leader. Empty/`None` rack, single-node, non-leader, or no
+    /// eligible peer → `None` (caller leaves PreferredReadReplica = -1).
+    pub fn select_preferred_read_replica(
+        &self,
+        topic: &TopicName,
+        partition: PartitionId,
+        client_rack: Option<&str>,
+    ) -> Option<u32> {
+        let rack = client_rack.map(str::trim).filter(|s| !s.is_empty())?;
+        let cluster = self.cluster.as_ref()?;
+        let topics = self.topics.read();
+        let t = topics.get(topic)?;
+        let part = t.partitions.get(&partition)?;
+        if !part.is_leader(self.node_id) {
+            return None;
+        }
+        let hwm = part.committed_hwm;
+        let mut candidates: Vec<u32> = part
+            .isr
+            .iter()
+            .copied()
+            .filter(|id| *id != self.node_id)
+            .filter(|id| {
+                cluster
+                    .config
+                    .broker(*id)
+                    .and_then(|b| b.rack.as_deref())
+                    .map(|r| r == rack)
+                    .unwrap_or(false)
+            })
+            .filter(|id| {
+                // Require observed LEO ≥ HWM so the follower can serve committed data.
+                part.follower_leo
+                    .get(id)
+                    .copied()
+                    .map(|leo| leo >= hwm)
+                    .unwrap_or(false)
+            })
+            .collect();
+        if candidates.is_empty() {
+            return None;
+        }
+        candidates.sort_unstable();
+        Some(candidates[0])
+    }
+
+    pub(crate) fn note_preferred_replica_redirect(&self) {
+        self.preferred_replica_redirect_total
+            .fetch_add(1, Ordering::Relaxed);
     }
 
     /// Effective `replica_lag_max_ms` with optional `VOLANT_REPLICA_LAG_MAX_MS` override.

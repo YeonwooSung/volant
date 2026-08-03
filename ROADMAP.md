@@ -3004,14 +3004,45 @@ Binding: **[docs/PHASE125_SPEC.md](./docs/PHASE125_SPEC.md)**.
 
 **Honest limitations:** not full Kafka `replica.lag.time.max.ms` parity; lazy
 evaluation on reconcile only (no dedicated ISR timer); monotonic process-local
-`Instant`; static membership; preferred-replica still deferred; Metadata ISR may
-lag when leader ≠ controller.
+`Instant`; static membership; preferred-replica → **closed by Phase 126** (MVP);
+Metadata ISR may lag when leader ≠ controller.
 
 **Still deferred:** multi-lang clients, chaos-mesh / long fuzz campaigns,
 full KIP-890/939 / `__transaction_state`, Kafka wire fuzz targets, dynamic
 membership / Raft, full Kafka broker catalog, consensus truncate journal /
-controller SoT pending set, per-broker BROKER config overrides, preferred
-replica / shared session registry, registry GC/TTL.
+controller SoT pending set, per-broker BROKER config overrides, shared
+session registry, full Kafka preferred-replica selector / throttling,
+registry GC/TTL.
+
+---
+
+### Phase 126 — PreferredReadReplica / rack-aware Fetch (MVP) ✅
+
+**Goal:** KIP-392 subset — when Kafka Fetch v11+ includes a non-empty client
+`rack_id`, the partition **leader** may set `PreferredReadReplica` to a
+same-rack ISR follower with observed LEO ≥ HWM (empty records redirect), and
+Metadata / DescribeCluster / NodeEndpoints advertise `cluster.toml` rack.
+
+Binding: **[docs/PHASE126_SPEC.md](./docs/PHASE126_SPEC.md)**.
+
+- [x] Parse Fetch v11+ `rack_id` (classic + flexible)
+- [x] `Broker::select_preferred_read_replica` (leader + rack match + LEO≥HWM; min id)
+- [x] PreferredReadReplica emit + empty records on redirect; never omit-away
+- [x] Metadata / DescribeCluster / NodeEndpoints rack from cluster.toml
+- [x] Metric: `volant_preferred_replica_redirect_total`
+- [x] Tests: `phase126_preferred_replica`
+- [x] Living docs honesty
+
+**Honest limitations:** not full Kafka `replica.selector.class` / throttled
+preferred logic; static racks only; follower usefulness still depends on real
+ReplicaFetch data copy; no rack-aware partition assignment; shared session
+store still deferred.
+
+**Still deferred:** multi-lang clients, chaos-mesh / long fuzz campaigns,
+full KIP-890/939 / `__transaction_state`, Kafka wire fuzz targets, dynamic
+membership / Raft, full Kafka broker catalog, consensus truncate journal /
+controller SoT pending set, per-broker BROKER config overrides, shared
+session registry, full preferred-replica selector parity, registry GC/TTL.
 
 ---
 
@@ -3050,7 +3081,7 @@ marker clip 111; fuzz corpus smoke CI 112; cluster admin fan-out 113) — see
 
 ## Suggested implementation order (PRs)
 
-Phases **0–125 are shipped**. Historical PR order for the core:
+Phases **0–126 are shipped**. Historical PR order for the core:
 
 1. Phase 1 segment format + unit tests  
 2. Phase 1 recovery + retention  
@@ -3078,6 +3109,7 @@ Phases **0–125 are shipped**. Historical PR order for the core:
 24. Phase 123 (DeleteRecords outbox leadership handoff MVP) ✅  
 25. Phase 124 (durable txn coordinator registry MVP) ✅  
 26. Phase 125 (time-based ISR lag shrink MVP) ✅  
+27. Phase 126 (PreferredReadReplica / rack-aware Fetch MVP) ✅  
 
 ---
 
@@ -3118,7 +3150,7 @@ cargo run -p volant-bench --release
 cargo test --workspace
 ```
 
-**Status (post–Phase 125):** core broker, ops (metrics / TLS / auth / SCRAM /
+**Status (post–Phase 126):** core broker, ops (metrics / TLS / auth / SCRAM /
 ACLs / Helm), and the Kafka wire shim are **shipped** (Fetch 0–18 Kafka max;
 ACL admin 0–3 with User resource; soft-marker `READ_COMMITTED` with **marker GC/clip**
 on DeleteRecords/retention/load (Phase 104/111); durable OFLE history; Fetch DivergingEpoch +
@@ -3146,7 +3178,10 @@ retry for offline peers) + **leadership handoff reconcile** Phase 123 (new leade
 rebuilds from local `log_start` — still not a consensus truncate log);
 **ACL/BROKER admin catch-up** Phase 117; sticky FindCoordinator Phase 121;
 txn EndTxn/AddOffsets/TxnOffsetCommit forward Phases 120/122;
-**durable Init-owner registry** Phase 124 (`__txn_coordinator`)).
+**durable Init-owner registry** Phase 124 (`__txn_coordinator`);
+**PreferredReadReplica / rack-aware Fetch MVP** Phase 126 (Metadata rack;
+redirect when same-rack ISR peer LEO≥HWM)).
 Still deferred: multi-language clients, full chaos-mesh suites / long fuzz
-campaigns, preferred-replica / shared session store, full KIP-890/939.
+campaigns, shared session store / full preferred-replica selector, full
+KIP-890/939.
 Details: [docs/KAFKA_COMPAT.md](./docs/KAFKA_COMPAT.md), [docs/ops.md](./docs/ops.md).

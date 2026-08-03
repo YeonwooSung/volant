@@ -86,7 +86,7 @@ workers.
 | Metadata | Live `leader_epoch` (not always `-1`) |
 | Advance | Explicit bump / multi-node failover best-effort |
 
-## Fetch DivergingEpoch + sessions (Phase 88 + 91 + 95 + 115 + 119)
+## Fetch DivergingEpoch + sessions (Phase 88 + 91 + 95 + 115 + 119) + preferred replica (126)
 
 | Feature | Behavior |
 |---------|----------|
@@ -98,6 +98,7 @@ workers.
 | Idle TTL (95) | Default 60s (`VOLANT_FETCH_SESSION_IDLE_MS`; `0` disables); lazy on create/incremental |
 | Max sessions (95) | Default 1000 (`VOLANT_FETCH_SESSION_MAX`; `0` unlimited); LRU-evict at cap |
 | Multi-broker (119) | Cluster session_id encodes owner; peer miss → transparent inter-broker Fetch forward |
+| PreferredReadReplica (126) | Fetch v11+ client `rack_id`; leader may set PreferredReadReplica to same-rack ISR peer with LEO≥HWM (empty records redirect); Metadata/DescribeCluster/NodeEndpoints advertise `cluster.toml` rack; metric `volant_preferred_replica_redirect_total` |
 | Errors | 70 session id not found (incl. after TTL/LRU / dead owner); 71 invalid session epoch |
 
 ## Cluster ISR (Phase 6 + 108/110/118/125)
@@ -144,7 +145,7 @@ workers.
 - Transparent EndTxn + AddOffsets + TxnOffsetCommit forward yes (Phase 120/122; Init-owner registry + inter-broker); sticky FindCoordinator yes (Phase 121; murmur2 + registry override); pin Init still recommended if client skips FindCoordinator
 - Durable Init-owner registry yes (Phase 124; local `__txn_coordinator`; stale completed entries may linger until re-Init)  
 
-- Fetch sessions durable local (Phase 115) + multi-broker forward MVP (Phase 119); omit cache is HWM+LSO only (not byte-identical Kafka response cache); idle TTL + max/LRU yes (Phase 95); not preferred-replica / not shared session store  
+- Fetch sessions durable local (Phase 115) + multi-broker forward MVP (Phase 119); omit cache is HWM+LSO only (not byte-identical Kafka response cache); idle TTL + max/LRU yes (Phase 95); PreferredReadReplica MVP yes (Phase 126; not full selector/throttling); not shared session store  
 - ACL / BROKER admin SoT is the **controller** (Phase 113 push + Phase 117 durable gens / rejoin catch-up), not Raft consensus; brief lag until heartbeat catch-up is honest  
 
 - DeleteRecords fan-out is **best-effort** for the client path; offline peers get **durable leader outbox retry** (Phase 116) + **new-leader reconcile from log_start** on leadership change (Phase 123) — still not a consensus truncate log (new leader must hold the advanced log start)  

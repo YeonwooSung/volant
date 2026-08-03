@@ -680,6 +680,15 @@ fn broker_metrics_text(broker: &Broker) -> String {
         "volant_isr_time_shrink_total {}\n",
         broker.isr_time_shrink_total()
     ));
+    // Phase 126: preferred read replica redirects.
+    text.push_str(
+        "# HELP volant_preferred_replica_redirect_total Fetch PreferredReadReplica redirects\n",
+    );
+    text.push_str("# TYPE volant_preferred_replica_redirect_total counter\n");
+    text.push_str(&format!(
+        "volant_preferred_replica_redirect_total {}\n",
+        broker.preferred_replica_redirect_total()
+    ));
     text
 }
 

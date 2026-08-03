@@ -99,22 +99,25 @@ fn encode_diverging_epoch(epoch: i32, end_offset: i64) -> BytesMut {
     body
 }
 
-/// Produce/Fetch NodeEndpoints entry for one broker.
-fn put_node_endpoints_tag(out: &mut BytesMut, endpoints: &[(i32, String, i32)]) {
+/// Produce/Fetch NodeEndpoints entry for one broker (rack from cluster.toml).
+fn put_node_endpoints_tag(out: &mut BytesMut, endpoints: &[(i32, String, i32, Option<String>)]) {
     let mut value = BytesMut::new();
     put_compact_array_len(&mut value, endpoints.len());
-    for (id, host, port) in endpoints {
+    for (id, host, port, rack) in endpoints {
         value.put_i32(*id);
         put_compact_string(&mut value, host);
         value.put_i32(*port);
-        put_compact_nullable_string(&mut value, None); // rack
+        put_compact_nullable_string(&mut value, rack.as_deref());
         put_empty_tag_buffer(&mut value);
     }
     put_single_tag(out, 0, &value);
 }
 
 /// Collect unique NodeEndpoints for leaders referenced by CurrentLeader ids.
-fn node_endpoints_for_leaders(broker: &Broker, leader_ids: &[i32]) -> Vec<(i32, String, i32)> {
+fn node_endpoints_for_leaders(
+    broker: &Broker,
+    leader_ids: &[i32],
+) -> Vec<(i32, String, i32, Option<String>)> {
     if leader_ids.is_empty() {
         return Vec::new();
     }
@@ -131,7 +134,8 @@ fn node_endpoints_for_leaders(broker: &Broker, leader_ids: &[i32]) -> Vec<(i32, 
             .find(|(i, _, _)| *i as i32 == id)
             .map(|(_, h, p)| (h.clone(), i32::from(*p)))
             .unwrap_or((snap.host.clone(), i32::from(snap.port)));
-        out.push((id, host, port));
+        let rack = broker.broker_rack(id as u32);
+        out.push((id, host, port, rack));
     }
     out
 }
@@ -700,11 +704,12 @@ pub(crate) fn put_fetch_partition_response(
         records,
         current_leader,
         None,
+        -1,
     );
 }
 
-/// Full Fetch partition response with explicit LSO + aborted list (Phase 86)
-/// and optional DivergingEpoch (Phase 88).
+/// Full Fetch partition response with explicit LSO + aborted list (Phase 86),
+/// optional DivergingEpoch (Phase 88), and PreferredReadReplica (Phase 126).
 pub(crate) fn put_fetch_partition_response_full(
     out: &mut BytesMut,
     version: i16,
@@ -717,6 +722,7 @@ pub(crate) fn put_fetch_partition_response_full(
     records: &[u8],
     current_leader: Option<(i32, i32)>,
     diverging_epoch: Option<(i32, i64)>,
+    preferred_read_replica: i32,
 ) {
     let flexible = version >= 12;
     // For DivergingEpoch (OFFSET_OUT_OF_RANGE), still emit real hwm/lso/log_start
@@ -748,7 +754,8 @@ pub(crate) fn put_fetch_partition_response_full(
         }
     }
     if version >= 11 {
-        out.put_i32(-1); // preferred_read_replica (no rack-aware follower fetch)
+        // -1 = no redirect; positive broker id = preferred follower (Phase 126).
+        out.put_i32(preferred_read_replica);
     }
     if flexible {
         put_compact_bytes(out, Some(records));
@@ -989,13 +996,14 @@ pub(crate) fn encode_fetch(broker: &Broker, src: &mut impl Buf, out: &mut BytesM
             }
         }
     }
-    // v11+: rack_id (ignored — preferred_read_replica always -1).
+    // v11+: client rack_id for PreferredReadReplica (Phase 126).
+    let mut client_rack: Option<String> = None;
     if version >= 11 {
-        if flexible {
-            let _ = get_compact_string(src);
+        client_rack = if flexible {
+            get_compact_string(src).ok().filter(|s| !s.is_empty())
         } else {
-            let _ = get_string(src);
-        }
+            get_string(src).ok().filter(|s| !s.is_empty())
+        };
     }
     if flexible {
         // Request top-level tags: ClusterId (v12+ tag 0), ReplicaState (v15+ tag 1).
@@ -1083,6 +1091,8 @@ pub(crate) fn encode_fetch(broker: &Broker, src: &mut impl Buf, out: &mut BytesM
         records: BytesMut,
         current_leader: Option<(i32, i32)>,
         diverging: Option<(i32, i64)>,
+        /// PreferredReadReplica broker id, or -1 (Phase 126).
+        preferred_read_replica: i32,
         /// When true and omit_unchanged, drop from response.
         omit: bool,
         /// Update session last_hwm/lso after include.
@@ -1124,6 +1134,7 @@ pub(crate) fn encode_fetch(broker: &Broker, src: &mut impl Buf, out: &mut BytesM
                     records: BytesMut::new(),
                     current_leader,
                     diverging: None,
+                    preferred_read_replica: -1,
                     omit: false,
                     note_cache: false,
                 });
@@ -1192,11 +1203,45 @@ pub(crate) fn encode_fetch(broker: &Broker, src: &mut impl Buf, out: &mut BytesM
                             records: BytesMut::new(),
                             current_leader: None,
                             diverging: Some((found_epoch, end_offset)),
+                            preferred_read_replica: -1,
                             omit: false,
                             note_cache: false,
                         });
                         continue;
                     }
+                }
+            }
+
+            // Phase 126: PreferredReadReplica redirect (leader only; empty records).
+            if version >= 11 {
+                if let Some(pref) = broker.select_preferred_read_replica(
+                    &name,
+                    PartitionId(partition as u32),
+                    client_rack.as_deref(),
+                ) {
+                    let hwm = part_meta.map(|p| p.hwm as i64).unwrap_or(0);
+                    let lso =
+                        broker.last_stable_offset(name.as_str(), partition as u32) as i64;
+                    let log_start =
+                        produce_log_start_offset(broker, &topic_name, partition as u32);
+                    let resp_lso = if version >= 4 { lso } else { hwm };
+                    broker.note_preferred_replica_redirect();
+                    built_parts.push(BuiltPart {
+                        partition,
+                        error: KafkaErrorCode::None.as_i16(),
+                        hwm,
+                        lso: resp_lso,
+                        log_start,
+                        aborted: Vec::new(),
+                        records: BytesMut::new(),
+                        current_leader: None,
+                        diverging: None,
+                        preferred_read_replica: pref as i32,
+                        // Never omit preferred redirects (client must see the id).
+                        omit: false,
+                        note_cache: false,
+                    });
+                    continue;
                 }
             }
 
@@ -1263,6 +1308,7 @@ pub(crate) fn encode_fetch(broker: &Broker, src: &mut impl Buf, out: &mut BytesM
                         records: set,
                         current_leader: None,
                         diverging: None,
+                        preferred_read_replica: -1,
                         omit,
                         note_cache: true,
                     });
@@ -1322,6 +1368,7 @@ pub(crate) fn encode_fetch(broker: &Broker, src: &mut impl Buf, out: &mut BytesM
                 &p.records,
                 p.current_leader,
                 p.diverging,
+                p.preferred_read_replica,
             );
             // Phase 91: seed/refresh omit cache for successful includes.
             if p.note_cache && p.error == 0 && resp_session_id != 0 {

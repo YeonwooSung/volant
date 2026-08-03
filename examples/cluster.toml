@@ -13,13 +13,17 @@ replica_lag_max_ms = 30000
 id = 1
 host = "127.0.0.1"
 port = 9092
+# Optional rack (Phase 126 PreferredReadReplica / Metadata)
+# rack = "rack-a"
 
 [[brokers]]
 id = 2
 host = "127.0.0.1"
 port = 9093
+# rack = "rack-b"
 
 [[brokers]]
 id = 3
 host = "127.0.0.1"
 port = 9094
+# rack = "rack-a"

@@ -97,7 +97,8 @@ pub(crate) fn encode_describe_cluster(
         out.put_i32(*id as i32);
         put_compact_string(out, host);
         out.put_i32(i32::from(*port));
-        put_compact_nullable_string(out, None); // rack
+        // Phase 126: advertise cluster.toml rack when set.
+        put_compact_nullable_string(out, broker.broker_rack(*id).as_deref());
         if version >= 2 {
             out.put_u8(0); // IsFenced = false (no fenced brokers)
         }
@@ -721,14 +722,14 @@ pub(crate) fn encode_metadata(broker: &Broker, src: &mut impl Buf, out: &mut Byt
         out.put_i32(0);
     }
 
-    // Brokers
+    // Brokers (Phase 126: rack from cluster.toml when set)
     if flexible {
         put_compact_array_len(out, snap.brokers.len());
         for (id, host, port) in &snap.brokers {
             out.put_i32(*id as i32);
             put_compact_string(out, host);
             out.put_i32(i32::from(*port));
-            put_compact_nullable_string(out, None); // rack
+            put_compact_nullable_string(out, broker.broker_rack(*id).as_deref());
             put_empty_tag_buffer(out);
         }
     } else {
@@ -738,7 +739,7 @@ pub(crate) fn encode_metadata(broker: &Broker, src: &mut impl Buf, out: &mut Byt
             put_string(out, host);
             out.put_i32(i32::from(*port));
             if version >= 1 {
-                put_nullable_string(out, None); // rack
+                put_nullable_string(out, broker.broker_rack(*id).as_deref());
             }
         }
     }
@@ -893,7 +894,7 @@ pub(crate) fn write_metadata_brokers_header(broker: &Broker, out: &mut BytesMut,
             out.put_i32(*id as i32);
             put_compact_string(out, host);
             out.put_i32(i32::from(*port));
-            put_compact_nullable_string(out, None);
+            put_compact_nullable_string(out, broker.broker_rack(*id).as_deref());
             put_empty_tag_buffer(out);
         }
         put_compact_nullable_string(out, Some(KAFKA_CLUSTER_ID));
@@ -905,7 +906,7 @@ pub(crate) fn write_metadata_brokers_header(broker: &Broker, out: &mut BytesMut,
             put_string(out, host);
             out.put_i32(i32::from(*port));
             if version >= 1 {
-                put_nullable_string(out, None);
+                put_nullable_string(out, broker.broker_rack(*id).as_deref());
             }
         }
         if version >= 2 {

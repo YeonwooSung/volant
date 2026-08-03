@@ -9,8 +9,8 @@ Volant is a resource-efficient alternative to Apache Kafka, built for:
 - **Streaming processing** — first-class operators (`map`, `filter`, windows) without a heavy runtime
 - **Small footprint** — native binary, predictable memory, simple operations
 
-> Status: **Phases 0–125 landed** — durable log, clustering (ISR death + rejoin /
-> lag shrink + time-based ISR lag), security, stream operators, a broad optional Kafka wire shim
+> Status: **Phases 0–126 landed** — durable log, clustering (ISR death + rejoin /
+> lag shrink + time-based ISR lag + PreferredReadReplica rack-aware Fetch), security, stream operators, a broad optional Kafka wire shim
 > (classic + flexible; ApiVersions 0–5; Fetch 0–18; ACL admin 0–3;
 > TRANSACTION_ABORTABLE subset; fetch session TTL/max + durable local sessions;
 > broker Describe/AlterConfigs with sparse durable restore; multi-broker 2PC MVP;
@@ -46,7 +46,7 @@ volant/
 │   ├── consistency.md    # HWM / ISR / acks
 │   ├── tuning.md         # Performance / I/O guide
 │   ├── PHASE1–6_SPEC.md  # Binding core specs
-│   ├── PHASE7–113_SPEC.md # Ship records (see history/)
+│   ├── PHASE7–126_SPEC.md # Ship records (see history/)
 │   └── history/          # Phase index + archived plans/reviews
 ├── deploy/               # Dockerfile, compose, systemd, Helm chart
 ├── ROADMAP.md
@@ -155,7 +155,8 @@ time-based ISR lag shrink via `replica_lag_max_ms` (Phase 125).
 Matrix + honesty: [docs/KAFKA_COMPAT.md](./docs/KAFKA_COMPAT.md).
 
 **Still deferred:** multi-language clients, chaos-mesh / long fuzz campaigns
-(corpus smoke CI MVP → **Phase 112**), preferred-replica / shared session store,
+(corpus smoke CI MVP → **Phase 112**), shared session store / full preferred
+selector (PreferredReadReplica MVP → **Phase 126**),
 full KIP-890/939. Cluster admin fan-out → **Phase 113**; multi-broker Enable2Pc
 MVP → **Phase 114**; durable local sessions → **Phase 115**; DeleteRecords offline
 outbox → **Phase 116**; ACL/BROKER catch-up → **Phase 117**; ISR rejoin/lag

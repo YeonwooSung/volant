@@ -1,6 +1,6 @@
 # Phase history index
 
-Ship records for **phases 0–125**. Binding core contracts are
+Ship records for **phases 0–126**. Binding core contracts are
 **[PHASE1_SPEC](../PHASE1_SPEC.md)–[PHASE6_SPEC](../PHASE6_SPEC.md)**. Living
 docs for day-to-day reading: [ops](../ops.md), [consistency](../consistency.md),
 [tuning](../tuning.md), [KAFKA_COMPAT](../KAFKA_COMPAT.md),
@@ -167,15 +167,16 @@ docs for day-to-day reading: [ops](../ops.md), [consistency](../consistency.md),
 | 123 | ✅ | DeleteRecords outbox leadership handoff MVP (new leader reconcile from log_start) | [PHASE123_SPEC.md](../PHASE123_SPEC.md) |
 | 124 | ✅ | Durable txn coordinator registry MVP (per-broker `__txn_coordinator`; restart restore for forward/FC) | [PHASE124_SPEC.md](../PHASE124_SPEC.md) |
 | 125 | ✅ | Time-based ISR lag shrink MVP (last-caught-up + `replica_lag_max_ms`; rejoin still Phase 118) | [PHASE125_SPEC.md](../PHASE125_SPEC.md) |
+| 126 | ✅ | PreferredReadReplica / rack-aware Fetch MVP (KIP-392 subset; Metadata rack; LEO≥HWM ISR peer) | [PHASE126_SPEC.md](../PHASE126_SPEC.md) |
 
 ---
 
-## Still deferred (post–Phase 125)
+## Still deferred (post–Phase 126)
 
 - Multi-language clients
 - Chaos-mesh / long fuzz campaigns (corpus **smoke CI** → **closed by Phase 112**)
 - Full KIP-890/939 / Kafka `__transaction_state` topic (multi-broker Enable2Pc MVP → **closed by Phase 114**)
-- Multi-broker session handoff / affinity routing (durable **local** → **115**; owner forward MVP → **closed by Phase 119**; preferred-replica / shared store still open)
+- Multi-broker session handoff / affinity routing (durable **local** → **115**; owner forward MVP → **closed by Phase 119**; preferred-replica MVP → **closed by Phase 126**; shared store still open)
 - Byte-identical response cache beyond HWM+LSO omit
 - Full KRaft epoch state machine / remote-log epochs
 - Full Kafka broker catalog / KRaft DynamicBrokerConfig
@@ -199,6 +200,7 @@ docs for day-to-day reading: [ops](../ops.md), [consistency](../consistency.md),
 - Outbox handoff on leadership change → **closed by Phase 123** (new leader reconcile from log_start; not consensus truncate log)
 - Durable Init-owner txn coordinator registry → **closed by Phase 124** (local `__txn_coordinator`; not `__transaction_state`)
 - Time-based ISR lag shrink → **closed by Phase 125** (last-caught-up + `replica_lag_max_ms`; not full Kafka replica.lag.time.max.ms)
+- PreferredReadReplica / rack-aware Fetch → **closed by Phase 126** (KIP-392 subset; not full selector/throttling; shared session store still open)
 - Per-broker BROKER config overrides / multi-master ACL merge
-- Preferred replica
 - Consensus truncate log / controller SoT DeleteRecords journal
+- Full Kafka preferred-replica selector / rack-aware partition assignment
