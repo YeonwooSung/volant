@@ -83,8 +83,9 @@ pub use delete_records_outbox::{
     OUTBOX_DIR as DELETE_RECORDS_OUTBOX_DIR, OUTBOX_FILE as DELETE_RECORDS_OUTBOX_FILE,
 };
 pub use txn_coordinator_registry::{
-    TxnCoordinatorEntry, TxnCoordinatorFile, TxnCoordinatorRegistry,
-    TXN_COORDINATOR_DIR, TXN_COORDINATOR_FILE, TXN_COORDINATOR_FILE_VERSION,
+    effective_txn_coordinator_ttl_ms, TxnCoordinatorEntry, TxnCoordinatorFile,
+    TxnCoordinatorRegistry, DEFAULT_TXN_COORDINATOR_TTL_MS, TXN_COORDINATOR_DIR,
+    TXN_COORDINATOR_FILE, TXN_COORDINATOR_FILE_VERSION,
 };
 pub use cluster_admin::{
     ClusterAdminFile, ClusterAdminStore, CLUSTER_ADMIN_DIR, CLUSTER_ADMIN_FILE,

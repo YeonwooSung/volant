@@ -2377,10 +2377,38 @@ impl Broker {
     /// Used by the background sweeper and tests. Lazy API paths still call
     /// [`Self::expire_timed_out_txns`] independently. Returns
     /// `(open_aborted, prepared_aborted, sessions_idle_evicted)`.
+    ///
+    /// Phase 127: also runs txn-coordinator registry TTL GC (count not returned
+    /// here; see [`Self::expire_txn_coordinator_registry`] / metrics).
     pub fn sweep_timeouts(&self) -> (usize, usize, usize) {
         let (open_n, prep_n) = self.expire_timed_out_txns();
         let idle_n = self.fetch_sessions.evict_idle_now();
+        let _ = self.expire_txn_coordinator_registry();
         (open_n, prep_n, idle_n)
+    }
+
+    /// Phase 127: drop stale Init-owner registry entries older than
+    /// [`crate::txn_coordinator_registry::effective_txn_coordinator_ttl_ms`].
+    ///
+    /// Returns number of map entries removed (id + pid counted separately).
+    /// `0` TTL (env) disables GC.
+    pub fn expire_txn_coordinator_registry(&self) -> usize {
+        use crate::txn_coordinator_registry::effective_txn_coordinator_ttl_ms;
+        use std::time::{SystemTime, UNIX_EPOCH};
+        let ttl = effective_txn_coordinator_ttl_ms();
+        if ttl == 0 {
+            return 0;
+        }
+        let now = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .map(|d| d.as_millis() as u64)
+            .unwrap_or(0);
+        self.txn_coordinator_registry.expire_stale(ttl, now)
+    }
+
+    /// Phase 127: cumulative registry GC removals.
+    pub fn txn_coordinator_registry_gc_total(&self) -> u64 {
+        self.txn_coordinator_registry.gc_total()
     }
 
     /// InitProducerId with Phase 90 2PC options (Enable2Pc / KeepPreparedTxn)

@@ -482,6 +482,15 @@ fn broker_metrics_text(broker: &Broker) -> String {
         "volant_txn_coordinator_registry_persist_errors_total {}\n",
         broker.txn_coordinator_registry_persist_errors_total()
     ));
+    // Phase 127: registry TTL GC.
+    text.push_str(
+        "# HELP volant_txn_coordinator_registry_gc_total Txn coordinator registry entries removed by TTL GC\n",
+    );
+    text.push_str("# TYPE volant_txn_coordinator_registry_gc_total counter\n");
+    text.push_str(&format!(
+        "volant_txn_coordinator_registry_gc_total {}\n",
+        broker.txn_coordinator_registry_gc_total()
+    ));
     text.push_str("# HELP volant_open_txns Live open (non-prepared) transactions\n");
     text.push_str("# TYPE volant_open_txns gauge\n");
     text.push_str(&format!("volant_open_txns {}\n", broker.open_txn_count()));

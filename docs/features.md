@@ -130,6 +130,7 @@ workers.
 | AddOffsets / TxnOffsetCommit forward | Phase 122: same 84/85 path; non-coordinator always forwards when owner known so deferred offsets buffer only on coordinator (no dual-commit) |
 | Sticky FindCoordinator | Group/txn keys → murmur2 over sorted configured broker ids; next live if preferred dead; known transactional_id → Init owner (overrides hash) |
 | Durable Init-owner registry (Phase 124) | `{data_dir}/__txn_coordinator/state.json`; restart restores by_id/by_pid; not cluster SoT / not full `__transaction_state` |
+| Registry TTL GC (Phase 127) | Drop stale by_id/by_pid after last-touch age; default 24h (`VOLANT_TXN_COORDINATOR_TTL_MS`; `0` off); background sweeper + metric `volant_txn_coordinator_registry_gc_total` |
 | Durable prepared | Local `__txn_prepared/state.json` on each participant + controller `__txn_prepared/cluster.json` index (identity/decision only) |
 | Fence | Init KeepPreparedTxn=false aborts local; peers force-abort via complete with `commit=false` even if prepared was PrepareCommit |
 | Metrics | `volant_txn_2pc_fanout_errors_total`, `volant_cluster_prepared_txns`, `volant_txn_forward_total` / `_errors_total` (25/26/28) |
@@ -143,7 +144,7 @@ workers.
 - Crash≡abort control batches yes (Phase 98); empty AddPartitions control yes (Phase 105)  
 - Prepared 2PC multi-broker MVP yes (Phase 114; **not** full KIP-890/939 / `__transaction_state` topic); prepared timeout yes (Phase 92); open-txn timeout yes (Phase 93); TRANSACTION_ABORTABLE honest subset after timeout (Phase 94; FindCoordinator never); transaction max timeout clamp yes (Phase 96; default 15m; Init **50** over-max)  
 - Transparent EndTxn + AddOffsets + TxnOffsetCommit forward yes (Phase 120/122; Init-owner registry + inter-broker); sticky FindCoordinator yes (Phase 121; murmur2 + registry override); pin Init still recommended if client skips FindCoordinator
-- Durable Init-owner registry yes (Phase 124; local `__txn_coordinator`; stale completed entries may linger until re-Init)  
+- Durable Init-owner registry yes (Phase 124; local `__txn_coordinator`); TTL GC yes (Phase 127; default 24h; re-Init still overwrites; long-lived txns must re-note within TTL)  
 
 - Fetch sessions durable local (Phase 115) + multi-broker forward MVP (Phase 119); omit cache is HWM+LSO only (not byte-identical Kafka response cache); idle TTL + max/LRU yes (Phase 95); PreferredReadReplica MVP yes (Phase 126; not full selector/throttling); not shared session store  
 - ACL / BROKER admin SoT is the **controller** (Phase 113 push + Phase 117 durable gens / rejoin catch-up), not Raft consensus; brief lag until heartbeat catch-up is honest  

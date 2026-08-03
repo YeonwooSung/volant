@@ -3042,7 +3042,34 @@ store still deferred.
 full KIP-890/939 / `__transaction_state`, Kafka wire fuzz targets, dynamic
 membership / Raft, full Kafka broker catalog, consensus truncate journal /
 controller SoT pending set, per-broker BROKER config overrides, shared
-session registry, full preferred-replica selector parity, registry GC/TTL.
+session registry, full preferred-replica selector parity,
+registry GC/TTL → **closed by Phase 127**.
+
+---
+
+### Phase 127 — Txn coordinator registry TTL GC (MVP) ✅
+
+**Goal:** Expire stale Phase 124 Init-owner registry entries after a configurable
+TTL so completed/abandoned transactional_id and producer_id mappings do not
+grow without bound.
+
+Binding: **[docs/PHASE127_SPEC.md](./docs/PHASE127_SPEC.md)**.
+
+- [x] Durable last-touch ms maps (file format v2; v1 load → now timestamps)
+- [x] `expire_stale(ttl, now)` + persist; metric `volant_txn_coordinator_registry_gc_total`
+- [x] `VOLANT_TXN_COORDINATOR_TTL_MS` (default 24h; `0` disables)
+- [x] Hook into `sweep_timeouts` background path
+- [x] Tests: unit + `phase127_txn_coordinator_gc`
+- [x] Living docs honesty
+
+**Honest limitations:** wall-clock TTL; long-lived txns must re-note within TTL;
+no eager EndTxn GC; env-only (not BROKER Describe/Alter); not cluster SoT.
+
+**Still deferred:** multi-lang clients, chaos-mesh / long fuzz campaigns,
+full KIP-890/939 / `__transaction_state`, Kafka wire fuzz targets, dynamic
+membership / Raft, full Kafka broker catalog, consensus truncate journal /
+controller SoT pending set, per-broker BROKER config overrides, shared
+session registry, full preferred-replica selector parity.
 
 ---
 
@@ -3081,7 +3108,7 @@ marker clip 111; fuzz corpus smoke CI 112; cluster admin fan-out 113) — see
 
 ## Suggested implementation order (PRs)
 
-Phases **0–126 are shipped**. Historical PR order for the core:
+Phases **0–127 are shipped**. Historical PR order for the core:
 
 1. Phase 1 segment format + unit tests  
 2. Phase 1 recovery + retention  
@@ -3110,6 +3137,7 @@ Phases **0–126 are shipped**. Historical PR order for the core:
 25. Phase 124 (durable txn coordinator registry MVP) ✅  
 26. Phase 125 (time-based ISR lag shrink MVP) ✅  
 27. Phase 126 (PreferredReadReplica / rack-aware Fetch MVP) ✅  
+28. Phase 127 (txn coordinator registry TTL GC MVP) ✅  
 
 ---
 
@@ -3150,7 +3178,7 @@ cargo run -p volant-bench --release
 cargo test --workspace
 ```
 
-**Status (post–Phase 126):** core broker, ops (metrics / TLS / auth / SCRAM /
+**Status (post–Phase 127):** core broker, ops (metrics / TLS / auth / SCRAM /
 ACLs / Helm), and the Kafka wire shim are **shipped** (Fetch 0–18 Kafka max;
 ACL admin 0–3 with User resource; soft-marker `READ_COMMITTED` with **marker GC/clip**
 on DeleteRecords/retention/load (Phase 104/111); durable OFLE history; Fetch DivergingEpoch +
@@ -3180,7 +3208,8 @@ rebuilds from local `log_start` — still not a consensus truncate log);
 txn EndTxn/AddOffsets/TxnOffsetCommit forward Phases 120/122;
 **durable Init-owner registry** Phase 124 (`__txn_coordinator`);
 **PreferredReadReplica / rack-aware Fetch MVP** Phase 126 (Metadata rack;
-redirect when same-rack ISR peer LEO≥HWM)).
+redirect when same-rack ISR peer LEO≥HWM);
+**txn coordinator registry TTL GC** Phase 127 (`VOLANT_TXN_COORDINATOR_TTL_MS`)).
 Still deferred: multi-language clients, full chaos-mesh suites / long fuzz
 campaigns, shared session store / full preferred-replica selector, full
 KIP-890/939.

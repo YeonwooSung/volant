@@ -9,8 +9,9 @@ Volant is a resource-efficient alternative to Apache Kafka, built for:
 - **Streaming processing** — first-class operators (`map`, `filter`, windows) without a heavy runtime
 - **Small footprint** — native binary, predictable memory, simple operations
 
-> Status: **Phases 0–126 landed** — durable log, clustering (ISR death + rejoin /
-> lag shrink + time-based ISR lag + PreferredReadReplica rack-aware Fetch), security, stream operators, a broad optional Kafka wire shim
+> Status: **Phases 0–127 landed** — durable log, clustering (ISR death + rejoin /
+> lag shrink + time-based ISR lag + PreferredReadReplica rack-aware Fetch +
+> txn coordinator registry TTL GC), security, stream operators, a broad optional Kafka wire shim
 > (classic + flexible; ApiVersions 0–5; Fetch 0–18; ACL admin 0–3;
 > TRANSACTION_ABORTABLE subset; fetch session TTL/max + durable local sessions;
 > broker Describe/AlterConfigs with sparse durable restore; multi-broker 2PC MVP;
@@ -46,7 +47,7 @@ volant/
 │   ├── consistency.md    # HWM / ISR / acks
 │   ├── tuning.md         # Performance / I/O guide
 │   ├── PHASE1–6_SPEC.md  # Binding core specs
-│   ├── PHASE7–126_SPEC.md # Ship records (see history/)
+│   ├── PHASE7–127_SPEC.md # Ship records (see history/)
 │   └── history/          # Phase index + archived plans/reviews
 ├── deploy/               # Dockerfile, compose, systemd, Helm chart
 ├── ROADMAP.md

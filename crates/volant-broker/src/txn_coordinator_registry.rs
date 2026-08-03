@@ -1,21 +1,20 @@
-//! Durable txn coordinator (Init-owner) registry (Phase 124).
+//! Durable txn coordinator (Init-owner) registry (Phase 124 + GC Phase 127).
 //!
 //! Layout: `{data_dir}/__txn_coordinator/state.json` (atomic replace on write).
 //!
 //! Phases 120–122 keep `transactional_id` / `producer_id` → coordinator
 //! `node_id` maps for transparent KafkaTxnForward and sticky FindCoordinator
-//! override. This module persists those maps so a broker restart on the same
-//! `data_dir` restores known ownership without waiting for re-Init or open
-//! fan-out.
+//! override. Phase 124 persists those maps across restart. Phase 127 adds
+//! optional TTL GC so completed / stale mappings do not grow without bound.
 //!
-//! At-least-once / stale entries for completed txns may linger until re-Init
-//! overwrites them (no GC in MVP).
+//! Default TTL is 24h (`VOLANT_TXN_COORDINATOR_TTL_MS`); `0` disables GC.
 
 use std::collections::HashMap;
 use std::fs::{self, File, OpenOptions};
 use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
+use std::time::{SystemTime, UNIX_EPOCH};
 
 use parking_lot::RwLock;
 use serde::{Deserialize, Serialize};
@@ -25,8 +24,10 @@ use tracing::warn;
 pub const TXN_COORDINATOR_DIR: &str = "__txn_coordinator";
 /// On-disk snapshot file name.
 pub const TXN_COORDINATOR_FILE: &str = "state.json";
-/// File format version.
-pub const TXN_COORDINATOR_FILE_VERSION: u32 = 1;
+/// File format version (2 = last-touch timestamps for GC).
+pub const TXN_COORDINATOR_FILE_VERSION: u32 = 2;
+/// Default registry entry TTL: 24 hours.
+pub const DEFAULT_TXN_COORDINATOR_TTL_MS: u64 = 24 * 60 * 60 * 1000;
 
 /// One durable mapping (exported for tests / dumps).
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -41,7 +42,7 @@ pub struct TxnCoordinatorEntry {
     pub coordinator_node_id: u32,
 }
 
-/// Full durable snapshot — mirrors the two in-memory maps.
+/// Full durable snapshot — mirrors the two in-memory maps + last-touch ms.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct TxnCoordinatorFile {
     /// Format version.
@@ -50,11 +51,15 @@ pub struct TxnCoordinatorFile {
     /// `transactional_id` → coordinator node id.
     #[serde(default)]
     pub by_id: HashMap<String, u32>,
-    /// `producer_id` → coordinator node id (string keys in JSON via serde_json map of string→u32).
-    ///
-    /// Serde encodes `HashMap<u64, u32>` as a JSON object with string keys.
+    /// `producer_id` → coordinator node id.
     #[serde(default)]
     pub by_pid: HashMap<u64, u32>,
+    /// Last note/touch wall time (unix ms) per transactional_id (Phase 127).
+    #[serde(default)]
+    pub id_last_ms: HashMap<String, u64>,
+    /// Last note/touch wall time (unix ms) per producer_id (Phase 127).
+    #[serde(default)]
+    pub pid_last_ms: HashMap<u64, u64>,
 }
 
 fn default_version() -> u32 {
@@ -67,6 +72,8 @@ impl Default for TxnCoordinatorFile {
             version: TXN_COORDINATOR_FILE_VERSION,
             by_id: HashMap::new(),
             by_pid: HashMap::new(),
+            id_last_ms: HashMap::new(),
+            pid_last_ms: HashMap::new(),
         }
     }
 }
@@ -78,8 +85,12 @@ pub struct TxnCoordinatorRegistry {
     path: Option<PathBuf>,
     by_id: RwLock<HashMap<String, u32>>,
     by_pid: RwLock<HashMap<u64, u32>>,
+    id_last_ms: RwLock<HashMap<String, u64>>,
+    pid_last_ms: RwLock<HashMap<u64, u64>>,
     restored: AtomicU64,
     persist_errors_total: AtomicU64,
+    /// Entries removed by TTL GC (Phase 127).
+    gc_total: AtomicU64,
 }
 
 impl Default for TxnCoordinatorRegistry {
@@ -95,8 +106,11 @@ impl TxnCoordinatorRegistry {
             path: None,
             by_id: RwLock::new(HashMap::new()),
             by_pid: RwLock::new(HashMap::new()),
+            id_last_ms: RwLock::new(HashMap::new()),
+            pid_last_ms: RwLock::new(HashMap::new()),
             restored: AtomicU64::new(0),
             persist_errors_total: AtomicU64::new(0),
+            gc_total: AtomicU64::new(0),
         }
     }
 
@@ -105,13 +119,16 @@ impl TxnCoordinatorRegistry {
         let dir = data_dir.as_ref().join(TXN_COORDINATOR_DIR);
         let _ = fs::create_dir_all(&dir);
         let path = dir.join(TXN_COORDINATOR_FILE);
-        let (by_id, by_pid, n) = load_maps(&path);
+        let loaded = load_maps(&path);
         Self {
             path: Some(path),
-            by_id: RwLock::new(by_id),
-            by_pid: RwLock::new(by_pid),
-            restored: AtomicU64::new(n),
+            by_id: RwLock::new(loaded.by_id),
+            by_pid: RwLock::new(loaded.by_pid),
+            id_last_ms: RwLock::new(loaded.id_last_ms),
+            pid_last_ms: RwLock::new(loaded.pid_last_ms),
+            restored: AtomicU64::new(loaded.restored),
             persist_errors_total: AtomicU64::new(0),
+            gc_total: AtomicU64::new(0),
         }
     }
 
@@ -128,6 +145,11 @@ impl TxnCoordinatorRegistry {
     /// Durable persist failures.
     pub fn persist_errors_total(&self) -> u64 {
         self.persist_errors_total.load(Ordering::Relaxed)
+    }
+
+    /// Cumulative entries removed by TTL GC (id + pid removals counted separately).
+    pub fn gc_total(&self) -> u64 {
+        self.gc_total.load(Ordering::Relaxed)
     }
 
     /// Number of known transactional_id mappings.
@@ -152,14 +174,19 @@ impl TxnCoordinatorRegistry {
         if coordinator_node_id == 0 {
             return;
         }
+        let now = now_ms();
         if !transactional_id.is_empty() {
             self.by_id
                 .write()
                 .insert(transactional_id.to_owned(), coordinator_node_id);
+            self.id_last_ms
+                .write()
+                .insert(transactional_id.to_owned(), now);
         }
         self.by_pid
             .write()
             .insert(producer_id, coordinator_node_id);
+        self.pid_last_ms.write().insert(producer_id, now);
         self.persist();
     }
 
@@ -184,13 +211,62 @@ impl TxnCoordinatorRegistry {
             .filter(|&id| id != 0)
     }
 
+    /// Drop entries whose last note is older than `ttl_ms` (Phase 127).
+    ///
+    /// `ttl_ms == 0` disables GC (returns 0). `now_ms` is injectable for tests.
+    /// Returns number of map entries removed (id + pid counted separately).
+    pub fn expire_stale(&self, ttl_ms: u64, now_ms: u64) -> usize {
+        if ttl_ms == 0 {
+            return 0;
+        }
+        let cutoff = now_ms.saturating_sub(ttl_ms);
+        let mut removed = 0usize;
+
+        {
+            let mut by_id = self.by_id.write();
+            let mut last = self.id_last_ms.write();
+            let stale: Vec<String> = by_id
+                .keys()
+                .filter(|k| last.get(*k).copied().unwrap_or(0) <= cutoff)
+                .cloned()
+                .collect();
+            for k in stale {
+                by_id.remove(&k);
+                last.remove(&k);
+                removed += 1;
+            }
+            // Drop orphan last_ms keys.
+            last.retain(|k, _| by_id.contains_key(k));
+        }
+        {
+            let mut by_pid = self.by_pid.write();
+            let mut last = self.pid_last_ms.write();
+            let stale: Vec<u64> = by_pid
+                .keys()
+                .filter(|k| last.get(*k).copied().unwrap_or(0) <= cutoff)
+                .copied()
+                .collect();
+            for k in stale {
+                by_pid.remove(&k);
+                last.remove(&k);
+                removed += 1;
+            }
+            last.retain(|k, _| by_pid.contains_key(k));
+        }
+
+        if removed > 0 {
+            self.gc_total.fetch_add(removed as u64, Ordering::Relaxed);
+            self.persist();
+        }
+        removed
+    }
+
     /// Snapshot entries for tests / dump (id rows + pid-only leftovers).
     pub fn list(&self) -> Vec<TxnCoordinatorEntry> {
         let by_id = self.by_id.read();
         let by_pid = self.by_pid.read();
         let mut out = Vec::new();
         for (txn_id, &coord) in by_id.iter() {
-            // Attach a pid that maps to the same coord if any (best-effort display).
             let pid = by_pid
                 .iter()
                 .find(|(_, c)| **c == coord)
@@ -203,7 +279,6 @@ impl TxnCoordinatorRegistry {
             });
         }
         for (&pid, &coord) in by_pid.iter() {
-            // Skip pids already represented via an id row with same coord+pid.
             if out
                 .iter()
                 .any(|e| e.producer_id == pid && e.coordinator_node_id == coord)
@@ -224,6 +299,22 @@ impl TxnCoordinatorRegistry {
         out
     }
 
+    /// Test / ops helper: force last-touch timestamp for an id mapping.
+    pub fn test_set_id_last_ms(&self, transactional_id: &str, ms: u64) {
+        if self.by_id.read().contains_key(transactional_id) {
+            self.id_last_ms
+                .write()
+                .insert(transactional_id.to_owned(), ms);
+        }
+    }
+
+    /// Test / ops helper: force last-touch timestamp for a pid mapping.
+    pub fn test_set_pid_last_ms(&self, producer_id: u64, ms: u64) {
+        if self.by_pid.read().contains_key(&producer_id) {
+            self.pid_last_ms.write().insert(producer_id, ms);
+        }
+    }
+
     fn persist(&self) {
         let Some(path) = &self.path else {
             return;
@@ -232,6 +323,8 @@ impl TxnCoordinatorRegistry {
             version: TXN_COORDINATOR_FILE_VERSION,
             by_id: self.by_id.read().clone(),
             by_pid: self.by_pid.read().clone(),
+            id_last_ms: self.id_last_ms.read().clone(),
+            pid_last_ms: self.pid_last_ms.read().clone(),
         };
         if save_file(path, &file).is_err() {
             self.persist_errors_total.fetch_add(1, Ordering::Relaxed);
@@ -243,25 +336,54 @@ impl TxnCoordinatorRegistry {
     }
 }
 
-fn load_maps(path: &Path) -> (HashMap<String, u32>, HashMap<u64, u32>, u64) {
+struct LoadedMaps {
+    by_id: HashMap<String, u32>,
+    by_pid: HashMap<u64, u32>,
+    id_last_ms: HashMap<String, u64>,
+    pid_last_ms: HashMap<u64, u64>,
+    restored: u64,
+}
+
+fn load_maps(path: &Path) -> LoadedMaps {
     let file = match load_file(path) {
         Ok(f) => f,
-        Err(_) => return (HashMap::new(), HashMap::new(), 0),
+        Err(_) => {
+            return LoadedMaps {
+                by_id: HashMap::new(),
+                by_pid: HashMap::new(),
+                id_last_ms: HashMap::new(),
+                pid_last_ms: HashMap::new(),
+                restored: 0,
+            };
+        }
     };
+    let now = now_ms();
     let mut by_id: HashMap<String, u32> = HashMap::new();
     let mut by_pid: HashMap<u64, u32> = HashMap::new();
+    let mut id_last_ms: HashMap<String, u64> = HashMap::new();
+    let mut pid_last_ms: HashMap<u64, u64> = HashMap::new();
     for (k, v) in file.by_id {
         if v != 0 && !k.is_empty() {
-            by_id.insert(k, v);
+            let ts = file.id_last_ms.get(&k).copied().filter(|&t| t > 0).unwrap_or(now);
+            by_id.insert(k.clone(), v);
+            id_last_ms.insert(k, ts);
         }
     }
     for (k, v) in file.by_pid {
         if v != 0 {
+            let ts = file.pid_last_ms.get(&k).copied().filter(|&t| t > 0).unwrap_or(now);
             by_pid.insert(k, v);
+            pid_last_ms.insert(k, ts);
         }
     }
-    let n = (by_id.len() + by_pid.len()) as u64;
-    (by_id, by_pid, n)
+    let restored = (by_id.len() + by_pid.len()) as u64;
+    LoadedMaps {
+        by_id,
+        by_pid,
+        id_last_ms,
+        pid_last_ms,
+        restored,
+    }
 }
 
 fn load_file(path: &Path) -> Result<TxnCoordinatorFile, ()> {
@@ -296,10 +418,29 @@ fn save_file(path: &Path, state: &TxnCoordinatorFile) -> Result<(), ()> {
     Ok(())
 }
 
+fn now_ms() -> u64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|d| d.as_millis() as u64)
+        .unwrap_or(0)
+}
+
+/// Effective registry TTL from `VOLANT_TXN_COORDINATOR_TTL_MS` or default 24h.
+///
+/// `0` disables GC. Invalid env values fall back to the default.
+pub fn effective_txn_coordinator_ttl_ms() -> u64 {
+    match std::env::var("VOLANT_TXN_COORDINATOR_TTL_MS") {
+        Ok(s) => match s.parse::<u64>() {
+            Ok(v) => v,
+            Err(_) => DEFAULT_TXN_COORDINATOR_TTL_MS,
+        },
+        Err(_) => DEFAULT_TXN_COORDINATOR_TTL_MS,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::time::{SystemTime, UNIX_EPOCH};
 
     fn temp_dir() -> PathBuf {
         let nanos = SystemTime::now()
@@ -336,7 +477,6 @@ mod tests {
         assert_eq!(r2.resolve_by_id("payments"), Some(1));
         assert_eq!(r2.resolve_by_pid(9), Some(1));
 
-        // Idempotent second open.
         let r3 = TxnCoordinatorRegistry::open(&dir);
         assert_eq!(r3.resolve_by_id("orders"), Some(2));
         assert_eq!(r3.id_count(), r2.id_count());
@@ -351,10 +491,10 @@ mod tests {
         let _ = fs::remove_dir_all(&dir);
         let r1 = TxnCoordinatorRegistry::open(&dir);
         r1.note("t", 1, 2);
-        r1.note("t", 5, 3); // new pid, new owner
+        r1.note("t", 5, 3);
         assert_eq!(r1.resolve_by_id("t"), Some(3));
         assert_eq!(r1.resolve_by_pid(5), Some(3));
-        // Old pid still maps (honest: no GC).
+        // Old pid remains until TTL GC (Phase 127).
         assert_eq!(r1.resolve_by_pid(1), Some(2));
 
         let r2 = TxnCoordinatorRegistry::open(&dir);
@@ -380,6 +520,59 @@ mod tests {
         assert_eq!(r1.resolve_by_pid(42), Some(7));
         let r2 = TxnCoordinatorRegistry::open(&dir);
         assert_eq!(r2.resolve_by_pid(42), Some(7));
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn ttl_gc_removes_stale_and_persists() {
+        let dir = temp_dir();
+        let _ = fs::remove_dir_all(&dir);
+        let r = TxnCoordinatorRegistry::open(&dir);
+        r.note("fresh", 10, 1);
+        r.note("stale", 20, 2);
+        r.test_set_id_last_ms("stale", 1_000);
+        r.test_set_pid_last_ms(20, 1_000);
+        // Keep fresh at "now".
+        let now = 1_000_000u64;
+        r.test_set_id_last_ms("fresh", now);
+        r.test_set_pid_last_ms(10, now);
+
+        assert_eq!(r.expire_stale(0, now), 0); // disabled
+        assert_eq!(r.resolve_by_id("stale"), Some(2));
+
+        let n = r.expire_stale(60_000, now); // 60s TTL
+        assert!(n >= 2, "removed {n}");
+        assert!(r.resolve_by_id("stale").is_none());
+        assert!(r.resolve_by_pid(20).is_none());
+        assert_eq!(r.resolve_by_id("fresh"), Some(1));
+        assert_eq!(r.resolve_by_pid(10), Some(1));
+        assert!(r.gc_total() >= 2);
+
+        let r2 = TxnCoordinatorRegistry::open(&dir);
+        assert!(r2.resolve_by_id("stale").is_none());
+        assert_eq!(r2.resolve_by_id("fresh"), Some(1));
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn v1_file_loads_with_now_timestamps() {
+        let dir = temp_dir();
+        let _ = fs::remove_dir_all(&dir);
+        let reg_dir = dir.join(TXN_COORDINATOR_DIR);
+        fs::create_dir_all(&reg_dir).unwrap();
+        let path = reg_dir.join(TXN_COORDINATOR_FILE);
+        // Phase 124 v1 shape (no last_ms maps).
+        let v1 = r#"{
+  "version": 1,
+  "by_id": { "legacy": 3 },
+  "by_pid": { "99": 3 }
+}"#;
+        fs::write(&path, v1).unwrap();
+        let r = TxnCoordinatorRegistry::open(&dir);
+        assert_eq!(r.resolve_by_id("legacy"), Some(3));
+        assert_eq!(r.resolve_by_pid(99), Some(3));
+        // Fresh timestamps → not immediately GC'd with 24h TTL.
+        assert_eq!(r.expire_stale(DEFAULT_TXN_COORDINATOR_TTL_MS, now_ms()), 0);
         let _ = fs::remove_dir_all(&dir);
     }
 }
