@@ -323,4 +323,4 @@ No flexible Fetch rack IT; no DescribeCluster/NodeEndpoints rack IT; no dedicate
 | #8 registry persist | **Fixed** | `persist_lock` + unique tmp |
 | #9 apply_push gen | **Fixed** | `atomic_fetch_max` |
 | #14–#15 tests | **Fixed** | phase126 rewrite; phase130 `consensus_fail`; phase99 key |
-| #10–#13 | **Open** | v15+ ReplicaState, journal GC, snapshot DoS, env bounds |
+| #10–#13 | **Fixed** (follow-up commit) | v15+ ReplicaState parse; journal prune+caps; env clamp |
