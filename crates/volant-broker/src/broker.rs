@@ -42,6 +42,7 @@ use crate::leader_epoch::{
 use crate::broker_config::{
     self, KEY_FETCH_SESSION_IDLE_MS, KEY_FETCH_SESSION_MAX, KEY_OPEN_TXN_TIMEOUT_MS,
     KEY_PREPARED_TXN_TIMEOUT_MS, KEY_SWEEP_INTERVAL_MS, KEY_TRANSACTION_MAX_TIMEOUT_MS,
+    KEY_TXN_COORDINATOR_TTL_MS,
 };
 use crate::cluster_admin::{ClusterAdminFile, ClusterAdminStore};
 use crate::delete_records_outbox::DeleteRecordsOutbox;
@@ -446,6 +447,11 @@ pub struct Broker {
     /// [`Broker::set_sweep_interval_ms`]. `0` pauses the background sweeper
     /// (lazy expire paths still run); task always spawned so 0→>0 works live.
     sweep_interval_ms: AtomicU64,
+    /// Init-owner registry entry TTL for GC (Phase 127/128).
+    ///
+    /// Default 24h; override via `VOLANT_TXN_COORDINATOR_TTL_MS`, sparse durable
+    /// BROKER config, or [`Broker::set_txn_coordinator_ttl_ms`]. `0` disables GC.
+    txn_coordinator_ttl_ms: AtomicU64,
     /// Open txns auto-aborted by timeout (lazy + background; Phase 97).
     open_txns_expired_total: AtomicU64,
     /// Prepared txns auto-aborted by timeout (lazy + background; Phase 97).
@@ -647,6 +653,7 @@ impl Broker {
             open_txn_timeout_ms: AtomicU64::new(default_open_txn_timeout_ms()),
             transaction_max_timeout_ms: AtomicU64::new(default_transaction_max_timeout_ms()),
             sweep_interval_ms: AtomicU64::new(default_sweep_interval_ms()),
+            txn_coordinator_ttl_ms: AtomicU64::new(default_txn_coordinator_ttl_ms()),
             open_txns_expired_total: AtomicU64::new(0),
             prepared_txns_expired_total: AtomicU64::new(0),
             abortable_producers: Mutex::new(HashSet::new()),
@@ -780,6 +787,7 @@ impl Broker {
             open_txn_timeout_ms: AtomicU64::new(default_open_txn_timeout_ms()),
             transaction_max_timeout_ms: AtomicU64::new(default_transaction_max_timeout_ms()),
             sweep_interval_ms: AtomicU64::new(default_sweep_interval_ms()),
+            txn_coordinator_ttl_ms: AtomicU64::new(default_txn_coordinator_ttl_ms()),
             open_txns_expired_total: AtomicU64::new(0),
             prepared_txns_expired_total: AtomicU64::new(0),
             abortable_producers: Mutex::new(HashSet::new()),
@@ -2193,6 +2201,16 @@ impl Broker {
         self.sweep_interval_ms.store(interval_ms, Ordering::Relaxed);
     }
 
+    /// Init-owner registry TTL in ms (Phase 127/128). `0` disables GC.
+    pub fn txn_coordinator_ttl_ms(&self) -> u64 {
+        self.txn_coordinator_ttl_ms.load(Ordering::Relaxed)
+    }
+
+    /// Override Init-owner registry TTL (Phase 128 BROKER config / tests).
+    pub fn set_txn_coordinator_ttl_ms(&self, ttl_ms: u64) {
+        self.txn_coordinator_ttl_ms.store(ttl_ms, Ordering::Relaxed);
+    }
+
     /// Current broker-level config entries for Kafka DescribeConfigs BROKER
     /// (Phase 99–102). Values are live knobs (product → env → sparse durable →
     /// setters/alter).
@@ -2221,6 +2239,10 @@ impl Broker {
             (
                 KEY_SWEEP_INTERVAL_MS.into(),
                 self.sweep_interval_ms().to_string(),
+            ),
+            (
+                KEY_TXN_COORDINATOR_TTL_MS.into(),
+                self.txn_coordinator_ttl_ms().to_string(),
             ),
         ]
     }
@@ -2279,6 +2301,7 @@ impl Broker {
                 self.set_fetch_session_max(max);
             }
             KEY_SWEEP_INTERVAL_MS => self.set_sweep_interval_ms(val),
+            KEY_TXN_COORDINATOR_TTL_MS => self.set_txn_coordinator_ttl_ms(val),
             _ => {
                 return Err(Error::InvalidArgument(format!(
                     "unknown broker config key: {key}"
@@ -2387,15 +2410,14 @@ impl Broker {
         (open_n, prep_n, idle_n)
     }
 
-    /// Phase 127: drop stale Init-owner registry entries older than
-    /// [`crate::txn_coordinator_registry::effective_txn_coordinator_ttl_ms`].
+    /// Phase 127/128: drop stale Init-owner registry entries older than
+    /// [`Self::txn_coordinator_ttl_ms`] (live knob: env → durable → Alter).
     ///
     /// Returns number of map entries removed (id + pid counted separately).
-    /// `0` TTL (env) disables GC.
+    /// `0` TTL disables GC.
     pub fn expire_txn_coordinator_registry(&self) -> usize {
-        use crate::txn_coordinator_registry::effective_txn_coordinator_ttl_ms;
         use std::time::{SystemTime, UNIX_EPOCH};
-        let ttl = effective_txn_coordinator_ttl_ms();
+        let ttl = self.txn_coordinator_ttl_ms();
         if ttl == 0 {
             return 0;
         }
@@ -6553,6 +6575,11 @@ fn default_sweep_interval_ms() -> u64 {
         .ok()
         .and_then(|s| s.parse::<u64>().ok())
         .unwrap_or(1_000)
+}
+
+/// Product default / env for registry TTL (Phase 127/128). Invalid env → 24h.
+fn default_txn_coordinator_ttl_ms() -> u64 {
+    crate::txn_coordinator_registry::effective_txn_coordinator_ttl_ms()
 }
 
 fn topics_from_open(txn: &OpenTxn) -> Vec<(String, Vec<i32>)> {

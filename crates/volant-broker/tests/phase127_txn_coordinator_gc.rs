@@ -61,14 +61,12 @@ fn expire_stale_drops_old_mappings() {
 fn sweep_timeouts_runs_registry_gc_with_env_ttl() {
     let base = unique_dir("sweep");
     let _g = Guard(base.clone());
-    // Short TTL for this process (test isolation: restore after).
-    let prev = std::env::var("VOLANT_TXN_COORDINATOR_TTL_MS").ok();
-    std::env::set_var("VOLANT_TXN_COORDINATOR_TTL_MS", "50");
-
     let broker = Arc::new(Broker::new(StorageConfig {
         data_dir: base.clone(),
         ..StorageConfig::default()
     }));
+    // Process-local knob (avoid env races with parallel tests).
+    broker.set_txn_coordinator_ttl_ms(50);
     let reg = broker.txn_coordinator_registry();
     reg.note("old", 9, 1);
     reg.test_set_id_last_ms("old", 1);
@@ -81,24 +79,17 @@ fn sweep_timeouts_runs_registry_gc_with_env_ttl() {
         reg.resolve_by_id("old").is_none(),
         "stale entry should be GC'd by sweep"
     );
-
-    match prev {
-        Some(v) => std::env::set_var("VOLANT_TXN_COORDINATOR_TTL_MS", v),
-        None => std::env::remove_var("VOLANT_TXN_COORDINATOR_TTL_MS"),
-    }
 }
 
 #[test]
 fn ttl_zero_disables_gc() {
     let base = unique_dir("disabled");
     let _g = Guard(base.clone());
-    let prev = std::env::var("VOLANT_TXN_COORDINATOR_TTL_MS").ok();
-    std::env::set_var("VOLANT_TXN_COORDINATOR_TTL_MS", "0");
-
     let broker = Arc::new(Broker::new(StorageConfig {
         data_dir: base.clone(),
         ..StorageConfig::default()
     }));
+    broker.set_txn_coordinator_ttl_ms(0);
     broker.note_txn_coordinator("linger", 5, 1);
     // Force ancient timestamps.
     broker
@@ -112,11 +103,6 @@ fn ttl_zero_disables_gc() {
         broker.txn_coordinator_registry().resolve_by_id("linger"),
         Some(1)
     );
-
-    match prev {
-        Some(v) => std::env::set_var("VOLANT_TXN_COORDINATOR_TTL_MS", v),
-        None => std::env::remove_var("VOLANT_TXN_COORDINATOR_TTL_MS"),
-    }
 }
 
 #[test]

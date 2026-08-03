@@ -116,7 +116,7 @@ workers.
 | Feature | Behavior |
 |---------|----------|
 | DeleteRecords fan-out | Partition **leader** truncates locally, then best-effort `ReplicaDeleteRecords` to other replicas (soft-marker GC/clip on peers). Client success does not wait on peer RPC success. Metric `volant_delete_records_fanout_errors_total`. **Phase 116:** failed peers are enqueued under `{data_dir}/__delete_records_outbox` and retried when live (at-least-once). **Phase 123:** new leader reconciles pending truncates from local `log_start` after leadership change (`volant_delete_records_outbox_reconcile_total`) |
-| BROKER config fan-out | Cluster **controller-only** Alter / IncrementalAlter for the six Phase 99 knobs; generationed push to live peers; sparse durable on each node. Non-controller → `NotController` / Kafka **41**. **Phase 117:** durable gens + heartbeat lag re-push (full effective knobs) so offline peers converge on rejoin |
+| BROKER config fan-out | Cluster **controller-only** Alter / IncrementalAlter for Phase 99 knobs **+** registry TTL (Phase 128; seven keys); generationed push to live peers; sparse durable on each node. Non-controller → `NotController` / Kafka **41**. **Phase 117:** durable gens + heartbeat lag re-push (full effective knobs) so offline peers converge on rejoin |
 | ACL snapshot fan-out | Cluster **controller-only** Create/Delete Acls; generationed full snapshot push; peers install + persist `__acls`. List/authorize remain local after apply. **Phase 117:** same catch-up path on rejoin / controller restart |
 
 ## Multi-broker 2PC (Phase 114 MVP) + txn forward (Phase 120/122) + sticky FindCoordinator (Phase 121) + durable registry (Phase 124)
@@ -131,6 +131,7 @@ workers.
 | Sticky FindCoordinator | Group/txn keys → murmur2 over sorted configured broker ids; next live if preferred dead; known transactional_id → Init owner (overrides hash) |
 | Durable Init-owner registry (Phase 124) | `{data_dir}/__txn_coordinator/state.json`; restart restores by_id/by_pid; not cluster SoT / not full `__transaction_state` |
 | Registry TTL GC (Phase 127) | Drop stale by_id/by_pid after last-touch age; default 24h (`VOLANT_TXN_COORDINATOR_TTL_MS`; `0` off); background sweeper + metric `volant_txn_coordinator_registry_gc_total` |
+| Registry TTL BROKER config (Phase 128) | Describe/Alter `volant.txn.coordinator.registry.ttl.ms`; sparse durable + controller fan-out; live GC uses AtomicU64 |
 | Durable prepared | Local `__txn_prepared/state.json` on each participant + controller `__txn_prepared/cluster.json` index (identity/decision only) |
 | Fence | Init KeepPreparedTxn=false aborts local; peers force-abort via complete with `commit=false` even if prepared was PrepareCommit |
 | Metrics | `volant_txn_2pc_fanout_errors_total`, `volant_cluster_prepared_txns`, `volant_txn_forward_total` / `_errors_total` (25/26/28) |
@@ -144,7 +145,7 @@ workers.
 - Crash≡abort control batches yes (Phase 98); empty AddPartitions control yes (Phase 105)  
 - Prepared 2PC multi-broker MVP yes (Phase 114; **not** full KIP-890/939 / `__transaction_state` topic); prepared timeout yes (Phase 92); open-txn timeout yes (Phase 93); TRANSACTION_ABORTABLE honest subset after timeout (Phase 94; FindCoordinator never); transaction max timeout clamp yes (Phase 96; default 15m; Init **50** over-max)  
 - Transparent EndTxn + AddOffsets + TxnOffsetCommit forward yes (Phase 120/122; Init-owner registry + inter-broker); sticky FindCoordinator yes (Phase 121; murmur2 + registry override); pin Init still recommended if client skips FindCoordinator
-- Durable Init-owner registry yes (Phase 124; local `__txn_coordinator`); TTL GC yes (Phase 127; default 24h; re-Init still overwrites; long-lived txns must re-note within TTL)  
+- Durable Init-owner registry yes (Phase 124; local `__txn_coordinator`); TTL GC yes (Phase 127/128; default 24h; BROKER Describe/Alter; re-Init still overwrites; long-lived txns must re-note within TTL)  
 
 - Fetch sessions durable local (Phase 115) + multi-broker forward MVP (Phase 119); omit cache is HWM+LSO only (not byte-identical Kafka response cache); idle TTL + max/LRU yes (Phase 95); PreferredReadReplica MVP yes (Phase 126; not full selector/throttling); not shared session store  
 - ACL / BROKER admin SoT is the **controller** (Phase 113 push + Phase 117 durable gens / rejoin catch-up), not Raft consensus; brief lag until heartbeat catch-up is honest  

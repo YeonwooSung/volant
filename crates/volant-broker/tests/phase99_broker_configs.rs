@@ -129,7 +129,7 @@ async fn describe_broker_defaults() {
         map.get(KEY_SWEEP_INTERVAL_MS),
         Some(&broker.sweep_interval_ms().to_string())
     );
-    assert_eq!(map.len(), 6);
+    assert_eq!(map.len(), 7); // six Phase 99 knobs + Phase 128 registry TTL
 
     // When no env overrides, product defaults match getters.
     if std::env::var("VOLANT_TRANSACTION_MAX_TIMEOUT_MS").is_err()

@@ -18,6 +18,7 @@ use serde::{Deserialize, Serialize};
 use volant_core::{Error, Result};
 
 use crate::kafka::fetch_session::{DEFAULT_IDLE_TIMEOUT_MS, DEFAULT_MAX_SESSIONS};
+use crate::txn_coordinator_registry::DEFAULT_TXN_COORDINATOR_TTL_MS;
 
 /// Kafka standard: max transaction timeout (Phase 96).
 pub const KEY_TRANSACTION_MAX_TIMEOUT_MS: &str = "transaction.max.timeout.ms";
@@ -31,6 +32,8 @@ pub const KEY_FETCH_SESSION_IDLE_MS: &str = "volant.fetch.session.idle.ms";
 pub const KEY_FETCH_SESSION_MAX: &str = "volant.fetch.session.max";
 /// Volant background sweep interval (Phase 97).
 pub const KEY_SWEEP_INTERVAL_MS: &str = "volant.sweep.interval.ms";
+/// Volant Init-owner registry TTL for GC (Phase 127/128).
+pub const KEY_TXN_COORDINATOR_TTL_MS: &str = "volant.txn.coordinator.registry.ttl.ms";
 
 /// Product default for `transaction.max.timeout.ms` (Kafka-aligned 15m).
 pub const DEFAULT_TRANSACTION_MAX_TIMEOUT_MS: u64 = 900_000;
@@ -55,6 +58,7 @@ pub const BROKER_CONFIG_KEYS: &[&str] = &[
     KEY_FETCH_SESSION_IDLE_MS,
     KEY_FETCH_SESSION_MAX,
     KEY_SWEEP_INTERVAL_MS,
+    KEY_TXN_COORDINATOR_TTL_MS,
 ];
 
 /// Short documentation for DescribeConfigs v3+ when requested.
@@ -78,6 +82,9 @@ pub fn documentation(key: &str) -> Option<&'static str> {
         KEY_SWEEP_INTERVAL_MS => {
             Some("Background open/prepared/session sweep interval in ms; 0 pauses sweeper (lazy expire remains)")
         }
+        KEY_TXN_COORDINATOR_TTL_MS => {
+            Some("Init-owner txn coordinator registry entry TTL in ms before GC; 0 disables GC")
+        }
         _ => None,
     }
 }
@@ -91,6 +98,7 @@ pub fn product_default(key: &str) -> Option<u64> {
         KEY_FETCH_SESSION_IDLE_MS => Some(DEFAULT_IDLE_TIMEOUT_MS),
         KEY_FETCH_SESSION_MAX => Some(DEFAULT_MAX_SESSIONS as u64),
         KEY_SWEEP_INTERVAL_MS => Some(DEFAULT_SWEEP_INTERVAL_MS),
+        KEY_TXN_COORDINATOR_TTL_MS => Some(DEFAULT_TXN_COORDINATOR_TTL_MS),
         _ => None,
     }
 }

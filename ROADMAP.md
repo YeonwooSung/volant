@@ -3073,6 +3073,31 @@ session registry, full preferred-replica selector parity.
 
 ---
 
+### Phase 128 — BROKER config for txn coordinator registry TTL (MVP) ✅
+
+**Goal:** Expose Phase 127 registry TTL as a Kafka BROKER Describe/AlterConfigs
+key (`volant.txn.coordinator.registry.ttl.ms`) with sparse durable restart and
+controller fan-out (same path as Phase 99–102/113 knobs).
+
+Binding: **[docs/PHASE128_SPEC.md](./docs/PHASE128_SPEC.md)**.
+
+- [x] Key in `BROKER_CONFIG_KEYS` + documentation + product default 24h
+- [x] Live `AtomicU64` on Broker; init from env; Describe/Alter/apply/load
+- [x] GC uses live knob (not env re-read)
+- [x] Tests: `phase128_txn_coordinator_ttl_config`; phase99 describe count 7
+- [x] Living docs honesty
+
+**Honest limitations:** controller-only cluster alter (homogeneous fan-out);
+env after start ignored without Alter; not full Kafka DynamicBrokerConfig.
+
+**Still deferred:** multi-lang clients, chaos-mesh / long fuzz campaigns,
+full KIP-890/939 / `__transaction_state`, Kafka wire fuzz targets, dynamic
+membership / Raft, full Kafka broker catalog, consensus truncate journal /
+controller SoT pending set, true per-broker heterogeneous BROKER overrides,
+shared session registry, full preferred-replica selector parity.
+
+---
+
 ## Performance targets (aspirational)
 
 | Metric | Single node target | Notes |
@@ -3108,7 +3133,7 @@ marker clip 111; fuzz corpus smoke CI 112; cluster admin fan-out 113) — see
 
 ## Suggested implementation order (PRs)
 
-Phases **0–127 are shipped**. Historical PR order for the core:
+Phases **0–128 are shipped**. Historical PR order for the core:
 
 1. Phase 1 segment format + unit tests  
 2. Phase 1 recovery + retention  
@@ -3138,6 +3163,7 @@ Phases **0–127 are shipped**. Historical PR order for the core:
 26. Phase 125 (time-based ISR lag shrink MVP) ✅  
 27. Phase 126 (PreferredReadReplica / rack-aware Fetch MVP) ✅  
 28. Phase 127 (txn coordinator registry TTL GC MVP) ✅  
+29. Phase 128 (BROKER config for registry TTL MVP) ✅  
 
 ---
 
@@ -3178,7 +3204,7 @@ cargo run -p volant-bench --release
 cargo test --workspace
 ```
 
-**Status (post–Phase 127):** core broker, ops (metrics / TLS / auth / SCRAM /
+**Status (post–Phase 128):** core broker, ops (metrics / TLS / auth / SCRAM /
 ACLs / Helm), and the Kafka wire shim are **shipped** (Fetch 0–18 Kafka max;
 ACL admin 0–3 with User resource; soft-marker `READ_COMMITTED` with **marker GC/clip**
 on DeleteRecords/retention/load (Phase 104/111); durable OFLE history; Fetch DivergingEpoch +
@@ -3209,7 +3235,7 @@ txn EndTxn/AddOffsets/TxnOffsetCommit forward Phases 120/122;
 **durable Init-owner registry** Phase 124 (`__txn_coordinator`);
 **PreferredReadReplica / rack-aware Fetch MVP** Phase 126 (Metadata rack;
 redirect when same-rack ISR peer LEO≥HWM);
-**txn coordinator registry TTL GC** Phase 127 (`VOLANT_TXN_COORDINATOR_TTL_MS`)).
+**txn coordinator registry TTL GC** Phase 127 + **BROKER config surface** Phase 128 (`volant.txn.coordinator.registry.ttl.ms`)).
 Still deferred: multi-language clients, full chaos-mesh suites / long fuzz
 campaigns, shared session store / full preferred-replica selector, full
 KIP-890/939.
