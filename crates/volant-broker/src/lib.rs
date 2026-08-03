@@ -98,11 +98,13 @@ pub use cluster_admin::{
     CLUSTER_ADMIN_FILE_VERSION,
 };
 pub use net::{
-    catch_up_peer_admin_state, drain_delete_records_outbox, fanout_cluster_acl_snapshot,
-    fanout_cluster_broker_config, fanout_delete_records, fanout_truncate_journal_note,
-    fanout_truncate_journal_push, fanout_txn_participant_complete,
-    fanout_txn_participant_open, fanout_txn_participant_prepare, run_metrics_server,
-    run_metrics_server_until, run_server, run_txn_2pc_fanout, serve_listener,
-    serve_listener_until, shutdown_signal, start_background_tasks, BackgroundTasks,
+    catch_up_peer_admin_state, delete_records_fanout_budget, drain_delete_records_outbox,
+    fanout_cluster_acl_snapshot, fanout_cluster_broker_config, fanout_delete_records,
+    fanout_truncate_journal_note, fanout_truncate_journal_push, fanout_txn_participant_complete,
+    fanout_txn_participant_open, fanout_txn_participant_prepare, inter_broker_rpc,
+    inter_broker_rpc_timeout, run_metrics_server, run_metrics_server_until, run_server,
+    run_txn_2pc_fanout, serve_listener, serve_listener_until, shutdown_signal,
+    start_background_tasks, BackgroundTasks, DEFAULT_DELETE_RECORDS_FANOUT_BUDGET_MS,
+    DEFAULT_INTER_BROKER_RPC_TIMEOUT_MS,
 };
 pub use offset_store::{OffsetStore, StoredOffset, OFFSET_UNKNOWN};

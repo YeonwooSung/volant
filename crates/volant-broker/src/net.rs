@@ -1420,7 +1420,36 @@ async fn fanout_truncate_journal_push_to(
 /// After a successful **leader** local truncate: multi-controller journal note
 /// (majority + selective push), then **parallel** `ReplicaDeleteRecords` to
 /// peers with outbox enqueue on failure. Never fails the client.
+///
+/// Enforced overall deadline: [`delete_records_fanout_budget`] (default **15s**).
+/// Each peer RPC is still bounded by [`inter_broker_rpc_timeout`] (default **5s**).
 pub async fn fanout_delete_records(
+    broker: &Broker,
+    topic: &str,
+    partition: u32,
+    before_offset: u64,
+) {
+    let budget = delete_records_fanout_budget();
+    match tokio::time::timeout(
+        budget,
+        fanout_delete_records_inner(broker, topic, partition, before_offset),
+    )
+    .await
+    {
+        Ok(()) => {}
+        Err(_) => {
+            warn!(
+                topic,
+                partition,
+                before_offset,
+                budget_ms = budget.as_millis() as u64,
+                "delete records fan-out overall budget exceeded; remaining peers left to outbox/reconcile"
+            );
+        }
+    }
+}
+
+async fn fanout_delete_records_inner(
     broker: &Broker,
     topic: &str,
     partition: u32,
@@ -2186,8 +2215,44 @@ pub async fn maybe_forward_kafka_fetch(
     }
 }
 
-/// Default inter-broker RPC budget (connect + auth + request).
-const INTER_BROKER_RPC_TIMEOUT: Duration = Duration::from_secs(5);
+/// Default per inter-broker RPC timeout: **5 seconds**.
+///
+/// Override with `VOLANT_INTER_BROKER_RPC_TIMEOUT_MS` (milliseconds; `0` is
+/// raised to 1ms so a deadline always exists).
+pub const DEFAULT_INTER_BROKER_RPC_TIMEOUT_MS: u64 = 5_000;
+
+/// Default overall budget for DeleteRecords peer fan-out (journal note + push
+/// + ReplicaDeleteRecords): **15 seconds**.
+///
+/// Override with `VOLANT_DELETE_RECORDS_FANOUT_BUDGET_MS` (milliseconds; `0`
+/// raised to 1ms).
+pub const DEFAULT_DELETE_RECORDS_FANOUT_BUDGET_MS: u64 = 15_000;
+
+fn env_duration_ms(var: &str, default_ms: u64) -> Duration {
+    let ms = std::env::var(var)
+        .ok()
+        .and_then(|s| s.parse::<u64>().ok())
+        .unwrap_or(default_ms)
+        .max(1);
+    Duration::from_millis(ms)
+}
+
+/// Effective per-RPC timeout (default 5s; env `VOLANT_INTER_BROKER_RPC_TIMEOUT_MS`).
+pub fn inter_broker_rpc_timeout() -> Duration {
+    env_duration_ms(
+        "VOLANT_INTER_BROKER_RPC_TIMEOUT_MS",
+        DEFAULT_INTER_BROKER_RPC_TIMEOUT_MS,
+    )
+}
+
+/// Effective DeleteRecords fan-out overall budget (default 15s; env
+/// `VOLANT_DELETE_RECORDS_FANOUT_BUDGET_MS`).
+pub fn delete_records_fanout_budget() -> Duration {
+    env_duration_ms(
+        "VOLANT_DELETE_RECORDS_FANOUT_BUDGET_MS",
+        DEFAULT_DELETE_RECORDS_FANOUT_BUDGET_MS,
+    )
+}
 
 /// Inter-broker RPC over a short-lived connection (plain TCP or optional TLS).
 ///
@@ -2195,8 +2260,8 @@ const INTER_BROKER_RPC_TIMEOUT: Duration = Duration::from_secs(5);
 /// When [`Broker::inter_broker_tls`] is set (and the `tls` feature is enabled),
 /// the connection is upgraded to TLS before the RPC.
 ///
-/// Bounded by [`INTER_BROKER_RPC_TIMEOUT`] so a black-holed peer cannot stall
-/// client paths that await fan-out (e.g. DeleteRecords journal note).
+/// Bounded by [`inter_broker_rpc_timeout`] (default **5s**) so a black-holed
+/// peer cannot stall client paths that await fan-out.
 pub async fn inter_broker_rpc(broker: &Broker, addr: &str, req: &Request) -> Result<Response> {
     inter_broker_rpc_owned(
         addr,
@@ -2214,8 +2279,9 @@ async fn inter_broker_rpc_owned(
     auth_token: Option<String>,
     inter_broker_tls: Option<crate::broker::InterBrokerTls>,
 ) -> Result<Response> {
+    let timeout = inter_broker_rpc_timeout();
     match tokio::time::timeout(
-        INTER_BROKER_RPC_TIMEOUT,
+        timeout,
         inter_broker_rpc_inner(addr, req, auth_token, inter_broker_tls),
     )
     .await
@@ -2223,7 +2289,7 @@ async fn inter_broker_rpc_owned(
         Ok(r) => r,
         Err(_) => Err(Error::Protocol(format!(
             "inter-broker rpc to {addr} timed out after {}ms",
-            INTER_BROKER_RPC_TIMEOUT.as_millis()
+            timeout.as_millis()
         ))),
     }
 }
@@ -3784,14 +3850,10 @@ async fn handle_request(broker: &Broker, req: Request) -> Result<Response> {
         } => match broker.delete_records(&topic, partition, before_offset) {
             Ok((low_watermark, error_code)) => {
                 // Phase 113/129/130: best-effort fan-out after local success.
-                // Overall budget + per-RPC timeout so black-holed peers cannot
-                // hang the client path indefinitely.
+                // Budget is enforced inside fanout_delete_records (default 15s
+                // overall; 5s per inter-broker RPC).
                 if error_code == 0 {
-                    let _ = tokio::time::timeout(
-                        Duration::from_secs(15),
-                        fanout_delete_records(broker, &topic, partition, before_offset),
-                    )
-                    .await;
+                    fanout_delete_records(broker, &topic, partition, before_offset).await;
                 }
                 Ok(Response::DeleteRecords {
                     error_code,
