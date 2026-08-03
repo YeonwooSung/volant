@@ -17,7 +17,7 @@ use super::codec::{
     get_compact_nullable_string, get_compact_string, get_nullable_string, get_string,
     put_bytes, put_compact_array_len, put_compact_bytes, put_compact_nullable_string,
     put_compact_string, put_empty_tag_buffer, put_nullable_string, put_string, put_unsigned_varint,
-    skip_tag_buffer,
+    read_unsigned_varint, skip_tag_buffer,
 };
 use super::compress::{fetch_compression_codec, CompressionCodec};
 use super::topic_id;
@@ -774,6 +774,42 @@ pub(crate) fn put_fetch_partition_response_full(
     }
 }
 
+/// Parse Fetch request top-level TAG_BUFFER after `rack_id`.
+///
+/// On flexible versions the buffer may carry:
+/// - tag **0** ClusterId (compact string) — content ignored
+/// - tag **1** ReplicaState (v15+): `ReplicaId` int32, `ReplicaEpoch` int64,
+///   nested TAG_BUFFER — when present with ≥4 body bytes, updates `replica_id`
+///   so preferred-replica redirect stays gated for followers (`replica_id >= 0`).
+///
+/// Leaves `replica_id` unchanged when the buffer is empty, tag 1 is absent, or
+/// the ReplicaState body is shorter than 4 bytes (consumer default remains -1).
+fn parse_fetch_request_tags(
+    src: &mut impl Buf,
+    version: i16,
+    replica_id: &mut i32,
+) -> Result<(), Error> {
+    let n = read_unsigned_varint(src)?;
+    for _ in 0..n {
+        let tag = read_unsigned_varint(src)?;
+        let len = read_unsigned_varint(src)? as usize;
+        if src.remaining() < len {
+            return Err(Error::Protocol("truncated tagged field body".into()));
+        }
+        if version >= 15 && tag == 1 && len >= 4 {
+            // ReplicaState.ReplicaId (int32 BE); rest is epoch + nested tags.
+            *replica_id = src.get_i32();
+            let rest = len - 4;
+            if rest > 0 {
+                src.advance(rest);
+            }
+        } else {
+            src.advance(len);
+        }
+    }
+    Ok(())
+}
+
 pub(crate) fn encode_fetch(broker: &Broker, src: &mut impl Buf, out: &mut BytesMut, version: i16, principal: &str) {
     // Fetch classic v0–11 + flexible v12–18 (Kafka max):
     //   request: replica_id (≤v14 only), max_wait, min_bytes,
@@ -794,7 +830,7 @@ pub(crate) fn encode_fetch(broker: &Broker, src: &mut impl Buf, out: &mut BytesM
     // Phase 91: omit-unchanged on empty-topics incremental (last HWM/LSO cache).
     // Phase 95/115: idle TTL + max sessions (lazy LRU); durable snapshot on mutations.
     // v14: wire-identical to v13 (OffsetMovedToTieredStorage never emitted).
-    // v15: top-level ReplicaId dropped; ReplicaState is tagged (ignored).
+    // v15: top-level ReplicaId dropped; ReplicaState tag 1 parsed for gate.
     // v16: NodeEndpoints top-level tag (KIP-951) on leader errors.
     // v17–18: request-only tagged fields; response framing unchanged from v16.
     use super::fetch_session::{
@@ -814,9 +850,8 @@ pub(crate) fn encode_fetch(broker: &Broker, src: &mut impl Buf, out: &mut BytesM
         put_fetch_empty_response(out, version, 0, 0);
         return;
     }
-    // Default -1 = consumer. v15+ drops top-level ReplicaId (ReplicaState tag
-    // still ignored); follower rack+ReplicaState preferred redirect remains a
-    // known limitation until ReplicaState is parsed.
+    // Default -1 = consumer. v15+ drops top-level ReplicaId; ReplicaState
+    // (top-level request tag 1) is parsed below after rack_id.
     let mut replica_id = -1i32;
     if version <= 14 {
         replica_id = src.get_i32();
@@ -1013,7 +1048,7 @@ pub(crate) fn encode_fetch(broker: &Broker, src: &mut impl Buf, out: &mut BytesM
     }
     if flexible {
         // Request top-level tags: ClusterId (v12+ tag 0), ReplicaState (v15+ tag 1).
-        let _ = skip_tag_buffer(src);
+        let _ = parse_fetch_request_tags(src, version, &mut replica_id);
     }
 
     // --- Session handling (v7+) ---

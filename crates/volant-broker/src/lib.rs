@@ -85,8 +85,9 @@ pub use delete_records_outbox::{
     OUTBOX_DIR as DELETE_RECORDS_OUTBOX_DIR, OUTBOX_FILE as DELETE_RECORDS_OUTBOX_FILE,
 };
 pub use truncate_journal::{
-    TruncateJournal, TruncateJournalEntry, TruncateJournalFile, TRUNCATE_JOURNAL_DIR,
-    TRUNCATE_JOURNAL_FILE, TRUNCATE_JOURNAL_FILE_VERSION,
+    TruncateJournal, TruncateJournalEntry, TruncateJournalFile, MAX_TRUNCATE_JOURNAL_ENTRIES,
+    MAX_TRUNCATE_JOURNAL_SNAPSHOT_BYTES, TRUNCATE_JOURNAL_DIR, TRUNCATE_JOURNAL_FILE,
+    TRUNCATE_JOURNAL_FILE_VERSION,
 };
 pub use txn_coordinator_registry::{
     effective_txn_coordinator_ttl_ms, TxnCoordinatorEntry, TxnCoordinatorFile,
@@ -105,6 +106,7 @@ pub use net::{
     inter_broker_rpc_timeout, run_metrics_server, run_metrics_server_until, run_server,
     run_txn_2pc_fanout, serve_listener, serve_listener_until, shutdown_signal,
     start_background_tasks, BackgroundTasks, DEFAULT_DELETE_RECORDS_FANOUT_BUDGET_MS,
-    DEFAULT_INTER_BROKER_RPC_TIMEOUT_MS,
+    DEFAULT_INTER_BROKER_RPC_TIMEOUT_MS, MAX_INTER_BROKER_TIMEOUT_MS,
+    MIN_INTER_BROKER_TIMEOUT_MS,
 };
 pub use offset_store::{OffsetStore, StoredOffset, OFFSET_UNKNOWN};

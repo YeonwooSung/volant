@@ -1,16 +1,47 @@
 //! Inter-broker RPC timeout (5s default) and DeleteRecords fan-out budget (20s).
 
-use std::sync::Arc;
+use std::sync::{Arc, Mutex, OnceLock};
 use std::time::{Duration, Instant};
 
 use tokio::net::TcpListener;
 use volant_broker::{
-    fanout_delete_records, inter_broker_rpc, serve_listener, Broker, BrokerEndpoint,
-    ClusterConfig, DEFAULT_DELETE_RECORDS_FANOUT_BUDGET_MS, DEFAULT_INTER_BROKER_RPC_TIMEOUT_MS,
+    delete_records_fanout_budget, fanout_delete_records, inter_broker_rpc,
+    inter_broker_rpc_timeout, serve_listener, Broker, BrokerEndpoint, ClusterConfig,
+    DEFAULT_DELETE_RECORDS_FANOUT_BUDGET_MS, DEFAULT_INTER_BROKER_RPC_TIMEOUT_MS,
+    MAX_INTER_BROKER_TIMEOUT_MS, MIN_INTER_BROKER_TIMEOUT_MS,
 };
 use volant_core::{Message, MessageBatch, PartitionId, TopicName};
 use volant_protocol::Request;
 use volant_storage::StorageConfig;
+
+/// Serialize tests that mutate process-global env vars.
+fn env_lock() -> &'static Mutex<()> {
+    static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
+    LOCK.get_or_init(|| Mutex::new(()))
+}
+
+/// Restore a previous env value on drop (including panic).
+struct EnvRestore {
+    key: &'static str,
+    prev: Option<String>,
+}
+
+impl EnvRestore {
+    fn set(key: &'static str, value: &str) -> Self {
+        let prev = std::env::var(key).ok();
+        std::env::set_var(key, value);
+        Self { key, prev }
+    }
+}
+
+impl Drop for EnvRestore {
+    fn drop(&mut self) {
+        match &self.prev {
+            Some(v) => std::env::set_var(self.key, v),
+            None => std::env::remove_var(self.key),
+        }
+    }
+}
 
 fn unique_dir(label: &str) -> std::path::PathBuf {
     let dir = std::env::temp_dir().join(format!(
@@ -33,16 +64,48 @@ impl Drop for Guard {
 fn default_timeout_constants() {
     assert_eq!(DEFAULT_INTER_BROKER_RPC_TIMEOUT_MS, 5_000);
     assert_eq!(DEFAULT_DELETE_RECORDS_FANOUT_BUDGET_MS, 20_000);
+    assert_eq!(MIN_INTER_BROKER_TIMEOUT_MS, 1);
+    assert_eq!(MAX_INTER_BROKER_TIMEOUT_MS, 600_000);
+}
+
+/// Env `0` clamps to 1ms; huge values clamp to MAX (10 min). Not “disable”.
+#[test]
+fn env_timeout_clamps_zero_and_huge() {
+    let _lock = env_lock().lock().unwrap();
+    let _rpc = EnvRestore::set("VOLANT_INTER_BROKER_RPC_TIMEOUT_MS", "0");
+    let _bud = EnvRestore::set("VOLANT_DELETE_RECORDS_FANOUT_BUDGET_MS", "0");
+    assert_eq!(
+        inter_broker_rpc_timeout(),
+        Duration::from_millis(MIN_INTER_BROKER_TIMEOUT_MS)
+    );
+    assert_eq!(
+        delete_records_fanout_budget(),
+        Duration::from_millis(MIN_INTER_BROKER_TIMEOUT_MS)
+    );
+
+    // Drop prior guards and set huge values (re-capture for restore).
+    drop(_rpc);
+    drop(_bud);
+    let _rpc = EnvRestore::set("VOLANT_INTER_BROKER_RPC_TIMEOUT_MS", "999999999");
+    let _bud = EnvRestore::set("VOLANT_DELETE_RECORDS_FANOUT_BUDGET_MS", "999999999");
+    assert_eq!(
+        inter_broker_rpc_timeout(),
+        Duration::from_millis(MAX_INTER_BROKER_TIMEOUT_MS)
+    );
+    assert_eq!(
+        delete_records_fanout_budget(),
+        Duration::from_millis(MAX_INTER_BROKER_TIMEOUT_MS)
+    );
 }
 
 /// Connecting to a black-hole address must fail within ~timeout, not hang.
 #[tokio::test]
 async fn inter_broker_rpc_times_out_on_blackhole() {
+    let _lock = env_lock().lock().unwrap();
     let base = unique_dir("rpc");
     let _g = Guard(base.clone());
     // Short timeout for a fast test.
-    let prev = std::env::var("VOLANT_INTER_BROKER_RPC_TIMEOUT_MS").ok();
-    std::env::set_var("VOLANT_INTER_BROKER_RPC_TIMEOUT_MS", "200");
+    let _env = EnvRestore::set("VOLANT_INTER_BROKER_RPC_TIMEOUT_MS", "200");
 
     let broker = Arc::new(Broker::new(StorageConfig {
         data_dir: base.join("n1"),
@@ -87,22 +150,17 @@ async fn inter_broker_rpc_times_out_on_blackhole() {
     );
 
     accept.abort();
-    match prev {
-        Some(v) => std::env::set_var("VOLANT_INTER_BROKER_RPC_TIMEOUT_MS", v),
-        None => std::env::remove_var("VOLANT_INTER_BROKER_RPC_TIMEOUT_MS"),
-    }
 }
 
 /// Fan-out with a black-hole peer finishes near the overall budget (not hang forever).
 #[tokio::test]
 async fn delete_records_fanout_respects_overall_budget() {
+    let _lock = env_lock().lock().unwrap();
     let base = unique_dir("budget");
     let _g = Guard(base.clone());
-    let prev_rpc = std::env::var("VOLANT_INTER_BROKER_RPC_TIMEOUT_MS").ok();
-    let prev_bud = std::env::var("VOLANT_DELETE_RECORDS_FANOUT_BUDGET_MS").ok();
     // Tight budgets for a fast test.
-    std::env::set_var("VOLANT_INTER_BROKER_RPC_TIMEOUT_MS", "300");
-    std::env::set_var("VOLANT_DELETE_RECORDS_FANOUT_BUDGET_MS", "800");
+    let _rpc = EnvRestore::set("VOLANT_INTER_BROKER_RPC_TIMEOUT_MS", "300");
+    let _bud = EnvRestore::set("VOLANT_DELETE_RECORDS_FANOUT_BUDGET_MS", "800");
 
     // Bind two ports first so cluster config can advertise them.
     let (l1, p1) = {
@@ -240,12 +298,4 @@ async fn delete_records_fanout_respects_overall_budget() {
 
     s_leader.abort();
     blackhole.abort();
-    match prev_rpc {
-        Some(v) => std::env::set_var("VOLANT_INTER_BROKER_RPC_TIMEOUT_MS", v),
-        None => std::env::remove_var("VOLANT_INTER_BROKER_RPC_TIMEOUT_MS"),
-    }
-    match prev_bud {
-        Some(v) => std::env::set_var("VOLANT_DELETE_RECORDS_FANOUT_BUDGET_MS", v),
-        None => std::env::remove_var("VOLANT_DELETE_RECORDS_FANOUT_BUDGET_MS"),
-    }
 }

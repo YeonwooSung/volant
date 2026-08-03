@@ -2235,17 +2235,24 @@ pub async fn maybe_forward_kafka_fetch(
 
 /// Default per inter-broker RPC timeout: **5 seconds**.
 ///
-/// Override with `VOLANT_INTER_BROKER_RPC_TIMEOUT_MS` (milliseconds; `0` is
-/// raised to 1ms so a deadline always exists).
+/// Override with `VOLANT_INTER_BROKER_RPC_TIMEOUT_MS` (milliseconds). Values
+/// are clamped to `[1ms, 10min]`; `0` is not “disable” — it becomes 1ms so a
+/// deadline always exists.
 pub const DEFAULT_INTER_BROKER_RPC_TIMEOUT_MS: u64 = 5_000;
+
+/// Minimum clamp for env-derived timeouts (ms). `0` and empty-invalid still become this.
+pub const MIN_INTER_BROKER_TIMEOUT_MS: u64 = 1;
+/// Maximum clamp for per-RPC and fan-out budget env values (10 minutes).
+pub const MAX_INTER_BROKER_TIMEOUT_MS: u64 = 600_000;
 
 /// Default overall budget for DeleteRecords peer fan-out (journal note + push
 /// + ReplicaDeleteRecords): **20 seconds** (≥ 3 × default 5s RPC + margin).
 ///
-/// Override with `VOLANT_DELETE_RECORDS_FANOUT_BUDGET_MS` (milliseconds; `0`
-/// raised to 1ms). When the env is **unset**, the effective budget is
-/// `max(DEFAULT, 3 * inter_broker_rpc_timeout_ms + 2000)` so a raised per-RPC
-/// timeout still leaves room for all three phases.
+/// Override with `VOLANT_DELETE_RECORDS_FANOUT_BUDGET_MS` (milliseconds).
+/// Values are clamped to `[1ms, 10min]`; `0` is not “disable”. When the env is
+/// **unset**, the effective budget is
+/// `max(DEFAULT, 3 * inter_broker_rpc_timeout_ms + 2000)` (also clamped to
+/// the max) so a raised per-RPC timeout still leaves room for all three phases.
 pub const DEFAULT_DELETE_RECORDS_FANOUT_BUDGET_MS: u64 = 20_000;
 
 fn env_duration_ms(var: &str, default_ms: u64) -> Duration {
@@ -2253,11 +2260,13 @@ fn env_duration_ms(var: &str, default_ms: u64) -> Duration {
         .ok()
         .and_then(|s| s.parse::<u64>().ok())
         .unwrap_or(default_ms)
-        .max(1);
+        .clamp(MIN_INTER_BROKER_TIMEOUT_MS, MAX_INTER_BROKER_TIMEOUT_MS);
     Duration::from_millis(ms)
 }
 
 /// Effective per-RPC timeout (default 5s; env `VOLANT_INTER_BROKER_RPC_TIMEOUT_MS`).
+///
+/// Clamped to [`MIN_INTER_BROKER_TIMEOUT_MS`]..=[`MAX_INTER_BROKER_TIMEOUT_MS`].
 pub fn inter_broker_rpc_timeout() -> Duration {
     env_duration_ms(
         "VOLANT_INTER_BROKER_RPC_TIMEOUT_MS",
@@ -2267,18 +2276,24 @@ pub fn inter_broker_rpc_timeout() -> Duration {
 
 /// Effective DeleteRecords fan-out overall budget.
 ///
-/// - Env `VOLANT_DELETE_RECORDS_FANOUT_BUDGET_MS` set → that value (min 1ms).
+/// - Env `VOLANT_DELETE_RECORDS_FANOUT_BUDGET_MS` set → that value, clamped to
+///   `[1ms, 10min]` (`0` is not disable).
 /// - Else → `max(DEFAULT_DELETE_RECORDS_FANOUT_BUDGET_MS,
-///   3 * inter_broker_rpc_timeout_ms + 2000)`.
+///   3 * inter_broker_rpc_timeout_ms + 2000)`, also clamped to the max.
 pub fn delete_records_fanout_budget() -> Duration {
     if let Ok(s) = std::env::var("VOLANT_DELETE_RECORDS_FANOUT_BUDGET_MS") {
         if let Ok(ms) = s.parse::<u64>() {
-            return Duration::from_millis(ms.max(1));
+            return Duration::from_millis(
+                ms.clamp(MIN_INTER_BROKER_TIMEOUT_MS, MAX_INTER_BROKER_TIMEOUT_MS),
+            );
         }
     }
     let rpc_ms = inter_broker_rpc_timeout().as_millis() as u64;
     let floor = (3u64.saturating_mul(rpc_ms)).saturating_add(2_000);
-    Duration::from_millis(DEFAULT_DELETE_RECORDS_FANOUT_BUDGET_MS.max(floor).max(1))
+    let ms = DEFAULT_DELETE_RECORDS_FANOUT_BUDGET_MS
+        .max(floor)
+        .clamp(MIN_INTER_BROKER_TIMEOUT_MS, MAX_INTER_BROKER_TIMEOUT_MS);
+    Duration::from_millis(ms)
 }
 
 /// Inter-broker RPC over a short-lived connection (plain TCP or optional TLS).

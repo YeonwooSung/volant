@@ -4865,6 +4865,9 @@ impl Broker {
         }
         let _ = self.topic_configs.delete(name.as_str());
         drop(topics);
+        // Best-effort: prune stale truncate-journal watermarks for deleted topic.
+        // Must not fail delete_topic (persist errors only increment metrics).
+        let _ = self.truncate_journal.remove_topic(name.as_str());
         if self.cluster.is_none() {
             self.persist_topic_catalog()?;
         }

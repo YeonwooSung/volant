@@ -98,7 +98,7 @@ workers.
 | Idle TTL (95) | Default 60s (`VOLANT_FETCH_SESSION_IDLE_MS`; `0` disables); lazy on create/incremental |
 | Max sessions (95) | Default 1000 (`VOLANT_FETCH_SESSION_MAX`; `0` unlimited); LRU-evict at cap |
 | Multi-broker (119) | Cluster session_id encodes owner; peer miss → transparent inter-broker Fetch forward |
-| PreferredReadReplica (126) | Fetch v11+ client `rack_id`; leader may set PreferredReadReplica to same-rack ISR peer with LEO≥HWM (empty records redirect); Metadata/DescribeCluster/NodeEndpoints advertise `cluster.toml` rack; metric `volant_preferred_replica_redirect_total` |
+| PreferredReadReplica (126) | Fetch v11+ client `rack_id`; leader may set PreferredReadReplica to same-rack ISR peer with LEO≥HWM (empty records redirect); gated off for followers (`replica_id` top-level ≤v14 / ReplicaState tag 1 on v15+); Metadata/DescribeCluster/NodeEndpoints advertise `cluster.toml` rack; metric `volant_preferred_replica_redirect_total` |
 | Errors | 70 session id not found (incl. after TTL/LRU / dead owner); 71 invalid session epoch |
 
 ## Cluster ISR (Phase 6 + 108/110/118/125)
@@ -115,7 +115,7 @@ workers.
 
 | Feature | Behavior |
 |---------|----------|
-| DeleteRecords fan-out | Partition **leader** truncates locally, then best-effort `ReplicaDeleteRecords` to other replicas (soft-marker GC/clip on peers). Client success does not wait on peer RPC success. Metric `volant_delete_records_fanout_errors_total`. **Phase 116:** peers pre-enqueued under `{data_dir}/__delete_records_outbox` (at-least-once; drop on success) and drained when live. **Phase 123:** new leader reconciles pending truncates from local `log_start` after leadership change. **Phase 129/130:** truncate journal (`__truncate_journal`); multi-controller majority note (Raft-style) + **always full-snapshot** `TruncateJournalPush` to live peers; reconcile = `max(local log_start, journal watermark)` |
+| DeleteRecords fan-out | Partition **leader** truncates locally, then best-effort `ReplicaDeleteRecords` to other replicas (soft-marker GC/clip on peers). Client success does not wait on peer RPC success. Metric `volant_delete_records_fanout_errors_total`. **Phase 116:** peers pre-enqueued under `{data_dir}/__delete_records_outbox` (at-least-once; drop on success) and drained when live. **Phase 123:** new leader reconciles pending truncates from local `log_start` after leadership change. **Phase 129/130:** truncate journal (`__truncate_journal`); multi-controller majority note (Raft-style) + **always full-snapshot** `TruncateJournalPush` to live peers; reconcile = `max(local log_start, journal watermark)`. Caps: 100k entries / 4 MiB push snapshot; `delete_topic` prunes journal watermarks (best-effort, no gen bump) |
 | BROKER config fan-out | Cluster **controller-only** Alter / IncrementalAlter for Phase 99 knobs **+** registry TTL (Phase 128; seven keys); generationed push to live peers; sparse durable on each node. Non-controller → `NotController` / Kafka **41**. **Phase 117:** durable gens + heartbeat lag re-push (full effective knobs) so offline peers converge on rejoin |
 | ACL snapshot fan-out | Cluster **controller-only** Create/Delete Acls; generationed full snapshot push; peers install + persist `__acls`. List/authorize remain local after apply. **Phase 117:** same catch-up path on rejoin / controller restart |
 

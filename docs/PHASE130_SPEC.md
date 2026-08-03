@@ -49,6 +49,9 @@ replica for the journal. Best-effort note/push retained for availability.
   quorum harder — honest Raft-like)
 - Client DeleteRecords does not block on majority
 - Controller role for other admin (ACL/BROKER config) unchanged
+- Journal is bounded: `MAX_TRUNCATE_JOURNAL_ENTRIES` (100_000) refuses new keys
+  at cap; `MAX_TRUNCATE_JOURNAL_SNAPSHOT_BYTES` (4 MiB) rejects oversized push
+  apply. Topic delete prunes local journal entries (no generation bump).
 
 ## Exit criteria
 

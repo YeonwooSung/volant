@@ -9,13 +9,20 @@
 //! remaining peers. New leaders reconcile as
 //! `max(local log_start, journal watermark)`.
 //!
+//! **Resource bounds:** entry count is capped at
+//! [`MAX_TRUNCATE_JOURNAL_ENTRIES`]; wire snapshots larger than
+//! [`MAX_TRUNCATE_JOURNAL_SNAPSHOT_BYTES`] or with more than that many entries
+//! are rejected. New keys are refused / skipped at the cap; max-merge of
+//! existing keys still works. Topic deletion prunes journal entries
+//! (`remove_topic`) without bumping generation.
+//!
 //! Not full Raft log replication / leader election (openraft KRaft still deferred).
 
 use std::collections::HashMap;
 use std::fs::{self, File, OpenOptions};
 use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 
 use bytes::Bytes;
 use parking_lot::{Mutex, RwLock};
@@ -28,6 +35,18 @@ pub const TRUNCATE_JOURNAL_DIR: &str = "__truncate_journal";
 pub const TRUNCATE_JOURNAL_FILE: &str = "state.json";
 /// File format version.
 pub const TRUNCATE_JOURNAL_FILE_VERSION: u32 = 1;
+
+/// Soft cap on distinct `(topic, partition)` watermarks.
+///
+/// When the map is at this size, `note` refuses brand-new keys (existing keys
+/// still max-merge) and `apply_push` skips brand-new keys beyond the cap.
+pub const MAX_TRUNCATE_JOURNAL_ENTRIES: usize = 100_000;
+
+/// Max accepted `TruncateJournalPush` snapshot payload size (4 MiB).
+///
+/// Tighter than the protocol `MAX_PAYLOAD` (16 MiB) so journal apply cannot
+/// force multi-megabyte JSON parse + merge work beyond this bound.
+pub const MAX_TRUNCATE_JOURNAL_SNAPSHOT_BYTES: usize = 4 * 1024 * 1024;
 
 /// One partition truncate watermark.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -76,6 +95,8 @@ type EntryKey = (String, u32);
 #[derive(Debug)]
 pub struct TruncateJournal {
     path: PathBuf,
+    /// Operational entry cap (defaults to [`MAX_TRUNCATE_JOURNAL_ENTRIES`]).
+    max_entries: usize,
     /// Map key → entry (max-merge).
     entries: RwLock<HashMap<EntryKey, TruncateJournalEntry>>,
     /// Serializes durable snapshot writes (unique tmp + rename).
@@ -94,11 +115,18 @@ pub struct TruncateJournal {
     consensus_success_total: AtomicU64,
     /// Phase 130: proposals that failed to reach majority.
     consensus_fail_total: AtomicU64,
+    /// Once-per-process warn when new keys are refused / skipped at cap.
+    cap_warned: AtomicBool,
 }
 
 impl TruncateJournal {
     /// Open or create empty journal under `data_dir`.
     pub fn open(data_dir: impl AsRef<Path>) -> Self {
+        Self::open_with_max(data_dir, MAX_TRUNCATE_JOURNAL_ENTRIES)
+    }
+
+    /// Open with a custom max entry count (unit tests / lower bound).
+    pub fn open_with_max(data_dir: impl AsRef<Path>, max_entries: usize) -> Self {
         let dir = data_dir.as_ref().join(TRUNCATE_JOURNAL_DIR);
         let _ = fs::create_dir_all(&dir);
         let path = dir.join(TRUNCATE_JOURNAL_FILE);
@@ -123,6 +151,7 @@ impl TruncateJournal {
         }
         Self {
             path,
+            max_entries: max_entries.max(1),
             entries: RwLock::new(map),
             persist_lock: Mutex::new(()),
             generation: AtomicU64::new(file.generation),
@@ -132,6 +161,7 @@ impl TruncateJournal {
             persist_errors_total: AtomicU64::new(0),
             consensus_success_total: AtomicU64::new(0),
             consensus_fail_total: AtomicU64::new(0),
+            cap_warned: AtomicBool::new(false),
         }
     }
 
@@ -188,6 +218,11 @@ impl TruncateJournal {
         self.entries.read().len()
     }
 
+    /// Operational max entry count (usually [`MAX_TRUNCATE_JOURNAL_ENTRIES`]).
+    pub fn max_entries(&self) -> usize {
+        self.max_entries
+    }
+
     /// Desired before_offset for a partition, if known.
     pub fn watermark(&self, topic: &str, partition: u32) -> Option<u64> {
         self.entries
@@ -198,6 +233,10 @@ impl TruncateJournal {
 
     /// Max-merge a watermark. When `bump_generation`, increments generation
     /// (controller path). Returns new generation.
+    ///
+    /// If the map is at [`Self::max_entries`] and `topic`/`partition` is a
+    /// **new** key, the insert is refused (current generation returned, no
+    /// persist). Max-merge updates of existing keys are always allowed.
     pub fn note(
         &self,
         topic: &str,
@@ -211,6 +250,11 @@ impl TruncateJournal {
         }
         let mut map = self.entries.write();
         let key = (topic.to_owned(), partition);
+        if !map.contains_key(&key) && map.len() >= self.max_entries {
+            self.warn_cap_once("note refused new key: truncate journal at entry cap");
+            drop(map);
+            return self.generation();
+        }
         let mut changed = false;
         map.entry(key)
             .and_modify(|cur| {
@@ -243,7 +287,42 @@ impl TruncateJournal {
         self.generation()
     }
 
-    /// Encode full snapshot JSON for push.
+    /// Remove all watermarks for `topic`. Persists if any removed.
+    ///
+    /// Does **not** bump generation (prune is local hygiene; peers drop the
+    /// same keys via their own `delete_topic` / eventual re-push without those
+    /// entries). Returns the number of entries removed.
+    pub fn remove_topic(&self, topic: &str) -> usize {
+        if topic.is_empty() {
+            return 0;
+        }
+        let mut map = self.entries.write();
+        let before = map.len();
+        map.retain(|k, _| k.0 != topic);
+        let removed = before - map.len();
+        drop(map);
+        if removed > 0 {
+            self.persist();
+        }
+        removed
+    }
+
+    /// Remove a single `(topic, partition)` watermark. Persists if removed.
+    /// Does not bump generation. Returns whether an entry was present.
+    pub fn remove_partition(&self, topic: &str, partition: u32) -> bool {
+        if topic.is_empty() {
+            return false;
+        }
+        let mut map = self.entries.write();
+        let removed = map.remove(&(topic.to_owned(), partition)).is_some();
+        drop(map);
+        if removed {
+            self.persist();
+        }
+        removed
+    }
+
+    /// Encode full snapshot JSON for push (compact).
     pub fn snapshot_bytes(&self) -> Bytes {
         let file = self.to_file();
         let json = serde_json::to_vec(&file).unwrap_or_default();
@@ -255,9 +334,28 @@ impl TruncateJournal {
     /// **Max-merges** entries into the local map (multi-controller safe) and
     /// advances generation to `max(local, push)`. Always merges entry maxes
     /// even for older push generations so a lagging push cannot shrink state.
+    ///
+    /// Rejects oversized payloads (`MAX_TRUNCATE_JOURNAL_SNAPSHOT_BYTES`) and
+    /// snapshots with more than `max_entries` raw entries. When the local map
+    /// is already at cap, only **existing** keys are updated; brand-new keys
+    /// beyond the cap are skipped (with a one-shot warn).
     pub fn apply_push(&self, generation: u64, snapshot: &[u8]) -> Result<(), String> {
+        if snapshot.len() > MAX_TRUNCATE_JOURNAL_SNAPSHOT_BYTES {
+            return Err(format!(
+                "truncate journal snapshot too large: {} bytes > max {}",
+                snapshot.len(),
+                MAX_TRUNCATE_JOURNAL_SNAPSHOT_BYTES
+            ));
+        }
         let file: TruncateJournalFile =
             serde_json::from_slice(snapshot).map_err(|e| format!("parse journal snapshot: {e}"))?;
+        if file.entries.len() > self.max_entries {
+            return Err(format!(
+                "truncate journal snapshot has too many entries: {} > max {}",
+                file.entries.len(),
+                self.max_entries
+            ));
+        }
         let mut changed = false;
         {
             let mut map = self.entries.write();
@@ -266,6 +364,12 @@ impl TruncateJournal {
                     continue;
                 }
                 let key = (e.topic.clone(), e.partition);
+                if !map.contains_key(&key) && map.len() >= self.max_entries {
+                    self.warn_cap_once(
+                        "apply_push skipped new key: truncate journal at entry cap",
+                    );
+                    continue;
+                }
                 map.entry(key)
                     .and_modify(|cur| {
                         if e.before_offset > cur.before_offset {
@@ -307,6 +411,15 @@ impl TruncateJournal {
                 .then(a.partition.cmp(&b.partition))
         });
         v
+    }
+
+    fn warn_cap_once(&self, msg: &str) {
+        if !self.cap_warned.swap(true, Ordering::Relaxed) {
+            warn!(
+                max_entries = self.max_entries,
+                "{msg}"
+            );
+        }
     }
 
     fn to_file(&self) -> TruncateJournalFile {
@@ -368,6 +481,7 @@ fn save_file(path: &Path, state: &TruncateJournalFile) -> Result<(), ()> {
         "{TRUNCATE_JOURNAL_FILE}.{}-{nanos}.tmp",
         std::process::id()
     ));
+    // Pretty JSON on disk for ops readability; wire uses compact `snapshot_bytes`.
     let result = (|| {
         let json = serde_json::to_string_pretty(state).map_err(|_| ())?;
         {
@@ -486,5 +600,170 @@ mod tests {
         assert_eq!(j.watermark("t", 1), Some(100)); // new entry merged
 
         let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn remove_topic_prunes_and_reloads_clean() {
+        let dir = temp();
+        let _ = fs::remove_dir_all(&dir);
+        let j = TruncateJournal::open(&dir);
+        let gen_before = j.note("keep", 0, 10, 1, true);
+        j.note("gone", 0, 20, 1, true);
+        j.note("gone", 1, 30, 1, true);
+        assert_eq!(j.entry_count(), 3);
+        assert_eq!(j.watermark("gone", 0), Some(20));
+        assert_eq!(j.watermark("gone", 1), Some(30));
+
+        let removed = j.remove_topic("gone");
+        assert_eq!(removed, 2);
+        // Prune does not bump generation.
+        assert_eq!(j.generation(), gen_before + 2); // two successful notes after first
+        assert_eq!(j.entry_count(), 1);
+        assert_eq!(j.watermark("keep", 0), Some(10));
+        assert_eq!(j.watermark("gone", 0), None);
+        assert_eq!(j.list().len(), 1);
+        assert_eq!(j.list()[0].topic, "keep");
+
+        // Second remove is a no-op.
+        assert_eq!(j.remove_topic("gone"), 0);
+
+        let j2 = TruncateJournal::open(&dir);
+        assert_eq!(j2.entry_count(), 1);
+        assert_eq!(j2.watermark("keep", 0), Some(10));
+        assert_eq!(j2.watermark("gone", 0), None);
+        assert!(j2.list().iter().all(|e| e.topic == "keep"));
+
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn remove_partition_single_key() {
+        let dir = temp();
+        let _ = fs::remove_dir_all(&dir);
+        let j = TruncateJournal::open(&dir);
+        j.note("t", 0, 10, 1, false);
+        j.note("t", 1, 20, 1, false);
+        assert!(j.remove_partition("t", 0));
+        assert!(!j.remove_partition("t", 0));
+        assert_eq!(j.watermark("t", 0), None);
+        assert_eq!(j.watermark("t", 1), Some(20));
+
+        let j2 = TruncateJournal::open(&dir);
+        assert_eq!(j2.watermark("t", 1), Some(20));
+        assert_eq!(j2.watermark("t", 0), None);
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn note_refuses_new_keys_at_cap_allows_existing_merge() {
+        let dir = temp();
+        let _ = fs::remove_dir_all(&dir);
+        let j = TruncateJournal::open_with_max(&dir, 2);
+        j.note("a", 0, 10, 1, true);
+        j.note("b", 0, 20, 1, true);
+        assert_eq!(j.entry_count(), 2);
+        let gen = j.generation();
+
+        // New key refused at cap.
+        let g = j.note("c", 0, 99, 1, true);
+        assert_eq!(g, gen);
+        assert_eq!(j.entry_count(), 2);
+        assert_eq!(j.watermark("c", 0), None);
+
+        // Existing key still max-merges.
+        j.note("a", 0, 50, 2, true);
+        assert_eq!(j.watermark("a", 0), Some(50));
+        assert_eq!(j.entry_count(), 2);
+
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn apply_push_rejects_oversized_byte_slice() {
+        let dir = temp();
+        let _ = fs::remove_dir_all(&dir);
+        let j = TruncateJournal::open(&dir);
+        let big = vec![b'x'; MAX_TRUNCATE_JOURNAL_SNAPSHOT_BYTES + 1];
+        let err = j.apply_push(1, &big).unwrap_err();
+        assert!(
+            err.contains("too large"),
+            "expected size rejection, got: {err}"
+        );
+        assert!(err.contains(&MAX_TRUNCATE_JOURNAL_SNAPSHOT_BYTES.to_string()));
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn apply_push_rejects_too_many_entries() {
+        let dir = temp();
+        let _ = fs::remove_dir_all(&dir);
+        let j = TruncateJournal::open_with_max(&dir, 3);
+        let file = TruncateJournalFile {
+            version: TRUNCATE_JOURNAL_FILE_VERSION,
+            generation: 1,
+            entries: (0..4)
+                .map(|i| TruncateJournalEntry {
+                    topic: format!("t{i}"),
+                    partition: 0,
+                    before_offset: 1,
+                    leader_epoch: 0,
+                })
+                .collect(),
+        };
+        let snap = serde_json::to_vec(&file).unwrap();
+        let err = j.apply_push(1, &snap).unwrap_err();
+        assert!(
+            err.contains("too many entries"),
+            "expected entry-count rejection, got: {err}"
+        );
+        assert_eq!(j.entry_count(), 0);
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn apply_push_skips_new_keys_past_cap_updates_existing() {
+        let dir = temp();
+        let _ = fs::remove_dir_all(&dir);
+        // Cap 2; local already full. Push payload must have len <= max (else hard reject).
+        let j = TruncateJournal::open_with_max(&dir, 2);
+        j.note("a", 0, 10, 1, false);
+        j.note("b", 0, 20, 1, false);
+        assert_eq!(j.entry_count(), 2);
+
+        let file = TruncateJournalFile {
+            version: TRUNCATE_JOURNAL_FILE_VERSION,
+            generation: 5,
+            entries: vec![
+                TruncateJournalEntry {
+                    topic: "a".into(),
+                    partition: 0,
+                    before_offset: 100, // update existing
+                    leader_epoch: 2,
+                },
+                TruncateJournalEntry {
+                    topic: "c".into(),
+                    partition: 0,
+                    before_offset: 50, // new — skip at cap
+                    leader_epoch: 1,
+                },
+            ],
+        };
+        let snap = serde_json::to_vec(&file).unwrap();
+        j.apply_push(5, &snap).unwrap();
+
+        assert_eq!(j.entry_count(), 2, "must not grow past cap");
+        assert_eq!(j.watermark("a", 0), Some(100));
+        assert_eq!(j.watermark("b", 0), Some(20));
+        assert_eq!(j.watermark("c", 0), None);
+        assert_eq!(j.applied_generation(), 5);
+
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn public_cap_constants_documented() {
+        assert_eq!(MAX_TRUNCATE_JOURNAL_ENTRIES, 100_000);
+        assert_eq!(MAX_TRUNCATE_JOURNAL_SNAPSHOT_BYTES, 4 * 1024 * 1024);
+        assert!(MAX_TRUNCATE_JOURNAL_SNAPSHOT_BYTES < 16 * 1024 * 1024);
     }
 }

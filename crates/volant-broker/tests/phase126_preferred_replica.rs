@@ -7,7 +7,10 @@ use std::time::Duration;
 use bytes::{Buf, BufMut, Bytes, BytesMut};
 use tokio::net::TcpListener;
 use volant_broker::kafka::codec::{
-    encode_record_batch, encode_request, get_bytes, get_string, put_bytes, put_string,
+    encode_record_batch, encode_request, encode_request_flexible, get_bytes,
+    get_compact_array_len, get_compact_bytes, get_string, get_uuid, put_bytes,
+    put_compact_array_len, put_compact_string, put_empty_tag_buffer, put_string,
+    put_unsigned_varint, put_uuid, skip_tag_buffer, volant_topic_uuid,
 };
 use volant_broker::{
     serve_kafka_listener, start_background_tasks, Broker, BrokerEndpoint, ClusterConfig,
@@ -167,6 +170,53 @@ fn fetch_body_v11_with_replica(
     body
 }
 
+/// Fetch v15 flexible body: no top-level ReplicaId; optional ReplicaState tag 1.
+///
+/// When `replica_state_id` is `Some(id)`, encodes tag 1 ReplicaState with that
+/// ReplicaId (follower gate). `None` → empty top-level tags (consumer default -1).
+fn fetch_body_v15(
+    topic_uuid: &[u8; 16],
+    fetch_offset: i64,
+    rack: Option<&str>,
+    replica_state_id: Option<i32>,
+) -> BytesMut {
+    let mut body = BytesMut::new();
+    // No replica_id — starts at MaxWaitMs (KIP-903 / Fetch v15+).
+    body.put_i32(0); // max_wait
+    body.put_i32(1); // min_bytes
+    body.put_i32(1_048_576); // max_bytes
+    body.put_u8(0); // isolation
+    body.put_i32(0); // session_id
+    body.put_i32(-1); // session_epoch FINAL
+    put_compact_array_len(&mut body, 1);
+    put_uuid(&mut body, topic_uuid);
+    put_compact_array_len(&mut body, 1);
+    body.put_i32(0); // partition
+    body.put_i32(-1); // current_leader_epoch
+    body.put_i64(fetch_offset);
+    body.put_i32(-1); // last_fetched_epoch
+    body.put_i64(-1); // log_start_offset
+    body.put_i32(1_000_000); // partition_max_bytes
+    put_empty_tag_buffer(&mut body); // partition tags
+    put_empty_tag_buffer(&mut body); // topic tags
+    put_compact_array_len(&mut body, 0); // forgotten
+    put_compact_string(&mut body, rack.unwrap_or(""));
+    if let Some(rid) = replica_state_id {
+        // Tag 1 = ReplicaState { ReplicaId int32, ReplicaEpoch int64, tags }
+        let mut value = BytesMut::new();
+        value.put_i32(rid);
+        value.put_i64(-1); // replica_epoch
+        put_empty_tag_buffer(&mut value);
+        put_unsigned_varint(&mut body, 1); // one tag
+        put_unsigned_varint(&mut body, 1); // tag 1
+        put_unsigned_varint(&mut body, value.len() as u32);
+        body.extend_from_slice(&value);
+    } else {
+        put_empty_tag_buffer(&mut body);
+    }
+    body
+}
+
 fn parse_fetch_v11_preferred(mut src: bytes::Bytes) -> (i16, i64, i32, usize) {
     // Correlation already consumed; body starts at throttle.
     assert!(
@@ -189,6 +239,30 @@ fn parse_fetch_v11_preferred(mut src: bytes::Bytes) -> (i16, i64, i32, usize) {
     assert_eq!(src.get_i32(), 0); // aborted
     let preferred = src.get_i32();
     let records = get_bytes(&mut src).unwrap().unwrap_or_default();
+    assert_eq!(top_err, 0);
+    assert_eq!(part_err, 0, "partition error {part_err}");
+    (part_err, hwm, preferred, records.len())
+}
+
+/// Parse flexible Fetch response (header v1 already stripped of corr + tags).
+fn parse_fetch_flex_preferred(mut src: bytes::Bytes) -> (i16, i64, i32, usize) {
+    assert_eq!(src.get_i32(), 0); // throttle
+    let top_err = src.get_i16();
+    let _session = src.get_i32();
+    let topic_count = get_compact_array_len(&mut src).unwrap().unwrap();
+    assert_eq!(topic_count, 1, "expected 1 topic, top_err={top_err}");
+    let _uuid = get_uuid(&mut src).unwrap();
+    let part_count = get_compact_array_len(&mut src).unwrap().unwrap();
+    assert_eq!(part_count, 1);
+    assert_eq!(src.get_i32(), 0); // partition index
+    let part_err = src.get_i16();
+    let hwm = src.get_i64();
+    let _lso = src.get_i64();
+    let _log_start = src.get_i64();
+    let n_aborted = get_compact_array_len(&mut src).unwrap().unwrap();
+    assert_eq!(n_aborted, 0);
+    let preferred = src.get_i32();
+    let records = get_compact_bytes(&mut src).unwrap().unwrap_or_default();
     assert_eq!(top_err, 0);
     assert_eq!(part_err, 0, "partition error {part_err}");
     (part_err, hwm, preferred, records.len())
@@ -796,6 +870,144 @@ async fn follower_fetch_no_preferred_redirect() {
     assert_eq!(
         preferred_follower, -1,
         "follower fetch (replica_id >= 0) must not get PreferredReadReplica redirect"
+    );
+
+    s1.abort();
+    s2.abort();
+    s3.abort();
+}
+
+/// Fetch v15+ ReplicaState tag: follower ReplicaId ≥ 0 must not get preferred
+/// redirect (mirrors classic top-level replica_id gate for flexible clients).
+#[tokio::test]
+async fn follower_fetch_v15_replica_state_no_preferred_redirect() {
+    let base = unique_dir("follower-v15-rs");
+    let _g = Guard(base.clone());
+
+    let (l1, p1) = bind_port0().await;
+    let (l2, p2) = bind_port0().await;
+    let (l3, p3) = bind_port0().await;
+    let cfg = cluster_config_racks(
+        [p1, p2, p3],
+        [Some("rack-a"), Some("rack-a"), Some("rack-a")],
+    );
+
+    let mk = |id: u32, dir: PathBuf| {
+        let storage = StorageConfig {
+            data_dir: dir,
+            flush_every_n: 1,
+            ..StorageConfig::default()
+        };
+        let b = Broker::with_cluster(storage, id, cfg.clone()).unwrap();
+        b.set_advertised("127.0.0.1", [p1, p2, p3][(id - 1) as usize]);
+        Arc::new(b)
+    };
+    let b1 = mk(1, base.join("n1"));
+    let b2 = mk(2, base.join("n2"));
+    let b3 = mk(3, base.join("n3"));
+    let _bg1 = start_background_tasks(Arc::clone(&b1));
+    let _bg2 = start_background_tasks(Arc::clone(&b2));
+    let _bg3 = start_background_tasks(Arc::clone(&b3));
+
+    let s1 = {
+        let b = Arc::clone(&b1);
+        tokio::spawn(async move {
+            serve_kafka_listener(l1, b).await.ok();
+        })
+    };
+    let s2 = {
+        let b = Arc::clone(&b2);
+        tokio::spawn(async move {
+            serve_kafka_listener(l2, b).await.ok();
+        })
+    };
+    let s3 = {
+        let b = Arc::clone(&b3);
+        tokio::spawn(async move {
+            serve_kafka_listener(l3, b).await.ok();
+        })
+    };
+    tokio::time::sleep(Duration::from_millis(30)).await;
+
+    b1.create_topic("t15", 1).unwrap();
+    propagate(&[&b1, &b2, &b3], "t15").await;
+    let topic = TopicName::new("t15");
+    let leader_id = b1.metadata(None).topics[0].partitions[0].leader;
+    let leader = match leader_id {
+        1 => Arc::clone(&b1),
+        2 => Arc::clone(&b2),
+        3 => Arc::clone(&b3),
+        _ => panic!("bad leader"),
+    };
+    let leader_addr = format!(
+        "127.0.0.1:{}",
+        [p1, p2, p3][(leader_id - 1) as usize]
+    );
+
+    let mut batch = MessageBatch::default();
+    batch.messages.push(Message::from_value("x"));
+    let (_, err) = leader
+        .produce_with_acks(&topic, PartitionId(0), batch, 1, None)
+        .unwrap();
+    assert_eq!(err, 0);
+    catch_up_isr(&leader, "t15");
+
+    let expected = leader
+        .select_preferred_read_replica(&topic, PartitionId(0), Some("rack-a"));
+    assert!(
+        expected.is_some(),
+        "same-rack cluster after catch_up must have preferred replica; leader={leader_id}"
+    );
+
+    let numeric_id = (0u32..64)
+        .find(|&id| leader.topic_name_by_id(id).as_deref() == Some("t15"))
+        .expect("t15 topic id");
+    let uuid = volant_topic_uuid(numeric_id);
+
+    // 1) Consumer Fetch v15 (no ReplicaState) → PreferredReadReplica redirect.
+    let resp_consumer = kafka_rpc(
+        &leader_addr,
+        encode_request_flexible(
+            1,
+            15,
+            5,
+            Some("c"),
+            &fetch_body_v15(&uuid, 0, Some("rack-a"), None),
+        ),
+    )
+    .await;
+    let mut src = resp_consumer.freeze();
+    assert_eq!(src.get_i32(), 5);
+    skip_tag_buffer(&mut src).unwrap(); // response header v1
+    let (_err, hwm, preferred_consumer, rec_len) = parse_fetch_flex_preferred(src);
+    assert!(hwm > 0);
+    assert_ne!(
+        preferred_consumer, -1,
+        "consumer Fetch v15 must get preferred redirect when eligible"
+    );
+    assert_eq!(preferred_consumer, expected.unwrap() as i32);
+    assert_eq!(rec_len, 0, "redirect responses carry empty records");
+
+    // 2) Follower Fetch v15 with ReplicaState.ReplicaId ≥ 0 → no redirect.
+    let follower_replica_id = if leader_id == 1 { 2i32 } else { 1i32 };
+    let resp_follower = kafka_rpc(
+        &leader_addr,
+        encode_request_flexible(
+            1,
+            15,
+            6,
+            Some("c"),
+            &fetch_body_v15(&uuid, 0, Some("rack-a"), Some(follower_replica_id)),
+        ),
+    )
+    .await;
+    let mut src2 = resp_follower.freeze();
+    assert_eq!(src2.get_i32(), 6);
+    skip_tag_buffer(&mut src2).unwrap();
+    let (_err2, _hwm2, preferred_follower, _) = parse_fetch_flex_preferred(src2);
+    assert_eq!(
+        preferred_follower, -1,
+        "follower Fetch v15 (ReplicaState.ReplicaId >= 0) must not get PreferredReadReplica redirect"
     );
 
     s1.abort();

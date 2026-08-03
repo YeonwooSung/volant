@@ -24,7 +24,7 @@ From `SUPPORTED_APIS` in `crates/volant-broker/src/kafka/mod.rs`:
 | Key | API | Versions | Notes |
 |----:|-----|----------|-------|
 | 0 | Produce | 0–13 | Classic 0–8; flex v9+; TopicId v13; KIP-951 CurrentLeader v10+; txn 123 after timeout (Phase 94) |
-| 1 | Fetch | 0–18 | Classic 0–11; flex v12–18; TopicId v13+; isolation LSO/aborted (Phase 86); ReplicaState v15+ ignore; NodeEndpoints v16+; CurrentLeader tag v12+; DivergingEpoch + sessions (Phase 88); omit-unchanged incremental (Phase 91); session idle TTL + max/LRU (Phase 95); durable local sessions (Phase 115); multi-broker session forward (Phase 119) |
+| 1 | Fetch | 0–18 | Classic 0–11; flex v12–18; TopicId v13+; isolation LSO/aborted (Phase 86); ReplicaState v15+ (ReplicaId gates preferred redirect); NodeEndpoints v16+; CurrentLeader tag v12+; DivergingEpoch + sessions (Phase 88); omit-unchanged incremental (Phase 91); session idle TTL + max/LRU (Phase 95); durable local sessions (Phase 115); multi-broker session forward (Phase 119) |
 | 2 | ListOffsets | 0–11 | Flex v6+; specials v7–11; READ_COMMITTED latest = LSO (Phase 86) |
 | 3 | Metadata | 0–13 | Flex v9+; TopicId v10–13; top-level ErrorCode v13; live leader_epoch (Phase 87) |
 | 8 | OffsetCommit | 0–10 | Flex v8+; TopicId v10 |
