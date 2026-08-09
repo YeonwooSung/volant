@@ -133,8 +133,12 @@ Without `--cluster-config`, the broker runs as a single node:
     when the peer is live again. **Phase 123:** on leadership change the new
     leader **reconciles** pending targets from its local `log_start` (current
     epoch) so offline peers still catch up when the old leader’s outbox is
-    orphaned — still not a consensus truncate log (new leader must already have
-    applied the truncate).
+    orphaned. **Phase 129–131:** multi-controller truncate journal
+    (`__truncate_journal`) majority note + full-snapshot push + heartbeat rejoin
+    catch-up; reconcile = `max(local log_start, journal watermark)`. Ingress
+    `TruncateJournalNote` fences negative/stale epochs / unknown TP (residual:
+    current-epoch forge under weak auth; push 88 max-merge unfenced by design).
+    Still not a full Raft truncate log.
   - **BROKER config / ACL mutate:** controller is SoT; non-controllers return
     `NotController`. Successful controller mutates push generationed state to
     live peers (config knobs or full ACL snapshot). Describe / authorize use

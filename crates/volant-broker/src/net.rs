@@ -1542,11 +1542,30 @@ async fn fanout_delete_records_inner(
     before_offset: u64,
 ) {
     // Phase 129/130: journal note (best-effort; never fails client).
+    // Only stamp while we still lead — never send leader_epoch=-1 (ingress
+    // rejects negative epochs for non-zero watermarks). Leadership loss after
+    // local truncate skips the note; the new leader reconcile uses log_start.
     if broker.cluster_config().is_some() {
-        let epoch = broker
-            .led_partition_epoch(topic, partition)
-            .unwrap_or(-1);
-        fanout_truncate_journal_note(broker, topic, partition, before_offset, epoch).await;
+        match broker.led_partition_epoch(topic, partition) {
+            Some(epoch) => {
+                fanout_truncate_journal_note(
+                    broker,
+                    topic,
+                    partition,
+                    before_offset,
+                    epoch,
+                )
+                .await;
+            }
+            None => {
+                warn!(
+                    topic,
+                    partition,
+                    before_offset,
+                    "skip truncate journal note: not partition leader (or unknown TP)"
+                );
+            }
+        }
     }
     let peers = broker.delete_records_fanout_peers(topic, partition);
     if peers.is_empty() {

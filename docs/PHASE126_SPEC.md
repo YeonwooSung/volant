@@ -77,11 +77,16 @@ caught-up same-rack ISR follower so clients can offload read traffic.
 
 ### Fetch path (`encode_fetch`)
 
-On success path before local `fetch_kafka`, if version ≥ 11 and selection
-returns `Some(id)`:
+On success path before local `fetch_kafka`, if version ≥ 11, `replica_id < 0`
+(consumer), **`!read_committed`**, and selection returns `Some(id)`:
 
 - note metric
 - push partition response with preferred = id, empty records, omit = false
+
+**READ_COMMITTED (isolation=1):** preferred redirect is **suppressed** — leader
+serves with aborted-marker / LSO filter. Followers may lack a complete soft-abort
+marker view; redirect would risk filter divergence vs the leader (MVP residual
+vs full marker/LSO parity on candidates).
 
 ### Rack advertisement
 
@@ -114,6 +119,8 @@ Unset rack → broker never selected as preferred (and Metadata rack null).
 3. Unknown / empty client rack → preferred -1, records present  
 4. Preferred broker accepts consumer Fetch without partition error  
 5. Metadata v1 emits configured racks  
+6. Follower `replica_id ≥ 0` / Fetch v15 ReplicaState → no preferred redirect  
+7. **READ_COMMITTED (isolation=1)** suppresses preferred even when selector would return `Some`; leader serves records; **READ_UNCOMMITTED** contrast still redirects  
 
 ---
 
@@ -125,6 +132,7 @@ Unset rack → broker never selected as preferred (and Metadata rack null).
   replication for follower serve usefulness  
 - No rack-aware produce / partition assignment  
 - Preferred never set for non-leader receivers  
+- **No preferred when isolation = READ_COMMITTED** — leader always serves (aborted-marker filter honesty); full marker/LSO parity on preferred candidates deferred  
 - Shared session store / preferred+session affinity still deferred  
 
 ## Exit criteria

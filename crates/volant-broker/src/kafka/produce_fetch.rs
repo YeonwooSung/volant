@@ -1255,7 +1255,10 @@ pub(crate) fn encode_fetch(broker: &Broker, src: &mut impl Buf, out: &mut BytesM
 
             // Phase 126: PreferredReadReplica redirect (consumer Fetch only;
             // empty records). replica_id >= 0 ⇒ follower — never redirect.
-            if version >= 11 && replica_id < 0 {
+            // READ_COMMITTED (isolation=1): suppress preferred — followers may
+            // lack a complete soft-abort-marker view → filter/LSO divergence vs
+            // leader. Keep reads on the leader (MVP residual vs full marker parity).
+            if version >= 11 && replica_id < 0 && !read_committed {
                 if let Some(pref) = broker.select_preferred_read_replica(
                     &name,
                     PartitionId(partition as u32),

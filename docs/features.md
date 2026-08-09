@@ -98,7 +98,7 @@ workers.
 | Idle TTL (95) | Default 60s (`VOLANT_FETCH_SESSION_IDLE_MS`; `0` disables); lazy on create/incremental |
 | Max sessions (95) | Default 1000 (`VOLANT_FETCH_SESSION_MAX`; `0` unlimited); LRU-evict at cap |
 | Multi-broker (119) | Cluster session_id encodes owner; peer miss → transparent inter-broker Fetch forward |
-| PreferredReadReplica (126) | Fetch v11+ client `rack_id`; leader may set PreferredReadReplica to same-rack ISR peer with LEO≥HWM (empty records redirect); gated off for followers (`replica_id` top-level ≤v14 / ReplicaState tag 1 on v15+); Metadata/DescribeCluster/NodeEndpoints advertise `cluster.toml` rack; metric `volant_preferred_replica_redirect_total` |
+| PreferredReadReplica (126) | Fetch v11+ client `rack_id`; leader may set PreferredReadReplica to same-rack ISR peer with LEO≥HWM (empty records redirect); **suppressed when isolation=READ_COMMITTED** (leader serves aborted-marker filter); gated off for followers (`replica_id` top-level ≤v14 / ReplicaState tag 1 on v15+); Metadata/DescribeCluster/NodeEndpoints advertise `cluster.toml` rack; metric `volant_preferred_replica_redirect_total` |
 | Errors | 70 session id not found (incl. after TTL/LRU / dead owner); 71 invalid session epoch |
 
 ## Cluster ISR (Phase 6 + 108/110/118/125)
@@ -147,10 +147,10 @@ workers.
 - Transparent EndTxn + AddOffsets + TxnOffsetCommit forward yes (Phase 120/122; Init-owner registry + inter-broker); sticky FindCoordinator yes (Phase 121; murmur2 + registry override); pin Init still recommended if client skips FindCoordinator
 - Durable Init-owner registry yes (Phase 124; local `__txn_coordinator`); TTL GC yes (Phase 127/128; default 24h; BROKER Describe/Alter; re-Init still overwrites; long-lived txns must re-note within TTL)  
 
-- Fetch sessions durable local (Phase 115) + multi-broker forward MVP (Phase 119); omit cache is HWM+LSO only (not byte-identical Kafka response cache); idle TTL + max/LRU yes (Phase 95); PreferredReadReplica MVP yes (Phase 126; not full selector/throttling); not shared session store  
+- Fetch sessions durable local (Phase 115) + multi-broker forward MVP (Phase 119); omit cache is HWM+LSO only (not byte-identical Kafka response cache); idle TTL + max/LRU yes (Phase 95); PreferredReadReplica MVP yes (Phase 126; not full selector/throttling; **no preferred under READ_COMMITTED**); not shared session store  
 - ACL / BROKER admin SoT is the **controller** (Phase 113 push + Phase 117 durable gens / rejoin catch-up), not Raft consensus; brief lag until heartbeat catch-up is honest  
 
-- DeleteRecords fan-out is **best-effort** for the client path; offline peers get **durable leader outbox retry** (Phase 116) + **new-leader reconcile** (Phase 123/129: `max(local log_start, journal watermark)`) — multi-controller majority journal MVP (Phase 130) + **heartbeat journal rejoin catch-up** (Phase 131; not full Raft log)  
+- DeleteRecords fan-out is **best-effort** for the client path; offline peers get **durable leader outbox retry** (Phase 116) + **new-leader reconcile** (Phase 123/129: `max(local log_start, journal watermark)`) — multi-controller majority journal MVP (Phase 130) + **heartbeat journal rejoin catch-up** (Phase 131; not full Raft log). **TruncateJournalNote** rejects negative/stale epochs / unknown TP (`phase132`); enable cluster auth for 86/88 (`phase133` locks the contract; **current-epoch forge** under weak auth remains)
 
 - Compaction simpler than Kafka (no tombstone retention window)  
 - Inter-broker not ACL-gated; uses shared-token when configured  

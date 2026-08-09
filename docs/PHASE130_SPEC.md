@@ -53,6 +53,23 @@ replica for the journal. Best-effort note/push retained for availability.
   at cap; `MAX_TRUNCATE_JOURNAL_SNAPSHOT_BYTES` (4 MiB) rejects oversized push
   apply. Topic delete prunes local journal entries (no generation bump).
 
+## Follow-ups landed (post-MVP residual)
+
+- **Ingress epoch/existence fence** on `handle_truncate_journal_note` (not a new
+  phase): empty topic → InvalidArg; `before_offset == 0` → no-op success;
+  unknown topic/partition → NotFound; `leader_epoch < 0` (non-zero offset) →
+  InvalidArg (journal requires a stamped epoch; fanout never stamps `-1` —
+  skips note if not leading); local epoch **strictly greater** than note →
+  InvalidProducerEpoch (19); future epochs (`req >= local`) accepted for
+  multi-controller lag. Receiver need **not** be leader. Proposer still uses
+  `local_note_truncate_journal`; ACL/auth for 86/88 unchanged (ib principal
+  **or** Cluster Alter when on).
+  **ITs:** `phase132_journal_note_fence` (epoch fence); `phase133_journal_auth`
+  (86/88 ACL/auth gates).
+- **Still open:** **current-epoch** forge + huge `before_offset` under auth/ACL
+  off (or any Cluster Alter / ib principal); push 88 max-merge intentionally
+  unfenced for catch-up. Enable cluster auth for 86/88 in production.
+
 ## Exit criteria
 
 1. Non-controller accepts note  

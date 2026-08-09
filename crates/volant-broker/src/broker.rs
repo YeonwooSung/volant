@@ -1054,11 +1054,19 @@ impl Broker {
     ///
     /// - Empty `topic` → [`ErrorCode::InvalidArg`], generation unchanged.
     /// - `before_offset == 0` → no-op success (journal ignores zero watermarks).
-    /// - Stale `leader_epoch` notes still merge (max-merge never shrinks
-    ///   watermarks); local reconcile applies epoch fencing on truncate.
+    /// - Unknown topic/partition → [`ErrorCode::NotFound`] (no orphan SoT keys).
+    /// - `leader_epoch < 0` with non-zero offset → [`ErrorCode::InvalidArg`]
+    ///   (journal SoT requires a stamped epoch; unlike ReplicaDeleteRecords).
+    /// - Stale epoch when local partition epoch is **strictly greater** than
+    ///   `leader_epoch` → [`ErrorCode::InvalidProducerEpoch`] (same fence as
+    ///   [`Self::handle_replica_delete_records`]); generation and watermark
+    ///   unchanged. Future epochs (`req >= local`) are accepted so lagging
+    ///   multi-controller peers can still ack after leadership bumps.
+    /// - Receivers need not be leaders (Phase 130 multi-controller).
     ///
-    /// Production deployments should enable ACL/auth on this path — notes are
-    /// otherwise only lightly validated here.
+    /// Proposer path uses [`Self::local_note_truncate_journal`] directly (trusted
+    /// local leadership). Production should still enable ACL/auth on 86/88 —
+    /// equal-epoch forge with a huge offset remains open under weak auth.
     pub fn handle_truncate_journal_note(
         &self,
         topic: &str,
@@ -1072,7 +1080,47 @@ impl Broker {
                 self.truncate_journal.generation(),
             );
         }
-        // before_offset == 0: local note is a no-op; return success + current gen.
+        // before_offset == 0: journal ignores zero watermarks; no existence check.
+        if before_offset == 0 {
+            return (0, self.truncate_journal.generation());
+        }
+
+        // Ingress fence: known partition + stamped epoch + RDR-style stale
+        // check before durable max-merge. Forged high before_offset with a
+        // missing/stale epoch must not become journal SoT (reconcile would
+        // otherwise drive real truncate ~500ms).
+        {
+            let name = TopicName::new(topic);
+            let topics = self.topics.read();
+            let Some(t) = topics.get(&name) else {
+                return (
+                    ErrorCode::NotFound as u16,
+                    self.truncate_journal.generation(),
+                );
+            };
+            let Some(part) = t.partitions.get(&PartitionId(partition)) else {
+                return (
+                    ErrorCode::NotFound as u16,
+                    self.truncate_journal.generation(),
+                );
+            };
+            // Journal is cluster SoT — require a non-negative epoch stamp.
+            // (ReplicaDeleteRecords still allows -1; that path is one-shot apply.)
+            if leader_epoch < 0 {
+                return (
+                    ErrorCode::InvalidArg as u16,
+                    self.truncate_journal.generation(),
+                );
+            }
+            let req_epoch = leader_epoch as u32;
+            if part.leader_epoch > req_epoch {
+                return (
+                    ErrorCode::InvalidProducerEpoch as u16,
+                    self.truncate_journal.generation(),
+                );
+            }
+        }
+
         let gen = self.local_note_truncate_journal(
             topic,
             partition,
