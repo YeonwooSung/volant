@@ -1,10 +1,10 @@
 # Volant residual TODO (review loop)
 
-**Baseline:** `main` @ `3e1d7ed` (Phase 131) + local residual fixes (journal note fence + preferred isolation) + Auth/ACL journal ITs  
-**Last review:** 2026-08-09 (journal fence residual + preferred×isolation)  
+**Baseline:** `main` @ `3e1d7ed` (Phase 131) + local residual fixes (journal note fence + preferred isolation + fan-out achieved-low) + Auth/ACL journal ITs  
+**Last review:** 2026-08-09 (fan-out achieved-low closed)  
 **Source reviews:** `docs/reviews/REVIEW_6708f1fe_phases126-130.md` + Phase 131 delta  
 
-**Note:** Journal note fence closed for existence/stale/negative epoch; fanout never stamps `-1`. Preferred redirect suppressed under READ_COMMITTED. Auth/ACL 86/88 locked by `phase133`. Honest residual: current-epoch forge under weak auth; push 88 unfenced by design. **Remaining open P0:** fan-out achieved-low.
+**Note:** Journal note fence closed for existence/stale/negative epoch; fanout never stamps `-1`. Preferred redirect suppressed under READ_COMMITTED. Auth/ACL 86/88 locked by `phase133`. Fan-out success path uses **achieved** `low_watermark` (post whole-segment clamp), not client-requested `before_offset`. Honest residual: current-epoch forge under weak auth; push 88 unfenced by design; peers still clamp independently; journal max-merge SoT; best-effort fan-out.
 
 Living roadmap: [ROADMAP.md](./ROADMAP.md) (Phases **0–131 shipped**). This file tracks **residual correctness / security / quality** work and long-horizon deferred items so review loops stay honest.
 
@@ -51,11 +51,16 @@ Living roadmap: [ROADMAP.md](./ROADMAP.md) (Phases **0–131 shipped**). This fi
 - [x] Cluster Alter allow for non-ib principal
 - [x] Optional push (88) deny/allow
 
+### Fan-out achieved-low (P0 residual fix, post-131)
+- [x] Native + Kafka DeleteRecords success path fans out journal note + ReplicaDeleteRecords + outbox at **achieved** `low_watermark` (after whole-segment clamp), not client-requested `before_offset`
+- [x] Client response was already honest (returns achieved low)
+- [x] Honest residual: peers still clamp independently; journal max-merge SoT; best-effort fan-out
+
 ---
 
 ## P0 residual (correctness / security — still open)
 
-These are the known residual bands after the 126–130 fix pass + journal note ingress fence + auth journal ITs + preferred isolation suppress. None block the Phase 131 MVP claim, but they remain **honest open P0-class** items.
+These are the known residual bands after the 126–130 fix pass + journal note ingress fence + auth journal ITs + preferred isolation suppress + fan-out achieved-low. None block the Phase 131 MVP claim. Code P0 residuals below are closed; remaining items are **honest residual** (not open code holes).
 
 - [x] **Journal note fence (epoch/existence + negative-epoch closed)**  
   Ingress: empty topic; zero offset no-op; unknown TP → NotFound; `leader_epoch < 0` → InvalidArg; stale local > req → InvalidProducerEpoch; future epochs accepted. Fanout stamps only while leading (never `-1`). ITs: `phase132` + `phase133`.  
@@ -64,9 +69,9 @@ These are the known residual bands after the 126–130 fix pass + journal note i
 - [x] **Preferred + isolation**  
   Fetch preferred redirect gated by `!read_committed` (`version >= 11 && replica_id < 0 && !read_committed`). READ_COMMITTED stays on the leader; READ_UNCOMMITTED still redirects. IT: `phase126_preferred_replica::read_committed_suppresses_preferred_redirect`. Full marker/LSO parity on preferred candidates deferred.
 
-- [ ] **Fan-out achieved-low**  
-  Client DeleteRecords success path fans out journal note + ReplicaDeleteRecords at **requested** `before_offset`, not achieved `low_watermark` after whole-segment clamp (`net.rs` DeleteRecords handler). Peers/journal can be told a watermark the leader never reached until later segment drops.  
-  **Direction:** fan-out / note at `low_watermark` (achieved); keep client response honest.
+- [x] **Fan-out achieved-low**  
+  Success fan-out (journal note + ReplicaDeleteRecords + outbox) uses **achieved** `low_watermark` after whole-segment clamp, not client-requested `before_offset`. Client response already returned achieved low.  
+  **Honest residual:** peers still clamp independently; journal remains max-merge SoT; fan-out stays best-effort.
 
 ---
 
@@ -105,6 +110,6 @@ These are the known residual bands after the 126–130 fix pass + journal note i
 | Phase 131 correctness | Heartbeat trailer + lag push + metrics + ITs look sound; limitations documented |
 | Prior P0 #1/#3–#9 | Landed in code |
 | Prior P0 #2 journal fence | **Partial** (epoch/existence landed; equal-epoch / `-1` still open — see P0 list) |
-| Other P0 | Preferred+isolation **done** (suppress when READ_COMMITTED); fan-out achieved-low still open |
+| Other P0 | Preferred+isolation **done**; fan-out achieved-low **done** (fan-out at achieved low after clamp) |
 
-**Stop condition:** **not met** — open P0 residual remains (fan-out achieved-low; journal current-epoch forge under weak auth is honest residual, not a code hole in epoch math).
+**Stop condition:** **met for open code P0** — fan-out achieved-low closed. Remaining journal current-epoch forge under weak auth is honest residual (not a code hole in epoch math); peers clamp independently; journal max-merge SoT; best-effort fan-out.

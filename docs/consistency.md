@@ -127,18 +127,20 @@ Without `--cluster-config`, the broker runs as a single node:
   `volant_isr_time_shrink_total`.
 - **Cluster admin fan-out (Phase 113 + 116 + 123):**
   - **DeleteRecords:** only the partition **leader** accepts the client RPC;
-    after local truncate it best-effort RPCs other replicas. Peer failure does
-    not fail the client. Failed targets are recorded in a **leader-local durable
-    outbox** (`__delete_records_outbox`, Phase 116) and retried at-least-once
-    when the peer is live again. **Phase 123:** on leadership change the new
-    leader **reconciles** pending targets from its local `log_start` (current
-    epoch) so offline peers still catch up when the old leader’s outbox is
-    orphaned. **Phase 129–131:** multi-controller truncate journal
-    (`__truncate_journal`) majority note + full-snapshot push + heartbeat rejoin
-    catch-up; reconcile = `max(local log_start, journal watermark)`. Ingress
-    `TruncateJournalNote` fences negative/stale epochs / unknown TP (residual:
-    current-epoch forge under weak auth; push 88 max-merge unfenced by design).
-    Still not a full Raft truncate log.
+    after local truncate it best-effort RPCs other replicas at the **achieved**
+    `low_watermark` (after whole-segment clamp), not the client-requested
+    `before_offset`. Peer failure does not fail the client. Failed targets are
+    recorded in a **leader-local durable outbox** (`__delete_records_outbox`,
+    Phase 116) and retried at-least-once when the peer is live again. **Phase
+    123:** on leadership change the new leader **reconciles** pending targets
+    from its local `log_start` (current epoch) so offline peers still catch up
+    when the old leader’s outbox is orphaned. **Phase 129–131:** multi-controller
+    truncate journal (`__truncate_journal`) majority note + full-snapshot push +
+    heartbeat rejoin catch-up; reconcile = `max(local log_start, journal
+    watermark)`. Ingress `TruncateJournalNote` fences negative/stale epochs /
+    unknown TP (residual: current-epoch forge under weak auth; push 88 max-merge
+    unfenced by design). Peers still clamp independently; journal max-merge SoT;
+    best-effort fan-out. Still not a full Raft truncate log.
   - **BROKER config / ACL mutate:** controller is SoT; non-controllers return
     `NotController`. Successful controller mutates push generationed state to
     live peers (config knobs or full ACL snapshot). Describe / authorize use

@@ -90,9 +90,9 @@ metadata-side effects do not.
 | Actor | Behavior |
 |-------|----------|
 | Client → any broker | Unchanged: only **partition leader** applies; others return `NotLeaderForPartition` |
-| Leader after successful local `delete_records` | Best-effort RPC to every **other replica** in the current assignment (or local ISR if assignment lag): `ReplicaDeleteRecords { topic, partition, before_offset, leader_epoch }` |
+| Leader after successful local `delete_records` | Best-effort RPC to every **other replica** in the current assignment (or local ISR if assignment lag): `ReplicaDeleteRecords { topic, partition, before_offset = achieved low_watermark, leader_epoch }` — fan-out / journal note / outbox use **achieved** low after whole-segment clamp, not the client-requested offset |
 | Follower receiving RPC | If local epoch ≤ request epoch (or no epoch stored): call storage `delete_records` + soft-marker GC/clip (Phase 104/111); reply low watermark. If epoch too old: reject with `FencedLeaderEpoch` / ignore |
-| Response to client | Still the **leader** low watermark after **local** success. Fan-out failure does **not** fail the client response (honest: eventually consistent log starts). Increment metric `volant_delete_records_fanout_errors_total` |
+| Response to client | Still the **leader** low watermark after **local** success (already achieved low). Fan-out failure does **not** fail the client response (honest: eventually consistent log starts). Increment metric `volant_delete_records_fanout_errors_total` |
 
 ### Why best-effort (not 2PC truncate)
 
@@ -126,19 +126,21 @@ local `Broker::delete_records`; fan-out is internal.
 ### Algorithm (leader)
 
 ```text
-low, err = local_delete_records(topic, partition, before)
+low, err = local_delete_records(topic, partition, before)  # low = achieved after whole-segment clamp
 if err != 0: return to client
 gc_and_persist_aborted_markers(...)   # existing Phase 104/111
 for replica_id in assigned_replicas(topic, partition) - {self}:
-    rpc ReplicaDeleteRecords(...); on error: metric++, log warn
+    rpc ReplicaDeleteRecords(..., before_offset=low, ...); on error: metric++, log warn
+# journal note + outbox also use achieved `low`, not client `before`
 return low to client
 ```
 
-Followers that are **not** yet at `before_offset` (LEO < before): still advance
+Honesty: fan-out / note / outbox pass **achieved** `low`, not the client-requested
+`before`. Followers that are **not** yet at that offset (LEO < low): still advance
 log start as far as storage allows (same as local `PartitionLog::delete_records`
-semantics — whole sealed segments only). Document: fan-out cannot invent
-segments the follower never had; it only truncates prefix the follower already
-replicated.
+semantics — whole sealed segments only; peers clamp independently). Document:
+fan-out cannot invent segments the follower never had; it only truncates prefix
+the follower already replicated. Journal remains max-merge SoT; fan-out best-effort.
 
 ---
 

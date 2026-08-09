@@ -46,8 +46,10 @@ const KAFKA_CLUSTER_NAME: &str = "kafka-cluster";
 
 /// Encode Kafka DeleteRecords response.
 ///
-/// Returns successful leader truncates as `(topic, partition, before_offset)` so
-/// the async accept path can best-effort fan out (Phase 113).
+/// Returns successful leader truncates as
+/// `(topic, partition, achieved_low_watermark)` so the async accept path can
+/// best-effort fan out at the **clamped** log start (Phase 113) — not the
+/// client-requested offset when whole-segment delete stops short.
 pub(crate) fn encode_delete_records(
     broker: &Broker,
     src: &mut impl Buf,
@@ -201,12 +203,9 @@ pub(crate) fn encode_delete_records(
                     };
                     out.put_i16(kerr);
                     // Phase 113: schedule fan-out only after local leader success.
+                    // Use achieved `low` (whole-segment clamp), not requested offset.
                     if err == 0 {
-                        fanouts.push((
-                            t.name.clone(),
-                            p.partition as u32,
-                            p.offset as u64,
-                        ));
+                        fanouts.push((t.name.clone(), p.partition as u32, low));
                     }
                 }
                 Err(Error::NotFound(_)) => {

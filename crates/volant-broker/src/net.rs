@@ -4022,8 +4022,12 @@ async fn handle_request(broker: &Broker, req: Request) -> Result<Response> {
                 // Phase 113/129/130: best-effort fan-out after local success.
                 // Budget is enforced inside fanout_delete_records (default 20s
                 // overall; 5s per inter-broker RPC).
+                // Fan-out journal note + ReplicaDeleteRecords + outbox at the
+                // **achieved** low_watermark (whole-segment clamp), not the
+                // client-requested before_offset — peers/journal must not be
+                // told a watermark the leader has not reached.
                 if error_code == 0 {
-                    fanout_delete_records(broker, &topic, partition, before_offset).await;
+                    fanout_delete_records(broker, &topic, partition, low_watermark).await;
                 }
                 Ok(Response::DeleteRecords {
                     error_code,
