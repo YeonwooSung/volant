@@ -1506,6 +1506,9 @@ async fn fanout_truncate_journal_push_to(
 /// so a budget abort or join failure cannot lose retry state; successful /
 /// fenced peers are `drop_entry`'d. Never fails the client.
 ///
+/// `truncate_to` is the **achieved** log start (whole-segment-clamped low
+/// watermark), not the client-requested offset.
+///
 /// Enforced overall deadline: [`delete_records_fanout_budget`] (default **20s**,
 /// or at least `3 *` [`inter_broker_rpc_timeout`] `+ 2s` when env unset).
 /// Each peer RPC is still bounded by [`inter_broker_rpc_timeout`] (default **5s**).
@@ -1513,12 +1516,12 @@ pub async fn fanout_delete_records(
     broker: &Broker,
     topic: &str,
     partition: u32,
-    before_offset: u64,
+    truncate_to: u64,
 ) {
     let budget = delete_records_fanout_budget();
     match tokio::time::timeout(
         budget,
-        fanout_delete_records_inner(broker, topic, partition, before_offset),
+        fanout_delete_records_inner(broker, topic, partition, truncate_to),
     )
     .await
     {
@@ -1527,7 +1530,7 @@ pub async fn fanout_delete_records(
             warn!(
                 topic,
                 partition,
-                before_offset,
+                truncate_to,
                 budget_ms = budget.as_millis() as u64,
                 "delete records fan-out overall budget exceeded; unfinished peers remain on outbox for drain/reconcile"
             );
@@ -1539,7 +1542,7 @@ async fn fanout_delete_records_inner(
     broker: &Broker,
     topic: &str,
     partition: u32,
-    before_offset: u64,
+    truncate_to: u64,
 ) {
     // Phase 129/130: journal note (best-effort; never fails client).
     // Only stamp while we still lead — never send leader_epoch=-1 (ingress
@@ -1552,16 +1555,16 @@ async fn fanout_delete_records_inner(
                     broker,
                     topic,
                     partition,
-                    before_offset,
+                    truncate_to,
                     epoch,
                 )
                 .await;
             }
             None => {
-                warn!(
+                debug!(
                     topic,
                     partition,
-                    before_offset,
+                    truncate_to,
                     "skip truncate journal note: not partition leader (or unknown TP)"
                 );
             }
@@ -1580,7 +1583,7 @@ async fn fanout_delete_records_inner(
             *replica_id,
             topic,
             partition,
-            before_offset,
+            truncate_to,
             *leader_epoch,
         );
     }
@@ -1592,7 +1595,7 @@ async fn fanout_delete_records_inner(
         let req = Request::ReplicaDeleteRecords {
             topic: topic.to_owned(),
             partition,
-            before_offset,
+            before_offset: truncate_to,
             leader_epoch,
         };
         let auth = auth.clone();
@@ -1640,7 +1643,7 @@ async fn fanout_delete_records_inner(
                         replica_id,
                         topic,
                         partition,
-                        before_offset,
+                        truncate_to,
                         leader_epoch,
                     );
                 }
@@ -1659,7 +1662,7 @@ async fn fanout_delete_records_inner(
                     replica_id,
                     topic,
                     partition,
-                    before_offset,
+                    truncate_to,
                     leader_epoch,
                 );
             }
@@ -1677,7 +1680,7 @@ async fn fanout_delete_records_inner(
                     replica_id,
                     topic,
                     partition,
-                    before_offset,
+                    truncate_to,
                     leader_epoch,
                 );
             }

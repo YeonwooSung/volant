@@ -1,12 +1,16 @@
 #![allow(dead_code)]
-//! Shared helpers for Kafka phase integration tests.
+//! Shared helpers for broker integration tests.
 //!
 //! Include from a test file with:
 //! ```ignore
 //! #[path = "common/mod.rs"]
 //! mod common;
 //! use common::{boot_kafka, rpc, temp_dir};
+//! use common::cluster::{boot_triple_inprocess, propagate, Guard};
 //! ```
+
+/// Native multi-broker / framed-RPC helpers (journal, DeleteRecords residual ITs).
+pub mod cluster;
 
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicU64, Ordering};

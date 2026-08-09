@@ -143,30 +143,20 @@ fn fetch_body_v11(topic: &str, fetch_offset: i64, rack: Option<&str>) -> BytesMu
 }
 
 /// Fetch v11 body with explicit `replica_id` (consumer = -1; follower ≥ 0).
-/// Isolation defaults to READ_UNCOMMITTED (0).
+/// Isolation = READ_UNCOMMITTED (0). For READ_COMMITTED preferred tests see
+/// `phase126_preferred_isolation`.
 fn fetch_body_v11_with_replica(
     topic: &str,
     fetch_offset: i64,
     replica_id: i32,
     rack: Option<&str>,
 ) -> BytesMut {
-    fetch_body_v11_full(topic, fetch_offset, replica_id, rack, 0)
-}
-
-/// Fetch v11 body with `replica_id` + isolation (`0` = READ_UNCOMMITTED, `1` = READ_COMMITTED).
-fn fetch_body_v11_full(
-    topic: &str,
-    fetch_offset: i64,
-    replica_id: i32,
-    rack: Option<&str>,
-    isolation: u8,
-) -> BytesMut {
     let mut body = BytesMut::new();
     body.put_i32(replica_id);
     body.put_i32(0); // max_wait
     body.put_i32(1); // min_bytes
     body.put_i32(1_048_576); // max_bytes
-    body.put_u8(isolation);
+    body.put_u8(0); // isolation READ_UNCOMMITTED
     body.put_i32(0); // session_id
     body.put_i32(-1); // session_epoch FINAL
     body.put_i32(1); // topics
@@ -1021,145 +1011,6 @@ async fn follower_fetch_v15_replica_state_no_preferred_redirect() {
         preferred_follower, -1,
         "follower Fetch v15 (ReplicaState.ReplicaId >= 0) must not get PreferredReadReplica redirect"
     );
-
-    s1.abort();
-    s2.abort();
-    s3.abort();
-}
-
-/// READ_COMMITTED (isolation=1) suppresses PreferredReadReplica redirect even when
-/// the selector would return a same-rack ISR follower. Leader serves records with
-/// aborted-marker filter instead (filter/LSO honesty vs incomplete follower view).
-///
-/// Contrast: same layout with isolation=0 still redirects.
-#[tokio::test]
-async fn read_committed_suppresses_preferred_redirect() {
-    let base = unique_dir("rc-suppress");
-    let _g = Guard(base.clone());
-
-    let (l1, p1) = bind_port0().await;
-    let (l2, p2) = bind_port0().await;
-    let (l3, p3) = bind_port0().await;
-    // All same rack ⇒ any leader has eligible same-rack followers after catch-up.
-    let cfg = cluster_config_racks(
-        [p1, p2, p3],
-        [Some("rack-a"), Some("rack-a"), Some("rack-a")],
-    );
-
-    let mk = |id: u32, dir: PathBuf| {
-        let storage = StorageConfig {
-            data_dir: dir,
-            flush_every_n: 1,
-            ..StorageConfig::default()
-        };
-        let b = Broker::with_cluster(storage, id, cfg.clone()).unwrap();
-        b.set_advertised("127.0.0.1", [p1, p2, p3][(id - 1) as usize]);
-        Arc::new(b)
-    };
-    let b1 = mk(1, base.join("n1"));
-    let b2 = mk(2, base.join("n2"));
-    let b3 = mk(3, base.join("n3"));
-    let _bg1 = start_background_tasks(Arc::clone(&b1));
-    let _bg2 = start_background_tasks(Arc::clone(&b2));
-    let _bg3 = start_background_tasks(Arc::clone(&b3));
-
-    let s1 = {
-        let b = Arc::clone(&b1);
-        tokio::spawn(async move {
-            serve_kafka_listener(l1, b).await.ok();
-        })
-    };
-    let s2 = {
-        let b = Arc::clone(&b2);
-        tokio::spawn(async move {
-            serve_kafka_listener(l2, b).await.ok();
-        })
-    };
-    let s3 = {
-        let b = Arc::clone(&b3);
-        tokio::spawn(async move {
-            serve_kafka_listener(l3, b).await.ok();
-        })
-    };
-    tokio::time::sleep(Duration::from_millis(30)).await;
-
-    b1.create_topic("rc", 1).unwrap();
-    propagate(&[&b1, &b2, &b3], "rc").await;
-    let topic = TopicName::new("rc");
-    let leader_id = b1.metadata(None).topics[0].partitions[0].leader;
-    let leader = match leader_id {
-        1 => Arc::clone(&b1),
-        2 => Arc::clone(&b2),
-        3 => Arc::clone(&b3),
-        _ => panic!("bad leader"),
-    };
-    let leader_addr = format!(
-        "127.0.0.1:{}",
-        [p1, p2, p3][(leader_id - 1) as usize]
-    );
-
-    let mut batch = MessageBatch::default();
-    batch.messages.push(Message::from_value("hello-rc"));
-    let (_, err) = leader
-        .produce_with_acks(&topic, PartitionId(0), batch, 1, None)
-        .unwrap();
-    assert_eq!(err, 0);
-    catch_up_isr(&leader, "rc");
-
-    // Selector would redirect — gate is isolation, not eligibility.
-    let expected = leader.select_preferred_read_replica(&topic, PartitionId(0), Some("rack-a"));
-    assert!(
-        expected.is_some(),
-        "same-rack cluster after catch_up must have preferred replica; leader={leader_id}"
-    );
-    let expected_id = expected.unwrap() as i32;
-
-    // 1) READ_COMMITTED (isolation=1) → preferred == -1, leader serves records.
-    let resp_rc = kafka_rpc(
-        &leader_addr,
-        encode_request(
-            1,
-            11,
-            5,
-            Some("c"),
-            &fetch_body_v11_full("rc", 0, -1, Some("rack-a"), 1),
-        ),
-    )
-    .await;
-    let mut src_rc = resp_rc.freeze();
-    assert_eq!(src_rc.get_i32(), 5);
-    let (_err_rc, hwm_rc, preferred_rc, rec_len_rc) = parse_fetch_v11_preferred(src_rc);
-    assert!(hwm_rc > 0);
-    assert_eq!(
-        preferred_rc, -1,
-        "READ_COMMITTED must suppress PreferredReadReplica redirect"
-    );
-    assert!(
-        rec_len_rc > 0,
-        "leader must serve records when preferred is suppressed"
-    );
-
-    // 2) Contrast: READ_UNCOMMITTED (isolation=0) still redirects on same layout.
-    let resp_ru = kafka_rpc(
-        &leader_addr,
-        encode_request(
-            1,
-            11,
-            6,
-            Some("c"),
-            &fetch_body_v11_full("rc", 0, -1, Some("rack-a"), 0),
-        ),
-    )
-    .await;
-    let mut src_ru = resp_ru.freeze();
-    assert_eq!(src_ru.get_i32(), 6);
-    let (_err_ru, hwm_ru, preferred_ru, rec_len_ru) = parse_fetch_v11_preferred(src_ru);
-    assert!(hwm_ru > 0);
-    assert_eq!(
-        preferred_ru, expected_id,
-        "READ_UNCOMMITTED must still preferred-redirect when eligible"
-    );
-    assert_eq!(rec_len_ru, 0, "redirect responses carry empty records");
 
     s1.abort();
     s2.abort();

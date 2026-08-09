@@ -343,6 +343,42 @@ enum FetchIsolation {
     ReadUncommitted,
 }
 
+/// How inter-broker truncate paths treat `leader_epoch` on the wire.
+///
+/// Shared by [`Broker::handle_replica_delete_records`] and
+/// [`Broker::handle_truncate_journal_note`] so the two paths cannot drift on
+/// the stale-epoch predicate; they differ only on whether `-1` is allowed.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum EpochFenceMode {
+    /// `leader_epoch < 0` skips the fence (one-shot ReplicaDeleteRecords).
+    AllowUnknown,
+    /// `leader_epoch < 0` → InvalidArg (journal SoT requires a stamped epoch).
+    RequireStamped,
+}
+
+/// Epoch fence shared by journal note ingress and ReplicaDeleteRecords.
+///
+/// - Stale: `requested >= 0` and `local > requested` → [`ErrorCode::InvalidProducerEpoch`]
+/// - Future / equal (`requested >= local`) → ok
+/// - Negative: mode-dependent (see [`EpochFenceMode`])
+fn fence_leader_epoch(
+    local_epoch: u32,
+    requested: i32,
+    mode: EpochFenceMode,
+) -> std::result::Result<(), ErrorCode> {
+    if requested < 0 {
+        return match mode {
+            EpochFenceMode::AllowUnknown => Ok(()),
+            EpochFenceMode::RequireStamped => Err(ErrorCode::InvalidArg),
+        };
+    }
+    let req = requested as u32;
+    if local_epoch > req {
+        return Err(ErrorCode::InvalidProducerEpoch);
+    }
+    Ok(())
+}
+
 /// Result of committing a transaction (Phase 18).
 #[derive(Debug, Clone)]
 pub struct TxnCommitResult {
@@ -1055,13 +1091,8 @@ impl Broker {
     /// - Empty `topic` → [`ErrorCode::InvalidArg`], generation unchanged.
     /// - `before_offset == 0` → no-op success (journal ignores zero watermarks).
     /// - Unknown topic/partition → [`ErrorCode::NotFound`] (no orphan SoT keys).
-    /// - `leader_epoch < 0` with non-zero offset → [`ErrorCode::InvalidArg`]
-    ///   (journal SoT requires a stamped epoch; unlike ReplicaDeleteRecords).
-    /// - Stale epoch when local partition epoch is **strictly greater** than
-    ///   `leader_epoch` → [`ErrorCode::InvalidProducerEpoch`] (same fence as
-    ///   [`Self::handle_replica_delete_records`]); generation and watermark
-    ///   unchanged. Future epochs (`req >= local`) are accepted so lagging
-    ///   multi-controller peers can still ack after leadership bumps.
+    /// - Epoch fence via [`EpochFenceMode::RequireStamped`] (negative epoch and
+    ///   stale local>req rejected; future epochs accepted for multi-controller lag).
     /// - Receivers need not be leaders (Phase 130 multi-controller).
     ///
     /// Proposer path uses [`Self::local_note_truncate_journal`] directly (trusted
@@ -1085,10 +1116,7 @@ impl Broker {
             return (0, self.truncate_journal.generation());
         }
 
-        // Ingress fence: known partition + stamped epoch + RDR-style stale
-        // check before durable max-merge. Forged high before_offset with a
-        // missing/stale epoch must not become journal SoT (reconcile would
-        // otherwise drive real truncate ~500ms).
+        // Ingress fence before durable max-merge (journal is cluster SoT).
         {
             let name = TopicName::new(topic);
             let topics = self.topics.read();
@@ -1104,20 +1132,12 @@ impl Broker {
                     self.truncate_journal.generation(),
                 );
             };
-            // Journal is cluster SoT — require a non-negative epoch stamp.
-            // (ReplicaDeleteRecords still allows -1; that path is one-shot apply.)
-            if leader_epoch < 0 {
-                return (
-                    ErrorCode::InvalidArg as u16,
-                    self.truncate_journal.generation(),
-                );
-            }
-            let req_epoch = leader_epoch as u32;
-            if part.leader_epoch > req_epoch {
-                return (
-                    ErrorCode::InvalidProducerEpoch as u16,
-                    self.truncate_journal.generation(),
-                );
+            if let Err(code) = fence_leader_epoch(
+                part.leader_epoch,
+                leader_epoch,
+                EpochFenceMode::RequireStamped,
+            ) {
+                return (code as u16, self.truncate_journal.generation());
             }
         }
 
@@ -1576,8 +1596,8 @@ impl Broker {
     /// Apply inter-broker `ReplicaDeleteRecords` (Phase 113 PR2).
     ///
     /// Truncates local log prefix (whole sealed segments) and runs Phase 104/111
-    /// soft-marker GC/clip. Rejects stale leader epochs when `leader_epoch >= 0`
-    /// and local epoch is higher ([`ErrorCode::InvalidProducerEpoch`] as fenced).
+    /// soft-marker GC/clip. Epoch fence: [`EpochFenceMode::AllowUnknown`]
+    /// (`leader_epoch < 0` skips; stale local>req → InvalidProducerEpoch).
     ///
     /// Returns `(error_code, low_watermark)`.
     pub fn handle_replica_delete_records(
@@ -1596,15 +1616,12 @@ impl Broker {
             let Some(part) = t.partitions.get_mut(&PartitionId(partition)) else {
                 return (ErrorCode::NotFound as u16, 0);
             };
-            // Stale leader: request epoch older than local → refuse truncate.
-            if leader_epoch >= 0 {
-                let req_epoch = leader_epoch as u32;
-                if part.leader_epoch > req_epoch {
-                    return (
-                        ErrorCode::InvalidProducerEpoch as u16,
-                        part.log.log_start_offset().raw(),
-                    );
-                }
+            if let Err(code) = fence_leader_epoch(
+                part.leader_epoch,
+                leader_epoch,
+                EpochFenceMode::AllowUnknown,
+            ) {
+                return (code as u16, part.log.log_start_offset().raw());
             }
             match part.log.delete_records(Offset::new(before_offset)) {
                 Ok(off) => off.raw(),
