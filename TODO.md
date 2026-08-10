@@ -1,76 +1,62 @@
 # Volant residual TODO (review loop)
 
-**Baseline:** HEAD product = **Phase 132** shipped (journal catch-up hardening) on top of Phase 131 + residual P0 fixes.  
-**Last review:** 2026-08-10 (Phase 132 implementation)  
-**Source reviews:** `docs/reviews/REVIEW_6708f1fe_phases126-130.md` + Phase 131/132  
+**Baseline:** HEAD product = **Phases 133–134** shipped (preferred polish + p2p heartbeat mesh) on top of Phase 132.  
+**Last review:** 2026-08-10 (A+B parallel ship)  
 
-**Note:** All open **code P0** residuals closed. Honest residual remains: current-epoch forge under weak auth; push (88) max-merge unfenced by design (ACL/auth is the gate); peers clamp independently; journal max-merge SoT; best-effort fan-out. Residual ITs named `phase132_journal_note_fence` / `phase133_journal_auth` are **post-131 residual fix tests**, not formal product phases 132/133. Formal Phase 132 tests live in `phase132_journal_catchup_hardening`.
+**Note:** Open code P0 closed. Honest residual: current-epoch forge under weak auth; push 88 unfenced by design; best-effort DeleteRecords fan-out; preferred still no load/throttling / no READ_COMMITTED on followers. Residual IT names `phase132_journal_note_fence` / `phase133_journal_auth` ≠ formal product phases.
 
-Living roadmap: [ROADMAP.md](./ROADMAP.md) (Phases **0–132 shipped**). Spec: [docs/PHASE132_SPEC.md](./docs/PHASE132_SPEC.md).
+Living roadmap: [ROADMAP.md](./ROADMAP.md) (Phases **0–134 shipped**). Specs: [PHASE133](./docs/PHASE133_SPEC.md), [PHASE134](./docs/PHASE134_SPEC.md).
 
 ---
 
 ## Shipped recently (mark done)
 
-### Phase 132 — Truncate journal catch-up hardening
-- [x] Non-blocking catch-up (`schedule_catch_up_peer_truncate_journal` from HeartbeatBroker)
-- [x] Per-peer single-flight + min-interval (`VOLANT_JOURNAL_CATCHUP_MIN_INTERVAL_MS`, default 500ms)
-- [x] Metric `volant_journal_catchup_skipped_total`
-- [x] Wire IT depth: push (88), majority note, schedule path — `phase132_journal_catchup_hardening`
-- [x] Living docs 0–132
+### Phase 134 — Peer-to-peer heartbeat mesh
+- [x] `heartbeat_mesh` to all configured peers (period session/3)
+- [x] Alive-set / ClusterState only when peer is controller
+- [x] Non-controller journal catch-up via mesh IT (`phase134_heartbeat_mesh`)
+- [x] Living docs
 
-### Phase 126–130 fix pass + hardening (`64d8413`…`82dcd88`)
-- [x] Reconcile freeze, ACL gate 86/88, fan-out outbox safety, always full push, registry/journal persist locks, preferred v15+, journal caps, timeouts
+### Phase 133 — Preferred selector polish
+- [x] Usable endpoint gate + highest-LEO then lowest-id ranking
+- [x] Tests `phase133_preferred_selector` (+ phase126 green)
+- [x] Living docs
 
-### Phase 131 — journal rejoin catch-up (`3e1d7ed`)
-- [x] `HeartbeatBroker` trailer `applied_journal_generation`
-- [x] Lag-driven `TruncateJournalPush` catch-up + metrics + ITs + living docs 0–131
+### Phase 132 — Journal catch-up hardening
+- [x] Non-blocking schedule, single-flight, min-interval, skipped metric, ITs
 
-### Residual P0 fixes (post-131)
-- [x] Journal note ingress fence (`phase132_journal_note_fence`)
-- [x] Auth/ACL journal ITs (`phase133_journal_auth`)
-- [x] Preferred + READ_COMMITTED suppress
-- [x] Fan-out at achieved low watermark
+### Residual P0 (post-131)
+- [x] Journal note fence / auth ITs / preferred+isolation / fan-out achieved-low
 
 ---
 
-## P0 residual (correctness / security — closed)
+## P1 residual
 
-- [x] Journal note fence — honest residual: current-epoch forge under weak auth; push 88 unfenced by design  
-- [x] Preferred + isolation  
-- [x] Fan-out achieved-low  
-
----
-
-## P1 residual (after Phase 132)
-
-- [ ] Preferred selector MVP polish: lowest-id tiebreak; no endpoint usability check → candidate **Phase 133**
 - [ ] N=2 static membership + one peer down → permanent journal majority fail (document)
 - [ ] Registry GC wall-clock TTL can drop long-lived txn Init-owner mappings (document)
+- [ ] Optional: non-blocking admin catch-up (same pattern as Phase 132 journal schedule)
 
 ---
 
-## P2 / later deferred (not near-term P0)
+## P2 / later deferred
 
-- [ ] Full openraft / KRaft-style metadata + truncate log (journal remains max-merge SoT)
+- [ ] Full openraft / KRaft-style metadata + truncate log
 - [ ] Full KIP-890 / 939 / `__transaction_state`
-- [ ] Shared fetch session store / full preferred-replica selector
-- [ ] Peer-to-peer heartbeat mesh — candidate after 132
-- [ ] Sync client wait on DeleteRecords majority — candidate after 132
+- [ ] Shared fetch session store / full preferred selector (beyond 133 polish)
+- [ ] Sync client wait on DeleteRecords majority
 - [ ] Multi-language clients
-- [ ] Full chaos-mesh suites / long fuzz campaigns (corpus smoke CI = Phase 112 MVP only)
+- [ ] Full chaos-mesh / long fuzz campaigns
 - [ ] Heterogeneous per-broker BROKER overrides without controller
 - [ ] True multi-master ACL merge
 
 ---
 
-## Review notes (this fire)
+## Review notes
 
 | Area | Verdict |
 |------|---------|
-| Phase 132 | **Shipped** — non-blocking schedule, single-flight, min-interval, skipped metric, hardening ITs |
-| Phase 131 | Heartbeat trailer + lag push; catch-up no longer stalls membership |
+| Phase 133 | **Shipped** — LEO-desc + usable-addr preferred ranking |
+| Phase 134 | **Shipped** — mesh HB; alive-set only vs controller |
 | P0 code | **Done** |
-| Residual IT naming | `phase132_journal_note_fence` / `phase133_journal_auth` ≠ formal product phases |
 
-**Stop condition:** Phase 132 exit criteria met. Next formal candidate: preferred selector polish (Phase 133) or cluster mesh / majority wait (P2).
+**Stop condition:** A+B complete. Next candidates: docs-only sharp edges, DeleteRecords majority wait, or larger Raft/KIP work.

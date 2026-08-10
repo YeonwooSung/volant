@@ -881,7 +881,7 @@ pub fn start_background_tasks(broker: Arc<Broker>) -> BackgroundTasks {
             }));
         }
 
-        // Heartbeat to controller (non-controller brokers).
+        // Phase 134: peer-to-peer heartbeat mesh (all configured peers).
         {
             let b = Arc::clone(&broker);
             let mut stop_rx = stop_tx.subscribe();
@@ -896,8 +896,8 @@ pub fn start_background_tasks(broker: Arc<Broker>) -> BackgroundTasks {
                     tokio::select! {
                         _ = stop_rx.changed() => break,
                         _ = interval.tick() => {
-                            if let Err(e) = heartbeat_to_controller(&b).await {
-                                debug!(error = %e, "controller heartbeat failed");
+                            if let Err(e) = heartbeat_mesh(&b).await {
+                                debug!(error = %e, "heartbeat mesh tick failed");
                             }
                         }
                     }
@@ -936,18 +936,31 @@ pub fn start_background_tasks(broker: Arc<Broker>) -> BackgroundTasks {
     BackgroundTasks { stop_tx, handles }
 }
 
-async fn heartbeat_to_controller(broker: &Broker) -> Result<()> {
+/// Phase 134: peer-to-peer heartbeat mesh (MVP).
+///
+/// Each tick:
+/// - if self is the current controller, self-touch membership locally
+/// - send [`Request::HeartbeatBroker`] to every other configured broker that
+///   has an address (sequential, per-peer `inter_broker_rpc` timeout)
+/// - on successful response: always [`Broker::note_peer_live`]
+/// - **only** if the peer contacted is the current controller: apply the
+///   controller alive-set + optional ClusterState pull (Phase 110/117 path)
+///
+/// Non-controller responses must never drive [`Broker::apply_controller_alive_set`]
+/// — partial alive lists could shrink ISR incorrectly.
+async fn heartbeat_mesh(broker: &Broker) -> Result<()> {
     let controller = broker.controller_id();
-    // Even the controller heartbeats to itself locally.
+    // Controller still self-touches membership locally (existing path).
     if controller == broker.node_id() {
         let _ = broker.handle_heartbeat_broker(broker.node_id(), controller, broker.generation());
-        return Ok(());
     }
-    let Some(addr) = broker.broker_addr(controller) else {
+
+    let Some(cfg) = broker.cluster_config() else {
         return Ok(());
     };
+    let self_id = broker.node_id();
     let req = Request::HeartbeatBroker {
-        broker_id: broker.node_id(),
+        broker_id: self_id,
         controller_id_known: controller,
         generation: broker.generation(),
         // Phase 117: report applied admin gens so controller can catch up lag.
@@ -956,7 +969,30 @@ async fn heartbeat_to_controller(broker: &Broker) -> Result<()> {
         // Phase 131: report applied truncate-journal gen for rejoin catch-up.
         applied_journal_generation: broker.truncate_journal_applied_generation(),
     };
-    let resp = inter_broker_rpc(broker, &addr, &req).await?;
+
+    for peer_id in cfg.broker_ids() {
+        if peer_id == self_id {
+            continue;
+        }
+        let Some(addr) = broker.broker_addr(peer_id) else {
+            continue;
+        };
+        if let Err(e) = heartbeat_to_peer(broker, peer_id, &addr, &req).await {
+            debug!(peer_id, error = %e, "peer heartbeat failed");
+        }
+    }
+    Ok(())
+}
+
+/// Heartbeat one peer. Alive-set / ClusterState apply only when `peer_id` is
+/// the current controller.
+async fn heartbeat_to_peer(
+    broker: &Broker,
+    peer_id: u32,
+    addr: &str,
+    req: &Request,
+) -> Result<()> {
+    let resp = inter_broker_rpc(broker, addr, req).await?;
     match resp {
         Response::HeartbeatBroker {
             controller_id,
@@ -964,33 +1000,41 @@ async fn heartbeat_to_controller(broker: &Broker) -> Result<()> {
             alive_brokers,
             ..
         } => {
-            // Phase 110: diff controller alive-set → on_broker_death for gaps
-            // (local ISR shrink) before refreshing live peers.
-            broker.apply_controller_alive_set(&alive_brokers)?;
-            // Ensure the peer we reached (reported controller) stays live even
-            // if a stale response omitted it from alive_brokers.
-            broker.note_peer_live(controller_id);
-            // Pull ClusterState if generation advanced.
-            if generation > broker.generation() {
-                let cs_req = Request::ClusterState {
-                    known_generation: broker.generation(),
-                };
-                if let Ok(cs_resp) = inter_broker_rpc(broker, &addr, &cs_req).await {
-                    if let Response::ClusterState {
-                        generation: g,
-                        controller_id: c,
-                        topics,
-                        ..
-                    } = cs_resp
-                    {
-                        broker.apply_cluster_state(g, c, &topics)?;
+            // Always mark the peer we reached as live (mesh liveness).
+            broker.note_peer_live(peer_id);
+
+            // Critical correctness (Phase 134): only trust alive-set / SoT
+            // pull from the *current* controller. Non-controller peers may
+            // return a partial local membership view.
+            if peer_id == broker.controller_id() {
+                // Phase 110: diff controller alive-set → on_broker_death for gaps
+                // (local ISR shrink) before refreshing live peers.
+                broker.apply_controller_alive_set(&alive_brokers)?;
+                // Ensure the peer we reached (reported controller) stays live even
+                // if a stale response omitted it from alive_brokers.
+                broker.note_peer_live(controller_id);
+                // Pull ClusterState if generation advanced.
+                if generation > broker.generation() {
+                    let cs_req = Request::ClusterState {
+                        known_generation: broker.generation(),
+                    };
+                    if let Ok(cs_resp) = inter_broker_rpc(broker, addr, &cs_req).await {
+                        if let Response::ClusterState {
+                            generation: g,
+                            controller_id: c,
+                            topics,
+                            ..
+                        } = cs_resp
+                        {
+                            broker.apply_cluster_state(g, c, &topics)?;
+                        }
                     }
                 }
             }
             Ok(())
         }
         other => Err(Error::Protocol(format!(
-            "unexpected heartbeat response: {other:?}"
+            "unexpected heartbeat response from peer {peer_id}: {other:?}"
         ))),
     }
 }

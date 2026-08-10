@@ -26,7 +26,7 @@ drift until the next DeleteRecords.
 | Deferred | Why / next home |
 |----------|-----------------|
 | Full Raft / openraft journal log | Larger; max-merge remains SoT |
-| Peer-to-peer heartbeats (mesh) | Heartbeats remain controller-centric |
+| Peer-to-peer heartbeats (mesh) | **closed by Phase 134** |
 | Sync wait on client DeleteRecords | Latency; keep best-effort client |
 | Catch-up await stall / per-peer throttle / single-flight | **closed by Phase 132** |
 | Shared fetch session store / full preferred selector | Orthogonal deferred |
@@ -67,9 +67,10 @@ Decode compatibility:
 ## Honest limitations
 
 - Not Raft; brief lag windows until the next successful heartbeat catch-up.
-- Controller-centric heartbeats: a non-controller that alone holds a watermark
+- ~~Controller-centric heartbeats: a non-controller that alone holds a watermark
   the controller never saw still relies on the DeleteRecords fan-out path /
-  later multi-controller notes to reach the controller.
+  later multi-controller notes to reach the controller.~~ **closed by Phase 134**
+  (mesh heartbeats; non-controller → non-controller lag catch-up).
 - Generation is a weak process-local counter (not a commit index).
 
 ## Exit criteria

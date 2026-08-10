@@ -3190,7 +3190,46 @@ Binding: **[docs/PHASE132_SPEC.md](./docs/PHASE132_SPEC.md)**.
 throttle may add brief lag vs chatty Phase 131 path.
 
 **Still deferred:** full openraft/KRaft, multi-lang, chaos/long fuzz, full
-KIP-890/939, shared session store, full preferred selector, peer heartbeat mesh,
+KIP-890/939, shared session store, full preferred selector,
+sync DeleteRecords majority wait, heterogeneous per-broker BROKER overrides.
+
+---
+
+### Phase 133 — Preferred read-replica selector polish (MVP) ✅
+
+**Goal:** Improve Phase 126 PreferredReadReplica selection: usable endpoint
+gate + rank by highest LEO then lowest id (not pure min-id).
+
+Binding: **[docs/PHASE133_SPEC.md](./docs/PHASE133_SPEC.md)**.
+
+- [x] Usable addr gate (live + non-empty host/port + broker_addr)
+- [x] Rank highest follower LEO, then lowest id
+- [x] Tests: `phase133_preferred_selector` (+ phase126 green)
+- [x] Living docs honesty
+
+**Honest limitations:** no load/throttling; no TCP probe; READ_COMMITTED still
+suppresses preferred (Phase 126).
+
+---
+
+### Phase 134 — Peer-to-peer heartbeat mesh (MVP) ✅
+
+**Goal:** Each broker heartbeats all configured peers so non-controller journal
+holders can drive Phase 131/132 catch-up without the controller holding the
+watermark. Alive-set apply only when contacting the controller.
+
+Binding: **[docs/PHASE134_SPEC.md](./docs/PHASE134_SPEC.md)**.
+
+- [x] `heartbeat_mesh` / `heartbeat_to_peer` (sequential; controller self-touch)
+- [x] `apply_controller_alive_set` only vs controller peer
+- [x] Test: `phase134_heartbeat_mesh` non-controller → lagging peer catch-up
+- [x] Living docs honesty
+
+**Honest limitations:** O(N) HB/tick; not full gossip; admin ACL/BROKER catch-up
+still controller SoT.
+
+**Still deferred:** full openraft/KRaft, multi-lang, chaos/long fuzz, full
+KIP-890/939, shared session store, full preferred selector (beyond 133 polish),
 sync DeleteRecords majority wait, heterogeneous per-broker BROKER overrides.
 
 ---
@@ -3230,7 +3269,7 @@ marker clip 111; fuzz corpus smoke CI 112; cluster admin fan-out 113) — see
 
 ## Suggested implementation order (PRs)
 
-Phases **0–132 are shipped**. Historical PR order for the core:
+Phases **0–134 are shipped**. Historical PR order for the core:
 
 1. Phase 1 segment format + unit tests  
 2. Phase 1 recovery + retention  
@@ -3265,6 +3304,8 @@ Phases **0–132 are shipped**. Historical PR order for the core:
 31. Phase 130 (multi-controller majority journal consensus MVP) ✅  
 32. Phase 131 (truncate journal rejoin catch-up MVP) ✅  
 33. Phase 132 (truncate journal catch-up hardening MVP) ✅  
+34. Phase 133 (preferred selector polish MVP) ✅  
+35. Phase 134 (peer-to-peer heartbeat mesh MVP) ✅  
 
 ---
 
@@ -3305,7 +3346,7 @@ cargo run -p volant-bench --release
 cargo test --workspace
 ```
 
-**Status (post–Phase 132):** core broker, ops (metrics / TLS / auth / SCRAM /
+**Status (post–Phase 134):** core broker, ops (metrics / TLS / auth / SCRAM /
 ACLs / Helm), and the Kafka wire shim are **shipped** (Fetch 0–18 Kafka max;
 ACL admin 0–3 with User resource; soft-marker `READ_COMMITTED` with **marker GC/clip**
 on DeleteRecords/retention/load (Phase 104/111); durable OFLE history; Fetch DivergingEpoch +
@@ -3336,7 +3377,7 @@ txn EndTxn/AddOffsets/TxnOffsetCommit forward Phases 120/122;
 **durable Init-owner registry** Phase 124 (`__txn_coordinator`);
 **PreferredReadReplica / rack-aware Fetch MVP** Phase 126 (Metadata rack;
 redirect when same-rack ISR peer LEO≥HWM);
-**txn coordinator registry TTL GC** Phase 127 + **BROKER config surface** Phase 128; **truncate journal** Phase 129 + **majority multi-controller consensus** Phase 130 + **journal rejoin catch-up** Phase 131 + **catch-up hardening** Phase 132 non-blocking/single-flight/throttle).
+**txn coordinator registry TTL GC** Phase 127 + **BROKER config surface** Phase 128; **truncate journal** Phase 129 + **majority multi-controller consensus** Phase 130 + **journal rejoin catch-up** Phase 131 + **catch-up hardening** Phase 132 + **preferred selector polish** Phase 133 + **p2p heartbeat mesh** Phase 134).
 Still deferred: multi-language clients, full chaos-mesh suites / long fuzz
 campaigns, shared session store / full preferred-replica selector, full
 KIP-890/939.

@@ -1,6 +1,6 @@
 # Phase history index
 
-Ship records for **phases 0–132** (shipped). Binding core contracts are
+Ship records for **phases 0–134** (shipped). Binding core contracts are
 **[PHASE1_SPEC](../PHASE1_SPEC.md)–[PHASE6_SPEC](../PHASE6_SPEC.md)**. Living
 docs for day-to-day reading: [ops](../ops.md), [consistency](../consistency.md),
 [tuning](../tuning.md), [KAFKA_COMPAT](../KAFKA_COMPAT.md),
@@ -174,10 +174,12 @@ docs for day-to-day reading: [ops](../ops.md), [consistency](../consistency.md),
 | 130 | ✅ | Multi-controller majority consensus for truncate journal (Raft-style commit; always full-snapshot push) | [PHASE130_SPEC.md](../PHASE130_SPEC.md) |
 | 131 | ✅ | Truncate journal rejoin catch-up (HeartbeatBroker applied_journal_generation + lag-driven TruncateJournalPush) | [PHASE131_SPEC.md](../PHASE131_SPEC.md) |
 | 132 | ✅ | Truncate journal catch-up hardening (non-blocking schedule / single-flight / min-interval + push wire ITs) | [PHASE132_SPEC.md](../PHASE132_SPEC.md) |
+| 133 | ✅ | Preferred read-replica selector polish (usable addr + highest LEO then lowest id) | [PHASE133_SPEC.md](../PHASE133_SPEC.md) |
+| 134 | ✅ | Peer-to-peer heartbeat mesh (HB all peers; alive-set only vs controller; journal catch-up path) | [PHASE134_SPEC.md](../PHASE134_SPEC.md) |
 
 ---
 
-## Still deferred (post–Phase 132)
+## Still deferred (post–Phase 134)
 
 - Multi-language clients
 - Chaos-mesh / long fuzz campaigns (corpus **smoke CI** → **closed by Phase 112**)
@@ -214,4 +216,6 @@ docs for day-to-day reading: [ops](../ops.md), [consistency](../consistency.md),
 - Multi-controller majority truncate journal consensus → **closed by Phase 130** (Raft-style majority note; not full openraft/KRaft)
 - Truncate journal rejoin catch-up / heartbeat lag re-push → **closed by Phase 131** (`applied_journal_generation` + TruncateJournalPush; not Raft)
 - Journal catch-up stall / throttle / single-flight hardening → **closed by Phase 132**
+- Preferred selector polish (usable addr + LEO ranking) → **closed by Phase 133**
+- Peer-to-peer heartbeat mesh → **closed by Phase 134**
 - Full Kafka preferred-replica selector / rack-aware partition assignment

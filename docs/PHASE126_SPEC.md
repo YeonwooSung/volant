@@ -18,7 +18,8 @@ caught-up same-rack ISR follower so clients can offload read traffic.
    - Cluster mode with broker racks in `cluster.toml`
    - Candidate ∈ local ISR, ≠ leader, rack matches client rack
    - Observed follower LEO ≥ partition HWM (can serve committed data)
-   - Deterministic: lowest broker id among candidates
+   - Deterministic ranking: **Phase 126 MVP used lowest broker id only**;
+     **Phase 133** ranks **highest LEO then lowest id**, plus usable-address gate
 3. **Response honesty (Kafka-like redirect):** on redirect, emit
    `PreferredReadReplica = id`, **empty records**, still fill HWM/LSO/log_start;
    never omit-unchanged away a preferred redirect.
@@ -31,7 +32,7 @@ caught-up same-rack ISR follower so clients can offload read traffic.
 
 | Deferred | Why / next home |
 |----------|-----------------|
-| Full Kafka replica selector / throttling / out-of-sync preferred | MVP is static rack match + LEO≥HWM only |
+| Full Kafka replica selector / throttling / out-of-sync preferred | MVP is static rack match + LEO≥HWM; Phase 133 adds LEO-desc + usable-addr ranking only |
 | Shared multi-broker session store | Orthogonal (Phase 119 forward remains) |
 | Rack-aware partition placement / assignor | Placement still round-robin |
 | Client-side consumer rack config in `volant-client` | Wire path only; clients send rack_id |
@@ -70,9 +71,12 @@ caught-up same-rack ISR follower so clients can offload read traffic.
   not partition leader?       → None
   for each id in local ISR:
     id == self?               skip
+    not live?                 skip
+    usable addr (host+port)?  skip if missing/empty  (Phase 133)
     config.broker(id).rack != client_rack?  skip
     follower_leo[id] < HWM?   skip
-  return min(candidates) or None
+  rank by (leo desc, id asc)  (Phase 133; was pure min id in 126 MVP)
+  return first or None
 ```
 
 ### Fetch path (`encode_fetch`)

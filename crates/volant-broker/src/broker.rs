@@ -1482,12 +1482,19 @@ impl Broker {
             .and_then(|b| b.rack.clone())
     }
 
-    /// Phase 126: select a preferred read replica for consumer Fetch (KIP-392 subset).
+    /// Phase 126 + 133: select a preferred read replica for consumer Fetch
+    /// (KIP-392 subset).
     ///
     /// Returns a **follower** broker id in the same rack as `client_rack` that is
-    /// currently in the local ISR with observed LEO ≥ HWM, when this node is the
-    /// partition leader. Empty/`None` rack, single-node, non-leader, or no
-    /// eligible peer → `None` (caller leaves PreferredReadReplica = -1).
+    /// currently in the local ISR, **live**, has a usable configured address
+    /// (`broker_addr` present and non-empty), and has observed LEO ≥ HWM, when
+    /// this node is the partition leader.
+    ///
+    /// **Ranking (Phase 133):** among eligible peers prefer **highest follower
+    /// LEO**, then **lowest broker id** as tiebreak (replaces pure min-id-only).
+    ///
+    /// Empty/`None` rack, single-node, non-leader, or no eligible peer → `None`
+    /// (caller leaves PreferredReadReplica = -1).
     pub fn select_preferred_read_replica(
         &self,
         topic: &TopicName,
@@ -1504,34 +1511,56 @@ impl Broker {
         }
         let hwm = part.committed_hwm;
         let live = self.live_brokers();
-        let mut candidates: Vec<u32> = part
-            .isr
-            .iter()
-            .copied()
-            .filter(|id| *id != self.node_id)
-            .filter(|id| live.contains(id))
-            .filter(|id| {
-                cluster
-                    .config
-                    .broker(*id)
-                    .and_then(|b| b.rack.as_deref())
-                    .map(|r| r.trim() == rack)
-                    .unwrap_or(false)
-            })
-            .filter(|id| {
-                // Require observed LEO ≥ HWM so the follower can serve committed data.
-                part.follower_leo
-                    .get(id)
-                    .copied()
-                    .map(|leo| leo >= hwm)
-                    .unwrap_or(false)
-            })
-            .collect();
-        if candidates.is_empty() {
-            return None;
+        // (leo, id) — rank by leo desc, id asc (Phase 133).
+        let mut best: Option<(u64, u32)> = None;
+        for &id in &part.isr {
+            if id == self.node_id {
+                continue;
+            }
+            if !live.contains(&id) {
+                continue;
+            }
+            // Usable endpoint gate (Phase 133): skip peers with no resolvable
+            // configured address (missing broker, empty host, or empty addr).
+            let usable = cluster
+                .config
+                .broker(id)
+                .map(|b| !b.host.trim().is_empty() && b.port != 0)
+                .unwrap_or(false)
+                && self
+                    .broker_addr(id)
+                    .map(|a| !a.trim().is_empty())
+                    .unwrap_or(false);
+            if !usable {
+                continue;
+            }
+            let same_rack = cluster
+                .config
+                .broker(id)
+                .and_then(|b| b.rack.as_deref())
+                .map(|r| r.trim() == rack)
+                .unwrap_or(false);
+            if !same_rack {
+                continue;
+            }
+            // Require observed LEO ≥ HWM so the follower can serve committed data.
+            let Some(leo) = part.follower_leo.get(&id).copied() else {
+                continue;
+            };
+            if leo < hwm {
+                continue;
+            }
+            match best {
+                None => best = Some((leo, id)),
+                Some((best_leo, best_id)) => {
+                    // Highest LEO wins; lowest id breaks ties.
+                    if leo > best_leo || (leo == best_leo && id < best_id) {
+                        best = Some((leo, id));
+                    }
+                }
+            }
         }
-        candidates.sort_unstable();
-        Some(candidates[0])
+        best.map(|(_, id)| id)
     }
 
     pub(crate) fn note_preferred_replica_redirect(&self) {
