@@ -694,7 +694,7 @@ mod tls {
 
     /// Shared Auth/SCRAM dispatch plus an mTLS-only gate when no token/SCRAM users exist.
     async fn dispatch_tls(
-        broker: &Broker,
+        broker: &std::sync::Arc<Broker>,
         frame: Frame,
         authenticated: &mut bool,
         principal: &mut Option<String>,

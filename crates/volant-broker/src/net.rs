@@ -749,6 +749,15 @@ fn broker_metrics_text(broker: &Broker) -> String {
         "volant_journal_catchup_errors_total {}\n",
         broker.journal_catchup_errors_total()
     ));
+    // Phase 132: schedule skips (single-flight / min-interval).
+    text.push_str(
+        "# HELP volant_journal_catchup_skipped_total Catch-up schedules skipped (in-flight or throttle)\n",
+    );
+    text.push_str("# TYPE volant_journal_catchup_skipped_total counter\n");
+    text.push_str(&format!(
+        "volant_journal_catchup_skipped_total {}\n",
+        broker.journal_catchup_skipped_total()
+    ));
     text
 }
 
@@ -991,6 +1000,10 @@ async fn heartbeat_to_controller(broker: &Broker) -> Result<()> {
 /// Any node with a newer journal may push (multi-controller). Uses opcode 88
 /// `TruncateJournalPush`. Increments journal catch-up success/error metrics.
 /// No-op when peer does not lag or local journal is empty.
+///
+/// Prefer [`schedule_catch_up_peer_truncate_journal`] from the HeartbeatBroker
+/// path (Phase 132) so membership is not stalled by the RPC. This direct API
+/// remains for tests and explicit callers.
 pub async fn catch_up_peer_truncate_journal(
     broker: &Broker,
     peer_id: u32,
@@ -1049,6 +1062,59 @@ pub async fn catch_up_peer_truncate_journal(
             broker.truncate_journal().note_journal_catchup_error();
         }
     }
+}
+
+/// Phase 132: schedule a non-blocking journal catch-up for a lagging peer.
+///
+/// Claims per-peer single-flight + min-interval throttle via
+/// [`Broker::try_begin_journal_catchup`], then spawns a task that runs
+/// [`catch_up_peer_truncate_journal`] and releases the claim. Returns
+/// immediately so HeartbeatBroker membership is not stalled by the push RPC.
+///
+/// No-op when the peer does not lag or the schedule is throttled / already
+/// in-flight (skipped metric increments on throttle).
+pub fn schedule_catch_up_peer_truncate_journal(
+    broker: Arc<Broker>,
+    peer_id: u32,
+    peer_addr: String,
+    peer_applied_journal: u64,
+) {
+    if !broker.peer_journal_gen_lags(peer_applied_journal) {
+        return;
+    }
+    if !broker.try_begin_journal_catchup(peer_id) {
+        debug!(
+            peer_id,
+            peer_applied_journal,
+            "truncate journal catch-up schedule skipped (in-flight or throttle)"
+        );
+        return;
+    }
+    tokio::spawn(async move {
+        // Bound overall work; inter_broker_rpc already has its own timeout.
+        // An extra outer timeout ensures finish_journal_catchup always runs.
+        let timeout = inter_broker_rpc_timeout() + Duration::from_secs(1);
+        let result = tokio::time::timeout(
+            timeout,
+            catch_up_peer_truncate_journal(
+                &broker,
+                peer_id,
+                &peer_addr,
+                peer_applied_journal,
+            ),
+        )
+        .await;
+        if result.is_err() {
+            warn!(
+                peer_id,
+                %peer_addr,
+                peer_applied_journal,
+                "truncate journal catch-up timed out"
+            );
+            broker.truncate_journal().note_journal_catchup_error();
+        }
+        broker.finish_journal_catchup(peer_id);
+    });
 }
 
 /// Phase 117: re-push controller ACL + BROKER config SoT to one lagging peer.
@@ -2722,7 +2788,7 @@ async fn write_response(stream: &mut TcpStream, corr: u32, response: Response) -
 
 /// Dispatch one framed request with connection auth / SCRAM state (plaintext + TLS).
 pub async fn dispatch_with_auth(
-    broker: &Broker,
+    broker: &Arc<Broker>,
     frame: Frame,
     authenticated: &mut bool,
     principal: &mut Option<String>,
@@ -2872,13 +2938,13 @@ fn handle_scram(
 }
 
 /// Handle a decoded request (shared by plaintext and TLS accept paths).
-pub async fn dispatch_request(broker: &Broker, req: Request) -> Response {
+pub async fn dispatch_request(broker: &Arc<Broker>, req: Request) -> Response {
     dispatch_request_as(broker, req, None).await
 }
 
 /// Dispatch with an optional connection principal for ACL checks (Phase 20).
 pub async fn dispatch_request_as(
-    broker: &Broker,
+    broker: &Arc<Broker>,
     req: Request,
     principal: Option<&str>,
 ) -> Response {
@@ -3118,7 +3184,7 @@ fn record_response_metrics(broker: &Broker, resp: &Response) {
     }
 }
 
-async fn handle_request(broker: &Broker, req: Request) -> Result<Response> {
+async fn handle_request(broker: &Arc<Broker>, req: Request) -> Result<Response> {
     match req {
         Request::Auth { .. } => {
             // Handled in dispatch_with_auth; should not reach here.
@@ -3611,22 +3677,21 @@ async fn handle_request(broker: &Broker, req: Request) -> Result<Response> {
                     }
                 }
             }
-            // Phase 131: any node with a newer truncate journal re-pushes to a
-            // lagging peer (multi-controller; not controller-gated). No extra
-            // throttle — lag check alone is enough; retries on next heartbeat
-            // if apply fails.
+            // Phase 131 + 132: any node with a newer truncate journal re-pushes
+            // to a lagging peer (multi-controller; not controller-gated).
+            // Phase 132: schedule async (single-flight + min-interval) so the
+            // HeartbeatBroker response is not blocked on TruncateJournalPush.
             if error_code == 0
                 && broker_id != broker.node_id()
                 && broker.peer_journal_gen_lags(applied_journal_generation)
             {
                 if let Some(addr) = broker.broker_addr(broker_id) {
-                    catch_up_peer_truncate_journal(
-                        broker,
+                    schedule_catch_up_peer_truncate_journal(
+                        Arc::clone(broker),
                         broker_id,
-                        &addr,
+                        addr,
                         applied_journal_generation,
-                    )
-                    .await;
+                    );
                 }
             }
             Ok(Response::HeartbeatBroker {

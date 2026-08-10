@@ -9,9 +9,9 @@ Volant is a resource-efficient alternative to Apache Kafka, built for:
 - **Streaming processing** — first-class operators (`map`, `filter`, windows) without a heavy runtime
 - **Small footprint** — native binary, predictable memory, simple operations
 
-> Status: **Phases 0–131 landed** — durable log, clustering (ISR death + rejoin /
+> Status: **Phases 0–132 landed** — durable log, clustering (ISR death + rejoin /
 > lag shrink + time-based ISR lag + PreferredReadReplica rack-aware Fetch +
-> txn coordinator registry TTL GC + BROKER TTL config + truncate journal + multi-controller majority + journal rejoin catch-up), security, stream operators, a broad optional Kafka wire shim
+> txn coordinator registry TTL GC + BROKER TTL config + truncate journal + multi-controller majority + journal rejoin catch-up + catch-up hardening), security, stream operators, a broad optional Kafka wire shim
 > (classic + flexible; ApiVersions 0–5; Fetch 0–18; ACL admin 0–3;
 > TRANSACTION_ABORTABLE subset; fetch session TTL/max + durable local sessions;
 > broker Describe/AlterConfigs with sparse durable restore; multi-broker 2PC MVP;

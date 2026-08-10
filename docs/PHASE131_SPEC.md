@@ -28,6 +28,7 @@ drift until the next DeleteRecords.
 | Full Raft / openraft journal log | Larger; max-merge remains SoT |
 | Peer-to-peer heartbeats (mesh) | Heartbeats remain controller-centric |
 | Sync wait on client DeleteRecords | Latency; keep best-effort client |
+| Catch-up await stall / per-peer throttle / single-flight | **closed by Phase 132** |
 | Shared fetch session store / full preferred selector | Orthogonal deferred |
 | Full KIP-890/939 / `__transaction_state` | Orthogonal |
 

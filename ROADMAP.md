@@ -3164,10 +3164,34 @@ Binding: **[docs/PHASE131_SPEC.md](./docs/PHASE131_SPEC.md)**.
 
 **Honest limitations:** not Raft; brief lag until next successful heartbeat;
 controller-centric heartbeats; generation is process-local (not commit index).
+Catch-up await stall / throttle hardening → **closed by Phase 132**.
 
 **Still deferred:** full openraft/KRaft / dynamic membership, multi-lang,
 chaos-mesh / long fuzz, full KIP-890/939, shared session store, full preferred
 selector, heterogeneous per-broker BROKER overrides without controller.
+
+---
+
+### Phase 132 — Truncate journal catch-up hardening (MVP) ✅
+
+**Goal:** Harden Phase 131 rejoin catch-up so HeartbeatBroker membership is not
+stalled by inline full-snapshot TruncateJournalPush; add per-peer throttle/
+single-flight; deepen journal opcode 87–89 / push wire ITs.
+
+Binding: **[docs/PHASE132_SPEC.md](./docs/PHASE132_SPEC.md)**.
+
+- [x] Non-blocking catch-up (`schedule_catch_up_peer_truncate_journal`; Heartbeat responds promptly)
+- [x] Per-peer single-flight / min-interval throttle (`VOLANT_JOURNAL_CATCHUP_MIN_INTERVAL_MS`, default 500ms)
+- [x] Metric `volant_journal_catchup_skipped_total`
+- [x] Integration tests: `phase132_journal_catchup_hardening` (push/majority/schedule/throttle)
+- [x] Living docs honesty (0–132)
+
+**Honest limitations:** still not Raft; controller-centric heartbeats;
+throttle may add brief lag vs chatty Phase 131 path.
+
+**Still deferred:** full openraft/KRaft, multi-lang, chaos/long fuzz, full
+KIP-890/939, shared session store, full preferred selector, peer heartbeat mesh,
+sync DeleteRecords majority wait, heterogeneous per-broker BROKER overrides.
 
 ---
 
@@ -3206,7 +3230,7 @@ marker clip 111; fuzz corpus smoke CI 112; cluster admin fan-out 113) — see
 
 ## Suggested implementation order (PRs)
 
-Phases **0–131 are shipped**. Historical PR order for the core:
+Phases **0–132 are shipped**. Historical PR order for the core:
 
 1. Phase 1 segment format + unit tests  
 2. Phase 1 recovery + retention  
@@ -3240,6 +3264,7 @@ Phases **0–131 are shipped**. Historical PR order for the core:
 30. Phase 129 (controller SoT truncate journal MVP) ✅  
 31. Phase 130 (multi-controller majority journal consensus MVP) ✅  
 32. Phase 131 (truncate journal rejoin catch-up MVP) ✅  
+33. Phase 132 (truncate journal catch-up hardening MVP) ✅  
 
 ---
 
@@ -3280,7 +3305,7 @@ cargo run -p volant-bench --release
 cargo test --workspace
 ```
 
-**Status (post–Phase 131):** core broker, ops (metrics / TLS / auth / SCRAM /
+**Status (post–Phase 132):** core broker, ops (metrics / TLS / auth / SCRAM /
 ACLs / Helm), and the Kafka wire shim are **shipped** (Fetch 0–18 Kafka max;
 ACL admin 0–3 with User resource; soft-marker `READ_COMMITTED` with **marker GC/clip**
 on DeleteRecords/retention/load (Phase 104/111); durable OFLE history; Fetch DivergingEpoch +
@@ -3311,7 +3336,7 @@ txn EndTxn/AddOffsets/TxnOffsetCommit forward Phases 120/122;
 **durable Init-owner registry** Phase 124 (`__txn_coordinator`);
 **PreferredReadReplica / rack-aware Fetch MVP** Phase 126 (Metadata rack;
 redirect when same-rack ISR peer LEO≥HWM);
-**txn coordinator registry TTL GC** Phase 127 + **BROKER config surface** Phase 128; **truncate journal** Phase 129 + **majority multi-controller consensus** Phase 130 + **journal rejoin catch-up** Phase 131).
+**txn coordinator registry TTL GC** Phase 127 + **BROKER config surface** Phase 128; **truncate journal** Phase 129 + **majority multi-controller consensus** Phase 130 + **journal rejoin catch-up** Phase 131 + **catch-up hardening** Phase 132 non-blocking/single-flight/throttle).
 Still deferred: multi-language clients, full chaos-mesh suites / long fuzz
 campaigns, shared session store / full preferred-replica selector, full
 KIP-890/939.

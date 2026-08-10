@@ -575,6 +575,19 @@ pub struct Broker {
     txn_forward_total: AtomicU64,
     /// Phase 120: failed transparent txn forward attempts.
     txn_forward_errors_total: AtomicU64,
+    /// Phase 132: per-peer journal catch-up single-flight + min-interval throttle.
+    journal_catchup: Mutex<JournalCatchupState>,
+    /// Phase 132: catch-up schedule skipped (in-flight or min-interval).
+    journal_catchup_skipped_total: AtomicU64,
+}
+
+/// Phase 132: in-process scheduler state for truncate-journal catch-up pushes.
+#[derive(Debug, Default)]
+struct JournalCatchupState {
+    /// Peers with an in-flight catch-up task.
+    in_flight: HashSet<u32>,
+    /// Last time a catch-up was **started** for each peer (throttle base).
+    last_start: HashMap<u32, Instant>,
 }
 
 /// Controller-side multi-broker prepared index entry (Phase 114).
@@ -731,6 +744,8 @@ impl Broker {
             txn_coordinator_registry,
             txn_forward_total: AtomicU64::new(0),
             txn_forward_errors_total: AtomicU64::new(0),
+            journal_catchup: Mutex::new(JournalCatchupState::default()),
+            journal_catchup_skipped_total: AtomicU64::new(0),
         };
         broker
             .reload_single_node_topics()
@@ -867,6 +882,8 @@ impl Broker {
             txn_coordinator_registry,
             txn_forward_total: AtomicU64::new(0),
             txn_forward_errors_total: AtomicU64::new(0),
+            journal_catchup: Mutex::new(JournalCatchupState::default()),
+            journal_catchup_skipped_total: AtomicU64::new(0),
         };
         // Open local partitions from persisted assignment.
         broker.apply_local_assignment()?;
@@ -1038,6 +1055,62 @@ impl Broker {
             return false;
         }
         local_gen > 0 || self.truncate_journal.entry_count() > 0
+    }
+
+    /// Phase 132: try to claim a journal catch-up slot for `peer_id`.
+    ///
+    /// Returns `true` when the caller should spawn a catch-up task. Returns
+    /// `false` (and increments [`Self::journal_catchup_skipped_total`]) when:
+    /// - a catch-up is already in-flight for this peer (single-flight), or
+    /// - a prior start was within the min-interval throttle window.
+    ///
+    /// On `true`, the caller **must** eventually call
+    /// [`Self::finish_journal_catchup`] (normally via a `Drop` guard or task
+    /// finally block) so single-flight is released.
+    pub fn try_begin_journal_catchup(&self, peer_id: u32) -> bool {
+        let min_ms = journal_catchup_min_interval_ms();
+        let mut st = self.journal_catchup.lock();
+        if st.in_flight.contains(&peer_id) {
+            self.journal_catchup_skipped_total
+                .fetch_add(1, Ordering::Relaxed);
+            return false;
+        }
+        if min_ms > 0 {
+            if let Some(started) = st.last_start.get(&peer_id) {
+                if started.elapsed() < Duration::from_millis(min_ms) {
+                    self.journal_catchup_skipped_total
+                        .fetch_add(1, Ordering::Relaxed);
+                    return false;
+                }
+            }
+        }
+        st.in_flight.insert(peer_id);
+        st.last_start.insert(peer_id, Instant::now());
+        true
+    }
+
+    /// Phase 132: release the per-peer catch-up single-flight claim.
+    pub fn finish_journal_catchup(&self, peer_id: u32) {
+        self.journal_catchup.lock().in_flight.remove(&peer_id);
+    }
+
+    /// Phase 132: schedule skips due to single-flight or min-interval.
+    pub fn journal_catchup_skipped_total(&self) -> u64 {
+        self.journal_catchup_skipped_total.load(Ordering::Relaxed)
+    }
+
+    /// Phase 132: force-reset catch-up scheduler state (integration tests).
+    pub fn reset_journal_catchup_scheduler_for_test(&self) {
+        let mut st = self.journal_catchup.lock();
+        st.in_flight.clear();
+        st.last_start.clear();
+        self.journal_catchup_skipped_total
+            .store(0, Ordering::Relaxed);
+    }
+
+    /// Whether a catch-up is currently in-flight for `peer_id` (Phase 132).
+    pub fn journal_catchup_in_flight(&self, peer_id: u32) -> bool {
+        self.journal_catchup.lock().in_flight.contains(&peer_id)
     }
 
     /// Configured cluster size for majority (static membership).
@@ -6895,6 +6968,20 @@ fn default_sweep_interval_ms() -> u64 {
 /// Product default / env for registry TTL (Phase 127/128). Invalid env → 24h.
 fn default_txn_coordinator_ttl_ms() -> u64 {
     crate::txn_coordinator_registry::effective_txn_coordinator_ttl_ms()
+}
+
+/// Default min interval between journal catch-up **starts** for the same peer
+/// (Phase 132). Default **500 ms**. Override with
+/// `VOLANT_JOURNAL_CATCHUP_MIN_INTERVAL_MS`; `0` disables time throttle
+/// (single-flight still applies).
+pub const DEFAULT_JOURNAL_CATCHUP_MIN_INTERVAL_MS: u64 = 500;
+
+/// Effective journal catch-up min-interval (Phase 132).
+pub fn journal_catchup_min_interval_ms() -> u64 {
+    std::env::var("VOLANT_JOURNAL_CATCHUP_MIN_INTERVAL_MS")
+        .ok()
+        .and_then(|s| s.parse::<u64>().ok())
+        .unwrap_or(DEFAULT_JOURNAL_CATCHUP_MIN_INTERVAL_MS)
 }
 
 fn topics_from_open(txn: &OpenTxn) -> Vec<(String, Vec<i32>)> {
