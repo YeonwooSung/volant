@@ -56,9 +56,10 @@ pub use scram::{
 };
 pub use assignor::{range_assign, range_assign_multi, sticky_assign, sticky_assign_multi};
 pub use broker::{
-    journal_catchup_min_interval_ms, murmur2, partition_for_key, sticky_coordinator_id, Broker,
-    ClusterState, IdempotentCheck, InterBrokerTls, MetadataSnapshot, PartitionMetadata,
-    TopicMetadata, Txn2pcFanout, TxnCommitResult, DEFAULT_JOURNAL_CATCHUP_MIN_INTERVAL_MS,
+    admin_catchup_min_interval_ms, journal_catchup_min_interval_ms, murmur2, partition_for_key,
+    sticky_coordinator_id, Broker, ClusterState, IdempotentCheck, InterBrokerTls, MetadataSnapshot,
+    PartitionMetadata, TopicMetadata, Txn2pcFanout, TxnCommitResult,
+    DEFAULT_ADMIN_CATCHUP_MIN_INTERVAL_MS, DEFAULT_JOURNAL_CATCHUP_MIN_INTERVAL_MS,
 };
 pub use cluster::{BrokerEndpoint, ClusterConfig};
 pub use group::{
@@ -104,9 +105,10 @@ pub use net::{
     fanout_delete_records, fanout_truncate_journal_note, fanout_truncate_journal_push,
     fanout_txn_participant_complete, fanout_txn_participant_open, fanout_txn_participant_prepare,
     inter_broker_rpc, inter_broker_rpc_timeout, run_metrics_server, run_metrics_server_until,
-    run_server, run_txn_2pc_fanout, schedule_catch_up_peer_truncate_journal, serve_listener,
-    serve_listener_until, shutdown_signal, start_background_tasks, BackgroundTasks,
-    DeleteRecordsFanoutResult, DEFAULT_DELETE_RECORDS_FANOUT_BUDGET_MS,
-    DEFAULT_INTER_BROKER_RPC_TIMEOUT_MS, MAX_INTER_BROKER_TIMEOUT_MS, MIN_INTER_BROKER_TIMEOUT_MS,
+    run_server, run_txn_2pc_fanout, schedule_catch_up_peer_admin_state,
+    schedule_catch_up_peer_truncate_journal, serve_listener, serve_listener_until, shutdown_signal,
+    start_background_tasks, BackgroundTasks, DeleteRecordsFanoutResult,
+    DEFAULT_DELETE_RECORDS_FANOUT_BUDGET_MS, DEFAULT_INTER_BROKER_RPC_TIMEOUT_MS,
+    MAX_INTER_BROKER_TIMEOUT_MS, MIN_INTER_BROKER_TIMEOUT_MS,
 };
 pub use offset_store::{OffsetStore, StoredOffset, OFFSET_UNKNOWN};

@@ -42,7 +42,15 @@ sweep / expire_stale(ttl):
 ## Honest limitations
 
 - Wall-clock based (not monotonic); clock skew may delay/advance GC
-- Active long-running txns must re-note (Init / open fan-out) within TTL
+- **Long-lived open txns can lose Init-owner mapping:** GC drops
+  `__txn_coordinator` entries when `last_touch` age exceeds TTL even if the
+  transaction is still open. Only **re-note** (re-Init / open fan-out that
+  touches the registry) refreshes `last_ms`. After drop, FindCoordinator
+  override and EndTxn / AddOffsets / TxnOffsetCommit forward fall back to the
+  hash ring only → risk of **wrong coordinator** until re-Init.
+  **Operators / clients:** re-note within TTL; set
+  `VOLANT_TXN_COORDINATOR_TTL_MS=0` (disable GC); lengthen the TTL; or Alter
+  `volant.txn.coordinator.registry.ttl.ms` (Phase 128)
 - Pid-only orphans after re-Init still expire only via TTL
 - Not cluster-wide GC coordination
 

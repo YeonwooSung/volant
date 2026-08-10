@@ -45,8 +45,12 @@ replica for the journal. Best-effort note/push retained for availability.
 
 - **Not full Raft:** no replicated log, no term/leader election for journal,
   no linearizable multi-key batching
-- Majority uses **static configured N**, not live-only (offline members make
-  quorum harder — honest Raft-like)
+- Majority uses **static configured N** (`floor(N/2)+1`), not live-only
+  (offline members make quorum harder — honest Raft-like). **Sharp edge:** for
+  **N=2**, majority is 2; if one configured member is down, proposers can never
+  reach majority (acks max 1 = local only). Local note may still persist;
+  `volant_truncate_journal_consensus_fail_total` increments. Prefer odd N (3+)
+  for fault-tolerant journal majority.
 - Client DeleteRecords does not block on majority
 - Controller role for other admin (ACL/BROKER config) unchanged
 - Journal is bounded: `MAX_TRUNCATE_JOURNAL_ENTRIES` (100_000) refuses new keys

@@ -3257,6 +3257,21 @@ heterogeneous per-broker BROKER overrides.
 
 ---
 
+### Phase 136 — Non-blocking admin catch-up (MVP) ✅
+
+**Goal:** ACL/BROKER config rejoin catch-up on HeartbeatBroker no longer awaits
+slow peers (mirror Phase 132 journal schedule).
+
+Binding: **[docs/PHASE136_SPEC.md](./docs/PHASE136_SPEC.md)**.
+
+- [x] `schedule_catch_up_peer_admin_state` (single-flight + min-interval)
+- [x] `VOLANT_ADMIN_CATCHUP_MIN_INTERVAL_MS` (default 500ms)
+- [x] Metric `volant_admin_catchup_skipped_total`
+- [x] Tests `phase136_admin_catchup_hardening` (+ phase117 green)
+- [x] Living docs; residual N=2 majority + registry TTL docs
+
+---
+
 ## Performance targets (aspirational)
 
 | Metric | Single node target | Notes |
@@ -3292,7 +3307,7 @@ marker clip 111; fuzz corpus smoke CI 112; cluster admin fan-out 113) — see
 
 ## Suggested implementation order (PRs)
 
-Phases **0–135 are shipped**. Historical PR order for the core:
+Phases **0–136 are shipped**. Historical PR order for the core:
 
 1. Phase 1 segment format + unit tests  
 2. Phase 1 recovery + retention  
@@ -3330,6 +3345,7 @@ Phases **0–135 are shipped**. Historical PR order for the core:
 34. Phase 133 (preferred selector polish MVP) ✅  
 35. Phase 134 (peer-to-peer heartbeat mesh MVP) ✅  
 36. Phase 135 (DeleteRecords optional majority wait) ✅  
+37. Phase 136 (non-blocking admin catch-up MVP) ✅  
 
 ---
 
@@ -3370,7 +3386,7 @@ cargo run -p volant-bench --release
 cargo test --workspace
 ```
 
-**Status (post–Phase 135):** core broker, ops (metrics / TLS / auth / SCRAM /
+**Status (post–Phase 136):** core broker, ops (metrics / TLS / auth / SCRAM /
 ACLs / Helm), and the Kafka wire shim are **shipped** (Fetch 0–18 Kafka max;
 ACL admin 0–3 with User resource; soft-marker `READ_COMMITTED` with **marker GC/clip**
 on DeleteRecords/retention/load (Phase 104/111); durable OFLE history; Fetch DivergingEpoch +
@@ -3401,7 +3417,7 @@ txn EndTxn/AddOffsets/TxnOffsetCommit forward Phases 120/122;
 **durable Init-owner registry** Phase 124 (`__txn_coordinator`);
 **PreferredReadReplica / rack-aware Fetch MVP** Phase 126 (Metadata rack;
 redirect when same-rack ISR peer LEO≥HWM);
-**txn coordinator registry TTL GC** Phase 127 + **BROKER config surface** Phase 128; **truncate journal** Phase 129 + **majority multi-controller consensus** Phase 130 + **journal rejoin catch-up** Phase 131 + **catch-up hardening** Phase 132 + **preferred selector polish** Phase 133 + **p2p heartbeat mesh** Phase 134 + **optional DeleteRecords majority wait** Phase 135).
+**txn coordinator registry TTL GC** Phase 127 + **BROKER config surface** Phase 128; **truncate journal** Phase 129 + **majority multi-controller consensus** Phase 130 + **journal rejoin catch-up** Phase 131 + **catch-up hardening** Phase 132 + **preferred selector polish** Phase 133 + **p2p heartbeat mesh** Phase 134 + **optional DeleteRecords majority wait** Phase 135 + **non-blocking admin catch-up** Phase 136).
 Still deferred: multi-language clients, full chaos-mesh suites / long fuzz
 campaigns, shared session store / full preferred-replica selector, full
 KIP-890/939.

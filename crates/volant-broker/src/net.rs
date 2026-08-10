@@ -681,6 +681,15 @@ fn broker_metrics_text(broker: &Broker) -> String {
         "volant_cluster_admin_catchup_errors_total {}\n",
         broker.cluster_admin_catchup_errors_total()
     ));
+    // Phase 136: admin catch-up schedule skips (single-flight / min-interval).
+    text.push_str(
+        "# HELP volant_admin_catchup_skipped_total Admin catch-up schedules skipped (in-flight or throttle)\n",
+    );
+    text.push_str("# TYPE volant_admin_catchup_skipped_total counter\n");
+    text.push_str(&format!(
+        "volant_admin_catchup_skipped_total {}\n",
+        broker.admin_catchup_skipped_total()
+    ));
     // Phase 118: ISR expand / shrink.
     text.push_str(
         "# HELP volant_isr_expand_total ISR membership expansions (rejoin / catch-up)\n",
@@ -1182,6 +1191,10 @@ pub fn schedule_catch_up_peer_truncate_journal(
 ///
 /// Uses Phase 113 opcodes. Increments catch-up success/error metrics. No-op when
 /// this node is not the controller or when neither domain lags.
+///
+/// Prefer [`schedule_catch_up_peer_admin_state`] from the HeartbeatBroker path
+/// (Phase 136) so membership is not stalled by up to two RPCs. This direct API
+/// remains for tests and explicit callers.
 pub async fn catch_up_peer_admin_state(
     broker: &Broker,
     peer_id: u32,
@@ -1311,6 +1324,69 @@ pub async fn catch_up_peer_admin_state(
             }
         }
     }
+}
+
+/// Phase 136: schedule a non-blocking admin (ACL/config) catch-up for a lagging peer.
+///
+/// Claims per-peer single-flight + min-interval throttle via
+/// [`Broker::try_begin_admin_catchup`], then spawns a task that runs
+/// [`catch_up_peer_admin_state`] and releases the claim. Returns immediately so
+/// HeartbeatBroker membership is not stalled by config/ACL re-push RPCs.
+///
+/// No-op when this node is not the controller, the peer does not lag, or the
+/// schedule is throttled / already in-flight (skipped metric increments on
+/// throttle).
+pub fn schedule_catch_up_peer_admin_state(
+    broker: Arc<Broker>,
+    peer_id: u32,
+    peer_addr: String,
+    peer_applied_config: u64,
+    peer_applied_acl: u64,
+) {
+    if !broker.is_controller() {
+        return;
+    }
+    let (need_config, need_acl) =
+        broker.peer_admin_gens_lag(peer_applied_config, peer_applied_acl);
+    if !need_config && !need_acl {
+        return;
+    }
+    if !broker.try_begin_admin_catchup(peer_id) {
+        debug!(
+            peer_id,
+            peer_applied_config,
+            peer_applied_acl,
+            "admin catch-up schedule skipped (in-flight or throttle)"
+        );
+        return;
+    }
+    tokio::spawn(async move {
+        // Admin catch-up may run up to 2 RPCs (config + ACL); outer bound is
+        // 2× inter_broker timeout + 1s so finish_admin_catchup always runs.
+        let timeout = inter_broker_rpc_timeout() * 2 + Duration::from_secs(1);
+        let result = tokio::time::timeout(
+            timeout,
+            catch_up_peer_admin_state(
+                &broker,
+                peer_id,
+                &peer_addr,
+                peer_applied_config,
+                peer_applied_acl,
+            ),
+        )
+        .await;
+        if result.is_err() {
+            warn!(
+                peer_id,
+                %peer_addr,
+                peer_applied_config,
+                peer_applied_acl,
+                "admin catch-up timed out"
+            );
+            broker.note_cluster_admin_catchup_error();
+        }
+        broker.finish_admin_catchup(peer_id);
+    });
 }
 
 /// Best-effort ACL snapshot fan-out to live peers (Phase 113 PR4).
@@ -3786,8 +3862,10 @@ async fn handle_request(broker: &Arc<Broker>, req: Request) -> Result<Response> 
         } => {
             let (error_code, controller_id, generation, alive_brokers) =
                 broker.handle_heartbeat_broker(broker_id, controller_id_known, generation);
-            // Phase 117: if we are controller and peer lags on ACL/config gens,
-            // re-push SoT state (covers offline miss + rejoin).
+            // Phase 117 + 136: if we are controller and peer lags on ACL/config
+            // gens, re-push SoT state (covers offline miss + rejoin).
+            // Phase 136: schedule async (single-flight + min-interval) so the
+            // HeartbeatBroker response is not blocked on config/ACL RPCs.
             if error_code == 0
                 && broker.is_controller()
                 && broker_id != broker.node_id()
@@ -3796,14 +3874,13 @@ async fn handle_request(broker: &Arc<Broker>, req: Request) -> Result<Response> 
                     broker.peer_admin_gens_lag(applied_config_generation, applied_acl_generation);
                 if need_cfg || need_acl {
                     if let Some(addr) = broker.broker_addr(broker_id) {
-                        catch_up_peer_admin_state(
-                            broker,
+                        schedule_catch_up_peer_admin_state(
+                            Arc::clone(broker),
                             broker_id,
-                            &addr,
+                            addr,
                             applied_config_generation,
                             applied_acl_generation,
-                        )
-                        .await;
+                        );
                     }
                 }
             }

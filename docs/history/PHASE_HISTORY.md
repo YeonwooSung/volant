@@ -1,6 +1,6 @@
 # Phase history index
 
-Ship records for **phases 0–135** (shipped). Binding core contracts are
+Ship records for **phases 0–136** (shipped). Binding core contracts are
 **[PHASE1_SPEC](../PHASE1_SPEC.md)–[PHASE6_SPEC](../PHASE6_SPEC.md)**. Living
 docs for day-to-day reading: [ops](../ops.md), [consistency](../consistency.md),
 [tuning](../tuning.md), [KAFKA_COMPAT](../KAFKA_COMPAT.md),
@@ -177,10 +177,11 @@ docs for day-to-day reading: [ops](../ops.md), [consistency](../consistency.md),
 | 133 | ✅ | Preferred read-replica selector polish (usable addr + highest LEO then lowest id) | [PHASE133_SPEC.md](../PHASE133_SPEC.md) |
 | 134 | ✅ | Peer-to-peer heartbeat mesh (HB all peers; alive-set only vs controller; journal catch-up path) | [PHASE134_SPEC.md](../PHASE134_SPEC.md) |
 | 135 | ✅ | DeleteRecords optional majority wait (client-visible journal majority; default off) | [PHASE135_SPEC.md](../PHASE135_SPEC.md) |
+| 136 | ✅ | Non-blocking admin ACL/BROKER catch-up (schedule + single-flight + min-interval) | [PHASE136_SPEC.md](../PHASE136_SPEC.md) |
 
 ---
 
-## Still deferred (post–Phase 135)
+## Still deferred (post–Phase 136)
 
 - Multi-language clients
 - Chaos-mesh / long fuzz campaigns (corpus **smoke CI** → **closed by Phase 112**)

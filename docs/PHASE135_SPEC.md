@@ -66,7 +66,10 @@ Config:
 ## Honest limitations
 
 - Local log may already be truncated when majority fails (no undo).
-- Majority uses **configured N** (Phase 130), not live-only.
+- Wait mode inherits Phase 130 majority: **configured N** (`floor(N/2)+1`), not
+  live-only. **Sharp edge:** **N=2** + one configured member down → majority
+  forever unreachable (local-only ack); wait returns `NotEnoughReplicas`; local
+  truncate still applied (no undo). Prefer odd N (3+).
 - Replica log truncate + outbox remain best-effort even in wait mode.
 - Kafka multi-partition DeleteRecords: per-partition wait; fail any partition
   that misses majority when wait is on (or document batch policy).

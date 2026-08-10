@@ -587,6 +587,10 @@ pub struct Broker {
     journal_catchup: Mutex<JournalCatchupState>,
     /// Phase 132: catch-up schedule skipped (in-flight or min-interval).
     journal_catchup_skipped_total: AtomicU64,
+    /// Phase 136: per-peer admin (ACL/config) catch-up single-flight + min-interval.
+    admin_catchup: Mutex<AdminCatchupState>,
+    /// Phase 136: admin catch-up schedule skipped (in-flight or min-interval).
+    admin_catchup_skipped_total: AtomicU64,
 }
 
 /// Phase 132: in-process scheduler state for truncate-journal catch-up pushes.
@@ -595,6 +599,15 @@ struct JournalCatchupState {
     /// Peers with an in-flight catch-up task.
     in_flight: HashSet<u32>,
     /// Last time a catch-up was **started** for each peer (throttle base).
+    last_start: HashMap<u32, Instant>,
+}
+
+/// Phase 136: in-process scheduler state for ACL/config admin catch-up re-pushes.
+#[derive(Debug, Default)]
+struct AdminCatchupState {
+    /// Peers with an in-flight admin catch-up task.
+    in_flight: HashSet<u32>,
+    /// Last time an admin catch-up was **started** for each peer (throttle base).
     last_start: HashMap<u32, Instant>,
 }
 
@@ -757,6 +770,8 @@ impl Broker {
             txn_forward_errors_total: AtomicU64::new(0),
             journal_catchup: Mutex::new(JournalCatchupState::default()),
             journal_catchup_skipped_total: AtomicU64::new(0),
+            admin_catchup: Mutex::new(AdminCatchupState::default()),
+            admin_catchup_skipped_total: AtomicU64::new(0),
         };
         broker
             .reload_single_node_topics()
@@ -898,6 +913,8 @@ impl Broker {
             txn_forward_errors_total: AtomicU64::new(0),
             journal_catchup: Mutex::new(JournalCatchupState::default()),
             journal_catchup_skipped_total: AtomicU64::new(0),
+            admin_catchup: Mutex::new(AdminCatchupState::default()),
+            admin_catchup_skipped_total: AtomicU64::new(0),
         };
         // Open local partitions from persisted assignment.
         broker.apply_local_assignment()?;
@@ -1164,6 +1181,61 @@ impl Broker {
     /// Whether a catch-up is currently in-flight for `peer_id` (Phase 132).
     pub fn journal_catchup_in_flight(&self, peer_id: u32) -> bool {
         self.journal_catchup.lock().in_flight.contains(&peer_id)
+    }
+
+    /// Phase 136: try to claim an admin (ACL/config) catch-up slot for `peer_id`.
+    ///
+    /// Returns `true` when the caller should spawn a catch-up task. Returns
+    /// `false` (and increments [`Self::admin_catchup_skipped_total`]) when:
+    /// - a catch-up is already in-flight for this peer (single-flight), or
+    /// - a prior start was within the min-interval throttle window.
+    ///
+    /// On `true`, the caller **must** eventually call
+    /// [`Self::finish_admin_catchup`].
+    pub fn try_begin_admin_catchup(&self, peer_id: u32) -> bool {
+        let min_ms = admin_catchup_min_interval_ms();
+        let mut st = self.admin_catchup.lock();
+        if st.in_flight.contains(&peer_id) {
+            self.admin_catchup_skipped_total
+                .fetch_add(1, Ordering::Relaxed);
+            return false;
+        }
+        if min_ms > 0 {
+            if let Some(started) = st.last_start.get(&peer_id) {
+                if started.elapsed() < Duration::from_millis(min_ms) {
+                    self.admin_catchup_skipped_total
+                        .fetch_add(1, Ordering::Relaxed);
+                    return false;
+                }
+            }
+        }
+        st.in_flight.insert(peer_id);
+        st.last_start.insert(peer_id, Instant::now());
+        true
+    }
+
+    /// Phase 136: release the per-peer admin catch-up single-flight claim.
+    pub fn finish_admin_catchup(&self, peer_id: u32) {
+        self.admin_catchup.lock().in_flight.remove(&peer_id);
+    }
+
+    /// Phase 136: schedule skips due to single-flight or min-interval.
+    pub fn admin_catchup_skipped_total(&self) -> u64 {
+        self.admin_catchup_skipped_total.load(Ordering::Relaxed)
+    }
+
+    /// Phase 136: force-reset admin catch-up scheduler state (integration tests).
+    pub fn reset_admin_catchup_scheduler_for_test(&self) {
+        let mut st = self.admin_catchup.lock();
+        st.in_flight.clear();
+        st.last_start.clear();
+        self.admin_catchup_skipped_total
+            .store(0, Ordering::Relaxed);
+    }
+
+    /// Whether an admin catch-up is currently in-flight for `peer_id` (Phase 136).
+    pub fn admin_catchup_in_flight(&self, peer_id: u32) -> bool {
+        self.admin_catchup.lock().in_flight.contains(&peer_id)
     }
 
     /// Configured cluster size for majority (static membership).
@@ -7076,6 +7148,20 @@ pub fn journal_catchup_min_interval_ms() -> u64 {
         .ok()
         .and_then(|s| s.parse::<u64>().ok())
         .unwrap_or(DEFAULT_JOURNAL_CATCHUP_MIN_INTERVAL_MS)
+}
+
+/// Default min interval between admin (ACL/config) catch-up **starts** for the
+/// same peer (Phase 136). Default **500 ms**. Override with
+/// `VOLANT_ADMIN_CATCHUP_MIN_INTERVAL_MS`; `0` disables time throttle
+/// (single-flight still applies).
+pub const DEFAULT_ADMIN_CATCHUP_MIN_INTERVAL_MS: u64 = 500;
+
+/// Effective admin catch-up min-interval (Phase 136).
+pub fn admin_catchup_min_interval_ms() -> u64 {
+    std::env::var("VOLANT_ADMIN_CATCHUP_MIN_INTERVAL_MS")
+        .ok()
+        .and_then(|s| s.parse::<u64>().ok())
+        .unwrap_or(DEFAULT_ADMIN_CATCHUP_MIN_INTERVAL_MS)
 }
 
 fn topics_from_open(txn: &OpenTxn) -> Vec<(String, Vec<i32>)> {

@@ -44,6 +44,9 @@ Broker.txn_coordinator_ttl_ms: AtomicU64
 - Cluster alters remain **controller-only** with generationed push (homogeneous)
 - Env after process start is ignored until restart unless Alter/setter used
 - Not a full Kafka broker config catalog entry
+- **Same Phase 127 sharp edge:** wall-clock registry TTL can still drop
+  long-lived Init-owner mappings that are not re-noted within TTL (set `0` /
+  longer TTL via env or this key; clients re-Init / re-note)
 
 ## Exit criteria
 
