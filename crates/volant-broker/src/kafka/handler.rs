@@ -393,19 +393,32 @@ async fn dispatch_kafka(
                     debug!(error = %e, "delete records flexible header tag buffer");
                 }
             }
+            // Phase 135: wait mode awaits journal majority per successful
+            // partition before response encoding. Default off: encode then
+            // fire-and-forget fan-out (Phase 113).
+            let wait = broker.delete_records_wait_majority();
             let fanouts = acl_api::encode_delete_records(
                 broker.as_ref(),
                 &mut src,
                 &mut out,
                 hdr.api_version,
                 principal,
-            );
-            // Phase 113: best-effort fan-out (fire-and-forget; client already answered).
-            for (topic, partition, before_offset) in fanouts {
-                let b = Arc::clone(broker);
-                tokio::spawn(async move {
-                    crate::net::fanout_delete_records(&b, &topic, partition, before_offset).await;
-                });
+                wait,
+            )
+            .await;
+            if !wait {
+                for (topic, partition, before_offset) in fanouts {
+                    let b = Arc::clone(broker);
+                    tokio::spawn(async move {
+                        let _ = crate::net::fanout_delete_records(
+                            &b,
+                            &topic,
+                            partition,
+                            before_offset,
+                        )
+                        .await;
+                    });
+                }
             }
         }
         Some(ApiKey::DescribeAcls) if (0..=3).contains(&hdr.api_version) => {

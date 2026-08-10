@@ -106,7 +106,7 @@ pub use net::{
     inter_broker_rpc, inter_broker_rpc_timeout, run_metrics_server, run_metrics_server_until,
     run_server, run_txn_2pc_fanout, schedule_catch_up_peer_truncate_journal, serve_listener,
     serve_listener_until, shutdown_signal, start_background_tasks, BackgroundTasks,
-    DEFAULT_DELETE_RECORDS_FANOUT_BUDGET_MS, DEFAULT_INTER_BROKER_RPC_TIMEOUT_MS,
-    MAX_INTER_BROKER_TIMEOUT_MS, MIN_INTER_BROKER_TIMEOUT_MS,
+    DeleteRecordsFanoutResult, DEFAULT_DELETE_RECORDS_FANOUT_BUDGET_MS,
+    DEFAULT_INTER_BROKER_RPC_TIMEOUT_MS, MAX_INTER_BROKER_TIMEOUT_MS, MIN_INTER_BROKER_TIMEOUT_MS,
 };
 pub use offset_store::{OffsetStore, StoredOffset, OFFSET_UNKNOWN};

@@ -3230,7 +3230,30 @@ still controller SoT.
 
 **Still deferred:** full openraft/KRaft, multi-lang, chaos/long fuzz, full
 KIP-890/939, shared session store, full preferred selector (beyond 133 polish),
-sync DeleteRecords majority wait, heterogeneous per-broker BROKER overrides.
+heterogeneous per-broker BROKER overrides.
+
+---
+
+### Phase 135 — DeleteRecords majority wait (optional) ✅
+
+**Goal:** Opt-in client wait on truncate-journal majority after local
+DeleteRecords. Default remains best-effort (no client fail on majority miss).
+
+Binding: **[docs/PHASE135_SPEC.md](./docs/PHASE135_SPEC.md)**.
+
+- [x] `VOLANT_DELETE_RECORDS_WAIT_MAJORITY` / `set_delete_records_wait_majority` (default off)
+- [x] `fanout_truncate_journal_note` → `bool`; `fanout_delete_records` → `DeleteRecordsFanoutResult`
+- [x] Native: wait on + majority fail → `NotEnoughReplicas` (15); low_watermark still local
+- [x] Kafka: wait on awaits fan-out; fail → **19** `NOT_ENOUGH_REPLICAS`
+- [x] Metrics `volant_delete_records_majority_wait_{success,fail}_total`
+- [x] Tests `phase135_delete_records_majority_wait` + living docs
+
+**Honest limitations:** local truncate is not rolled back on majority fail;
+majority uses configured N; replica log truncate/outbox still best-effort.
+
+**Still deferred:** full openraft/KRaft, multi-lang, chaos/long fuzz, full
+KIP-890/939, shared session store, full preferred selector (beyond 133 polish),
+heterogeneous per-broker BROKER overrides.
 
 ---
 
@@ -3269,7 +3292,7 @@ marker clip 111; fuzz corpus smoke CI 112; cluster admin fan-out 113) — see
 
 ## Suggested implementation order (PRs)
 
-Phases **0–134 are shipped**. Historical PR order for the core:
+Phases **0–135 are shipped**. Historical PR order for the core:
 
 1. Phase 1 segment format + unit tests  
 2. Phase 1 recovery + retention  
@@ -3306,6 +3329,7 @@ Phases **0–134 are shipped**. Historical PR order for the core:
 33. Phase 132 (truncate journal catch-up hardening MVP) ✅  
 34. Phase 133 (preferred selector polish MVP) ✅  
 35. Phase 134 (peer-to-peer heartbeat mesh MVP) ✅  
+36. Phase 135 (DeleteRecords optional majority wait) ✅  
 
 ---
 
@@ -3346,7 +3370,7 @@ cargo run -p volant-bench --release
 cargo test --workspace
 ```
 
-**Status (post–Phase 134):** core broker, ops (metrics / TLS / auth / SCRAM /
+**Status (post–Phase 135):** core broker, ops (metrics / TLS / auth / SCRAM /
 ACLs / Helm), and the Kafka wire shim are **shipped** (Fetch 0–18 Kafka max;
 ACL admin 0–3 with User resource; soft-marker `READ_COMMITTED` with **marker GC/clip**
 on DeleteRecords/retention/load (Phase 104/111); durable OFLE history; Fetch DivergingEpoch +
@@ -3377,7 +3401,7 @@ txn EndTxn/AddOffsets/TxnOffsetCommit forward Phases 120/122;
 **durable Init-owner registry** Phase 124 (`__txn_coordinator`);
 **PreferredReadReplica / rack-aware Fetch MVP** Phase 126 (Metadata rack;
 redirect when same-rack ISR peer LEO≥HWM);
-**txn coordinator registry TTL GC** Phase 127 + **BROKER config surface** Phase 128; **truncate journal** Phase 129 + **majority multi-controller consensus** Phase 130 + **journal rejoin catch-up** Phase 131 + **catch-up hardening** Phase 132 + **preferred selector polish** Phase 133 + **p2p heartbeat mesh** Phase 134).
+**txn coordinator registry TTL GC** Phase 127 + **BROKER config surface** Phase 128; **truncate journal** Phase 129 + **majority multi-controller consensus** Phase 130 + **journal rejoin catch-up** Phase 131 + **catch-up hardening** Phase 132 + **preferred selector polish** Phase 133 + **p2p heartbeat mesh** Phase 134 + **optional DeleteRecords majority wait** Phase 135).
 Still deferred: multi-language clients, full chaos-mesh suites / long fuzz
 campaigns, shared session store / full preferred-replica selector, full
 KIP-890/939.

@@ -1,6 +1,6 @@
 # Phase history index
 
-Ship records for **phases 0–134** (shipped). Binding core contracts are
+Ship records for **phases 0–135** (shipped). Binding core contracts are
 **[PHASE1_SPEC](../PHASE1_SPEC.md)–[PHASE6_SPEC](../PHASE6_SPEC.md)**. Living
 docs for day-to-day reading: [ops](../ops.md), [consistency](../consistency.md),
 [tuning](../tuning.md), [KAFKA_COMPAT](../KAFKA_COMPAT.md),
@@ -176,10 +176,11 @@ docs for day-to-day reading: [ops](../ops.md), [consistency](../consistency.md),
 | 132 | ✅ | Truncate journal catch-up hardening (non-blocking schedule / single-flight / min-interval + push wire ITs) | [PHASE132_SPEC.md](../PHASE132_SPEC.md) |
 | 133 | ✅ | Preferred read-replica selector polish (usable addr + highest LEO then lowest id) | [PHASE133_SPEC.md](../PHASE133_SPEC.md) |
 | 134 | ✅ | Peer-to-peer heartbeat mesh (HB all peers; alive-set only vs controller; journal catch-up path) | [PHASE134_SPEC.md](../PHASE134_SPEC.md) |
+| 135 | ✅ | DeleteRecords optional majority wait (client-visible journal majority; default off) | [PHASE135_SPEC.md](../PHASE135_SPEC.md) |
 
 ---
 
-## Still deferred (post–Phase 134)
+## Still deferred (post–Phase 135)
 
 - Multi-language clients
 - Chaos-mesh / long fuzz campaigns (corpus **smoke CI** → **closed by Phase 112**)
@@ -218,4 +219,5 @@ docs for day-to-day reading: [ops](../ops.md), [consistency](../consistency.md),
 - Journal catch-up stall / throttle / single-flight hardening → **closed by Phase 132**
 - Preferred selector polish (usable addr + LEO ranking) → **closed by Phase 133**
 - Peer-to-peer heartbeat mesh → **closed by Phase 134**
+- Sync client wait on DeleteRecords majority → **closed by Phase 135** (opt-in; default best-effort)
 - Full Kafka preferred-replica selector / rack-aware partition assignment

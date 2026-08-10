@@ -70,6 +70,9 @@ pub enum KafkaErrorCode {
     MessageTooLarge = 10,
     /// Network exception (unused).
     NetworkException = 13,
+    /// Not enough in-sync replicas (Kafka `NOT_ENOUGH_REPLICAS`; Phase 135
+    /// DeleteRecords majority-wait failure).
+    NotEnoughReplicas = 19,
     /// Invalid topic name / args.
     InvalidTopicException = 17,
     /// Invalid request.

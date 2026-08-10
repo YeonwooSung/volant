@@ -538,6 +538,14 @@ pub struct Broker {
     applied_acl_generation: AtomicU64,
     /// DeleteRecords fan-out RPC failures (Phase 113; real fan-out in later PR).
     delete_records_fanout_errors_total: AtomicU64,
+    /// Phase 135: when true, native/Kafka DeleteRecords waits for truncate-journal
+    /// majority after local truncate and surfaces `NotEnoughReplicas` on fail.
+    /// Default **false** (`VOLANT_DELETE_RECORDS_WAIT_MAJORITY`).
+    delete_records_wait_majority: AtomicBool,
+    /// Phase 135: client wait path observed journal majority success.
+    delete_records_majority_wait_success_total: AtomicU64,
+    /// Phase 135: client wait path observed journal majority failure.
+    delete_records_majority_wait_fail_total: AtomicU64,
     /// BROKER config push RPC failures (Phase 113).
     cluster_config_push_errors_total: AtomicU64,
     /// ACL snapshot push RPC failures (Phase 113).
@@ -727,6 +735,9 @@ impl Broker {
             acl_generation: AtomicU64::new(0),
             applied_acl_generation: AtomicU64::new(0),
             delete_records_fanout_errors_total: AtomicU64::new(0),
+            delete_records_wait_majority: AtomicBool::new(default_delete_records_wait_majority()),
+            delete_records_majority_wait_success_total: AtomicU64::new(0),
+            delete_records_majority_wait_fail_total: AtomicU64::new(0),
             cluster_config_push_errors_total: AtomicU64::new(0),
             cluster_acl_push_errors_total: AtomicU64::new(0),
             txn_2pc_fanout_errors_total: AtomicU64::new(0),
@@ -865,6 +876,9 @@ impl Broker {
             acl_generation: AtomicU64::new(0),
             applied_acl_generation: AtomicU64::new(0),
             delete_records_fanout_errors_total: AtomicU64::new(0),
+            delete_records_wait_majority: AtomicBool::new(default_delete_records_wait_majority()),
+            delete_records_majority_wait_success_total: AtomicU64::new(0),
+            delete_records_majority_wait_fail_total: AtomicU64::new(0),
             cluster_config_push_errors_total: AtomicU64::new(0),
             cluster_acl_push_errors_total: AtomicU64::new(0),
             txn_2pc_fanout_errors_total: AtomicU64::new(0),
@@ -947,6 +961,45 @@ impl Broker {
     /// Increment DeleteRecords fan-out error counter (Phase 113).
     pub fn note_delete_records_fanout_error(&self) {
         self.delete_records_fanout_errors_total
+            .fetch_add(1, Ordering::Relaxed);
+    }
+
+    /// Phase 135: whether DeleteRecords client path waits for journal majority.
+    ///
+    /// Default **false** (best-effort; client success independent of majority).
+    /// Env `VOLANT_DELETE_RECORDS_WAIT_MAJORITY` = `1`/`true`/`yes` enables at
+    /// construct time; use [`Self::set_delete_records_wait_majority`] in tests.
+    pub fn delete_records_wait_majority(&self) -> bool {
+        self.delete_records_wait_majority.load(Ordering::Relaxed)
+    }
+
+    /// Phase 135: runtime toggle for tests / operator tooling.
+    pub fn set_delete_records_wait_majority(&self, wait: bool) {
+        self.delete_records_wait_majority
+            .store(wait, Ordering::Relaxed);
+    }
+
+    /// Phase 135: wait-mode majority success counter.
+    pub fn delete_records_majority_wait_success_total(&self) -> u64 {
+        self.delete_records_majority_wait_success_total
+            .load(Ordering::Relaxed)
+    }
+
+    /// Phase 135: wait-mode majority failure counter.
+    pub fn delete_records_majority_wait_fail_total(&self) -> u64 {
+        self.delete_records_majority_wait_fail_total
+            .load(Ordering::Relaxed)
+    }
+
+    /// Increment wait-mode majority success (Phase 135; only when wait is on).
+    pub fn note_delete_records_majority_wait_success(&self) {
+        self.delete_records_majority_wait_success_total
+            .fetch_add(1, Ordering::Relaxed);
+    }
+
+    /// Increment wait-mode majority failure (Phase 135; only when wait is on).
+    pub fn note_delete_records_majority_wait_fail(&self) {
+        self.delete_records_majority_wait_fail_total
             .fetch_add(1, Ordering::Relaxed);
     }
 
@@ -6955,6 +7008,18 @@ fn unix_now_ms() -> i64 {
         .duration_since(UNIX_EPOCH)
         .map(|d| d.as_millis() as i64)
         .unwrap_or(0)
+}
+
+/// Phase 135: `VOLANT_DELETE_RECORDS_WAIT_MAJORITY` → true for `1`/`true`/`yes`
+/// (case-insensitive); unset / anything else → **false** (default best-effort).
+fn default_delete_records_wait_majority() -> bool {
+    match std::env::var("VOLANT_DELETE_RECORDS_WAIT_MAJORITY") {
+        Ok(s) => {
+            let t = s.trim();
+            t == "1" || t.eq_ignore_ascii_case("true") || t.eq_ignore_ascii_case("yes")
+        }
+        Err(_) => false,
+    }
 }
 
 /// Default prepared-txn timeout from env or 60s (Phase 92).

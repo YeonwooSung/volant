@@ -536,6 +536,23 @@ fn broker_metrics_text(broker: &Broker) -> String {
         "volant_delete_records_fanout_errors_total {}\n",
         broker.delete_records_fanout_errors_total()
     ));
+    // Phase 135: optional client-visible wait on truncate-journal majority.
+    text.push_str(
+        "# HELP volant_delete_records_majority_wait_success_total DeleteRecords wait-mode journal majority successes\n",
+    );
+    text.push_str("# TYPE volant_delete_records_majority_wait_success_total counter\n");
+    text.push_str(&format!(
+        "volant_delete_records_majority_wait_success_total {}\n",
+        broker.delete_records_majority_wait_success_total()
+    ));
+    text.push_str(
+        "# HELP volant_delete_records_majority_wait_fail_total DeleteRecords wait-mode journal majority failures\n",
+    );
+    text.push_str("# TYPE volant_delete_records_majority_wait_fail_total counter\n");
+    text.push_str(&format!(
+        "volant_delete_records_majority_wait_fail_total {}\n",
+        broker.delete_records_majority_wait_fail_total()
+    ));
     // Phase 116: durable DeleteRecords outbox for offline / failed peers.
     text.push_str(
         "# HELP volant_delete_records_outbox_depth Pending DeleteRecords truncates for peers\n",
@@ -1424,7 +1441,7 @@ pub async fn fanout_cluster_broker_config(
     }
 }
 
-/// Phase 129/130: multi-controller majority note + best-effort full-snapshot push.
+/// Phase 129/130/135: multi-controller majority note + best-effort full-snapshot push.
 ///
 /// 1. Durable **local** note (counts as 1 ack).
 /// 2. **Parallel** `TruncateJournalNote` to all other live peers (`JoinSet`).
@@ -1433,16 +1450,18 @@ pub async fn fanout_cluster_broker_config(
 ///    (full journal snapshot) so multi-key catch-up works even when a peer
 ///    acked the single-key note.
 ///
-/// Never fails the client DeleteRecords path. Not full Raft log/leader election.
+/// Returns `true` when there is **no cluster** or acks ≥ majority(configured N).
+/// Not full Raft log/leader election. Client visibility of majority is gated by
+/// [`Broker::delete_records_wait_majority`] (Phase 135; default off).
 pub async fn fanout_truncate_journal_note(
     broker: &Broker,
     topic: &str,
     partition: u32,
     before_offset: u64,
     leader_epoch: i32,
-) {
+) -> bool {
     if broker.cluster_config().is_none() {
-        return;
+        return true;
     }
     let n = broker.cluster_member_count();
     let need = TruncateJournal::majority(n);
@@ -1515,7 +1534,8 @@ pub async fn fanout_truncate_journal_note(
         }
     }
 
-    if acks >= need {
+    let majority_ok = acks >= need;
+    if majority_ok {
         broker.truncate_journal().note_consensus_success();
         debug!(
             acks,
@@ -1545,6 +1565,7 @@ pub async fn fanout_truncate_journal_note(
         .filter_map(|id| broker.broker_addr(id).map(|a| (id, a)))
         .collect();
     fanout_truncate_journal_push_to(broker, max_gen.max(local_gen), push_peers).await;
+    majority_ok
 }
 
 /// Phase 129/130: best-effort **parallel** push of full truncate journal snapshot
@@ -1608,30 +1629,120 @@ async fn fanout_truncate_journal_push_to(
     }
 }
 
-/// Best-effort DeleteRecords fan-out to other replicas (Phase 113/116 + 129/130).
+/// Result of [`fanout_delete_records`] (Phase 135).
+///
+/// `majority_ok` reflects **truncate-journal majority** only (not replica log
+/// truncate / outbox). Single-node and note-skipped (not leader) paths report
+/// `true` so wait-mode does not false-fail the client for those cases.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct DeleteRecordsFanoutResult {
+    /// Whether journal majority was reached (or no cluster / note skipped).
+    pub majority_ok: bool,
+}
+
+/// Best-effort DeleteRecords fan-out to other replicas (Phase 113/116 + 129/130/135).
 ///
 /// After a successful **leader** local truncate: multi-controller journal note
 /// (majority + full-snapshot push), then **parallel** `ReplicaDeleteRecords` to
 /// peers. Peers are **pre-enqueued** on the durable outbox before the JoinSet
 /// so a budget abort or join failure cannot lose retry state; successful /
-/// fenced peers are `drop_entry`'d. Never fails the client.
+/// fenced peers are `drop_entry`'d.
+///
+/// Returns [`DeleteRecordsFanoutResult`]; default client path still ignores
+/// `majority_ok` unless [`Broker::delete_records_wait_majority`] is on.
 ///
 /// `truncate_to` is the **achieved** log start (whole-segment-clamped low
 /// watermark), not the client-requested offset.
 ///
-/// Enforced overall deadline: [`delete_records_fanout_budget`] (default **20s**,
-/// or at least `3 *` [`inter_broker_rpc_timeout`] `+ 2s` when env unset).
-/// Each peer RPC is still bounded by [`inter_broker_rpc_timeout`] (default **5s**).
+/// Journal majority is evaluated **before** the remaining budget is applied to
+/// replica fan-out, so a slow peer log-truncate cannot flip `majority_ok`.
+/// Overall deadline: [`delete_records_fanout_budget`] (default **20s**, or at
+/// least `3 *` [`inter_broker_rpc_timeout`] `+ 2s` when env unset). Each peer
+/// RPC is still bounded by [`inter_broker_rpc_timeout`] (default **5s**).
 pub async fn fanout_delete_records(
     broker: &Broker,
     topic: &str,
     partition: u32,
     truncate_to: u64,
-) {
+) -> DeleteRecordsFanoutResult {
     let budget = delete_records_fanout_budget();
+    let start = std::time::Instant::now();
+
+    // Phase 129/130/135: journal note first so majority_ok is known even if
+    // subsequent ReplicaDeleteRecords hits the remaining budget.
+    // Only stamp while we still lead — never send leader_epoch=-1 (ingress
+    // rejects negative epochs for non-zero watermarks). Leadership loss after
+    // local truncate skips the note; the new leader reconcile uses log_start.
+    // Prefer majority_ok=true when note is skipped (not leader) — client already
+    // got local success or NotLeader before fan-out in the normal path.
+    let majority_ok = if broker.cluster_config().is_some() {
+        match broker.led_partition_epoch(topic, partition) {
+            Some(epoch) => {
+                let note_budget = budget.saturating_sub(start.elapsed());
+                if note_budget.is_zero() {
+                    warn!(
+                        topic,
+                        partition,
+                        truncate_to,
+                        "delete records fan-out budget exhausted before journal note"
+                    );
+                    false
+                } else {
+                    match tokio::time::timeout(
+                        note_budget,
+                        fanout_truncate_journal_note(
+                            broker,
+                            topic,
+                            partition,
+                            truncate_to,
+                            epoch,
+                        ),
+                    )
+                    .await
+                    {
+                        Ok(ok) => ok,
+                        Err(_) => {
+                            warn!(
+                                topic,
+                                partition,
+                                truncate_to,
+                                budget_ms = budget.as_millis() as u64,
+                                "delete records journal note exceeded fan-out budget"
+                            );
+                            false
+                        }
+                    }
+                }
+            }
+            None => {
+                debug!(
+                    topic,
+                    partition,
+                    truncate_to,
+                    "skip truncate journal note: not partition leader (or unknown TP)"
+                );
+                true
+            }
+        }
+    } else {
+        true
+    };
+
+    let remaining = budget.saturating_sub(start.elapsed());
+    if remaining.is_zero() {
+        warn!(
+            topic,
+            partition,
+            truncate_to,
+            budget_ms = budget.as_millis() as u64,
+            "delete records fan-out budget exhausted before replica truncate; unfinished peers remain on outbox for drain/reconcile"
+        );
+        return DeleteRecordsFanoutResult { majority_ok };
+    }
+
     match tokio::time::timeout(
-        budget,
-        fanout_delete_records_inner(broker, topic, partition, truncate_to),
+        remaining,
+        fanout_delete_records_replica_inner(broker, topic, partition, truncate_to),
     )
     .await
     {
@@ -1642,44 +1753,19 @@ pub async fn fanout_delete_records(
                 partition,
                 truncate_to,
                 budget_ms = budget.as_millis() as u64,
-                "delete records fan-out overall budget exceeded; unfinished peers remain on outbox for drain/reconcile"
+                "delete records replica fan-out overall budget exceeded; unfinished peers remain on outbox for drain/reconcile"
             );
         }
     }
+    DeleteRecordsFanoutResult { majority_ok }
 }
 
-async fn fanout_delete_records_inner(
+async fn fanout_delete_records_replica_inner(
     broker: &Broker,
     topic: &str,
     partition: u32,
     truncate_to: u64,
 ) {
-    // Phase 129/130: journal note (best-effort; never fails client).
-    // Only stamp while we still lead — never send leader_epoch=-1 (ingress
-    // rejects negative epochs for non-zero watermarks). Leadership loss after
-    // local truncate skips the note; the new leader reconcile uses log_start.
-    if broker.cluster_config().is_some() {
-        match broker.led_partition_epoch(topic, partition) {
-            Some(epoch) => {
-                fanout_truncate_journal_note(
-                    broker,
-                    topic,
-                    partition,
-                    truncate_to,
-                    epoch,
-                )
-                .await;
-            }
-            None => {
-                debug!(
-                    topic,
-                    partition,
-                    truncate_to,
-                    "skip truncate journal note: not partition leader (or unknown TP)"
-                );
-            }
-        }
-    }
     let peers = broker.delete_records_fanout_peers(topic, partition);
     if peers.is_empty() {
         return;
@@ -4131,18 +4217,33 @@ async fn handle_request(broker: &Arc<Broker>, req: Request) -> Result<Response> 
             before_offset,
         } => match broker.delete_records(&topic, partition, before_offset) {
             Ok((low_watermark, error_code)) => {
-                // Phase 113/129/130: best-effort fan-out after local success.
+                // Phase 113/129/130/135: fan-out after local success.
                 // Budget is enforced inside fanout_delete_records (default 20s
                 // overall; 5s per inter-broker RPC).
                 // Fan-out journal note + ReplicaDeleteRecords + outbox at the
                 // **achieved** low_watermark (whole-segment clamp), not the
                 // client-requested before_offset — peers/journal must not be
                 // told a watermark the leader has not reached.
+                //
+                // Default (wait off): always return local error_code (0 on
+                // success) even if journal majority fails. Wait on: surface
+                // NotEnoughReplicas (15) when majority fails; low_watermark
+                // remains the achieved local low (no rollback).
+                let mut err = error_code;
                 if error_code == 0 {
-                    fanout_delete_records(broker, &topic, partition, low_watermark).await;
+                    let fan =
+                        fanout_delete_records(broker, &topic, partition, low_watermark).await;
+                    if broker.delete_records_wait_majority() {
+                        if fan.majority_ok {
+                            broker.note_delete_records_majority_wait_success();
+                        } else {
+                            err = ErrorCode::NotEnoughReplicas as u16;
+                            broker.note_delete_records_majority_wait_fail();
+                        }
+                    }
                 }
                 Ok(Response::DeleteRecords {
-                    error_code,
+                    error_code: err,
                     topic,
                     partition,
                     low_watermark,

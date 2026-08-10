@@ -50,12 +50,18 @@ const KAFKA_CLUSTER_NAME: &str = "kafka-cluster";
 /// `(topic, partition, achieved_low_watermark)` so the async accept path can
 /// best-effort fan out at the **clamped** log start (Phase 113) — not the
 /// client-requested offset when whole-segment delete stops short.
-pub(crate) fn encode_delete_records(
+///
+/// When `wait_majority` is **true** (Phase 135), each successful local truncate
+/// **awaits** [`crate::net::fanout_delete_records`] before writing the partition
+/// error code: majority fail → Kafka `NOT_ENOUGH_REPLICAS` (**19**). Fan-outs
+/// are already completed in that mode (returned vec is empty).
+pub(crate) async fn encode_delete_records(
     broker: &Broker,
     src: &mut impl Buf,
     out: &mut BytesMut,
     version: i16,
     principal: &str,
+    wait_majority: bool,
 ) -> Vec<(String, u32, u64)> {
     // DeleteRecords classic v0–1 / flexible v2:
     //   topics[{ name, partitions[{ partition, offset }]}], timeout_ms
@@ -194,19 +200,40 @@ pub(crate) fn encode_delete_records(
             match broker.delete_records(&t.name, p.partition as u32, p.offset as u64) {
                 Ok((low, err)) => {
                     out.put_i64(low as i64);
-                    let kerr = if err == 0 {
+                    let mut final_err = err;
+                    // Phase 113/135: fan-out only after local leader success at
+                    // achieved `low` (whole-segment clamp), not requested offset.
+                    if err == 0 {
+                        if wait_majority {
+                            let fan = crate::net::fanout_delete_records(
+                                broker,
+                                &t.name,
+                                p.partition as u32,
+                                low,
+                            )
+                            .await;
+                            if fan.majority_ok {
+                                broker.note_delete_records_majority_wait_success();
+                            } else {
+                                // Kafka NOT_ENOUGH_REPLICAS (19); local low still returned.
+                                final_err = volant_protocol::ErrorCode::NotEnoughReplicas as u16;
+                                broker.note_delete_records_majority_wait_fail();
+                            }
+                            // Fan-out already completed; do not return for spawn.
+                        } else {
+                            fanouts.push((t.name.clone(), p.partition as u32, low));
+                        }
+                    }
+                    let kerr = if final_err == 0 {
                         KafkaErrorCode::None.as_i16()
-                    } else if err == 13 {
+                    } else if final_err == 13 {
                         KafkaErrorCode::NotLeaderForPartition.as_i16()
+                    } else if final_err == volant_protocol::ErrorCode::NotEnoughReplicas as u16 {
+                        KafkaErrorCode::NotEnoughReplicas.as_i16()
                     } else {
                         KafkaErrorCode::Unknown.as_i16()
                     };
                     out.put_i16(kerr);
-                    // Phase 113: schedule fan-out only after local leader success.
-                    // Use achieved `low` (whole-segment clamp), not requested offset.
-                    if err == 0 {
-                        fanouts.push((t.name.clone(), p.partition as u32, low));
-                    }
                 }
                 Err(Error::NotFound(_)) => {
                     out.put_i64(0);
