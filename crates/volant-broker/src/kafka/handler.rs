@@ -350,6 +350,7 @@ async fn dispatch_kafka(
                 }
             }
             // Phase 119: transparent forward when session lives on a peer.
+            // Phase 138: promote-from-mirror on owner miss (inside maybe_forward).
             if let Some(body) = crate::net::maybe_forward_kafka_fetch(
                 broker.as_ref(),
                 hdr.api_version,
@@ -361,6 +362,8 @@ async fn dispatch_kafka(
                 out.extend_from_slice(&body);
             } else {
                 produce_fetch::encode_fetch(broker, &mut src, &mut out, hdr.api_version, principal);
+                // Phase 138: best-effort session mirror fan-out after local mutations.
+                crate::net::schedule_session_mirror_fanout(broker);
             }
         }
         Some(ApiKey::ListOffsets) if (0..=11).contains(&hdr.api_version) => {

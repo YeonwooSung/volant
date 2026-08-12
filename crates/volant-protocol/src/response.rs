@@ -92,6 +92,10 @@ pub enum ResponseOpcode {
     TruncateJournalNote = 87,
     /// Truncate journal push result (Phase 129).
     TruncateJournalPush = 89,
+    /// Fetch session mirror put result (Phase 138).
+    FetchSessionMirrorPut = 91,
+    /// Fetch session mirror delete result (Phase 138).
+    FetchSessionMirrorDelete = 93,
     /// Error response.
     Error = 0xFFFF,
 }
@@ -143,6 +147,8 @@ impl ResponseOpcode {
             85 => Self::KafkaTxnForward,
             87 => Self::TruncateJournalNote,
             89 => Self::TruncateJournalPush,
+            91 => Self::FetchSessionMirrorPut,
+            93 => Self::FetchSessionMirrorDelete,
             0xFFFF => Self::Error,
             _ => return None,
         })
@@ -732,6 +738,16 @@ pub enum Response {
         /// Protocol error code.
         error_code: u16,
     },
+    /// Fetch session mirror put result (Phase 138).
+    FetchSessionMirrorPut {
+        /// Protocol error code.
+        error_code: u16,
+    },
+    /// Fetch session mirror delete result (Phase 138).
+    FetchSessionMirrorDelete {
+        /// Protocol error code.
+        error_code: u16,
+    },
     /// Error response.
     Error {
         /// Error code.
@@ -812,6 +828,10 @@ impl Response {
             Self::KafkaTxnForward { .. } => ResponseOpcode::KafkaTxnForward as u16,
             Self::TruncateJournalNote { .. } => ResponseOpcode::TruncateJournalNote as u16,
             Self::TruncateJournalPush { .. } => ResponseOpcode::TruncateJournalPush as u16,
+            Self::FetchSessionMirrorPut { .. } => ResponseOpcode::FetchSessionMirrorPut as u16,
+            Self::FetchSessionMirrorDelete { .. } => {
+                ResponseOpcode::FetchSessionMirrorDelete as u16
+            }
             Self::Error { .. } => ResponseOpcode::Error as u16,
         }
     }

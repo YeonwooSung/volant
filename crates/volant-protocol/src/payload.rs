@@ -553,6 +553,16 @@ pub fn encode_request(req: &Request) -> Result<Bytes> {
             dst.put_u64_le(*generation);
             put_bytes(&mut dst, snapshot);
         }
+        Request::FetchSessionMirrorPut {
+            session_id,
+            snapshot,
+        } => {
+            dst.put_i32_le(*session_id);
+            put_bytes(&mut dst, snapshot);
+        }
+        Request::FetchSessionMirrorDelete { session_id } => {
+            dst.put_i32_le(*session_id);
+        }
     }
     finish_payload(dst)
 }
@@ -1166,6 +1176,29 @@ pub fn decode_request(opcode: u16, payload: &[u8]) -> Result<Request> {
                 snapshot,
             })
         }
+        RequestOpcode::FetchSessionMirrorPut => {
+            if src.remaining() < 4 {
+                return Err(Error::Protocol(
+                    "truncated fetch session mirror put session_id".into(),
+                ));
+            }
+            let session_id = src.get_i32_le();
+            let snapshot = get_bytes(&mut src)?;
+            Ok(Request::FetchSessionMirrorPut {
+                session_id,
+                snapshot,
+            })
+        }
+        RequestOpcode::FetchSessionMirrorDelete => {
+            if src.remaining() < 4 {
+                return Err(Error::Protocol(
+                    "truncated fetch session mirror delete session_id".into(),
+                ));
+            }
+            Ok(Request::FetchSessionMirrorDelete {
+                session_id: src.get_i32_le(),
+            })
+        }
     }
 }
 
@@ -1582,6 +1615,12 @@ pub fn encode_response(resp: &Response) -> Result<Bytes> {
             dst.put_u64_le(*generation);
         }
         Response::TruncateJournalPush { error_code } => {
+            dst.put_u16_le(*error_code);
+        }
+        Response::FetchSessionMirrorPut { error_code } => {
+            dst.put_u16_le(*error_code);
+        }
+        Response::FetchSessionMirrorDelete { error_code } => {
             dst.put_u16_le(*error_code);
         }
         Response::Error { code, message } => {
@@ -2405,6 +2444,26 @@ pub fn decode_response(opcode: u16, payload: &[u8]) -> Result<Response> {
                 ));
             }
             Ok(Response::TruncateJournalPush {
+                error_code: src.get_u16_le(),
+            })
+        }
+        ResponseOpcode::FetchSessionMirrorPut => {
+            if src.remaining() < 2 {
+                return Err(Error::Protocol(
+                    "truncated fetch session mirror put response".into(),
+                ));
+            }
+            Ok(Response::FetchSessionMirrorPut {
+                error_code: src.get_u16_le(),
+            })
+        }
+        ResponseOpcode::FetchSessionMirrorDelete => {
+            if src.remaining() < 2 {
+                return Err(Error::Protocol(
+                    "truncated fetch session mirror delete response".into(),
+                ));
+            }
+            Ok(Response::FetchSessionMirrorDelete {
                 error_code: src.get_u16_le(),
             })
         }
@@ -3973,6 +4032,63 @@ mod tests {
         assert!(decode_response(ResponseOpcode::TruncateJournalNote as u16, &[]).is_err());
         assert!(decode_response(ResponseOpcode::TruncateJournalNote as u16, &[0, 0]).is_err());
         assert!(decode_response(ResponseOpcode::TruncateJournalPush as u16, &[]).is_err());
+    }
+
+    #[test]
+    fn phase138_fetch_session_mirror_opcodes_roundtrip() {
+        let put = Request::FetchSessionMirrorPut {
+            session_id: 42,
+            snapshot: Bytes::from_static(b"{\"id\":42,\"epoch\":1}"),
+        };
+        let pb = encode_request(&put).unwrap();
+        assert_eq!(put.opcode(), RequestOpcode::FetchSessionMirrorPut as u16);
+        assert_eq!(
+            decode_request(RequestOpcode::FetchSessionMirrorPut as u16, &pb).unwrap(),
+            put
+        );
+        let empty_put = Request::FetchSessionMirrorPut {
+            session_id: 0,
+            snapshot: Bytes::new(),
+        };
+        let epb = encode_request(&empty_put).unwrap();
+        assert_eq!(
+            decode_request(RequestOpcode::FetchSessionMirrorPut as u16, &epb).unwrap(),
+            empty_put
+        );
+
+        let del = Request::FetchSessionMirrorDelete { session_id: -7 };
+        let db = encode_request(&del).unwrap();
+        assert_eq!(
+            del.opcode(),
+            RequestOpcode::FetchSessionMirrorDelete as u16
+        );
+        assert_eq!(
+            decode_request(RequestOpcode::FetchSessionMirrorDelete as u16, &db).unwrap(),
+            del
+        );
+
+        let pr = Response::FetchSessionMirrorPut { error_code: 0 };
+        let prb = encode_response(&pr).unwrap();
+        assert_eq!(pr.opcode(), ResponseOpcode::FetchSessionMirrorPut as u16);
+        assert_eq!(
+            decode_response(ResponseOpcode::FetchSessionMirrorPut as u16, &prb).unwrap(),
+            pr
+        );
+        let dr = Response::FetchSessionMirrorDelete { error_code: 14 };
+        let drb = encode_response(&dr).unwrap();
+        assert_eq!(
+            dr.opcode(),
+            ResponseOpcode::FetchSessionMirrorDelete as u16
+        );
+        assert_eq!(
+            decode_response(ResponseOpcode::FetchSessionMirrorDelete as u16, &drb).unwrap(),
+            dr
+        );
+
+        assert!(decode_request(RequestOpcode::FetchSessionMirrorPut as u16, &[]).is_err());
+        assert!(decode_request(RequestOpcode::FetchSessionMirrorDelete as u16, &[]).is_err());
+        assert!(decode_response(ResponseOpcode::FetchSessionMirrorPut as u16, &[]).is_err());
+        assert!(decode_response(ResponseOpcode::FetchSessionMirrorDelete as u16, &[]).is_err());
     }
 
     #[test]

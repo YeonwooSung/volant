@@ -1,5 +1,5 @@
 //! Fetch session state (Phase 88 + 91 omit-unchanged + Phase 95 limits + Phase 115 durable
-//! + Phase 119 multi-broker owner encoding / handoff).
+//! + Phase 119 multi-broker owner encoding / handoff + Phase 138 peer mirror).
 //!
 //! Tracks topic partitions, last-seen fetch params, last-returned HWM/LSO (Phase 91),
 //! idle TTL / max concurrent sessions with lazy LRU eviction (Phase 95), and optional
@@ -8,6 +8,10 @@
 //! Sessions remain **owned by one broker**. In cluster mode, `session_id` embeds the
 //! owner `node_id` so a peer can transparent-forward Kafka Fetch (Phase 119). Single-node
 //! keeps sequential ids.
+//!
+//! Phase 138: primary owners push best-effort JSON snapshots to peers (`SessionMirrorOp`);
+//! peers keep a **foreign mirror** map (RAM-only, not in `__fetch_sessions`). On owner miss
+//! after forward failure, `promote_from_mirror` moves a mirror into the primary table.
 
 use std::collections::HashMap;
 use std::fs::{self, File, OpenOptions};
@@ -44,6 +48,15 @@ pub const SESSION_OWNER_SHIFT: u32 = 19;
 pub const SESSION_LOCAL_MASK: i32 = (1 << SESSION_OWNER_SHIFT) - 1; // 0x7FFFF
 /// Owner `node_id` mask (12 bits) — supports ids 1..4095.
 pub const SESSION_OWNER_MASK: u32 = 0xFFF;
+
+/// Dirty op for best-effort peer fan-out of primary session mutations (Phase 138).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SessionMirrorOp {
+    /// Full snapshot put for `session_id` (export via [`FetchSessionManager::export_session_bytes`]).
+    Put(i32),
+    /// Remove foreign mirror for `session_id`.
+    Delete(i32),
+}
 
 /// Encode a cluster-mode session id from owner broker and local counter.
 pub fn encode_session_id(owner_node_id: u32, local: i32) -> i32 {
@@ -145,10 +158,15 @@ pub struct FetchSession {
 }
 
 /// Fetch session table with idle TTL + max concurrent (Phase 95) + optional
-/// durability (Phase 115) + cluster owner encoding (Phase 119).
+/// durability (Phase 115) + cluster owner encoding (Phase 119) + peer mirror
+/// (Phase 138).
 #[derive(Debug)]
 pub struct FetchSessionManager {
     sessions: Mutex<HashMap<i32, FetchSession>>,
+    /// Foreign (non-owned) session mirrors — not served until promote (Phase 138).
+    mirrors: Mutex<HashMap<i32, FetchSession>>,
+    /// Pending put/delete ops for peer fan-out (cluster owner only; Phase 138).
+    pending_mirror: Mutex<Vec<SessionMirrorOp>>,
     /// Next **local** counter (not necessarily the full session_id).
     next_id: AtomicI32,
     /// Idle TTL in ms; `0` disables idle eviction.
@@ -171,6 +189,12 @@ pub struct FetchSessionManager {
     forward_total: AtomicU64,
     /// Failed multi-broker Fetch forward attempts (Phase 119).
     forward_errors_total: AtomicU64,
+    /// Successful `apply_mirror_put` installs (Phase 138).
+    mirror_puts_applied_total: AtomicU64,
+    /// `apply_mirror_delete` calls that removed a mirror (Phase 138).
+    mirror_deletes_applied_total: AtomicU64,
+    /// Successful `promote_from_mirror` promotions into primary (Phase 138).
+    promote_total: AtomicU64,
 }
 
 impl Default for FetchSessionManager {
@@ -200,6 +224,8 @@ impl FetchSessionManager {
     ) -> Self {
         Self {
             sessions: Mutex::new(HashMap::new()),
+            mirrors: Mutex::new(HashMap::new()),
+            pending_mirror: Mutex::new(Vec::new()),
             next_id: AtomicI32::new(1),
             idle_timeout_ms: AtomicU64::new(idle_timeout_ms),
             max_sessions: AtomicUsize::new(max_sessions),
@@ -211,6 +237,9 @@ impl FetchSessionManager {
             owner_node_id: AtomicU32::new(owner_node_id),
             forward_total: AtomicU64::new(0),
             forward_errors_total: AtomicU64::new(0),
+            mirror_puts_applied_total: AtomicU64::new(0),
+            mirror_deletes_applied_total: AtomicU64::new(0),
+            promote_total: AtomicU64::new(0),
         }
     }
 
@@ -289,6 +318,113 @@ impl FetchSessionManager {
     /// Record a failed multi-broker Fetch forward (Phase 119).
     pub fn record_forward_error(&self) {
         self.forward_errors_total.fetch_add(1, Ordering::Relaxed);
+    }
+
+    /// Drain pending mirror put/delete ops for peer fan-out (Phase 138).
+    pub fn drain_mirror_ops(&self) -> Vec<SessionMirrorOp> {
+        std::mem::take(&mut *self.pending_mirror.lock())
+    }
+
+    /// Whether any mirror ops are pending fan-out (Phase 138).
+    pub fn has_pending_mirror_ops(&self) -> bool {
+        !self.pending_mirror.lock().is_empty()
+    }
+
+    /// JSON bytes of one primary session (`StoredFetchSession` shape) for MirrorPut.
+    pub fn export_session_bytes(&self, session_id: i32) -> Option<Vec<u8>> {
+        let guard = self.sessions.lock();
+        let session = guard.get(&session_id)?;
+        let stored = session_to_stored(session_id, session);
+        serde_json::to_vec(&stored).ok()
+    }
+
+    /// Install/replace a foreign mirror from a JSON snapshot (Phase 138 Put).
+    pub fn apply_mirror_put(&self, snapshot: &[u8]) -> Result<(), String> {
+        let stored: StoredFetchSession =
+            serde_json::from_slice(snapshot).map_err(|e| e.to_string())?;
+        if stored.id <= 0 {
+            return Err("invalid session id".to_owned());
+        }
+        let (id, session) =
+            stored_to_session(stored).ok_or_else(|| "invalid session snapshot".to_owned())?;
+        self.mirrors.lock().insert(id, session);
+        self.mirror_puts_applied_total
+            .fetch_add(1, Ordering::Relaxed);
+        Ok(())
+    }
+
+    /// Remove a foreign mirror (Phase 138 Delete). No-op if missing.
+    pub fn apply_mirror_delete(&self, session_id: i32) {
+        if self.mirrors.lock().remove(&session_id).is_some() {
+            self.mirror_deletes_applied_total
+                .fetch_add(1, Ordering::Relaxed);
+        }
+    }
+
+    /// Move mirror → primary if primary is missing (Phase 138).
+    ///
+    /// Returns `true` if primary already had the id or the mirror was promoted.
+    pub fn promote_from_mirror(&self, session_id: i32) -> bool {
+        // Lock order: sessions then mirrors (avoid deadlock with other dual-lock paths).
+        let mut sessions = self.sessions.lock();
+        if sessions.contains_key(&session_id) {
+            return true;
+        }
+        let mut mirrors = self.mirrors.lock();
+        let Some(session) = mirrors.remove(&session_id) else {
+            return false;
+        };
+        sessions.insert(session_id, session);
+        self.persist_locked(&sessions);
+        drop(mirrors);
+        drop(sessions);
+        self.promote_total.fetch_add(1, Ordering::Relaxed);
+        // New local SoT — re-queue Put for peers (cluster only).
+        self.queue_mirror_put(session_id);
+        true
+    }
+
+    /// Whether a foreign mirror exists for `session_id` (Phase 138).
+    pub fn mirror_contains(&self, session_id: i32) -> bool {
+        self.mirrors.lock().contains_key(&session_id)
+    }
+
+    /// Number of foreign mirrors (Phase 138).
+    pub fn mirrored_count(&self) -> usize {
+        self.mirrors.lock().len()
+    }
+
+    /// Successful mirror put installs applied on this broker (Phase 138).
+    pub fn mirror_puts_applied_total(&self) -> u64 {
+        self.mirror_puts_applied_total.load(Ordering::Relaxed)
+    }
+
+    /// Successful mirror deletes applied on this broker (Phase 138).
+    pub fn mirror_deletes_applied_total(&self) -> u64 {
+        self.mirror_deletes_applied_total.load(Ordering::Relaxed)
+    }
+
+    /// Successful mirror → primary promotions (Phase 138).
+    pub fn promote_total(&self) -> u64 {
+        self.promote_total.load(Ordering::Relaxed)
+    }
+
+    /// Queue Put for peer fan-out when this broker is a cluster owner (Phase 138).
+    fn queue_mirror_put(&self, session_id: i32) {
+        if self.owner_node_id.load(Ordering::Relaxed) > 0 {
+            self.pending_mirror
+                .lock()
+                .push(SessionMirrorOp::Put(session_id));
+        }
+    }
+
+    /// Queue Delete for peer fan-out when this broker is a cluster owner (Phase 138).
+    fn queue_mirror_delete(&self, session_id: i32) {
+        if self.owner_node_id.load(Ordering::Relaxed) > 0 {
+            self.pending_mirror
+                .lock()
+                .push(SessionMirrorOp::Delete(session_id));
+        }
     }
 
     /// Current idle timeout in milliseconds (`0` = disabled).
@@ -403,6 +539,8 @@ impl FetchSessionManager {
             let mut guard = self.sessions.lock();
             if guard.remove(&session_id).is_some() {
                 self.persist_locked(&guard);
+                drop(guard);
+                self.queue_mirror_delete(session_id);
             }
         }
     }
@@ -429,6 +567,8 @@ impl FetchSessionManager {
             },
         );
         self.persist_locked(&guard);
+        drop(guard);
+        self.queue_mirror_put(id);
         id
     }
 
@@ -467,6 +607,8 @@ impl FetchSessionManager {
         session.epoch = next_epoch(epoch);
         session.last_activity_ms = now_ms;
         self.persist_locked(&guard);
+        drop(guard);
+        self.queue_mirror_put(session_id);
         Ok(())
     }
 
@@ -509,6 +651,8 @@ impl FetchSessionManager {
             }
         }
         self.persist_locked(&guard);
+        drop(guard);
+        self.queue_mirror_put(session_id);
     }
 
     /// Apply forgotten_topics_data removals.
@@ -539,6 +683,8 @@ impl FetchSessionManager {
             }
         }
         self.persist_locked(&guard);
+        drop(guard);
+        self.queue_mirror_put(session_id);
     }
 
     /// Snapshot topics currently in the session (for empty-topics incremental).
@@ -577,6 +723,8 @@ impl FetchSessionManager {
         part.last_hwm = Some(hwm);
         part.last_lso = Some(lso);
         self.persist_locked(&guard);
+        drop(guard);
+        self.queue_mirror_put(session_id);
     }
 
     /// Drop idle sessions under the lock. Counts each removal as an eviction.
@@ -586,12 +734,22 @@ impl FetchSessionManager {
             return;
         }
         let idle_ms_i = idle_ms as i64;
-        let before = sessions.len();
-        sessions.retain(|_, s| now_ms.saturating_sub(s.last_activity_ms) <= idle_ms_i);
-        let removed = before.saturating_sub(sessions.len()) as u64;
-        if removed > 0 {
-            self.evicted_total.fetch_add(removed, Ordering::Relaxed);
-            self.idle_evicted_total.fetch_add(removed, Ordering::Relaxed);
+        let removed_ids: Vec<i32> = sessions
+            .iter()
+            .filter(|(_, s)| now_ms.saturating_sub(s.last_activity_ms) > idle_ms_i)
+            .map(|(id, _)| *id)
+            .collect();
+        if removed_ids.is_empty() {
+            return;
+        }
+        for id in &removed_ids {
+            sessions.remove(id);
+        }
+        let removed = removed_ids.len() as u64;
+        self.evicted_total.fetch_add(removed, Ordering::Relaxed);
+        self.idle_evicted_total.fetch_add(removed, Ordering::Relaxed);
+        for id in removed_ids {
+            self.queue_mirror_delete(id);
         }
     }
 
@@ -609,6 +767,7 @@ impl FetchSessionManager {
         if let Some(id) = victim {
             sessions.remove(&id);
             self.evicted_total.fetch_add(1, Ordering::Relaxed);
+            self.queue_mirror_delete(id);
         }
     }
 
@@ -776,6 +935,48 @@ struct StoredSessionPartition {
     last_lso: Option<i64>,
 }
 
+fn session_to_stored(id: i32, s: &FetchSession) -> StoredFetchSession {
+    let mut topics: Vec<StoredSessionTopic> = s
+        .topics
+        .iter()
+        .map(|(key, t)| {
+            let (wire_kind, wire_name, wire_uuid_hex) = match &t.wire {
+                TopicWireId::Name(n) => ("name".to_owned(), Some(n.clone()), None),
+                TopicWireId::Uuid(u) => ("uuid".to_owned(), None, Some(hex::encode(u))),
+            };
+            let mut partitions: Vec<StoredSessionPartition> = t
+                .partitions
+                .iter()
+                .map(|(pid, p)| StoredSessionPartition {
+                    id: *pid,
+                    fetch_offset: p.fetch_offset,
+                    current_leader_epoch: p.current_leader_epoch,
+                    last_fetched_epoch: p.last_fetched_epoch,
+                    max_bytes: p.max_bytes,
+                    last_hwm: p.last_hwm,
+                    last_lso: p.last_lso,
+                })
+                .collect();
+            partitions.sort_by_key(|p| p.id);
+            StoredSessionTopic {
+                key: key.clone(),
+                wire_kind,
+                wire_name,
+                wire_uuid_hex,
+                name: t.name.clone(),
+                partitions,
+            }
+        })
+        .collect();
+    topics.sort_by(|a, b| a.key.cmp(&b.key));
+    StoredFetchSession {
+        id,
+        epoch: s.epoch,
+        last_activity_ms: s.last_activity_ms,
+        topics,
+    }
+}
+
 fn snapshot_file(sessions: &HashMap<i32, FetchSession>, next_id: i32) -> StoredFetchSessionsFile {
     let mut out = Vec::with_capacity(sessions.len());
     let mut ids: Vec<i32> = sessions.keys().copied().collect();
@@ -784,47 +985,7 @@ fn snapshot_file(sessions: &HashMap<i32, FetchSession>, next_id: i32) -> StoredF
         let Some(s) = sessions.get(&id) else {
             continue;
         };
-        let mut topics: Vec<StoredSessionTopic> = s
-            .topics
-            .iter()
-            .map(|(key, t)| {
-                let (wire_kind, wire_name, wire_uuid_hex) = match &t.wire {
-                    TopicWireId::Name(n) => ("name".to_owned(), Some(n.clone()), None),
-                    TopicWireId::Uuid(u) => {
-                        ("uuid".to_owned(), None, Some(hex::encode(u)))
-                    }
-                };
-                let mut partitions: Vec<StoredSessionPartition> = t
-                    .partitions
-                    .iter()
-                    .map(|(pid, p)| StoredSessionPartition {
-                        id: *pid,
-                        fetch_offset: p.fetch_offset,
-                        current_leader_epoch: p.current_leader_epoch,
-                        last_fetched_epoch: p.last_fetched_epoch,
-                        max_bytes: p.max_bytes,
-                        last_hwm: p.last_hwm,
-                        last_lso: p.last_lso,
-                    })
-                    .collect();
-                partitions.sort_by_key(|p| p.id);
-                StoredSessionTopic {
-                    key: key.clone(),
-                    wire_kind,
-                    wire_name,
-                    wire_uuid_hex,
-                    name: t.name.clone(),
-                    partitions,
-                }
-            })
-            .collect();
-        topics.sort_by(|a, b| a.key.cmp(&b.key));
-        out.push(StoredFetchSession {
-            id,
-            epoch: s.epoch,
-            last_activity_ms: s.last_activity_ms,
-            topics,
-        });
+        out.push(session_to_stored(id, s));
     }
     StoredFetchSessionsFile {
         version: FETCH_SESSIONS_FILE_VERSION,
@@ -1172,5 +1333,91 @@ mod tests {
         assert!(session_local_part(id) > 0);
         assert!(mgr.contains(id));
         assert!(mgr.begin_incremental_at(id, 1, 1_100).is_ok());
+    }
+
+    #[test]
+    fn phase138_export_apply_mirror_put_contains() {
+        let owner = FetchSessionManager::with_limits_and_owner(0, 0, 1);
+        let id = owner.create_at(topic_map("orders", 3), 1_000);
+        owner.note_returned(id, "orders", 0, 9, 9);
+        let bytes = owner.export_session_bytes(id).expect("export");
+
+        let peer = FetchSessionManager::with_limits(0, 0);
+        assert!(!peer.mirror_contains(id));
+        peer.apply_mirror_put(&bytes).expect("put");
+        assert!(peer.mirror_contains(id));
+        assert_eq!(peer.mirrored_count(), 1);
+        assert_eq!(peer.mirror_puts_applied_total(), 1);
+        assert!(!peer.contains(id));
+        // Bad JSON rejected.
+        assert!(peer.apply_mirror_put(b"not-json").is_err());
+    }
+
+    #[test]
+    fn phase138_promote_moves_mirror_to_primary() {
+        let owner = FetchSessionManager::with_limits_and_owner(0, 0, 2);
+        let id = owner.create_at(topic_map("t", 1), 1_000);
+        let bytes = owner.export_session_bytes(id).unwrap();
+
+        let peer = FetchSessionManager::with_limits(0, 0);
+        peer.apply_mirror_put(&bytes).unwrap();
+        assert!(peer.mirror_contains(id));
+        assert!(!peer.contains(id));
+
+        assert!(peer.promote_from_mirror(id));
+        assert!(peer.contains(id));
+        assert!(!peer.mirror_contains(id));
+        assert_eq!(peer.mirrored_count(), 0);
+        assert_eq!(peer.promote_total(), 1);
+        // Primary already has id → true no-op.
+        assert!(peer.promote_from_mirror(id));
+        assert_eq!(peer.promote_total(), 1);
+        // Missing → false.
+        assert!(!peer.promote_from_mirror(id + 99));
+    }
+
+    #[test]
+    fn phase138_apply_mirror_delete() {
+        let owner = FetchSessionManager::with_limits_and_owner(0, 0, 1);
+        let id = owner.create_at(HashMap::new(), 1_000);
+        let bytes = owner.export_session_bytes(id).unwrap();
+
+        let peer = FetchSessionManager::with_limits(0, 0);
+        peer.apply_mirror_put(&bytes).unwrap();
+        assert!(peer.mirror_contains(id));
+        peer.apply_mirror_delete(id);
+        assert!(!peer.mirror_contains(id));
+        assert_eq!(peer.mirror_deletes_applied_total(), 1);
+        // Missing is no-op.
+        peer.apply_mirror_delete(id);
+        assert_eq!(peer.mirror_deletes_applied_total(), 1);
+    }
+
+    #[test]
+    fn phase138_drain_mirror_ops_put_on_create() {
+        let mgr = FetchSessionManager::with_limits_and_owner(0, 0, 1);
+        let id = mgr.create_at(HashMap::new(), 1_000);
+        let ops = mgr.drain_mirror_ops();
+        assert!(
+            ops.iter().any(|op| *op == SessionMirrorOp::Put(id)),
+            "expected Put({id}), got {ops:?}"
+        );
+        // Drained empty.
+        assert!(mgr.drain_mirror_ops().is_empty());
+        // owner_node_id=0 does not queue.
+        let single = FetchSessionManager::with_limits(0, 0);
+        let _ = single.create_at(HashMap::new(), 1_000);
+        assert!(single.drain_mirror_ops().is_empty());
+    }
+
+    #[test]
+    fn phase138_close_yields_delete() {
+        let mgr = FetchSessionManager::with_limits_and_owner(0, 0, 1);
+        let id = mgr.create_at(HashMap::new(), 1_000);
+        let _ = mgr.drain_mirror_ops(); // drop create Put
+        mgr.close(id);
+        let ops = mgr.drain_mirror_ops();
+        assert_eq!(ops, vec![SessionMirrorOp::Delete(id)]);
+        assert!(!mgr.contains(id));
     }
 }

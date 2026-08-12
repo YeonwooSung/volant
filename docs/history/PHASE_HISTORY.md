@@ -1,6 +1,6 @@
 # Phase history index
 
-Ship records for **phases 0–137** (shipped). Binding core contracts are
+Ship records for **phases 0–138** (shipped). Binding core contracts are
 **[PHASE1_SPEC](../PHASE1_SPEC.md)–[PHASE6_SPEC](../PHASE6_SPEC.md)**. Living
 docs for day-to-day reading: [ops](../ops.md), [consistency](../consistency.md),
 [tuning](../tuning.md), [KAFKA_COMPAT](../KAFKA_COMPAT.md),
@@ -179,15 +179,16 @@ docs for day-to-day reading: [ops](../ops.md), [consistency](../consistency.md),
 | 135 | ✅ | DeleteRecords optional majority wait (client-visible journal majority; default off) | [PHASE135_SPEC.md](../PHASE135_SPEC.md) |
 | 136 | ✅ | Non-blocking admin ACL/BROKER catch-up (schedule + single-flight + min-interval) | [PHASE136_SPEC.md](../PHASE136_SPEC.md) |
 | 137 | ✅ | DeleteRecords native wait trailer + journal topic GC (assignment prune + anti-resurrection push) | [PHASE137_SPEC.md](../PHASE137_SPEC.md) |
+| 138 | ✅ | Shared fetch session mirror + promote MVP (best-effort peer put/delete 90–93; promote on owner miss; not Raft) | [PHASE138_SPEC.md](../PHASE138_SPEC.md) |
 
 ---
 
-## Still deferred (post–Phase 137)
+## Still deferred (post–Phase 138)
 
 - Multi-language clients
 - Chaos-mesh / long fuzz campaigns (corpus **smoke CI** → **closed by Phase 112**)
 - Full KIP-890/939 / Kafka `__transaction_state` topic (multi-broker Enable2Pc MVP → **closed by Phase 114**)
-- Multi-broker session handoff / affinity routing (durable **local** → **115**; owner forward MVP → **closed by Phase 119**; preferred-replica MVP → **closed by Phase 126**; shared store still open)
+- Multi-broker session handoff / affinity routing (durable **local** → **115**; owner forward MVP → **closed by Phase 119**; preferred-replica MVP → **closed by Phase 126**; shared mirror + promote MVP → **closed by Phase 138**; residual: Raft registry / serve-without-promote / debounced put / full preferred selector)
 - Byte-identical response cache beyond HWM+LSO omit
 - Full KRaft epoch state machine / remote-log epochs
 - Full Kafka broker catalog / KRaft DynamicBrokerConfig
@@ -211,7 +212,8 @@ docs for day-to-day reading: [ops](../ops.md), [consistency](../consistency.md),
 - Outbox handoff on leadership change → **closed by Phase 123** (new leader reconcile from log_start; not consensus truncate log)
 - Durable Init-owner txn coordinator registry → **closed by Phase 124** (local `__txn_coordinator`; not `__transaction_state`)
 - Time-based ISR lag shrink → **closed by Phase 125** (last-caught-up + `replica_lag_max_ms`; not full Kafka replica.lag.time.max.ms)
-- PreferredReadReplica / rack-aware Fetch → **closed by Phase 126** (KIP-392 subset; not full selector/throttling; shared session store still open)
+- PreferredReadReplica / rack-aware Fetch → **closed by Phase 126** (KIP-392 subset; not full selector/throttling; preferred residual orthogonal to Phase 138 mirror)
+- Shared fetch session mirror + promote → **closed by Phase 138** (best-effort peer mirror; not Raft; dual-promote race honest; no session_id re-encode)
 - Txn coordinator registry TTL GC → **closed by Phase 127** (default 24h; `0` disables; not eager EndTxn GC)
 - BROKER config for registry TTL → **closed by Phase 128** (`volant.txn.coordinator.registry.ttl.ms`; env still works; not full DynamicBrokerConfig)
 - Per-broker BROKER config overrides / multi-master ACL merge

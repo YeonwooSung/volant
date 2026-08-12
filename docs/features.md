@@ -59,7 +59,8 @@ shim: [KAFKA_COMPAT.md](./KAFKA_COMPAT.md).
 | Transaction max timeout (Phase 96) | Broker max default **15m** (`VOLANT_TRANSACTION_MAX_TIMEOUT_MS`; `0` = no max); Init over-max → **50**; effective open/prepared clamped |
 | Background sweeper (Phase 97/101/106) | Periodic open/prepared + idle session expiry (default 1s / `VOLANT_SWEEP_INTERVAL_MS`); `0` pauses bg; always-spawn so 0→>0 without restart; graceful shutdown/join on stop; lazy paths remain |
 | BROKER config (Phase 99–103) | Describe/Alter txn/session/sweep knobs; **sparse** durable under `__broker_config/state.json` (only altered keys; DELETE unfreezes env); resource name must be empty or local `node_id` decimal (Phase 103) |
-| Durable fetch sessions (Phase 115) | `{data_dir}/__fetch_sessions/state.json`; restart restores session_id/epoch/omit cache within idle TTL; **not** multi-broker sticky |
+| Durable fetch sessions (Phase 115) | `{data_dir}/__fetch_sessions/state.json`; restart restores session_id/epoch/omit cache within idle TTL; multi-broker sticky via 119 forward + **138 mirror** |
+| Shared session mirror (Phase 138) | Best-effort peer put/delete (opcodes 90–93); foreign mirror table; promote on owner forward miss; **not** Raft; dual-promote race may **71** |
 
 ## Security (19–22)
 
@@ -86,7 +87,7 @@ workers.
 | Metadata | Live `leader_epoch` (not always `-1`) |
 | Advance | Explicit bump / multi-node failover best-effort |
 
-## Fetch DivergingEpoch + sessions (Phase 88 + 91 + 95 + 115 + 119) + preferred replica (126)
+## Fetch DivergingEpoch + sessions (Phase 88 + 91 + 95 + 115 + 119 + 138) + preferred replica (126)
 
 | Feature | Behavior |
 |---------|----------|
@@ -98,8 +99,9 @@ workers.
 | Idle TTL (95) | Default 60s (`VOLANT_FETCH_SESSION_IDLE_MS`; `0` disables); lazy on create/incremental |
 | Max sessions (95) | Default 1000 (`VOLANT_FETCH_SESSION_MAX`; `0` unlimited); LRU-evict at cap |
 | Multi-broker (119) | Cluster session_id encodes owner; peer miss → transparent inter-broker Fetch forward |
+| Shared mirror (138) | Best-effort MirrorPut/Delete (90–93) after primary mutations; foreign mirror not served while owner alive; owner forward fail → `promote_from_mirror` then local serve; put lag/fail still **70**; dual-promote race may later **71**; metrics `volant_fetch_session_mirror_puts_total` / `_deletes_total` / `volant_fetch_session_promote_total` / `volant_fetch_sessions_mirrored` |
 | PreferredReadReplica (126+133) | Fetch v11+ client `rack_id`; leader may set PreferredReadReplica to same-rack live ISR peer with usable addr + LEO≥HWM (empty records redirect); **rank highest LEO then lowest id** (Phase 133); **suppressed when isolation=READ_COMMITTED** (leader serves aborted-marker filter); gated off for followers (`replica_id` top-level ≤v14 / ReplicaState tag 1 on v15+); Metadata/DescribeCluster/NodeEndpoints advertise `cluster.toml` rack; metric `volant_preferred_replica_redirect_total` |
-| Errors | 70 session id not found (incl. after TTL/LRU / dead owner); 71 invalid session epoch |
+| Errors | 70 session id not found (incl. after TTL/LRU / dead owner without mirror); 71 invalid session epoch |
 
 ## Cluster ISR (Phase 6 + 108/110/118/125)
 
@@ -147,7 +149,7 @@ workers.
 - Transparent EndTxn + AddOffsets + TxnOffsetCommit forward yes (Phase 120/122; Init-owner registry + inter-broker); sticky FindCoordinator yes (Phase 121; murmur2 + registry override); pin Init still recommended if client skips FindCoordinator
 - Durable Init-owner registry yes (Phase 124; local `__txn_coordinator`); TTL GC yes (Phase 127/128; default 24h wall-clock on `last_touch`; BROKER Describe/Alter `volant.txn.coordinator.registry.ttl.ms` / env `VOLANT_TXN_COORDINATOR_TTL_MS`; `0` disables; re-Init still overwrites). **Operators:** long-lived open txns must re-note (re-Init / open fan-out) within TTL or set TTL=`0` / longer — else Init-owner drop → hash-ring-only FindCoordinator / forward (wrong coordinator risk until re-Init)  
 
-- Fetch sessions durable local (Phase 115) + multi-broker forward MVP (Phase 119); omit cache is HWM+LSO only (not byte-identical Kafka response cache); idle TTL + max/LRU yes (Phase 95); PreferredReadReplica MVP yes (Phase 126+133 LEO-desc/usable-addr ranking; not full selector/throttling; **no preferred under READ_COMMITTED**); not shared session store  
+- Fetch sessions durable local (Phase 115) + multi-broker forward MVP (Phase 119) + best-effort shared mirror + promote (Phase 138; not Raft; dual-promote race honest; no session_id re-encode); omit cache is HWM+LSO only (not byte-identical Kafka response cache); idle TTL + max/LRU yes (Phase 95); PreferredReadReplica MVP yes (Phase 126+133 LEO-desc/usable-addr ranking; not full selector/throttling; **no preferred under READ_COMMITTED**; preferred still orthogonal to mirror)  
 - ACL / BROKER admin SoT is the **controller** (Phase 113 push + Phase 117 durable gens / rejoin catch-up + Phase 136 non-blocking/throttled schedule), not Raft consensus; brief lag until heartbeat catch-up is honest  
 
 - DeleteRecords fan-out is **best-effort** at **achieved** low (post whole-segment clamp) by default; peers still clamp independently; journal max-merge SoT. Offline peers get **durable leader outbox retry** (Phase 116) + **new-leader reconcile** (Phase 123/129: `max(local log_start, journal watermark)`) — multi-controller majority journal MVP (Phase 130) + **heartbeat journal rejoin catch-up** (Phase 131) + **non-blocking/throttled catch-up** (Phase 132) + **p2p heartbeat mesh** (Phase 134; not full Raft log). **Phase 135/137 wait** surfaces majority fail to the client (native 15 / Kafka 19) without undoing local truncate; native per-request trailer (Phase 137) overrides the broker knob; Kafka still env/broker only; replica log truncate + outbox remain best-effort even in wait mode. Assignment remove prunes peer journal topics; push cannot resurrect unknown topics (Phase 137). **TruncateJournalNote** rejects negative/stale epochs / unknown TP (residual IT `phase132_journal_note_fence`); enable cluster auth for 86/88 (residual IT `phase133_journal_auth`; **current-epoch forge** under weak auth remains)

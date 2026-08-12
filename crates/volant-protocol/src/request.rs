@@ -92,6 +92,10 @@ pub enum RequestOpcode {
     TruncateJournalNote = 86,
     /// Best-effort full truncate journal snapshot push (Phase 129/130).
     TruncateJournalPush = 88,
+    /// Owner → peers: install/update fetch session mirror snapshot (Phase 138).
+    FetchSessionMirrorPut = 90,
+    /// Owner → peers: remove fetch session mirror (Phase 138).
+    FetchSessionMirrorDelete = 92,
 }
 
 impl RequestOpcode {
@@ -141,6 +145,8 @@ impl RequestOpcode {
             84 => Self::KafkaTxnForward,
             86 => Self::TruncateJournalNote,
             88 => Self::TruncateJournalPush,
+            90 => Self::FetchSessionMirrorPut,
+            92 => Self::FetchSessionMirrorDelete,
             _ => return None,
         })
     }
@@ -588,6 +594,18 @@ pub enum Request {
         /// Versioned snapshot bytes (JSON matching `__truncate_journal/state.json`).
         snapshot: Bytes,
     },
+    /// Owner → peers: install/update one durable fetch session snapshot (Phase 138).
+    FetchSessionMirrorPut {
+        /// Session id mirrored.
+        session_id: i32,
+        /// JSON snapshot of one durable session entry (id, epoch, topics, omit cache).
+        snapshot: Bytes,
+    },
+    /// Owner → peers: remove a fetch session mirror (Phase 138).
+    FetchSessionMirrorDelete {
+        /// Session id to remove from the peer mirror table.
+        session_id: i32,
+    },
 }
 
 impl Request {
@@ -637,6 +655,10 @@ impl Request {
             Self::KafkaTxnForward { .. } => RequestOpcode::KafkaTxnForward as u16,
             Self::TruncateJournalNote { .. } => RequestOpcode::TruncateJournalNote as u16,
             Self::TruncateJournalPush { .. } => RequestOpcode::TruncateJournalPush as u16,
+            Self::FetchSessionMirrorPut { .. } => RequestOpcode::FetchSessionMirrorPut as u16,
+            Self::FetchSessionMirrorDelete { .. } => {
+                RequestOpcode::FetchSessionMirrorDelete as u16
+            }
         }
     }
 }

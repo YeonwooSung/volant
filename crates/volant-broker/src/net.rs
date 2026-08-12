@@ -449,6 +449,39 @@ fn broker_metrics_text(broker: &Broker) -> String {
         "volant_fetch_session_forward_errors_total {}\n",
         sessions.forward_errors_total()
     ));
+    // Phase 138: session mirror + promote.
+    text.push_str(
+        "# HELP volant_fetch_session_mirror_puts_total Mirror put installs applied on this broker\n",
+    );
+    text.push_str("# TYPE volant_fetch_session_mirror_puts_total counter\n");
+    text.push_str(&format!(
+        "volant_fetch_session_mirror_puts_total {}\n",
+        sessions.mirror_puts_applied_total()
+    ));
+    text.push_str(
+        "# HELP volant_fetch_session_mirror_deletes_total Mirror deletes applied on this broker\n",
+    );
+    text.push_str("# TYPE volant_fetch_session_mirror_deletes_total counter\n");
+    text.push_str(&format!(
+        "volant_fetch_session_mirror_deletes_total {}\n",
+        sessions.mirror_deletes_applied_total()
+    ));
+    text.push_str(
+        "# HELP volant_fetch_session_promote_total Mirror→primary promotions after owner miss\n",
+    );
+    text.push_str("# TYPE volant_fetch_session_promote_total counter\n");
+    text.push_str(&format!(
+        "volant_fetch_session_promote_total {}\n",
+        sessions.promote_total()
+    ));
+    text.push_str(
+        "# HELP volant_fetch_sessions_mirrored Foreign session mirrors currently held\n",
+    );
+    text.push_str("# TYPE volant_fetch_sessions_mirrored gauge\n");
+    text.push_str(&format!(
+        "volant_fetch_sessions_mirrored {}\n",
+        sessions.mirrored_count()
+    ));
     // Phase 120/122: multi-broker EndTxn / AddOffsets / TxnOffsetCommit forward.
     text.push_str(
         "# HELP volant_txn_forward_total Successful Kafka txn API forwards to coordinator (EndTxn/AddOffsets/TxnOffsetCommit)\n",
@@ -2532,8 +2565,9 @@ pub async fn maybe_forward_kafka_end_txn(
     maybe_forward_kafka_txn(broker, 26, api_version, principal, end_txn_body).await
 }
 
-/// Phase 119: if this Fetch should be served by a peer session owner, forward
-/// the Kafka body and return the owner's response body. `None` = handle locally.
+/// Phase 119 + 138: if this Fetch should be served by a peer session owner,
+/// forward the Kafka body and return the owner's response body.
+/// `None` = handle locally (including after Phase 138 promote-from-mirror).
 ///
 /// Never re-forwards on the owner (caller is the Kafka client path only).
 pub async fn maybe_forward_kafka_fetch(
@@ -2560,9 +2594,17 @@ pub async fn maybe_forward_kafka_fetch(
     }
     let owner = decode_session_owner(session_id)?;
     if owner == broker.node_id() {
+        // Encoded as us but missing: try promote (peer mirrored us before restart).
+        if broker.fetch_sessions().promote_from_mirror(session_id) {
+            return None;
+        }
         return None;
     }
     let Some(addr) = broker.broker_addr(owner) else {
+        // Owner addr unknown — promote from mirror if present.
+        if broker.fetch_sessions().promote_from_mirror(session_id) {
+            return None;
+        }
         broker.fetch_sessions().record_forward_error();
         let mut out = BytesMut::new();
         put_fetch_empty_response(&mut out, api_version, 70, session_id);
@@ -2590,6 +2632,9 @@ pub async fn maybe_forward_kafka_fetch(
                 "kafka fetch forward peer error"
             );
             broker.fetch_sessions().record_forward_error();
+            if broker.fetch_sessions().promote_from_mirror(session_id) {
+                return None;
+            }
             let mut out = BytesMut::new();
             put_fetch_empty_response(&mut out, api_version, 70, session_id);
             Some(out.freeze())
@@ -2597,6 +2642,9 @@ pub async fn maybe_forward_kafka_fetch(
         Ok(other) => {
             tracing::debug!(owner, ?other, session_id, "kafka fetch forward unexpected");
             broker.fetch_sessions().record_forward_error();
+            if broker.fetch_sessions().promote_from_mirror(session_id) {
+                return None;
+            }
             let mut out = BytesMut::new();
             put_fetch_empty_response(&mut out, api_version, 70, session_id);
             Some(out.freeze())
@@ -2604,11 +2652,130 @@ pub async fn maybe_forward_kafka_fetch(
         Err(e) => {
             tracing::debug!(owner, error = %e, session_id, "kafka fetch forward rpc failed");
             broker.fetch_sessions().record_forward_error();
+            // Phase 138: promote mirrored session and serve locally.
+            if broker.fetch_sessions().promote_from_mirror(session_id) {
+                return None;
+            }
             let mut out = BytesMut::new();
             put_fetch_empty_response(&mut out, api_version, 70, session_id);
             Some(out.freeze())
         }
     }
+}
+
+/// Phase 138: best-effort fan-out of pending session mirror put/delete ops.
+///
+/// Does not fail the client path; fire-and-forget with per-RPC timeout.
+pub async fn fanout_session_mirror_ops(broker: &Broker) {
+    use crate::kafka::fetch_session::SessionMirrorOp;
+    use bytes::Bytes;
+
+    let ops = broker.fetch_sessions().drain_mirror_ops();
+    if ops.is_empty() || broker.cluster_config().is_none() {
+        return;
+    }
+    let self_id = broker.node_id();
+    let peers: Vec<(u32, String)> = broker
+        .live_brokers()
+        .into_iter()
+        .filter(|&id| id != self_id)
+        .filter_map(|id| broker.broker_addr(id).map(|a| (id, a)))
+        .collect();
+    if peers.is_empty() {
+        return;
+    }
+
+    for op in ops {
+        match op {
+            SessionMirrorOp::Put(session_id) => {
+                let Some(snap) = broker.fetch_sessions().export_session_bytes(session_id) else {
+                    continue;
+                };
+                let req = Request::FetchSessionMirrorPut {
+                    session_id,
+                    snapshot: Bytes::from(snap),
+                };
+                for (peer_id, addr) in &peers {
+                    match inter_broker_rpc(broker, addr, &req).await {
+                        Ok(Response::FetchSessionMirrorPut { error_code: 0 }) => {}
+                        Ok(Response::FetchSessionMirrorPut { error_code }) => {
+                            tracing::debug!(
+                                peer_id,
+                                session_id,
+                                error_code,
+                                "session mirror put peer error"
+                            );
+                        }
+                        Ok(other) => {
+                            tracing::debug!(
+                                peer_id,
+                                session_id,
+                                ?other,
+                                "session mirror put unexpected"
+                            );
+                        }
+                        Err(e) => {
+                            tracing::debug!(
+                                peer_id,
+                                session_id,
+                                error = %e,
+                                "session mirror put rpc failed"
+                            );
+                        }
+                    }
+                }
+            }
+            SessionMirrorOp::Delete(session_id) => {
+                let req = Request::FetchSessionMirrorDelete { session_id };
+                for (peer_id, addr) in &peers {
+                    match inter_broker_rpc(broker, addr, &req).await {
+                        Ok(Response::FetchSessionMirrorDelete { error_code: 0 }) => {}
+                        Ok(Response::FetchSessionMirrorDelete { error_code }) => {
+                            tracing::debug!(
+                                peer_id,
+                                session_id,
+                                error_code,
+                                "session mirror delete peer error"
+                            );
+                        }
+                        Ok(other) => {
+                            tracing::debug!(
+                                peer_id,
+                                session_id,
+                                ?other,
+                                "session mirror delete unexpected"
+                            );
+                        }
+                        Err(e) => {
+                            tracing::debug!(
+                                peer_id,
+                                session_id,
+                                error = %e,
+                                "session mirror delete rpc failed"
+                            );
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
+
+/// Schedule [`fanout_session_mirror_ops`] after local Kafka Fetch session mutations.
+///
+/// Spawns a best-effort task only when ops are pending; does not block the
+/// client Fetch response path.
+pub fn schedule_session_mirror_fanout(broker: &Arc<Broker>) {
+    if broker.cluster_config().is_none() {
+        return;
+    }
+    if !broker.fetch_sessions().has_pending_mirror_ops() {
+        return;
+    }
+    let b = Arc::clone(broker);
+    tokio::spawn(async move {
+        fanout_session_mirror_ops(b.as_ref()).await;
+    });
 }
 
 /// Default per inter-broker RPC timeout: **5 seconds**.
@@ -3204,6 +3371,8 @@ fn authorize_request(
         | Request::TxnParticipantComplete { .. }
         | Request::KafkaFetchForward { .. }
         | Request::KafkaTxnForward { .. }
+        | Request::FetchSessionMirrorPut { .. }
+        | Request::FetchSessionMirrorDelete { .. }
         | Request::Auth { .. }
         | Request::ScramFirst { .. }
         | Request::ScramFinal { .. } => return None,
@@ -3296,6 +3465,8 @@ fn authorize_request(
         | Request::TxnParticipantComplete { .. }
         | Request::KafkaFetchForward { .. }
         | Request::KafkaTxnForward { .. }
+        | Request::FetchSessionMirrorPut { .. }
+        | Request::FetchSessionMirrorDelete { .. }
         | Request::Auth { .. }
         | Request::ScramFirst { .. }
         | Request::ScramFinal { .. } => true,
@@ -3381,7 +3552,9 @@ fn record_response_metrics(broker: &Broker, resp: &Response) {
         | Response::KafkaFetchForward { error_code, .. }
         | Response::KafkaTxnForward { error_code, .. }
         | Response::TruncateJournalNote { error_code, .. }
-        | Response::TruncateJournalPush { error_code } => {
+        | Response::TruncateJournalPush { error_code }
+        | Response::FetchSessionMirrorPut { error_code }
+        | Response::FetchSessionMirrorDelete { error_code } => {
             if *error_code != 0 {
                 m.record_error(*error_code);
             }
@@ -4122,10 +4295,30 @@ async fn handle_request(broker: &Arc<Broker>, req: Request) -> Result<Response> 
                 api_version,
                 &principal,
             );
+            // Phase 138: mirror session mutations from owner-side encode.
+            schedule_session_mirror_fanout(broker);
             Ok(Response::KafkaFetchForward {
                 error_code: 0,
                 body: out.freeze(),
             })
+        }
+        Request::FetchSessionMirrorPut {
+            session_id: _,
+            snapshot,
+        } => {
+            // Phase 138: install foreign mirror snapshot (best-effort SoT copy).
+            let error_code = match broker.fetch_sessions().apply_mirror_put(&snapshot) {
+                Ok(()) => 0,
+                Err(e) => {
+                    tracing::debug!(error = %e, "fetch session mirror put apply failed");
+                    ErrorCode::InvalidArg as u16
+                }
+            };
+            Ok(Response::FetchSessionMirrorPut { error_code })
+        }
+        Request::FetchSessionMirrorDelete { session_id } => {
+            broker.fetch_sessions().apply_mirror_delete(session_id);
+            Ok(Response::FetchSessionMirrorDelete { error_code: 0 })
         }
         Request::KafkaTxnForward {
             api_key,

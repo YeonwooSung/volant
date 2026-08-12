@@ -41,6 +41,9 @@ Key series (prefix `volant_`):
 - `volant_fetch_sessions_idle_evicted_total` (Phase 97 idle-only subset)
 - `volant_fetch_sessions_restored` / `volant_fetch_sessions_persist_errors_total` (Phase 115 durable)
 - `volant_fetch_session_forward_total` / `volant_fetch_session_forward_errors_total` (Phase 119 multi-broker handoff)
+- `volant_fetch_session_mirror_puts_total` / `volant_fetch_session_mirror_deletes_total` (Phase 138 peer mirror installs/removes applied)
+- `volant_fetch_session_promote_total` (Phase 138 mirror→primary after owner miss)
+- `volant_fetch_sessions_mirrored` (Phase 138 gauge: foreign mirrors currently held)
 - `volant_txn_forward_total` / `volant_txn_forward_errors_total` (Phase 120/122 Kafka txn API forward: EndTxn / AddOffsets / TxnOffsetCommit)
 - `volant_txn_coordinator_registry_restored` / `volant_txn_coordinator_registry_persist_errors_total` (Phase 124 durable Init-owner registry)
 - `volant_txn_coordinator_registry_gc_total` (Phase 127 registry TTL GC drops)
@@ -197,7 +200,7 @@ volant-server \
 - **Leader epochs:** durable history under `{data_dir}/__leader_epochs` (Phase 87);
   OffsetForLeaderEpoch returns prior-epoch end offsets; Metadata advertises live
   epoch. Not a full KRaft epoch state machine.
-- **Fetch DivergingEpoch / sessions (Phase 88 + 91 + 95 + 115):** truncation →
+- **Fetch DivergingEpoch / sessions (Phase 88 + 91 + 95 + 115 + 119 + 138):** truncation →
   OFFSET_OUT_OF_RANGE + DivergingEpoch tag 0 from history; fetch sessions
   (create / forgotten / errors 70–71); empty-topics incremental
   **omits** partitions when HWM+LSO unchanged and records empty (Phase 91);
@@ -209,8 +212,13 @@ volant-server \
   TTL. **Multi-broker handoff MVP (Phase 119):** cluster session_ids embed the owner
   `node_id`; a peer that lacks the session transparent-forwards the Kafka Fetch body
   to the owner over inter-broker RPC (opcode 82/83) so epoch + omit-unchanged stay
-  correct. Owner death / unreachable ⇒ **70**. Sticky routing still preferred for
-  latency (one extra RTT on forward).
+  correct while the owner is alive. **Shared mirror MVP (Phase 138):** owner best-effort
+  fans out MirrorPut/Delete (opcodes 90–93) to live peers; peers hold a foreign mirror
+  table (not served while owner alive). Owner death / forward fail: if a mirror is
+  present, promote into primary and serve locally; else **70**. Best-effort only (not
+  Raft); put lag/fail still **70**; dual-promote race may later **71**; session_id
+  owner bits are not re-encoded. Sticky routing still preferred for latency (one
+  extra RTT on forward when owner is up).
 - **ACLs:** Kafka ACL admin maps to Volant Phase 20/21 ACLs (LITERAL only;
   CreateAcls enables enforcement). Describe/Create/DeleteAcls **0–3**: v3 accepts
   Kafka **User** resource type (stored as `ResourceType::User`; not used on the
@@ -348,7 +356,8 @@ curl -s -H "Authorization: Bearer $VOLANT_METRICS_TOKEN" \
 - Multi-language clients
 - Full chaos-mesh suites / long fuzz campaigns (corpus **smoke CI MVP** → **closed by Phase 112**)
 - Full KIP-890/939 / Kafka `__transaction_state` topic (multi-broker Enable2Pc MVP → **closed by Phase 114**)
-- Multi-broker session affinity / durable sessions
+- Multi-broker session affinity / durable sessions → **closed by Phase 115/119**; shared mirror + promote → **closed by Phase 138** (best-effort residual: Raft registry / serve-without-promote / debounced put)
+- Full preferred-replica selector / rack-aware partition assignment (beyond 126/133)
 - Byte-identical Kafka compressed response cache (omit is HWM+LSO based)
 - Accept-loop drain + single-flight background tasks → **closed by Phase 109** (bg join: Phase 106)
 - Non-controller alive-set auto-death → **closed by Phase 110**
