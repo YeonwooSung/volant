@@ -170,6 +170,8 @@ async fn push_inter_broker_principal_allows() {
     let snap = Bytes::from(src.truncate_journal().snapshot_bytes());
 
     let (dst, _gd) = new_single_broker("p133", "push-dst");
+    // Phase 137: push filters unknown topics; topic must exist on dst for watermark apply.
+    dst.create_topic("t", 1).unwrap();
     dst.set_auth_token(Some("secret".into()));
     dst.configure_acls(true, None, vec![], "token".into())
         .unwrap();

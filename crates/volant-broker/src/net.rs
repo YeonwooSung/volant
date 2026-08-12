@@ -4292,9 +4292,10 @@ async fn handle_request(broker: &Arc<Broker>, req: Request) -> Result<Response> 
             topic,
             partition,
             before_offset,
+            wait_majority,
         } => match broker.delete_records(&topic, partition, before_offset) {
             Ok((low_watermark, error_code)) => {
-                // Phase 113/129/130/135: fan-out after local success.
+                // Phase 113/129/130/135/137: fan-out after local success.
                 // Budget is enforced inside fanout_delete_records (default 20s
                 // overall; 5s per inter-broker RPC).
                 // Fan-out journal note + ReplicaDeleteRecords + outbox at the
@@ -4306,11 +4307,12 @@ async fn handle_request(broker: &Arc<Broker>, req: Request) -> Result<Response> 
                 // success) even if journal majority fails. Wait on: surface
                 // NotEnoughReplicas (15) when majority fails; low_watermark
                 // remains the achieved local low (no rollback).
+                // Phase 137: per-request wait_majority trailer (0=broker, 1/2 force).
                 let mut err = error_code;
                 if error_code == 0 {
                     let fan =
                         fanout_delete_records(broker, &topic, partition, low_watermark).await;
-                    if broker.delete_records_wait_majority() {
+                    if broker.effective_delete_records_wait_majority(wait_majority) {
                         if fan.majority_ok {
                             broker.note_delete_records_majority_wait_success();
                         } else {

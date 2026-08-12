@@ -16,9 +16,14 @@
 //! existing keys still works. Topic deletion prunes journal entries
 //! (`remove_topic`) without bumping generation.
 //!
+//! **Phase 137 known-topic filter:** [`Self::apply_push_filtered`] can skip
+//! snapshot entries whose topic is not in a caller-supplied set so deleted
+//! topics cannot resurrect via peer push. Unfiltered [`Self::apply_push`]
+//! (`known_topics = None`) still accepts all keys (unit-test / direct use).
+//!
 //! Not full Raft log replication / leader election (openraft KRaft still deferred).
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::fs::{self, File, OpenOptions};
 use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
@@ -357,15 +362,33 @@ impl TruncateJournal {
 
     /// Apply a peer/controller push snapshot (Phase 129/130).
     ///
+    /// Unfiltered: accepts all snapshot keys. Prefer
+    /// [`Self::apply_push_filtered`] from the broker push path so deleted
+    /// topics cannot resurrect (Phase 137).
+    pub fn apply_push(&self, generation: u64, snapshot: &[u8]) -> Result<(), String> {
+        self.apply_push_filtered(generation, snapshot, None)
+    }
+
+    /// Apply a peer/controller push snapshot with optional known-topic filter.
+    ///
     /// **Max-merges** entries into the local map (multi-controller safe) and
     /// advances generation to `max(local, push)`. Always merges entry maxes
     /// even for older push generations so a lagging push cannot shrink state.
+    ///
+    /// When `known_topics` is `Some(set)`, entries whose `topic` is **not** in
+    /// the set are skipped (Phase 137 anti-resurrection). `None` accepts all
+    /// keys (backward-compatible unit-test path).
     ///
     /// Rejects oversized payloads (`MAX_TRUNCATE_JOURNAL_SNAPSHOT_BYTES`) and
     /// snapshots with more than `max_entries` raw entries. When the local map
     /// is already at cap, only **existing** keys are updated; brand-new keys
     /// beyond the cap are skipped (with a one-shot warn).
-    pub fn apply_push(&self, generation: u64, snapshot: &[u8]) -> Result<(), String> {
+    pub fn apply_push_filtered(
+        &self,
+        generation: u64,
+        snapshot: &[u8],
+        known_topics: Option<&HashSet<String>>,
+    ) -> Result<(), String> {
         if snapshot.len() > MAX_TRUNCATE_JOURNAL_SNAPSHOT_BYTES {
             return Err(format!(
                 "truncate journal snapshot too large: {} bytes > max {}",
@@ -388,6 +411,11 @@ impl TruncateJournal {
             for e in file.entries {
                 if e.before_offset == 0 || e.topic.is_empty() {
                     continue;
+                }
+                if let Some(known) = known_topics {
+                    if !known.contains(&e.topic) {
+                        continue;
+                    }
                 }
                 let key = (e.topic.clone(), e.partition);
                 if !map.contains_key(&key) && map.len() >= self.max_entries {
@@ -791,5 +819,50 @@ mod tests {
         assert_eq!(MAX_TRUNCATE_JOURNAL_ENTRIES, 100_000);
         assert_eq!(MAX_TRUNCATE_JOURNAL_SNAPSHOT_BYTES, 4 * 1024 * 1024);
         assert!(MAX_TRUNCATE_JOURNAL_SNAPSHOT_BYTES < 16 * 1024 * 1024);
+    }
+
+    /// Phase 137: filtered apply skips topics not in the known set (anti-resurrection).
+    #[test]
+    fn apply_push_skips_unknown_topics_when_filtered() {
+        let dir = temp();
+        let _ = fs::remove_dir_all(&dir);
+        let file = TruncateJournalFile {
+            version: TRUNCATE_JOURNAL_FILE_VERSION,
+            generation: 3,
+            entries: vec![
+                TruncateJournalEntry {
+                    topic: "gone".into(),
+                    partition: 0,
+                    before_offset: 99,
+                    leader_epoch: 1,
+                },
+                TruncateJournalEntry {
+                    topic: "alive".into(),
+                    partition: 0,
+                    before_offset: 42,
+                    leader_epoch: 1,
+                },
+            ],
+        };
+        let snap = serde_json::to_vec(&file).unwrap();
+
+        let filtered = TruncateJournal::open(dir.join("filtered"));
+        assert_eq!(filtered.entry_count(), 0);
+        let mut known = HashSet::new();
+        known.insert("alive".to_owned());
+        filtered
+            .apply_push_filtered(3, &snap, Some(&known))
+            .unwrap();
+        assert_eq!(filtered.watermark("gone", 0), None);
+        assert_eq!(filtered.watermark("alive", 0), Some(42));
+        assert_eq!(filtered.applied_generation(), 3);
+
+        // Unfiltered path still accepts all keys.
+        let unfiltered = TruncateJournal::open(dir.join("unfiltered"));
+        unfiltered.apply_push(3, &snap).unwrap();
+        assert_eq!(unfiltered.watermark("gone", 0), Some(99));
+        assert_eq!(unfiltered.watermark("alive", 0), Some(42));
+
+        let _ = fs::remove_dir_all(&dir);
     }
 }

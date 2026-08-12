@@ -162,6 +162,12 @@ enum TopicCmd {
         /// Drop sealed segments entirely before this offset.
         #[arg(long)]
         before_offset: u64,
+        /// Force majority wait for this request (Phase 137 flag 1).
+        #[arg(long, conflicts_with = "no_wait_majority")]
+        wait_majority: bool,
+        /// Force no majority wait for this request (Phase 137 flag 2).
+        #[arg(long, conflicts_with = "wait_majority")]
+        no_wait_majority: bool,
         /// Broker address.
         #[arg(long, default_value = "127.0.0.1:9092")]
         broker: String,
@@ -541,11 +547,21 @@ async fn main() -> Result<()> {
                 name,
                 partition,
                 before_offset,
+                wait_majority,
+                no_wait_majority,
                 broker,
             } => {
                 let client = connect(&broker, auth).await?;
+                // Phase 137: 0=broker default, 1=force wait, 2=force no-wait.
+                let wait_flag = if wait_majority {
+                    1u8
+                } else if no_wait_majority {
+                    2u8
+                } else {
+                    0u8
+                };
                 let res = client
-                    .delete_records(&name, partition, before_offset)
+                    .delete_records_with_wait_flag(&name, partition, before_offset, wait_flag)
                     .await
                     .with_context(|| format!("delete-records '{name}' p{partition}"))?;
                 println!(

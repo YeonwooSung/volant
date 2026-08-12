@@ -369,10 +369,12 @@ pub fn encode_request(req: &Request) -> Result<Bytes> {
             topic,
             partition,
             before_offset,
+            wait_majority,
         } => {
             put_string(&mut dst, topic)?;
             dst.put_u32_le(*partition);
             dst.put_u64_le(*before_offset);
+            dst.put_u8(*wait_majority);
         }
         Request::CreatePartitions {
             topic,
@@ -904,10 +906,17 @@ pub fn decode_request(opcode: u16, payload: &[u8]) -> Result<Request> {
             }
             let partition = src.get_u32_le();
             let before_offset = src.get_u64_le();
+            // Phase 137: optional wait_majority trailer (absent → 0).
+            let wait_majority = if src.remaining() >= 1 {
+                src.get_u8()
+            } else {
+                0
+            };
             Ok(Request::DeleteRecords {
                 topic,
                 partition,
                 before_offset,
+                wait_majority,
             })
         }
         RequestOpcode::CreatePartitions => {
@@ -2692,6 +2701,7 @@ mod tests {
             topic: "events".into(),
             partition: 2,
             before_offset: 100,
+            wait_majority: 0,
         };
         let b = encode_request(&req).unwrap();
         assert_eq!(
@@ -2709,6 +2719,41 @@ mod tests {
             decode_response(ResponseOpcode::DeleteRecords as u16, &b).unwrap(),
             resp
         );
+    }
+
+    /// Phase 137: legacy payload without trailer decodes wait_majority=0;
+    /// trailers 1 and 2 round-trip.
+    #[test]
+    fn phase137_delete_records_wait_majority_trailer() {
+        // Legacy body: topic + partition + before_offset (no trailer).
+        let mut legacy = bytes::BytesMut::new();
+        put_string(&mut legacy, "events").unwrap();
+        legacy.put_u32_le(1);
+        legacy.put_u64_le(42);
+        let decoded = decode_request(RequestOpcode::DeleteRecords as u16, &legacy).unwrap();
+        assert_eq!(
+            decoded,
+            Request::DeleteRecords {
+                topic: "events".into(),
+                partition: 1,
+                before_offset: 42,
+                wait_majority: 0,
+            }
+        );
+
+        for flag in [1u8, 2u8] {
+            let req = Request::DeleteRecords {
+                topic: "events".into(),
+                partition: 0,
+                before_offset: 10,
+                wait_majority: flag,
+            };
+            let b = encode_request(&req).unwrap();
+            assert_eq!(
+                decode_request(RequestOpcode::DeleteRecords as u16, &b).unwrap(),
+                req
+            );
+        }
     }
 
     #[test]

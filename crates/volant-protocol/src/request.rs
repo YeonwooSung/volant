@@ -416,6 +416,8 @@ pub enum Request {
         partition: u32,
         /// Drop sealed segments entirely before this offset.
         before_offset: u64,
+        /// Phase 137: 0=broker default, 1=force wait, 2=force no-wait.
+        wait_majority: u8,
     },
     /// Increase topic partition count (Phase 15).
     CreatePartitions {

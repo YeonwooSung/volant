@@ -996,6 +996,18 @@ impl Broker {
             .store(wait, Ordering::Relaxed);
     }
 
+    /// Phase 137: merge request trailer with broker default wait knob.
+    /// * 0 / other → `delete_records_wait_majority()`
+    /// * 1 → true
+    /// * 2 → false
+    pub fn effective_delete_records_wait_majority(&self, request_flag: u8) -> bool {
+        match request_flag {
+            1 => true,
+            2 => false,
+            _ => self.delete_records_wait_majority(),
+        }
+    }
+
     /// Phase 135: wait-mode majority success counter.
     pub fn delete_records_majority_wait_success_total(&self) -> u64 {
         self.delete_records_majority_wait_success_total
@@ -1272,14 +1284,32 @@ impl Broker {
         self.controller_note_truncate_journal(topic, partition, before_offset, leader_epoch)
     }
 
+    /// Known topic names for Phase 137 journal push anti-resurrection.
+    ///
+    /// Cluster: assignment topic keys. Single-node: local topics map.
+    fn journal_known_topics(&self) -> HashSet<String> {
+        if let Some(cluster) = &self.cluster {
+            cluster.assignment.read().topics.keys().cloned().collect()
+        } else {
+            self.topics
+                .read()
+                .keys()
+                .map(|n| n.as_str().to_owned())
+                .collect()
+        }
+    }
+
     /// Phase 129/130: apply journal snapshot push (max-merge).
+    ///
+    /// Phase 137: filters to known topics so deleted topics cannot resurrect.
     pub fn apply_truncate_journal_push(
         &self,
         generation: u64,
         snapshot: &[u8],
     ) -> Result<()> {
+        let known = self.journal_known_topics();
         self.truncate_journal
-            .apply_push(generation, snapshot)
+            .apply_push_filtered(generation, snapshot, Some(&known))
             .map_err(Error::InvalidArgument)
     }
 
@@ -6352,6 +6382,10 @@ impl Broker {
     }
 
     /// Apply a ClusterState snapshot from the controller.
+    ///
+    /// Phase 137: topics removed from the assignment are pruned from the
+    /// local truncate journal so peers that never ran `delete_topic` drop
+    /// watermarks (anti-linger / peer prune).
     pub fn apply_cluster_state(
         &self,
         generation: u32,
@@ -6361,13 +6395,20 @@ impl Broker {
         let Some(cluster) = &self.cluster else {
             return Ok(());
         };
-        {
+        let removed: Vec<String> = {
             let mut asg = cluster.assignment.write();
             if generation < asg.generation {
                 return Ok(()); // stale
             }
+            let old: HashSet<String> = asg.topics.keys().cloned().collect();
             asg.apply_wire(generation, topics);
             save_assignment(&cluster.data_dir, &asg)?;
+            let new: HashSet<_> = asg.topics.keys().cloned().collect();
+            old.into_iter().filter(|t| !new.contains(t)).collect()
+        };
+        // Best-effort journal prune outside the assignment write lock.
+        for t in &removed {
+            let _ = self.truncate_journal.remove_topic(t);
         }
         let _ = controller_id;
         self.apply_local_assignment()?;

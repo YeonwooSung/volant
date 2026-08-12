@@ -3272,6 +3272,33 @@ Binding: **[docs/PHASE136_SPEC.md](./docs/PHASE136_SPEC.md)**.
 
 ---
 
+### Phase 137 — DeleteRecords request wait flag + journal GC hygiene ✅
+
+**Goal:** Native per-request majority-wait override (optional trailer) and
+truncate-journal topic GC so deleted topics do not linger or resurrect via push.
+Kafka path stays broker-knob only.
+
+Binding: **[docs/PHASE137_SPEC.md](./docs/PHASE137_SPEC.md)**.
+
+- [x] Native `DeleteRecords` optional trailer `wait_majority: u8` (0=broker default, 1=force wait, 2=force no-wait)
+- [x] `Broker::effective_delete_records_wait_majority`; metrics when effective wait on
+- [x] `Client::delete_records_with_wait_flag` + CLI `--wait-majority` / `--no-wait-majority`
+- [x] `apply_cluster_state` prunes removed topics from truncate journal
+- [x] Push apply filters to known topics (anti-resurrection)
+- [x] Tests `phase137_delete_records_request_wait_flag` + `phase137_journal_topic_gc`
+- [x] Living docs 0–137
+
+**Honest limitations:** local truncate still not rolled back on majority fail;
+Kafka clients cannot pass per-request wait (env/`VOLANT_DELETE_RECORDS_WAIT_MAJORITY`
+only); journal majority still over configured N; known-topic filter can briefly
+skip watermarks for brand-new topics until assignment includes them.
+
+**Still deferred:** rollback local truncate on majority fail; full openraft/KRaft,
+multi-lang, chaos/long fuzz, full KIP-890/939, shared session store, full preferred
+selector (beyond 133 polish), heterogeneous per-broker BROKER overrides.
+
+---
+
 ## Performance targets (aspirational)
 
 | Metric | Single node target | Notes |
@@ -3307,7 +3334,7 @@ marker clip 111; fuzz corpus smoke CI 112; cluster admin fan-out 113) — see
 
 ## Suggested implementation order (PRs)
 
-Phases **0–136 are shipped**. Historical PR order for the core:
+Phases **0–137 are shipped**. Historical PR order for the core:
 
 1. Phase 1 segment format + unit tests  
 2. Phase 1 recovery + retention  
@@ -3346,6 +3373,7 @@ Phases **0–136 are shipped**. Historical PR order for the core:
 35. Phase 134 (peer-to-peer heartbeat mesh MVP) ✅  
 36. Phase 135 (DeleteRecords optional majority wait) ✅  
 37. Phase 136 (non-blocking admin catch-up MVP) ✅  
+38. Phase 137 (DeleteRecords request wait flag + journal topic GC) ✅  
 
 ---
 
@@ -3386,7 +3414,7 @@ cargo run -p volant-bench --release
 cargo test --workspace
 ```
 
-**Status (post–Phase 136):** core broker, ops (metrics / TLS / auth / SCRAM /
+**Status (post–Phase 137):** core broker, ops (metrics / TLS / auth / SCRAM /
 ACLs / Helm), and the Kafka wire shim are **shipped** (Fetch 0–18 Kafka max;
 ACL admin 0–3 with User resource; soft-marker `READ_COMMITTED` with **marker GC/clip**
 on DeleteRecords/retention/load (Phase 104/111); durable OFLE history; Fetch DivergingEpoch +
@@ -3417,8 +3445,8 @@ txn EndTxn/AddOffsets/TxnOffsetCommit forward Phases 120/122;
 **durable Init-owner registry** Phase 124 (`__txn_coordinator`);
 **PreferredReadReplica / rack-aware Fetch MVP** Phase 126 (Metadata rack;
 redirect when same-rack ISR peer LEO≥HWM);
-**txn coordinator registry TTL GC** Phase 127 + **BROKER config surface** Phase 128; **truncate journal** Phase 129 + **majority multi-controller consensus** Phase 130 + **journal rejoin catch-up** Phase 131 + **catch-up hardening** Phase 132 + **preferred selector polish** Phase 133 + **p2p heartbeat mesh** Phase 134 + **optional DeleteRecords majority wait** Phase 135 + **non-blocking admin catch-up** Phase 136).
+**txn coordinator registry TTL GC** Phase 127 + **BROKER config surface** Phase 128; **truncate journal** Phase 129 + **majority multi-controller consensus** Phase 130 + **journal rejoin catch-up** Phase 131 + **catch-up hardening** Phase 132 + **preferred selector polish** Phase 133 + **p2p heartbeat mesh** Phase 134 + **optional DeleteRecords majority wait** Phase 135 + **non-blocking admin catch-up** Phase 136 + **native DeleteRecords request wait trailer + journal topic GC** Phase 137).
 Still deferred: multi-language clients, full chaos-mesh suites / long fuzz
 campaigns, shared session store / full preferred-replica selector, full
-KIP-890/939.
+KIP-890/939, rollback local truncate on majority fail.
 Details: [docs/KAFKA_COMPAT.md](./docs/KAFKA_COMPAT.md), [docs/ops.md](./docs/ops.md).

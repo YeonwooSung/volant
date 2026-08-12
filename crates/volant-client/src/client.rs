@@ -509,17 +509,33 @@ impl Client {
     /// Delete records before `before_offset` on a partition (Phase 14).
     ///
     /// Returns the new log start offset (low watermark).
+    /// Sends `wait_majority: 0` (broker default; Phase 137).
     pub async fn delete_records(
         &self,
         topic: &str,
         partition: u32,
         before_offset: u64,
     ) -> Result<DeleteRecordsResult> {
+        self.delete_records_with_wait_flag(topic, partition, before_offset, 0)
+            .await
+    }
+
+    /// Delete records with Phase 137 majority-wait trailer.
+    ///
+    /// `wait_majority`: 0 = broker default, 1 = force wait, 2 = force no-wait.
+    pub async fn delete_records_with_wait_flag(
+        &self,
+        topic: &str,
+        partition: u32,
+        before_offset: u64,
+        wait_majority: u8,
+    ) -> Result<DeleteRecordsResult> {
         let resp = self
             .round_trip(Request::DeleteRecords {
                 topic: topic.to_owned(),
                 partition,
                 before_offset,
+                wait_majority,
             })
             .await?;
         match resp {

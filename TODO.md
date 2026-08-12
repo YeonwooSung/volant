@@ -1,13 +1,21 @@
 # Volant residual TODO (review loop)
 
-**Baseline:** HEAD product = **Phase 136** shipped (non-blocking admin catch-up) + residual docs (N=2 majority, registry TTL).  
-**Last review:** 2026-08-10  
+**Baseline:** HEAD product = **Phase 137** shipped (native DeleteRecords wait trailer + journal topic GC hygiene).  
+**Last review:** 2026-08-12  
 
-Living roadmap: [ROADMAP.md](./ROADMAP.md) (Phases **0–136 shipped**). Spec: [docs/PHASE136_SPEC.md](./docs/PHASE136_SPEC.md).
+Living roadmap: [ROADMAP.md](./ROADMAP.md) (Phases **0–137 shipped**). Spec: [docs/PHASE137_SPEC.md](./docs/PHASE137_SPEC.md).
 
 ---
 
 ## Shipped recently
+
+### Phase 137 — DeleteRecords request wait flag + journal GC hygiene
+- [x] Native optional trailer `wait_majority: u8` (0=broker default, 1=force wait, 2=force no-wait)
+- [x] `Client::delete_records_with_wait_flag` + CLI `--wait-majority` / `--no-wait-majority`
+- [x] `apply_cluster_state` prunes removed topics from truncate journal
+- [x] Push apply filters to known topics (anti-resurrection)
+- [x] Tests `phase137_delete_records_request_wait_flag` + `phase137_journal_topic_gc`
+- [x] Kafka path still env/broker knob only (no per-request wire field)
 
 ### Phase 136 — Non-blocking admin catch-up
 - [x] `schedule_catch_up_peer_admin_state` (single-flight + min-interval)
@@ -39,7 +47,7 @@ _(none open)_
 - [ ] Full chaos-mesh / long fuzz campaigns
 - [ ] Heterogeneous per-broker BROKER overrides without controller
 - [ ] True multi-master ACL merge
-- [ ] Request-level DeleteRecords wait flag on wire (Phase 135 env-only)
+- [x] Request-level DeleteRecords wait flag on wire (Phase 137 native trailer; Kafka still env-only)
 - [ ] Rollback local truncate on majority fail
 
 ---
@@ -48,8 +56,9 @@ _(none open)_
 
 | Area | Verdict |
 |------|---------|
+| Phase 137 | **Shipped** — native per-request wait + journal topic prune / anti-resurrection |
 | Phase 136 | **Shipped** — admin catch-up no longer stalls HeartbeatBroker |
 | N=2 / TTL docs | **Done** |
 | P0 code | **Done** |
 
-**Next candidates:** shared fetch sessions, request-level majority-wait flag, or larger Raft/KIP work.
+**Next candidates:** shared fetch sessions, rollback-on-majority-fail (hard), or larger Raft/KIP work.

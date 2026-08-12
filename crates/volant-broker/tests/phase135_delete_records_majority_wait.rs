@@ -123,6 +123,7 @@ async fn wait_off_succeeds_without_majority() {
             topic: "t".into(),
             partition: 0,
             before_offset: 15,
+            wait_majority: 0,
         },
     )
     .await;
@@ -256,6 +257,7 @@ async fn wait_on_majority_ok() {
             topic: "maj".into(),
             partition: 0,
             before_offset: 15,
+            wait_majority: 0,
         },
     )
     .await;
@@ -351,6 +353,7 @@ async fn wait_on_majority_fail() {
             topic: "p135a".into(),
             partition: 0,
             before_offset: 15,
+            wait_majority: 0,
         },
     )
     .await;
@@ -481,6 +484,7 @@ async fn single_node_majority_ok_true() {
             topic: "s".into(),
             partition: 0,
             before_offset: 10,
+            wait_majority: 0,
         },
     )
     .await;

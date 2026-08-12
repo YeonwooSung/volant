@@ -1,6 +1,6 @@
 # Phase history index
 
-Ship records for **phases 0–136** (shipped). Binding core contracts are
+Ship records for **phases 0–137** (shipped). Binding core contracts are
 **[PHASE1_SPEC](../PHASE1_SPEC.md)–[PHASE6_SPEC](../PHASE6_SPEC.md)**. Living
 docs for day-to-day reading: [ops](../ops.md), [consistency](../consistency.md),
 [tuning](../tuning.md), [KAFKA_COMPAT](../KAFKA_COMPAT.md),
@@ -178,10 +178,11 @@ docs for day-to-day reading: [ops](../ops.md), [consistency](../consistency.md),
 | 134 | ✅ | Peer-to-peer heartbeat mesh (HB all peers; alive-set only vs controller; journal catch-up path) | [PHASE134_SPEC.md](../PHASE134_SPEC.md) |
 | 135 | ✅ | DeleteRecords optional majority wait (client-visible journal majority; default off) | [PHASE135_SPEC.md](../PHASE135_SPEC.md) |
 | 136 | ✅ | Non-blocking admin ACL/BROKER catch-up (schedule + single-flight + min-interval) | [PHASE136_SPEC.md](../PHASE136_SPEC.md) |
+| 137 | ✅ | DeleteRecords native wait trailer + journal topic GC (assignment prune + anti-resurrection push) | [PHASE137_SPEC.md](../PHASE137_SPEC.md) |
 
 ---
 
-## Still deferred (post–Phase 136)
+## Still deferred (post–Phase 137)
 
 - Multi-language clients
 - Chaos-mesh / long fuzz campaigns (corpus **smoke CI** → **closed by Phase 112**)
@@ -219,6 +220,9 @@ docs for day-to-day reading: [ops](../ops.md), [consistency](../consistency.md),
 - Truncate journal rejoin catch-up / heartbeat lag re-push → **closed by Phase 131** (`applied_journal_generation` + TruncateJournalPush; not Raft)
 - Journal catch-up stall / throttle / single-flight hardening → **closed by Phase 132**
 - Preferred selector polish (usable addr + LEO ranking) → **closed by Phase 133**
+- Request-level DeleteRecords majority-wait flag → **closed by Phase 137** (native trailer; Kafka still env/broker only)
+- Truncate-journal topic prune on assignment remove + push anti-resurrection → **closed by Phase 137**
+- Rollback local truncate on majority fail (still open)
 - Peer-to-peer heartbeat mesh → **closed by Phase 134**
 - Sync client wait on DeleteRecords majority → **closed by Phase 135** (opt-in; default best-effort)
 - Full Kafka preferred-replica selector / rack-aware partition assignment
