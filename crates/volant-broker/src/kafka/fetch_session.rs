@@ -1,5 +1,6 @@
 //! Fetch session state (Phase 88 + 91 omit-unchanged + Phase 95 limits + Phase 115 durable
-//! + Phase 119 multi-broker owner encoding / handoff + Phase 138 peer mirror).
+//! + Phase 119 multi-broker owner encoding / handoff + Phase 138 peer mirror + Phase 139
+//! mirror polish).
 //!
 //! Tracks topic partitions, last-seen fetch params, last-returned HWM/LSO (Phase 91),
 //! idle TTL / max concurrent sessions with lazy LRU eviction (Phase 95), and optional
@@ -9,15 +10,17 @@
 //! owner `node_id` so a peer can transparent-forward Kafka Fetch (Phase 119). Single-node
 //! keeps sequential ids.
 //!
-//! Phase 138: primary owners push best-effort JSON snapshots to peers (`SessionMirrorOp`);
-//! peers keep a **foreign mirror** map (RAM-only, not in `__fetch_sessions`). On owner miss
-//! after forward failure, `promote_from_mirror` moves a mirror into the primary table.
+//! Phase 138/139: primary owners push best-effort JSON snapshots to peers
+//! (`SessionMirrorOp`); peers keep a **foreign mirror** map. Puts are coalesced (one
+//! slot per session), Puts may be debounced, Deletes flush immediately, and
+//! `mirror_gen` fences stale applies / promote supersede. Optional durable mirrors
+//! live under `{data_dir}/__fetch_session_mirrors/state.json`.
 
 use std::collections::HashMap;
 use std::fs::{self, File, OpenOptions};
 use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicI32, AtomicU32, AtomicU64, AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicI32, AtomicU32, AtomicU64, AtomicUsize, Ordering};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use parking_lot::Mutex;
@@ -42,6 +45,14 @@ pub const FETCH_SESSIONS_FILE: &str = "state.json";
 /// File format version (Phase 115).
 pub const FETCH_SESSIONS_FILE_VERSION: u32 = 1;
 
+/// On-disk directory for optional durable peer mirrors (Phase 139).
+pub const FETCH_SESSION_MIRRORS_DIR: &str = "__fetch_session_mirrors";
+/// On-disk mirror snapshot file name (Phase 139).
+pub const FETCH_SESSION_MIRRORS_FILE: &str = "state.json";
+
+/// Default Put fan-out min interval ms (Phase 139). `0` = immediate after coalesce.
+pub const DEFAULT_MIRROR_PUT_MIN_INTERVAL_MS: u64 = 50;
+
 /// Bit shift for owner `node_id` inside cluster `session_id` (Phase 119).
 pub const SESSION_OWNER_SHIFT: u32 = 19;
 /// Local counter mask (19 bits) for cluster `session_id` (Phase 119).
@@ -49,13 +60,26 @@ pub const SESSION_LOCAL_MASK: i32 = (1 << SESSION_OWNER_SHIFT) - 1; // 0x7FFFF
 /// Owner `node_id` mask (12 bits) — supports ids 1..4095.
 pub const SESSION_OWNER_MASK: u32 = 0xFFF;
 
-/// Dirty op for best-effort peer fan-out of primary session mutations (Phase 138).
+/// Dirty op for best-effort peer fan-out of primary session mutations (Phase 138/139).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SessionMirrorOp {
     /// Full snapshot put for `session_id` (export via [`FetchSessionManager::export_session_bytes`]).
     Put(i32),
     /// Remove foreign mirror for `session_id`.
     Delete(i32),
+}
+
+/// Whether `a` is strictly newer than `b` for mirror fencing (Phase 139).
+///
+/// Order: `mirror_gen`, then `epoch`, then `last_activity_ms`.
+pub fn session_is_newer(a: &FetchSession, b: &FetchSession) -> bool {
+    if a.mirror_gen != b.mirror_gen {
+        return a.mirror_gen > b.mirror_gen;
+    }
+    if a.epoch != b.epoch {
+        return a.epoch > b.epoch;
+    }
+    a.last_activity_ms > b.last_activity_ms
 }
 
 /// Encode a cluster-mode session id from owner broker and local counter.
@@ -155,18 +179,20 @@ pub struct FetchSession {
     pub topics: HashMap<String, SessionTopic>,
     /// Last successful session Fetch activity (unix ms; Phase 95).
     pub last_activity_ms: i64,
+    /// Monotonic mutation generation for peer-mirror fencing (Phase 139).
+    pub mirror_gen: u64,
 }
 
 /// Fetch session table with idle TTL + max concurrent (Phase 95) + optional
 /// durability (Phase 115) + cluster owner encoding (Phase 119) + peer mirror
-/// (Phase 138).
+/// (Phase 138/139).
 #[derive(Debug)]
 pub struct FetchSessionManager {
     sessions: Mutex<HashMap<i32, FetchSession>>,
     /// Foreign (non-owned) session mirrors — not served until promote (Phase 138).
     mirrors: Mutex<HashMap<i32, FetchSession>>,
-    /// Pending put/delete ops for peer fan-out (cluster owner only; Phase 138).
-    pending_mirror: Mutex<Vec<SessionMirrorOp>>,
+    /// Pending put/delete ops keyed by session_id (coalesced; Phase 138/139).
+    pending_mirror: Mutex<HashMap<i32, SessionMirrorOp>>,
     /// Next **local** counter (not necessarily the full session_id).
     next_id: AtomicI32,
     /// Idle TTL in ms; `0` disables idle eviction.
@@ -195,6 +221,20 @@ pub struct FetchSessionManager {
     mirror_deletes_applied_total: AtomicU64,
     /// Successful `promote_from_mirror` promotions into primary (Phase 138).
     promote_total: AtomicU64,
+    /// Put ops dropped by coalesce (Phase 139).
+    mirror_puts_coalesced_total: AtomicU64,
+    /// Stale mirror puts rejected by fencing (Phase 139).
+    mirror_stale_put_rejects_total: AtomicU64,
+    /// Promote path where newer mirror superseded primary (Phase 139).
+    promote_supersede_total: AtomicU64,
+    /// Mirrors restored from durable snapshot at open (Phase 139).
+    mirror_restored: AtomicU64,
+    /// Min interval between Put fan-outs; `0` = immediate (Phase 139).
+    mirror_put_min_interval_ms: AtomicU64,
+    /// Single-flight arm for debounced Put fan-out (Phase 139).
+    mirror_put_debounce_armed: AtomicBool,
+    /// Optional durable path for foreign mirrors (Phase 139).
+    mirror_durable_path: Option<PathBuf>,
 }
 
 impl Default for FetchSessionManager {
@@ -225,7 +265,7 @@ impl FetchSessionManager {
         Self {
             sessions: Mutex::new(HashMap::new()),
             mirrors: Mutex::new(HashMap::new()),
-            pending_mirror: Mutex::new(Vec::new()),
+            pending_mirror: Mutex::new(HashMap::new()),
             next_id: AtomicI32::new(1),
             idle_timeout_ms: AtomicU64::new(idle_timeout_ms),
             max_sessions: AtomicUsize::new(max_sessions),
@@ -240,6 +280,13 @@ impl FetchSessionManager {
             mirror_puts_applied_total: AtomicU64::new(0),
             mirror_deletes_applied_total: AtomicU64::new(0),
             promote_total: AtomicU64::new(0),
+            mirror_puts_coalesced_total: AtomicU64::new(0),
+            mirror_stale_put_rejects_total: AtomicU64::new(0),
+            promote_supersede_total: AtomicU64::new(0),
+            mirror_restored: AtomicU64::new(0),
+            mirror_put_min_interval_ms: AtomicU64::new(default_mirror_put_min_interval_ms()),
+            mirror_put_debounce_armed: AtomicBool::new(false),
+            mirror_durable_path: None,
         }
     }
 
@@ -270,6 +317,9 @@ impl FetchSessionManager {
     }
 
     /// Open durable sessions with limits + owner encoding (Phase 119).
+    ///
+    /// When `VOLANT_FETCH_SESSION_MIRROR_DURABLE` is enabled, also loads optional
+    /// durable peer mirrors from `__fetch_session_mirrors` (Phase 139).
     pub fn open_with_limits_and_owner(
         data_dir: impl AsRef<Path>,
         idle_timeout_ms: u64,
@@ -281,7 +331,25 @@ impl FetchSessionManager {
         let _ = fs::create_dir_all(&dir);
         mgr.durable_path = Some(dir.join(FETCH_SESSIONS_FILE));
         mgr.load_from_disk_at(now_ms());
+        if default_mirror_durable_enabled() {
+            mgr.enable_mirror_durable(data_dir.as_ref());
+        }
         mgr
+    }
+
+    /// Enable durable foreign mirrors under `data_dir/__fetch_session_mirrors` (Phase 139).
+    ///
+    /// Loads existing mirrors with idle TTL filter. Safe for unit tests without env.
+    pub fn enable_mirror_durable(&mut self, data_dir: impl AsRef<Path>) {
+        let dir = data_dir.as_ref().join(FETCH_SESSION_MIRRORS_DIR);
+        let _ = fs::create_dir_all(&dir);
+        self.mirror_durable_path = Some(dir.join(FETCH_SESSION_MIRRORS_FILE));
+        self.load_mirrors_from_disk_at(now_ms());
+    }
+
+    /// Whether foreign mirrors are persisted to disk (Phase 139).
+    pub fn is_mirror_durable(&self) -> bool {
+        self.mirror_durable_path.is_some()
     }
 
     /// Cluster owner node id used for session_id encoding (`0` = sequential).
@@ -320,14 +388,63 @@ impl FetchSessionManager {
         self.forward_errors_total.fetch_add(1, Ordering::Relaxed);
     }
 
-    /// Drain pending mirror put/delete ops for peer fan-out (Phase 138).
+    /// Drain pending mirror put/delete ops for peer fan-out (Phase 138/139).
+    ///
+    /// Returns **Deletes first**, then Puts, each group stable-sorted by `session_id`.
     pub fn drain_mirror_ops(&self) -> Vec<SessionMirrorOp> {
-        std::mem::take(&mut *self.pending_mirror.lock())
+        let mut map = std::mem::take(&mut *self.pending_mirror.lock());
+        if map.is_empty() {
+            return Vec::new();
+        }
+        let mut ids: Vec<i32> = map.keys().copied().collect();
+        ids.sort_unstable();
+        let mut deletes = Vec::new();
+        let mut puts = Vec::new();
+        for id in ids {
+            match map.remove(&id) {
+                Some(SessionMirrorOp::Delete(sid)) => deletes.push(SessionMirrorOp::Delete(sid)),
+                Some(SessionMirrorOp::Put(sid)) => puts.push(SessionMirrorOp::Put(sid)),
+                None => {}
+            }
+        }
+        deletes.extend(puts);
+        deletes
     }
 
     /// Whether any mirror ops are pending fan-out (Phase 138).
     pub fn has_pending_mirror_ops(&self) -> bool {
         !self.pending_mirror.lock().is_empty()
+    }
+
+    /// Whether a Delete is pending (flushes immediately; Phase 139).
+    pub fn has_pending_mirror_delete(&self) -> bool {
+        self.pending_mirror
+            .lock()
+            .values()
+            .any(|op| matches!(op, SessionMirrorOp::Delete(_)))
+    }
+
+    /// Put fan-out min interval ms (`0` = immediate after coalesce; Phase 139).
+    pub fn mirror_put_min_interval_ms(&self) -> u64 {
+        self.mirror_put_min_interval_ms.load(Ordering::Relaxed)
+    }
+
+    /// Override Put fan-out min interval ms (Phase 139 tests / runtime).
+    pub fn set_mirror_put_min_interval_ms(&self, ms: u64) {
+        self.mirror_put_min_interval_ms.store(ms, Ordering::Relaxed);
+    }
+
+    /// Try to arm single-flight Put debounce. Returns `true` if this caller armed it.
+    pub fn try_arm_mirror_put_debounce(&self) -> bool {
+        self.mirror_put_debounce_armed
+            .compare_exchange(false, true, Ordering::AcqRel, Ordering::Relaxed)
+            .is_ok()
+    }
+
+    /// Clear Put debounce arm after a delayed flush (Phase 139).
+    pub fn clear_mirror_put_debounce_armed(&self) {
+        self.mirror_put_debounce_armed
+            .store(false, Ordering::Release);
     }
 
     /// JSON bytes of one primary session (`StoredFetchSession` shape) for MirrorPut.
@@ -338,7 +455,11 @@ impl FetchSessionManager {
         serde_json::to_vec(&stored).ok()
     }
 
-    /// Install/replace a foreign mirror from a JSON snapshot (Phase 138 Put).
+    /// Install/replace a foreign mirror from a JSON snapshot (Phase 138/139 Put).
+    ///
+    /// Fencing: newer `mirror_gen` (then epoch, then activity) wins. Stale puts are
+    /// dropped without clobbering primary or mirror. When primary exists and the
+    /// incoming snapshot is newer, primary is replaced (converge).
     pub fn apply_mirror_put(&self, snapshot: &[u8]) -> Result<(), String> {
         let stored: StoredFetchSession =
             serde_json::from_slice(snapshot).map_err(|e| e.to_string())?;
@@ -347,7 +468,45 @@ impl FetchSessionManager {
         }
         let (id, session) =
             stored_to_session(stored).ok_or_else(|| "invalid session snapshot".to_owned())?;
-        self.mirrors.lock().insert(id, session);
+
+        // Lock order: sessions then mirrors.
+        {
+            let mut sessions = self.sessions.lock();
+            if sessions.contains_key(&id) {
+                let newer = sessions
+                    .get(&id)
+                    .map(|primary| session_is_newer(&session, primary))
+                    .unwrap_or(false);
+                if !newer {
+                    self.mirror_stale_put_rejects_total
+                        .fetch_add(1, Ordering::Relaxed);
+                    return Ok(());
+                }
+                sessions.insert(id, session);
+                self.persist_locked(&sessions);
+                drop(sessions);
+                let mut mirrors = self.mirrors.lock();
+                if mirrors.remove(&id).is_some() {
+                    self.persist_mirrors_locked(&mirrors);
+                }
+                self.mirror_puts_applied_total
+                    .fetch_add(1, Ordering::Relaxed);
+                return Ok(());
+            }
+        }
+
+        let mut mirrors = self.mirrors.lock();
+        let newer = mirrors
+            .get(&id)
+            .map(|existing| session_is_newer(&session, existing))
+            .unwrap_or(true);
+        if !newer {
+            self.mirror_stale_put_rejects_total
+                .fetch_add(1, Ordering::Relaxed);
+            return Ok(());
+        }
+        mirrors.insert(id, session);
+        self.persist_mirrors_locked(&mirrors);
         self.mirror_puts_applied_total
             .fetch_add(1, Ordering::Relaxed);
         Ok(())
@@ -355,27 +514,54 @@ impl FetchSessionManager {
 
     /// Remove a foreign mirror (Phase 138 Delete). No-op if missing.
     pub fn apply_mirror_delete(&self, session_id: i32) {
-        if self.mirrors.lock().remove(&session_id).is_some() {
+        let mut mirrors = self.mirrors.lock();
+        if mirrors.remove(&session_id).is_some() {
+            self.persist_mirrors_locked(&mirrors);
             self.mirror_deletes_applied_total
                 .fetch_add(1, Ordering::Relaxed);
         }
     }
 
-    /// Move mirror → primary if primary is missing (Phase 138).
+    /// Move mirror → primary, or supersede primary when mirror is newer (Phase 138/139).
     ///
-    /// Returns `true` if primary already had the id or the mirror was promoted.
+    /// Returns `true` if primary ends up holding the id (already present, promoted,
+    /// or superseded). Returns `false` when neither primary nor mirror has the id.
     pub fn promote_from_mirror(&self, session_id: i32) -> bool {
-        // Lock order: sessions then mirrors (avoid deadlock with other dual-lock paths).
+        // Lock order: sessions then mirrors.
         let mut sessions = self.sessions.lock();
+        let mut mirrors = self.mirrors.lock();
+        let mirror = mirrors.remove(&session_id);
+
         if sessions.contains_key(&session_id) {
+            if let Some(m) = mirror {
+                let supersede = sessions
+                    .get(&session_id)
+                    .map(|primary| session_is_newer(&m, primary))
+                    .unwrap_or(false);
+                if supersede {
+                    sessions.insert(session_id, m);
+                    self.persist_locked(&sessions);
+                    self.persist_mirrors_locked(&mirrors);
+                    drop(mirrors);
+                    drop(sessions);
+                    self.promote_supersede_total
+                        .fetch_add(1, Ordering::Relaxed);
+                    self.promote_total.fetch_add(1, Ordering::Relaxed);
+                    self.queue_mirror_put(session_id);
+                    return true;
+                }
+                // Older mirror dropped; primary kept.
+                self.persist_mirrors_locked(&mirrors);
+            }
             return true;
         }
-        let mut mirrors = self.mirrors.lock();
-        let Some(session) = mirrors.remove(&session_id) else {
+
+        let Some(session) = mirror else {
             return false;
         };
         sessions.insert(session_id, session);
         self.persist_locked(&sessions);
+        self.persist_mirrors_locked(&mirrors);
         drop(mirrors);
         drop(sessions);
         self.promote_total.fetch_add(1, Ordering::Relaxed);
@@ -409,22 +595,59 @@ impl FetchSessionManager {
         self.promote_total.load(Ordering::Relaxed)
     }
 
-    /// Queue Put for peer fan-out when this broker is a cluster owner (Phase 138).
+    /// Puts dropped by pending-op coalesce (Phase 139).
+    pub fn mirror_puts_coalesced_total(&self) -> u64 {
+        self.mirror_puts_coalesced_total.load(Ordering::Relaxed)
+    }
+
+    /// Stale mirror puts rejected by fencing (Phase 139).
+    pub fn mirror_stale_put_rejects_total(&self) -> u64 {
+        self.mirror_stale_put_rejects_total.load(Ordering::Relaxed)
+    }
+
+    /// Promotions where a newer mirror superseded primary (Phase 139).
+    pub fn promote_supersede_total(&self) -> u64 {
+        self.promote_supersede_total.load(Ordering::Relaxed)
+    }
+
+    /// Mirrors restored from durable snapshot at open (Phase 139).
+    pub fn mirror_restored(&self) -> u64 {
+        self.mirror_restored.load(Ordering::Relaxed)
+    }
+
+    /// Queue Put for peer fan-out when this broker is a cluster owner (Phase 138/139).
+    ///
+    /// One slot per `session_id`; a second Put coalesces (counts drop). Put after
+    /// Delete wins the slot.
     fn queue_mirror_put(&self, session_id: i32) {
-        if self.owner_node_id.load(Ordering::Relaxed) > 0 {
-            self.pending_mirror
-                .lock()
-                .push(SessionMirrorOp::Put(session_id));
+        if self.owner_node_id.load(Ordering::Relaxed) == 0 {
+            return;
+        }
+        let mut pending = self.pending_mirror.lock();
+        match pending.get(&session_id) {
+            Some(SessionMirrorOp::Put(_)) => {
+                self.mirror_puts_coalesced_total
+                    .fetch_add(1, Ordering::Relaxed);
+            }
+            Some(SessionMirrorOp::Delete(_)) | None => {
+                pending.insert(session_id, SessionMirrorOp::Put(session_id));
+            }
         }
     }
 
-    /// Queue Delete for peer fan-out when this broker is a cluster owner (Phase 138).
+    /// Queue Delete for peer fan-out when this broker is a cluster owner (Phase 138/139).
+    ///
+    /// Delete supersedes a pending Put (counts as a coalesced put drop).
     fn queue_mirror_delete(&self, session_id: i32) {
-        if self.owner_node_id.load(Ordering::Relaxed) > 0 {
-            self.pending_mirror
-                .lock()
-                .push(SessionMirrorOp::Delete(session_id));
+        if self.owner_node_id.load(Ordering::Relaxed) == 0 {
+            return;
         }
+        let mut pending = self.pending_mirror.lock();
+        if matches!(pending.get(&session_id), Some(SessionMirrorOp::Put(_))) {
+            self.mirror_puts_coalesced_total
+                .fetch_add(1, Ordering::Relaxed);
+        }
+        pending.insert(session_id, SessionMirrorOp::Delete(session_id));
     }
 
     /// Current idle timeout in milliseconds (`0` = disabled).
@@ -564,6 +787,7 @@ impl FetchSessionManager {
                 epoch: 1,
                 topics,
                 last_activity_ms: now_ms,
+                mirror_gen: 1,
             },
         );
         self.persist_locked(&guard);
@@ -606,6 +830,7 @@ impl FetchSessionManager {
         }
         session.epoch = next_epoch(epoch);
         session.last_activity_ms = now_ms;
+        session.mirror_gen = session.mirror_gen.saturating_add(1);
         self.persist_locked(&guard);
         drop(guard);
         self.queue_mirror_put(session_id);
@@ -650,6 +875,7 @@ impl FetchSessionManager {
                 entry.partitions.insert(*pid, merged);
             }
         }
+        session.mirror_gen = session.mirror_gen.saturating_add(1);
         self.persist_locked(&guard);
         drop(guard);
         self.queue_mirror_put(session_id);
@@ -682,6 +908,7 @@ impl FetchSessionManager {
                 session.topics.remove(key);
             }
         }
+        session.mirror_gen = session.mirror_gen.saturating_add(1);
         self.persist_locked(&guard);
         drop(guard);
         self.queue_mirror_put(session_id);
@@ -714,14 +941,17 @@ impl FetchSessionManager {
         let Some(session) = guard.get_mut(&session_id) else {
             return;
         };
-        let Some(topic) = session.topics.get_mut(topic_key) else {
-            return;
-        };
-        let Some(part) = topic.partitions.get_mut(&partition) else {
-            return;
-        };
-        part.last_hwm = Some(hwm);
-        part.last_lso = Some(lso);
+        {
+            let Some(topic) = session.topics.get_mut(topic_key) else {
+                return;
+            };
+            let Some(part) = topic.partitions.get_mut(&partition) else {
+                return;
+            };
+            part.last_hwm = Some(hwm);
+            part.last_lso = Some(lso);
+        }
+        session.mirror_gen = session.mirror_gen.saturating_add(1);
         self.persist_locked(&guard);
         drop(guard);
         self.queue_mirror_put(session_id);
@@ -842,6 +1072,58 @@ impl FetchSessionManager {
             self.persist_errors_total.fetch_add(1, Ordering::Relaxed);
         }
     }
+
+    /// Load durable foreign mirrors; filter idle (Phase 139).
+    fn load_mirrors_from_disk_at(&self, now_ms: i64) {
+        let Some(path) = self.mirror_durable_path.as_ref() else {
+            return;
+        };
+        let file = match load_file(path) {
+            Some(f) => f,
+            None => {
+                self.mirror_restored.store(0, Ordering::Relaxed);
+                return;
+            }
+        };
+
+        let idle_ms = self.idle_timeout_ms.load(Ordering::Relaxed);
+        let idle_ms_i = idle_ms as i64;
+        let mut loaded: HashMap<i32, FetchSession> = HashMap::new();
+        let mut idle_dropped = 0u64;
+
+        for s in file.sessions {
+            if s.id <= 0 {
+                continue;
+            }
+            if idle_ms > 0 && now_ms.saturating_sub(s.last_activity_ms) > idle_ms_i {
+                idle_dropped += 1;
+                continue;
+            }
+            if let Some(session) = stored_to_session(s) {
+                loaded.insert(session.0, session.1);
+            }
+        }
+
+        self.mirror_restored
+            .store(loaded.len() as u64, Ordering::Relaxed);
+        let mut guard = self.mirrors.lock();
+        *guard = loaded;
+        if idle_dropped > 0 {
+            self.persist_mirrors_locked(&guard);
+        }
+    }
+
+    /// Persist foreign mirrors (Phase 139). No-op without path.
+    fn persist_mirrors_locked(&self, mirrors: &HashMap<i32, FetchSession>) {
+        let Some(path) = self.mirror_durable_path.as_ref() else {
+            return;
+        };
+        // next_id is unused for mirrors; store 1 for a valid file shape.
+        let file = snapshot_file(mirrors, 1);
+        if save_file(path, &file).is_err() {
+            self.persist_errors_total.fetch_add(1, Ordering::Relaxed);
+        }
+    }
 }
 
 /// Next session epoch after a successful request (Kafka `FetchSession.nextEpoch`).
@@ -878,6 +1160,25 @@ pub fn default_max_sessions() -> usize {
         .unwrap_or(DEFAULT_MAX_SESSIONS)
 }
 
+/// Default Put fan-out min interval from env or 50ms (Phase 139).
+pub fn default_mirror_put_min_interval_ms() -> u64 {
+    std::env::var("VOLANT_FETCH_SESSION_MIRROR_PUT_MIN_INTERVAL_MS")
+        .ok()
+        .and_then(|s| s.parse::<u64>().ok())
+        .unwrap_or(DEFAULT_MIRROR_PUT_MIN_INTERVAL_MS)
+}
+
+/// Whether durable peer mirrors are enabled via env (Phase 139). Default off.
+pub fn default_mirror_durable_enabled() -> bool {
+    match std::env::var("VOLANT_FETCH_SESSION_MIRROR_DURABLE") {
+        Ok(s) => {
+            let s = s.trim();
+            s == "1" || s.eq_ignore_ascii_case("true") || s.eq_ignore_ascii_case("yes")
+        }
+        Err(_) => false,
+    }
+}
+
 // --- Phase 115 durable file format ---
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -903,6 +1204,9 @@ struct StoredFetchSession {
     id: i32,
     epoch: i32,
     last_activity_ms: i64,
+    /// Peer-mirror fencing generation (Phase 139); absent on older snapshots.
+    #[serde(default)]
+    mirror_gen: u64,
     #[serde(default)]
     topics: Vec<StoredSessionTopic>,
 }
@@ -973,6 +1277,7 @@ fn session_to_stored(id: i32, s: &FetchSession) -> StoredFetchSession {
         id,
         epoch: s.epoch,
         last_activity_ms: s.last_activity_ms,
+        mirror_gen: s.mirror_gen,
         topics,
     }
 }
@@ -1034,6 +1339,7 @@ fn stored_to_session(s: StoredFetchSession) -> Option<(i32, FetchSession)> {
             epoch: s.epoch,
             topics,
             last_activity_ms: s.last_activity_ms,
+            mirror_gen: s.mirror_gen,
         },
     ))
 }
@@ -1419,5 +1725,179 @@ mod tests {
         let ops = mgr.drain_mirror_ops();
         assert_eq!(ops, vec![SessionMirrorOp::Delete(id)]);
         assert!(!mgr.contains(id));
+    }
+
+    #[test]
+    fn phase139_coalesce_puts_same_session() {
+        let mgr = FetchSessionManager::with_limits_and_owner(0, 0, 1);
+        let id = mgr.create_at(HashMap::new(), 1_000);
+        // create queues Put; more mutations coalesce.
+        assert!(mgr.begin_incremental_at(id, 1, 1_100).is_ok());
+        mgr.note_returned(id, "x", 0, 1, 1); // no topic — still queues? note_returned no-ops without topic
+        mgr.merge_topics(id, &topic_map("t", 0));
+        mgr.forget(id, &[]); // empty forgotten → no-op, no queue
+        let ops = mgr.drain_mirror_ops();
+        assert_eq!(ops, vec![SessionMirrorOp::Put(id)]);
+        assert!(mgr.mirror_puts_coalesced_total() >= 1);
+    }
+
+    #[test]
+    fn phase139_delete_supersedes_put() {
+        let mgr = FetchSessionManager::with_limits_and_owner(0, 0, 1);
+        let id = mgr.create_at(HashMap::new(), 1_000);
+        assert!(mgr.has_pending_mirror_ops());
+        mgr.close(id);
+        let ops = mgr.drain_mirror_ops();
+        assert_eq!(ops, vec![SessionMirrorOp::Delete(id)]);
+        assert!(mgr.mirror_puts_coalesced_total() >= 1);
+        assert!(!mgr.has_pending_mirror_delete());
+    }
+
+    #[test]
+    fn phase139_drain_deletes_before_puts() {
+        let mgr = FetchSessionManager::with_limits_and_owner(0, 0, 1);
+        let a = mgr.create_at(HashMap::new(), 1_000);
+        let b = mgr.create_at(HashMap::new(), 1_100);
+        let _ = mgr.drain_mirror_ops();
+        mgr.close(a);
+        assert!(mgr.begin_incremental_at(b, 1, 1_200).is_ok());
+        let ops = mgr.drain_mirror_ops();
+        assert_eq!(
+            ops,
+            vec![SessionMirrorOp::Delete(a), SessionMirrorOp::Put(b)]
+        );
+    }
+
+    #[test]
+    fn phase139_apply_put_rejects_stale_gen() {
+        let owner = FetchSessionManager::with_limits_and_owner(0, 0, 1);
+        let id = owner.create_at(topic_map("t", 0), 1_000);
+        let older = owner.export_session_bytes(id).unwrap();
+        assert!(owner.begin_incremental_at(id, 1, 1_100).is_ok());
+        let newer = owner.export_session_bytes(id).unwrap();
+
+        let peer = FetchSessionManager::with_limits(0, 0);
+        peer.apply_mirror_put(&newer).unwrap();
+        assert_eq!(peer.mirror_puts_applied_total(), 1);
+        peer.apply_mirror_put(&older).unwrap();
+        assert_eq!(peer.mirror_puts_applied_total(), 1);
+        assert_eq!(peer.mirror_stale_put_rejects_total(), 1);
+        // Mirror still holds newer gen.
+        let mirror_gen = {
+            let g = peer.mirrors.lock();
+            g.get(&id).unwrap().mirror_gen
+        };
+        assert!(mirror_gen >= 2);
+    }
+
+    #[test]
+    fn phase139_promote_supersede_and_keep_newer_primary() {
+        let owner = FetchSessionManager::with_limits_and_owner(0, 0, 2);
+        let id = owner.create_at(topic_map("t", 1), 1_000);
+        let v1 = owner.export_session_bytes(id).unwrap();
+        assert!(owner.begin_incremental_at(id, 1, 1_100).is_ok());
+        let v2 = owner.export_session_bytes(id).unwrap();
+
+        // Converge: primary present + newer put replaces primary.
+        let peer = FetchSessionManager::with_limits(0, 0);
+        peer.apply_mirror_put(&v1).unwrap();
+        assert!(peer.promote_from_mirror(id));
+        assert!(peer.contains(id));
+        peer.apply_mirror_put(&v2).unwrap();
+        assert!(!peer.mirror_contains(id));
+        assert_eq!(peer.mirror_puts_applied_total(), 2);
+
+        // Keep newer primary: older mirror dropped without supersede.
+        let peer2 = FetchSessionManager::with_limits(0, 0);
+        peer2.apply_mirror_put(&v2).unwrap();
+        assert!(peer2.promote_from_mirror(id));
+        let promote_before = peer2.promote_total();
+        // Inject older mirror under the same id while primary is newer.
+        {
+            let stored: StoredFetchSession = serde_json::from_slice(&v1).unwrap();
+            let (sid, sess) = stored_to_session(stored).unwrap();
+            peer2.mirrors.lock().insert(sid, sess);
+        }
+        assert!(peer2.promote_from_mirror(id));
+        assert_eq!(peer2.promote_total(), promote_before); // no new promote
+        assert!(!peer2.mirror_contains(id));
+        let primary_gen = {
+            let g = peer2.sessions.lock();
+            g.get(&id).unwrap().mirror_gen
+        };
+        assert!(primary_gen >= 2);
+
+        // Supersede: primary older, mirror newer.
+        let peer3 = FetchSessionManager::with_limits(0, 0);
+        peer3.apply_mirror_put(&v1).unwrap();
+        assert!(peer3.promote_from_mirror(id));
+        {
+            let stored: StoredFetchSession = serde_json::from_slice(&v2).unwrap();
+            let (sid, sess) = stored_to_session(stored).unwrap();
+            peer3.mirrors.lock().insert(sid, sess);
+        }
+        let super_before = peer3.promote_supersede_total();
+        assert!(peer3.promote_from_mirror(id));
+        assert_eq!(peer3.promote_supersede_total(), super_before + 1);
+        assert!(!peer3.mirror_contains(id));
+        let primary_gen = {
+            let g = peer3.sessions.lock();
+            g.get(&id).unwrap().mirror_gen
+        };
+        assert!(primary_gen >= 2);
+    }
+
+    #[test]
+    fn phase139_durable_mirror_roundtrip() {
+        let dir = temp_data_dir();
+        let id = {
+            let owner = FetchSessionManager::with_limits_and_owner(0, 0, 1);
+            let id = owner.create_at(topic_map("orders", 2), 1_000);
+            owner.note_returned(id, "orders", 0, 3, 3);
+            let bytes = owner.export_session_bytes(id).unwrap();
+
+            let mut peer = FetchSessionManager::with_limits(0, 0);
+            peer.enable_mirror_durable(&dir);
+            assert!(peer.is_mirror_durable());
+            peer.apply_mirror_put(&bytes).unwrap();
+            assert!(peer.mirror_contains(id));
+            id
+        };
+
+        let mut peer2 = FetchSessionManager::with_limits(0, 0);
+        peer2.enable_mirror_durable(&dir);
+        assert_eq!(peer2.mirror_restored(), 1);
+        assert!(peer2.mirror_contains(id));
+        assert!(peer2.promote_from_mirror(id));
+        assert!(peer2.contains(id));
+        assert!(!peer2.mirror_contains(id));
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn phase139_session_is_newer_order() {
+        let base = FetchSession {
+            epoch: 2,
+            topics: HashMap::new(),
+            last_activity_ms: 100,
+            mirror_gen: 5,
+        };
+        let higher_gen = FetchSession {
+            mirror_gen: 6,
+            ..base.clone()
+        };
+        assert!(session_is_newer(&higher_gen, &base));
+        assert!(!session_is_newer(&base, &higher_gen));
+        let higher_epoch = FetchSession {
+            epoch: 3,
+            ..base.clone()
+        };
+        assert!(session_is_newer(&higher_epoch, &base));
+        let higher_act = FetchSession {
+            last_activity_ms: 200,
+            ..base.clone()
+        };
+        assert!(session_is_newer(&higher_act, &base));
+        assert!(!session_is_newer(&base, &base));
     }
 }

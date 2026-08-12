@@ -577,6 +577,11 @@ pub struct Broker {
     isr_time_shrink_total: AtomicU64,
     /// Phase 126: Fetch preferred_read_replica redirects emitted.
     preferred_replica_redirect_total: AtomicU64,
+    /// Phase 140: preferred candidate suppressed (e.g. READ_COMMITTED).
+    preferred_replica_suppressed_total: AtomicU64,
+    /// Phase 140: max leader_leo − follower_leo for preferred eligibility.
+    /// `u64::MAX` = unlimited (env unset). Override via setter in tests.
+    preferred_replica_max_leo_lag: AtomicU64,
     /// Phase 120/124: durable Init-owner txn coordinator registry.
     txn_coordinator_registry: TxnCoordinatorRegistry,
     /// Phase 120: successful transparent EndTxn (txn) forwards.
@@ -765,6 +770,8 @@ impl Broker {
             isr_shrink_total: AtomicU64::new(0),
             isr_time_shrink_total: AtomicU64::new(0),
             preferred_replica_redirect_total: AtomicU64::new(0),
+            preferred_replica_suppressed_total: AtomicU64::new(0),
+            preferred_replica_max_leo_lag: AtomicU64::new(default_preferred_replica_max_leo_lag()),
             txn_coordinator_registry,
             txn_forward_total: AtomicU64::new(0),
             txn_forward_errors_total: AtomicU64::new(0),
@@ -908,6 +915,8 @@ impl Broker {
             isr_shrink_total: AtomicU64::new(0),
             isr_time_shrink_total: AtomicU64::new(0),
             preferred_replica_redirect_total: AtomicU64::new(0),
+            preferred_replica_suppressed_total: AtomicU64::new(0),
+            preferred_replica_max_leo_lag: AtomicU64::new(default_preferred_replica_max_leo_lag()),
             txn_coordinator_registry,
             txn_forward_total: AtomicU64::new(0),
             txn_forward_errors_total: AtomicU64::new(0),
@@ -1628,6 +1637,25 @@ impl Broker {
         self.preferred_replica_redirect_total.load(Ordering::Relaxed)
     }
 
+    /// Preferred-replica suppress counter (Phase 140): candidate existed but
+    /// Fetch did not redirect (e.g. READ_COMMITTED).
+    pub fn preferred_replica_suppressed_total(&self) -> u64 {
+        self.preferred_replica_suppressed_total
+            .load(Ordering::Relaxed)
+    }
+
+    /// Max `leader_leo − follower_leo` for preferred eligibility (Phase 140).
+    /// `u64::MAX` = unlimited.
+    pub fn preferred_replica_max_leo_lag(&self) -> u64 {
+        self.preferred_replica_max_leo_lag.load(Ordering::Relaxed)
+    }
+
+    /// Phase 140: runtime max LEO lag for tests / operator tooling.
+    pub fn set_preferred_replica_max_leo_lag(&self, max_lag: u64) {
+        self.preferred_replica_max_leo_lag
+            .store(max_lag, Ordering::Relaxed);
+    }
+
     /// Optional rack for a configured broker (cluster.toml); `None` single-node or unset.
     pub fn broker_rack(&self, broker_id: u32) -> Option<String> {
         self.cluster
@@ -1637,12 +1665,13 @@ impl Broker {
             .and_then(|b| b.rack.clone())
     }
 
-    /// Phase 126 + 133: select a preferred read replica for consumer Fetch
+    /// Phase 126 + 133 + 140: select a preferred read replica for consumer Fetch
     /// (KIP-392 subset).
     ///
     /// Returns a **follower** broker id in the same rack as `client_rack` that is
     /// currently in the local ISR, **live**, has a usable configured address
-    /// (`broker_addr` present and non-empty), and has observed LEO ≥ HWM, when
+    /// (`broker_addr` present and non-empty), has observed LEO ≥ HWM, and
+    /// (Phase 140) optional `leader_leo − follower_leo ≤ max_leo_lag`, when
     /// this node is the partition leader.
     ///
     /// **Ranking (Phase 133):** among eligible peers prefer **highest follower
@@ -1665,6 +1694,8 @@ impl Broker {
             return None;
         }
         let hwm = part.committed_hwm;
+        let leader_leo = part.leo();
+        let max_lag = self.preferred_replica_max_leo_lag.load(Ordering::Relaxed);
         let live = self.live_brokers();
         // (leo, id) — rank by leo desc, id asc (Phase 133).
         let mut best: Option<(u64, u32)> = None;
@@ -1705,6 +1736,10 @@ impl Broker {
             if leo < hwm {
                 continue;
             }
+            // Phase 140: optional max lag vs leader LEO (unset → unlimited).
+            if leader_leo.saturating_sub(leo) > max_lag {
+                continue;
+            }
             match best {
                 None => best = Some((leo, id)),
                 Some((best_leo, best_id)) => {
@@ -1720,6 +1755,11 @@ impl Broker {
 
     pub(crate) fn note_preferred_replica_redirect(&self) {
         self.preferred_replica_redirect_total
+            .fetch_add(1, Ordering::Relaxed);
+    }
+
+    pub(crate) fn note_preferred_replica_suppressed(&self) {
+        self.preferred_replica_suppressed_total
             .fetch_add(1, Ordering::Relaxed);
     }
 
@@ -7121,6 +7161,15 @@ fn unix_now_ms() -> i64 {
         .duration_since(UNIX_EPOCH)
         .map(|d| d.as_millis() as i64)
         .unwrap_or(0)
+}
+
+/// Phase 140: `VOLANT_PREFERRED_REPLICA_MAX_LEO_LAG` → parsed u64; unset/invalid
+/// → `u64::MAX` (unlimited, 126/133 behavior).
+fn default_preferred_replica_max_leo_lag() -> u64 {
+    std::env::var("VOLANT_PREFERRED_REPLICA_MAX_LEO_LAG")
+        .ok()
+        .and_then(|s| s.trim().parse::<u64>().ok())
+        .unwrap_or(u64::MAX)
 }
 
 /// Phase 135: `VOLANT_DELETE_RECORDS_WAIT_MAJORITY` → true for `1`/`true`/`yes`

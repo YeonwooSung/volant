@@ -1258,35 +1258,42 @@ pub(crate) fn encode_fetch(broker: &Broker, src: &mut impl Buf, out: &mut BytesM
             // READ_COMMITTED (isolation=1): suppress preferred — followers may
             // lack a complete soft-abort-marker view → filter/LSO divergence vs
             // leader. Keep reads on the leader (MVP residual vs full marker parity).
-            if version >= 11 && replica_id < 0 && !read_committed {
+            // Phase 140: still count suppress when a candidate would have been
+            // selected under READ_COMMITTED.
+            if version >= 11 && replica_id < 0 {
                 if let Some(pref) = broker.select_preferred_read_replica(
                     &name,
                     PartitionId(partition as u32),
                     client_rack.as_deref(),
                 ) {
-                    let hwm = part_meta.map(|p| p.hwm as i64).unwrap_or(0);
-                    let lso =
-                        broker.last_stable_offset(name.as_str(), partition as u32) as i64;
-                    let log_start =
-                        produce_log_start_offset(broker, &topic_name, partition as u32);
-                    let resp_lso = if version >= 4 { lso } else { hwm };
-                    broker.note_preferred_replica_redirect();
-                    built_parts.push(BuiltPart {
-                        partition,
-                        error: KafkaErrorCode::None.as_i16(),
-                        hwm,
-                        lso: resp_lso,
-                        log_start,
-                        aborted: Vec::new(),
-                        records: BytesMut::new(),
-                        current_leader: None,
-                        diverging: None,
-                        preferred_read_replica: pref as i32,
-                        // Never omit preferred redirects (client must see the id).
-                        omit: false,
-                        note_cache: false,
-                    });
-                    continue;
+                    if read_committed {
+                        broker.note_preferred_replica_suppressed();
+                        // Fall through: serve on leader (no redirect).
+                    } else {
+                        let hwm = part_meta.map(|p| p.hwm as i64).unwrap_or(0);
+                        let lso =
+                            broker.last_stable_offset(name.as_str(), partition as u32) as i64;
+                        let log_start =
+                            produce_log_start_offset(broker, &topic_name, partition as u32);
+                        let resp_lso = if version >= 4 { lso } else { hwm };
+                        broker.note_preferred_replica_redirect();
+                        built_parts.push(BuiltPart {
+                            partition,
+                            error: KafkaErrorCode::None.as_i16(),
+                            hwm,
+                            lso: resp_lso,
+                            log_start,
+                            aborted: Vec::new(),
+                            records: BytesMut::new(),
+                            current_leader: None,
+                            diverging: None,
+                            preferred_read_replica: pref as i32,
+                            // Never omit preferred redirects (client must see the id).
+                            omit: false,
+                            note_cache: false,
+                        });
+                        continue;
+                    }
                 }
             }
 

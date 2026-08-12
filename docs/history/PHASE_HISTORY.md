@@ -1,6 +1,6 @@
 # Phase history index
 
-Ship records for **phases 0–138** (shipped). Binding core contracts are
+Ship records for **phases 0–140** (shipped). Binding core contracts are
 **[PHASE1_SPEC](../PHASE1_SPEC.md)–[PHASE6_SPEC](../PHASE6_SPEC.md)**. Living
 docs for day-to-day reading: [ops](../ops.md), [consistency](../consistency.md),
 [tuning](../tuning.md), [KAFKA_COMPAT](../KAFKA_COMPAT.md),
@@ -180,15 +180,17 @@ docs for day-to-day reading: [ops](../ops.md), [consistency](../consistency.md),
 | 136 | ✅ | Non-blocking admin ACL/BROKER catch-up (schedule + single-flight + min-interval) | [PHASE136_SPEC.md](../PHASE136_SPEC.md) |
 | 137 | ✅ | DeleteRecords native wait trailer + journal topic GC (assignment prune + anti-resurrection push) | [PHASE137_SPEC.md](../PHASE137_SPEC.md) |
 | 138 | ✅ | Shared fetch session mirror + promote MVP (best-effort peer put/delete 90–93; promote on owner miss; not Raft) | [PHASE138_SPEC.md](../PHASE138_SPEC.md) |
+| 139 | ✅ | Session mirror polish (coalesce/debounce Puts; optional durable `__fetch_session_mirrors`; `mirror_gen` fence) | [PHASE139_SPEC.md](../PHASE139_SPEC.md) |
+| 140 | ✅ | Preferred-replica selector depth (optional max LEO lag; RC suppress metric) | [PHASE140_SPEC.md](../PHASE140_SPEC.md) |
 
 ---
 
-## Still deferred (post–Phase 138)
+## Still deferred (post–Phase 140)
 
 - Multi-language clients
 - Chaos-mesh / long fuzz campaigns (corpus **smoke CI** → **closed by Phase 112**)
 - Full KIP-890/939 / Kafka `__transaction_state` topic (multi-broker Enable2Pc MVP → **closed by Phase 114**)
-- Multi-broker session handoff / affinity routing (durable **local** → **115**; owner forward MVP → **closed by Phase 119**; preferred-replica MVP → **closed by Phase 126**; shared mirror + promote MVP → **closed by Phase 138**; residual: Raft registry / serve-without-promote / debounced put / full preferred selector)
+- Multi-broker session handoff / affinity routing (durable **local** → **115**; owner forward MVP → **closed by Phase 119**; preferred-replica MVP → **closed by Phase 126**; shared mirror + promote MVP → **closed by Phase 138**; mirror polish → **closed by Phase 139**; residual: Raft registry / serve-without-promote / incremental put / full preferred selector)
 - Byte-identical response cache beyond HWM+LSO omit
 - Full KRaft epoch state machine / remote-log epochs
 - Full Kafka broker catalog / KRaft DynamicBrokerConfig
@@ -212,8 +214,11 @@ docs for day-to-day reading: [ops](../ops.md), [consistency](../consistency.md),
 - Outbox handoff on leadership change → **closed by Phase 123** (new leader reconcile from log_start; not consensus truncate log)
 - Durable Init-owner txn coordinator registry → **closed by Phase 124** (local `__txn_coordinator`; not `__transaction_state`)
 - Time-based ISR lag shrink → **closed by Phase 125** (last-caught-up + `replica_lag_max_ms`; not full Kafka replica.lag.time.max.ms)
-- PreferredReadReplica / rack-aware Fetch → **closed by Phase 126** (KIP-392 subset; not full selector/throttling; preferred residual orthogonal to Phase 138 mirror)
+- PreferredReadReplica / rack-aware Fetch → **closed by Phase 126** (KIP-392 subset; not full selector/throttling; preferred residual orthogonal to Phase 138/139 mirror)
+- Preferred selector polish (usable addr + LEO ranking) → **closed by Phase 133**
+- Preferred max LEO lag + RC suppress metric → **closed by Phase 140** (still not full Kafka selector/throttling)
 - Shared fetch session mirror + promote → **closed by Phase 138** (best-effort peer mirror; not Raft; dual-promote race honest; no session_id re-encode)
+- Session mirror polish (debounce/durable/fence) → **closed by Phase 139** (coalesce + min-interval Puts; optional durable; `mirror_gen`; residual dual-promote / serve-without-promote)
 - Txn coordinator registry TTL GC → **closed by Phase 127** (default 24h; `0` disables; not eager EndTxn GC)
 - BROKER config for registry TTL → **closed by Phase 128** (`volant.txn.coordinator.registry.ttl.ms`; env still works; not full DynamicBrokerConfig)
 - Per-broker BROKER config overrides / multi-master ACL merge
@@ -221,10 +226,9 @@ docs for day-to-day reading: [ops](../ops.md), [consistency](../consistency.md),
 - Multi-controller majority truncate journal consensus → **closed by Phase 130** (Raft-style majority note; not full openraft/KRaft)
 - Truncate journal rejoin catch-up / heartbeat lag re-push → **closed by Phase 131** (`applied_journal_generation` + TruncateJournalPush; not Raft)
 - Journal catch-up stall / throttle / single-flight hardening → **closed by Phase 132**
-- Preferred selector polish (usable addr + LEO ranking) → **closed by Phase 133**
 - Request-level DeleteRecords majority-wait flag → **closed by Phase 137** (native trailer; Kafka still env/broker only)
 - Truncate-journal topic prune on assignment remove + push anti-resurrection → **closed by Phase 137**
 - Rollback local truncate on majority fail (still open)
 - Peer-to-peer heartbeat mesh → **closed by Phase 134**
 - Sync client wait on DeleteRecords majority → **closed by Phase 135** (opt-in; default best-effort)
-- Full Kafka preferred-replica selector / rack-aware partition assignment
+- Full Kafka preferred-replica selector / throttling / rack-aware partition assignment (beyond 126/133/140)

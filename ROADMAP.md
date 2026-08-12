@@ -3319,13 +3319,70 @@ Binding: **[docs/PHASE138_SPEC.md](./docs/PHASE138_SPEC.md)**.
 
 **Honest limitations:** best-effort (put lag/fail still **70**); not dual-master
 while owner alive; dual-promote race may yield later **71**; no re-encode of
-session_id owner bits; full snapshot put per mutation can be chatty; preferred
-selector residual still orthogonal (Phase 126/133); single-node no fan-out.
+session_id owner bits; full snapshot put per mutation can be chatty (Phase 139
+coalesce/debounce); preferred selector residual still orthogonal (Phase 126/133/140);
+single-node no fan-out.
 
 **Still deferred:** Raft / controller session registry; serve from mirror without
-promote; debounced/incremental mirror put; full preferred selector; rollback
+promote; incremental/delta MirrorPut wire; full preferred selector; rollback
 local truncate on majority fail; full openraft/KRaft; multi-lang; chaos/long fuzz;
 full KIP-890/939; heterogeneous per-broker BROKER overrides.
+
+---
+
+### Phase 139 — Session mirror polish (debounce + durable + fence) ✅
+
+**Goal:** Make Phase 138 peer mirrors less chatty and optionally durable, with
+light `mirror_gen` fencing. No new opcodes; still **not** Raft.
+
+Binding: **[docs/PHASE139_SPEC.md](./docs/PHASE139_SPEC.md)**.
+
+- [x] Coalesce dirty ops (one pending op per `session_id`; Delete supersedes Put)
+- [x] Debounced Puts: `VOLANT_FETCH_SESSION_MIRROR_PUT_MIN_INTERVAL_MS` default **50**;
+  Delete flushes immediately
+- [x] Optional durable mirrors: `VOLANT_FETCH_SESSION_MIRROR_DURABLE` →
+  `{data_dir}/__fetch_session_mirrors/state.json` (default off; idle TTL filter on load)
+- [x] `mirror_gen` fencing on `apply_mirror_put` / `promote_from_mirror`
+- [x] Metrics: `volant_fetch_session_mirror_puts_coalesced_total`,
+  `volant_fetch_session_mirror_stale_put_rejects_total`,
+  `volant_fetch_session_promote_supersede_total`,
+  `volant_fetch_session_mirror_restored`
+- [x] Tests phase139 unit + `phase139_session_mirror_polish` (+ phase138 green)
+- [x] Living docs 0–139
+
+**Honest limitations:** still best-effort (put lag/fail **70**); dual-promote race
+may **71**; no incremental/delta wire; no serve-from-mirror without promote;
+durable mirrors off by default.
+
+**Still deferred:** Raft / controller session registry; serve from mirror without
+promote; incremental MirrorPut; full preferred selector; rollback local truncate
+on majority fail; full openraft/KRaft; multi-lang; chaos/long fuzz; full KIP-890/939;
+heterogeneous per-broker BROKER overrides.
+
+---
+
+### Phase 140 — Preferred-replica selector depth ✅
+
+**Goal:** Observability + optional freshness lag on Phase 126/133 preferred
+selection. Does **not** re-ship usable-addr or LEO ranking (already 133).
+
+Binding: **[docs/PHASE140_SPEC.md](./docs/PHASE140_SPEC.md)**.
+
+- [x] Optional `VOLANT_PREFERRED_REPLICA_MAX_LEO_LAG` (parsed u64; **unset** =
+  unlimited — 126/133 behavior unchanged)
+- [x] Metric `volant_preferred_replica_suppressed_total` when READ_COMMITTED
+  suppresses an otherwise-valid preferred candidate
+- [x] Tests `phase140_preferred_selector` (multi-rack, lag, dead, RC suppress)
+- [x] Living docs 0–140 + KAFKA_COMPAT honesty (126+133+140)
+
+**Honest limitations:** not full Kafka selector/throttling; no TCP probe; no
+rack-aware partition assignment; preferred still orthogonal to session mirror
+(119/138/139); RC still forces leader serve for aborted-marker filter.
+
+**Still deferred:** full preferred selector / throttling / assignment; serve from
+mirror without promote; Raft session registry; rollback local truncate on majority
+fail; full openraft/KRaft; multi-lang; chaos/long fuzz; full KIP-890/939;
+heterogeneous per-broker BROKER overrides.
 
 ---
 
@@ -3364,7 +3421,7 @@ marker clip 111; fuzz corpus smoke CI 112; cluster admin fan-out 113) — see
 
 ## Suggested implementation order (PRs)
 
-Phases **0–138 are shipped**. Historical PR order for the core:
+Phases **0–140 are shipped**. Historical PR order for the core:
 
 1. Phase 1 segment format + unit tests  
 2. Phase 1 recovery + retention  
@@ -3405,6 +3462,8 @@ Phases **0–138 are shipped**. Historical PR order for the core:
 37. Phase 136 (non-blocking admin catch-up MVP) ✅  
 38. Phase 137 (DeleteRecords request wait flag + journal topic GC) ✅  
 39. Phase 138 (shared fetch session mirror + promote MVP) ✅  
+40. Phase 139 (session mirror polish: coalesce/debounce + durable + fence) ✅  
+41. Phase 140 (preferred-replica max LEO lag + RC suppress metric) ✅  
 
 ---
 
@@ -3445,7 +3504,7 @@ cargo run -p volant-bench --release
 cargo test --workspace
 ```
 
-**Status (post–Phase 138):** core broker, ops (metrics / TLS / auth / SCRAM /
+**Status (post–Phase 140):** core broker, ops (metrics / TLS / auth / SCRAM /
 ACLs / Helm), and the Kafka wire shim are **shipped** (Fetch 0–18 Kafka max;
 ACL admin 0–3 with User resource; soft-marker `READ_COMMITTED` with **marker GC/clip**
 on DeleteRecords/retention/load (Phase 104/111); durable OFLE history; Fetch DivergingEpoch +
@@ -3469,7 +3528,9 @@ controller cluster prepared index — not full KIP-890 / `__transaction_state`);
 **durable fetch sessions** Phase 115 (`__fetch_sessions`);
 **multi-broker session handoff** Phase 119 (owner-encoded id + transparent forward);
 **shared session mirror + promote** Phase 138 (best-effort peer mirror opcodes
-90–93; promote on owner miss — not Raft; dual-promote race honest);
+90–93; promote on owner miss — not Raft; dual-promote race honest) + **mirror polish**
+Phase 139 (coalesce/debounce Puts, optional durable `__fetch_session_mirrors`,
+`mirror_gen` fence);
 **durable DeleteRecords outbox** Phase 116 (`__delete_records_outbox`; at-least-once
 retry for offline peers) + **leadership handoff reconcile** Phase 123 (new leader
 rebuilds from local `log_start` — still not a consensus truncate log);
@@ -3477,10 +3538,12 @@ rebuilds from local `log_start` — still not a consensus truncate log);
 txn EndTxn/AddOffsets/TxnOffsetCommit forward Phases 120/122;
 **durable Init-owner registry** Phase 124 (`__txn_coordinator`);
 **PreferredReadReplica / rack-aware Fetch MVP** Phase 126 (Metadata rack;
-redirect when same-rack ISR peer LEO≥HWM);
-**txn coordinator registry TTL GC** Phase 127 + **BROKER config surface** Phase 128; **truncate journal** Phase 129 + **majority multi-controller consensus** Phase 130 + **journal rejoin catch-up** Phase 131 + **catch-up hardening** Phase 132 + **preferred selector polish** Phase 133 + **p2p heartbeat mesh** Phase 134 + **optional DeleteRecords majority wait** Phase 135 + **non-blocking admin catch-up** Phase 136 + **native DeleteRecords request wait trailer + journal topic GC** Phase 137).
+redirect when same-rack ISR peer LEO≥HWM) + **selector polish** Phase 133
+(usable addr + LEO-desc rank) + **max LEO lag + RC suppress metric** Phase 140;
+**txn coordinator registry TTL GC** Phase 127 + **BROKER config surface** Phase 128; **truncate journal** Phase 129 + **majority multi-controller consensus** Phase 130 + **journal rejoin catch-up** Phase 131 + **catch-up hardening** Phase 132 + **p2p heartbeat mesh** Phase 134 + **optional DeleteRecords majority wait** Phase 135 + **non-blocking admin catch-up** Phase 136 + **native DeleteRecords request wait trailer + journal topic GC** Phase 137).
 Still deferred: multi-language clients, full chaos-mesh suites / long fuzz
-campaigns, full preferred-replica selector (beyond 133; Phase 138 closed shared
-session mirror MVP — residual: Raft registry / serve-without-promote /
-debounced put), full KIP-890/939, rollback local truncate on majority fail.
+campaigns, full preferred-replica selector / throttling / rack-aware assignment
+(beyond 126/133/140 lag+metric; Phase 138/139 closed shared mirror MVP —
+residual: Raft registry / serve-without-promote / incremental put), full
+KIP-890/939, rollback local truncate on majority fail.
 Details: [docs/KAFKA_COMPAT.md](./docs/KAFKA_COMPAT.md), [docs/ops.md](./docs/ops.md).

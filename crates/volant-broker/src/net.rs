@@ -482,6 +482,39 @@ fn broker_metrics_text(broker: &Broker) -> String {
         "volant_fetch_sessions_mirrored {}\n",
         sessions.mirrored_count()
     ));
+    // Phase 139: mirror polish (coalesce / fence / durable restore).
+    text.push_str(
+        "# HELP volant_fetch_session_mirror_puts_coalesced_total Pending Put ops dropped by coalesce\n",
+    );
+    text.push_str("# TYPE volant_fetch_session_mirror_puts_coalesced_total counter\n");
+    text.push_str(&format!(
+        "volant_fetch_session_mirror_puts_coalesced_total {}\n",
+        sessions.mirror_puts_coalesced_total()
+    ));
+    text.push_str(
+        "# HELP volant_fetch_session_mirror_stale_put_rejects_total Stale mirror puts rejected by fencing\n",
+    );
+    text.push_str("# TYPE volant_fetch_session_mirror_stale_put_rejects_total counter\n");
+    text.push_str(&format!(
+        "volant_fetch_session_mirror_stale_put_rejects_total {}\n",
+        sessions.mirror_stale_put_rejects_total()
+    ));
+    text.push_str(
+        "# HELP volant_fetch_session_promote_supersede_total Promotions where newer mirror superseded primary\n",
+    );
+    text.push_str("# TYPE volant_fetch_session_promote_supersede_total counter\n");
+    text.push_str(&format!(
+        "volant_fetch_session_promote_supersede_total {}\n",
+        sessions.promote_supersede_total()
+    ));
+    text.push_str(
+        "# HELP volant_fetch_session_mirror_restored Foreign mirrors restored from durable snapshot\n",
+    );
+    text.push_str("# TYPE volant_fetch_session_mirror_restored counter\n");
+    text.push_str(&format!(
+        "volant_fetch_session_mirror_restored {}\n",
+        sessions.mirror_restored()
+    ));
     // Phase 120/122: multi-broker EndTxn / AddOffsets / TxnOffsetCommit forward.
     text.push_str(
         "# HELP volant_txn_forward_total Successful Kafka txn API forwards to coordinator (EndTxn/AddOffsets/TxnOffsetCommit)\n",
@@ -757,6 +790,15 @@ fn broker_metrics_text(broker: &Broker) -> String {
     text.push_str(&format!(
         "volant_preferred_replica_redirect_total {}\n",
         broker.preferred_replica_redirect_total()
+    ));
+    // Phase 140: preferred candidate suppressed (e.g. READ_COMMITTED).
+    text.push_str(
+        "# HELP volant_preferred_replica_suppressed_total Fetch preferred candidates suppressed\n",
+    );
+    text.push_str("# TYPE volant_preferred_replica_suppressed_total counter\n");
+    text.push_str(&format!(
+        "volant_preferred_replica_suppressed_total {}\n",
+        broker.preferred_replica_suppressed_total()
     ));
     // Phase 129: truncate journal.
     text.push_str(
@@ -2763,17 +2805,44 @@ pub async fn fanout_session_mirror_ops(broker: &Broker) {
 
 /// Schedule [`fanout_session_mirror_ops`] after local Kafka Fetch session mutations.
 ///
-/// Spawns a best-effort task only when ops are pending; does not block the
-/// client Fetch response path.
+/// Phase 139: **Deletes** flush immediately. **Puts** are single-flight debounced
+/// by `mirror_put_min_interval_ms` (default 50; `0` = immediate after coalesce).
+/// Does not block the client Fetch response path.
 pub fn schedule_session_mirror_fanout(broker: &Arc<Broker>) {
     if broker.cluster_config().is_none() {
         return;
     }
-    if !broker.fetch_sessions().has_pending_mirror_ops() {
+    let sessions = broker.fetch_sessions();
+    if !sessions.has_pending_mirror_ops() {
+        return;
+    }
+
+    // Delete pending → flush now (no debounce wait).
+    if sessions.has_pending_mirror_delete() {
+        let b = Arc::clone(broker);
+        tokio::spawn(async move {
+            fanout_session_mirror_ops(b.as_ref()).await;
+        });
+        return;
+    }
+
+    let interval_ms = sessions.mirror_put_min_interval_ms();
+    if interval_ms == 0 {
+        let b = Arc::clone(broker);
+        tokio::spawn(async move {
+            fanout_session_mirror_ops(b.as_ref()).await;
+        });
+        return;
+    }
+
+    // Puts only: single-flight debounce. Further schedules are no-ops until flush.
+    if !sessions.try_arm_mirror_put_debounce() {
         return;
     }
     let b = Arc::clone(broker);
     tokio::spawn(async move {
+        tokio::time::sleep(std::time::Duration::from_millis(interval_ms)).await;
+        b.fetch_sessions().clear_mirror_put_debounce_armed();
         fanout_session_mirror_ops(b.as_ref()).await;
     });
 }
