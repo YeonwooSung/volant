@@ -186,10 +186,11 @@ docs for day-to-day reading: [ops](../ops.md), [consistency](../consistency.md),
 | 142 | ✅ | Metadata ISR freshness when leader ≠ controller (overlay + IsrUpdate 94/95) | [PHASE142_SPEC.md](../PHASE142_SPEC.md) |
 | 143 | ✅ | Fetch session promote claim fence (lowest-id `promoted_by`; MirrorPut converge) | [PHASE143_SPEC.md](../PHASE143_SPEC.md) |
 | 144 | ✅ | Preferred × session thrash suppress (`session_id != 0` → no PreferredReadReplica) | [PHASE144_SPEC.md](../PHASE144_SPEC.md) |
+| 148 | ✅ | Defer local DeleteRecords truncate until journal majority (wait mode; no truncate on fail) | [PHASE148_SPEC.md](../PHASE148_SPEC.md) |
 
 ---
 
-## Still deferred (post–Phase 144)
+## Still deferred (post–Phase 144 / 148)
 
 
 - Multi-language clients

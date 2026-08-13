@@ -1,14 +1,21 @@
 # Volant residual TODO (review loop)
 
-**Baseline:** HEAD product = **Phases 0–144** shipped (promote claim fence + preferred × session suppress).  
+**Baseline:** HEAD product = **Phases 0–144 + 148** shipped (148 = defer DeleteRecords truncate until journal majority).  
 **Last review:** 2026-08-13  
 
-Living roadmap: [ROADMAP.md](./ROADMAP.md) (Phases **0–144 shipped**).  
-Recent specs: [PHASE144](./docs/PHASE144_SPEC.md) · [PHASE143](./docs/PHASE143_SPEC.md) · [PHASE142](./docs/PHASE142_SPEC.md) · [PHASE141](./docs/PHASE141_SPEC.md).
+Living roadmap: [ROADMAP.md](./ROADMAP.md) (Phases **0–144 + 148 shipped**; 145–147 not implemented).  
+Recent specs: [PHASE148](./docs/PHASE148_SPEC.md) · [PHASE144](./docs/PHASE144_SPEC.md) · [PHASE143](./docs/PHASE143_SPEC.md) · [PHASE142](./docs/PHASE142_SPEC.md).
 
 ---
 
 ## Shipped recently
+
+### Phase 148 — Defer local DeleteRecords truncate until journal majority
+- [x] Wait mode: journal majority note **first**, then local truncate + replica fan-out
+- [x] Majority fail → `NotEnoughReplicas` (15); **log_start unchanged** (provisional journal rolled back)
+- [x] Wait off: legacy local-first unchanged
+- [x] Metrics `volant_delete_records_majority_first_{success,fail}_total` (+ wait_* still tick)
+- [x] Tests `phase148_defer_truncate_majority`; phase135/137 adapted
 
 ### Phase 144 — Preferred × session thrash suppress
 - [x] Suppress PreferredReadReplica when `req_session_id != 0` (non-FINAL epoch)
@@ -73,7 +80,7 @@ _(none open)_
 | P3 | Full preferred selector / throttling / rack-aware assignment | Beyond 126/133/140/144 |
 | P3 | Incremental/delta MirrorPut wire | 139 coalesces full snapshots only |
 | P3 | Serve-from-mirror without promote | Dual-epoch design required |
-| P3 | Rollback / defer local truncate until majority | Hard; segment delete is irreversible today |
+| P3 | Rollback after wait-off local truncate | Wait-on defer → **closed by Phase 148**; wait-off still irreversible |
 | Later | Heterogeneous per-broker BROKER overrides | Controller-only homogeneous push today |
 | Later | True multi-master ACL merge | Or lock “controller SoT forever” |
 | Later | Full openraft / KRaft metadata + truncate log | Replaces static ISR + journal majority MVP |
@@ -96,13 +103,14 @@ _(none open)_
 - [x] Metadata ISR overlay + leader→controller IsrUpdate (Phase 142)
 - [x] Promote claim fence lowest-id (Phase 143)
 - [x] Preferred × session thrash light suppress (Phase 144)
+- [x] Defer local DeleteRecords truncate until journal majority when wait on (Phase 148)
 - [ ] Full preferred-replica selector / rack-aware partition assignment (beyond 140/144)
 - [ ] Multi-language clients
 - [ ] Full chaos-mesh / long fuzz campaigns
 - [ ] Heterogeneous per-broker BROKER overrides without controller
 - [ ] True multi-master ACL merge
 - [x] Request-level DeleteRecords wait flag (Phase 137; Kafka still env-only)
-- [ ] Rollback local truncate on majority fail
+- [x] Wait-mode no local truncate on majority fail (Phase 148); wait-off still irreversible
 - [ ] Incremental/delta MirrorPut wire
 - [ ] Serve from mirror without promote / dual-master sessions
 
@@ -112,6 +120,7 @@ _(none open)_
 
 | Area | Verdict |
 |------|---------|
+| Phase 148 | **Shipped** — wait-mode majority-first DeleteRecords; no local truncate on fail |
 | Phase 144 | **Shipped** — preferred suppress on established fetch session; session suppress metric |
 | Phase 143 | **Shipped** — `promoted_by` lowest-id claim fence; best-effort MirrorPut; not Raft |
 | Phase 142 | **Shipped** — leader Metadata overlay + IsrUpdate 94/95; best-effort report |

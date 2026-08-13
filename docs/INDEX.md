@@ -31,8 +31,8 @@ Start here. Prefer living docs over individual phase ship records.
 
 | Document | Purpose |
 |----------|---------|
-| [history/PHASE_HISTORY.md](./history/PHASE_HISTORY.md) | One-line index for phases 0–143 (shipped) |
-| [PHASE7_SPEC.md](./PHASE7_SPEC.md) … [PHASE143_SPEC.md](./PHASE143_SPEC.md) | Per-phase ship records (deep dive) |
+| [history/PHASE_HISTORY.md](./history/PHASE_HISTORY.md) | One-line index for phases 0–144 + 148 (shipped) |
+| [PHASE7_SPEC.md](./PHASE7_SPEC.md) … [PHASE148_SPEC.md](./PHASE148_SPEC.md) | Per-phase ship records (deep dive) |
 | [history/archive/](./history/archive/) | Implementation plans & reviews (archaeology) |
 
 ## Config samples

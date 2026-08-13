@@ -78,6 +78,7 @@ fn effective_wait_flag_resolution() {
 }
 
 /// Flag 1 forces wait when broker default is off; solo N=3 → NotEnoughReplicas.
+/// Phase 148: log_start unchanged on wait-mode majority fail.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn flag_1_forces_wait_when_env_off() {
     let base = unique_dir("p137", "flag1");
@@ -108,6 +109,13 @@ async fn flag_1_forces_wait_when_env_off() {
     assert_is_leader(&b1, "t137a");
     fill_local(&b1, "t137a", 40);
 
+    let earliest_before = b1
+        .list_offsets("t137a", &[0])
+        .unwrap()
+        .first()
+        .map(|e| e.1)
+        .unwrap_or(0);
+
     let before_ok = b1.delete_records_majority_wait_success_total();
     let before_fail = b1.delete_records_majority_wait_fail_total();
 
@@ -132,10 +140,17 @@ async fn flag_1_forces_wait_when_env_off() {
                 ErrorCode::NotEnoughReplicas as u16,
                 "flag 1 + solo majority fail must surface 15 (got {error_code})"
             );
-            assert!(
-                low_watermark > 0,
-                "local truncate still advances low_watermark={low_watermark}"
+            assert_eq!(
+                low_watermark, earliest_before,
+                "Phase 148: wait fail must not truncate; low={low_watermark} before={earliest_before}"
             );
+            let earliest_after = b1
+                .list_offsets("t137a", &[0])
+                .unwrap()
+                .first()
+                .map(|e| e.1)
+                .unwrap_or(0);
+            assert_eq!(earliest_after, earliest_before, "log_start unchanged");
         }
         other => panic!("unexpected: {other:?}"),
     }

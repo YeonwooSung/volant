@@ -3464,10 +3464,31 @@ Binding: **[docs/PHASE144_SPEC.md](./docs/PHASE144_SPEC.md)**.
 immediately uses that new id on the preferred broker). Suppress covers the
 common established-session case.
 
-**Still deferred:** promote claim fence (Phase 143); full preferred selector /
-throttling / rack-aware assignment; serve-from-mirror without promote; Raft
-session registry; rollback local truncate; full openraft/KRaft; multi-lang;
-chaos/long fuzz; full KIP-890/939.
+**Still deferred:** full preferred selector / throttling / rack-aware
+assignment; serve-from-mirror without promote; Raft session registry; wait-off
+local truncate rollback; full openraft/KRaft; multi-lang; chaos/long fuzz; full
+KIP-890/939.
+
+### Phase 148 — Defer local DeleteRecords truncate until journal majority ✅
+
+**Goal:** When effective `wait_majority` is on, run truncate-journal majority
+**before** local segment delete so majority fail does not destroy local data.
+
+Binding: **[docs/PHASE148_SPEC.md](./docs/PHASE148_SPEC.md)**.
+
+- [x] Wait on: `fanout_truncate_journal_note_provisional` → then local truncate →
+  `fanout_delete_records_replicas_only`
+- [x] Majority fail → native **15** / Kafka **19**; `log_start` unchanged;
+  provisional journal rolled back
+- [x] Wait off: legacy local-first + `fanout_delete_records` unchanged
+- [x] Metrics `volant_delete_records_majority_first_{success,fail}_total`
+- [x] Tests `phase148_defer_truncate_majority`; phase135/137 adapted
+
+**Honest residual:** wait-off path still local-first (irreversible); partial
+peer journal notes without majority; configured-N majority (N=2 trap).
+
+**Still deferred:** Phases 145–147; full 2PC truncate / Raft log; wait for all
+replica log truncates; wait-off undo.
 
 
 ---

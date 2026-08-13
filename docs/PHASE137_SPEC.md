@@ -42,8 +42,8 @@ truncate-journal prune so deleted topics do not linger or resurrect via push.
 
 | Deferred | Why |
 |----------|-----|
-| Rollback local truncate on majority fail | Storage deletes segment files; no undo |
-| Defer local truncate until majority (provisional note) | Larger redesign of note timing |
+| Rollback local truncate on majority fail | **Wait-on defer → closed by Phase 148**; wait-off still irreversible |
+| Defer local truncate until majority (provisional note) | **Closed by Phase 148** |
 | Shared fetch session store / full preferred selector | Orthogonal |
 | Full openraft / KRaft / KIP-890 | Out of scope |
 | Kafka per-request wait field | Not in Kafka wire; env/broker only |
@@ -88,7 +88,8 @@ truncate-journal prune so deleted topics do not linger or resurrect via push.
 
 ## Honest limitations
 
-- Local truncate still irreversible when wait fails (Phase 135 residual).
+- **Phase 148:** wait-mode majority fail no longer truncates locally; wait-off
+  remains local-first irreversible.
 - Journal majority still over **configured N** (N=2 one-down trap).
 - Known-topic filter can briefly skip watermarks for a brand-new topic until
   assignment/local catalog includes it; later catch-up push applies them.
@@ -151,4 +152,5 @@ No new opcodes.
   resurrect watermarks (`apply_push` direct callers keep `known_topics = None`).
 - Tests: `phase137_delete_records_request_wait_flag`, `phase137_journal_topic_gc`
   (+ protocol unit roundtrip / legacy decode).
-- Residual: no local rollback on majority fail; Kafka still env-only.
+- Residual: Kafka still env-only; wait-off local-first irreversible (Phase 148
+  closes wait-on no-truncate-on-fail).

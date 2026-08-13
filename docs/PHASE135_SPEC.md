@@ -42,20 +42,16 @@ successful local DeleteRecords, so operators can choose best-effort latency
 ## Design
 
 ```text
-  client DeleteRecords
+  client DeleteRecords  (Phase 148 supersedes wait-on ordering)
        │
-       ▼
-  local truncate → achieved low
+       ├─ wait OFF (default): local truncate first → fanout (journal+replicas)
+       │     always error_code=0 if local ok (majority miss ignored)
        │
-       ▼
-  fanout_delete_records (journal majority + push + ReplicaDeleteRecords)
-       │
-       ├─ wait_majority OFF (default): always error_code=0 if local ok
-       │
-       └─ wait_majority ON:
-              majority ok  → error_code=0
-              majority fail → error_code=NotEnoughReplicas (15)
-              (low_watermark still achieved local low)
+       └─ wait ON (Phase 148 majority-first):
+              journal majority note first
+                 │
+                 ├─ fail → NotEnoughReplicas (15); log_start unchanged
+                 └─ ok   → local truncate → replica fan-out; error_code=0
 ```
 
 Config:
@@ -65,11 +61,13 @@ Config:
 
 ## Honest limitations
 
-- Local log may already be truncated when majority fails (no undo).
+- **Superseded by Phase 148 for wait mode:** wait-on majority fail no longer
+  truncates local log (journal note first; provisional note rolled back).
+  Wait-**off** path remains local-first (irreversible).
 - Wait mode inherits Phase 130 majority: **configured N** (`floor(N/2)+1`), not
   live-only. **Sharp edge:** **N=2** + one configured member down → majority
-  forever unreachable (local-only ack); wait returns `NotEnoughReplicas`; local
-  truncate still applied (no undo). Prefer odd N (3+).
+  forever unreachable; wait returns `NotEnoughReplicas` without local truncate
+  (Phase 148). Prefer odd N (3+).
 - Replica log truncate + outbox remain best-effort even in wait mode.
 - Kafka multi-partition DeleteRecords: per-partition wait; fail any partition
   that misses majority when wait is on (or document batch policy).
@@ -95,9 +93,12 @@ Config:
   note runs first under budget so replica timeouts do not flip majority_ok;
   note skipped (not leader) → `majority_ok = true`.
 - Native `DeleteRecords`: when wait on + local ok + `!majority_ok` →
-  `ErrorCode::NotEnoughReplicas` (**15**); `low_watermark` still local achieved.
-- Kafka DeleteRecords: wait on → await fan-out inside encode; fail → Kafka
-  `NOT_ENOUGH_REPLICAS` (**19**). Wait off → fire-and-forget spawn (unchanged).
+  `ErrorCode::NotEnoughReplicas` (**15**). **Phase 148:** ordering flipped to
+  majority-first; fail leaves `log_start` unchanged.
+- Kafka DeleteRecords: wait on → majority-first inside encode; fail → Kafka
+  `NOT_ENOUGH_REPLICAS` (**19**) without local truncate. Wait off →
+  fire-and-forget spawn (unchanged).
 - Metrics (wait mode only):
   `volant_delete_records_majority_wait_success_total` /
-  `volant_delete_records_majority_wait_fail_total`.
+  `volant_delete_records_majority_wait_fail_total` (+ Phase 148
+  `majority_first_*`).
