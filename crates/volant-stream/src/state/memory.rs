@@ -1,28 +1,12 @@
-//! In-memory key-value state store for stream operators.
+//! Process-local in-memory key-value store.
 
 use std::collections::BTreeMap;
 
 use bytes::Bytes;
 
-/// Key-value store used by stateful operators (`reduce`, windows).
-pub trait KeyValueStore: Send {
-    /// Look up a value by key.
-    fn get(&self, key: &[u8]) -> Option<Bytes>;
-    /// Insert or replace a key.
-    fn put(&mut self, key: Bytes, value: Bytes);
-    /// Remove a key if present.
-    fn delete(&mut self, key: &[u8]);
-    /// Iterate all entries in key order.
-    fn iter(&self) -> Box<dyn Iterator<Item = (Bytes, Bytes)> + '_>;
-    /// Number of entries.
-    fn len(&self) -> usize;
-    /// Whether the store is empty.
-    fn is_empty(&self) -> bool {
-        self.len() == 0
-    }
-}
+use super::KeyValueStore;
 
-/// In-process [`HashMap`](std::collections::HashMap)-backed store (ordered via `BTreeMap`).
+/// In-process ordered store (`BTreeMap`). State is lost on process exit.
 #[derive(Debug, Default, Clone)]
 pub struct MemoryStore {
     map: BTreeMap<Vec<u8>, Bytes>,
@@ -60,5 +44,21 @@ impl KeyValueStore for MemoryStore {
 
     fn len(&self) -> usize {
         self.map.len()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn memory_crud() {
+        let mut s = MemoryStore::new();
+        assert!(s.is_empty());
+        s.put(Bytes::from_static(b"a"), Bytes::from_static(b"1"));
+        assert_eq!(s.get(b"a").as_deref(), Some(b"1".as_ref()));
+        assert_eq!(s.len(), 1);
+        s.delete(b"a");
+        assert!(s.is_empty());
     }
 }

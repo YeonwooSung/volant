@@ -1,14 +1,20 @@
 # Volant residual TODO (review loop)
 
-**Baseline:** HEAD product = **Phases 0–148** shipped (all prior P2 + P3 MVPs).  
+**Baseline:** HEAD product = **Phases 0–149** shipped (all prior P2 + P3 MVPs).  
 **Last review:** 2026-08-13  
 
-Living roadmap: [ROADMAP.md](./ROADMAP.md) (Phases **0–148 shipped**).  
-Recent specs: [PHASE148](./docs/PHASE148_SPEC.md) · [PHASE147](./docs/PHASE147_SPEC.md) · [PHASE146](./docs/PHASE146_SPEC.md) · [PHASE145](./docs/PHASE145_SPEC.md).
+Living roadmap: [ROADMAP.md](./ROADMAP.md) (Phases **0–149 shipped**).  
+Recent specs: [PHASE149](./docs/PHASE149_SPEC.md) · [PHASE148](./docs/PHASE148_SPEC.md) · [PHASE147](./docs/PHASE147_SPEC.md) · [PHASE146](./docs/PHASE146_SPEC.md).
 
 ---
 
 ## Shipped recently (P3)
+
+### Phase 149 — Durable stream state store
+- [x] `DurableStore` (redb) implements `KeyValueStore`; survives restart
+- [x] `count_reduce_durable` / `count_reduce_with_store`; `StreamBuilder::state_dir`
+- [x] Tests `phase149_durable_state` + MemoryStore regression
+- [x] Honesty: durable state ≠ exactly-once; consensus left to sibling (150)
 
 ### Phase 148 — Defer local truncate until journal majority
 - [x] Wait-on: majority note **before** local truncate; fail → log unchanged
@@ -47,12 +53,13 @@ _(none open for the prior P3 list)_
 
 | Pri | Item | Notes |
 |----:|------|-------|
+| Later | Broker consensus (sibling 150) | Not stream state |
+| Later | Exactly-once stream processing | Durable state ≠ EOS |
 | Later | Full preferred throttling / TCP probe | Beyond 145 assignment |
 | Later | Dual-epoch mirror SoT / Raft session registry | 147 residual |
 | Later | Wait-off truncate rollback / Raft truncate log | 148 residual wait-off path |
 | Later | Full openraft / KRaft metadata | Product bet |
 | Later | Full KIP-890 / `__transaction_state` | Product bet |
-| Later | Durable stream state store | `volant-stream` in-memory |
 | Later | Multi-language clients | Ecosystem |
 | Later | Long fuzz + chaos-mesh | Phase 112 is smoke only |
 | Later | Perf campaign vs aspirational targets | Publish numbers |
@@ -63,10 +70,11 @@ _(none open for the prior P3 list)_
 
 | Area | Verdict |
 |------|---------|
+| Phase 149 | **Shipped** — redb durable stream KV; consensus deferred |
 | Phase 148 | **Shipped** — wait mode majority-first |
 | Phase 147 | **Shipped** — serve mirror without promote (default) |
 | Phase 146 | **Shipped** — delta MirrorPut wire |
 | Phase 145 | **Shipped** — rack-aware create assignment |
 | P0–P3 (listed) | **None open** |
 
-**Default next slice:** product bet (streams / Raft / multi-lang) or hardening (chaos/perf).
+**Default next slice:** product bet (consensus / Raft / multi-lang) or hardening (chaos/perf).

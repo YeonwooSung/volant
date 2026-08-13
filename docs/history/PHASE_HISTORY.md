@@ -1,6 +1,6 @@
 # Phase history index
 
-Ship records for **phases 0–145** (shipped). Binding core contracts are
+Ship records for **phases 0–149** (shipped). Binding core contracts are
 **[PHASE1_SPEC](../PHASE1_SPEC.md)–[PHASE6_SPEC](../PHASE6_SPEC.md)**. Living
 docs for day-to-day reading: [ops](../ops.md), [consistency](../consistency.md),
 [tuning](../tuning.md), [KAFKA_COMPAT](../KAFKA_COMPAT.md),
@@ -190,18 +190,11 @@ docs for day-to-day reading: [ops](../ops.md), [consistency](../consistency.md),
 | 146 | ✅ | Incremental/delta MirrorPut wire (`mode=full|delta`; last_mirrored cache) | [PHASE146_SPEC.md](../PHASE146_SPEC.md) |
 | 147 | ✅ | Serve-from-mirror without promote (owner miss; dual-epoch residual) | [PHASE147_SPEC.md](../PHASE147_SPEC.md) |
 | 148 | ✅ | Defer local DeleteRecords truncate until journal majority (wait mode) | [PHASE148_SPEC.md](../PHASE148_SPEC.md) |
+| 149 | ✅ | Durable stream state store (`DurableStore` / redb; not exactly-once) | [PHASE149_SPEC.md](../PHASE149_SPEC.md) |
 
 ---
 
-## Still deferred (post–Phase 148)
-
----
-
-## Still deferred (post–Phase 148 / 148)
-
----
-
-## Still deferred (post–Phase 147)
+## Still deferred (post–Phase 149)
 
 
 - Multi-language clients
@@ -254,3 +247,5 @@ docs for day-to-day reading: [ops](../ops.md), [consistency](../consistency.md),
 - Peer-to-peer heartbeat mesh → **closed by Phase 134**
 - Sync client wait on DeleteRecords majority → **closed by Phase 135** (opt-in; default best-effort)
 - Full Kafka preferred-replica selector / throttling (beyond 126/133/140/144; rack-aware create assignment → **closed by Phase 145**)
+- Durable stream state store (in-process) → **closed by Phase 149** (`DurableStore` / redb; not exactly-once; not distributed workers)
+- Broker consensus / openraft → sibling Phase 150 (not stream state)

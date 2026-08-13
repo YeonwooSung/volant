@@ -72,11 +72,14 @@ shim: [KAFKA_COMPAT.md](./KAFKA_COMPAT.md).
 | SCRAM-SHA-256 | Durable users; **native** + Kafka SASL |
 | SCRAM-SHA-512 | Dual hashes per user; **Kafka SASL only** |
 
-## Stream processing (Phase 4+)
+## Stream processing (Phase 4+ / 149)
 
 In-process `volant-stream`: map, filter, flat_map, reduce, windows, foreach.
-**In-memory state only**; at-least-once. No durable state store, no distributed
-workers.
+**State stores:** `MemoryStore` (default) and **Phase 149** `DurableStore` (redb
+under a directory; `{state_dir}/kv.redb`). Use `count_reduce_durable(path)` or
+`StreamBuilder::state_dir` + `reduce_count_durable`. **At-least-once** still
+applies — durable aggregates survive restart but are **not** exactly-once (replay
+can double-count). No distributed stream workers; window buckets still process-local.
 
 ## Leader epochs (Phase 87)
 

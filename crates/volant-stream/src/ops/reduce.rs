@@ -1,10 +1,12 @@
 //! Keyed reduce operator.
 
+use std::path::Path;
+
 use bytes::Bytes;
 use volant_core::{Offset, Record, Result};
 
 use crate::operator::Operator;
-use crate::state::{KeyValueStore, MemoryStore};
+use crate::state::{DurableStore, KeyValueStore, MemoryStore, StreamStateError};
 
 /// Keyed reduce: aggregates values per record key (empty key → `""`).
 ///
@@ -22,6 +24,16 @@ impl<S, Init, Add> Reduce<S, Init, Add> {
     pub fn with_store(store: S, init: Init, add: Add) -> Self {
         Self { store, init, add }
     }
+
+    /// Borrow the underlying store (tests / inspection).
+    pub fn store(&self) -> &S {
+        &self.store
+    }
+
+    /// Mutable borrow of the underlying store.
+    pub fn store_mut(&mut self) -> &mut S {
+        &mut self.store
+    }
 }
 
 /// Build a reduce operator backed by [`MemoryStore`].
@@ -33,20 +45,60 @@ where
     Reduce::with_store(MemoryStore::new(), init, add)
 }
 
+/// Build a reduce operator with an injected store (memory or durable).
+pub fn reduce_with_store<S, Init, Add>(
+    store: S,
+    init: Init,
+    add: Add,
+) -> Reduce<S, Init, Add>
+where
+    S: KeyValueStore,
+    Init: FnMut() -> Bytes + Send + 'static,
+    Add: FnMut(&Bytes, &Record) -> Result<Bytes> + Send + 'static,
+{
+    Reduce::with_store(store, init, add)
+}
+
+/// Init fn pointer for word-count reduce (`"0"`).
+pub type CountInit = fn() -> Bytes;
+/// Add fn pointer for word-count reduce (decimal sum).
+pub type CountAdd = fn(&Bytes, &Record) -> Result<Bytes>;
+
+fn count_init() -> Bytes {
+    Bytes::from_static(b"0")
+}
+
+fn count_add(agg: &Bytes, record: &Record) -> Result<Bytes> {
+    let prev = parse_count(agg);
+    let delta = parse_count(&record.value);
+    Ok(Bytes::from(format!("{}", prev + delta)))
+}
+
 /// Word-count style reduce: parse decimal counts, sum by key, emit decimal.
 ///
 /// Input convention: key = group key, value = decimal integer (or empty/`"1"` → 1).
 /// Output: key unchanged, value = running total as UTF-8 decimal bytes.
-pub fn count_reduce() -> Reduce<MemoryStore, impl FnMut() -> Bytes, impl FnMut(&Bytes, &Record) -> Result<Bytes>>
+pub fn count_reduce() -> Reduce<MemoryStore, CountInit, CountAdd> {
+    Reduce::with_store(MemoryStore::new(), count_init, count_add)
+}
+
+/// Word-count reduce backed by an existing [`KeyValueStore`].
+pub fn count_reduce_with_store<S>(store: S) -> Reduce<S, CountInit, CountAdd>
+where
+    S: KeyValueStore,
 {
-    reduce(
-        || Bytes::from_static(b"0"),
-        |agg, record| {
-            let prev = parse_count(agg);
-            let delta = parse_count(&record.value);
-            Ok(Bytes::from(format!("{}", prev + delta)))
-        },
-    )
+    Reduce::with_store(store, count_init, count_add)
+}
+
+/// Word-count reduce with a new [`DurableStore`] at `path` (directory).
+///
+/// Aggregates survive process restart when reopened at the same path.
+/// At-least-once still applies — durable state is not exactly-once.
+pub fn count_reduce_durable(
+    path: impl AsRef<Path>,
+) -> std::result::Result<Reduce<DurableStore, CountInit, CountAdd>, StreamStateError> {
+    let store = DurableStore::open(path)?;
+    Ok(count_reduce_with_store(store))
 }
 
 fn parse_count(v: &Bytes) -> u64 {

@@ -216,7 +216,7 @@ Binding API: **[docs/PHASE4_SPEC.md](./docs/PHASE4_SPEC.md)**.
    - [x] Keyed `reduce` / `count_reduce` with in-memory `MemoryStore`
    - [x] Tumbling windows (event-time)
    - [ ] Hopping windows — deferred
-   - [ ] RocksDB / durable state — deferred (in-memory only)
+   - [x] Durable state store — **Phase 149** (`DurableStore` / redb; not RocksDB)
 4. Source / sink adapters
    - [x] `TopicSource` (`GroupConsumer`) + `TopicSink` (produce)
    - [x] `StreamBuilder` / `Topology` / `StreamApp` runtime
@@ -233,6 +233,7 @@ Binding API: **[docs/PHASE4_SPEC.md](./docs/PHASE4_SPEC.md)**.
   (`cargo run -p volant-stream --example word_count`)
 
 **Non-goals for Phase 4:** exactly-once, WASM plugins, RocksDB, distributed stream workers.
+(Durable local state later closed by **Phase 149** via redb — still not EOS / workers.)
 
 ---
 
@@ -3490,6 +3491,27 @@ peer journal notes without majority; configured-N majority (N=2 trap).
 **Still deferred:** Phases 145–147; full 2PC truncate / Raft log; wait for all
 replica log truncates; wait-off undo.
 
+### Phase 149 — Durable stream state store (MVP) ✅
+
+**Goal:** Persist `volant-stream` keyed aggregates across process restart via a
+pure-Rust embedded KV. Closes Phase 4 residual “RocksDB / durable state.”
+
+Binding: **[docs/PHASE149_SPEC.md](./docs/PHASE149_SPEC.md)**.
+
+- [x] `DurableStore` (`redb = "2"`) implements `KeyValueStore`
+- [x] Path = directory; on-disk `{path}/kv.redb`; table `"kv"`
+- [x] Auto-flush each put/delete (`Durability::Immediate`); `flush()` API
+- [x] `count_reduce_durable` / `count_reduce_with_store` / `Reduce::with_store`
+- [x] `StreamBuilder::state_dir` + `reduce_count_durable`; `Topology::state_dir`
+- [x] Tests `phase149_durable_state` (CRUD, restart, reduce, MemoryStore)
+
+**Honest residual:** at-least-once still applies (durable ≠ exactly-once);
+one redb lock per path; window buckets still process-local; no distributed
+stream workers / changelog.
+
+**Still deferred:** exactly-once streams; broker consensus (sibling 150);
+RocksDB; distributed topology; durable window buckets.
+
 ### Phase 145 — Rack-aware partition assignment MVP ✅
 
 **Goal:** Create-time replica placement that maximizes rack diversity when
@@ -3671,7 +3693,7 @@ cargo run -p volant-bench --release
 cargo test --workspace
 ```
 
-**Status (post–Phase 145):** core broker, ops (metrics / TLS / auth / SCRAM /
+**Status (post–Phase 149):** core broker, ops (metrics / TLS / auth / SCRAM /
 ACLs / Helm), and the Kafka wire shim are **shipped** (Fetch 0–18 Kafka max;
 ACL admin 0–3 with User resource; soft-marker `READ_COMMITTED` with **marker GC/clip**
 on DeleteRecords/retention/load (Phase 104/111); durable OFLE history; Fetch DivergingEpoch +
@@ -3715,12 +3737,9 @@ no/single rack; `VOLANT_RACK_AWARE_ASSIGNMENT=0` off);
 **Metadata ISR overlay + leader→controller IsrUpdate** Phase 142;
 **txn coordinator registry TTL GC** Phase 127 + **BROKER config surface** Phase 128; **truncate journal** Phase 129 + **majority multi-controller consensus** Phase 130 + **journal rejoin catch-up** Phase 131 + **catch-up hardening** Phase 132 + **p2p heartbeat mesh** Phase 134 + **optional DeleteRecords majority wait** Phase 135 + **non-blocking admin catch-up** Phase 136 + **native DeleteRecords request wait trailer + journal topic GC** Phase 137).
 Still deferred: multi-language clients, full chaos-mesh suites / long fuzz
-campaigns, full preferred-replica throttling residual (assignment MVP closed by
-Phase 145; Phase 138/139/143 closed shared mirror MVP — residual: Raft registry /
-serve-without-promote / incremental put), full KIP-890/939, rollback local
-truncate on majority fail.
-campaigns, full preferred-replica selector / throttling / rack-aware assignment
+campaigns, full preferred-replica selector / throttling residual
 (beyond 126/133/140/144; Phase 138/139/143/147 closed shared mirror MVP —
 residual: Raft registry / dual-epoch converge / incremental put), full
-KIP-890/939, rollback local truncate on majority fail.
+KIP-890/939, rollback local truncate on majority fail, exactly-once streams
+(Phase 149 shipped local durable state only), broker consensus (sibling 150).
 Details: [docs/KAFKA_COMPAT.md](./docs/KAFKA_COMPAT.md), [docs/ops.md](./docs/ops.md).

@@ -13,6 +13,7 @@ bytes = { workspace = true }
 thiserror = { workspace = true }
 tokio = { workspace = true }
 tracing = { workspace = true }
+redb = { workspace = true }
 
 [dev-dependencies]
 volant-broker = { workspace = true }

@@ -1,10 +1,13 @@
 //! Fluent topology builder (`StreamBuilder`).
 
+use std::path::{Path, PathBuf};
+
 use volant_core::{Error, Result};
 
 use crate::operator::Operator;
 use crate::pipeline::Pipeline;
 use crate::source::SourceConfig;
+use crate::state::StreamStateError;
 
 /// Fluent builder for a source → operators → sink topology.
 pub struct StreamBuilder {
@@ -12,6 +15,13 @@ pub struct StreamBuilder {
     source_topic: Option<String>,
     source_config: Option<SourceConfig>,
     sink_topic: Option<String>,
+    /// Optional directory for durable stream state ([`crate::state::DurableStore`]).
+    ///
+    /// Phase 149: stored on the built [`Topology`] for apps to open stores.
+    /// Callers wire durable reduce via [`crate::ops::count_reduce_durable`] or
+    /// [`StreamBuilder::reduce_count_durable`] — default [`StreamBuilder::reduce_count`]
+    /// still uses in-memory state.
+    state_dir: Option<PathBuf>,
     pipeline: Pipeline,
 }
 
@@ -23,6 +33,7 @@ impl StreamBuilder {
             source_topic: None,
             source_config: None,
             sink_topic: None,
+            state_dir: None,
             pipeline: Pipeline::new(),
         }
     }
@@ -30,6 +41,17 @@ impl StreamBuilder {
     /// Application / topology name.
     pub fn name(&self) -> &str {
         &self.name
+    }
+
+    /// Set an optional directory for durable stream state stores.
+    ///
+    /// Does not auto-wire operators: pass the path to
+    /// [`crate::ops::count_reduce_durable`] / [`StreamBuilder::reduce_count_durable`],
+    /// or open [`crate::state::DurableStore`] yourself. The path is copied onto
+    /// [`Topology::state_dir`] at build time for application use.
+    pub fn state_dir(mut self, path: impl AsRef<Path>) -> Self {
+        self.state_dir = Some(path.as_ref().to_path_buf());
+        self
     }
 
     /// Set the source topic and consumer config.
@@ -75,9 +97,24 @@ impl StreamBuilder {
         self.then(crate::ops::foreach(f))
     }
 
-    /// Append a keyed count reduce.
+    /// Append a keyed count reduce with in-memory state.
     pub fn reduce_count(self) -> Self {
         self.then(crate::ops::count_reduce())
+    }
+
+    /// Append a keyed count reduce backed by [`crate::state::DurableStore`]
+    /// under [`StreamBuilder::state_dir`].
+    ///
+    /// Requires `state_dir` to be set. Opens (or creates) the store immediately.
+    pub fn reduce_count_durable(self) -> std::result::Result<Self, StreamStateError> {
+        let path = self.state_dir.clone().ok_or_else(|| {
+            StreamStateError::Io(std::io::Error::new(
+                std::io::ErrorKind::InvalidInput,
+                "state_dir required for reduce_count_durable",
+            ))
+        })?;
+        let op = crate::ops::count_reduce_durable(path)?;
+        Ok(self.then(op))
     }
 
     /// Append an arbitrary operator.
@@ -108,6 +145,7 @@ impl StreamBuilder {
             source_topic,
             source_config,
             sink_topic,
+            state_dir: self.state_dir,
             pipeline: self.pipeline,
         })
     }
@@ -128,6 +166,9 @@ pub struct Topology {
     pub source_config: SourceConfig,
     /// Output topic.
     pub sink_topic: String,
+    /// Optional durable state directory (Phase 149). Apps may open
+    /// [`crate::state::DurableStore`] here; not auto-consumed by the runtime.
+    pub state_dir: Option<PathBuf>,
     /// Operator chain.
     pub pipeline: Pipeline,
 }

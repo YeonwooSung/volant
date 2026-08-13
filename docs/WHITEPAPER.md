@@ -299,7 +299,7 @@ Volant deliberately does **not** claim production Kafka parity. Open gaps:
 4. Full Kafka API surface beyond advertised keys; multi-broker session affinity / durable sessions
 5. Full KRaft epoch state machine (durable history is MVP)
 6. Kafka cooperative-sticky assignor **protocol** parity (native JoinGroup revoke list exists)
-7. Stream state durability and distributed stream topology (`MemoryStore` only)
+7. Distributed stream topology / exactly-once (Phase **149** shipped local `DurableStore`/redb; still at-least-once, no workers)
 8. Full chaos-mesh / long fuzz campaigns (corpus smoke CI MVP → Phase 112; `fuzz/` seeds + deterministic replay)
 9. Full Raft multi-master ACL consensus (Phase **113** is controller SoT + snapshot fan-out, not consensus); DeleteRecords fan-out is best-effort (Phase **113**)
 10. Helm chart has no `--kafka-listen` surface; version **0.1.0** MVP readiness
