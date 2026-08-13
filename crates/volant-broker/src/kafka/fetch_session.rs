@@ -1,6 +1,6 @@
 //! Fetch session state (Phase 88 + 91 omit-unchanged + Phase 95 limits + Phase 115 durable
 //! + Phase 119 multi-broker owner encoding / handoff + Phase 138 peer mirror + Phase 139
-//! mirror polish + Phase 143 promote claim fence).
+//! mirror polish + Phase 143 promote claim fence + Phase 146 incremental MirrorPut).
 //!
 //! Tracks topic partitions, last-seen fetch params, last-returned HWM/LSO (Phase 91),
 //! idle TTL / max concurrent sessions with lazy LRU eviction (Phase 95), and optional
@@ -18,6 +18,10 @@
 //!
 //! Phase 143: `promoted_by` lowest-id claim fence breaks dual-promote ties when two
 //! peers promote the same equal-freshness snapshot; claim travels in MirrorPut JSON.
+//!
+//! Phase 146: MirrorPut JSON may be `mode=full` (default, complete topics map) or
+//! `mode=delta` (topic upserts + `remove_topic_keys`). Fan-out prefers delta against
+//! an in-memory `last_mirrored` cache; opcode **90** unchanged.
 
 use std::collections::HashMap;
 use std::fs::{self, File, OpenOptions};
@@ -29,7 +33,8 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use parking_lot::Mutex;
 use serde::{Deserialize, Serialize};
 
-use super::topic_id::TopicWireId;
+// Re-export so external tests / callers can build [`SessionTopic`] maps.
+pub use super::topic_id::TopicWireId;
 
 /// Kafka `FetchSession.INITIAL_EPOCH` — create / full fetch.
 pub const INITIAL_EPOCH: i32 = 0;
@@ -66,10 +71,21 @@ pub const SESSION_OWNER_MASK: u32 = 0xFFF;
 /// Dirty op for best-effort peer fan-out of primary session mutations (Phase 138/139).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SessionMirrorOp {
-    /// Full snapshot put for `session_id` (export via [`FetchSessionManager::export_session_bytes`]).
+    /// Snapshot put for `session_id` (full or delta; export via
+    /// [`FetchSessionManager::export_mirror_put_bytes`] / [`FetchSessionManager::export_session_bytes`]).
     Put(i32),
     /// Remove foreign mirror for `session_id`.
     Delete(i32),
+}
+
+/// Default MirrorPut / durable snapshot mode (`"full"`).
+fn default_mirror_mode() -> String {
+    "full".to_owned()
+}
+
+/// Whether a MirrorPut JSON `mode` field is delta (Phase 146).
+fn is_delta_mode(mode: &str) -> bool {
+    mode.eq_ignore_ascii_case("delta")
 }
 
 /// Whether `a` is strictly newer than `b` for mirror fencing (Phase 139).
@@ -137,7 +153,7 @@ pub fn session_local_part(session_id: i32) -> i32 {
 }
 
 /// Cached partition fetch parameters inside a session.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SessionPartition {
     /// Last fetch offset the client requested for this partition.
     pub fetch_offset: i64,
@@ -185,7 +201,7 @@ impl SessionPartition {
 }
 
 /// One topic entry inside a fetch session.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SessionTopic {
     /// Wire identity to echo on responses (name or TopicId UUID).
     pub wire: TopicWireId,
@@ -196,7 +212,7 @@ pub struct SessionTopic {
 }
 
 /// One active fetch session.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct FetchSession {
     /// Next expected `session_epoch` from the client.
     pub epoch: i32,
@@ -215,7 +231,7 @@ pub struct FetchSession {
 
 /// Fetch session table with idle TTL + max concurrent (Phase 95) + optional
 /// durability (Phase 115) + cluster owner encoding (Phase 119) + peer mirror
-/// (Phase 138/139) + promote claim fence (Phase 143).
+/// (Phase 138/139) + promote claim fence (Phase 143) + incremental MirrorPut (Phase 146).
 #[derive(Debug)]
 pub struct FetchSessionManager {
     sessions: Mutex<HashMap<i32, FetchSession>>,
@@ -223,6 +239,8 @@ pub struct FetchSessionManager {
     mirrors: Mutex<HashMap<i32, FetchSession>>,
     /// Pending put/delete ops keyed by session_id (coalesced; Phase 138/139).
     pending_mirror: Mutex<HashMap<i32, SessionMirrorOp>>,
+    /// Last successfully exported full/applied primary state for delta fan-out (Phase 146).
+    last_mirrored: Mutex<HashMap<i32, FetchSession>>,
     /// Next **local** counter (not necessarily the full session_id).
     next_id: AtomicI32,
     /// Idle TTL in ms; `0` disables idle eviction.
@@ -261,6 +279,8 @@ pub struct FetchSessionManager {
     mirror_restored: AtomicU64,
     /// Dual-promote / claim-lose rejects (Phase 143).
     promote_claim_reject_total: AtomicU64,
+    /// Delta MirrorPut payloads sent or applied (Phase 146).
+    mirror_delta_puts_total: AtomicU64,
     /// Min interval between Put fan-outs; `0` = immediate (Phase 139).
     mirror_put_min_interval_ms: AtomicU64,
     /// Single-flight arm for debounced Put fan-out (Phase 139).
@@ -298,6 +318,7 @@ impl FetchSessionManager {
             sessions: Mutex::new(HashMap::new()),
             mirrors: Mutex::new(HashMap::new()),
             pending_mirror: Mutex::new(HashMap::new()),
+            last_mirrored: Mutex::new(HashMap::new()),
             next_id: AtomicI32::new(1),
             idle_timeout_ms: AtomicU64::new(idle_timeout_ms),
             max_sessions: AtomicUsize::new(max_sessions),
@@ -317,6 +338,7 @@ impl FetchSessionManager {
             promote_supersede_total: AtomicU64::new(0),
             mirror_restored: AtomicU64::new(0),
             promote_claim_reject_total: AtomicU64::new(0),
+            mirror_delta_puts_total: AtomicU64::new(0),
             mirror_put_min_interval_ms: AtomicU64::new(default_mirror_put_min_interval_ms()),
             mirror_put_debounce_armed: AtomicBool::new(false),
             mirror_durable_path: None,
@@ -480,7 +502,10 @@ impl FetchSessionManager {
             .store(false, Ordering::Release);
     }
 
-    /// JSON bytes of one primary session (`StoredFetchSession` shape) for MirrorPut.
+    /// JSON bytes of one primary session as a **full** snapshot (`mode=full`) for MirrorPut.
+    ///
+    /// Prefer [`Self::export_mirror_put_bytes`] on the fan-out path so peers receive
+    /// deltas when a prior export is cached (Phase 146).
     pub fn export_session_bytes(&self, session_id: i32) -> Option<Vec<u8>> {
         let guard = self.sessions.lock();
         let session = guard.get(&session_id)?;
@@ -488,20 +513,80 @@ impl FetchSessionManager {
         serde_json::to_vec(&stored).ok()
     }
 
-    /// Install/replace a foreign mirror from a JSON snapshot (Phase 138/139/143 Put).
+    /// Export a MirrorPut payload as full or delta relative to `prev` (Phase 146).
+    ///
+    /// - `prev == None` → full snapshot (`mode=full`).
+    /// - Topics equal → metadata-only delta (empty upserts / removes).
+    /// - Topics differ → delta with upserted topic keys + `remove_topic_keys` for gone keys.
+    ///
+    /// Always includes current `mirror_gen` / `epoch` / `last_activity_ms` / `promoted_by`.
+    pub fn export_session_delta_bytes(
+        &self,
+        session_id: i32,
+        prev: Option<&FetchSession>,
+    ) -> Option<Vec<u8>> {
+        let guard = self.sessions.lock();
+        let session = guard.get(&session_id)?;
+        let stored = match prev {
+            None => session_to_stored(session_id, session),
+            Some(prev_sess) => session_to_delta_stored(session_id, session, prev_sess),
+        };
+        serde_json::to_vec(&stored).ok()
+    }
+
+    /// Export MirrorPut payload for fan-out, preferring delta vs [`Self::last_mirrored`] (Phase 146).
+    ///
+    /// Returns `(payload_bytes, is_delta)`. On success the caller should
+    /// [`Self::note_last_mirrored`] after scheduling the export.
+    pub fn export_mirror_put_bytes(&self, session_id: i32) -> Option<(Vec<u8>, bool)> {
+        let prev = self.last_mirrored.lock().get(&session_id).cloned();
+        let is_delta = prev.is_some();
+        let bytes = self.export_session_delta_bytes(session_id, prev.as_ref())?;
+        Some((bytes, is_delta))
+    }
+
+    /// Record the primary session as last-exported for future deltas (Phase 146).
+    ///
+    /// Call after a successful MirrorPut export schedule. No-op when primary missing.
+    pub fn note_last_mirrored(&self, session_id: i32) {
+        let session = {
+            let guard = self.sessions.lock();
+            match guard.get(&session_id) {
+                Some(s) => s.clone(),
+                None => return,
+            }
+        };
+        self.last_mirrored.lock().insert(session_id, session);
+    }
+
+    /// Drop cached last-exported state for `session_id` (Phase 146).
+    pub fn clear_last_mirrored(&self, session_id: i32) {
+        self.last_mirrored.lock().remove(&session_id);
+    }
+
+    /// Install/replace a foreign mirror from a JSON snapshot (Phase 138/139/143/146 Put).
     ///
     /// Fencing: [`session_claim_wins`] — newer `mirror_gen`/epoch/activity, else
     /// lowest non-zero `promoted_by` on equal freshness. Stale or claim-losing puts
     /// do not clobber primary or mirror. When primary exists and the incoming
     /// snapshot wins, primary is replaced (converge).
+    ///
+    /// Phase 146: `mode=delta` merges topic upserts into existing primary or mirror
+    /// and applies `remove_topic_keys`. Missing base installs upserts as full state.
+    /// Absent / `"full"` mode replaces topics wholesale (legacy path).
     pub fn apply_mirror_put(&self, snapshot: &[u8]) -> Result<(), String> {
         let stored: StoredFetchSession =
             serde_json::from_slice(snapshot).map_err(|e| e.to_string())?;
         if stored.id <= 0 {
             return Err("invalid session id".to_owned());
         }
-        let (id, session) =
-            stored_to_session(stored).ok_or_else(|| "invalid session snapshot".to_owned())?;
+        let is_delta = is_delta_mode(&stored.mode);
+        let (id, session) = if is_delta {
+            self.resolve_delta_put(stored)
+                .ok_or_else(|| "invalid delta session snapshot".to_owned())?
+        } else {
+            stored_to_session(stored).ok_or_else(|| "invalid session snapshot".to_owned())?
+        };
 
         // Lock order: sessions then mirrors.
         {
@@ -527,6 +612,10 @@ impl FetchSessionManager {
                 }
                 self.mirror_puts_applied_total
                     .fetch_add(1, Ordering::Relaxed);
+                if is_delta {
+                    self.mirror_delta_puts_total
+                        .fetch_add(1, Ordering::Relaxed);
+                }
                 return Ok(());
             }
         }
@@ -547,7 +636,59 @@ impl FetchSessionManager {
         self.persist_mirrors_locked(&mirrors);
         self.mirror_puts_applied_total
             .fetch_add(1, Ordering::Relaxed);
+        if is_delta {
+            self.mirror_delta_puts_total
+                .fetch_add(1, Ordering::Relaxed);
+        }
         Ok(())
+    }
+
+    /// Build the post-merge session for a delta MirrorPut (Phase 146).
+    ///
+    /// Base = primary if present, else mirror, else empty topics. Upserts merge into
+    /// the topics map; `remove_topic_keys` drop keys; metadata fields come from payload.
+    fn resolve_delta_put(&self, stored: StoredFetchSession) -> Option<(i32, FetchSession)> {
+        let id = stored.id;
+        let remove_keys = stored.remove_topic_keys.clone();
+        let upserts = stored_topics_to_map(stored.topics)?;
+        let epoch = stored.epoch;
+        let last_activity_ms = stored.last_activity_ms;
+        let mirror_gen = stored.mirror_gen;
+        let promoted_by = stored.promoted_by;
+
+        // Prefer primary base, then mirror (lock order: sessions then mirrors).
+        let base_topics = {
+            let sessions = self.sessions.lock();
+            if let Some(primary) = sessions.get(&id) {
+                primary.topics.clone()
+            } else {
+                drop(sessions);
+                let mirrors = self.mirrors.lock();
+                mirrors
+                    .get(&id)
+                    .map(|m| m.topics.clone())
+                    .unwrap_or_default()
+            }
+        };
+
+        let mut topics = base_topics;
+        for (k, v) in upserts {
+            topics.insert(k, v);
+        }
+        for k in remove_keys {
+            topics.remove(&k);
+        }
+
+        Some((
+            id,
+            FetchSession {
+                epoch,
+                topics,
+                last_activity_ms,
+                mirror_gen,
+                promoted_by,
+            },
+        ))
     }
 
     /// Classify a losing put as stale-gen vs claim-fence reject (Phase 139/143).
@@ -688,6 +829,17 @@ impl FetchSessionManager {
     /// Dual-promote / claim-lose rejects (Phase 143).
     pub fn promote_claim_reject_total(&self) -> u64 {
         self.promote_claim_reject_total.load(Ordering::Relaxed)
+    }
+
+    /// Delta MirrorPut payloads sent or applied (Phase 146).
+    pub fn mirror_delta_puts_total(&self) -> u64 {
+        self.mirror_delta_puts_total.load(Ordering::Relaxed)
+    }
+
+    /// Record that a delta MirrorPut was scheduled for fan-out (Phase 146).
+    pub fn record_mirror_delta_put_sent(&self) {
+        self.mirror_delta_puts_total
+            .fetch_add(1, Ordering::Relaxed);
     }
 
     /// Queue Put for peer fan-out when this broker is a cluster owner (Phase 138/139).
@@ -838,6 +990,7 @@ impl FetchSessionManager {
             if guard.remove(&session_id).is_some() {
                 self.persist_locked(&guard);
                 drop(guard);
+                self.clear_last_mirrored(session_id);
                 self.queue_mirror_delete(session_id);
             }
         }
@@ -1055,6 +1208,7 @@ impl FetchSessionManager {
         self.evicted_total.fetch_add(removed, Ordering::Relaxed);
         self.idle_evicted_total.fetch_add(removed, Ordering::Relaxed);
         for id in removed_ids {
+            self.clear_last_mirrored(id);
             self.queue_mirror_delete(id);
         }
     }
@@ -1073,6 +1227,7 @@ impl FetchSessionManager {
         if let Some(id) = victim {
             sessions.remove(&id);
             self.evicted_total.fetch_add(1, Ordering::Relaxed);
+            self.clear_last_mirrored(id);
             self.queue_mirror_delete(id);
         }
     }
@@ -1286,6 +1441,15 @@ struct StoredFetchSession {
     /// Claim-promote node id (Phase 143); absent on older snapshots → `0`.
     #[serde(default)]
     promoted_by: u32,
+    /// MirrorPut wire mode: `"full"` (complete topics) or `"delta"` (upserts + removes).
+    ///
+    /// Default `"full"` for backward compat with pre-Phase-146 peers / durable files.
+    #[serde(default = "default_mirror_mode")]
+    mode: String,
+    /// Topic map keys to remove when `mode=delta` (Phase 146). Ignored for full mode.
+    #[serde(default)]
+    remove_topic_keys: Vec<String>,
+    /// Full topics map (`mode=full`) or topic upserts only (`mode=delta`).
     #[serde(default)]
     topics: Vec<StoredSessionTopic>,
 }
@@ -1318,38 +1482,41 @@ struct StoredSessionPartition {
     last_lso: Option<i64>,
 }
 
+fn session_topic_to_stored(key: &str, t: &SessionTopic) -> StoredSessionTopic {
+    let (wire_kind, wire_name, wire_uuid_hex) = match &t.wire {
+        TopicWireId::Name(n) => ("name".to_owned(), Some(n.clone()), None),
+        TopicWireId::Uuid(u) => ("uuid".to_owned(), None, Some(hex::encode(u))),
+    };
+    let mut partitions: Vec<StoredSessionPartition> = t
+        .partitions
+        .iter()
+        .map(|(pid, p)| StoredSessionPartition {
+            id: *pid,
+            fetch_offset: p.fetch_offset,
+            current_leader_epoch: p.current_leader_epoch,
+            last_fetched_epoch: p.last_fetched_epoch,
+            max_bytes: p.max_bytes,
+            last_hwm: p.last_hwm,
+            last_lso: p.last_lso,
+        })
+        .collect();
+    partitions.sort_by_key(|p| p.id);
+    StoredSessionTopic {
+        key: key.to_owned(),
+        wire_kind,
+        wire_name,
+        wire_uuid_hex,
+        name: t.name.clone(),
+        partitions,
+    }
+}
+
+/// Full snapshot (`mode=full`) for durable files and MirrorPut baseline export.
 fn session_to_stored(id: i32, s: &FetchSession) -> StoredFetchSession {
     let mut topics: Vec<StoredSessionTopic> = s
         .topics
         .iter()
-        .map(|(key, t)| {
-            let (wire_kind, wire_name, wire_uuid_hex) = match &t.wire {
-                TopicWireId::Name(n) => ("name".to_owned(), Some(n.clone()), None),
-                TopicWireId::Uuid(u) => ("uuid".to_owned(), None, Some(hex::encode(u))),
-            };
-            let mut partitions: Vec<StoredSessionPartition> = t
-                .partitions
-                .iter()
-                .map(|(pid, p)| StoredSessionPartition {
-                    id: *pid,
-                    fetch_offset: p.fetch_offset,
-                    current_leader_epoch: p.current_leader_epoch,
-                    last_fetched_epoch: p.last_fetched_epoch,
-                    max_bytes: p.max_bytes,
-                    last_hwm: p.last_hwm,
-                    last_lso: p.last_lso,
-                })
-                .collect();
-            partitions.sort_by_key(|p| p.id);
-            StoredSessionTopic {
-                key: key.clone(),
-                wire_kind,
-                wire_name,
-                wire_uuid_hex,
-                name: t.name.clone(),
-                partitions,
-            }
-        })
+        .map(|(key, t)| session_topic_to_stored(key, t))
         .collect();
     topics.sort_by(|a, b| a.key.cmp(&b.key));
     StoredFetchSession {
@@ -1358,30 +1525,47 @@ fn session_to_stored(id: i32, s: &FetchSession) -> StoredFetchSession {
         last_activity_ms: s.last_activity_ms,
         mirror_gen: s.mirror_gen,
         promoted_by: s.promoted_by,
+        mode: default_mirror_mode(),
+        remove_topic_keys: Vec::new(),
         topics,
     }
 }
 
-fn snapshot_file(sessions: &HashMap<i32, FetchSession>, next_id: i32) -> StoredFetchSessionsFile {
-    let mut out = Vec::with_capacity(sessions.len());
-    let mut ids: Vec<i32> = sessions.keys().copied().collect();
-    ids.sort_unstable();
-    for id in ids {
-        let Some(s) = sessions.get(&id) else {
-            continue;
-        };
-        out.push(session_to_stored(id, s));
-    }
-    StoredFetchSessionsFile {
-        version: FETCH_SESSIONS_FILE_VERSION,
-        next_id,
-        sessions: out,
+/// Delta snapshot relative to `prev` (Phase 146). Topics equal → metadata-only delta.
+fn session_to_delta_stored(id: i32, cur: &FetchSession, prev: &FetchSession) -> StoredFetchSession {
+    let mut remove_topic_keys: Vec<String> = prev
+        .topics
+        .keys()
+        .filter(|k| !cur.topics.contains_key(*k))
+        .cloned()
+        .collect();
+    remove_topic_keys.sort();
+
+    let mut upserts: Vec<StoredSessionTopic> = cur
+        .topics
+        .iter()
+        .filter(|(k, t)| prev.topics.get(*k) != Some(*t))
+        .map(|(k, t)| session_topic_to_stored(k, t))
+        .collect();
+    upserts.sort_by(|a, b| a.key.cmp(&b.key));
+
+    StoredFetchSession {
+        id,
+        epoch: cur.epoch,
+        last_activity_ms: cur.last_activity_ms,
+        mirror_gen: cur.mirror_gen,
+        promoted_by: cur.promoted_by,
+        mode: "delta".to_owned(),
+        remove_topic_keys,
+        topics: upserts,
     }
 }
 
-fn stored_to_session(s: StoredFetchSession) -> Option<(i32, FetchSession)> {
-    let mut topics = HashMap::new();
-    for t in s.topics {
+fn stored_topics_to_map(
+    topics: Vec<StoredSessionTopic>,
+) -> Option<HashMap<String, SessionTopic>> {
+    let mut out = HashMap::new();
+    for t in topics {
         let wire = match t.wire_kind.as_str() {
             "uuid" => {
                 let hex = t.wire_uuid_hex.as_deref().unwrap_or("");
@@ -1404,7 +1588,7 @@ fn stored_to_session(s: StoredFetchSession) -> Option<(i32, FetchSession)> {
                 },
             );
         }
-        topics.insert(
+        out.insert(
             t.key,
             SessionTopic {
                 wire,
@@ -1413,6 +1597,29 @@ fn stored_to_session(s: StoredFetchSession) -> Option<(i32, FetchSession)> {
             },
         );
     }
+    Some(out)
+}
+
+fn snapshot_file(sessions: &HashMap<i32, FetchSession>, next_id: i32) -> StoredFetchSessionsFile {
+    let mut out = Vec::with_capacity(sessions.len());
+    let mut ids: Vec<i32> = sessions.keys().copied().collect();
+    ids.sort_unstable();
+    for id in ids {
+        let Some(s) = sessions.get(&id) else {
+            continue;
+        };
+        out.push(session_to_stored(id, s));
+    }
+    StoredFetchSessionsFile {
+        version: FETCH_SESSIONS_FILE_VERSION,
+        next_id,
+        sessions: out,
+    }
+}
+
+/// Full-mode install: topics are the complete map (`mode` ignored for durable load).
+fn stored_to_session(s: StoredFetchSession) -> Option<(i32, FetchSession)> {
+    let topics = stored_topics_to_map(s.topics)?;
     Some((
         s.id,
         FetchSession {
@@ -2026,5 +2233,186 @@ mod tests {
         let (id, sess) = stored_to_session(stored).unwrap();
         assert_eq!(id, 1);
         assert_eq!(sess.promoted_by, 0);
+    }
+
+    #[test]
+    fn phase146_full_put_still_works() {
+        let owner = FetchSessionManager::with_limits_and_owner(0, 0, 1);
+        let id = owner.create_at(topic_map("orders", 3), 1_000);
+        let bytes = owner.export_session_bytes(id).expect("export full");
+        let v: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+        assert_eq!(v.get("mode").and_then(|m| m.as_str()), Some("full"));
+
+        let peer = FetchSessionManager::with_limits(0, 0);
+        peer.apply_mirror_put(&bytes).unwrap();
+        assert!(peer.mirror_contains(id));
+        assert_eq!(peer.mirror_puts_applied_total(), 1);
+        assert_eq!(peer.mirror_delta_puts_total(), 0);
+        assert!(peer.promote_from_mirror(id));
+        let topics = peer.snapshot_topics(id);
+        assert!(topics.contains_key("orders"));
+    }
+
+    #[test]
+    fn phase146_delta_upsert_adds_topic() {
+        let owner = FetchSessionManager::with_limits_and_owner(0, 0, 1);
+        let id = owner.create_at(topic_map("orders", 1), 1_000);
+        let full = owner.export_session_bytes(id).unwrap();
+
+        let peer = FetchSessionManager::with_limits(0, 0);
+        peer.apply_mirror_put(&full).unwrap();
+
+        owner.merge_topics(id, &topic_map("payments", 0));
+        let prev = peer.mirrors.lock().get(&id).cloned();
+        let delta = owner
+            .export_session_delta_bytes(id, prev.as_ref())
+            .expect("delta");
+        let v: serde_json::Value = serde_json::from_slice(&delta).unwrap();
+        assert_eq!(v.get("mode").and_then(|m| m.as_str()), Some("delta"));
+        let topics = v.get("topics").and_then(|t| t.as_array()).unwrap();
+        assert!(
+            topics.iter().any(|t| t.get("key").and_then(|k| k.as_str()) == Some("payments")),
+            "upsert should include payments: {v}"
+        );
+
+        peer.apply_mirror_put(&delta).unwrap();
+        assert_eq!(peer.mirror_delta_puts_total(), 1);
+        assert!(peer.promote_from_mirror(id));
+        let snap = peer.snapshot_topics(id);
+        assert!(snap.contains_key("orders"));
+        assert!(snap.contains_key("payments"));
+    }
+
+    #[test]
+    fn phase146_delta_remove_topic_keys() {
+        let owner = FetchSessionManager::with_limits_and_owner(0, 0, 1);
+        let mut topics = topic_map("a", 1);
+        topics.extend(topic_map("b", 2));
+        let id = owner.create_at(topics, 1_000);
+        let full = owner.export_session_bytes(id).unwrap();
+
+        let peer = FetchSessionManager::with_limits(0, 0);
+        peer.apply_mirror_put(&full).unwrap();
+        let prev = peer.mirrors.lock().get(&id).cloned();
+
+        owner.forget(id, &[("b".into(), vec![])]);
+        let delta = owner
+            .export_session_delta_bytes(id, prev.as_ref())
+            .unwrap();
+        let v: serde_json::Value = serde_json::from_slice(&delta).unwrap();
+        assert_eq!(v.get("mode").and_then(|m| m.as_str()), Some("delta"));
+        let removes = v
+            .get("remove_topic_keys")
+            .and_then(|r| r.as_array())
+            .unwrap();
+        assert!(removes.iter().any(|x| x.as_str() == Some("b")));
+
+        peer.apply_mirror_put(&delta).unwrap();
+        peer.promote_from_mirror(id);
+        let snap = peer.snapshot_topics(id);
+        assert!(snap.contains_key("a"));
+        assert!(!snap.contains_key("b"));
+    }
+
+    #[test]
+    fn phase146_old_json_without_mode_applies_as_full() {
+        // Pre-146 peers omit mode / remove_topic_keys; defaults → full install.
+        let raw = r#"{"id":42,"epoch":2,"last_activity_ms":500,"mirror_gen":3,"promoted_by":0,"topics":[{"key":"t","wire_kind":"name","wire_name":"t","name":"t","partitions":[{"id":0,"fetch_offset":9,"current_leader_epoch":-1,"last_fetched_epoch":-1,"max_bytes":1000}]}]}"#;
+        let stored: StoredFetchSession = serde_json::from_str(raw).unwrap();
+        assert_eq!(stored.mode, "full");
+        assert!(stored.remove_topic_keys.is_empty());
+
+        let peer = FetchSessionManager::with_limits(0, 0);
+        peer.apply_mirror_put(raw.as_bytes()).unwrap();
+        assert!(peer.mirror_contains(42));
+        assert_eq!(peer.mirror_delta_puts_total(), 0);
+        assert!(peer.promote_from_mirror(42));
+        let snap = peer.snapshot_topics(42);
+        assert!(snap.contains_key("t"));
+        assert_eq!(snap["t"].partitions[&0].fetch_offset, 9);
+    }
+
+    #[test]
+    fn phase146_metadata_only_delta_keeps_topics() {
+        let owner = FetchSessionManager::with_limits_and_owner(0, 0, 1);
+        let id = owner.create_at(topic_map("sticky", 5), 1_000);
+        let full = owner.export_session_bytes(id).unwrap();
+
+        let peer = FetchSessionManager::with_limits(0, 0);
+        peer.apply_mirror_put(&full).unwrap();
+        let prev = peer.mirrors.lock().get(&id).cloned().unwrap();
+
+        // Epoch/activity/gen bump only (begin_incremental does not change topics).
+        assert!(owner.begin_incremental_at(id, 1, 2_000).is_ok());
+        let delta = owner
+            .export_session_delta_bytes(id, Some(&prev))
+            .unwrap();
+        let v: serde_json::Value = serde_json::from_slice(&delta).unwrap();
+        assert_eq!(v.get("mode").and_then(|m| m.as_str()), Some("delta"));
+        assert_eq!(
+            v.get("topics").and_then(|t| t.as_array()).map(|a| a.len()),
+            Some(0)
+        );
+        assert_eq!(
+            v.get("remove_topic_keys")
+                .and_then(|r| r.as_array())
+                .map(|a| a.len()),
+            Some(0)
+        );
+        let new_act = v.get("last_activity_ms").and_then(|x| x.as_i64()).unwrap();
+        assert_eq!(new_act, 2_000);
+
+        peer.apply_mirror_put(&delta).unwrap();
+        assert_eq!(peer.mirror_delta_puts_total(), 1);
+        peer.promote_from_mirror(id);
+        let snap = peer.snapshot_topics(id);
+        assert!(snap.contains_key("sticky"));
+        assert_eq!(snap["sticky"].partitions[&0].fetch_offset, 5);
+    }
+
+    #[test]
+    fn phase146_delta_without_base_installs_upserts() {
+        let owner = FetchSessionManager::with_limits_and_owner(0, 0, 1);
+        let id = owner.create_at(topic_map("solo", 1), 1_000);
+        // Force a "delta" payload by exporting against empty prev topics.
+        let empty = FetchSession {
+            epoch: 0,
+            topics: HashMap::new(),
+            last_activity_ms: 0,
+            mirror_gen: 0,
+            promoted_by: 0,
+        };
+        let delta = owner
+            .export_session_delta_bytes(id, Some(&empty))
+            .unwrap();
+        let v: serde_json::Value = serde_json::from_slice(&delta).unwrap();
+        assert_eq!(v.get("mode").and_then(|m| m.as_str()), Some("delta"));
+
+        let peer = FetchSessionManager::with_limits(0, 0);
+        peer.apply_mirror_put(&delta).unwrap();
+        assert!(peer.mirror_contains(id));
+        assert_eq!(peer.mirror_delta_puts_total(), 1);
+        peer.promote_from_mirror(id);
+        assert!(peer.snapshot_topics(id).contains_key("solo"));
+    }
+
+    #[test]
+    fn phase146_export_mirror_put_bytes_uses_last_mirrored() {
+        let owner = FetchSessionManager::with_limits_and_owner(0, 0, 1);
+        let id = owner.create_at(topic_map("t", 0), 1_000);
+        let (b1, d1) = owner.export_mirror_put_bytes(id).unwrap();
+        assert!(!d1, "first export is full");
+        let v1: serde_json::Value = serde_json::from_slice(&b1).unwrap();
+        assert_eq!(v1.get("mode").and_then(|m| m.as_str()), Some("full"));
+        owner.note_last_mirrored(id);
+
+        assert!(owner.begin_incremental_at(id, 1, 1_500).is_ok());
+        let (b2, d2) = owner.export_mirror_put_bytes(id).unwrap();
+        assert!(d2, "second export is delta");
+        let v2: serde_json::Value = serde_json::from_slice(&b2).unwrap();
+        assert_eq!(v2.get("mode").and_then(|m| m.as_str()), Some("delta"));
+        owner.note_last_mirrored(id);
+        owner.record_mirror_delta_put_sent();
+        assert_eq!(owner.mirror_delta_puts_total(), 1);
     }
 }

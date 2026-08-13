@@ -529,6 +529,15 @@ fn broker_metrics_text(broker: &Broker) -> String {
         "volant_fetch_session_promote_claim_reject_total {}\n",
         sessions.promote_claim_reject_total()
     ));
+    // Phase 146: incremental/delta MirrorPut wire.
+    text.push_str(
+        "# HELP volant_fetch_session_mirror_delta_puts_total Delta MirrorPut payloads sent or applied\n",
+    );
+    text.push_str("# TYPE volant_fetch_session_mirror_delta_puts_total counter\n");
+    text.push_str(&format!(
+        "volant_fetch_session_mirror_delta_puts_total {}\n",
+        sessions.mirror_delta_puts_total()
+    ));
     // Phase 120/122: multi-broker EndTxn / AddOffsets / TxnOffsetCommit forward.
     text.push_str(
         "# HELP volant_txn_forward_total Successful Kafka txn API forwards to coordinator (EndTxn/AddOffsets/TxnOffsetCommit)\n",
@@ -2894,9 +2903,17 @@ pub async fn fanout_session_mirror_ops(broker: &Broker) {
     for op in ops {
         match op {
             SessionMirrorOp::Put(session_id) => {
-                let Some(snap) = broker.fetch_sessions().export_session_bytes(session_id) else {
+                // Phase 146: prefer delta vs last-exported primary; else full.
+                let Some((snap, is_delta)) =
+                    broker.fetch_sessions().export_mirror_put_bytes(session_id)
+                else {
                     continue;
                 };
+                if is_delta {
+                    broker.fetch_sessions().record_mirror_delta_put_sent();
+                }
+                // Cache exported state so subsequent Puts can delta (even if peers lag).
+                broker.fetch_sessions().note_last_mirrored(session_id);
                 let req = Request::FetchSessionMirrorPut {
                     session_id,
                     snapshot: Bytes::from(snap),
