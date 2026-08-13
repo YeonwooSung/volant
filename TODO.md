@@ -1,14 +1,20 @@
 # Volant residual TODO (review loop)
 
-**Baseline:** HEAD product = **Phases 0–143** shipped (promote claim fence).  
+**Baseline:** HEAD product = **Phases 0–144** shipped (promote claim fence + preferred × session suppress).  
 **Last review:** 2026-08-13  
 
-Living roadmap: [ROADMAP.md](./ROADMAP.md) (Phases **0–143 shipped**).  
-Recent specs: [PHASE143](./docs/PHASE143_SPEC.md) · [PHASE142](./docs/PHASE142_SPEC.md) · [PHASE141](./docs/PHASE141_SPEC.md) · [PHASE140](./docs/PHASE140_SPEC.md).
+Living roadmap: [ROADMAP.md](./ROADMAP.md) (Phases **0–144 shipped**).  
+Recent specs: [PHASE144](./docs/PHASE144_SPEC.md) · [PHASE143](./docs/PHASE143_SPEC.md) · [PHASE142](./docs/PHASE142_SPEC.md) · [PHASE141](./docs/PHASE141_SPEC.md).
 
 ---
 
 ## Shipped recently
+
+### Phase 144 — Preferred × session thrash suppress
+- [x] Suppress PreferredReadReplica when `req_session_id != 0` (non-FINAL epoch)
+- [x] Metric `volant_preferred_replica_session_suppressed_total`
+- [x] Full fetch (`session_id == 0`) still prefers; RC path unchanged (Phase 140)
+- [x] Tests `phase144_preferred_session_suppress` + phase126/133/140 green
 
 ### Phase 143 — Fetch session promote claim fence (lowest-id)
 - [x] `promoted_by` on session + MirrorPut JSON (default `0` for old mirrors)
@@ -64,8 +70,7 @@ _(none open)_
 
 | Pri | Item | Notes |
 |----:|------|-------|
-| P2 | **Preferred × session thrash** doc or light suppress | Client may session-on-leader then follow PreferredReadReplica → forward |
-| P3 | Full preferred selector / throttling / rack-aware assignment | Beyond 126/133/140 |
+| P3 | Full preferred selector / throttling / rack-aware assignment | Beyond 126/133/140/144 |
 | P3 | Incremental/delta MirrorPut wire | 139 coalesces full snapshots only |
 | P3 | Serve-from-mirror without promote | Dual-epoch design required |
 | P3 | Rollback / defer local truncate until majority | Hard; segment delete is irreversible today |
@@ -90,7 +95,8 @@ _(none open)_
 - [x] N=2 majority ops tooling / health gauges (Phase 141)
 - [x] Metadata ISR overlay + leader→controller IsrUpdate (Phase 142)
 - [x] Promote claim fence lowest-id (Phase 143)
-- [ ] Full preferred-replica selector / rack-aware partition assignment (beyond 140)
+- [x] Preferred × session thrash light suppress (Phase 144)
+- [ ] Full preferred-replica selector / rack-aware partition assignment (beyond 140/144)
 - [ ] Multi-language clients
 - [ ] Full chaos-mesh / long fuzz campaigns
 - [ ] Heterogeneous per-broker BROKER overrides without controller
@@ -106,6 +112,7 @@ _(none open)_
 
 | Area | Verdict |
 |------|---------|
+| Phase 144 | **Shipped** — preferred suppress on established fetch session; session suppress metric |
 | Phase 143 | **Shipped** — `promoted_by` lowest-id claim fence; best-effort MirrorPut; not Raft |
 | Phase 142 | **Shipped** — leader Metadata overlay + IsrUpdate 94/95; best-effort report |
 | Phase 141 | **Shipped** — majority health gauges; majority algo unchanged |
@@ -114,5 +121,6 @@ _(none open)_
 | Phase 138 | **Shipped** — best-effort mirror + promote-on-miss |
 | Phase 137 | **Shipped** — native wait trailer + journal topic GC |
 | P0 / P1 code | **None open** |
+| P2 residual | **None open** |
 
-**Default next slice:** preferred × session thrash doc/suppress. Larger Raft/KIP only with a clear product goal.
+**Default next slice:** pick a P3 product residual (incremental MirrorPut, serve-from-mirror, full preferred selector) or a larger product bet (streams durable state / Raft / multi-lang). Larger Raft/KIP only with a clear product goal.

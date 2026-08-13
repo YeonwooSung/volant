@@ -24,7 +24,7 @@ Does **not** re-ship usable-addr or LEO ranking (already 133).
 |----------|-----|
 | Re-implement usable-addr / LEO ranking | Phase 133 |
 | Full Kafka selector / throttling | Product residual |
-| Preferred × session thrash suppress | Orthogonal 119/138 |
+| Preferred × session thrash suppress | Orthogonal 119/138 → **closed by Phase 144** |
 | Rack-aware partition assignment | Orthogonal |
 | TCP probe | Config+liveness only |
 

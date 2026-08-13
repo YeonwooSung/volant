@@ -814,6 +814,15 @@ fn broker_metrics_text(broker: &Broker) -> String {
         "volant_preferred_replica_suppressed_total {}\n",
         broker.preferred_replica_suppressed_total()
     ));
+    // Phase 144: preferred suppressed due to established fetch session.
+    text.push_str(
+        "# HELP volant_preferred_replica_session_suppressed_total Fetch preferred suppressed for established session\n",
+    );
+    text.push_str("# TYPE volant_preferred_replica_session_suppressed_total counter\n");
+    text.push_str(&format!(
+        "volant_preferred_replica_session_suppressed_total {}\n",
+        broker.preferred_replica_session_suppressed_total()
+    ));
     // Phase 129: truncate journal.
     text.push_str(
         "# HELP volant_truncate_journal_generation Controller/local truncate journal generation\n",

@@ -3442,7 +3442,33 @@ exchange); not Raft session registry; no session_id re-encode.
 
 **Still deferred:** preferred × session thrash; rollback local truncate on
 majority fail; live-only majority; full openraft/KRaft; multi-lang; chaos/long
-fuzz; full KIP-890/939; full preferred selector beyond 140.
+fuzz; full KIP-890/939; full preferred selector beyond 140/144.
+
+### Phase 144 — Preferred × session thrash suppress ✅
+
+**Goal:** When a consumer already holds a Kafka fetch session (`req_session_id
+!= 0`), do not emit PreferredReadReplica redirects. Avoids session-on-leader
+then preferred-follower → owner-miss forward thrash (119) / promote (138).
+
+Binding: **[docs/PHASE144_SPEC.md](./docs/PHASE144_SPEC.md)**.
+
+- [x] Suppress preferred when `req_session_id != 0` and epoch is not FINAL
+- [x] Metric `volant_preferred_replica_session_suppressed_total` when a candidate
+  would have been selected but was session-suppressed
+- [x] Full fetch (`session_id == 0`) still preferred-redirects; RC path unchanged
+- [x] Tests `phase144_preferred_session_suppress` + phase126/133/140 green
+- [x] Living docs honesty
+
+**Honest residual:** first full fetch with rack may still preferred-redirect
+**and** create a session in the same response (client can still thrash if it
+immediately uses that new id on the preferred broker). Suppress covers the
+common established-session case.
+
+**Still deferred:** promote claim fence (Phase 143); full preferred selector /
+throttling / rack-aware assignment; serve-from-mirror without promote; Raft
+session registry; rollback local truncate; full openraft/KRaft; multi-lang;
+chaos/long fuzz; full KIP-890/939.
+
 
 ---
 
@@ -3481,7 +3507,7 @@ marker clip 111; fuzz corpus smoke CI 112; cluster admin fan-out 113) — see
 
 ## Suggested implementation order (PRs)
 
-Phases **0–143 are shipped**. Historical PR order for the core:
+Phases **0–144 are shipped**. Historical PR order for the core:
 
 1. Phase 1 segment format + unit tests  
 2. Phase 1 recovery + retention  
@@ -3526,6 +3552,8 @@ Phases **0–143 are shipped**. Historical PR order for the core:
 41. Phase 140 (preferred-replica max LEO lag + RC suppress metric) ✅  
 42. Phase 141 (N=2 majority ops health gauges) ✅  
 43. Phase 142 (Metadata ISR overlay + leader→controller IsrUpdate 94/95) ✅  
+44. Phase 143 (promote claim fence lowest-id) ✅  
+45. Phase 144 (preferred × session thrash suppress) ✅  
 44. Phase 143 (fetch session promote claim fence lowest-id `promoted_by`) ✅
 
 ---
@@ -3567,7 +3595,7 @@ cargo run -p volant-bench --release
 cargo test --workspace
 ```
 
-**Status (post–Phase 143):** core broker, ops (metrics / TLS / auth / SCRAM /
+**Status (post–Phase 144):** core broker, ops (metrics / TLS / auth / SCRAM /
 ACLs / Helm), and the Kafka wire shim are **shipped** (Fetch 0–18 Kafka max;
 ACL admin 0–3 with User resource; soft-marker `READ_COMMITTED` with **marker GC/clip**
 on DeleteRecords/retention/load (Phase 104/111); durable OFLE history; Fetch DivergingEpoch +
