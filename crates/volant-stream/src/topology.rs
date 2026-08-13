@@ -6,6 +6,7 @@ use volant_core::{Error, Result};
 
 use crate::operator::Operator;
 use crate::pipeline::Pipeline;
+use crate::runtime::ProcessingGuarantee;
 use crate::source::SourceConfig;
 use crate::state::StreamStateError;
 
@@ -22,6 +23,8 @@ pub struct StreamBuilder {
     /// [`StreamBuilder::reduce_count_durable`] — default [`StreamBuilder::reduce_count`]
     /// still uses in-memory state.
     state_dir: Option<PathBuf>,
+    /// Processing guarantee (Phase 151). Default: at-least-once.
+    processing_guarantee: ProcessingGuarantee,
     pipeline: Pipeline,
 }
 
@@ -34,6 +37,7 @@ impl StreamBuilder {
             source_config: None,
             sink_topic: None,
             state_dir: None,
+            processing_guarantee: ProcessingGuarantee::AtLeastOnce,
             pipeline: Pipeline::new(),
         }
     }
@@ -129,6 +133,24 @@ impl StreamBuilder {
         self
     }
 
+    /// Enable exactly-once processing (Phase 151) with the given transactional id.
+    ///
+    /// Sink produces and source group offsets are committed atomically via
+    /// [`volant_client::TransactionalProducer`]. Fences prior owners of the
+    /// same id. Default remains [`ProcessingGuarantee::AtLeastOnce`].
+    pub fn exactly_once(mut self, transactional_id: impl Into<String>) -> Self {
+        self.processing_guarantee = ProcessingGuarantee::ExactlyOnce {
+            transactional_id: transactional_id.into(),
+        };
+        self
+    }
+
+    /// Override the processing guarantee explicitly.
+    pub fn processing_guarantee(mut self, guarantee: ProcessingGuarantee) -> Self {
+        self.processing_guarantee = guarantee;
+        self
+    }
+
     /// Build a [`Topology`] (validates source + sink are set).
     pub fn build(self) -> Result<Topology> {
         let source_topic = self
@@ -146,6 +168,7 @@ impl StreamBuilder {
             source_config,
             sink_topic,
             state_dir: self.state_dir,
+            processing_guarantee: self.processing_guarantee,
             pipeline: self.pipeline,
         })
     }
@@ -169,6 +192,8 @@ pub struct Topology {
     /// Optional durable state directory (Phase 149). Apps may open
     /// [`crate::state::DurableStore`] here; not auto-consumed by the runtime.
     pub state_dir: Option<PathBuf>,
+    /// At-least-once (default) or exactly-once (Phase 151).
+    pub processing_guarantee: ProcessingGuarantee,
     /// Operator chain.
     pub pipeline: Pipeline,
 }

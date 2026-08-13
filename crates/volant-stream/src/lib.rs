@@ -6,15 +6,26 @@
 //! - Stateful: [`reduce`](ops::reduce) / [`count_reduce`](ops::count_reduce), [`TumblingWindow`](window::TumblingWindow)
 //! - Durable state (Phase 149): [`DurableStore`](state::DurableStore), [`count_reduce_durable`](ops::count_reduce_durable)
 //! - Topology: [`StreamBuilder`](topology::StreamBuilder) → [`StreamApp`](runtime::StreamApp)
+//! - Exactly-once MVP (Phase 151): [`ProcessingGuarantee::ExactlyOnce`],
+//!   [`StreamBuilder::exactly_once`]
 //!
-//! # At-least-once
+//! # At-least-once (default)
 //!
 //! The runtime commits consumer offsets **after** a successful sink produce.
 //! A crash between produce and commit can cause duplicate outputs.
-//! Exactly-once / transactions are a stretch goal (not implemented).
 //!
-//! Durable aggregate state ([`DurableStore`]) survives process restart but does
-//! **not** provide exactly-once: replay after crash can still double-count.
+//! # Exactly-once (Phase 151)
+//!
+//! Opt in with [`StreamBuilder::exactly_once`] or
+//! [`StreamApp::start_exactly_once`]. Each non-empty step:
+//! `begin` → transactional sink produce → `add_offsets(group, positions)` →
+//! `commit`. Atomic produce + offset commit via Volant write-through
+//! transactions + soft markers (not full Kafka Streams EOS / 2PC with durable
+//! stream state). Fence via `transactional_id`. Empty polls skip the txn.
+//!
+//! Durable aggregate state ([`DurableStore`]) pairs well with EOS sinks but is
+//! **not** joined into the same broker transaction; optional `flush()` before
+//! commit is not auto-wired (MVP).
 //!
 //! # Offline processing
 //!
@@ -39,7 +50,7 @@ pub use ops::{
     reduce, reduce_with_store, Reduce,
 };
 pub use pipeline::Pipeline;
-pub use runtime::{process_pipeline, StreamApp};
+pub use runtime::{process_pipeline, ProcessingGuarantee, StreamApp};
 pub use sink::TopicSink;
 pub use source::{record_from_value, SourceConfig, TopicSource};
 pub use state::{DurableStore, KeyValueStore, MemoryStore, StreamStateError};

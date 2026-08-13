@@ -1,5 +1,6 @@
 //! Topic source adapter (GroupConsumer).
 
+use std::collections::HashMap;
 use std::sync::Arc;
 
 use volant_client::{Client, FetchedRecord, GroupConsumer};
@@ -53,13 +54,36 @@ impl TopicSource {
         &self.topic
     }
 
+    /// Consumer group id (for transactional offset commit).
+    pub fn group_id(&self) -> &str {
+        self.consumer.group_id()
+    }
+
+    /// Next-read positions as `(topic, partition) → offset`.
+    pub fn positions(&self) -> &HashMap<(String, u32), u64> {
+        self.consumer.positions()
+    }
+
+    /// Pending next offsets after the last poll: `(topic, partition, next_offset)`.
+    ///
+    /// Used by the exactly-once path to [`volant_client::TransactionalProducer::add_offsets`].
+    pub fn pending_offsets(&self) -> Vec<(String, u32, u64)> {
+        self.consumer
+            .positions()
+            .iter()
+            .map(|((topic, partition), offset)| (topic.clone(), *partition, *offset))
+            .collect()
+    }
+
     /// Poll for new records, converted to core [`Record`]s.
     pub async fn poll(&mut self) -> Result<Vec<Record>> {
         let fetched = self.consumer.poll().await?;
         Ok(fetched.into_iter().map(fetched_to_record).collect())
     }
 
-    /// Commit consumer offsets (call after successful sink produce).
+    /// Commit consumer offsets (at-least-once path; call after successful sink produce).
+    ///
+    /// Exactly-once apps commit offsets via the transactional producer instead.
     pub async fn commit(&self) -> Result<()> {
         self.consumer.commit().await
     }

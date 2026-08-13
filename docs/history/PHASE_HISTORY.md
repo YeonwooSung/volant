@@ -191,15 +191,17 @@ docs for day-to-day reading: [ops](../ops.md), [consistency](../consistency.md),
 | 146 | ✅ | Incremental/delta MirrorPut wire (`mode=full|delta`; last_mirrored cache) | [PHASE146_SPEC.md](../PHASE146_SPEC.md) |
 | 147 | ✅ | Serve-from-mirror without promote (owner miss; dual-epoch residual) | [PHASE147_SPEC.md](../PHASE147_SPEC.md) |
 | 148 | ✅ | Defer local DeleteRecords truncate until journal majority (wait mode) | [PHASE148_SPEC.md](../PHASE148_SPEC.md) |
-| 149 | ✅ | Durable stream state store (`DurableStore` / redb; not exactly-once) | [PHASE149_SPEC.md](../PHASE149_SPEC.md) |
+| 149 | ✅ | Durable stream state store (`DurableStore` / redb; not exactly-once alone) | [PHASE149_SPEC.md](../PHASE149_SPEC.md) |
 | 150 | ✅ | Assignment generation majority consensus (opcodes 96/97; static N) | [PHASE150_SPEC.md](../PHASE150_SPEC.md) |
+| 151 | ✅ | Stream exactly-once MVP (txn produce + group offsets; not full KS EOS) | [PHASE151_SPEC.md](../PHASE151_SPEC.md) |
 
 ---
 
-## Still deferred (post–Phase 150)
+## Still deferred (post–Phase 151)
 
 - Full openraft / KRaft dynamic membership (assignment gen majority MVP → **closed by Phase 150**; residual: Metadata may lead committed_gen; static N only)
 - Metadata gated exclusively on `committed_generation` (150 residual)
+- Full Kafka Streams EOS / 2PC durable state + offsets (stream EOS MVP → **closed by Phase 151**; residual: state not in broker txn)
 
 ---
 
@@ -256,5 +258,6 @@ docs for day-to-day reading: [ops](../ops.md), [consistency](../consistency.md),
 - Peer-to-peer heartbeat mesh → **closed by Phase 134**
 - Sync client wait on DeleteRecords majority → **closed by Phase 135** (opt-in; default best-effort)
 - Full Kafka preferred-replica selector / throttling (beyond 126/133/140/144; rack-aware create assignment → **closed by Phase 145**)
-- Durable stream state store (in-process) → **closed by Phase 149** (`DurableStore` / redb; not exactly-once; not distributed workers)
-- Broker consensus / openraft → sibling Phase 150 (not stream state)
+- Durable stream state store (in-process) → **closed by Phase 149** (`DurableStore` / redb; not distributed workers)
+- Stream exactly-once (txn produce + group offset commit) → **closed by Phase 151** (not full KS EOS; durable state not in same txn)
+- Broker consensus / openraft → Phase 150 MVP (not full openraft; not stream state)

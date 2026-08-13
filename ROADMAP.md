@@ -222,7 +222,7 @@ Binding API: **[docs/PHASE4_SPEC.md](./docs/PHASE4_SPEC.md)**.
    - [x] `StreamBuilder` / `Topology` / `StreamApp` runtime
 5. Processing guarantees
    - [x] At-least-once (commit offsets after successful sink produce)
-   - [ ] Exactly-once / transactional produce — stretch, deferred
+   - [x] Exactly-once / transactional produce — **Phase 151** MVP
 6. Optional WASM or plugin operators later — deferred
 
 **Exit criteria**
@@ -233,7 +233,8 @@ Binding API: **[docs/PHASE4_SPEC.md](./docs/PHASE4_SPEC.md)**.
   (`cargo run -p volant-stream --example word_count`)
 
 **Non-goals for Phase 4:** exactly-once, WASM plugins, RocksDB, distributed stream workers.
-(Durable local state later closed by **Phase 149** via redb — still not EOS / workers.)
+(Durable local state → **Phase 149**; stream EOS MVP → **Phase 151**; still not
+full KS EOS / distributed workers.)
 
 ---
 
@@ -3505,12 +3506,13 @@ Binding: **[docs/PHASE149_SPEC.md](./docs/PHASE149_SPEC.md)**.
 - [x] `StreamBuilder::state_dir` + `reduce_count_durable`; `Topology::state_dir`
 - [x] Tests `phase149_durable_state` (CRUD, restart, reduce, MemoryStore)
 
-**Honest residual:** at-least-once still applies (durable ≠ exactly-once);
-one redb lock per path; window buckets still process-local; no distributed
-stream workers / changelog.
+**Honest residual:** durable state alone ≠ exactly-once (pair with Phase 151
+for sink+offset atomicity); one redb lock per path; window buckets still
+process-local; no distributed stream workers / changelog.
 
-**Still deferred:** exactly-once streams; broker consensus (sibling 150);
-RocksDB; distributed topology; durable window buckets.
+**Still deferred:** exactly-once streams → **closed by Phase 151** (MVP);
+broker consensus (sibling 150); RocksDB; distributed topology; durable window
+buckets; full 2PC state+offsets.
 
 ### Phase 145 — Rack-aware partition assignment MVP ✅
 
@@ -3590,6 +3592,30 @@ Raft / dynamic membership / controller election change.
 **Still deferred:** full openraft/KRaft; Metadata gated on committed gen;
 dynamic membership; multi-lang; chaos/long fuzz; full KIP-890/939.
 
+### Phase 151 — Stream exactly-once (EOS) MVP ✅
+
+**Goal:** Atomic sink produce + consumer group offset commit per stream step via
+Volant `TransactionalProducer`, closing the at-least-once crash window that
+could duplicate outputs. Closes Phase 4/149 residual “exactly-once streams.”
+
+Binding: **[docs/PHASE151_SPEC.md](./docs/PHASE151_SPEC.md)**.
+
+- [x] `ProcessingGuarantee::{AtLeastOnce, ExactlyOnce { transactional_id }}`
+- [x] `StreamBuilder::exactly_once` / `Topology::processing_guarantee`
+- [x] `TopicSource::{group_id, positions, pending_offsets}`
+- [x] `TopicSink::send_all_in_txn`
+- [x] EOS `step`: begin → produce → add_offsets → commit; abort on fail;
+  empty poll no-ops without txn
+- [x] `StreamApp::start` / `start_with_guarantee` / `start_exactly_once`
+- [x] Tests `phase151_exactly_once` (ALO regression, EOS e2e, empty step)
+
+**Honest residual:** depends on Volant write-through txns + soft markers — **not**
+full Kafka Streams EOS; durable stream state is **not** in the same atomic txn
+as produce+offsets; in-process only; fence via `transactional_id`.
+
+**Still deferred:** full 2PC state+offsets; distributed stream workers; full
+openraft/KRaft; multi-lang; chaos/long fuzz; full KIP-890/939.
+
 
 ---
 
@@ -3628,8 +3654,7 @@ marker clip 111; fuzz corpus smoke CI 112; cluster admin fan-out 113) — see
 
 ## Suggested implementation order (PRs)
 
-Phases **0–150 are shipped**. Historical PR order for the core:
-Phases **0–150 are shipped**. Historical PR order for the core:
+Phases **0–151 are shipped**. Historical PR order for the core:
 
 1. Phase 1 segment format + unit tests  
 2. Phase 1 recovery + retention  
@@ -3764,6 +3789,7 @@ Still deferred: multi-language clients, full chaos-mesh suites / long fuzz
 campaigns, full preferred-replica selector / throttling residual
 (beyond 126/133/140/144; Phase 138/139/143/147 closed shared mirror MVP —
 residual: Raft registry / dual-epoch converge / incremental put), full
-KIP-890/939, rollback local truncate on majority fail, exactly-once streams
-(Phase 149 shipped local durable state only), broker consensus (sibling 150).
+KIP-890/939, rollback local truncate on majority fail, full Kafka Streams EOS /
+2PC state+offsets (Phase **151** shipped EOS MVP; Phase **149** durable state),
+full openraft/KRaft (Phase **150** assignment majority MVP).
 Details: [docs/KAFKA_COMPAT.md](./docs/KAFKA_COMPAT.md), [docs/ops.md](./docs/ops.md).
