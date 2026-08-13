@@ -1,7 +1,6 @@
 # Phase history index
 
-Ship records for **phases 0–149** (shipped). Binding core contracts are
-Ship records for **phases 0–150** (shipped). Binding core contracts are
+Ship records for **phases 0–152** (shipped). Binding core contracts are
 **[PHASE1_SPEC](../PHASE1_SPEC.md)–[PHASE6_SPEC](../PHASE6_SPEC.md)**. Living
 docs for day-to-day reading: [ops](../ops.md), [consistency](../consistency.md),
 [tuning](../tuning.md), [KAFKA_COMPAT](../KAFKA_COMPAT.md),
@@ -193,17 +192,15 @@ docs for day-to-day reading: [ops](../ops.md), [consistency](../consistency.md),
 | 148 | ✅ | Defer local DeleteRecords truncate until journal majority (wait mode) | [PHASE148_SPEC.md](../PHASE148_SPEC.md) |
 | 149 | ✅ | Durable stream state store (`DurableStore` / redb; not exactly-once) | [PHASE149_SPEC.md](../PHASE149_SPEC.md) |
 | 150 | ✅ | Assignment generation majority consensus (opcodes 96/97; static N) | [PHASE150_SPEC.md](../PHASE150_SPEC.md) |
+| 151 | — | Stream EOS sibling (out of scope for broker assignment depth) | — |
+| 152 | ✅ | Assignment consensus depth — Metadata serves committed snapshot | [PHASE152_SPEC.md](../PHASE152_SPEC.md) |
 
 ---
 
-## Still deferred (post–Phase 150)
+## Still deferred (post–Phase 152)
 
-- Full openraft / KRaft dynamic membership (assignment gen majority MVP → **closed by Phase 150**; residual: Metadata may lead committed_gen; static N only)
-- Metadata gated exclusively on `committed_generation` (150 residual)
-
----
-
-## Still deferred (post–Phase 150)
+- Full openraft / KRaft dynamic membership (assignment gen majority MVP → **closed by Phase 150**; Metadata lead residual → **closed by Phase 152**; static N only)
+- ~~Metadata gated exclusively on `committed_generation` (150 residual)~~ → **closed by Phase 152**
 
 
 - Multi-language clients
@@ -257,4 +254,4 @@ docs for day-to-day reading: [ops](../ops.md), [consistency](../consistency.md),
 - Sync client wait on DeleteRecords majority → **closed by Phase 135** (opt-in; default best-effort)
 - Full Kafka preferred-replica selector / throttling (beyond 126/133/140/144; rack-aware create assignment → **closed by Phase 145**)
 - Durable stream state store (in-process) → **closed by Phase 149** (`DurableStore` / redb; not exactly-once; not distributed workers)
-- Broker consensus / openraft → sibling Phase 150 (not stream state)
+- Broker consensus / openraft → sibling Phase 150 (not stream state); Metadata lead residual → **closed by Phase 152** (committed-only default)

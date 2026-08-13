@@ -5,6 +5,10 @@
 leaders / ISR snapshots) without embedding full openraft / KRaft. Same pattern
 as truncate-journal majority (Phase 130).
 
+**Phase 152 residual closed:** Metadata may no longer lead
+`committed_generation` when `VOLANT_ASSIGNMENT_METADATA_COMMITTED_ONLY` is on
+(default) — see [PHASE152_SPEC.md](./PHASE152_SPEC.md).
+
 ## Goals
 
 1. **Durable committed generation** under
@@ -30,7 +34,7 @@ as truncate-journal majority (Phase 130).
 |----------|-----|
 | Full openraft / KRaft / `__cluster_metadata` | Larger product bet |
 | Dynamic membership reconfiguration | Static N only |
-| Metadata always gated on `committed_generation` | MVP: Metadata may lead committed_gen; metrics expose lag |
+| Metadata always gated on `committed_generation` | **Closed by Phase 152** (default committed-only Metadata + snapshot) |
 | Per-partition Raft log | Assignment gen only |
 | Stream durable state | Phase 149 sibling; out of scope |
 
@@ -62,8 +66,11 @@ as truncate-journal majority (Phase 130).
 
 - **Not full Raft:** no term/leader election for metadata, no linearizable multi-key log
 - Majority uses **static configured N** (N=2 trap: one peer down → permanent fail)
-- Metadata / local assignment may **lead** `committed_generation` until majority
-- Wait-mode fail does **not** roll back local create/delete (like journal default)
+- ~~Metadata / local assignment may **lead** `committed_generation` until majority~~
+  → **Phase 152:** default Metadata serves committed snapshot; set
+  `VOLANT_ASSIGNMENT_METADATA_COMMITTED_ONLY=0` to restore lead Metadata
+- Wait-mode / committed-only fail does **not** roll back local create/delete
+  (local disk honesty residual; Metadata hides uncommitted when gated)
 - Death-path / background ISR generation bumps still rely on ClusterState pull;
   IsrUpdate path fans out best-effort when enabled
 - Controller remains **lowest live id** (unchanged)

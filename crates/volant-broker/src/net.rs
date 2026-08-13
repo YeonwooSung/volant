@@ -928,6 +928,27 @@ fn broker_metrics_text(broker: &Broker) -> String {
         "volant_assignment_committed_generation {}\n",
         broker.assignment_committed_generation()
     ));
+    // Phase 152: Metadata serves committed assignment when consensus enabled.
+    text.push_str(
+        "# HELP volant_assignment_metadata_committed_only Metadata uses committed assignment snapshot (0/1)\n",
+    );
+    text.push_str("# TYPE volant_assignment_metadata_committed_only gauge\n");
+    text.push_str(&format!(
+        "volant_assignment_metadata_committed_only {}\n",
+        if broker.assignment_metadata_committed_only() {
+            1
+        } else {
+            0
+        }
+    ));
+    text.push_str(
+        "# HELP volant_assignment_generation_lag Live assignment generation minus committed (max 0)\n",
+    );
+    text.push_str("# TYPE volant_assignment_generation_lag gauge\n");
+    text.push_str(&format!(
+        "volant_assignment_generation_lag {}\n",
+        broker.assignment_generation_lag()
+    ));
     // Phase 141: N=2 majority ops / health gauges (configured vs live).
     text.push_str(
         "# HELP volant_cluster_configured_brokers Configured static membership size (1 if single-node)\n",
@@ -1851,17 +1872,20 @@ pub async fn fanout_truncate_journal_note(
     majority_ok
 }
 
-/// Phase 150: majority assignment consensus note fan-out.
+/// Phase 150/152: majority assignment consensus note fan-out.
 ///
 /// 1. Local ack (controller already has assignment) + set pending generation.
 /// 2. Parallel `AssignmentConsensusNote` to live peers with full wire topics.
 /// 3. Peer applies via `apply_cluster_state` when generation ≥ local.
-/// 4. Majority of **configured N** → durable `committed_generation` + success
-///    metric; else fail metric (local assignment retained — best-effort).
+/// 4. Majority of **configured N** → durable `committed_generation` + committed
+///    assignment snapshot (Phase 152 Metadata SoT) + success metric; else fail
+///    metric (local assignment retained — best-effort; not rolled back).
 ///
 /// Returns `true` when there is **no cluster**, consensus is **disabled**, or
 /// acks ≥ majority(configured N). Client wait is gated by
-/// [`Broker::assignment_consensus_wait`] (default off).
+/// [`Broker::assignment_consensus_wait`] or
+/// [`Broker::assignment_metadata_committed_only`] (Phase 152 forces wait-like
+/// admin visibility when Metadata is committed-only).
 pub async fn fanout_assignment_consensus(broker: &Broker) -> bool {
     if broker.cluster_config().is_none() {
         // Single-node: trivial majority 1 — mark local gen committed.
@@ -1940,6 +1964,13 @@ pub async fn fanout_assignment_consensus(broker: &Broker) -> bool {
     let majority_ok = acks >= need;
     if majority_ok {
         broker.assignment_consensus().commit(generation);
+        // Phase 152: durable committed assignment snapshot for Metadata SoT.
+        if let Some(cluster) = broker.cluster_state() {
+            let snap = cluster.assignment.read().clone();
+            broker
+                .assignment_consensus()
+                .note_committed_snapshot(generation, &snap);
+        }
         debug!(
             acks,
             need,
@@ -1962,14 +1993,18 @@ pub async fn fanout_assignment_consensus(broker: &Broker) -> bool {
 
 /// After a successful controller assignment mutation: best-effort (or wait)
 /// majority consensus. Returns `None` when consensus is disabled / not needed
-/// for the client response; `Some(false)` only when **wait** is on and majority
-/// failed.
+/// for the client response; `Some(false)` when majority failed and either
+/// **wait** or **metadata committed-only** (Phase 152) is on.
 pub async fn maybe_fanout_assignment_consensus(broker: &Broker) -> Option<bool> {
     if broker.cluster_config().is_none() || !broker.assignment_consensus_enabled() {
         return None;
     }
     let ok = fanout_assignment_consensus(broker).await;
-    if broker.assignment_consensus_wait() && !ok {
+    // Phase 152: committed-only Metadata forces wait-like admin visibility so
+    // create ok cannot race Metadata miss.
+    let must_wait = broker.assignment_consensus_wait()
+        || broker.assignment_metadata_committed_only();
+    if must_wait && !ok {
         Some(false)
     } else {
         Some(ok)

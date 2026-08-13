@@ -9,13 +9,13 @@ Volant is a resource-efficient alternative to Apache Kafka, built for:
 - **Streaming processing** — first-class operators (`map`, `filter`, windows) without a heavy runtime
 - **Small footprint** — native binary, predictable memory, simple operations
 
-> Status: **Phases 0–150 landed** — durable log, clustering (ISR death + rejoin /
-> Status: **Phases 0–150 landed** — durable log, clustering (ISR death + rejoin /
+> Status: **Phases 0–152 landed** — durable log, clustering (ISR death + rejoin /
 > lag shrink + time-based ISR lag + Metadata leader ISR overlay + leader→controller IsrUpdate +
 > N=2 majority health gauges + PreferredReadReplica rack-aware Fetch +
 > preferred selector polish + optional max LEO lag / RC suppress metric +
 > preferred × established-session suppress + rack-aware create assignment +
 > assignment generation majority consensus (Phase 150) +
+> Metadata serves committed assignment (Phase 152) +
 > p2p heartbeat mesh + optional DeleteRecords majority wait +
 > native request wait trailer + journal topic GC +
 > non-blocking admin catch-up +

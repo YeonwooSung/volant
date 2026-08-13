@@ -12,8 +12,8 @@ pub use assignment::{
     reconcile_isr, shrink_isr, shrink_isr_by_time, topic_hash, will_use_rack_aware_assignment,
 };
 pub use assignment_consensus::{
-    AssignmentConsensus, AssignmentConsensusFile, ASSIGNMENT_CONSENSUS_DIR,
-    ASSIGNMENT_CONSENSUS_FILE, ASSIGNMENT_CONSENSUS_FILE_VERSION,
+    AssignmentConsensus, AssignmentConsensusFile, ASSIGNMENT_COMMITTED_SNAPSHOT_FILE,
+    ASSIGNMENT_CONSENSUS_DIR, ASSIGNMENT_CONSENSUS_FILE, ASSIGNMENT_CONSENSUS_FILE_VERSION,
 };
 pub use config::{BrokerEndpoint, ClusterConfig};
 pub use membership::Membership;

@@ -31,12 +31,8 @@ Start here. Prefer living docs over individual phase ship records.
 
 | Document | Purpose |
 |----------|---------|
-| [history/PHASE_HISTORY.md](./history/PHASE_HISTORY.md) | One-line index for phases 0–150 (shipped) |
-| [PHASE7_SPEC.md](./PHASE7_SPEC.md) … [PHASE149_SPEC.md](./PHASE149_SPEC.md) | Per-phase ship records (deep dive) |
-| [history/PHASE_HISTORY.md](./history/PHASE_HISTORY.md) | One-line index for phases 0–150 (shipped) |
-| [PHASE7_SPEC.md](./PHASE7_SPEC.md) … [PHASE145_SPEC.md](./PHASE145_SPEC.md) | Per-phase ship records (deep dive) |
-| [history/PHASE_HISTORY.md](./history/PHASE_HISTORY.md) | One-line index for phases 0–150 + 148 (shipped) |
-| [PHASE7_SPEC.md](./PHASE7_SPEC.md) … [PHASE150_SPEC.md](./PHASE150_SPEC.md) | Per-phase ship records (deep dive) |
+| [history/PHASE_HISTORY.md](./history/PHASE_HISTORY.md) | One-line index for phases 0–152 (shipped) |
+| [PHASE7_SPEC.md](./PHASE7_SPEC.md) … [PHASE152_SPEC.md](./PHASE152_SPEC.md) | Per-phase ship records (deep dive) |
 | [history/archive/](./history/archive/) | Implementation plans & reviews (archaeology) |
 
 ## Config samples
@@ -60,7 +56,7 @@ Start here. Prefer living docs over individual phase ship records.
 
 Living docs match **git HEAD product** (`SUPPORTED_APIS`, last feature commit Phase **147**):
 
-- **Status ceiling:** Phases **0–150** shipped. Kafka shim **23–109** (… **135 = optional DeleteRecords majority wait**; **136 = non-blocking admin catch-up**; **137 = native DeleteRecords wait trailer + journal topic GC** — Kafka still env-only for wait; **138 = best-effort shared fetch session mirror + promote**; **139 = mirror coalesce/debounce + optional durable + `mirror_gen` fence**; **140 = preferred max LEO lag + RC suppress metric**; **141 = N=2 majority health gauges** `volant_cluster_*`; **142 = Metadata leader ISR overlay + IsrUpdate 94/95**; **143 = promote claim fence lowest-id `promoted_by`**; **144 = preferred × established-session suppress**; **147 = serve-from-mirror without promote on owner miss**)
+- **Status ceiling:** Phases **0–152** shipped. Kafka shim **23–109** (… **135 = optional DeleteRecords majority wait**; **136 = non-blocking admin catch-up**; **137 = native DeleteRecords wait trailer + journal topic GC** — Kafka still env-only for wait; **138 = best-effort shared fetch session mirror + promote**; **139 = mirror coalesce/debounce + optional durable + `mirror_gen` fence**; **140 = preferred max LEO lag + RC suppress metric**; **141 = N=2 majority health gauges** `volant_cluster_*`; **142 = Metadata leader ISR overlay + IsrUpdate 94/95**; **143 = promote claim fence lowest-id `promoted_by`**; **144 = preferred × established-session suppress**; **147 = serve-from-mirror without promote on owner miss**; **150/152 = assignment majority consensus + Metadata serves committed snapshot**)
 - **Kafka SoT:** [KAFKA_COMPAT.md](./KAFKA_COMPAT.md) — matrix + semantic honesty
 - **WHITEPAPER:** architecture + positioning; no full API matrix
 - **Binding core:** PHASE1–6; **ship records:** PHASE7–147 via [PHASE_HISTORY](./history/PHASE_HISTORY.md)
