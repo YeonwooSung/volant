@@ -1,6 +1,7 @@
 //! Fetch session state (Phase 88 + 91 omit-unchanged + Phase 95 limits + Phase 115 durable
 //! + Phase 119 multi-broker owner encoding / handoff + Phase 138 peer mirror + Phase 139
-//! mirror polish + Phase 143 promote claim fence + Phase 146 incremental MirrorPut).
+//! mirror polish + Phase 143 promote claim fence + Phase 146 incremental MirrorPut +
+//! Phase 147 serve-from-mirror).
 //!
 //! Tracks topic partitions, last-seen fetch params, last-returned HWM/LSO (Phase 91),
 //! idle TTL / max concurrent sessions with lazy LRU eviction (Phase 95), and optional
@@ -22,6 +23,10 @@
 //! Phase 146: MirrorPut JSON may be `mode=full` (default, complete topics map) or
 //! `mode=delta` (topic upserts + `remove_topic_keys`). Fan-out prefers delta against
 //! an in-memory `last_mirrored` cache; opcode **90** unchanged.
+//!
+//! Phase 147: on owner miss, **serve reads from foreign mirror without promoting** into
+//! primary (default). Mirror-only mutations stay on the mirror table (no
+//! `queue_mirror_put`). Dual-epoch residual: two peers may both serve their mirrors.
 
 use std::collections::HashMap;
 use std::fs::{self, File, OpenOptions};
@@ -231,11 +236,11 @@ pub struct FetchSession {
 
 /// Fetch session table with idle TTL + max concurrent (Phase 95) + optional
 /// durability (Phase 115) + cluster owner encoding (Phase 119) + peer mirror
-/// (Phase 138/139) + promote claim fence (Phase 143) + incremental MirrorPut (Phase 146).
+/// (Phase 138/139) + promote claim fence (Phase 143) + incremental MirrorPut (Phase 146/147).
 #[derive(Debug)]
 pub struct FetchSessionManager {
     sessions: Mutex<HashMap<i32, FetchSession>>,
-    /// Foreign (non-owned) session mirrors — not served until promote (Phase 138).
+    /// Foreign (non-owned) session mirrors — served without promote by default (Phase 147).
     mirrors: Mutex<HashMap<i32, FetchSession>>,
     /// Pending put/delete ops keyed by session_id (coalesced; Phase 138/139).
     pending_mirror: Mutex<HashMap<i32, SessionMirrorOp>>,
@@ -281,6 +286,12 @@ pub struct FetchSessionManager {
     promote_claim_reject_total: AtomicU64,
     /// Delta MirrorPut payloads sent or applied (Phase 146).
     mirror_delta_puts_total: AtomicU64,
+    /// Owner-miss local serve from mirror without promote (Phase 147).
+    serve_from_mirror_total: AtomicU64,
+    /// When true, owner miss + mirror → serve without promote (Phase 147; default on).
+    serve_mirror_without_promote: AtomicBool,
+    /// When true, owner miss + mirror → promote into primary (Phase 147; default off).
+    promote_on_miss: AtomicBool,
     /// Min interval between Put fan-outs; `0` = immediate (Phase 139).
     mirror_put_min_interval_ms: AtomicU64,
     /// Single-flight arm for debounced Put fan-out (Phase 139).
@@ -339,6 +350,11 @@ impl FetchSessionManager {
             mirror_restored: AtomicU64::new(0),
             promote_claim_reject_total: AtomicU64::new(0),
             mirror_delta_puts_total: AtomicU64::new(0),
+            serve_from_mirror_total: AtomicU64::new(0),
+            serve_mirror_without_promote: AtomicBool::new(
+                default_serve_mirror_without_promote(),
+            ),
+            promote_on_miss: AtomicBool::new(default_promote_on_miss()),
             mirror_put_min_interval_ms: AtomicU64::new(default_mirror_put_min_interval_ms()),
             mirror_put_debounce_armed: AtomicBool::new(false),
             mirror_durable_path: None,
@@ -842,6 +858,66 @@ impl FetchSessionManager {
             .fetch_add(1, Ordering::Relaxed);
     }
 
+    /// Owner-miss serves that used foreign mirror without promote (Phase 147).
+    pub fn serve_from_mirror_total(&self) -> u64 {
+        self.serve_from_mirror_total.load(Ordering::Relaxed)
+    }
+
+    /// Record a serve-from-mirror decision in `maybe_forward` (Phase 147).
+    pub fn record_serve_from_mirror(&self) {
+        self.serve_from_mirror_total.fetch_add(1, Ordering::Relaxed);
+    }
+
+    /// Whether owner miss prefers mirror serve without promote (Phase 147).
+    pub fn serve_mirror_without_promote(&self) -> bool {
+        self.serve_mirror_without_promote.load(Ordering::Relaxed)
+    }
+
+    /// Override serve-without-promote knob (Phase 147 tests / runtime).
+    pub fn set_serve_mirror_without_promote(&self, enabled: bool) {
+        self.serve_mirror_without_promote
+            .store(enabled, Ordering::Relaxed);
+    }
+
+    /// Whether owner miss forces promote into primary (Phase 147).
+    pub fn promote_on_miss(&self) -> bool {
+        self.promote_on_miss.load(Ordering::Relaxed)
+    }
+
+    /// Override promote-on-miss knob (Phase 147 tests / runtime).
+    pub fn set_promote_on_miss(&self, enabled: bool) {
+        self.promote_on_miss.store(enabled, Ordering::Relaxed);
+    }
+
+    /// Clone foreign mirror session if present (Phase 147).
+    pub fn mirror_session_clone(&self, session_id: i32) -> Option<FetchSession> {
+        self.mirrors.lock().get(&session_id).cloned()
+    }
+
+    /// Primary or foreign mirror holds `session_id` (Phase 147).
+    pub fn has_servable_session(&self, session_id: i32) -> bool {
+        self.contains(session_id) || self.mirror_contains(session_id)
+    }
+
+    /// Owner-miss: serve from mirror without promote (default) or promote (opt-in/legacy).
+    ///
+    /// Returns `true` when the caller should return `None` so local `encode_fetch` serves.
+    /// Returns `false` when neither mirror nor promote can help (caller emits **70**).
+    pub fn try_owner_miss_local_serve(&self, session_id: i32) -> bool {
+        if !self.mirror_contains(session_id) {
+            return false;
+        }
+        if self.promote_on_miss() {
+            return self.promote_from_mirror(session_id);
+        }
+        if self.serve_mirror_without_promote() {
+            self.record_serve_from_mirror();
+            return true;
+        }
+        // SERVE_MIRROR_WITHOUT_PROMOTE=0 legacy → promote.
+        self.promote_from_mirror(session_id)
+    }
+
     /// Queue Put for peer fan-out when this broker is a cluster owner (Phase 138/139).
     ///
     /// One slot per `session_id`; a second Put coalesces (counts drop). Put after
@@ -984,15 +1060,26 @@ impl FetchSessionManager {
     }
 
     /// Close a session (no-op for id 0 / missing). Not counted as eviction.
+    ///
+    /// Primary close queues MirrorDelete (Phase 138). Mirror-only close removes
+    /// the foreign entry in-place without fan-out (Phase 147; not SoT owner).
     pub fn close(&self, session_id: i32) {
-        if session_id != 0 {
+        if session_id == 0 {
+            return;
+        }
+        {
             let mut guard = self.sessions.lock();
             if guard.remove(&session_id).is_some() {
                 self.persist_locked(&guard);
                 drop(guard);
                 self.clear_last_mirrored(session_id);
                 self.queue_mirror_delete(session_id);
+                return;
             }
+        }
+        let mut mirrors = self.mirrors.lock();
+        if mirrors.remove(&session_id).is_some() {
+            self.persist_mirrors_locked(&mirrors);
         }
     }
 
@@ -1025,15 +1112,17 @@ impl FetchSessionManager {
         id
     }
 
-    /// Validate incremental request epoch and advance expected epoch.
+    /// Validate incremental request epoch and advance expected epoch (**primary only**).
     ///
     /// Lazy-evicts idle sessions first. Returns `Ok(())` or Kafka top-level
     /// error code (70 / 71). Touches activity on success.
+    ///
+    /// Prefer [`Self::begin_incremental_from_any`] on the encode path (Phase 147).
     pub fn begin_incremental(&self, session_id: i32, epoch: i32) -> Result<(), i16> {
         self.begin_incremental_at(session_id, epoch, now_ms())
     }
 
-    /// Incremental begin with explicit timestamp (unit tests).
+    /// Incremental begin with explicit timestamp (unit tests; primary only).
     pub fn begin_incremental_at(
         &self,
         session_id: i32,
@@ -1066,86 +1155,119 @@ impl FetchSessionManager {
         Ok(())
     }
 
+    /// Incremental begin: primary first, else foreign mirror without promote (Phase 147).
+    ///
+    /// Mirror path advances epoch / activity / `mirror_gen` in-place and persists
+    /// mirrors when durable — **no** `queue_mirror_put` and **no** primary insert.
+    pub fn begin_incremental_from_any(&self, session_id: i32, epoch: i32) -> Result<(), i16> {
+        self.begin_incremental_from_any_at(session_id, epoch, now_ms())
+    }
+
+    /// [`Self::begin_incremental_from_any`] with explicit timestamp (tests).
+    pub fn begin_incremental_from_any_at(
+        &self,
+        session_id: i32,
+        epoch: i32,
+        now_ms: i64,
+    ) -> Result<(), i16> {
+        // Primary path (same as begin_incremental_at, including idle eviction).
+        {
+            let mut guard = self.sessions.lock();
+            let before = guard.len();
+            self.evict_idle_locked(&mut guard, now_ms);
+            let idle_removed = guard.len() != before;
+            if let Some(session) = guard.get_mut(&session_id) {
+                if session.epoch != epoch {
+                    if idle_removed {
+                        self.persist_locked(&guard);
+                    }
+                    return Err(71);
+                }
+                session.epoch = next_epoch(epoch);
+                session.last_activity_ms = now_ms;
+                session.mirror_gen = session.mirror_gen.saturating_add(1);
+                self.persist_locked(&guard);
+                drop(guard);
+                self.queue_mirror_put(session_id);
+                return Ok(());
+            }
+            if idle_removed {
+                self.persist_locked(&guard);
+            }
+        }
+        // Mirror-only (Phase 147).
+        let mut mirrors = self.mirrors.lock();
+        let Some(session) = mirrors.get_mut(&session_id) else {
+            return Err(70);
+        };
+        if session.epoch != epoch {
+            return Err(71);
+        }
+        session.epoch = next_epoch(epoch);
+        session.last_activity_ms = now_ms;
+        session.mirror_gen = session.mirror_gen.saturating_add(1);
+        self.persist_mirrors_locked(&mirrors);
+        Ok(())
+    }
+
     /// Merge request topics/partitions into an existing session.
     ///
     /// New or updated partitions keep/replace fetch params; `last_hwm`/`last_lso`
     /// are preserved when the same partition already existed (offset updates do
     /// not clear the omit cache — empty-records + same HWM still omits).
+    ///
+    /// Primary mutates + `queue_mirror_put`. Mirror-only mutates in-place without
+    /// put fan-out (Phase 147).
     pub fn merge_topics(&self, session_id: i32, topics: &HashMap<String, SessionTopic>) {
-        let mut guard = self.sessions.lock();
-        let Some(session) = guard.get_mut(&session_id) else {
-            return;
-        };
-        for (key, topic) in topics {
-            let entry = session
-                .topics
-                .entry(key.clone())
-                .or_insert_with(|| SessionTopic {
-                    wire: topic.wire.clone(),
-                    name: topic.name.clone(),
-                    partitions: HashMap::new(),
-                });
-            // Prefer latest wire/name.
-            entry.wire = topic.wire.clone();
-            if !topic.name.is_empty() {
-                entry.name = topic.name.clone();
-            }
-            for (pid, part) in &topic.partitions {
-                let prev = entry.partitions.get(pid);
-                let mut merged = part.clone();
-                // Preserve omit cache across param merges unless the request
-                // carried explicit last_* (request path always None).
-                if merged.last_hwm.is_none() {
-                    if let Some(p) = prev {
-                        merged.last_hwm = p.last_hwm;
-                        merged.last_lso = p.last_lso;
-                    }
-                }
-                entry.partitions.insert(*pid, merged);
+        {
+            let mut guard = self.sessions.lock();
+            if let Some(session) = guard.get_mut(&session_id) {
+                merge_topics_into(session, topics);
+                self.persist_locked(&guard);
+                drop(guard);
+                self.queue_mirror_put(session_id);
+                return;
             }
         }
-        session.mirror_gen = session.mirror_gen.saturating_add(1);
-        self.persist_locked(&guard);
-        drop(guard);
-        self.queue_mirror_put(session_id);
+        let mut mirrors = self.mirrors.lock();
+        if let Some(session) = mirrors.get_mut(&session_id) {
+            merge_topics_into(session, topics);
+            self.persist_mirrors_locked(&mirrors);
+        }
     }
 
     /// Apply forgotten_topics_data removals.
+    ///
+    /// Mirror-only forget applies in-place without put fan-out (Phase 147).
     pub fn forget(&self, session_id: i32, forgotten: &[(String, Vec<i32>)]) {
         if session_id == 0 || forgotten.is_empty() {
             return;
         }
-        let mut guard = self.sessions.lock();
-        let Some(session) = guard.get_mut(&session_id) else {
-            return;
-        };
-        for (key, parts) in forgotten {
-            if parts.is_empty() {
-                // Empty partition list: drop whole topic (Kafka allows this).
-                session.topics.remove(key);
-                continue;
-            }
-            let empty = if let Some(topic) = session.topics.get_mut(key) {
-                for p in parts {
-                    topic.partitions.remove(p);
-                }
-                topic.partitions.is_empty()
-            } else {
-                false
-            };
-            if empty {
-                session.topics.remove(key);
+        {
+            let mut guard = self.sessions.lock();
+            if let Some(session) = guard.get_mut(&session_id) {
+                forget_into(session, forgotten);
+                self.persist_locked(&guard);
+                drop(guard);
+                self.queue_mirror_put(session_id);
+                return;
             }
         }
-        session.mirror_gen = session.mirror_gen.saturating_add(1);
-        self.persist_locked(&guard);
-        drop(guard);
-        self.queue_mirror_put(session_id);
+        let mut mirrors = self.mirrors.lock();
+        if let Some(session) = mirrors.get_mut(&session_id) {
+            forget_into(session, forgotten);
+            self.persist_mirrors_locked(&mirrors);
+        }
     }
 
     /// Snapshot topics currently in the session (for empty-topics incremental).
+    ///
+    /// Primary first, else foreign mirror (Phase 147).
     pub fn snapshot_topics(&self, session_id: i32) -> HashMap<String, SessionTopic> {
-        self.sessions
+        if let Some(s) = self.sessions.lock().get(&session_id) {
+            return s.topics.clone();
+        }
+        self.mirrors
             .lock()
             .get(&session_id)
             .map(|s| s.topics.clone())
@@ -1155,6 +1277,7 @@ impl FetchSessionManager {
     /// Record HWM/LSO returned for a partition after it was included in a response.
     ///
     /// Only call for `error == 0` includes (Phase 91 MVP).
+    /// Mirror-only updates apply in-place without put fan-out (Phase 147).
     pub fn note_returned(
         &self,
         session_id: i32,
@@ -1166,24 +1289,23 @@ impl FetchSessionManager {
         if session_id == 0 {
             return;
         }
-        let mut guard = self.sessions.lock();
-        let Some(session) = guard.get_mut(&session_id) else {
-            return;
-        };
         {
-            let Some(topic) = session.topics.get_mut(topic_key) else {
+            let mut guard = self.sessions.lock();
+            if let Some(session) = guard.get_mut(&session_id) {
+                if note_returned_into(session, topic_key, partition, hwm, lso) {
+                    self.persist_locked(&guard);
+                    drop(guard);
+                    self.queue_mirror_put(session_id);
+                }
                 return;
-            };
-            let Some(part) = topic.partitions.get_mut(&partition) else {
-                return;
-            };
-            part.last_hwm = Some(hwm);
-            part.last_lso = Some(lso);
+            }
         }
-        session.mirror_gen = session.mirror_gen.saturating_add(1);
-        self.persist_locked(&guard);
-        drop(guard);
-        self.queue_mirror_put(session_id);
+        let mut mirrors = self.mirrors.lock();
+        if let Some(session) = mirrors.get_mut(&session_id) {
+            if note_returned_into(session, topic_key, partition, hwm, lso) {
+                self.persist_mirrors_locked(&mirrors);
+            }
+        }
     }
 
     /// Drop idle sessions under the lock. Counts each removal as an eviction.
@@ -1368,6 +1490,76 @@ pub fn next_epoch(prev: i32) -> i32 {
     }
 }
 
+fn merge_topics_into(session: &mut FetchSession, topics: &HashMap<String, SessionTopic>) {
+    for (key, topic) in topics {
+        let entry = session
+            .topics
+            .entry(key.clone())
+            .or_insert_with(|| SessionTopic {
+                wire: topic.wire.clone(),
+                name: topic.name.clone(),
+                partitions: HashMap::new(),
+            });
+        entry.wire = topic.wire.clone();
+        if !topic.name.is_empty() {
+            entry.name = topic.name.clone();
+        }
+        for (pid, part) in &topic.partitions {
+            let prev = entry.partitions.get(pid);
+            let mut merged = part.clone();
+            if merged.last_hwm.is_none() {
+                if let Some(p) = prev {
+                    merged.last_hwm = p.last_hwm;
+                    merged.last_lso = p.last_lso;
+                }
+            }
+            entry.partitions.insert(*pid, merged);
+        }
+    }
+    session.mirror_gen = session.mirror_gen.saturating_add(1);
+}
+
+fn forget_into(session: &mut FetchSession, forgotten: &[(String, Vec<i32>)]) {
+    for (key, parts) in forgotten {
+        if parts.is_empty() {
+            session.topics.remove(key);
+            continue;
+        }
+        let empty = if let Some(topic) = session.topics.get_mut(key) {
+            for p in parts {
+                topic.partitions.remove(p);
+            }
+            topic.partitions.is_empty()
+        } else {
+            false
+        };
+        if empty {
+            session.topics.remove(key);
+        }
+    }
+    session.mirror_gen = session.mirror_gen.saturating_add(1);
+}
+
+/// Returns `true` when a partition was updated.
+fn note_returned_into(
+    session: &mut FetchSession,
+    topic_key: &str,
+    partition: i32,
+    hwm: i64,
+    lso: i64,
+) -> bool {
+    let Some(topic) = session.topics.get_mut(topic_key) else {
+        return false;
+    };
+    let Some(part) = topic.partitions.get_mut(&partition) else {
+        return false;
+    };
+    part.last_hwm = Some(hwm);
+    part.last_lso = Some(lso);
+    session.mirror_gen = session.mirror_gen.saturating_add(1);
+    true
+}
+
 fn now_ms() -> i64 {
     SystemTime::now()
         .duration_since(UNIX_EPOCH)
@@ -1402,6 +1594,37 @@ pub fn default_mirror_put_min_interval_ms() -> u64 {
 /// Whether durable peer mirrors are enabled via env (Phase 139). Default off.
 pub fn default_mirror_durable_enabled() -> bool {
     match std::env::var("VOLANT_FETCH_SESSION_MIRROR_DURABLE") {
+        Ok(s) => {
+            let s = s.trim();
+            s == "1" || s.eq_ignore_ascii_case("true") || s.eq_ignore_ascii_case("yes")
+        }
+        Err(_) => false,
+    }
+}
+
+/// Serve foreign mirror without promote on owner miss (Phase 147). Default **on**.
+///
+/// Set `VOLANT_FETCH_SESSION_SERVE_MIRROR_WITHOUT_PROMOTE=0` (or false/no/off) for
+/// legacy Phase 138 promote-on-miss when mirror is present.
+pub fn default_serve_mirror_without_promote() -> bool {
+    match std::env::var("VOLANT_FETCH_SESSION_SERVE_MIRROR_WITHOUT_PROMOTE") {
+        Ok(s) => {
+            let s = s.trim();
+            !(s == "0"
+                || s.eq_ignore_ascii_case("false")
+                || s.eq_ignore_ascii_case("no")
+                || s.eq_ignore_ascii_case("off"))
+        }
+        Err(_) => true,
+    }
+}
+
+/// Force promote-on-miss when mirror present (Phase 147). Default **off**.
+///
+/// `VOLANT_FETCH_SESSION_PROMOTE_ON_MISS=1` overrides serve-without-promote and
+/// moves mirror → primary (Phase 138 path).
+pub fn default_promote_on_miss() -> bool {
+    match std::env::var("VOLANT_FETCH_SESSION_PROMOTE_ON_MISS") {
         Ok(s) => {
             let s = s.trim();
             s == "1" || s.eq_ignore_ascii_case("true") || s.eq_ignore_ascii_case("yes")
@@ -2414,5 +2637,101 @@ mod tests {
         owner.note_last_mirrored(id);
         owner.record_mirror_delta_put_sent();
         assert_eq!(owner.mirror_delta_puts_total(), 1);
+    }
+
+    #[test]
+    fn phase147_begin_incremental_from_any_mirror_only() {
+        let owner = FetchSessionManager::with_limits_and_owner(0, 0, 1);
+        let id = owner.create_at(topic_map("orders", 1), 1_000);
+        let bytes = owner.export_session_bytes(id).unwrap();
+
+        let peer = FetchSessionManager::with_limits(0, 0);
+        peer.apply_mirror_put(&bytes).unwrap();
+        assert!(peer.has_servable_session(id));
+        assert!(!peer.contains(id));
+        assert!(peer.mirror_contains(id));
+        let snap = peer.mirror_session_clone(id).expect("mirror clone");
+        assert_eq!(snap.epoch, 1);
+        assert!(snap.topics.contains_key("orders"));
+
+        // Primary-only begin fails; from_any succeeds on mirror.
+        assert_eq!(peer.begin_incremental_at(id, 1, 1_100), Err(70));
+        assert!(peer.begin_incremental_from_any_at(id, 1, 1_100).is_ok());
+        assert!(!peer.contains(id));
+        assert!(peer.mirror_contains(id));
+        assert_eq!(peer.promote_total(), 0);
+        assert!(!peer.has_pending_mirror_ops());
+
+        let after = peer.mirror_session_clone(id).unwrap();
+        assert_eq!(after.epoch, 2);
+        let topics = peer.snapshot_topics(id);
+        assert!(topics.contains_key("orders"));
+
+        peer.note_returned(id, "orders", 0, 5, 5);
+        assert!(!peer.has_pending_mirror_ops());
+        let noted = peer.mirror_session_clone(id).unwrap();
+        assert_eq!(
+            noted.topics["orders"].partitions[&0].last_hwm,
+            Some(5)
+        );
+
+        // Wrong epoch / missing id.
+        assert_eq!(peer.begin_incremental_from_any_at(id, 99, 1_200), Err(71));
+        assert_eq!(
+            peer.begin_incremental_from_any_at(id + 99, 1, 1_300),
+            Err(70)
+        );
+    }
+
+    #[test]
+    fn phase147_try_owner_miss_serve_without_promote() {
+        let owner = FetchSessionManager::with_limits_and_owner(0, 0, 1);
+        let id = owner.create_at(HashMap::new(), 1_000);
+        let bytes = owner.export_session_bytes(id).unwrap();
+
+        let peer = FetchSessionManager::with_limits(0, 0);
+        assert!(!peer.try_owner_miss_local_serve(id)); // no mirror
+
+        peer.apply_mirror_put(&bytes).unwrap();
+        assert!(peer.serve_mirror_without_promote());
+        assert!(!peer.promote_on_miss());
+        let before = peer.serve_from_mirror_total();
+        assert!(peer.try_owner_miss_local_serve(id));
+        assert_eq!(peer.serve_from_mirror_total(), before + 1);
+        assert_eq!(peer.promote_total(), 0);
+        assert!(peer.mirror_contains(id));
+        assert!(!peer.contains(id));
+    }
+
+    #[test]
+    fn phase147_try_owner_miss_promote_on_miss() {
+        let owner = FetchSessionManager::with_limits_and_owner(0, 0, 1);
+        let id = owner.create_at(HashMap::new(), 1_000);
+        let bytes = owner.export_session_bytes(id).unwrap();
+
+        let peer = FetchSessionManager::with_limits_and_owner(0, 0, 2);
+        peer.apply_mirror_put(&bytes).unwrap();
+        peer.set_promote_on_miss(true);
+        assert!(peer.try_owner_miss_local_serve(id));
+        assert_eq!(peer.promote_total(), 1);
+        assert_eq!(peer.serve_from_mirror_total(), 0);
+        assert!(peer.contains(id));
+        assert!(!peer.mirror_contains(id));
+    }
+
+    #[test]
+    fn phase147_legacy_serve_without_promote_off_promotes() {
+        let owner = FetchSessionManager::with_limits_and_owner(0, 0, 1);
+        let id = owner.create_at(HashMap::new(), 1_000);
+        let bytes = owner.export_session_bytes(id).unwrap();
+
+        let peer = FetchSessionManager::with_limits(0, 0);
+        peer.apply_mirror_put(&bytes).unwrap();
+        peer.set_serve_mirror_without_promote(false);
+        peer.set_promote_on_miss(false);
+        assert!(peer.try_owner_miss_local_serve(id));
+        assert_eq!(peer.promote_total(), 1);
+        assert_eq!(peer.serve_from_mirror_total(), 0);
+        assert!(peer.contains(id));
     }
 }

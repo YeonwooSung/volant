@@ -25,7 +25,7 @@ optional durable peer mirrors, light promote fencing. No new opcodes; not Raft.
 | Deferred | Why |
 |----------|-----|
 | Incremental/delta MirrorPut wire | Coalesce only |
-| Serve-from-mirror without promote | Dual-epoch |
+| Serve-from-mirror without promote | **Closed by Phase 147** (dual-epoch residual) |
 | Raft / session_id re-encode | Out of scope |
 | Full dual-promote elimination | Needs consensus |
 

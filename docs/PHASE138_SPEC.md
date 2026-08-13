@@ -34,7 +34,7 @@ happy path. **Not** Raft / not controller session SoT.
 | Deferred | Why |
 |----------|-----|
 | Raft / controller session registry | Hot SoT; larger than MVP |
-| Multi-writer serve from mirror without promote | Dual-epoch races |
+| Multi-writer serve from mirror without promote | **Closed by Phase 147** (dual-epoch residual remains) |
 | Re-encode session_id to new owner | Client recreate; keep id stable |
 | Debounced mirror put | Chatty full put OK for MVP |
 | Preferred re-home of session owner | Orthogonal |
@@ -54,17 +54,18 @@ happy path. **Not** Raft / not controller session SoT.
 
   Client → B, A unreachable:
        B forward fails
-       B promote_from_mirror(session_id)?
-            yes → local encode_fetch (omit cache preserved)
-            no  → empty Fetch top-level 70
+       Phase 147 default: mirror present → serve without promote
+       (opt-in promote: VOLANT_FETCH_SESSION_PROMOTE_ON_MISS=1)
+            no mirror → empty Fetch top-level 70
 ```
 
-### Promote rules
+### Promote rules (Phase 138 original; now opt-in via Phase 147)
 
 1. Only after forward fail or missing owner addr (never while local primary hit).
 2. Mirror must exist; promote inserts into primary under same `session_id`.
 3. Session_id owner bits may still name dead A — routing: local hit first.
 4. Dual-promote race → possible later **71**; client recreates (honest).
+5. **Phase 147 default:** serve mirror without promote (see PHASE147_SPEC).
 
 ## Honest limitations
 

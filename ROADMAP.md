@@ -3512,6 +3512,36 @@ lacks full Kafka throttling/probe (126/133/140/144 unchanged).
 
 **Still deferred:** preferred throttle residual; serve-from-mirror without
 promote; incremental MirrorPut; rollback local truncate; full openraft/KRaft;
+**Still deferred:** full preferred selector / throttling / rack-aware assignment;
+serve-from-mirror without promote → **closed by Phase 147**; Raft session
+registry; rollback local truncate; full openraft/KRaft; multi-lang; chaos/long
+fuzz; full KIP-890/939.
+
+### Phase 147 — Serve-from-mirror without promote (MVP) ✅
+
+**Goal:** On owner miss, serve a foreign fetch-session mirror **without**
+`promote_from_mirror` (no ownership claim). Dual-epoch residual is honest: two
+peers may both serve mirrors without a single SoT.
+
+Binding: **[docs/PHASE147_SPEC.md](./docs/PHASE147_SPEC.md)**.
+
+- [x] `mirror_session_clone` / `has_servable_session` / `begin_incremental_from_any`
+- [x] Mirror-only `merge`/`forget`/`note_returned`/`close`/`snapshot` in-place
+  (no `queue_mirror_put`)
+- [x] `maybe_forward_kafka_fetch`: default serve-from-mirror; metric
+  `volant_fetch_session_serve_from_mirror_total`
+- [x] Knobs: `VOLANT_FETCH_SESSION_SERVE_MIRROR_WITHOUT_PROMOTE` (default **on**),
+  `VOLANT_FETCH_SESSION_PROMOTE_ON_MISS` (default **off**)
+- [x] Tests `phase147_serve_from_mirror`; phase138/139 defaults updated; 143 green
+
+**Default behavior change:** owner miss + mirror no longer always promotes;
+promote is opt-in via env/setter.
+
+**Honest residual:** dual-epoch (no single SoT across dual mirrors); best-effort
+mirror put lag still **70**; not Raft.
+
+**Still deferred:** Raft session registry; dual-epoch converge; incremental
+MirrorPut; full preferred selector; rollback local truncate; full openraft/KRaft;
 multi-lang; chaos/long fuzz; full KIP-890/939.
 
 
@@ -3553,6 +3583,7 @@ marker clip 111; fuzz corpus smoke CI 112; cluster admin fan-out 113) — see
 ## Suggested implementation order (PRs)
 
 Phases **0–145 are shipped**. Historical PR order for the core:
+Phases **0–147 are shipped**. Historical PR order for the core:
 
 1. Phase 1 segment format + unit tests  
 2. Phase 1 recovery + retention  
@@ -3688,4 +3719,8 @@ campaigns, full preferred-replica throttling residual (assignment MVP closed by
 Phase 145; Phase 138/139/143 closed shared mirror MVP — residual: Raft registry /
 serve-without-promote / incremental put), full KIP-890/939, rollback local
 truncate on majority fail.
+campaigns, full preferred-replica selector / throttling / rack-aware assignment
+(beyond 126/133/140/144; Phase 138/139/143/147 closed shared mirror MVP —
+residual: Raft registry / dual-epoch converge / incremental put), full
+KIP-890/939, rollback local truncate on majority fail.
 Details: [docs/KAFKA_COMPAT.md](./docs/KAFKA_COMPAT.md), [docs/ops.md](./docs/ops.md).

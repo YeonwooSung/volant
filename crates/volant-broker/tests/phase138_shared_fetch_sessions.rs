@@ -1,4 +1,5 @@
-//! Phase 138: shared fetch session mirror + promote-on-owner-miss.
+//! Phase 138: shared fetch session mirror + owner-miss local serve
+//! (Phase 147 default: serve-from-mirror without promote).
 
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -410,9 +411,9 @@ async fn happy_path_still_forwards_while_owner_up() {
     assert_eq!(peer.fetch_sessions().active_count(), 0);
 }
 
-/// Owner unreachable + mirror present → promote and serve (no permanent 70).
+/// Owner unreachable + mirror present → serve from mirror without promote (Phase 147 default).
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-async fn promote_on_owner_unreachable() {
+async fn serve_from_mirror_on_owner_unreachable() {
     let mut h = ClusterHarness::boot().await;
     h.b1.create_topic("die", 1).unwrap();
     propagate(&[&h.b1, &h.b2, &h.b3], "die").await;
@@ -456,6 +457,7 @@ async fn promote_on_owner_unreachable() {
     tokio::time::sleep(Duration::from_millis(30)).await;
 
     let promote_before = peer.fetch_sessions().promote_total();
+    let serve_before = peer.fetch_sessions().serve_from_mirror_total();
     let body = fetch_v12_empty_topics(sid, 1);
     let resp = kafka_rpc(
         &peer_kafka,
@@ -466,27 +468,32 @@ async fn promote_on_owner_unreachable() {
     let (top_err, echo) = assert_flex_header(&mut src, 11);
     assert_eq!(
         top_err, 0,
-        "promote-on-miss must succeed (got top_err={top_err})"
+        "serve-from-mirror must succeed (got top_err={top_err})"
     );
     assert_eq!(echo, sid);
-    assert!(
-        peer.fetch_sessions().promote_total() > promote_before,
-        "must record promote"
+    assert_eq!(
+        peer.fetch_sessions().promote_total(),
+        promote_before,
+        "default must not promote"
     );
     assert!(
-        peer.fetch_sessions().contains(sid),
-        "primary must hold session after promote"
+        peer.fetch_sessions().serve_from_mirror_total() > serve_before,
+        "must record serve_from_mirror"
     );
     assert!(
-        !peer.fetch_sessions().mirror_contains(sid),
-        "mirror consumed on promote"
+        !peer.fetch_sessions().contains(sid),
+        "primary must stay empty without promote"
+    );
+    assert!(
+        peer.fetch_sessions().mirror_contains(sid),
+        "mirror remains foreign"
     );
 
     // Omit may or may not fire depending on peer-local HWM vs mirrored cache;
     // just ensure a well-formed body (topic array present).
     let _n_topics = get_compact_array_len(&mut src).unwrap().unwrap();
 
-    // Next epoch on peer (local) works without owner.
+    // Next epoch on peer (mirror-only) works without owner / promote.
     let body = fetch_v12_empty_topics(sid, 2);
     let resp = kafka_rpc(
         &peer_kafka,
@@ -497,6 +504,8 @@ async fn promote_on_owner_unreachable() {
     let (top_err, echo) = assert_flex_header(&mut src, 12);
     assert_eq!(top_err, 0);
     assert_eq!(echo, sid);
+    assert!(!peer.fetch_sessions().contains(sid));
+    assert!(peer.fetch_sessions().mirror_contains(sid));
 }
 
 /// Owner unreachable + no mirror → 70.
@@ -555,9 +564,9 @@ async fn no_mirror_owner_dead_is_70() {
     assert_eq!(echo, sid);
 }
 
-/// Wrong epoch after promote still returns 71.
+/// Wrong epoch on serve-from-mirror still returns 71 (Phase 147; no promote required).
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-async fn wrong_epoch_after_promote_is_71() {
+async fn wrong_epoch_on_mirror_serve_is_71() {
     let mut h = ClusterHarness::boot().await;
     h.b1.create_topic("ep", 1).unwrap();
     propagate(&[&h.b1, &h.b2, &h.b3], "ep").await;
@@ -595,7 +604,7 @@ async fn wrong_epoch_after_promote_is_71() {
     h.kill_native(leader_id);
     tokio::time::sleep(Duration::from_millis(30)).await;
 
-    // Wrong epoch 99 after promote path.
+    // Wrong epoch 99 against mirrored session.
     let body = fetch_v12_empty_topics(sid, 99);
     let resp = kafka_rpc(
         &peer_kafka,
@@ -604,7 +613,8 @@ async fn wrong_epoch_after_promote_is_71() {
     .await;
     let mut src = resp.freeze();
     let (top_err, echo) = assert_flex_header(&mut src, 11);
-    // Promote happens first; then begin_incremental sees wrong epoch → 71.
-    assert_eq!(top_err, 71, "wrong epoch after promote → 71");
+    // Serve-from-mirror decision, then begin_incremental_from_any sees wrong epoch → 71.
+    assert_eq!(top_err, 71, "wrong epoch on mirror serve → 71");
     assert_eq!(echo, sid);
+    assert_eq!(peer.fetch_sessions().promote_total(), 0);
 }

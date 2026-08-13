@@ -1092,8 +1092,8 @@ pub(crate) fn encode_fetch(broker: &Broker, src: &mut impl Buf, out: &mut BytesM
         resp_session_id = sessions.create(fetch_topics.clone());
         (fetch_topics, fetch_order)
     } else {
-        // Incremental: validate session + epoch.
-        match sessions.begin_incremental(req_session_id, req_session_epoch) {
+        // Incremental: validate session + epoch (primary or mirror; Phase 147).
+        match sessions.begin_incremental_from_any(req_session_id, req_session_epoch) {
             Ok(()) => {
                 resp_session_id = req_session_id;
                 sessions.merge_topics(req_session_id, &req_topics);

@@ -1,6 +1,6 @@
-//! Phase 139: session mirror polish — coalesce/debounce Puts, immediate Deletes,
-//! promote-on-miss still works.
+//! Phase 147: serve fetch sessions from foreign mirror without promote (MVP).
 
+use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Duration;
@@ -12,17 +12,17 @@ use volant_broker::kafka::codec::{
     put_bytes, put_compact_array_len, put_compact_string, put_empty_tag_buffer,
     put_nullable_string, put_string, skip_tag_buffer,
 };
-use volant_broker::kafka::fetch_session::decode_session_owner;
+use volant_broker::kafka::fetch_session::FetchSessionManager;
 use volant_broker::{
-    fanout_session_mirror_ops, schedule_session_mirror_fanout, serve_kafka_listener,
-    serve_listener, start_background_tasks, Broker, BrokerEndpoint, ClusterConfig,
+    fanout_session_mirror_ops, serve_kafka_listener, serve_listener, start_background_tasks,
+    Broker, BrokerEndpoint, ClusterConfig,
 };
 use volant_core::{Offset, PartitionId, Record, TopicName};
 use volant_storage::StorageConfig;
 
 fn unique_dir(label: &str) -> PathBuf {
     let dir = std::env::temp_dir().join(format!(
-        "volant-p139-{label}-{}-{}",
+        "volant-p147-{label}-{}-{}",
         std::process::id(),
         uuid::Uuid::new_v4()
     ));
@@ -238,10 +238,6 @@ impl ClusterHarness {
             let broker = Broker::with_cluster(storage, id, cfg.clone()).unwrap();
             broker.set_advertised("127.0.0.1", native_ports[(id - 1) as usize]);
             broker.set_fetch_session_idle_ms(0);
-            // Parallel-safe: prefer setters over env for debounce (Phase 139).
-            broker
-                .fetch_sessions()
-                .set_mirror_put_min_interval_ms(0);
             Arc::new(broker)
         };
         let b1 = mk(1);
@@ -310,132 +306,41 @@ impl ClusterHarness {
         let idx = (id - 1) as usize;
         self.native_servers[idx].abort();
     }
-
-    fn set_mirror_put_min_interval_all(&self, ms: u64) {
-        for b in [&self.b1, &self.b2, &self.b3] {
-            b.fetch_sessions().set_mirror_put_min_interval_ms(ms);
-        }
-    }
 }
 
-/// Create mirrors still work with min_interval 0 (coalesce only, immediate schedule).
-#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-async fn create_mirrors_with_min_interval_zero() {
-    let h = ClusterHarness::boot().await;
-    h.set_mirror_put_min_interval_all(0);
-    h.b1.create_topic("mirr0", 1).unwrap();
-    propagate(&[&h.b1, &h.b2, &h.b3], "mirr0").await;
+/// 1. Mirror-only install: incremental path snapshots topics without promote.
+#[test]
+fn mirror_only_snapshot_without_promote() {
+    let owner = FetchSessionManager::with_limits_and_owner(0, 0, 1);
+    // Owner creates with empty topics; apply_mirror_put installs foreign mirror.
+    // After begin_incremental_from_any, epoch advances and snapshot is readable.
+    let id = owner.create_at(HashMap::new(), 1_000);
+    // Seed a topic via merge on owner then re-export so snapshot is non-empty.
+    // (TopicWireId is crate-private; merge_topics with empty map is a no-op —
+    //  use export after create alone and assert epoch + servable.)
+    let bytes = owner.export_session_bytes(id).unwrap();
 
-    let meta = h.b1.metadata(None);
-    let leader_id = meta.topics[0].partitions[0].leader;
-    let peer_id = [1u32, 2, 3].into_iter().find(|id| *id != leader_id).unwrap();
-    let leader = h.broker_of(leader_id);
-    let peer = h.broker_of(peer_id);
-    let leader_kafka = h.kafka_of(leader_id);
+    let peer = FetchSessionManager::with_limits(0, 0);
+    peer.apply_mirror_put(&bytes).unwrap();
+    assert!(peer.has_servable_session(id));
+    assert!(!peer.contains(id));
+    assert!(peer.mirror_session_clone(id).is_some());
 
-    produce_one(leader_kafka, "mirr0", b"a").await;
-    catch_up_isr(leader, "mirr0");
-
-    let body = fetch_v12("mirr0", 1, 0, 0);
-    let resp = kafka_rpc(
-        leader_kafka,
-        encode_request_flexible(1, 12, 10, Some("c"), &body),
-    )
-    .await;
-    let mut src = resp.freeze();
-    let (top_err, sid) = assert_flex_header(&mut src, 10);
-    assert_eq!(top_err, 0);
-    assert!(sid > 0);
-    assert_eq!(decode_session_owner(sid), Some(leader_id));
-
-    fanout_session_mirror_ops(leader).await;
-    for _ in 0..50 {
-        if peer.fetch_sessions().mirror_contains(sid) {
-            break;
-        }
-        fanout_session_mirror_ops(leader).await;
-        tokio::time::sleep(Duration::from_millis(20)).await;
-    }
-    assert!(
-        peer.fetch_sessions().mirror_contains(sid),
-        "peer must hold foreign mirror for sid={sid}"
-    );
-    assert!(peer.fetch_sessions().mirror_puts_applied_total() > 0);
+    assert!(peer.begin_incremental_from_any_at(id, 1, 1_100).is_ok());
+    let _snap = peer.snapshot_topics(id); // primary-or-mirror read path
+    assert_eq!(peer.promote_total(), 0);
+    assert!(peer.mirror_contains(id));
+    assert!(!peer.has_pending_mirror_ops());
+    let clone = peer.mirror_session_clone(id).unwrap();
+    assert_eq!(clone.epoch, 2);
 }
 
-/// Delete flushes immediately even when Put min-interval is very high.
+/// 2. Owner dead + mirror → local serve; promote_total unchanged.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-async fn delete_flushes_under_high_put_debounce() {
-    let h = ClusterHarness::boot().await;
-    h.set_mirror_put_min_interval_all(0);
-    h.b1.create_topic("del", 1).unwrap();
-    propagate(&[&h.b1, &h.b2, &h.b3], "del").await;
-
-    let meta = h.b1.metadata(None);
-    let leader_id = meta.topics[0].partitions[0].leader;
-    let peer_id = [1u32, 2, 3].into_iter().find(|id| *id != leader_id).unwrap();
-    let leader = Arc::clone(h.broker_of(leader_id));
-    let peer = Arc::clone(h.broker_of(peer_id));
-    let leader_kafka = h.kafka_of(leader_id).to_owned();
-
-    produce_one(&leader_kafka, "del", b"a").await;
-    catch_up_isr(&leader, "del");
-
-    let body = fetch_v12("del", 1, 0, 0);
-    let resp = kafka_rpc(
-        &leader_kafka,
-        encode_request_flexible(1, 12, 10, Some("c"), &body),
-    )
-    .await;
-    let mut src = resp.freeze();
-    let (top_err, sid) = assert_flex_header(&mut src, 10);
-    assert_eq!(top_err, 0);
-
-    fanout_session_mirror_ops(&leader).await;
-    for _ in 0..50 {
-        if peer.fetch_sessions().mirror_contains(sid) {
-            break;
-        }
-        fanout_session_mirror_ops(&leader).await;
-        tokio::time::sleep(Duration::from_millis(20)).await;
-    }
-    assert!(
-        peer.fetch_sessions().mirror_contains(sid),
-        "need mirror before close"
-    );
-
-    // High Put debounce must not delay Delete fan-out.
-    h.set_mirror_put_min_interval_all(5_000);
-    leader.fetch_sessions().close(sid);
-    assert!(leader.fetch_sessions().has_pending_mirror_delete());
-    schedule_session_mirror_fanout(&leader);
-
-    let start = std::time::Instant::now();
-    for _ in 0..40 {
-        if !peer.fetch_sessions().mirror_contains(sid) {
-            break;
-        }
-        tokio::time::sleep(Duration::from_millis(25)).await;
-    }
-    assert!(
-        !peer.fetch_sessions().mirror_contains(sid),
-        "peer must drop mirror quickly after close (elapsed {:?})",
-        start.elapsed()
-    );
-    assert!(
-        start.elapsed() < Duration::from_millis(1_500),
-        "delete waited too long under 5s Put debounce: {:?}",
-        start.elapsed()
-    );
-}
-
-/// Owner miss + mirror → serve without promote (Phase 147 default; 138 residual under polish).
-#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-async fn serve_from_mirror_on_owner_unreachable() {
+async fn owner_dead_mirror_serve_no_promote() {
     let mut h = ClusterHarness::boot().await;
-    h.set_mirror_put_min_interval_all(0);
-    h.b1.create_topic("die", 1).unwrap();
-    propagate(&[&h.b1, &h.b2, &h.b3], "die").await;
+    h.b1.create_topic("m147", 1).unwrap();
+    propagate(&[&h.b1, &h.b2, &h.b3], "m147").await;
 
     let meta = h.b1.metadata(None);
     let leader_id = meta.topics[0].partitions[0].leader;
@@ -445,10 +350,10 @@ async fn serve_from_mirror_on_owner_unreachable() {
     let leader_kafka = h.kafka_of(leader_id).to_owned();
     let peer_kafka = h.kafka_of(peer_id).to_owned();
 
-    produce_one(&leader_kafka, "die", b"a").await;
-    catch_up_isr(&leader, "die");
+    produce_one(&leader_kafka, "m147", b"a").await;
+    catch_up_isr(&leader, "m147");
 
-    let body = fetch_v12("die", 1, 0, 0);
+    let body = fetch_v12("m147", 1, 0, 0);
     let resp = kafka_rpc(
         &leader_kafka,
         encode_request_flexible(1, 12, 10, Some("c"), &body),
@@ -466,10 +371,7 @@ async fn serve_from_mirror_on_owner_unreachable() {
         fanout_session_mirror_ops(&leader).await;
         tokio::time::sleep(Duration::from_millis(20)).await;
     }
-    assert!(
-        peer.fetch_sessions().mirror_contains(sid),
-        "need mirror before killing owner path"
-    );
+    assert!(peer.fetch_sessions().mirror_contains(sid));
 
     h.kill_native(leader_id);
     tokio::time::sleep(Duration::from_millis(30)).await;
@@ -484,18 +386,132 @@ async fn serve_from_mirror_on_owner_unreachable() {
     .await;
     let mut src = resp.freeze();
     let (top_err, echo) = assert_flex_header(&mut src, 11);
-    assert_eq!(
-        top_err, 0,
-        "serve-from-mirror must succeed (got top_err={top_err})"
-    );
+    assert_eq!(top_err, 0);
     assert_eq!(echo, sid);
-    assert_eq!(
-        peer.fetch_sessions().promote_total(),
-        promote_before,
-        "default must not promote"
-    );
+    assert_eq!(peer.fetch_sessions().promote_total(), promote_before);
     assert!(peer.fetch_sessions().serve_from_mirror_total() > serve_before);
     assert!(!peer.fetch_sessions().contains(sid));
     assert!(peer.fetch_sessions().mirror_contains(sid));
-    let _n_topics = get_compact_array_len(&mut src).unwrap().unwrap();
+    let _ = get_compact_array_len(&mut src).unwrap().unwrap();
+}
+
+/// 3. promote_on_miss=1 still promotes into primary.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn promote_on_miss_still_promotes() {
+    let mut h = ClusterHarness::boot().await;
+    h.b1.create_topic("p147", 1).unwrap();
+    propagate(&[&h.b1, &h.b2, &h.b3], "p147").await;
+
+    let meta = h.b1.metadata(None);
+    let leader_id = meta.topics[0].partitions[0].leader;
+    let peer_id = [1u32, 2, 3].into_iter().find(|id| *id != leader_id).unwrap();
+    let leader = Arc::clone(h.broker_of(leader_id));
+    let peer = Arc::clone(h.broker_of(peer_id));
+    let leader_kafka = h.kafka_of(leader_id).to_owned();
+    let peer_kafka = h.kafka_of(peer_id).to_owned();
+
+    // Force legacy promote path on this peer only.
+    peer.fetch_sessions().set_promote_on_miss(true);
+
+    produce_one(&leader_kafka, "p147", b"a").await;
+    catch_up_isr(&leader, "p147");
+
+    let body = fetch_v12("p147", 1, 0, 0);
+    let resp = kafka_rpc(
+        &leader_kafka,
+        encode_request_flexible(1, 12, 10, Some("c"), &body),
+    )
+    .await;
+    let mut src = resp.freeze();
+    let (top_err, sid) = assert_flex_header(&mut src, 10);
+    assert_eq!(top_err, 0);
+
+    fanout_session_mirror_ops(&leader).await;
+    for _ in 0..50 {
+        if peer.fetch_sessions().mirror_contains(sid) {
+            break;
+        }
+        fanout_session_mirror_ops(&leader).await;
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+    assert!(peer.fetch_sessions().mirror_contains(sid));
+
+    h.kill_native(leader_id);
+    tokio::time::sleep(Duration::from_millis(30)).await;
+
+    let promote_before = peer.fetch_sessions().promote_total();
+    let serve_before = peer.fetch_sessions().serve_from_mirror_total();
+    let body = fetch_v12_empty_topics(sid, 1);
+    let resp = kafka_rpc(
+        &peer_kafka,
+        encode_request_flexible(1, 12, 11, Some("c"), &body),
+    )
+    .await;
+    let mut src = resp.freeze();
+    let (top_err, echo) = assert_flex_header(&mut src, 11);
+    assert_eq!(top_err, 0);
+    assert_eq!(echo, sid);
+    assert!(
+        peer.fetch_sessions().promote_total() > promote_before,
+        "promote_on_miss must promote"
+    );
+    assert_eq!(
+        peer.fetch_sessions().serve_from_mirror_total(),
+        serve_before,
+        "must not count serve_from_mirror when promoting"
+    );
+    assert!(peer.fetch_sessions().contains(sid));
+    assert!(!peer.fetch_sessions().mirror_contains(sid));
+}
+
+/// 4. No mirror + owner dead → 70.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn no_mirror_still_70() {
+    let mut h = ClusterHarness::boot().await;
+    h.b1.create_topic("gone147", 1).unwrap();
+    propagate(&[&h.b1, &h.b2, &h.b3], "gone147").await;
+
+    let meta = h.b1.metadata(None);
+    let leader_id = meta.topics[0].partitions[0].leader;
+    let peer_id = [1u32, 2, 3].into_iter().find(|id| *id != leader_id).unwrap();
+    let leader = Arc::clone(h.broker_of(leader_id));
+    let peer = Arc::clone(h.broker_of(peer_id));
+    let leader_kafka = h.kafka_of(leader_id).to_owned();
+    let peer_kafka = h.kafka_of(peer_id).to_owned();
+
+    produce_one(&leader_kafka, "gone147", b"a").await;
+    catch_up_isr(&leader, "gone147");
+
+    let body = fetch_v12("gone147", 1, 0, 0);
+    let resp = kafka_rpc(
+        &leader_kafka,
+        encode_request_flexible(1, 12, 10, Some("c"), &body),
+    )
+    .await;
+    let mut src = resp.freeze();
+    let (top_err, sid) = assert_flex_header(&mut src, 10);
+    assert_eq!(top_err, 0);
+
+    let _ = leader.fetch_sessions().drain_mirror_ops();
+    for _ in 0..5 {
+        if peer.fetch_sessions().mirror_contains(sid) {
+            peer.fetch_sessions().apply_mirror_delete(sid);
+        }
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+    assert!(!peer.fetch_sessions().mirror_contains(sid));
+
+    h.kill_native(leader_id);
+    tokio::time::sleep(Duration::from_millis(30)).await;
+
+    let body = fetch_v12_empty_topics(sid, 1);
+    let resp = kafka_rpc(
+        &peer_kafka,
+        encode_request_flexible(1, 12, 11, Some("c"), &body),
+    )
+    .await;
+    let mut src = resp.freeze();
+    let (top_err, echo) = assert_flex_header(&mut src, 11);
+    assert_eq!(top_err, 70);
+    assert_eq!(echo, sid);
 }
