@@ -186,16 +186,17 @@ docs for day-to-day reading: [ops](../ops.md), [consistency](../consistency.md),
 | 142 | ✅ | Metadata ISR freshness when leader ≠ controller (overlay + IsrUpdate 94/95) | [PHASE142_SPEC.md](../PHASE142_SPEC.md) |
 | 143 | ✅ | Fetch session promote claim fence (lowest-id `promoted_by`; MirrorPut converge) | [PHASE143_SPEC.md](../PHASE143_SPEC.md) |
 | 144 | ✅ | Preferred × session thrash suppress (`session_id != 0` → no PreferredReadReplica) | [PHASE144_SPEC.md](../PHASE144_SPEC.md) |
+| 147 | ✅ | Serve-from-mirror without promote (owner miss default; dual-epoch residual) | [PHASE147_SPEC.md](../PHASE147_SPEC.md) |
 
 ---
 
-## Still deferred (post–Phase 144)
+## Still deferred (post–Phase 147)
 
 
 - Multi-language clients
 - Chaos-mesh / long fuzz campaigns (corpus **smoke CI** → **closed by Phase 112**)
 - Full KIP-890/939 / Kafka `__transaction_state` topic (multi-broker Enable2Pc MVP → **closed by Phase 114**)
-- Multi-broker session handoff / affinity routing (durable **local** → **115**; owner forward MVP → **closed by Phase 119**; preferred-replica MVP → **closed by Phase 126**; shared mirror + promote MVP → **closed by Phase 138**; mirror polish → **closed by Phase 139**; promote claim fence → **closed by Phase 143**; preferred × session suppress → **closed by Phase 144**; residual: Raft registry / serve-without-promote / incremental put / full preferred selector)
+- Multi-broker session handoff / affinity routing (durable **local** → **115**; owner forward MVP → **closed by Phase 119**; preferred-replica MVP → **closed by Phase 126**; shared mirror + promote MVP → **closed by Phase 138**; mirror polish → **closed by Phase 139**; promote claim fence → **closed by Phase 143**; preferred × session suppress → **closed by Phase 144**; serve-without-promote → **closed by Phase 147**; residual: Raft registry / dual-epoch converge / incremental put / full preferred selector)
 - Byte-identical response cache beyond HWM+LSO omit
 - Full KRaft epoch state machine / remote-log epochs
 - Full Kafka broker catalog / KRaft DynamicBrokerConfig
@@ -225,8 +226,9 @@ docs for day-to-day reading: [ops](../ops.md), [consistency](../consistency.md),
 - N=2 majority ops / health gauges → **closed by Phase 141** (majority algorithm still configured-N; no live-only flip)
 - Metadata ISR lag when leader ≠ controller → **closed by Phase 142** (leader overlay + best-effort IsrUpdate 94/95)
 - Shared fetch session mirror + promote → **closed by Phase 138** (best-effort peer mirror; not Raft; no session_id re-encode)
-- Session mirror polish (debounce/durable/fence) → **closed by Phase 139** (coalesce + min-interval Puts; optional durable; `mirror_gen`; residual serve-without-promote)
+- Session mirror polish (debounce/durable/fence) → **closed by Phase 139** (coalesce + min-interval Puts; optional durable; `mirror_gen`)
 - Promote claim fence (lowest-id) → **closed by Phase 143** (best-effort MirrorPut claim; not Raft; brief dual primary until exchange)
+- Serve-from-mirror without promote → **closed by Phase 147** (default on owner miss; dual-epoch residual; promote via `VOLANT_FETCH_SESSION_PROMOTE_ON_MISS`)
 - Txn coordinator registry TTL GC → **closed by Phase 127** (default 24h; `0` disables; not eager EndTxn GC)
 - BROKER config for registry TTL → **closed by Phase 128** (`volant.txn.coordinator.registry.ttl.ms`; env still works; not full DynamicBrokerConfig)
 - Per-broker BROKER config overrides / multi-master ACL merge

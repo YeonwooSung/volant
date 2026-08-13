@@ -529,6 +529,15 @@ fn broker_metrics_text(broker: &Broker) -> String {
         "volant_fetch_session_promote_claim_reject_total {}\n",
         sessions.promote_claim_reject_total()
     ));
+    // Phase 147: serve foreign mirror without promote on owner miss.
+    text.push_str(
+        "# HELP volant_fetch_session_serve_from_mirror_total Owner-miss serves from foreign mirror without promote\n",
+    );
+    text.push_str("# TYPE volant_fetch_session_serve_from_mirror_total counter\n");
+    text.push_str(&format!(
+        "volant_fetch_session_serve_from_mirror_total {}\n",
+        sessions.serve_from_mirror_total()
+    ));
     // Phase 120/122: multi-broker EndTxn / AddOffsets / TxnOffsetCommit forward.
     text.push_str(
         "# HELP volant_txn_forward_total Successful Kafka txn API forwards to coordinator (EndTxn/AddOffsets/TxnOffsetCommit)\n",
@@ -2667,9 +2676,9 @@ pub async fn maybe_forward_kafka_end_txn(
     maybe_forward_kafka_txn(broker, 26, api_version, principal, end_txn_body).await
 }
 
-/// Phase 119 + 138: if this Fetch should be served by a peer session owner,
+/// Phase 119 + 138 + 147: if this Fetch should be served by a peer session owner,
 /// forward the Kafka body and return the owner's response body.
-/// `None` = handle locally (including after Phase 138 promote-from-mirror).
+/// `None` = handle locally (primary hit, serve-from-mirror, or promote-from-mirror).
 ///
 /// Never re-forwards on the owner (caller is the Kafka client path only).
 pub async fn maybe_forward_kafka_fetch(
@@ -2690,21 +2699,29 @@ pub async fn maybe_forward_kafka_fetch(
     if session_id == 0 || session_epoch == INITIAL_EPOCH {
         return None;
     }
-    // Local hit (or owner-local miss → 70 via encode_fetch).
+    // Local primary hit → encode_fetch. Mirror-only still attempts Phase 119
+    // forward while owner is reachable; on owner miss, try_owner_miss_local_serve
+    // prefers serve-from-mirror without promote (Phase 147).
     if broker.fetch_sessions().contains(session_id) {
         return None;
     }
     let owner = decode_session_owner(session_id)?;
     if owner == broker.node_id() {
-        // Encoded as us but missing: try promote (peer mirrored us before restart).
-        if broker.fetch_sessions().promote_from_mirror(session_id) {
+        // Encoded as us but primary missing: serve mirror or promote (Phase 147/138).
+        if broker
+            .fetch_sessions()
+            .try_owner_miss_local_serve(session_id)
+        {
             return None;
         }
         return None;
     }
     let Some(addr) = broker.broker_addr(owner) else {
-        // Owner addr unknown — promote from mirror if present.
-        if broker.fetch_sessions().promote_from_mirror(session_id) {
+        // Owner addr unknown — serve mirror or promote.
+        if broker
+            .fetch_sessions()
+            .try_owner_miss_local_serve(session_id)
+        {
             return None;
         }
         broker.fetch_sessions().record_forward_error();
@@ -2734,7 +2751,10 @@ pub async fn maybe_forward_kafka_fetch(
                 "kafka fetch forward peer error"
             );
             broker.fetch_sessions().record_forward_error();
-            if broker.fetch_sessions().promote_from_mirror(session_id) {
+            if broker
+                .fetch_sessions()
+                .try_owner_miss_local_serve(session_id)
+            {
                 return None;
             }
             let mut out = BytesMut::new();
@@ -2744,7 +2764,10 @@ pub async fn maybe_forward_kafka_fetch(
         Ok(other) => {
             tracing::debug!(owner, ?other, session_id, "kafka fetch forward unexpected");
             broker.fetch_sessions().record_forward_error();
-            if broker.fetch_sessions().promote_from_mirror(session_id) {
+            if broker
+                .fetch_sessions()
+                .try_owner_miss_local_serve(session_id)
+            {
                 return None;
             }
             let mut out = BytesMut::new();
@@ -2754,8 +2777,11 @@ pub async fn maybe_forward_kafka_fetch(
         Err(e) => {
             tracing::debug!(owner, error = %e, session_id, "kafka fetch forward rpc failed");
             broker.fetch_sessions().record_forward_error();
-            // Phase 138: promote mirrored session and serve locally.
-            if broker.fetch_sessions().promote_from_mirror(session_id) {
+            // Phase 147: prefer serve-from-mirror; Phase 138 promote when knobs say so.
+            if broker
+                .fetch_sessions()
+                .try_owner_miss_local_serve(session_id)
+            {
                 return None;
             }
             let mut out = BytesMut::new();

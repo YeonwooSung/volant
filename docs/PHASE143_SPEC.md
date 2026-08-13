@@ -32,7 +32,7 @@ puts but does not break ties when two peers promote the *same* snapshot.
 | Deferred | Why |
 |----------|-----|
 | Raft session registry | Larger product |
-| Serve-from-mirror without promote | Dual-epoch design |
+| Serve-from-mirror without promote | **Closed by Phase 147** (dual-epoch residual remains) |
 | Re-encode session_id owner bits | Orthogonal |
 | Preferred × session thrash | Phase 144 candidate |
 | New inter-broker opcode | Claim travels in existing MirrorPut JSON |

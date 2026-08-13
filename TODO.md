@@ -1,14 +1,23 @@
 # Volant residual TODO (review loop)
 
-**Baseline:** HEAD product = **Phases 0–144** shipped (promote claim fence + preferred × session suppress).  
+**Baseline:** HEAD product = **Phases 0–147** shipped (serve-from-mirror without promote).  
 **Last review:** 2026-08-13  
 
-Living roadmap: [ROADMAP.md](./ROADMAP.md) (Phases **0–144 shipped**).  
-Recent specs: [PHASE144](./docs/PHASE144_SPEC.md) · [PHASE143](./docs/PHASE143_SPEC.md) · [PHASE142](./docs/PHASE142_SPEC.md) · [PHASE141](./docs/PHASE141_SPEC.md).
+Living roadmap: [ROADMAP.md](./ROADMAP.md) (Phases **0–147 shipped**).  
+Recent specs: [PHASE147](./docs/PHASE147_SPEC.md) · [PHASE144](./docs/PHASE144_SPEC.md) · [PHASE143](./docs/PHASE143_SPEC.md) · [PHASE142](./docs/PHASE142_SPEC.md).
 
 ---
 
 ## Shipped recently
+
+### Phase 147 — Serve-from-mirror without promote (MVP)
+- [x] `begin_incremental_from_any` / `has_servable_session` / `mirror_session_clone`
+- [x] Mirror-only mutations in-place (no `queue_mirror_put` / no primary insert)
+- [x] Owner miss default: serve mirror; metric `volant_fetch_session_serve_from_mirror_total`
+- [x] Knobs: `VOLANT_FETCH_SESSION_SERVE_MIRROR_WITHOUT_PROMOTE` (default on),
+  `VOLANT_FETCH_SESSION_PROMOTE_ON_MISS` (default off)
+- [x] Tests `phase147_serve_from_mirror`; phase138/139 adjusted; phase143 green
+- [x] Honest dual-epoch residual documented
 
 ### Phase 144 — Preferred × session thrash suppress
 - [x] Suppress PreferredReadReplica when `req_session_id != 0` (non-FINAL epoch)
@@ -72,7 +81,7 @@ _(none open)_
 |----:|------|-------|
 | P3 | Full preferred selector / throttling / rack-aware assignment | Beyond 126/133/140/144 |
 | P3 | Incremental/delta MirrorPut wire | 139 coalesces full snapshots only |
-| P3 | Serve-from-mirror without promote | Dual-epoch design required |
+| P3 | Dual-epoch converge / Raft session SoT | 147 serves mirrors without single SoT |
 | P3 | Rollback / defer local truncate until majority | Hard; segment delete is irreversible today |
 | Later | Heterogeneous per-broker BROKER overrides | Controller-only homogeneous push today |
 | Later | True multi-master ACL merge | Or lock “controller SoT forever” |

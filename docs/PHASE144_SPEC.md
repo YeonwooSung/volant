@@ -31,7 +31,7 @@ the client would follow preferred to a same-rack follower with that `session_id`
 | Promote claim fence | Phase 143 sibling |
 | Session ownership / re-encode on preferred | Larger design |
 | Suppress preferred on first session-less fetch forever | First full fetch may still redirect |
-| Serve-from-mirror without promote | Orthogonal 138/139 |
+| Serve-from-mirror without promote | **Closed by Phase 147** |
 
 ## Rule (encode path)
 

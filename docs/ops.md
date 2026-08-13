@@ -42,10 +42,11 @@ Key series (prefix `volant_`):
 - `volant_fetch_sessions_restored` / `volant_fetch_sessions_persist_errors_total` (Phase 115 durable)
 - `volant_fetch_session_forward_total` / `volant_fetch_session_forward_errors_total` (Phase 119 multi-broker handoff)
 - `volant_fetch_session_mirror_puts_total` / `volant_fetch_session_mirror_deletes_total` (Phase 138 peer mirror installs/removes applied)
-- `volant_fetch_session_promote_total` (Phase 138 mirror→primary after owner miss)
+- `volant_fetch_session_promote_total` (Phase 138 mirror→primary after owner miss; opt-in after Phase 147)
 - `volant_fetch_sessions_mirrored` (Phase 138 gauge: foreign mirrors currently held)
 - `volant_fetch_session_mirror_puts_coalesced_total` / `volant_fetch_session_mirror_stale_put_rejects_total` / `volant_fetch_session_promote_supersede_total` / `volant_fetch_session_mirror_restored` (Phase 139 coalesce / `mirror_gen` fence / durable restore)
 - `volant_fetch_session_promote_claim_reject_total` (Phase 143 dual-promote / claim-lose rejects)
+- `volant_fetch_session_serve_from_mirror_total` (Phase 147 owner-miss serve foreign mirror without promote)
 - `volant_preferred_replica_redirect_total` (Phase 126 PreferredReadReplica redirects)
 - `volant_preferred_replica_suppressed_total` (Phase 140: READ_COMMITTED suppress when a preferred candidate existed)
 - `volant_preferred_replica_session_suppressed_total` (Phase 144: preferred suppress when client has established fetch session)
@@ -218,10 +219,13 @@ volant-server \
   TTL. **Multi-broker handoff MVP (Phase 119):** cluster session_ids embed the owner
   `node_id`; a peer that lacks the session transparent-forwards the Kafka Fetch body
   to the owner over inter-broker RPC (opcode 82/83) so epoch + omit-unchanged stay
-  correct while the owner is alive. **Shared mirror MVP (Phase 138 + polish 139 + claim 143):**
+  correct while the owner is alive. **Shared mirror MVP (Phase 138 + polish 139 + claim 143 + serve 147):**
   owner best-effort fans out MirrorPut/Delete (opcodes 90–93) to live peers; peers
-  hold a foreign mirror table (not served while owner alive). Owner death / forward
-  fail: if a mirror is present, promote into primary and serve locally; else **70**.
+  hold a foreign mirror table (not served while owner alive — still forward). Owner
+  death / forward fail: if a mirror is present, **default serve from mirror without
+  promote** (Phase 147; metric `volant_fetch_session_serve_from_mirror_total`); else
+  **70**. Force promote with `VOLANT_FETCH_SESSION_PROMOTE_ON_MISS=1`, or restore
+  legacy always-promote with `VOLANT_FETCH_SESSION_SERVE_MIRROR_WITHOUT_PROMOTE=0`.
   **Phase 139:** dirty ops coalesce to one pending op per `session_id` (Delete
   supersedes Put); Puts debounce via `VOLANT_FETCH_SESSION_MIRROR_PUT_MIN_INTERVAL_MS`
   (default **50**; `0` = coalesce only, flush immediately); Deletes flush immediately;
@@ -229,10 +233,10 @@ volant-server \
   `{data_dir}/__fetch_session_mirrors/state.json` (default **off**; load filters idle
   TTL); `mirror_gen` fences stale apply/promote. **Phase 143:** `promoted_by`
   lowest-id claim fence on equal-fresh dual-promote (claim travels in MirrorPut;
-  metric `volant_fetch_session_promote_claim_reject_total`). Best-effort only (not
-  Raft); put lag/fail still **70**; brief dual primary until MirrorPut claim
-  exchange; session_id owner bits are not re-encoded. Sticky routing still preferred
-  for latency (one extra RTT on forward when owner is up).
+  metric `volant_fetch_session_promote_claim_reject_total`). **Phase 147 residual:**
+  dual-epoch (two peers may both serve mirrors without single SoT). Best-effort only
+  (not Raft); put lag/fail still **70**; session_id owner bits are not re-encoded.
+  Sticky routing still preferred for latency (one extra RTT on forward when owner is up).
 - **PreferredReadReplica (Phase 126 + 133 + 140 + 144):** Fetch v11+ client
   `rack_id`; leader may redirect to same-rack live ISR peer with usable addr +
   LEO≥HWM (empty records; rank highest LEO then lowest id). Optional freshness:
@@ -392,7 +396,7 @@ curl -s -H "Authorization: Bearer $VOLANT_METRICS_TOKEN" \
 - Multi-language clients
 - Full chaos-mesh suites / long fuzz campaigns (corpus **smoke CI MVP** → **closed by Phase 112**)
 - Full KIP-890/939 / Kafka `__transaction_state` topic (multi-broker Enable2Pc MVP → **closed by Phase 114**)
-- Multi-broker session affinity / durable sessions → **closed by Phase 115/119**; shared mirror + promote → **closed by Phase 138**; mirror polish (coalesce/debounce + optional durable + fence) → **closed by Phase 139** (best-effort residual: Raft registry / serve-without-promote / incremental put)
+- Multi-broker session affinity / durable sessions → **closed by Phase 115/119**; shared mirror + promote → **closed by Phase 138**; mirror polish → **closed by Phase 139**; claim fence → **closed by Phase 143**; serve-from-mirror without promote → **closed by Phase 147** (best-effort residual: Raft registry / dual-epoch converge / incremental put)
 - Full preferred-replica selector / throttling / rack-aware partition assignment (beyond 126/133/140 lag+suppress metric)
 - Byte-identical Kafka compressed response cache (omit is HWM+LSO based)
 - Accept-loop drain + single-flight background tasks → **closed by Phase 109** (bg join: Phase 106)
