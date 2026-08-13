@@ -122,7 +122,11 @@ Without `--cluster-config`, the broker runs as a single node:
   catch-up. ClusterState apply on the leader preserves still-caught-up local
   rejoin members so a controller assignment that still lists a shrunk set does
   not undo rejoin (then re-applies offset + time shrink). Produce/HWM use
-  **leader-local** ISR; Metadata ISR on non-leaders may lag. Metrics:
+  **leader-local** ISR. **Phase 142:** Metadata on the partition **leader**
+  overlays local ISR (and local epoch/HWM); non-controller leaders best-effort
+  report ISR to the controller (`IsrUpdate` 94/95) so controller assignment is
+  SoT and ClusterState pulls refresh peers — report lag/fail still leaves
+  non-leader Metadata stale until retry. Metrics:
   `volant_isr_expand_total` / `volant_isr_shrink_total` /
   `volant_isr_time_shrink_total`.
 - **Cluster admin fan-out (Phase 113 + 116 + 123):**

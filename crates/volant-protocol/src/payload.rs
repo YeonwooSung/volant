@@ -563,6 +563,24 @@ pub fn encode_request(req: &Request) -> Result<Bytes> {
         Request::FetchSessionMirrorDelete { session_id } => {
             dst.put_i32_le(*session_id);
         }
+        Request::IsrUpdate {
+            topic,
+            partition,
+            leader_id,
+            leader_epoch,
+            isr,
+            generation_hint,
+        } => {
+            put_string(&mut dst, topic)?;
+            dst.put_u32_le(*partition);
+            dst.put_u32_le(*leader_id);
+            dst.put_u32_le(*leader_epoch);
+            dst.put_u32_le(isr.len() as u32);
+            for id in isr {
+                dst.put_u32_le(*id);
+            }
+            dst.put_u32_le(*generation_hint);
+        }
     }
     finish_payload(dst)
 }
@@ -1199,6 +1217,32 @@ pub fn decode_request(opcode: u16, payload: &[u8]) -> Result<Request> {
                 session_id: src.get_i32_le(),
             })
         }
+        RequestOpcode::IsrUpdate => {
+            let topic = get_string(&mut src)?;
+            if src.remaining() < 4 + 4 + 4 + 4 {
+                return Err(Error::Protocol("truncated isr update header".into()));
+            }
+            let partition = src.get_u32_le();
+            let leader_id = src.get_u32_le();
+            let leader_epoch = src.get_u32_le();
+            let isr_count = src.get_u32_le() as usize;
+            if src.remaining() < isr_count.saturating_mul(4).saturating_add(4) {
+                return Err(Error::Protocol("truncated isr update isr/generation".into()));
+            }
+            let mut isr = Vec::with_capacity(isr_count);
+            for _ in 0..isr_count {
+                isr.push(src.get_u32_le());
+            }
+            let generation_hint = src.get_u32_le();
+            Ok(Request::IsrUpdate {
+                topic,
+                partition,
+                leader_id,
+                leader_epoch,
+                isr,
+                generation_hint,
+            })
+        }
     }
 }
 
@@ -1622,6 +1666,13 @@ pub fn encode_response(resp: &Response) -> Result<Bytes> {
         }
         Response::FetchSessionMirrorDelete { error_code } => {
             dst.put_u16_le(*error_code);
+        }
+        Response::IsrUpdate {
+            error_code,
+            generation,
+        } => {
+            dst.put_u16_le(*error_code);
+            dst.put_u32_le(*generation);
         }
         Response::Error { code, message } => {
             dst.put_u16_le(*code);
@@ -2465,6 +2516,15 @@ pub fn decode_response(opcode: u16, payload: &[u8]) -> Result<Response> {
             }
             Ok(Response::FetchSessionMirrorDelete {
                 error_code: src.get_u16_le(),
+            })
+        }
+        ResponseOpcode::IsrUpdate => {
+            if src.remaining() < 2 + 4 {
+                return Err(Error::Protocol("truncated isr update response".into()));
+            }
+            Ok(Response::IsrUpdate {
+                error_code: src.get_u16_le(),
+                generation: src.get_u32_le(),
             })
         }
         ResponseOpcode::Error => {
@@ -4089,6 +4149,39 @@ mod tests {
         assert!(decode_request(RequestOpcode::FetchSessionMirrorDelete as u16, &[]).is_err());
         assert!(decode_response(ResponseOpcode::FetchSessionMirrorPut as u16, &[]).is_err());
         assert!(decode_response(ResponseOpcode::FetchSessionMirrorDelete as u16, &[]).is_err());
+    }
+
+    #[test]
+    fn phase142_isr_update_roundtrip() {
+        let req = Request::IsrUpdate {
+            topic: "p142".into(),
+            partition: 0,
+            leader_id: 2,
+            leader_epoch: 3,
+            isr: vec![2, 3],
+            generation_hint: 7,
+        };
+        let bytes = encode_request(&req).unwrap();
+        assert_eq!(req.opcode(), RequestOpcode::IsrUpdate as u16);
+        assert_eq!(
+            decode_request(RequestOpcode::IsrUpdate as u16, &bytes).unwrap(),
+            req
+        );
+
+        let resp = Response::IsrUpdate {
+            error_code: 0,
+            generation: 42,
+        };
+        let rb = encode_response(&resp).unwrap();
+        assert_eq!(resp.opcode(), ResponseOpcode::IsrUpdate as u16);
+        assert_eq!(
+            decode_response(ResponseOpcode::IsrUpdate as u16, &rb).unwrap(),
+            resp
+        );
+
+        assert!(decode_request(RequestOpcode::IsrUpdate as u16, &[]).is_err());
+        assert!(decode_response(ResponseOpcode::IsrUpdate as u16, &[]).is_err());
+        assert!(decode_response(ResponseOpcode::IsrUpdate as u16, &[0, 0]).is_err());
     }
 
     #[test]

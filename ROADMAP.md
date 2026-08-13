@@ -3005,7 +3005,8 @@ Binding: **[docs/PHASE125_SPEC.md](./docs/PHASE125_SPEC.md)**.
 **Honest limitations:** not full Kafka `replica.lag.time.max.ms` parity; lazy
 evaluation on reconcile only (no dedicated ISR timer); monotonic process-local
 `Instant`; static membership; preferred-replica → **closed by Phase 126** (MVP);
-Metadata ISR may lag when leader ≠ controller.
+Metadata ISR lag when leader ≠ controller → **closed by Phase 142** (overlay +
+IsrUpdate report MVP).
 
 **Still deferred:** multi-lang clients, chaos-mesh / long fuzz campaigns,
 full KIP-890/939 / `__transaction_state`, Kafka wire fuzz targets, dynamic
@@ -3382,7 +3383,25 @@ rack-aware partition assignment; preferred still orthogonal to session mirror
 **Still deferred:** full preferred selector / throttling / assignment; serve from
 mirror without promote; Raft session registry; rollback local truncate on majority
 fail; full openraft/KRaft; multi-lang; chaos/long fuzz; full KIP-890/939;
-heterogeneous per-broker BROKER overrides.
+heterogeneous per-broker BROKER overrides; Metadata ISR lag → **closed by Phase 142**.
+
+---
+
+### Phase 142 — Metadata ISR freshness when leader ≠ controller ✅
+
+**Goal:** Leader Metadata overlays live local ISR; non-controller leaders
+best-effort report ISR to the controller (`IsrUpdate` 94/95).
+
+Binding: **[docs/PHASE142_SPEC.md](./docs/PHASE142_SPEC.md)**.
+
+- [x] Cluster `metadata()` leader-local ISR / epoch / HWM overlay
+- [x] Opcodes **94/95** + controller `apply_leader_isr_update` (epoch fence)
+- [x] Enqueue on ReplicaFetch reconcile + death shrink; gen align on success
+- [x] Tests `phase142_metadata_isr`
+- [x] Living docs honesty
+
+**Honest limitations:** best-effort report; non-leader Metadata may lag until
+ClusterState; not Raft metadata log.
 
 ---
 
@@ -3464,6 +3483,7 @@ Phases **0–140 are shipped**. Historical PR order for the core:
 39. Phase 138 (shared fetch session mirror + promote MVP) ✅  
 40. Phase 139 (session mirror polish: coalesce/debounce + durable + fence) ✅  
 41. Phase 140 (preferred-replica max LEO lag + RC suppress metric) ✅  
+42. Phase 142 (Metadata ISR overlay + leader→controller IsrUpdate 94/95) ✅  
 
 ---
 
@@ -3504,7 +3524,7 @@ cargo run -p volant-bench --release
 cargo test --workspace
 ```
 
-**Status (post–Phase 140):** core broker, ops (metrics / TLS / auth / SCRAM /
+**Status (post–Phase 142):** core broker, ops (metrics / TLS / auth / SCRAM /
 ACLs / Helm), and the Kafka wire shim are **shipped** (Fetch 0–18 Kafka max;
 ACL admin 0–3 with User resource; soft-marker `READ_COMMITTED` with **marker GC/clip**
 on DeleteRecords/retention/load (Phase 104/111); durable OFLE history; Fetch DivergingEpoch +
@@ -3540,10 +3560,11 @@ txn EndTxn/AddOffsets/TxnOffsetCommit forward Phases 120/122;
 **PreferredReadReplica / rack-aware Fetch MVP** Phase 126 (Metadata rack;
 redirect when same-rack ISR peer LEO≥HWM) + **selector polish** Phase 133
 (usable addr + LEO-desc rank) + **max LEO lag + RC suppress metric** Phase 140;
+**Metadata ISR overlay + leader→controller IsrUpdate** Phase 142;
 **txn coordinator registry TTL GC** Phase 127 + **BROKER config surface** Phase 128; **truncate journal** Phase 129 + **majority multi-controller consensus** Phase 130 + **journal rejoin catch-up** Phase 131 + **catch-up hardening** Phase 132 + **p2p heartbeat mesh** Phase 134 + **optional DeleteRecords majority wait** Phase 135 + **non-blocking admin catch-up** Phase 136 + **native DeleteRecords request wait trailer + journal topic GC** Phase 137).
 Still deferred: multi-language clients, full chaos-mesh suites / long fuzz
 campaigns, full preferred-replica selector / throttling / rack-aware assignment
 (beyond 126/133/140 lag+metric; Phase 138/139 closed shared mirror MVP —
-residual: Raft registry / serve-without-promote / incremental put), full
-KIP-890/939, rollback local truncate on majority fail.
+residual: Raft registry / serve-without-promote / incremental put), N=2 majority
+ops tooling, full KIP-890/939, rollback local truncate on majority fail.
 Details: [docs/KAFKA_COMPAT.md](./docs/KAFKA_COMPAT.md), [docs/ops.md](./docs/ops.md).

@@ -182,10 +182,12 @@ docs for day-to-day reading: [ops](../ops.md), [consistency](../consistency.md),
 | 138 | ✅ | Shared fetch session mirror + promote MVP (best-effort peer put/delete 90–93; promote on owner miss; not Raft) | [PHASE138_SPEC.md](../PHASE138_SPEC.md) |
 | 139 | ✅ | Session mirror polish (coalesce/debounce Puts; optional durable `__fetch_session_mirrors`; `mirror_gen` fence) | [PHASE139_SPEC.md](../PHASE139_SPEC.md) |
 | 140 | ✅ | Preferred-replica selector depth (optional max LEO lag; RC suppress metric) | [PHASE140_SPEC.md](../PHASE140_SPEC.md) |
+| 141 | — | *(reserved / sibling: N=2 majority ops tooling — may ship independently)* | — |
+| 142 | ✅ | Metadata ISR freshness when leader ≠ controller (overlay + IsrUpdate 94/95) | [PHASE142_SPEC.md](../PHASE142_SPEC.md) |
 
 ---
 
-## Still deferred (post–Phase 140)
+## Still deferred (post–Phase 142)
 
 - Multi-language clients
 - Chaos-mesh / long fuzz campaigns (corpus **smoke CI** → **closed by Phase 112**)
@@ -217,6 +219,7 @@ docs for day-to-day reading: [ops](../ops.md), [consistency](../consistency.md),
 - PreferredReadReplica / rack-aware Fetch → **closed by Phase 126** (KIP-392 subset; not full selector/throttling; preferred residual orthogonal to Phase 138/139 mirror)
 - Preferred selector polish (usable addr + LEO ranking) → **closed by Phase 133**
 - Preferred max LEO lag + RC suppress metric → **closed by Phase 140** (still not full Kafka selector/throttling)
+- Metadata ISR lag when leader ≠ controller → **closed by Phase 142** (leader overlay + best-effort IsrUpdate 94/95)
 - Shared fetch session mirror + promote → **closed by Phase 138** (best-effort peer mirror; not Raft; dual-promote race honest; no session_id re-encode)
 - Session mirror polish (debounce/durable/fence) → **closed by Phase 139** (coalesce + min-interval Puts; optional durable; `mirror_gen`; residual dual-promote / serve-without-promote)
 - Txn coordinator registry TTL GC → **closed by Phase 127** (default 24h; `0` disables; not eager EndTxn GC)
