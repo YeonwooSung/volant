@@ -3376,7 +3376,7 @@ Binding: **[docs/PHASE140_SPEC.md](./docs/PHASE140_SPEC.md)**.
 - [x] Metric `volant_preferred_replica_suppressed_total` when READ_COMMITTED
   suppresses an otherwise-valid preferred candidate
 - [x] Tests `phase140_preferred_selector` (multi-rack, lag, dead, RC suppress)
-- [x] Living docs 0–150 + KAFKA_COMPAT honesty (126+133+140)
+- [x] Living docs 0–152 + KAFKA_COMPAT honesty (126+133+140)
 
 **Honest limitations:** not full Kafka selector/throttling; no TCP probe; no
 rack-aware partition assignment; preferred still orthogonal to session mirror
@@ -3585,12 +3585,39 @@ Binding: **[docs/PHASE150_SPEC.md](./docs/PHASE150_SPEC.md)**.
   `volant_assignment_committed_generation`
 - [x] Tests `phase150_assignment_consensus` + protocol roundtrip
 
-**Honest residual:** Metadata may lead `committed_generation`; wait fail does
-not roll back local assignment; static N majority (N=2 trap); not per-partition
-Raft / dynamic membership / controller election change.
+**Honest residual (partially closed by Phase 152):** ~~Metadata may lead
+`committed_generation`~~ → Phase 152 default committed-only Metadata; wait /
+committed-only fail does not roll back local assignment; static N majority
+(N=2 trap); not per-partition Raft / dynamic membership / controller election
+change.
 
-**Still deferred:** full openraft/KRaft; Metadata gated on committed gen;
-dynamic membership; multi-lang; chaos/long fuzz; full KIP-890/939.
+**Still deferred:** full openraft/KRaft; dynamic membership; multi-lang;
+chaos/long fuzz; full KIP-890/939; local assignment rollback on majority fail.
+
+### Phase 152 — Assignment consensus depth (Metadata serves committed) ✅
+
+**Goal:** Metadata (cluster path) serves the majority-committed assignment
+snapshot so clients cannot observe topics that have not reached configured-N
+majority. Closes Phase 150 “Metadata may lead committed_generation” residual.
+
+Binding: **[docs/PHASE152_SPEC.md](./docs/PHASE152_SPEC.md)**.
+
+- [x] Durable `{data_dir}/__assignment_consensus/committed_snapshot.json`
+- [x] `note_committed_snapshot` / `committed_snapshot` on `AssignmentConsensus`
+- [x] Fan-out majority → `commit(gen)` + store controller assignment clone
+- [x] Metadata gates on committed snap when consensus + committed_only (default)
+- [x] `VOLANT_ASSIGNMENT_METADATA_COMMITTED_ONLY` default **on**; forces wait-like
+  admin visibility (create/delete/partitions → 15 on majority miss)
+- [x] Metrics `volant_assignment_metadata_committed_only` +
+  `volant_assignment_generation_lag`
+- [x] Tests `phase152_consensus_depth` (+ phase150 still green)
+
+**Honest residual:** local assignment files not rolled back on majority fail;
+peer note-apply may install snapshot before controller majority tally completes
+for other peers; not full KRaft / dynamic membership.
+
+**Still deferred:** full openraft/KRaft; dynamic membership; multi-lang;
+chaos/long fuzz; full KIP-890/939; local assignment rollback.
 
 ### Phase 151 — Stream exactly-once (EOS) MVP ✅
 
@@ -3654,7 +3681,7 @@ marker clip 111; fuzz corpus smoke CI 112; cluster admin fan-out 113) — see
 
 ## Suggested implementation order (PRs)
 
-Phases **0–151 are shipped**. Historical PR order for the core:
+Phases **0–152 are shipped**. Historical PR order for the core:
 
 1. Phase 1 segment format + unit tests  
 2. Phase 1 recovery + retention  

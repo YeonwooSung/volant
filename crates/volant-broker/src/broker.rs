@@ -616,6 +616,10 @@ pub struct Broker {
     /// majority and surface `NotEnoughReplicas` on fail. Default **false**
     /// (`VOLANT_ASSIGNMENT_CONSENSUS_WAIT`).
     assignment_consensus_wait: AtomicBool,
+    /// Phase 152: when true (and consensus enabled), Metadata serves the
+    /// majority-committed assignment snapshot. Default **true**
+    /// (`VOLANT_ASSIGNMENT_METADATA_COMMITTED_ONLY`).
+    assignment_metadata_committed_only: AtomicBool,
 }
 
 /// One pending leader→controller ISR report (Phase 142).
@@ -829,6 +833,9 @@ impl Broker {
                 default_assignment_consensus_enabled(1),
             ),
             assignment_consensus_wait: AtomicBool::new(default_assignment_consensus_wait()),
+            assignment_metadata_committed_only: AtomicBool::new(
+                default_assignment_metadata_committed_only(),
+            ),
         };
         broker
             .reload_single_node_topics()
@@ -987,6 +994,9 @@ impl Broker {
                 default_assignment_consensus_enabled(n_configured),
             ),
             assignment_consensus_wait: AtomicBool::new(default_assignment_consensus_wait()),
+            assignment_metadata_committed_only: AtomicBool::new(
+                default_assignment_metadata_committed_only(),
+            ),
         };
         // Open local partitions from persisted assignment.
         broker.apply_local_assignment()?;
@@ -1297,6 +1307,26 @@ impl Broker {
             .store(wait, Ordering::Relaxed);
     }
 
+    /// Phase 152: Metadata serves majority-committed assignment when consensus
+    /// is enabled (default **true**).
+    pub fn assignment_metadata_committed_only(&self) -> bool {
+        self.assignment_metadata_committed_only
+            .load(Ordering::Relaxed)
+    }
+
+    /// Phase 152: runtime toggle for tests / ops (`0` env restores lead Metadata).
+    pub fn set_assignment_metadata_committed_only(&self, v: bool) {
+        self.assignment_metadata_committed_only
+            .store(v, Ordering::Relaxed);
+    }
+
+    /// Phase 152: `max(0, live_generation - committed_generation)`.
+    pub fn assignment_generation_lag(&self) -> u32 {
+        let live = self.generation();
+        let committed = self.assignment_committed_generation();
+        live.saturating_sub(committed)
+    }
+
     /// Phase 150: handle peer `AssignmentConsensusNote` — apply snapshot when
     /// `generation >= local`, return acked generation.
     pub fn handle_assignment_consensus_note(
@@ -1315,6 +1345,19 @@ impl Broker {
                 // Peer applied (or ignored stale). Ack the proposed generation
                 // so the controller can count majority; durable commit is
                 // controller-side only after majority.
+                //
+                // Phase 152: also install committed snapshot from the applied
+                // live assignment so peer Metadata (committed-only) can serve
+                // the generation once applied. Residual: peer may advertise a
+                // gen that the controller later fails to majority-commit when
+                // other peers are down (static-N honesty).
+                if let Some(cluster) = &self.cluster {
+                    let snap = cluster.assignment.read().clone();
+                    if snap.generation > 0 {
+                        self.assignment_consensus
+                            .note_committed_snapshot(snap.generation, &snap);
+                    }
+                }
                 let local = self.generation();
                 (0, local.max(generation))
             }
@@ -6402,8 +6445,38 @@ impl Broker {
         let controller_id = self.controller_id();
 
         // Build topic list from assignment (cluster) or local topics.
+        // Phase 152: when consensus is enabled and committed-only is on, serve
+        // majority-committed snapshot. Bootstrap (live gen == 0) still uses live
+        // empty assignment; once live advances past committed, hide uncommitted
+        // topics (do not fall back to live). committed_only=false → always live.
         let topic_meta = if let Some(cluster) = &self.cluster {
-            let asg = cluster.assignment.read();
+            let use_committed = self.assignment_consensus_enabled()
+                && self.assignment_metadata_committed_only();
+            let live_guard = cluster.assignment.read();
+            let committed_gen = self.assignment_consensus.committed_generation();
+            let committed_owned = if use_committed {
+                if committed_gen > 0 {
+                    // Prefer durable snap; if missing, empty (never fall back to
+                    // a live assignment that may lead committed_gen).
+                    Some(
+                        self.assignment_consensus
+                            .committed_snapshot()
+                            .unwrap_or_default(),
+                    )
+                } else if live_guard.generation == 0 {
+                    // True bootstrap: empty cluster, live == committed == 0.
+                    None // fall through to live (also empty)
+                } else {
+                    // Live has uncommitted work; serve empty until first majority.
+                    Some(AssignmentSnapshot::default())
+                }
+            } else {
+                None
+            };
+            let asg: &AssignmentSnapshot = match committed_owned.as_ref() {
+                Some(snap) => snap,
+                None => &*live_guard,
+            };
             let local = self.topics.read();
             let names: Vec<String> = match topics {
                 None | Some([]) => asg.topics.keys().cloned().collect(),
@@ -7668,6 +7741,24 @@ fn default_assignment_consensus_wait() -> bool {
             t == "1" || t.eq_ignore_ascii_case("true") || t.eq_ignore_ascii_case("yes")
         }
         Err(_) => false,
+    }
+}
+
+/// Phase 152: `VOLANT_ASSIGNMENT_METADATA_COMMITTED_ONLY` default **true**.
+/// Explicit `0`/`false`/`no` restores Metadata that may lead committed gen.
+fn default_assignment_metadata_committed_only() -> bool {
+    match std::env::var("VOLANT_ASSIGNMENT_METADATA_COMMITTED_ONLY") {
+        Ok(s) => {
+            let t = s.trim();
+            if t == "0" || t.eq_ignore_ascii_case("false") || t.eq_ignore_ascii_case("no") {
+                return false;
+            }
+            if t == "1" || t.eq_ignore_ascii_case("true") || t.eq_ignore_ascii_case("yes") {
+                return true;
+            }
+            true
+        }
+        Err(_) => true,
     }
 }
 

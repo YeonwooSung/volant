@@ -48,7 +48,7 @@ When `acks=all`, if `|ISR| < min_insync_replicas`, the leader rejects the produc
 
 - Exactly-once produce/consume end-to-end (Kafka control-batch wire on EndTxn + crash promote shipped as Phase **89**/**98** MVP; soft markers remain isolation SoT; not full EOS)
 - Durable in-flight txn recovery that resumes open transactions (open txn crash ≡ **abort** via `__txn_markers`; write-through ranges are not rolled forward)
-- Linearizability of metadata during controller failover (brief windows of stale Metadata; Phase **150** majority assignment commit is not full KRaft — Metadata may still lead `committed_generation` until majority)
+- Linearizability of metadata during controller failover (brief windows of stale Metadata; Phase **150**/**152** majority assignment commit is not full KRaft — default Metadata serves committed snapshot when `VOLANT_ASSIGNMENT_METADATA_COMMITTED_ONLY` is on; set `0` to restore Phase 150 lead-Metadata; local assignment may still lead committed gen on disk)
 - Durability if `min_insync_replicas=1` and that sole replica dies after ack
 - Full KRaft leader-epoch state machine (Phase **87** durable OFLE history is a soft JSON MVP)
 

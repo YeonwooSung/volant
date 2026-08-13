@@ -63,7 +63,8 @@ pub use broker::{
 };
 pub use cluster::{
     AssignmentConsensus, AssignmentConsensusFile, BrokerEndpoint, ClusterConfig,
-    ASSIGNMENT_CONSENSUS_DIR, ASSIGNMENT_CONSENSUS_FILE, ASSIGNMENT_CONSENSUS_FILE_VERSION,
+    ASSIGNMENT_COMMITTED_SNAPSHOT_FILE, ASSIGNMENT_CONSENSUS_DIR, ASSIGNMENT_CONSENSUS_FILE,
+    ASSIGNMENT_CONSENSUS_FILE_VERSION,
 };
 pub use group::{
     static_member_id, GroupCoordinator, GroupDescription, GroupListEntry, GroupMemberDescription,
