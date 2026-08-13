@@ -1,44 +1,118 @@
 # Volant residual TODO (review loop)
 
-**Baseline:** HEAD product = **Phases 0–154** shipped (EOS↔durable atomic boundary + KRaft-style metadata Raft log).  
+**Baseline:** HEAD product = **Phases 0–154** shipped.  
 **Last review:** 2026-08-13  
 
-Living roadmap: [ROADMAP.md](./ROADMAP.md) (Phases **0–154 shipped**).  
-Recent specs: [PHASE154](./docs/PHASE154_SPEC.md) · [PHASE153](./docs/PHASE153_SPEC.md) · [PHASE152](./docs/PHASE152_SPEC.md) · [PHASE151](./docs/PHASE151_SPEC.md).
+Living roadmap: [ROADMAP.md](./ROADMAP.md).  
+Recent specs: [PHASE154](./docs/PHASE154_SPEC.md) · [PHASE153](./docs/PHASE153_SPEC.md) · [PHASE152](./docs/PHASE152_SPEC.md) · [PHASE151](./docs/PHASE151_SPEC.md) · [PHASE150](./docs/PHASE150_SPEC.md) · [PHASE149](./docs/PHASE149_SPEC.md).  
+Phase index: [docs/history/PHASE_HISTORY.md](./docs/history/PHASE_HISTORY.md).
 
 ---
 
-## Shipped recently
+## Status
 
-### Phase 154 — KRaft-style metadata Raft log (MVP)
-- [x] Ordered log `(term, index)` + AppendEntries opcodes **98/99**
-- [x] Majority match_index → commit_index → apply SetAssignment
-- [x] Durable `__metadata_raft/{log,hard_state}.json`
-- [x] Env `VOLANT_METADATA_RAFT` (default on multi-node)
-- [x] Metrics term/commit/last_applied/append success|fail
-- [x] Tests `phase154_metadata_raft`
-- **Honesty:** not full openraft election/InstallSnapshot; lowest-id controller still leader; static N
+| Band | Status |
+|------|--------|
+| **P0 / P1** | **None open** |
+| **P2** (N=2 gauges, Metadata ISR, promote claim, preferred×session) | **Closed** (141–144) |
+| **P3** (rack assignment, delta mirror, serve-from-mirror, defer truncate) | **Closed** (145–148) |
+| **Product: streams durable + EOS** | **MVP closed** (149, 151, 153) |
+| **Product: consensus / KRaft-style metadata** | **MVP closed** (150, 152, 154) |
 
-### Phase 153 — EOS + durable state atomic boundary
-- [x] DurableStore staging checkpoint (begin/commit/abort)
-- [x] EOS step: checkpoint → process → txn commit → durable commit_checkpoint
-- [x] Abort path discards staged state
-- [x] Tests `phase153_eos_durable_atomic` + 149/151 green
-- **Honesty:** process-local staging, not distributed 2PC with broker
-
-### Phase 152 / 151
-- [x] Metadata committed-only; stream ExactlyOnce txn produce+offsets
+**Ceiling:** Phases **0–154**. Next free inter-broker opcode after **98/99** is **100+**.
 
 ---
 
-## Open residual
+## Shipped recently (compact)
 
-| Pri | Item | Notes |
-|----:|------|-------|
-| Later | True openraft leader election + InstallSnapshot | Beyond 154 log MVP |
-| Later | Dynamic membership reconfiguration | Static N only |
-| Later | Distributed EOS 2PC with broker-held state | Beyond process-local checkpoint |
-| Later | Multi-lang / chaos / perf | Ecosystem |
+### Consensus / metadata (150 → 152 → 154)
+- [x] **150** — Assignment majority notes (opcodes **96/97**); configured-N majority
+- [x] **152** — Metadata serves **committed** assignment snapshot (`VOLANT_ASSIGNMENT_METADATA_COMMITTED_ONLY` default on)
+- [x] **154** — KRaft-style metadata **Raft log** (term/index, AppendEntries **98/99**, commit_index → apply)
+
+### Streams (149 → 151 → 153)
+- [x] **149** — `DurableStore` (redb) `KeyValueStore`; `count_reduce_durable`
+- [x] **151** — `ProcessingGuarantee::ExactlyOnce` — txn produce + deferred group offsets
+- [x] **153** — EOS **checkpoint** boundary: stage durable puts until EndTxn succeeds; abort discards
+
+### Earlier P2 / P3 (still residual-relevant)
+- [x] **141** — N=2 majority health gauges (`volant_cluster_*`)
+- [x] **142** — Metadata ISR overlay + `IsrUpdate` **94/95**
+- [x] **143** — Promote claim fence (`promoted_by` lowest-id)
+- [x] **144** — Preferred suppress when `req_session_id != 0`
+- [x] **145** — Rack-aware partition assignment on create
+- [x] **146** — Delta MirrorPut (`mode=full|delta`)
+- [x] **147** — Serve-from-mirror without promote (default)
+- [x] **148** — Wait-mode DeleteRecords: majority **before** local truncate
+
+---
+
+## Next candidates (suggested order)
+
+| Pri | Item | Why / notes |
+|----:|------|-------------|
+| **P2** | **True Raft leader election** for metadata | 154 still uses **lowest live id** as leader; no RequestVote |
+| **P2** | **InstallSnapshot / log compaction** for metadata Raft | 154 log grows with full `SetAssignment` entries |
+| **P2** | **Local assignment rollback** on consensus/Raft majority fail | Create may leave local disk ahead of commit (honest residual) |
+| **P3** | **Distributed EOS 2PC** (broker-held stream state) | 153 is **process-local** staging only |
+| **P3** | **Durable window buckets** | 149/153 cover reduce KV, not tumbling window maps |
+| **P3** | Preferred **throttling / TCP probe** | Beyond 140/144/145 |
+| **Later** | Full **openraft** crate integration | Replace custom `__metadata_raft` when ready |
+| **Later** | **Dynamic membership** reconfiguration | Static `cluster.toml` N only |
+| **Later** | Full **KIP-890 / `__transaction_state`** | Txn depth beyond 2PC MVP |
+| **Later** | **Multi-language clients** | Ecosystem |
+| **Later** | **Long fuzz + chaos-mesh** | Phase 112 is corpus smoke only |
+| **Later** | **Perf campaign** vs aspirational targets | Publish numbers; group-commit default |
+
+**Default next slice:** metadata Raft **election + snapshot** (close the largest honesty gaps on 154), *or* chaos/perf if product focus shifts to ops confidence.
+
+---
+
+## Closed checklist (was open residual)
+
+- [x] N=2 majority ops tooling / health gauges → **Phase 141**
+- [x] Metadata ISR lag (leader ≠ controller) → **Phase 142**
+- [x] Promote claim fence (dual-promote) → **Phase 143**
+- [x] Preferred × session thrash suppress → **Phase 144**
+- [x] Rack-aware partition assignment → **Phase 145**
+- [x] Incremental/delta MirrorPut → **Phase 146**
+- [x] Serve-from-mirror without promote → **Phase 147**
+- [x] Defer local truncate until majority (wait mode) → **Phase 148**
+- [x] Durable stream state store → **Phase 149**
+- [x] Assignment majority consensus notes → **Phase 150**
+- [x] Stream EOS (txn produce + offsets) → **Phase 151**
+- [x] Metadata = committed assignment → **Phase 152**
+- [x] EOS + durable state atomic boundary → **Phase 153**
+- [x] KRaft-style metadata Raft log MVP → **Phase 154**
+
+---
+
+## Still open (honest limitations)
+
+### Metadata / consensus
+- [ ] True **openraft** leader election + term contests (154: lowest-id controller)
+- [ ] **InstallSnapshot** / log truncation for metadata Raft
+- [ ] **Dynamic membership** (add/remove brokers without static N)
+- [ ] Rollback **local** assignment file when majority/Raft append fails
+- [ ] Per-partition Raft / full KRaft `__cluster_metadata` topic parity
+
+### Streams
+- [ ] **Distributed** EOS (state coordinated with broker, not only process staging)
+- [ ] Durable **window** state (tumbling buckets still in-memory)
+- [ ] Exactly-once with **cross-app** fencing beyond single `transactional_id`
+
+### Kafka / txn / ops
+- [ ] Full **KIP-890 / 939** / `__transaction_state`
+- [ ] Kafka DeleteRecords **per-request** wait flag (native has trailer; Kafka env-only)
+- [ ] Full preferred selector **throttling** / TCP probe
+- [ ] Multi-language clients
+- [ ] Long fuzz campaigns + chaos-mesh
+- [ ] Published perf numbers vs aspirational table; group-commit decision
+
+### Wait-off / best-effort paths (by design)
+- DeleteRecords **wait off**: still local-first (irreversible truncate)
+- Session mirror: dual-epoch if two peers serve without promote (147)
+- Metadata raft **uncommitted** local mutate may lead commit until majority (Metadata committed-only hides when on)
 
 ---
 
@@ -46,8 +120,12 @@ Recent specs: [PHASE154](./docs/PHASE154_SPEC.md) · [PHASE153](./docs/PHASE153_
 
 | Area | Verdict |
 |------|---------|
-| Phase 154 | **Shipped** — KRaft-style metadata log MVP |
-| Phase 153 | **Shipped** — EOS durable checkpoint boundary |
-| Prior P2/P3/product slices | **None open** for listed residuals |
+| Phase 154 | **Shipped** — metadata log + AppendEntries; not full openraft election |
+| Phase 153 | **Shipped** — EOS durable checkpoint; process-local only |
+| Phase 152 | **Shipped** — Metadata committed-only SoT |
+| Phase 151 | **Shipped** — stream ExactlyOnce via Volant txns |
+| Phase 150/149 | **Shipped** — majority notes + redb DurableStore |
+| Phases 141–148 | **Shipped** — prior P2/P3 residuals |
+| P0 / P1 code | **None open** |
 
-**Default next slice:** openraft election, multi-lang, or chaos/perf.
+**How to use this file:** mark new work by phase number in ROADMAP + PHASE*_SPEC; fold completed rows into “Closed checklist”; keep “Still open” as the only honesty surface for operators and contributors.
