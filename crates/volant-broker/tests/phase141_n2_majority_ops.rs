@@ -6,7 +6,9 @@
 use std::path::PathBuf;
 use std::sync::Arc;
 
-use volant_broker::{render_metrics, Broker, BrokerEndpoint, ClusterConfig};
+use volant_broker::{
+    render_metrics, Broker, BrokerEndpoint, ClusterConfig, TruncateJournal,
+};
 use volant_storage::StorageConfig;
 
 fn unique_dir(label: &str) -> PathBuf {
@@ -184,4 +186,94 @@ fn metrics_text_single_node_zeros_impossible() {
     assert!(text.contains("volant_cluster_live_brokers 1\n"));
     assert!(text.contains("volant_cluster_majority_quorum 1\n"));
     assert!(text.contains("volant_cluster_majority_impossible 0\n"));
+}
+
+#[test]
+fn n3_two_dead_majority_impossible() {
+    let base = unique_dir("n3-two-dead");
+    let _g = Guard(base.clone());
+    let nodes = boot_n(&base, &[(1, 14151), (2, 14152), (3, 14153)]);
+    let b1 = &nodes[0];
+    assert_ops(b1, 3, 3, 2, false);
+
+    b1.on_broker_death(2).unwrap();
+    assert_ops(b1, 3, 2, 2, false);
+
+    b1.on_broker_death(3).unwrap();
+    // live=1, quorum=2 → impossible
+    assert_ops(b1, 3, 1, 2, true);
+    let text = render_metrics(b1);
+    assert!(text.contains("volant_cluster_live_brokers 1\n"));
+    assert!(text.contains("volant_cluster_majority_impossible 1\n"));
+}
+
+#[test]
+fn n5_quorum_math_matches_truncate_journal() {
+    let base = unique_dir("n5-quorum");
+    let _g = Guard(base.clone());
+    // five-node static membership; floor(5/2)+1 = 3
+    let ports: Vec<(u32, u16)> = (1..=5).map(|id| (id, 14200 + id as u16)).collect();
+    let nodes = boot_n(&base, &ports);
+    let b1 = &nodes[0];
+    assert_ops(b1, 5, 5, 3, false);
+    assert_eq!(
+        b1.majority_quorum_size() as usize,
+        TruncateJournal::majority(5)
+    );
+
+    // Kill two → live=3 == quorum → still reachable
+    b1.on_broker_death(4).unwrap();
+    b1.on_broker_death(5).unwrap();
+    assert_ops(b1, 5, 3, 3, false);
+
+    // Kill one more → live=2 < 3 → impossible
+    b1.on_broker_death(3).unwrap();
+    assert_ops(b1, 5, 2, 3, true);
+}
+
+#[test]
+fn n2_metrics_flip_after_death_and_helpers_stable() {
+    let base = unique_dir("n2-flip");
+    let _g = Guard(base.clone());
+    let nodes = boot_n(&base, &[(1, 14161), (2, 14162)]);
+    let b1 = &nodes[0];
+    let text_ok = render_metrics(b1);
+    assert!(
+        text_ok.contains("volant_cluster_majority_impossible 0\n"),
+        "before death"
+    );
+    assert!(!b1.majority_impossible());
+
+    b1.on_broker_death(2).unwrap();
+    assert!(b1.majority_impossible());
+    let text_bad = render_metrics(b1);
+    assert!(text_bad.contains("volant_cluster_majority_impossible 1\n"));
+    // Configured membership never shrinks with death.
+    assert_eq!(b1.configured_broker_count(), 2);
+    assert_eq!(b1.majority_quorum_size(), 2);
+    assert_eq!(b1.live_broker_count(), 1);
+}
+
+#[test]
+fn peer_does_not_flip_impossible_until_it_observes_death() {
+    // Gauges are a *local* membership view: killing on b1 does not update b2.
+    let base = unique_dir("n2-local-view");
+    let _g = Guard(base.clone());
+    let nodes = boot_n(&base, &[(1, 14171), (2, 14172)]);
+    nodes[0].on_broker_death(2).unwrap();
+    assert!(nodes[0].majority_impossible());
+    assert_ops(&nodes[1], 2, 2, 2, false);
+}
+
+#[test]
+fn quorum_sizes_match_majority_helper_for_common_n() {
+    // floor(N/2)+1 table used by journal note + wait mode.
+    for n in [1usize, 2, 3, 4, 5, 7] {
+        let expected = n / 2 + 1;
+        assert_eq!(TruncateJournal::majority(n), expected, "N={n}");
+    }
+    let dir = unique_dir("quorum-table");
+    let _g = Guard(dir.clone());
+    let single = Broker::new(storage(dir));
+    assert_eq!(single.majority_quorum_size(), TruncateJournal::majority(1) as u64);
 }
