@@ -538,14 +538,19 @@ pub struct Broker {
     applied_acl_generation: AtomicU64,
     /// DeleteRecords fan-out RPC failures (Phase 113; real fan-out in later PR).
     delete_records_fanout_errors_total: AtomicU64,
-    /// Phase 135: when true, native/Kafka DeleteRecords waits for truncate-journal
-    /// majority after local truncate and surfaces `NotEnoughReplicas` on fail.
-    /// Default **false** (`VOLANT_DELETE_RECORDS_WAIT_MAJORITY`).
+    /// Phase 135/148: when true, native/Kafka DeleteRecords waits for
+    /// truncate-journal majority and surfaces `NotEnoughReplicas` on fail.
+    /// Phase 148: wait mode **defers local truncate** until majority (no data
+    /// loss on fail). Default **false** (`VOLANT_DELETE_RECORDS_WAIT_MAJORITY`).
     delete_records_wait_majority: AtomicBool,
-    /// Phase 135: client wait path observed journal majority success.
+    /// Phase 135/148: client wait path observed journal majority success.
     delete_records_majority_wait_success_total: AtomicU64,
-    /// Phase 135: client wait path observed journal majority failure.
+    /// Phase 135/148: client wait path observed journal majority failure.
     delete_records_majority_wait_fail_total: AtomicU64,
+    /// Phase 148: wait-mode majority-first path successes (journal then local).
+    delete_records_majority_first_success_total: AtomicU64,
+    /// Phase 148: wait-mode majority-first path failures (no local truncate).
+    delete_records_majority_first_fail_total: AtomicU64,
     /// BROKER config push RPC failures (Phase 113).
     cluster_config_push_errors_total: AtomicU64,
     /// ACL snapshot push RPC failures (Phase 113).
@@ -779,6 +784,8 @@ impl Broker {
             delete_records_wait_majority: AtomicBool::new(default_delete_records_wait_majority()),
             delete_records_majority_wait_success_total: AtomicU64::new(0),
             delete_records_majority_wait_fail_total: AtomicU64::new(0),
+            delete_records_majority_first_success_total: AtomicU64::new(0),
+            delete_records_majority_first_fail_total: AtomicU64::new(0),
             cluster_config_push_errors_total: AtomicU64::new(0),
             cluster_acl_push_errors_total: AtomicU64::new(0),
             txn_2pc_fanout_errors_total: AtomicU64::new(0),
@@ -927,6 +934,8 @@ impl Broker {
             delete_records_wait_majority: AtomicBool::new(default_delete_records_wait_majority()),
             delete_records_majority_wait_success_total: AtomicU64::new(0),
             delete_records_majority_wait_fail_total: AtomicU64::new(0),
+            delete_records_majority_first_success_total: AtomicU64::new(0),
+            delete_records_majority_first_fail_total: AtomicU64::new(0),
             cluster_config_push_errors_total: AtomicU64::new(0),
             cluster_acl_push_errors_total: AtomicU64::new(0),
             txn_2pc_fanout_errors_total: AtomicU64::new(0),
@@ -1058,16 +1067,87 @@ impl Broker {
             .load(Ordering::Relaxed)
     }
 
-    /// Increment wait-mode majority success (Phase 135; only when wait is on).
+    /// Increment wait-mode majority success (Phase 135/148; only when wait is on).
     pub fn note_delete_records_majority_wait_success(&self) {
         self.delete_records_majority_wait_success_total
             .fetch_add(1, Ordering::Relaxed);
     }
 
-    /// Increment wait-mode majority failure (Phase 135; only when wait is on).
+    /// Increment wait-mode majority failure (Phase 135/148; only when wait is on).
     pub fn note_delete_records_majority_wait_fail(&self) {
         self.delete_records_majority_wait_fail_total
             .fetch_add(1, Ordering::Relaxed);
+    }
+
+    /// Phase 148: majority-first path success counter.
+    pub fn delete_records_majority_first_success_total(&self) -> u64 {
+        self.delete_records_majority_first_success_total
+            .load(Ordering::Relaxed)
+    }
+
+    /// Phase 148: majority-first path failure counter (no local truncate).
+    pub fn delete_records_majority_first_fail_total(&self) -> u64 {
+        self.delete_records_majority_first_fail_total
+            .load(Ordering::Relaxed)
+    }
+
+    /// Increment majority-first success (Phase 148 wait path after journal + local).
+    pub fn note_delete_records_majority_first_success(&self) {
+        self.delete_records_majority_first_success_total
+            .fetch_add(1, Ordering::Relaxed);
+    }
+
+    /// Increment majority-first fail (Phase 148 wait path; local log unchanged).
+    pub fn note_delete_records_majority_first_fail(&self) {
+        self.delete_records_majority_first_fail_total
+            .fetch_add(1, Ordering::Relaxed);
+    }
+
+    /// Phase 148: preflight DeleteRecords without mutating the log.
+    ///
+    /// Returns `(log_start, error_code)`. `error_code == 0` means this node may
+    /// proceed (leader or single-node). Not-leader returns `(0, NotLeader)`.
+    /// Missing topic/partition → [`Error::NotFound`].
+    pub fn delete_records_leader_log_start(
+        &self,
+        topic: &str,
+        partition: u32,
+    ) -> Result<(u64, u16)> {
+        let name = TopicName::new(topic);
+        let topics = self.topics.read();
+        let t = topics
+            .get(&name)
+            .ok_or_else(|| Error::NotFound(format!("topic {topic}")))?;
+        let part = t
+            .partitions
+            .get(&PartitionId(partition))
+            .ok_or_else(|| Error::NotFound(format!("partition {topic}/{partition}")))?;
+        if self.cluster.is_some() && !part.is_leader(self.node_id) {
+            return Ok((0, ErrorCode::NotLeaderForPartition as u16));
+        }
+        Ok((part.log.log_start_offset().raw(), 0))
+    }
+
+    /// Phase 148: journal note offset for majority-first — `min(before, LEO)`.
+    ///
+    /// Whole-segment clamp may still land local low below this; max-merge journal
+    /// (watermark ≥ local) remains honest.
+    pub fn delete_records_note_offset(
+        &self,
+        topic: &str,
+        partition: u32,
+        before_offset: u64,
+    ) -> u64 {
+        let name = TopicName::new(topic);
+        let topics = self.topics.read();
+        let Some(part) = topics
+            .get(&name)
+            .and_then(|t| t.partitions.get(&PartitionId(partition)))
+        else {
+            return before_offset;
+        };
+        let leo = part.log.log_end_offset().raw();
+        before_offset.min(leo)
     }
 
     /// Durable DeleteRecords outbox (Phase 116).

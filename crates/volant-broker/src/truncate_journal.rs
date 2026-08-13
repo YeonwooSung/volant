@@ -262,6 +262,14 @@ impl TruncateJournal {
             .map(|e| e.before_offset)
     }
 
+    /// Full journal entry for a partition, if known (Phase 148 provisional-note rollback).
+    pub fn entry(&self, topic: &str, partition: u32) -> Option<TruncateJournalEntry> {
+        self.entries
+            .read()
+            .get(&(topic.to_owned(), partition))
+            .cloned()
+    }
+
     /// Max-merge a watermark. When `bump_generation`, increments generation
     /// (controller path). Returns new generation.
     ///

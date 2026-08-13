@@ -191,6 +191,11 @@ docs for day-to-day reading: [ops](../ops.md), [consistency](../consistency.md),
 ---
 
 ## Still deferred (post–Phase 145)
+| 148 | ✅ | Defer local DeleteRecords truncate until journal majority (wait mode; no truncate on fail) | [PHASE148_SPEC.md](../PHASE148_SPEC.md) |
+
+---
+
+## Still deferred (post–Phase 144 / 148)
 
 
 - Multi-language clients

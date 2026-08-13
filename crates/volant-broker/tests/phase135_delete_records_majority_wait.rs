@@ -1,8 +1,9 @@
 //! Phase 135: optional DeleteRecords wait on truncate-journal majority.
 //!
-//! Default off = best-effort (client success independent of journal majority).
-//! Wait on = surface `NotEnoughReplicas` (15) when majority is not reached;
-//! local low_watermark still advances (no rollback).
+//! Default off = best-effort (client success independent of journal majority;
+//! local-first truncate).
+//! Wait on (Phase 148): journal majority **first**; fail → `NotEnoughReplicas`
+//! (15) with **unchanged** log_start (no local truncate).
 
 #[path = "common/mod.rs"]
 mod common;
@@ -288,13 +289,15 @@ async fn wait_on_majority_ok() {
     );
     assert!(
         b1.truncate_journal_consensus_success_total() > before_cons_ok
-            || b1.truncate_journal().watermark("maj", 0) == Some(low),
+            || b1.truncate_journal().watermark("maj", 0).is_some(),
         "journal majority should succeed with 3 live nodes"
     );
-    assert_eq!(
-        b1.truncate_journal().watermark("maj", 0),
-        Some(low),
-        "journal stamps achieved low"
+    // Phase 148: journal notes requested/clamped-estimate offset first; local
+    // whole-segment low may be ≤ journal watermark (max-merge honest).
+    let jwm = b1.truncate_journal().watermark("maj", 0);
+    assert!(
+        jwm.is_some() && jwm.unwrap() >= low,
+        "journal watermark {jwm:?} must be ≥ achieved low {low}"
     );
 
     // Fan-out result API also reports majority_ok.
@@ -310,7 +313,7 @@ async fn wait_on_majority_ok() {
 }
 
 /// Wait on + only proposer live (acks < majority of 3) → NotEnoughReplicas (15),
-/// fail metric++, local low_watermark still advanced.
+/// fail metric++, **log_start unchanged** (Phase 148: no local truncate on fail).
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn wait_on_majority_fail() {
     let base = unique_dir("p135", "wait-fail");
@@ -346,6 +349,7 @@ async fn wait_on_majority_fail() {
 
     let before_ok = b1.delete_records_majority_wait_success_total();
     let before_fail = b1.delete_records_majority_wait_fail_total();
+    let before_first_fail = b1.delete_records_majority_first_fail_total();
 
     let resp = dispatch_request(
         &b1,
@@ -368,12 +372,11 @@ async fn wait_on_majority_fail() {
                 ErrorCode::NotEnoughReplicas as u16,
                 "wait-on + solo proposer must return NotEnoughReplicas (15), got {error_code}"
             );
-            assert!(
-                low_watermark > earliest_before || low_watermark > 0,
-                "local truncate must still advance low_watermark={low_watermark} \
-                 (earliest_before={earliest_before}); no rollback on majority fail"
+            assert_eq!(
+                low_watermark, earliest_before,
+                "Phase 148: wait-on majority fail must not truncate; \
+                 low_watermark={low_watermark} earliest_before={earliest_before}"
             );
-            // Honest residual: log_start matches response low.
             let earliest_after = b1
                 .list_offsets("p135a", &[0])
                 .unwrap()
@@ -381,8 +384,8 @@ async fn wait_on_majority_fail() {
                 .map(|e| e.1)
                 .unwrap_or(0);
             assert_eq!(
-                earliest_after, low_watermark,
-                "local log start must match returned low_watermark"
+                earliest_after, earliest_before,
+                "local log_start must be unchanged after wait-on majority fail"
             );
         }
         other => panic!("unexpected: {other:?}"),
@@ -392,15 +395,20 @@ async fn wait_on_majority_fail() {
         b1.delete_records_majority_wait_fail_total() > before_fail,
         "wait-on majority fail must increment fail metric"
     );
+    assert!(
+        b1.delete_records_majority_first_fail_total() > before_first_fail,
+        "Phase 148 majority-first fail metric must increment"
+    );
     assert_eq!(
         b1.delete_records_majority_wait_success_total(),
         before_ok,
         "fail path must not increment success metric"
     );
-    // Local journal note retained even when consensus fails (Phase 130 residual).
+    // Phase 148: provisional journal note is rolled back on majority fail so
+    // outbox reconcile will not auto-truncate.
     assert!(
-        b1.truncate_journal().watermark("p135a", 0).is_some(),
-        "local journal watermark retained after majority fail"
+        b1.truncate_journal().watermark("p135a", 0).is_none(),
+        "provisional journal watermark must be rolled back after wait-on majority fail"
     );
 
     s1.abort();

@@ -616,7 +616,9 @@ fn broker_metrics_text(broker: &Broker) -> String {
         "volant_delete_records_fanout_errors_total {}\n",
         broker.delete_records_fanout_errors_total()
     ));
-    // Phase 135: optional client-visible wait on truncate-journal majority.
+    // Phase 135/148: optional client-visible wait on truncate-journal majority.
+    // Wait mode (Phase 148) defers local truncate until majority; fail leaves
+    // log_start unchanged. Counters tick only when effective wait is on.
     text.push_str(
         "# HELP volant_delete_records_majority_wait_success_total DeleteRecords wait-mode journal majority successes\n",
     );
@@ -626,12 +628,29 @@ fn broker_metrics_text(broker: &Broker) -> String {
         broker.delete_records_majority_wait_success_total()
     ));
     text.push_str(
-        "# HELP volant_delete_records_majority_wait_fail_total DeleteRecords wait-mode journal majority failures\n",
+        "# HELP volant_delete_records_majority_wait_fail_total DeleteRecords wait-mode journal majority failures (Phase 148: no local truncate)\n",
     );
     text.push_str("# TYPE volant_delete_records_majority_wait_fail_total counter\n");
     text.push_str(&format!(
         "volant_delete_records_majority_wait_fail_total {}\n",
         broker.delete_records_majority_wait_fail_total()
+    ));
+    // Phase 148: majority-first ordering (wait mode only; same events as wait_*).
+    text.push_str(
+        "# HELP volant_delete_records_majority_first_success_total DeleteRecords wait-mode majority-first successes (journal then local truncate)\n",
+    );
+    text.push_str("# TYPE volant_delete_records_majority_first_success_total counter\n");
+    text.push_str(&format!(
+        "volant_delete_records_majority_first_success_total {}\n",
+        broker.delete_records_majority_first_success_total()
+    ));
+    text.push_str(
+        "# HELP volant_delete_records_majority_first_fail_total DeleteRecords wait-mode majority-first failures (log_start unchanged)\n",
+    );
+    text.push_str("# TYPE volant_delete_records_majority_first_fail_total counter\n");
+    text.push_str(&format!(
+        "volant_delete_records_majority_first_fail_total {}\n",
+        broker.delete_records_majority_first_fail_total()
     ));
     // Phase 116: durable DeleteRecords outbox for offline / failed peers.
     text.push_str(
@@ -1860,6 +1879,49 @@ pub struct DeleteRecordsFanoutResult {
     pub majority_ok: bool,
 }
 
+/// Phase 148: journal majority note **before** local truncate (wait mode).
+///
+/// Uses current [`Broker::led_partition_epoch`]. On majority **fail**, rolls
+/// back the provisional local journal watermark to `prev` so
+/// [`Broker::reconcile_delete_records_outbox`] does not auto-apply a
+/// non-majority note. Peer-side provisional notes from partial acks remain a
+/// best-effort residual (max-merge).
+///
+/// Single-node / no cluster / not-leader → `true` (caller handles NotLeader).
+pub async fn fanout_truncate_journal_note_provisional(
+    broker: &Broker,
+    topic: &str,
+    partition: u32,
+    before_offset: u64,
+) -> bool {
+    if broker.cluster_config().is_none() {
+        return true;
+    }
+    let Some(epoch) = broker.led_partition_epoch(topic, partition) else {
+        debug!(
+            topic,
+            partition,
+            before_offset,
+            "skip provisional journal note: not partition leader"
+        );
+        return true;
+    };
+    let prev = broker
+        .truncate_journal()
+        .entry(topic, partition)
+        .map(|e| (e.before_offset, e.leader_epoch));
+    let ok =
+        fanout_truncate_journal_note(broker, topic, partition, before_offset, epoch).await;
+    if !ok {
+        // Undo provisional local watermark so reconcile will not truncate.
+        broker.truncate_journal().remove_partition(topic, partition);
+        if let Some((off, ep)) = prev {
+            let _ = broker.local_note_truncate_journal(topic, partition, off, ep);
+        }
+    }
+    ok
+}
+
 /// Best-effort DeleteRecords fan-out to other replicas (Phase 113/116 + 129/130/135).
 ///
 /// After a successful **leader** local truncate: multi-controller journal note
@@ -1869,7 +1931,10 @@ pub struct DeleteRecordsFanoutResult {
 /// fenced peers are `drop_entry`'d.
 ///
 /// Returns [`DeleteRecordsFanoutResult`]; default client path still ignores
-/// `majority_ok` unless [`Broker::delete_records_wait_majority`] is on.
+/// `majority_ok` unless wait mode is on (Phase 135/148). **Wait-off** path
+/// remains local-first then this fan-out. **Wait-on** (Phase 148) uses
+/// [`fanout_truncate_journal_note_provisional`] first, then local truncate, then
+/// [`fanout_delete_records_replicas_only`] (journal already noted).
 ///
 /// `truncate_to` is the **achieved** log start (whole-segment-clamped low
 /// watermark), not the client-requested offset.
@@ -1978,6 +2043,36 @@ pub async fn fanout_delete_records(
         }
     }
     DeleteRecordsFanoutResult { majority_ok }
+}
+
+/// Phase 148: replica + outbox fan-out only (journal already majority-noted).
+///
+/// Used after wait-mode majority-first local truncate so we do not double-run
+/// journal consensus (second note would max-merge / re-count metrics).
+pub async fn fanout_delete_records_replicas_only(
+    broker: &Broker,
+    topic: &str,
+    partition: u32,
+    truncate_to: u64,
+) {
+    let budget = delete_records_fanout_budget();
+    match tokio::time::timeout(
+        budget,
+        fanout_delete_records_replica_inner(broker, topic, partition, truncate_to),
+    )
+    .await
+    {
+        Ok(()) => {}
+        Err(_) => {
+            warn!(
+                topic,
+                partition,
+                truncate_to,
+                budget_ms = budget.as_millis() as u64,
+                "delete records replica-only fan-out overall budget exceeded; unfinished peers remain on outbox for drain/reconcile"
+            );
+        }
+    }
 }
 
 async fn fanout_delete_records_replica_inner(
@@ -4744,49 +4839,108 @@ async fn handle_request(broker: &Arc<Broker>, req: Request) -> Result<Response> 
             partition,
             before_offset,
             wait_majority,
-        } => match broker.delete_records(&topic, partition, before_offset) {
-            Ok((low_watermark, error_code)) => {
-                // Phase 113/129/130/135/137: fan-out after local success.
-                // Budget is enforced inside fanout_delete_records (default 20s
-                // overall; 5s per inter-broker RPC).
-                // Fan-out journal note + ReplicaDeleteRecords + outbox at the
-                // **achieved** low_watermark (whole-segment clamp), not the
-                // client-requested before_offset — peers/journal must not be
-                // told a watermark the leader has not reached.
-                //
-                // Default (wait off): always return local error_code (0 on
-                // success) even if journal majority fails. Wait on: surface
-                // NotEnoughReplicas (15) when majority fails; low_watermark
-                // remains the achieved local low (no rollback).
-                // Phase 137: per-request wait_majority trailer (0=broker, 1/2 force).
-                let mut err = error_code;
-                if error_code == 0 {
-                    let fan =
-                        fanout_delete_records(broker, &topic, partition, low_watermark).await;
-                    if broker.effective_delete_records_wait_majority(wait_majority) {
-                        if fan.majority_ok {
-                            broker.note_delete_records_majority_wait_success();
-                        } else {
-                            err = ErrorCode::NotEnoughReplicas as u16;
+        } => {
+            // Phase 137: per-request wait_majority trailer (0=broker, 1/2 force).
+            let wait = broker.effective_delete_records_wait_majority(wait_majority);
+            if wait {
+                // Phase 148: majority-first — do **not** local-truncate until
+                // journal majority. Fail → NotEnoughReplicas + current log_start.
+                match broker.delete_records_leader_log_start(&topic, partition) {
+                    Ok((log_start, pre_err)) if pre_err != 0 => Ok(Response::DeleteRecords {
+                        error_code: pre_err,
+                        topic,
+                        partition,
+                        low_watermark: log_start,
+                    }),
+                    Ok((log_start, _)) => {
+                        let note_offset =
+                            broker.delete_records_note_offset(&topic, partition, before_offset);
+                        let majority_ok = fanout_truncate_journal_note_provisional(
+                            broker,
+                            &topic,
+                            partition,
+                            note_offset,
+                        )
+                        .await;
+                        if !majority_ok {
                             broker.note_delete_records_majority_wait_fail();
+                            broker.note_delete_records_majority_first_fail();
+                            return Ok(Response::DeleteRecords {
+                                error_code: ErrorCode::NotEnoughReplicas as u16,
+                                topic,
+                                partition,
+                                low_watermark: log_start,
+                            });
+                        }
+                        match broker.delete_records(&topic, partition, before_offset) {
+                            Ok((low_watermark, error_code)) => {
+                                if error_code == 0 {
+                                    // Journal already majority-noted; replica/outbox only.
+                                    fanout_delete_records_replicas_only(
+                                        broker,
+                                        &topic,
+                                        partition,
+                                        low_watermark,
+                                    )
+                                    .await;
+                                    broker.note_delete_records_majority_wait_success();
+                                    broker.note_delete_records_majority_first_success();
+                                }
+                                Ok(Response::DeleteRecords {
+                                    error_code,
+                                    topic,
+                                    partition,
+                                    low_watermark,
+                                })
+                            }
+                            Err(Error::NotFound(_)) => Ok(Response::DeleteRecords {
+                                error_code: ErrorCode::NotFound as u16,
+                                topic,
+                                partition,
+                                low_watermark: 0,
+                            }),
+                            Err(e) => Err(e),
                         }
                     }
+                    Err(Error::NotFound(_)) => Ok(Response::DeleteRecords {
+                        error_code: ErrorCode::NotFound as u16,
+                        topic,
+                        partition,
+                        low_watermark: 0,
+                    }),
+                    Err(e) => Err(e),
                 }
-                Ok(Response::DeleteRecords {
-                    error_code: err,
-                    topic,
-                    partition,
-                    low_watermark,
-                })
+            } else {
+                // Wait off (default): local-first then best-effort fan-out
+                // (Phase 113/129/130/135). Client success independent of majority.
+                match broker.delete_records(&topic, partition, before_offset) {
+                    Ok((low_watermark, error_code)) => {
+                        if error_code == 0 {
+                            let _ = fanout_delete_records(
+                                broker,
+                                &topic,
+                                partition,
+                                low_watermark,
+                            )
+                            .await;
+                        }
+                        Ok(Response::DeleteRecords {
+                            error_code,
+                            topic,
+                            partition,
+                            low_watermark,
+                        })
+                    }
+                    Err(Error::NotFound(_)) => Ok(Response::DeleteRecords {
+                        error_code: ErrorCode::NotFound as u16,
+                        topic,
+                        partition,
+                        low_watermark: 0,
+                    }),
+                    Err(e) => Err(e),
+                }
             }
-            Err(Error::NotFound(_)) => Ok(Response::DeleteRecords {
-                error_code: ErrorCode::NotFound as u16,
-                topic,
-                partition,
-                low_watermark: 0,
-            }),
-            Err(e) => Err(e),
-        },
+        }
         Request::CreatePartitions {
             topic,
             total_count,

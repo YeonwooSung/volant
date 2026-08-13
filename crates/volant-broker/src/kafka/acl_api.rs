@@ -51,10 +51,11 @@ const KAFKA_CLUSTER_NAME: &str = "kafka-cluster";
 /// best-effort fan out at the **clamped** log start (Phase 113) — not the
 /// client-requested offset when whole-segment delete stops short.
 ///
-/// When `wait_majority` is **true** (Phase 135), each successful local truncate
-/// **awaits** [`crate::net::fanout_delete_records`] before writing the partition
-/// error code: majority fail → Kafka `NOT_ENOUGH_REPLICAS` (**19**). Fan-outs
-/// are already completed in that mode (returned vec is empty).
+/// When `wait_majority` is **true** (Phase 135/148): journal majority is
+/// attempted **before** local truncate (Phase 148). Majority fail → Kafka
+/// `NOT_ENOUGH_REPLICAS` (**19**) and **unchanged** low watermark (no local
+/// truncate). Majority ok → local truncate then replica fan-out. Returned
+/// fanouts vec is empty in wait mode (work already completed).
 pub(crate) async fn encode_delete_records(
     broker: &Broker,
     src: &mut impl Buf,
@@ -197,51 +198,116 @@ pub(crate) async fn encode_delete_records(
                 }
                 continue;
             }
-            match broker.delete_records(&t.name, p.partition as u32, p.offset as u64) {
-                Ok((low, err)) => {
-                    out.put_i64(low as i64);
-                    let mut final_err = err;
-                    // Phase 113/135: fan-out only after local leader success at
-                    // achieved `low` (whole-segment clamp), not requested offset.
-                    if err == 0 {
-                        if wait_majority {
-                            let fan = crate::net::fanout_delete_records(
+            if wait_majority {
+                // Phase 148: majority-first — journal note before local truncate.
+                match broker
+                    .delete_records_leader_log_start(&t.name, p.partition as u32)
+                {
+                    Ok((log_start, pre_err)) if pre_err != 0 => {
+                        out.put_i64(log_start as i64);
+                        let kerr = if pre_err == 13 {
+                            KafkaErrorCode::NotLeaderForPartition.as_i16()
+                        } else {
+                            KafkaErrorCode::Unknown.as_i16()
+                        };
+                        out.put_i16(kerr);
+                    }
+                    Ok((log_start, _)) => {
+                        let before = p.offset as u64;
+                        let note_offset = broker.delete_records_note_offset(
+                            &t.name,
+                            p.partition as u32,
+                            before,
+                        );
+                        let majority_ok =
+                            crate::net::fanout_truncate_journal_note_provisional(
                                 broker,
                                 &t.name,
                                 p.partition as u32,
-                                low,
+                                note_offset,
                             )
                             .await;
-                            if fan.majority_ok {
-                                broker.note_delete_records_majority_wait_success();
-                            } else {
-                                // Kafka NOT_ENOUGH_REPLICAS (19); local low still returned.
-                                final_err = volant_protocol::ErrorCode::NotEnoughReplicas as u16;
-                                broker.note_delete_records_majority_wait_fail();
-                            }
-                            // Fan-out already completed; do not return for spawn.
+                        if !majority_ok {
+                            broker.note_delete_records_majority_wait_fail();
+                            broker.note_delete_records_majority_first_fail();
+                            out.put_i64(log_start as i64);
+                            out.put_i16(KafkaErrorCode::NotEnoughReplicas.as_i16());
                         } else {
-                            fanouts.push((t.name.clone(), p.partition as u32, low));
+                            match broker.delete_records(
+                                &t.name,
+                                p.partition as u32,
+                                before,
+                            ) {
+                                Ok((low, err)) => {
+                                    out.put_i64(low as i64);
+                                    if err == 0 {
+                                        crate::net::fanout_delete_records_replicas_only(
+                                            broker,
+                                            &t.name,
+                                            p.partition as u32,
+                                            low,
+                                        )
+                                        .await;
+                                        broker.note_delete_records_majority_wait_success();
+                                        broker.note_delete_records_majority_first_success();
+                                    }
+                                    let kerr = if err == 0 {
+                                        KafkaErrorCode::None.as_i16()
+                                    } else if err == 13 {
+                                        KafkaErrorCode::NotLeaderForPartition.as_i16()
+                                    } else {
+                                        KafkaErrorCode::Unknown.as_i16()
+                                    };
+                                    out.put_i16(kerr);
+                                }
+                                Err(Error::NotFound(_)) => {
+                                    out.put_i64(0);
+                                    out.put_i16(
+                                        KafkaErrorCode::UnknownTopicOrPartition.as_i16(),
+                                    );
+                                }
+                                Err(_) => {
+                                    out.put_i64(0);
+                                    out.put_i16(KafkaErrorCode::Unknown.as_i16());
+                                }
+                            }
                         }
                     }
-                    let kerr = if final_err == 0 {
-                        KafkaErrorCode::None.as_i16()
-                    } else if final_err == 13 {
-                        KafkaErrorCode::NotLeaderForPartition.as_i16()
-                    } else if final_err == volant_protocol::ErrorCode::NotEnoughReplicas as u16 {
-                        KafkaErrorCode::NotEnoughReplicas.as_i16()
-                    } else {
-                        KafkaErrorCode::Unknown.as_i16()
-                    };
-                    out.put_i16(kerr);
+                    Err(Error::NotFound(_)) => {
+                        out.put_i64(0);
+                        out.put_i16(KafkaErrorCode::UnknownTopicOrPartition.as_i16());
+                    }
+                    Err(_) => {
+                        out.put_i64(0);
+                        out.put_i16(KafkaErrorCode::Unknown.as_i16());
+                    }
                 }
-                Err(Error::NotFound(_)) => {
-                    out.put_i64(0);
-                    out.put_i16(KafkaErrorCode::UnknownTopicOrPartition.as_i16());
-                }
-                Err(_) => {
-                    out.put_i64(0);
-                    out.put_i16(KafkaErrorCode::Unknown.as_i16());
+            } else {
+                // Wait off: local-first; fan-out returned for fire-and-forget spawn.
+                match broker.delete_records(&t.name, p.partition as u32, p.offset as u64)
+                {
+                    Ok((low, err)) => {
+                        out.put_i64(low as i64);
+                        if err == 0 {
+                            fanouts.push((t.name.clone(), p.partition as u32, low));
+                        }
+                        let kerr = if err == 0 {
+                            KafkaErrorCode::None.as_i16()
+                        } else if err == 13 {
+                            KafkaErrorCode::NotLeaderForPartition.as_i16()
+                        } else {
+                            KafkaErrorCode::Unknown.as_i16()
+                        };
+                        out.put_i16(kerr);
+                    }
+                    Err(Error::NotFound(_)) => {
+                        out.put_i64(0);
+                        out.put_i16(KafkaErrorCode::UnknownTopicOrPartition.as_i16());
+                    }
+                    Err(_) => {
+                        out.put_i64(0);
+                        out.put_i16(KafkaErrorCode::Unknown.as_i16());
+                    }
                 }
             }
             if flex {
