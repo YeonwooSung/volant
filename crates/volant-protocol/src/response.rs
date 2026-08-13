@@ -100,6 +100,8 @@ pub enum ResponseOpcode {
     IsrUpdate = 95,
     /// Assignment consensus note result (Phase 150).
     AssignmentConsensusNote = 97,
+    /// Metadata Raft AppendEntries result (Phase 154).
+    MetadataRaftAppend = 99,
     /// Error response.
     Error = 0xFFFF,
 }
@@ -155,6 +157,7 @@ impl ResponseOpcode {
             93 => Self::FetchSessionMirrorDelete,
             95 => Self::IsrUpdate,
             97 => Self::AssignmentConsensusNote,
+            99 => Self::MetadataRaftAppend,
             0xFFFF => Self::Error,
             _ => return None,
         })
@@ -376,7 +379,7 @@ pub struct OffsetFetchEntry {
 }
 
 /// One partition in a cluster-state snapshot.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct ClusterPartitionState {
     /// Partition id.
     pub partition_id: u32,
@@ -391,7 +394,7 @@ pub struct ClusterPartitionState {
 }
 
 /// One topic in a cluster-state snapshot.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct ClusterTopicState {
     /// Topic name.
     pub name: String,
@@ -768,6 +771,15 @@ pub enum Response {
         /// Assignment generation applied / acked by the peer.
         generation: u32,
     },
+    /// Metadata Raft AppendEntries result (Phase 154).
+    MetadataRaftAppend {
+        /// Peer's current term.
+        term: u64,
+        /// 1 = prev matched and entries accepted; 0 = reject.
+        success: u8,
+        /// Highest matching log index on the peer.
+        match_index: u64,
+    },
     /// Error response.
     Error {
         /// Error code.
@@ -856,6 +868,7 @@ impl Response {
             Self::AssignmentConsensusNote { .. } => {
                 ResponseOpcode::AssignmentConsensusNote as u16
             }
+            Self::MetadataRaftAppend { .. } => ResponseOpcode::MetadataRaftAppend as u16,
             Self::Error { .. } => ResponseOpcode::Error as u16,
         }
     }

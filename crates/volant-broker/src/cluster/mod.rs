@@ -4,6 +4,7 @@ pub mod assignment;
 pub mod assignment_consensus;
 pub mod config;
 pub mod membership;
+pub mod metadata_raft;
 pub mod state;
 
 pub use assignment::{
@@ -17,6 +18,11 @@ pub use assignment_consensus::{
 };
 pub use config::{BrokerEndpoint, ClusterConfig};
 pub use membership::Membership;
+pub use metadata_raft::{
+    AppendEntriesResult, MetadataCommand, MetadataLogEntry, MetadataRaftHardState,
+    MetadataRaftState, METADATA_RAFT_DIR, METADATA_RAFT_FILE_VERSION, METADATA_RAFT_HARD_STATE_FILE,
+    METADATA_RAFT_LOG_FILE,
+};
 pub use state::{
     load_assignment, save_assignment, AssignmentSnapshot, PartitionAssignment, TopicAssignment,
 };

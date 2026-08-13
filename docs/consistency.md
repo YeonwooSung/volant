@@ -48,7 +48,7 @@ When `acks=all`, if `|ISR| < min_insync_replicas`, the leader rejects the produc
 
 - Exactly-once produce/consume end-to-end (Kafka control-batch wire on EndTxn + crash promote shipped as Phase **89**/**98** MVP; soft markers remain isolation SoT; not full EOS)
 - Durable in-flight txn recovery that resumes open transactions (open txn crash ≡ **abort** via `__txn_markers`; write-through ranges are not rolled forward)
-- Linearizability of metadata during controller failover (brief windows of stale Metadata; Phase **150**/**152** majority assignment commit is not full KRaft — default Metadata serves committed snapshot when `VOLANT_ASSIGNMENT_METADATA_COMMITTED_ONLY` is on; set `0` to restore Phase 150 lead-Metadata; local assignment may still lead committed gen on disk)
+- Linearizability of metadata during controller failover (brief windows of stale Metadata; Phase **150**/**152** majority assignment notes + Phase **154** KRaft-style metadata log MVP are **not** full openraft/KRaft election — default Metadata serves committed snapshot when `VOLANT_ASSIGNMENT_METADATA_COMMITTED_ONLY` is on; set `0` to restore Phase 150 lead-Metadata; local assignment may still lead committed gen on disk; controller remains lowest live id)
 - Durability if `min_insync_replicas=1` and that sole replica dies after ack
 - Full KRaft leader-epoch state machine (Phase **87** durable OFLE history is a soft JSON MVP)
 
@@ -157,18 +157,24 @@ Without `--cluster-config`, the broker runs as a single node:
     `HeartbeatBroker`; when the controller sees lag it re-pushes opcodes 72–75
     (full effective BROKER knobs + full ACL snapshot). Brief lag until the next
     successful heartbeat + catch-up RPC is still allowed; not Raft.
-  - **Assignment majority (Phase 150):** after controller assignment mutations
+  - **Assignment majority (Phase 150/152):** after controller assignment mutations
     (CreateTopic / DeleteTopic / CreatePartitions; best-effort IsrUpdate),
-    controller fans out `AssignmentConsensusNote` (96/97) with full wire topics;
-    peers apply via `apply_cluster_state`. Majority =
+    controller fans out `AssignmentConsensusNote` (96/97) with full wire topics
+    when metadata Raft is **off**; peers apply via `apply_cluster_state`. Majority =
     `floor(N/2)+1` of **configured** N. Durable
     `{data_dir}/__assignment_consensus` tracks `committed_generation` /
-    `pending_generation`. Default fan-out **on**
+    `pending_generation` + committed snapshot (Phase 152). Default fan-out **on**
     (`VOLANT_ASSIGNMENT_CONSENSUS`); client wait **off**
     (`VOLANT_ASSIGNMENT_CONSENSUS_WAIT` — fail → native **15**, local assignment
     retained). Metrics: `volant_assignment_consensus_*` +
-    `volant_assignment_committed_generation`. **Not** full openraft/KRaft;
-    Metadata may lead committed gen until majority.
+    `volant_assignment_committed_generation`.
+  - **Metadata Raft log (Phase 154):** when `VOLANT_METADATA_RAFT` is on (default
+    in cluster mode), the same admin mutations append `SetAssignment` entries to
+    a durable ordered log (`{data_dir}/__metadata_raft/`) with `(term, index)`,
+    replicate via `MetadataRaftAppend` (98/99), and advance `commit_index` only
+    after majority match_index; apply runs only then (also bumps Phase 152
+    committed snapshot). **Not** full openraft/KRaft election — controller remains
+    lowest live id; no InstallSnapshot; static N.
 - **Multi-broker 2PC (Phase 114 + 120 + 121 + 122 + 124):** Enable2Pc prepare/complete is coordinated
   over inter-broker RPC (opcodes 76–81). Init owner is the txn coordinator;
   produce still targets partition leaders after open fan-out. **Phase 120:**

@@ -62,9 +62,11 @@ pub use broker::{
     DEFAULT_ADMIN_CATCHUP_MIN_INTERVAL_MS, DEFAULT_JOURNAL_CATCHUP_MIN_INTERVAL_MS,
 };
 pub use cluster::{
-    AssignmentConsensus, AssignmentConsensusFile, BrokerEndpoint, ClusterConfig,
-    ASSIGNMENT_COMMITTED_SNAPSHOT_FILE, ASSIGNMENT_CONSENSUS_DIR, ASSIGNMENT_CONSENSUS_FILE,
-    ASSIGNMENT_CONSENSUS_FILE_VERSION,
+    AssignmentConsensus, AssignmentConsensusFile, BrokerEndpoint, ClusterConfig, MetadataCommand,
+    MetadataLogEntry, MetadataRaftHardState, MetadataRaftState, ASSIGNMENT_COMMITTED_SNAPSHOT_FILE,
+    ASSIGNMENT_CONSENSUS_DIR, ASSIGNMENT_CONSENSUS_FILE, ASSIGNMENT_CONSENSUS_FILE_VERSION,
+    METADATA_RAFT_DIR, METADATA_RAFT_FILE_VERSION, METADATA_RAFT_HARD_STATE_FILE,
+    METADATA_RAFT_LOG_FILE,
 };
 pub use group::{
     static_member_id, GroupCoordinator, GroupDescription, GroupListEntry, GroupMemberDescription,
@@ -107,15 +109,16 @@ pub use net::{
     catch_up_peer_admin_state, catch_up_peer_truncate_journal, delete_records_fanout_budget,
     drain_delete_records_outbox, fanout_assignment_consensus, fanout_cluster_acl_snapshot,
     fanout_cluster_broker_config, fanout_delete_records, fanout_delete_records_replicas_only,
-    fanout_isr_update_reports, fanout_session_mirror_ops, fanout_truncate_journal_note,
-    fanout_truncate_journal_note_provisional, fanout_truncate_journal_push,
-    fanout_txn_participant_complete, fanout_txn_participant_open, fanout_txn_participant_prepare,
-    inter_broker_rpc, inter_broker_rpc_timeout, maybe_fanout_assignment_consensus, render_metrics,
-    run_metrics_server, run_metrics_server_until, run_server, run_txn_2pc_fanout,
-    schedule_catch_up_peer_admin_state, schedule_catch_up_peer_truncate_journal,
-    schedule_isr_update_reports, schedule_session_mirror_fanout, serve_listener,
-    serve_listener_until, shutdown_signal, start_background_tasks, BackgroundTasks,
-    DeleteRecordsFanoutResult, DEFAULT_DELETE_RECORDS_FANOUT_BUDGET_MS,
-    DEFAULT_INTER_BROKER_RPC_TIMEOUT_MS, MAX_INTER_BROKER_TIMEOUT_MS, MIN_INTER_BROKER_TIMEOUT_MS,
+    fanout_isr_update_reports, fanout_metadata_raft_append, fanout_session_mirror_ops,
+    fanout_truncate_journal_note, fanout_truncate_journal_note_provisional,
+    fanout_truncate_journal_push, fanout_txn_participant_complete, fanout_txn_participant_open,
+    fanout_txn_participant_prepare, inter_broker_rpc, inter_broker_rpc_timeout,
+    maybe_fanout_assignment_consensus, render_metrics, run_metrics_server,
+    run_metrics_server_until, run_server, run_txn_2pc_fanout, schedule_catch_up_peer_admin_state,
+    schedule_catch_up_peer_truncate_journal, schedule_isr_update_reports,
+    schedule_session_mirror_fanout, serve_listener, serve_listener_until, shutdown_signal,
+    start_background_tasks, BackgroundTasks, DeleteRecordsFanoutResult,
+    DEFAULT_DELETE_RECORDS_FANOUT_BUDGET_MS, DEFAULT_INTER_BROKER_RPC_TIMEOUT_MS,
+    MAX_INTER_BROKER_TIMEOUT_MS, MIN_INTER_BROKER_TIMEOUT_MS,
 };
 pub use offset_store::{OffsetStore, StoredOffset, OFFSET_UNKNOWN};

@@ -18,10 +18,11 @@ use volant_protocol::{
 };
 
 use crate::broker::{Broker, Txn2pcFanout};
-use crate::cluster::AssignmentConsensus;
+use crate::cluster::{AssignmentConsensus, MetadataCommand, MetadataLogEntry, MetadataRaftState};
 use crate::metrics::Metrics;
 use crate::replica::run_follower_loops;
 use crate::truncate_journal::TruncateJournal;
+use volant_protocol::{metadata_raft_cmd, MetadataRaftLogEntry};
 
 /// Default max wait when joining background tasks after stop is signaled.
 const BG_SHUTDOWN_TIMEOUT: Duration = Duration::from_secs(5);
@@ -948,6 +949,45 @@ fn broker_metrics_text(broker: &Broker) -> String {
     text.push_str(&format!(
         "volant_assignment_generation_lag {}\n",
         broker.assignment_generation_lag()
+    ));
+    // Phase 154: KRaft-style metadata Raft log.
+    text.push_str("# HELP volant_metadata_raft_term Metadata Raft current term\n");
+    text.push_str("# TYPE volant_metadata_raft_term gauge\n");
+    text.push_str(&format!(
+        "volant_metadata_raft_term {}\n",
+        broker.metadata_raft_term()
+    ));
+    text.push_str(
+        "# HELP volant_metadata_raft_commit_index Metadata Raft commit index\n",
+    );
+    text.push_str("# TYPE volant_metadata_raft_commit_index gauge\n");
+    text.push_str(&format!(
+        "volant_metadata_raft_commit_index {}\n",
+        broker.metadata_raft_commit_index()
+    ));
+    text.push_str(
+        "# HELP volant_metadata_raft_last_applied Metadata Raft last applied index\n",
+    );
+    text.push_str("# TYPE volant_metadata_raft_last_applied gauge\n");
+    text.push_str(&format!(
+        "volant_metadata_raft_last_applied {}\n",
+        broker.metadata_raft_last_applied()
+    ));
+    text.push_str(
+        "# HELP volant_metadata_raft_append_success_total Majority metadata Raft appends\n",
+    );
+    text.push_str("# TYPE volant_metadata_raft_append_success_total counter\n");
+    text.push_str(&format!(
+        "volant_metadata_raft_append_success_total {}\n",
+        broker.metadata_raft_append_success_total()
+    ));
+    text.push_str(
+        "# HELP volant_metadata_raft_append_fail_total Metadata Raft appends without majority\n",
+    );
+    text.push_str("# TYPE volant_metadata_raft_append_fail_total counter\n");
+    text.push_str(&format!(
+        "volant_metadata_raft_append_fail_total {}\n",
+        broker.metadata_raft_append_fail_total()
     ));
     // Phase 141: N=2 majority ops / health gauges (configured vs live).
     text.push_str(
@@ -1995,8 +2035,25 @@ pub async fn fanout_assignment_consensus(broker: &Broker) -> bool {
 /// majority consensus. Returns `None` when consensus is disabled / not needed
 /// for the client response; `Some(false)` when majority failed and either
 /// **wait** or **metadata committed-only** (Phase 152) is on.
+///
+/// Phase 154: when metadata Raft is enabled, prefers
+/// [`fanout_metadata_raft_append`] over Phase 150 notes.
 pub async fn maybe_fanout_assignment_consensus(broker: &Broker) -> Option<bool> {
-    if broker.cluster_config().is_none() || !broker.assignment_consensus_enabled() {
+    if broker.cluster_config().is_none() {
+        return None;
+    }
+    // Phase 154: prefer KRaft-style metadata log when enabled.
+    if broker.metadata_raft_enabled() {
+        let ok = fanout_metadata_raft_append(broker).await;
+        let must_wait = broker.assignment_consensus_wait()
+            || broker.assignment_metadata_committed_only();
+        return if must_wait && !ok {
+            Some(false)
+        } else {
+            Some(ok)
+        };
+    }
+    if !broker.assignment_consensus_enabled() {
         return None;
     }
     let ok = fanout_assignment_consensus(broker).await;
@@ -2009,6 +2066,198 @@ pub async fn maybe_fanout_assignment_consensus(broker: &Broker) -> Option<bool> 
     } else {
         Some(ok)
     }
+}
+
+/// Convert internal log entry to wire form.
+fn metadata_entry_to_wire(e: &MetadataLogEntry) -> MetadataRaftLogEntry {
+    match &e.payload {
+        MetadataCommand::SetAssignment { generation, topics } => MetadataRaftLogEntry {
+            term: e.term,
+            index: e.index,
+            command_kind: metadata_raft_cmd::SET_ASSIGNMENT,
+            generation: *generation,
+            topics: topics.clone(),
+        },
+        MetadataCommand::Noop => MetadataRaftLogEntry {
+            term: e.term,
+            index: e.index,
+            command_kind: metadata_raft_cmd::NOOP,
+            generation: 0,
+            topics: vec![],
+        },
+    }
+}
+
+/// Convert wire log entry to internal form.
+fn metadata_entry_from_wire(e: &MetadataRaftLogEntry) -> MetadataLogEntry {
+    let payload = match e.command_kind {
+        metadata_raft_cmd::SET_ASSIGNMENT => MetadataCommand::SetAssignment {
+            generation: e.generation,
+            topics: e.topics.clone(),
+        },
+        _ => MetadataCommand::Noop,
+    };
+    MetadataLogEntry {
+        term: e.term,
+        index: e.index,
+        payload,
+    }
+}
+
+/// Phase 154: append current assignment to the metadata Raft log and fan out
+/// AppendEntries to live peers. Advances `commit_index` only on majority
+/// match_index; then applies committed entries (and Phase 152 committed snap).
+///
+/// Returns `true` when majority of **configured N** matched the new index
+/// (self counts as 1). Single-node / no-cluster: local append+commit.
+pub async fn fanout_metadata_raft_append(broker: &Broker) -> bool {
+    if broker.cluster_config().is_none() {
+        // Single-node: append + commit + apply locally.
+        let entry = broker.append_assignment_to_metadata_log();
+        broker.metadata_raft().advance_commit(entry.index);
+        broker.metadata_raft().note_append_success();
+        broker.apply_committed_metadata_entries();
+        return true;
+    }
+    if !broker.metadata_raft_enabled() {
+        return true;
+    }
+
+    let n = broker.cluster_member_count();
+    let need = MetadataRaftState::majority(n);
+
+    // Append local log entry for current live assignment.
+    let entry = broker.append_assignment_to_metadata_log();
+    let term = entry.term;
+    let index = entry.index;
+    let prev_log_index = index.saturating_sub(1);
+    let prev_log_term = broker.metadata_raft().term_at(prev_log_index);
+    // Leader commit before this round (entry not yet committed).
+    let leader_commit = broker.metadata_raft().commit_index();
+    let wire_entries = vec![metadata_entry_to_wire(&entry)];
+
+    // Local match (leader already has the entry).
+    let mut matched = 1usize;
+    let mut match_indexes = vec![index];
+
+    let peers: Vec<(u32, String)> = broker
+        .live_brokers()
+        .into_iter()
+        .filter(|id| *id != broker.node_id())
+        .filter_map(|id| broker.broker_addr(id).map(|a| (id, a)))
+        .collect();
+
+    let auth = broker.auth_token();
+    let tls = broker.inter_broker_tls();
+    let leader_id = broker.node_id();
+    let mut set = tokio::task::JoinSet::new();
+    for (peer_id, addr) in peers {
+        let req = Request::MetadataRaftAppend {
+            leader_id,
+            term,
+            prev_log_index,
+            prev_log_term,
+            entries: wire_entries.clone(),
+            leader_commit,
+        };
+        let auth = auth.clone();
+        let tls = tls.clone();
+        set.spawn(async move {
+            let res = inter_broker_rpc_owned(&addr, &req, auth, tls).await;
+            (peer_id, res)
+        });
+    }
+
+    while let Some(joined) = set.join_next().await {
+        match joined {
+            Ok((_peer_id, Ok(Response::MetadataRaftAppend {
+                term: peer_term,
+                success,
+                match_index,
+            }))) => {
+                if peer_term > term {
+                    warn!(
+                        peer_term,
+                        term, "metadata raft append: peer has higher term"
+                    );
+                }
+                if success != 0 && match_index >= index {
+                    matched += 1;
+                    match_indexes.push(match_index);
+                }
+            }
+            Ok((peer_id, Ok(other))) => {
+                warn!(peer_id, ?other, index, "metadata raft append unexpected");
+            }
+            Ok((peer_id, Err(e))) => {
+                warn!(
+                    peer_id,
+                    error = %e,
+                    index,
+                    "metadata raft append rpc failed"
+                );
+            }
+            Err(e) => {
+                warn!(error = %e, index, "metadata raft append join error");
+            }
+        }
+    }
+
+    let majority_ok = matched >= need;
+    if majority_ok {
+        broker.metadata_raft().advance_commit(index);
+        // Heartbeat-style second pass: push updated leader_commit so peers
+        // advance commit_index and apply without waiting for the next mutation.
+        let new_commit = broker.metadata_raft().commit_index();
+        let peers2: Vec<(u32, String)> = broker
+            .live_brokers()
+            .into_iter()
+            .filter(|id| *id != broker.node_id())
+            .filter_map(|id| broker.broker_addr(id).map(|a| (id, a)))
+            .collect();
+        let auth = broker.auth_token();
+        let tls = broker.inter_broker_tls();
+        let mut set2 = tokio::task::JoinSet::new();
+        for (peer_id, addr) in peers2 {
+            let req = Request::MetadataRaftAppend {
+                leader_id,
+                term,
+                prev_log_index: index,
+                prev_log_term: term,
+                entries: vec![],
+                leader_commit: new_commit,
+            };
+            let auth = auth.clone();
+            let tls = tls.clone();
+            set2.spawn(async move {
+                let _ = inter_broker_rpc_owned(&addr, &req, auth, tls).await;
+                peer_id
+            });
+        }
+        while set2.join_next().await.is_some() {}
+
+        broker.metadata_raft().note_append_success();
+        broker.apply_committed_metadata_entries();
+        debug!(
+            matched,
+            need,
+            n,
+            index,
+            commit = new_commit,
+            "metadata raft majority append ok"
+        );
+    } else {
+        broker.metadata_raft().note_append_fail();
+        warn!(
+            matched,
+            need,
+            n,
+            index,
+            "metadata raft majority append failed (uncommitted entry retained)"
+        );
+    }
+    let _ = match_indexes;
+    majority_ok
 }
 
 /// Phase 129/130: best-effort **parallel** push of full truncate journal snapshot
@@ -3929,6 +4178,7 @@ fn authorize_request(
         | Request::FetchSessionMirrorDelete { .. }
         | Request::IsrUpdate { .. }
         | Request::AssignmentConsensusNote { .. }
+        | Request::MetadataRaftAppend { .. }
         | Request::Auth { .. }
         | Request::ScramFirst { .. }
         | Request::ScramFinal { .. } => return None,
@@ -4025,6 +4275,7 @@ fn authorize_request(
         | Request::FetchSessionMirrorDelete { .. }
         | Request::IsrUpdate { .. }
         | Request::AssignmentConsensusNote { .. }
+        | Request::MetadataRaftAppend { .. }
         | Request::Auth { .. }
         | Request::ScramFirst { .. }
         | Request::ScramFinal { .. } => true,
@@ -4117,6 +4368,11 @@ fn record_response_metrics(broker: &Broker, resp: &Response) {
         | Response::AssignmentConsensusNote { error_code, .. } => {
             if *error_code != 0 {
                 m.record_error(*error_code);
+            }
+        }
+        Response::MetadataRaftAppend { success, .. } => {
+            if *success == 0 {
+                m.record_error(ErrorCode::Unknown as u16);
             }
         }
         Response::Metadata { .. } => {}
@@ -4919,9 +5175,13 @@ async fn handle_request(broker: &Arc<Broker>, req: Request) -> Result<Response> 
                 &isr,
                 generation_hint,
             );
-            // Phase 150: best-effort assignment majority after controller ISR bump.
-            if error_code == 0 && broker.assignment_consensus_enabled() {
-                let _ = fanout_assignment_consensus(broker).await;
+            // Phase 150/154: best-effort assignment majority after controller ISR bump.
+            if error_code == 0 {
+                if broker.metadata_raft_enabled() {
+                    let _ = fanout_metadata_raft_append(broker).await;
+                } else if broker.assignment_consensus_enabled() {
+                    let _ = fanout_assignment_consensus(broker).await;
+                }
             }
             Ok(Response::IsrUpdate {
                 error_code,
@@ -4938,6 +5198,30 @@ async fn handle_request(broker: &Arc<Broker>, req: Request) -> Result<Response> 
             Ok(Response::AssignmentConsensusNote {
                 error_code,
                 generation: acked_gen,
+            })
+        }
+        Request::MetadataRaftAppend {
+            leader_id,
+            term,
+            prev_log_index,
+            prev_log_term,
+            entries,
+            leader_commit,
+        } => {
+            let internal: Vec<MetadataLogEntry> =
+                entries.iter().map(metadata_entry_from_wire).collect();
+            let (resp_term, success, match_index) = broker.handle_metadata_raft_append(
+                leader_id,
+                term,
+                prev_log_index,
+                prev_log_term,
+                &internal,
+                leader_commit,
+            );
+            Ok(Response::MetadataRaftAppend {
+                term: resp_term,
+                success: if success { 1 } else { 0 },
+                match_index,
             })
         }
         Request::KafkaTxnForward {

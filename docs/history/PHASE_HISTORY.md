@@ -1,6 +1,6 @@
 # Phase history index
 
-Ship records for **phases 0–152** (shipped). Binding core contracts are
+Ship records for **phases 0–154** (shipped). Binding core contracts are
 **[PHASE1_SPEC](../PHASE1_SPEC.md)–[PHASE6_SPEC](../PHASE6_SPEC.md)**. Living
 docs for day-to-day reading: [ops](../ops.md), [consistency](../consistency.md),
 [tuning](../tuning.md), [KAFKA_COMPAT](../KAFKA_COMPAT.md),
@@ -194,24 +194,14 @@ docs for day-to-day reading: [ops](../ops.md), [consistency](../consistency.md),
 | 150 | ✅ | Assignment generation majority consensus (opcodes 96/97; static N) | [PHASE150_SPEC.md](../PHASE150_SPEC.md) |
 | 151 | ✅ | Stream exactly-once MVP (txn produce + deferred group offsets) | [PHASE151_SPEC.md](../PHASE151_SPEC.md) |
 | 152 | ✅ | Assignment consensus depth (Metadata = committed snapshot) | [PHASE152_SPEC.md](../PHASE152_SPEC.md) |
+| 154 | ✅ | KRaft-style metadata Raft log MVP (opcodes 98/99; static N) | [PHASE154_SPEC.md](../PHASE154_SPEC.md) |
 
 ---
 
-## Still deferred (post–Phase 152)
+## Still deferred (post–Phase 154)
 
-- Full openraft / KRaft dynamic membership (assignment gen majority MVP → **closed by Phase 150**; residual: Metadata may lead committed_gen; static N only)
-- Metadata gated exclusively on `committed_generation` (150 residual)
+- Full openraft election + InstallSnapshot + dynamic membership (metadata log MVP → **closed by Phase 154**; residual: lowest-id controller, no snapshot install)
 - Full Kafka Streams EOS / 2PC durable state + offsets (stream EOS MVP → **closed by Phase 151**; residual: state not in broker txn)
-
----
-
-## Still deferred (post–Phase 152)
-
----
-
-## Still deferred (post–Phase 152)
-
-- Full openraft / KRaft dynamic membership (assignment gen majority MVP → **closed by Phase 150**; Metadata lead residual → **closed by Phase 152**; static N only)
 - ~~Metadata gated exclusively on `committed_generation` (150 residual)~~ → **closed by Phase 152**
 
 
@@ -267,6 +257,5 @@ docs for day-to-day reading: [ops](../ops.md), [consistency](../consistency.md),
 - Full Kafka preferred-replica selector / throttling (beyond 126/133/140/144; rack-aware create assignment → **closed by Phase 145**)
 - Durable stream state store (in-process) → **closed by Phase 149** (`DurableStore` / redb; not distributed workers)
 - Stream exactly-once (txn produce + group offset commit) → **closed by Phase 151** (not full KS EOS; durable state not in same txn)
-- Broker consensus / openraft → Phase 150 MVP (not full openraft; not stream state)
 - Durable stream state store (in-process) → **closed by Phase 149** (`DurableStore` / redb; not exactly-once; not distributed workers)
-- Broker consensus / openraft → sibling Phase 150 (not stream state); Metadata lead residual → **closed by Phase 152** (committed-only default)
+- Broker consensus / openraft → Phase 150 notes + Phase 154 metadata log MVP (not full openraft election; Metadata lead residual → **closed by Phase 152**)
