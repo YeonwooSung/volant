@@ -3544,6 +3544,30 @@ mirror put lag still **70**; not Raft.
 MirrorPut; full preferred selector; rollback local truncate; full openraft/KRaft;
 multi-lang; chaos/long fuzz; full KIP-890/939.
 
+### Phase 150 — Cluster assignment majority consensus (MVP) ✅
+
+**Goal:** Raft-style majority commit for assignment generations (topics /
+leaders / ISR) without full openraft/KRaft. Mirror truncate-journal Phase 130
+pattern: propose note + configured-N majority + durable committed generation.
+
+Binding: **[docs/PHASE150_SPEC.md](./docs/PHASE150_SPEC.md)**.
+
+- [x] Durable `{data_dir}/__assignment_consensus/state.json`
+- [x] Opcodes **96/97** `AssignmentConsensusNote` (ClusterState topics encoding)
+- [x] `fanout_assignment_consensus` after CreateTopic / DeleteTopic /
+  CreatePartitions (+ best-effort IsrUpdate)
+- [x] `VOLANT_ASSIGNMENT_CONSENSUS` default **on**; `_WAIT` default **off**
+- [x] Metrics `volant_assignment_consensus_{success,fail}_total` +
+  `volant_assignment_committed_generation`
+- [x] Tests `phase150_assignment_consensus` + protocol roundtrip
+
+**Honest residual:** Metadata may lead `committed_generation`; wait fail does
+not roll back local assignment; static N majority (N=2 trap); not per-partition
+Raft / dynamic membership / controller election change.
+
+**Still deferred:** full openraft/KRaft; Metadata gated on committed gen;
+dynamic membership; multi-lang; chaos/long fuzz; full KIP-890/939.
+
 
 ---
 

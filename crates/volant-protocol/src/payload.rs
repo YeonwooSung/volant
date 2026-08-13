@@ -142,6 +142,85 @@ fn get_headers(src: &mut impl Buf) -> Result<Vec<(String, Bytes)>> {
     Ok(headers)
 }
 
+/// Encode ClusterState-style topics list (shared with AssignmentConsensusNote).
+fn put_cluster_topics(dst: &mut BytesMut, topics: &[ClusterTopicState]) -> Result<()> {
+    dst.put_u32_le(topics.len() as u32);
+    for t in topics {
+        put_string(dst, &t.name)?;
+        dst.put_u32_le(t.topic_id);
+        dst.put_u32_le(t.partitions.len() as u32);
+        for p in &t.partitions {
+            dst.put_u32_le(p.partition_id);
+            dst.put_u32_le(p.leader);
+            dst.put_u32_le(p.leader_epoch);
+            dst.put_u32_le(p.replicas.len() as u32);
+            for r in &p.replicas {
+                dst.put_u32_le(*r);
+            }
+            dst.put_u32_le(p.isr.len() as u32);
+            for r in &p.isr {
+                dst.put_u32_le(*r);
+            }
+        }
+    }
+    Ok(())
+}
+
+/// Decode ClusterState-style topics list (shared with AssignmentConsensusNote).
+fn get_cluster_topics(src: &mut impl Buf) -> Result<Vec<ClusterTopicState>> {
+    if src.remaining() < 4 {
+        return Err(Error::Protocol("truncated cluster topics count".into()));
+    }
+    let topic_count = src.get_u32_le() as usize;
+    let mut topics = Vec::with_capacity(topic_count);
+    for _ in 0..topic_count {
+        let name = get_string(src)?;
+        if src.remaining() < 4 + 4 {
+            return Err(Error::Protocol("truncated cluster topic header".into()));
+        }
+        let topic_id = src.get_u32_le();
+        let part_count = src.get_u32_le() as usize;
+        let mut partitions = Vec::with_capacity(part_count);
+        for _ in 0..part_count {
+            if src.remaining() < 4 + 4 + 4 + 4 {
+                return Err(Error::Protocol("truncated cluster partition header".into()));
+            }
+            let partition_id = src.get_u32_le();
+            let leader = src.get_u32_le();
+            let leader_epoch = src.get_u32_le();
+            let replica_count = src.get_u32_le() as usize;
+            if src.remaining() < replica_count.saturating_mul(4).saturating_add(4) {
+                return Err(Error::Protocol("truncated cluster replicas".into()));
+            }
+            let mut replicas = Vec::with_capacity(replica_count);
+            for _ in 0..replica_count {
+                replicas.push(src.get_u32_le());
+            }
+            let isr_count = src.get_u32_le() as usize;
+            if src.remaining() < isr_count.saturating_mul(4) {
+                return Err(Error::Protocol("truncated cluster isr".into()));
+            }
+            let mut isr = Vec::with_capacity(isr_count);
+            for _ in 0..isr_count {
+                isr.push(src.get_u32_le());
+            }
+            partitions.push(ClusterPartitionState {
+                partition_id,
+                leader,
+                leader_epoch,
+                replicas,
+                isr,
+            });
+        }
+        topics.push(ClusterTopicState {
+            name,
+            topic_id,
+            partitions,
+        });
+    }
+    Ok(topics)
+}
+
 fn finish_payload(dst: BytesMut) -> Result<Bytes> {
     if dst.len() > MAX_PAYLOAD {
         return Err(Error::Protocol(format!(
@@ -580,6 +659,15 @@ pub fn encode_request(req: &Request) -> Result<Bytes> {
                 dst.put_u32_le(*id);
             }
             dst.put_u32_le(*generation_hint);
+        }
+        Request::AssignmentConsensusNote {
+            generation,
+            controller_id,
+            topics,
+        } => {
+            dst.put_u32_le(*generation);
+            dst.put_u32_le(*controller_id);
+            put_cluster_topics(&mut dst, topics)?;
         }
     }
     finish_payload(dst)
@@ -1243,6 +1331,21 @@ pub fn decode_request(opcode: u16, payload: &[u8]) -> Result<Request> {
                 generation_hint,
             })
         }
+        RequestOpcode::AssignmentConsensusNote => {
+            if src.remaining() < 4 + 4 + 4 {
+                return Err(Error::Protocol(
+                    "truncated assignment consensus note header".into(),
+                ));
+            }
+            let generation = src.get_u32_le();
+            let controller_id = src.get_u32_le();
+            let topics = get_cluster_topics(&mut src)?;
+            Ok(Request::AssignmentConsensusNote {
+                generation,
+                controller_id,
+                topics,
+            })
+        }
     }
 }
 
@@ -1416,25 +1519,7 @@ pub fn encode_response(resp: &Response) -> Result<Bytes> {
             dst.put_u16_le(*error_code);
             dst.put_u32_le(*generation);
             dst.put_u32_le(*controller_id);
-            dst.put_u32_le(topics.len() as u32);
-            for t in topics {
-                put_string(&mut dst, &t.name)?;
-                dst.put_u32_le(t.topic_id);
-                dst.put_u32_le(t.partitions.len() as u32);
-                for p in &t.partitions {
-                    dst.put_u32_le(p.partition_id);
-                    dst.put_u32_le(p.leader);
-                    dst.put_u32_le(p.leader_epoch);
-                    dst.put_u32_le(p.replicas.len() as u32);
-                    for r in &p.replicas {
-                        dst.put_u32_le(*r);
-                    }
-                    dst.put_u32_le(p.isr.len() as u32);
-                    for r in &p.isr {
-                        dst.put_u32_le(*r);
-                    }
-                }
-            }
+            put_cluster_topics(&mut dst, topics)?;
         }
         Response::Auth { error_code } => {
             dst.put_u16_le(*error_code);
@@ -1668,6 +1753,13 @@ pub fn encode_response(resp: &Response) -> Result<Bytes> {
             dst.put_u16_le(*error_code);
         }
         Response::IsrUpdate {
+            error_code,
+            generation,
+        } => {
+            dst.put_u16_le(*error_code);
+            dst.put_u32_le(*generation);
+        }
+        Response::AssignmentConsensusNote {
             error_code,
             generation,
         } => {
@@ -2012,62 +2104,13 @@ pub fn decode_response(opcode: u16, payload: &[u8]) -> Result<Response> {
             })
         }
         ResponseOpcode::ClusterState => {
-            if src.remaining() < 2 + 4 + 4 + 4 {
+            if src.remaining() < 2 + 4 + 4 {
                 return Err(Error::Protocol("truncated cluster state response".into()));
             }
             let error_code = src.get_u16_le();
             let generation = src.get_u32_le();
             let controller_id = src.get_u32_le();
-            let topic_count = src.get_u32_le() as usize;
-            let mut topics = Vec::with_capacity(topic_count);
-            for _ in 0..topic_count {
-                let name = get_string(&mut src)?;
-                if src.remaining() < 4 + 4 {
-                    return Err(Error::Protocol("truncated cluster topic header".into()));
-                }
-                let topic_id = src.get_u32_le();
-                let partition_count = src.get_u32_le() as usize;
-                let mut partitions = Vec::with_capacity(partition_count);
-                for _ in 0..partition_count {
-                    if src.remaining() < 4 + 4 + 4 + 4 {
-                        return Err(Error::Protocol("truncated cluster partition".into()));
-                    }
-                    let partition_id = src.get_u32_le();
-                    let leader = src.get_u32_le();
-                    let leader_epoch = src.get_u32_le();
-                    let replica_count = src.get_u32_le() as usize;
-                    let mut replicas = Vec::with_capacity(replica_count);
-                    for _ in 0..replica_count {
-                        if src.remaining() < 4 {
-                            return Err(Error::Protocol("truncated cluster replica".into()));
-                        }
-                        replicas.push(src.get_u32_le());
-                    }
-                    if src.remaining() < 4 {
-                        return Err(Error::Protocol("truncated cluster isr count".into()));
-                    }
-                    let isr_count = src.get_u32_le() as usize;
-                    let mut isr = Vec::with_capacity(isr_count);
-                    for _ in 0..isr_count {
-                        if src.remaining() < 4 {
-                            return Err(Error::Protocol("truncated cluster isr".into()));
-                        }
-                        isr.push(src.get_u32_le());
-                    }
-                    partitions.push(ClusterPartitionState {
-                        partition_id,
-                        leader,
-                        leader_epoch,
-                        replicas,
-                        isr,
-                    });
-                }
-                topics.push(ClusterTopicState {
-                    name,
-                    topic_id,
-                    partitions,
-                });
-            }
+            let topics = get_cluster_topics(&mut src)?;
             Ok(Response::ClusterState {
                 error_code,
                 generation,
@@ -2523,6 +2566,17 @@ pub fn decode_response(opcode: u16, payload: &[u8]) -> Result<Response> {
                 return Err(Error::Protocol("truncated isr update response".into()));
             }
             Ok(Response::IsrUpdate {
+                error_code: src.get_u16_le(),
+                generation: src.get_u32_le(),
+            })
+        }
+        ResponseOpcode::AssignmentConsensusNote => {
+            if src.remaining() < 2 + 4 {
+                return Err(Error::Protocol(
+                    "truncated assignment consensus note response".into(),
+                ));
+            }
+            Ok(Response::AssignmentConsensusNote {
                 error_code: src.get_u16_le(),
                 generation: src.get_u32_le(),
             })
@@ -4149,6 +4203,52 @@ mod tests {
         assert!(decode_request(RequestOpcode::FetchSessionMirrorDelete as u16, &[]).is_err());
         assert!(decode_response(ResponseOpcode::FetchSessionMirrorPut as u16, &[]).is_err());
         assert!(decode_response(ResponseOpcode::FetchSessionMirrorDelete as u16, &[]).is_err());
+    }
+
+    #[test]
+    fn phase150_assignment_consensus_note_roundtrip() {
+        let req = Request::AssignmentConsensusNote {
+            generation: 7,
+            controller_id: 1,
+            topics: vec![ClusterTopicState {
+                name: "ac".into(),
+                topic_id: 3,
+                partitions: vec![ClusterPartitionState {
+                    partition_id: 0,
+                    leader: 1,
+                    leader_epoch: 2,
+                    replicas: vec![1, 2, 3],
+                    isr: vec![1, 2],
+                }],
+            }],
+        };
+        assert_eq!(
+            req.opcode(),
+            RequestOpcode::AssignmentConsensusNote as u16
+        );
+        let bytes = encode_request(&req).unwrap();
+        assert_eq!(
+            decode_request(RequestOpcode::AssignmentConsensusNote as u16, &bytes).unwrap(),
+            req
+        );
+
+        let resp = Response::AssignmentConsensusNote {
+            error_code: 0,
+            generation: 7,
+        };
+        assert_eq!(
+            resp.opcode(),
+            ResponseOpcode::AssignmentConsensusNote as u16
+        );
+        let rb = encode_response(&resp).unwrap();
+        assert_eq!(
+            decode_response(ResponseOpcode::AssignmentConsensusNote as u16, &rb).unwrap(),
+            resp
+        );
+
+        assert!(decode_request(RequestOpcode::AssignmentConsensusNote as u16, &[]).is_err());
+        assert!(decode_response(ResponseOpcode::AssignmentConsensusNote as u16, &[]).is_err());
+        assert!(decode_response(ResponseOpcode::AssignmentConsensusNote as u16, &[0, 0]).is_err());
     }
 
     #[test]
