@@ -2,6 +2,8 @@
 
 use bytes::Bytes;
 
+use crate::response::ClusterTopicState;
+
 /// Request opcodes (Phase 2–6 wire values).
 #[repr(u16)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -98,6 +100,8 @@ pub enum RequestOpcode {
     FetchSessionMirrorDelete = 92,
     /// Non-controller leader → controller: report live ISR (Phase 142).
     IsrUpdate = 94,
+    /// Controller → peers: assignment generation majority consensus note (Phase 150).
+    AssignmentConsensusNote = 96,
 }
 
 impl RequestOpcode {
@@ -150,6 +154,7 @@ impl RequestOpcode {
             90 => Self::FetchSessionMirrorPut,
             92 => Self::FetchSessionMirrorDelete,
             94 => Self::IsrUpdate,
+            96 => Self::AssignmentConsensusNote,
             _ => return None,
         })
     }
@@ -624,6 +629,18 @@ pub enum Request {
         /// Optional local assignment generation hint (`0` = none).
         generation_hint: u32,
     },
+    /// Controller → peers: propose assignment snapshot for majority commit (Phase 150).
+    ///
+    /// Wire topics reuse [`ClusterTopicState`] encoding (same body as
+    /// ClusterState response topics). Peers apply when `generation >= local`.
+    AssignmentConsensusNote {
+        /// Assignment generation being proposed.
+        generation: u32,
+        /// Controller id proposing the snapshot.
+        controller_id: u32,
+        /// Full assignment topics (leaders / replicas / ISR).
+        topics: Vec<ClusterTopicState>,
+    },
 }
 
 impl Request {
@@ -678,6 +695,9 @@ impl Request {
                 RequestOpcode::FetchSessionMirrorDelete as u16
             }
             Self::IsrUpdate { .. } => RequestOpcode::IsrUpdate as u16,
+            Self::AssignmentConsensusNote { .. } => {
+                RequestOpcode::AssignmentConsensusNote as u16
+            }
         }
     }
 }

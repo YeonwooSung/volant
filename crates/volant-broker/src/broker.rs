@@ -23,8 +23,8 @@ use volant_storage::StorageConfig;
 
 use crate::cluster::{
     assign_replicas, elect_leader, load_assignment, reconcile_isr, save_assignment, shrink_isr,
-    shrink_isr_by_time, AssignmentSnapshot, ClusterConfig, Membership, PartitionAssignment,
-    TopicAssignment,
+    shrink_isr_by_time, AssignmentConsensus, AssignmentSnapshot, ClusterConfig, Membership,
+    PartitionAssignment, TopicAssignment,
 };
 use crate::group::GroupCoordinator;
 use crate::metrics::Metrics;
@@ -607,6 +607,15 @@ pub struct Broker {
     admin_catchup_skipped_total: AtomicU64,
     /// Phase 142: pending IsrUpdate reports (non-controller leader → controller).
     pending_isr_reports: Mutex<Vec<PendingIsrReport>>,
+    /// Phase 150: durable assignment generation consensus state.
+    assignment_consensus: AssignmentConsensus,
+    /// Phase 150: when true, admin assignment mutations fan out consensus notes.
+    /// Default **on** for configured N ≥ 2; env `VOLANT_ASSIGNMENT_CONSENSUS`.
+    assignment_consensus_enabled: AtomicBool,
+    /// Phase 150: when true, CreateTopic/DeleteTopic/CreatePartitions wait for
+    /// majority and surface `NotEnoughReplicas` on fail. Default **false**
+    /// (`VOLANT_ASSIGNMENT_CONSENSUS_WAIT`).
+    assignment_consensus_wait: AtomicBool,
 }
 
 /// One pending leader→controller ISR report (Phase 142).
@@ -735,6 +744,8 @@ impl Broker {
         let truncate_journal = TruncateJournal::open(&storage.data_dir);
         // Phase 124: durable Init-owner txn coordinator registry.
         let txn_coordinator_registry = TxnCoordinatorRegistry::open(&storage.data_dir);
+        // Phase 150: assignment generation consensus (single-node majority=1).
+        let assignment_consensus = AssignmentConsensus::open(&storage.data_dir);
         let broker = Self {
             storage,
             topics: RwLock::new(HashMap::new()),
@@ -812,6 +823,12 @@ impl Broker {
             admin_catchup: Mutex::new(AdminCatchupState::default()),
             admin_catchup_skipped_total: AtomicU64::new(0),
             pending_isr_reports: Mutex::new(Vec::new()),
+            assignment_consensus,
+            // Single-node: consensus enabled (trivial majority 1) unless env off.
+            assignment_consensus_enabled: AtomicBool::new(
+                default_assignment_consensus_enabled(1),
+            ),
+            assignment_consensus_wait: AtomicBool::new(default_assignment_consensus_wait()),
         };
         broker
             .reload_single_node_topics()
@@ -855,6 +872,7 @@ impl Broker {
             .unwrap_or(0)
             .saturating_add(1);
         let membership = Membership::new(node_id, config.session_timeout_ms, &config.broker_ids());
+        let n_configured = config.brokers.len().max(1);
         let data_dir = storage.data_dir.clone();
         let cluster = Arc::new(ClusterState {
             config,
@@ -885,6 +903,8 @@ impl Broker {
         let truncate_journal = TruncateJournal::open(&storage.data_dir);
         // Phase 124: durable Init-owner txn coordinator registry.
         let txn_coordinator_registry = TxnCoordinatorRegistry::open(&storage.data_dir);
+        // Phase 150: assignment generation consensus.
+        let assignment_consensus = AssignmentConsensus::open(&storage.data_dir);
         let broker = Self {
             storage,
             topics: RwLock::new(HashMap::new()),
@@ -962,6 +982,11 @@ impl Broker {
             admin_catchup: Mutex::new(AdminCatchupState::default()),
             admin_catchup_skipped_total: AtomicU64::new(0),
             pending_isr_reports: Mutex::new(Vec::new()),
+            assignment_consensus,
+            assignment_consensus_enabled: AtomicBool::new(
+                default_assignment_consensus_enabled(n_configured),
+            ),
+            assignment_consensus_wait: AtomicBool::new(default_assignment_consensus_wait()),
         };
         // Open local partitions from persisted assignment.
         broker.apply_local_assignment()?;
@@ -1228,6 +1253,80 @@ impl Broker {
     /// Phase 130: majority consensus success count.
     pub fn truncate_journal_consensus_success_total(&self) -> u64 {
         self.truncate_journal.consensus_success_total()
+    }
+
+    /// Phase 150: assignment consensus state.
+    pub fn assignment_consensus(&self) -> &AssignmentConsensus {
+        &self.assignment_consensus
+    }
+
+    /// Phase 150: last majority-committed assignment generation.
+    pub fn assignment_committed_generation(&self) -> u32 {
+        self.assignment_consensus.committed_generation()
+    }
+
+    /// Phase 150: majority assignment commit success count.
+    pub fn assignment_consensus_success_total(&self) -> u64 {
+        self.assignment_consensus.success_total()
+    }
+
+    /// Phase 150: majority assignment commit failure count.
+    pub fn assignment_consensus_fail_total(&self) -> u64 {
+        self.assignment_consensus.fail_total()
+    }
+
+    /// Phase 150: whether admin paths fan out assignment consensus notes.
+    pub fn assignment_consensus_enabled(&self) -> bool {
+        self.assignment_consensus_enabled.load(Ordering::Relaxed)
+    }
+
+    /// Phase 150: runtime toggle for tests / ops.
+    pub fn set_assignment_consensus_enabled(&self, enabled: bool) {
+        self.assignment_consensus_enabled
+            .store(enabled, Ordering::Relaxed);
+    }
+
+    /// Phase 150: whether CreateTopic/etc. wait for majority before client ok.
+    pub fn assignment_consensus_wait(&self) -> bool {
+        self.assignment_consensus_wait.load(Ordering::Relaxed)
+    }
+
+    /// Phase 150: runtime toggle for tests (`set_assignment_consensus_wait(true)`).
+    pub fn set_assignment_consensus_wait(&self, wait: bool) {
+        self.assignment_consensus_wait
+            .store(wait, Ordering::Relaxed);
+    }
+
+    /// Phase 150: handle peer `AssignmentConsensusNote` — apply snapshot when
+    /// `generation >= local`, return acked generation.
+    pub fn handle_assignment_consensus_note(
+        &self,
+        generation: u32,
+        controller_id: u32,
+        topics: &[ClusterTopicState],
+    ) -> (u16, u32) {
+        if self.cluster.is_none() {
+            // Single-node: accept and commit locally.
+            self.assignment_consensus.commit(generation);
+            return (0, generation);
+        }
+        match self.apply_cluster_state(generation, controller_id, topics) {
+            Ok(()) => {
+                // Peer applied (or ignored stale). Ack the proposed generation
+                // so the controller can count majority; durable commit is
+                // controller-side only after majority.
+                let local = self.generation();
+                (0, local.max(generation))
+            }
+            Err(e) => {
+                warn!(
+                    error = %e,
+                    generation,
+                    "assignment consensus note apply failed"
+                );
+                (ErrorCode::Unknown as u16, self.generation())
+            }
+        }
     }
 
     /// Phase 130: majority consensus failure count.
@@ -7535,6 +7634,35 @@ fn default_preferred_replica_max_leo_lag() -> u64 {
 /// (case-insensitive); unset / anything else → **false** (default best-effort).
 fn default_delete_records_wait_majority() -> bool {
     match std::env::var("VOLANT_DELETE_RECORDS_WAIT_MAJORITY") {
+        Ok(s) => {
+            let t = s.trim();
+            t == "1" || t.eq_ignore_ascii_case("true") || t.eq_ignore_ascii_case("yes")
+        }
+        Err(_) => false,
+    }
+}
+
+/// Phase 150: `VOLANT_ASSIGNMENT_CONSENSUS` — explicit off/on; else default **on**
+/// for configured membership size `n >= 1` (N=1 trivial majority; N≥2 product).
+fn default_assignment_consensus_enabled(n: usize) -> bool {
+    match std::env::var("VOLANT_ASSIGNMENT_CONSENSUS") {
+        Ok(s) => {
+            let t = s.trim();
+            if t == "0" || t.eq_ignore_ascii_case("false") || t.eq_ignore_ascii_case("no") {
+                return false;
+            }
+            if t == "1" || t.eq_ignore_ascii_case("true") || t.eq_ignore_ascii_case("yes") {
+                return true;
+            }
+            n >= 2
+        }
+        Err(_) => true, // default on (including N=1 trivial)
+    }
+}
+
+/// Phase 150: `VOLANT_ASSIGNMENT_CONSENSUS_WAIT` default **false** (best-effort).
+fn default_assignment_consensus_wait() -> bool {
+    match std::env::var("VOLANT_ASSIGNMENT_CONSENSUS_WAIT") {
         Ok(s) => {
             let t = s.trim();
             t == "1" || t.eq_ignore_ascii_case("true") || t.eq_ignore_ascii_case("yes")

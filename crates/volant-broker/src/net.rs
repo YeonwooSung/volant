@@ -18,6 +18,7 @@ use volant_protocol::{
 };
 
 use crate::broker::{Broker, Txn2pcFanout};
+use crate::cluster::AssignmentConsensus;
 use crate::metrics::Metrics;
 use crate::replica::run_follower_loops;
 use crate::truncate_journal::TruncateJournal;
@@ -901,6 +902,31 @@ fn broker_metrics_text(broker: &Broker) -> String {
     text.push_str(&format!(
         "volant_truncate_journal_consensus_fail_total {}\n",
         broker.truncate_journal_consensus_fail_total()
+    ));
+    // Phase 150: assignment generation majority consensus.
+    text.push_str(
+        "# HELP volant_assignment_consensus_success_total Majority assignment commits\n",
+    );
+    text.push_str("# TYPE volant_assignment_consensus_success_total counter\n");
+    text.push_str(&format!(
+        "volant_assignment_consensus_success_total {}\n",
+        broker.assignment_consensus_success_total()
+    ));
+    text.push_str(
+        "# HELP volant_assignment_consensus_fail_total Assignment proposals without majority\n",
+    );
+    text.push_str("# TYPE volant_assignment_consensus_fail_total counter\n");
+    text.push_str(&format!(
+        "volant_assignment_consensus_fail_total {}\n",
+        broker.assignment_consensus_fail_total()
+    ));
+    text.push_str(
+        "# HELP volant_assignment_committed_generation Last majority-committed assignment generation\n",
+    );
+    text.push_str("# TYPE volant_assignment_committed_generation gauge\n");
+    text.push_str(&format!(
+        "volant_assignment_committed_generation {}\n",
+        broker.assignment_committed_generation()
     ));
     // Phase 141: N=2 majority ops / health gauges (configured vs live).
     text.push_str(
@@ -1823,6 +1849,131 @@ pub async fn fanout_truncate_journal_note(
         .collect();
     fanout_truncate_journal_push_to(broker, max_gen.max(local_gen), push_peers).await;
     majority_ok
+}
+
+/// Phase 150: majority assignment consensus note fan-out.
+///
+/// 1. Local ack (controller already has assignment) + set pending generation.
+/// 2. Parallel `AssignmentConsensusNote` to live peers with full wire topics.
+/// 3. Peer applies via `apply_cluster_state` when generation ≥ local.
+/// 4. Majority of **configured N** → durable `committed_generation` + success
+///    metric; else fail metric (local assignment retained — best-effort).
+///
+/// Returns `true` when there is **no cluster**, consensus is **disabled**, or
+/// acks ≥ majority(configured N). Client wait is gated by
+/// [`Broker::assignment_consensus_wait`] (default off).
+pub async fn fanout_assignment_consensus(broker: &Broker) -> bool {
+    if broker.cluster_config().is_none() {
+        // Single-node: trivial majority 1 — mark local gen committed.
+        let gen = broker.generation();
+        broker.assignment_consensus().commit(gen.max(0));
+        return true;
+    }
+    if !broker.assignment_consensus_enabled() {
+        return true;
+    }
+
+    let n = broker.cluster_member_count();
+    let need = AssignmentConsensus::majority(n);
+    let (error, generation, controller_id, topics) = broker.cluster_state_snapshot();
+    let _ = error;
+    broker.assignment_consensus().set_pending(generation);
+
+    // Local ack (controller already holds the assignment).
+    let mut acks = 1usize;
+
+    let peers: Vec<(u32, String)> = broker
+        .live_brokers()
+        .into_iter()
+        .filter(|id| *id != broker.node_id())
+        .filter_map(|id| broker.broker_addr(id).map(|a| (id, a)))
+        .collect();
+
+    let auth = broker.auth_token();
+    let tls = broker.inter_broker_tls();
+    let mut set = tokio::task::JoinSet::new();
+    for (peer_id, addr) in peers {
+        let req = Request::AssignmentConsensusNote {
+            generation,
+            controller_id,
+            topics: topics.clone(),
+        };
+        let auth = auth.clone();
+        let tls = tls.clone();
+        set.spawn(async move {
+            let res = inter_broker_rpc_owned(&addr, &req, auth, tls).await;
+            (peer_id, res)
+        });
+    }
+
+    while let Some(joined) = set.join_next().await {
+        match joined {
+            Ok((_peer_id, Ok(Response::AssignmentConsensusNote {
+                error_code: 0,
+                generation: _,
+            }))) => {
+                acks += 1;
+            }
+            Ok((peer_id, Ok(Response::AssignmentConsensusNote { error_code, .. }))) => {
+                warn!(
+                    peer_id,
+                    error_code, generation, "assignment consensus note peer error"
+                );
+            }
+            Ok((peer_id, Ok(other))) => {
+                warn!(peer_id, ?other, generation, "assignment consensus unexpected");
+            }
+            Ok((peer_id, Err(e))) => {
+                warn!(
+                    peer_id,
+                    error = %e,
+                    generation,
+                    "assignment consensus note rpc failed"
+                );
+            }
+            Err(e) => {
+                warn!(error = %e, generation, "assignment consensus join error");
+            }
+        }
+    }
+
+    let majority_ok = acks >= need;
+    if majority_ok {
+        broker.assignment_consensus().commit(generation);
+        debug!(
+            acks,
+            need,
+            n,
+            generation,
+            "assignment majority consensus ok"
+        );
+    } else {
+        broker.assignment_consensus().note_fail();
+        warn!(
+            acks,
+            need,
+            n,
+            generation,
+            "assignment majority consensus failed (local assignment retained)"
+        );
+    }
+    majority_ok
+}
+
+/// After a successful controller assignment mutation: best-effort (or wait)
+/// majority consensus. Returns `None` when consensus is disabled / not needed
+/// for the client response; `Some(false)` only when **wait** is on and majority
+/// failed.
+pub async fn maybe_fanout_assignment_consensus(broker: &Broker) -> Option<bool> {
+    if broker.cluster_config().is_none() || !broker.assignment_consensus_enabled() {
+        return None;
+    }
+    let ok = fanout_assignment_consensus(broker).await;
+    if broker.assignment_consensus_wait() && !ok {
+        Some(false)
+    } else {
+        Some(ok)
+    }
 }
 
 /// Phase 129/130: best-effort **parallel** push of full truncate journal snapshot
@@ -3742,6 +3893,7 @@ fn authorize_request(
         | Request::FetchSessionMirrorPut { .. }
         | Request::FetchSessionMirrorDelete { .. }
         | Request::IsrUpdate { .. }
+        | Request::AssignmentConsensusNote { .. }
         | Request::Auth { .. }
         | Request::ScramFirst { .. }
         | Request::ScramFinal { .. } => return None,
@@ -3837,6 +3989,7 @@ fn authorize_request(
         | Request::FetchSessionMirrorPut { .. }
         | Request::FetchSessionMirrorDelete { .. }
         | Request::IsrUpdate { .. }
+        | Request::AssignmentConsensusNote { .. }
         | Request::Auth { .. }
         | Request::ScramFirst { .. }
         | Request::ScramFinal { .. } => true,
@@ -3925,7 +4078,8 @@ fn record_response_metrics(broker: &Broker, resp: &Response) {
         | Response::TruncateJournalPush { error_code }
         | Response::FetchSessionMirrorPut { error_code }
         | Response::FetchSessionMirrorDelete { error_code }
-        | Response::IsrUpdate { error_code, .. } => {
+        | Response::IsrUpdate { error_code, .. }
+        | Response::AssignmentConsensusNote { error_code, .. } => {
             if *error_code != 0 {
                 m.record_error(*error_code);
             }
@@ -3956,12 +4110,23 @@ async fn handle_request(broker: &Arc<Broker>, req: Request) -> Result<Response> 
             }
             let topic = TopicName::new(name.clone());
             match broker.create_topic_with_configs(topic, partitions, &configs) {
-                Ok(id) => Ok(Response::CreateTopic {
-                    topic_id: id.0,
-                    name,
-                    partitions,
-                    error_code: 0,
-                }),
+                Ok(id) => {
+                    // Phase 150: best-effort (or wait) assignment majority.
+                    if maybe_fanout_assignment_consensus(broker).await == Some(false) {
+                        return Ok(Response::Error {
+                            code: ErrorCode::NotEnoughReplicas as u16,
+                            message: format!(
+                                "assignment consensus majority failed for create topic {name}"
+                            ),
+                        });
+                    }
+                    Ok(Response::CreateTopic {
+                        topic_id: id.0,
+                        name,
+                        partitions,
+                        error_code: 0,
+                    })
+                }
                 Err(e) => {
                     // Surface NotController-style messages.
                     if e.to_string().contains("not controller") {
@@ -3978,6 +4143,14 @@ async fn handle_request(broker: &Arc<Broker>, req: Request) -> Result<Response> 
         Request::DeleteTopic { name } => {
             let topic = TopicName::new(name.clone());
             broker.delete_topic(&topic)?;
+            if maybe_fanout_assignment_consensus(broker).await == Some(false) {
+                return Ok(Response::Error {
+                    code: ErrorCode::NotEnoughReplicas as u16,
+                    message: format!(
+                        "assignment consensus majority failed for delete topic {name}"
+                    ),
+                });
+            }
             Ok(Response::DeleteTopic {
                 name,
                 error_code: 0,
@@ -4711,9 +4884,25 @@ async fn handle_request(broker: &Arc<Broker>, req: Request) -> Result<Response> 
                 &isr,
                 generation_hint,
             );
+            // Phase 150: best-effort assignment majority after controller ISR bump.
+            if error_code == 0 && broker.assignment_consensus_enabled() {
+                let _ = fanout_assignment_consensus(broker).await;
+            }
             Ok(Response::IsrUpdate {
                 error_code,
                 generation,
+            })
+        }
+        Request::AssignmentConsensusNote {
+            generation,
+            controller_id,
+            topics,
+        } => {
+            let (error_code, acked_gen) =
+                broker.handle_assignment_consensus_note(generation, controller_id, &topics);
+            Ok(Response::AssignmentConsensusNote {
+                error_code,
+                generation: acked_gen,
             })
         }
         Request::KafkaTxnForward {
@@ -4988,11 +5177,20 @@ async fn handle_request(broker: &Arc<Broker>, req: Request) -> Result<Response> 
             topic,
             total_count,
         } => match broker.create_partitions(&topic, total_count) {
-            Ok(partitions) => Ok(Response::CreatePartitions {
-                error_code: 0,
-                topic,
-                partitions,
-            }),
+            Ok(partitions) => {
+                if maybe_fanout_assignment_consensus(broker).await == Some(false) {
+                    return Ok(Response::CreatePartitions {
+                        error_code: ErrorCode::NotEnoughReplicas as u16,
+                        topic,
+                        partitions: 0,
+                    });
+                }
+                Ok(Response::CreatePartitions {
+                    error_code: 0,
+                    topic,
+                    partitions,
+                })
+            }
             Err(Error::NotFound(_)) => Ok(Response::CreatePartitions {
                 error_code: ErrorCode::NotFound as u16,
                 topic,

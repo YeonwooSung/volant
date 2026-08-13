@@ -1,51 +1,41 @@
 # Volant residual TODO (review loop)
 
-**Baseline:** HEAD product = **Phases 0–149** shipped (all prior P2 + P3 MVPs).  
+**Baseline:** HEAD product = **Phases 0–150** shipped (durable stream state + assignment majority consensus).  
 **Last review:** 2026-08-13  
 
-Living roadmap: [ROADMAP.md](./ROADMAP.md) (Phases **0–149 shipped**).  
-Recent specs: [PHASE149](./docs/PHASE149_SPEC.md) · [PHASE148](./docs/PHASE148_SPEC.md) · [PHASE147](./docs/PHASE147_SPEC.md) · [PHASE146](./docs/PHASE146_SPEC.md).
+Living roadmap: [ROADMAP.md](./ROADMAP.md) (Phases **0–150 shipped**).  
+Recent specs: [PHASE150](./docs/PHASE150_SPEC.md) · [PHASE149](./docs/PHASE149_SPEC.md) · [PHASE148](./docs/PHASE148_SPEC.md) · [PHASE147](./docs/PHASE147_SPEC.md).
 
 ---
 
-## Shipped recently (P3)
+## Shipped recently
+
+### Phase 150 — Assignment majority consensus (MVP)
+- [x] Opcodes **96/97** `AssignmentConsensusNote`; configured-N majority
+- [x] Durable `__assignment_consensus/state.json` committed/pending gen
+- [x] Fan-out after create/delete topic / create partitions (+ IsrUpdate best-effort)
+- [x] Env `VOLANT_ASSIGNMENT_CONSENSUS` (default on) / `_WAIT` (default off)
+- [x] Metrics success/fail + committed_generation gauge
+- [x] Tests `phase150_assignment_consensus`
+- **Honesty:** not full openraft/KRaft; Metadata may lead committed_gen; static membership
 
 ### Phase 149 — Durable stream state store
-- [x] `DurableStore` (redb) implements `KeyValueStore`; survives restart
-- [x] `count_reduce_durable` / `count_reduce_with_store`; `StreamBuilder::state_dir`
-- [x] Tests `phase149_durable_state` + MemoryStore regression
-- [x] Honesty: durable state ≠ exactly-once; consensus left to sibling (150)
+- [x] `DurableStore` via **redb** (`KeyValueStore`); Immediate commit durability
+- [x] `count_reduce_durable` / `StreamBuilder::state_dir` + `reduce_count_durable`
+- [x] Tests `phase149_durable_state` (CRUD, restart, reduce)
+- **Honesty:** durable state ≠ exactly-once; at-least-once runtime unchanged
 
-### Phase 148 — Defer local truncate until journal majority
-- [x] Wait-on: majority note **before** local truncate; fail → log unchanged
-- [x] Wait-off: local-first unchanged
-- [x] Tests `phase148_defer_truncate_majority` + phase135/137
-
-### Phase 147 — Serve-from-mirror without promote
-- [x] Owner miss + mirror → serve without `promote_from_mirror` (default)
-- [x] `VOLANT_FETCH_SESSION_PROMOTE_ON_MISS=1` restores promote path
-- [x] Metric `volant_fetch_session_serve_from_mirror_total`
-- [x] Tests `phase147_serve_from_mirror`
-
-### Phase 146 — Incremental/delta MirrorPut
-- [x] JSON `mode=full|delta` + `remove_topic_keys`; opcode 90 unchanged
-- [x] Fan-out prefers delta via `last_mirrored` cache
-- [x] Metric `volant_fetch_session_mirror_delta_puts_total`
-- [x] Tests `phase146_mirror_put_delta`
-
-### Phase 145 — Rack-aware partition assignment
-- [x] Multi-rack diversity on create; env `VOLANT_RACK_AWARE_ASSIGNMENT` (default on)
-- [x] Metric `volant_rack_aware_assignment_total`
-- [x] Tests `phase145_rack_aware_assignment`
+### Phases 145–148 (P3)
+- [x] Rack-aware assignment; delta MirrorPut; serve-from-mirror; defer truncate wait
 
 ### Phases 141–144 (P2)
-- [x] N=2 majority gauges; Metadata ISR; promote claim fence; preferred×session suppress
+- [x] Majority gauges; Metadata ISR; promote claim; preferred×session suppress
 
 ---
 
-## P1 / P2 / P3 residual
+## P1 / P2 / listed-P3 residual
 
-_(none open for the prior P3 list)_
+_(none open)_
 
 ---
 
@@ -53,16 +43,13 @@ _(none open for the prior P3 list)_
 
 | Pri | Item | Notes |
 |----:|------|-------|
-| Later | Broker consensus (sibling 150) | Not stream state |
-| Later | Exactly-once stream processing | Durable state ≠ EOS |
-| Later | Full preferred throttling / TCP probe | Beyond 145 assignment |
-| Later | Dual-epoch mirror SoT / Raft session registry | 147 residual |
-| Later | Wait-off truncate rollback / Raft truncate log | 148 residual wait-off path |
-| Later | Full openraft / KRaft metadata | Product bet |
-| Later | Full KIP-890 / `__transaction_state` | Product bet |
+| Later | Full openraft / KRaft metadata + dynamic membership | Beyond 150 majority notes |
+| Later | Exactly-once streams / transactional sinks | Beyond durable state |
+| Later | Durable window buckets | Phase 149 is reduce KV only |
+| Later | Full KIP-890 / `__transaction_state` | Txn depth |
 | Later | Multi-language clients | Ecosystem |
-| Later | Long fuzz + chaos-mesh | Phase 112 is smoke only |
-| Later | Perf campaign vs aspirational targets | Publish numbers |
+| Later | Long fuzz + chaos-mesh | Phase 112 smoke only |
+| Later | Perf campaign | Publish numbers |
 
 ---
 
@@ -70,11 +57,8 @@ _(none open for the prior P3 list)_
 
 | Area | Verdict |
 |------|---------|
-| Phase 149 | **Shipped** — redb durable stream KV; consensus deferred |
-| Phase 148 | **Shipped** — wait mode majority-first |
-| Phase 147 | **Shipped** — serve mirror without promote (default) |
-| Phase 146 | **Shipped** — delta MirrorPut wire |
-| Phase 145 | **Shipped** — rack-aware create assignment |
-| P0–P3 (listed) | **None open** |
+| Phase 150 | **Shipped** — assignment majority consensus MVP |
+| Phase 149 | **Shipped** — redb durable stream KV |
+| P0–P3 listed | **None open** |
 
-**Default next slice:** product bet (consensus / Raft / multi-lang) or hardening (chaos/perf).
+**Default next slice:** exactly-once streams, full openraft, multi-lang, or hardening (chaos/perf).

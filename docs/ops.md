@@ -51,6 +51,8 @@ Key series (prefix `volant_`):
 - `volant_preferred_replica_suppressed_total` (Phase 140: READ_COMMITTED suppress when a preferred candidate existed)
 - `volant_preferred_replica_session_suppressed_total` (Phase 144: preferred suppress when client has established fetch session)
 - `volant_rack_aware_assignment_total` (Phase 145: create/create-partitions used multi-rack diversity placement)
+- `volant_assignment_consensus_success_total` / `_fail_total` (Phase 150: assignment generation majority commits / misses)
+- `volant_assignment_committed_generation` (Phase 150: last majority-committed assignment gen gauge)
 - `volant_txn_forward_total` / `volant_txn_forward_errors_total` (Phase 120/122 Kafka txn API forward: EndTxn / AddOffsets / TxnOffsetCommit)
 - `volant_txn_coordinator_registry_restored` / `volant_txn_coordinator_registry_persist_errors_total` (Phase 124 durable Init-owner registry)
 - `volant_txn_coordinator_registry_gc_total` (Phase 127 registry TTL GC drops)
@@ -367,8 +369,16 @@ specs. Ops-critical notes only:
 | ACLs | `--acl-enable`; durable `__acls/acls.json`; User resource is Kafka admin store-only; **cluster:** Create/Delete controller-only + snapshot fan-out (Phase 113) + rejoin catch-up (Phase 117) + **non-blocking admin catch-up** (Phase 136) |
 | Compaction | `cleanup.policy=compact` on **sealed** segments; empty value = tombstone |
 
-**Cluster sharp edges:** Truncate-journal majority (Phase 130) and Phase 135/137/148
-wait mode use **configured N** (`floor(N/2)+1`), not live-only. For **N=2**, majority
+**Assignment consensus (Phase 150):** controller assignment mutations fan out
+`AssignmentConsensusNote` (opcodes 96/97) when `VOLANT_ASSIGNMENT_CONSENSUS` is
+on (default). Majority = configured N same as journal. Optional client wait
+`VOLANT_ASSIGNMENT_CONSENSUS_WAIT` (default off) → native **15** on majority
+miss; local create/delete is **not** rolled back. Metadata may lead
+`volant_assignment_committed_generation` until majority. Not full KRaft.
+
+**Cluster sharp edges:** Truncate-journal majority (Phase 130), assignment
+majority (Phase 150), and Phase 135/137/148 wait mode use **configured N**
+(`floor(N/2)+1`), not live-only. For **N=2**, majority
 is 2 — one peer down → permanent journal majority fail (`consensus_fail` / wait
 `NotEnoughReplicas`). **Phase 148:** wait-on fail does **not** truncate local log
 (provisional journal rolled back); wait-off still local-first. Prefer **odd N (3+)**

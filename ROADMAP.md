@@ -3375,7 +3375,7 @@ Binding: **[docs/PHASE140_SPEC.md](./docs/PHASE140_SPEC.md)**.
 - [x] Metric `volant_preferred_replica_suppressed_total` when READ_COMMITTED
   suppresses an otherwise-valid preferred candidate
 - [x] Tests `phase140_preferred_selector` (multi-rack, lag, dead, RC suppress)
-- [x] Living docs 0–140 + KAFKA_COMPAT honesty (126+133+140)
+- [x] Living docs 0–150 + KAFKA_COMPAT honesty (126+133+140)
 
 **Honest limitations:** not full Kafka selector/throttling; no TCP probe; no
 rack-aware partition assignment; preferred still orthogonal to session mirror
@@ -3566,6 +3566,30 @@ mirror put lag still **70**; not Raft.
 MirrorPut; full preferred selector; rollback local truncate; full openraft/KRaft;
 multi-lang; chaos/long fuzz; full KIP-890/939.
 
+### Phase 150 — Cluster assignment majority consensus (MVP) ✅
+
+**Goal:** Raft-style majority commit for assignment generations (topics /
+leaders / ISR) without full openraft/KRaft. Mirror truncate-journal Phase 130
+pattern: propose note + configured-N majority + durable committed generation.
+
+Binding: **[docs/PHASE150_SPEC.md](./docs/PHASE150_SPEC.md)**.
+
+- [x] Durable `{data_dir}/__assignment_consensus/state.json`
+- [x] Opcodes **96/97** `AssignmentConsensusNote` (ClusterState topics encoding)
+- [x] `fanout_assignment_consensus` after CreateTopic / DeleteTopic /
+  CreatePartitions (+ best-effort IsrUpdate)
+- [x] `VOLANT_ASSIGNMENT_CONSENSUS` default **on**; `_WAIT` default **off**
+- [x] Metrics `volant_assignment_consensus_{success,fail}_total` +
+  `volant_assignment_committed_generation`
+- [x] Tests `phase150_assignment_consensus` + protocol roundtrip
+
+**Honest residual:** Metadata may lead `committed_generation`; wait fail does
+not roll back local assignment; static N majority (N=2 trap); not per-partition
+Raft / dynamic membership / controller election change.
+
+**Still deferred:** full openraft/KRaft; Metadata gated on committed gen;
+dynamic membership; multi-lang; chaos/long fuzz; full KIP-890/939.
+
 
 ---
 
@@ -3604,8 +3628,8 @@ marker clip 111; fuzz corpus smoke CI 112; cluster admin fan-out 113) — see
 
 ## Suggested implementation order (PRs)
 
-Phases **0–145 are shipped**. Historical PR order for the core:
-Phases **0–147 are shipped**. Historical PR order for the core:
+Phases **0–150 are shipped**. Historical PR order for the core:
+Phases **0–150 are shipped**. Historical PR order for the core:
 
 1. Phase 1 segment format + unit tests  
 2. Phase 1 recovery + retention  

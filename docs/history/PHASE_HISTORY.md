@@ -1,6 +1,7 @@
 # Phase history index
 
 Ship records for **phases 0–149** (shipped). Binding core contracts are
+Ship records for **phases 0–150** (shipped). Binding core contracts are
 **[PHASE1_SPEC](../PHASE1_SPEC.md)–[PHASE6_SPEC](../PHASE6_SPEC.md)**. Living
 docs for day-to-day reading: [ops](../ops.md), [consistency](../consistency.md),
 [tuning](../tuning.md), [KAFKA_COMPAT](../KAFKA_COMPAT.md),
@@ -191,10 +192,18 @@ docs for day-to-day reading: [ops](../ops.md), [consistency](../consistency.md),
 | 147 | ✅ | Serve-from-mirror without promote (owner miss; dual-epoch residual) | [PHASE147_SPEC.md](../PHASE147_SPEC.md) |
 | 148 | ✅ | Defer local DeleteRecords truncate until journal majority (wait mode) | [PHASE148_SPEC.md](../PHASE148_SPEC.md) |
 | 149 | ✅ | Durable stream state store (`DurableStore` / redb; not exactly-once) | [PHASE149_SPEC.md](../PHASE149_SPEC.md) |
+| 150 | ✅ | Assignment generation majority consensus (opcodes 96/97; static N) | [PHASE150_SPEC.md](../PHASE150_SPEC.md) |
 
 ---
 
-## Still deferred (post–Phase 149)
+## Still deferred (post–Phase 150)
+
+- Full openraft / KRaft dynamic membership (assignment gen majority MVP → **closed by Phase 150**; residual: Metadata may lead committed_gen; static N only)
+- Metadata gated exclusively on `committed_generation` (150 residual)
+
+---
+
+## Still deferred (post–Phase 150)
 
 
 - Multi-language clients

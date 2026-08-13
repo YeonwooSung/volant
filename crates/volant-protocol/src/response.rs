@@ -98,6 +98,8 @@ pub enum ResponseOpcode {
     FetchSessionMirrorDelete = 93,
     /// ISR update result (Phase 142).
     IsrUpdate = 95,
+    /// Assignment consensus note result (Phase 150).
+    AssignmentConsensusNote = 97,
     /// Error response.
     Error = 0xFFFF,
 }
@@ -152,6 +154,7 @@ impl ResponseOpcode {
             91 => Self::FetchSessionMirrorPut,
             93 => Self::FetchSessionMirrorDelete,
             95 => Self::IsrUpdate,
+            97 => Self::AssignmentConsensusNote,
             0xFFFF => Self::Error,
             _ => return None,
         })
@@ -758,6 +761,13 @@ pub enum Response {
         /// Controller assignment generation after apply (unchanged on reject).
         generation: u32,
     },
+    /// Assignment consensus note result (Phase 150).
+    AssignmentConsensusNote {
+        /// 0 = ok.
+        error_code: u16,
+        /// Assignment generation applied / acked by the peer.
+        generation: u32,
+    },
     /// Error response.
     Error {
         /// Error code.
@@ -843,6 +853,9 @@ impl Response {
                 ResponseOpcode::FetchSessionMirrorDelete as u16
             }
             Self::IsrUpdate { .. } => ResponseOpcode::IsrUpdate as u16,
+            Self::AssignmentConsensusNote { .. } => {
+                ResponseOpcode::AssignmentConsensusNote as u16
+            }
             Self::Error { .. } => ResponseOpcode::Error as u16,
         }
     }
