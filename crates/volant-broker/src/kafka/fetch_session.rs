@@ -1,6 +1,6 @@
 //! Fetch session state (Phase 88 + 91 omit-unchanged + Phase 95 limits + Phase 115 durable
 //! + Phase 119 multi-broker owner encoding / handoff + Phase 138 peer mirror + Phase 139
-//! mirror polish).
+//! mirror polish + Phase 143 promote claim fence).
 //!
 //! Tracks topic partitions, last-seen fetch params, last-returned HWM/LSO (Phase 91),
 //! idle TTL / max concurrent sessions with lazy LRU eviction (Phase 95), and optional
@@ -15,6 +15,9 @@
 //! slot per session), Puts may be debounced, Deletes flush immediately, and
 //! `mirror_gen` fences stale applies / promote supersede. Optional durable mirrors
 //! live under `{data_dir}/__fetch_session_mirrors/state.json`.
+//!
+//! Phase 143: `promoted_by` lowest-id claim fence breaks dual-promote ties when two
+//! peers promote the same equal-freshness snapshot; claim travels in MirrorPut JSON.
 
 use std::collections::HashMap;
 use std::fs::{self, File, OpenOptions};
@@ -80,6 +83,28 @@ pub fn session_is_newer(a: &FetchSession, b: &FetchSession) -> bool {
         return a.epoch > b.epoch;
     }
     a.last_activity_ms > b.last_activity_ms
+}
+
+/// Whether `incoming` should replace `existing` as source of truth (Phase 139 + 143).
+///
+/// 1. Strictly newer by [`session_is_newer`] (`mirror_gen` / epoch / activity) wins.
+/// 2. Strictly older loses.
+/// 3. Equal freshness: lowest non-zero `promoted_by` wins (claim fence). Unclaimed
+///    (`0`) keeps existing on a pure tie; claimed equal-fresh beats unclaimed.
+pub fn session_claim_wins(incoming: &FetchSession, existing: &FetchSession) -> bool {
+    if session_is_newer(incoming, existing) {
+        return true;
+    }
+    if session_is_newer(existing, incoming) {
+        return false;
+    }
+    // Equal freshness: lowest non-zero claim wins.
+    match (incoming.promoted_by, existing.promoted_by) {
+        (0, 0) => false, // keep existing
+        (0, _) => false, // unclaimed does not beat claimed
+        (_, 0) => true,  // claimed beats unclaimed at equal freshness
+        (a, b) => a < b,  // both non-zero: lower id wins
+    }
 }
 
 /// Encode a cluster-mode session id from owner broker and local counter.
@@ -181,11 +206,16 @@ pub struct FetchSession {
     pub last_activity_ms: i64,
     /// Monotonic mutation generation for peer-mirror fencing (Phase 139).
     pub mirror_gen: u64,
+    /// Node id that last claim-promoted this session into primary (Phase 143).
+    ///
+    /// `0` = never claim-promoted (created on original owner via normal create).
+    /// Non-zero = broker that won (or last held) the promote claim fence.
+    pub promoted_by: u32,
 }
 
 /// Fetch session table with idle TTL + max concurrent (Phase 95) + optional
 /// durability (Phase 115) + cluster owner encoding (Phase 119) + peer mirror
-/// (Phase 138/139).
+/// (Phase 138/139) + promote claim fence (Phase 143).
 #[derive(Debug)]
 pub struct FetchSessionManager {
     sessions: Mutex<HashMap<i32, FetchSession>>,
@@ -229,6 +259,8 @@ pub struct FetchSessionManager {
     promote_supersede_total: AtomicU64,
     /// Mirrors restored from durable snapshot at open (Phase 139).
     mirror_restored: AtomicU64,
+    /// Dual-promote / claim-lose rejects (Phase 143).
+    promote_claim_reject_total: AtomicU64,
     /// Min interval between Put fan-outs; `0` = immediate (Phase 139).
     mirror_put_min_interval_ms: AtomicU64,
     /// Single-flight arm for debounced Put fan-out (Phase 139).
@@ -284,6 +316,7 @@ impl FetchSessionManager {
             mirror_stale_put_rejects_total: AtomicU64::new(0),
             promote_supersede_total: AtomicU64::new(0),
             mirror_restored: AtomicU64::new(0),
+            promote_claim_reject_total: AtomicU64::new(0),
             mirror_put_min_interval_ms: AtomicU64::new(default_mirror_put_min_interval_ms()),
             mirror_put_debounce_armed: AtomicBool::new(false),
             mirror_durable_path: None,
@@ -455,11 +488,12 @@ impl FetchSessionManager {
         serde_json::to_vec(&stored).ok()
     }
 
-    /// Install/replace a foreign mirror from a JSON snapshot (Phase 138/139 Put).
+    /// Install/replace a foreign mirror from a JSON snapshot (Phase 138/139/143 Put).
     ///
-    /// Fencing: newer `mirror_gen` (then epoch, then activity) wins. Stale puts are
-    /// dropped without clobbering primary or mirror. When primary exists and the
-    /// incoming snapshot is newer, primary is replaced (converge).
+    /// Fencing: [`session_claim_wins`] — newer `mirror_gen`/epoch/activity, else
+    /// lowest non-zero `promoted_by` on equal freshness. Stale or claim-losing puts
+    /// do not clobber primary or mirror. When primary exists and the incoming
+    /// snapshot wins, primary is replaced (converge).
     pub fn apply_mirror_put(&self, snapshot: &[u8]) -> Result<(), String> {
         let stored: StoredFetchSession =
             serde_json::from_slice(snapshot).map_err(|e| e.to_string())?;
@@ -473,13 +507,15 @@ impl FetchSessionManager {
         {
             let mut sessions = self.sessions.lock();
             if sessions.contains_key(&id) {
-                let newer = sessions
+                let wins = sessions
                     .get(&id)
-                    .map(|primary| session_is_newer(&session, primary))
+                    .map(|primary| session_claim_wins(&session, primary))
                     .unwrap_or(false);
-                if !newer {
-                    self.mirror_stale_put_rejects_total
-                        .fetch_add(1, Ordering::Relaxed);
+                if !wins {
+                    self.record_put_reject(
+                        sessions.get(&id).expect("contains_key"),
+                        &session,
+                    );
                     return Ok(());
                 }
                 sessions.insert(id, session);
@@ -496,13 +532,15 @@ impl FetchSessionManager {
         }
 
         let mut mirrors = self.mirrors.lock();
-        let newer = mirrors
+        let wins = mirrors
             .get(&id)
-            .map(|existing| session_is_newer(&session, existing))
+            .map(|existing| session_claim_wins(&session, existing))
             .unwrap_or(true);
-        if !newer {
-            self.mirror_stale_put_rejects_total
-                .fetch_add(1, Ordering::Relaxed);
+        if !wins {
+            self.record_put_reject(
+                mirrors.get(&id).expect("get after !wins"),
+                &session,
+            );
             return Ok(());
         }
         mirrors.insert(id, session);
@@ -510,6 +548,18 @@ impl FetchSessionManager {
         self.mirror_puts_applied_total
             .fetch_add(1, Ordering::Relaxed);
         Ok(())
+    }
+
+    /// Classify a losing put as stale-gen vs claim-fence reject (Phase 139/143).
+    fn record_put_reject(&self, existing: &FetchSession, incoming: &FetchSession) {
+        if session_is_newer(existing, incoming) {
+            self.mirror_stale_put_rejects_total
+                .fetch_add(1, Ordering::Relaxed);
+        } else {
+            // Equal freshness (or incoming newer-by-activity but lost? only equal here).
+            self.promote_claim_reject_total
+                .fetch_add(1, Ordering::Relaxed);
+        }
     }
 
     /// Remove a foreign mirror (Phase 138 Delete). No-op if missing.
@@ -522,23 +572,31 @@ impl FetchSessionManager {
         }
     }
 
-    /// Move mirror → primary, or supersede primary when mirror is newer (Phase 138/139).
+    /// Move mirror → primary, or supersede primary when mirror wins claim (Phase 138/139/143).
     ///
     /// Returns `true` if primary ends up holding the id (already present, promoted,
     /// or superseded). Returns `false` when neither primary nor mirror has the id.
+    ///
+    /// On empty-primary promote, stamps `promoted_by` with local [`Self::owner_node_id`]
+    /// when non-zero (Phase 143 claim fence).
     pub fn promote_from_mirror(&self, session_id: i32) -> bool {
         // Lock order: sessions then mirrors.
         let mut sessions = self.sessions.lock();
         let mut mirrors = self.mirrors.lock();
         let mirror = mirrors.remove(&session_id);
+        let owner = self.owner_node_id.load(Ordering::Relaxed);
 
         if sessions.contains_key(&session_id) {
-            if let Some(m) = mirror {
+            if let Some(mut m) = mirror {
                 let supersede = sessions
                     .get(&session_id)
-                    .map(|primary| session_is_newer(&m, primary))
+                    .map(|primary| session_claim_wins(&m, primary))
                     .unwrap_or(false);
                 if supersede {
+                    // Claim stamp: keep mirror claim if set; else local owner.
+                    if m.promoted_by == 0 && owner > 0 {
+                        m.promoted_by = owner;
+                    }
                     sessions.insert(session_id, m);
                     self.persist_locked(&sessions);
                     self.persist_mirrors_locked(&mirrors);
@@ -550,15 +608,27 @@ impl FetchSessionManager {
                     self.queue_mirror_put(session_id);
                     return true;
                 }
-                // Older mirror dropped; primary kept.
+                // Lost claim or older: drop mirror; count claim reject when equal
+                // freshness and claim lost (not pure stale gen).
+                if let Some(primary) = sessions.get(&session_id) {
+                    if !session_is_newer(primary, &m) && !session_is_newer(&m, primary) {
+                        self.promote_claim_reject_total
+                            .fetch_add(1, Ordering::Relaxed);
+                    }
+                }
                 self.persist_mirrors_locked(&mirrors);
             }
             return true;
         }
 
-        let Some(session) = mirror else {
+        let Some(mut session) = mirror else {
             return false;
         };
+        // Empty primary: stamp local owner only when mirror is unclaimed; keep a
+        // prior winning claim that arrived via MirrorPut.
+        if session.promoted_by == 0 && owner > 0 {
+            session.promoted_by = owner;
+        }
         sessions.insert(session_id, session);
         self.persist_locked(&sessions);
         self.persist_mirrors_locked(&mirrors);
@@ -613,6 +683,11 @@ impl FetchSessionManager {
     /// Mirrors restored from durable snapshot at open (Phase 139).
     pub fn mirror_restored(&self) -> u64 {
         self.mirror_restored.load(Ordering::Relaxed)
+    }
+
+    /// Dual-promote / claim-lose rejects (Phase 143).
+    pub fn promote_claim_reject_total(&self) -> u64 {
+        self.promote_claim_reject_total.load(Ordering::Relaxed)
     }
 
     /// Queue Put for peer fan-out when this broker is a cluster owner (Phase 138/139).
@@ -788,6 +863,7 @@ impl FetchSessionManager {
                 topics,
                 last_activity_ms: now_ms,
                 mirror_gen: 1,
+                promoted_by: 0,
             },
         );
         self.persist_locked(&guard);
@@ -1207,6 +1283,9 @@ struct StoredFetchSession {
     /// Peer-mirror fencing generation (Phase 139); absent on older snapshots.
     #[serde(default)]
     mirror_gen: u64,
+    /// Claim-promote node id (Phase 143); absent on older snapshots → `0`.
+    #[serde(default)]
+    promoted_by: u32,
     #[serde(default)]
     topics: Vec<StoredSessionTopic>,
 }
@@ -1278,6 +1357,7 @@ fn session_to_stored(id: i32, s: &FetchSession) -> StoredFetchSession {
         epoch: s.epoch,
         last_activity_ms: s.last_activity_ms,
         mirror_gen: s.mirror_gen,
+        promoted_by: s.promoted_by,
         topics,
     }
 }
@@ -1340,6 +1420,7 @@ fn stored_to_session(s: StoredFetchSession) -> Option<(i32, FetchSession)> {
             topics,
             last_activity_ms: s.last_activity_ms,
             mirror_gen: s.mirror_gen,
+            promoted_by: s.promoted_by,
         },
     ))
 }
@@ -1881,6 +1962,7 @@ mod tests {
             topics: HashMap::new(),
             last_activity_ms: 100,
             mirror_gen: 5,
+            promoted_by: 0,
         };
         let higher_gen = FetchSession {
             mirror_gen: 6,
@@ -1899,5 +1981,50 @@ mod tests {
         };
         assert!(session_is_newer(&higher_act, &base));
         assert!(!session_is_newer(&base, &base));
+    }
+
+    #[test]
+    fn phase143_session_claim_wins_lowest_id() {
+        let base = FetchSession {
+            epoch: 1,
+            topics: HashMap::new(),
+            last_activity_ms: 100,
+            mirror_gen: 3,
+            promoted_by: 0,
+        };
+        let claim2 = FetchSession {
+            promoted_by: 2,
+            ..base.clone()
+        };
+        let claim3 = FetchSession {
+            promoted_by: 3,
+            ..base.clone()
+        };
+        // Equal gen: lower claim wins.
+        assert!(session_claim_wins(&claim2, &claim3));
+        assert!(!session_claim_wins(&claim3, &claim2));
+        // Claimed beats unclaimed at equal freshness.
+        assert!(session_claim_wins(&claim2, &base));
+        assert!(!session_claim_wins(&base, &claim2));
+        // Both unclaimed: keep existing.
+        assert!(!session_claim_wins(&base, &base));
+        // Strictly newer gen still wins even with higher claim.
+        let high_claim_new = FetchSession {
+            mirror_gen: 4,
+            promoted_by: 9,
+            ..base.clone()
+        };
+        assert!(session_claim_wins(&high_claim_new, &claim2));
+        assert!(!session_claim_wins(&claim2, &high_claim_new));
+    }
+
+    #[test]
+    fn phase143_promoted_by_default_on_old_json() {
+        let raw = r#"{"id":1,"epoch":1,"last_activity_ms":100,"mirror_gen":1,"topics":[]}"#;
+        let stored: StoredFetchSession = serde_json::from_str(raw).unwrap();
+        assert_eq!(stored.promoted_by, 0);
+        let (id, sess) = stored_to_session(stored).unwrap();
+        assert_eq!(id, 1);
+        assert_eq!(sess.promoted_by, 0);
     }
 }

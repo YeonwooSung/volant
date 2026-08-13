@@ -1,14 +1,21 @@
 # Volant residual TODO (review loop)
 
-**Baseline:** HEAD product = **Phases 141–142** shipped (N=2 majority ops gauges + Metadata ISR freshness).  
+**Baseline:** HEAD product = **Phases 0–143** shipped (promote claim fence).  
 **Last review:** 2026-08-13  
 
-Living roadmap: [ROADMAP.md](./ROADMAP.md) (Phases **0–142 shipped**).  
-Recent specs: [PHASE142](./docs/PHASE142_SPEC.md) · [PHASE141](./docs/PHASE141_SPEC.md) · [PHASE140](./docs/PHASE140_SPEC.md) · [PHASE139](./docs/PHASE139_SPEC.md).
+Living roadmap: [ROADMAP.md](./ROADMAP.md) (Phases **0–143 shipped**).  
+Recent specs: [PHASE143](./docs/PHASE143_SPEC.md) · [PHASE142](./docs/PHASE142_SPEC.md) · [PHASE141](./docs/PHASE141_SPEC.md) · [PHASE140](./docs/PHASE140_SPEC.md).
 
 ---
 
 ## Shipped recently
+
+### Phase 143 — Fetch session promote claim fence (lowest-id)
+- [x] `promoted_by` on session + MirrorPut JSON (default `0` for old mirrors)
+- [x] `session_claim_wins` after `mirror_gen`/epoch/activity; lowest non-zero claim
+- [x] `promote_from_mirror` stamps claim; dual-promote converges via MirrorPut
+- [x] Metric `volant_fetch_session_promote_claim_reject_total`
+- [x] Tests `phase143_promote_claim_fence` + phase138/139 green
 
 ### Phase 142 — Metadata ISR freshness (leader ≠ controller)
 - [x] Leader Metadata overlays local ISR / epoch / HWM
@@ -57,7 +64,6 @@ _(none open)_
 
 | Pri | Item | Notes |
 |----:|------|-------|
-| P2 | **Promote claim fence** (lowest-id / seq) | Dual-promote of *identical* snapshots still possible after 139 |
 | P2 | **Preferred × session thrash** doc or light suppress | Client may session-on-leader then follow PreferredReadReplica → forward |
 | P3 | Full preferred selector / throttling / rack-aware assignment | Beyond 126/133/140 |
 | P3 | Incremental/delta MirrorPut wire | 139 coalesces full snapshots only |
@@ -83,6 +89,7 @@ _(none open)_
 - [x] Preferred lag ceiling + RC suppress metric (Phase 140)
 - [x] N=2 majority ops tooling / health gauges (Phase 141)
 - [x] Metadata ISR overlay + leader→controller IsrUpdate (Phase 142)
+- [x] Promote claim fence lowest-id (Phase 143)
 - [ ] Full preferred-replica selector / rack-aware partition assignment (beyond 140)
 - [ ] Multi-language clients
 - [ ] Full chaos-mesh / long fuzz campaigns
@@ -99,6 +106,7 @@ _(none open)_
 
 | Area | Verdict |
 |------|---------|
+| Phase 143 | **Shipped** — `promoted_by` lowest-id claim fence; best-effort MirrorPut; not Raft |
 | Phase 142 | **Shipped** — leader Metadata overlay + IsrUpdate 94/95; best-effort report |
 | Phase 141 | **Shipped** — majority health gauges; majority algo unchanged |
 | Phase 140 | **Shipped** — lag knob + RC suppress; not full Kafka selector |
@@ -107,4 +115,4 @@ _(none open)_
 | Phase 137 | **Shipped** — native wait trailer + journal topic GC |
 | P0 / P1 code | **None open** |
 
-**Default next slice:** promote claim fence if dual-promote in the wild is painful, *or* preferred × session thrash doc/suppress. Larger Raft/KIP only with a clear product goal.
+**Default next slice:** preferred × session thrash doc/suppress. Larger Raft/KIP only with a clear product goal.

@@ -45,6 +45,7 @@ Key series (prefix `volant_`):
 - `volant_fetch_session_promote_total` (Phase 138 mirror→primary after owner miss)
 - `volant_fetch_sessions_mirrored` (Phase 138 gauge: foreign mirrors currently held)
 - `volant_fetch_session_mirror_puts_coalesced_total` / `volant_fetch_session_mirror_stale_put_rejects_total` / `volant_fetch_session_promote_supersede_total` / `volant_fetch_session_mirror_restored` (Phase 139 coalesce / `mirror_gen` fence / durable restore)
+- `volant_fetch_session_promote_claim_reject_total` (Phase 143 dual-promote / claim-lose rejects)
 - `volant_preferred_replica_redirect_total` (Phase 126 PreferredReadReplica redirects)
 - `volant_preferred_replica_suppressed_total` (Phase 140: READ_COMMITTED suppress when a preferred candidate existed)
 - `volant_txn_forward_total` / `volant_txn_forward_errors_total` (Phase 120/122 Kafka txn API forward: EndTxn / AddOffsets / TxnOffsetCommit)
@@ -216,7 +217,7 @@ volant-server \
   TTL. **Multi-broker handoff MVP (Phase 119):** cluster session_ids embed the owner
   `node_id`; a peer that lacks the session transparent-forwards the Kafka Fetch body
   to the owner over inter-broker RPC (opcode 82/83) so epoch + omit-unchanged stay
-  correct while the owner is alive. **Shared mirror MVP (Phase 138 + polish 139):**
+  correct while the owner is alive. **Shared mirror MVP (Phase 138 + polish 139 + claim 143):**
   owner best-effort fans out MirrorPut/Delete (opcodes 90–93) to live peers; peers
   hold a foreign mirror table (not served while owner alive). Owner death / forward
   fail: if a mirror is present, promote into primary and serve locally; else **70**.
@@ -225,10 +226,12 @@ volant-server \
   (default **50**; `0` = coalesce only, flush immediately); Deletes flush immediately;
   optional durable peer mirrors `VOLANT_FETCH_SESSION_MIRROR_DURABLE=1` →
   `{data_dir}/__fetch_session_mirrors/state.json` (default **off**; load filters idle
-  TTL); `mirror_gen` fences stale apply/promote. Best-effort only (not Raft); put
-  lag/fail still **70**; dual-promote race may later **71**; session_id owner bits
-  are not re-encoded. Sticky routing still preferred for latency (one extra RTT on
-  forward when owner is up).
+  TTL); `mirror_gen` fences stale apply/promote. **Phase 143:** `promoted_by`
+  lowest-id claim fence on equal-fresh dual-promote (claim travels in MirrorPut;
+  metric `volant_fetch_session_promote_claim_reject_total`). Best-effort only (not
+  Raft); put lag/fail still **70**; brief dual primary until MirrorPut claim
+  exchange; session_id owner bits are not re-encoded. Sticky routing still preferred
+  for latency (one extra RTT on forward when owner is up).
 - **PreferredReadReplica (Phase 126 + 133 + 140):** Fetch v11+ client `rack_id`;
   leader may redirect to same-rack live ISR peer with usable addr + LEO≥HWM
   (empty records; rank highest LEO then lowest id). Optional freshness:

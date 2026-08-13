@@ -1,6 +1,6 @@
 # Phase history index
 
-Ship records for **phases 0–140** (shipped). Binding core contracts are
+Ship records for **phases 0–143** (shipped). Binding core contracts are
 **[PHASE1_SPEC](../PHASE1_SPEC.md)–[PHASE6_SPEC](../PHASE6_SPEC.md)**. Living
 docs for day-to-day reading: [ops](../ops.md), [consistency](../consistency.md),
 [tuning](../tuning.md), [KAFKA_COMPAT](../KAFKA_COMPAT.md),
@@ -184,10 +184,11 @@ docs for day-to-day reading: [ops](../ops.md), [consistency](../consistency.md),
 | 140 | ✅ | Preferred-replica selector depth (optional max LEO lag; RC suppress metric) | [PHASE140_SPEC.md](../PHASE140_SPEC.md) |
 | 141 | ✅ | N=2 majority ops tooling (configured/live/quorum/impossible gauges + Broker helpers) | [PHASE141_SPEC.md](../PHASE141_SPEC.md) |
 | 142 | ✅ | Metadata ISR freshness when leader ≠ controller (overlay + IsrUpdate 94/95) | [PHASE142_SPEC.md](../PHASE142_SPEC.md) |
+| 143 | ✅ | Fetch session promote claim fence (lowest-id `promoted_by`) | [PHASE143_SPEC.md](../PHASE143_SPEC.md) |
 
 ---
 
-## Still deferred (post–Phase 142)
+## Still deferred (post–Phase 143)
 
 - Multi-language clients
 - Chaos-mesh / long fuzz campaigns (corpus **smoke CI** → **closed by Phase 112**)
@@ -221,8 +222,9 @@ docs for day-to-day reading: [ops](../ops.md), [consistency](../consistency.md),
 - Preferred max LEO lag + RC suppress metric → **closed by Phase 140** (still not full Kafka selector/throttling)
 - N=2 majority ops / health gauges → **closed by Phase 141** (majority algorithm still configured-N; no live-only flip)
 - Metadata ISR lag when leader ≠ controller → **closed by Phase 142** (leader overlay + best-effort IsrUpdate 94/95)
-- Shared fetch session mirror + promote → **closed by Phase 138** (best-effort peer mirror; not Raft; dual-promote race honest; no session_id re-encode)
-- Session mirror polish (debounce/durable/fence) → **closed by Phase 139** (coalesce + min-interval Puts; optional durable; `mirror_gen`; residual dual-promote / serve-without-promote)
+- Shared fetch session mirror + promote → **closed by Phase 138** (best-effort peer mirror; not Raft; no session_id re-encode)
+- Session mirror polish (debounce/durable/fence) → **closed by Phase 139** (coalesce + min-interval Puts; optional durable; `mirror_gen`; residual serve-without-promote)
+- Promote claim fence (lowest-id) → **closed by Phase 143** (best-effort MirrorPut claim; not Raft; brief dual primary until exchange)
 - Txn coordinator registry TTL GC → **closed by Phase 127** (default 24h; `0` disables; not eager EndTxn GC)
 - BROKER config for registry TTL → **closed by Phase 128** (`volant.txn.coordinator.registry.ttl.ms`; env still works; not full DynamicBrokerConfig)
 - Per-broker BROKER config overrides / multi-master ACL merge

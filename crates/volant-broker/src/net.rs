@@ -520,6 +520,15 @@ fn broker_metrics_text(broker: &Broker) -> String {
         "volant_fetch_session_mirror_restored {}\n",
         sessions.mirror_restored()
     ));
+    // Phase 143: promote claim fence (lowest-id dual-promote).
+    text.push_str(
+        "# HELP volant_fetch_session_promote_claim_reject_total Dual-promote claim-lose rejects on put/promote\n",
+    );
+    text.push_str("# TYPE volant_fetch_session_promote_claim_reject_total counter\n");
+    text.push_str(&format!(
+        "volant_fetch_session_promote_claim_reject_total {}\n",
+        sessions.promote_claim_reject_total()
+    ));
     // Phase 120/122: multi-broker EndTxn / AddOffsets / TxnOffsetCommit forward.
     text.push_str(
         "# HELP volant_txn_forward_total Successful Kafka txn API forwards to coordinator (EndTxn/AddOffsets/TxnOffsetCommit)\n",
