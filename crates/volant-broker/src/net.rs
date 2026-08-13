@@ -380,6 +380,11 @@ fn metrics_token_ok(request: &str, expected: &str) -> bool {
     false
 }
 
+/// Prometheus text for `GET /metrics` (also used by Phase 141 ops tests).
+pub fn render_metrics(broker: &Broker) -> String {
+    broker_metrics_text(broker)
+}
+
 fn broker_metrics_text(broker: &Broker) -> String {
     let metrics: Arc<Metrics> = broker.metrics();
     let lag = broker.consumer_lag_snapshots();
@@ -832,6 +837,39 @@ fn broker_metrics_text(broker: &Broker) -> String {
     text.push_str(&format!(
         "volant_truncate_journal_consensus_fail_total {}\n",
         broker.truncate_journal_consensus_fail_total()
+    ));
+    // Phase 141: N=2 majority ops / health gauges (configured vs live).
+    text.push_str(
+        "# HELP volant_cluster_configured_brokers Configured static membership size (1 if single-node)\n",
+    );
+    text.push_str("# TYPE volant_cluster_configured_brokers gauge\n");
+    text.push_str(&format!(
+        "volant_cluster_configured_brokers {}\n",
+        broker.configured_broker_count()
+    ));
+    text.push_str(
+        "# HELP volant_cluster_live_brokers Live membership size from local view (1 if single-node)\n",
+    );
+    text.push_str("# TYPE volant_cluster_live_brokers gauge\n");
+    text.push_str(&format!(
+        "volant_cluster_live_brokers {}\n",
+        broker.live_broker_count()
+    ));
+    text.push_str(
+        "# HELP volant_cluster_majority_quorum Journal majority floor(N/2)+1 for configured N\n",
+    );
+    text.push_str("# TYPE volant_cluster_majority_quorum gauge\n");
+    text.push_str(&format!(
+        "volant_cluster_majority_quorum {}\n",
+        broker.majority_quorum_size()
+    ));
+    text.push_str(
+        "# HELP volant_cluster_majority_impossible 1 when live < majority(configured); journal majority cannot succeed\n",
+    );
+    text.push_str("# TYPE volant_cluster_majority_impossible gauge\n");
+    text.push_str(&format!(
+        "volant_cluster_majority_impossible {}\n",
+        if broker.majority_impossible() { 1 } else { 0 }
     ));
     // Phase 131: truncate journal rejoin catch-up.
     text.push_str(

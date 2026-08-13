@@ -1267,6 +1267,39 @@ impl Broker {
             .unwrap_or(1)
     }
 
+    /// Configured membership size as `u64` (Phase 141 ops gauges).
+    ///
+    /// Single-node (no cluster config) is **1**. Same as
+    /// [`Self::cluster_member_count`] for multi-node.
+    pub fn configured_broker_count(&self) -> u64 {
+        self.cluster_member_count() as u64
+    }
+
+    /// Live membership size as `u64` (Phase 141 ops gauges).
+    ///
+    /// Single-node is **1**. Multi-node uses local membership
+    /// ([`Self::live_brokers`]).
+    pub fn live_broker_count(&self) -> u64 {
+        self.live_brokers().len() as u64
+    }
+
+    /// Journal-majority quorum size `floor(N/2)+1` for **configured** N (Phase 141).
+    ///
+    /// Matches [`TruncateJournal::majority`] / Phase 130 note fan-out. Single-node
+    /// is **1**.
+    pub fn majority_quorum_size(&self) -> u64 {
+        TruncateJournal::majority(self.cluster_member_count()) as u64
+    }
+
+    /// Whether journal majority cannot succeed given live vs configured N (Phase 141).
+    ///
+    /// `true` when `live_broker_count() < majority_quorum_size()`. Single-node is
+    /// always `false`. Classic sharp edge: **N=2** with one peer down → majority
+    /// need 2 but live is 1.
+    pub fn majority_impossible(&self) -> bool {
+        self.live_broker_count() < self.majority_quorum_size()
+    }
+
     /// Durable local note + generation bump (any broker; Phase 130 multi-controller).
     ///
     /// Returns new local generation. Prefer

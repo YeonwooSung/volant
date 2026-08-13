@@ -31,7 +31,7 @@ Start here. Prefer living docs over individual phase ship records.
 
 | Document | Purpose |
 |----------|---------|
-| [history/PHASE_HISTORY.md](./history/PHASE_HISTORY.md) | One-line index for phases 0–140 (shipped) |
+| [history/PHASE_HISTORY.md](./history/PHASE_HISTORY.md) | One-line index for phases 0–141 (shipped) |
 | [PHASE7_SPEC.md](./PHASE7_SPEC.md) … [PHASE124_SPEC.md](./PHASE124_SPEC.md) | Per-phase ship records (deep dive) |
 | [history/archive/](./history/archive/) | Implementation plans & reviews (archaeology) |
 
@@ -52,14 +52,14 @@ Start here. Prefer living docs over individual phase ship records.
 | Protocol implementer | PHASE1–6 binding specs |
 | Roadmap / deferred | ROADMAP end sections |
 
-## Compaction note (2026-08-12, post–Phase 140 ship)
+## Compaction note (2026-08-13, post–Phase 141 ship)
 
-Living docs match **git HEAD product** (`SUPPORTED_APIS`, last feature commit Phase **140**):
+Living docs match **git HEAD product** (`SUPPORTED_APIS`, last feature commit Phase **141**):
 
-- **Status ceiling:** Phases **0–140** shipped. Kafka shim **23–109** (… **135 = optional DeleteRecords majority wait**; **136 = non-blocking admin catch-up**; **137 = native DeleteRecords wait trailer + journal topic GC** — Kafka still env-only for wait; **138 = best-effort shared fetch session mirror + promote**; **139 = mirror coalesce/debounce + optional durable + `mirror_gen` fence**; **140 = preferred max LEO lag + RC suppress metric**)
+- **Status ceiling:** Phases **0–141** shipped. Kafka shim **23–109** (… **135 = optional DeleteRecords majority wait**; **136 = non-blocking admin catch-up**; **137 = native DeleteRecords wait trailer + journal topic GC** — Kafka still env-only for wait; **138 = best-effort shared fetch session mirror + promote**; **139 = mirror coalesce/debounce + optional durable + `mirror_gen` fence**; **140 = preferred max LEO lag + RC suppress metric**; **141 = N=2 majority health gauges** `volant_cluster_*`)
 - **Kafka SoT:** [KAFKA_COMPAT.md](./KAFKA_COMPAT.md) — matrix + semantic honesty
 - **WHITEPAPER:** architecture + positioning; no full API matrix
-- **Binding core:** PHASE1–6; **ship records:** PHASE7–140 via [PHASE_HISTORY](./history/PHASE_HISTORY.md)
+- **Binding core:** PHASE1–6; **ship records:** PHASE7–141 via [PHASE_HISTORY](./history/PHASE_HISTORY.md)
 - **README / ops:** compact bands + ops table (not per-phase diaries)
 - **Txn honesty (shipped):** write-through + soft markers + EndTxn control batches (Phase 89) + crash-promote ABORT control (Phase 98) + **empty AddPartitions control** (Phase 105) + prepared 2PC MVP (Phase 90) + prepared/open timeout (Phase 92/93) + TRANSACTION_ABORTABLE honest subset after timeout (Phase 94) + transaction max timeout clamp (Phase 96; default 15m; Init **50** over-max) + background sweeper (Phase 97; always-spawn / 0→>0 live Phase 101; **graceful shutdown/join** Phase 106; **accept-loop drain + single-flight** Phase 109) + BROKER Describe/AlterConfigs knobs (Phase 99) + **sparse** durable restart restore (Phase 100/102) + BROKER name vs local `node_id` (Phase 103; **parallel test isolation** Phase 107) + **aborted soft-marker GC/clip** on DeleteRecords/retention/load (Phase 104/111) + **multi-broker Enable2Pc prepare/complete** (Phase 114; controller cluster prepared index; not full `__transaction_state`) + **transparent EndTxn forward** (Phase 120) + **sticky FindCoordinator** (Phase 121) + **AddOffsets / TxnOffsetCommit forward** (Phase 122)
 - **Cluster ISR (Phase 108/110/118/125):** follower death shrinks local ISR + recomputes HWM on every observer; controller bumps generation on pure ISR shrink; **non-controllers** also apply controller `alive_brokers` diffs / local expire → `on_broker_death` (Phase 110); **Phase 118** re-expands ISR when a recovering follower ReplicaFetches to LEO ≥ HWM (lag ≤ `replica_lag_max_messages`) and lag-shrinks slow-but-alive members; **Phase 125** also time-shrinks members whose last caught-up stamp exceeds `replica_lag_max_ms` (default 30s; `0` off); metrics `volant_isr_expand_total` / `volant_isr_shrink_total` / `volant_isr_time_shrink_total`

@@ -1,14 +1,21 @@
 # Volant residual TODO (review loop)
 
-**Baseline:** HEAD product = **Phase 140** shipped (preferred max LEO lag + RC suppress metric).  
-**Last review:** 2026-08-12  
+**Baseline:** HEAD product = **Phase 141** shipped (N=2 majority ops health gauges).  
+**Last review:** 2026-08-13  
 
-Living roadmap: [ROADMAP.md](./ROADMAP.md) (Phases **0–140 shipped**).  
-Recent specs: [PHASE140](./docs/PHASE140_SPEC.md) · [PHASE139](./docs/PHASE139_SPEC.md) · [PHASE138](./docs/PHASE138_SPEC.md) · [PHASE137](./docs/PHASE137_SPEC.md).
+Living roadmap: [ROADMAP.md](./ROADMAP.md) (Phases **0–141 shipped**).  
+Recent specs: [PHASE141](./docs/PHASE141_SPEC.md) · [PHASE140](./docs/PHASE140_SPEC.md) · [PHASE139](./docs/PHASE139_SPEC.md) · [PHASE138](./docs/PHASE138_SPEC.md).
 
 ---
 
 ## Shipped recently
+
+### Phase 141 — N=2 majority ops tooling
+- [x] Gauges: `volant_cluster_configured_brokers` / `_live_brokers` / `_majority_quorum` / `_majority_impossible`
+- [x] Broker helpers: `configured_broker_count` / `live_broker_count` / `majority_quorum_size` / `majority_impossible`
+- [x] Tests `phase141_n2_majority_ops`
+- [x] Docs: ops sharp edge + metrics scrape list; majority algorithm **unchanged**
+- [ ] Metadata ISR lag (separate residual — not in this phase)
 
 ### Phase 140 — Preferred-replica selector depth
 - [x] Optional `VOLANT_PREFERRED_REPLICA_MAX_LEO_LAG` (unset = unlimited)
@@ -45,7 +52,6 @@ _(none open)_
 
 | Pri | Item | Notes |
 |----:|------|-------|
-| P2 | **N=2 majority ops tooling** | Health/alert when configured N=2 and one down (journal wait fails forever) |
 | P2 | **Metadata ISR lag** when leader ≠ controller | Clients can see stale ISR |
 | P2 | **Promote claim fence** (lowest-id / seq) | Dual-promote of *identical* snapshots still possible after 139 |
 | P2 | **Preferred × session thrash** doc or light suppress | Client may session-on-leader then follow PreferredReadReplica → forward |
@@ -71,6 +77,7 @@ _(none open)_
 - [x] Shared fetch session store MVP (Phase 138)
 - [x] Debounced / durable peer mirrors + `mirror_gen` fence (Phase 139)
 - [x] Preferred lag ceiling + RC suppress metric (Phase 140)
+- [x] N=2 majority ops tooling / health gauges (Phase 141)
 - [ ] Full preferred-replica selector / rack-aware partition assignment (beyond 140)
 - [ ] Multi-language clients
 - [ ] Full chaos-mesh / long fuzz campaigns
@@ -80,7 +87,8 @@ _(none open)_
 - [ ] Rollback local truncate on majority fail
 - [ ] Incremental/delta MirrorPut wire
 - [ ] Serve from mirror without promote / dual-master sessions
-- [ ] N=2 majority ops tooling / Metadata ISR lag
+- [x] N=2 majority ops tooling / health gauges (Phase 141)
+- [ ] Metadata ISR lag when leader ≠ controller
 
 ---
 
@@ -88,10 +96,11 @@ _(none open)_
 
 | Area | Verdict |
 |------|---------|
+| Phase 141 | **Shipped** — majority health gauges; majority algo unchanged; Metadata ISR lag still open |
 | Phase 140 | **Shipped** — lag knob + RC suppress; not full Kafka selector |
 | Phase 139 | **Shipped** — coalesce/debounce, optional durable, `mirror_gen` fence |
 | Phase 138 | **Shipped** — best-effort mirror + promote-on-miss |
 | Phase 137 | **Shipped** — native wait trailer + journal topic GC |
 | P0 / P1 code | **None open** |
 
-**Default next slice:** ops honesty (N=2 majority health + Metadata ISR lag) *or* promote claim fence if dual-promote in the wild is painful. Larger Raft/KIP only with a clear product goal.
+**Default next slice:** Metadata ISR lag (stale ISR when leader ≠ controller) *or* promote claim fence if dual-promote in the wild is painful. Larger Raft/KIP only with a clear product goal.

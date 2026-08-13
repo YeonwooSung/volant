@@ -54,6 +54,7 @@ Key series (prefix `volant_`):
 - `volant_journal_catchup_skipped_total` (Phase 132 schedule skips: in-flight single-flight or min-interval throttle; env `VOLANT_JOURNAL_CATCHUP_MIN_INTERVAL_MS`, default 500ms, `0` disables time throttle)
 - `volant_admin_catchup_skipped_total` (Phase 136 admin ACL/config catch-up schedule skips: in-flight or min-interval; env `VOLANT_ADMIN_CATCHUP_MIN_INTERVAL_MS`, default 500ms, `0` disables time throttle)
 - `volant_delete_records_majority_wait_success_total` / `_fail_total` (Phase 135/137; only when **effective** wait is on — broker env `VOLANT_DELETE_RECORDS_WAIT_MAJORITY` and/or native request trailer `wait_majority=1`)
+- `volant_cluster_configured_brokers` / `volant_cluster_live_brokers` / `volant_cluster_majority_quorum` / `volant_cluster_majority_impossible` (Phase 141: journal majority health; `impossible=1` when `live < floor(N/2)+1` for configured N — classic N=2 one-down)
 - `volant_open_txns` / `volant_prepared_txns` (Phase 97 gauges)
 - `volant_open_txns_expired_total` / `volant_prepared_txns_expired_total` (Phase 97)
 - `volant_build_info{version=...}`
@@ -351,6 +352,14 @@ is 2 — one peer down → permanent journal majority fail (local note may persi
 `consensus_fail` / wait `NotEnoughReplicas`). Prefer **odd N (3+)** for majority
 journal / wait mode. Native clients may override the broker wait knob per request
 (Phase 137); Kafka clients cannot.
+
+**Phase 141 ops signal:** scrape
+`volant_cluster_majority_impossible` (gauge 0/1) plus
+`volant_cluster_configured_brokers` / `volant_cluster_live_brokers` /
+`volant_cluster_majority_quorum`. Alert when `majority_impossible == 1` (or when
+`live < quorum` for configured N). Single-node always reports impossible `0`.
+Gauges are **local membership view** (death-detect lag can briefly disagree
+across brokers).
 
 CLI examples: [features.md](./features.md), [../README.md](../README.md).
 

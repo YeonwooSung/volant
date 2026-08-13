@@ -159,7 +159,7 @@ static ISR). Later work is summarized by band — full chronicle in
 **Kafka ceilings (code SoT):** ApiVersions **0–5**, Fetch **0–18**, Produce/Metadata
 **0–13**, ACL admin **0–3** (User resource v3, store-only); Fetch isolation
 READ_COMMITTED MVP (Phase 86) + soft-marker GC/clip on DeleteRecords/retention/load (Phase 104/111); durable OffsetForLeaderEpoch history (Phase 87); Fetch DivergingEpoch + real fetch sessions MVP (Phase 88); Kafka control batches on EndTxn (Phase 89), crash≡abort open promote (Phase 98), and empty AddPartitions membership (Phase 105); prepared 2PC MVP (Phase 90); omit-unchanged incremental sessions (Phase 91); prepared timeout auto-abort (Phase 92); open-txn timeout (Phase 93); fetch session idle TTL + max/LRU (Phase 95); transaction max timeout clamp (Phase 96); background txn/session sweeper + metrics (Phase 97; always-spawn / 0→>0 live Phase 101; graceful shutdown/join Phase 106); BROKER Describe/AlterConfigs for txn/session/sweep knobs (Phase 99) with **sparse** durable restart restore (Phase 100/102) and resource name empty-or-`node_id` (Phase 103; parallel test isolation Phase 107); follower-death ISR shrink + HWM recompute so rolling-restart `acks=all` does not time out (Phase 108); accept-loop drain + single-flight `start_background_tasks` (Phase 109); non-controller alive-set auto-death (Phase 110); straddle soft-marker clip (Phase 111); cluster admin fan-out — DeleteRecords best-effort replica truncate, controller-only BROKER config + ACL snapshot push (Phase 113); multi-broker Enable2Pc prepare/complete (Phase 114); durable local fetch sessions under `__fetch_sessions` (Phase 115); multi-broker fetch session handoff via owner-encoded id + transparent inter-broker forward (Phase 119); best-effort shared fetch session mirror + promote-on-owner-miss (Phase 138; not Raft) + coalesce/debounce + optional durable peer mirrors + `mirror_gen` fence (Phase 139); transparent EndTxn forward to Init-owner coordinator (Phase 120); sticky FindCoordinator via murmur2 static ring + Init-owner override (Phase 121); transparent AddOffsetsToTxn / TxnOffsetCommit forward (Phase 122); durable DeleteRecords outbox retry for offline peers (Phase 116) + new-leader outbox reconcile on leadership change (Phase 123); ACL/BROKER admin catch-up on rejoin/controller restart (Phase 117; durable gens + heartbeat re-push — not Raft); ISR rejoin when ReplicaFetch LEO ≥ HWM + lag-based shrink of slow-but-alive members (Phase 118);
-time-based ISR lag shrink via `replica_lag_max_ms` (Phase 125); PreferredReadReplica max LEO lag + RC suppress metric (Phase 140).
+time-based ISR lag shrink via `replica_lag_max_ms` (Phase 125); PreferredReadReplica max LEO lag + RC suppress metric (Phase 140); journal majority health gauges (Phase 141).
 Matrix + honesty: [docs/KAFKA_COMPAT.md](./docs/KAFKA_COMPAT.md).
 
 **Still deferred:** multi-language clients, chaos-mesh / long fuzz campaigns
@@ -175,6 +175,7 @@ serve-without-promote / incremental put), full KIP-890/939. Cluster admin fan-ou
 outbox leadership handoff → **Phase 123**. Durable txn coordinator registry →
 **Phase 124**. Time-based ISR lag → **Phase 125**. Shared session mirror + promote →
 **Phase 138**; mirror polish → **Phase 139**. Preferred lag/suppress → **Phase 140**.
+N=2 majority health gauges → **Phase 141**.
 
 ### Networked client (library)
 

@@ -3386,6 +3386,31 @@ heterogeneous per-broker BROKER overrides.
 
 ---
 
+### Phase 141 — N=2 majority ops tooling ✅
+
+**Goal:** Health/alert metrics so operators detect when configured-N journal
+majority cannot succeed (classic: **N=2** with one peer down). Does **not**
+change majority math (still `floor(N/2)+1` on configured membership).
+
+Binding: **[docs/PHASE141_SPEC.md](./docs/PHASE141_SPEC.md)**.
+
+- [x] Gauges: `volant_cluster_configured_brokers` / `volant_cluster_live_brokers`
+  / `volant_cluster_majority_quorum` / `volant_cluster_majority_impossible`
+- [x] Broker helpers: `configured_broker_count` / `live_broker_count` /
+  `majority_quorum_size` / `majority_impossible`
+- [x] Public `render_metrics` for scrape text + tests
+- [x] Tests `phase141_n2_majority_ops` (single / N=2 / N=3 live+death paths)
+- [x] Living docs 0–141 (ops sharp edge + scrape list)
+
+**Honest limitations:** gauges are **local membership view**; not Alertmanager
+rules; not live-only majority; not Metadata ISR lag (sibling residual).
+
+**Still deferred:** Metadata ISR lag; rollback local truncate on majority fail;
+live-only majority; full openraft/KRaft; multi-lang; chaos/long fuzz; full
+KIP-890/939; full preferred selector beyond 140.
+
+---
+
 ## Performance targets (aspirational)
 
 | Metric | Single node target | Notes |
@@ -3421,7 +3446,7 @@ marker clip 111; fuzz corpus smoke CI 112; cluster admin fan-out 113) — see
 
 ## Suggested implementation order (PRs)
 
-Phases **0–140 are shipped**. Historical PR order for the core:
+Phases **0–141 are shipped**. Historical PR order for the core:
 
 1. Phase 1 segment format + unit tests  
 2. Phase 1 recovery + retention  
@@ -3464,6 +3489,7 @@ Phases **0–140 are shipped**. Historical PR order for the core:
 39. Phase 138 (shared fetch session mirror + promote MVP) ✅  
 40. Phase 139 (session mirror polish: coalesce/debounce + durable + fence) ✅  
 41. Phase 140 (preferred-replica max LEO lag + RC suppress metric) ✅  
+42. Phase 141 (N=2 majority ops health gauges) ✅  
 
 ---
 
@@ -3504,7 +3530,7 @@ cargo run -p volant-bench --release
 cargo test --workspace
 ```
 
-**Status (post–Phase 140):** core broker, ops (metrics / TLS / auth / SCRAM /
+**Status (post–Phase 141):** core broker, ops (metrics / TLS / auth / SCRAM /
 ACLs / Helm), and the Kafka wire shim are **shipped** (Fetch 0–18 Kafka max;
 ACL admin 0–3 with User resource; soft-marker `READ_COMMITTED` with **marker GC/clip**
 on DeleteRecords/retention/load (Phase 104/111); durable OFLE history; Fetch DivergingEpoch +
@@ -3540,10 +3566,11 @@ txn EndTxn/AddOffsets/TxnOffsetCommit forward Phases 120/122;
 **PreferredReadReplica / rack-aware Fetch MVP** Phase 126 (Metadata rack;
 redirect when same-rack ISR peer LEO≥HWM) + **selector polish** Phase 133
 (usable addr + LEO-desc rank) + **max LEO lag + RC suppress metric** Phase 140;
+**N=2 majority health gauges** Phase 141 (`volant_cluster_*` configured/live/quorum/impossible);
 **txn coordinator registry TTL GC** Phase 127 + **BROKER config surface** Phase 128; **truncate journal** Phase 129 + **majority multi-controller consensus** Phase 130 + **journal rejoin catch-up** Phase 131 + **catch-up hardening** Phase 132 + **p2p heartbeat mesh** Phase 134 + **optional DeleteRecords majority wait** Phase 135 + **non-blocking admin catch-up** Phase 136 + **native DeleteRecords request wait trailer + journal topic GC** Phase 137).
 Still deferred: multi-language clients, full chaos-mesh suites / long fuzz
 campaigns, full preferred-replica selector / throttling / rack-aware assignment
 (beyond 126/133/140 lag+metric; Phase 138/139 closed shared mirror MVP —
-residual: Raft registry / serve-without-promote / incremental put), full
-KIP-890/939, rollback local truncate on majority fail.
+residual: Raft registry / serve-without-promote / incremental put), Metadata ISR
+lag, full KIP-890/939, rollback local truncate on majority fail.
 Details: [docs/KAFKA_COMPAT.md](./docs/KAFKA_COMPAT.md), [docs/ops.md](./docs/ops.md).
