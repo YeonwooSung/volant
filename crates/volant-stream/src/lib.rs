@@ -8,24 +8,25 @@
 //! - Topology: [`StreamBuilder`](topology::StreamBuilder) → [`StreamApp`](runtime::StreamApp)
 //! - Exactly-once MVP (Phase 151): [`ProcessingGuarantee::ExactlyOnce`],
 //!   [`StreamBuilder::exactly_once`]
+//! - EOS + durable checkpoint (Phase 153): stage [`DurableStore`] puts until
+//!   EndTxn succeeds; abort on empty step / txn fail
 //!
 //! # At-least-once (default)
 //!
 //! The runtime commits consumer offsets **after** a successful sink produce.
 //! A crash between produce and commit can cause duplicate outputs.
+//! Durable puts remain immediate (no checkpoint).
 //!
-//! # Exactly-once (Phase 151)
+//! # Exactly-once (Phase 151 / 153)
 //!
 //! Opt in with [`StreamBuilder::exactly_once`] or
 //! [`StreamApp::start_exactly_once`]. Each non-empty step:
-//! `begin` → transactional sink produce → `add_offsets(group, positions)` →
-//! `commit`. Atomic produce + offset commit via Volant write-through
-//! transactions + soft markers (not full Kafka Streams EOS / 2PC with durable
-//! stream state). Fence via `transactional_id`. Empty polls skip the txn.
-//!
-//! Durable aggregate state ([`DurableStore`]) pairs well with EOS sinks but is
-//! **not** joined into the same broker transaction; optional `flush()` before
-//! commit is not auto-wired (MVP).
+//! `begin_checkpoint` → process → `txn.begin` → transactional sink produce →
+//! `add_offsets(group, positions)` → `txn.commit` → `commit_checkpoint`.
+//! Atomic produce + offset commit via Volant write-through transactions + soft
+//! markers. Durable state is process-local staging (not distributed 2PC with
+//! the broker). Fence via `transactional_id`. Empty polls abort the checkpoint
+//! and skip the txn.
 //!
 //! # Offline processing
 //!

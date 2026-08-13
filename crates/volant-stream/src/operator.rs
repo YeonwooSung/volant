@@ -18,4 +18,15 @@ pub trait Operator: Send {
     fn punctuate(&mut self, _now_ms: i64) -> Result<Vec<Record>> {
         Ok(vec![])
     }
+
+    /// Enter state-store staging for an EOS step (Phase 153). Default no-op.
+    fn begin_checkpoint(&mut self) {}
+
+    /// Persist staged state after a successful EndTxn. Default no-op.
+    fn commit_checkpoint(&mut self) -> Result<()> {
+        Ok(())
+    }
+
+    /// Discard staged state after txn abort or empty step. Default no-op.
+    fn abort_checkpoint(&mut self) {}
 }

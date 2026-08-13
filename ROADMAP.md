@@ -3507,12 +3507,14 @@ Binding: **[docs/PHASE149_SPEC.md](./docs/PHASE149_SPEC.md)**.
 - [x] Tests `phase149_durable_state` (CRUD, restart, reduce, MemoryStore)
 
 **Honest residual:** durable state alone ≠ exactly-once (pair with Phase 151
-for sink+offset atomicity); one redb lock per path; window buckets still
-process-local; no distributed stream workers / changelog.
+EOS + Phase 153 checkpoint); one redb lock per path; window buckets still
+process-local; no distributed stream workers / changelog. ALO keeps immediate
+put; EOS stages via Phase 153.
 
 **Still deferred:** exactly-once streams → **closed by Phase 151** (MVP);
-broker consensus (sibling 150); RocksDB; distributed topology; durable window
-buckets; full 2PC state+offsets.
+EOS durable boundary → **closed by Phase 153** (local staging); broker
+consensus (sibling 150/152); RocksDB; distributed topology; durable window
+buckets; distributed 2PC state↔broker.
 
 ### Phase 145 — Rack-aware partition assignment MVP ✅
 
@@ -3637,12 +3639,37 @@ Binding: **[docs/PHASE151_SPEC.md](./docs/PHASE151_SPEC.md)**.
 - [x] Tests `phase151_exactly_once` (ALO regression, EOS e2e, empty step)
 
 **Honest residual:** depends on Volant write-through txns + soft markers — **not**
-full Kafka Streams EOS; durable stream state is **not** in the same atomic txn
-as produce+offsets; in-process only; fence via `transactional_id`.
+full Kafka Streams EOS; durable stream state staging closed by **Phase 153**
+(process-local checkpoint after EndTxn); in-process only; fence via
+`transactional_id`.
 
-**Still deferred:** full 2PC state+offsets; distributed stream workers; full
+**Still deferred:** distributed 2PC state↔broker; distributed stream workers; full
 openraft/KRaft; multi-lang; chaos/long fuzz; full KIP-890/939.
 
+### Phase 153 — EOS + durable stream state atomic boundary ✅
+
+**Goal:** Single process-local atomic boundary so Phase 149 `DurableStore`
+aggregates do not advance before a successful Phase 151 EndTxn. Closes Phase
+151 residual “EOS + durable state single atomic boundary.”
+
+Binding: **[docs/PHASE153_SPEC.md](./docs/PHASE153_SPEC.md)**.
+
+- [x] `KeyValueStore::{begin_checkpoint, commit_checkpoint, abort_checkpoint, in_checkpoint}`
+  (defaults no-op; `commit` → `Result<(), StreamStateError>`)
+- [x] `DurableStore` staging overlay; one Immediate redb txn on commit; abort discards
+- [x] Outside checkpoint: keep immediate put (ALO)
+- [x] `Operator` defaults; `Reduce` forwards; `Pipeline` fan-out
+- [x] EOS `step_exactly_once`: begin_checkpoint → process → EndTxn → commit_checkpoint;
+  empty/fail → abort_checkpoint
+- [x] Tests `phase153_eos_durable_atomic` (+ phase149 / phase151 green)
+
+**Honest residual:** process-local staging only — **not** distributed 2PC with the
+broker; if EndTxn succeeds and local commit fails, offsets may lead state
+(returned as `Err`); ALO durable still immediate; windows not durable; no
+distributed stream workers.
+
+**Still deferred:** full openraft/KRaft (sibling 154+); multi-lang; chaos/long
+fuzz; full KIP-890/939; local assignment rollback.
 
 ---
 
@@ -3681,7 +3708,7 @@ marker clip 111; fuzz corpus smoke CI 112; cluster admin fan-out 113) — see
 
 ## Suggested implementation order (PRs)
 
-Phases **0–152 are shipped**. Historical PR order for the core:
+Phases **0–153 are shipped**. Historical PR order for the core:
 
 1. Phase 1 segment format + unit tests  
 2. Phase 1 recovery + retention  
@@ -3817,6 +3844,7 @@ campaigns, full preferred-replica selector / throttling residual
 (beyond 126/133/140/144; Phase 138/139/143/147 closed shared mirror MVP —
 residual: Raft registry / dual-epoch converge / incremental put), full
 KIP-890/939, rollback local truncate on majority fail, full Kafka Streams EOS /
-2PC state+offsets (Phase **151** shipped EOS MVP; Phase **149** durable state),
+2PC state+offsets (Phase **151** EOS MVP; Phase **149** durable state; Phase **153**
+process-local durable checkpoint after EndTxn — not distributed 2PC),
 full openraft/KRaft (Phase **150** assignment majority MVP).
 Details: [docs/KAFKA_COMPAT.md](./docs/KAFKA_COMPAT.md), [docs/ops.md](./docs/ops.md).

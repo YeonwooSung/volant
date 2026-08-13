@@ -194,25 +194,16 @@ docs for day-to-day reading: [ops](../ops.md), [consistency](../consistency.md),
 | 150 | ✅ | Assignment generation majority consensus (opcodes 96/97; static N) | [PHASE150_SPEC.md](../PHASE150_SPEC.md) |
 | 151 | ✅ | Stream exactly-once MVP (txn produce + deferred group offsets) | [PHASE151_SPEC.md](../PHASE151_SPEC.md) |
 | 152 | ✅ | Assignment consensus depth (Metadata = committed snapshot) | [PHASE152_SPEC.md](../PHASE152_SPEC.md) |
+| 153 | ✅ | EOS + durable stream state atomic boundary (checkpoint staging) | [PHASE153_SPEC.md](../PHASE153_SPEC.md) |
 
 ---
 
-## Still deferred (post–Phase 152)
-
-- Full openraft / KRaft dynamic membership (assignment gen majority MVP → **closed by Phase 150**; residual: Metadata may lead committed_gen; static N only)
-- Metadata gated exclusively on `committed_generation` (150 residual)
-- Full Kafka Streams EOS / 2PC durable state + offsets (stream EOS MVP → **closed by Phase 151**; residual: state not in broker txn)
-
----
-
-## Still deferred (post–Phase 152)
-
----
-
-## Still deferred (post–Phase 152)
+## Still deferred (post–Phase 153)
 
 - Full openraft / KRaft dynamic membership (assignment gen majority MVP → **closed by Phase 150**; Metadata lead residual → **closed by Phase 152**; static N only)
 - ~~Metadata gated exclusively on `committed_generation` (150 residual)~~ → **closed by Phase 152**
+- ~~EOS + durable state single atomic boundary (151 residual)~~ → **closed by Phase 153** (process-local staging; not distributed 2PC)
+- Distributed 2PC durable state ↔ broker / full Kafka Streams EOS depth
 
 
 - Multi-language clients

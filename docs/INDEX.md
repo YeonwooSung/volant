@@ -31,10 +31,8 @@ Start here. Prefer living docs over individual phase ship records.
 
 | Document | Purpose |
 |----------|---------|
-| [history/PHASE_HISTORY.md](./history/PHASE_HISTORY.md) | One-line index for phases 0–152 (shipped) |
-| [PHASE7_SPEC.md](./PHASE7_SPEC.md) … [PHASE151_SPEC.md](./PHASE151_SPEC.md) | Per-phase ship records (deep dive) |
-| [history/PHASE_HISTORY.md](./history/PHASE_HISTORY.md) | One-line index for phases 0–152 (shipped) |
-| [PHASE7_SPEC.md](./PHASE7_SPEC.md) … [PHASE152_SPEC.md](./PHASE152_SPEC.md) | Per-phase ship records (deep dive) |
+| [history/PHASE_HISTORY.md](./history/PHASE_HISTORY.md) | One-line index for phases 0–153 (shipped) |
+| [PHASE7_SPEC.md](./PHASE7_SPEC.md) … [PHASE153_SPEC.md](./PHASE153_SPEC.md) | Per-phase ship records (deep dive) |
 | [history/archive/](./history/archive/) | Implementation plans & reviews (archaeology) |
 
 ## Config samples
@@ -58,11 +56,10 @@ Start here. Prefer living docs over individual phase ship records.
 
 Living docs match **git HEAD product** (`SUPPORTED_APIS`, last feature commit Phase **147**):
 
-- **Status ceiling:** Phases **0–152** shipped (stream EOS MVP Phase **151**). Kafka shim **23–109** (… **135 = optional DeleteRecords majority wait**; **136 = non-blocking admin catch-up**; **137 = native DeleteRecords wait trailer + journal topic GC** — Kafka still env-only for wait; **138 = best-effort shared fetch session mirror + promote**; **139 = mirror coalesce/debounce + optional durable + `mirror_gen` fence**; **140 = preferred max LEO lag + RC suppress metric**; **141 = N=2 majority health gauges** `volant_cluster_*`; **142 = Metadata leader ISR overlay + IsrUpdate 94/95**; **143 = promote claim fence lowest-id `promoted_by`**; **144 = preferred × established-session suppress**; **147 = serve-from-mirror without promote on owner miss**; **149 = durable stream state**; **150 = assignment majority consensus**; **151 = stream exactly-once MVP**)
-- **Status ceiling:** Phases **0–152** shipped. Kafka shim **23–109** (… **135 = optional DeleteRecords majority wait**; **136 = non-blocking admin catch-up**; **137 = native DeleteRecords wait trailer + journal topic GC** — Kafka still env-only for wait; **138 = best-effort shared fetch session mirror + promote**; **139 = mirror coalesce/debounce + optional durable + `mirror_gen` fence**; **140 = preferred max LEO lag + RC suppress metric**; **141 = N=2 majority health gauges** `volant_cluster_*`; **142 = Metadata leader ISR overlay + IsrUpdate 94/95**; **143 = promote claim fence lowest-id `promoted_by`**; **144 = preferred × established-session suppress**; **147 = serve-from-mirror without promote on owner miss**; **150/152 = assignment majority consensus + Metadata serves committed snapshot**)
+- **Status ceiling:** Phases **0–153** shipped (stream EOS Phase **151** + durable checkpoint Phase **153**; assignment consensus depth Phase **152**). Kafka shim **23–109** (… **135 = optional DeleteRecords majority wait**; **136 = non-blocking admin catch-up**; **137 = native DeleteRecords wait trailer + journal topic GC** — Kafka still env-only for wait; **138 = best-effort shared fetch session mirror + promote**; **139 = mirror coalesce/debounce + optional durable + `mirror_gen` fence**; **140 = preferred max LEO lag + RC suppress metric**; **141 = N=2 majority health gauges** `volant_cluster_*`; **142 = Metadata leader ISR overlay + IsrUpdate 94/95**; **143 = promote claim fence lowest-id `promoted_by`**; **144 = preferred × established-session suppress**; **147 = serve-from-mirror without promote on owner miss**; **149 = durable stream state**; **150/152 = assignment majority consensus + Metadata serves committed snapshot**; **151/153 = stream EOS + durable checkpoint staging**)
 - **Kafka SoT:** [KAFKA_COMPAT.md](./KAFKA_COMPAT.md) — matrix + semantic honesty
 - **WHITEPAPER:** architecture + positioning; no full API matrix
-- **Binding core:** PHASE1–6; **ship records:** PHASE7–147 via [PHASE_HISTORY](./history/PHASE_HISTORY.md)
+- **Binding core:** PHASE1–6; **ship records:** PHASE7–153 via [PHASE_HISTORY](./history/PHASE_HISTORY.md)
 
 - **README / ops:** compact bands + ops table (not per-phase diaries)
 - **Txn honesty (shipped):** write-through + soft markers + EndTxn control batches (Phase 89) + crash-promote ABORT control (Phase 98) + **empty AddPartitions control** (Phase 105) + prepared 2PC MVP (Phase 90) + prepared/open timeout (Phase 92/93) + TRANSACTION_ABORTABLE honest subset after timeout (Phase 94) + transaction max timeout clamp (Phase 96; default 15m; Init **50** over-max) + background sweeper (Phase 97; always-spawn / 0→>0 live Phase 101; **graceful shutdown/join** Phase 106; **accept-loop drain + single-flight** Phase 109) + BROKER Describe/AlterConfigs knobs (Phase 99) + **sparse** durable restart restore (Phase 100/102) + BROKER name vs local `node_id` (Phase 103; **parallel test isolation** Phase 107) + **aborted soft-marker GC/clip** on DeleteRecords/retention/load (Phase 104/111) + **multi-broker Enable2Pc prepare/complete** (Phase 114; controller cluster prepared index; not full `__transaction_state`) + **transparent EndTxn forward** (Phase 120) + **sticky FindCoordinator** (Phase 121) + **AddOffsets / TxnOffsetCommit forward** (Phase 122)

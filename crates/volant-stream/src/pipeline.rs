@@ -70,6 +70,28 @@ impl Pipeline {
         }
         Ok(all_out)
     }
+
+    /// Enter checkpoint staging on every operator (Phase 153 EOS).
+    pub fn begin_checkpoint(&mut self) {
+        for op in &mut self.operators {
+            op.begin_checkpoint();
+        }
+    }
+
+    /// Commit staged state on every operator after successful EndTxn.
+    pub fn commit_checkpoint(&mut self) -> Result<()> {
+        for op in &mut self.operators {
+            op.commit_checkpoint()?;
+        }
+        Ok(())
+    }
+
+    /// Abort staged state on every operator (txn fail or empty step).
+    pub fn abort_checkpoint(&mut self) {
+        for op in &mut self.operators {
+            op.abort_checkpoint();
+        }
+    }
 }
 
 impl Default for Pipeline {

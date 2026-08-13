@@ -41,9 +41,10 @@ impl Default for ProcessingGuarantee {
 /// sink produce. A crash between produce and commit may redeliver input
 /// records (duplicate outputs).
 ///
-/// **Exactly-once (Phase 151):** each non-empty step begins a transaction,
-/// produces sink records transactionally, adds consumer group offsets, and
-/// commits atomically. Empty polls (no input, no output) skip the transaction.
+/// **Exactly-once (Phase 151 / 153):** each non-empty step stages durable
+/// state, begins a transaction, produces sink records transactionally, adds
+/// consumer group offsets, commits the txn, then commits the state checkpoint.
+/// Empty polls (no input, no output) abort the checkpoint and skip the txn.
 pub struct StreamApp {
     /// Topology name.
     pub name: String,
@@ -154,18 +155,48 @@ impl StreamApp {
         Ok(())
     }
 
-    /// Exactly-once: transactional produce + deferred group offsets (Phase 151).
+    /// Exactly-once: transactional produce + deferred group offsets (Phase 151)
+    /// with durable state checkpoint after EndTxn (Phase 153).
     ///
-    /// Empty poll with no punctuate output skips the transaction.
+    /// Order:
+    /// 1. `pipeline.begin_checkpoint()` — durable puts stage only
+    /// 2. poll → process → punctuate
+    /// 3. empty skip → `abort_checkpoint` (no txn)
+    /// 4. txn begin → produce → add_offsets → commit
+    /// 5. on success → `pipeline.commit_checkpoint()`
+    /// 6. on fail → abort txn + `abort_checkpoint`
+    ///
+    /// ALO path does not use checkpoints (DurableStore remains immediate-put).
     async fn step_exactly_once(&mut self) -> Result<()> {
-        let records = self.source.poll().await?;
-        let had_input = !records.is_empty();
-        let mut out = self.pipeline.process(records)?;
-        let now = now_ms();
-        out.extend(self.pipeline.punctuate(now)?);
+        self.pipeline.begin_checkpoint();
 
-        // Empty poll, no punctuate emissions → no txn.
+        let records = match self.source.poll().await {
+            Ok(r) => r,
+            Err(e) => {
+                self.pipeline.abort_checkpoint();
+                return Err(e);
+            }
+        };
+        let had_input = !records.is_empty();
+        let mut out = match self.pipeline.process(records) {
+            Ok(o) => o,
+            Err(e) => {
+                self.pipeline.abort_checkpoint();
+                return Err(e);
+            }
+        };
+        let now = now_ms();
+        match self.pipeline.punctuate(now) {
+            Ok(p) => out.extend(p),
+            Err(e) => {
+                self.pipeline.abort_checkpoint();
+                return Err(e);
+            }
+        }
+
+        // Empty poll, no punctuate emissions → no txn; drop staged state.
         if !had_input && out.is_empty() {
+            self.pipeline.abort_checkpoint();
             return Ok(());
         }
 
@@ -173,17 +204,31 @@ impl StreamApp {
         let pending = self.source.pending_offsets();
         // If somehow no outputs and no positions, nothing to commit.
         if out.is_empty() && pending.is_empty() {
+            self.pipeline.abort_checkpoint();
             return Ok(());
         }
 
-        let txn = self.txn.as_mut().ok_or_else(|| {
-            Error::InvalidArgument("exactly-once step requires transactional producer".into())
-        })?;
+        let txn = match self.txn.as_mut() {
+            Some(t) => t,
+            None => {
+                self.pipeline.abort_checkpoint();
+                return Err(Error::InvalidArgument(
+                    "exactly-once step requires transactional producer".into(),
+                ));
+            }
+        };
 
         if let Err(e) = eos_try_commit(txn, &self.sink, &group_id, pending, &out).await {
             if txn.is_open() {
                 let _ = txn.abort().await;
             }
+            self.pipeline.abort_checkpoint();
+            return Err(e);
+        }
+
+        // Only after successful EndTxn — durable state may advance.
+        if let Err(e) = self.pipeline.commit_checkpoint() {
+            // Broker txn already committed; state commit failed (honesty residual).
             return Err(e);
         }
         Ok(())

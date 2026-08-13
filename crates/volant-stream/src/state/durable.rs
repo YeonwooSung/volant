@@ -8,18 +8,25 @@
 //! # Durability
 //!
 //! - Single table `"kv"`; keys and values are raw bytes.
-//! - Each [`KeyValueStore::put`] / [`KeyValueStore::delete`] opens a write
-//!   transaction and commits with redb's default [`Durability::Immediate`]
-//!   (fsync on commit) — auto-flush every mutation for MVP simplicity.
-//! - [`DurableStore::flush`] is an explicit no-op barrier: mutations are already
-//!   durable after commit. Callers may still invoke it for API symmetry.
+//! - **Outside a checkpoint:** each [`KeyValueStore::put`] /
+//!   [`KeyValueStore::delete`] opens a write transaction and commits with
+//!   redb's default [`Durability::Immediate`] (fsync on commit) — ALO /
+//!   non-EOS path.
+//! - **Inside a checkpoint (Phase 153):** puts/deletes stage in an in-memory
+//!   overlay; [`commit_checkpoint`] applies them in one Immediate write txn;
+//!   [`abort_checkpoint`] discards the overlay. Process-local staging only —
+//!   not distributed 2PC with the broker.
+//! - [`DurableStore::flush`] is an explicit no-op barrier for API symmetry
+//!   (does not commit a checkpoint).
 //! - Surviving process restart: reopen the same directory path.
 //!
 //! # Honesty
 //!
-//! Durable aggregate state ≠ exactly-once processing. At-least-once still
-//! applies (duplicate inputs can double-count after crash/replay).
+//! Durable aggregate state ≠ exactly-once processing by itself. Pair with
+//! EOS (Phase 151) + checkpoint ordering (Phase 153) so durable state does not
+//! advance before a successful EndTxn. At-least-once still uses immediate puts.
 
+use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
 
 use bytes::Bytes;
@@ -51,12 +58,21 @@ pub enum StreamStateError {
     Commit(String),
 }
 
+/// In-memory overlay while a checkpoint is open.
+#[derive(Default)]
+struct Staging {
+    puts: BTreeMap<Vec<u8>, Bytes>,
+    deletes: BTreeSet<Vec<u8>>,
+}
+
 /// redb-backed durable [`KeyValueStore`].
 ///
 /// Store root is a **directory**. The redb file is `{path}/kv.redb`.
 pub struct DurableStore {
     path: PathBuf,
     db: Database,
+    /// When `Some`, puts/deletes touch the overlay only (Phase 153).
+    staging: Option<Staging>,
 }
 
 impl DurableStore {
@@ -81,13 +97,18 @@ impl DurableStore {
             txn.commit()
                 .map_err(|e| StreamStateError::Commit(e.to_string()))?;
         }
-        Ok(Self { path, db })
+        Ok(Self {
+            path,
+            db,
+            staging: None,
+        })
     }
 
     /// Flush durable state to disk.
     ///
-    /// MVP: each put/delete already commits with Immediate durability (fsync).
-    /// This method remains for API symmetry and future batching.
+    /// Outside a checkpoint, each put/delete already commits with Immediate
+    /// durability. Does **not** commit an open checkpoint — use
+    /// [`KeyValueStore::commit_checkpoint`].
     pub fn flush(&self) -> Result<(), StreamStateError> {
         Ok(())
     }
@@ -100,10 +121,8 @@ impl DurableStore {
     fn panic_ctx(op: &str, err: impl std::fmt::Display) -> ! {
         panic!("DurableStore {op} failed: {err}");
     }
-}
 
-impl KeyValueStore for DurableStore {
-    fn get(&self, key: &[u8]) -> Option<Bytes> {
+    fn disk_get(&self, key: &[u8]) -> Option<Bytes> {
         let txn = self
             .db
             .begin_read()
@@ -120,7 +139,45 @@ impl KeyValueStore for DurableStore {
         }
     }
 
-    fn put(&mut self, key: Bytes, value: Bytes) {
+    fn disk_len(&self) -> usize {
+        let txn = self
+            .db
+            .begin_read()
+            .unwrap_or_else(|e| Self::panic_ctx("begin_read", e));
+        let table = match txn.open_table(KV) {
+            Ok(t) => t,
+            Err(redb::TableError::TableDoesNotExist(_)) => return 0,
+            Err(e) => Self::panic_ctx("open_table(read)", e),
+        };
+        table
+            .len()
+            .unwrap_or_else(|e| Self::panic_ctx("len", e)) as usize
+    }
+
+    fn disk_iter_map(&self) -> BTreeMap<Vec<u8>, Bytes> {
+        let txn = self
+            .db
+            .begin_read()
+            .unwrap_or_else(|e| Self::panic_ctx("begin_read", e));
+        let table = match txn.open_table(KV) {
+            Ok(t) => t,
+            Err(redb::TableError::TableDoesNotExist(_)) => return BTreeMap::new(),
+            Err(e) => Self::panic_ctx("open_table(read)", e),
+        };
+        table
+            .iter()
+            .unwrap_or_else(|e| Self::panic_ctx("iter", e))
+            .map(|item| {
+                let (k, v) = item.unwrap_or_else(|e| Self::panic_ctx("iter item", e));
+                (
+                    k.value().to_vec(),
+                    Bytes::copy_from_slice(v.value()),
+                )
+            })
+            .collect()
+    }
+
+    fn put_immediate(&mut self, key: Bytes, value: Bytes) {
         let txn = self
             .db
             .begin_write()
@@ -137,7 +194,7 @@ impl KeyValueStore for DurableStore {
             .unwrap_or_else(|e| Self::panic_ctx("commit", e));
     }
 
-    fn delete(&mut self, key: &[u8]) {
+    fn delete_immediate(&mut self, key: &[u8]) {
         let txn = self
             .db
             .begin_write()
@@ -154,45 +211,127 @@ impl KeyValueStore for DurableStore {
             .unwrap_or_else(|e| Self::panic_ctx("commit", e));
     }
 
-    fn iter(&self) -> Box<dyn Iterator<Item = (Bytes, Bytes)> + '_> {
+    fn apply_staging(&mut self, staging: Staging) -> Result<(), StreamStateError> {
+        if staging.puts.is_empty() && staging.deletes.is_empty() {
+            return Ok(());
+        }
         let txn = self
             .db
-            .begin_read()
-            .unwrap_or_else(|e| Self::panic_ctx("begin_read", e));
-        let table = match txn.open_table(KV) {
-            Ok(t) => t,
-            Err(redb::TableError::TableDoesNotExist(_)) => {
-                return Box::new(std::iter::empty());
+            .begin_write()
+            .map_err(|e| StreamStateError::Transaction(e.to_string()))?;
+        {
+            let mut table = txn
+                .open_table(KV)
+                .map_err(|e| StreamStateError::Table(e.to_string()))?;
+            for key in &staging.deletes {
+                table
+                    .remove(key.as_slice())
+                    .map_err(|e| StreamStateError::Table(e.to_string()))?;
             }
-            Err(e) => Self::panic_ctx("open_table(read)", e),
-        };
-        let items: Vec<(Bytes, Bytes)> = table
-            .iter()
-            .unwrap_or_else(|e| Self::panic_ctx("iter", e))
-            .map(|item| {
-                let (k, v) = item.unwrap_or_else(|e| Self::panic_ctx("iter item", e));
-                (
-                    Bytes::copy_from_slice(k.value()),
-                    Bytes::copy_from_slice(v.value()),
-                )
-            })
-            .collect();
-        Box::new(items.into_iter())
+            for (key, value) in &staging.puts {
+                table
+                    .insert(key.as_slice(), value.as_ref())
+                    .map_err(|e| StreamStateError::Table(e.to_string()))?;
+            }
+        }
+        txn.commit()
+            .map_err(|e| StreamStateError::Commit(e.to_string()))?;
+        Ok(())
+    }
+}
+
+impl KeyValueStore for DurableStore {
+    fn get(&self, key: &[u8]) -> Option<Bytes> {
+        if let Some(st) = &self.staging {
+            if st.deletes.contains(key) {
+                return None;
+            }
+            if let Some(v) = st.puts.get(key) {
+                return Some(v.clone());
+            }
+        }
+        self.disk_get(key)
+    }
+
+    fn put(&mut self, key: Bytes, value: Bytes) {
+        if let Some(st) = &mut self.staging {
+            let k = key.to_vec();
+            st.deletes.remove(&k);
+            st.puts.insert(k, value);
+            return;
+        }
+        self.put_immediate(key, value);
+    }
+
+    fn delete(&mut self, key: &[u8]) {
+        if let Some(st) = &mut self.staging {
+            st.puts.remove(key);
+            st.deletes.insert(key.to_vec());
+            return;
+        }
+        self.delete_immediate(key);
+    }
+
+    fn iter(&self) -> Box<dyn Iterator<Item = (Bytes, Bytes)> + '_> {
+        let mut map = self.disk_iter_map();
+        if let Some(st) = &self.staging {
+            for d in &st.deletes {
+                map.remove(d);
+            }
+            for (k, v) in &st.puts {
+                map.insert(k.clone(), v.clone());
+            }
+        }
+        Box::new(
+            map.into_iter()
+                .map(|(k, v)| (Bytes::from(k), v)),
+        )
     }
 
     fn len(&self) -> usize {
-        let txn = self
-            .db
-            .begin_read()
-            .unwrap_or_else(|e| Self::panic_ctx("begin_read", e));
-        let table = match txn.open_table(KV) {
-            Ok(t) => t,
-            Err(redb::TableError::TableDoesNotExist(_)) => return 0,
-            Err(e) => Self::panic_ctx("open_table(read)", e),
+        let Some(st) = &self.staging else {
+            return self.disk_len();
         };
-        table
-            .len()
-            .unwrap_or_else(|e| Self::panic_ctx("len", e)) as usize
+        // disk − deletes-present-on-disk + puts-absent-on-disk
+        // (put removes key from deletes; overwrite of existing key is zero delta)
+        let mut n = self.disk_len();
+        for d in &st.deletes {
+            if self.disk_get(d).is_some() {
+                n = n.saturating_sub(1);
+            }
+        }
+        for k in st.puts.keys() {
+            if self.disk_get(k).is_none() {
+                n = n.saturating_add(1);
+            }
+        }
+        n
+    }
+
+    fn begin_checkpoint(&mut self) {
+        if self.staging.is_none() {
+            self.staging = Some(Staging::default());
+        }
+    }
+
+    fn commit_checkpoint(&mut self) -> Result<(), StreamStateError> {
+        let Some(staging) = self.staging.take() else {
+            return Ok(());
+        };
+        if let Err(e) = self.apply_staging(staging) {
+            // Leave not-in-checkpoint on failure; staged data is lost — caller
+            // already committed the broker txn in the EOS path (honesty residual).
+            return Err(e);
+        }
+        Ok(())
+    }
+
+    fn abort_checkpoint(&mut self) {
+        self.staging = None;
+    }
+
+    fn in_checkpoint(&self) -> bool {
+        self.staging.is_some()
     }
 }
 
@@ -244,6 +383,38 @@ mod tests {
             assert_eq!(store.get(b"b").as_deref(), Some(b"2".as_ref()));
             assert_eq!(store.len(), 2);
         }
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn checkpoint_abort_leaves_disk_unchanged() {
+        let dir = temp_store_dir("ckpt-abort");
+        let mut store = DurableStore::open(&dir).expect("open");
+        store.put(Bytes::from_static(b"seed"), Bytes::from_static(b"1"));
+        store.begin_checkpoint();
+        store.put(Bytes::from_static(b"new"), Bytes::from_static(b"2"));
+        assert_eq!(store.get(b"new").as_deref(), Some(b"2".as_ref()));
+        store.abort_checkpoint();
+        assert_eq!(store.get(b"new"), None);
+        assert_eq!(store.get(b"seed").as_deref(), Some(b"1".as_ref()));
+        drop(store);
+        let store = DurableStore::open(&dir).expect("reopen");
+        assert_eq!(store.get(b"new"), None);
+        assert_eq!(store.get(b"seed").as_deref(), Some(b"1".as_ref()));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn checkpoint_commit_persists() {
+        let dir = temp_store_dir("ckpt-commit");
+        {
+            let mut store = DurableStore::open(&dir).expect("open");
+            store.begin_checkpoint();
+            store.put(Bytes::from_static(b"k"), Bytes::from_static(b"v"));
+            store.commit_checkpoint().expect("commit");
+        }
+        let store = DurableStore::open(&dir).expect("reopen");
+        assert_eq!(store.get(b"k").as_deref(), Some(b"v".as_ref()));
         let _ = std::fs::remove_dir_all(&dir);
     }
 }

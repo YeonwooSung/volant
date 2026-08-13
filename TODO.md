@@ -1,14 +1,23 @@
 # Volant residual TODO (review loop)
 
-**Baseline:** HEAD product = **Phases 0–152** shipped (stream EOS + consensus-depth Metadata).  
+**Baseline:** HEAD product = **Phases 0–153** shipped (EOS + durable checkpoint + consensus-depth Metadata).  
 **Last review:** 2026-08-13  
 
-Living roadmap: [ROADMAP.md](./ROADMAP.md) (Phases **0–152 shipped**).  
-Recent specs: [PHASE152](./docs/PHASE152_SPEC.md) · [PHASE151](./docs/PHASE151_SPEC.md) · [PHASE150](./docs/PHASE150_SPEC.md) · [PHASE149](./docs/PHASE149_SPEC.md).
+Living roadmap: [ROADMAP.md](./ROADMAP.md) (Phases **0–153 shipped**).  
+Recent specs: [PHASE153](./docs/PHASE153_SPEC.md) · [PHASE152](./docs/PHASE152_SPEC.md) · [PHASE151](./docs/PHASE151_SPEC.md) · [PHASE149](./docs/PHASE149_SPEC.md).
 
 ---
 
 ## Shipped recently
+
+### Phase 153 — EOS + durable stream state atomic boundary
+- [x] `KeyValueStore` checkpoint defaults (`begin` / `commit` / `abort` / `in_checkpoint`)
+- [x] `DurableStore` staging overlay; single Immediate txn on commit; abort discards
+- [x] `Operator` / `Reduce` / `Pipeline` checkpoint hooks
+- [x] EOS step: begin_checkpoint → process → EndTxn → commit_checkpoint (abort on fail/empty)
+- [x] ALO path: no checkpoint (immediate durable put)
+- [x] Tests `phase153_eos_durable_atomic` + phase149/151 green
+- **Honesty:** process-local staging, not distributed 2PC with broker
 
 ### Phase 152 — Assignment consensus depth
 - [x] Durable committed assignment snapshot for Metadata SoT
@@ -23,7 +32,7 @@ Recent specs: [PHASE152](./docs/PHASE152_SPEC.md) · [PHASE151](./docs/PHASE151_
 - [x] EOS step: begin → produce → add_offsets → commit_transaction
 - [x] ALO default unchanged; builder `exactly_once(id)`
 - [x] Tests `phase151_exactly_once` (live + empty step)
-- **Honesty:** write-through txns + soft markers; durable state not in same atomic txn
+- **Honesty:** write-through txns + soft markers; Phase 153 stages durable state after EndTxn
 
 ### Phase 150 / 149
 - [x] Assignment majority notes; redb durable stream KV
@@ -35,8 +44,8 @@ Recent specs: [PHASE152](./docs/PHASE152_SPEC.md) · [PHASE151](./docs/PHASE151_
 | Pri | Item | Notes |
 |----:|------|-------|
 | Later | Full openraft / KRaft + dynamic membership | Beyond 150/152 |
-| Later | EOS + durable state single atomic boundary | Phase 151 residual |
 | Later | Local assignment rollback on consensus fail | Phase 152 residual |
+| Later | Distributed 2PC durable state ↔ broker | Phase 153 residual (local staging only) |
 | Later | Full KIP-890 / multi-lang / chaos / perf | Ecosystem & hardening |
 
 ---
@@ -45,8 +54,9 @@ Recent specs: [PHASE152](./docs/PHASE152_SPEC.md) · [PHASE151](./docs/PHASE151_
 
 | Area | Verdict |
 |------|---------|
+| Phase 153 | **Shipped** — EOS + durable checkpoint boundary |
 | Phase 152 | **Shipped** — Metadata serves committed assignment |
 | Phase 151 | **Shipped** — stream EOS via Volant transactions |
 | P0–P3 listed earlier | **None open** |
 
-**Default next slice:** openraft depth, multi-lang, or chaos/perf hardening.
+**Default next slice:** openraft depth (Phase 154 sibling), multi-lang, or chaos/perf hardening.

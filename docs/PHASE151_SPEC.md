@@ -71,9 +71,9 @@ Empty poll (no records, no position advance, no punctuate emit): **no transactio
 ### Durable store
 
 EOS pairs best with [`DurableStore`] (Phase 149) so aggregates survive restart.
-The pipeline does **not** auto-`flush()` state before txn commit (MVP); reduce
-mutations with redb Immediate durability already fsync per put. Full 2PC of
-local state + Kafka offsets remains deferred.
+**Phase 153** stages durable puts during an EOS step and commits the checkpoint
+only after successful EndTxn (process-local; not distributed 2PC with the broker).
+ALO path still uses immediate put.
 
 ## API surface
 

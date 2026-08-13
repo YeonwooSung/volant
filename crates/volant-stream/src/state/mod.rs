@@ -2,6 +2,8 @@
 //!
 //! - [`MemoryStore`] — process-local, lost on restart
 //! - [`DurableStore`] — redb-backed, survives process restart (Phase 149)
+//! - Checkpoint staging (Phase 153): optional begin/commit/abort so EOS can
+//!   stage durable puts until the broker transaction succeeds
 
 mod durable;
 mod memory;
@@ -13,8 +15,15 @@ use bytes::Bytes;
 
 /// Key-value store used by stateful operators (`reduce`, windows).
 ///
-/// Methods are infallible at the trait boundary. Durable backends may
+/// Methods are infallible at the trait boundary (except
+/// [`commit_checkpoint`](Self::commit_checkpoint)). Durable backends may
 /// panic on unrecoverable storage I/O after a successful [`DurableStore::open`].
+///
+/// # Checkpoints (Phase 153)
+///
+/// Defaults are no-ops. [`DurableStore`] stages puts/deletes in memory while a
+/// checkpoint is open and only fsyncs on [`commit_checkpoint`](Self::commit_checkpoint).
+/// Outside a checkpoint, durable stores keep immediate-put behavior (ALO).
 pub trait KeyValueStore: Send {
     /// Look up a value by key.
     fn get(&self, key: &[u8]) -> Option<Bytes>;
@@ -29,5 +38,21 @@ pub trait KeyValueStore: Send {
     /// Whether the store is empty.
     fn is_empty(&self) -> bool {
         self.len() == 0
+    }
+
+    /// Enter staging mode (no-op by default).
+    fn begin_checkpoint(&mut self) {}
+
+    /// Persist staged mutations (fsync as applicable). No-op when not staging.
+    fn commit_checkpoint(&mut self) -> Result<(), StreamStateError> {
+        Ok(())
+    }
+
+    /// Discard staged mutations; restore view to last committed durable state.
+    fn abort_checkpoint(&mut self) {}
+
+    /// Whether a checkpoint is open (staging active).
+    fn in_checkpoint(&self) -> bool {
+        false
     }
 }

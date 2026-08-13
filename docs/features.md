@@ -72,7 +72,7 @@ shim: [KAFKA_COMPAT.md](./KAFKA_COMPAT.md).
 | SCRAM-SHA-256 | Durable users; **native** + Kafka SASL |
 | SCRAM-SHA-512 | Dual hashes per user; **Kafka SASL only** |
 
-## Stream processing (Phase 4+ / 149 / 151)
+## Stream processing (Phase 4+ / 149 / 151 / 153)
 
 In-process `volant-stream`: map, filter, flat_map, reduce, windows, foreach.
 **State stores:** `MemoryStore` (default) and **Phase 149** `DurableStore` (redb
@@ -82,12 +82,17 @@ under a directory; `{state_dir}/kv.redb`). Use `count_reduce_durable(path)` or
 **Processing guarantees:**
 | Mode | API | Behavior |
 |------|-----|----------|
-| At-least-once (default) | `StreamApp::start` / default builder | Produce sink → then `OffsetCommit`; crash between may redeliver |
-| Exactly-once MVP (Phase 151) | `StreamBuilder::exactly_once(txn_id)` / `StreamApp::start_exactly_once` | Per non-empty step: `begin` → transactional produce → `add_offsets(group, positions)` → `commit`; empty poll skips txn; fence via `transactional_id` |
+| At-least-once (default) | `StreamApp::start` / default builder | Produce sink → then `OffsetCommit`; crash between may redeliver; durable puts **immediate** |
+| Exactly-once MVP (Phase 151 + 153) | `StreamBuilder::exactly_once(txn_id)` / `StreamApp::start_exactly_once` | Per non-empty step: `begin_checkpoint` → process → `txn.begin` → transactional produce → `add_offsets` → `txn.commit` → `commit_checkpoint`; empty/fail → `abort_checkpoint`; fence via `transactional_id` |
 
-**Honesty:** EOS depends on Volant write-through transactions + soft markers — **not**
-full Kafka Streams EOS / 2PC with durable stream state in the same txn. Durable
-aggregates alone (149) do not imply EOS; pair with 151 for sink+offset atomicity.
+**Phase 153 checkpoints:** `KeyValueStore::{begin,commit,abort}_checkpoint`;
+`DurableStore` stages puts in an overlay until commit (one Immediate redb txn).
+`Reduce` / `Pipeline` fan out. Never durable-commit before successful EndTxn.
+
+**Honesty:** EOS depends on Volant write-through transactions + soft markers —
+**not** full Kafka Streams EOS / distributed 2PC. Checkpoint staging is
+**process-local** (not broker-joined). Durable aggregates alone (149) do not
+imply EOS; pair with 151+153 for sink+offset atomicity and state-not-ahead-of-offsets.
 No distributed stream workers; window buckets still process-local.
 
 ## Leader epochs (Phase 87)

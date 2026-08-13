@@ -3,7 +3,7 @@
 use std::path::Path;
 
 use bytes::Bytes;
-use volant_core::{Offset, Record, Result};
+use volant_core::{Error, Offset, Record, Result};
 
 use crate::operator::Operator;
 use crate::state::{DurableStore, KeyValueStore, MemoryStore, StreamStateError};
@@ -143,6 +143,20 @@ where
 
     fn name(&self) -> &str {
         "reduce"
+    }
+
+    fn begin_checkpoint(&mut self) {
+        self.store.begin_checkpoint();
+    }
+
+    fn commit_checkpoint(&mut self) -> Result<()> {
+        self.store
+            .commit_checkpoint()
+            .map_err(|e| Error::Storage(e.to_string()))
+    }
+
+    fn abort_checkpoint(&mut self) {
+        self.store.abort_checkpoint();
     }
 }
 
