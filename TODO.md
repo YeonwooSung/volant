@@ -1,14 +1,22 @@
 # Volant residual TODO (review loop)
 
-**Baseline:** HEAD product = **Phases 0–144** shipped (promote claim fence + preferred × session suppress).  
+**Baseline:** HEAD product = **Phases 0–144 + 146** shipped (skip 145; incremental MirrorPut).  
 **Last review:** 2026-08-13  
 
-Living roadmap: [ROADMAP.md](./ROADMAP.md) (Phases **0–144 shipped**).  
-Recent specs: [PHASE144](./docs/PHASE144_SPEC.md) · [PHASE143](./docs/PHASE143_SPEC.md) · [PHASE142](./docs/PHASE142_SPEC.md) · [PHASE141](./docs/PHASE141_SPEC.md).
+Living roadmap: [ROADMAP.md](./ROADMAP.md) (Phases **0–144 + 146 shipped**; **145 not implemented**).  
+Recent specs: [PHASE146](./docs/PHASE146_SPEC.md) · [PHASE144](./docs/PHASE144_SPEC.md) · [PHASE143](./docs/PHASE143_SPEC.md) · [PHASE142](./docs/PHASE142_SPEC.md).
 
 ---
 
 ## Shipped recently
+
+### Phase 146 — Incremental/delta MirrorPut wire (MVP)
+- [x] `mode` / `remove_topic_keys` on MirrorPut JSON (`"full"` default for old peers)
+- [x] `apply_mirror_put` delta merge (upsert + remove; no-base installs upserts)
+- [x] `export_session_delta_bytes` + `export_mirror_put_bytes` / `last_mirrored` cache
+- [x] Fan-out prefers delta; opcode **90** unchanged
+- [x] Metric `volant_fetch_session_mirror_delta_puts_total` (sent or applied)
+- [x] Tests `phase146_mirror_put_delta` + phase138/139/143 green
 
 ### Phase 144 — Preferred × session thrash suppress
 - [x] Suppress PreferredReadReplica when `req_session_id != 0` (non-FINAL epoch)
@@ -71,7 +79,6 @@ _(none open)_
 | Pri | Item | Notes |
 |----:|------|-------|
 | P3 | Full preferred selector / throttling / rack-aware assignment | Beyond 126/133/140/144 |
-| P3 | Incremental/delta MirrorPut wire | 139 coalesces full snapshots only |
 | P3 | Serve-from-mirror without promote | Dual-epoch design required |
 | P3 | Rollback / defer local truncate until majority | Hard; segment delete is irreversible today |
 | Later | Heterogeneous per-broker BROKER overrides | Controller-only homogeneous push today |
@@ -96,6 +103,7 @@ _(none open)_
 - [x] Metadata ISR overlay + leader→controller IsrUpdate (Phase 142)
 - [x] Promote claim fence lowest-id (Phase 143)
 - [x] Preferred × session thrash light suppress (Phase 144)
+- [x] Incremental/delta MirrorPut wire (Phase 146; full still default; best-effort)
 - [ ] Full preferred-replica selector / rack-aware partition assignment (beyond 140/144)
 - [ ] Multi-language clients
 - [ ] Full chaos-mesh / long fuzz campaigns
@@ -103,7 +111,6 @@ _(none open)_
 - [ ] True multi-master ACL merge
 - [x] Request-level DeleteRecords wait flag (Phase 137; Kafka still env-only)
 - [ ] Rollback local truncate on majority fail
-- [ ] Incremental/delta MirrorPut wire
 - [ ] Serve from mirror without promote / dual-master sessions
 
 ---
@@ -112,6 +119,7 @@ _(none open)_
 
 | Area | Verdict |
 |------|---------|
+| Phase 146 | **Shipped** — delta MirrorPut JSON (`mode`/`remove_topic_keys`); `last_mirrored` cache; not Raft resync |
 | Phase 144 | **Shipped** — preferred suppress on established fetch session; session suppress metric |
 | Phase 143 | **Shipped** — `promoted_by` lowest-id claim fence; best-effort MirrorPut; not Raft |
 | Phase 142 | **Shipped** — leader Metadata overlay + IsrUpdate 94/95; best-effort report |
@@ -123,4 +131,4 @@ _(none open)_
 | P0 / P1 code | **None open** |
 | P2 residual | **None open** |
 
-**Default next slice:** pick a P3 product residual (incremental MirrorPut, serve-from-mirror, full preferred selector) or a larger product bet (streams durable state / Raft / multi-lang). Larger Raft/KIP only with a clear product goal.
+**Default next slice:** pick a P3 product residual (serve-from-mirror, full preferred selector) or a larger product bet (streams durable state / Raft / multi-lang). Larger Raft/KIP only with a clear product goal.
