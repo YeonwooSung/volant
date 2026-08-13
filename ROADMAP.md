@@ -3424,9 +3424,37 @@ Binding: **[docs/PHASE142_SPEC.md](./docs/PHASE142_SPEC.md)**.
 **Honest limitations:** best-effort report; non-leader Metadata may lag until
 ClusterState; not Raft metadata log.
 
-**Still deferred:** promote claim fence; preferred × session thrash; rollback
-local truncate on majority fail; live-only majority; full openraft/KRaft;
-multi-lang; chaos/long fuzz; full KIP-890/939; full preferred selector beyond 140.
+**Still deferred:** promote claim fence; rollback local truncate on majority fail;
+live-only majority; full openraft/KRaft; multi-lang; chaos/long fuzz;
+full KIP-890/939; full preferred selector beyond 140. Preferred × session thrash
+→ **closed by Phase 144**.
+
+---
+
+### Phase 144 — Preferred × session thrash suppress ✅
+
+**Goal:** When a consumer already holds a Kafka fetch session (`req_session_id
+!= 0`), do not emit PreferredReadReplica redirects. Avoids session-on-leader
+then preferred-follower → owner-miss forward thrash (119) / promote (138).
+
+Binding: **[docs/PHASE144_SPEC.md](./docs/PHASE144_SPEC.md)**.
+
+- [x] Suppress preferred when `req_session_id != 0` and epoch is not FINAL
+- [x] Metric `volant_preferred_replica_session_suppressed_total` when a candidate
+  would have been selected but was session-suppressed
+- [x] Full fetch (`session_id == 0`) still preferred-redirects; RC path unchanged
+- [x] Tests `phase144_preferred_session_suppress` + phase126/133/140 green
+- [x] Living docs honesty
+
+**Honest residual:** first full fetch with rack may still preferred-redirect
+**and** create a session in the same response (client can still thrash if it
+immediately uses that new id on the preferred broker). Suppress covers the
+common established-session case.
+
+**Still deferred:** promote claim fence (Phase 143); full preferred selector /
+throttling / rack-aware assignment; serve-from-mirror without promote; Raft
+session registry; rollback local truncate; full openraft/KRaft; multi-lang;
+chaos/long fuzz; full KIP-890/939.
 
 ---
 

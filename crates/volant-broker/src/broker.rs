@@ -579,6 +579,8 @@ pub struct Broker {
     preferred_replica_redirect_total: AtomicU64,
     /// Phase 140: preferred candidate suppressed (e.g. READ_COMMITTED).
     preferred_replica_suppressed_total: AtomicU64,
+    /// Phase 144: preferred candidate suppressed due to established fetch session.
+    preferred_replica_session_suppressed_total: AtomicU64,
     /// Phase 140: max leader_leo − follower_leo for preferred eligibility.
     /// `u64::MAX` = unlimited (env unset). Override via setter in tests.
     preferred_replica_max_leo_lag: AtomicU64,
@@ -790,6 +792,7 @@ impl Broker {
             isr_time_shrink_total: AtomicU64::new(0),
             preferred_replica_redirect_total: AtomicU64::new(0),
             preferred_replica_suppressed_total: AtomicU64::new(0),
+            preferred_replica_session_suppressed_total: AtomicU64::new(0),
             preferred_replica_max_leo_lag: AtomicU64::new(default_preferred_replica_max_leo_lag()),
             txn_coordinator_registry,
             txn_forward_total: AtomicU64::new(0),
@@ -936,6 +939,7 @@ impl Broker {
             isr_time_shrink_total: AtomicU64::new(0),
             preferred_replica_redirect_total: AtomicU64::new(0),
             preferred_replica_suppressed_total: AtomicU64::new(0),
+            preferred_replica_session_suppressed_total: AtomicU64::new(0),
             preferred_replica_max_leo_lag: AtomicU64::new(default_preferred_replica_max_leo_lag()),
             txn_coordinator_registry,
             txn_forward_total: AtomicU64::new(0),
@@ -1698,6 +1702,13 @@ impl Broker {
             .load(Ordering::Relaxed)
     }
 
+    /// Preferred-replica session suppress counter (Phase 144): candidate existed
+    /// but Fetch did not redirect because the client already has a fetch session.
+    pub fn preferred_replica_session_suppressed_total(&self) -> u64 {
+        self.preferred_replica_session_suppressed_total
+            .load(Ordering::Relaxed)
+    }
+
     /// Max `leader_leo − follower_leo` for preferred eligibility (Phase 140).
     /// `u64::MAX` = unlimited.
     pub fn preferred_replica_max_leo_lag(&self) -> u64 {
@@ -1814,6 +1825,11 @@ impl Broker {
 
     pub(crate) fn note_preferred_replica_suppressed(&self) {
         self.preferred_replica_suppressed_total
+            .fetch_add(1, Ordering::Relaxed);
+    }
+
+    pub(crate) fn note_preferred_replica_session_suppressed(&self) {
+        self.preferred_replica_session_suppressed_total
             .fetch_add(1, Ordering::Relaxed);
     }
 

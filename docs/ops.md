@@ -47,6 +47,7 @@ Key series (prefix `volant_`):
 - `volant_fetch_session_mirror_puts_coalesced_total` / `volant_fetch_session_mirror_stale_put_rejects_total` / `volant_fetch_session_promote_supersede_total` / `volant_fetch_session_mirror_restored` (Phase 139 coalesce / `mirror_gen` fence / durable restore)
 - `volant_preferred_replica_redirect_total` (Phase 126 PreferredReadReplica redirects)
 - `volant_preferred_replica_suppressed_total` (Phase 140: READ_COMMITTED suppress when a preferred candidate existed)
+- `volant_preferred_replica_session_suppressed_total` (Phase 144: preferred suppress when client has established fetch session)
 - `volant_txn_forward_total` / `volant_txn_forward_errors_total` (Phase 120/122 Kafka txn API forward: EndTxn / AddOffsets / TxnOffsetCommit)
 - `volant_txn_coordinator_registry_restored` / `volant_txn_coordinator_registry_persist_errors_total` (Phase 124 durable Init-owner registry)
 - `volant_txn_coordinator_registry_gc_total` (Phase 127 registry TTL GC drops)
@@ -229,15 +230,19 @@ volant-server \
   lag/fail still **70**; dual-promote race may later **71**; session_id owner bits
   are not re-encoded. Sticky routing still preferred for latency (one extra RTT on
   forward when owner is up).
-- **PreferredReadReplica (Phase 126 + 133 + 140):** Fetch v11+ client `rack_id`;
-  leader may redirect to same-rack live ISR peer with usable addr + LEO≥HWM
-  (empty records; rank highest LEO then lowest id). Optional freshness:
+- **PreferredReadReplica (Phase 126 + 133 + 140 + 144):** Fetch v11+ client
+  `rack_id`; leader may redirect to same-rack live ISR peer with usable addr +
+  LEO≥HWM (empty records; rank highest LEO then lowest id). Optional freshness:
   `VOLANT_PREFERRED_REPLICA_MAX_LEO_LAG` (parsed u64) skips peers with
   `leader_leo - follower_leo > lag`; **unset** = unlimited (126/133 behavior).
   **Suppressed** when isolation=`READ_COMMITTED` (leader keeps aborted-marker
   filter); metric `volant_preferred_replica_suppressed_total` when a candidate
-  existed (Phase 140). Not full Kafka selector/throttling; orthogonal to session
-  mirror.
+  existed (Phase 140). **Also suppressed** when the client Fetch already has a
+  non-zero `session_id` (established session; not FINAL close) so preferred does
+  not send the session to a follower owner-miss thrash path; metric
+  `volant_preferred_replica_session_suppressed_total` (Phase 144). Full fetch
+  (`session_id == 0`) may still preferred-redirect. Not full Kafka
+  selector/throttling.
 - **ACLs:** Kafka ACL admin maps to Volant Phase 20/21 ACLs (LITERAL only;
   CreateAcls enables enforcement). Describe/Create/DeleteAcls **0–3**: v3 accepts
   Kafka **User** resource type (stored as `ResourceType::User`; not used on the

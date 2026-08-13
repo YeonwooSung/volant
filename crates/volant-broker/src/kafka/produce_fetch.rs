@@ -1260,6 +1260,10 @@ pub(crate) fn encode_fetch(broker: &Broker, src: &mut impl Buf, out: &mut BytesM
             // leader. Keep reads on the leader (MVP residual vs full marker parity).
             // Phase 140: still count suppress when a candidate would have been
             // selected under READ_COMMITTED.
+            // Phase 144: suppress preferred when the client already holds a
+            // fetch session (`req_session_id != 0`, non-FINAL epoch). Redirect
+            // after session-on-leader would send the session_id to a follower
+            // owner miss → forward thrash (119) / promote (138).
             if version >= 11 && replica_id < 0 {
                 if let Some(pref) = broker.select_preferred_read_replica(
                     &name,
@@ -1269,6 +1273,9 @@ pub(crate) fn encode_fetch(broker: &Broker, src: &mut impl Buf, out: &mut BytesM
                     if read_committed {
                         broker.note_preferred_replica_suppressed();
                         // Fall through: serve on leader (no redirect).
+                    } else if req_session_id != 0 && req_session_epoch != FINAL_EPOCH {
+                        broker.note_preferred_replica_session_suppressed();
+                        // Fall through: serve locally; preferred_read_replica = -1.
                     } else {
                         let hwm = part_meta.map(|p| p.hwm as i64).unwrap_or(0);
                         let lso =

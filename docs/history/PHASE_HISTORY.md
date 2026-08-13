@@ -184,15 +184,16 @@ docs for day-to-day reading: [ops](../ops.md), [consistency](../consistency.md),
 | 140 | ✅ | Preferred-replica selector depth (optional max LEO lag; RC suppress metric) | [PHASE140_SPEC.md](../PHASE140_SPEC.md) |
 | 141 | ✅ | N=2 majority ops tooling (configured/live/quorum/impossible gauges + Broker helpers) | [PHASE141_SPEC.md](../PHASE141_SPEC.md) |
 | 142 | ✅ | Metadata ISR freshness when leader ≠ controller (overlay + IsrUpdate 94/95) | [PHASE142_SPEC.md](../PHASE142_SPEC.md) |
+| 144 | ✅ | Preferred × session thrash light suppress (established session_id; session suppress metric) | [PHASE144_SPEC.md](../PHASE144_SPEC.md) |
 
 ---
 
-## Still deferred (post–Phase 142)
+## Still deferred (post–Phase 144)
 
 - Multi-language clients
 - Chaos-mesh / long fuzz campaigns (corpus **smoke CI** → **closed by Phase 112**)
 - Full KIP-890/939 / Kafka `__transaction_state` topic (multi-broker Enable2Pc MVP → **closed by Phase 114**)
-- Multi-broker session handoff / affinity routing (durable **local** → **115**; owner forward MVP → **closed by Phase 119**; preferred-replica MVP → **closed by Phase 126**; shared mirror + promote MVP → **closed by Phase 138**; mirror polish → **closed by Phase 139**; residual: Raft registry / serve-without-promote / incremental put / full preferred selector)
+- Multi-broker session handoff / affinity routing (durable **local** → **115**; owner forward MVP → **closed by Phase 119**; preferred-replica MVP → **closed by Phase 126**; shared mirror + promote MVP → **closed by Phase 138**; mirror polish → **closed by Phase 139**; preferred × session suppress → **closed by Phase 144**; residual: Raft registry / serve-without-promote / incremental put / full preferred selector / promote claim fence)
 - Byte-identical response cache beyond HWM+LSO omit
 - Full KRaft epoch state machine / remote-log epochs
 - Full Kafka broker catalog / KRaft DynamicBrokerConfig
