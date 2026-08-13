@@ -581,6 +581,8 @@ pub struct Broker {
     preferred_replica_suppressed_total: AtomicU64,
     /// Phase 144: preferred candidate suppressed due to established fetch session.
     preferred_replica_session_suppressed_total: AtomicU64,
+    /// Phase 145: create/create-partitions used rack-diversity assignment.
+    rack_aware_assignment_total: AtomicU64,
     /// Phase 140: max leader_leo − follower_leo for preferred eligibility.
     /// `u64::MAX` = unlimited (env unset). Override via setter in tests.
     preferred_replica_max_leo_lag: AtomicU64,
@@ -793,6 +795,7 @@ impl Broker {
             preferred_replica_redirect_total: AtomicU64::new(0),
             preferred_replica_suppressed_total: AtomicU64::new(0),
             preferred_replica_session_suppressed_total: AtomicU64::new(0),
+            rack_aware_assignment_total: AtomicU64::new(0),
             preferred_replica_max_leo_lag: AtomicU64::new(default_preferred_replica_max_leo_lag()),
             txn_coordinator_registry,
             txn_forward_total: AtomicU64::new(0),
@@ -940,6 +943,7 @@ impl Broker {
             preferred_replica_redirect_total: AtomicU64::new(0),
             preferred_replica_suppressed_total: AtomicU64::new(0),
             preferred_replica_session_suppressed_total: AtomicU64::new(0),
+            rack_aware_assignment_total: AtomicU64::new(0),
             preferred_replica_max_leo_lag: AtomicU64::new(default_preferred_replica_max_leo_lag()),
             txn_coordinator_registry,
             txn_forward_total: AtomicU64::new(0),
@@ -1707,6 +1711,12 @@ impl Broker {
     pub fn preferred_replica_session_suppressed_total(&self) -> u64 {
         self.preferred_replica_session_suppressed_total
             .load(Ordering::Relaxed)
+    }
+
+    /// Rack-aware partition assignment counter (Phase 145): create-topic /
+    /// create-partitions used multi-rack diversity placement.
+    pub fn rack_aware_assignment_total(&self) -> u64 {
+        self.rack_aware_assignment_total.load(Ordering::Relaxed)
     }
 
     /// Max `leader_leo − follower_leo` for preferred eligibility (Phase 140).
@@ -5233,7 +5243,18 @@ impl Broker {
             .default_replication_factor
             .min(broker_ids.len() as u32)
             .max(1);
-        let replica_sets = assign_replicas(name.as_str(), partitions, &broker_ids, rf);
+        let broker_racks: Vec<(u32, Option<&str>)> = cluster
+            .config
+            .brokers
+            .iter()
+            .map(|b| (b.id, b.rack.as_deref()))
+            .collect();
+        let (replica_sets, rack_aware) =
+            assign_replicas(name.as_str(), partitions, broker_racks.iter().copied(), rf);
+        if rack_aware {
+            self.rack_aware_assignment_total
+                .fetch_add(1, Ordering::Relaxed);
+        }
         let id = TopicId(self.next_topic_id.fetch_add(1, Ordering::SeqCst));
 
         let mut part_map = HashMap::new();
@@ -5418,16 +5439,24 @@ impl Broker {
             .default_replication_factor
             .min(broker_ids.len() as u32)
             .max(1);
+        let broker_racks: Vec<(u32, Option<&str>)> = cluster
+            .config
+            .brokers
+            .iter()
+            .map(|b| (b.id, b.rack.as_deref()))
+            .collect();
 
         let mut new_part_map = HashMap::new();
+        let mut any_rack_aware = false;
         for pid in current..total_count {
             // Distinct placement seed per partition id.
-            let sets = assign_replicas(
+            let (sets, rack_aware) = assign_replicas(
                 &format!("{}#{pid}", name.as_str()),
                 1,
-                &broker_ids,
+                broker_racks.iter().copied(),
                 rf,
             );
+            any_rack_aware |= rack_aware;
             let replicas = sets.into_iter().next().unwrap_or_else(|| vec![self.node_id]);
             let leader = replicas.first().copied().unwrap_or(self.node_id);
             all_replica_sets.push(replicas.clone());
@@ -5440,6 +5469,10 @@ impl Broker {
                     leader_epoch: 0,
                 },
             );
+        }
+        if any_rack_aware {
+            self.rack_aware_assignment_total
+                .fetch_add(1, Ordering::Relaxed);
         }
 
         {

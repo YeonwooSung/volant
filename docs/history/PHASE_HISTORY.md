@@ -1,6 +1,6 @@
 # Phase history index
 
-Ship records for **phases 0–143** (shipped). Binding core contracts are
+Ship records for **phases 0–145** (shipped). Binding core contracts are
 **[PHASE1_SPEC](../PHASE1_SPEC.md)–[PHASE6_SPEC](../PHASE6_SPEC.md)**. Living
 docs for day-to-day reading: [ops](../ops.md), [consistency](../consistency.md),
 [tuning](../tuning.md), [KAFKA_COMPAT](../KAFKA_COMPAT.md),
@@ -186,16 +186,17 @@ docs for day-to-day reading: [ops](../ops.md), [consistency](../consistency.md),
 | 142 | ✅ | Metadata ISR freshness when leader ≠ controller (overlay + IsrUpdate 94/95) | [PHASE142_SPEC.md](../PHASE142_SPEC.md) |
 | 143 | ✅ | Fetch session promote claim fence (lowest-id `promoted_by`; MirrorPut converge) | [PHASE143_SPEC.md](../PHASE143_SPEC.md) |
 | 144 | ✅ | Preferred × session thrash suppress (`session_id != 0` → no PreferredReadReplica) | [PHASE144_SPEC.md](../PHASE144_SPEC.md) |
+| 145 | ✅ | Rack-aware partition assignment MVP (multi-rack create diversity + metric) | [PHASE145_SPEC.md](../PHASE145_SPEC.md) |
 
 ---
 
-## Still deferred (post–Phase 144)
+## Still deferred (post–Phase 145)
 
 
 - Multi-language clients
 - Chaos-mesh / long fuzz campaigns (corpus **smoke CI** → **closed by Phase 112**)
 - Full KIP-890/939 / Kafka `__transaction_state` topic (multi-broker Enable2Pc MVP → **closed by Phase 114**)
-- Multi-broker session handoff / affinity routing (durable **local** → **115**; owner forward MVP → **closed by Phase 119**; preferred-replica MVP → **closed by Phase 126**; shared mirror + promote MVP → **closed by Phase 138**; mirror polish → **closed by Phase 139**; promote claim fence → **closed by Phase 143**; preferred × session suppress → **closed by Phase 144**; residual: Raft registry / serve-without-promote / incremental put / full preferred selector)
+- Multi-broker session handoff / affinity routing (durable **local** → **115**; owner forward MVP → **closed by Phase 119**; preferred-replica MVP → **closed by Phase 126**; shared mirror + promote MVP → **closed by Phase 138**; mirror polish → **closed by Phase 139**; promote claim fence → **closed by Phase 143**; preferred × session suppress → **closed by Phase 144**; rack-aware create assignment → **closed by Phase 145**; residual: Raft registry / serve-without-promote / incremental put / full preferred throttle)
 - Byte-identical response cache beyond HWM+LSO omit
 - Full KRaft epoch state machine / remote-log epochs
 - Full Kafka broker catalog / KRaft DynamicBrokerConfig
@@ -239,4 +240,4 @@ docs for day-to-day reading: [ops](../ops.md), [consistency](../consistency.md),
 - Rollback local truncate on majority fail (still open)
 - Peer-to-peer heartbeat mesh → **closed by Phase 134**
 - Sync client wait on DeleteRecords majority → **closed by Phase 135** (opt-in; default best-effort)
-- Full Kafka preferred-replica selector / throttling / rack-aware partition assignment (beyond 126/133/140)
+- Full Kafka preferred-replica selector / throttling (beyond 126/133/140/144; rack-aware create assignment → **closed by Phase 145**)

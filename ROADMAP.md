@@ -3469,6 +3469,30 @@ throttling / rack-aware assignment; serve-from-mirror without promote; Raft
 session registry; rollback local truncate; full openraft/KRaft; multi-lang;
 chaos/long fuzz; full KIP-890/939.
 
+### Phase 145 — Rack-aware partition assignment MVP ✅
+
+**Goal:** Create-time replica placement that maximizes rack diversity when
+`cluster.toml` brokers declare ≥2 distinct racks. Preserve pure round-robin
+when racks are absent, single-rack, or env-disabled. Bounded residual of full
+preferred/throttling/assignment — assignment depth only (no Kafka preferred
+redirect throttle).
+
+Binding: **[docs/PHASE145_SPEC.md](./docs/PHASE145_SPEC.md)**.
+
+- [x] `assign_replicas` accepts `(id, rack)`; rack-diversity when multi-rack
+- [x] `None` rack → unique pseudo-rack only inside diversity path
+- [x] Legacy RR when no/single configured rack or `VOLANT_RACK_AWARE_ASSIGNMENT=0`
+- [x] Wire create_topic / create-partitions from `ClusterConfig`
+- [x] Metric `volant_rack_aware_assignment_total`
+- [x] Tests `phase145_rack_aware_assignment` + assignment unit tests
+
+**Honest residual:** no rebalance of existing topics; preferred selector still
+lacks full Kafka throttling/probe (126/133/140/144 unchanged).
+
+**Still deferred:** preferred throttle residual; serve-from-mirror without
+promote; incremental MirrorPut; rollback local truncate; full openraft/KRaft;
+multi-lang; chaos/long fuzz; full KIP-890/939.
+
 
 ---
 
@@ -3507,7 +3531,7 @@ marker clip 111; fuzz corpus smoke CI 112; cluster admin fan-out 113) — see
 
 ## Suggested implementation order (PRs)
 
-Phases **0–144 are shipped**. Historical PR order for the core:
+Phases **0–145 are shipped**. Historical PR order for the core:
 
 1. Phase 1 segment format + unit tests  
 2. Phase 1 recovery + retention  
@@ -3554,7 +3578,7 @@ Phases **0–144 are shipped**. Historical PR order for the core:
 43. Phase 142 (Metadata ISR overlay + leader→controller IsrUpdate 94/95) ✅  
 44. Phase 143 (promote claim fence lowest-id) ✅  
 45. Phase 144 (preferred × session thrash suppress) ✅  
-44. Phase 143 (fetch session promote claim fence lowest-id `promoted_by`) ✅
+46. Phase 145 (rack-aware partition assignment MVP) ✅  
 
 ---
 
@@ -3595,7 +3619,7 @@ cargo run -p volant-bench --release
 cargo test --workspace
 ```
 
-**Status (post–Phase 144):** core broker, ops (metrics / TLS / auth / SCRAM /
+**Status (post–Phase 145):** core broker, ops (metrics / TLS / auth / SCRAM /
 ACLs / Helm), and the Kafka wire shim are **shipped** (Fetch 0–18 Kafka max;
 ACL admin 0–3 with User resource; soft-marker `READ_COMMITTED` with **marker GC/clip**
 on DeleteRecords/retention/load (Phase 104/111); durable OFLE history; Fetch DivergingEpoch +
@@ -3631,15 +3655,16 @@ txn EndTxn/AddOffsets/TxnOffsetCommit forward Phases 120/122;
 **durable Init-owner registry** Phase 124 (`__txn_coordinator`);
 **PreferredReadReplica / rack-aware Fetch MVP** Phase 126 (Metadata rack;
 redirect when same-rack ISR peer LEO≥HWM) + **selector polish** Phase 133
-(usable addr + LEO-desc rank) + **max LEO lag + RC suppress metric** Phase 140;
+(usable addr + LEO-desc rank) + **max LEO lag + RC suppress metric** Phase 140
++ **session suppress** Phase 144;
+**rack-aware create assignment** Phase 145 (multi-rack diversity; legacy RR when
+no/single rack; `VOLANT_RACK_AWARE_ASSIGNMENT=0` off);
 **N=2 majority health gauges** Phase 141 (`volant_cluster_*` configured/live/quorum/impossible);
 **Metadata ISR overlay + leader→controller IsrUpdate** Phase 142;
-**promote claim fence** Phase 143;
 **txn coordinator registry TTL GC** Phase 127 + **BROKER config surface** Phase 128; **truncate journal** Phase 129 + **majority multi-controller consensus** Phase 130 + **journal rejoin catch-up** Phase 131 + **catch-up hardening** Phase 132 + **p2p heartbeat mesh** Phase 134 + **optional DeleteRecords majority wait** Phase 135 + **non-blocking admin catch-up** Phase 136 + **native DeleteRecords request wait trailer + journal topic GC** Phase 137).
 Still deferred: multi-language clients, full chaos-mesh suites / long fuzz
-campaigns, preferred × session thrash, full preferred-replica selector /
-throttling / rack-aware assignment (beyond 126/133/140 lag+metric; Phase
-138/139/143 closed shared mirror MVP — residual: Raft registry /
+campaigns, full preferred-replica throttling residual (assignment MVP closed by
+Phase 145; Phase 138/139/143 closed shared mirror MVP — residual: Raft registry /
 serve-without-promote / incremental put), full KIP-890/939, rollback local
 truncate on majority fail.
 Details: [docs/KAFKA_COMPAT.md](./docs/KAFKA_COMPAT.md), [docs/ops.md](./docs/ops.md).

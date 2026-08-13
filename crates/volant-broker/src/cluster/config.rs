@@ -15,7 +15,7 @@ pub struct BrokerEndpoint {
     pub host: String,
     /// Port.
     pub port: u16,
-    /// Optional rack (ignored for placement in Phase 6).
+    /// Optional rack (Phase 126 preferred-read; Phase 145 multi-rack assignment).
     #[serde(default)]
     pub rack: Option<String>,
 }

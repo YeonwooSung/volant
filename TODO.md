@@ -1,14 +1,21 @@
 # Volant residual TODO (review loop)
 
-**Baseline:** HEAD product = **Phases 0–144** shipped (promote claim fence + preferred × session suppress).  
+**Baseline:** HEAD product = **Phases 0–145** shipped (rack-aware assignment MVP).  
 **Last review:** 2026-08-13  
 
-Living roadmap: [ROADMAP.md](./ROADMAP.md) (Phases **0–144 shipped**).  
-Recent specs: [PHASE144](./docs/PHASE144_SPEC.md) · [PHASE143](./docs/PHASE143_SPEC.md) · [PHASE142](./docs/PHASE142_SPEC.md) · [PHASE141](./docs/PHASE141_SPEC.md).
+Living roadmap: [ROADMAP.md](./ROADMAP.md) (Phases **0–145 shipped**).  
+Recent specs: [PHASE145](./docs/PHASE145_SPEC.md) · [PHASE144](./docs/PHASE144_SPEC.md) · [PHASE143](./docs/PHASE143_SPEC.md) · [PHASE142](./docs/PHASE142_SPEC.md).
 
 ---
 
 ## Shipped recently
+
+### Phase 145 — Rack-aware partition assignment MVP
+- [x] Rack-diversity `assign_replicas` when ≥2 distinct configured racks
+- [x] Legacy round-robin when no/single rack or `VOLANT_RACK_AWARE_ASSIGNMENT=0`
+- [x] Wire into create_topic / create-partitions from `ClusterConfig` racks
+- [x] Metric `volant_rack_aware_assignment_total`
+- [x] Tests `phase145_rack_aware_assignment` + assignment unit tests green
 
 ### Phase 144 — Preferred × session thrash suppress
 - [x] Suppress PreferredReadReplica when `req_session_id != 0` (non-FINAL epoch)
@@ -70,7 +77,7 @@ _(none open)_
 
 | Pri | Item | Notes |
 |----:|------|-------|
-| P3 | Full preferred selector / throttling / rack-aware assignment | Beyond 126/133/140/144 |
+| P3 | Full preferred selector / throttling (beyond 126/133/140/144) | Assignment MVP → **Phase 145**; residual Kafka throttle/probe |
 | P3 | Incremental/delta MirrorPut wire | 139 coalesces full snapshots only |
 | P3 | Serve-from-mirror without promote | Dual-epoch design required |
 | P3 | Rollback / defer local truncate until majority | Hard; segment delete is irreversible today |
@@ -96,7 +103,8 @@ _(none open)_
 - [x] Metadata ISR overlay + leader→controller IsrUpdate (Phase 142)
 - [x] Promote claim fence lowest-id (Phase 143)
 - [x] Preferred × session thrash light suppress (Phase 144)
-- [ ] Full preferred-replica selector / rack-aware partition assignment (beyond 140/144)
+- [x] Rack-aware partition assignment MVP (Phase 145; create-time diversity)
+- [ ] Full preferred-replica selector / throttling (beyond 140/144/145 assignment)
 - [ ] Multi-language clients
 - [ ] Full chaos-mesh / long fuzz campaigns
 - [ ] Heterogeneous per-broker BROKER overrides without controller
@@ -112,6 +120,7 @@ _(none open)_
 
 | Area | Verdict |
 |------|---------|
+| Phase 145 | **Shipped** — rack-aware create assignment MVP; legacy RR preserved; no rebalance |
 | Phase 144 | **Shipped** — preferred suppress on established fetch session; session suppress metric |
 | Phase 143 | **Shipped** — `promoted_by` lowest-id claim fence; best-effort MirrorPut; not Raft |
 | Phase 142 | **Shipped** — leader Metadata overlay + IsrUpdate 94/95; best-effort report |
@@ -123,4 +132,4 @@ _(none open)_
 | P0 / P1 code | **None open** |
 | P2 residual | **None open** |
 
-**Default next slice:** pick a P3 product residual (incremental MirrorPut, serve-from-mirror, full preferred selector) or a larger product bet (streams durable state / Raft / multi-lang). Larger Raft/KIP only with a clear product goal.
+**Default next slice:** pick a P3 product residual (incremental MirrorPut, serve-from-mirror, preferred throttling residual) or a larger product bet (streams durable state / Raft / multi-lang). Larger Raft/KIP only with a clear product goal.

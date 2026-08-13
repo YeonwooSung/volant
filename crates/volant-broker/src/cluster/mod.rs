@@ -6,8 +6,9 @@ pub mod membership;
 pub mod state;
 
 pub use assignment::{
-    assign_replicas, compute_hwm, elect_leader, expand_isr, isr_rejoin_eligible, reconcile_isr,
-    shrink_isr, shrink_isr_by_time, topic_hash,
+    assign_replicas, assign_replicas_round_robin, compute_hwm, distinct_configured_racks,
+    elect_leader, expand_isr, isr_rejoin_eligible, rack_aware_assignment_enabled,
+    reconcile_isr, shrink_isr, shrink_isr_by_time, topic_hash, will_use_rack_aware_assignment,
 };
 pub use config::{BrokerEndpoint, ClusterConfig};
 pub use membership::Membership;

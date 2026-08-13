@@ -823,6 +823,15 @@ fn broker_metrics_text(broker: &Broker) -> String {
         "volant_preferred_replica_session_suppressed_total {}\n",
         broker.preferred_replica_session_suppressed_total()
     ));
+    // Phase 145: rack-aware replica assignment on create.
+    text.push_str(
+        "# HELP volant_rack_aware_assignment_total Topic create/create-partitions using rack-diversity placement\n",
+    );
+    text.push_str("# TYPE volant_rack_aware_assignment_total counter\n");
+    text.push_str(&format!(
+        "volant_rack_aware_assignment_total {}\n",
+        broker.rack_aware_assignment_total()
+    ));
     // Phase 129: truncate journal.
     text.push_str(
         "# HELP volant_truncate_journal_generation Controller/local truncate journal generation\n",

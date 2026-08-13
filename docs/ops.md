@@ -49,6 +49,7 @@ Key series (prefix `volant_`):
 - `volant_preferred_replica_redirect_total` (Phase 126 PreferredReadReplica redirects)
 - `volant_preferred_replica_suppressed_total` (Phase 140: READ_COMMITTED suppress when a preferred candidate existed)
 - `volant_preferred_replica_session_suppressed_total` (Phase 144: preferred suppress when client has established fetch session)
+- `volant_rack_aware_assignment_total` (Phase 145: create/create-partitions used multi-rack diversity placement)
 - `volant_txn_forward_total` / `volant_txn_forward_errors_total` (Phase 120/122 Kafka txn API forward: EndTxn / AddOffsets / TxnOffsetCommit)
 - `volant_txn_coordinator_registry_restored` / `volant_txn_coordinator_registry_persist_errors_total` (Phase 124 durable Init-owner registry)
 - `volant_txn_coordinator_registry_gc_total` (Phase 127 registry TTL GC drops)
@@ -247,6 +248,12 @@ volant-server \
   `volant_preferred_replica_session_suppressed_total` (Phase 144). Full fetch
   (`session_id == 0`) may still preferred-redirect. Not full Kafka
   selector/throttling.
+- **Rack-aware create assignment (Phase 145):** when `cluster.toml` brokers
+  declare ≥2 distinct `rack` values, new topic / create-partitions replica sets
+  maximize rack diversity (leader = first replica). Default **on**; set
+  `VOLANT_RACK_AWARE_ASSIGNMENT=0` (or `false`/`no`/`off`) for legacy
+  round-robin. No racks / single rack → legacy RR unchanged. Metric
+  `volant_rack_aware_assignment_total`. Does **not** rebalance existing topics.
 - **ACLs:** Kafka ACL admin maps to Volant Phase 20/21 ACLs (LITERAL only;
   CreateAcls enables enforcement). Describe/Create/DeleteAcls **0–3**: v3 accepts
   Kafka **User** resource type (stored as `ResourceType::User`; not used on the
@@ -393,7 +400,7 @@ curl -s -H "Authorization: Bearer $VOLANT_METRICS_TOKEN" \
 - Full chaos-mesh suites / long fuzz campaigns (corpus **smoke CI MVP** → **closed by Phase 112**)
 - Full KIP-890/939 / Kafka `__transaction_state` topic (multi-broker Enable2Pc MVP → **closed by Phase 114**)
 - Multi-broker session affinity / durable sessions → **closed by Phase 115/119**; shared mirror + promote → **closed by Phase 138**; mirror polish (coalesce/debounce + optional durable + fence) → **closed by Phase 139** (best-effort residual: Raft registry / serve-without-promote / incremental put)
-- Full preferred-replica selector / throttling / rack-aware partition assignment (beyond 126/133/140 lag+suppress metric)
+- Full preferred-replica selector / throttling residual (beyond 126/133/140/144; rack-aware create assignment → **closed by Phase 145**)
 - Byte-identical Kafka compressed response cache (omit is HWM+LSO based)
 - Accept-loop drain + single-flight background tasks → **closed by Phase 109** (bg join: Phase 106)
 - Non-controller alive-set auto-death → **closed by Phase 110**
