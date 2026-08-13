@@ -1014,6 +1014,10 @@ pub fn start_background_tasks(broker: Arc<Broker>) -> BackgroundTasks {
                         _ = stop_rx.changed() => break,
                         _ = interval.tick() => {
                             b.tick_cluster();
+                            // Phase 142: death-path ISR shrink may enqueue reports.
+                            if b.has_pending_isr_reports() {
+                                schedule_isr_update_reports(&b);
+                            }
                         }
                     }
                 }
@@ -2841,6 +2845,98 @@ pub async fn fanout_session_mirror_ops(broker: &Broker) {
     }
 }
 
+/// Phase 142: best-effort drain of pending IsrUpdate reports to the controller.
+///
+/// Fire-and-forget; does not block client/replica paths. On success aligns the
+/// leader's local assignment generation to the controller response.
+pub fn schedule_isr_update_reports(broker: &Arc<Broker>) {
+    if !broker.has_pending_isr_reports() {
+        return;
+    }
+    let b = Arc::clone(broker);
+    tokio::spawn(async move {
+        fanout_isr_update_reports(&b).await;
+    });
+}
+
+/// Send queued IsrUpdate RPCs to the current controller (Phase 142).
+pub async fn fanout_isr_update_reports(broker: &Broker) {
+    let reports = broker.drain_pending_isr_reports();
+    if reports.is_empty() {
+        return;
+    }
+    let controller_id = broker.controller_id();
+    if controller_id == broker.node_id() {
+        // Became controller since enqueue; apply locally.
+        for r in reports {
+            let (err, gen) = broker.apply_leader_isr_update(
+                &r.topic,
+                r.partition,
+                r.leader_id,
+                r.leader_epoch,
+                &r.isr,
+                r.generation_hint,
+            );
+            if err == 0 {
+                broker.align_assignment_generation(gen);
+            }
+        }
+        return;
+    }
+    let Some(addr) = broker.broker_addr(controller_id) else {
+        tracing::debug!(
+            controller_id,
+            "isr update: no controller addr; reports dropped"
+        );
+        return;
+    };
+    for r in reports {
+        let req = Request::IsrUpdate {
+            topic: r.topic.clone(),
+            partition: r.partition,
+            leader_id: r.leader_id,
+            leader_epoch: r.leader_epoch,
+            isr: r.isr.clone(),
+            generation_hint: r.generation_hint,
+        };
+        match inter_broker_rpc(broker, &addr, &req).await {
+            Ok(Response::IsrUpdate {
+                error_code: 0,
+                generation,
+            }) => {
+                broker.align_assignment_generation(generation);
+            }
+            Ok(Response::IsrUpdate {
+                error_code,
+                generation: _,
+            }) => {
+                tracing::debug!(
+                    topic = %r.topic,
+                    partition = r.partition,
+                    error_code,
+                    "isr update rejected by controller"
+                );
+            }
+            Ok(other) => {
+                tracing::debug!(
+                    topic = %r.topic,
+                    partition = r.partition,
+                    ?other,
+                    "isr update unexpected response"
+                );
+            }
+            Err(e) => {
+                tracing::debug!(
+                    topic = %r.topic,
+                    partition = r.partition,
+                    error = %e,
+                    "isr update rpc failed"
+                );
+            }
+        }
+    }
+}
+
 /// Schedule [`fanout_session_mirror_ops`] after local Kafka Fetch session mutations.
 ///
 /// Phase 139: **Deletes** flush immediately. **Puts** are single-flight debounced
@@ -3480,6 +3576,7 @@ fn authorize_request(
         | Request::KafkaTxnForward { .. }
         | Request::FetchSessionMirrorPut { .. }
         | Request::FetchSessionMirrorDelete { .. }
+        | Request::IsrUpdate { .. }
         | Request::Auth { .. }
         | Request::ScramFirst { .. }
         | Request::ScramFinal { .. } => return None,
@@ -3574,6 +3671,7 @@ fn authorize_request(
         | Request::KafkaTxnForward { .. }
         | Request::FetchSessionMirrorPut { .. }
         | Request::FetchSessionMirrorDelete { .. }
+        | Request::IsrUpdate { .. }
         | Request::Auth { .. }
         | Request::ScramFirst { .. }
         | Request::ScramFinal { .. } => true,
@@ -3661,7 +3759,8 @@ fn record_response_metrics(broker: &Broker, resp: &Response) {
         | Response::TruncateJournalNote { error_code, .. }
         | Response::TruncateJournalPush { error_code }
         | Response::FetchSessionMirrorPut { error_code }
-        | Response::FetchSessionMirrorDelete { error_code } => {
+        | Response::FetchSessionMirrorDelete { error_code }
+        | Response::IsrUpdate { error_code, .. } => {
             if *error_code != 0 {
                 m.record_error(*error_code);
             }
@@ -4123,6 +4222,10 @@ async fn handle_request(broker: &Arc<Broker>, req: Request) -> Result<Response> 
         } => {
             let (error_code, high_watermark, leader_epoch, records) = broker
                 .handle_replica_fetch(&topic, partition, from_offset, max_bytes, replica_id)?;
+            // Phase 142: best-effort leader→controller ISR report after local reconcile.
+            if broker.has_pending_isr_reports() {
+                schedule_isr_update_reports(broker);
+            }
             Ok(Response::ReplicaFetch {
                 error_code,
                 topic,
@@ -4426,6 +4529,27 @@ async fn handle_request(broker: &Arc<Broker>, req: Request) -> Result<Response> 
         Request::FetchSessionMirrorDelete { session_id } => {
             broker.fetch_sessions().apply_mirror_delete(session_id);
             Ok(Response::FetchSessionMirrorDelete { error_code: 0 })
+        }
+        Request::IsrUpdate {
+            topic,
+            partition,
+            leader_id,
+            leader_epoch,
+            isr,
+            generation_hint,
+        } => {
+            let (error_code, generation) = broker.apply_leader_isr_update(
+                &topic,
+                partition,
+                leader_id,
+                leader_epoch,
+                &isr,
+                generation_hint,
+            );
+            Ok(Response::IsrUpdate {
+                error_code,
+                generation,
+            })
         }
         Request::KafkaTxnForward {
             api_key,

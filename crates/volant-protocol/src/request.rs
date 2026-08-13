@@ -96,6 +96,8 @@ pub enum RequestOpcode {
     FetchSessionMirrorPut = 90,
     /// Owner → peers: remove fetch session mirror (Phase 138).
     FetchSessionMirrorDelete = 92,
+    /// Non-controller leader → controller: report live ISR (Phase 142).
+    IsrUpdate = 94,
 }
 
 impl RequestOpcode {
@@ -147,6 +149,7 @@ impl RequestOpcode {
             88 => Self::TruncateJournalPush,
             90 => Self::FetchSessionMirrorPut,
             92 => Self::FetchSessionMirrorDelete,
+            94 => Self::IsrUpdate,
             _ => return None,
         })
     }
@@ -606,6 +609,21 @@ pub enum Request {
         /// Session id to remove from the peer mirror table.
         session_id: i32,
     },
+    /// Non-controller partition leader → controller: live ISR snapshot (Phase 142).
+    IsrUpdate {
+        /// Topic name.
+        topic: String,
+        /// Partition id.
+        partition: u32,
+        /// Claimed leader broker id.
+        leader_id: u32,
+        /// Leader epoch at the time of the ISR change.
+        leader_epoch: u32,
+        /// Full ISR set (must include `leader_id`).
+        isr: Vec<u32>,
+        /// Optional local assignment generation hint (`0` = none).
+        generation_hint: u32,
+    },
 }
 
 impl Request {
@@ -659,6 +677,7 @@ impl Request {
             Self::FetchSessionMirrorDelete { .. } => {
                 RequestOpcode::FetchSessionMirrorDelete as u16
             }
+            Self::IsrUpdate { .. } => RequestOpcode::IsrUpdate as u16,
         }
     }
 }

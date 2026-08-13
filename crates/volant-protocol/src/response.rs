@@ -96,6 +96,8 @@ pub enum ResponseOpcode {
     FetchSessionMirrorPut = 91,
     /// Fetch session mirror delete result (Phase 138).
     FetchSessionMirrorDelete = 93,
+    /// ISR update result (Phase 142).
+    IsrUpdate = 95,
     /// Error response.
     Error = 0xFFFF,
 }
@@ -149,6 +151,7 @@ impl ResponseOpcode {
             89 => Self::TruncateJournalPush,
             91 => Self::FetchSessionMirrorPut,
             93 => Self::FetchSessionMirrorDelete,
+            95 => Self::IsrUpdate,
             0xFFFF => Self::Error,
             _ => return None,
         })
@@ -748,6 +751,13 @@ pub enum Response {
         /// Protocol error code.
         error_code: u16,
     },
+    /// ISR update result (Phase 142).
+    IsrUpdate {
+        /// 0 = ok; 14 = not controller; 13 = not leader; 19 = fenced epoch; 2 = unknown TP.
+        error_code: u16,
+        /// Controller assignment generation after apply (unchanged on reject).
+        generation: u32,
+    },
     /// Error response.
     Error {
         /// Error code.
@@ -832,6 +842,7 @@ impl Response {
             Self::FetchSessionMirrorDelete { .. } => {
                 ResponseOpcode::FetchSessionMirrorDelete as u16
             }
+            Self::IsrUpdate { .. } => ResponseOpcode::IsrUpdate as u16,
             Self::Error { .. } => ResponseOpcode::Error as u16,
         }
     }

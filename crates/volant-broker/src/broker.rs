@@ -596,6 +596,25 @@ pub struct Broker {
     admin_catchup: Mutex<AdminCatchupState>,
     /// Phase 136: admin catch-up schedule skipped (in-flight or min-interval).
     admin_catchup_skipped_total: AtomicU64,
+    /// Phase 142: pending IsrUpdate reports (non-controller leader → controller).
+    pending_isr_reports: Mutex<Vec<PendingIsrReport>>,
+}
+
+/// One pending leader→controller ISR report (Phase 142).
+#[derive(Debug, Clone)]
+pub struct PendingIsrReport {
+    /// Topic name.
+    pub topic: String,
+    /// Partition id.
+    pub partition: u32,
+    /// Claiming leader id.
+    pub leader_id: u32,
+    /// Leader epoch at report time.
+    pub leader_epoch: u32,
+    /// Full ISR set.
+    pub isr: Vec<u32>,
+    /// Local generation hint (`0` = none).
+    pub generation_hint: u32,
 }
 
 /// Phase 132: in-process scheduler state for truncate-journal catch-up pushes.
@@ -779,6 +798,7 @@ impl Broker {
             journal_catchup_skipped_total: AtomicU64::new(0),
             admin_catchup: Mutex::new(AdminCatchupState::default()),
             admin_catchup_skipped_total: AtomicU64::new(0),
+            pending_isr_reports: Mutex::new(Vec::new()),
         };
         broker
             .reload_single_node_topics()
@@ -924,6 +944,7 @@ impl Broker {
             journal_catchup_skipped_total: AtomicU64::new(0),
             admin_catchup: Mutex::new(AdminCatchupState::default()),
             admin_catchup_skipped_total: AtomicU64::new(0),
+            pending_isr_reports: Mutex::new(Vec::new()),
         };
         // Open local partitions from persisted assignment.
         broker.apply_local_assignment()?;
@@ -6167,18 +6188,32 @@ impl Broker {
                         .partitions
                         .iter()
                         .map(|(pid, p)| {
-                            let hwm = local
+                            let local_part = local
                                 .get(&TopicName::new(&name))
-                                .and_then(|lt| lt.partitions.get(&PartitionId(*pid)))
-                                .map(|lp| lp.committed_hwm)
-                                .unwrap_or(0);
+                                .and_then(|lt| lt.partitions.get(&PartitionId(*pid)));
+                            let hwm = local_part.map(|lp| lp.committed_hwm).unwrap_or(0);
+                            // Phase 142: when this node is the partition leader,
+                            // prefer live local ISR / epoch over assignment lag.
+                            let is_local_leader = p.leader == self.node_id
+                                || local_part
+                                    .map(|lp| lp.is_leader(self.node_id))
+                                    .unwrap_or(false);
+                            let (isr, leader_epoch) = if is_local_leader {
+                                if let Some(lp) = local_part {
+                                    (lp.isr.clone(), lp.leader_epoch)
+                                } else {
+                                    (p.isr.clone(), p.leader_epoch)
+                                }
+                            } else {
+                                (p.isr.clone(), p.leader_epoch)
+                            };
                             PartitionMetadata {
                                 partition_id: PartitionId(*pid),
                                 leader: p.leader,
                                 hwm,
                                 replicas: p.replicas.clone(),
-                                isr: p.isr.clone(),
-                                leader_epoch: p.leader_epoch,
+                                isr,
+                                leader_epoch,
                             }
                         })
                         .collect();
@@ -6335,18 +6370,35 @@ impl Broker {
                 part.isr = isr;
                 part.recompute_hwm(self.node_id);
 
-                // Persist ISR change into assignment (generation bump so peers pull).
-                {
+                // Persist ISR into assignment. Controller bumps generation so
+                // peers pull; non-controller leaders report to controller (Phase 142).
+                let isr_changed = {
+                    let isr_now = part.isr.clone();
                     let mut asg = cluster.assignment.write();
+                    let mut changed = false;
                     if let Some(ta) = asg.topics.get_mut(topic) {
                         if let Some(pa) = ta.partitions.get_mut(&partition) {
-                            if pa.isr != part.isr {
-                                pa.isr = part.isr.clone();
-                                asg.generation = asg.generation.saturating_add(1);
-                                let _ = save_assignment(&cluster.data_dir, &asg);
+                            if pa.isr != isr_now {
+                                pa.isr = isr_now;
+                                changed = true;
+                                if self.is_controller() {
+                                    asg.generation = asg.generation.saturating_add(1);
+                                    let _ = save_assignment(&cluster.data_dir, &asg);
+                                }
                             }
                         }
                     }
+                    changed
+                };
+                if isr_changed && !self.is_controller() {
+                    self.enqueue_isr_report(PendingIsrReport {
+                        topic: topic.to_owned(),
+                        partition,
+                        leader_id: part.leader,
+                        leader_epoch: part.leader_epoch,
+                        isr: part.isr.clone(),
+                        generation_hint: cluster.assignment.read().generation,
+                    });
                 }
             } else {
                 part.catch_up_hwm();
@@ -6683,7 +6735,8 @@ impl Broker {
     /// Every observer removes the dead broker from **local** partition ISR and
     /// recomputes HWM (unblocks `acks=all`). The controller additionally updates
     /// the durable assignment (including pure ISR shrink — generation bump) so
-    /// peers learn via ClusterState pull.
+    /// peers learn via ClusterState pull. Non-controller leaders also enqueue
+    /// Phase 142 IsrUpdate reports so controller assignment converges.
     pub fn on_broker_death(&self, dead_id: u32) -> Result<()> {
         let Some(cluster) = &self.cluster else {
             return Ok(());
@@ -6693,6 +6746,8 @@ impl Broker {
         // Local ISR shrink on every observer (leader may not be controller).
         self.shrink_local_isr_for_dead(dead_id);
         if !cluster.membership.read().is_controller() {
+            // Phase 142: report leader-local ISR shrink to controller (best-effort).
+            self.enqueue_isr_reports_for_local_leaders();
             return Ok(());
         }
         let live = cluster.membership.read().live_brokers();
@@ -7097,6 +7152,148 @@ impl Broker {
             .get(&partition)
             .ok_or_else(|| Error::NotFound(format!("partition {partition}")))?;
         Ok(part.isr.clone())
+    }
+
+    /// Queue a Phase 142 IsrUpdate report (coalesced by topic/partition).
+    fn enqueue_isr_report(&self, report: PendingIsrReport) {
+        let mut q = self.pending_isr_reports.lock();
+        if let Some(existing) = q
+            .iter_mut()
+            .find(|r| r.topic == report.topic && r.partition == report.partition)
+        {
+            *existing = report;
+        } else {
+            q.push(report);
+        }
+    }
+
+    /// Enqueue IsrUpdate for every partition this node currently leads.
+    ///
+    /// Used after non-controller death shrink so controller assignment catches up.
+    fn enqueue_isr_reports_for_local_leaders(&self) {
+        let Some(cluster) = &self.cluster else {
+            return;
+        };
+        let gen_hint = cluster.assignment.read().generation;
+        let topics = self.topics.read();
+        let mut reports = Vec::new();
+        for (name, t) in topics.iter() {
+            for (pid, part) in &t.partitions {
+                if !part.is_leader(self.node_id) {
+                    continue;
+                }
+                reports.push(PendingIsrReport {
+                    topic: name.as_str().to_owned(),
+                    partition: pid.0,
+                    leader_id: part.leader,
+                    leader_epoch: part.leader_epoch,
+                    isr: part.isr.clone(),
+                    generation_hint: gen_hint,
+                });
+            }
+        }
+        drop(topics);
+        // Mirror local ISR into assignment without bumping generation.
+        {
+            let mut asg = cluster.assignment.write();
+            for r in &reports {
+                if let Some(ta) = asg.topics.get_mut(&r.topic) {
+                    if let Some(pa) = ta.partitions.get_mut(&r.partition) {
+                        if pa.isr != r.isr {
+                            pa.isr = r.isr.clone();
+                        }
+                    }
+                }
+            }
+        }
+        for r in reports {
+            self.enqueue_isr_report(r);
+        }
+    }
+
+    /// Drain pending IsrUpdate reports (Phase 142).
+    pub fn drain_pending_isr_reports(&self) -> Vec<PendingIsrReport> {
+        std::mem::take(&mut *self.pending_isr_reports.lock())
+    }
+
+    /// Whether any IsrUpdate reports are queued.
+    pub fn has_pending_isr_reports(&self) -> bool {
+        !self.pending_isr_reports.lock().is_empty()
+    }
+
+    /// Align local assignment generation to controller SoT after a successful
+    /// IsrUpdate report (Phase 142). Avoids permanent gen divergence that would
+    /// reject later ClusterState pulls.
+    pub fn align_assignment_generation(&self, controller_generation: u32) {
+        let Some(cluster) = &self.cluster else {
+            return;
+        };
+        let mut asg = cluster.assignment.write();
+        if asg.generation != controller_generation {
+            asg.generation = controller_generation;
+            let _ = save_assignment(&cluster.data_dir, &asg);
+        }
+    }
+
+    /// Controller: apply a leader-reported ISR update (Phase 142).
+    ///
+    /// Accepts only when this node is controller, the topic/partition exists,
+    /// `leader_id` matches the assignment leader, and `leader_epoch` is not
+    /// stale (`local > requested` → fenced). On success updates assignment ISR,
+    /// bumps generation, and persists.
+    ///
+    /// Returns `(error_code, assignment_generation)`.
+    pub fn apply_leader_isr_update(
+        &self,
+        topic: &str,
+        partition: u32,
+        leader_id: u32,
+        leader_epoch: u32,
+        isr: &[u32],
+        _generation_hint: u32,
+    ) -> (u16, u32) {
+        let Some(cluster) = &self.cluster else {
+            // Single-node: no-op success.
+            return (0, 0);
+        };
+        if !self.is_controller() {
+            return (ErrorCode::NotController as u16, self.generation());
+        }
+        if topic.is_empty() {
+            return (ErrorCode::InvalidArg as u16, self.generation());
+        }
+        if isr.is_empty() || !isr.contains(&leader_id) {
+            return (ErrorCode::InvalidArg as u16, self.generation());
+        }
+
+        let mut asg = cluster.assignment.write();
+        let Some(ta) = asg.topics.get_mut(topic) else {
+            return (ErrorCode::NotFound as u16, asg.generation);
+        };
+        let Some(pa) = ta.partitions.get_mut(&partition) else {
+            return (ErrorCode::NotFound as u16, asg.generation);
+        };
+        if pa.leader != leader_id {
+            return (ErrorCode::NotLeaderForPartition as u16, asg.generation);
+        }
+        if pa.leader_epoch > leader_epoch {
+            return (ErrorCode::InvalidProducerEpoch as u16, asg.generation);
+        }
+        // Keep only replica-set members; always include leader.
+        let mut new_isr: Vec<u32> = Vec::with_capacity(isr.len());
+        new_isr.push(leader_id);
+        for &id in isr {
+            if id != leader_id && pa.replicas.contains(&id) && !new_isr.contains(&id) {
+                new_isr.push(id);
+            }
+        }
+        if pa.isr != new_isr {
+            pa.isr = new_isr;
+            asg.generation = asg.generation.saturating_add(1);
+            let _ = save_assignment(&cluster.data_dir, &asg);
+        }
+        let gen = asg.generation;
+        (0, gen)
     }
 
     /// Reconcile local membership against the controller's `alive_brokers`

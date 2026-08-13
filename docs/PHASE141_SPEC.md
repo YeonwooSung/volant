@@ -33,7 +33,7 @@ algorithm.
 | Rollback local truncate on majority fail | Hard; irreversible segment delete |
 | Auto-reconfigure N | Ops policy, not broker auto |
 | Alertmanager rules files | Operator-owned; metrics only |
-| Metadata ISR lag | Phase 142 sibling / separate residual |
+| Metadata ISR lag | Closed by Phase 142 (leader overlay + IsrUpdate) |
 | New CLI `cluster health` | No existing cluster CLI surface; metrics-first |
 
 ## Semantics
