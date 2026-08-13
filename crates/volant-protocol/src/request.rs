@@ -102,6 +102,8 @@ pub enum RequestOpcode {
     IsrUpdate = 94,
     /// Controller → peers: assignment generation majority consensus note (Phase 150).
     AssignmentConsensusNote = 96,
+    /// Controller → peers: KRaft-style metadata Raft AppendEntries (Phase 154).
+    MetadataRaftAppend = 98,
 }
 
 impl RequestOpcode {
@@ -155,6 +157,7 @@ impl RequestOpcode {
             92 => Self::FetchSessionMirrorDelete,
             94 => Self::IsrUpdate,
             96 => Self::AssignmentConsensusNote,
+            98 => Self::MetadataRaftAppend,
             _ => return None,
         })
     }
@@ -641,6 +644,44 @@ pub enum Request {
         /// Full assignment topics (leaders / replicas / ISR).
         topics: Vec<ClusterTopicState>,
     },
+    /// Controller → peers: simplified Raft AppendEntries for metadata log (Phase 154).
+    MetadataRaftAppend {
+        /// Leader (controller) broker id.
+        leader_id: u32,
+        /// Leader term.
+        term: u64,
+        /// Index of log entry immediately preceding new ones.
+        prev_log_index: u64,
+        /// Term of `prev_log_index` entry (`0` when prev is empty).
+        prev_log_term: u64,
+        /// New entries to append (may be empty heartbeat).
+        entries: Vec<MetadataRaftLogEntry>,
+        /// Leader's commit index.
+        leader_commit: u64,
+    },
+}
+
+/// One metadata Raft log entry on the wire (Phase 154).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct MetadataRaftLogEntry {
+    /// Term that authored this entry.
+    pub term: u64,
+    /// Log index (1-based).
+    pub index: u64,
+    /// Command kind: `0` = Noop, `1` = SetAssignment.
+    pub command_kind: u8,
+    /// Assignment generation (`0` for Noop).
+    pub generation: u32,
+    /// Topics payload for SetAssignment (empty for Noop).
+    pub topics: Vec<ClusterTopicState>,
+}
+
+/// Wire command kinds for [`MetadataRaftLogEntry`].
+pub mod metadata_raft_cmd {
+    /// No-op filler.
+    pub const NOOP: u8 = 0;
+    /// Full assignment snapshot.
+    pub const SET_ASSIGNMENT: u8 = 1;
 }
 
 impl Request {
@@ -698,6 +739,7 @@ impl Request {
             Self::AssignmentConsensusNote { .. } => {
                 RequestOpcode::AssignmentConsensusNote as u16
             }
+            Self::MetadataRaftAppend { .. } => RequestOpcode::MetadataRaftAppend as u16,
         }
     }
 }

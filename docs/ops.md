@@ -55,6 +55,8 @@ Key series (prefix `volant_`):
 - `volant_assignment_committed_generation` (Phase 150: last majority-committed assignment gen gauge)
 - `volant_assignment_metadata_committed_only` (Phase 152: Metadata uses committed assignment snapshot, gauge 0/1)
 - `volant_assignment_generation_lag` (Phase 152: `max(0, live_gen - committed_gen)`)
+- `volant_metadata_raft_term` / `volant_metadata_raft_commit_index` / `volant_metadata_raft_last_applied` (Phase 154: KRaft-style metadata log gauges)
+- `volant_metadata_raft_append_success_total` / `_fail_total` (Phase 154: majority append commits / misses)
 - `volant_txn_forward_total` / `volant_txn_forward_errors_total` (Phase 120/122 Kafka txn API forward: EndTxn / AddOffsets / TxnOffsetCommit)
 - `volant_txn_coordinator_registry_restored` / `volant_txn_coordinator_registry_persist_errors_total` (Phase 124 durable Init-owner registry)
 - `volant_txn_coordinator_registry_gc_total` (Phase 127 registry TTL GC drops)
@@ -371,7 +373,12 @@ specs. Ops-critical notes only:
 | ACLs | `--acl-enable`; durable `__acls/acls.json`; User resource is Kafka admin store-only; **cluster:** Create/Delete controller-only + snapshot fan-out (Phase 113) + rejoin catch-up (Phase 117) + **non-blocking admin catch-up** (Phase 136) |
 | Compaction | `cleanup.policy=compact` on **sealed** segments; empty value = tombstone |
 
-**Assignment consensus (Phase 150/152):** controller assignment mutations fan out
+**Assignment consensus (Phase 150/152) + metadata Raft (Phase 154):** controller
+assignment mutations prefer the **KRaft-style metadata log** when
+`VOLANT_METADATA_RAFT` is on (default in cluster mode): append `SetAssignment`
+to `{data_dir}/__metadata_raft/`, fan out `MetadataRaftAppend` (opcodes 98/99),
+advance `commit_index` only on majority match_index, then apply + Phase 152
+committed snapshot. Set `VOLANT_METADATA_RAFT=0` to use Phase 150
 `AssignmentConsensusNote` (opcodes 96/97) when `VOLANT_ASSIGNMENT_CONSENSUS` is
 on (default). Majority = configured N same as journal. Optional client wait
 `VOLANT_ASSIGNMENT_CONSENSUS_WAIT` (default off) → native **15** on majority
@@ -382,11 +389,12 @@ under `__assignment_consensus/committed_snapshot.json`. Committed-only also
 forces wait-like admin visibility (create/delete/partitions → **15** on
 majority miss) so clients cannot get create-ok then Metadata miss. Set
 `VOLANT_ASSIGNMENT_METADATA_COMMITTED_ONLY=0` to restore Phase 150 lead
-Metadata. Gauge `volant_assignment_generation_lag` exposes live vs committed.
-Not full KRaft.
+Metadata. Gauges: `volant_assignment_generation_lag`,
+`volant_metadata_raft_{term,commit_index,last_applied}`. **Not** full openraft
+election (lowest-id controller remains leader).
 
 **Cluster sharp edges:** Truncate-journal majority (Phase 130), assignment
-majority (Phase 150), and Phase 135/137/148 wait mode use **configured N**
+majority (Phase 150/154), and Phase 135/137/148 wait mode use **configured N**
 (`floor(N/2)+1`), not live-only. For **N=2**, majority
 is 2 — one peer down → permanent journal majority fail (`consensus_fail` / wait
 `NotEnoughReplicas`). **Phase 148:** wait-on fail does **not** truncate local log

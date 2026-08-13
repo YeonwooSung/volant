@@ -24,7 +24,7 @@ use volant_storage::StorageConfig;
 use crate::cluster::{
     assign_replicas, elect_leader, load_assignment, reconcile_isr, save_assignment, shrink_isr,
     shrink_isr_by_time, AssignmentConsensus, AssignmentSnapshot, ClusterConfig, Membership,
-    PartitionAssignment, TopicAssignment,
+    MetadataCommand, MetadataLogEntry, MetadataRaftState, PartitionAssignment, TopicAssignment,
 };
 use crate::group::GroupCoordinator;
 use crate::metrics::Metrics;
@@ -620,6 +620,12 @@ pub struct Broker {
     /// majority-committed assignment snapshot. Default **true**
     /// (`VOLANT_ASSIGNMENT_METADATA_COMMITTED_ONLY`).
     assignment_metadata_committed_only: AtomicBool,
+    /// Phase 154: KRaft-style metadata Raft log (MVP).
+    metadata_raft: MetadataRaftState,
+    /// Phase 154: when true, admin assignment mutations use the metadata Raft
+    /// log (opcodes 98/99) instead of AssignmentConsensusNote. Default **on**
+    /// in cluster mode (`VOLANT_METADATA_RAFT`).
+    metadata_raft_enabled: AtomicBool,
 }
 
 /// One pending leader→controller ISR report (Phase 142).
@@ -750,6 +756,8 @@ impl Broker {
         let txn_coordinator_registry = TxnCoordinatorRegistry::open(&storage.data_dir);
         // Phase 150: assignment generation consensus (single-node majority=1).
         let assignment_consensus = AssignmentConsensus::open(&storage.data_dir);
+        // Phase 154: KRaft-style metadata log (single-node).
+        let metadata_raft = MetadataRaftState::open(&storage.data_dir);
         let broker = Self {
             storage,
             topics: RwLock::new(HashMap::new()),
@@ -836,6 +844,9 @@ impl Broker {
             assignment_metadata_committed_only: AtomicBool::new(
                 default_assignment_metadata_committed_only(),
             ),
+            metadata_raft,
+            // Single-node: metadata raft default off (cluster mode prefers on).
+            metadata_raft_enabled: AtomicBool::new(default_metadata_raft_enabled(false)),
         };
         broker
             .reload_single_node_topics()
@@ -912,6 +923,8 @@ impl Broker {
         let txn_coordinator_registry = TxnCoordinatorRegistry::open(&storage.data_dir);
         // Phase 150: assignment generation consensus.
         let assignment_consensus = AssignmentConsensus::open(&storage.data_dir);
+        // Phase 154: KRaft-style metadata Raft log.
+        let metadata_raft = MetadataRaftState::open(&storage.data_dir);
         let broker = Self {
             storage,
             topics: RwLock::new(HashMap::new()),
@@ -997,6 +1010,8 @@ impl Broker {
             assignment_metadata_committed_only: AtomicBool::new(
                 default_assignment_metadata_committed_only(),
             ),
+            metadata_raft,
+            metadata_raft_enabled: AtomicBool::new(default_metadata_raft_enabled(true)),
         };
         // Open local partitions from persisted assignment.
         broker.apply_local_assignment()?;
@@ -1370,6 +1385,123 @@ impl Broker {
                 (ErrorCode::Unknown as u16, self.generation())
             }
         }
+    }
+
+    /// Phase 154: metadata Raft log state.
+    pub fn metadata_raft(&self) -> &MetadataRaftState {
+        &self.metadata_raft
+    }
+
+    /// Phase 154: whether admin paths use the metadata Raft log.
+    pub fn metadata_raft_enabled(&self) -> bool {
+        self.metadata_raft_enabled.load(Ordering::Relaxed)
+    }
+
+    /// Phase 154: runtime toggle for tests / ops.
+    pub fn set_metadata_raft_enabled(&self, enabled: bool) {
+        self.metadata_raft_enabled
+            .store(enabled, Ordering::Relaxed);
+    }
+
+    /// Phase 154: current metadata Raft term.
+    pub fn metadata_raft_term(&self) -> u64 {
+        self.metadata_raft.current_term()
+    }
+
+    /// Phase 154: metadata Raft commit index.
+    pub fn metadata_raft_commit_index(&self) -> u64 {
+        self.metadata_raft.commit_index()
+    }
+
+    /// Phase 154: metadata Raft last applied index.
+    pub fn metadata_raft_last_applied(&self) -> u64 {
+        self.metadata_raft.last_applied()
+    }
+
+    /// Phase 154: append success total.
+    pub fn metadata_raft_append_success_total(&self) -> u64 {
+        self.metadata_raft.append_success_total()
+    }
+
+    /// Phase 154: append fail total.
+    pub fn metadata_raft_append_fail_total(&self) -> u64 {
+        self.metadata_raft.append_fail_total()
+    }
+
+    /// Phase 154: handle peer `MetadataRaftAppend` (simplified AppendEntries).
+    ///
+    /// On success, advances peer log/commit and applies committed
+    /// `SetAssignment` entries to live assignment + Phase 152 committed snap.
+    pub fn handle_metadata_raft_append(
+        &self,
+        leader_id: u32,
+        term: u64,
+        prev_log_index: u64,
+        prev_log_term: u64,
+        entries: &[MetadataLogEntry],
+        leader_commit: u64,
+    ) -> (u64, bool, u64) {
+        let _ = leader_id;
+        let r = self.metadata_raft.append_entries(
+            term,
+            prev_log_index,
+            prev_log_term,
+            entries,
+            leader_commit,
+        );
+        if r.success {
+            self.apply_committed_metadata_entries();
+        }
+        (r.term, r.success, r.match_index)
+    }
+
+    /// Phase 154: apply committed-but-unapplied log entries to assignment.
+    ///
+    /// Also bumps Phase 152 `assignment_consensus` committed snapshot for
+    /// metrics/Metadata compatibility.
+    pub fn apply_committed_metadata_entries(&self) {
+        let controller_id = self.controller_id();
+        for entry in self.metadata_raft.take_entries_to_apply() {
+            match &entry.payload {
+                MetadataCommand::SetAssignment { generation, topics } => {
+                    if self.cluster.is_some() {
+                        if let Err(e) =
+                            self.apply_cluster_state(*generation, controller_id, topics)
+                        {
+                            warn!(
+                                error = %e,
+                                index = entry.index,
+                                generation,
+                                "metadata raft apply SetAssignment failed"
+                            );
+                            continue;
+                        }
+                    }
+                    // Phase 152 compatibility: committed snapshot + gen.
+                    if let Some(cluster) = &self.cluster {
+                        let snap = cluster.assignment.read().clone();
+                        self.assignment_consensus
+                            .note_committed_snapshot(*generation, &snap);
+                    } else {
+                        // Single-node: still advance consensus gens for metrics.
+                        self.assignment_consensus.commit(*generation);
+                    }
+                }
+                MetadataCommand::Noop => {}
+            }
+        }
+    }
+
+    /// Phase 154: leader helper — append current live assignment as a log entry.
+    pub fn append_assignment_to_metadata_log(&self) -> MetadataLogEntry {
+        let (generation, topics) = if let Some(cluster) = &self.cluster {
+            let asg = cluster.assignment.read();
+            (asg.generation, asg.to_wire_topics())
+        } else {
+            (0, vec![])
+        };
+        self.metadata_raft
+            .append_command(MetadataCommand::SetAssignment { generation, topics })
     }
 
     /// Phase 130: majority consensus failure count.
@@ -7759,6 +7891,25 @@ fn default_assignment_metadata_committed_only() -> bool {
             true
         }
         Err(_) => true,
+    }
+}
+
+/// Phase 154: `VOLANT_METADATA_RAFT` — default **on** in cluster mode, **off**
+/// single-node. Explicit `0`/`false`/`no` disables (Phase 150 notes only);
+/// `1`/`true`/`yes` enables.
+fn default_metadata_raft_enabled(cluster_mode: bool) -> bool {
+    match std::env::var("VOLANT_METADATA_RAFT") {
+        Ok(s) => {
+            let t = s.trim();
+            if t == "0" || t.eq_ignore_ascii_case("false") || t.eq_ignore_ascii_case("no") {
+                return false;
+            }
+            if t == "1" || t.eq_ignore_ascii_case("true") || t.eq_ignore_ascii_case("yes") {
+                return true;
+            }
+            cluster_mode
+        }
+        Err(_) => cluster_mode,
     }
 }
 

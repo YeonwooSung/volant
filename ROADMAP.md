@@ -3376,7 +3376,7 @@ Binding: **[docs/PHASE140_SPEC.md](./docs/PHASE140_SPEC.md)**.
 - [x] Metric `volant_preferred_replica_suppressed_total` when READ_COMMITTED
   suppresses an otherwise-valid preferred candidate
 - [x] Tests `phase140_preferred_selector` (multi-rack, lag, dead, RC suppress)
-- [x] Living docs 0–152 + KAFKA_COMPAT honesty (126+133+140)
+- [x] Living docs 0–154 + KAFKA_COMPAT honesty (126+133+140)
 
 **Honest limitations:** not full Kafka selector/throttling; no TCP probe; no
 rack-aware partition assignment; preferred still orthogonal to session mirror
@@ -3670,6 +3670,34 @@ distributed stream workers.
 
 **Still deferred:** full openraft/KRaft (sibling 154+); multi-lang; chaos/long
 fuzz; full KIP-890/939; local assignment rollback.
+### Phase 154 — KRaft-style metadata Raft log (MVP) ✅
+
+**Goal:** Replicated **ordered log** for assignment mutations with
+`(term, index)`, majority AppendEntries, and apply only when `commit_index`
+advances — beyond Phase 150/152 majority notes of full snapshots. Not full
+openraft embed.
+
+Binding: **[docs/PHASE154_SPEC.md](./docs/PHASE154_SPEC.md)**.
+
+- [x] Module `cluster/metadata_raft.rs` — `MetadataLogEntry` / `MetadataCommand` /
+  `MetadataRaftState`
+- [x] Durable `{data_dir}/__metadata_raft/log.json` + `hard_state.json`
+- [x] Opcodes **98/99** `MetadataRaftAppend` (prev match, entries, leader_commit)
+- [x] `fanout_metadata_raft_append` after CreateTopic / DeleteTopic /
+  CreatePartitions (+ best-effort IsrUpdate) when `VOLANT_METADATA_RAFT` on
+- [x] Majority match_index → `commit_index`; `apply_committed_metadata_entries`
+  + Phase 152 committed snapshot bump
+- [x] `VOLANT_METADATA_RAFT=0` keeps Phase 150/152 AssignmentConsensusNote path
+- [x] Metrics `volant_metadata_raft_{term,commit_index,last_applied}` +
+  `append_{success,fail}_total`
+- [x] Tests `phase154_metadata_raft` (+ phase150/152 + protocol still green)
+
+**Honest residual:** no true Raft election (lowest-id controller); no
+InstallSnapshot / log compaction; static N; full-snapshot SetAssignment; local
+assignment may lead commit until majority (Metadata committed-only hides).
+
+**Still deferred:** full openraft election + dynamic membership; multi-lang;
+chaos/long fuzz; full KIP-890/939; local assignment rollback.
 
 ---
 
@@ -3709,6 +3737,7 @@ marker clip 111; fuzz corpus smoke CI 112; cluster admin fan-out 113) — see
 ## Suggested implementation order (PRs)
 
 Phases **0–153 are shipped**. Historical PR order for the core:
+Phases **0–154 are shipped**. Historical PR order for the core:
 
 1. Phase 1 segment format + unit tests  
 2. Phase 1 recovery + retention  

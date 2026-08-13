@@ -669,6 +669,28 @@ pub fn encode_request(req: &Request) -> Result<Bytes> {
             dst.put_u32_le(*controller_id);
             put_cluster_topics(&mut dst, topics)?;
         }
+        Request::MetadataRaftAppend {
+            leader_id,
+            term,
+            prev_log_index,
+            prev_log_term,
+            entries,
+            leader_commit,
+        } => {
+            dst.put_u32_le(*leader_id);
+            dst.put_u64_le(*term);
+            dst.put_u64_le(*prev_log_index);
+            dst.put_u64_le(*prev_log_term);
+            dst.put_u32_le(entries.len() as u32);
+            for e in entries {
+                dst.put_u64_le(e.term);
+                dst.put_u64_le(e.index);
+                dst.put_u8(e.command_kind);
+                dst.put_u32_le(e.generation);
+                put_cluster_topics(&mut dst, &e.topics)?;
+            }
+            dst.put_u64_le(*leader_commit);
+        }
     }
     finish_payload(dst)
 }
@@ -1346,6 +1368,54 @@ pub fn decode_request(opcode: u16, payload: &[u8]) -> Result<Request> {
                 topics,
             })
         }
+        RequestOpcode::MetadataRaftAppend => {
+            // leader_id(4) + term(8) + prev_idx(8) + prev_term(8) + entries_len(4)
+            if src.remaining() < 4 + 8 + 8 + 8 + 4 {
+                return Err(Error::Protocol(
+                    "truncated metadata raft append header".into(),
+                ));
+            }
+            let leader_id = src.get_u32_le();
+            let term = src.get_u64_le();
+            let prev_log_index = src.get_u64_le();
+            let prev_log_term = src.get_u64_le();
+            let entry_count = src.get_u32_le() as usize;
+            let mut entries = Vec::with_capacity(entry_count);
+            for _ in 0..entry_count {
+                // term(8) + index(8) + kind(1) + generation(4) + topics
+                if src.remaining() < 8 + 8 + 1 + 4 {
+                    return Err(Error::Protocol(
+                        "truncated metadata raft log entry header".into(),
+                    ));
+                }
+                let e_term = src.get_u64_le();
+                let e_index = src.get_u64_le();
+                let command_kind = src.get_u8();
+                let generation = src.get_u32_le();
+                let topics = get_cluster_topics(&mut src)?;
+                entries.push(crate::request::MetadataRaftLogEntry {
+                    term: e_term,
+                    index: e_index,
+                    command_kind,
+                    generation,
+                    topics,
+                });
+            }
+            if src.remaining() < 8 {
+                return Err(Error::Protocol(
+                    "truncated metadata raft leader_commit".into(),
+                ));
+            }
+            let leader_commit = src.get_u64_le();
+            Ok(Request::MetadataRaftAppend {
+                leader_id,
+                term,
+                prev_log_index,
+                prev_log_term,
+                entries,
+                leader_commit,
+            })
+        }
     }
 }
 
@@ -1765,6 +1835,15 @@ pub fn encode_response(resp: &Response) -> Result<Bytes> {
         } => {
             dst.put_u16_le(*error_code);
             dst.put_u32_le(*generation);
+        }
+        Response::MetadataRaftAppend {
+            term,
+            success,
+            match_index,
+        } => {
+            dst.put_u64_le(*term);
+            dst.put_u8(*success);
+            dst.put_u64_le(*match_index);
         }
         Response::Error { code, message } => {
             dst.put_u16_le(*code);
@@ -2579,6 +2658,19 @@ pub fn decode_response(opcode: u16, payload: &[u8]) -> Result<Response> {
             Ok(Response::AssignmentConsensusNote {
                 error_code: src.get_u16_le(),
                 generation: src.get_u32_le(),
+            })
+        }
+        ResponseOpcode::MetadataRaftAppend => {
+            // term(8) + success(1) + match_index(8)
+            if src.remaining() < 8 + 1 + 8 {
+                return Err(Error::Protocol(
+                    "truncated metadata raft append response".into(),
+                ));
+            }
+            Ok(Response::MetadataRaftAppend {
+                term: src.get_u64_le(),
+                success: src.get_u8(),
+                match_index: src.get_u64_le(),
             })
         }
         ResponseOpcode::Error => {
@@ -4249,6 +4341,59 @@ mod tests {
         assert!(decode_request(RequestOpcode::AssignmentConsensusNote as u16, &[]).is_err());
         assert!(decode_response(ResponseOpcode::AssignmentConsensusNote as u16, &[]).is_err());
         assert!(decode_response(ResponseOpcode::AssignmentConsensusNote as u16, &[0, 0]).is_err());
+    }
+
+    #[test]
+    fn phase154_metadata_raft_append_roundtrip() {
+        use crate::request::{metadata_raft_cmd, MetadataRaftLogEntry};
+        let req = Request::MetadataRaftAppend {
+            leader_id: 1,
+            term: 3,
+            prev_log_index: 1,
+            prev_log_term: 2,
+            entries: vec![MetadataRaftLogEntry {
+                term: 3,
+                index: 2,
+                command_kind: metadata_raft_cmd::SET_ASSIGNMENT,
+                generation: 5,
+                topics: vec![ClusterTopicState {
+                    name: "mraft".into(),
+                    topic_id: 9,
+                    partitions: vec![ClusterPartitionState {
+                        partition_id: 0,
+                        leader: 1,
+                        leader_epoch: 0,
+                        replicas: vec![1, 2],
+                        isr: vec![1],
+                    }],
+                }],
+            }],
+            leader_commit: 1,
+        };
+        assert_eq!(req.opcode(), RequestOpcode::MetadataRaftAppend as u16);
+        let bytes = encode_request(&req).unwrap();
+        assert_eq!(
+            decode_request(RequestOpcode::MetadataRaftAppend as u16, &bytes).unwrap(),
+            req
+        );
+
+        let resp = Response::MetadataRaftAppend {
+            term: 3,
+            success: 1,
+            match_index: 2,
+        };
+        assert_eq!(
+            resp.opcode(),
+            ResponseOpcode::MetadataRaftAppend as u16
+        );
+        let rb = encode_response(&resp).unwrap();
+        assert_eq!(
+            decode_response(ResponseOpcode::MetadataRaftAppend as u16, &rb).unwrap(),
+            resp
+        );
+
+        assert!(decode_request(RequestOpcode::MetadataRaftAppend as u16, &[]).is_err());
+        assert!(decode_response(ResponseOpcode::MetadataRaftAppend as u16, &[]).is_err());
     }
 
     #[test]
