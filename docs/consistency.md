@@ -48,7 +48,7 @@ When `acks=all`, if `|ISR| < min_insync_replicas`, the leader rejects the produc
 
 - Exactly-once produce/consume end-to-end (Kafka control-batch wire on EndTxn + crash promote shipped as Phase **89**/**98** MVP; soft markers remain isolation SoT; not full EOS)
 - Durable in-flight txn recovery that resumes open transactions (open txn crash ≡ **abort** via `__txn_markers`; write-through ranges are not rolled forward)
-- Linearizability of metadata during controller failover (brief windows of stale Metadata; Phase **150**/**152** majority assignment notes + Phase **154** KRaft-style metadata log MVP are **not** full openraft/KRaft election — default Metadata serves committed snapshot when `VOLANT_ASSIGNMENT_METADATA_COMMITTED_ONLY` is on; set `0` to restore Phase 150 lead-Metadata; local assignment may still lead committed gen on disk; controller remains lowest live id)
+- Linearizability of metadata during controller failover (brief windows of stale Metadata; Phase **150**/**152** majority assignment notes + Phase **154** KRaft-style metadata log MVP are **not** full openraft/KRaft election — v0.2 default Metadata serves the **live** assignment (`VOLANT_ASSIGNMENT_METADATA_COMMITTED_ONLY` **off**); set `1` to serve the majority-committed snapshot; local assignment may still lead committed gen on disk; controller remains lowest live id)
 - Durability if `min_insync_replicas=1` and that sole replica dies after ack
 - Full KRaft leader-epoch state machine (Phase **87** durable OFLE history is a soft JSON MVP)
 
@@ -164,12 +164,16 @@ Without `--cluster-config`, the broker runs as a single node:
     `floor(N/2)+1` of **configured** N. Durable
     `{data_dir}/__assignment_consensus` tracks `committed_generation` /
     `pending_generation` + committed snapshot (Phase 152). Default fan-out **on**
-    (`VOLANT_ASSIGNMENT_CONSENSUS`); client wait **off**
+    (`VOLANT_ASSIGNMENT_CONSENSUS`, best-effort); client wait **off**
     (`VOLANT_ASSIGNMENT_CONSENSUS_WAIT` — fail → native **15**, local assignment
-    retained). Metrics: `volant_assignment_consensus_*` +
+    retained). v0.2: `VOLANT_ASSIGNMENT_METADATA_COMMITTED_ONLY` default **off**
+    (live Metadata); majority miss does **not** fail CreateTopic / DeleteTopic /
+    CreatePartitions unless wait or committed-only is on. Metrics:
+    `volant_assignment_consensus_*` +
     `volant_assignment_committed_generation`.
-  - **Metadata Raft log (Phase 154):** when `VOLANT_METADATA_RAFT` is on (default
-    in cluster mode), the same admin mutations append `SetAssignment` entries to
+  - **Metadata Raft log (Phase 154):** when `VOLANT_METADATA_RAFT` is on (v0.2
+    default **off**; explicit `1`/`true`/`yes` enables), the same admin mutations
+    append `SetAssignment` entries to
     a durable ordered log (`{data_dir}/__metadata_raft/`) with `(term, index)`,
     replicate via `MetadataRaftAppend` (98/99), and advance `commit_index` only
     after majority match_index; apply runs only then (also bumps Phase 152

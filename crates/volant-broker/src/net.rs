@@ -2047,24 +2047,21 @@ pub async fn maybe_fanout_assignment_consensus(broker: &Broker) -> Option<bool> 
         let ok = fanout_metadata_raft_append(broker).await;
         let must_wait = broker.assignment_consensus_wait()
             || broker.assignment_metadata_committed_only();
-        return if must_wait && !ok {
-            Some(false)
-        } else {
-            Some(ok)
-        };
+        return if must_wait { Some(ok) } else { None };
     }
     if !broker.assignment_consensus_enabled() {
         return None;
     }
     let ok = fanout_assignment_consensus(broker).await;
     // Phase 152: committed-only Metadata forces wait-like admin visibility so
-    // create ok cannot race Metadata miss.
+    // create ok cannot race Metadata miss. Completed fan-out with !must_wait
+    // is ignored (including 96/97 miss) so handlers do not fail the client.
     let must_wait = broker.assignment_consensus_wait()
         || broker.assignment_metadata_committed_only();
-    if must_wait && !ok {
-        Some(false)
-    } else {
+    if must_wait {
         Some(ok)
+    } else {
+        None
     }
 }
 

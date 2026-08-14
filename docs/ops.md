@@ -373,23 +373,24 @@ specs. Ops-critical notes only:
 | ACLs | `--acl-enable`; durable `__acls/acls.json`; User resource is Kafka admin store-only; **cluster:** Create/Delete controller-only + snapshot fan-out (Phase 113) + rejoin catch-up (Phase 117) + **non-blocking admin catch-up** (Phase 136) |
 | Compaction | `cleanup.policy=compact` on **sealed** segments; empty value = tombstone |
 
-**Assignment consensus (Phase 150/152) + metadata Raft (Phase 154):** controller
-assignment mutations prefer the **KRaft-style metadata log** when
-`VOLANT_METADATA_RAFT` is on (default in cluster mode): append `SetAssignment`
-to `{data_dir}/__metadata_raft/`, fan out `MetadataRaftAppend` (opcodes 98/99),
+**Assignment consensus (Phase 150/152) + metadata Raft (Phase 154):**
+
+| Env | v0.2 default | Role |
+|-----|--------------|------|
+| `VOLANT_METADATA_RAFT` | **off** | `1`/`true`/`yes` prefers 154 AppendEntries 98/99; unset/`0` uses Phase 150 notes |
+| `VOLANT_ASSIGNMENT_METADATA_COMMITTED_ONLY` | **off** | `1` serves majority-committed Metadata snapshot + wait-like admin; unset/`0` is live assignment |
+| `VOLANT_ASSIGNMENT_CONSENSUS` | **on** | Best-effort 96/97 push. Must **not** gate Metadata or fail CreateTopic |
+| `VOLANT_ASSIGNMENT_CONSENSUS_WAIT` | **off** | `1` → native **15** on majority miss; local create/delete is **not** rolled back |
+
+CreateTopic / DeleteTopic / CreatePartitions succeed when the controller writes
+`{data_dir}/cluster/assignment.json`. A 96/97 majority miss does **not** fail
+the client unless wait or committed-only is on. Metadata serves the **live**
+assignment. Set `VOLANT_METADATA_RAFT=1` to append `SetAssignment` to
+`{data_dir}/__metadata_raft/`, fan out `MetadataRaftAppend` (opcodes 98/99),
 advance `commit_index` only on majority match_index, then apply + Phase 152
-committed snapshot. Set `VOLANT_METADATA_RAFT=0` to use Phase 150
-`AssignmentConsensusNote` (opcodes 96/97) when `VOLANT_ASSIGNMENT_CONSENSUS` is
-on (default). Majority = configured N same as journal. Optional client wait
-`VOLANT_ASSIGNMENT_CONSENSUS_WAIT` (default off) → native **15** on majority
-miss; local create/delete is **not** rolled back. **Phase 152:** Metadata
-serves the majority-committed assignment snapshot when
-`VOLANT_ASSIGNMENT_METADATA_COMMITTED_ONLY` is on (default) — committed snap
-under `__assignment_consensus/committed_snapshot.json`. Committed-only also
-forces wait-like admin visibility (create/delete/partitions → **15** on
-majority miss) so clients cannot get create-ok then Metadata miss. Set
-`VOLANT_ASSIGNMENT_METADATA_COMMITTED_ONLY=0` to restore Phase 150 lead
-Metadata. Gauges: `volant_assignment_generation_lag`,
+committed snapshot. Majority = configured N same as journal. Committed-only
+snapshot lives under `__assignment_consensus/committed_snapshot.json`. Gauges:
+`volant_assignment_generation_lag`,
 `volant_metadata_raft_{term,commit_index,last_applied}`. **Not** full openraft
 election (lowest-id controller remains leader).
 
