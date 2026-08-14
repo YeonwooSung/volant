@@ -411,6 +411,34 @@ per request (Phase 137); Kafka clients cannot.
 Gauges are **local membership view** (death-detect lag can briefly disagree
 across brokers).
 
+## v0.2 ISR / chaos
+
+What v0.2 **proves** in CI (do not re-open as new work):
+
+| Scenario | Already tested by |
+|----------|-------------------|
+| 3-node `acks=all` leader kill; no acknowledged data loss | `cluster_failover::three_node_acks_all_survives_leader_kill` |
+| Follower death ISR shrink; leader still accepts `acks=all` (Phase 108) | `phase8_redirect_restart::rolling_restart_follower_preserves_data` |
+| Rolling follower restart while leader accepts `acks=all` | same Phase 8 test (stop accept → produce mid-down → rebind → produce) |
+| Non-controller alive-set / expire death (Phase 110) | `phase110_alive_set_death` |
+| ISR rejoin after catch-up + lag shrink (Phase 118) | `phase118_isr_rejoin` |
+| Time-based ISR lag shrink (Phase 125) | `phase125_isr_time_lag` |
+| N=2 majority health gauges after in-process death (Phase 141) | `phase141_n2_majority_ops` |
+| Lowest-id controller death → next-lowest controller; `acks=all` + CreateTopic continue | `v02_isr_chaos::controller_death_lowest_id_failover_produce_continues` |
+| N=2 one-dead: `volant_cluster_majority_impossible=1` **and** CreateTopic wait → native **15** | `v02_isr_chaos::n2_majority_impossible_create_topic_wait` |
+
+**Operator recipe (RF=3, `min_insync_replicas=2`):**
+
+1. Produce with `acks=all`. Restart **followers first** (ISR shrinks; remaining live ISR still ≥ min ISR).
+2. Restart the controller last. Next-lowest live id becomes controller; clients refresh Metadata on `NotLeaderForPartition`. Brief Metadata lag on the new controller is allowed ([consistency.md](./consistency.md)).
+3. Prefer **odd N (3+)**. On **N=2**, one peer down flips `majority_impossible=1` — journal majority and `VOLANT_ASSIGNMENT_CONSENSUS_WAIT=1` CreateTopic cannot succeed (local `assignment.json` is still written; default wait **off** does not fail the client).
+
+**Wontfix in v0.2** (not a test gap to close here):
+
+- Disk-full / ENOSPC on the data dir
+- Network partition mesh (asymmetric / partial partitions, split-brain)
+- Long chaos-mesh suites and uncapped fuzz campaigns (corpus smoke is Phase 112)
+
 CLI examples: [features.md](./features.md), [../README.md](../README.md).
 
 ## Metrics auth (Phase 21)
