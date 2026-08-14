@@ -170,7 +170,7 @@ where
 }
 
 /// Abort in-flight connection tasks and await them (bounded).
-pub(super) async fn drain_connection_tasks(handles: Vec<JoinHandle<()>>) {
+async fn drain_connection_tasks(handles: Vec<JoinHandle<()>>) {
     if handles.is_empty() {
         return;
     }

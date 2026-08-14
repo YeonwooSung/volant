@@ -1240,7 +1240,7 @@ impl Broker {
         };
 
         // Blocking HWM wait only when an explicit timeout is provided.
-        // Network path uses async polling (see net.rs) to stay runtime-agnostic.
+        // Network path uses async polling (see net/dispatch.rs) to stay runtime-agnostic.
         if need_wait {
             if let Some(timeout) = wait_timeout {
                 let deadline = std::time::Instant::now() + timeout;
