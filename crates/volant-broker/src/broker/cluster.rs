@@ -580,6 +580,83 @@ impl Broker {
         Ok(())
     }
 
+    /// Clone the live cluster assignment (`None` when not clustered).
+    pub fn clone_live_assignment(&self) -> Option<AssignmentSnapshot> {
+        self.cluster.as_ref().map(|c| c.assignment.read().clone())
+    }
+
+    /// Restore a previously cloned live assignment after a wait-path majority miss.
+    ///
+    /// Writes `prev` into `cluster.assignment` and `{data_dir}/cluster/assignment.json`
+    /// only when live generation still equals `expected_gen` (the generation this
+    /// request wrote). If another admin already advanced generation, skip rewind.
+    /// Drops local topics / extra partitions (and their on-disk dirs) not in `prev`,
+    /// then `apply_local_assignment` so a rolled-back delete can reopen logs.
+    /// Does not touch `committed_snapshot.json`.
+    pub fn restore_live_assignment(
+        &self,
+        prev: &AssignmentSnapshot,
+        expected_gen: u32,
+    ) -> Result<()> {
+        let Some(cluster) = &self.cluster else {
+            return Ok(());
+        };
+        {
+            let mut asg = cluster.assignment.write();
+            if asg.generation != expected_gen {
+                tracing::warn!(
+                    live_gen = asg.generation,
+                    expected_gen,
+                    "skip assignment restore; live generation advanced"
+                );
+                return Ok(());
+            }
+            let live = asg.clone();
+            *asg = prev.clone();
+            if let Err(e) = save_assignment(&cluster.data_dir, &asg) {
+                *asg = live;
+                return Err(e);
+            }
+        }
+        let keep: HashSet<String> = prev.topics.keys().cloned().collect();
+        let mut drop_dirs: Vec<std::path::PathBuf> = Vec::new();
+        {
+            let mut topics = self.topics.write();
+            for name in topics.keys() {
+                if !keep.contains(name.as_str()) {
+                    drop_dirs.push(self.storage.data_dir.join(name.as_str()));
+                }
+            }
+            topics.retain(|name, _| keep.contains(name.as_str()));
+            for (name, topic) in topics.iter_mut() {
+                let Some(ta) = prev.topics.get(name.as_str()) else {
+                    continue;
+                };
+                let keep_pids: HashSet<u32> = ta.partitions.keys().copied().collect();
+                for pid in topic.partitions.keys() {
+                    if !keep_pids.contains(&pid.0) {
+                        drop_dirs.push(
+                            self.storage
+                                .data_dir
+                                .join(name.as_str())
+                                .join(format!("{}", pid.0)),
+                        );
+                    }
+                }
+                topic.partitions.retain(|pid, _| keep_pids.contains(&pid.0));
+            }
+        }
+        self.rr_counters
+            .write()
+            .retain(|name, _| keep.contains(name.as_str()));
+        for dir in drop_dirs {
+            if dir.exists() {
+                let _ = std::fs::remove_dir_all(&dir);
+            }
+        }
+        self.apply_local_assignment()
+    }
+
     /// Remove `dead_id` from every local partition ISR and advance HWM when we lead.
     ///
     /// Called from [`Self::on_broker_death`] on **every** node that observes the death

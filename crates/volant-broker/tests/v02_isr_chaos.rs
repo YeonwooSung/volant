@@ -366,7 +366,7 @@ fn assignment_json_has_topic(data_dir: &std::path::Path, topic: &str) -> bool {
 }
 
 /// N=2 one-dead: `majority_impossible` gauge flips, and CreateTopic with wait
-/// on returns `NotEnoughReplicas` (15) while still writing `assignment.json`.
+/// on returns `NotEnoughReplicas` (15) and rolls back `assignment.json`.
 #[tokio::test]
 async fn n2_majority_impossible_create_topic_wait() {
     let base = unique_dir("v02", "n2-maj");
@@ -442,9 +442,25 @@ async fn n2_majority_impossible_create_topic_wait() {
         other => panic!("CreateTopic wait expected Error 15, got {other:?}"),
     }
     assert!(
-        assignment_json_has_topic(&data_dir, "blocked"),
-        "mutate-first: assignment.json is written even when wait fails"
+        !assignment_json_has_topic(&data_dir, "blocked"),
+        "wait-fail must roll back assignment.json (no leftover blocked topic)"
     );
+    let resps = rpc_seq(
+        &addr,
+        &[Request::Metadata {
+            topics: vec!["blocked".into()],
+        }],
+    )
+    .await;
+    match &resps[0] {
+        Response::Metadata { topics, .. } => {
+            assert!(
+                !topics.iter().any(|t| t.name == "blocked"),
+                "Metadata must not serve rolled-back topic, got {topics:?}"
+            );
+        }
+        other => panic!("Metadata expected, got {other:?}"),
+    }
 
     s1.abort();
 }

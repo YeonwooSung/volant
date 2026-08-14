@@ -4,10 +4,10 @@
 
 | | |
 |---|---|
-| Version | 0.1.0 (Apache-2.0) |
+| Version | 0.2.0 (Apache-2.0) |
 | Language | Rust 1.75+ |
-| Status | Phases 0–102 landed (product / git HEAD) |
-| Date | 2026-07-18 |
+| Status | Phases 0–154 landed; **v0.2 shipped** |
+| Date | 2026-08-14 |
 
 ---
 
@@ -269,9 +269,12 @@ the wire.
 ## 8. Stream processing
 
 `volant-stream` provides in-process operators (`map`, `filter`, `flat_map`,
-`reduce`, windows, foreach) without a heavy runtime. State is **in-memory**;
-delivery is at-least-once. No RocksDB, no distributed stream workers, no WASM
-plugins (deferred).
+`reduce`, windows, foreach) without a heavy runtime. State is **not only
+in-memory**: `DurableStore` (redb) and `TumblingWindow::durable` persist
+process-local aggregates / open buckets. Default `TumblingWindow::new` and
+`MemoryStore` stay in-memory. Delivery is at-least-once unless the app opts
+into process-local EOS (151/153). No RocksDB, no distributed stream workers,
+no WASM plugins (deferred).
 
 ---
 
@@ -307,7 +310,7 @@ Volant deliberately does **not** claim production Kafka parity. Open gaps:
 7. Distributed stream topology / workers (Phase **149** local `DurableStore`/redb; Phase **151** EOS MVP; Phase **153** durable checkpoint staging; no distributed workers)
 8. Full chaos-mesh / long fuzz campaigns (corpus smoke CI MVP → Phase 112; `fuzz/` seeds + deterministic replay)
 9. Full Raft multi-master ACL consensus (Phase **113** is controller SoT + snapshot fan-out, not consensus); DeleteRecords fan-out is best-effort (Phase **113**)
-10. Helm chart has no `--kafka-listen` surface; version **0.1.0** MVP readiness
+10. Helm chart has no `--kafka-listen` surface; version **0.2.0** MVP readiness
 
 ### What is solid today
 

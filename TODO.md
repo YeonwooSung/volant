@@ -27,7 +27,7 @@ Phase index: [docs/history/PHASE_HISTORY.md](./docs/history/PHASE_HISTORY.md).
 
 ### Consensus / metadata (150 → 152 → 154)
 - [x] **150** — Assignment majority notes (opcodes **96/97**); configured-N majority
-- [x] **152** — Metadata serves **committed** assignment snapshot (`VOLANT_ASSIGNMENT_METADATA_COMMITTED_ONLY` default on)
+- [x] **152** — Metadata **opt-in** committed assignment snapshot (`VOLANT_ASSIGNMENT_METADATA_COMMITTED_ONLY` default **off**; live Metadata)
 - [x] **154** — KRaft-style metadata **Raft log** (term/index, AppendEntries **98/99**, commit_index → apply)
 
 ### Streams (149 → 151 → 153)
@@ -53,18 +53,18 @@ Phase index: [docs/history/PHASE_HISTORY.md](./docs/history/PHASE_HISTORY.md).
 |----:|------|-------------|
 | **P2** | **True Raft leader election** for metadata | **frozen (v0.2)** — [docs/V02_FREEZE.md](./docs/V02_FREEZE.md) §3/§4. Not the next slice. |
 | **P2** | **InstallSnapshot / log compaction** for metadata Raft | **frozen (v0.2)** — [docs/V02_FREEZE.md](./docs/V02_FREEZE.md) §3/§4. Do not extend 154. |
-| **P2** | **Local assignment rollback** on consensus/Raft majority fail | Create may leave local disk ahead of commit (honest residual) |
+| **P2** | **Local assignment rollback** on consensus/Raft majority fail | **this slice (v0.3 residual)** — wait/committed-only miss restores live `assignment.json` |
 | **P3** | **Distributed EOS 2PC** (broker-held stream state) | 153 is **process-local** staging only |
-| **P3** | **Durable window buckets** | 149/153 cover reduce KV, not tumbling window maps |
+| **P3** | **Durable window buckets** | **closed (v0.2 PR5)** — `TumblingWindow::durable`; still process-local |
 | **P3** | Preferred **throttling / TCP probe** | Beyond 140/144/145 |
 | **Later** | Full **openraft** crate integration | Replace custom `__metadata_raft` when ready |
 | **Later** | **Dynamic membership** reconfiguration | Static `cluster.toml` N only |
 | **Later** | Full **KIP-890 / `__transaction_state`** | Txn depth beyond 2PC MVP |
 | **Later** | **Multi-language clients** | Ecosystem |
 | **Later** | **Long fuzz + chaos-mesh** | Phase 112 is corpus smoke only |
-| **Later** | **Perf campaign** vs aspirational targets | Publish numbers; group-commit default |
+| **Later** | **Perf campaign** vs aspirational targets | **closed (v0.2 PR2)** — measured table published; aspirational demoted; no group-commit |
 
-**Default next slice:** [docs/V02_FREEZE.md](./docs/V02_FREEZE.md) item 1 (flip metadata defaults + docs honesty). Homemade Raft election / InstallSnapshot is **not** the next slice.
+**Default next slice:** v0.3 residual (this wait-fail assignment rollback) then frozen election / InstallSnapshot. Homemade Raft election / InstallSnapshot is **not** the next product bet.
 
 ---
 
@@ -93,12 +93,12 @@ Phase index: [docs/history/PHASE_HISTORY.md](./docs/history/PHASE_HISTORY.md).
 - [ ] True **openraft** leader election + term contests (154: lowest-id controller)
 - [ ] **InstallSnapshot** / log truncation for metadata Raft
 - [ ] **Dynamic membership** (add/remove brokers without static N)
-- [ ] Rollback **local** assignment file when majority/Raft append fails
+- [x] Rollback **local** assignment file when wait/committed-only majority misses (v0.3 residual; `!must_wait` still retains local)
 - [ ] Per-partition Raft / full KRaft `__cluster_metadata` topic parity
 
 ### Streams
 - [ ] **Distributed** EOS (state coordinated with broker, not only process staging)
-- [ ] Durable **window** state (tumbling buckets still in-memory)
+- [x] Durable **window** state (in-process `TumblingWindow::durable`; not cluster EOS)
 - [ ] Exactly-once with **cross-app** fencing beyond single `transactional_id`
 
 ### Kafka / txn / ops
@@ -107,7 +107,7 @@ Phase index: [docs/history/PHASE_HISTORY.md](./docs/history/PHASE_HISTORY.md).
 - [ ] Full preferred selector **throttling** / TCP probe
 - [ ] Multi-language clients
 - [ ] Long fuzz campaigns + chaos-mesh
-- [ ] Published perf numbers vs aspirational table; group-commit decision
+- [x] Published perf numbers vs aspirational table; group-commit **not** implemented
 
 ### Wait-off / best-effort paths (by design)
 - DeleteRecords **wait off**: still local-first (irreversible truncate)
@@ -122,7 +122,7 @@ Phase index: [docs/history/PHASE_HISTORY.md](./docs/history/PHASE_HISTORY.md).
 |------|---------|
 | Phase 154 | **Shipped** — metadata log + AppendEntries; not full openraft election |
 | Phase 153 | **Shipped** — EOS durable checkpoint; process-local only |
-| Phase 152 | **Shipped** — Metadata committed-only SoT |
+| Phase 152 | **Shipped (opt-in)** — committed-only Metadata; v0.2 default **off** (live) |
 | Phase 151 | **Shipped** — stream ExactlyOnce via Volant txns |
 | Phase 150/149 | **Shipped** — majority notes + redb DurableStore |
 | Phases 141–148 | **Shipped** — prior P2/P3 residuals |

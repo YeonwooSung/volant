@@ -687,7 +687,8 @@ pub async fn fanout_truncate_journal_note(
 /// 3. Peer applies via `apply_cluster_state` when generation ≥ local.
 /// 4. Majority of **configured N** → durable `committed_generation` + committed
 ///    assignment snapshot (Phase 152 Metadata SoT) + success metric; else fail
-///    metric (local assignment retained — best-effort; not rolled back).
+///    metric (local assignment retained here; wait/committed-only handlers
+///    may restore live `assignment.json`).
 ///
 /// Returns `true` when there is **no cluster**, consensus is **disabled**, or
 /// acks ≥ majority(configured N). Client wait is gated by
@@ -795,7 +796,7 @@ pub async fn fanout_assignment_consensus(broker: &Broker) -> bool {
         broker.assignment_consensus().note_fail();
         warn!(
             acks,
-            need, n, generation, "assignment majority consensus failed (local assignment retained)"
+            need, n, generation, "assignment majority consensus failed (local assignment retained here; wait/committed-only handlers may restore live assignment.json)"
         );
     }
     majority_ok

@@ -1340,7 +1340,7 @@ checksum = "0b928f33d975fc6ad9f86c8f283853ad26bdd5b10b7f1542aa2fa15e2289105a"
 
 [[package]]
 name = "volant-bench"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "anyhow",
  "clap",
@@ -1351,7 +1351,7 @@ dependencies = [
 
 [[package]]
 name = "volant-broker"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "base64",
  "bytes",
@@ -1386,7 +1386,7 @@ dependencies = [
 
 [[package]]
 name = "volant-cli"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "anyhow",
  "bytes",
@@ -1402,7 +1402,7 @@ dependencies = [
 
 [[package]]
 name = "volant-client"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "base64",
  "bytes",
@@ -1426,7 +1426,7 @@ dependencies = [
 
 [[package]]
 name = "volant-core"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "bytes",
  "crc32fast",
@@ -1437,7 +1437,7 @@ dependencies = [
 
 [[package]]
 name = "volant-examples"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "anyhow",
  "bytes",
@@ -1453,7 +1453,7 @@ dependencies = [
 
 [[package]]
 name = "volant-protocol"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "bytes",
  "crc32fast",
@@ -1464,7 +1464,7 @@ dependencies = [
 
 [[package]]
 name = "volant-server"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "anyhow",
  "bytes",
@@ -1485,7 +1485,7 @@ dependencies = [
 
 [[package]]
 name = "volant-storage"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "bytes",
  "crc32fast",
@@ -1500,7 +1500,7 @@ dependencies = [
 
 [[package]]
 name = "volant-stream"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "bytes",
  "redb",

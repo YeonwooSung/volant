@@ -93,7 +93,9 @@ under a directory; `{state_dir}/kv.redb`). Use `count_reduce_durable(path)` or
 **not** full Kafka Streams EOS / distributed 2PC. Checkpoint staging is
 **process-local** (not broker-joined). Durable aggregates alone (149) do not
 imply EOS; pair with 151+153 for sink+offset atomicity and state-not-ahead-of-offsets.
-No distributed stream workers; window buckets still process-local.
+No distributed stream workers. Window buckets are process-local;
+`TumblingWindow::durable` persists open buckets via `DurableStore` (in-process
+restart only — not cluster EOS).
 
 ## Leader epochs (Phase 87)
 
