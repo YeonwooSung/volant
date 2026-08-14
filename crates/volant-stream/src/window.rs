@@ -10,6 +10,8 @@ use crate::state::{DurableStore, KeyValueStore, MemoryStore, StreamStateError};
 
 /// Metadata key for highest event time seen.
 const META_MAX_EVENT: &[u8] = b"\x00max_event_ms";
+/// Metadata key for the window size this store was written with.
+const META_SIZE: &[u8] = b"\x00size_ms";
 /// Bucket key prefix: `0x01 || i64_be(window_start) || record_key`.
 const BUCKET_PREFIX: u8 = 0x01;
 
@@ -41,8 +43,9 @@ impl TumblingWindow<MemoryStore> {
 impl TumblingWindow<DurableStore> {
     /// Create a durable tumbling window under `path` (directory).
     ///
-    /// Buckets and max event time survive process restart when reopened at
-    /// the same path with the same `size_ms`. Use a distinct directory from
+    /// Buckets, max event time, and `size_ms` survive process restart when
+    /// reopened at the same path. A different `size_ms` returns
+    /// [`StreamStateError::WindowSizeMismatch`]. Use a distinct directory from
     /// other durable operators (they share one redb table).
     ///
     /// Outside a checkpoint, each mutation is immediate (ALO). Under EOS
@@ -52,7 +55,16 @@ impl TumblingWindow<DurableStore> {
         size_ms: i64,
         path: impl AsRef<Path>,
     ) -> std::result::Result<Self, StreamStateError> {
-        Ok(Self::with_store(size_ms, DurableStore::open(path)?))
+        if size_ms <= 0 {
+            return Err(StreamStateError::Io(std::io::Error::new(
+                std::io::ErrorKind::InvalidInput,
+                "window size must be positive",
+            )));
+        }
+        let store = DurableStore::open(path)?;
+        let mut window = Self::with_store(size_ms, store);
+        window.bind_size_ms()?;
+        Ok(window)
     }
 }
 
@@ -144,6 +156,34 @@ impl<S: KeyValueStore> TumblingWindow<S> {
             .put(Bytes::from_static(META_MAX_EVENT), Self::encode_i64(ts));
     }
 
+    /// Persist `size_ms` on first use; error if the store was written with another size.
+    fn bind_size_ms(&mut self) -> std::result::Result<(), StreamStateError> {
+        match self.store.get(META_SIZE) {
+            None => {
+                self.store.put(
+                    Bytes::from_static(META_SIZE),
+                    Self::encode_i64(self.size_ms),
+                );
+                Ok(())
+            }
+            Some(v) => {
+                let stored = Self::decode_i64(&v).ok_or_else(|| {
+                    StreamStateError::Io(std::io::Error::new(
+                        std::io::ErrorKind::InvalidData,
+                        "corrupt window size metadata",
+                    ))
+                })?;
+                if stored != self.size_ms {
+                    return Err(StreamStateError::WindowSizeMismatch {
+                        stored,
+                        requested: self.size_ms,
+                    });
+                }
+                Ok(())
+            }
+        }
+    }
+
     /// Snapshot of open buckets: `(window_start, key, count)`.
     pub fn buckets(&self) -> Vec<(i64, Bytes, u64)> {
         let mut out: Vec<(i64, Bytes, u64)> = self
@@ -197,6 +237,8 @@ impl<S: KeyValueStore> TumblingWindow<S> {
 
 impl<S: KeyValueStore> Operator for TumblingWindow<S> {
     fn process(&mut self, record: Record) -> Result<Vec<Record>> {
+        self.bind_size_ms()
+            .map_err(|e| Error::Storage(e.to_string()))?;
         let max_event = self.max_event_ms();
         let ts = if record.timestamp_ms > 0 {
             record.timestamp_ms
@@ -223,6 +265,8 @@ impl<S: KeyValueStore> Operator for TumblingWindow<S> {
     }
 
     fn punctuate(&mut self, now_ms: i64) -> Result<Vec<Record>> {
+        self.bind_size_ms()
+            .map_err(|e| Error::Storage(e.to_string()))?;
         let watermark = now_ms.max(self.max_event_ms());
         // Emit all windows that have fully ended by `now_ms`.
         // Use now_ms + 1 style: windows with end <= now are closed when

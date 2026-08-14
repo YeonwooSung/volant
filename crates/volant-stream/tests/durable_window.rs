@@ -4,7 +4,9 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 use bytes::Bytes;
 use volant_core::{Offset, Record};
-use volant_stream::{DurableStore, KeyValueStore, Operator, Pipeline, TumblingWindow};
+use volant_stream::{
+    DurableStore, KeyValueStore, Operator, Pipeline, StreamStateError, TumblingWindow,
+};
 
 fn temp_dir(label: &str) -> std::path::PathBuf {
     let nanos = SystemTime::now()
@@ -101,9 +103,6 @@ fn durable_window_checkpoint_abort() {
         assert_eq!(w.buckets()[0].2, 1);
         assert_eq!(w.max_event_ms(), 100);
     }
-    let store = DurableStore::open(&dir).expect("reopen store");
-    // One bucket + max_event metadata; count must still be 1.
-    drop(store);
     {
         let w = TumblingWindow::durable(1000, &dir).expect("reopen window");
         assert_eq!(w.buckets().len(), 1);
@@ -179,13 +178,40 @@ fn with_store_durable() {
         let store = DurableStore::open(&dir).expect("open store");
         let mut w = TumblingWindow::with_store(1000, store);
         w.process(rec(b"k", "1", 50)).unwrap();
-        assert_eq!(w.store().len(), 2); // bucket + max_event
+        assert_eq!(w.store().len(), 3); // bucket + max_event + size
     }
     {
         let store = DurableStore::open(&dir).expect("reopen store");
         assert!(store.get(b"\x00max_event_ms").is_some());
+        assert!(store.get(b"\x00size_ms").is_some());
         let w = TumblingWindow::with_store(1000, store);
         assert_eq!(w.buckets()[0].2, 1);
     }
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+// ── 8. Reopen with a different size_ms is an error ───────────────────────
+
+#[test]
+fn durable_window_size_mismatch() {
+    let dir = temp_dir("size-mismatch");
+    {
+        let mut w = TumblingWindow::durable(1000, &dir).expect("open");
+        w.process(rec(b"foo", "1", 100)).unwrap();
+    }
+    let err = match TumblingWindow::durable(500, &dir) {
+        Ok(_) => panic!("expected size mismatch, durable(500) succeeded"),
+        Err(e) => e,
+    };
+    match err {
+        StreamStateError::WindowSizeMismatch { stored, requested } => {
+            assert_eq!(stored, 1000);
+            assert_eq!(requested, 500);
+        }
+        other => panic!("expected WindowSizeMismatch, got {other}"),
+    }
+    // Matching size still opens.
+    let w = TumblingWindow::durable(1000, &dir).expect("reopen matching");
+    assert_eq!(w.buckets()[0].2, 1);
     let _ = std::fs::remove_dir_all(&dir);
 }

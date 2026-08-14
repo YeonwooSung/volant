@@ -56,6 +56,14 @@ pub enum StreamStateError {
     /// redb commit failure.
     #[error("stream state commit: {0}")]
     Commit(String),
+    /// Stored tumbling-window size does not match the size requested on open.
+    #[error("stream state window size mismatch: stored {stored} ms, requested {requested} ms")]
+    WindowSizeMismatch {
+        /// Size persisted in the store.
+        stored: i64,
+        /// Size passed to this open.
+        requested: i64,
+    },
 }
 
 /// In-memory overlay while a checkpoint is open.
