@@ -173,6 +173,10 @@ async fn controller_death_lowest_id_failover_produce_continues() {
         !local_isr.contains(&1),
         "leader-local ISR must drop dead controller: {local_isr:?}"
     );
+    // Re-kill after the sleep so heartbeat-mesh cannot revive id=1 before
+    // the live-set check (same window as the pre-CreateTopic re-kill).
+    b2.test_kill_broker(1).unwrap();
+    b3.test_kill_broker(1).unwrap();
     assert!(
         !b2.live_brokers().contains(&1) && !b3.live_brokers().contains(&1),
         "survivors must not list id=1 live"
