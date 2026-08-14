@@ -7,6 +7,7 @@ Start here. Prefer living docs over individual phase ship records.
 | Document | Purpose |
 |----------|---------|
 | **[WHITEPAPER.md](./WHITEPAPER.md)** | Technical whitepaper (architecture, positioning, honesty) |
+| **[V02_FREEZE.md](./V02_FREEZE.md)** | v0.2 product freeze (scope lock) |
 | **[ops.md](./ops.md)** | Operator runbook (flags, metrics, auth, TLS, Kafka listen) |
 | **[consistency.md](./consistency.md)** | What “committed” means (HWM / ISR / acks) |
 | **[tuning.md](./tuning.md)** | Performance / I/O / affinity guide |

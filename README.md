@@ -34,6 +34,7 @@ Volant is a resource-efficient alternative to Apache Kafka, built for:
 > Start with the [whitepaper](./docs/WHITEPAPER.md) and
 > [docs index](./docs/INDEX.md); also [ROADMAP.md](./ROADMAP.md),
 > [ops](./docs/ops.md), [deploy/](./deploy/), [consistency](./docs/consistency.md).
+> v0.2 scope is locked in [docs/V02_FREEZE.md](./docs/V02_FREEZE.md).
 
 ---
 

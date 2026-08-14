@@ -617,14 +617,14 @@ pub struct Broker {
     /// (`VOLANT_ASSIGNMENT_CONSENSUS_WAIT`).
     assignment_consensus_wait: AtomicBool,
     /// Phase 152: when true (and consensus enabled), Metadata serves the
-    /// majority-committed assignment snapshot. Default **true**
+    /// majority-committed assignment snapshot. Default **false**
     /// (`VOLANT_ASSIGNMENT_METADATA_COMMITTED_ONLY`).
     assignment_metadata_committed_only: AtomicBool,
     /// Phase 154: KRaft-style metadata Raft log (MVP).
     metadata_raft: MetadataRaftState,
     /// Phase 154: when true, admin assignment mutations use the metadata Raft
-    /// log (opcodes 98/99) instead of AssignmentConsensusNote. Default **on**
-    /// in cluster mode (`VOLANT_METADATA_RAFT`).
+    /// log (opcodes 98/99) instead of AssignmentConsensusNote. Default **off**
+    /// (`VOLANT_METADATA_RAFT`).
     metadata_raft_enabled: AtomicBool,
 }
 
@@ -845,7 +845,7 @@ impl Broker {
                 default_assignment_metadata_committed_only(),
             ),
             metadata_raft,
-            // Single-node: metadata raft default off (cluster mode prefers on).
+            // metadata raft default off (cluster and single-node).
             metadata_raft_enabled: AtomicBool::new(default_metadata_raft_enabled(false)),
         };
         broker
@@ -1323,7 +1323,8 @@ impl Broker {
     }
 
     /// Phase 152: Metadata serves majority-committed assignment when consensus
-    /// is enabled (default **true**).
+    /// is enabled (default **false**; `VOLANT_ASSIGNMENT_METADATA_COMMITTED_ONLY=1`
+    /// serves the committed snapshot).
     pub fn assignment_metadata_committed_only(&self) -> bool {
         self.assignment_metadata_committed_only
             .load(Ordering::Relaxed)
@@ -7876,8 +7877,9 @@ fn default_assignment_consensus_wait() -> bool {
     }
 }
 
-/// Phase 152: `VOLANT_ASSIGNMENT_METADATA_COMMITTED_ONLY` default **true**.
-/// Explicit `0`/`false`/`no` restores Metadata that may lead committed gen.
+/// Phase 152: `VOLANT_ASSIGNMENT_METADATA_COMMITTED_ONLY` default **false**
+/// (live Metadata). Explicit `1`/`true`/`yes` serves the committed snapshot;
+/// `0`/`false`/`no` stays off.
 fn default_assignment_metadata_committed_only() -> bool {
     match std::env::var("VOLANT_ASSIGNMENT_METADATA_COMMITTED_ONLY") {
         Ok(s) => {
@@ -7890,12 +7892,12 @@ fn default_assignment_metadata_committed_only() -> bool {
             }
             true
         }
-        Err(_) => true,
+        Err(_) => false,
     }
 }
 
-/// Phase 154: `VOLANT_METADATA_RAFT` — default **on** in cluster mode, **off**
-/// single-node. Explicit `0`/`false`/`no` disables (Phase 150 notes only);
+/// Phase 154: `VOLANT_METADATA_RAFT` — default **off** (cluster and single-node).
+/// Explicit `0`/`false`/`no` disables (Phase 150 notes only);
 /// `1`/`true`/`yes` enables.
 fn default_metadata_raft_enabled(cluster_mode: bool) -> bool {
     match std::env::var("VOLANT_METADATA_RAFT") {
@@ -7909,7 +7911,7 @@ fn default_metadata_raft_enabled(cluster_mode: bool) -> bool {
             }
             cluster_mode
         }
-        Err(_) => cluster_mode,
+        Err(_) => false,
     }
 }
 

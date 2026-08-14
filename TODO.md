@@ -51,8 +51,8 @@ Phase index: [docs/history/PHASE_HISTORY.md](./docs/history/PHASE_HISTORY.md).
 
 | Pri | Item | Why / notes |
 |----:|------|-------------|
-| **P2** | **True Raft leader election** for metadata | 154 still uses **lowest live id** as leader; no RequestVote |
-| **P2** | **InstallSnapshot / log compaction** for metadata Raft | 154 log grows with full `SetAssignment` entries |
+| **P2** | **True Raft leader election** for metadata | **frozen (v0.2)** — [docs/V02_FREEZE.md](./docs/V02_FREEZE.md) §3/§4. Not the next slice. |
+| **P2** | **InstallSnapshot / log compaction** for metadata Raft | **frozen (v0.2)** — [docs/V02_FREEZE.md](./docs/V02_FREEZE.md) §3/§4. Do not extend 154. |
 | **P2** | **Local assignment rollback** on consensus/Raft majority fail | Create may leave local disk ahead of commit (honest residual) |
 | **P3** | **Distributed EOS 2PC** (broker-held stream state) | 153 is **process-local** staging only |
 | **P3** | **Durable window buckets** | 149/153 cover reduce KV, not tumbling window maps |
@@ -64,7 +64,7 @@ Phase index: [docs/history/PHASE_HISTORY.md](./docs/history/PHASE_HISTORY.md).
 | **Later** | **Long fuzz + chaos-mesh** | Phase 112 is corpus smoke only |
 | **Later** | **Perf campaign** vs aspirational targets | Publish numbers; group-commit default |
 
-**Default next slice:** metadata Raft **election + snapshot** (close the largest honesty gaps on 154), *or* chaos/perf if product focus shifts to ops confidence.
+**Default next slice:** [docs/V02_FREEZE.md](./docs/V02_FREEZE.md) item 1 (flip metadata defaults + docs honesty). Homemade Raft election / InstallSnapshot is **not** the next slice.
 
 ---
 
