@@ -54,7 +54,8 @@ Phase index: [docs/history/PHASE_HISTORY.md](./docs/history/PHASE_HISTORY.md).
 | **P2** | **True Raft leader election** for metadata | **frozen (v0.2)** — [docs/V02_FREEZE.md](./docs/V02_FREEZE.md) §3/§4. Not the next slice. |
 | **P2** | **InstallSnapshot / log compaction** for metadata Raft | **frozen (v0.2)** — [docs/V02_FREEZE.md](./docs/V02_FREEZE.md) §3/§4. Do not extend 154. |
 | **P2** | **Local assignment rollback** on consensus/Raft majority fail | **closed (v0.3)** — wait/committed-only miss restores live `assignment.json` |
-| **P2** | **Kafka admin assignment wait/rollback** | **this slice (v0.4)** — CreateTopics/DeleteTopics/CreatePartitions share native `complete_assignment_mutation` (Kafka **19**) |
+| **P2** | **Kafka admin assignment wait/rollback** | **closed (v0.4)** — CreateTopics/DeleteTopics/CreatePartitions share native `complete_assignment_mutation` (Kafka **19**) |
+| **P2** | **v0.5 ops confidence** | **this slice** — unwritable data dir, minority isolate of the leader, leader die mid in-flight `acks=all` |
 | **P3** | **Distributed EOS 2PC** (broker-held stream state) | 153 is **process-local** staging only |
 | **P3** | **Durable window buckets** | **closed (v0.2 PR5)** — `TumblingWindow::durable`; still process-local |
 | **P3** | Preferred **throttling / TCP probe** | Beyond 140/144/145 |
@@ -65,7 +66,7 @@ Phase index: [docs/history/PHASE_HISTORY.md](./docs/history/PHASE_HISTORY.md).
 | **Later** | **Long fuzz + chaos-mesh** | Phase 112 is corpus smoke only |
 | **Later** | **Perf campaign** vs aspirational targets | **closed (v0.2 PR2)** — measured table published; aspirational demoted; no group-commit |
 
-**Default next slice:** v0.4 Kafka admin wait/rollback (this slice). Homemade Raft election / InstallSnapshot is **not** the next product bet. Do not open Phase 155.
+**Default next slice:** v0.5 ops confidence (this slice). Homemade Raft election / InstallSnapshot / Phase 155 is **not** the next product bet. Do not open Phase 155.
 
 ---
 
@@ -87,6 +88,7 @@ Phase index: [docs/history/PHASE_HISTORY.md](./docs/history/PHASE_HISTORY.md).
 - [x] KRaft-style metadata Raft log MVP → **Phase 154**
 - [x] Assignment wait-fail local rollback → **v0.3**
 - [x] Kafka admin assignment wait/rollback → **v0.4**
+- [x] Unwritable dir / isolate leader / in-flight acks=all → **v0.5**
 
 ---
 
@@ -98,6 +100,7 @@ Phase index: [docs/history/PHASE_HISTORY.md](./docs/history/PHASE_HISTORY.md).
 - [ ] **Dynamic membership** (add/remove brokers without static N)
 - [x] Rollback **local** assignment file when wait/committed-only majority misses (v0.3 residual; `!must_wait` still retains local)
 - [x] Kafka CreateTopics / DeleteTopics / CreatePartitions honor the same wait/rollback (v0.4; majority miss → Kafka **19**)
+- [x] v0.5 ops confidence (unwritable dir / isolate leader / in-flight acks=all)
 - [ ] Per-partition Raft / full KRaft `__cluster_metadata` topic parity
 
 ### Streams

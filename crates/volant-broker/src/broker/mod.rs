@@ -610,6 +610,8 @@ pub struct Broker {
     /// log (opcodes 98/99) instead of AssignmentConsensusNote. Default **off**
     /// (`VOLANT_METADATA_RAFT`).
     metadata_raft_enabled: AtomicBool,
+    /// Test hook: when true, outbound inter-broker RPC fails without connecting.
+    inter_broker_blocked: AtomicBool,
 }
 
 /// One pending leader→controller ISR report (Phase 142).
@@ -834,6 +836,7 @@ impl Broker {
             metadata_raft,
             // metadata raft default off (cluster and single-node).
             metadata_raft_enabled: AtomicBool::new(default_metadata_raft_enabled(false)),
+            inter_broker_blocked: AtomicBool::new(false),
         };
         broker
             .reload_single_node_topics()
@@ -998,6 +1001,7 @@ impl Broker {
             ),
             metadata_raft,
             metadata_raft_enabled: AtomicBool::new(default_metadata_raft_enabled(true)),
+            inter_broker_blocked: AtomicBool::new(false),
         };
         // Open local partitions from persisted assignment.
         broker.apply_local_assignment()?;
