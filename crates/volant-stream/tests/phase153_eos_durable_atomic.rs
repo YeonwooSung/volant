@@ -135,9 +135,7 @@ fn reduce_checkpoint_commit_advances() {
     {
         let mut reduce = count_reduce_durable(&dir).expect("open reduce");
         reduce.begin_checkpoint();
-        reduce
-            .process(count_rec(b"world", "3"))
-            .expect("process");
+        reduce.process(count_rec(b"world", "3")).expect("process");
         assert_eq!(reduce.get(b"world").as_deref(), Some(b"3".as_ref()));
         reduce.commit_checkpoint().expect("commit");
     }
@@ -159,9 +157,7 @@ fn pipeline_checkpoint_order_abort() {
     {
         let mut pipe = Pipeline::new().then(count_reduce_durable(&dir).expect("reduce"));
         pipe.begin_checkpoint();
-        let out = pipe
-            .process(vec![count_rec(b"x", "1")])
-            .expect("process");
+        let out = pipe.process(vec![count_rec(b"x", "1")]).expect("process");
         assert_eq!(out.len(), 1);
         assert_eq!(out[0].value.as_ref(), b"6");
         pipe.abort_checkpoint();
@@ -233,18 +229,14 @@ fn simulate_eos_step_order_commit_and_abort() {
 
     // --- successful EOS-like step ---
     reduce.begin_checkpoint();
-    reduce
-        .process(count_rec(b"z", "1"))
-        .expect("process");
+    reduce.process(count_rec(b"z", "1")).expect("process");
     // (broker txn would commit here)
     reduce.commit_checkpoint().expect("commit ckpt");
     assert_eq!(reduce.get(b"z").as_deref(), Some(b"1".as_ref()));
 
     // --- failed / aborted EOS-like step ---
     reduce.begin_checkpoint();
-    reduce
-        .process(count_rec(b"z", "1"))
-        .expect("process");
+    reduce.process(count_rec(b"z", "1")).expect("process");
     assert_eq!(reduce.get(b"z").as_deref(), Some(b"2".as_ref()));
     // (broker txn fails → abort txn + abort checkpoint)
     reduce.abort_checkpoint();

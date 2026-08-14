@@ -46,11 +46,7 @@ where
 }
 
 /// Build a reduce operator with an injected store (memory or durable).
-pub fn reduce_with_store<S, Init, Add>(
-    store: S,
-    init: Init,
-    add: Add,
-) -> Reduce<S, Init, Add>
+pub fn reduce_with_store<S, Init, Add>(store: S, init: Init, add: Add) -> Reduce<S, Init, Add>
 where
     S: KeyValueStore,
     Init: FnMut() -> Bytes + Send + 'static,
@@ -122,10 +118,7 @@ where
             .key
             .clone()
             .unwrap_or_else(|| Bytes::from_static(b""));
-        let current = self
-            .store
-            .get(&key_bytes)
-            .unwrap_or_else(|| (self.init)());
+        let current = self.store.get(&key_bytes).unwrap_or_else(|| (self.init)());
         let next = (self.add)(&current, &record)?;
         self.store.put(key_bytes.clone(), next.clone());
         Ok(vec![Record {

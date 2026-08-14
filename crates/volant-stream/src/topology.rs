@@ -59,11 +59,7 @@ impl StreamBuilder {
     }
 
     /// Set the source topic and consumer config.
-    pub fn source_topic(
-        mut self,
-        topic: impl Into<String>,
-        config: SourceConfig,
-    ) -> Self {
+    pub fn source_topic(mut self, topic: impl Into<String>, config: SourceConfig) -> Self {
         self.source_topic = Some(topic.into());
         self.source_config = Some(config);
         self

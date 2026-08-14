@@ -5,6 +5,9 @@
 //! - Stateless: [`map`](ops::map), [`filter`](ops::filter), [`flat_map`](ops::flat_map), [`foreach`](ops::foreach)
 //! - Stateful: [`reduce`](ops::reduce) / [`count_reduce`](ops::count_reduce), [`TumblingWindow`](window::TumblingWindow)
 //! - Durable state (Phase 149): [`DurableStore`](state::DurableStore), [`count_reduce_durable`](ops::count_reduce_durable)
+//! - Durable windows: [`TumblingWindow::durable`] persists open buckets via
+//!   [`DurableStore`] so one app survives process restart; default
+//!   [`TumblingWindow::new`] stays in-memory (ALO)
 //! - Topology: [`StreamBuilder`](topology::StreamBuilder) → [`StreamApp`](runtime::StreamApp)
 //! - Exactly-once MVP (Phase 151): [`ProcessingGuarantee::ExactlyOnce`],
 //!   [`StreamBuilder::exactly_once`]
@@ -27,6 +30,9 @@
 //! markers. Durable state is process-local staging (not distributed 2PC with
 //! the broker). Fence via `transactional_id`. Empty polls abort the checkpoint
 //! and skip the txn.
+//!
+//! Durable window buckets and reduce aggregates survive restart in **one
+//! process** when configured. This is not cluster EOS or distributed 2PC.
 //!
 //! # Offline processing
 //!
