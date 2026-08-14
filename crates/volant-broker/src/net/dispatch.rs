@@ -458,10 +458,20 @@ async fn handle_request(broker: &Arc<Broker>, req: Request) -> Result<Response> 
                 });
             }
             let topic = TopicName::new(name.clone());
+            let prev = if broker.assignment_consensus_wait()
+                || broker.assignment_metadata_committed_only()
+            {
+                broker.clone_live_assignment()
+            } else {
+                None
+            };
             match broker.create_topic_with_configs(topic, partitions, &configs) {
                 Ok(id) => {
                     // Phase 150: best-effort (or wait) assignment majority.
                     if maybe_fanout_assignment_consensus(broker).await == Some(false) {
+                        if let Some(prev) = prev.as_ref() {
+                            let _ = broker.restore_live_assignment(prev);
+                        }
                         return Ok(Response::Error {
                             code: ErrorCode::NotEnoughReplicas as u16,
                             message: format!(
@@ -491,8 +501,18 @@ async fn handle_request(broker: &Arc<Broker>, req: Request) -> Result<Response> 
         }
         Request::DeleteTopic { name } => {
             let topic = TopicName::new(name.clone());
+            let prev = if broker.assignment_consensus_wait()
+                || broker.assignment_metadata_committed_only()
+            {
+                broker.clone_live_assignment()
+            } else {
+                None
+            };
             broker.delete_topic(&topic)?;
             if maybe_fanout_assignment_consensus(broker).await == Some(false) {
+                if let Some(prev) = prev.as_ref() {
+                    let _ = broker.restore_live_assignment(prev);
+                }
                 return Ok(Response::Error {
                     code: ErrorCode::NotEnoughReplicas as u16,
                     message: format!(
@@ -1527,9 +1547,19 @@ async fn handle_request(broker: &Arc<Broker>, req: Request) -> Result<Response> 
             }
         }
         Request::CreatePartitions { topic, total_count } => {
+            let prev = if broker.assignment_consensus_wait()
+                || broker.assignment_metadata_committed_only()
+            {
+                broker.clone_live_assignment()
+            } else {
+                None
+            };
             match broker.create_partitions(&topic, total_count) {
                 Ok(partitions) => {
                     if maybe_fanout_assignment_consensus(broker).await == Some(false) {
+                        if let Some(prev) = prev.as_ref() {
+                            let _ = broker.restore_live_assignment(prev);
+                        }
                         return Ok(Response::CreatePartitions {
                             error_code: ErrorCode::NotEnoughReplicas as u16,
                             topic,

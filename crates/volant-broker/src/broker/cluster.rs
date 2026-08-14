@@ -580,6 +580,36 @@ impl Broker {
         Ok(())
     }
 
+    /// Clone the live cluster assignment (`None` when not clustered).
+    pub fn clone_live_assignment(&self) -> Option<AssignmentSnapshot> {
+        self.cluster.as_ref().map(|c| c.assignment.read().clone())
+    }
+
+    /// Restore a previously cloned live assignment after a wait-path majority miss.
+    ///
+    /// Writes `prev` into `cluster.assignment` and `{data_dir}/cluster/assignment.json`,
+    /// drops local topics / rr counters whose names are not in `prev`, then
+    /// `apply_local_assignment` so a rolled-back delete can reopen logs.
+    /// Does not touch `committed_snapshot.json`.
+    pub fn restore_live_assignment(&self, prev: &AssignmentSnapshot) -> Result<()> {
+        let Some(cluster) = &self.cluster else {
+            return Ok(());
+        };
+        {
+            let mut asg = cluster.assignment.write();
+            *asg = prev.clone();
+            save_assignment(&cluster.data_dir, &asg)?;
+        }
+        let keep: HashSet<String> = prev.topics.keys().cloned().collect();
+        self.topics
+            .write()
+            .retain(|name, _| keep.contains(name.as_str()));
+        self.rr_counters
+            .write()
+            .retain(|name, _| keep.contains(name.as_str()));
+        self.apply_local_assignment()
+    }
+
     /// Remove `dead_id` from every local partition ISR and advance HWM when we lead.
     ///
     /// Called from [`Self::on_broker_death`] on **every** node that observes the death

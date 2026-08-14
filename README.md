@@ -9,32 +9,16 @@ Volant is a resource-efficient alternative to Apache Kafka, built for:
 - **Streaming processing** — first-class operators (`map`, `filter`, windows) without a heavy runtime
 - **Small footprint** — native binary, predictable memory, simple operations
 
-> Status: **Phases 0–154 landed** — durable log, clustering (ISR death + rejoin /
-> Status: **Phases 0–154 landed** — durable log, clustering (ISR death + rejoin /
-> lag shrink + time-based ISR lag + Metadata leader ISR overlay + leader→controller IsrUpdate +
-> N=2 majority health gauges + PreferredReadReplica rack-aware Fetch +
-> preferred selector polish + optional max LEO lag / RC suppress metric +
-> preferred × established-session suppress + rack-aware create assignment +
-> assignment generation majority consensus (Phase 150) +
-> Metadata serves committed assignment (Phase 152) +
-> KRaft-style metadata Raft log MVP (Phase 154; opcodes 98/99) +
-> p2p heartbeat mesh + optional DeleteRecords majority wait +
-> native request wait trailer + journal topic GC +
-> non-blocking admin catch-up +
-> best-effort shared fetch session mirror + serve-from-mirror without promote +
-> mirror coalesce/debounce + optional durable peer mirrors + promote claim fence +
-> txn coordinator registry TTL GC + BROKER TTL config + truncate journal + multi-controller majority + journal rejoin catch-up + catch-up hardening), security, stream operators + durable redb state (Phase 149) + exactly-once MVP (Phase 151: transactional sink + group offsets) + EOS durable checkpoint (Phase 153), a broad optional Kafka wire shim
-> (classic + flexible; ApiVersions 0–5; Fetch 0–18; ACL admin 0–3;
-> TRANSACTION_ABORTABLE subset; fetch session TTL/max + durable local sessions +
-> multi-broker owner forward + peer mirror MVP (polish 139; claim fence 143; session suppress 144; serve-mirror 147);
-> broker Describe/AlterConfigs with sparse durable restore; multi-broker 2PC MVP;
-> cluster admin fan-out for DeleteRecords / BROKER config / ACLs; durable
-> DeleteRecords outbox for offline replicas), and fuzz corpus smoke CI.
-> Single-node mode (no `--cluster-config`) preserves the simple path.
+> Status: **v0.2 shipped** (crate **0.2.0**, Phases **0–154**). Durable log,
+> Phase 6 ISR clustering, security MVP, in-process streams (149/151/153 +
+> `TumblingWindow::durable` window buckets), optional Kafka shim (38 keys).
+> Metadata serves the **live** assignment by default (Phase 152 committed-only
+> is **opt-in**). Homemade metadata Raft stays behind flags. Single-node mode
+> (no `--cluster-config`) preserves the simple path.
 > Start with the [whitepaper](./docs/WHITEPAPER.md) and
 > [docs index](./docs/INDEX.md); also [ROADMAP.md](./ROADMAP.md),
 > [ops](./docs/ops.md), [deploy/](./deploy/), [consistency](./docs/consistency.md).
-> v0.2 scope is locked in [docs/V02_FREEZE.md](./docs/V02_FREEZE.md).
+> v0.2 scope: [docs/V02_FREEZE.md](./docs/V02_FREEZE.md).
 
 ---
 

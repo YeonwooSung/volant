@@ -322,7 +322,7 @@ helm install volant ./deploy/helm/volant \
   --set cluster.enabled=true \
   --set cluster.replicas=3 \
   --set image.repository=volant \
-  --set image.tag=0.1.0
+  --set image.tag=0.2.0
 ```
 
 Deploys a StatefulSet, headless Service, and ConfigMap `cluster.toml`
@@ -380,11 +380,14 @@ specs. Ops-critical notes only:
 | `VOLANT_METADATA_RAFT` | **off** | `1`/`true`/`yes` prefers 154 AppendEntries 98/99; unset/`0` uses Phase 150 notes |
 | `VOLANT_ASSIGNMENT_METADATA_COMMITTED_ONLY` | **off** | `1` serves majority-committed Metadata snapshot + wait-like admin; unset/`0` is live assignment |
 | `VOLANT_ASSIGNMENT_CONSENSUS` | **on** | Best-effort 96/97 push. Must **not** gate Metadata or fail CreateTopic |
-| `VOLANT_ASSIGNMENT_CONSENSUS_WAIT` | **off** | `1` → native **15** on majority miss; local create/delete is **not** rolled back |
+| `VOLANT_ASSIGNMENT_CONSENSUS_WAIT` | **off** | `1` → native **15** on majority miss; **rolls back** live `assignment.json` (must_wait path only) |
 
 CreateTopic / DeleteTopic / CreatePartitions succeed when the controller writes
 `{data_dir}/cluster/assignment.json`. A 96/97 majority miss does **not** fail
-the client unless wait or committed-only is on. Metadata serves the **live**
+the client unless wait or committed-only is on. On that **must_wait** path a
+miss **rolls back** the live assignment (client 15, Metadata, and
+`assignment.json` match the pre-mutation snapshot). `!must_wait` keeps the
+local write as SoT. Metadata serves the **live**
 assignment. Set `VOLANT_METADATA_RAFT=1` to append `SetAssignment` to
 `{data_dir}/__metadata_raft/`, fan out `MetadataRaftAppend` (opcodes 98/99),
 advance `commit_index` only on majority match_index, then apply + Phase 152
@@ -431,7 +434,7 @@ What v0.2 **proves** in CI (do not re-open as new work):
 
 1. Produce with `acks=all`. Restart **followers first** (ISR shrinks; remaining live ISR still ≥ min ISR).
 2. Restart the controller last. Next-lowest live id becomes controller; clients refresh Metadata on `NotLeaderForPartition`. Brief Metadata lag on the new controller is allowed ([consistency.md](./consistency.md)).
-3. Prefer **odd N (3+)**. On **N=2**, one peer down flips `majority_impossible=1` — journal majority and `VOLANT_ASSIGNMENT_CONSENSUS_WAIT=1` CreateTopic cannot succeed (local `assignment.json` is still written; default wait **off** does not fail the client).
+3. Prefer **odd N (3+)**. On **N=2**, one peer down flips `majority_impossible=1` — journal majority and `VOLANT_ASSIGNMENT_CONSENSUS_WAIT=1` CreateTopic cannot succeed (must_wait miss **rolls back** live `assignment.json`; default wait **off** does not fail the client and keeps the local write).
 
 **Wontfix in v0.2** (not a test gap to close here):
 
