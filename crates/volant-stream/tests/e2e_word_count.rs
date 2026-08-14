@@ -11,8 +11,8 @@ use volant_client::Client;
 use volant_core::{Message, Offset, Record, Result};
 use volant_storage::StorageConfig;
 use volant_stream::{
-    count_reduce, filter, flat_map, foreach, map, process_pipeline, record_from_value,
-    SourceConfig, StreamApp, StreamBuilder, TumblingWindow, Pipeline,
+    count_reduce, filter, flat_map, foreach, map, process_pipeline, record_from_value, Pipeline,
+    SourceConfig, StreamApp, StreamBuilder, TumblingWindow,
 };
 
 // ── helpers ──────────────────────────────────────────────────────────────
@@ -274,21 +274,14 @@ async fn live_word_count_source_sink() {
     let (addr, server) = boot_server(dir.clone()).await;
 
     let client = Arc::new(Client::connect_addr(&addr).await.expect("connect"));
-    client
-        .create_topic("lines", 1)
-        .await
-        .expect("create lines");
+    client.create_topic("lines", 1).await.expect("create lines");
     client
         .create_topic("counts", 1)
         .await
         .expect("create counts");
 
     // Produce input lines.
-    for line in [
-        "the quick brown fox",
-        "the fox jumps",
-        "quick quick fox",
-    ] {
+    for line in ["the quick brown fox", "the fox jumps", "quick quick fox"] {
         client
             .produce(
                 "lines",
@@ -323,10 +316,7 @@ async fn live_word_count_source_sink() {
         .fetch("counts", 0, Offset::ZERO, 1000, 0)
         .await
         .expect("fetch counts");
-    assert!(
-        !fetched.records.is_empty(),
-        "expected sink output records"
-    );
+    assert!(!fetched.records.is_empty(), "expected sink output records");
 
     let mut counts: HashMap<String, u64> = HashMap::new();
     for r in &fetched.records {
@@ -351,4 +341,3 @@ async fn live_word_count_source_sink() {
     server.abort();
     let _ = std::fs::remove_dir_all(&dir);
 }
-

@@ -56,6 +56,14 @@ pub enum StreamStateError {
     /// redb commit failure.
     #[error("stream state commit: {0}")]
     Commit(String),
+    /// Stored tumbling-window size does not match the size requested on open.
+    #[error("stream state window size mismatch: stored {stored} ms, requested {requested} ms")]
+    WindowSizeMismatch {
+        /// Size persisted in the store.
+        stored: i64,
+        /// Size passed to this open.
+        requested: i64,
+    },
 }
 
 /// In-memory overlay while a checkpoint is open.
@@ -83,7 +91,8 @@ impl DurableStore {
         let path = path.as_ref().to_path_buf();
         std::fs::create_dir_all(&path)?;
         let db_path = path.join(DB_FILE);
-        let db = Database::create(&db_path).map_err(|e| StreamStateError::Database(e.to_string()))?;
+        let db =
+            Database::create(&db_path).map_err(|e| StreamStateError::Database(e.to_string()))?;
         // Ensure the table exists so subsequent reads do not fail with TableDoesNotExist.
         {
             let txn = db
@@ -149,9 +158,7 @@ impl DurableStore {
             Err(redb::TableError::TableDoesNotExist(_)) => return 0,
             Err(e) => Self::panic_ctx("open_table(read)", e),
         };
-        table
-            .len()
-            .unwrap_or_else(|e| Self::panic_ctx("len", e)) as usize
+        table.len().unwrap_or_else(|e| Self::panic_ctx("len", e)) as usize
     }
 
     fn disk_iter_map(&self) -> BTreeMap<Vec<u8>, Bytes> {
@@ -169,10 +176,7 @@ impl DurableStore {
             .unwrap_or_else(|e| Self::panic_ctx("iter", e))
             .map(|item| {
                 let (k, v) = item.unwrap_or_else(|e| Self::panic_ctx("iter item", e));
-                (
-                    k.value().to_vec(),
-                    Bytes::copy_from_slice(v.value()),
-                )
+                (k.value().to_vec(), Bytes::copy_from_slice(v.value()))
             })
             .collect()
     }
@@ -282,10 +286,7 @@ impl KeyValueStore for DurableStore {
                 map.insert(k.clone(), v.clone());
             }
         }
-        Box::new(
-            map.into_iter()
-                .map(|(k, v)| (Bytes::from(k), v)),
-        )
+        Box::new(map.into_iter().map(|(k, v)| (Bytes::from(k), v)))
     }
 
     fn len(&self) -> usize {

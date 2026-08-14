@@ -118,10 +118,7 @@ fn builder_default_is_at_least_once() {
         .sink_topic("out")
         .build()
         .expect("build");
-    assert_eq!(
-        topo.processing_guarantee,
-        ProcessingGuarantee::AtLeastOnce
-    );
+    assert_eq!(topo.processing_guarantee, ProcessingGuarantee::AtLeastOnce);
 }
 
 #[test]
@@ -130,12 +127,8 @@ fn offline_process_still_works() {
         .flat_map(split_words)
         .reduce_count()
         .build_pipeline();
-    let emitted = process_pipeline(
-        &mut pipeline,
-        vec![line_record("hello hello world")],
-        None,
-    )
-    .expect("process");
+    let emitted = process_pipeline(&mut pipeline, vec![line_record("hello hello world")], None)
+        .expect("process");
     let mut counts = HashMap::new();
     for r in &emitted {
         let key = r
@@ -247,11 +240,7 @@ async fn eos_path_produce_and_commit_offsets() {
         .await
         .expect("create counts");
 
-    for line in [
-        "the quick brown fox",
-        "the fox jumps",
-        "quick quick fox",
-    ] {
+    for line in ["the quick brown fox", "the fox jumps", "quick quick fox"] {
         client
             .produce(
                 "lines-eos",
@@ -328,10 +317,7 @@ async fn eos_empty_step_noops() {
     let (addr, server) = boot_server(dir.clone()).await;
 
     let client = Arc::new(Client::connect_addr(&addr).await.expect("connect"));
-    client
-        .create_topic("empty-in", 1)
-        .await
-        .expect("create in");
+    client.create_topic("empty-in", 1).await.expect("create in");
     client
         .create_topic("empty-out", 1)
         .await
@@ -369,8 +355,7 @@ async fn eos_empty_step_noops() {
         .await
         .expect("fetch_offsets");
     assert!(
-        offs.is_empty()
-            || offs.iter().all(|e| e.offset == u64::MAX || e.offset == 0),
+        offs.is_empty() || offs.iter().all(|e| e.offset == u64::MAX || e.offset == 0),
         "empty EOS steps should not commit meaningful offsets: {offs:?}"
     );
 
@@ -386,10 +371,7 @@ async fn start_exactly_once_api() {
 
     let client = Arc::new(Client::connect_addr(&addr).await.expect("connect"));
     client.create_topic("api-in", 1).await.expect("create in");
-    client
-        .create_topic("api-out", 1)
-        .await
-        .expect("create out");
+    client.create_topic("api-out", 1).await.expect("create out");
 
     client
         .produce(

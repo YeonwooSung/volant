@@ -1,9 +1,12 @@
-//! Key-value state stores for stream operators.
+//! Key-value state stores for stream operators (`reduce`, tumbling windows).
 //!
-//! - [`MemoryStore`] — process-local, lost on restart
+//! - [`MemoryStore`] — process-local, lost on restart (default ALO path)
 //! - [`DurableStore`] — redb-backed, survives process restart (Phase 149)
 //! - Checkpoint staging (Phase 153): optional begin/commit/abort so EOS can
 //!   stage durable puts until the broker transaction succeeds
+//!
+//! Window buckets use the same store + overlay. Restart restore is
+//! in-process only — not distributed EOS / 2PC.
 
 mod durable;
 mod memory;

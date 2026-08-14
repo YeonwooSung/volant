@@ -235,7 +235,10 @@ impl StreamApp {
     }
 
     /// Process an offline batch (no network) — for tests.
-    pub fn process_offline(&mut self, records: Vec<volant_core::Record>) -> Result<Vec<volant_core::Record>> {
+    pub fn process_offline(
+        &mut self,
+        records: Vec<volant_core::Record>,
+    ) -> Result<Vec<volant_core::Record>> {
         let mut out = self.pipeline.process(records)?;
         out.extend(self.pipeline.punctuate(now_ms())?);
         Ok(out)
