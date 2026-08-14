@@ -38,8 +38,8 @@ From `SUPPORTED_APIS` in `crates/volant-broker/src/kafka/mod.rs`:
 | 16 | ListGroups | 0–5 | Flex v3; StatesFilter v4; TypesFilter v5 (`classic`) |
 | 17 | SaslHandshake | 0–1 | PLAIN, SCRAM-SHA-256, SCRAM-SHA-512 |
 | 18 | ApiVersions | 0–5 | Flex v3–5; header always v0; empty feature tags; v5 ClusterId/NodeId ignored |
-| 19 | CreateTopics | 0–7 | Flex v5+; TopicId response v7 |
-| 20 | DeleteTopics | 0–6 | Flex v4+; ErrorMessage v5; TopicId v6 |
+| 19 | CreateTopics | 0–7 | Flex v5+; TopicId response v7; assignment wait/rollback same as native (majority miss → **19**) |
+| 20 | DeleteTopics | 0–6 | Flex v4+; ErrorMessage v5; TopicId v6; assignment wait/rollback same as native (majority miss → **19**) |
 | 21 | DeleteRecords | 0–2 | Flex v2; GC/clip aborted soft markers vs log start (Phase 104/111); best-effort replica fan-out (Phase 113) + durable leader outbox retry for offline peers (Phase 116) + new-leader outbox reconcile on leadership change (Phase 123); optional journal majority wait via broker env `VOLANT_DELETE_RECORDS_WAIT_MAJORITY` only (Phase 135 — fail → Kafka **19**); **no** per-request wait field (Phase 137 native trailer is native-only) |
 | 22 | InitProducerId | 0–6 | Flex v2+; v6 Enable2Pc/KeepPreparedTxn (Phase 90 prepared MVP); OngoingTxn* when prepared |
 | 23 | OffsetForLeaderEpoch | 0–4 | Flex v4; durable epoch history MVP (Phase 87); prior epochs → transition end |
@@ -51,7 +51,7 @@ From `SUPPORTED_APIS` in `crates/volant-broker/src/kafka/mod.rs`:
 | 32 | DescribeConfigs | 0–4 | Flex v4; TOPIC + BROKER (Phase 99–103; name empty or local `node_id`; sparse durable; cluster effective values after Phase 113 push) |
 | 33 | AlterConfigs | 0–2 | Flex v2; TOPIC + BROKER SET (empty = product default; name check Phase 103; sparse durable Phase 100/102; BROKER cluster Alter **controller-only** Phase 113 → **41**) |
 | 36 | SaslAuthenticate | 0–2 | Flex v2 |
-| 37 | CreatePartitions | 0–3 | Flex v2+; v3 = v2 wire (no KIP-599 quota) |
+| 37 | CreatePartitions | 0–3 | Flex v2+; v3 = v2 wire (no KIP-599 quota); assignment wait/rollback same as native (majority miss → **19**) |
 | 42 | DeleteGroups | 0–3 | Flex v2; ErrorMessage v3 |
 | 44 | IncrementalAlterConfigs | 0–1 | SET/DELETE only; TOPIC + BROKER (Phase 99–103 name check + sparse durable; BROKER cluster Alter controller-only Phase 113) |
 | 47 | OffsetDelete | 0 | Classic only |
@@ -117,7 +117,7 @@ These are **current** product facts, not temporary docs lag:
 | Preferred replica | **MVP** (Phase **126** + **133** + **140** + **144**): Fetch v11+ rack → same-rack live ISR peer with usable addr + LEO≥HWM redirect (empty records); **rank highest LEO then lowest id** (133); optional `VOLANT_PREFERRED_REPLICA_MAX_LEO_LAG` skips peers over lag vs leader LEO (**unset** = unlimited) (140); **suppressed when isolation=READ_COMMITTED** (leader serves aborted filter); metric `volant_preferred_replica_suppressed_total` when a candidate existed (140); **suppressed when client has established fetch session** (`req_session_id != 0`, non-FINAL) to avoid session-owner thrash after preferred redirect; metric `volant_preferred_replica_session_suppressed_total` (144); full fetch `session_id == 0` may still redirect; gated off for followers (`replica_id` / ReplicaState); Metadata rack from `cluster.toml`; not full Kafka selector/throttling / rack-aware partition assignment |
 
 | ISR / HWM (cluster) | Kafka-style static ISR (Phase 6): death shrink + HWM recompute (Phase 108/110); **rejoin** when ReplicaFetch LEO ≥ HWM and lag ≤ `replica_lag_max_messages`; lag-shrink of slow-but-alive members (Phase 118); **time-based lag shrink** via last-caught-up + `replica_lag_max_ms` (Phase 125; not full Kafka `replica.lag.time.max.ms` parity); **Phase 142:** Metadata on the leader overlays local ISR; non-controller leaders best-effort `IsrUpdate` (94/95) to controller — non-leader Metadata may still lag until report + ClusterState |
-| CreateTopics | Replica assignment arrays ignored; configs response often null |
+| CreateTopics | Replica assignment arrays ignored; configs response often null; wait/rollback same as native CreateTopic (majority miss → **19**) |
 | Storage | Log stores uncompressed Volant records; Fetch re-encodes |
 | Auth | Kafka port: SASL or `kafka-anonymous`; no shared-token on Kafka port |
 | ACLs | LITERAL only; host always `*`; User resource (v3) stored only (no SCRAM-admin gating); no TransactionalId/DelegationToken; cluster Create/Delete are **controller-only** with generationed snapshot fan-out (Phase 113) + durable-gen rejoin catch-up (Phase 117) — not Raft multi-master consensus |

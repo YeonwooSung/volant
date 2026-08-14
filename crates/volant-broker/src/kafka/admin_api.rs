@@ -7,6 +7,7 @@ use crate::acl::{
     AclOperation, ResourceType, CLUSTER_RESOURCE,
 };
 use crate::broker::Broker;
+use crate::net::{complete_assignment_mutation, snapshot_if_must_wait};
 
 use super::codec::{
     get_compact_array_len,
@@ -20,7 +21,7 @@ use super::KafkaErrorCode;
 /// Default partition count when CreateTopics v4+ sends `num_partitions = -1`.
 const DEFAULT_TOPIC_PARTITIONS: u32 = 1;
 
-pub(crate) fn encode_create_topics(
+pub(crate) async fn encode_create_topics(
     broker: &Broker,
     src: &mut impl Buf,
     out: &mut BytesMut,
@@ -297,6 +298,7 @@ pub(crate) fn encode_create_topics(
             continue;
         }
 
+        let prev = snapshot_if_must_wait(broker);
         let result = if t.configs.is_empty() {
             broker.create_topic(t.name.as_str(), partitions)
         } else {
@@ -304,14 +306,25 @@ pub(crate) fn encode_create_topics(
         };
 
         match result {
-            Ok(id) => write_result(
-                out,
-                KafkaErrorCode::None,
-                None,
-                partitions as i32,
-                1,
-                Some(id.0),
-            ),
+            Ok(id) => match complete_assignment_mutation(broker, prev).await {
+                Ok(true) => write_result(
+                    out,
+                    KafkaErrorCode::None,
+                    None,
+                    partitions as i32,
+                    1,
+                    Some(id.0),
+                ),
+                Ok(false) => write_result(
+                    out,
+                    KafkaErrorCode::NotEnoughReplicas,
+                    Some("assignment consensus majority failed"),
+                    -1,
+                    -1,
+                    None,
+                ),
+                Err(_) => write_result(out, KafkaErrorCode::Unknown, None, -1, -1, None),
+            },
             Err(Error::InvalidArgument(msg)) if msg.contains("already exists") => {
                 write_result(
                     out,
@@ -345,7 +358,7 @@ pub(crate) fn put_unsigned_varint_null_array(dst: &mut BytesMut) {
     put_unsigned_varint(dst, 0);
 }
 
-pub(crate) fn encode_delete_topics(
+pub(crate) async fn encode_delete_topics(
     broker: &Broker,
     src: &mut impl Buf,
     out: &mut BytesMut,
@@ -496,8 +509,16 @@ pub(crate) fn encode_delete_topics(
                     Some("topic authorization failed"),
                 )
             } else {
+                let prev = snapshot_if_must_wait(broker);
                 match broker.delete_topic(&TopicName::new(name.clone())) {
-                    Ok(()) => (KafkaErrorCode::None, None),
+                    Ok(()) => match complete_assignment_mutation(broker, prev).await {
+                        Ok(true) => (KafkaErrorCode::None, None),
+                        Ok(false) => (
+                            KafkaErrorCode::NotEnoughReplicas,
+                            Some("assignment consensus majority failed"),
+                        ),
+                        Err(_) => (KafkaErrorCode::Unknown, None),
+                    },
                     Err(Error::NotFound(_)) => (
                         KafkaErrorCode::UnknownTopicOrPartition,
                         Some("unknown topic or partition"),
@@ -525,7 +546,7 @@ pub(crate) fn encode_delete_topics(
     }
 }
 
-pub(crate) fn encode_create_partitions(
+pub(crate) async fn encode_create_partitions(
     broker: &Broker,
     src: &mut impl Buf,
     out: &mut BytesMut,
@@ -686,8 +707,16 @@ pub(crate) fn encode_create_partitions(
                 }
             }
         } else {
+            let prev = snapshot_if_must_wait(broker);
             match broker.create_partitions(&r.topic, r.count as u32) {
-                Ok(_) => (KafkaErrorCode::None.as_i16(), None),
+                Ok(_) => match complete_assignment_mutation(broker, prev).await {
+                    Ok(true) => (KafkaErrorCode::None.as_i16(), None),
+                    Ok(false) => (
+                        KafkaErrorCode::NotEnoughReplicas.as_i16(),
+                        Some("assignment consensus majority failed"),
+                    ),
+                    Err(_) => (KafkaErrorCode::Unknown.as_i16(), None),
+                },
                 Err(Error::NotFound(_)) => (
                     KafkaErrorCode::UnknownTopicOrPartition.as_i16(),
                     Some("topic not found"),

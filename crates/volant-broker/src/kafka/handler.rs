@@ -380,7 +380,8 @@ async fn dispatch_kafka(
                     debug!(error = %e, "create topics flexible header tag buffer");
                 }
             }
-            admin_api::encode_create_topics(broker, &mut src, &mut out, hdr.api_version, principal);
+            admin_api::encode_create_topics(broker, &mut src, &mut out, hdr.api_version, principal)
+                .await;
         }
         Some(ApiKey::DeleteTopics) if (0..=6).contains(&hdr.api_version) => {
             if hdr.api_version >= 4 {
@@ -388,7 +389,8 @@ async fn dispatch_kafka(
                     debug!(error = %e, "delete topics flexible header tag buffer");
                 }
             }
-            admin_api::encode_delete_topics(broker, &mut src, &mut out, hdr.api_version, principal);
+            admin_api::encode_delete_topics(broker, &mut src, &mut out, hdr.api_version, principal)
+                .await;
         }
         Some(ApiKey::DeleteRecords) if (0..=2).contains(&hdr.api_version) => {
             if hdr.api_version >= 2 {
@@ -682,7 +684,8 @@ async fn dispatch_kafka(
                     debug!(error = %e, "create partitions flexible header tag buffer");
                 }
             }
-            admin_api::encode_create_partitions(broker, &mut src, &mut out, hdr.api_version, principal);
+            admin_api::encode_create_partitions(broker, &mut src, &mut out, hdr.api_version, principal)
+                .await;
         }
         Some(ApiKey::DescribeConfigs) if (0..=4).contains(&hdr.api_version) => {
             if hdr.api_version >= 4 {
