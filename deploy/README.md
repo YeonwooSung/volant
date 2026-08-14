@@ -43,12 +43,12 @@ curl -s localhost:9102/metrics | head
 
 ```bash
 # Build/push image first
-docker build -f deploy/Dockerfile -t volant:0.1.0 .
+docker build -f deploy/Dockerfile -t volant:0.2.0 .
 
 # Single-node (default)
 helm install volant ./deploy/helm/volant \
   --set image.repository=volant \
-  --set image.tag=0.1.0 \
+  --set image.tag=0.2.0 \
   --set authToken=s3cret
 
 # Multi-node StatefulSet (Phase 9)
@@ -56,7 +56,7 @@ helm install volant ./deploy/helm/volant \
   --set cluster.enabled=true \
   --set cluster.replicas=3 \
   --set image.repository=volant \
-  --set image.tag=0.1.0
+  --set image.tag=0.2.0
 ```
 
 See [helm/volant/README.md](./helm/volant/README.md).

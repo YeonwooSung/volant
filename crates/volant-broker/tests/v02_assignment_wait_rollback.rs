@@ -12,7 +12,8 @@ use std::time::Duration;
 
 use common::cluster::{bind_port0, cluster_config_n2, default_storage, rpc_seq, unique_dir, Guard};
 use volant_broker::{serve_listener, start_background_tasks, Broker};
-use volant_protocol::{ErrorCode, Request, Response};
+use volant_core::{PartitionId, TopicName};
+use volant_protocol::{ErrorCode, ProduceMessage, Request, Response};
 
 fn assignment_json_has_topic(data_dir: &std::path::Path, topic: &str) -> bool {
     let path = data_dir.join("cluster").join("assignment.json");
@@ -168,6 +169,45 @@ async fn n2_one_dead_wait_rolls_back_assignment() {
         Some(1),
         "wait-fail CreatePartitions must leave u at 1 partition"
     );
+    assert!(
+        !b1.topics_has_partition(&TopicName::new("u"), PartitionId(1)),
+        "local partition map must drop rolled-back pid 1"
+    );
+    let resps = rpc_seq(
+        &addr,
+        &[Request::Produce {
+            topic: "u".into(),
+            partition: 1,
+            acks: 1,
+            messages: vec![ProduceMessage {
+                key: None,
+                value: b"x".to_vec().into(),
+                timestamp_ms: -1,
+                headers: vec![],
+            }],
+            producer_id: 0,
+            producer_epoch: 0,
+            base_sequence: -1,
+        }],
+    )
+    .await;
+    match &resps[0] {
+        Response::Error { code, .. } => {
+            assert_eq!(
+                *code,
+                ErrorCode::NotFound as u16,
+                "Produce u/1 must be NotFound after CreatePartitions rollback"
+            );
+        }
+        Response::Produce { error_code, .. } => {
+            assert_eq!(
+                *error_code,
+                ErrorCode::NotFound as u16,
+                "Produce u/1 must be NotFound after CreatePartitions rollback"
+            );
+        }
+        other => panic!("Produce u/1 expected NotFound, got {other:?}"),
+    }
     let resps = rpc_seq(
         &addr,
         &[Request::Metadata {

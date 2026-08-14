@@ -10,7 +10,7 @@ Single-node **Deployment** by default; multi-node **StatefulSet** when
 helm install volant ./deploy/helm/volant \
   --set authToken=s3cret \
   --set image.repository=volant \
-  --set image.tag=0.1.0
+  --set image.tag=0.2.0
 ```
 
 ## Multi-node cluster
@@ -22,7 +22,7 @@ helm install volant ./deploy/helm/volant \
   --set cluster.defaultReplicationFactor=3 \
   --set cluster.minInsyncReplicas=2 \
   --set image.repository=volant \
-  --set image.tag=0.1.0 \
+  --set image.tag=0.2.0 \
   --set authToken=s3cret
 ```
 

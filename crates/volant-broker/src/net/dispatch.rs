@@ -467,10 +467,11 @@ async fn handle_request(broker: &Arc<Broker>, req: Request) -> Result<Response> 
             };
             match broker.create_topic_with_configs(topic, partitions, &configs) {
                 Ok(id) => {
+                    let expected_gen = broker.generation();
                     // Phase 150: best-effort (or wait) assignment majority.
                     if maybe_fanout_assignment_consensus(broker).await == Some(false) {
                         if let Some(prev) = prev.as_ref() {
-                            let _ = broker.restore_live_assignment(prev);
+                            broker.restore_live_assignment(prev, expected_gen)?;
                         }
                         return Ok(Response::Error {
                             code: ErrorCode::NotEnoughReplicas as u16,
@@ -509,9 +510,10 @@ async fn handle_request(broker: &Arc<Broker>, req: Request) -> Result<Response> 
                 None
             };
             broker.delete_topic(&topic)?;
+            let expected_gen = broker.generation();
             if maybe_fanout_assignment_consensus(broker).await == Some(false) {
                 if let Some(prev) = prev.as_ref() {
-                    let _ = broker.restore_live_assignment(prev);
+                    broker.restore_live_assignment(prev, expected_gen)?;
                 }
                 return Ok(Response::Error {
                     code: ErrorCode::NotEnoughReplicas as u16,
@@ -1556,9 +1558,10 @@ async fn handle_request(broker: &Arc<Broker>, req: Request) -> Result<Response> 
             };
             match broker.create_partitions(&topic, total_count) {
                 Ok(partitions) => {
+                    let expected_gen = broker.generation();
                     if maybe_fanout_assignment_consensus(broker).await == Some(false) {
                         if let Some(prev) = prev.as_ref() {
-                            let _ = broker.restore_live_assignment(prev);
+                            broker.restore_live_assignment(prev, expected_gen)?;
                         }
                         return Ok(Response::CreatePartitions {
                             error_code: ErrorCode::NotEnoughReplicas as u16,
