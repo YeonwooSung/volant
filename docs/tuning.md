@@ -16,7 +16,7 @@ This guide covers **OS limits**, **page cache / dirty ratios**, **disk**,
 | Area | Default recommendation |
 |------|------------------------|
 | File descriptors | `ulimit -n` ≥ 65536 for many partitions / clients |
-| Durability vs throughput | `flush_every_n = 0` + explicit flush (acks=1) for benches; tighten for prod |
+| Durability vs throughput | v0.2: keep `flush_every_n = 0` + explicit flush (acks=1). Group-commit is not implemented. |
 | Reads | mmap sealed segments (always on by default) |
 | Writes | buffered sequential append (default); optional `direct-io` / `io-uring` on Linux |
 | CPU pinning | optional `thread-per-core` + `VOLANT_CPU_LIST` on dedicated hosts |
@@ -157,8 +157,12 @@ sudo sysctl -w vm.dirty_ratio=15
 
 | `StorageConfig.flush_every_n` | Behavior |
 |-------------------------------|----------|
-| `0` (default) | Rely on OS + explicit `flush` (broker acks=1 path calls flush after produce) |
+| `0` (default, **v0.2 decision**) | Rely on OS + explicit `flush` (broker acks=1 path calls flush after produce) |
 | `N > 0` | fsync roughly every N appends on the hot path — lower throughput, smoother durability |
+
+There is **no group-commit window**. `flush_every_n` is a count of appends since
+the last fsync, not a time-based coalescer. v0.2 keeps the default at `0`:
+changing it was not justified by measurement (see benches below).
 
 For **throughput benches**, keep `flush_every_n = 0` and measure with a single
 end-of-run flush (as `volant-bench` does). For **latency-sensitive production**,
@@ -398,10 +402,11 @@ features (`mmap` / `O_DIRECT` / `io_uring`) and optional CPU pinning first.
 ### Storage append micro-bench (always available)
 
 ```bash
-cargo run -p volant-bench --release
+cargo run -p volant-bench --release -- append
 ```
 
 Reports messages/s for single-partition append (~100-byte values by default).
+A bare `volant-bench` invocation (no subcommand) is not a valid mode.
 
 ### Multi-mode harness
 
@@ -425,16 +430,25 @@ when comparing feature flags.
 
 ### Interpreting results
 
-| Metric | Phase 1 / Phase 5 laptop sample | Notes |
-|--------|----------------------------------|-------|
-| Append msgs/s (100 B) | ~560k | default std path, no intermediate flush |
-| Fetch msgs/s (100 B) | ~640k | sequential `PartitionLog::read` |
-| Produce-batch msgs/s | ~616k | in-process broker, batch size 100 |
-| Produce p99 | not gated | aim < 5 ms local NVMe, acks=1 |
-| Fetch BW | approach sequential disk BW | feature paths on Linux may differ |
+Published v0.2 numbers (one host, not an SLA). Method: Apple M3 Pro / arm64,
+macOS 26.3.1, APFS internal SSD, rustc 1.97.1, `volant-bench --release`,
+`flush_every_n=0`, 100-byte values, `--count 100000`, default std/mmap path.
+`--direct-io` / `--io-uring` are **not wired** on this binary; `io_uring` is
+Linux-only and was not run.
 
-Publish numbers with: CPU model, OS, disk type, feature flags, `flush_every_n`,
-and message size.
+| Metric | Measured 2026-08-14 | Notes |
+|--------|---------------------|-------|
+| Append msgs/s (100 B) | 669538 (repeat 663225) | `append --count 100000 --value-size 100` |
+| Fetch msgs/s (100 B) | 663080 | sequential `PartitionLog::read`; not a disk-BW claim |
+| Produce-batch msgs/s | 667061 | in-process broker, `--batch-size 100` |
+| Append + `--flush-every 1` | 217 msgs/s | `--count 2000` only — fsync-per-message; not a published target |
+| Produce p99 | **not measured** | `volant-bench` has no latency histogram; do not cite < 5 ms |
+| Idle RSS / binary size | **not measured** | old < 50 MB / < 15 MB rows are unmet aspirational text |
+
+The old ≥ 1M produce / ≥ disk-sequential-fetch / p99 / RSS / binary-size
+targets stay **aspirational and unmet**. Re-run the commands above on the
+target host; publish CPU, OS, disk, feature flags, `flush_every_n`, and
+message size with any new figure.
 
 ---
 
