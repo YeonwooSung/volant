@@ -277,14 +277,19 @@ plugins (deferred).
 
 ## 9. Performance intent
 
+v0.2 publishes **one** `volant-bench --release` run. These are not SLAs.
+
 | Metric | Status | Notes |
 |--------|--------|-------|
-| Single-partition append | **Measured baseline** (Phase 1) | Exit criterion ≥ 200k msgs/s; ~570k once measured on a laptop (~100-byte values). Re-run: `cargo run -p volant-bench --release -- append` |
-| Produce p99 | **Aspirational** | < 5 ms local NVMe, acks=1 — not a CI SLA |
-| Idle RSS | **Aspirational** | < 50 MB with no topics under load |
-| Binary size | **Aspirational** | < 15 MB stripped `volant-server` |
+| Single-partition append | **Measured** (2026-08-14) | 669538 msgs/s on Apple M3 Pro / macOS 26.3.1 (`append --count 100000 --value-size 100`, `flush_every_n=0`, std/mmap). Repeat 663225 msgs/s. Phase 1 ≥ 200k is met. The older ~570k laptop figure is stale. |
+| In-process produce-batch | **Measured** (2026-08-14) | 667061 msgs/s (`produce-batch --count 100000 --batch-size 100`). Below the old ≥ 1M aspirational target. |
+| Sequential fetch | **Measured** (2026-08-14) | 663080 msgs/s (`fetch --count 100000 --value-size 100`). Not a disk-bandwidth claim. |
+| Produce p99 | **Not measured** | Old target < 5 ms local NVMe, acks=1 — `volant-bench` has no p99. Not a CI SLA. |
+| Idle RSS | **Not measured** | Old target < 50 MB. Do not treat as fact. |
+| Binary size | **Not measured** | Old target < 15 MB stripped `volant-server`. Do not treat as fact. |
 
-Do not treat aspirational rows as continuous guarantees. Tuning:
+Group-commit is not implemented. Default flush remains `flush_every_n = 0` plus
+explicit flush. Method and demoted rows: [ROADMAP.md](../ROADMAP.md). Tuning:
 [tuning.md](./tuning.md).
 
 ---

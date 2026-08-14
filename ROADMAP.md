@@ -110,9 +110,9 @@ Binding format and API: **[docs/PHASE1_SPEC.md](./docs/PHASE1_SPEC.md)**.
 - Survive kill -9 mid-append without corruption
 - Sustained append ≥ 200k small msgs/s on laptop (single partition) — measure with:
   ```bash
-  cargo run -p volant-bench --release
+  cargo run -p volant-bench --release -- append
   ```
-- **Baseline measured:** ~570k msgs/s (100-byte values, release, laptop) — exceeds 200k target
+- **Baseline measured (2026-08-14):** 669538 msgs/s (`append --count 100000 --value-size 100`, release, Apple M3 Pro / macOS 26.3.1, `flush_every_n=0`). A repeat of the same command was 663225 msgs/s. Exceeds the 200k exit criterion. Method and the other modes: [Performance](#performance-v02-storage-truth).
 - Torn-tail recovery covered by unit/integration tests
 - Fetch matches Kafka semantics for earliest / latest / by-offset
 
@@ -3702,18 +3702,60 @@ chaos/long fuzz; full KIP-890/939; local assignment rollback.
 
 ---
 
-## Performance targets (aspirational)
+## Performance (v0.2 storage truth)
 
-| Metric | Single node target | Notes |
-|--------|--------------------|-------|
-| Produce throughput | ≥ 1M msgs/s | 100-byte payloads, batching on |
-| Produce p99 latency | < 5 ms | Local NVMe, acks=1 |
-| Fetch throughput | ≥ disk sequential BW | mmap / io_uring path |
-| Memory (idle broker) | < 50 MB RSS | No topics under load |
-| Binary size | < 15 MB stripped | `volant-server` release |
+These numbers are **one release-mode `volant-bench` run**, not SLAs and not CI
+gates. Re-run on the target host before comparing hardware. Do not treat the
+old aspirational rows as facts.
 
-**Phase 1 baseline:** single-partition append ≥ 200k msgs/s (≈100-byte values), measured by
-`cargo run -p volant-bench --release`. Broader targets will be revised after Phase 1–2 baselines.
+### Method (2026-08-14)
+
+| Field | Value |
+|-------|-------|
+| Host | Apple M3 Pro (`arm64`), 11 CPUs, 18 GiB RAM |
+| OS | macOS 26.3.1 (Darwin 25.3.0) |
+| Disk | APFS on internal Apple Fabric SSD (temp dir under `/var/folders`) |
+| rustc / cargo | 1.97.1 |
+| Build | `cargo run -p volant-bench --release` (default std / mmap path) |
+| Flush | `StorageConfig.flush_every_n = 0` + one explicit end-of-run `flush` |
+| Payload | 100-byte values, `--count 100000` |
+| Not run | `--direct-io` / `--io-uring` (not wired on `volant-bench`; `io_uring` is Linux-only) |
+
+```bash
+cargo run -p volant-bench --release -- append --count 100000 --value-size 100
+cargo run -p volant-bench --release -- fetch --count 100000 --value-size 100
+cargo run -p volant-bench --release -- produce-batch --count 100000 --batch-size 100
+```
+
+### Measured (this host)
+
+| Mode | Throughput | Bandwidth | Elapsed |
+|------|------------|-----------|---------|
+| `append` | 669538 msgs/s | 63.85 MB/s | 149.357 ms |
+| `fetch` | 663080 msgs/s | 63.24 MB/s | 150.811 ms |
+| `produce-batch` (batch 100) | 667061 msgs/s | 63.62 MB/s | 149.911 ms |
+
+A second `append` with the same flags was 663225 msgs/s (same order of magnitude).
+The Phase 1 exit criterion (≥ 200k msgs/s single-partition append) is **met**.
+The older ~570k laptop figure is superseded by the table above.
+
+### v0.2 flush decision
+
+Group-commit is **not implemented**. Storage honors `flush_every_n` (`0` = OS +
+explicit `flush` only). Default remains **`flush_every_n = 0`**. On this host,
+`append --flush-every 1 --count 2000` was **217 msgs/s** (9.234 s) — fsync per
+message is not a v0.2 default. Broker acks=1 still issues an explicit flush
+after produce (see [docs/tuning.md](./docs/tuning.md)).
+
+### Aspirational / unmet (not SLAs)
+
+| Metric | Old target | v0.2 status |
+|--------|------------|-------------|
+| Produce throughput ≥ 1M msgs/s | 100-byte payloads, batching on | **Unmet** — in-process `produce-batch` measured ~667k msgs/s on this host. No network path was timed. |
+| Produce p99 < 5 ms | Local NVMe, acks=1 | **Not measured** — `volant-bench` does not record latency percentiles. |
+| Fetch ≥ disk sequential BW | mmap / io_uring | **Not measured** — fetch bench is 100-byte records (~63 MB/s payload), not a disk-saturation run. `io_uring` skipped on macOS. |
+| Idle broker RSS < 50 MB | No topics under load | **Not measured** |
+| Stripped `volant-server` < 15 MB | release | **Not measured** |
 
 ---
 
@@ -3796,7 +3838,7 @@ Track these before locking APIs:
 1. **Replication:** ~~Raft-per-partition vs leader/follower + controller (Kafka-like)?~~ → **Kafka-style ISR (Phase 6)**
 2. **Kafka wire compatibility:** ~~first-class or optional adapter?~~ → **optional adapter (`--kafka-listen`, Phases 23–85 shipped)**
 3. **State store for streams:** embed RocksDB, redb, or custom mmap store?
-4. **Default durability:** fsync every batch vs group commit window?
+4. **Default durability:** ~~fsync every batch vs group commit window?~~ → **v0.2: keep `flush_every_n = 0`** + explicit flush (acks=1). Group-commit is not implemented; do not claim it.
 5. **Multi-tenancy:** namespaces / quotas in v1 or later?
 
 ---
@@ -3819,8 +3861,8 @@ cargo run -p volant-server -- \
 # CLI
 cargo run -p volant-cli -- version
 
-# Phase 1 append micro-bench (release recommended)
-cargo run -p volant-bench --release
+# Phase 1 append micro-bench (release required for published numbers)
+cargo run -p volant-bench --release -- append
 
 # Tests
 cargo test --workspace
