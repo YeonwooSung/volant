@@ -103,6 +103,11 @@ async fn controller_death_lowest_id_failover_produce_continues() {
 
     let meta = admin.metadata().await.unwrap();
     let leader_id = meta.topics[0].partitions[0].leader;
+    // `events` is topic_hash start=2 → replicas [3,1,2]; this is controller-as-follower.
+    assert_eq!(
+        leader_id, 3,
+        "events must place leader on 3 (not the controller)"
+    );
     assert_eq!(meta.topics[0].partitions[0].replicas.len(), 3);
 
     let producer = Client::connect(ClientConfig {
@@ -152,10 +157,25 @@ async fn controller_death_lowest_id_failover_produce_continues() {
         .find(|t| t.name.as_str() == "events")
         .expect("events topic on new controller");
     let new_leader_id = events.partitions[0].leader;
-    assert_ne!(new_leader_id, 1, "dead controller must not remain leader");
+    assert_eq!(
+        new_leader_id, leader_id,
+        "controller-as-follower death must not move the partition leader"
+    );
     assert!(
-        new_leader_id == 2 || new_leader_id == 3,
-        "new leader must be a survivor, got {new_leader_id}"
+        !events.partitions[0].isr.contains(&1),
+        "assignment ISR must drop dead controller: {:?}",
+        events.partitions[0].isr
+    );
+    let local_isr = b3
+        .local_partition_isr(&TopicName::new("events"), PartitionId(0))
+        .unwrap();
+    assert!(
+        !local_isr.contains(&1),
+        "leader-local ISR must drop dead controller: {local_isr:?}"
+    );
+    assert!(
+        !b2.live_brokers().contains(&1) && !b3.live_brokers().contains(&1),
+        "survivors must not list id=1 live"
     );
 
     let new_leader = broker_of(new_leader_id);
@@ -167,7 +187,7 @@ async fn controller_death_lowest_id_failover_produce_continues() {
     );
     // Seed remaining follower LEO so acks=all is not stuck if ReplicaFetch lags
     // across the controller handoff (same honesty as cluster_failover).
-    let other = if new_leader_id == 2 { 3 } else { 2 };
+    let other = 2;
     let other_leo = broker_of(other)
         .log_end_offset(&topic, PartitionId(0))
         .unwrap_or(0);
@@ -202,20 +222,73 @@ async fn controller_death_lowest_id_failover_produce_continues() {
             .expect("acks=all must continue after controller death");
     }
 
-    // Admin on the new controller (lowest live id).
+    // Heartbeat-mesh can revive id=1 on a late RPC; re-kill immediately before
+    // admin so CreateTopic cannot race NotController back to the dead node.
+    b2.test_kill_broker(1).unwrap();
+    b3.test_kill_broker(1).unwrap();
+    assert!(
+        b2.is_controller(),
+        "id=2 must still be controller before admin"
+    );
+
+    // `survivor` is topic_hash start=1 → replicas [2,3,1], leader 2 (writable
+    // on a survivor; `after-ctrl` would place leader on the dead id=1).
     let new_ctrl = Client::connect(ClientConfig {
         brokers: vec![format!("127.0.0.1:{p2}")],
         ..ClientConfig::default()
     })
     .await
     .unwrap();
-    new_ctrl
-        .create_topic("after-ctrl", 1)
-        .await
-        .expect("CreateTopic must succeed on the new controller");
-    propagate_async(&[&b2, &b3], "after-ctrl").await;
-    assert!(b2.partition_count_opt("after-ctrl").is_some());
-    assert!(b3.partition_count_opt("after-ctrl").is_some());
+    create_topic_retry_not_controller(&new_ctrl, &[&b2, &b3], 1, "survivor").await;
+    // New topic ISR is assigned from configured N (includes 1); shrink it.
+    b2.test_kill_broker(1).unwrap();
+    b3.test_kill_broker(1).unwrap();
+    propagate_async(&[&b2, &b3], "survivor").await;
+    assert!(b2.partition_count_opt("survivor").is_some());
+    assert!(b3.partition_count_opt("survivor").is_some());
+
+    let surv_snap = b2.metadata(None);
+    let surv = surv_snap
+        .topics
+        .iter()
+        .find(|t| t.name.as_str() == "survivor")
+        .expect("survivor topic on new controller");
+    let surv_leader = surv.partitions[0].leader;
+    assert!(
+        surv_leader == 2 || surv_leader == 3,
+        "new topic leader must be a survivor, got {surv_leader}"
+    );
+    assert!(
+        !surv.partitions[0].isr.contains(&1),
+        "new topic ISR must drop dead controller: {:?}",
+        surv.partitions[0].isr
+    );
+
+    let surv_other = if surv_leader == 2 { 3 } else { 2 };
+    let surv_topic = TopicName::new("survivor");
+    let surv_broker = broker_of(surv_leader);
+    let surv_leo = surv_broker
+        .log_end_offset(&surv_topic, PartitionId(0))
+        .unwrap_or(0);
+    surv_broker
+        .test_set_follower_leo(&surv_topic, PartitionId(0), surv_other, surv_leo + 1)
+        .unwrap();
+    Client::connect(ClientConfig {
+        brokers: vec![format!("127.0.0.1:{}", port_of(surv_leader))],
+        acks: 255,
+        max_redirects: 2,
+        ..ClientConfig::default()
+    })
+    .await
+    .unwrap()
+    .produce_with_acks(
+        "survivor",
+        Some(0),
+        vec![Message::from_value("on-survivor")],
+        255,
+    )
+    .await
+    .expect("new topic must be writable on a survivor after controller death");
 
     let want = (PRE + POST) as usize;
     let mut got = Vec::new();
@@ -250,6 +323,33 @@ async fn controller_death_lowest_id_failover_produce_continues() {
 
     h2.abort();
     h3.abort();
+}
+
+/// Re-kill `dead_id` and retry CreateTopic if heartbeat-mesh revival flipped
+/// controller_id back to the dead lowest id (NotController on :p2).
+async fn create_topic_retry_not_controller(
+    client: &Client,
+    survivors: &[&Broker],
+    dead_id: u32,
+    name: &str,
+) {
+    for attempt in 0..8 {
+        for s in survivors {
+            let _ = s.test_kill_broker(dead_id);
+        }
+        match client.create_topic(name, 1).await {
+            Ok(_) => return,
+            Err(e) => {
+                let msg = e.to_string();
+                if msg.to_ascii_lowercase().contains("not controller") && attempt + 1 < 8 {
+                    tokio::time::sleep(Duration::from_millis(30)).await;
+                    continue;
+                }
+                panic!("CreateTopic {name} on new controller failed: {e}");
+            }
+        }
+    }
+    panic!("CreateTopic {name} still NotController after retries");
 }
 
 fn assignment_json_has_topic(data_dir: &std::path::Path, topic: &str) -> bool {

@@ -7,31 +7,9 @@ mod common;
 use std::sync::Arc;
 use std::time::Duration;
 
-use common::cluster::{bind_port0, default_storage, rpc_seq, unique_dir, Guard};
-use volant_broker::{
-    serve_listener, start_background_tasks, Broker, BrokerEndpoint, ClusterConfig,
-};
+use common::cluster::{bind_port0, cluster_config_n2, default_storage, rpc_seq, unique_dir, Guard};
+use volant_broker::{serve_listener, start_background_tasks, Broker};
 use volant_protocol::{Request, Response};
-
-fn cluster_config_n2(ports: [u16; 2]) -> ClusterConfig {
-    ClusterConfig {
-        default_replication_factor: 2,
-        min_insync_replicas: 1,
-        session_timeout_ms: 2000,
-        replica_fetch_max_wait_ms: 50,
-        replica_fetch_max_bytes: 1_048_576,
-        replica_lag_max_messages: 10_000,
-        replica_lag_max_ms: 30_000,
-        brokers: (1..=2)
-            .map(|id| BrokerEndpoint {
-                id,
-                host: "127.0.0.1".into(),
-                port: ports[(id - 1) as usize],
-                rack: None,
-            })
-            .collect(),
-    }
-}
 
 fn assignment_json_has_topic(data_dir: &std::path::Path, topic: &str) -> bool {
     let path = data_dir.join("cluster").join("assignment.json");
