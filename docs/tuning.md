@@ -253,10 +253,11 @@ Enable **only** when you need:
 ```bash
 # Confirm feature build (Linux)
 cargo build -p volant-storage --features direct-io --release
-
-# Bench with direct path when the bench harness supports --direct-io:
-cargo run -p volant-bench --release -- append --direct-io
 ```
+
+`volant-bench` does **not** accept `--direct-io` (clap unexpected argument). Measure
+the default std/mmap path with `append` / `fetch` / `produce-batch`, or set
+`StorageConfig::{direct_io, buffer_pool_*}` from your own harness.
 
 Misaligned `O_DIRECT` writes fail with `EINVAL` — treat alignment bugs as
 hard failures in tests.
@@ -286,9 +287,10 @@ hard failures in tests.
 
 ```bash
 cargo build -p volant-storage --features io-uring --release
-# When bench supports it:
-cargo run -p volant-bench --release -- append --io-uring
 ```
+
+`volant-bench` does **not** accept `--io-uring` (clap unexpected argument). The
+published v0.2 numbers are the default std/mmap path; `io_uring` was not run.
 
 ### Caveats
 
@@ -378,7 +380,7 @@ Current stack: Tokio TCP + length-prefixed Volant frames.
 |-------|----------|
 | Listen backlog | OS default via Tokio; raise `net.core.somaxconn` under connection storms |
 | Nagle | Tokio/Tokio-tcp typically fine for request/response; batch produces client-side |
-| Bandwidth | Fetch throughput targets sequential disk BW when payload-bound |
+| Bandwidth | When payload-bound, fetch *may* approach sequential disk BW; v0.2 did not measure a disk-saturation run (100-byte fetch ~63 MiB/s) |
 | TLS | Not in Phase 5 (Phase 7) — do not expect zero-copy sendfile through TLS |
 
 ```bash
