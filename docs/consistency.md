@@ -166,7 +166,9 @@ Without `--cluster-config`, the broker runs as a single node:
     `pending_generation` + committed snapshot (Phase 152). Default fan-out **on**
     (`VOLANT_ASSIGNMENT_CONSENSUS`, best-effort); client wait **off**
     (`VOLANT_ASSIGNMENT_CONSENSUS_WAIT` — fail → native **15** and **roll back**
-    live `assignment.json` on the must_wait path only). v0.2:
+    live `assignment.json` on the must_wait path only). Kafka CreateTopics /
+    DeleteTopics / CreatePartitions honor the same wait/rollback (Kafka **19**).
+    v0.2:
     `VOLANT_ASSIGNMENT_METADATA_COMMITTED_ONLY` default **off**
     (live Metadata); majority miss does **not** fail CreateTopic / DeleteTopic /
     CreatePartitions unless wait or committed-only is on. Metrics:

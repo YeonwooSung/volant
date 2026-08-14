@@ -15,12 +15,12 @@ use crate::broker::{Broker, Txn2pcFanout};
 use crate::cluster::MetadataLogEntry;
 
 use super::fanout::{
-    fanout_assignment_consensus, fanout_cluster_acl_snapshot, fanout_delete_records,
-    fanout_delete_records_replicas_only, fanout_metadata_raft_append,
-    fanout_truncate_journal_note_provisional, maybe_fanout_assignment_consensus,
-    metadata_entry_from_wire, put_end_txn_error_response, run_txn_2pc_fanout,
-    schedule_catch_up_peer_admin_state, schedule_catch_up_peer_truncate_journal,
-    schedule_isr_update_reports, schedule_session_mirror_fanout,
+    complete_assignment_mutation, fanout_assignment_consensus, fanout_cluster_acl_snapshot,
+    fanout_delete_records, fanout_delete_records_replicas_only, fanout_metadata_raft_append,
+    fanout_truncate_journal_note_provisional, metadata_entry_from_wire, put_end_txn_error_response,
+    run_txn_2pc_fanout, schedule_catch_up_peer_admin_state,
+    schedule_catch_up_peer_truncate_journal, schedule_isr_update_reports,
+    schedule_session_mirror_fanout, snapshot_if_must_wait,
 };
 
 /// Dispatch one framed request with connection auth / SCRAM state (plaintext + TLS).
@@ -458,21 +458,11 @@ async fn handle_request(broker: &Arc<Broker>, req: Request) -> Result<Response> 
                 });
             }
             let topic = TopicName::new(name.clone());
-            let prev = if broker.assignment_consensus_wait()
-                || broker.assignment_metadata_committed_only()
-            {
-                broker.clone_live_assignment()
-            } else {
-                None
-            };
+            let prev = snapshot_if_must_wait(broker);
             match broker.create_topic_with_configs(topic, partitions, &configs) {
                 Ok(id) => {
-                    let expected_gen = broker.generation();
                     // Phase 150: best-effort (or wait) assignment majority.
-                    if maybe_fanout_assignment_consensus(broker).await == Some(false) {
-                        if let Some(prev) = prev.as_ref() {
-                            broker.restore_live_assignment(prev, expected_gen)?;
-                        }
+                    if !complete_assignment_mutation(broker, prev).await? {
                         return Ok(Response::Error {
                             code: ErrorCode::NotEnoughReplicas as u16,
                             message: format!(
@@ -502,19 +492,9 @@ async fn handle_request(broker: &Arc<Broker>, req: Request) -> Result<Response> 
         }
         Request::DeleteTopic { name } => {
             let topic = TopicName::new(name.clone());
-            let prev = if broker.assignment_consensus_wait()
-                || broker.assignment_metadata_committed_only()
-            {
-                broker.clone_live_assignment()
-            } else {
-                None
-            };
+            let prev = snapshot_if_must_wait(broker);
             broker.delete_topic(&topic)?;
-            let expected_gen = broker.generation();
-            if maybe_fanout_assignment_consensus(broker).await == Some(false) {
-                if let Some(prev) = prev.as_ref() {
-                    broker.restore_live_assignment(prev, expected_gen)?;
-                }
+            if !complete_assignment_mutation(broker, prev).await? {
                 return Ok(Response::Error {
                     code: ErrorCode::NotEnoughReplicas as u16,
                     message: format!(
@@ -1549,20 +1529,10 @@ async fn handle_request(broker: &Arc<Broker>, req: Request) -> Result<Response> 
             }
         }
         Request::CreatePartitions { topic, total_count } => {
-            let prev = if broker.assignment_consensus_wait()
-                || broker.assignment_metadata_committed_only()
-            {
-                broker.clone_live_assignment()
-            } else {
-                None
-            };
+            let prev = snapshot_if_must_wait(broker);
             match broker.create_partitions(&topic, total_count) {
                 Ok(partitions) => {
-                    let expected_gen = broker.generation();
-                    if maybe_fanout_assignment_consensus(broker).await == Some(false) {
-                        if let Some(prev) = prev.as_ref() {
-                            broker.restore_live_assignment(prev, expected_gen)?;
-                        }
+                    if !complete_assignment_mutation(broker, prev).await? {
                         return Ok(Response::CreatePartitions {
                             error_code: ErrorCode::NotEnoughReplicas as u16,
                             topic,

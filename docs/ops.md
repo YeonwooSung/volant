@@ -383,9 +383,11 @@ specs. Ops-critical notes only:
 | `VOLANT_ASSIGNMENT_CONSENSUS_WAIT` | **off** | `1` → native **15** on majority miss; **rolls back** live `assignment.json` (must_wait path only) |
 
 CreateTopic / DeleteTopic / CreatePartitions succeed when the controller writes
-`{data_dir}/cluster/assignment.json`. A 96/97 majority miss does **not** fail
+`{data_dir}/cluster/assignment.json`. Kafka CreateTopics / DeleteTopics /
+CreatePartitions honor the same wait/rollback (majority miss → Kafka **19**).
+A 96/97 majority miss does **not** fail
 the client unless wait or committed-only is on. On that **must_wait** path a
-miss **rolls back** the live assignment (client 15, Metadata, and
+miss **rolls back** the live assignment (client 15 / Kafka 19, Metadata, and
 `assignment.json` match the pre-mutation snapshot). `!must_wait` keeps the
 local write as SoT. Metadata serves the **live**
 assignment. Set `VOLANT_METADATA_RAFT=1` to append `SetAssignment` to

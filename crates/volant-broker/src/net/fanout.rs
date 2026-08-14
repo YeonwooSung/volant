@@ -9,7 +9,9 @@ use volant_core::{Error, Result};
 use volant_protocol::{ErrorCode, Request, Response};
 
 use crate::broker::{Broker, Txn2pcFanout};
-use crate::cluster::{AssignmentConsensus, MetadataCommand, MetadataLogEntry, MetadataRaftState};
+use crate::cluster::{
+    AssignmentConsensus, AssignmentSnapshot, MetadataCommand, MetadataLogEntry, MetadataRaftState,
+};
 use crate::truncate_journal::TruncateJournal;
 use volant_protocol::{metadata_raft_cmd, MetadataRaftLogEntry};
 
@@ -834,6 +836,31 @@ pub async fn maybe_fanout_assignment_consensus(broker: &Broker) -> Option<bool> 
     } else {
         None
     }
+}
+
+/// Clone live assignment when wait or committed-only will fail the client on a miss.
+pub fn snapshot_if_must_wait(broker: &Broker) -> Option<AssignmentSnapshot> {
+    if broker.assignment_consensus_wait() || broker.assignment_metadata_committed_only() {
+        broker.clone_live_assignment()
+    } else {
+        None
+    }
+}
+
+/// After a successful local assignment mutate. `Ok(true)` = client success.
+/// `Ok(false)` = majority miss and live assignment restored (when prev set).
+pub async fn complete_assignment_mutation(
+    broker: &Broker,
+    prev: Option<AssignmentSnapshot>,
+) -> Result<bool> {
+    let expected_gen = broker.generation();
+    if maybe_fanout_assignment_consensus(broker).await == Some(false) {
+        if let Some(prev) = prev.as_ref() {
+            broker.restore_live_assignment(prev, expected_gen)?;
+        }
+        return Ok(false);
+    }
+    Ok(true)
 }
 
 /// Convert internal log entry to wire form.
