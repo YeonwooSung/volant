@@ -71,6 +71,9 @@ pub(super) async fn heartbeat_mesh(broker: &Broker) -> Result<()> {
 /// Heartbeat one peer. Alive-set / ClusterState apply only when `peer_id` is
 /// the current controller.
 async fn heartbeat_to_peer(broker: &Broker, peer_id: u32, addr: &str, req: &Request) -> Result<()> {
+    if broker.test_inter_broker_blocked() {
+        return Err(Error::Protocol("inter-broker rpc blocked".into()));
+    }
     let resp = inter_broker_rpc(broker, addr, req).await?;
     match resp {
         Response::HeartbeatBroker {

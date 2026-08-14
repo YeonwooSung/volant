@@ -1006,6 +1006,21 @@ impl Broker {
         self.on_broker_death(dead_id)
     }
 
+    /// Test hook: fail outbound inter-broker RPC immediately (no connect).
+    ///
+    /// Used to isolate a still-alive process that cannot heartbeat or
+    /// ReplicaFetch out. Default is unblocked.
+    pub fn test_set_inter_broker_blocked(&self, blocked: bool) {
+        self.inter_broker_blocked
+            .store(blocked, std::sync::atomic::Ordering::Relaxed);
+    }
+
+    /// Whether outbound inter-broker RPC is blocked (test hook).
+    pub fn test_inter_broker_blocked(&self) -> bool {
+        self.inter_broker_blocked
+            .load(std::sync::atomic::Ordering::Relaxed)
+    }
+
     /// Force-set follower LEO and recompute HWM (unit tests).
     ///
     /// Also stamps last-caught-up when lag ≤ `replica_lag_max_messages` so Phase

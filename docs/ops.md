@@ -440,11 +440,22 @@ What v0.2 **proves** in CI (do not re-open as new work):
 
 **Wontfix in v0.2** (not a test gap to close here):
 
-- Disk-full / ENOSPC on the data dir
-- Network partition mesh (asymmetric / partial partitions, split-brain)
 - Long chaos-mesh suites and uncapped fuzz campaigns (corpus smoke is Phase 112)
+- Asymmetric / partial network-partition mesh (v0.5 isolate is in-process, not chaos-mesh)
 
 CLI examples: [features.md](./features.md), [../README.md](../README.md).
+
+## v0.5 ops confidence
+
+Closes the three v0.2 holes operators actually hit. Honest limits: **EACCES not ENOSPC**; **in-process isolate not chaos-mesh**; **no asymmetric partial mesh**.
+
+| Scenario | Test | Honest limit |
+|----------|------|----------------|
+| Unwritable data dir: next produce errors (no panic); already-written records still fetch | `v05_ops_confidence::unwritable_data_dir_produce_errors_fetch_still_works` | CI `chmod`s the partition dir to `0o555` (and/or `.log` read-only). That is **EACCES**, not a full-disk **ENOSPC** volume. Operator path is the same: append fails. |
+| Minority isolate of the partition leader (split-brain honesty) | `v05_ops_confidence::minority_isolate_leader_split_brain_honesty` | Abort `serve_listener` + outbound `inter_broker_rpc` hook. Process stays up. Survivors expire past `session_timeout`, elect, and accept `acks=all`. Isolated `acks=all` does not commit within the 10s HWM wait. Isolated `acks=1` may append locally (not cluster-committed). Not chaos-mesh; no asymmetric partial mesh. |
+| Leader dies while `acks=all` is in flight | `v05_ops_confidence::leader_abort_mid_inflight_acks_all` | Pre-kill successful `acks=all` responses are present on the new leader. The in-flight batch may timeout or fail and is **not** required to be committed. |
+
+Long chaos-mesh suites and uncapped fuzz remain deferred (Phase 112 is corpus smoke only).
 
 ## Metrics auth (Phase 21)
 
