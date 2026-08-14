@@ -845,7 +845,7 @@ impl Broker {
                 default_assignment_metadata_committed_only(),
             ),
             metadata_raft,
-            // Single-node: metadata raft default off (cluster mode prefers on).
+            // metadata raft default off (cluster and single-node).
             metadata_raft_enabled: AtomicBool::new(default_metadata_raft_enabled(false)),
         };
         broker
@@ -1323,7 +1323,8 @@ impl Broker {
     }
 
     /// Phase 152: Metadata serves majority-committed assignment when consensus
-    /// is enabled (default **true**).
+    /// is enabled (default **false**; `VOLANT_ASSIGNMENT_METADATA_COMMITTED_ONLY=1`
+    /// serves the committed snapshot).
     pub fn assignment_metadata_committed_only(&self) -> bool {
         self.assignment_metadata_committed_only
             .load(Ordering::Relaxed)
