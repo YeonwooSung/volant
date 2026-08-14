@@ -7,11 +7,11 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::Duration;
 
-use bytes::{BytesMut};
+use bytes::BytesMut;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::{TcpListener, TcpStream};
 use volant_broker::{
-    serve_listener, start_background_tasks, Broker, BrokerEndpoint, ClusterConfig, BackgroundTasks,
+    serve_listener, start_background_tasks, BackgroundTasks, Broker, BrokerEndpoint, ClusterConfig,
 };
 use volant_protocol::{
     codec::{decode_frame, encode_frame},
@@ -50,6 +50,27 @@ pub fn cluster_config_with_session(ports: [u16; 3], session_timeout_ms: u32) -> 
         replica_lag_max_messages: 10_000,
         replica_lag_max_ms: 30_000,
         brokers: (1..=3)
+            .map(|id| BrokerEndpoint {
+                id,
+                host: "127.0.0.1".into(),
+                port: ports[(id - 1) as usize],
+                rack: None,
+            })
+            .collect(),
+    }
+}
+
+/// Static N=2 cluster (majority = 2; one death → `majority_impossible`).
+pub fn cluster_config_n2(ports: [u16; 2]) -> ClusterConfig {
+    ClusterConfig {
+        default_replication_factor: 2,
+        min_insync_replicas: 1,
+        session_timeout_ms: 2000,
+        replica_fetch_max_wait_ms: 50,
+        replica_fetch_max_bytes: 1_048_576,
+        replica_lag_max_messages: 10_000,
+        replica_lag_max_ms: 30_000,
+        brokers: (1..=2)
             .map(|id| BrokerEndpoint {
                 id,
                 host: "127.0.0.1".into(),
