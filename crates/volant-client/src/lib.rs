@@ -52,6 +52,8 @@
 //! on that same transient set (default 0). Error 2 (no live members),
 //! 9 / 10 / 11, 13 / 14, and protocol are not retried. Range
 //! assignor inherits via `describe_group`.
+//! v0.94 redirects topic `describe_configs` / `alter_configs` on that
+//! same error **14** budget. Topic-only (not Kafka BROKER configs).
 
 #![deny(missing_docs)]
 
