@@ -820,5 +820,67 @@ class TestCreatePartitionsCodec(unittest.TestCase):
         self.assertEqual(decode_response(OP_CREATE_PARTITIONS_RESPONSE, raw), resp)
 
 
+class TestReassignPartitionsCodec(unittest.TestCase):
+    def test_reassign_partitions_request_partition_and_replicas(self) -> None:
+        from volant.codec import (
+            ReassignPartitionsRequest,
+            decode_reassign_partitions_request,
+            encode_reassign_partitions_request,
+        )
+
+        req = ReassignPartitionsRequest(topic="events", partition=0, replicas=[1, 2])
+        raw = encode_reassign_partitions_request(req)
+        expected = bytes.fromhex(
+            "0600"
+            "6576656e7473"  # "events"
+            "00000000"  # partition 0
+            "02000000"  # replica_count 2
+            "01000000"  # replica 1
+            "02000000"  # replica 2
+        )
+        self.assertEqual(_hx(raw), _hx(expected))
+        self.assertEqual(decode_reassign_partitions_request(raw), req)
+
+    def test_reassign_partitions_request_all_empty_replicas(self) -> None:
+        from volant.codec import (
+            REASSIGN_ALL_PARTITIONS,
+            ReassignPartitionsRequest,
+            decode_reassign_partitions_request,
+            encode_reassign_partitions_request,
+        )
+
+        req = ReassignPartitionsRequest(
+            topic="events", partition=REASSIGN_ALL_PARTITIONS, replicas=[]
+        )
+        raw = encode_reassign_partitions_request(req)
+        expected = bytes.fromhex(
+            "0600"
+            "6576656e7473"  # "events"
+            "ffffffff"  # u32::MAX = all partitions
+            "00000000"  # empty replicas (auto-place)
+        )
+        self.assertEqual(_hx(raw), _hx(expected))
+        self.assertEqual(decode_reassign_partitions_request(raw), req)
+        self.assertEqual(req.partition, 0xFFFFFFFF)
+
+    def test_reassign_partitions_response_roundtrip(self) -> None:
+        from volant.codec import (
+            OP_REASSIGN_PARTITIONS_RESPONSE,
+            ReassignPartitionsResponse,
+            decode_reassign_partitions_response,
+            encode_reassign_partitions_response,
+        )
+
+        resp = ReassignPartitionsResponse(error_code=0, generation=7)
+        raw = encode_reassign_partitions_response(resp)
+        expected = bytes.fromhex(
+            "0000"  # error_code 0
+            "07000000"  # generation 7
+        )
+        self.assertEqual(_hx(raw), _hx(expected))
+        self.assertEqual(decode_reassign_partitions_response(raw), resp)
+        self.assertEqual(decode_response(OP_REASSIGN_PARTITIONS_RESPONSE, raw), resp)
+
+
 if __name__ == "__main__":
     unittest.main()

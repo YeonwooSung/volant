@@ -21,6 +21,7 @@ import java.util.Map;
  * try (Client c = Client.connect("127.0.0.1", 9092)) {
  *   c.createTopic("t", 1);
  *   int parts = c.createPartitions("t", 2);
+ *   int gen = c.reassignPartitions("t", new int[] {1, 2}); // all partitions
  *   long off = c.produce("t", 0, null, "hello".getBytes(UTF_8));
  *   List&lt;Record&gt; recs = c.fetch("t", 0, 0);
  *   c.offsetCommit("g", "t", 0, 5);
@@ -545,6 +546,48 @@ public final class Client implements AutoCloseable {
         Codec.CreatePartitionsResponse resp = (Codec.CreatePartitionsResponse) decoded;
         check(resp.errorCode, "create_partitions");
         return (int) resp.partitions;
+    }
+
+    /**
+     * Reassign replicas for every partition of {@code topic} (native opcode 114).
+     *
+     * <p>Empty {@code replicas} asks the controller to auto-place with current
+     * membership. Returns the assignment generation. This is not Kafka
+     * AlterPartitionReassignments (API key 45).
+     */
+    public int reassignPartitions(String topic, int... replicas) {
+        return reassignPartitions(topic, (Integer) null, replicas);
+    }
+
+    /**
+     * Reassign replicas for {@code topic} (native opcode 114).
+     *
+     * <p>{@code partition == null} updates every partition (wire {@code
+     * u32::MAX}). Empty {@code replicas} asks the controller to auto-place
+     * with the current membership. Returns the assignment generation.
+     * Non-zero {@code error_code} is {@link BrokerException}. This is not
+     * Kafka AlterPartitionReassignments (API key 45).
+     */
+    public int reassignPartitions(String topic, Integer partition, int... replicas) {
+        long wirePartition = partition == null
+                ? Codec.REASSIGN_ALL_PARTITIONS
+                : (partition.longValue() & 0xFFFFFFFFL);
+        List<Long> ids = new ArrayList<>();
+        if (replicas != null) {
+            for (int id : replicas) {
+                ids.add(id & 0xFFFFFFFFL);
+            }
+        }
+        byte[] payload = Codec.encodeReassignPartitionsRequest(
+                new Codec.ReassignPartitionsRequest(topic, wirePartition, ids));
+        Object decoded = roundTrip(Codec.OP_REASSIGN_PARTITIONS, payload);
+        if (!(decoded instanceof Codec.ReassignPartitionsResponse)) {
+            throw new ProtocolException(
+                    "unexpected response for reassign_partitions: " + typeName(decoded));
+        }
+        Codec.ReassignPartitionsResponse resp = (Codec.ReassignPartitionsResponse) decoded;
+        check(resp.errorCode, "reassign_partitions");
+        return (int) resp.generation;
     }
 
     /**

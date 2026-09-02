@@ -57,7 +57,12 @@ public final class Codec {
     public static final int OP_DELETE_SCRAM_USER_RESPONSE = 67;
     public static final int OP_LIST_SCRAM_USERS = 68;
     public static final int OP_LIST_SCRAM_USERS_RESPONSE = 69;
+    public static final int OP_REASSIGN_PARTITIONS = 114;
+    public static final int OP_REASSIGN_PARTITIONS_RESPONSE = 115;
     public static final int OP_ERROR = 0xFFFF;
+
+    /** ReassignPartitions.partition sentinel (u32::MAX): every partition. */
+    public static final long REASSIGN_ALL_PARTITIONS = 0xFFFFFFFFL;
 
     /** ListGroups state: offsets only, no live members. */
     public static final int GROUP_STATE_EMPTY = 0;
@@ -757,6 +762,30 @@ public final class Codec {
             this.errorCode = errorCode;
             this.topic = topic;
             this.partitions = partitions;
+        }
+    }
+
+    public static final class ReassignPartitionsRequest {
+        public final String topic;
+        public final long partition;
+        public final List<Long> replicas;
+
+        public ReassignPartitionsRequest(String topic, long partition, List<Long> replicas) {
+            this.topic = topic;
+            this.partition = partition;
+            this.replicas = replicas == null
+                    ? Collections.emptyList()
+                    : Collections.unmodifiableList(new ArrayList<>(replicas));
+        }
+    }
+
+    public static final class ReassignPartitionsResponse {
+        public final int errorCode;
+        public final long generation;
+
+        public ReassignPartitionsResponse(int errorCode, long generation) {
+            this.errorCode = errorCode;
+            this.generation = generation;
         }
     }
 
@@ -1869,6 +1898,44 @@ public final class Codec {
         return new CreatePartitionsResponse(errorCode, topic, partitions);
     }
 
+    public static byte[] encodeReassignPartitionsRequest(ReassignPartitionsRequest req) {
+        Writer w = new Writer();
+        putString(w, req.topic);
+        w.u32(req.partition);
+        List<Long> replicas = req.replicas == null ? Collections.emptyList() : req.replicas;
+        w.u32(replicas.size());
+        for (Long id : replicas) {
+            w.u32(id == null ? 0L : id);
+        }
+        return w.finish();
+    }
+
+    public static ReassignPartitionsRequest decodeReassignPartitionsRequest(byte[] payload) {
+        Reader r = new Reader(payload);
+        String topic = getString(r);
+        long partition = r.u32();
+        long n = r.u32();
+        List<Long> replicas = new ArrayList<>();
+        for (long i = 0; i < n; i++) {
+            replicas.add(r.u32());
+        }
+        return new ReassignPartitionsRequest(topic, partition, replicas);
+    }
+
+    public static byte[] encodeReassignPartitionsResponse(ReassignPartitionsResponse resp) {
+        Writer w = new Writer();
+        w.u16(resp.errorCode);
+        w.u32(resp.generation);
+        return w.finish();
+    }
+
+    public static ReassignPartitionsResponse decodeReassignPartitionsResponse(byte[] payload) {
+        Reader r = new Reader(payload);
+        int errorCode = r.u16();
+        long generation = r.u32();
+        return new ReassignPartitionsResponse(errorCode, generation);
+    }
+
     // --- error opcode ------------------------------------------------------
 
     public static byte[] encodeErrorResponse(ErrorResponse resp) {
@@ -2018,6 +2085,8 @@ public final class Codec {
                 return decodeAlterConfigsResponse(payload);
             case OP_DELETE_RECORDS_RESPONSE:
                 return decodeDeleteRecordsResponse(payload);
+            case OP_REASSIGN_PARTITIONS_RESPONSE:
+                return decodeReassignPartitionsResponse(payload);
             case OP_ERROR:
                 return decodeErrorResponse(payload);
             default:

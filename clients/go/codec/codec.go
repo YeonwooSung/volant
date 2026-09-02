@@ -55,9 +55,15 @@ const (
 	OpDeleteScramUserResponse    uint16 = 67
 	OpListScramUsers             uint16 = 68
 	OpListScramUsersResponse     uint16 = 69
+	OpReassignPartitions         uint16 = 114
+	OpReassignPartitionsResponse uint16 = 115
 	OpError                 uint16 = 0xFFFF
 
 	nullLen = 0xFFFFFFFF
+
+	// ReassignAllPartitions is the ReassignPartitions.partition sentinel
+	// (u32::MAX): apply to every partition of the topic.
+	ReassignAllPartitions uint32 = 0xFFFFFFFF
 )
 
 // BrokerError is a non-zero broker error_code or Error opcode.
@@ -706,6 +712,22 @@ type CreatePartitionsResponse struct {
 	ErrorCode  uint16
 	Topic      string
 	Partitions uint32
+}
+
+// ReassignPartitionsRequest is the ReassignPartitions opcode (114) body.
+// Partition == ReassignAllPartitions (u32::MAX) applies to every partition.
+// Empty Replicas means auto-place with current membership.
+type ReassignPartitionsRequest struct {
+	Topic     string
+	Partition uint32
+	Replicas  []uint32
+}
+
+// ReassignPartitionsResponse is the ReassignPartitions reply (opcode 115).
+// Generation is the assignment generation after apply (0 on error).
+type ReassignPartitionsResponse struct {
+	ErrorCode  uint16
+	Generation uint32
 }
 
 
@@ -2402,6 +2424,68 @@ func DecodeCreatePartitionsResponse(payload []byte) (CreatePartitionsResponse, e
 	return CreatePartitionsResponse{ErrorCode: code, Topic: topic, Partitions: n}, nil
 }
 
+func EncodeReassignPartitionsRequest(req ReassignPartitionsRequest) ([]byte, error) {
+	w := &writer{}
+	if err := putString(w, req.Topic); err != nil {
+		return nil, err
+	}
+	w.u32(req.Partition)
+	replicas := req.Replicas
+	if replicas == nil {
+		replicas = []uint32{}
+	}
+	w.u32(uint32(len(replicas)))
+	for _, id := range replicas {
+		w.u32(id)
+	}
+	return w.buf, nil
+}
+
+func DecodeReassignPartitionsRequest(payload []byte) (ReassignPartitionsRequest, error) {
+	r := &reader{data: payload}
+	topic, err := getString(r)
+	if err != nil {
+		return ReassignPartitionsRequest{}, err
+	}
+	part, err := r.u32()
+	if err != nil {
+		return ReassignPartitionsRequest{}, err
+	}
+	n, err := r.u32()
+	if err != nil {
+		return ReassignPartitionsRequest{}, err
+	}
+	replicas := make([]uint32, 0, n)
+	for i := uint32(0); i < n; i++ {
+		id, err := r.u32()
+		if err != nil {
+			return ReassignPartitionsRequest{}, err
+		}
+		replicas = append(replicas, id)
+	}
+	return ReassignPartitionsRequest{Topic: topic, Partition: part, Replicas: replicas}, nil
+}
+
+func EncodeReassignPartitionsResponse(resp ReassignPartitionsResponse) ([]byte, error) {
+	w := &writer{}
+	w.u16(resp.ErrorCode)
+	w.u32(resp.Generation)
+	return w.buf, nil
+}
+
+func DecodeReassignPartitionsResponse(payload []byte) (ReassignPartitionsResponse, error) {
+	r := &reader{data: payload}
+	code, err := r.u16()
+	if err != nil {
+		return ReassignPartitionsResponse{}, err
+	}
+	gen, err := r.u32()
+	if err != nil {
+		return ReassignPartitionsResponse{}, err
+	}
+	return ReassignPartitionsResponse{ErrorCode: code, Generation: gen}, nil
+}
+
 func EncodeInitProducerIdRequest(req InitProducerIdRequest) ([]byte, error) {
 	w := &writer{}
 	// Always write the string; empty transactional_id = non-transactional PID.
@@ -2637,6 +2721,8 @@ func DecodeResponse(opcode uint16, payload []byte) (any, error) {
 		return DecodeAlterConfigsResponse(payload)
 	case OpDeleteRecordsResponse:
 		return DecodeDeleteRecordsResponse(payload)
+	case OpReassignPartitionsResponse:
+		return DecodeReassignPartitionsResponse(payload)
 	case OpError:
 		return DecodeErrorResponse(payload)
 	default:

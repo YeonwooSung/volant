@@ -589,6 +589,39 @@ func (c *Client) CreatePartitions(topic string, totalCount uint32) (uint32, erro
 	return resp.Partitions, nil
 }
 
+// ReassignPartitions reassigns replicas for topic (native opcode 114).
+// A nil partition updates every partition (wire u32::MAX). Nil or empty
+// replicas asks the controller to auto-place with the current membership
+// (same as CreateTopic). Returns the assignment generation. Non-zero
+// error_code is BrokerError. This is not Kafka AlterPartitionReassignments
+// (API key 45).
+func (c *Client) ReassignPartitions(topic string, replicas []uint32, partition *uint32) (uint32, error) {
+	part := codec.ReassignAllPartitions
+	if partition != nil {
+		part = *partition
+	}
+	payload, err := codec.EncodeReassignPartitionsRequest(codec.ReassignPartitionsRequest{
+		Topic:     topic,
+		Partition: part,
+		Replicas:  replicas,
+	})
+	if err != nil {
+		return 0, err
+	}
+	decoded, err := c.roundTrip(codec.OpReassignPartitions, payload)
+	if err != nil {
+		return 0, err
+	}
+	resp, ok := decoded.(codec.ReassignPartitionsResponse)
+	if !ok {
+		return 0, &frame.ProtocolError{Msg: fmt.Sprintf("unexpected response for reassign_partitions: %T", decoded)}
+	}
+	if err := check(resp.ErrorCode, "reassign_partitions"); err != nil {
+		return 0, err
+	}
+	return resp.Generation, nil
+}
+
 // Produce sends one message (null key when key is nil) with acks=1.
 // Default trailer is (0, 0, -1). After EnableIdempotence the first produce
 // sends InitProducerId (empty transactional_id) and later produces attach

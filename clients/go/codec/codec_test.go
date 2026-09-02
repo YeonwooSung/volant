@@ -1190,3 +1190,67 @@ func TestCreatePartitionsResponsePayloadRS(t *testing.T) {
 		t.Fatalf("dispatch %#v", got)
 	}
 }
+
+func TestReassignPartitionsRequestPartitionAndReplicas(t *testing.T) {
+	req := ReassignPartitionsRequest{Topic: "events", Partition: 0, Replicas: []uint32{1, 2}}
+	raw, err := EncodeReassignPartitionsRequest(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	expected := mustHex(t, "0600"+"6576656e7473"+"00000000"+"02000000"+"01000000"+"02000000")
+	if !bytes.Equal(raw, expected) {
+		t.Fatalf("encode:\n got %x\nwant %x", raw, expected)
+	}
+	decoded, err := DecodeReassignPartitionsRequest(raw)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if decoded.Topic != "events" || decoded.Partition != 0 || len(decoded.Replicas) != 2 || decoded.Replicas[0] != 1 || decoded.Replicas[1] != 2 {
+		t.Fatalf("decoded %+v", decoded)
+	}
+}
+
+func TestReassignPartitionsRequestAllEmptyReplicas(t *testing.T) {
+	req := ReassignPartitionsRequest{Topic: "events", Partition: ReassignAllPartitions, Replicas: []uint32{}}
+	raw, err := EncodeReassignPartitionsRequest(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	expected := mustHex(t, "0600"+"6576656e7473"+"ffffffff"+"00000000")
+	if !bytes.Equal(raw, expected) {
+		t.Fatalf("encode:\n got %x\nwant %x", raw, expected)
+	}
+	decoded, err := DecodeReassignPartitionsRequest(raw)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if decoded.Topic != "events" || decoded.Partition != 0xFFFFFFFF || len(decoded.Replicas) != 0 {
+		t.Fatalf("decoded %+v", decoded)
+	}
+}
+
+func TestReassignPartitionsResponseRoundtrip(t *testing.T) {
+	resp := ReassignPartitionsResponse{ErrorCode: 0, Generation: 7}
+	raw, err := EncodeReassignPartitionsResponse(resp)
+	if err != nil {
+		t.Fatal(err)
+	}
+	expected := mustHex(t, "0000"+"07000000")
+	if !bytes.Equal(raw, expected) {
+		t.Fatalf("encode:\n got %x\nwant %x", raw, expected)
+	}
+	decoded, err := DecodeReassignPartitionsResponse(raw)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if decoded.ErrorCode != 0 || decoded.Generation != 7 {
+		t.Fatalf("decoded %+v", decoded)
+	}
+	got, err := DecodeResponse(OpReassignPartitionsResponse, raw)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if rr, ok := got.(ReassignPartitionsResponse); !ok || rr.Generation != 7 {
+		t.Fatalf("dispatch %#v", got)
+	}
+}

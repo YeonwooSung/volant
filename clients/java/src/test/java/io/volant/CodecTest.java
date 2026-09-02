@@ -714,4 +714,45 @@ class CodecTest {
                 Codec.decodeResponse(Codec.OP_CREATE_PARTITIONS_RESPONSE, raw));
         assertEquals(4, dispatched.partitions);
     }
+
+    @Test
+    void reassignPartitionsRequestPartitionAndReplicas() {
+        Codec.ReassignPartitionsRequest req =
+                new Codec.ReassignPartitionsRequest("events", 0, Arrays.asList(1L, 2L));
+        byte[] raw = Codec.encodeReassignPartitionsRequest(req);
+        byte[] expected = hx("0600" + "6576656e7473" + "00000000" + "02000000" + "01000000" + "02000000");
+        assertArrayEquals(expected, raw);
+        Codec.ReassignPartitionsRequest decoded = Codec.decodeReassignPartitionsRequest(raw);
+        assertEquals("events", decoded.topic);
+        assertEquals(0, decoded.partition);
+        assertEquals(Arrays.asList(1L, 2L), decoded.replicas);
+    }
+
+    @Test
+    void reassignPartitionsRequestAllEmptyReplicas() {
+        Codec.ReassignPartitionsRequest req = new Codec.ReassignPartitionsRequest(
+                "events", Codec.REASSIGN_ALL_PARTITIONS, Collections.emptyList());
+        byte[] raw = Codec.encodeReassignPartitionsRequest(req);
+        byte[] expected = hx("0600" + "6576656e7473" + "ffffffff" + "00000000");
+        assertArrayEquals(expected, raw);
+        Codec.ReassignPartitionsRequest decoded = Codec.decodeReassignPartitionsRequest(raw);
+        assertEquals("events", decoded.topic);
+        assertEquals(0xFFFFFFFFL, decoded.partition);
+        assertTrue(decoded.replicas.isEmpty());
+    }
+
+    @Test
+    void reassignPartitionsResponseRoundtrip() {
+        Codec.ReassignPartitionsResponse resp = new Codec.ReassignPartitionsResponse(0, 7);
+        byte[] raw = Codec.encodeReassignPartitionsResponse(resp);
+        byte[] expected = hx("0000" + "07000000");
+        assertArrayEquals(expected, raw);
+        Codec.ReassignPartitionsResponse decoded = Codec.decodeReassignPartitionsResponse(raw);
+        assertEquals(0, decoded.errorCode);
+        assertEquals(7, decoded.generation);
+        Codec.ReassignPartitionsResponse dispatched = assertInstanceOf(
+                Codec.ReassignPartitionsResponse.class,
+                Codec.decodeResponse(Codec.OP_REASSIGN_PARTITIONS_RESPONSE, raw));
+        assertEquals(7, dispatched.generation);
+    }
 }
