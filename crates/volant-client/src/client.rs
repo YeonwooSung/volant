@@ -468,7 +468,7 @@ impl Client {
     /// Describe topic configuration (Phase 13).
     pub async fn describe_configs(&self, topic: &str) -> Result<DescribeConfigsResult> {
         let resp = self
-            .round_trip(Request::DescribeConfigs {
+            .admin_round_trip(Request::DescribeConfigs {
                 topic: topic.to_owned(),
             })
             .await?;
@@ -498,7 +498,7 @@ impl Client {
     /// Alter topic configuration (Phase 13). Empty value clears a key.
     pub async fn alter_configs(&self, topic: &str, configs: Vec<(String, String)>) -> Result<()> {
         let resp = self
-            .round_trip(Request::AlterConfigs {
+            .admin_round_trip(Request::AlterConfigs {
                 topic: topic.to_owned(),
                 configs,
             })
@@ -1215,6 +1215,8 @@ impl Client {
                 | Response::DeleteScramUser { error_code }
                 | Response::ListScramUsers { error_code, .. }
                 | Response::ListAcls { error_code, .. }
+                | Response::DescribeConfigs { error_code, .. }
+                | Response::AlterConfigs { error_code, .. }
                     if *error_code == ErrorCode::NotController as u16 =>
                 {
                     (true, None)

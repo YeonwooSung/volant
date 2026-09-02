@@ -44,6 +44,8 @@
 //! `delete_scram_user` / `list_scram_users`) and `list_acls` on error
 //! **14** using the same `redirect_to_controller` / `max_redirects`
 //! budget as v0.79.
+//! v0.94 redirects topic `describe_configs` / `alter_configs` on that
+//! same error **14** budget. Topic-only (not Kafka BROKER configs).
 
 #![deny(missing_docs)]
 
