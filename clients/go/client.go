@@ -1215,21 +1215,38 @@ func (c *Client) ensureProducerID() error {
 	if err != nil {
 		return err
 	}
-	decoded, err := c.roundTrip(codec.OpInitProducerId, payload)
-	if err != nil {
-		return err
+	maxRetries := c.maxRetries
+	if maxRetries < 0 {
+		maxRetries = 0
 	}
-	resp, ok := decoded.(codec.InitProducerIdResponse)
-	if !ok {
-		return &frame.ProtocolError{Msg: fmt.Sprintf("unexpected response for init_producer_id: %T", decoded)}
+	retryAttempt := 0
+	for {
+		decoded, err := c.roundTrip(codec.OpInitProducerId, payload)
+		if err != nil {
+			if isTransientProduceErr(err) && retryAttempt < maxRetries {
+				retryAttempt++
+				c.sleepProduceRetry()
+				continue
+			}
+			return err
+		}
+		resp, ok := decoded.(codec.InitProducerIdResponse)
+		if !ok {
+			return &frame.ProtocolError{Msg: fmt.Sprintf("unexpected response for init_producer_id: %T", decoded)}
+		}
+		if isTransientBroker(resp.ErrorCode) && retryAttempt < maxRetries {
+			retryAttempt++
+			c.sleepProduceRetry()
+			continue
+		}
+		if err := check(resp.ErrorCode, "init_producer_id"); err != nil {
+			return err
+		}
+		c.producerID = resp.ProducerID
+		c.producerEpoch = resp.Epoch
+		c.producerReady = true
+		return nil
 	}
-	if err := check(resp.ErrorCode, "init_producer_id"); err != nil {
-		return err
-	}
-	c.producerID = resp.ProducerID
-	c.producerEpoch = resp.Epoch
-	c.producerReady = true
-	return nil
 }
 
 // Fetch reads records from topic/partition starting at offset.

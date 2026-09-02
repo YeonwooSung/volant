@@ -76,7 +76,7 @@ class ScriptedBroker:
     ``leave_group_codes`` / ``offset_commit_codes`` / ``offset_fetch_codes`` /
     ``delete_offsets_codes`` / ``list_offsets_codes`` /
     ``describe_group_codes`` / ``list_groups_codes`` /
-    ``metadata_codes`` / ``list_members_codes`` are queues of
+    ``metadata_codes`` / ``list_members_codes`` / ``init_codes`` are queues of
     error_code values consumed across connections. Metadata is a fixed
     response (or a callable of ``() -> MetadataResponse``). Non-zero
     ``metadata_codes`` reply as Error opcode (native Metadata has no
@@ -85,6 +85,7 @@ class ScriptedBroker:
 
     def __init__(self) -> None:
         self.produce_codes: list[int] = []
+        self.init_codes: list[int] = []
         self.fetch_codes: list[int] = []
         self.heartbeat_codes: list[int] = []
         self.leave_group_codes: list[int] = []
@@ -193,12 +194,13 @@ class ScriptedBroker:
             self.init_count += 1
             req = decode_init_producer_id_request(raw)
             self.init_txn_ids.append(req.transactional_id)
+            code = self.init_codes.pop(0) if self.init_codes else 0
             return (
                 encode_init_producer_id_response(
                     InitProducerIdResponse(
                         producer_id=self.init_pid,
                         epoch=self.init_epoch,
-                        error_code=0,
+                        error_code=code,
                     )
                 ),
                 OP_INIT_PRODUCER_ID_RESPONSE,
@@ -534,6 +536,70 @@ class TestIdempotentProduce(unittest.TestCase):
 
 
 TIMEOUT = 7
+UNKNOWN_PRODUCER = 21
+
+
+class TestInitProducerIdRetry(unittest.TestCase):
+    def test_default_max_retries_zero_raises_on_init_timeout(self) -> None:
+        with ScriptedBroker() as srv:
+            srv.init_codes = [TIMEOUT]
+            with Client(srv.addr, timeout=5.0, enable_idempotence=True) as c:
+                self.assertEqual(c.max_retries, 0)
+                with self.assertRaises(BrokerError) as ctx:
+                    c.produce("t", 0, value=b"hello")
+            self.assertEqual(ctx.exception.code, TIMEOUT)
+            self.assertEqual(ctx.exception.op, "init_producer_id")
+            self.assertEqual(srv.init_count, 1)
+            self.assertEqual(srv.produce_count, 0)
+
+    def test_retries_init_timeout_then_ok(self) -> None:
+        with ScriptedBroker() as srv:
+            srv.init_codes = [TIMEOUT, 0]
+            with Client(
+                srv.addr,
+                timeout=5.0,
+                enable_idempotence=True,
+                max_retries=2,
+                retry_backoff_ms=0,
+            ) as c:
+                result = c.produce("t", 0, value=b"hello")
+            self.assertEqual(result.base_offset, 7)
+            self.assertEqual(srv.init_count, 2)
+            self.assertEqual(srv.produce_count, 1)
+
+    def test_init_unknown_producer_id_not_retried(self) -> None:
+        with ScriptedBroker() as srv:
+            srv.init_codes = [UNKNOWN_PRODUCER]
+            with Client(
+                srv.addr,
+                timeout=5.0,
+                enable_idempotence=True,
+                max_retries=2,
+                retry_backoff_ms=0,
+            ) as c:
+                with self.assertRaises(BrokerError) as ctx:
+                    c.produce("t", 0, value=b"hello")
+            self.assertEqual(ctx.exception.code, UNKNOWN_PRODUCER)
+            self.assertEqual(ctx.exception.op, "init_producer_id")
+            self.assertEqual(srv.init_count, 1)
+            self.assertEqual(srv.produce_count, 0)
+
+    def test_init_exhausted_retries_raises(self) -> None:
+        with ScriptedBroker() as srv:
+            srv.init_codes = [TIMEOUT, TIMEOUT, TIMEOUT]
+            with Client(
+                srv.addr,
+                timeout=5.0,
+                enable_idempotence=True,
+                max_retries=2,
+                retry_backoff_ms=0,
+            ) as c:
+                with self.assertRaises(BrokerError) as ctx:
+                    c.produce("t", 0, value=b"hello")
+            self.assertEqual(ctx.exception.code, TIMEOUT)
+            self.assertEqual(ctx.exception.op, "init_producer_id")
+            self.assertEqual(srv.init_count, 3)
+            self.assertEqual(srv.produce_count, 0)
 
 
 class TestProduceRetry(unittest.TestCase):

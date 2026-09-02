@@ -1064,17 +1064,43 @@ public final class Client implements AutoCloseable {
         }
         String txn = transactionalId == null ? "" : transactionalId;
         byte[] payload = Codec.encodeInitProducerIdRequest(new Codec.InitProducerIdRequest(txn));
-        Object decoded = roundTrip(Codec.OP_INIT_PRODUCER_ID, payload);
-        if (!(decoded instanceof Codec.InitProducerIdResponse)) {
-            throw new ProtocolException("unexpected response for init_producer_id: " + typeName(decoded));
+        int retryAttempt = 0;
+        while (true) {
+            Object decoded;
+            try {
+                decoded = roundTrip(Codec.OP_INIT_PRODUCER_ID, payload);
+            } catch (BrokerException e) {
+                if (isTransientBroker(e.code) && retryAttempt < maxRetries) {
+                    retryAttempt++;
+                    sleepProduceRetry();
+                    continue;
+                }
+                throw e;
+            } catch (RuntimeException e) {
+                if (isTransientTransport(e) && retryAttempt < maxRetries) {
+                    retryAttempt++;
+                    sleepProduceRetry();
+                    continue;
+                }
+                throw e;
+            }
+            if (!(decoded instanceof Codec.InitProducerIdResponse)) {
+                throw new ProtocolException("unexpected response for init_producer_id: " + typeName(decoded));
+            }
+            Codec.InitProducerIdResponse resp = (Codec.InitProducerIdResponse) decoded;
+            if (isTransientBroker(resp.errorCode) && retryAttempt < maxRetries) {
+                retryAttempt++;
+                sleepProduceRetry();
+                continue;
+            }
+            check(resp.errorCode, "init_producer_id");
+            producerId = resp.producerId;
+            producerEpoch = resp.epoch;
+            producerReady = true;
+            inTransaction = false;
+            nextSeq.clear();
+            return;
         }
-        Codec.InitProducerIdResponse resp = (Codec.InitProducerIdResponse) decoded;
-        check(resp.errorCode, "init_producer_id");
-        producerId = resp.producerId;
-        producerEpoch = resp.epoch;
-        producerReady = true;
-        inTransaction = false;
-        nextSeq.clear();
     }
 
     /**
