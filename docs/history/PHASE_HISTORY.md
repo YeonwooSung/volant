@@ -239,6 +239,11 @@ docs for day-to-day reading: [ops](../ops.md), [consistency](../consistency.md),
 | v0.38 | ✅ | Follower Add/RemoveBroker forward to openraft leader | [V38_SPEC.md](../V38_SPEC.md) |
 | v0.39 | ✅ | Restore assignment if add-broker joint rolls back | [V39_SPEC.md](../V39_SPEC.md) |
 | v0.40 | ✅ | Wait for homemade metadata-raft commit before CreateTopic ok | [V40_SPEC.md](../V40_SPEC.md) |
+| v0.41 | ✅ | Client-side range assignor on Python/Go/Java | [V41_SPEC.md](../V41_SPEC.md) |
+| v0.42 | ✅ | Shared-token Auth on Python/Go/Java clients | [V42_SPEC.md](../V42_SPEC.md) |
+| v0.43 | ✅ | Leader redirect on Python/Go/Java produce/fetch | [V43_SPEC.md](../V43_SPEC.md) |
+| v0.44 | ✅ | Rust GroupConsumer background heartbeat | [V44_SPEC.md](../V44_SPEC.md) |
+| v0.45 | ✅ | Clustered DeleteRecords wait-off requires ACK | [V45_SPEC.md](../V45_SPEC.md) |
 
 ---
 

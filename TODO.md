@@ -1,6 +1,6 @@
 # Volant residual TODO (review loop)
 
-**Baseline:** HEAD product = **Phases 0–154** + residuals **v0.3–v0.40**.  
+**Baseline:** HEAD product = **Phases 0–154** + residuals **v0.3–v0.45**.  
 **Last review:** 2026-09-02  
 
 Living roadmap: [ROADMAP.md](./ROADMAP.md).  
@@ -64,11 +64,11 @@ Phase index: [docs/history/PHASE_HISTORY.md](./docs/history/PHASE_HISTORY.md).
 | **Later** | Full **openraft** crate integration | **v0.11–v0.26 + redb log (v0.35) + joint rollback (v0.34) + follower forward (v0.38)** — not RocksDB/KRaft |
 | **Later** | **Dynamic membership** reconfiguration | **overlay v0.10 + joint v0.26 + rollback v0.34 + follower forward v0.38 + reassign rollback v0.39** — overlay still SoT |
 | **Later** | Full **KIP-890 / `__transaction_state`** | **log MVP closed (v0.13)** — opt-in JSON topic; not Kafka schemas |
-| **Later** | **Multi-language clients** | **Python/Go/Java GroupConsumer v0.31–v0.33 + static v0.36 + bg heartbeat v0.37**; not kafka-python / assignor |
+| **Later** | **Multi-language clients** | **Python/Go/Java GroupConsumer v0.31–v0.33 + static v0.36 + bg heartbeat v0.37 + range assignor v0.41 + Auth v0.42 + redirect v0.43**; not kafka-python / SyncGroup |
 | **Later** | **Long fuzz + chaos-mesh** | **MVP closed (v0.15)** — extended corpus + Chaos Mesh YAML + A→B isolate |
 | **Later** | **Perf campaign** vs aspirational targets | **closed (v0.2 PR2)** — measured table published; group-commit **v0.20** (opt-in, no new bench) |
 
-**Default next slice:** client-side range assignor, shared-token Auth / leader redirect on language clients, or openraft RocksDB if redb is not enough. Homemade Raft election / InstallSnapshot-on-154 / Phase 155 is **not** the next product bet. Do not open Phase 155.
+**Default next slice:** language-client SCRAM / idempotent produce / auto-commit, or openraft RocksDB if redb is not enough. Homemade Raft election / InstallSnapshot-on-154 / Phase 155 is **not** the next product bet. Do not open Phase 155.
 
 ---
 
@@ -126,6 +126,11 @@ Phase index: [docs/history/PHASE_HISTORY.md](./docs/history/PHASE_HISTORY.md).
 - [x] Follower Add/RemoveBroker forward to openraft leader → **v0.38**
 - [x] Restore assignment if add-broker joint rolls back → **v0.39**
 - [x] Wait for homemade metadata-raft commit before CreateTopic ok → **v0.40**
+- [x] Client-side range assignor (Python/Go/Java) → **v0.41**
+- [x] Shared-token Auth on Python/Go/Java clients → **v0.42**
+- [x] Leader redirect on Python/Go/Java produce/fetch → **v0.43**
+- [x] Rust GroupConsumer background heartbeat → **v0.44**
+- [x] Clustered DeleteRecords wait-off requires ACK → **v0.45**
 
 ---
 
@@ -149,14 +154,15 @@ Phase index: [docs/history/PHASE_HISTORY.md](./docs/history/PHASE_HISTORY.md).
 - [x] `__transaction_state` log MVP (v0.13; Volant JSON; not Kafka KIP-890/939 schemas)
 - [x] Kafka DeleteRecords **per-request** wait flag (v0.6 flex v2 tag 0; v0–1 env-only)
 - [x] Preferred selector **throttling** / TCP probe (v0.7; opt-in, not Kafka quota)
-- [x] Multi-language clients — Python/Go/Java GroupConsumer (v0.31–v0.33) + static (v0.36) + bg heartbeat (v0.37); not kafka-python / custom assignor
+- [x] Multi-language clients — Python/Go/Java GroupConsumer (v0.31–v0.33) + static (v0.36) + bg heartbeat (v0.37) + range assignor (v0.41) + Auth (v0.42) + redirect (v0.43); not kafka-python / SyncGroup
 - [x] Long fuzz campaigns + chaos-mesh MVP (v0.15; corpus + YAML + A→B isolate; not multi-hour CI)
 - [x] Published perf numbers vs aspirational table; group-commit **v0.20** (opt-in)
 
 ### Wait-off / best-effort paths (by design)
-- DeleteRecords **wait off**: cluster upgrades to wait-on unless `VOLANT_DELETE_RECORDS_ALLOW_IRREVERSIBLE=1` (v0.29); single-node / explicit allow still irreversible
+- DeleteRecords **wait off**: cluster upgrades to wait-on unless **both** `VOLANT_DELETE_RECORDS_ALLOW_IRREVERSIBLE=1` **and** `VOLANT_DELETE_RECORDS_IRREVERSIBLE_ACK=1` (v0.45). Single-node wait-off, and both-envs-on, are still irreversible
 - Session mirror: dual unclaimed primary (v0.25) + mirror-only (v0.30) converge on MirrorPut / helper; still not Raft
-- Metadata raft wait-commit default **on** (v0.40): CreateTopic waits for `commit_index` else rollback + **15**; escape `VOLANT_METADATA_RAFT_WAIT_COMMIT=0` (Phase 154 tests). ALLOW wait-off still irreversible (v0.29)
+- Metadata raft wait-commit default **on** (v0.40): CreateTopic waits for `commit_index` else rollback + **15**; escape `VOLANT_METADATA_RAFT_WAIT_COMMIT=0` (Phase 154 tests)
+- Local `assignor="range"` is solo-member only (JoinGroup has no member list / no SyncGroup)
 
 ---
 
@@ -178,5 +184,6 @@ Phase index: [docs/history/PHASE_HISTORY.md](./docs/history/PHASE_HISTORY.md).
 | v0.26–v0.30 | **Shipped** — openraft joint; client TLS; JoinGroup; wait-off safety; mirror converge |
 | v0.31–v0.35 | **Shipped** — Python/Go/Java GroupConsumer; joint rollback; openraft redb |
 | v0.36–v0.40 | **Shipped** — static membership; bg heartbeat; follower forward; reassign rollback; raft wait-commit |
+| v0.41–v0.45 | **Shipped** — client range assignor; shared-token Auth; leader redirect; Rust heartbeat; wait-off ACK |
 
 **How to use this file:** mark new work by phase number in ROADMAP + PHASE*_SPEC; fold completed rows into “Closed checklist”; keep “Still open” as the only honesty surface for operators and contributors.
