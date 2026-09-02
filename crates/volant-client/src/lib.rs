@@ -44,6 +44,10 @@
 //! `delete_scram_user` / `list_scram_users`) and `list_acls` on error
 //! **14** using the same `redirect_to_controller` / `max_redirects`
 //! budget as v0.79.
+//! v0.91 redirects [`Client::add_broker`] / [`Client::remove_broker`]
+//! on error **14** via the same `admin_round_trip` /
+//! `redirect_to_controller` / `max_redirects` budget. Overlay is still
+//! SoT; this is not Kafka broker catalog.
 
 #![deny(missing_docs)]
 
