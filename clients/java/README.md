@@ -46,6 +46,8 @@ try (Client c = Client.connect("127.0.0.1", 9092)) {
   g.close();
   // Opt-in auto-commit (v0.48). Default off. interval 0 = after every poll.
   GroupConsumer a = GroupConsumer.joinWithAutoCommit(c, "g", List.of("t"), 10_000, 5000);
+  // Opt-in auto_offset_reset (v0.62). Default earliest (position 0).
+  GroupConsumer r = GroupConsumer.joinWithOffsetReset(c, "g", List.of("t"), 10_000, "latest");
   Metadata meta = c.metadata();
 }
 
@@ -215,6 +217,14 @@ commits dirty positions then leaves. This is **not** Kafka
 it does not collide with `join(..., boolean heartbeat)` or
 `join(..., String assignor)`.
 
+`joinWithOffsetReset(..., "latest")` (v0.62) is a tiny Kafka subset:
+`earliest` (default, position 0, no ListOffsets), `latest` (native
+ListOffsets LEO), `none` (raise if OffsetFetch is missing /
+`OFFSET_UNKNOWN`). Invalid strings throw `IllegalArgumentException`
+before JoinGroup. Auto-commit stays off on this method. Not Kafka
+`auto.offset.reset` (no timestamp). Rust GroupConsumer still starts
+at 0 / OffsetFetch only.
+
 Not implemented: `kafka-clients`, Kafka cooperative-sticky / SyncGroup,
 seeing other group members on the wire, SCRAM, async I/O, Kafka
 transactions (API keys 22/24/25/26/28). Native BeginTxn/EndTxn
@@ -260,3 +270,4 @@ See [docs/V23_SPEC.md](../../docs/V23_SPEC.md),
 [docs/V58_SPEC.md](../../docs/V58_SPEC.md),
 [docs/V59_SPEC.md](../../docs/V59_SPEC.md),
 [docs/V63_SPEC.md](../../docs/V63_SPEC.md).
+[docs/V62_SPEC.md](../../docs/V62_SPEC.md).

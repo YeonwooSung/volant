@@ -35,6 +35,7 @@ import java.util.concurrent.locks.ReentrantLock;
  * GroupConsumer g = GroupConsumer.join(c, "g", List.of("t"), 10_000);
  * GroupConsumer s = GroupConsumer.joinStatic(c, "g", List.of("t"), 10_000, "inst-1");
  * GroupConsumer a = GroupConsumer.joinWithAutoCommit(c, "g", List.of("t"), 10_000, 5000);
+ * GroupConsumer r = GroupConsumer.joinWithOffsetReset(c, "g", List.of("t"), 10_000, "latest");
  * List&lt;Record&gt; recs = g.poll(500);
  * g.commit();
  * g.close();
@@ -55,6 +56,9 @@ public final class GroupConsumer implements AutoCloseable {
     private static final long DEFAULT_AUTO_COMMIT_INTERVAL_MS = 5000L;
     static final String ASSIGNOR_BROKER = "broker";
     static final String ASSIGNOR_RANGE = "range";
+    static final String RESET_EARLIEST = "earliest";
+    static final String RESET_LATEST = "latest";
+    static final String RESET_NONE = "none";
 
     private final Backend backend;
     private final String groupId;
@@ -66,6 +70,7 @@ public final class GroupConsumer implements AutoCloseable {
     private final String assignor;
     private final boolean autoCommit;
     private final long autoCommitIntervalMs;
+    private final String autoOffsetReset;
     private long lastAutoCommitNanos;
     private boolean dirty;
     private final ReentrantLock lock = new ReentrantLock();
@@ -119,6 +124,21 @@ public final class GroupConsumer implements AutoCloseable {
             String assignor,
             boolean autoCommit,
             long autoCommitIntervalMs) {
+        this(backend, groupId, topics, sessionTimeoutMs, groupInstanceId, heartbeat, assignor, autoCommit,
+                autoCommitIntervalMs, RESET_EARLIEST);
+    }
+
+    GroupConsumer(
+            Backend backend,
+            String groupId,
+            List<String> topics,
+            int sessionTimeoutMs,
+            String groupInstanceId,
+            boolean heartbeat,
+            String assignor,
+            boolean autoCommit,
+            long autoCommitIntervalMs,
+            String autoOffsetReset) {
         this.backend = backend;
         this.groupId = groupId;
         this.topics = topics == null
@@ -130,6 +150,7 @@ public final class GroupConsumer implements AutoCloseable {
         this.assignor = normalizeAssignor(assignor);
         this.autoCommit = autoCommit;
         this.autoCommitIntervalMs = autoCommitIntervalMs < 0 ? 0L : autoCommitIntervalMs;
+        this.autoOffsetReset = normalizeAutoOffsetReset(autoOffsetReset);
     }
 
     /** Background heartbeat period: {@code sessionTimeoutMs / 3}, clamped to 100–3000 ms. */
@@ -211,6 +232,37 @@ public final class GroupConsumer implements AutoCloseable {
                 intervalMs);
     }
 
+    /**
+     * Join with an explicit {@code auto_offset_reset} (v0.62). Default
+     * {@link #join} stays {@code earliest} (position 0, no ListOffsets).
+     *
+     * <p>{@code autoOffsetReset} is {@code "earliest"}, {@code "latest"}
+     * (native ListOffsets LEO), or {@code "none"} (raise if OffsetFetch is
+     * missing / {@link #OFFSET_UNKNOWN}). Empty / {@code null} is
+     * {@code earliest}. Unknown values throw
+     * {@link IllegalArgumentException} before JoinGroup. Not Kafka
+     * {@code auto.offset.reset} (no timestamp).
+     *
+     * <p>Auto-commit stays off (use {@link #joinWithAutoCommit} for that).
+     * Named method so it does not collide with
+     * {@link #join(Client, String, List, int, String)} assignor or
+     * {@link #joinStatic} instance id.
+     */
+    public static GroupConsumer joinWithOffsetReset(
+            Client client, String group, List<String> topics, int sessionTimeoutMs, String autoOffsetReset) {
+        return join(
+                new ClientBackend(client),
+                group,
+                topics,
+                sessionTimeoutMs,
+                "",
+                true,
+                ASSIGNOR_BROKER,
+                false,
+                DEFAULT_AUTO_COMMIT_INTERVAL_MS,
+                autoOffsetReset);
+    }
+
     static GroupConsumer join(Backend backend, String group, List<String> topics, int sessionTimeoutMs) {
         return join(backend, group, topics, sessionTimeoutMs, "", true, ASSIGNOR_BROKER);
     }
@@ -268,6 +320,46 @@ public final class GroupConsumer implements AutoCloseable {
             String assignor,
             boolean autoCommit,
             long autoCommitIntervalMs) {
+        return join(
+                backend,
+                group,
+                topics,
+                sessionTimeoutMs,
+                groupInstanceId,
+                heartbeat,
+                assignor,
+                autoCommit,
+                autoCommitIntervalMs,
+                RESET_EARLIEST);
+    }
+
+    /** Package-visible: unit tests keep {@code heartbeat=false}. */
+    static GroupConsumer joinWithOffsetReset(
+            Backend backend, String group, List<String> topics, int sessionTimeoutMs, String autoOffsetReset) {
+        return join(
+                backend,
+                group,
+                topics,
+                sessionTimeoutMs,
+                "",
+                false,
+                ASSIGNOR_BROKER,
+                false,
+                DEFAULT_AUTO_COMMIT_INTERVAL_MS,
+                autoOffsetReset);
+    }
+
+    static GroupConsumer join(
+            Backend backend,
+            String group,
+            List<String> topics,
+            int sessionTimeoutMs,
+            String groupInstanceId,
+            boolean heartbeat,
+            String assignor,
+            boolean autoCommit,
+            long autoCommitIntervalMs,
+            String autoOffsetReset) {
         int timeout = sessionTimeoutMs == 0 ? 10_000 : sessionTimeoutMs;
         GroupConsumer g = new GroupConsumer(
                 backend,
@@ -278,7 +370,8 @@ public final class GroupConsumer implements AutoCloseable {
                 heartbeat,
                 assignor,
                 autoCommit,
-                autoCommitIntervalMs);
+                autoCommitIntervalMs,
+                autoOffsetReset);
         g.doJoin();
         g.startHeartbeat();
         return g;
@@ -336,9 +429,14 @@ public final class GroupConsumer implements AutoCloseable {
             fetchPositionsFor(toFetch);
         }
 
+        List<Tp> missing = new ArrayList<>();
         for (Codec.Assignment a : assignment) {
-            positions.putIfAbsent(new Tp(a.topic, a.partition), 0L);
+            Tp tp = new Tp(a.topic, a.partition);
+            if (!positions.containsKey(tp)) {
+                missing.add(tp);
+            }
         }
+        applyReset(missing);
     }
 
     private void fetchPositionsFor(List<Tp> partitions) {
@@ -350,9 +448,63 @@ public final class GroupConsumer implements AutoCloseable {
             entries.add(new Codec.OffsetEntry(tp.topic, tp.partition));
         }
         List<Codec.OffsetFetchEntry> fetched = backend.fetchOffsets(groupId, entries);
+        Map<Tp, Long> found = new HashMap<>();
         for (Codec.OffsetFetchEntry e : fetched) {
-            long pos = e.offset == OFFSET_UNKNOWN ? 0L : e.offset;
-            positions.put(new Tp(e.topic, e.partition), pos);
+            found.put(new Tp(e.topic, e.partition), e.offset);
+        }
+        List<Tp> unknown = new ArrayList<>();
+        for (Tp tp : partitions) {
+            Long off = found.get(tp);
+            if (off == null || off == OFFSET_UNKNOWN) {
+                unknown.add(tp);
+                continue;
+            }
+            positions.put(tp, off);
+        }
+        applyReset(unknown);
+    }
+
+    private void applyReset(List<Tp> partitions) {
+        if (partitions.isEmpty()) {
+            return;
+        }
+        if (RESET_EARLIEST.equals(autoOffsetReset)) {
+            for (Tp tp : partitions) {
+                positions.put(tp, 0L);
+            }
+            return;
+        }
+        if (RESET_NONE.equals(autoOffsetReset)) {
+            Tp tp = partitions.get(0);
+            throw new IllegalStateException(
+                    "no committed offset for " + tp.topic + "-" + tp.partition
+                            + " and auto_offset_reset=" + autoOffsetReset);
+        }
+        Map<String, List<Integer>> byTopic = new LinkedHashMap<>();
+        for (Tp tp : partitions) {
+            byTopic.computeIfAbsent(tp.topic, k -> new ArrayList<>()).add(tp.partition);
+        }
+        for (Map.Entry<String, List<Integer>> e : byTopic.entrySet()) {
+            List<Integer> wanted = e.getValue();
+            int[] parts = new int[wanted.size()];
+            for (int i = 0; i < wanted.size(); i++) {
+                parts[i] = wanted.get(i);
+            }
+            List<OffsetListing> listings = backend.listOffsets(e.getKey(), parts);
+            Map<Integer, Long> got = new HashMap<>();
+            if (listings != null) {
+                for (OffsetListing listing : listings) {
+                    got.put(listing.partition, listing.latest);
+                }
+            }
+            for (int part : wanted) {
+                Long latest = got.get(part);
+                if (latest == null) {
+                    throw new IllegalStateException(
+                            "list_offsets missing partition " + e.getKey() + "-" + part);
+                }
+                positions.put(new Tp(e.getKey(), part), latest);
+            }
         }
     }
 
@@ -585,6 +737,11 @@ public final class GroupConsumer implements AutoCloseable {
         }
     }
 
+    /** Join-time reset policy ({@code earliest} / {@code latest} / {@code none}). */
+    public String autoOffsetReset() {
+        return autoOffsetReset;
+    }
+
     public List<Codec.Assignment> lastRevoked() {
         lock.lock();
         try {
@@ -626,6 +783,19 @@ public final class GroupConsumer implements AutoCloseable {
             return ASSIGNOR_RANGE;
         }
         throw new IllegalArgumentException("unknown assignor: " + name);
+    }
+
+    static String normalizeAutoOffsetReset(String name) {
+        if (name == null || name.isEmpty() || RESET_EARLIEST.equals(name)) {
+            return RESET_EARLIEST;
+        }
+        if (RESET_LATEST.equals(name)) {
+            return RESET_LATEST;
+        }
+        if (RESET_NONE.equals(name)) {
+            return RESET_NONE;
+        }
+        throw new IllegalArgumentException("unknown auto_offset_reset: " + name);
     }
 
     private static Set<Tp> toSet(List<Codec.Assignment> items) {
@@ -691,6 +861,8 @@ public final class GroupConsumer implements AutoCloseable {
 
         List<Codec.OffsetFetchEntry> fetchOffsets(String group, List<Codec.OffsetEntry> entries);
 
+        List<OffsetListing> listOffsets(String topic, int... partitions);
+
         Metadata metadata();
     }
 
@@ -731,6 +903,11 @@ public final class GroupConsumer implements AutoCloseable {
         @Override
         public List<Codec.OffsetFetchEntry> fetchOffsets(String group, List<Codec.OffsetEntry> entries) {
             return client.offsetFetchEntries(group, entries);
+        }
+
+        @Override
+        public List<OffsetListing> listOffsets(String topic, int... partitions) {
+            return client.listOffsets(topic, partitions);
         }
 
         @Override

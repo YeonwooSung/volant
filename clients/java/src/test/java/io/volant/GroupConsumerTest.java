@@ -39,6 +39,8 @@ class GroupConsumerTest {
 
         GroupConsumer g = GroupConsumer.join(fake, "g", List.of("t"), 10_000, false);
         assertEquals(0L, g.positions().values().iterator().next());
+        assertEquals("earliest", g.autoOffsetReset());
+        assertEquals(0, fake.listOffsetCount);
         g.close();
     }
 
@@ -335,6 +337,68 @@ class GroupConsumerTest {
     }
 
     @Test
+    void latestUnknownUsesListOffsets() {
+        FakeBackend fake = new FakeBackend();
+        fake.nextJoin = joinResult("m1", 1, assign("t", 0));
+        fake.committed.put(tp("t", 0), GroupConsumer.OFFSET_UNKNOWN);
+        fake.listOffsetEntries.put(tp("t", 0), new OffsetListing(0, 0, 10));
+        GroupConsumer g = GroupConsumer.joinWithOffsetReset(fake, "g", List.of("t"), 10_000, "latest");
+        assertEquals(10L, g.positions().values().iterator().next());
+        assertEquals(1, fake.listOffsetCount);
+        assertEquals("t", fake.lastListOffsetTopic);
+        assertEquals(List.of(0), fake.lastListOffsetPartitions);
+        assertEquals(0, fake.fetchCount);
+        g.close();
+    }
+
+    @Test
+    void latestCommittedSkipsListOffsets() {
+        FakeBackend fake = new FakeBackend();
+        fake.nextJoin = joinResult("m1", 1, assign("t", 0));
+        fake.committed.put(tp("t", 0), 5L);
+        fake.listOffsetEntries.put(tp("t", 0), new OffsetListing(0, 0, 10));
+        GroupConsumer g = GroupConsumer.joinWithOffsetReset(fake, "g", List.of("t"), 10_000, "latest");
+        assertEquals(5L, g.positions().values().iterator().next());
+        assertEquals(0, fake.listOffsetCount);
+        g.close();
+    }
+
+    @Test
+    void noneUnknownRaisesWithoutFetch() {
+        FakeBackend fake = new FakeBackend();
+        fake.nextJoin = joinResult("m1", 1, assign("t", 0));
+        fake.committed.put(tp("t", 0), GroupConsumer.OFFSET_UNKNOWN);
+        IllegalStateException ex = assertThrows(
+                IllegalStateException.class,
+                () -> GroupConsumer.joinWithOffsetReset(fake, "g", List.of("t"), 10_000, "none"));
+        assertTrue(ex.getMessage().contains("auto_offset_reset"));
+        assertEquals(0, fake.fetchCount);
+        assertEquals(0, fake.listOffsetCount);
+    }
+
+    @Test
+    void invalidAutoOffsetResetThrowsBeforeJoin() {
+        FakeBackend fake = new FakeBackend();
+        IllegalArgumentException ex = assertThrows(
+                IllegalArgumentException.class,
+                () -> GroupConsumer.joinWithOffsetReset(fake, "g", List.of("t"), 10_000, "foo"));
+        assertTrue(ex.getMessage().contains("unknown auto_offset_reset"));
+        assertEquals(0, fake.joinCount);
+        assertEquals(0, fake.listOffsetCount);
+    }
+
+    @Test
+    void latestEmptyAssignmentSkipsListOffsets() {
+        FakeBackend fake = new FakeBackend();
+        fake.nextJoin = joinResult("m1", 1, Collections.emptyList());
+        GroupConsumer g = GroupConsumer.joinWithOffsetReset(fake, "g", List.of("t"), 10_000, "latest");
+        assertTrue(g.positions().isEmpty());
+        assertEquals(0, fake.listOffsetCount);
+        assertEquals(0, fake.fetchOffsetCount);
+        g.close();
+    }
+
+    @Test
     void heartbeatFalseIsPollOnly() throws Exception {
         FakeBackend fake = new FakeBackend();
         fake.nextJoin = joinResult("m1", 1, assign("t", 0));
@@ -374,6 +438,10 @@ class GroupConsumerTest {
         int leaveCount;
         int fetchCount;
         int fetchOffsetCount;
+        int listOffsetCount;
+        String lastListOffsetTopic = "";
+        List<Integer> lastListOffsetPartitions = Collections.emptyList();
+        final Map<String, OffsetListing> listOffsetEntries = new LinkedHashMap<>();
         long lastMaxWaitMs;
         int lastSessionTimeoutMs;
         String lastGroupInstanceId = "";
@@ -452,6 +520,24 @@ class GroupConsumerTest {
                 Long off = committed.get(tp(e.topic, e.partition));
                 out.add(new Codec.OffsetFetchEntry(
                         e.topic, e.partition, off == null ? GroupConsumer.OFFSET_UNKNOWN : off, ""));
+            }
+            return out;
+        }
+
+        @Override
+        public List<OffsetListing> listOffsets(String topic, int... partitions) {
+            listOffsetCount++;
+            lastListOffsetTopic = topic == null ? "" : topic;
+            lastListOffsetPartitions = new ArrayList<>();
+            List<OffsetListing> out = new ArrayList<>();
+            if (partitions != null) {
+                for (int p : partitions) {
+                    lastListOffsetPartitions.add(p);
+                    OffsetListing e = listOffsetEntries.get(tp(topic, p));
+                    if (e != null) {
+                        out.add(e);
+                    }
+                }
             }
             return out;
         }
