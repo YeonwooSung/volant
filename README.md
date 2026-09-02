@@ -156,8 +156,8 @@ time-based ISR lag shrink via `replica_lag_max_ms` (Phase 125); PreferredReadRep
 Matrix + honesty: [docs/KAFKA_COMPAT.md](./docs/KAFKA_COMPAT.md).
 
 **Still deferred:** multi-language clients, chaos-mesh / long fuzz campaigns
-(corpus smoke CI MVP → **Phase 112**), full preferred
-throttling residual beyond 126/133/140/144 (PreferredReadReplica MVP → **Phase 126**;
+(corpus smoke CI MVP → **Phase 112**), full Kafka preferred quota
+(beyond 126/133/140/144 + v0.7 opt-in throttle/probe; PreferredReadReplica MVP → **Phase 126**;
 rack-aware create assignment → **Phase 145**;
 shared session mirror MVP → **Phase 138/139/143** — residual Raft registry /
 serve-without-promote / incremental put), full KIP-890/939. Cluster admin fan-out →

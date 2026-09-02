@@ -3912,11 +3912,12 @@ no/single rack; `VOLANT_RACK_AWARE_ASSIGNMENT=0` off);
 **Metadata ISR overlay + leader→controller IsrUpdate** Phase 142;
 **txn coordinator registry TTL GC** Phase 127 + **BROKER config surface** Phase 128; **truncate journal** Phase 129 + **majority multi-controller consensus** Phase 130 + **journal rejoin catch-up** Phase 131 + **catch-up hardening** Phase 132 + **p2p heartbeat mesh** Phase 134 + **optional DeleteRecords majority wait** Phase 135 + **non-blocking admin catch-up** Phase 136 + **native DeleteRecords request wait trailer + journal topic GC** Phase 137).
 Still deferred: multi-language clients, full chaos-mesh suites / long fuzz
-campaigns, full preferred-replica selector / throttling residual
-(beyond 126/133/140/144; Phase 138/139/143/147 closed shared mirror MVP —
-residual: Raft registry / dual-epoch converge / incremental put), full
-KIP-890/939, rollback local truncate on majority fail, full Kafka Streams EOS /
-2PC state+offsets (Phase **151** EOS MVP; Phase **149** durable state; Phase **153**
-process-local durable checkpoint after EndTxn — not distributed 2PC),
-full openraft/KRaft (Phase **150** assignment majority MVP).
+campaigns, Kafka client-quota preferred throttling (v0.7 closed opt-in
+redirect throttle + TCP probe), full
+KIP-890/939, rollback local truncate on majority fail (wait-off still
+irreversible), full Kafka Streams EOS / multi-worker 2PC (Phase **151** EOS
+MVP; Phase **149** durable state; Phase **153** process-local checkpoint;
+**v0.8** application_id fence; **v0.9** opt-in changelog in the EOS txn —
+still one-process), full openraft/KRaft (Phase **150** assignment majority
+MVP; **v0.10** membership overlay — not Raft joint consensus).
 Details: [docs/KAFKA_COMPAT.md](./docs/KAFKA_COMPAT.md), [docs/ops.md](./docs/ops.md).

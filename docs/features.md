@@ -35,7 +35,7 @@ shim: [KAFKA_COMPAT.md](./KAFKA_COMPAT.md).
 | Group admin | list / describe / delete-offsets; static membership |
 | Topic configs | `retention.ms` / `retention.bytes` / `segment.bytes` |
 | Topic catalog | Survives single-node restart |
-| DeleteRecords | Truncate sealed segments before offset; GC/clip aborted soft markers vs new log start (Phase 104/111); native optional `wait_majority` trailer (Phase 137) |
+| DeleteRecords | Truncate sealed segments before offset; GC/clip aborted soft markers vs new log start (Phase 104/111); native optional `wait_majority` trailer (Phase 137); Kafka flex v2 tag 0 = same flag (v0.6; not a Kafka standard field) |
 | CreatePartitions | Grow partition count (cannot shrink) |
 | ListOffsets | Earliest / latest (+ Kafka specials on shim) |
 | Compaction | `cleanup.policy=compact` on sealed segments |

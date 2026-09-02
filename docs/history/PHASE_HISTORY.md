@@ -197,21 +197,34 @@ docs for day-to-day reading: [ops](../ops.md), [consistency](../consistency.md),
 | 153 | ✅ | EOS + durable stream state atomic checkpoint boundary | [PHASE153_SPEC.md](../PHASE153_SPEC.md) |
 | 154 | ✅ | KRaft-style metadata Raft log MVP (opcodes 98/99; static N) | [PHASE154_SPEC.md](../PHASE154_SPEC.md) |
 
+### Residual slices (not phases)
+
+| Slice | Status | One-liner | Spec |
+|------:|:------:|-----------|------|
+| v0.3 | ✅ | Assignment wait-fail local rollback | — |
+| v0.4 | ✅ | Kafka admin assignment wait/rollback | — |
+| v0.5 | ✅ | Ops confidence (unwritable dir / isolate / in-flight acks=all) | — |
+| v0.6 | ✅ | Kafka DeleteRecords flex v2 tag 0 wait flag | [V06_SPEC.md](../V06_SPEC.md) |
+| v0.7 | ✅ | Preferred redirect throttle + TCP probe | [V07_SPEC.md](../V07_SPEC.md) |
+| v0.8 | ✅ | Cross-app EOS fencing via `application_id` | [V08_SPEC.md](../V08_SPEC.md) |
+| v0.9 | ✅ | EOS changelog-backed durable state (txn 2PC MVP) | [V09_SPEC.md](../V09_SPEC.md) |
+| v0.10 | ✅ | Dynamic membership overlay (add/remove broker) | [V10_SPEC.md](../V10_SPEC.md) |
+
+---
+
+## Still deferred (post–v0.10)
+
+- Full openraft / KRaft (assignment gen majority MVP → **closed by Phase 150**; Metadata lead residual → **closed by Phase 152**; membership overlay → **v0.10**; homemade election still frozen)
+
 ---
 
 ## Still deferred (post–Phase 154)
 
-- Full openraft / KRaft dynamic membership (assignment gen majority MVP → **closed by Phase 150**; Metadata lead residual → **closed by Phase 152**; static N only)
-
----
-
-## Still deferred (post–Phase 154)
-
-- Full openraft election + InstallSnapshot + dynamic membership (metadata log MVP → **closed by Phase 154**; residual: lowest-id controller, no snapshot install)
-- Full Kafka Streams EOS / 2PC durable state + offsets (stream EOS MVP → **closed by Phase 151**; residual: state not in broker txn)
+- Full openraft election + InstallSnapshot (metadata log MVP → **closed by Phase 154**; membership overlay → **v0.10**; residual: lowest-id controller, no snapshot install, not Raft joint consensus)
+- Full Kafka Streams EOS / multi-worker 2PC (stream EOS MVP → **closed by Phase 151**; checkpoint → **153**; app fence → **v0.8**; changelog in txn → **v0.9**; residual: one-process topology)
 - ~~Metadata gated exclusively on `committed_generation` (150 residual)~~ → **closed by Phase 152**
-- ~~EOS + durable state single atomic boundary (151 residual)~~ → **closed by Phase 153** (process-local staging; not distributed 2PC)
-- Distributed 2PC durable state ↔ broker / full Kafka Streams EOS depth
+- ~~EOS + durable state single atomic boundary (151 residual)~~ → **closed by Phase 153** (process-local staging; changelog opt-in **v0.9**)
+- Multi-worker stream assignment / broker-held state machine
 
 
 - Multi-language clients

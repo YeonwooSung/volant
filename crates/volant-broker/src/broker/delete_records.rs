@@ -1184,7 +1184,7 @@ impl Broker {
             }
             // v0.7: optional short TCP connect against advertised host:port.
             if self.preferred_replica_tcp_probe.load(Ordering::Relaxed) {
-                let Some(ep) = cluster.config.broker(id) else {
+                let Some(ep) = cfg.broker(id) else {
                     continue;
                 };
                 if !preferred_replica_tcp_probe_ok(&ep.host, ep.port) {
