@@ -1486,27 +1486,86 @@ class Client:
         """Describe a live consumer group (native opcode 34/35).
 
         Error 2 (NotFound, no live members) raises :class:`BrokerError`.
+        Transient broker/transport errors retry up to ``max_retries``
+        extra times (default 0). Error 2 / 9 / 10 / 11 / 13 / 14 are
+        not retried.
         """
         payload = codec.encode_describe_group_request(
             DescribeGroupRequest(group_id=group)
         )
-        resp = self._round_trip(codec.OP_DESCRIBE_GROUP, payload)
-        if not isinstance(resp, DescribeGroupResponse):
-            raise ProtocolError(f"unexpected response for describe_group: {type(resp)}")
-        self._check(resp.error_code, "describe_group")
-        return DescribeGroupResult(
-            group_id=resp.group_id,
-            generation=resp.generation,
-            members=list(resp.members),
-        )
+        max_retries = max(0, int(self.max_retries))
+        retry_attempt = 0
+        while True:
+            try:
+                resp = self._round_trip(codec.OP_DESCRIBE_GROUP, payload)
+            except BrokerError as e:
+                if _is_transient_broker(e.code) and retry_attempt < max_retries:
+                    retry_attempt += 1
+                    self._sleep_produce_retry()
+                    continue
+                raise
+            except OSError:
+                if retry_attempt < max_retries:
+                    retry_attempt += 1
+                    self._sleep_produce_retry()
+                    continue
+                raise
+            if not isinstance(resp, DescribeGroupResponse):
+                raise ProtocolError(
+                    f"unexpected response for describe_group: {type(resp)}"
+                )
+            if (
+                _is_transient_broker(resp.error_code)
+                and retry_attempt < max_retries
+            ):
+                retry_attempt += 1
+                self._sleep_produce_retry()
+                continue
+            self._check(resp.error_code, "describe_group")
+            return DescribeGroupResult(
+                group_id=resp.group_id,
+                generation=resp.generation,
+                members=list(resp.members),
+            )
 
     def list_groups(self) -> list[GroupListing]:
-        """List known consumer groups (native opcode 36/37)."""
-        resp = self._round_trip(codec.OP_LIST_GROUPS, codec.encode_list_groups_request())
-        if not isinstance(resp, ListGroupsResponse):
-            raise ProtocolError(f"unexpected response for list_groups: {type(resp)}")
-        self._check(resp.error_code, "list_groups")
-        return list(resp.groups)
+        """List known consumer groups (native opcode 36/37).
+
+        Transient broker/transport errors retry up to ``max_retries``
+        extra times (default 0). Error 2 / 9 / 10 / 11 / 13 / 14 are
+        not retried.
+        """
+        payload = codec.encode_list_groups_request()
+        max_retries = max(0, int(self.max_retries))
+        retry_attempt = 0
+        while True:
+            try:
+                resp = self._round_trip(codec.OP_LIST_GROUPS, payload)
+            except BrokerError as e:
+                if _is_transient_broker(e.code) and retry_attempt < max_retries:
+                    retry_attempt += 1
+                    self._sleep_produce_retry()
+                    continue
+                raise
+            except OSError:
+                if retry_attempt < max_retries:
+                    retry_attempt += 1
+                    self._sleep_produce_retry()
+                    continue
+                raise
+            if not isinstance(resp, ListGroupsResponse):
+                raise ProtocolError(
+                    f"unexpected response for list_groups: {type(resp)}"
+                )
+            if (
+                _is_transient_broker(resp.error_code)
+                and retry_attempt < max_retries
+            ):
+                retry_attempt += 1
+                self._sleep_produce_retry()
+                continue
+            self._check(resp.error_code, "list_groups")
+            return list(resp.groups)
 
     def create_scram_user(
         self, username: str, password: str, iterations: int = 0
