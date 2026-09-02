@@ -70,8 +70,12 @@
 //! v0.102 retries InitProducerId (`ensure_producer_id`) on that same
 //! transient set (default 0). Error 13 / 14 / 9 / 10 / 11 / 2,
 //! protocol, and UnknownProducerId (21) on Init itself are not retried.
-//! Produce / BeginTxn / `admin_round_trip` are unchanged. Already
-//! initialized clients skip Init.
+//! Already initialized clients skip Init.
+//! v0.104 retries controller-gated admin (`create_topic` / ACLs /
+//! SCRAM-admin / Add/RemoveBroker / Describe/AlterConfigs, which share
+//! `admin_round_trip`) on that same transient set (default 0). Error
+//! **14** stays on `max_redirects` (independent counter). 13 / 9 / 10 /
+//! 11 / 2 / 21 / InvalidTxnState (22) and protocol are not retried.
 
 #![deny(missing_docs)]
 
