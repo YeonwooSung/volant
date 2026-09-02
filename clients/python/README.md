@@ -168,8 +168,9 @@ re-Init. Heartbeat shares produce/fetch ``max_retries`` (default 0);
 rebalance codes 9 / 10 / 11 are not retried. LeaveGroup shares
 ``max_retries``; error 10 is success (already left). JoinGroup is not
 retried. OffsetCommit / OffsetFetch / DeleteOffsets / ListOffsets /
-DescribeGroup / ListGroups / Metadata / ListMembers
-share the same ``max_retries`` (default 0).
+DescribeGroup / ListGroups / Metadata / ListMembers / BeginTxn /
+EndTxn share the same ``max_retries`` (default 0). InvalidTxnState
+(22) is not retried.
 This is not Kafka ``retries``.
 
 Correlation ids increment per request. Decode verifies magic `V` (0x56),

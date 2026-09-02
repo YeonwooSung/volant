@@ -50,6 +50,9 @@ func parseControllerID(msg string) *uint32 {
 // unknownProducerID is native ErrorCode::UnknownProducerId.
 const unknownProducerID uint16 = 21
 
+// invalidTxnState is native ErrorCode::InvalidTxnState.
+const invalidTxnState uint16 = 22
+
 // Transient produce retry codes (match Rust is_transient_error_code).
 const (
 	errIO                 uint16 = 6
@@ -725,8 +728,10 @@ func (c *Client) SetTransactionalID(id string) {
 	}
 }
 
-
 // BeginTransaction opens a native transaction (opcode 50). Requires SetTransactionalID.
+// Transient broker/transport errors retry up to maxRetries extra times
+// (default 0). InvalidTxnState (22) and txn fence / epoch errors are
+// not retried.
 func (c *Client) BeginTransaction() error {
 	if c.transactionalID == "" {
 		return fmt.Errorf("transactional_id not configured")
@@ -741,25 +746,44 @@ func (c *Client) BeginTransaction() error {
 	if err != nil {
 		return err
 	}
-	decoded, err := c.roundTrip(codec.OpBeginTxn, payload)
-	if err != nil {
-		return err
+	maxRetries := c.maxRetries
+	if maxRetries < 0 {
+		maxRetries = 0
 	}
-	resp, ok := decoded.(codec.BeginTxnResponse)
-	if !ok {
-		return &frame.ProtocolError{Msg: fmt.Sprintf("unexpected response for begin_txn: %T", decoded)}
+	retryAttempt := 0
+	for {
+		decoded, err := c.roundTrip(codec.OpBeginTxn, payload)
+		if err != nil {
+			if isTransientProduceErr(err) && retryAttempt < maxRetries {
+				retryAttempt++
+				c.sleepProduceRetry()
+				continue
+			}
+			return err
+		}
+		resp, ok := decoded.(codec.BeginTxnResponse)
+		if !ok {
+			return &frame.ProtocolError{Msg: fmt.Sprintf("unexpected response for begin_txn: %T", decoded)}
+		}
+		if resp.ErrorCode == invalidTxnState {
+			return check(resp.ErrorCode, "begin_txn")
+		}
+		if isTransientBroker(resp.ErrorCode) && retryAttempt < maxRetries {
+			retryAttempt++
+			c.sleepProduceRetry()
+			continue
+		}
+		if err := check(resp.ErrorCode, "begin_txn"); err != nil {
+			return err
+		}
+		c.seqAtBegin = make(map[seqKey]int32, len(c.nextSeq))
+		for k, v := range c.nextSeq {
+			c.seqAtBegin[k] = v
+		}
+		c.inTransaction = true
+		return nil
 	}
-	if err := check(resp.ErrorCode, "begin_txn"); err != nil {
-		return err
-	}
-	c.seqAtBegin = make(map[seqKey]int32, len(c.nextSeq))
-	for k, v := range c.nextSeq {
-		c.seqAtBegin[k] = v
-	}
-	c.inTransaction = true
-	return nil
 }
-
 
 // CommitTransaction ends the open transaction with committed=1 (opcode 52).
 // offsets may be nil. Returns per-batch TxnProduceResult rows.
@@ -767,13 +791,11 @@ func (c *Client) CommitTransaction(offsets []codec.TxnOffsetCommit) ([]codec.Txn
 	return c.endTransaction(true, offsets)
 }
 
-
 // AbortTransaction ends the open transaction with committed=0 and rewinds sequences.
 func (c *Client) AbortTransaction() error {
 	_, err := c.endTransaction(false, nil)
 	return err
 }
-
 
 func (c *Client) endTransaction(committed bool, offsets []codec.TxnOffsetCommit) ([]codec.TxnProduceResult, error) {
 	if !c.producerReady {
@@ -791,26 +813,46 @@ func (c *Client) endTransaction(committed bool, offsets []codec.TxnOffsetCommit)
 	if err != nil {
 		return nil, err
 	}
-	decoded, err := c.roundTrip(codec.OpEndTxn, payload)
-	if err != nil {
-		return nil, err
+	maxRetries := c.maxRetries
+	if maxRetries < 0 {
+		maxRetries = 0
 	}
-	resp, ok := decoded.(codec.EndTxnResponse)
-	if !ok {
-		return nil, &frame.ProtocolError{Msg: fmt.Sprintf("unexpected response for end_txn: %T", decoded)}
-	}
-	if err := check(resp.ErrorCode, "end_txn"); err != nil {
-		return nil, err
-	}
-	c.inTransaction = false
-	if !committed {
-		c.nextSeq = make(map[seqKey]int32, len(c.seqAtBegin))
-		for k, v := range c.seqAtBegin {
-			c.nextSeq[k] = v
+	retryAttempt := 0
+	for {
+		decoded, err := c.roundTrip(codec.OpEndTxn, payload)
+		if err != nil {
+			if isTransientProduceErr(err) && retryAttempt < maxRetries {
+				retryAttempt++
+				c.sleepProduceRetry()
+				continue
+			}
+			return nil, err
 		}
+		resp, ok := decoded.(codec.EndTxnResponse)
+		if !ok {
+			return nil, &frame.ProtocolError{Msg: fmt.Sprintf("unexpected response for end_txn: %T", decoded)}
+		}
+		if resp.ErrorCode == invalidTxnState {
+			return nil, check(resp.ErrorCode, "end_txn")
+		}
+		if isTransientBroker(resp.ErrorCode) && retryAttempt < maxRetries {
+			retryAttempt++
+			c.sleepProduceRetry()
+			continue
+		}
+		if err := check(resp.ErrorCode, "end_txn"); err != nil {
+			return nil, err
+		}
+		c.inTransaction = false
+		if !committed {
+			c.nextSeq = make(map[seqKey]int32, len(c.seqAtBegin))
+			for k, v := range c.seqAtBegin {
+				c.nextSeq[k] = v
+			}
+		}
+		c.seqAtBegin = make(map[seqKey]int32)
+		return resp.Results, nil
 	}
-	c.seqAtBegin = make(map[seqKey]int32)
-	return resp.Results, nil
 }
 
 func (c *Client) AddBroker(id uint32, host string, port uint16, rack *string) (uint64, error) {
@@ -851,7 +893,6 @@ func (c *Client) AddBroker(id uint32, host string, port uint16, rack *string) (u
 	}
 }
 
-
 // RemoveBroker removes a broker from the membership overlay (native 104/105).
 // Returns the overlay generation. Error 14 follows maxRedirects when the
 // broker cannot forward.
@@ -890,7 +931,6 @@ func (c *Client) RemoveBroker(id uint32) (uint64, error) {
 		return resp.Generation, nil
 	}
 }
-
 
 // ListMembers lists configured + live membership (native opcode 106/107).
 // Overlay is still SoT. Transient broker/transport errors retry up to
@@ -1583,7 +1623,6 @@ type DescribeConfigsResult struct {
 	Configs        [][2]string
 }
 
-
 // DescribeConfigs returns topic configuration (native opcode 40/41).
 // Topic configs only (not Kafka DescribeConfigs / BROKER). Empty values
 // mean the key is unset. Non-zero error_code is BrokerError with
@@ -1676,7 +1715,6 @@ func (c *Client) DescribeConfigs(topic string) (DescribeConfigsResult, error) {
 		}, nil
 	}
 }
-
 
 // AlterConfigs updates topic configuration (native opcode 42/43).
 // Empty value clears that key (same as Rust). Topic configs only.

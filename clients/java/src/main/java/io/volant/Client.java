@@ -66,6 +66,8 @@ public final class Client implements AutoCloseable {
     private static final Pattern CONTROLLER_ID = Pattern.compile("controller_id=(\\d+)");
     /** Native {@code ErrorCode::UnknownProducerId}. */
     static final int UNKNOWN_PRODUCER_ID = 21;
+    /** Native {@code ErrorCode::InvalidTxnState}. */
+    static final int INVALID_TXN_STATE = 22;
 
     private String addr;
     private Socket socket;
@@ -1077,6 +1079,9 @@ public final class Client implements AutoCloseable {
 
     /**
      * Open a native transaction (opcode 50). Requires {@link #setTransactionalId}.
+     * Transient broker/transport errors retry up to {@code maxRetries} extra
+     * times (default 0). InvalidTxnState (22) and txn fence / epoch errors
+     * are not retried.
      */
     public void beginTransaction() {
         if (transactionalId == null || transactionalId.isEmpty()) {
@@ -1084,15 +1089,44 @@ public final class Client implements AutoCloseable {
         }
         ensureProducerId();
         byte[] payload = Codec.encodeBeginTxnRequest(new Codec.BeginTxnRequest(producerId, producerEpoch));
-        Object decoded = roundTrip(Codec.OP_BEGIN_TXN, payload);
-        if (!(decoded instanceof Codec.BeginTxnResponse)) {
-            throw new ProtocolException("unexpected response for begin_txn: " + typeName(decoded));
+        int retryAttempt = 0;
+        while (true) {
+            Object decoded;
+            try {
+                decoded = roundTrip(Codec.OP_BEGIN_TXN, payload);
+            } catch (BrokerException e) {
+                if (isTransientBroker(e.code) && retryAttempt < maxRetries) {
+                    retryAttempt++;
+                    sleepProduceRetry();
+                    continue;
+                }
+                throw e;
+            } catch (RuntimeException e) {
+                if (isTransientTransport(e) && retryAttempt < maxRetries) {
+                    retryAttempt++;
+                    sleepProduceRetry();
+                    continue;
+                }
+                throw e;
+            }
+            if (!(decoded instanceof Codec.BeginTxnResponse)) {
+                throw new ProtocolException("unexpected response for begin_txn: " + typeName(decoded));
+            }
+            Codec.BeginTxnResponse resp = (Codec.BeginTxnResponse) decoded;
+            if (resp.errorCode == INVALID_TXN_STATE) {
+                check(resp.errorCode, "begin_txn");
+            }
+            if (isTransientBroker(resp.errorCode) && retryAttempt < maxRetries) {
+                retryAttempt++;
+                sleepProduceRetry();
+                continue;
+            }
+            check(resp.errorCode, "begin_txn");
+            seqAtBegin.clear();
+            seqAtBegin.putAll(nextSeq);
+            inTransaction = true;
+            return;
         }
-        Codec.BeginTxnResponse resp = (Codec.BeginTxnResponse) decoded;
-        check(resp.errorCode, "begin_txn");
-        seqAtBegin.clear();
-        seqAtBegin.putAll(nextSeq);
-        inTransaction = true;
     }
 
     /** Commit the open transaction (opcode 52, committed=1). */
@@ -1116,19 +1150,47 @@ public final class Client implements AutoCloseable {
         }
         byte[] payload = Codec.encodeEndTxnRequest(
                 new Codec.EndTxnRequest(producerId, producerEpoch, committed, offsets));
-        Object decoded = roundTrip(Codec.OP_END_TXN, payload);
-        if (!(decoded instanceof Codec.EndTxnResponse)) {
-            throw new ProtocolException("unexpected response for end_txn: " + typeName(decoded));
+        int retryAttempt = 0;
+        while (true) {
+            Object decoded;
+            try {
+                decoded = roundTrip(Codec.OP_END_TXN, payload);
+            } catch (BrokerException e) {
+                if (isTransientBroker(e.code) && retryAttempt < maxRetries) {
+                    retryAttempt++;
+                    sleepProduceRetry();
+                    continue;
+                }
+                throw e;
+            } catch (RuntimeException e) {
+                if (isTransientTransport(e) && retryAttempt < maxRetries) {
+                    retryAttempt++;
+                    sleepProduceRetry();
+                    continue;
+                }
+                throw e;
+            }
+            if (!(decoded instanceof Codec.EndTxnResponse)) {
+                throw new ProtocolException("unexpected response for end_txn: " + typeName(decoded));
+            }
+            Codec.EndTxnResponse resp = (Codec.EndTxnResponse) decoded;
+            if (resp.errorCode == INVALID_TXN_STATE) {
+                check(resp.errorCode, "end_txn");
+            }
+            if (isTransientBroker(resp.errorCode) && retryAttempt < maxRetries) {
+                retryAttempt++;
+                sleepProduceRetry();
+                continue;
+            }
+            check(resp.errorCode, "end_txn");
+            inTransaction = false;
+            if (!committed) {
+                nextSeq.clear();
+                nextSeq.putAll(seqAtBegin);
+            }
+            seqAtBegin.clear();
+            return resp.results;
         }
-        Codec.EndTxnResponse resp = (Codec.EndTxnResponse) decoded;
-        check(resp.errorCode, "end_txn");
-        inTransaction = false;
-        if (!committed) {
-            nextSeq.clear();
-            nextSeq.putAll(seqAtBegin);
-        }
-        seqAtBegin.clear();
-        return resp.results;
     }
 
     private static String seqKey(String topic, int partition) {

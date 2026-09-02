@@ -75,6 +75,8 @@ _NOT_CONTROLLER = 14
 _CONTROLLER_ID_RE = re.compile(r"controller_id=(\d+)")
 # Native ErrorCode::UnknownProducerId — pid not allocated via InitProducerId.
 _UNKNOWN_PRODUCER = 21
+# Native ErrorCode::InvalidTxnState — e.g. BeginTxn after the broker already began.
+_INVALID_TXN_STATE = 22
 # Transient produce codes (Rust is_transient_error_code). Not 13 / 21.
 _IO = 6
 _TIMEOUT = 7
@@ -263,12 +265,13 @@ class Client:
 
         c = Client("127.0.0.1:9092", enable_idempotence=True)
 
-    Optional produce/fetch/heartbeat retry (v0.61 / v0.66 / v0.74)
-    retries transient broker codes 6, 7, 15, 16 and TCP I/O errors.
-    Default ``max_retries=0`` (no extra attempts). ``retry_backoff_ms``
-    defaults to 50; tests may set 0. Error 13 stays on the redirect
-    budget; error 21 stays on the one re-Init. Heartbeat rebalance
-    codes 9 / 10 / 11 are not retried::
+    Optional produce/fetch/heartbeat/BeginTxn/EndTxn retry (v0.61 /
+    v0.66 / v0.74 / v0.99) retries transient broker codes 6, 7, 15,
+    16 and TCP I/O errors. Default ``max_retries=0`` (no extra
+    attempts). ``retry_backoff_ms`` defaults to 50; tests may set 0.
+    Error 13 stays on the redirect budget; error 21 stays on the one
+    re-Init. Heartbeat rebalance codes 9 / 10 / 11 are not retried.
+    InvalidTxnState (22) is not retried::
 
         c = Client("127.0.0.1:9092", max_retries=3, retry_backoff_ms=50)
         c.max_retries = 3
@@ -978,7 +981,12 @@ class Client:
                 )
 
     def begin_transaction(self) -> None:
-        """Open a native transaction (opcode 50). Requires ``transactional_id``."""
+        """Open a native transaction (opcode 50). Requires ``transactional_id``.
+
+        Transient broker/transport errors retry up to ``max_retries``
+        extra times (default 0). InvalidTxnState (22) and txn fence /
+        epoch errors are not retried.
+        """
         if not self.transactional_id:
             raise ValueError("transactional_id not configured")
         self._ensure_producer_id()
@@ -987,12 +995,40 @@ class Client:
                 producer_id=self._producer_id, producer_epoch=self._producer_epoch
             )
         )
-        resp = self._round_trip(codec.OP_BEGIN_TXN, payload)
-        if not isinstance(resp, codec.BeginTxnResponse):
-            raise ProtocolError(f"unexpected response for begin_txn: {type(resp)}")
-        self._check(resp.error_code, "begin_txn")
-        self._seq_at_begin = dict(self._next_seq)
-        self._in_transaction = True
+        max_retries = max(0, int(self.max_retries))
+        retry_attempt = 0
+        while True:
+            try:
+                resp = self._round_trip(codec.OP_BEGIN_TXN, payload)
+            except BrokerError as e:
+                if _is_transient_broker(e.code) and retry_attempt < max_retries:
+                    retry_attempt += 1
+                    self._sleep_produce_retry()
+                    continue
+                raise
+            except OSError:
+                if retry_attempt < max_retries:
+                    retry_attempt += 1
+                    self._sleep_produce_retry()
+                    continue
+                raise
+            if not isinstance(resp, codec.BeginTxnResponse):
+                raise ProtocolError(
+                    f"unexpected response for begin_txn: {type(resp)}"
+                )
+            if resp.error_code == _INVALID_TXN_STATE:
+                self._check(resp.error_code, "begin_txn")
+            if (
+                _is_transient_broker(resp.error_code)
+                and retry_attempt < max_retries
+            ):
+                retry_attempt += 1
+                self._sleep_produce_retry()
+                continue
+            self._check(resp.error_code, "begin_txn")
+            self._seq_at_begin = dict(self._next_seq)
+            self._in_transaction = True
+            return
 
     def commit_transaction(
         self, offsets: Optional[Iterable[codec.TxnOffsetCommit]] = None
@@ -1017,15 +1053,42 @@ class Client:
                 offsets=offsets,
             )
         )
-        resp = self._round_trip(codec.OP_END_TXN, payload)
-        if not isinstance(resp, codec.EndTxnResponse):
-            raise ProtocolError(f"unexpected response for end_txn: {type(resp)}")
-        self._check(resp.error_code, "end_txn")
-        self._in_transaction = False
-        if not committed:
-            self._next_seq = dict(self._seq_at_begin)
-        self._seq_at_begin.clear()
-        return list(resp.results)
+        max_retries = max(0, int(self.max_retries))
+        retry_attempt = 0
+        while True:
+            try:
+                resp = self._round_trip(codec.OP_END_TXN, payload)
+            except BrokerError as e:
+                if _is_transient_broker(e.code) and retry_attempt < max_retries:
+                    retry_attempt += 1
+                    self._sleep_produce_retry()
+                    continue
+                raise
+            except OSError:
+                if retry_attempt < max_retries:
+                    retry_attempt += 1
+                    self._sleep_produce_retry()
+                    continue
+                raise
+            if not isinstance(resp, codec.EndTxnResponse):
+                raise ProtocolError(
+                    f"unexpected response for end_txn: {type(resp)}"
+                )
+            if resp.error_code == _INVALID_TXN_STATE:
+                self._check(resp.error_code, "end_txn")
+            if (
+                _is_transient_broker(resp.error_code)
+                and retry_attempt < max_retries
+            ):
+                retry_attempt += 1
+                self._sleep_produce_retry()
+                continue
+            self._check(resp.error_code, "end_txn")
+            self._in_transaction = False
+            if not committed:
+                self._next_seq = dict(self._seq_at_begin)
+            self._seq_at_begin.clear()
+            return list(resp.results)
 
     def fetch(
         self,
