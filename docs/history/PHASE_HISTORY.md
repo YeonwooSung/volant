@@ -289,6 +289,11 @@ docs for day-to-day reading: [ops](../ops.md), [consistency](../consistency.md),
 | v0.88 | ✅ | Rust SCRAM-admin/ListAcls NotController redirect | [V88_SPEC.md](../V88_SPEC.md) |
 | v0.89 | ✅ | AddBroker/RemoveBroker NotController redirect on Python/Go/Java | [V89_SPEC.md](../V89_SPEC.md) |
 | v0.90 | ✅ | DescribeGroup/ListGroups retry on Python/Go/Java | [V90_SPEC.md](../V90_SPEC.md) |
+| v0.91 | ✅ | Rust AddBroker/RemoveBroker NotController redirect | [V91_SPEC.md](../V91_SPEC.md) |
+| v0.92 | ✅ | Rust DescribeGroup/ListGroups retry | [V92_SPEC.md](../V92_SPEC.md) |
+| v0.93 | ✅ | Describe/AlterConfigs NotController redirect on Python/Go/Java | [V93_SPEC.md](../V93_SPEC.md) |
+| v0.94 | ✅ | Rust Describe/AlterConfigs NotController redirect | [V94_SPEC.md](../V94_SPEC.md) |
+| v0.95 | ✅ | Metadata/ListMembers retry on Python/Go/Java | [V95_SPEC.md](../V95_SPEC.md) |
 
 ---
 

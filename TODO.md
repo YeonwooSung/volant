@@ -1,6 +1,6 @@
 # Volant residual TODO (review loop)
 
-**Baseline:** HEAD product = **Phases 0–154** + residuals **v0.3–v0.90**.  
+**Baseline:** HEAD product = **Phases 0–154** + residuals **v0.3–v0.95**.  
 **Last review:** 2026-09-02  
 
 Living roadmap: [ROADMAP.md](./ROADMAP.md).  
@@ -64,11 +64,11 @@ Phase index: [docs/history/PHASE_HISTORY.md](./docs/history/PHASE_HISTORY.md).
 | **Later** | Full **openraft** crate integration | **v0.11–v0.26 + redb log (v0.35) + joint rollback (v0.34) + follower forward (v0.38)** — not RocksDB/KRaft |
 | **Later** | **Dynamic membership** reconfiguration | **overlay v0.10 + joint v0.26 + rollback v0.34 + follower forward v0.38 + reassign rollback v0.39** — overlay still SoT |
 | **Later** | Full **KIP-890 / `__transaction_state`** | **log MVP closed (v0.13)** — opt-in JSON topic; not Kafka schemas |
-| **Later** | **Multi-language clients** | **Python/Go/Java through v0.90** + Rust LeaveGroup / SCRAM 14 **v0.87/v0.88**; not kafka-python / SyncGroup |
+| **Later** | **Multi-language clients** | **Python/Go/Java through v0.95** + Rust Add/RemoveBroker 14 / Describe retry / configs 14 **v0.91/v0.92/v0.94**; not kafka-python / SyncGroup |
 | **Later** | **Long fuzz + chaos-mesh** | **MVP closed (v0.15)** — extended corpus + Chaos Mesh YAML + A→B isolate |
 | **Later** | **Perf campaign** vs aspirational targets | **closed (v0.2 PR2)** — measured table published; group-commit **v0.20** (opt-in, no new bench) |
 
-**Default next slice:** JoinGroup is still not retried (not idempotent). Describe/AlterConfigs / DeleteOffsets 14 if the broker ever returns it, Rust Add/RemoveBroker 14, or openraft RocksDB if redb is not enough. SyncGroup still has no opcode. Homemade Raft election / InstallSnapshot-on-154 / Phase 155 is **not** the next product bet. Do not open Phase 155.
+**Default next slice:** JoinGroup is still not retried (not idempotent). DeleteOffsets 14 if the broker ever returns it, Rust Metadata/ListMembers retry, or openraft RocksDB if redb is not enough. SyncGroup still has no opcode. Homemade Raft election / InstallSnapshot-on-154 / Phase 155 is **not** the next product bet. Do not open Phase 155.
 
 ---
 
@@ -176,6 +176,11 @@ Phase index: [docs/history/PHASE_HISTORY.md](./docs/history/PHASE_HISTORY.md).
 - [x] Rust SCRAM-admin/ListAcls NotController redirect → **v0.88**
 - [x] AddBroker/RemoveBroker NotController redirect on Python/Go/Java → **v0.89**
 - [x] DescribeGroup/ListGroups retry on Python/Go/Java → **v0.90**
+- [x] Rust AddBroker/RemoveBroker NotController redirect → **v0.91**
+- [x] Rust DescribeGroup/ListGroups retry → **v0.92**
+- [x] Describe/AlterConfigs NotController redirect on Python/Go/Java → **v0.93**
+- [x] Rust Describe/AlterConfigs NotController redirect → **v0.94**
+- [x] Metadata/ListMembers retry on Python/Go/Java → **v0.95**
 
 ---
 
@@ -199,7 +204,7 @@ Phase index: [docs/history/PHASE_HISTORY.md](./docs/history/PHASE_HISTORY.md).
 - [x] `__transaction_state` log MVP (v0.13; Volant JSON; not Kafka KIP-890/939 schemas)
 - [x] Kafka DeleteRecords **per-request** wait flag (v0.6 flex v2 tag 0; v0–1 env-only)
 - [x] Preferred selector **throttling** / TCP probe (v0.7; opt-in, not Kafka quota)
-- [x] Multi-language clients — Python/Go/Java through v0.90 (incl. LeaveGroup retry, Add/RemoveBroker 14, Describe/ListGroups retry) + Rust LeaveGroup / SCRAM 14 **v0.87/v0.88**; not kafka-python / SyncGroup
+- [x] Multi-language clients — Python/Go/Java through v0.95 (incl. configs 14, Metadata/ListMembers retry) + Rust Add/RemoveBroker 14 / Describe retry / configs 14 **v0.91/v0.92/v0.94**; not kafka-python / SyncGroup
 - [x] Long fuzz campaigns + chaos-mesh MVP (v0.15; corpus + YAML + A→B isolate; not multi-hour CI)
 - [x] Published perf numbers vs aspirational table; group-commit **v0.20** (opt-in)
 
@@ -210,12 +215,12 @@ Phase index: [docs/history/PHASE_HISTORY.md](./docs/history/PHASE_HISTORY.md).
 - Local `assignor="range"` uses DescribeGroup members (language **v0.69**, Rust **v0.73**); describe failure falls back. JoinGroup still has no member list / no SyncGroup
 - Language-client SCRAM handshake is **SHA-256** only (v0.46); admin Create/Delete/ListScramUsers are native **64–69** (v0.55); password is sent in the clear on create (use TLS); not Kafka SASL / AlterUserScramCredentials
 - Idempotent produce is native **32/33** (v0.47); BeginTxn/EndTxn are native **50–53** (v0.57); `TransactionalProducer` is a thin helper (v0.63). Not Kafka txn API keys
-- Produce/fetch/heartbeat/offset-admin/ListOffsets/LeaveGroup/DescribeGroup/ListGroups retry (v0.61 / v0.66 / v0.74 / v0.78 / v0.82 / v0.86 / v0.90 / Rust **v0.80/v0.83/v0.84/v0.87**) is default **0**; transient codes 6/7/15/16 + TCP I/O only. LeaveGroup error **10** is success (already left). Error 13 stays on `max_redirects`. JoinGroup is not retried
+- Produce/fetch/heartbeat/offset-admin/ListOffsets/LeaveGroup/DescribeGroup/ListGroups/Metadata/ListMembers retry (v0.61 / v0.66 / v0.74 / v0.78 / v0.82 / v0.86 / v0.90 / v0.95 / Rust **v0.80/v0.83/v0.84/v0.87/v0.92**) is default **0**; transient codes 6/7/15/16 + TCP I/O only. LeaveGroup error **10** is success (already left). Error 13 stays on `max_redirects`. JoinGroup is not retried
 - Auto-commit is poll-tied and default **off** (language **v0.48**, Rust **v0.60**); not Kafka `enable.auto.commit`
 - GroupConsumer `auto_offset_reset`: `earliest` is ListOffsets earliest (language **v0.70**, Rust **v0.71**); `latest` is LEO. Not Kafka timestamp reset
 - Go/Java convenience Produce is still one message; `ProduceBatch` / `produce(..., messages, acks)` sends N in one RPC (v0.68)
 - ListOffsets is native **48/49** (v0.50); `latest` is LEO; no isolation / timestamp
-- DeleteRecords error 13 redirects like Produce/Fetch (v0.65). CreateTopic / DeleteTopic / CreatePartitions / Reassign / CreateAcls / DeleteAcls follow error **14** (language **v0.72**, Rust **v0.79**). SCRAM-admin / ListAcls follow 14 (language **v0.85**, Rust **v0.88**). Add/RemoveBroker follow 14 on language clients when broker forward is unavailable (**v0.89**). Metadata `controller_id` trailer (**v0.77**; `0` = unknown) is preferred when the 14 message has no hint (Rust splice + language **v0.81**). Describe/AlterConfigs and DeleteOffsets still do not redirect. Rust Add/RemoveBroker still do not redirect
+- DeleteRecords error 13 redirects like Produce/Fetch (v0.65). CreateTopic / DeleteTopic / CreatePartitions / Reassign / CreateAcls / DeleteAcls follow error **14** (language **v0.72**, Rust **v0.79**). SCRAM-admin / ListAcls follow 14 (language **v0.85**, Rust **v0.88**). Add/RemoveBroker follow 14 when broker forward is unavailable (language **v0.89**, Rust **v0.91**). Describe/AlterConfigs follow 14 (language **v0.93**, Rust **v0.94**; broker may still not return 14 on local-readable topic configs). Metadata `controller_id` trailer (**v0.77**; `0` = unknown) is preferred when the 14 message has no hint (Rust splice + language **v0.81**). DeleteOffsets still does not redirect. Rust Metadata/ListMembers still do not retry
 - GroupConsumer poll fetch size is tunable (language **v0.75**, Rust **v0.76**, default 100 / 4MiB)
 - CreatePartitions **46/47** (v0.51) cannot shrink; Describe/AlterConfigs **40–43** (v0.53) are topic-only; DeleteOffsets **38/39** (v0.54) has no DeleteGroups opcode
 - ACLs are native **54–59** (v0.56), exact-match delete only. Membership **102–107** (v0.58) and Reassign **114/115** (v0.59) do not change overlay-as-SoT
@@ -250,5 +255,6 @@ Phase index: [docs/history/PHASE_HISTORY.md](./docs/history/PHASE_HISTORY.md).
 | v0.76–v0.80 | **Shipped** — Rust poll knobs; Metadata controller_id; offset-admin retry; Rust admin 14; Rust heartbeat retry |
 | v0.81–v0.85 | **Shipped** — language Metadata.controller_id hunt; ListOffsets retry; Rust offset/ListOffsets retry; SCRAM/ListAcls 14 |
 | v0.86–v0.90 | **Shipped** — LeaveGroup retry; Rust LeaveGroup; Rust SCRAM 14; Add/RemoveBroker 14; Describe/ListGroups retry |
+| v0.91–v0.95 | **Shipped** — Rust Add/RemoveBroker 14; Rust Describe/ListGroups retry; configs 14; Rust configs 14; Metadata/ListMembers retry |
 
 **How to use this file:** mark new work by phase number in ROADMAP + PHASE*_SPEC; fold completed rows into “Closed checklist”; keep “Still open” as the only honesty surface for operators and contributors.
