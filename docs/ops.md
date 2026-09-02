@@ -499,6 +499,10 @@ curl -s -H "Authorization: Bearer $VOLANT_METRICS_TOKEN" \
 
 Full list: [ROADMAP.md](../ROADMAP.md).
 
+## v0.7 preferred throttle / probe
+
+Opt-in only (`VOLANT_PREFERRED_REPLICA_THROTTLE_MS` / `VOLANT_PREFERRED_REPLICA_TCP_PROBE`; both default **off**). Throttle is a Fetch top-level `throttle_time_ms` on preferred **redirect**, not a Kafka client-quota. Probe is a short advertised `host:port` TCP connect (~75ms), not a broker-to-broker Fetch health check and not an async probe cache. See [V07_SPEC.md](./V07_SPEC.md).
+
 ## Shipped (not gaps)
 
 Kafka wire shim **Phases 23–109** (ApiVersions **0–5**, Fetch **0–18**, ACL admin

@@ -15,6 +15,24 @@ use crate::delete_records_outbox::DeleteRecordsOutbox;
 use super::*;
 use super::{fence_leader_epoch, EpochFenceMode};
 
+/// Short TCP connect against advertised `host:port` (v0.7 preferred probe).
+///
+/// Unresolvable address, connect failure, or timeout (~75ms) → `false`.
+fn preferred_replica_tcp_probe_ok(host: &str, port: u16) -> bool {
+    use std::net::{TcpStream, ToSocketAddrs};
+    let timeout = Duration::from_millis(75);
+    let addr = format!("{}:{}", host.trim(), port);
+    let Ok(iter) = addr.to_socket_addrs() else {
+        return false;
+    };
+    for sa in iter {
+        if TcpStream::connect_timeout(&sa, timeout).is_ok() {
+            return true;
+        }
+    }
+    false
+}
+
 impl Broker {
     // --- Phase 113 cluster admin generations (fan-out behavior lands in later PRs) ---
 
@@ -1042,6 +1060,40 @@ impl Broker {
             .store(max_lag, Ordering::Relaxed);
     }
 
+    /// v0.7: configured preferred-redirect `throttle_time_ms` (`0` = off).
+    pub fn preferred_replica_throttle_ms(&self) -> u32 {
+        self.preferred_replica_throttle_ms.load(Ordering::Relaxed)
+    }
+
+    /// v0.7: runtime preferred-redirect throttle for tests / operator tooling.
+    pub fn set_preferred_replica_throttle_ms(&self, throttle_ms: u32) {
+        self.preferred_replica_throttle_ms
+            .store(throttle_ms, Ordering::Relaxed);
+    }
+
+    /// v0.7: whether preferred selection probes advertised `host:port`.
+    pub fn preferred_replica_tcp_probe(&self) -> bool {
+        self.preferred_replica_tcp_probe.load(Ordering::Relaxed)
+    }
+
+    /// v0.7: runtime TCP probe enable for tests / operator tooling.
+    pub fn set_preferred_replica_tcp_probe(&self, enabled: bool) {
+        self.preferred_replica_tcp_probe
+            .store(enabled, Ordering::Relaxed);
+    }
+
+    /// v0.7: preferred-redirect throttle applications.
+    pub fn preferred_replica_throttled_total(&self) -> u64 {
+        self.preferred_replica_throttled_total
+            .load(Ordering::Relaxed)
+    }
+
+    /// v0.7: preferred TCP probe failures.
+    pub fn preferred_replica_probe_fail_total(&self) -> u64 {
+        self.preferred_replica_probe_fail_total
+            .load(Ordering::Relaxed)
+    }
+
     /// Optional rack for a configured broker (cluster.toml); `None` single-node or unset.
     pub fn broker_rack(&self, broker_id: u32) -> Option<String> {
         self.cluster
@@ -1051,8 +1103,8 @@ impl Broker {
             .and_then(|b| b.rack.clone())
     }
 
-    /// Phase 126 + 133 + 140: select a preferred read replica for consumer Fetch
-    /// (KIP-392 subset).
+    /// Phase 126 + 133 + 140 + v0.7: select a preferred read replica for
+    /// consumer Fetch (KIP-392 subset).
     ///
     /// Returns a **follower** broker id in the same rack as `client_rack` that is
     /// currently in the local ISR, **live**, has a usable configured address
@@ -1062,6 +1114,10 @@ impl Broker {
     ///
     /// **Ranking (Phase 133):** among eligible peers prefer **highest follower
     /// LEO**, then **lowest broker id** as tiebreak (replaces pure min-id-only).
+    ///
+    /// **v0.7 TCP probe (opt-in):** when `VOLANT_PREFERRED_REPLICA_TCP_PROBE` is
+    /// on, skip peers whose advertised `host:port` fails a short TCP connect.
+    /// Default off — existing 126/133/140/144 tests stay unchanged.
     ///
     /// Empty/`None` rack, single-node, non-leader, or no eligible peer → `None`
     /// (caller leaves PreferredReadReplica = -1).
@@ -1126,6 +1182,16 @@ impl Broker {
             if leader_leo.saturating_sub(leo) > max_lag {
                 continue;
             }
+            // v0.7: optional short TCP connect against advertised host:port.
+            if self.preferred_replica_tcp_probe.load(Ordering::Relaxed) {
+                let Some(ep) = cluster.config.broker(id) else {
+                    continue;
+                };
+                if !preferred_replica_tcp_probe_ok(&ep.host, ep.port) {
+                    self.note_preferred_replica_probe_fail();
+                    continue;
+                }
+            }
             match best {
                 None => best = Some((leo, id)),
                 Some((best_leo, best_id)) => {
@@ -1151,6 +1217,16 @@ impl Broker {
 
     pub(crate) fn note_preferred_replica_session_suppressed(&self) {
         self.preferred_replica_session_suppressed_total
+            .fetch_add(1, Ordering::Relaxed);
+    }
+
+    pub(crate) fn note_preferred_replica_throttled(&self) {
+        self.preferred_replica_throttled_total
+            .fetch_add(1, Ordering::Relaxed);
+    }
+
+    pub(crate) fn note_preferred_replica_probe_fail(&self) {
+        self.preferred_replica_probe_fail_total
             .fetch_add(1, Ordering::Relaxed);
     }
 

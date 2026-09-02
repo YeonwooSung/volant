@@ -641,10 +641,11 @@ pub(crate) fn put_fetch_response_header(
     version: i16,
     error: i16,
     session_id: i32,
+    throttle_time_ms: i32,
 ) {
     // throttle (v1+), top-level error + session_id (v7+)
     if version >= 1 {
-        out.put_i32(0);
+        out.put_i32(throttle_time_ms.max(0));
     }
     if version >= 7 {
         out.put_i16(error);
@@ -660,7 +661,7 @@ pub(crate) fn put_fetch_empty_response(
     session_id: i32,
 ) {
     let flexible = version >= 12;
-    put_fetch_response_header(out, version, error, session_id);
+    put_fetch_response_header(out, version, error, session_id, 0);
     if flexible {
         put_compact_array_len(out, 0);
         put_empty_tag_buffer(out);
@@ -1143,6 +1144,8 @@ pub(crate) fn encode_fetch(broker: &Broker, src: &mut impl Buf, out: &mut BytesM
     let mut kip951_leaders: Vec<i32> = Vec::new();
     // (topic_key, wire, name, included partitions)
     let mut built_topics: Vec<(String, TopicWireId, String, Vec<BuiltPart>)> = Vec::new();
+    // v0.7: at least one partition emitted a PreferredReadReplica redirect.
+    let mut preferred_redirected = false;
 
     for key in &fetch_order {
         let Some(topic) = fetch_topics.get(key) else {
@@ -1284,6 +1287,7 @@ pub(crate) fn encode_fetch(broker: &Broker, src: &mut impl Buf, out: &mut BytesM
                             produce_log_start_offset(broker, &topic_name, partition as u32);
                         let resp_lso = if version >= 4 { lso } else { hwm };
                         broker.note_preferred_replica_redirect();
+                        preferred_redirected = true;
                         built_parts.push(BuiltPart {
                             partition,
                             error: KafkaErrorCode::None.as_i16(),
@@ -1400,7 +1404,18 @@ pub(crate) fn encode_fetch(broker: &Broker, src: &mut impl Buf, out: &mut BytesM
     }
 
     // --- Encode responses ---
-    put_fetch_response_header(out, version, top_error, resp_session_id);
+    // v0.7: opt-in preferred redirect throttle (default 0). Never clobber a
+    // larger existing throttle — max(existing, configured).
+    let mut throttle_time_ms = 0i32;
+    if preferred_redirected {
+        let cfg = broker.preferred_replica_throttle_ms();
+        if cfg > 0 {
+            let applied = i32::try_from(cfg).unwrap_or(i32::MAX);
+            throttle_time_ms = throttle_time_ms.max(applied);
+            broker.note_preferred_replica_throttled();
+        }
+    }
+    put_fetch_response_header(out, version, top_error, resp_session_id, throttle_time_ms);
     if flexible {
         put_compact_array_len(out, topics_out.len());
     } else {

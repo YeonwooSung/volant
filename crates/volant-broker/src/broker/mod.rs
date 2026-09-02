@@ -575,6 +575,14 @@ pub struct Broker {
     /// Phase 140: max leader_leo − follower_leo for preferred eligibility.
     /// `u64::MAX` = unlimited (env unset). Override via setter in tests.
     preferred_replica_max_leo_lag: AtomicU64,
+    /// v0.7: Fetch top-level `throttle_time_ms` on preferred redirect (`0` = off).
+    preferred_replica_throttle_ms: AtomicU32,
+    /// v0.7: skip preferred candidates whose advertised `host:port` fails TCP connect.
+    preferred_replica_tcp_probe: AtomicBool,
+    /// v0.7: preferred redirect throttle applied to a Fetch response.
+    preferred_replica_throttled_total: AtomicU64,
+    /// v0.7: preferred TCP probe failures (unresolvable / connect / timeout).
+    preferred_replica_probe_fail_total: AtomicU64,
     /// Phase 120/124: durable Init-owner txn coordinator registry.
     txn_coordinator_registry: TxnCoordinatorRegistry,
     /// Phase 120: successful transparent EndTxn (txn) forwards.
@@ -818,6 +826,10 @@ impl Broker {
             preferred_replica_session_suppressed_total: AtomicU64::new(0),
             rack_aware_assignment_total: AtomicU64::new(0),
             preferred_replica_max_leo_lag: AtomicU64::new(default_preferred_replica_max_leo_lag()),
+            preferred_replica_throttle_ms: AtomicU32::new(default_preferred_replica_throttle_ms()),
+            preferred_replica_tcp_probe: AtomicBool::new(default_preferred_replica_tcp_probe()),
+            preferred_replica_throttled_total: AtomicU64::new(0),
+            preferred_replica_probe_fail_total: AtomicU64::new(0),
             txn_coordinator_registry,
             txn_forward_total: AtomicU64::new(0),
             txn_forward_errors_total: AtomicU64::new(0),
@@ -983,6 +995,10 @@ impl Broker {
             preferred_replica_session_suppressed_total: AtomicU64::new(0),
             rack_aware_assignment_total: AtomicU64::new(0),
             preferred_replica_max_leo_lag: AtomicU64::new(default_preferred_replica_max_leo_lag()),
+            preferred_replica_throttle_ms: AtomicU32::new(default_preferred_replica_throttle_ms()),
+            preferred_replica_tcp_probe: AtomicBool::new(default_preferred_replica_tcp_probe()),
+            preferred_replica_throttled_total: AtomicU64::new(0),
+            preferred_replica_probe_fail_total: AtomicU64::new(0),
             txn_coordinator_registry,
             txn_forward_total: AtomicU64::new(0),
             txn_forward_errors_total: AtomicU64::new(0),
@@ -1544,6 +1560,30 @@ fn default_preferred_replica_max_leo_lag() -> u64 {
         .ok()
         .and_then(|s| s.trim().parse::<u64>().ok())
         .unwrap_or(u64::MAX)
+}
+
+/// v0.7: `VOLANT_PREFERRED_REPLICA_THROTTLE_MS` → parsed u32 ms; unset / 0 /
+/// invalid → `0` (today's Fetch `throttle_time_ms` unchanged).
+fn default_preferred_replica_throttle_ms() -> u32 {
+    std::env::var("VOLANT_PREFERRED_REPLICA_THROTTLE_MS")
+        .ok()
+        .and_then(|s| s.trim().parse::<u32>().ok())
+        .unwrap_or(0)
+}
+
+/// v0.7: `VOLANT_PREFERRED_REPLICA_TCP_PROBE` → true for `1`/`true`/`yes`/`on`
+/// (case-insensitive); unset / anything else → **false**.
+fn default_preferred_replica_tcp_probe() -> bool {
+    match std::env::var("VOLANT_PREFERRED_REPLICA_TCP_PROBE") {
+        Ok(s) => {
+            let t = s.trim();
+            t == "1"
+                || t.eq_ignore_ascii_case("true")
+                || t.eq_ignore_ascii_case("yes")
+                || t.eq_ignore_ascii_case("on")
+        }
+        Err(_) => false,
+    }
 }
 
 /// Phase 135: `VOLANT_DELETE_RECORDS_WAIT_MAJORITY` → true for `1`/`true`/`yes`
