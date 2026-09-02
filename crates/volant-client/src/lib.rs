@@ -36,6 +36,10 @@
 //! v0.84 retries [`Client::list_offsets`] on that same transient set
 //! (default 0). Error 2 (NotFound) is not retried. GroupConsumer
 //! earliest/latest reset inherit.
+//! v0.87 retries [`Client::leave_group`] on that same transient set
+//! (default 0). Error 10 (`UnknownMemberId`) is success (already
+//! left). 9 / 11 / 13 / 14 / 2 and protocol are not retried.
+//! [`GroupConsumer::leave`] inherits.
 
 #![deny(missing_docs)]
 
