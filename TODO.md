@@ -1,6 +1,6 @@
 # Volant residual TODO (review loop)
 
-**Baseline:** HEAD product = **Phases 0–154** + residuals **v0.3–v0.70**.  
+**Baseline:** HEAD product = **Phases 0–154** + residuals **v0.3–v0.75**.  
 **Last review:** 2026-09-02  
 
 Living roadmap: [ROADMAP.md](./ROADMAP.md).  
@@ -64,11 +64,11 @@ Phase index: [docs/history/PHASE_HISTORY.md](./docs/history/PHASE_HISTORY.md).
 | **Later** | Full **openraft** crate integration | **v0.11–v0.26 + redb log (v0.35) + joint rollback (v0.34) + follower forward (v0.38)** — not RocksDB/KRaft |
 | **Later** | **Dynamic membership** reconfiguration | **overlay v0.10 + joint v0.26 + rollback v0.34 + follower forward v0.38 + reassign rollback v0.39** — overlay still SoT |
 | **Later** | Full **KIP-890 / `__transaction_state`** | **log MVP closed (v0.13)** — opt-in JSON topic; not Kafka schemas |
-| **Later** | **Multi-language clients** | **Python/Go/Java through v0.70** + Rust auto_offset_reset **v0.67**; not kafka-python / SyncGroup |
+| **Later** | **Multi-language clients** | **Python/Go/Java through v0.75** + Rust earliest/range **v0.71/v0.73**; not kafka-python / SyncGroup |
 | **Later** | **Long fuzz + chaos-mesh** | **MVP closed (v0.15)** — extended corpus + Chaos Mesh YAML + A→B isolate |
 | **Later** | **Perf campaign** vs aspirational targets | **closed (v0.2 PR2)** — measured table published; group-commit **v0.20** (opt-in, no new bench) |
 
-**Default next slice:** admin error-14 redirect, Rust `earliest` via ListOffsets, or openraft RocksDB if redb is not enough. SyncGroup still has no opcode (range now uses DescribeGroup client-side). Homemade Raft election / InstallSnapshot-on-154 / Phase 155 is **not** the next product bet. Do not open Phase 155.
+**Default next slice:** Metadata `controller_id` trailer (admin 14 still hunts another advertised broker), Rust poll fetch knobs, or openraft RocksDB if redb is not enough. SyncGroup still has no opcode. Homemade Raft election / InstallSnapshot-on-154 / Phase 155 is **not** the next product bet. Do not open Phase 155.
 
 ---
 
@@ -156,6 +156,11 @@ Phase index: [docs/history/PHASE_HISTORY.md](./docs/history/PHASE_HISTORY.md).
 - [x] Go/Java ProduceBatch → **v0.68**
 - [x] Multi-member range via DescribeGroup → **v0.69**
 - [x] GroupConsumer earliest via ListOffsets → **v0.70**
+- [x] Rust GroupConsumer earliest via ListOffsets → **v0.71**
+- [x] Admin NotController redirect on Python/Go/Java → **v0.72**
+- [x] Rust GroupConsumer range via DescribeGroup → **v0.73**
+- [x] Heartbeat retry on Python/Go/Java → **v0.74**
+- [x] GroupConsumer poll fetch knobs on Python/Go/Java → **v0.75**
 
 ---
 
@@ -179,7 +184,7 @@ Phase index: [docs/history/PHASE_HISTORY.md](./docs/history/PHASE_HISTORY.md).
 - [x] `__transaction_state` log MVP (v0.13; Volant JSON; not Kafka KIP-890/939 schemas)
 - [x] Kafka DeleteRecords **per-request** wait flag (v0.6 flex v2 tag 0; v0–1 env-only)
 - [x] Preferred selector **throttling** / TCP probe (v0.7; opt-in, not Kafka quota)
-- [x] Multi-language clients — Python/Go/Java through v0.70 (incl. fetch retry, ProduceBatch, DescribeGroup range, earliest via ListOffsets) + Rust auto_offset_reset **v0.67**; not kafka-python / SyncGroup
+- [x] Multi-language clients — Python/Go/Java through v0.75 (incl. admin 14 redirect, heartbeat retry, poll fetch knobs) + Rust earliest/range **v0.71/v0.73**; not kafka-python / SyncGroup
 - [x] Long fuzz campaigns + chaos-mesh MVP (v0.15; corpus + YAML + A→B isolate; not multi-hour CI)
 - [x] Published perf numbers vs aspirational table; group-commit **v0.20** (opt-in)
 
@@ -187,15 +192,16 @@ Phase index: [docs/history/PHASE_HISTORY.md](./docs/history/PHASE_HISTORY.md).
 - DeleteRecords **wait off**: cluster upgrades to wait-on unless **both** `VOLANT_DELETE_RECORDS_ALLOW_IRREVERSIBLE=1` **and** `VOLANT_DELETE_RECORDS_IRREVERSIBLE_ACK=1` (v0.45). Single-node wait-off, and both-envs-on, are still irreversible
 - Session mirror: dual unclaimed primary (v0.25) + mirror-only (v0.30) converge on MirrorPut / helper; still not Raft
 - Metadata raft wait-commit default **on** (v0.40): CreateTopic waits for `commit_index` else rollback + **15**; escape `VOLANT_METADATA_RAFT_WAIT_COMMIT=0` (Phase 154 tests)
-- Local `assignor="range"` uses DescribeGroup members (v0.69); describe failure falls back to solo. JoinGroup still has no member list / no SyncGroup
+- Local `assignor="range"` uses DescribeGroup members (language **v0.69**, Rust **v0.73**); describe failure falls back. JoinGroup still has no member list / no SyncGroup
 - Language-client SCRAM handshake is **SHA-256** only (v0.46); admin Create/Delete/ListScramUsers are native **64–69** (v0.55); password is sent in the clear on create (use TLS); not Kafka SASL / AlterUserScramCredentials
 - Idempotent produce is native **32/33** (v0.47); BeginTxn/EndTxn are native **50–53** (v0.57); `TransactionalProducer` is a thin helper (v0.63). Not Kafka txn API keys
-- Produce/fetch retry (v0.61 / v0.66) is default **0**; transient codes 6/7/15/16 + TCP I/O only. Error 13 stays on `max_redirects`
+- Produce/fetch/heartbeat retry (v0.61 / v0.66 / v0.74) is default **0**; transient codes 6/7/15/16 + TCP I/O only. Error 13 stays on `max_redirects`. JoinGroup / LeaveGroup are not retried
 - Auto-commit is poll-tied and default **off** (language **v0.48**, Rust **v0.60**); not Kafka `enable.auto.commit`
-- GroupConsumer `auto_offset_reset`: language `earliest` is ListOffsets earliest (v0.70); `latest` is LEO. Not Kafka timestamp reset. Rust (v0.67) still uses position **0** for earliest
+- GroupConsumer `auto_offset_reset`: `earliest` is ListOffsets earliest (language **v0.70**, Rust **v0.71**); `latest` is LEO. Not Kafka timestamp reset
 - Go/Java convenience Produce is still one message; `ProduceBatch` / `produce(..., messages, acks)` sends N in one RPC (v0.68)
 - ListOffsets is native **48/49** (v0.50); `latest` is LEO; no isolation / timestamp
-- DeleteRecords error 13 now redirects like Produce/Fetch (v0.65). Other admin RPCs still do not
+- DeleteRecords error 13 redirects like Produce/Fetch (v0.65). CreateTopic / DeleteTopic / CreatePartitions / Reassign / CreateAcls / DeleteAcls follow error **14** (v0.72): parse `controller_id=` from the message or try another advertised broker. Native Metadata has no controller_id. Describe/AlterConfigs, DeleteOffsets, Add/RemoveBroker still do not redirect
+- GroupConsumer poll fetch size is tunable (language **v0.75**, default 100 / 4MiB). Rust poll fetch size is still hardcoded
 - CreatePartitions **46/47** (v0.51) cannot shrink; Describe/AlterConfigs **40–43** (v0.53) are topic-only; DeleteOffsets **38/39** (v0.54) has no DeleteGroups opcode
 - ACLs are native **54–59** (v0.56), exact-match delete only. Membership **102–107** (v0.58) and Reassign **114/115** (v0.59) do not change overlay-as-SoT
 
@@ -225,5 +231,6 @@ Phase index: [docs/history/PHASE_HISTORY.md](./docs/history/PHASE_HISTORY.md).
 | v0.56–v0.60 | **Shipped** — client ACLs; BeginTxn/EndTxn; membership admin; ReassignPartitions; Rust auto-commit |
 | v0.61–v0.65 | **Shipped** — produce retry; auto_offset_reset; TransactionalProducer; Fetch knobs / Produce acks; DeleteRecords redirect |
 | v0.66–v0.70 | **Shipped** — fetch retry; Rust auto_offset_reset; Go/Java ProduceBatch; DescribeGroup range; earliest via ListOffsets |
+| v0.71–v0.75 | **Shipped** — Rust earliest via ListOffsets; admin 14 redirect; Rust range via DescribeGroup; heartbeat retry; poll fetch knobs |
 
 **How to use this file:** mark new work by phase number in ROADMAP + PHASE*_SPEC; fold completed rows into “Closed checklist”; keep “Still open” as the only honesty surface for operators and contributors.

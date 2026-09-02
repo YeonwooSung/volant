@@ -269,6 +269,11 @@ docs for day-to-day reading: [ops](../ops.md), [consistency](../consistency.md),
 | v0.68 | ✅ | Go/Java ProduceBatch | [V68_SPEC.md](../V68_SPEC.md) |
 | v0.69 | ✅ | Multi-member range via DescribeGroup | [V69_SPEC.md](../V69_SPEC.md) |
 | v0.70 | ✅ | GroupConsumer earliest via ListOffsets | [V70_SPEC.md](../V70_SPEC.md) |
+| v0.71 | ✅ | Rust GroupConsumer earliest via ListOffsets | [V71_SPEC.md](../V71_SPEC.md) |
+| v0.72 | ✅ | Admin NotController redirect on Python/Go/Java | [V72_SPEC.md](../V72_SPEC.md) |
+| v0.73 | ✅ | Rust GroupConsumer range via DescribeGroup | [V73_SPEC.md](../V73_SPEC.md) |
+| v0.74 | ✅ | Heartbeat retry on Python/Go/Java | [V74_SPEC.md](../V74_SPEC.md) |
+| v0.75 | ✅ | GroupConsumer poll fetch knobs on Python/Go/Java | [V75_SPEC.md](../V75_SPEC.md) |
 
 ---
 
