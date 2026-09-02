@@ -447,6 +447,7 @@ impl Broker {
                 self.clear_txn_abortable(pid);
                 self.note_txn_coordinator(transactional_id, pid, self.node_id);
                 let _ = self.persist_producer_state();
+                // KeepPrepared leaves prepare_* as the last coordinator-log state.
                 return InitProducerIdResult {
                     error_code: 0,
                     producer_id: pid,
@@ -497,12 +498,26 @@ impl Broker {
                         ControlMarkerType::Abort,
                         &txn,
                     );
+                    self.append_transaction_state(
+                        transactional_id,
+                        TXN_STATE_COMPLETE_ABORT,
+                        existing,
+                        old_epoch,
+                        txn.opened_at_ms,
+                    );
                 }
                 // Phase 94: epoch fence clears abortable for the new identity.
                 self.clear_txn_abortable(existing);
                 // Phase 120: this broker remains/becomes Init owner for the txn id.
                 self.note_txn_coordinator(transactional_id, existing, self.node_id);
                 let _ = self.persist_producer_state();
+                self.append_transaction_state(
+                    transactional_id,
+                    TXN_STATE_EMPTY,
+                    existing,
+                    epoch,
+                    0,
+                );
                 return InitProducerIdResult {
                     error_code: 0,
                     producer_id: existing,
@@ -531,6 +546,7 @@ impl Broker {
         // Phase 120: this broker is the Init owner / txn coordinator.
         self.note_txn_coordinator(transactional_id, id, self.node_id);
         let _ = self.persist_producer_state();
+        self.append_transaction_state(transactional_id, TXN_STATE_EMPTY, id, epoch, 0);
         InitProducerIdResult {
             error_code: 0,
             producer_id: id,
@@ -565,18 +581,30 @@ impl Broker {
         if !txn_id.is_empty() && self.prepared_txns.lock().contains_key(&txn_id) {
             return ErrorCode::InvalidTxnState as u16;
         }
-        let mut open = self.open_txns.lock();
-        if open.contains_key(&producer_id) {
-            return ErrorCode::InvalidTxnState as u16;
+        let opened_at_ms = unix_now_ms();
+        {
+            let mut open = self.open_txns.lock();
+            if open.contains_key(&producer_id) {
+                return ErrorCode::InvalidTxnState as u16;
+            }
+            open.insert(
+                producer_id,
+                OpenTxn {
+                    opened_at_ms,
+                    producer_epoch,
+                    ..OpenTxn::default()
+                },
+            );
         }
-        open.insert(
-            producer_id,
-            OpenTxn {
-                opened_at_ms: unix_now_ms(),
+        if !txn_id.is_empty() {
+            self.append_transaction_state(
+                &txn_id,
+                TXN_STATE_ONGOING,
+                producer_id,
                 producer_epoch,
-                ..OpenTxn::default()
-            },
-        );
+                opened_at_ms,
+            );
+        }
         0
     }
 
@@ -1137,10 +1165,23 @@ impl Broker {
                 drop(prepared);
                 // Completing a live prepare clears any stale abortable mark.
                 self.clear_txn_abortable(producer_id);
+                let start_ms = prep.prepared_at_ms;
                 let results =
                     self.finalize_txn(producer_id, producer_epoch, committed, prep.open, offsets)?;
                 self.persist_prepared_txns();
                 self.clear_cluster_prepared_index(&transactional_id);
+                let state = if committed {
+                    TXN_STATE_COMPLETE_COMMIT
+                } else {
+                    TXN_STATE_COMPLETE_ABORT
+                };
+                self.append_transaction_state(
+                    &transactional_id,
+                    state,
+                    producer_id,
+                    producer_epoch,
+                    start_ms,
+                );
                 let fanout = if self.cluster.is_some() {
                     Txn2pcFanout::Complete {
                         transactional_id,
@@ -1181,12 +1222,13 @@ impl Broker {
 
         // Phase 90: first EndTxn on a 2PC producer → prepare (durable).
         if enable_2pc && !transactional_id.is_empty() {
+            let prepared_at_ms = unix_now_ms();
             let prep = PreparedTxn {
                 transactional_id: transactional_id.clone(),
                 producer_id,
                 producer_epoch,
                 commit: committed,
-                prepared_at_ms: unix_now_ms(),
+                prepared_at_ms,
                 open: txn,
             };
             self.prepared_txns
@@ -1201,6 +1243,18 @@ impl Broker {
                 producer_epoch,
                 committed,
             );
+            let state = if committed {
+                TXN_STATE_PREPARE_COMMIT
+            } else {
+                TXN_STATE_PREPARE_ABORT
+            };
+            self.append_transaction_state(
+                &transactional_id,
+                state,
+                producer_id,
+                producer_epoch,
+                prepared_at_ms,
+            );
             let fanout = if self.cluster.is_some() {
                 Txn2pcFanout::Prepare {
                     transactional_id,
@@ -1214,7 +1268,22 @@ impl Broker {
             return Ok((0, Vec::new(), fanout));
         }
 
+        let start_ms = txn.opened_at_ms;
         let results = self.finalize_txn(producer_id, producer_epoch, committed, txn, offsets)?;
+        if !transactional_id.is_empty() {
+            let state = if committed {
+                TXN_STATE_COMPLETE_COMMIT
+            } else {
+                TXN_STATE_COMPLETE_ABORT
+            };
+            self.append_transaction_state(
+                &transactional_id,
+                state,
+                producer_id,
+                producer_epoch,
+                start_ms,
+            );
+        }
         // Non-2PC one-shot: still fan out complete so peers that held open
         // ranges (from open fan-out) finalize consistently in cluster mode.
         let fanout = if self.cluster.is_some() && !transactional_id.is_empty() {
@@ -1398,6 +1467,9 @@ impl Broker {
     }
 
     /// Force-abort a prepared txn (InitProducerId KeepPreparedTxn=false / Phase 92 timeout).
+    ///
+    /// Fence abort writes a single `complete_abort` on `__transaction_state`
+    /// (not prepare_abort then complete_abort).
     pub(super) fn force_abort_prepared(&self, prep: PreparedTxn) {
         self.record_aborted_from_txn(prep.producer_id, &prep.open);
         self.append_txn_control_markers(
@@ -1407,6 +1479,13 @@ impl Broker {
             &prep.open,
         );
         self.persist_prepared_txns();
+        self.append_transaction_state(
+            &prep.transactional_id,
+            TXN_STATE_COMPLETE_ABORT,
+            prep.producer_id,
+            prep.producer_epoch,
+            prep.prepared_at_ms,
+        );
     }
 
     /// Lazy expiry of timed-out open **and** prepared txns (Phase 92/93).
@@ -1509,6 +1588,21 @@ impl Broker {
             self.append_txn_control_markers(pid, epoch, ControlMarkerType::Abort, &txn);
             // Phase 94: client must observe TRANSACTION_ABORTABLE until EndTxn.
             self.mark_txn_abortable(pid);
+            let tid = self
+                .producer_state
+                .read()
+                .get(&pid)
+                .map(|p| p.transactional_id.clone())
+                .unwrap_or_default();
+            if !tid.is_empty() {
+                self.append_transaction_state(
+                    &tid,
+                    TXN_STATE_COMPLETE_ABORT,
+                    pid,
+                    epoch,
+                    txn.opened_at_ms,
+                );
+            }
         }
         if n > 0 {
             self.persist_txn_markers();
@@ -1554,6 +1648,13 @@ impl Broker {
                 &prep.open,
             );
             self.mark_txn_abortable(prep.producer_id);
+            self.append_transaction_state(
+                &prep.transactional_id,
+                TXN_STATE_COMPLETE_ABORT,
+                prep.producer_id,
+                prep.producer_epoch,
+                prep.prepared_at_ms,
+            );
         }
         if n > 0 {
             self.persist_prepared_txns();

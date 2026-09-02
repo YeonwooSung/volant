@@ -53,10 +53,13 @@ pub use acl::{
 pub use assignor::{range_assign, range_assign_multi, sticky_assign, sticky_assign_multi};
 pub use broker::{
     admin_catchup_min_interval_ms, journal_catchup_min_interval_ms, murmur2, partition_for_key,
-    sticky_coordinator_id, Broker, ClusterState, IdempotentCheck, InterBrokerTls,
-    MembershipSnapshot, MetadataSnapshot, PartitionMetadata, PendingIsrReport, TopicMetadata,
-    Txn2pcFanout, TxnCommitResult, DEFAULT_ADMIN_CATCHUP_MIN_INTERVAL_MS,
-    DEFAULT_JOURNAL_CATCHUP_MIN_INTERVAL_MS,
+    sticky_coordinator_id, transaction_state_topic_enabled_from_env, Broker, ClusterState,
+    IdempotentCheck, InterBrokerTls, MembershipSnapshot, MetadataSnapshot, PartitionMetadata,
+    PendingIsrReport, TopicMetadata, TransactionStateRecord, Txn2pcFanout, TxnCommitResult,
+    DEFAULT_ADMIN_CATCHUP_MIN_INTERVAL_MS, DEFAULT_JOURNAL_CATCHUP_MIN_INTERVAL_MS,
+    ENV_TRANSACTION_STATE_TOPIC, TRANSACTION_STATE_HEADER, TRANSACTION_STATE_RECORD_VERSION,
+    TRANSACTION_STATE_TOPIC, TXN_STATE_COMPLETE_ABORT, TXN_STATE_COMPLETE_COMMIT, TXN_STATE_EMPTY,
+    TXN_STATE_ONGOING, TXN_STATE_PREPARE_ABORT, TXN_STATE_PREPARE_COMMIT,
 };
 pub use broker_config::{
     BrokerConfigFile, BrokerConfigStore, BROKER_CONFIG_DIR, BROKER_CONFIG_FILE_VERSION,
