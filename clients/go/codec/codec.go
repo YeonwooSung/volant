@@ -2,7 +2,7 @@
 //
 // Matches crates/volant-protocol/src/payload.rs for Produce, Fetch,
 // CreateTopic, Metadata, DeleteTopic, OffsetCommit, OffsetFetch,
-// JoinGroup, Heartbeat, LeaveGroup, Auth, DescribeGroup, ListGroups, ListOffsets, and InitProducerId.
+// JoinGroup, Heartbeat, LeaveGroup, Auth, DescribeGroup, ListGroups, ListOffsets, InitProducerId, and Scram.
 // Frame headers are big-endian (see package frame); payload integers and
 // length prefixes are little-endian.
 package codec
@@ -29,6 +29,10 @@ const (
 	OpAuthResponse          uint16 = 31
 	OpInitProducerId        uint16 = 32
 	OpInitProducerIdResponse uint16 = 33
+	OpScramFirst            uint16 = 60
+	OpScramFirstResponse    uint16 = 61
+	OpScramFinal            uint16 = 62
+	OpScramFinalResponse    uint16 = 63
 	OpDescribeGroup         uint16 = 34
 	OpDescribeGroupResponse uint16 = 35
 	OpListGroups            uint16 = 36
@@ -496,6 +500,29 @@ type InitProducerIdResponse struct {
 }
 // GroupState is the ListGroups state byte (Phase 12).
 type GroupState uint8
+
+type ScramFirstRequest struct {
+	Username    string
+	ClientNonce string
+}
+
+type ScramFirstResponse struct {
+	ErrorCode     uint16
+	CombinedNonce string
+	Salt          []byte
+	Iterations    uint32
+}
+
+type ScramFinalRequest struct {
+	Username      string
+	CombinedNonce string
+	ClientProof   []byte
+}
+
+type ScramFinalResponse struct {
+	ErrorCode       uint16
+	ServerSignature []byte
+}
 
 const (
 	// GroupStateEmpty is offsets on disk only; no live members.
@@ -1852,6 +1879,119 @@ func DecodeInitProducerIdResponse(payload []byte) (InitProducerIdResponse, error
 	return InitProducerIdResponse{ProducerID: pid, Epoch: epoch, ErrorCode: code}, nil
 }
 
+func EncodeScramFirstRequest(req ScramFirstRequest) ([]byte, error) {
+	w := &writer{}
+	if err := putString(w, req.Username); err != nil {
+		return nil, err
+	}
+	if err := putString(w, req.ClientNonce); err != nil {
+		return nil, err
+	}
+	return w.buf, nil
+}
+
+func DecodeScramFirstRequest(payload []byte) (ScramFirstRequest, error) {
+	r := &reader{data: payload}
+	user, err := getString(r)
+	if err != nil {
+		return ScramFirstRequest{}, err
+	}
+	nonce, err := getString(r)
+	if err != nil {
+		return ScramFirstRequest{}, err
+	}
+	return ScramFirstRequest{Username: user, ClientNonce: nonce}, nil
+}
+
+func EncodeScramFirstResponse(resp ScramFirstResponse) ([]byte, error) {
+	w := &writer{}
+	w.u16(resp.ErrorCode)
+	if err := putString(w, resp.CombinedNonce); err != nil {
+		return nil, err
+	}
+	putBytes(w, resp.Salt)
+	w.u32(resp.Iterations)
+	return w.buf, nil
+}
+
+func DecodeScramFirstResponse(payload []byte) (ScramFirstResponse, error) {
+	r := &reader{data: payload}
+	code, err := r.u16()
+	if err != nil {
+		return ScramFirstResponse{}, err
+	}
+	combined, err := getString(r)
+	if err != nil {
+		return ScramFirstResponse{}, err
+	}
+	salt, err := getBytes(r)
+	if err != nil {
+		return ScramFirstResponse{}, err
+	}
+	iters, err := r.u32()
+	if err != nil {
+		return ScramFirstResponse{}, err
+	}
+	return ScramFirstResponse{
+		ErrorCode:     code,
+		CombinedNonce: combined,
+		Salt:          salt,
+		Iterations:    iters,
+	}, nil
+}
+
+func EncodeScramFinalRequest(req ScramFinalRequest) ([]byte, error) {
+	w := &writer{}
+	if err := putString(w, req.Username); err != nil {
+		return nil, err
+	}
+	if err := putString(w, req.CombinedNonce); err != nil {
+		return nil, err
+	}
+	putBytes(w, req.ClientProof)
+	return w.buf, nil
+}
+
+func DecodeScramFinalRequest(payload []byte) (ScramFinalRequest, error) {
+	r := &reader{data: payload}
+	user, err := getString(r)
+	if err != nil {
+		return ScramFinalRequest{}, err
+	}
+	combined, err := getString(r)
+	if err != nil {
+		return ScramFinalRequest{}, err
+	}
+	proof, err := getBytes(r)
+	if err != nil {
+		return ScramFinalRequest{}, err
+	}
+	return ScramFinalRequest{
+		Username:      user,
+		CombinedNonce: combined,
+		ClientProof:   proof,
+	}, nil
+}
+
+func EncodeScramFinalResponse(resp ScramFinalResponse) ([]byte, error) {
+	w := &writer{}
+	w.u16(resp.ErrorCode)
+	putBytes(w, resp.ServerSignature)
+	return w.buf, nil
+}
+
+func DecodeScramFinalResponse(payload []byte) (ScramFinalResponse, error) {
+	r := &reader{data: payload}
+	code, err := r.u16()
+	if err != nil {
+		return ScramFinalResponse{}, err
+	}
+	sig, err := getBytes(r)
+	if err != nil {
+		return ScramFinalResponse{}, err
+	}
+	return ScramFinalResponse{ErrorCode: code, ServerSignature: sig}, nil
+}
 func EncodeErrorResponse(resp ErrorResponse) ([]byte, error) {
 	w := &writer{}
 	w.u16(resp.Code)
@@ -1901,6 +2041,10 @@ func DecodeResponse(opcode uint16, payload []byte) (any, error) {
 		return DecodeAuthResponse(payload)
 	case OpInitProducerIdResponse:
 		return DecodeInitProducerIdResponse(payload)
+	case OpScramFirstResponse:
+		return DecodeScramFirstResponse(payload)
+	case OpScramFinalResponse:
+		return DecodeScramFinalResponse(payload)
 	case OpDescribeGroupResponse:
 		return DecodeDescribeGroupResponse(payload)
 	case OpListGroupsResponse:

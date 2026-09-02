@@ -11,7 +11,7 @@ import java.util.List;
  * <p>Matches {@code crates/volant-protocol/src/payload.rs} for the MVP opcodes:
  * Produce, Fetch, CreateTopic, Metadata, DeleteTopic, OffsetCommit,
  * OffsetFetch, JoinGroup, Heartbeat, LeaveGroup, Auth, DescribeGroup,
- * ListGroups, ListOffsets, InitProducerId.
+ * ListGroups, ListOffsets, InitProducerId, Scram.
  *
  * <p>Header fields are big-endian (see {@link Frame}); <strong>payload</strong>
  * integers and length prefixes are little-endian.
@@ -31,6 +31,10 @@ public final class Codec {
     public static final int OP_AUTH_RESPONSE = 31;
     public static final int OP_INIT_PRODUCER_ID = 32;
     public static final int OP_INIT_PRODUCER_ID_RESPONSE = 33;
+    public static final int OP_SCRAM_FIRST = 60;
+    public static final int OP_SCRAM_FIRST_RESPONSE = 61;
+    public static final int OP_SCRAM_FINAL = 62;
+    public static final int OP_SCRAM_FINAL_RESPONSE = 63;
     public static final int OP_DESCRIBE_GROUP = 34;
     public static final int OP_DESCRIBE_GROUP_RESPONSE = 35;
     public static final int OP_LIST_GROUPS = 36;
@@ -470,6 +474,52 @@ public final class Codec {
             this.producerId = producerId;
             this.epoch = epoch;
             this.errorCode = errorCode;
+        }
+    }
+
+    public static final class ScramFirstRequest {
+        public final String username;
+        public final String clientNonce;
+
+        public ScramFirstRequest(String username, String clientNonce) {
+            this.username = username == null ? "" : username;
+            this.clientNonce = clientNonce == null ? "" : clientNonce;
+        }
+    }
+
+    public static final class ScramFirstResponse {
+        public final int errorCode;
+        public final String combinedNonce;
+        public final byte[] salt;
+        public final long iterations;
+
+        public ScramFirstResponse(int errorCode, String combinedNonce, byte[] salt, long iterations) {
+            this.errorCode = errorCode;
+            this.combinedNonce = combinedNonce == null ? "" : combinedNonce;
+            this.salt = salt == null ? new byte[0] : salt;
+            this.iterations = iterations;
+        }
+    }
+
+    public static final class ScramFinalRequest {
+        public final String username;
+        public final String combinedNonce;
+        public final byte[] clientProof;
+
+        public ScramFinalRequest(String username, String combinedNonce, byte[] clientProof) {
+            this.username = username == null ? "" : username;
+            this.combinedNonce = combinedNonce == null ? "" : combinedNonce;
+            this.clientProof = clientProof == null ? new byte[0] : clientProof;
+        }
+    }
+
+    public static final class ScramFinalResponse {
+        public final int errorCode;
+        public final byte[] serverSignature;
+
+        public ScramFinalResponse(int errorCode, byte[] serverSignature) {
+            this.errorCode = errorCode;
+            this.serverSignature = serverSignature == null ? new byte[0] : serverSignature;
         }
     }
 
@@ -1438,6 +1488,59 @@ public final class Codec {
 
     // --- error opcode ------------------------------------------------------
 
+    public static byte[] encodeScramFirstRequest(ScramFirstRequest req) {
+        Writer w = new Writer();
+        putString(w, req.username);
+        putString(w, req.clientNonce);
+        return w.finish();
+    }
+
+    public static ScramFirstRequest decodeScramFirstRequest(byte[] payload) {
+        Reader r = new Reader(payload);
+        return new ScramFirstRequest(getString(r), getString(r));
+    }
+
+    public static byte[] encodeScramFirstResponse(ScramFirstResponse resp) {
+        Writer w = new Writer();
+        w.u16(resp.errorCode);
+        putString(w, resp.combinedNonce);
+        putBytes(w, resp.salt);
+        w.u32(resp.iterations);
+        return w.finish();
+    }
+
+    public static ScramFirstResponse decodeScramFirstResponse(byte[] payload) {
+        Reader r = new Reader(payload);
+        return new ScramFirstResponse(r.u16(), getString(r), getBytes(r), r.u32());
+    }
+
+    public static byte[] encodeScramFinalRequest(ScramFinalRequest req) {
+        Writer w = new Writer();
+        putString(w, req.username);
+        putString(w, req.combinedNonce);
+        putBytes(w, req.clientProof);
+        return w.finish();
+    }
+
+    public static ScramFinalRequest decodeScramFinalRequest(byte[] payload) {
+        Reader r = new Reader(payload);
+        return new ScramFinalRequest(getString(r), getString(r), getBytes(r));
+    }
+
+    public static byte[] encodeScramFinalResponse(ScramFinalResponse resp) {
+        Writer w = new Writer();
+        w.u16(resp.errorCode);
+        putBytes(w, resp.serverSignature);
+        return w.finish();
+    }
+
+    public static ScramFinalResponse decodeScramFinalResponse(byte[] payload) {
+        Reader r = new Reader(payload);
+        return new ScramFinalResponse(r.u16(), getBytes(r));
+    }
+
+    // --- error opcode ------------------------------------------------------
+
     public static Object decodeResponse(int opcode, byte[] payload) {
         switch (opcode) {
             case OP_PRODUCE:
@@ -1464,6 +1567,10 @@ public final class Codec {
                 return decodeAuthResponse(payload);
             case OP_INIT_PRODUCER_ID_RESPONSE:
                 return decodeInitProducerIdResponse(payload);
+            case OP_SCRAM_FIRST_RESPONSE:
+                return decodeScramFirstResponse(payload);
+            case OP_SCRAM_FINAL_RESPONSE:
+                return decodeScramFinalResponse(payload);
             case OP_DESCRIBE_GROUP_RESPONSE:
                 return decodeDescribeGroupResponse(payload);
             case OP_LIST_GROUPS_RESPONSE:

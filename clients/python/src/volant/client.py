@@ -205,6 +205,13 @@ class Client:
     per-partition sequence trailer. Default is off (trailer ``(0, 0, -1)``)::
 
         c = Client("127.0.0.1:9092", enable_idempotence=True)
+
+    Optional SCRAM-SHA-256 (v0.46) runs after connect when both
+    ``scram_username`` and ``scram_password`` are set and ``auth_token``
+    is unset. Token wins if both are provided. Username without
+    password (or vice versa) is a constructor error::
+
+        c = Client("127.0.0.1:9092", scram_username="alice", scram_password="s3cret")
     """
 
     def __init__(
@@ -220,9 +227,15 @@ class Client:
         auth_token: Optional[str] = None,
         max_redirects: int = 1,
         enable_idempotence: bool = False,
+        scram_username: Optional[str] = None,
+        scram_password: Optional[str] = None,
     ) -> None:
         if tls and (tls_cert is None) != (tls_key is None):
             raise ValueError("tls_cert and tls_key must both be set or both unset")
+        user = scram_username or None
+        password = scram_password or None
+        if (user is None) != (password is None):
+            raise ValueError("scram_username and scram_password must both be set")
         self.tls = bool(tls)
         self._timeout = timeout
         self._tls_insecure = tls_insecure
@@ -230,6 +243,8 @@ class Client:
         self._tls_cert = tls_cert
         self._tls_key = tls_key
         self.auth_token = auth_token or None
+        self.scram_username = user
+        self.scram_password = password
         # 0 = never redirect (raise on the first NotLeaderForPartition).
         self.max_redirects = max(0, int(max_redirects))
         self.enable_idempotence = bool(enable_idempotence)
@@ -242,12 +257,11 @@ class Client:
         self._sock = None  # type: ignore[assignment]
         self.addr = ""
         self._open(addr)
-        if self.auth_token:
-            try:
-                self._authenticate(self.auth_token)
-            except Exception:
-                self.close()
-                raise
+        try:
+            self._maybe_authenticate()
+        except Exception:
+            self.close()
+            raise
 
     def _open(self, addr: str) -> None:
         host, port = _parse_addr(addr)
@@ -284,8 +298,7 @@ class Client:
             except OSError:
                 pass
         self._open(addr)
-        if self.auth_token:
-            self._authenticate(self.auth_token)
+        self._maybe_authenticate()
 
     def _redirect_to_leader(self, topic: str, partition: int) -> bool:
         """Metadata → reconnect to the partition leader.
@@ -386,6 +399,13 @@ class Client:
         if error_code != 0:
             raise BrokerError(error_code, op=op)
 
+    def _maybe_authenticate(self) -> None:
+        if self.auth_token:
+            self._authenticate(self.auth_token)
+            return
+        if self.scram_username and self.scram_password:
+            self._authenticate_scram(self.scram_username, self.scram_password)
+
     def _authenticate(self, token: str) -> None:
         payload = codec.encode_auth_request(codec.AuthRequest(token=token))
         resp = self._round_trip(codec.OP_AUTH, payload)
@@ -428,6 +448,39 @@ class Client:
         key = (topic, partition)
         cur = self._next_seq.get(key, 0)
         self._next_seq[key] = cur + max(0, int(count))
+
+    def _authenticate_scram(self, username: str, password: str) -> None:
+        from .scram import client_proof_and_server_sig, generate_client_nonce
+
+        client_nonce = generate_client_nonce()
+        payload = codec.encode_scram_first_request(
+            codec.ScramFirstRequest(username=username, client_nonce=client_nonce)
+        )
+        first = self._round_trip(codec.OP_SCRAM_FIRST, payload)
+        if not isinstance(first, codec.ScramFirstResponse):
+            raise ProtocolError(f"unexpected response for scram first: {type(first)}")
+        self._check(first.error_code, "scram first")
+        proof, expected_sig = client_proof_and_server_sig(
+            username,
+            password,
+            client_nonce,
+            first.combined_nonce,
+            first.salt,
+            first.iterations,
+        )
+        payload = codec.encode_scram_final_request(
+            codec.ScramFinalRequest(
+                username=username,
+                combined_nonce=first.combined_nonce,
+                client_proof=proof,
+            )
+        )
+        final = self._round_trip(codec.OP_SCRAM_FINAL, payload)
+        if not isinstance(final, codec.ScramFinalResponse):
+            raise ProtocolError(f"unexpected response for scram final: {type(final)}")
+        self._check(final.error_code, "scram final")
+        if final.server_signature != expected_sig:
+            raise ProtocolError("scram server signature mismatch")
 
     def create_topic(
         self,

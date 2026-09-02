@@ -73,6 +73,9 @@ c, err = volant.DialAuth("127.0.0.1:9092", "s3cret")
 c, err = volant.DialTLSAuth("127.0.0.1:9092", volant.TLSConfig{CAFile: "ca.pem"}, "s3cret")
 // Optional idempotent produce (v0.47). Default off (trailer (0, 0, -1)).
 c.EnableIdempotence()
+// Optional SCRAM-SHA-256 (v0.46). Dial / DialAuth / DialTLS stay.
+c, err = volant.DialScram("127.0.0.1:9092", "alice", "s3cret")
+c, err = volant.DialTLSScram("127.0.0.1:9092", volant.TLSConfig{CAFile: "ca.pem"}, "alice", "s3cret")
 ```
 
 `Produce(..., nil, value)` sends a null key. `Fetch` returns `[]Record`
@@ -145,6 +148,10 @@ transactional_id; later produces attach pid/epoch/seq. Default off
 keeps trailer `(0, 0, -1)`. Redirect keeps the same pid. UnknownProducerId
 (21) re-Inits once and resets sequences. Not Kafka idempotent produce
 v2; no transactions.
+SCRAM-SHA-256 (v0.46): `DialScram` / `DialTLSScram` send opcodes 60
+then 62 after connect. Empty user or password is an error before
+dial. A rejected proof or server-signature mismatch fails Dial.
+Leader redirect re-runs the same auth path.
 
 ## Honesty
 
@@ -166,6 +173,9 @@ Not implemented: `kafka-go`, Kafka cooperative-sticky / SyncGroup,
 seeing other group members on the wire, SCRAM, async I/O, transactions
 (BeginTxn/EndTxn). Idempotent produce is opt-in (`EnableIdempotence()`);
 default off. Local `WithAssignor("range")` cannot split
+seeing other group members on the wire, SCRAM-SHA-512, Kafka SASL,
+async I/O, idempotent
+produce. Local `WithAssignor("range")` cannot split
 across live members. Thin `Client.JoinGroup` still sends empty
 `group_instance_id`; use `JoinGroupConsumerStatic` for static
 membership. Thin `OffsetCommit` is still the admin path (empty member,
@@ -186,5 +196,6 @@ See [docs/V19_SPEC.md](../../docs/V19_SPEC.md),
 [docs/V43_SPEC.md](../../docs/V43_SPEC.md), and
 [docs/V47_SPEC.md](../../docs/V47_SPEC.md),
 [docs/V48_SPEC.md](../../docs/V48_SPEC.md),
-[docs/V49_SPEC.md](../../docs/V49_SPEC.md), and
-[docs/V50_SPEC.md](../../docs/V50_SPEC.md).
+[docs/V49_SPEC.md](../../docs/V49_SPEC.md),
+[docs/V50_SPEC.md](../../docs/V50_SPEC.md).,
+[docs/V46_SPEC.md](../../docs/V46_SPEC.md).

@@ -62,6 +62,9 @@ Client.connectTls("127.0.0.1", 9092, TlsOptions.ca("ca.pem"), "s3cret");
 try (Client c = Client.connect("127.0.0.1", 9092)) {
   c.setEnableIdempotence(true);
 }
+// Optional SCRAM-SHA-256 (v0.46). Existing overloads stay.
+Client.connectScram("127.0.0.1", 9092, "alice", "s3cret");
+Client.connectTlsScram("127.0.0.1", 9092, TlsOptions.ca("ca.pem"), "alice", "s3cret");
 ```
 
 `produce(..., null, value)` sends a null key. `fetch` returns `List<Record>`
@@ -132,6 +135,11 @@ empty transactional_id; later produces attach pid/epoch/seq. Default
 off keeps trailer `(0, 0, -1)`. Redirect keeps the same pid. If the
 broker returns UnknownProducerId (21), the client re-Inits once and
 resets sequences. Not Kafka idempotent produce v2; no transactions.
+SCRAM-SHA-256 (v0.46): `connectScram` / `connectTlsScram` send opcodes
+60 then 62 after connect. Null or empty user or password throws
+`IllegalArgumentException` before connect. A rejected proof or
+server-signature mismatch fails the constructor. Leader redirect
+re-runs the same auth path.
 
 ## Honesty
 
@@ -155,6 +163,9 @@ seeing other group members on the wire, SCRAM, async I/O, transactions
 (BeginTxn/EndTxn). Idempotent produce is opt-in
 (`setEnableIdempotence(true)`); default off. Local `assignor="range"`
 cannot split across
+seeing other group members on the wire, SCRAM-SHA-512, Kafka SASL,
+async I/O, idempotent
+produce. Local `assignor="range"` cannot split across
 live members. Sync only; one TCP connection; acks=1 by default. Thin
 `joinGroup` still sends empty `group_instance_id`; use
 `GroupConsumer.joinStatic` for static membership. Convenience
@@ -176,5 +187,6 @@ See [docs/V23_SPEC.md](../../docs/V23_SPEC.md),
 [docs/V43_SPEC.md](../../docs/V43_SPEC.md), and
 [docs/V47_SPEC.md](../../docs/V47_SPEC.md),
 [docs/V48_SPEC.md](../../docs/V48_SPEC.md),
-[docs/V49_SPEC.md](../../docs/V49_SPEC.md), and
-[docs/V50_SPEC.md](../../docs/V50_SPEC.md).
+[docs/V49_SPEC.md](../../docs/V49_SPEC.md),
+[docs/V50_SPEC.md](../../docs/V50_SPEC.md).,
+[docs/V46_SPEC.md](../../docs/V46_SPEC.md).

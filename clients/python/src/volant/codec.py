@@ -3,7 +3,7 @@
 Matches `crates/volant-protocol/src/payload.rs` for the MVP opcodes:
 Produce, Fetch, CreateTopic, Metadata, DeleteTopic, OffsetCommit,
 OffsetFetch, JoinGroup, Heartbeat, LeaveGroup, Auth, DescribeGroup,
-ListGroups, ListOffsets, InitProducerId.
+ListGroups, ListOffsets, InitProducerId, Scram.
 
 Header fields are big-endian (see :mod:`volant.frame`); **payload** integers
 and length prefixes are little-endian.
@@ -32,6 +32,10 @@ OP_AUTH = 30
 OP_AUTH_RESPONSE = 31
 OP_INIT_PRODUCER_ID = 32
 OP_INIT_PRODUCER_ID_RESPONSE = 33
+OP_SCRAM_FIRST = 60
+OP_SCRAM_FIRST_RESPONSE = 61
+OP_SCRAM_FINAL = 62
+OP_SCRAM_FINAL_RESPONSE = 63
 OP_DESCRIBE_GROUP = 34
 OP_DESCRIBE_GROUP_RESPONSE = 35
 OP_LIST_GROUPS = 36
@@ -443,6 +447,34 @@ class InitProducerIdResponse:
     producer_id: int
     epoch: int
     error_code: int
+
+
+@dataclass
+class ScramFirstRequest:
+    username: str
+    client_nonce: str
+
+
+@dataclass
+class ScramFirstResponse:
+    error_code: int
+    combined_nonce: str
+    salt: bytes
+    iterations: int
+
+
+@dataclass
+class ScramFinalRequest:
+    username: str
+    combined_nonce: str
+    client_proof: bytes
+
+
+@dataclass
+class ScramFinalResponse:
+    error_code: int
+    server_signature: bytes
+
 
 
 
@@ -1249,6 +1281,67 @@ def decode_init_producer_id_response(payload: bytes) -> InitProducerIdResponse:
 
 
 
+def encode_scram_first_request(req: ScramFirstRequest) -> bytes:
+    w = _Writer()
+    _put_string(w, req.username)
+    _put_string(w, req.client_nonce)
+    return w.finish()
+
+
+def decode_scram_first_request(payload: bytes) -> ScramFirstRequest:
+    r = _Reader(payload)
+    return ScramFirstRequest(username=_get_string(r), client_nonce=_get_string(r))
+
+
+def encode_scram_first_response(resp: ScramFirstResponse) -> bytes:
+    w = _Writer()
+    w.u16_le(resp.error_code)
+    _put_string(w, resp.combined_nonce)
+    _put_bytes(w, resp.salt)
+    w.u32_le(resp.iterations)
+    return w.finish()
+
+
+def decode_scram_first_response(payload: bytes) -> ScramFirstResponse:
+    r = _Reader(payload)
+    return ScramFirstResponse(
+        error_code=r.u16_le(),
+        combined_nonce=_get_string(r),
+        salt=_get_bytes(r),
+        iterations=r.u32_le(),
+    )
+
+
+def encode_scram_final_request(req: ScramFinalRequest) -> bytes:
+    w = _Writer()
+    _put_string(w, req.username)
+    _put_string(w, req.combined_nonce)
+    _put_bytes(w, req.client_proof)
+    return w.finish()
+
+
+def decode_scram_final_request(payload: bytes) -> ScramFinalRequest:
+    r = _Reader(payload)
+    return ScramFinalRequest(
+        username=_get_string(r),
+        combined_nonce=_get_string(r),
+        client_proof=_get_bytes(r),
+    )
+
+
+def encode_scram_final_response(resp: ScramFinalResponse) -> bytes:
+    w = _Writer()
+    w.u16_le(resp.error_code)
+    _put_bytes(w, resp.server_signature)
+    return w.finish()
+
+
+def decode_scram_final_response(payload: bytes) -> ScramFinalResponse:
+    r = _Reader(payload)
+    return ScramFinalResponse(error_code=r.u16_le(), server_signature=_get_bytes(r))
+
+
+
 def encode_error_response(resp: ErrorResponse) -> bytes:
     w = _Writer()
     w.u16_le(resp.code)
@@ -1287,6 +1380,10 @@ def decode_response(opcode: int, payload: bytes):
         return decode_auth_response(payload)
     if opcode == OP_INIT_PRODUCER_ID_RESPONSE:
         return decode_init_producer_id_response(payload)
+    if opcode == OP_SCRAM_FIRST_RESPONSE:
+        return decode_scram_first_response(payload)
+    if opcode == OP_SCRAM_FINAL_RESPONSE:
+        return decode_scram_final_response(payload)
     if opcode == OP_DESCRIBE_GROUP_RESPONSE:
         return decode_describe_group_response(payload)
     if opcode == OP_LIST_GROUPS_RESPONSE:

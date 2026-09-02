@@ -41,6 +41,9 @@ import java.util.Map;
  * // Optional shared-token Auth (v0.42):
  * Client.connect("127.0.0.1", 9092, "s3cret");
  * Client.connectTls("127.0.0.1", 9092, TlsOptions.ca("ca.pem"), "s3cret");
+ * // Optional SCRAM-SHA-256 (v0.46). Token wins if both are set.
+ * Client.connectScram("127.0.0.1", 9092, "alice", "s3cret");
+ * Client.connectTlsScram("127.0.0.1", 9092, TlsOptions.ca("ca.pem"), "alice", "s3cret");
  * </pre>
  */
 public final class Client implements AutoCloseable {
@@ -59,6 +62,8 @@ public final class Client implements AutoCloseable {
     private final boolean tls;
     private final TlsOptions tlsOptions;
     private final String authToken;
+    private final String scramUsername;
+    private final String scramPassword;
     private int maxRedirects = 1;
     private boolean enableIdempotence = false;
     private long producerId = 0L;
@@ -69,12 +74,25 @@ public final class Client implements AutoCloseable {
     private byte[] buf = new byte[0];
 
     private Client(String addr, Socket socket, int timeoutMs, TlsOptions tlsOptions, String authToken) {
+        this(addr, socket, timeoutMs, tlsOptions, authToken, null, null);
+    }
+
+    private Client(
+            String addr,
+            Socket socket,
+            int timeoutMs,
+            TlsOptions tlsOptions,
+            String authToken,
+            String scramUsername,
+            String scramPassword) {
         this.addr = addr;
         this.socket = socket;
         this.timeoutMs = timeoutMs;
         this.tls = tlsOptions != null;
         this.tlsOptions = tlsOptions;
         this.authToken = authToken;
+        this.scramUsername = scramUsername;
+        this.scramPassword = scramPassword;
     }
 
     /** Connect to a native Volant listener with a 10s timeout. */
@@ -127,6 +145,42 @@ public final class Client implements AutoCloseable {
         }
         Socket s = openSocket(host, port, timeoutMs, tls);
         Client c = new Client(formatAddr(host, port), s, timeoutMs, tls, authToken);
+        return finishConnect(c);
+    }
+
+    /**
+     * Connect and run SCRAM-SHA-256 (opcodes 60–63) after TCP.
+     * Username and password must both be non-empty.
+     */
+    public static Client connectScram(String host, int port, String user, String pass) {
+        return connectScram(host, port, DEFAULT_TIMEOUT_MS, user, pass);
+    }
+
+    /** Connect with timeout and SCRAM-SHA-256. */
+    public static Client connectScram(String host, int port, int timeoutMs, String user, String pass) {
+        requireScramPair(user, pass);
+        Socket s = openSocket(host, port, timeoutMs, null);
+        Client c = new Client(formatAddr(host, port), s, timeoutMs, null, null, user, pass);
+        return finishConnect(c);
+    }
+
+    /**
+     * Connect with TLS and SCRAM-SHA-256 after the handshake.
+     * Username and password must both be non-empty.
+     */
+    public static Client connectTlsScram(String host, int port, TlsOptions tls, String user, String pass) {
+        return connectTlsScram(host, port, tls, DEFAULT_TIMEOUT_MS, user, pass);
+    }
+
+    /** Connect with TLS, timeout, and SCRAM-SHA-256. */
+    public static Client connectTlsScram(
+            String host, int port, TlsOptions tls, int timeoutMs, String user, String pass) {
+        if (tls == null) {
+            throw new IllegalArgumentException("tls options are required; use connectScram() for plaintext");
+        }
+        requireScramPair(user, pass);
+        Socket s = openSocket(host, port, timeoutMs, tls);
+        Client c = new Client(formatAddr(host, port), s, timeoutMs, tls, null, user, pass);
         return finishConnect(c);
     }
 
@@ -284,17 +338,68 @@ public final class Client implements AutoCloseable {
         }
     }
 
+    private static void requireScramPair(String user, String pass) {
+        boolean hasUser = user != null && !user.isEmpty();
+        boolean hasPass = pass != null && !pass.isEmpty();
+        if (!hasUser || !hasPass) {
+            throw new IllegalArgumentException("scram username and password must both be set");
+        }
+    }
+
     private void maybeAuthenticate() {
-        if (authToken == null || authToken.isEmpty()) {
+        if (authToken != null && !authToken.isEmpty()) {
+            authenticate(authToken);
             return;
         }
-        byte[] payload = Codec.encodeAuthRequest(new Codec.AuthRequest(authToken));
+        if (scramUsername != null
+                && !scramUsername.isEmpty()
+                && scramPassword != null
+                && !scramPassword.isEmpty()) {
+            authenticateScram(scramUsername, scramPassword);
+        }
+    }
+
+    private void authenticate(String token) {
+        byte[] payload = Codec.encodeAuthRequest(new Codec.AuthRequest(token));
         Object decoded = roundTrip(Codec.OP_AUTH, payload);
         if (!(decoded instanceof Codec.AuthResponse)) {
             throw new ProtocolException("unexpected response for auth: " + typeName(decoded));
         }
         Codec.AuthResponse resp = (Codec.AuthResponse) decoded;
         check(resp.errorCode, "auth");
+    }
+
+    private void authenticateScram(String username, String password) {
+        String clientNonce = Scram.generateClientNonce();
+        byte[] payload =
+                Codec.encodeScramFirstRequest(new Codec.ScramFirstRequest(username, clientNonce));
+        Object decoded = roundTrip(Codec.OP_SCRAM_FIRST, payload);
+        if (!(decoded instanceof Codec.ScramFirstResponse)) {
+            throw new ProtocolException("unexpected response for scram first: " + typeName(decoded));
+        }
+        Codec.ScramFirstResponse first = (Codec.ScramFirstResponse) decoded;
+        check(first.errorCode, "scram first");
+        if (first.iterations <= 0 || first.iterations > Integer.MAX_VALUE) {
+            throw new ProtocolException("scram iterations out of range: " + first.iterations);
+        }
+        Scram.Proof proof = Scram.clientProofAndServerSig(
+                username,
+                password,
+                clientNonce,
+                first.combinedNonce,
+                first.salt,
+                (int) first.iterations);
+        payload = Codec.encodeScramFinalRequest(
+                new Codec.ScramFinalRequest(username, first.combinedNonce, proof.clientProof));
+        decoded = roundTrip(Codec.OP_SCRAM_FINAL, payload);
+        if (!(decoded instanceof Codec.ScramFinalResponse)) {
+            throw new ProtocolException("unexpected response for scram final: " + typeName(decoded));
+        }
+        Codec.ScramFinalResponse finalResp = (Codec.ScramFinalResponse) decoded;
+        check(finalResp.errorCode, "scram final");
+        if (!Scram.signaturesEqual(finalResp.serverSignature, proof.serverSignature)) {
+            throw new ProtocolException("scram server signature mismatch");
+        }
     }
 
     private static String formatAddr(String host, int port) {

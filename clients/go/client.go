@@ -4,6 +4,7 @@
 package volant
 
 import (
+	"crypto/hmac"
 	"crypto/tls"
 	"crypto/x509"
 	"encoding/binary"
@@ -91,6 +92,8 @@ type Client struct {
 	tls               bool
 	tlsCfg            TLSConfig
 	authToken         string
+	scramUser         string
+	scramPass         string
 	maxRedirects      int
 	enableIdempotence bool
 	producerID        uint64
@@ -124,16 +127,25 @@ func Dial(addr string) (*Client, error) {
 
 // DialTimeout connects with an explicit dial / RPC timeout.
 func DialTimeout(addr string, timeout time.Duration) (*Client, error) {
-	return dialPlain(addr, timeout, "")
+	return dialPlain(addr, timeout, "", "", "")
 }
 
 // DialAuth is [Dial] plus a shared-token Auth (opcode 30) after connect.
 // An empty token skips Auth (same as [Dial]).
 func DialAuth(addr, token string) (*Client, error) {
-	return dialPlain(addr, defaultTimeout, token)
+	return dialPlain(addr, defaultTimeout, token, "", "")
 }
 
-func dialPlain(addr string, timeout time.Duration, token string) (*Client, error) {
+// DialScram is [Dial] plus SCRAM-SHA-256 after connect (v0.46).
+// Username and password must both be non-empty.
+func DialScram(addr, user, pass string) (*Client, error) {
+	if err := checkScramPair(user, pass); err != nil {
+		return nil, err
+	}
+	return dialPlain(addr, defaultTimeout, "", user, pass)
+}
+
+func dialPlain(addr string, timeout time.Duration, token, scramUser, scramPass string) (*Client, error) {
 	conn, err := net.DialTimeout("tcp", addr, timeout)
 	if err != nil {
 		return nil, err
@@ -144,6 +156,8 @@ func dialPlain(addr string, timeout time.Duration, token string) (*Client, error
 		timeout:      timeout,
 		nextCorr:     1,
 		authToken:    token,
+		scramUser:    scramUser,
+		scramPass:    scramPass,
 		maxRedirects: 1,
 	}
 	if err := c.maybeAuthenticate(); err != nil {
@@ -161,16 +175,25 @@ func DialTLS(addr string, cfg TLSConfig) (*Client, error) {
 
 // DialTLSTimeout is [DialTLS] with an explicit dial / handshake / RPC timeout.
 func DialTLSTimeout(addr string, cfg TLSConfig, timeout time.Duration) (*Client, error) {
-	return dialTLS(addr, cfg, timeout, "")
+	return dialTLS(addr, cfg, timeout, "", "", "")
 }
 
 // DialTLSAuth is [DialTLS] plus a shared-token Auth after the TLS handshake.
 // An empty token skips Auth (same as [DialTLS]).
 func DialTLSAuth(addr string, cfg TLSConfig, token string) (*Client, error) {
-	return dialTLS(addr, cfg, defaultTimeout, token)
+	return dialTLS(addr, cfg, defaultTimeout, token, "", "")
 }
 
-func dialTLS(addr string, cfg TLSConfig, timeout time.Duration, token string) (*Client, error) {
+// DialTLSScram is [DialTLS] plus SCRAM-SHA-256 after the handshake (v0.46).
+// Username and password must both be non-empty.
+func DialTLSScram(addr string, cfg TLSConfig, user, pass string) (*Client, error) {
+	if err := checkScramPair(user, pass); err != nil {
+		return nil, err
+	}
+	return dialTLS(addr, cfg, defaultTimeout, "", user, pass)
+}
+
+func dialTLS(addr string, cfg TLSConfig, timeout time.Duration, token, scramUser, scramPass string) (*Client, error) {
 	if (cfg.CertFile == "") != (cfg.KeyFile == "") {
 		return nil, fmt.Errorf("tls_cert and tls_key must both be set or both unset")
 	}
@@ -197,6 +220,8 @@ func dialTLS(addr string, cfg TLSConfig, timeout time.Duration, token string) (*
 		tls:          true,
 		tlsCfg:       cfg,
 		authToken:    token,
+		scramUser:    scramUser,
+		scramPass:    scramPass,
 		maxRedirects: 1,
 	}
 	if err := c.maybeAuthenticate(); err != nil {
@@ -395,13 +420,31 @@ func check(errorCode uint16, op string) error {
 	return nil
 }
 
+func checkScramPair(user, pass string) error {
+	if user == "" || pass == "" {
+		return fmt.Errorf("scram username and password must both be set")
+	}
+	return nil
+}
+
 func (c *Client) maybeAuthenticate() error {
-	if c.authToken == "" {
+	if c.authToken != "" {
+		if err := c.authenticate(c.authToken); err != nil {
+			_ = c.Close()
+			return err
+		}
 		return nil
 	}
-	if err := c.authenticate(c.authToken); err != nil {
+	if c.scramUser != "" && c.scramPass != "" {
+		if err := c.authenticateScram(c.scramUser, c.scramPass); err != nil {
+			_ = c.Close()
+			return err
+		}
+		return nil
+	}
+	if c.scramUser != "" || c.scramPass != "" {
 		_ = c.Close()
-		return err
+		return fmt.Errorf("scram username and password must both be set")
 	}
 	return nil
 }
@@ -420,6 +463,60 @@ func (c *Client) authenticate(token string) error {
 		return &frame.ProtocolError{Msg: fmt.Sprintf("unexpected response for auth: %T", decoded)}
 	}
 	return check(resp.ErrorCode, "auth")
+}
+
+func (c *Client) authenticateScram(username, password string) error {
+	clientNonce, err := generateClientNonce()
+	if err != nil {
+		return err
+	}
+	payload, err := codec.EncodeScramFirstRequest(codec.ScramFirstRequest{
+		Username:    username,
+		ClientNonce: clientNonce,
+	})
+	if err != nil {
+		return err
+	}
+	decoded, err := c.roundTrip(codec.OpScramFirst, payload)
+	if err != nil {
+		return err
+	}
+	first, ok := decoded.(codec.ScramFirstResponse)
+	if !ok {
+		return &frame.ProtocolError{Msg: fmt.Sprintf("unexpected response for scram first: %T", decoded)}
+	}
+	if err := check(first.ErrorCode, "scram first"); err != nil {
+		return err
+	}
+	proof, expectedSig, err := ClientProofAndServerSig(
+		username, password, clientNonce, first.CombinedNonce, first.Salt, first.Iterations,
+	)
+	if err != nil {
+		return err
+	}
+	payload, err = codec.EncodeScramFinalRequest(codec.ScramFinalRequest{
+		Username:      username,
+		CombinedNonce: first.CombinedNonce,
+		ClientProof:   proof,
+	})
+	if err != nil {
+		return err
+	}
+	decoded, err = c.roundTrip(codec.OpScramFinal, payload)
+	if err != nil {
+		return err
+	}
+	final, ok := decoded.(codec.ScramFinalResponse)
+	if !ok {
+		return &frame.ProtocolError{Msg: fmt.Sprintf("unexpected response for scram final: %T", decoded)}
+	}
+	if err := check(final.ErrorCode, "scram final"); err != nil {
+		return err
+	}
+	if !hmac.Equal(final.ServerSignature, expectedSig) {
+		return &frame.ProtocolError{Msg: "scram server signature mismatch"}
+	}
+	return nil
 }
 
 // CreateTopic creates a topic with the given partition count.

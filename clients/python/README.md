@@ -68,6 +68,8 @@ c = Client("127.0.0.1:9092", auth_token="s3cret")
 c = Client("127.0.0.1:9092", tls=True, tls_ca="ca.pem", auth_token="s3cret")
 # Optional idempotent produce (v0.47). Default off (trailer (0, 0, -1)).
 c = Client("127.0.0.1:9092", enable_idempotence=True)
+# Optional SCRAM-SHA-256 (v0.46). Token wins if both are set.
+c = Client("127.0.0.1:9092", scram_username="alice", scram_password="s3cret")
 ```
 
 `Client` is also a context manager. `produce(..., key=b"...")` is supported;
@@ -142,6 +144,11 @@ empty transactional_id; later produces attach pid/epoch/seq. Default
 off keeps trailer `(0, 0, -1)`. Redirect keeps the same pid. If the
 broker returns UnknownProducerId (21), the client re-Inits once and
 resets sequences. Not Kafka idempotent produce v2; no transactions.
+SCRAM-SHA-256 (v0.46) sends opcodes 60 then 62 after connect when
+`scram_username` and `scram_password` are both set and `auth_token` is
+unset. Username without password (or vice versa) is a constructor
+error. A rejected proof or server-signature mismatch fails the
+constructor. Leader redirect re-runs the same auth path.
 
 ## Honesty
 
@@ -162,6 +169,9 @@ Not implemented: `kafka-python`, Kafka cooperative-sticky / SyncGroup,
 seeing other group members on the wire, SCRAM, async I/O,
 transactions (BeginTxn/EndTxn). Idempotent produce is opt-in
 (`enable_idempotence=True`); default off. Local `assignor="range"` cannot
+seeing other group members on the wire, SCRAM-SHA-512, Kafka SASL,
+async I/O, idempotent
+produce, auto-commit. Local `assignor="range"` cannot
 split across live members. Thin `join_group` still defaults to empty
 `group_instance_id` unless the caller (or `GroupConsumer.join`) passes
 one. Offset commit/fetch is the
@@ -183,5 +193,6 @@ See [docs/V14_SPEC.md](../../docs/V14_SPEC.md),
 [docs/V43_SPEC.md](../../docs/V43_SPEC.md), and
 [docs/V47_SPEC.md](../../docs/V47_SPEC.md),
 [docs/V48_SPEC.md](../../docs/V48_SPEC.md),
-[docs/V49_SPEC.md](../../docs/V49_SPEC.md), and
-[docs/V50_SPEC.md](../../docs/V50_SPEC.md).
+[docs/V49_SPEC.md](../../docs/V49_SPEC.md),
+[docs/V50_SPEC.md](../../docs/V50_SPEC.md).,
+[docs/V46_SPEC.md](../../docs/V46_SPEC.md).
