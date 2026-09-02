@@ -7,7 +7,7 @@ import threading
 import unittest
 from typing import Optional
 
-from volant import BrokerError, Client, TxnOffsetCommit, TxnProduceResult
+from volant import BrokerError, Client, TransactionalProducer, TxnOffsetCommit, TxnProduceResult
 from volant.codec import (
     OP_BEGIN_TXN,
     OP_BEGIN_TXN_RESPONSE,
@@ -219,6 +219,77 @@ class TestTxnClient(unittest.TestCase):
                     c.begin_transaction()
             self.assertEqual(ctx.exception.code, 22)
             self.assertEqual(ctx.exception.op, "begin_txn")
+            self.assertEqual(srv.opcodes, [OP_INIT_PRODUCER_ID, OP_BEGIN_TXN])
+
+
+class TestTransactionalProducer(unittest.TestCase):
+    def test_begin_produce_add_offsets_commit(self) -> None:
+        with _TxnServer() as srv:
+            with Client(srv.addr, timeout=5.0, transactional_id="txn-1") as c:
+                p = TransactionalProducer(c)
+                self.assertFalse(p.is_open())
+                p.begin()
+                self.assertTrue(p.is_open())
+                p.produce("t", 0, value=b"x")
+                p.add_offsets("g", [("t", 0, 1)])
+                results = p.commit()
+                self.assertFalse(p.is_open())
+            self.assertEqual(
+                srv.opcodes,
+                [OP_INIT_PRODUCER_ID, OP_BEGIN_TXN, OP_PRODUCE, OP_END_TXN],
+            )
+            end = srv.end_reqs[0]
+            self.assertTrue(end.committed)
+            self.assertEqual(len(end.offsets), 1)
+            self.assertEqual(end.offsets[0].group_id, "g")
+            self.assertEqual(end.offsets[0].topic, "t")
+            self.assertEqual(end.offsets[0].partition, 0)
+            self.assertEqual(end.offsets[0].offset, 1)
+            self.assertEqual(results, [TxnProduceResult("t", 0, 10, 1)])
+
+    def test_abort_clears_queue(self) -> None:
+        with _TxnServer() as srv:
+            with Client(srv.addr, timeout=5.0, transactional_id="txn-1") as c:
+                p = TransactionalProducer(c)
+                p.begin()
+                p.produce("t", 0, value=b"x")
+                p.add_offsets("g", [("t", 0, 1)])
+                p.abort()
+                self.assertFalse(p.is_open())
+                p.begin()
+                p.commit()
+            self.assertFalse(srv.end_reqs[0].committed)
+            self.assertEqual(srv.end_reqs[0].offsets, [])
+            self.assertTrue(srv.end_reqs[1].committed)
+            self.assertEqual(srv.end_reqs[1].offsets, [])
+
+    def test_missing_transactional_id_constructor_fails(self) -> None:
+        with _TxnServer() as srv:
+            with Client(srv.addr, timeout=5.0) as c:
+                with self.assertRaises(ValueError) as ctx:
+                    TransactionalProducer(c)
+            self.assertIn("transactional_id", str(ctx.exception))
+            self.assertEqual(srv.opcodes, [])
+
+    def test_commit_while_not_open(self) -> None:
+        with _TxnServer() as srv:
+            with Client(srv.addr, timeout=5.0, transactional_id="txn-1") as c:
+                p = TransactionalProducer(c)
+                with self.assertRaises(ValueError) as ctx:
+                    p.commit()
+                self.assertIn("not open", str(ctx.exception))
+                with self.assertRaises(ValueError):
+                    p.abort()
+            self.assertEqual(srv.opcodes, [])
+
+    def test_double_begin_raises(self) -> None:
+        with _TxnServer() as srv:
+            with Client(srv.addr, timeout=5.0, transactional_id="txn-1") as c:
+                p = TransactionalProducer(c)
+                p.begin()
+                with self.assertRaises(ValueError) as ctx:
+                    p.begin()
+                self.assertIn("already open", str(ctx.exception))
             self.assertEqual(srv.opcodes, [OP_INIT_PRODUCER_ID, OP_BEGIN_TXN])
 
 

@@ -74,6 +74,13 @@ try (Client c = Client.connect("127.0.0.1", 9092)) {
   c.produce("t", 0, null, "hello".getBytes(UTF_8));
   c.commitTransaction(); // or List<TxnOffsetCommit>
   c.abortTransaction();
+  // Optional TransactionalProducer helper (v0.63). Queues offsets until commit.
+  TransactionalProducer p = TransactionalProducer.from(c); // must have transactional_id
+  p.begin();
+  p.produce("t", 0, null, "x".getBytes(UTF_8));
+  p.addOffsets("g", "t", 0, 1L); // or List<TxnOffsetCommit>
+  List<TxnProduceResult> results = p.commit(); // or p.abort()
+  boolean open = p.isOpen();
 }
 // Optional SCRAM-SHA-256 (v0.46). Existing overloads stay.
 Client.connectScram("127.0.0.1", 9092, "alice", "s3cret");
@@ -172,6 +179,10 @@ Native transactions (v0.57) are opt-in via `setTransactionalId`.
 `beginTransaction` / `commitTransaction` / `abortTransaction` send
 opcodes 50–53. Init uses that id. Abort rewinds sequences. Not Kafka
 transactions (API keys 22/24/25/26/28).
+`TransactionalProducer` (v0.63) is a thin helper: `begin` / `produce` /
+`addOffsets` (local queue) / `commit` / `abort`. Produce is
+write-through; LSO/commit is broker-side. `from` fails if
+`transactional_id` is unset.
 SCRAM-SHA-256 (v0.46): `connectScram` / `connectTlsScram` send opcodes
 60 then 62 after connect. Null or empty user or password throws
 `IllegalArgumentException` before connect. A rejected proof or
@@ -247,4 +258,5 @@ See [docs/V23_SPEC.md](../../docs/V23_SPEC.md),
 [docs/V55_SPEC.md](../../docs/V55_SPEC.md),
 [docs/V56_SPEC.md](../../docs/V56_SPEC.md),
 [docs/V58_SPEC.md](../../docs/V58_SPEC.md),
-[docs/V59_SPEC.md](../../docs/V59_SPEC.md).
+[docs/V59_SPEC.md](../../docs/V59_SPEC.md),
+[docs/V63_SPEC.md](../../docs/V63_SPEC.md).

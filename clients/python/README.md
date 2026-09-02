@@ -80,6 +80,14 @@ c.begin_transaction()
 c.produce("t", 0, value=b"hello")
 c.commit_transaction()  # or commit_transaction(offsets=[TxnOffsetCommit(...)])
 c.abort_transaction()
+# Optional TransactionalProducer helper (v0.63). Queues offsets until commit.
+from volant import TransactionalProducer
+p = TransactionalProducer(c)  # c must have transactional_id
+p.begin()
+p.produce("t", 0, value=b"x")
+p.add_offsets("g", [("t", 0, 1)])
+results = p.commit()  # or p.abort()
+_ = p.is_open()
 # Optional SCRAM-SHA-256 (v0.46). Token wins if both are set.
 c = Client("127.0.0.1:9092", scram_username="alice", scram_password="s3cret")
 # SCRAM admin (v0.55). Opcodes 64–69; not the handshake. Password in clear.
@@ -182,6 +190,10 @@ Native transactions (v0.57) are opt-in via `transactional_id=`.
 `begin_transaction` / `commit_transaction` / `abort_transaction` send
 opcodes 50–53. Init uses that id. Abort rewinds sequences. Not Kafka
 transactions (API keys 22/24/25/26/28).
+`TransactionalProducer` (v0.63) is a thin helper: `begin` / `produce` /
+`add_offsets` (local queue) / `commit` / `abort`. Produce is
+write-through; LSO/commit is broker-side. Constructor fails if
+`transactional_id` is unset.
 SCRAM-SHA-256 (v0.46) sends opcodes 60 then 62 after connect when
 `scram_username` and `scram_password` are both set and `auth_token` is
 unset. Username without password (or vice versa) is a constructor
@@ -255,4 +267,5 @@ See [docs/V14_SPEC.md](../../docs/V14_SPEC.md),
 [docs/V55_SPEC.md](../../docs/V55_SPEC.md),
 [docs/V56_SPEC.md](../../docs/V56_SPEC.md),
 [docs/V58_SPEC.md](../../docs/V58_SPEC.md),
-[docs/V59_SPEC.md](../../docs/V59_SPEC.md).
+[docs/V59_SPEC.md](../../docs/V59_SPEC.md),
+[docs/V63_SPEC.md](../../docs/V63_SPEC.md).

@@ -92,6 +92,14 @@ _ = c.BeginTransaction()
 _ = c.Produce("t", 0, nil, []byte("hello"))
 _, _ = c.CommitTransaction(nil) // or []codec.TxnOffsetCommit
 _ = c.AbortTransaction()
+// Optional TransactionalProducer helper (v0.63). Queues offsets until Commit.
+p, err := volant.NewTransactionalProducer(c) // c must have transactional_id
+_ = p.Begin()
+_, _ = p.Produce("t", 0, nil, []byte("x"))
+p.AddOffsets("g", []volant.TxnOffset{{Topic: "t", Partition: 0, Offset: 1}})
+results, err := p.Commit() // or p.Abort()
+_ = p.IsOpen()
+_ = results
 // Optional SCRAM-SHA-256 (v0.46). Dial / DialAuth / DialTLS stay.
 c, err = volant.DialScram("127.0.0.1:9092", "alice", "s3cret")
 c, err = volant.DialTLSScram("127.0.0.1:9092", volant.TLSConfig{CAFile: "ca.pem"}, "alice", "s3cret")
@@ -194,6 +202,10 @@ Native transactions (v0.57) are opt-in via `SetTransactionalID`.
 `BeginTransaction` / `CommitTransaction` / `AbortTransaction` send
 opcodes 50–53. Init uses that id. Abort rewinds sequences. Not Kafka
 transactions (API keys 22/24/25/26/28).
+`TransactionalProducer` (v0.63) is a thin helper: `Begin` / `Produce` /
+`AddOffsets` (local queue) / `Commit` / `Abort`. Produce is
+write-through; LSO/commit is broker-side. `NewTransactionalProducer`
+fails if `transactional_id` is unset.
 SCRAM-SHA-256 (v0.46): `DialScram` / `DialTLSScram` send opcodes 60
 then 62 after connect. Empty user or password is an error before
 dial. A rejected proof or server-signature mismatch fails Dial.
@@ -266,4 +278,5 @@ See [docs/V19_SPEC.md](../../docs/V19_SPEC.md),
 [docs/V56_SPEC.md](../../docs/V56_SPEC.md),
 [docs/V58_SPEC.md](../../docs/V58_SPEC.md),
 [docs/V59_SPEC.md](../../docs/V59_SPEC.md).
-[docs/V57_SPEC.md](../../docs/V57_SPEC.md).
+[docs/V57_SPEC.md](../../docs/V57_SPEC.md),
+[docs/V63_SPEC.md](../../docs/V63_SPEC.md).
