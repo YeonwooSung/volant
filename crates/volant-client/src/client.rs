@@ -1215,6 +1215,8 @@ impl Client {
                 | Response::DeleteScramUser { error_code }
                 | Response::ListScramUsers { error_code, .. }
                 | Response::ListAcls { error_code, .. }
+                | Response::AddBroker { error_code, .. }
+                | Response::RemoveBroker { error_code, .. }
                     if *error_code == ErrorCode::NotController as u16 =>
                 {
                     (true, None)
@@ -1553,7 +1555,7 @@ impl Client {
         rack: Option<&str>,
     ) -> Result<u64> {
         let resp = self
-            .round_trip(Request::AddBroker {
+            .admin_round_trip(Request::AddBroker {
                 id,
                 host: host.to_owned(),
                 port,
@@ -1577,7 +1579,7 @@ impl Client {
 
     /// Remove a broker from the membership overlay (v0.10).
     pub async fn remove_broker(&self, id: u32) -> Result<u64> {
-        let resp = self.round_trip(Request::RemoveBroker { id }).await?;
+        let resp = self.admin_round_trip(Request::RemoveBroker { id }).await?;
         match resp {
             Response::RemoveBroker {
                 error_code,
