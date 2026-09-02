@@ -1,8 +1,24 @@
 //! Group-coordinated consumer (`GroupConsumer`).
+//!
+//! After a successful [`GroupConsumer::join`] / [`GroupConsumer::join_static`],
+//! a background task heartbeats every [`heartbeat_interval`] so a silent
+//! consumer does not expire. Disable with
+//! [`GroupConsumer::join_with_heartbeat`] / [`GroupConsumer::join_static_with_heartbeat`].
+//! [`GroupConsumer::poll`] still heartbeats once at the start of the call.
+//!
+//! The join lock serializes the heartbeat task against `poll` / `commit` /
+//! `leave`. This is **not** a fully concurrent consumer — do not call `poll`
+//! from two tasks. [`GroupConsumer::leave`] stops the task and sends
+//! LeaveGroup. `Drop` only `abort()`s the task (no LeaveGroup); call
+//! `leave().await` for a clean leave.
 
 use std::collections::{HashMap, HashSet};
-use std::sync::Arc;
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::{Arc, Mutex};
+use std::time::Duration;
 
+use tokio::sync::{watch, Mutex as AsyncMutex};
+use tokio::task::JoinHandle;
 use volant_core::{Offset, Result};
 use volant_protocol::{FetchRecord, OffsetCommitEntry, OffsetEntry};
 
@@ -11,6 +27,38 @@ use crate::client::Client;
 /// Wire sentinel: unknown / not-committed offset (`docs/PHASE3_SPEC.md`).
 const OFFSET_UNKNOWN: u64 = u64::MAX;
 
+/// Minimum background heartbeat period (ms).
+const HEARTBEAT_INTERVAL_MIN_MS: u32 = 100;
+/// Maximum background heartbeat period (ms).
+const HEARTBEAT_INTERVAL_MAX_MS: u32 = 3000;
+/// How long [`GroupConsumer::leave`] waits for the heartbeat task to exit.
+const HEARTBEAT_SHUTDOWN_TIMEOUT: Duration = Duration::from_millis(500);
+
+/// Background heartbeat period: `session_timeout_ms / 3`, clamped to
+/// `[100ms, 3000ms]`.
+pub fn heartbeat_interval(session_timeout_ms: u32) -> Duration {
+    let third = session_timeout_ms / 3;
+    let ms = third.clamp(HEARTBEAT_INTERVAL_MIN_MS, HEARTBEAT_INTERVAL_MAX_MS);
+    Duration::from_millis(u64::from(ms))
+}
+
+#[derive(Debug)]
+struct JoinState {
+    member_id: String,
+    generation: u32,
+    assignment: Vec<(String, u32)>,
+    last_revoked: Vec<(String, u32)>,
+    positions: HashMap<(String, u32), u64>,
+}
+
+#[derive(Debug)]
+struct Shared {
+    /// Serializes heartbeat vs poll / commit / leave. Not a concurrent consumer.
+    gate: AsyncMutex<()>,
+    state: Mutex<JoinState>,
+    heartbeat_count: AtomicU64,
+}
+
 /// High-level consumer that joins a group, polls assigned partitions, and commits.
 #[derive(Debug)]
 pub struct GroupConsumer {
@@ -18,37 +66,75 @@ pub struct GroupConsumer {
     group_id: String,
     topics: Vec<String>,
     session_timeout_ms: u32,
-    member_id: String,
     /// Static membership instance id (Phase 12); empty = dynamic.
     group_instance_id: String,
-    generation: u32,
-    assignment: Vec<(String, u32)>,
-    /// Partitions dropped on the last rebalance (Phase 17 cooperative).
-    last_revoked: Vec<(String, u32)>,
-    /// Next fetch offset per (topic, partition).
-    positions: HashMap<(String, u32), u64>,
+    shared: Arc<Shared>,
+    hb_stop: Option<watch::Sender<bool>>,
+    hb_task: Option<JoinHandle<()>>,
 }
 
 impl GroupConsumer {
-    /// Join a consumer group on the given topics.
+    /// Join a consumer group on the given topics (background heartbeat on).
     pub async fn join(
         client: Arc<Client>,
         group_id: impl Into<String>,
         topics: Vec<String>,
         session_timeout_ms: u32,
     ) -> Result<Self> {
-        Self::join_static(client, group_id, topics, session_timeout_ms, "").await
+        Self::join_static_with_heartbeat(client, group_id, topics, session_timeout_ms, "", true)
+            .await
     }
 
     /// Join with static membership (`group_instance_id`, Phase 12).
     ///
-    /// Empty `group_instance_id` is dynamic membership.
+    /// Empty `group_instance_id` is dynamic membership. Background heartbeat on.
     pub async fn join_static(
         client: Arc<Client>,
         group_id: impl Into<String>,
         topics: Vec<String>,
         session_timeout_ms: u32,
         group_instance_id: impl Into<String>,
+    ) -> Result<Self> {
+        Self::join_static_with_heartbeat(
+            client,
+            group_id,
+            topics,
+            session_timeout_ms,
+            group_instance_id,
+            true,
+        )
+        .await
+    }
+
+    /// [`join`](Self::join) with an explicit background-heartbeat switch.
+    ///
+    /// `heartbeat = false` keeps poll-only membership (no task).
+    pub async fn join_with_heartbeat(
+        client: Arc<Client>,
+        group_id: impl Into<String>,
+        topics: Vec<String>,
+        session_timeout_ms: u32,
+        heartbeat: bool,
+    ) -> Result<Self> {
+        Self::join_static_with_heartbeat(
+            client,
+            group_id,
+            topics,
+            session_timeout_ms,
+            "",
+            heartbeat,
+        )
+        .await
+    }
+
+    /// [`join_static`](Self::join_static) with an explicit background-heartbeat switch.
+    pub async fn join_static_with_heartbeat(
+        client: Arc<Client>,
+        group_id: impl Into<String>,
+        topics: Vec<String>,
+        session_timeout_ms: u32,
+        group_instance_id: impl Into<String>,
+        heartbeat: bool,
     ) -> Result<Self> {
         let group_id = group_id.into();
         let group_instance_id = group_instance_id.into();
@@ -57,132 +143,124 @@ impl GroupConsumer {
         } else {
             session_timeout_ms
         };
-        let mut this = Self {
+        let this = Self {
             client,
             group_id,
             topics,
             session_timeout_ms: timeout,
-            member_id: String::new(),
             group_instance_id,
-            generation: 0,
-            assignment: Vec::new(),
-            last_revoked: Vec::new(),
-            positions: HashMap::new(),
+            shared: Arc::new(Shared {
+                gate: AsyncMutex::new(()),
+                state: Mutex::new(JoinState {
+                    member_id: String::new(),
+                    generation: 0,
+                    assignment: Vec::new(),
+                    last_revoked: Vec::new(),
+                    positions: HashMap::new(),
+                }),
+                heartbeat_count: AtomicU64::new(0),
+            }),
+            hb_stop: None,
+            hb_task: None,
         };
-        this.do_join().await?;
+        {
+            let _gate = this.shared.gate.lock().await;
+            do_join(
+                &this.client,
+                &this.group_id,
+                &this.topics,
+                this.session_timeout_ms,
+                &this.group_instance_id,
+                &this.shared,
+            )
+            .await?;
+        }
+        let mut this = this;
+        if heartbeat {
+            this.spawn_heartbeat();
+        }
         Ok(this)
     }
 
-    async fn do_join(&mut self) -> Result<()> {
-        let previous = self.assignment.clone();
-        let result = self
-            .client
-            .join_group_with_instance(
-                &self.group_id,
-                &self.member_id,
-                self.session_timeout_ms,
-                self.topics.clone(),
-                &self.group_instance_id,
+    fn spawn_heartbeat(&mut self) {
+        let (stop_tx, stop_rx) = watch::channel(false);
+        let client = Arc::clone(&self.client);
+        let group_id = self.group_id.clone();
+        let topics = self.topics.clone();
+        let session_timeout_ms = self.session_timeout_ms;
+        let group_instance_id = self.group_instance_id.clone();
+        let shared = Arc::clone(&self.shared);
+        self.hb_stop = Some(stop_tx);
+        self.hb_task = Some(tokio::spawn(async move {
+            heartbeat_loop(
+                client,
+                group_id,
+                topics,
+                session_timeout_ms,
+                group_instance_id,
+                shared,
+                stop_rx,
             )
-            .await?;
-        self.member_id = result.member_id;
-        self.generation = result.generation;
-        let new_assignment: Vec<(String, u32)> = result
-            .assignment
-            .into_iter()
-            .map(|a| (a.topic, a.partition))
-            .collect();
-
-        // Cooperative handoff (Phase 17): retain positions for sticky-kept
-        // partitions; only OffsetFetch newly assigned; drop revoked.
-        let old_set: HashSet<(String, u32)> = previous.iter().cloned().collect();
-        let new_set: HashSet<(String, u32)> = new_assignment.iter().cloned().collect();
-
-        let mut revoked: Vec<(String, u32)> = old_set
-            .difference(&new_set)
-            .cloned()
-            .collect();
-        // Union with broker-reported revoked (best-effort).
-        for a in result.revoked {
-            let tp = (a.topic, a.partition);
-            if !revoked.contains(&tp) {
-                revoked.push(tp);
-            }
-        }
-        revoked.sort();
-
-        let added: Vec<(String, u32)> = new_set.difference(&old_set).cloned().collect();
-
-        for tp in &revoked {
-            self.positions.remove(tp);
-        }
-
-        self.assignment = new_assignment;
-        self.last_revoked = revoked;
-
-        if !added.is_empty() || self.positions.is_empty() && !self.assignment.is_empty() {
-            // First join: positions empty and assignment full → fetch all.
-            // Rebalance: only fetch offsets for newly added partitions.
-            let to_fetch: Vec<(String, u32)> = if previous.is_empty() {
-                self.assignment.clone()
-            } else {
-                added
-            };
-            self.fetch_positions_for(&to_fetch).await?;
-        }
-
-        // Ensure every assigned partition has a position.
-        for (t, p) in &self.assignment {
-            self.positions.entry((t.clone(), *p)).or_insert(0);
-        }
-        Ok(())
+            .await;
+        }));
     }
 
-    async fn fetch_positions_for(&mut self, partitions: &[(String, u32)]) -> Result<()> {
-        if partitions.is_empty() {
-            return Ok(());
+    async fn shutdown_heartbeat(&mut self) {
+        if let Some(tx) = self.hb_stop.take() {
+            let _ = tx.send(true);
         }
-        let entries: Vec<OffsetEntry> = partitions
-            .iter()
-            .map(|(t, p)| OffsetEntry {
-                topic: t.clone(),
-                partition: *p,
-            })
-            .collect();
-        let fetched = self.client.fetch_offsets(&self.group_id, entries).await?;
-        for e in fetched {
-            let pos = if e.offset == OFFSET_UNKNOWN {
-                0
-            } else {
-                e.offset
-            };
-            self.positions.insert((e.topic, e.partition), pos);
+        if let Some(mut handle) = self.hb_task.take() {
+            tokio::select! {
+                _ = &mut handle => {}
+                _ = tokio::time::sleep(HEARTBEAT_SHUTDOWN_TIMEOUT) => {
+                    handle.abort();
+                    let _ = handle.await;
+                }
+            }
         }
-        Ok(())
     }
 
     /// Heartbeat + fetch from all assigned partitions.
+    ///
+    /// Do not call from two tasks; the lock only serializes this call against
+    /// the background heartbeat.
     pub async fn poll(&mut self) -> Result<Vec<FetchedRecord>> {
-        // Heartbeat; re-join on rebalance.
+        let _gate = self.shared.gate.lock().await;
+        let (member_id, generation) = membership(&self.shared);
+        self.shared.heartbeat_count.fetch_add(1, Ordering::Relaxed);
         let hb = self
             .client
-            .heartbeat(&self.group_id, &self.member_id, self.generation)
+            .heartbeat(&self.group_id, &member_id, generation)
             .await?;
         if hb.needs_rebalance() {
-            self.do_join().await?;
+            do_join(
+                &self.client,
+                &self.group_id,
+                &self.topics,
+                self.session_timeout_ms,
+                &self.group_instance_id,
+                &self.shared,
+            )
+            .await?;
         }
 
+        let assignment = lock_state(&self.shared).assignment.clone();
         let mut out = Vec::new();
-        let assignment = self.assignment.clone();
         for (topic, partition) in assignment {
-            let from = *self.positions.get(&(topic.clone(), partition)).unwrap_or(&0);
+            let from = lock_state(&self.shared)
+                .positions
+                .get(&(topic.clone(), partition))
+                .copied()
+                .unwrap_or(0);
             let result = self
                 .client
                 .fetch(&topic, partition, Offset::new(from), 100, 0)
                 .await?;
             for r in result.records {
                 let next = r.offset.saturating_add(1);
-                self.positions.insert((topic.clone(), partition), next);
+                lock_state(&self.shared)
+                    .positions
+                    .insert((topic.clone(), partition), next);
                 out.push(FetchedRecord {
                     topic: topic.clone(),
                     partition,
@@ -195,49 +273,57 @@ impl GroupConsumer {
 
     /// Commit last+1 positions for all assigned partitions.
     pub async fn commit(&self) -> Result<()> {
-        if self.positions.is_empty() {
-            return Ok(());
-        }
-        let entries: Vec<OffsetCommitEntry> = self
-            .positions
-            .iter()
-            .map(|((topic, partition), offset)| OffsetCommitEntry {
-                topic: topic.clone(),
-                partition: *partition,
-                offset: *offset,
-                metadata: String::new(),
-            })
-            .collect();
+        let _gate = self.shared.gate.lock().await;
+        let (member_id, generation, entries) = {
+            let state = lock_state(&self.shared);
+            if state.positions.is_empty() {
+                return Ok(());
+            }
+            let entries: Vec<OffsetCommitEntry> = state
+                .positions
+                .iter()
+                .map(|((topic, partition), offset)| OffsetCommitEntry {
+                    topic: topic.clone(),
+                    partition: *partition,
+                    offset: *offset,
+                    metadata: String::new(),
+                })
+                .collect();
+            (state.member_id.clone(), state.generation, entries)
+        };
         self.client
-            .commit_offsets(&self.group_id, &self.member_id, self.generation, entries)
+            .commit_offsets(&self.group_id, &member_id, generation, entries)
             .await
     }
 
-    /// Leave the group (consumes self).
-    pub async fn leave(self) -> Result<()> {
-        self.client
-            .leave_group(&self.group_id, &self.member_id)
-            .await
+    /// Stop the heartbeat task (if any) and leave the group (consumes self).
+    ///
+    /// Idempotent with `Drop`: after this returns the task is gone. Required
+    /// for a clean LeaveGroup — `Drop` only aborts the task.
+    pub async fn leave(mut self) -> Result<()> {
+        self.shutdown_heartbeat().await;
+        let member_id = lock_state(&self.shared).member_id.clone();
+        self.client.leave_group(&self.group_id, &member_id).await
     }
 
     /// Current assignment as (topic, partition) pairs.
-    pub fn assignment(&self) -> &[(String, u32)] {
-        &self.assignment
+    pub fn assignment(&self) -> Vec<(String, u32)> {
+        lock_state(&self.shared).assignment.clone()
     }
 
     /// Partitions revoked on the most recent join/rebalance (Phase 17).
-    pub fn last_revoked(&self) -> &[(String, u32)] {
-        &self.last_revoked
+    pub fn last_revoked(&self) -> Vec<(String, u32)> {
+        lock_state(&self.shared).last_revoked.clone()
     }
 
     /// Group member id.
-    pub fn member_id(&self) -> &str {
-        &self.member_id
+    pub fn member_id(&self) -> String {
+        lock_state(&self.shared).member_id.clone()
     }
 
     /// Current generation.
     pub fn generation(&self) -> u32 {
-        self.generation
+        lock_state(&self.shared).generation
     }
 
     /// Group id.
@@ -246,8 +332,168 @@ impl GroupConsumer {
     }
 
     /// Current next-read positions.
-    pub fn positions(&self) -> &HashMap<(String, u32), u64> {
-        &self.positions
+    pub fn positions(&self) -> HashMap<(String, u32), u64> {
+        lock_state(&self.shared).positions.clone()
+    }
+
+    /// Heartbeat RPCs issued by this consumer (poll + background).
+    pub fn heartbeat_count(&self) -> u64 {
+        self.shared.heartbeat_count.load(Ordering::Relaxed)
+    }
+}
+
+impl Drop for GroupConsumer {
+    fn drop(&mut self) {
+        if let Some(tx) = self.hb_stop.take() {
+            let _ = tx.send(true);
+        }
+        if let Some(task) = self.hb_task.take() {
+            task.abort();
+        }
+    }
+}
+
+fn lock_state(shared: &Shared) -> std::sync::MutexGuard<'_, JoinState> {
+    shared.state.lock().unwrap_or_else(|e| e.into_inner())
+}
+
+fn membership(shared: &Shared) -> (String, u32) {
+    let state = lock_state(shared);
+    (state.member_id.clone(), state.generation)
+}
+
+async fn do_join(
+    client: &Client,
+    group_id: &str,
+    topics: &[String],
+    session_timeout_ms: u32,
+    group_instance_id: &str,
+    shared: &Shared,
+) -> Result<()> {
+    let (member_id, previous) = {
+        let state = lock_state(shared);
+        (state.member_id.clone(), state.assignment.clone())
+    };
+    let result = client
+        .join_group_with_instance(
+            group_id,
+            &member_id,
+            session_timeout_ms,
+            topics.to_vec(),
+            group_instance_id,
+        )
+        .await?;
+    let new_assignment: Vec<(String, u32)> = result
+        .assignment
+        .into_iter()
+        .map(|a| (a.topic, a.partition))
+        .collect();
+
+    let old_set: HashSet<(String, u32)> = previous.iter().cloned().collect();
+    let new_set: HashSet<(String, u32)> = new_assignment.iter().cloned().collect();
+
+    let mut revoked: Vec<(String, u32)> = old_set.difference(&new_set).cloned().collect();
+    for a in result.revoked {
+        let tp = (a.topic, a.partition);
+        if !revoked.contains(&tp) {
+            revoked.push(tp);
+        }
+    }
+    revoked.sort();
+
+    let added: Vec<(String, u32)> = new_set.difference(&old_set).cloned().collect();
+    let positions_empty = lock_state(shared).positions.is_empty();
+
+    let to_fetch: Vec<(String, u32)> =
+        if !added.is_empty() || positions_empty && !new_assignment.is_empty() {
+            if previous.is_empty() {
+                new_assignment.clone()
+            } else {
+                added
+            }
+        } else {
+            Vec::new()
+        };
+    let fetched = if to_fetch.is_empty() {
+        Vec::new()
+    } else {
+        let entries: Vec<OffsetEntry> = to_fetch
+            .iter()
+            .map(|(t, p)| OffsetEntry {
+                topic: t.clone(),
+                partition: *p,
+            })
+            .collect();
+        client.fetch_offsets(group_id, entries).await?
+    };
+
+    let mut state = lock_state(shared);
+    for tp in &revoked {
+        state.positions.remove(tp);
+    }
+    state.member_id = result.member_id;
+    state.generation = result.generation;
+    state.assignment = new_assignment;
+    state.last_revoked = revoked;
+    for e in fetched {
+        let pos = if e.offset == OFFSET_UNKNOWN {
+            0
+        } else {
+            e.offset
+        };
+        state.positions.insert((e.topic, e.partition), pos);
+    }
+    let assigned = state.assignment.clone();
+    for (t, p) in assigned {
+        state.positions.entry((t, p)).or_insert(0);
+    }
+    Ok(())
+}
+
+async fn heartbeat_loop(
+    client: Arc<Client>,
+    group_id: String,
+    topics: Vec<String>,
+    session_timeout_ms: u32,
+    group_instance_id: String,
+    shared: Arc<Shared>,
+    mut stop: watch::Receiver<bool>,
+) {
+    let interval = heartbeat_interval(session_timeout_ms);
+    loop {
+        tokio::select! {
+            _ = stop.changed() => {
+                if *stop.borrow() {
+                    break;
+                }
+            }
+            _ = tokio::time::sleep(interval) => {
+                if *stop.borrow() {
+                    break;
+                }
+                let _gate = shared.gate.lock().await;
+                if *stop.borrow() {
+                    break;
+                }
+                let (member_id, generation) = membership(&shared);
+                shared.heartbeat_count.fetch_add(1, Ordering::Relaxed);
+                match client.heartbeat(&group_id, &member_id, generation).await {
+                    Ok(hb) if hb.needs_rebalance() => {
+                        let _ = do_join(
+                            &client,
+                            &group_id,
+                            &topics,
+                            session_timeout_ms,
+                            &group_instance_id,
+                            &shared,
+                        )
+                        .await;
+                    }
+                    Ok(_) => {}
+                    Err(_) => {}
+                }
+            }
+        }
     }
 }
 
@@ -260,4 +506,17 @@ pub struct FetchedRecord {
     pub partition: u32,
     /// Wire record.
     pub record: FetchRecord,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn heartbeat_interval_clamps() {
+        assert_eq!(heartbeat_interval(0), Duration::from_millis(100));
+        assert_eq!(heartbeat_interval(150), Duration::from_millis(100));
+        assert_eq!(heartbeat_interval(900), Duration::from_millis(300));
+        assert_eq!(heartbeat_interval(10_000), Duration::from_millis(3000));
+    }
 }

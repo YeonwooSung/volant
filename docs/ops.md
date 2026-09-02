@@ -870,6 +870,14 @@ with member+generation, rejoin on error 9. Codec and mock unit tests
 need no broker; live commit/fetch + resume is `VOLANT_E2E=1`. See
 [V33_SPEC.md](./V33_SPEC.md).
 
+## v0.44 Rust GroupConsumer heartbeat
+
+Rust `GroupConsumer::join` now spawns a background heartbeat
+(`session_timeout_ms / 3`, clamped `[100ms, 3000ms]`) so a silent
+member does not expire. Escape: `join_with_heartbeat(..., false)`
+(poll-only). `leave().await` is required for LeaveGroup; `Drop` only
+aborts the task. See [V44_SPEC.md](./V44_SPEC.md).
+
 ## Shipped (not gaps)
 
 Kafka wire shim **Phases 23–109** (ApiVersions **0–5**, Fetch **0–18**, ACL admin

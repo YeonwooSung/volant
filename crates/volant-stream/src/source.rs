@@ -60,7 +60,7 @@ impl TopicSource {
     }
 
     /// Next-read positions as `(topic, partition) → offset`.
-    pub fn positions(&self) -> &HashMap<(String, u32), u64> {
+    pub fn positions(&self) -> HashMap<(String, u32), u64> {
         self.consumer.positions()
     }
 
