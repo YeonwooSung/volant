@@ -2,7 +2,7 @@
 //
 // Matches crates/volant-protocol/src/payload.rs for Produce, Fetch,
 // CreateTopic, Metadata, DeleteTopic, OffsetCommit, OffsetFetch,
-// JoinGroup, Heartbeat, LeaveGroup, and Auth.
+// JoinGroup, Heartbeat, LeaveGroup, Auth, ScramFirst, and ScramFinal.
 // Frame headers are big-endian (see package frame); payload integers and
 // length prefixes are little-endian.
 package codec
@@ -15,19 +15,23 @@ import (
 )
 
 const (
-	OpProduce      uint16 = 1
-	OpFetch        uint16 = 2
-	OpCreateTopic  uint16 = 3
-	OpMetadata     uint16 = 4
-	OpDeleteTopic  uint16 = 5
-	OpOffsetCommit uint16 = 6
-	OpOffsetFetch  uint16 = 7
-	OpJoinGroup    uint16 = 8
-	OpHeartbeat    uint16 = 9
-	OpLeaveGroup   uint16 = 10
-	OpAuth         uint16 = 30
-	OpAuthResponse uint16 = 31
-	OpError        uint16 = 0xFFFF
+	OpProduce            uint16 = 1
+	OpFetch              uint16 = 2
+	OpCreateTopic        uint16 = 3
+	OpMetadata           uint16 = 4
+	OpDeleteTopic        uint16 = 5
+	OpOffsetCommit       uint16 = 6
+	OpOffsetFetch        uint16 = 7
+	OpJoinGroup          uint16 = 8
+	OpHeartbeat          uint16 = 9
+	OpLeaveGroup         uint16 = 10
+	OpAuth               uint16 = 30
+	OpAuthResponse       uint16 = 31
+	OpScramFirst         uint16 = 60
+	OpScramFirstResponse uint16 = 61
+	OpScramFinal         uint16 = 62
+	OpScramFinalResponse uint16 = 63
+	OpError              uint16 = 0xFFFF
 
 	nullLen = 0xFFFFFFFF
 )
@@ -474,6 +478,33 @@ type AuthRequest struct {
 // AuthResponse is the Auth reply (opcode 31).
 type AuthResponse struct {
 	ErrorCode uint16
+}
+
+// ScramFirstRequest is the ScramFirst request (opcode 60).
+type ScramFirstRequest struct {
+	Username    string
+	ClientNonce string
+}
+
+// ScramFirstResponse is the ScramFirst reply (opcode 61).
+type ScramFirstResponse struct {
+	ErrorCode     uint16
+	CombinedNonce string
+	Salt          []byte
+	Iterations    uint32
+}
+
+// ScramFinalRequest is the ScramFinal request (opcode 62).
+type ScramFinalRequest struct {
+	Username      string
+	CombinedNonce string
+	ClientProof   []byte
+}
+
+// ScramFinalResponse is the ScramFinal reply (opcode 63).
+type ScramFinalResponse struct {
+	ErrorCode       uint16
+	ServerSignature []byte
 }
 
 func EncodeProduceRequest(req ProduceRequest) ([]byte, error) {
@@ -1473,6 +1504,120 @@ func DecodeAuthResponse(payload []byte) (AuthResponse, error) {
 	return AuthResponse{ErrorCode: code}, nil
 }
 
+func EncodeScramFirstRequest(req ScramFirstRequest) ([]byte, error) {
+	w := &writer{}
+	if err := putString(w, req.Username); err != nil {
+		return nil, err
+	}
+	if err := putString(w, req.ClientNonce); err != nil {
+		return nil, err
+	}
+	return w.buf, nil
+}
+
+func DecodeScramFirstRequest(payload []byte) (ScramFirstRequest, error) {
+	r := &reader{data: payload}
+	user, err := getString(r)
+	if err != nil {
+		return ScramFirstRequest{}, err
+	}
+	nonce, err := getString(r)
+	if err != nil {
+		return ScramFirstRequest{}, err
+	}
+	return ScramFirstRequest{Username: user, ClientNonce: nonce}, nil
+}
+
+func EncodeScramFirstResponse(resp ScramFirstResponse) ([]byte, error) {
+	w := &writer{}
+	w.u16(resp.ErrorCode)
+	if err := putString(w, resp.CombinedNonce); err != nil {
+		return nil, err
+	}
+	putBytes(w, resp.Salt)
+	w.u32(resp.Iterations)
+	return w.buf, nil
+}
+
+func DecodeScramFirstResponse(payload []byte) (ScramFirstResponse, error) {
+	r := &reader{data: payload}
+	code, err := r.u16()
+	if err != nil {
+		return ScramFirstResponse{}, err
+	}
+	combined, err := getString(r)
+	if err != nil {
+		return ScramFirstResponse{}, err
+	}
+	salt, err := getBytes(r)
+	if err != nil {
+		return ScramFirstResponse{}, err
+	}
+	iters, err := r.u32()
+	if err != nil {
+		return ScramFirstResponse{}, err
+	}
+	return ScramFirstResponse{
+		ErrorCode:     code,
+		CombinedNonce: combined,
+		Salt:          salt,
+		Iterations:    iters,
+	}, nil
+}
+
+func EncodeScramFinalRequest(req ScramFinalRequest) ([]byte, error) {
+	w := &writer{}
+	if err := putString(w, req.Username); err != nil {
+		return nil, err
+	}
+	if err := putString(w, req.CombinedNonce); err != nil {
+		return nil, err
+	}
+	putBytes(w, req.ClientProof)
+	return w.buf, nil
+}
+
+func DecodeScramFinalRequest(payload []byte) (ScramFinalRequest, error) {
+	r := &reader{data: payload}
+	user, err := getString(r)
+	if err != nil {
+		return ScramFinalRequest{}, err
+	}
+	combined, err := getString(r)
+	if err != nil {
+		return ScramFinalRequest{}, err
+	}
+	proof, err := getBytes(r)
+	if err != nil {
+		return ScramFinalRequest{}, err
+	}
+	return ScramFinalRequest{
+		Username:      user,
+		CombinedNonce: combined,
+		ClientProof:   proof,
+	}, nil
+}
+
+func EncodeScramFinalResponse(resp ScramFinalResponse) ([]byte, error) {
+	w := &writer{}
+	w.u16(resp.ErrorCode)
+	putBytes(w, resp.ServerSignature)
+	return w.buf, nil
+}
+
+func DecodeScramFinalResponse(payload []byte) (ScramFinalResponse, error) {
+	r := &reader{data: payload}
+	code, err := r.u16()
+	if err != nil {
+		return ScramFinalResponse{}, err
+	}
+	sig, err := getBytes(r)
+	if err != nil {
+		return ScramFinalResponse{}, err
+	}
+	return ScramFinalResponse{ErrorCode: code, ServerSignature: sig}, nil
+}
+
 func EncodeErrorResponse(resp ErrorResponse) ([]byte, error) {
 	w := &writer{}
 	w.u16(resp.Code)
@@ -1520,6 +1665,10 @@ func DecodeResponse(opcode uint16, payload []byte) (any, error) {
 		return DecodeLeaveGroupResponse(payload)
 	case OpAuthResponse:
 		return DecodeAuthResponse(payload)
+	case OpScramFirstResponse:
+		return DecodeScramFirstResponse(payload)
+	case OpScramFinalResponse:
+		return DecodeScramFinalResponse(payload)
 	case OpError:
 		return DecodeErrorResponse(payload)
 	default:

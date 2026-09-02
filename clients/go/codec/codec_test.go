@@ -912,3 +912,119 @@ func TestAuthResponseOkAndFailed(t *testing.T) {
 		t.Fatalf("dispatch fail %#v", got)
 	}
 }
+
+func TestScramFirstRequest(t *testing.T) {
+	req := ScramFirstRequest{Username: "alice", ClientNonce: "n1"}
+	raw, err := EncodeScramFirstRequest(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	expected := mustHex(t, "0500616c69636502006e31")
+	if !bytes.Equal(raw, expected) {
+		t.Fatalf("encode:\n got %x\nwant %x", raw, expected)
+	}
+	decoded, err := DecodeScramFirstRequest(raw)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if decoded != req {
+		t.Fatalf("decoded %+v", decoded)
+	}
+}
+
+func TestScramFirstResponse(t *testing.T) {
+	resp := ScramFirstResponse{
+		ErrorCode:     0,
+		CombinedNonce: "n1s1",
+		Salt:          []byte{1, 2, 3},
+		Iterations:    4096,
+	}
+	raw, err := EncodeScramFirstResponse(resp)
+	if err != nil {
+		t.Fatal(err)
+	}
+	expected := mustHex(t, "000004006e3173310300000001020300100000")
+	if !bytes.Equal(raw, expected) {
+		t.Fatalf("encode:\n got %x\nwant %x", raw, expected)
+	}
+	decoded, err := DecodeScramFirstResponse(raw)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if decoded.ErrorCode != resp.ErrorCode || decoded.CombinedNonce != resp.CombinedNonce || decoded.Iterations != resp.Iterations || !bytes.Equal(decoded.Salt, resp.Salt) {
+		t.Fatalf("decoded %+v", decoded)
+	}
+	got, err := DecodeResponse(OpScramFirstResponse, raw)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, ok := got.(ScramFirstResponse); !ok {
+		t.Fatalf("dispatch %#v", got)
+	}
+}
+
+func TestScramFinalRequest(t *testing.T) {
+	req := ScramFinalRequest{
+		Username:      "alice",
+		CombinedNonce: "n1s1",
+		ClientProof:   make([]byte, 32),
+	}
+	raw, err := EncodeScramFinalRequest(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	expected := mustHex(t, "0500616c69636504006e31733120000000"+hexZeros(32))
+	if !bytes.Equal(raw, expected) {
+		t.Fatalf("encode:\n got %x\nwant %x", raw, expected)
+	}
+	decoded, err := DecodeScramFinalRequest(raw)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if decoded.Username != req.Username || decoded.CombinedNonce != req.CombinedNonce || !bytes.Equal(decoded.ClientProof, req.ClientProof) {
+		t.Fatalf("decoded %+v", decoded)
+	}
+}
+
+func TestScramFinalResponse(t *testing.T) {
+	sig := bytes.Repeat([]byte{9}, 32)
+	resp := ScramFinalResponse{ErrorCode: 0, ServerSignature: sig}
+	raw, err := EncodeScramFinalResponse(resp)
+	if err != nil {
+		t.Fatal(err)
+	}
+	expected := mustHex(t, "000020000000"+hexNines(32))
+	if !bytes.Equal(raw, expected) {
+		t.Fatalf("encode:\n got %x\nwant %x", raw, expected)
+	}
+	decoded, err := DecodeScramFinalResponse(raw)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if decoded.ErrorCode != 0 || !bytes.Equal(decoded.ServerSignature, sig) {
+		t.Fatalf("decoded %+v", decoded)
+	}
+	got, err := DecodeResponse(OpScramFinalResponse, raw)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, ok := got.(ScramFinalResponse); !ok {
+		t.Fatalf("dispatch %#v", got)
+	}
+}
+
+func hexZeros(n int) string {
+	out := make([]byte, n*2)
+	for i := range out {
+		out[i] = '0'
+	}
+	return string(out)
+}
+
+func hexNines(n int) string {
+	out := make([]byte, 0, n*2)
+	for i := 0; i < n; i++ {
+		out = append(out, '0', '9')
+	}
+	return string(out)
+}

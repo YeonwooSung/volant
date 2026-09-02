@@ -35,9 +35,17 @@ from volant.codec import (
     ProduceMessage,
     ProduceRequest,
     ProduceResponse,
+    ScramFinalRequest,
+    ScramFinalResponse,
+    ScramFirstRequest,
+    ScramFirstResponse,
     TopicInfo,
     decode_auth_request,
     decode_auth_response,
+    decode_scram_final_request,
+    decode_scram_final_response,
+    decode_scram_first_request,
+    decode_scram_first_response,
     decode_create_topic_request,
     decode_create_topic_response,
     decode_delete_topic_request,
@@ -61,6 +69,10 @@ from volant.codec import (
     decode_response,
     encode_auth_request,
     encode_auth_response,
+    encode_scram_final_request,
+    encode_scram_final_response,
+    encode_scram_first_request,
+    encode_scram_first_response,
     encode_create_topic_request,
     encode_create_topic_response,
     encode_delete_topic_request,
@@ -82,6 +94,8 @@ from volant.codec import (
     encode_produce_request,
     encode_produce_response,
     OP_AUTH_RESPONSE,
+    OP_SCRAM_FINAL_RESPONSE,
+    OP_SCRAM_FIRST_RESPONSE,
     OP_HEARTBEAT,
     OP_JOIN_GROUP,
     OP_LEAVE_GROUP,
@@ -622,6 +636,40 @@ class TestAuthCodec(unittest.TestCase):
         self.assertEqual(raw, bytes.fromhex("1100"))
         self.assertEqual(decode_auth_response(raw), fail)
         self.assertEqual(decode_response(OP_AUTH_RESPONSE, raw), fail)
+
+
+class TestScramCodec(unittest.TestCase):
+    def test_scram_first_request(self) -> None:
+        req = ScramFirstRequest(username="alice", client_nonce="n1")
+        raw = encode_scram_first_request(req)
+        self.assertEqual(_hx(raw), "0500616c69636502006e31")
+        self.assertEqual(decode_scram_first_request(raw), req)
+
+    def test_scram_first_response(self) -> None:
+        resp = ScramFirstResponse(
+            error_code=0, combined_nonce="n1s1", salt=bytes([1, 2, 3]), iterations=4096
+        )
+        raw = encode_scram_first_response(resp)
+        self.assertEqual(_hx(raw), "000004006e3173310300000001020300100000")
+        self.assertEqual(decode_scram_first_response(raw), resp)
+        self.assertEqual(decode_response(OP_SCRAM_FIRST_RESPONSE, raw), resp)
+
+    def test_scram_final_request(self) -> None:
+        req = ScramFinalRequest(
+            username="alice", combined_nonce="n1s1", client_proof=bytes(32)
+        )
+        raw = encode_scram_final_request(req)
+        expected = "0500616c69636504006e31733120000000" + ("00" * 32)
+        self.assertEqual(_hx(raw), expected)
+        self.assertEqual(decode_scram_final_request(raw), req)
+
+    def test_scram_final_response(self) -> None:
+        resp = ScramFinalResponse(error_code=0, server_signature=bytes([9] * 32))
+        raw = encode_scram_final_response(resp)
+        expected = "000020000000" + ("09" * 32)
+        self.assertEqual(_hx(raw), expected)
+        self.assertEqual(decode_scram_final_response(raw), resp)
+        self.assertEqual(decode_response(OP_SCRAM_FINAL_RESPONSE, raw), resp)
 
 
 if __name__ == "__main__":

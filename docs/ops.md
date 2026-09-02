@@ -146,6 +146,12 @@ ClientConfig {
 }
 ```
 
+Language clients (v0.46): Python
+`Client(..., scram_username="alice", scram_password="s3cret")`,
+Go `DialScram` / `DialTLSScram`, Java `connectScram` /
+`connectTlsScram`. SHA-256 only; no Kafka SASL. If `auth_token` is
+also set, the client sends shared-token Auth and skips SCRAM.
+
 Notes:
 
 - `auth_required` when shared token **or** any SCRAM user **or** mTLS is configured.

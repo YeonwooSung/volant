@@ -54,6 +54,9 @@ Client.connectTls(
 // Optional shared-token Auth (v0.42). null / empty skips Auth.
 Client.connect("127.0.0.1", 9092, "s3cret");
 Client.connectTls("127.0.0.1", 9092, TlsOptions.ca("ca.pem"), "s3cret");
+// Optional SCRAM-SHA-256 (v0.46). Existing overloads stay.
+Client.connectScram("127.0.0.1", 9092, "alice", "s3cret");
+Client.connectTlsScram("127.0.0.1", 9092, TlsOptions.ca("ca.pem"), "alice", "s3cret");
 ```
 
 `produce(..., null, value)` sends a null key. `fetch` returns `List<Record>`
@@ -115,6 +118,12 @@ Shared-token Auth (v0.42): `connect(..., authToken)` /
 the token is non-empty. A rejected token throws `BrokerException` with
 code 17 and closes the socket. Existing overloads are unchanged.
 
+SCRAM-SHA-256 (v0.46): `connectScram` / `connectTlsScram` send opcodes
+60 then 62 after connect. Null or empty user or password throws
+`IllegalArgumentException` before connect. A rejected proof or
+server-signature mismatch fails the constructor. Leader redirect
+re-runs the same auth path.
+
 ## Honesty
 
 `GroupConsumer` starts a background heartbeat executor after join
@@ -123,7 +132,8 @@ Pass `heartbeat=false` for the v0.33 poll-only loop. Not a fully
 concurrent API: do not share the `Client` while the consumer is open.
 
 Not implemented: `kafka-clients`, Kafka cooperative-sticky / SyncGroup,
-seeing other group members on the wire, SCRAM, async I/O, idempotent
+seeing other group members on the wire, SCRAM-SHA-512, Kafka SASL,
+async I/O, idempotent
 produce. Local `assignor="range"` cannot split across
 live members. Sync only; one TCP connection; acks=1 by default. Thin
 `joinGroup` still sends empty `group_instance_id`; use
@@ -142,5 +152,6 @@ See [docs/V23_SPEC.md](../../docs/V23_SPEC.md),
 [docs/V36_SPEC.md](../../docs/V36_SPEC.md),
 [docs/V37_SPEC.md](../../docs/V37_SPEC.md),
 [docs/V41_SPEC.md](../../docs/V41_SPEC.md),
-[docs/V42_SPEC.md](../../docs/V42_SPEC.md), and
-[docs/V43_SPEC.md](../../docs/V43_SPEC.md).
+[docs/V42_SPEC.md](../../docs/V42_SPEC.md),
+[docs/V43_SPEC.md](../../docs/V43_SPEC.md), and
+[docs/V46_SPEC.md](../../docs/V46_SPEC.md).

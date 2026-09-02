@@ -61,6 +61,8 @@ c = Client(
 # Optional shared-token Auth (v0.42). Empty / unset skips Auth.
 c = Client("127.0.0.1:9092", auth_token="s3cret")
 c = Client("127.0.0.1:9092", tls=True, tls_ca="ca.pem", auth_token="s3cret")
+# Optional SCRAM-SHA-256 (v0.46). Token wins if both are set.
+c = Client("127.0.0.1:9092", scram_username="alice", scram_password="s3cret")
 ```
 
 `Client` is also a context manager. `produce(..., key=b"...")` is supported;
@@ -126,6 +128,12 @@ Shared-token Auth (v0.42) sends native opcode 30 after connect (and
 TLS, if any) when `auth_token` is a non-empty string. A rejected token
 raises `BrokerError` with code 17 and closes the socket.
 
+SCRAM-SHA-256 (v0.46) sends opcodes 60 then 62 after connect when
+`scram_username` and `scram_password` are both set and `auth_token` is
+unset. Username without password (or vice versa) is a constructor
+error. A rejected proof or server-signature mismatch fails the
+constructor. Leader redirect re-runs the same auth path.
+
 ## Honesty
 
 `GroupConsumer` starts a background heartbeat thread after join
@@ -134,7 +142,8 @@ Pass `heartbeat=False` for the v0.31 poll-only loop. Not a fully
 concurrent API: do not share the `Client` while the consumer is open.
 
 Not implemented: `kafka-python`, Kafka cooperative-sticky / SyncGroup,
-seeing other group members on the wire, SCRAM, async I/O, idempotent
+seeing other group members on the wire, SCRAM-SHA-512, Kafka SASL,
+async I/O, idempotent
 produce, auto-commit. Local `assignor="range"` cannot
 split across live members. Thin `join_group` still defaults to empty
 `group_instance_id` unless the caller (or `GroupConsumer.join`) passes
@@ -153,5 +162,6 @@ See [docs/V14_SPEC.md](../../docs/V14_SPEC.md),
 [docs/V36_SPEC.md](../../docs/V36_SPEC.md),
 [docs/V37_SPEC.md](../../docs/V37_SPEC.md),
 [docs/V41_SPEC.md](../../docs/V41_SPEC.md),
-[docs/V42_SPEC.md](../../docs/V42_SPEC.md), and
-[docs/V43_SPEC.md](../../docs/V43_SPEC.md).
+[docs/V42_SPEC.md](../../docs/V42_SPEC.md),
+[docs/V43_SPEC.md](../../docs/V43_SPEC.md), and
+[docs/V46_SPEC.md](../../docs/V46_SPEC.md).

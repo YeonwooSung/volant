@@ -67,6 +67,9 @@ c, err = volant.DialTLS("127.0.0.1:9092", volant.TLSConfig{
 // Optional shared-token Auth (v0.42). Empty token skips Auth.
 c, err = volant.DialAuth("127.0.0.1:9092", "s3cret")
 c, err = volant.DialTLSAuth("127.0.0.1:9092", volant.TLSConfig{CAFile: "ca.pem"}, "s3cret")
+// Optional SCRAM-SHA-256 (v0.46). Dial / DialAuth / DialTLS stay.
+c, err = volant.DialScram("127.0.0.1:9092", "alice", "s3cret")
+c, err = volant.DialTLSScram("127.0.0.1:9092", volant.TLSConfig{CAFile: "ca.pem"}, "alice", "s3cret")
 ```
 
 `Produce(..., nil, value)` sends a null key. `Fetch` returns `[]Record`
@@ -130,6 +133,11 @@ opcode 30 after connect when the token is non-empty. A rejected token
 returns `BrokerError` with code 17 and closes the socket. `Dial` /
 `DialTLS` are unchanged.
 
+SCRAM-SHA-256 (v0.46): `DialScram` / `DialTLSScram` send opcodes 60
+then 62 after connect. Empty user or password is an error before
+dial. A rejected proof or server-signature mismatch fails Dial.
+Leader redirect re-runs the same auth path.
+
 ## Honesty
 
 `JoinGroupConsumer` starts a background heartbeat goroutine after
@@ -139,7 +147,8 @@ Not a fully concurrent API: do not share the `Client` while the
 consumer is open.
 
 Not implemented: `kafka-go`, Kafka cooperative-sticky / SyncGroup,
-seeing other group members on the wire, SCRAM, async I/O, idempotent
+seeing other group members on the wire, SCRAM-SHA-512, Kafka SASL,
+async I/O, idempotent
 produce. Local `WithAssignor("range")` cannot split
 across live members. Thin `Client.JoinGroup` still sends empty
 `group_instance_id`; use `JoinGroupConsumerStatic` for static
@@ -157,5 +166,6 @@ See [docs/V19_SPEC.md](../../docs/V19_SPEC.md),
 [docs/V36_SPEC.md](../../docs/V36_SPEC.md),
 [docs/V37_SPEC.md](../../docs/V37_SPEC.md),
 [docs/V41_SPEC.md](../../docs/V41_SPEC.md),
-[docs/V42_SPEC.md](../../docs/V42_SPEC.md), and
-[docs/V43_SPEC.md](../../docs/V43_SPEC.md).
+[docs/V42_SPEC.md](../../docs/V42_SPEC.md),
+[docs/V43_SPEC.md](../../docs/V43_SPEC.md), and
+[docs/V46_SPEC.md](../../docs/V46_SPEC.md).

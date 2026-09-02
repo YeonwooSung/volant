@@ -589,4 +589,53 @@ class CodecTest {
                 assertInstanceOf(Codec.AuthResponse.class, Codec.decodeResponse(Codec.OP_AUTH_RESPONSE, fail));
         assertEquals(17, dispatchedFail.errorCode);
     }
+
+    @Test
+    void scramFirstRequest() {
+        byte[] raw = Codec.encodeScramFirstRequest(new Codec.ScramFirstRequest("alice", "n1"));
+        assertArrayEquals(hx("0500616c69636502006e31"), raw);
+        Codec.ScramFirstRequest decoded = Codec.decodeScramFirstRequest(raw);
+        assertEquals("alice", decoded.username);
+        assertEquals("n1", decoded.clientNonce);
+    }
+
+    @Test
+    void scramFirstResponse() {
+        byte[] raw = Codec.encodeScramFirstResponse(
+                new Codec.ScramFirstResponse(0, "n1s1", new byte[] {1, 2, 3}, 4096));
+        assertArrayEquals(hx("000004006e3173310300000001020300100000"), raw);
+        Codec.ScramFirstResponse decoded = Codec.decodeScramFirstResponse(raw);
+        assertEquals(0, decoded.errorCode);
+        assertEquals("n1s1", decoded.combinedNonce);
+        assertArrayEquals(new byte[] {1, 2, 3}, decoded.salt);
+        assertEquals(4096, decoded.iterations);
+        Object got = Codec.decodeResponse(Codec.OP_SCRAM_FIRST_RESPONSE, raw);
+        assertInstanceOf(Codec.ScramFirstResponse.class, got);
+    }
+
+    @Test
+    void scramFinalRequest() {
+        byte[] raw = Codec.encodeScramFinalRequest(
+                new Codec.ScramFinalRequest("alice", "n1s1", new byte[32]));
+        String expected = "0500616c69636504006e31733120000000" + "00".repeat(32);
+        assertArrayEquals(hx(expected), raw);
+        Codec.ScramFinalRequest decoded = Codec.decodeScramFinalRequest(raw);
+        assertEquals("alice", decoded.username);
+        assertEquals("n1s1", decoded.combinedNonce);
+        assertEquals(32, decoded.clientProof.length);
+    }
+
+    @Test
+    void scramFinalResponse() {
+        byte[] sig = new byte[32];
+        java.util.Arrays.fill(sig, (byte) 9);
+        byte[] raw = Codec.encodeScramFinalResponse(new Codec.ScramFinalResponse(0, sig));
+        String expected = "000020000000" + "09".repeat(32);
+        assertArrayEquals(hx(expected), raw);
+        Codec.ScramFinalResponse decoded = Codec.decodeScramFinalResponse(raw);
+        assertEquals(0, decoded.errorCode);
+        assertArrayEquals(sig, decoded.serverSignature);
+        Object got = Codec.decodeResponse(Codec.OP_SCRAM_FINAL_RESPONSE, raw);
+        assertInstanceOf(Codec.ScramFinalResponse.class, got);
+    }
 }
