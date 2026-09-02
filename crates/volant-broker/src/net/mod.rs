@@ -345,6 +345,11 @@ pub fn start_background_tasks(broker: Arc<Broker>) -> BackgroundTasks {
                                 "background timeout sweep"
                             );
                         }
+                        // v0.30: periodic best-effort MirrorPut of foreign mirrors
+                        // so peers can self-converge without a client Fetch.
+                        if b.fetch_sessions().queue_foreign_mirror_puts() > 0 {
+                            schedule_session_mirror_fanout(&b);
+                        }
                     }
                 }
             }

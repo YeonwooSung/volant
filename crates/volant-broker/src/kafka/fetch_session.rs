@@ -34,6 +34,13 @@
 //! `mirror_gen`, then higher epoch, then lowest non-zero `promoted_by` / owner id
 //! (`0` = no claim, loses). Default **on**; `VOLANT_SESSION_DUAL_EPOCH_CONVERGE=0`
 //! disables. Phase 147 single owner-miss serve-from-mirror is unchanged. Not Raft.
+//!
+//! v0.30: when **both** sides hold only a foreign mirror (no local primary) for the
+//! same session id, inbound MirrorPut / [`FetchSessionManager::converge_dual_mirror`]
+//! overwrites the loser with the winner's snapshot (same order as v0.25). Serving
+//! from a foreign mirror (Phase 147) or a session-touch / sweep queues a best-effort
+//! MirrorPut so peers can compare. Default **on**; `VOLANT_SESSION_MIRROR_CONVERGE=0`
+//! disables. Does **not** promote unless Phase 147 `promote_on_miss` is already on.
 
 use std::collections::HashMap;
 use std::fs::{self, File, OpenOptions};
@@ -301,7 +308,7 @@ pub struct FetchSession {
 /// Fetch session table with idle TTL + max concurrent (Phase 95) + optional
 /// durability (Phase 115) + cluster owner encoding (Phase 119) + peer mirror
 /// (Phase 138/139) + promote claim fence (Phase 143) + incremental MirrorPut (Phase 146/147)
-/// + dual-epoch converge (v0.25).
+/// + dual-epoch converge (v0.25) + mirror-only converge (v0.30).
 #[derive(Debug)]
 pub struct FetchSessionManager {
     sessions: Mutex<HashMap<i32, FetchSession>>,
@@ -355,12 +362,16 @@ pub struct FetchSessionManager {
     serve_from_mirror_total: AtomicU64,
     /// Unclaimed dual-primary demotes (v0.25).
     dual_epoch_converge_total: AtomicU64,
+    /// Mirror-only loser overwrites (v0.30).
+    mirror_converge_total: AtomicU64,
     /// When true, owner miss + mirror → serve without promote (Phase 147; default on).
     serve_mirror_without_promote: AtomicBool,
     /// When true, owner miss + mirror → promote into primary (Phase 147; default off).
     promote_on_miss: AtomicBool,
     /// When true, unclaimed dual-primary MirrorPut/helper demotes the loser (v0.25; default on).
     dual_epoch_converge: AtomicBool,
+    /// When true, mirror↔mirror MirrorPut/helper overwrites the loser (v0.30; default on).
+    mirror_converge: AtomicBool,
     /// Min interval between Put fan-outs; `0` = immediate (Phase 139).
     mirror_put_min_interval_ms: AtomicU64,
     /// Single-flight arm for debounced Put fan-out (Phase 139).
@@ -421,9 +432,11 @@ impl FetchSessionManager {
             mirror_delta_puts_total: AtomicU64::new(0),
             serve_from_mirror_total: AtomicU64::new(0),
             dual_epoch_converge_total: AtomicU64::new(0),
+            mirror_converge_total: AtomicU64::new(0),
             serve_mirror_without_promote: AtomicBool::new(default_serve_mirror_without_promote()),
             promote_on_miss: AtomicBool::new(default_promote_on_miss()),
             dual_epoch_converge: AtomicBool::new(default_dual_epoch_converge()),
+            mirror_converge: AtomicBool::new(default_mirror_converge()),
             mirror_put_min_interval_ms: AtomicU64::new(default_mirror_put_min_interval_ms()),
             mirror_put_debounce_armed: AtomicBool::new(false),
             mirror_durable_path: None,
@@ -587,14 +600,20 @@ impl FetchSessionManager {
             .store(false, Ordering::Release);
     }
 
-    /// JSON bytes of one primary session as a **full** snapshot (`mode=full`) for MirrorPut.
+    /// JSON bytes of one session as a **full** snapshot (`mode=full`) for MirrorPut.
     ///
-    /// Prefer [`Self::export_mirror_put_bytes`] on the fan-out path so peers receive
-    /// deltas when a prior export is cached (Phase 146).
+    /// Primary first; if this node has **no** local primary, export the foreign
+    /// mirror and mark `from_mirror` so peers run v0.30 mirror↔mirror compare
+    /// (and do not demote a primary). Prefer [`Self::export_mirror_put_bytes`]
+    /// on the fan-out path so primaries can send deltas (Phase 146).
     pub fn export_session_bytes(&self, session_id: i32) -> Option<Vec<u8>> {
-        let guard = self.sessions.lock();
-        let session = guard.get(&session_id)?;
-        let stored = session_to_stored(session_id, session);
+        if let Some(session) = self.primary_session_clone(session_id) {
+            let stored = session_to_stored(session_id, &session);
+            return serde_json::to_vec(&stored).ok();
+        }
+        let session = self.mirror_session_clone(session_id)?;
+        let mut stored = session_to_stored(session_id, &session);
+        stored.from_mirror = true;
         serde_json::to_vec(&stored).ok()
     }
 
@@ -610,12 +629,20 @@ impl FetchSessionManager {
         session_id: i32,
         prev: Option<&FetchSession>,
     ) -> Option<Vec<u8>> {
-        let guard = self.sessions.lock();
-        let session = guard.get(&session_id)?;
-        let stored = match prev {
-            None => session_to_stored(session_id, session),
-            Some(prev_sess) => session_to_delta_stored(session_id, session, prev_sess),
-        };
+        {
+            let guard = self.sessions.lock();
+            if let Some(session) = guard.get(&session_id) {
+                let stored = match prev {
+                    None => session_to_stored(session_id, session),
+                    Some(prev_sess) => session_to_delta_stored(session_id, session, prev_sess),
+                };
+                return serde_json::to_vec(&stored).ok();
+            }
+        }
+        // v0.30: foreign-mirror fan-out is always a full snapshot (`from_mirror`).
+        let session = self.mirror_session_clone(session_id)?;
+        let mut stored = session_to_stored(session_id, &session);
+        stored.from_mirror = true;
         serde_json::to_vec(&stored).ok()
     }
 
@@ -623,11 +650,18 @@ impl FetchSessionManager {
     ///
     /// Returns `(payload_bytes, is_delta)`. On success the caller should
     /// [`Self::note_last_mirrored`] after scheduling the export.
+    ///
+    /// When only a foreign mirror exists (no primary), returns a **full**
+    /// `from_mirror` snapshot so peers can run v0.30 mirror↔mirror compare.
     pub fn export_mirror_put_bytes(&self, session_id: i32) -> Option<(Vec<u8>, bool)> {
-        let prev = self.last_mirrored.lock().get(&session_id).cloned();
-        let is_delta = prev.is_some();
-        let bytes = self.export_session_delta_bytes(session_id, prev.as_ref())?;
-        Some((bytes, is_delta))
+        if self.contains(session_id) {
+            let prev = self.last_mirrored.lock().get(&session_id).cloned();
+            let is_delta = prev.is_some();
+            let bytes = self.export_session_delta_bytes(session_id, prev.as_ref())?;
+            return Some((bytes, is_delta));
+        }
+        let bytes = self.export_session_bytes(session_id)?;
+        Some((bytes, false))
     }
 
     /// Record the primary session as last-exported for future deltas (Phase 146).
@@ -649,7 +683,7 @@ impl FetchSessionManager {
         self.last_mirrored.lock().remove(&session_id);
     }
 
-    /// Install/replace a foreign mirror from a JSON snapshot (Phase 138/139/143/146/v0.25 Put).
+    /// Install/replace a foreign mirror from a JSON snapshot (Phase 138/139/143/146/v0.25/v0.30 Put).
     ///
     /// Fencing: [`session_claim_wins`] — newer `mirror_gen`/epoch/activity, else
     /// lowest non-zero `promoted_by` on equal freshness. Stale or claim-losing puts
@@ -662,6 +696,11 @@ impl FetchSessionManager {
     /// mirror (does not stay owner). Disable with
     /// `VOLANT_SESSION_DUAL_EPOCH_CONVERGE=0`.
     ///
+    /// v0.30: a `from_mirror` snapshot never touches a local primary (mirror↔mirror
+    /// only). When local has **no** primary and already holds a mirror, dual-mirror
+    /// converge uses the same winner order as v0.25 and overwrites the loser.
+    /// Disable with `VOLANT_SESSION_MIRROR_CONVERGE=0`.
+    ///
     /// Phase 146: `mode=delta` merges topic upserts into existing primary or mirror
     /// and applies `remove_topic_keys`. Missing base installs upserts as full state.
     /// Absent / `"full"` mode replaces topics wholesale (legacy path).
@@ -671,6 +710,7 @@ impl FetchSessionManager {
         if stored.id <= 0 {
             return Err("invalid session id".to_owned());
         }
+        let from_mirror = stored.from_mirror;
         let is_delta = is_delta_mode(&stored.mode);
         let (id, session) = if is_delta {
             self.resolve_delta_put(stored)
@@ -683,6 +723,10 @@ impl FetchSessionManager {
         {
             let mut sessions = self.sessions.lock();
             if sessions.contains_key(&id) {
+                if from_mirror {
+                    // v0.30: mirror-only put must not demote or replace a primary.
+                    return Ok(());
+                }
                 let primary = sessions.get(&id).expect("contains_key");
                 let dual = self.dual_epoch_converge_enabled()
                     && both_unclaimed_primary_ish(primary, &session);
@@ -730,6 +774,30 @@ impl FetchSessionManager {
                     .fetch_add(1, Ordering::Relaxed);
                 if is_delta {
                     self.mirror_delta_puts_total.fetch_add(1, Ordering::Relaxed);
+                }
+                return Ok(());
+            }
+        }
+
+        if from_mirror && self.mirror_converge_enabled() {
+            let mut mirrors = self.mirrors.lock();
+            if let Some(existing) = mirrors.get(&id) {
+                let incoming_wins = session_dual_epoch_wins(
+                    &session,
+                    session.promoted_by,
+                    existing,
+                    self.owner_node_id(),
+                );
+                if incoming_wins {
+                    mirrors.insert(id, session);
+                    self.persist_mirrors_locked(&mirrors);
+                    drop(mirrors);
+                    self.mirror_converge_total.fetch_add(1, Ordering::Relaxed);
+                    self.mirror_puts_applied_total
+                        .fetch_add(1, Ordering::Relaxed);
+                    if is_delta {
+                        self.mirror_delta_puts_total.fetch_add(1, Ordering::Relaxed);
+                    }
                 }
                 return Ok(());
             }
@@ -997,6 +1065,21 @@ impl FetchSessionManager {
         self.dual_epoch_converge.store(enabled, Ordering::Relaxed);
     }
 
+    /// Mirror-only loser overwrites since process start (v0.30).
+    pub fn mirror_converge_total(&self) -> u64 {
+        self.mirror_converge_total.load(Ordering::Relaxed)
+    }
+
+    /// Whether mirror↔mirror converge is enabled (v0.30; default on).
+    pub fn mirror_converge_enabled(&self) -> bool {
+        self.mirror_converge.load(Ordering::Relaxed)
+    }
+
+    /// Override mirror↔mirror converge knob (v0.30 tests / runtime).
+    pub fn set_mirror_converge(&self, enabled: bool) {
+        self.mirror_converge.store(enabled, Ordering::Relaxed);
+    }
+
     /// Clone the primary session if present (v0.25 tests / helper).
     pub fn primary_session_clone(&self, session_id: i32) -> Option<FetchSession> {
         self.sessions.lock().get(&session_id).cloned()
@@ -1016,6 +1099,16 @@ impl FetchSessionManager {
         if mirrors.remove(&session_id).is_some() {
             self.persist_mirrors_locked(&mirrors);
         }
+    }
+
+    /// Insert or replace a foreign mirror without promoting (v0.30 fixtures).
+    ///
+    /// Does not touch a local primary if one exists. Tests should use this on
+    /// managers that hold **no** primary for `session_id`.
+    pub fn install_mirror(&self, session_id: i32, session: FetchSession) {
+        let mut mirrors = self.mirrors.lock();
+        mirrors.insert(session_id, session);
+        self.persist_mirrors_locked(&mirrors);
     }
 
     /// If local primary and `incoming` both look unclaimed primary-ish, keep the
@@ -1038,6 +1131,57 @@ impl FetchSessionManager {
             return false;
         }
         self.demote_primary_to_winner_mirror(session_id, incoming)
+    }
+
+    /// If local has **only** a foreign mirror (no primary) and `incoming` wins
+    /// the v0.25 compare, overwrite the local mirror with `incoming`.
+    ///
+    /// Returns `true` when the local mirror was overwritten. No-op (returns
+    /// `false`) when the knob is off, local has a primary, local mirror is
+    /// missing, or local wins / ties. Never promotes.
+    pub fn converge_dual_mirror(&self, session_id: i32, incoming: &FetchSession) -> bool {
+        if !self.mirror_converge_enabled() {
+            return false;
+        }
+        if self.contains(session_id) {
+            return false;
+        }
+        let Some(local) = self.mirror_session_clone(session_id) else {
+            return false;
+        };
+        if !session_dual_epoch_wins(incoming, incoming.promoted_by, &local, self.owner_node_id()) {
+            return false;
+        }
+        let mut mirrors = self.mirrors.lock();
+        mirrors.insert(session_id, incoming.clone());
+        self.persist_mirrors_locked(&mirrors);
+        drop(mirrors);
+        self.mirror_converge_total.fetch_add(1, Ordering::Relaxed);
+        true
+    }
+
+    /// Queue a best-effort MirrorPut for every foreign mirror that has no local
+    /// primary (v0.30 periodic / session-touch helper).
+    ///
+    /// No-op when the knob is off or this manager is sequential (`owner_node_id
+    /// == 0`). Returns the number of session ids queued.
+    pub fn queue_foreign_mirror_puts(&self) -> usize {
+        if !self.mirror_converge_enabled() || self.owner_node_id() == 0 {
+            return 0;
+        }
+        let ids: Vec<i32> = {
+            let sessions = self.sessions.lock();
+            let mirrors = self.mirrors.lock();
+            mirrors
+                .keys()
+                .copied()
+                .filter(|id| !sessions.contains_key(id))
+                .collect()
+        };
+        for id in &ids {
+            self.queue_mirror_put(*id);
+        }
+        ids.len()
     }
 
     /// Demote local primary to a mirror of `winner`. Increments the converge metric.
@@ -1073,9 +1217,10 @@ impl FetchSessionManager {
     /// Returns `true` when the caller should return `None` so local `encode_fetch` serves.
     /// Returns `false` when neither mirror nor promote can help (caller emits **70**).
     ///
-    /// v0.25: this single owner-miss path is unchanged. Dual-epoch converge runs on
-    /// inbound MirrorPut / [`Self::converge_dual_epoch`] when a second unclaimed
-    /// primary is observed — not here.
+    /// v0.25: dual-epoch converge still runs on inbound MirrorPut /
+    /// [`Self::converge_dual_epoch`], not here. v0.30: when serving from a
+    /// foreign mirror (no promote), best-effort queue a MirrorPut so other
+    /// live peers can run mirror↔mirror compare.
     pub fn try_owner_miss_local_serve(&self, session_id: i32) -> bool {
         if !self.mirror_contains(session_id) {
             return false;
@@ -1085,6 +1230,9 @@ impl FetchSessionManager {
         }
         if self.serve_mirror_without_promote() {
             self.record_serve_from_mirror();
+            if self.mirror_converge_enabled() {
+                self.queue_mirror_put(session_id);
+            }
             return true;
         }
         // SERVE_MIRROR_WITHOUT_PROMOTE=0 legacy → promote.
@@ -1331,7 +1479,8 @@ impl FetchSessionManager {
     /// Incremental begin: primary first, else foreign mirror without promote (Phase 147).
     ///
     /// Mirror path advances epoch / activity / `mirror_gen` in-place and persists
-    /// mirrors when durable — **no** `queue_mirror_put` and **no** primary insert.
+    /// mirrors when durable — **no** primary insert. v0.30: when the mirror-converge
+    /// knob is on, queues a best-effort MirrorPut so peers can compare snapshots.
     pub fn begin_incremental_from_any(&self, session_id: i32, epoch: i32) -> Result<(), i16> {
         self.begin_incremental_from_any_at(session_id, epoch, now_ms())
     }
@@ -1380,6 +1529,10 @@ impl FetchSessionManager {
         session.last_activity_ms = now_ms;
         session.mirror_gen = session.mirror_gen.saturating_add(1);
         self.persist_mirrors_locked(&mirrors);
+        drop(mirrors);
+        if self.mirror_converge_enabled() {
+            self.queue_mirror_put(session_id);
+        }
         Ok(())
     }
 
@@ -1824,6 +1977,23 @@ pub fn default_dual_epoch_converge() -> bool {
     }
 }
 
+/// Mirror-only (no primary) self-converge (v0.30). Default **on**.
+///
+/// Set `VOLANT_SESSION_MIRROR_CONVERGE=0` (or false/no/off) to disable
+/// (regression escape: two foreign mirrors can remain diverged).
+pub fn default_mirror_converge() -> bool {
+    match std::env::var("VOLANT_SESSION_MIRROR_CONVERGE") {
+        Ok(s) => {
+            let s = s.trim();
+            !(s == "0"
+                || s.eq_ignore_ascii_case("false")
+                || s.eq_ignore_ascii_case("no")
+                || s.eq_ignore_ascii_case("off"))
+        }
+        Err(_) => true,
+    }
+}
+
 /// Converge two managers that both hold an unclaimed primary for `session_id`.
 ///
 /// The loser demotes its primary to a mirror of the winner and increments
@@ -1851,6 +2021,39 @@ pub fn converge_dual_epoch_pair(
         b.converge_dual_epoch(session_id, &sa)
     } else if b_wins && !a_wins {
         a.converge_dual_epoch(session_id, &sb)
+    } else {
+        false
+    }
+}
+
+/// Converge two managers that both hold **only** a foreign mirror for `session_id`.
+///
+/// The loser overwrites its mirror with the winner's snapshot and increments
+/// `volant_fetch_session_mirror_converge_total` on the loser. Tie (equal
+/// gen/epoch/claim) keeps both locals. No-op when either side has a primary,
+/// either mirror is missing, or the loser's knob is off.
+///
+/// Returns `true` when an overwrite happened. Never promotes.
+pub fn converge_dual_mirror_pair(
+    a: &FetchSessionManager,
+    b: &FetchSessionManager,
+    session_id: i32,
+) -> bool {
+    if a.contains(session_id) || b.contains(session_id) {
+        return false;
+    }
+    let Some(sa) = a.mirror_session_clone(session_id) else {
+        return false;
+    };
+    let Some(sb) = b.mirror_session_clone(session_id) else {
+        return false;
+    };
+    let a_wins = session_dual_epoch_wins(&sa, a.owner_node_id(), &sb, b.owner_node_id());
+    let b_wins = session_dual_epoch_wins(&sb, b.owner_node_id(), &sa, a.owner_node_id());
+    if a_wins && !b_wins {
+        b.converge_dual_mirror(session_id, &sa)
+    } else if b_wins && !a_wins {
+        a.converge_dual_mirror(session_id, &sb)
     } else {
         false
     }
@@ -1887,6 +2090,12 @@ struct StoredFetchSession {
     /// Claim-promote node id (Phase 143); absent on older snapshots → `0`.
     #[serde(default)]
     promoted_by: u32,
+    /// True when this snapshot was exported from a foreign mirror (v0.30).
+    ///
+    /// Absent on older snapshots / primary exports → `false`. A `from_mirror`
+    /// put never replaces a local primary.
+    #[serde(default)]
+    from_mirror: bool,
     /// MirrorPut wire mode: `"full"` (complete topics) or `"delta"` (upserts + removes).
     ///
     /// Default `"full"` for backward compat with pre-Phase-146 peers / durable files.
@@ -1971,6 +2180,7 @@ fn session_to_stored(id: i32, s: &FetchSession) -> StoredFetchSession {
         last_activity_ms: s.last_activity_ms,
         mirror_gen: s.mirror_gen,
         promoted_by: s.promoted_by,
+        from_mirror: false,
         mode: default_mirror_mode(),
         remove_topic_keys: Vec::new(),
         topics,
@@ -2001,6 +2211,7 @@ fn session_to_delta_stored(id: i32, cur: &FetchSession, prev: &FetchSession) -> 
         last_activity_ms: cur.last_activity_ms,
         mirror_gen: cur.mirror_gen,
         promoted_by: cur.promoted_by,
+        from_mirror: false,
         mode: "delta".to_owned(),
         remove_topic_keys,
         topics: upserts,
@@ -3031,5 +3242,60 @@ mod tests {
         assert_eq!(b.dual_epoch_converge_total(), 0);
         assert!(!a.converge_dual_epoch(id, &v25_sess(3, 9, 0)));
         assert!(a.contains(id));
+    }
+
+    #[test]
+    fn v30_converge_overwrites_loser_mirror() {
+        let a = FetchSessionManager::with_limits_and_owner(0, 0, 1);
+        let b = FetchSessionManager::with_limits_and_owner(0, 0, 2);
+        let id = 42;
+        a.install_mirror(id, v25_sess(1, 5, 0));
+        b.install_mirror(id, v25_sess(9, 1, 0));
+        assert!(!a.contains(id) && !b.contains(id));
+        assert!(a.mirror_contains(id) && b.mirror_contains(id));
+
+        assert!(converge_dual_mirror_pair(&a, &b, id));
+        assert!(!a.contains(id) && !b.contains(id));
+        assert_eq!(a.mirror_session_clone(id).unwrap().mirror_gen, 5);
+        assert_eq!(b.mirror_session_clone(id).unwrap().mirror_gen, 5);
+        assert_eq!(b.mirror_converge_total(), 1);
+        assert_eq!(a.mirror_converge_total(), 0);
+        assert_eq!(a.promote_total(), 0);
+        assert_eq!(b.promote_total(), 0);
+    }
+
+    #[test]
+    fn v30_converge_env_off_is_noop() {
+        let a = FetchSessionManager::with_limits(0, 0);
+        let b = FetchSessionManager::with_limits(0, 0);
+        a.set_mirror_converge(false);
+        b.set_mirror_converge(false);
+        let id = 7;
+        a.install_mirror(id, v25_sess(1, 2, 0));
+        b.install_mirror(id, v25_sess(3, 1, 0));
+        assert!(!converge_dual_mirror_pair(&a, &b, id));
+        assert_eq!(a.mirror_session_clone(id).unwrap().mirror_gen, 2);
+        assert_eq!(b.mirror_session_clone(id).unwrap().mirror_gen, 1);
+        assert_eq!(a.mirror_converge_total(), 0);
+        assert_eq!(b.mirror_converge_total(), 0);
+        assert!(!a.converge_dual_mirror(id, &v25_sess(3, 9, 0)));
+        assert_eq!(a.mirror_session_clone(id).unwrap().mirror_gen, 2);
+    }
+
+    #[test]
+    fn v30_from_mirror_put_does_not_touch_primary() {
+        let owner = FetchSessionManager::with_limits_and_owner(0, 0, 1);
+        let peer = FetchSessionManager::with_limits_and_owner(0, 0, 2);
+        let id = 11;
+        owner.install_primary(id, v25_sess(1, 1, 0));
+        peer.install_mirror(id, v25_sess(9, 9, 0));
+        let put = peer.export_session_bytes(id).unwrap();
+        owner.apply_mirror_put(&put).unwrap();
+        assert!(owner.contains(id));
+        assert!(!owner.mirror_contains(id));
+        assert_eq!(owner.primary_session_clone(id).unwrap().mirror_gen, 1);
+        assert_eq!(owner.dual_epoch_converge_total(), 0);
+        assert_eq!(owner.mirror_converge_total(), 0);
+        assert_eq!(owner.promote_total(), 0);
     }
 }
