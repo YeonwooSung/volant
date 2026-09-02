@@ -214,6 +214,11 @@ docs for day-to-day reading: [ops](../ops.md), [consistency](../consistency.md),
 | v0.13 | ✅ | `__transaction_state` topic (KIP-890 log MVP) | [V13_SPEC.md](../V13_SPEC.md) |
 | v0.14 | ✅ | Python native client (produce/fetch/metadata) | [V14_SPEC.md](../V14_SPEC.md) |
 | v0.15 | ✅ | Fuzz corpus expansion + chaos-mesh + A→B isolate | [V15_SPEC.md](../V15_SPEC.md) |
+| v0.16 | ✅ | openraft SetAssignment log apply | [V16_SPEC.md](../V16_SPEC.md) |
+| v0.17 | ✅ | openraft InstallSnapshot (opcodes 112/113) | [V17_SPEC.md](../V17_SPEC.md) |
+| v0.18 | ✅ | Partition reassignment after add-broker | [V18_SPEC.md](../V18_SPEC.md) |
+| v0.19 | ✅ | Go native client (produce/fetch/metadata) | [V19_SPEC.md](../V19_SPEC.md) |
+| v0.20 | ✅ | Produce group-commit (coalesced fsync) | [V20_SPEC.md](../V20_SPEC.md) |
 
 ---
 
