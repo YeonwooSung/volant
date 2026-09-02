@@ -1122,6 +1122,9 @@ class ClientTest {
         final List<Integer> deleteScramCodes = new CopyOnWriteArrayList<>();
         final List<Integer> listScramCodes = new CopyOnWriteArrayList<>();
         final List<Integer> listAclsCodes = new CopyOnWriteArrayList<>();
+        final List<int[]> addBrokerReplies = new CopyOnWriteArrayList<>();
+        final List<String> addBrokerMessages = new CopyOnWriteArrayList<>();
+        final List<Integer> removeBrokerCodes = new CopyOnWriteArrayList<>();
         volatile Metadata meta = new Metadata(Collections.emptyList(), Collections.emptyList());
         final AtomicInteger createTopicCount = new AtomicInteger();
         final AtomicInteger createPartitionsCount = new AtomicInteger();
@@ -1131,6 +1134,8 @@ class ClientTest {
         final AtomicInteger deleteScramCount = new AtomicInteger();
         final AtomicInteger listScramCount = new AtomicInteger();
         final AtomicInteger listAclsCount = new AtomicInteger();
+        final AtomicInteger addBrokerCount = new AtomicInteger();
+        final AtomicInteger removeBrokerCount = new AtomicInteger();
         final AtomicInteger metadataCount = new AtomicInteger();
         final AtomicInteger listMembersCount = new AtomicInteger();
         final AtomicInteger acceptCount = new AtomicInteger();
@@ -1183,6 +1188,16 @@ class ClientTest {
         void queueCreateScramOk() {
             createScramReplies.add(new int[] {0, 0});
             createScramMessages.add("");
+        }
+
+        void queueAddBrokerError(int code, String message) {
+            addBrokerReplies.add(new int[] {code, 1});
+            addBrokerMessages.add(message);
+        }
+
+        void queueAddBrokerOk() {
+            addBrokerReplies.add(new int[] {0, 0});
+            addBrokerMessages.add("");
         }
 
         private void serve(Socket conn) {
@@ -1301,6 +1316,32 @@ class ClientTest {
                 replyOp[0] = Codec.OP_LIST_ACLS_RESPONSE;
                 return Codec.encodeListAclsResponse(
                         new Codec.ListAclsResponse(code, Collections.emptyList()));
+            }
+            if (frame.opcode == Codec.OP_ADD_BROKER) {
+                addBrokerCount.incrementAndGet();
+                int code = 0;
+                boolean asError = false;
+                String message = "";
+                if (!addBrokerReplies.isEmpty()) {
+                    int[] spec = addBrokerReplies.remove(0);
+                    code = spec[0];
+                    asError = spec[1] != 0;
+                    message = addBrokerMessages.isEmpty() ? "" : addBrokerMessages.remove(0);
+                }
+                if (asError) {
+                    replyOp[0] = Codec.OP_ERROR;
+                    return Codec.encodeErrorResponse(new Codec.ErrorResponse(code, message));
+                }
+                replyOp[0] = Codec.OP_ADD_BROKER_RESPONSE;
+                return Codec.encodeAddBrokerResponse(
+                        new Codec.AddBrokerResponse(code, code == 0 ? 11L : 0L));
+            }
+            if (frame.opcode == Codec.OP_REMOVE_BROKER) {
+                removeBrokerCount.incrementAndGet();
+                int code = removeBrokerCodes.isEmpty() ? 0 : removeBrokerCodes.remove(0);
+                replyOp[0] = Codec.OP_REMOVE_BROKER_RESPONSE;
+                return Codec.encodeRemoveBrokerResponse(
+                        new Codec.RemoveBrokerResponse(code, code == 0 ? 12L : 0L));
             }
             if (frame.opcode == Codec.OP_METADATA) {
                 metadataCount.incrementAndGet();
@@ -1584,6 +1625,58 @@ class ClientTest {
             assertEquals(1, follower.listScramCount.get());
             assertEquals(1, follower.metadataCount.get());
             assertEquals(1, leader.listScramCount.get());
+        }
+    }
+
+    @Test
+    void addBrokerError14RedirectsViaControllerId() throws Exception {
+        try (AdminBroker leader = AdminBroker.start();
+                AdminBroker follower = AdminBroker.start()) {
+            follower.queueAddBrokerError(NOT_CONTROLLER, "not controller; controller_id=2");
+            follower.meta = controllerMeta(2, "127.0.0.1", leader.port);
+            leader.queueAddBrokerOk();
+            try (Client c = Client.connect("127.0.0.1", follower.port, 5_000)) {
+                long gen = c.addBroker(3, "10.0.0.3", 9092);
+                assertEquals(11L, gen);
+                assertEquals(leader.port, Integer.parseInt(c.addr().substring(c.addr().indexOf(':') + 1)));
+            }
+            assertEquals(1, follower.addBrokerCount.get());
+            assertEquals(1, follower.metadataCount.get());
+            assertEquals(1, leader.addBrokerCount.get());
+        }
+    }
+
+    @Test
+    void removeBrokerTyped14NoHintThenOk() throws Exception {
+        try (AdminBroker leader = AdminBroker.start();
+                AdminBroker follower = AdminBroker.start()) {
+            follower.removeBrokerCodes.add(NOT_CONTROLLER);
+            follower.meta = otherBrokerMeta(follower.port, "127.0.0.1", leader.port);
+            try (Client c = Client.connect("127.0.0.1", follower.port, 5_000)) {
+                long gen = c.removeBroker(3);
+                assertEquals(12L, gen);
+                assertEquals(leader.port, Integer.parseInt(c.addr().substring(c.addr().indexOf(':') + 1)));
+            }
+            assertEquals(1, follower.removeBrokerCount.get());
+            assertEquals(1, follower.metadataCount.get());
+            assertEquals(1, leader.removeBrokerCount.get());
+        }
+    }
+
+    @Test
+    void addBrokerMaxRedirectsZeroRaisesOnFirst14() throws Exception {
+        try (AdminBroker follower = AdminBroker.start()) {
+            follower.queueAddBrokerError(NOT_CONTROLLER, "not controller; controller_id=2");
+            follower.meta = controllerMeta(2, "127.0.0.1", 9);
+            try (Client c = Client.connect("127.0.0.1", follower.port, 5_000)) {
+                c.setMaxRedirects(0);
+                BrokerException ex =
+                        assertThrows(BrokerException.class, () -> c.addBroker(3, "10.0.0.3", 9092));
+                assertEquals(NOT_CONTROLLER, ex.code);
+            }
+            assertEquals(1, follower.addBrokerCount.get());
+            assertEquals(0, follower.metadataCount.get());
+            assertEquals(1, follower.acceptCount.get());
         }
     }
 

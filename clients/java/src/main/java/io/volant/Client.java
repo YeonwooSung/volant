@@ -709,6 +709,12 @@ public final class Client implements AutoCloseable {
         if (decoded instanceof Codec.ListAclsResponse) {
             return ((Codec.ListAclsResponse) decoded).errorCode;
         }
+        if (decoded instanceof Codec.AddBrokerResponse) {
+            return ((Codec.AddBrokerResponse) decoded).errorCode;
+        }
+        if (decoded instanceof Codec.RemoveBrokerResponse) {
+            return ((Codec.RemoveBrokerResponse) decoded).errorCode;
+        }
         return 0;
     }
 
@@ -768,31 +774,25 @@ public final class Client implements AutoCloseable {
      * Add a broker endpoint to the membership overlay (native 102/103).
      * {@code rack == null} is absent on the wire (flag 0). Returns the overlay
      * generation. Overlay is still SoT; this is not Kafka broker catalog.
+     * Error 14 follows {@code maxRedirects} when the broker cannot forward.
      */
     public long addBroker(int id, String host, int port, String rack) {
         byte[] payload = Codec.encodeAddBrokerRequest(new Codec.AddBrokerRequest(id, host, port, rack));
-        Object decoded = roundTrip(Codec.OP_ADD_BROKER, payload);
-        if (!(decoded instanceof Codec.AddBrokerResponse)) {
-            throw new ProtocolException("unexpected response for add_broker: " + typeName(decoded));
-        }
-        Codec.AddBrokerResponse resp = (Codec.AddBrokerResponse) decoded;
-        check(resp.errorCode, "add_broker");
+        Codec.AddBrokerResponse resp = (Codec.AddBrokerResponse) adminRoundTrip(
+                Codec.OP_ADD_BROKER, payload, Codec.AddBrokerResponse.class, "add_broker");
         return resp.generation;
     }
 
 
     /**
      * Remove a broker from the membership overlay (native 104/105). Returns
-     * the overlay generation.
+     * the overlay generation. Error 14 follows {@code maxRedirects} when the
+     * broker cannot forward.
      */
     public long removeBroker(int id) {
         byte[] payload = Codec.encodeRemoveBrokerRequest(new Codec.RemoveBrokerRequest(id));
-        Object decoded = roundTrip(Codec.OP_REMOVE_BROKER, payload);
-        if (!(decoded instanceof Codec.RemoveBrokerResponse)) {
-            throw new ProtocolException("unexpected response for remove_broker: " + typeName(decoded));
-        }
-        Codec.RemoveBrokerResponse resp = (Codec.RemoveBrokerResponse) decoded;
-        check(resp.errorCode, "remove_broker");
+        Codec.RemoveBrokerResponse resp = (Codec.RemoveBrokerResponse) adminRoundTrip(
+                Codec.OP_REMOVE_BROKER, payload, Codec.RemoveBrokerResponse.class, "remove_broker");
         return resp.generation;
     }
 

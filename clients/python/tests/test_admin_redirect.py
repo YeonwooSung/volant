@@ -9,6 +9,8 @@ from typing import Optional
 
 from volant import AclBinding, BrokerError, Client
 from volant.codec import (
+    OP_ADD_BROKER,
+    OP_ADD_BROKER_RESPONSE,
     OP_CREATE_ACLS,
     OP_CREATE_ACLS_RESPONSE,
     OP_CREATE_PARTITIONS,
@@ -28,6 +30,9 @@ from volant.codec import (
     OP_METADATA,
     OP_REASSIGN_PARTITIONS,
     OP_REASSIGN_PARTITIONS_RESPONSE,
+    OP_REMOVE_BROKER,
+    OP_REMOVE_BROKER_RESPONSE,
+    AddBrokerResponse,
     BrokerInfo,
     CreateAclsResponse,
     CreatePartitionsResponse,
@@ -40,8 +45,10 @@ from volant.codec import (
     ListScramUsersResponse,
     MetadataResponse,
     ReassignPartitionsResponse,
+    RemoveBrokerResponse,
     decode_create_partitions_request,
     decode_create_topic_request,
+    encode_add_broker_response,
     encode_create_acls_response,
     encode_create_partitions_response,
     encode_create_scram_user_response,
@@ -53,6 +60,7 @@ from volant.codec import (
     encode_list_scram_users_response,
     encode_metadata_response,
     encode_reassign_partitions_response,
+    encode_remove_broker_response,
 )
 from volant.frame import encode_frame, try_decode_frame
 
@@ -75,6 +83,9 @@ class _AdminServer:
         self.delete_scram_codes: list[int] = []
         self.list_scram_codes: list[int] = []
         self.list_acls_codes: list[int] = []
+        # AddBroker: (code, message, as_error_opcode). Empty queue → success.
+        self.add_broker_replies: list[tuple[int, str, bool]] = []
+        self.remove_broker_codes: list[int] = []
         self.metadata: Optional[MetadataResponse] = None
         self.opcodes: list[int] = []
         self.create_topic_count = 0
@@ -85,6 +96,8 @@ class _AdminServer:
         self.delete_scram_count = 0
         self.list_scram_count = 0
         self.list_acls_count = 0
+        self.add_broker_count = 0
+        self.remove_broker_count = 0
         self.metadata_count = 0
         self.list_members_count = 0
         self.accept_count = 0
@@ -259,6 +272,38 @@ class _AdminServer:
                 return (
                     encode_list_acls_response(ListAclsResponse(error_code=code, entries=[])),
                     OP_LIST_ACLS_RESPONSE,
+                )
+            if opcode == OP_ADD_BROKER:
+                self.add_broker_count += 1
+                if self.add_broker_replies:
+                    code, message, as_error = self.add_broker_replies.pop(0)
+                else:
+                    code, message, as_error = 0, "", False
+                if as_error:
+                    return (
+                        encode_error_response(ErrorResponse(code=code, message=message)),
+                        OP_ERROR,
+                    )
+                return (
+                    encode_add_broker_response(
+                        AddBrokerResponse(
+                            error_code=code, generation=11 if code == 0 else 0
+                        )
+                    ),
+                    OP_ADD_BROKER_RESPONSE,
+                )
+            if opcode == OP_REMOVE_BROKER:
+                self.remove_broker_count += 1
+                code = (
+                    self.remove_broker_codes.pop(0) if self.remove_broker_codes else 0
+                )
+                return (
+                    encode_remove_broker_response(
+                        RemoveBrokerResponse(
+                            error_code=code, generation=0 if code else 12
+                        )
+                    ),
+                    OP_REMOVE_BROKER_RESPONSE,
                 )
             if opcode == OP_METADATA:
                 self.metadata_count += 1
@@ -554,6 +599,51 @@ class TestAdminNotControllerRedirect(unittest.TestCase):
         self.assertEqual(follower.list_scram_count, 1)
         self.assertEqual(follower.metadata_count, 1)
         self.assertEqual(leader.list_scram_count, 1)
+
+    def test_add_broker_error_14_redirects_via_controller_id(self) -> None:
+        with _AdminServer() as leader, _AdminServer() as follower:
+            follower.add_broker_replies = [
+                (NOT_CONTROLLER, "not controller; controller_id=2", True)
+            ]
+            follower.metadata = _controller_meta(2, "127.0.0.1", leader.port)
+            leader.add_broker_replies = [(0, "", False)]
+            with Client(follower.addr, timeout=5.0) as c:
+                gen = c.add_broker(3, "10.0.0.3", 9092)
+            self.assertEqual(gen, 11)
+            self.assertEqual(c.addr, leader.addr)
+        self.assertEqual(follower.add_broker_count, 1)
+        self.assertEqual(follower.metadata_count, 1)
+        self.assertEqual(leader.add_broker_count, 1)
+        self.assertEqual(follower.list_members_count, 0)
+
+    def test_remove_broker_typed_14_no_hint_then_ok(self) -> None:
+        with _AdminServer() as leader, _AdminServer() as follower:
+            follower.remove_broker_codes = [NOT_CONTROLLER]
+            follower.metadata = _other_broker_meta(
+                follower.port, "127.0.0.1", leader.port
+            )
+            leader.remove_broker_codes = [0]
+            with Client(follower.addr, timeout=5.0) as c:
+                gen = c.remove_broker(3)
+            self.assertEqual(gen, 12)
+            self.assertEqual(c.addr, leader.addr)
+        self.assertEqual(follower.remove_broker_count, 1)
+        self.assertEqual(follower.metadata_count, 1)
+        self.assertEqual(leader.remove_broker_count, 1)
+
+    def test_add_broker_max_redirects_zero_raises_on_first_14(self) -> None:
+        with _AdminServer() as follower:
+            follower.add_broker_replies = [
+                (NOT_CONTROLLER, "not controller; controller_id=2", True)
+            ]
+            follower.metadata = _controller_meta(2, "127.0.0.1", 9)
+            with Client(follower.addr, timeout=5.0, max_redirects=0) as c:
+                with self.assertRaises(BrokerError) as ctx:
+                    c.add_broker(3, "10.0.0.3", 9092)
+            self.assertEqual(ctx.exception.code, NOT_CONTROLLER)
+        self.assertEqual(follower.add_broker_count, 1)
+        self.assertEqual(follower.metadata_count, 0)
+        self.assertEqual(follower.accept_count, 1)
 
 
 if __name__ == "__main__":

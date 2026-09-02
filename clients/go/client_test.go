@@ -1746,6 +1746,8 @@ type adminBroker struct {
 	deleteScramCodes      []uint16
 	listScramCodes        []uint16
 	listAclsCodes         []uint16
+	addBrokerReplies      []createTopicReply
+	removeBrokerCodes     []uint16
 	meta                  codec.MetadataResponse
 	createTopicCount      int
 	createPartitionsCount int
@@ -1755,6 +1757,8 @@ type adminBroker struct {
 	deleteScramCount      int
 	listScramCount        int
 	listAclsCount         int
+	addBrokerCount        int
+	removeBrokerCount     int
 	metadataCount         int
 	listMembersCount      int
 	acceptCount           int
@@ -1805,6 +1809,12 @@ func (s *adminBroker) scramAclSnapshot() (createScram, deleteScram, listScram, l
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	return s.createScramCount, s.deleteScramCount, s.listScramCount, s.listAclsCount, s.metadataCount, s.acceptCount
+}
+
+func (s *adminBroker) membershipSnapshot() (addBroker, removeBroker, metas, accepts int) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.addBrokerCount, s.removeBrokerCount, s.metadataCount, s.acceptCount
 }
 
 func (s *adminBroker) serve(conn net.Conn) {
@@ -1961,6 +1971,37 @@ func (s *adminBroker) handle(f *frame.Frame) ([]byte, error) {
 		}
 		payload, err = codec.EncodeListAclsResponse(codec.ListAclsResponse{ErrorCode: code})
 		replyOp = codec.OpListAclsResponse
+	case codec.OpAddBroker:
+		s.addBrokerCount++
+		rep := createTopicReply{}
+		if len(s.addBrokerReplies) > 0 {
+			rep = s.addBrokerReplies[0]
+			s.addBrokerReplies = s.addBrokerReplies[1:]
+		}
+		if rep.asError {
+			payload, err = codec.EncodeErrorResponse(codec.ErrorResponse{Code: rep.code, Message: rep.message})
+			replyOp = codec.OpError
+			break
+		}
+		gen := uint64(0)
+		if rep.code == 0 {
+			gen = 11
+		}
+		payload, err = codec.EncodeAddBrokerResponse(codec.AddBrokerResponse{ErrorCode: rep.code, Generation: gen})
+		replyOp = codec.OpAddBrokerResponse
+	case codec.OpRemoveBroker:
+		s.removeBrokerCount++
+		code := uint16(0)
+		if len(s.removeBrokerCodes) > 0 {
+			code = s.removeBrokerCodes[0]
+			s.removeBrokerCodes = s.removeBrokerCodes[1:]
+		}
+		gen := uint64(0)
+		if code == 0 {
+			gen = 12
+		}
+		payload, err = codec.EncodeRemoveBrokerResponse(codec.RemoveBrokerResponse{ErrorCode: code, Generation: gen})
+		replyOp = codec.OpRemoveBrokerResponse
 	case codec.OpMetadata:
 		s.metadataCount++
 		payload, err = codec.EncodeMetadataResponse(s.meta)
@@ -2481,6 +2522,102 @@ func TestListScramUsersError14ThenOk(t *testing.T) {
 	_, _, lls, _, _, _ := leader.scramAclSnapshot()
 	if lls != 1 {
 		t.Fatalf("leader list_scram=%d want 1", lls)
+	}
+}
+
+func TestAddBrokerError14RedirectsViaControllerID(t *testing.T) {
+	leader := &adminBroker{}
+	_, stopL := startAdmin(t, leader)
+	defer stopL()
+	follower := &adminBroker{
+		addBrokerReplies: []createTopicReply{{
+			code: notController, message: "not controller; controller_id=2", asError: true,
+		}},
+		meta: controllerMeta(2, "127.0.0.1", leader.port()),
+	}
+	fAddr, stopF := startAdmin(t, follower)
+	defer stopF()
+
+	c, err := volant.DialTimeout(fAddr, 5*time.Second)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer c.Close()
+	gen, err := c.AddBroker(3, "10.0.0.3", 9092, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if gen != 11 {
+		t.Fatalf("generation %d want 11", gen)
+	}
+	ab, _, metas, _ := follower.membershipSnapshot()
+	if ab != 1 || metas != 1 {
+		t.Fatalf("follower add_broker=%d metadata=%d want 1,1", ab, metas)
+	}
+	lab, _, _, _ := leader.membershipSnapshot()
+	if lab != 1 {
+		t.Fatalf("leader add_broker=%d want 1", lab)
+	}
+}
+
+func TestRemoveBrokerTyped14NoHintThenOk(t *testing.T) {
+	leader := &adminBroker{}
+	_, stopL := startAdmin(t, leader)
+	defer stopL()
+	follower := &adminBroker{
+		removeBrokerCodes: []uint16{notController},
+	}
+	fAddr, stopF := startAdmin(t, follower)
+	defer stopF()
+	follower.mu.Lock()
+	follower.meta = otherBrokerMeta(follower.port(), "127.0.0.1", leader.port())
+	follower.mu.Unlock()
+
+	c, err := volant.DialTimeout(fAddr, 5*time.Second)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer c.Close()
+	gen, err := c.RemoveBroker(3)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if gen != 12 {
+		t.Fatalf("generation %d want 12", gen)
+	}
+	_, rb, metas, _ := follower.membershipSnapshot()
+	if rb != 1 || metas != 1 {
+		t.Fatalf("follower remove_broker=%d metadata=%d want 1,1", rb, metas)
+	}
+	_, lrb, _, _ := leader.membershipSnapshot()
+	if lrb != 1 {
+		t.Fatalf("leader remove_broker=%d want 1", lrb)
+	}
+}
+
+func TestAddBrokerMaxRedirectsZeroRaisesOnFirst14(t *testing.T) {
+	follower := &adminBroker{
+		addBrokerReplies: []createTopicReply{{
+			code: notController, message: "not controller; controller_id=2", asError: true,
+		}},
+		meta: controllerMeta(2, "127.0.0.1", 9),
+	}
+	fAddr, stopF := startAdmin(t, follower)
+	defer stopF()
+
+	c, err := volant.DialTimeout(fAddr, 5*time.Second)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer c.Close()
+	c.SetMaxRedirects(0)
+	_, err = c.AddBroker(3, "10.0.0.3", 9092, nil)
+	if brokerCode(err) != notController {
+		t.Fatalf("err=%v want code 14", err)
+	}
+	ab, _, metas, accepts := follower.membershipSnapshot()
+	if ab != 1 || metas != 0 || accepts != 1 {
+		t.Fatalf("add_broker=%d metadata=%d accepts=%d want 1,0,1", ab, metas, accepts)
 	}
 }
 

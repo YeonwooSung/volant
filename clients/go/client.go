@@ -712,7 +712,8 @@ func (c *Client) CreatePartitions(topic string, totalCount uint32) (uint32, erro
 
 // AddBroker adds a broker endpoint to the membership overlay (native 102/103).
 // rack nil is absent on the wire (flag 0). Returns the overlay generation.
-// Overlay is still SoT; this is not Kafka broker catalog.
+// Overlay is still SoT; this is not Kafka broker catalog. Error 14 follows
+// maxRedirects when the broker cannot forward.
 
 // SetTransactionalID sets the native transactional_id used on InitProducerId
 // (opcode 32) and required by BeginTransaction. Empty / unset means
@@ -819,40 +820,75 @@ func (c *Client) AddBroker(id uint32, host string, port uint16, rack *string) (u
 	if err != nil {
 		return 0, err
 	}
-	decoded, err := c.roundTrip(codec.OpAddBroker, payload)
-	if err != nil {
-		return 0, err
+	maxAttempts := 1 + c.maxRedirects
+	for attempt := 1; ; attempt++ {
+		decoded, err := c.roundTrip(codec.OpAddBroker, payload)
+		if err != nil {
+			ok, rerr := c.maybeRedirectController(err, attempt, maxAttempts)
+			if rerr != nil {
+				return 0, rerr
+			}
+			if ok {
+				continue
+			}
+			return 0, err
+		}
+		resp, ok := decoded.(codec.AddBrokerResponse)
+		if !ok {
+			return 0, &frame.ProtocolError{Msg: fmt.Sprintf("unexpected response for add_broker: %T", decoded)}
+		}
+		ok, rerr := c.maybeRedirectControllerCode(resp.ErrorCode, "", attempt, maxAttempts)
+		if rerr != nil {
+			return 0, rerr
+		}
+		if ok {
+			continue
+		}
+		if err := check(resp.ErrorCode, "add_broker"); err != nil {
+			return 0, err
+		}
+		return resp.Generation, nil
 	}
-	resp, ok := decoded.(codec.AddBrokerResponse)
-	if !ok {
-		return 0, &frame.ProtocolError{Msg: fmt.Sprintf("unexpected response for add_broker: %T", decoded)}
-	}
-	if err := check(resp.ErrorCode, "add_broker"); err != nil {
-		return 0, err
-	}
-	return resp.Generation, nil
 }
 
 
 // RemoveBroker removes a broker from the membership overlay (native 104/105).
-// Returns the overlay generation.
+// Returns the overlay generation. Error 14 follows maxRedirects when the
+// broker cannot forward.
 func (c *Client) RemoveBroker(id uint32) (uint64, error) {
 	payload, err := codec.EncodeRemoveBrokerRequest(codec.RemoveBrokerRequest{ID: id})
 	if err != nil {
 		return 0, err
 	}
-	decoded, err := c.roundTrip(codec.OpRemoveBroker, payload)
-	if err != nil {
-		return 0, err
+	maxAttempts := 1 + c.maxRedirects
+	for attempt := 1; ; attempt++ {
+		decoded, err := c.roundTrip(codec.OpRemoveBroker, payload)
+		if err != nil {
+			ok, rerr := c.maybeRedirectController(err, attempt, maxAttempts)
+			if rerr != nil {
+				return 0, rerr
+			}
+			if ok {
+				continue
+			}
+			return 0, err
+		}
+		resp, ok := decoded.(codec.RemoveBrokerResponse)
+		if !ok {
+			return 0, &frame.ProtocolError{Msg: fmt.Sprintf("unexpected response for remove_broker: %T", decoded)}
+		}
+		ok, rerr := c.maybeRedirectControllerCode(resp.ErrorCode, "", attempt, maxAttempts)
+		if rerr != nil {
+			return 0, rerr
+		}
+		if ok {
+			continue
+		}
+		if err := check(resp.ErrorCode, "remove_broker"); err != nil {
+			return 0, err
+		}
+		return resp.Generation, nil
 	}
-	resp, ok := decoded.(codec.RemoveBrokerResponse)
-	if !ok {
-		return 0, &frame.ProtocolError{Msg: fmt.Sprintf("unexpected response for remove_broker: %T", decoded)}
-	}
-	if err := check(resp.ErrorCode, "remove_broker"); err != nil {
-		return 0, err
-	}
-	return resp.Generation, nil
 }
 
 
