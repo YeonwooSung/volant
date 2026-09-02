@@ -855,3 +855,200 @@ func TestFailedRetriesDoNotIncrementSequence(t *testing.T) {
 	}
 }
 
+func batchMsgs(values ...string) []codec.ProduceMessage {
+	out := make([]codec.ProduceMessage, len(values))
+	for i, v := range values {
+		out[i] = codec.ProduceMessage{Value: []byte(v), TimestampMs: -1}
+	}
+	return out
+}
+
+func TestProduceBatchThreeMessages(t *testing.T) {
+	srv := &scriptedBroker{}
+	addr, stop := startScripted(t, srv)
+	defer stop()
+
+	c, err := volant.DialTimeout(addr, 5*time.Second)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer c.Close()
+
+	off, err := c.ProduceBatch("t", 0, batchMsgs("a", "b", "c"), 1)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if off != 7 {
+		t.Fatalf("base offset: got %d want 7", off)
+	}
+	reqs := srv.copyProduces()
+	if len(reqs) != 1 {
+		t.Fatalf("produces %d want 1", len(reqs))
+	}
+	if n := len(reqs[0].Messages); n != 3 {
+		t.Fatalf("messages %d want 3", n)
+	}
+	if reqs[0].Acks != 1 {
+		t.Fatalf("acks %d want 1", reqs[0].Acks)
+	}
+	got := string(reqs[0].Messages[0].Value) + string(reqs[0].Messages[1].Value) + string(reqs[0].Messages[2].Value)
+	if got != "abc" {
+		t.Fatalf("values %q want abc", got)
+	}
+}
+
+func TestProduceBatchEmpty(t *testing.T) {
+	srv := &scriptedBroker{}
+	addr, stop := startScripted(t, srv)
+	defer stop()
+
+	c, err := volant.DialTimeout(addr, 5*time.Second)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer c.Close()
+
+	if _, err := c.ProduceBatch("t", 0, nil, 1); err == nil {
+		t.Fatal("expected empty-batch error")
+	}
+	if _, err := c.ProduceBatch("t", 0, []codec.ProduceMessage{}, 1); err == nil {
+		t.Fatal("expected empty-batch error")
+	}
+	fp, _, _, _ := srv.snapshot()
+	if fp != 0 {
+		t.Fatalf("produce count %d want 0", fp)
+	}
+}
+
+func TestProduceStillOneMessage(t *testing.T) {
+	srv := &scriptedBroker{}
+	addr, stop := startScripted(t, srv)
+	defer stop()
+
+	c, err := volant.DialTimeout(addr, 5*time.Second)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer c.Close()
+
+	if _, err := c.Produce("t", 0, nil, []byte("hello")); err != nil {
+		t.Fatal(err)
+	}
+	reqs := srv.copyProduces()
+	if len(reqs) != 1 {
+		t.Fatalf("produces %d want 1", len(reqs))
+	}
+	if n := len(reqs[0].Messages); n != 1 {
+		t.Fatalf("messages %d want 1", n)
+	}
+	if string(reqs[0].Messages[0].Value) != "hello" {
+		t.Fatalf("value %q want hello", reqs[0].Messages[0].Value)
+	}
+}
+
+func TestProduceBatchRetriesTimeoutThenOk(t *testing.T) {
+	srv := &scriptedBroker{produceCodes: []uint16{timeoutCode, 0}}
+	addr, stop := startScripted(t, srv)
+	defer stop()
+
+	c, err := volant.DialTimeout(addr, 5*time.Second)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer c.Close()
+	c.SetMaxRetries(2)
+	c.SetRetryBackoff(0)
+
+	off, err := c.ProduceBatch("t", 0, batchMsgs("a", "b", "c"), 1)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if off != 7 {
+		t.Fatalf("base offset: got %d want 7", off)
+	}
+	reqs := srv.copyProduces()
+	if len(reqs) != 2 {
+		t.Fatalf("produces %d want 2", len(reqs))
+	}
+	for i, req := range reqs {
+		if n := len(req.Messages); n != 3 {
+			t.Fatalf("produce %d messages %d want 3", i, n)
+		}
+		got := string(req.Messages[0].Value) + string(req.Messages[1].Value) + string(req.Messages[2].Value)
+		if got != "abc" {
+			t.Fatalf("produce %d values %q want abc", i, got)
+		}
+	}
+}
+
+func TestProduceBatchRedirectsToLeader(t *testing.T) {
+	leader := &scriptedBroker{}
+	_, stopL := startScripted(t, leader)
+	defer stopL()
+
+	follower := &scriptedBroker{
+		produceCodes: []uint16{notLeader},
+		meta:         leaderMeta("t", 0, 2, "127.0.0.1", leader.port()),
+	}
+	addr, stopF := startScripted(t, follower)
+	defer stopF()
+
+	c, err := volant.DialTimeout(addr, 5*time.Second)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer c.Close()
+
+	off, err := c.ProduceBatch("t", 0, batchMsgs("a", "b", "c"), 1)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if off != 7 {
+		t.Fatalf("base offset: got %d want 7", off)
+	}
+	fp, _, fm, _ := follower.snapshot()
+	lp, _, _, _ := leader.snapshot()
+	if fp != 1 || fm != 1 {
+		t.Fatalf("follower produce/metadata = %d/%d want 1/1", fp, fm)
+	}
+	if lp != 1 {
+		t.Fatalf("leader produce = %d want 1", lp)
+	}
+	if n := len(follower.copyProduces()[0].Messages); n != 3 {
+		t.Fatalf("follower messages %d want 3", n)
+	}
+	if n := len(leader.copyProduces()[0].Messages); n != 3 {
+		t.Fatalf("leader messages %d want 3", n)
+	}
+}
+
+func TestProduceBatchIncrementsSequenceByCount(t *testing.T) {
+	srv := &scriptedBroker{}
+	addr, stop := startScripted(t, srv)
+	defer stop()
+
+	c, err := volant.DialTimeout(addr, 5*time.Second)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer c.Close()
+	c.EnableIdempotence()
+
+	if _, err := c.ProduceBatch("t", 0, batchMsgs("a", "b", "c"), 1); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := c.ProduceBatch("t", 0, batchMsgs("d", "e"), 1); err != nil {
+		t.Fatal(err)
+	}
+	reqs := srv.copyProduces()
+	if len(reqs) != 2 {
+		t.Fatalf("produces %d want 2", len(reqs))
+	}
+	if reqs[0].BaseSequence != 0 {
+		t.Fatalf("first seq %d want 0", reqs[0].BaseSequence)
+	}
+	if reqs[1].BaseSequence != 3 {
+		t.Fatalf("second seq %d want 3", reqs[1].BaseSequence)
+	}
+}
+

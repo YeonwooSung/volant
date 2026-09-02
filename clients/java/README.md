@@ -13,6 +13,7 @@ Crate / client version **0.2.0**.
 import static java.nio.charset.StandardCharsets.UTF_8;
 
 import io.volant.Client;
+import io.volant.Codec;
 import io.volant.GroupConsumer;
 import io.volant.Metadata;
 import io.volant.Offset;
@@ -28,6 +29,10 @@ try (Client c = Client.connect("127.0.0.1", 9092)) {
   long off = c.produce("t", 0, null, "hello".getBytes(UTF_8));
   // produce(..., acks): 1 = leader, 255 = acks=all (v0.64). produce 4-arg stays acks=1.
   off = c.produce("t", 0, null, "hello".getBytes(UTF_8), 255);
+  // produce(topic, partition, messages, acks): N messages in one RPC (v0.68).
+  off = c.produce("t", 0, List.of(
+      new Codec.ProduceMessage(null, "a".getBytes(UTF_8)),
+      new Codec.ProduceMessage(null, "b".getBytes(UTF_8))), 1);
   List<Record> recs = c.fetch("t", 0, 0);
   // fetch 6-arg: max_messages / max_bytes / max_wait_ms (v0.64). fetch 3-arg stays 128 / 4MiB / 0.
   recs = c.fetch("t", 0, 0, 10, 4096L, 100);
@@ -252,9 +257,10 @@ seeing other group members on the wire, SCRAM-SHA-512, Kafka SASL,
 async I/O, idempotent
 produce. Local `assignor="range"` cannot split across
 live members. Sync only; one TCP connection; acks=1 by default
-(`produce(..., acks)` / `acks=255` is acks=all; v0.64). Convenience
-Produce is still one message per RPC (not Kafka Produce; native
-opcode 1). Public 6-arg `fetch` exposes max_messages / max_bytes /
+(`produce(..., acks)` / `acks=255` is acks=all; v0.64). 4-arg
+`produce` stays one message; `produce(topic, partition, messages, acks)`
+sends N in one RPC (v0.68; not Kafka Produce; native opcode 1).
+Public 6-arg `fetch` exposes max_messages / max_bytes /
 max_wait_ms (not Kafka Fetch; native opcode 2). Thin
 `joinGroup` still sends empty `group_instance_id`; use
 `GroupConsumer.joinStatic` for static membership. Convenience
