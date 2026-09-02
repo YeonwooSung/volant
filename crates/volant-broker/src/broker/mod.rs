@@ -661,6 +661,10 @@ pub struct Broker {
     /// log (opcodes 98/99) instead of AssignmentConsensusNote. Default **off**
     /// (`VOLANT_METADATA_RAFT`).
     metadata_raft_enabled: AtomicBool,
+    /// v0.40: homemade 154 waits for `commit_index` before CreateTopic /
+    /// DeleteTopic / CreatePartitions client ok. Default **on**; `0` restores
+    /// 154 mutate-first (`VOLANT_METADATA_RAFT_WAIT_COMMIT`).
+    metadata_raft_wait_commit: AtomicBool,
     /// v0.11: when true, `controller_id()` is the openraft leader. Default **off**.
     pub(crate) openraft_metadata_enabled: AtomicBool,
     /// Live openraft node (started from background tasks when the flag is on).
@@ -934,6 +938,7 @@ impl Broker {
             metadata_raft,
             // metadata raft default off (cluster and single-node).
             metadata_raft_enabled: AtomicBool::new(default_metadata_raft_enabled(false)),
+            metadata_raft_wait_commit: AtomicBool::new(default_metadata_raft_wait_commit()),
             openraft_metadata_enabled: AtomicBool::new(default_openraft_metadata_enabled()),
             openraft_meta: Mutex::new(None),
             openraft_metrics: OpenraftMetricsCache::default(),
@@ -1147,6 +1152,7 @@ impl Broker {
             ),
             metadata_raft,
             metadata_raft_enabled: AtomicBool::new(default_metadata_raft_enabled(true)),
+            metadata_raft_wait_commit: AtomicBool::new(default_metadata_raft_wait_commit()),
             openraft_metadata_enabled: AtomicBool::new(default_openraft_metadata_enabled()),
             openraft_meta: Mutex::new(None),
             openraft_metrics: OpenraftMetricsCache::default(),
@@ -1910,6 +1916,25 @@ fn default_metadata_raft_enabled(cluster_mode: bool) -> bool {
             cluster_mode
         }
         Err(_) => false,
+    }
+}
+
+/// v0.40: `VOLANT_METADATA_RAFT_WAIT_COMMIT` default **on** (safety).
+///
+/// When homemade 154 is on, CreateTopic / DeleteTopic / CreatePartitions wait
+/// until `commit_index` covers the new entry. `0` / `false` / `no` / `off`
+/// restores 154 mutate-first (client ok from local `assignment.json`).
+/// Inert when homemade raft is off or openraft is preferred.
+fn default_metadata_raft_wait_commit() -> bool {
+    match std::env::var("VOLANT_METADATA_RAFT_WAIT_COMMIT") {
+        Ok(s) => {
+            let t = s.trim();
+            !(t == "0"
+                || t.eq_ignore_ascii_case("false")
+                || t.eq_ignore_ascii_case("no")
+                || t.eq_ignore_ascii_case("off"))
+        }
+        Err(_) => true,
     }
 }
 

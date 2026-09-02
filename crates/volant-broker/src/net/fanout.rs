@@ -851,8 +851,9 @@ pub async fn fanout_assignment_consensus(broker: &Broker) -> bool {
 
 /// After a successful controller assignment mutation: best-effort (or wait)
 /// majority consensus. Returns `None` when consensus is disabled / not needed
-/// for the client response; `Some(false)` when majority failed and either
-/// **wait** or **metadata committed-only** (Phase 152) is on.
+/// for the client response; `Some(false)` when majority failed and
+/// [`Broker::assignment_must_wait`] is on (Phase 150 wait, Phase 152
+/// committed-only, or v0.40 homemade 154 wait-commit).
 ///
 /// v0.16: when `VOLANT_OPENRAFT_METADATA` is on, prefer openraft
 /// `SetAssignment` (`client_write`, opcodes 108/109) over homemade 154
@@ -860,7 +861,9 @@ pub async fn fanout_assignment_consensus(broker: &Broker) -> bool {
 /// (best-effort; client success does not depend on the result).
 ///
 /// Phase 154: when metadata Raft is enabled (and openraft is off), prefers
-/// [`fanout_metadata_raft_append`] over Phase 150 notes.
+/// [`fanout_metadata_raft_append`] over Phase 150 notes. v0.40 wait-commit
+/// (default **on**) requires `commit_index` to cover the new entry before
+/// client ok; `VOLANT_METADATA_RAFT_WAIT_COMMIT=0` keeps 154 mutate-first.
 pub async fn maybe_fanout_assignment_consensus(broker: &Broker) -> Option<bool> {
     if broker.cluster_config().is_none() {
         return None;
@@ -868,16 +871,20 @@ pub async fn maybe_fanout_assignment_consensus(broker: &Broker) -> Option<bool> 
     // v0.16: prefer openraft assignment apply when the flag is on.
     if broker.openraft_metadata_enabled() {
         let ok = broker.client_write_set_assignment().await;
-        let must_wait =
-            broker.assignment_consensus_wait() || broker.assignment_metadata_committed_only();
+        let must_wait = broker.assignment_must_wait();
         return if must_wait { Some(ok) } else { None };
     }
     // Phase 154: prefer KRaft-style metadata log when enabled.
     if broker.metadata_raft_enabled() {
+        let before = broker.metadata_raft_commit_index();
         let ok = fanout_metadata_raft_append(broker).await;
-        let must_wait =
-            broker.assignment_consensus_wait() || broker.assignment_metadata_committed_only();
-        return if must_wait { Some(ok) } else { None };
+        let must_wait = broker.assignment_must_wait();
+        if must_wait {
+            // v0.40: client ok only when commit_index covers the new entry.
+            let committed = ok && broker.metadata_raft_commit_index() > before;
+            return Some(committed);
+        }
+        return None;
     }
     if !broker.assignment_consensus_enabled() {
         return None;
@@ -886,18 +893,18 @@ pub async fn maybe_fanout_assignment_consensus(broker: &Broker) -> Option<bool> 
     // Phase 152: committed-only Metadata forces wait-like admin visibility so
     // create ok cannot race Metadata miss. Completed fan-out with !must_wait
     // is ignored (including 96/97 miss) so handlers do not fail the client.
-    let must_wait =
-        broker.assignment_consensus_wait() || broker.assignment_metadata_committed_only();
-    if must_wait {
+    // v0.40 wait-commit is inert here (homemade raft is off in this branch).
+    if broker.assignment_must_wait() {
         Some(ok)
     } else {
         None
     }
 }
 
-/// Clone live assignment when wait or committed-only will fail the client on a miss.
+/// Clone live assignment when wait / committed-only / homemade wait-commit
+/// will fail the client on a miss.
 pub fn snapshot_if_must_wait(broker: &Broker) -> Option<AssignmentSnapshot> {
-    if broker.assignment_consensus_wait() || broker.assignment_metadata_committed_only() {
+    if broker.assignment_must_wait() {
         broker.clone_live_assignment()
     } else {
         None

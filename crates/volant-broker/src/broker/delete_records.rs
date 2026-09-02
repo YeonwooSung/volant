@@ -437,6 +437,33 @@ impl Broker {
         self.metadata_raft_enabled.store(enabled, Ordering::Relaxed);
     }
 
+    /// v0.40: whether homemade 154 waits for `commit_index` before client ok.
+    ///
+    /// Default **on**. Inert unless homemade raft is on and openraft is off.
+    pub fn metadata_raft_wait_commit(&self) -> bool {
+        self.metadata_raft_wait_commit.load(Ordering::Relaxed)
+    }
+
+    /// v0.40: runtime toggle (`0` env restores 154 mutate-first).
+    pub fn set_metadata_raft_wait_commit(&self, wait: bool) {
+        self.metadata_raft_wait_commit
+            .store(wait, Ordering::Relaxed);
+    }
+
+    /// Whether a CreateTopic / DeleteTopic / CreatePartitions majority miss
+    /// must fail the client and roll back live assignment.
+    ///
+    /// True when Phase 150 wait, Phase 152 committed-only, or homemade 154
+    /// wait-commit (v0.40) is on. Openraft-only does not use wait-commit
+    /// (v0.16 already `client_write`s; fail-the-client stays wait/committed-only).
+    pub fn assignment_must_wait(&self) -> bool {
+        self.assignment_consensus_wait()
+            || self.assignment_metadata_committed_only()
+            || (self.metadata_raft_enabled()
+                && !self.openraft_metadata_enabled()
+                && self.metadata_raft_wait_commit())
+    }
+
     /// Phase 154: current metadata Raft term.
     pub fn metadata_raft_term(&self) -> u64 {
         self.metadata_raft.current_term()

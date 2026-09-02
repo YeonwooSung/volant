@@ -411,6 +411,7 @@ specs. Ops-critical notes only:
 | `VOLANT_ASSIGNMENT_METADATA_COMMITTED_ONLY` | **off** | `1` serves majority-committed Metadata snapshot + wait-like admin; unset/`0` is live assignment |
 | `VOLANT_ASSIGNMENT_CONSENSUS` | **on** | Best-effort 96/97 push. Must **not** gate Metadata or fail CreateTopic |
 | `VOLANT_ASSIGNMENT_CONSENSUS_WAIT` | **off** | `1` → native **15** on majority miss; **rolls back** live `assignment.json` (must_wait path only) |
+| `VOLANT_METADATA_RAFT_WAIT_COMMIT` | **on** | Homemade 154 CreateTopic / DeleteTopic / CreatePartitions wait for `commit_index` (majority). `0`/`false`/`no`/`off` restores 154 mutate-first |
 
 CreateTopic / DeleteTopic / CreatePartitions succeed when the controller writes
 `{data_dir}/cluster/assignment.json`. Kafka CreateTopics / DeleteTopics /
@@ -554,6 +555,17 @@ them into `raft.redb` and then prefers redb. Stale JSON is ignored while
 the redb file exists (safe to delete after import). Not RocksDB / not
 openraft-rocks. Homemade `{data_dir}/__metadata_raft/` is a different
 store. See [V35_SPEC.md](./V35_SPEC.md).
+
+## v0.40 raft wait-commit
+
+When `VOLANT_METADATA_RAFT=1` (homemade 154, openraft off), CreateTopic /
+DeleteTopic / CreatePartitions wait until `commit_index` covers the new
+`SetAssignment` entry before client ok. Majority miss or RPC timeout
+**rolls back** live `assignment.json` (native **15** / Kafka **19**),
+same restore as v0.3. Default **on**. Set
+`VOLANT_METADATA_RAFT_WAIT_COMMIT=0` to keep 154 mutate-first (local
+write is SoT; uncommitted log entry retained). Openraft-only is unchanged
+(v0.16 already waits on `client_write`). See [V40_SPEC.md](./V40_SPEC.md).
 
 **Cluster sharp edges:** Truncate-journal majority (Phase 130), assignment
 majority (Phase 150/154), and Phase 135/137/148 wait mode use **configured N**
