@@ -9,6 +9,10 @@
 //! v0.60 adds opt-in auto-commit after a successful [`GroupConsumer::poll`]
 //! that returned records ([`GroupConsumer::join_with_auto_commit`]; default
 //! off). Not Kafka `enable.auto.commit`.
+//! v0.67 adds opt-in [`GroupConsumer::join_with_auto_offset_reset`]
+//! (`earliest` / `latest` / `none`) when OffsetFetch is missing or
+//! `OFFSET_UNKNOWN`. Default remains `earliest` (position 0, no ListOffsets).
+//! Not Kafka `auto.offset.reset`.
 
 #![deny(missing_docs)]
 
