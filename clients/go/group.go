@@ -44,6 +44,43 @@ type groupConsumerOptions struct {
 	autoCommit          bool
 	autoCommitInterval  time.Duration
 	autoOffsetReset     string
+	fetchMaxMessages    uint32
+	fetchMaxBytes       uint32
+}
+
+const (
+	pollMaxMessages = 100
+	pollMaxBytes    = 4 * 1024 * 1024
+)
+
+func clampFetchMaxMessages(n int) uint32 {
+	if n <= 0 {
+		return pollMaxMessages
+	}
+	return uint32(n)
+}
+
+func clampFetchMaxBytes(n int) uint32 {
+	if n <= 0 {
+		return pollMaxBytes
+	}
+	return uint32(n)
+}
+
+// WithFetchMaxMessages bounds each assigned Fetch inside Poll
+// (default 100). Values <= 0 clamp to 100. Not Kafka max.poll.records.
+func WithFetchMaxMessages(n int) GroupConsumerOption {
+	return func(o *groupConsumerOptions) {
+		o.fetchMaxMessages = clampFetchMaxMessages(n)
+	}
+}
+
+// WithFetchMaxBytes bounds each assigned Fetch inside Poll
+// (default 4MiB). Values <= 0 clamp to 4MiB.
+func WithFetchMaxBytes(n int) GroupConsumerOption {
+	return func(o *groupConsumerOptions) {
+		o.fetchMaxBytes = clampFetchMaxBytes(n)
+	}
 }
 
 // WithAutoCommit enables offset auto-commit after a successful Poll that
@@ -180,6 +217,8 @@ type GroupConsumer struct {
 	autoCommit          bool
 	autoCommitInterval  time.Duration
 	autoOffsetReset     string
+	fetchMaxMessages    uint32
+	fetchMaxBytes       uint32
 	lastAutoCommit      time.Time
 	dirty               bool
 
@@ -242,6 +281,14 @@ func joinGroupConsumer(c *Client, group string, topics []string, sessionTimeoutM
 	if err != nil {
 		return nil, err
 	}
+	fetchMaxMessages := o.fetchMaxMessages
+	if fetchMaxMessages == 0 {
+		fetchMaxMessages = pollMaxMessages
+	}
+	fetchMaxBytes := o.fetchMaxBytes
+	if fetchMaxBytes == 0 {
+		fetchMaxBytes = pollMaxBytes
+	}
 	g := &GroupConsumer{
 		client:              c,
 		groupID:             group,
@@ -254,6 +301,8 @@ func joinGroupConsumer(c *Client, group string, topics []string, sessionTimeoutM
 		autoCommit:          o.autoCommit,
 		autoCommitInterval:  o.autoCommitInterval,
 		autoOffsetReset:     reset,
+		fetchMaxMessages:    fetchMaxMessages,
+		fetchMaxBytes:       fetchMaxBytes,
 		stop:                make(chan struct{}),
 		hbDone:              make(chan struct{}),
 	}
@@ -519,6 +568,14 @@ func (g *GroupConsumer) Poll(timeout time.Duration) ([]FetchedRecord, error) {
 
 	var out []FetchedRecord
 	assignment := copyAssignment(g.assignment)
+	maxMessages := g.fetchMaxMessages
+	if maxMessages == 0 {
+		maxMessages = pollMaxMessages
+	}
+	maxBytes := g.fetchMaxBytes
+	if maxBytes == 0 {
+		maxBytes = pollMaxBytes
+	}
 	for _, a := range assignment {
 		from := g.positions[topicPartition{a.Topic, a.Partition}]
 		var maxWait uint32
@@ -530,7 +587,7 @@ func (g *GroupConsumer) Poll(timeout time.Duration) ([]FetchedRecord, error) {
 				}
 			}
 		}
-		recs, err := g.client.fetchAt(a.Topic, int(a.Partition), int64(from), 100, maxWait)
+		recs, err := g.client.FetchOpts(a.Topic, int(a.Partition), int64(from), maxMessages, maxBytes, maxWait)
 		if err != nil {
 			return nil, err
 		}
@@ -733,6 +790,22 @@ func (g *GroupConsumer) AutoOffsetReset() string {
 		return ""
 	}
 	return g.autoOffsetReset
+}
+
+// FetchMaxMessages is the Poll fetch max_messages (default 100).
+func (g *GroupConsumer) FetchMaxMessages() uint32 {
+	if g == nil {
+		return 0
+	}
+	return g.fetchMaxMessages
+}
+
+// FetchMaxBytes is the Poll fetch max_bytes (default 4MiB).
+func (g *GroupConsumer) FetchMaxBytes() uint32 {
+	if g == nil {
+		return 0
+	}
+	return g.fetchMaxBytes
 }
 
 // Positions returns next-read offsets for assigned partitions.

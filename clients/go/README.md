@@ -74,6 +74,8 @@ err = g.Close()
 g, err = volant.JoinGroupConsumer(c, "g", []string{"t"}, 10_000, volant.WithAutoCommit(5*time.Second))
 // Opt-in auto_offset_reset (v0.62/v0.70). Default earliest (ListOffsets earliest).
 g, err = volant.JoinGroupConsumer(c, "g", []string{"t"}, 10_000, volant.WithAutoOffsetReset("latest"))
+// Poll fetch size (v0.75). Default 100 / 4MiB; not Kafka max.poll.records.
+g, err = volant.JoinGroupConsumer(c, "g", []string{"t"}, 10_000, volant.WithFetchMaxMessages(10), volant.WithFetchMaxBytes(4096))
 _ = batch
 meta, err := c.Metadata()
 _ = off
@@ -263,6 +265,12 @@ LEO), `none` (error if OffsetFetch is missing / `OFFSET_UNKNOWN`).
 Invalid strings fail Join before JoinGroup. Not Kafka
 `auto.offset.reset` (no timestamp). Rust GroupConsumer still starts
 at 0 / OffsetFetch only.
+
+Poll fetch size is tunable (`WithFetchMaxMessages` /
+`WithFetchMaxBytes`, default **100 / 4MiB**; v0.75). `Poll` still
+takes only a max-wait timeout. Values `<= 0` clamp to the defaults.
+This is **not** Kafka `max.poll.records` (and not `Fetch`'s default
+128).
 
 Not implemented: `kafka-go`, Kafka cooperative-sticky / SyncGroup,
 seeing other group members on the wire, SCRAM, async I/O, Kafka
