@@ -31,6 +31,14 @@ member_id, generation, assignment = c.join_group(
 )
 c.heartbeat("g", member_id, generation)
 c.leave_group("g", member_id)
+
+# High-level group consumer (v0.31). Two members need two Clients.
+from volant import GroupConsumer
+g = GroupConsumer.join(c, group="g", topics=["t"], session_timeout_ms=10_000)
+recs = g.poll(max_wait_ms=500)
+g.commit()
+g.close()
+
 meta = c.metadata()
 c.close()
 
@@ -56,6 +64,10 @@ overridden). `offset_fetch` returns committed `(partition, offset)` pairs
 for the given topic. `join_group` sends empty `member_id` on first join
 (broker assigns one) and unpacks as
 `(member_id, generation, assignment)`.
+`GroupConsumer.join` / `poll` / `commit` / `close` is the high-level
+loop (heartbeat on poll, re-join on error 9/10/11, cooperative revoke).
+`commit` sends the joined `member_id` + `generation`. `close` leaves
+the group and does not close the `Client`.
 
 Correlation ids increment per request. Decode verifies magic `V` (0x56),
 protocol version 1, and IEEE CRC32 of the **payload only**.
@@ -93,14 +105,16 @@ set or both unset. Handshake failures close the TCP socket.
 
 ## Honesty
 
-Not implemented: `kafka-python`, high-level GroupConsumer / assignor
-loop, SCRAM / shared-token auth, async I/O, idempotent produce, leader
-redirect. Offset commit/fetch is the admin path only (empty member,
-generation 0) unless the caller passes a joined `member_id` /
-`generation`. Sync only; one TCP connection; acks=1 by default. TLS
-does not change broker TLS (Phase 8/19) and does not add Kafka API keys.
+Not implemented: `kafka-python`, client-side assignor, SCRAM /
+shared-token auth, async I/O, idempotent produce, leader redirect,
+background heartbeat thread, auto-commit. Offset commit/fetch is the
+admin path only (empty member, generation 0) unless the caller (or
+`GroupConsumer.commit`) passes a joined `member_id` / `generation`.
+Sync only; one TCP connection; acks=1 by default. TLS does not change
+broker TLS (Phase 8/19) and does not add Kafka API keys.
 
 See [docs/V14_SPEC.md](../../docs/V14_SPEC.md),
 [docs/V24_SPEC.md](../../docs/V24_SPEC.md),
-[docs/V27_SPEC.md](../../docs/V27_SPEC.md), and
-[docs/V28_SPEC.md](../../docs/V28_SPEC.md).
+[docs/V27_SPEC.md](../../docs/V27_SPEC.md),
+[docs/V28_SPEC.md](../../docs/V28_SPEC.md), and
+[docs/V31_SPEC.md](../../docs/V31_SPEC.md).

@@ -800,6 +800,17 @@ an empty member id; the broker assigns one. Codec tests need no broker;
 live join → heartbeat → leave is `VOLANT_E2E=1`. See
 [V28_SPEC.md](./V28_SPEC.md).
 
+## v0.31 Python GroupConsumer
+
+Python high-level `GroupConsumer.join` / `poll` / `commit` / `close` on
+the native client (not Kafka, not `--kafka-listen`). Join keeps
+`member_id` / `generation` / assignment; `poll` heartbeats and fetches
+assigned partitions; error 9/10/11 re-joins once; `commit` uses the
+joined member (not the admin empty-member path); `close` is LeaveGroup.
+Two members need two `Client` connections. Unit tests need no broker;
+live poll+commit / two-member split is `VOLANT_E2E=1`. See
+[V31_SPEC.md](./V31_SPEC.md).
+
 ## Shipped (not gaps)
 
 Kafka wire shim **Phases 23–109** (ApiVersions **0–5**, Fetch **0–18**, ACL admin

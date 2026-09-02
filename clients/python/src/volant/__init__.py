@@ -12,6 +12,7 @@ from .codec import (
     TopicInfo,
 )
 from .frame import ProtocolError
+from .group import FetchedRecord, GroupConsumer
 
 __version__ = "0.2.0"
 
@@ -20,8 +21,10 @@ __all__ = [
     "BrokerError",
     "BrokerInfo",
     "Client",
+    "FetchedRecord",
     "FetchRecord",
     "FetchResult",
+    "GroupConsumer",
     "JoinGroupResult",
     "MetadataResponse",
     "PartitionInfo",
