@@ -16,6 +16,11 @@
 //!   overlay; [`commit_checkpoint`] applies them in one Immediate write txn;
 //!   [`abort_checkpoint`] discards the overlay. Process-local staging only —
 //!   not distributed 2PC with the broker.
+//! - **Changelog (v0.9, opt-in):** [`staged_changelog`](Self::staged_changelog)
+//!   exposes the overlay so the EOS runtime can produce deltas in the same
+//!   txn as sink + offsets. [`open_with_changelog`](Self::open_with_changelog)
+//!   replays a broker topic (last-write-wins). Without changelog, behavior is
+//!   still Phase 153 (process-local).
 //! - [`DurableStore::flush`] is an explicit no-op barrier for API symmetry
 //!   (does not commit a checkpoint).
 //! - Surviving process restart: reopen the same directory path.
@@ -125,6 +130,24 @@ impl DurableStore {
     /// Directory path of this store.
     pub fn path(&self) -> &Path {
         &self.path
+    }
+
+    /// Staged overlay as changelog deltas (`None` value = delete).
+    ///
+    /// Empty when no checkpoint is open. Does not include committed disk
+    /// state. Keys appear at most once (last write in the overlay wins).
+    pub fn staged_changelog(&self) -> Vec<(Bytes, Option<Bytes>)> {
+        let Some(st) = &self.staging else {
+            return Vec::new();
+        };
+        let mut out = Vec::with_capacity(st.deletes.len() + st.puts.len());
+        for k in &st.deletes {
+            out.push((Bytes::copy_from_slice(k), None));
+        }
+        for (k, v) in &st.puts {
+            out.push((Bytes::copy_from_slice(k), Some(v.clone())));
+        }
+        out
     }
 
     fn panic_ctx(op: &str, err: impl std::fmt::Display) -> ! {
@@ -334,6 +357,10 @@ impl KeyValueStore for DurableStore {
     fn in_checkpoint(&self) -> bool {
         self.staging.is_some()
     }
+
+    fn staged_changelog(&self) -> Vec<(Bytes, Option<Bytes>)> {
+        DurableStore::staged_changelog(self)
+    }
 }
 
 #[cfg(test)]
@@ -402,6 +429,30 @@ mod tests {
         let store = DurableStore::open(&dir).expect("reopen");
         assert_eq!(store.get(b"new"), None);
         assert_eq!(store.get(b"seed").as_deref(), Some(b"1".as_ref()));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn staged_changelog_puts_and_deletes() {
+        let dir = temp_store_dir("staged-cl");
+        let mut store = DurableStore::open(&dir).expect("open");
+        store.put(Bytes::from_static(b"keep"), Bytes::from_static(b"1"));
+        assert!(store.staged_changelog().is_empty());
+
+        store.begin_checkpoint();
+        store.put(Bytes::from_static(b"new"), Bytes::from_static(b"2"));
+        store.delete(b"keep");
+        store.put(Bytes::from_static(b"new"), Bytes::from_static(b"3")); // last write
+        let mut deltas = store.staged_changelog();
+        deltas.sort_by(|a, b| a.0.cmp(&b.0));
+        assert_eq!(deltas.len(), 2);
+        assert_eq!(deltas[0].0.as_ref(), b"keep");
+        assert!(deltas[0].1.is_none());
+        assert_eq!(deltas[1].0.as_ref(), b"new");
+        assert_eq!(deltas[1].1.as_deref(), Some(b"3".as_ref()));
+
+        store.abort_checkpoint();
+        assert!(store.staged_changelog().is_empty());
         let _ = std::fs::remove_dir_all(&dir);
     }
 

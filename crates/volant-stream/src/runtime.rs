@@ -3,12 +3,14 @@
 use std::sync::Arc;
 use std::time::{SystemTime, UNIX_EPOCH};
 
+use bytes::Bytes;
 use volant_client::{Client, TransactionalProducer};
 use volant_core::{Error, Result};
 
 use crate::pipeline::Pipeline;
 use crate::sink::TopicSink;
 use crate::source::TopicSource;
+use crate::state::{ensure_changelog_topic, produce_changelog_in_txn};
 use crate::topology::Topology;
 
 /// Suffix used to build the dedicated cross-app fence transactional id.
@@ -82,10 +84,11 @@ impl ProcessingGuarantee {
 /// sink produce. A crash between produce and commit may redeliver input
 /// records (duplicate outputs).
 ///
-/// **Exactly-once (Phase 151 / 153):** each non-empty step stages durable
-/// state, begins a transaction, produces sink records transactionally, adds
-/// consumer group offsets, commits the txn, then commits the state checkpoint.
-/// Empty polls (no input, no output) abort the checkpoint and skip the txn.
+/// **Exactly-once (Phase 151 / 153 / v0.9):** each non-empty step stages durable
+/// state, begins a transaction, produces sink records, optionally produces
+/// changelog deltas, adds consumer group offsets, commits the txn, then
+/// commits the state checkpoint. Empty polls abort the checkpoint and skip
+/// the txn. Changelog is opt-in ([`crate::topology::StreamBuilder::changelog_topic`]).
 pub struct StreamApp {
     /// Topology name.
     pub name: String,
@@ -100,6 +103,8 @@ pub struct StreamApp {
     /// Claimed at start via InitProducerId; heartbeated each EOS step so a
     /// later owner of the same fence id fences this runtime.
     app_fence: Option<TransactionalProducer>,
+    /// Opt-in changelog topic (v0.9). `None` = Phase 153 process-local only.
+    changelog_topic: Option<String>,
 }
 
 impl StreamApp {
@@ -148,14 +153,24 @@ impl StreamApp {
             }
             None => None,
         };
+        let changelog_topic = topology.changelog_topic;
+        let mut pipeline = topology.pipeline;
+        // Replay only when EOS + changelog are both configured (opt-in).
+        if matches!(guarantee, ProcessingGuarantee::ExactlyOnce { .. }) {
+            if let Some(ref topic) = changelog_topic {
+                ensure_changelog_topic(&client, topic).await?;
+                pipeline.replay_changelog(&client, topic).await?;
+            }
+        }
         Ok(Self {
             name: topology.name,
             source,
             sink,
-            pipeline: topology.pipeline,
+            pipeline,
             guarantee,
             txn,
             app_fence,
+            changelog_topic,
         })
     }
 
@@ -209,6 +224,11 @@ impl StreamApp {
         &self.guarantee
     }
 
+    /// Opt-in changelog topic, if configured.
+    pub fn changelog_topic(&self) -> Option<&str> {
+        self.changelog_topic.as_deref()
+    }
+
     /// Run until `max_polls` is reached (if `Some`) or forever.
     ///
     /// Each iteration: poll → process → punctuate → sink → commit (ALO or EOS).
@@ -248,20 +268,21 @@ impl StreamApp {
     }
 
     /// Exactly-once: transactional produce + deferred group offsets (Phase 151)
-    /// with durable state checkpoint after EndTxn (Phase 153) and optional
-    /// cross-app fence heartbeat (v0.8).
+    /// with durable state checkpoint after EndTxn (Phase 153), optional
+    /// cross-app fence heartbeat (v0.8), and optional changelog produce (v0.9).
     ///
     /// Order:
     /// 1. app-fence heartbeat (BeginTxn + abort on `{app}::__volant_app_fence`)
     /// 2. `pipeline.begin_checkpoint()` — durable puts stage only
     /// 3. poll → process → punctuate
     /// 4. empty skip → `abort_checkpoint` (no txn)
-    /// 5. txn begin → produce → add_offsets → commit
+    /// 5. txn begin → sink produce → changelog produce → add_offsets → EndTxn
     /// 6. on success → `pipeline.commit_checkpoint()`
     /// 7. on fail → abort txn + `abort_checkpoint`
     ///
     /// ALO path does not use checkpoints (DurableStore remains immediate-put).
     /// Absent / empty `application_id` skips step 1 (Phase 151/153).
+    /// Changelog produce is skipped when no topic is configured or no staged deltas.
     async fn step_exactly_once(&mut self) -> Result<()> {
         if let Err(e) = self.heartbeat_app_fence_if_configured().await {
             return Err(e);
@@ -317,7 +338,18 @@ impl StreamApp {
             }
         };
 
-        if let Err(e) = eos_try_commit(txn, &self.sink, &group_id, pending, &out).await {
+        let deltas = self.pipeline.staged_changelog();
+        if let Err(e) = eos_try_commit(
+            txn,
+            &self.sink,
+            &group_id,
+            pending,
+            &out,
+            self.changelog_topic.as_deref(),
+            &deltas,
+        )
+        .await
+        {
             if txn.is_open() {
                 let _ = txn.abort().await;
             }
@@ -402,9 +434,14 @@ async fn eos_try_commit(
     group_id: &str,
     pending: Vec<(String, u32, u64)>,
     out: &[volant_core::Record],
+    changelog_topic: Option<&str>,
+    deltas: &[(Bytes, Option<Bytes>)],
 ) -> Result<()> {
     txn.begin().await?;
     sink.send_all_in_txn(txn, out).await?;
+    if let Some(topic) = changelog_topic {
+        produce_changelog_in_txn(txn, topic, deltas).await?;
+    }
     if !pending.is_empty() {
         txn.add_offsets(group_id, pending);
     }

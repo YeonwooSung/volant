@@ -8,7 +8,7 @@ use crate::operator::Operator;
 use crate::pipeline::Pipeline;
 use crate::runtime::ProcessingGuarantee;
 use crate::source::SourceConfig;
-use crate::state::StreamStateError;
+use crate::state::{StreamStateError, DEFAULT_CHANGELOG_TOPIC};
 
 /// Fluent builder for a source → operators → sink topology.
 pub struct StreamBuilder {
@@ -25,6 +25,8 @@ pub struct StreamBuilder {
     state_dir: Option<PathBuf>,
     /// Processing guarantee (Phase 151). Default: at-least-once.
     processing_guarantee: ProcessingGuarantee,
+    /// Opt-in changelog topic (v0.9). `None` = Phase 153 process-local only.
+    changelog_topic: Option<String>,
     pipeline: Pipeline,
 }
 
@@ -38,6 +40,7 @@ impl StreamBuilder {
             sink_topic: None,
             state_dir: None,
             processing_guarantee: ProcessingGuarantee::AtLeastOnce,
+            changelog_topic: None,
             pipeline: Pipeline::new(),
         }
     }
@@ -194,6 +197,26 @@ impl StreamBuilder {
         self
     }
 
+    /// Enable changelog produce/replay with the default topic
+    /// [`DEFAULT_CHANGELOG_TOPIC`] (`__volant_changelog`).
+    ///
+    /// Opt-in. Existing `exactly_once` + [`crate::state::DurableStore::open`]
+    /// without this stays Phase 153 (process-local staging). Changelog
+    /// records are produced only on the EOS path, in the same txn as sink +
+    /// offsets.
+    pub fn changelog(self) -> Self {
+        self.changelog_topic(DEFAULT_CHANGELOG_TOPIC)
+    }
+
+    /// Enable changelog produce/replay on `topic` (created on first use).
+    ///
+    /// Prefer `{topology_or_store}__changelog` when more than one app shares
+    /// a cluster. Default off.
+    pub fn changelog_topic(mut self, topic: impl Into<String>) -> Self {
+        self.changelog_topic = Some(topic.into());
+        self
+    }
+
     /// Build a [`Topology`] (validates source + sink are set).
     pub fn build(self) -> Result<Topology> {
         let source_topic = self
@@ -212,6 +235,7 @@ impl StreamBuilder {
             sink_topic,
             state_dir: self.state_dir,
             processing_guarantee: self.processing_guarantee,
+            changelog_topic: self.changelog_topic,
             pipeline: self.pipeline,
         })
     }
@@ -237,6 +261,8 @@ pub struct Topology {
     pub state_dir: Option<PathBuf>,
     /// At-least-once (default) or exactly-once (Phase 151).
     pub processing_guarantee: ProcessingGuarantee,
+    /// Opt-in changelog topic (v0.9). `None` keeps Phase 153 process-local staging.
+    pub changelog_topic: Option<String>,
     /// Operator chain.
     pub pipeline: Pipeline,
 }

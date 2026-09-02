@@ -291,6 +291,14 @@ impl<S: KeyValueStore> Operator for TumblingWindow<S> {
     fn abort_checkpoint(&mut self) {
         self.store.abort_checkpoint();
     }
+
+    fn staged_changelog(&self) -> Vec<(Bytes, Option<Bytes>)> {
+        self.store.staged_changelog()
+    }
+
+    fn apply_changelog(&mut self, key: Bytes, value: Option<Bytes>) {
+        self.store.apply_changelog(key, value);
+    }
 }
 
 #[cfg(test)]
