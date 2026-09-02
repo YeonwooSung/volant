@@ -1155,6 +1155,76 @@ class ClientTest {
     }
 
     @Test
+    void createPartitionsPrefersMetadataControllerId() throws Exception {
+        try (AdminBroker controller = AdminBroker.start();
+                AdminBroker decoy = AdminBroker.start();
+                AdminBroker follower = AdminBroker.start()) {
+            follower.createPartitionsCodes.add(NOT_CONTROLLER);
+            List<Metadata.BrokerInfo> brokers = new ArrayList<>();
+            brokers.add(new Metadata.BrokerInfo(1, "127.0.0.1", follower.port));
+            brokers.add(new Metadata.BrokerInfo(3, "127.0.0.1", decoy.port));
+            brokers.add(new Metadata.BrokerInfo(2, "127.0.0.1", controller.port));
+            follower.meta = new Metadata(brokers, Collections.emptyList(), 2);
+            try (Client c = Client.connect("127.0.0.1", follower.port, 5_000)) {
+                int n = c.createPartitions("events", 4);
+                assertEquals(4, n);
+                assertEquals("127.0.0.1:" + controller.port, c.addr());
+            }
+            assertEquals(1, follower.createPartitionsCount.get());
+            assertEquals(1, follower.metadataCount.get());
+            assertEquals(1, controller.createPartitionsCount.get());
+            assertEquals(0, decoy.createPartitionsCount.get());
+        }
+    }
+
+    @Test
+    void createPartitionsMetadataControllerIdZeroPicksOther() throws Exception {
+        try (AdminBroker later = AdminBroker.start();
+                AdminBroker firstOther = AdminBroker.start();
+                AdminBroker follower = AdminBroker.start()) {
+            follower.createPartitionsCodes.add(NOT_CONTROLLER);
+            List<Metadata.BrokerInfo> brokers = new ArrayList<>();
+            brokers.add(new Metadata.BrokerInfo(1, "127.0.0.1", follower.port));
+            brokers.add(new Metadata.BrokerInfo(3, "127.0.0.1", firstOther.port));
+            brokers.add(new Metadata.BrokerInfo(2, "127.0.0.1", later.port));
+            follower.meta = new Metadata(brokers, Collections.emptyList(), 0);
+            try (Client c = Client.connect("127.0.0.1", follower.port, 5_000)) {
+                int n = c.createPartitions("events", 4);
+                assertEquals(4, n);
+                assertEquals("127.0.0.1:" + firstOther.port, c.addr());
+            }
+            assertEquals(1, follower.createPartitionsCount.get());
+            assertEquals(1, follower.metadataCount.get());
+            assertEquals(1, firstOther.createPartitionsCount.get());
+            assertEquals(0, later.createPartitionsCount.get());
+        }
+    }
+
+    @Test
+    void createTopicMessageControllerIdWinsOverMetadata() throws Exception {
+        try (AdminBroker hinted = AdminBroker.start();
+                AdminBroker metaCtrl = AdminBroker.start();
+                AdminBroker follower = AdminBroker.start()) {
+            follower.queueCreateTopicError(NOT_CONTROLLER, "not controller; controller_id=3");
+            List<Metadata.BrokerInfo> brokers = new ArrayList<>();
+            brokers.add(new Metadata.BrokerInfo(1, "127.0.0.1", follower.port));
+            brokers.add(new Metadata.BrokerInfo(2, "127.0.0.1", metaCtrl.port));
+            brokers.add(new Metadata.BrokerInfo(3, "127.0.0.1", hinted.port));
+            follower.meta = new Metadata(brokers, Collections.emptyList(), 2);
+            hinted.queueCreateTopicOk();
+            try (Client c = Client.connect("127.0.0.1", follower.port, 5_000)) {
+                int id = c.createTopic("events", 1);
+                assertEquals(1, id);
+                assertEquals("127.0.0.1:" + hinted.port, c.addr());
+            }
+            assertEquals(1, follower.createTopicCount.get());
+            assertEquals(1, follower.metadataCount.get());
+            assertEquals(1, hinted.createTopicCount.get());
+            assertEquals(0, metaCtrl.createTopicCount.get());
+        }
+    }
+
+    @Test
     void maxRedirectsZeroRaisesOnFirst14() throws Exception {
         try (AdminBroker follower = AdminBroker.start()) {
             follower.queueCreateTopicError(NOT_CONTROLLER, "not controller; controller_id=2");

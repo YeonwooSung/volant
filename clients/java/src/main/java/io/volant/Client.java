@@ -584,16 +584,19 @@ public final class Client implements AutoCloseable {
      * Metadata → reconnect to the controller.
      *
      * <p>If {@code controllerId} is known (parsed from {@code controller_id=N}
-     * in a 14 Error message), look that node up in Metadata brokers, then
-     * {@link #listMembers()} if Metadata has no matching id. Otherwise pick
-     * the first advertised broker whose host:port is not this connection.
-     * Native Metadata has no controller_id field.
+     * in a 14 Error message, or Metadata's v0.77 trailer when non-zero), look
+     * that node up in Metadata brokers, then {@link #listMembers()} if
+     * Metadata has no matching id. Otherwise pick the first advertised broker
+     * whose host:port is not this connection.
      *
      * @return true when the caller should retry; false on no other broker /
      *     lookup miss / empty host / reconnect fail (raise the original 14).
      */
     private boolean redirectToController(Long controllerId) {
         Metadata meta = metadata();
+        if (controllerId == null && meta.controllerId != 0) {
+            controllerId = meta.controllerId;
+        }
         String host = null;
         int port = 0;
         if (controllerId != null) {

@@ -1286,16 +1286,20 @@ func (c *Client) maybeRedirectControllerCode(code uint16, msg string, attempt, m
 }
 
 // redirectToController refreshes Metadata and reconnects to the controller.
-// If controllerID is set (parsed from controller_id=N in a 14 Error message),
-// look that node up in Metadata brokers, then ListMembers if Metadata has no
-// matching id. Otherwise pick the first advertised broker whose host:port is
-// not this connection. Native Metadata has no controller_id field.
+// If controllerID is set (parsed from controller_id=N in a 14 Error message,
+// or Metadata's v0.77 trailer when non-zero), look that node up in Metadata
+// brokers, then ListMembers if Metadata has no matching id. Otherwise pick
+// the first advertised broker whose host:port is not this connection.
 // ok is false on no other broker / lookup miss / empty host / reconnect fail
 // (caller should surface the original error 14).
 func (c *Client) redirectToController(controllerID *uint32) (bool, error) {
 	meta, err := c.Metadata()
 	if err != nil {
 		return false, err
+	}
+	if controllerID == nil && meta.ControllerID != 0 {
+		id := meta.ControllerID
+		controllerID = &id
 	}
 	var host string
 	var port uint16
