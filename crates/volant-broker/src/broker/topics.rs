@@ -64,6 +64,7 @@ impl Broker {
             .write()
             .insert(name.clone(), AtomicU64::new(0));
         self.topic_configs.save(name.as_str(), &topic_cfg)?;
+        self.maybe_enable_partition_raft_range(name.as_str(), 0, partitions);
         // Seed epoch 0 @ start 0 for each new partition (Phase 87).
         {
             let mut epochs = self.leader_epochs.write();
@@ -177,6 +178,8 @@ impl Broker {
             .write()
             .insert(name.clone(), AtomicU64::new(0));
         self.topic_configs.save(name.as_str(), topic_cfg)?;
+        self.maybe_enable_partition_raft_range(name.as_str(), 0, partitions);
+        self.maybe_append_cluster_metadata();
         Ok(id)
     }
 
@@ -202,6 +205,9 @@ impl Broker {
         }
         let _ = self.topic_configs.delete(name.as_str());
         drop(topics);
+        if self.cluster.is_some() {
+            self.maybe_append_cluster_metadata();
+        }
         // Best-effort: prune stale truncate-journal watermarks for deleted topic.
         // Must not fail delete_topic (persist errors only increment metrics).
         let _ = self.truncate_journal.remove_topic(name.as_str());
@@ -263,6 +269,7 @@ impl Broker {
         }
         self.persist_leader_epochs();
         self.persist_topic_catalog()?;
+        self.maybe_enable_partition_raft_range(name.as_str(), current, total_count);
         Ok(total_count)
     }
 
@@ -379,6 +386,8 @@ impl Broker {
             }
         }
         self.persist_leader_epochs();
+        self.maybe_enable_partition_raft_range(name.as_str(), current, total_count);
+        self.maybe_append_cluster_metadata();
         Ok(total_count)
     }
 

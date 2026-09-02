@@ -2,6 +2,7 @@
 
 pub mod assignment;
 pub mod assignment_consensus;
+pub mod cluster_metadata;
 pub mod config;
 pub mod membership;
 pub mod metadata_raft;
@@ -17,6 +18,11 @@ pub use assignment_consensus::{
     AssignmentConsensus, AssignmentConsensusFile, ASSIGNMENT_COMMITTED_SNAPSHOT_FILE,
     ASSIGNMENT_CONSENSUS_DIR, ASSIGNMENT_CONSENSUS_FILE, ASSIGNMENT_CONSENSUS_FILE_VERSION,
 };
+pub use cluster_metadata::{
+    cluster_metadata_replicas, cluster_metadata_topic_env_enabled,
+    load_assignment_from_cluster_metadata, CLUSTER_METADATA_HEADER, CLUSTER_METADATA_HEADER_VALUE,
+    CLUSTER_METADATA_TOPIC,
+};
 pub use config::{BrokerEndpoint, ClusterConfig};
 pub use membership::Membership;
 pub use metadata_raft::{
@@ -29,5 +35,6 @@ pub use overlay::{
     validate_membership_overlay, MembershipOverlay, MEMBERSHIP_OVERLAY_FILE,
 };
 pub use state::{
-    load_assignment, save_assignment, AssignmentSnapshot, PartitionAssignment, TopicAssignment,
+    assignment_path, load_assignment, save_assignment, AssignmentSnapshot, PartitionAssignment,
+    TopicAssignment,
 };

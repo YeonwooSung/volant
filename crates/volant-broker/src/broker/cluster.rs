@@ -10,7 +10,7 @@ use volant_protocol::{ClusterTopicState, ErrorCode, FetchRecord};
 
 use crate::cluster::{
     elect_leader, reconcile_isr, save_assignment, shrink_isr, shrink_isr_by_time,
-    AssignmentSnapshot,
+    AssignmentSnapshot, CLUSTER_METADATA_TOPIC,
 };
 use crate::leader_epoch::{self, end_offset_for, ensure_entry};
 use crate::topic::Topic;
@@ -433,6 +433,18 @@ impl Broker {
         }
         let _ = controller_id;
         self.apply_local_assignment()?;
+        if self.partition_raft_new_topics_enabled() {
+            for t in topics {
+                if t.name == CLUSTER_METADATA_TOPIC {
+                    continue;
+                }
+                for p in &t.partitions {
+                    if p.replicas.contains(&self.node_id) {
+                        self.enable_partition_raft(&t.name, p.partition_id);
+                    }
+                }
+            }
+        }
         Ok(())
     }
 
@@ -619,6 +631,7 @@ impl Broker {
                 return Err(e);
             }
         }
+        self.maybe_append_cluster_metadata();
         let keep: HashSet<String> = prev.topics.keys().cloned().collect();
         let mut drop_dirs: Vec<std::path::PathBuf> = Vec::new();
         {

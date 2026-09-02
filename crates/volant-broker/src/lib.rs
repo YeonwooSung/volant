@@ -66,12 +66,14 @@ pub use broker_config::{
     KEY_SWEEP_INTERVAL_MS, KEY_TRANSACTION_MAX_TIMEOUT_MS, KEY_TXN_COORDINATOR_TTL_MS,
 };
 pub use cluster::{
-    load_membership_overlay, membership_overlay_path, save_membership_overlay, AssignmentConsensus,
-    AssignmentConsensusFile, BrokerEndpoint, ClusterConfig, MembershipOverlay, MetadataCommand,
-    MetadataLogEntry, MetadataRaftHardState, MetadataRaftState, ASSIGNMENT_COMMITTED_SNAPSHOT_FILE,
-    ASSIGNMENT_CONSENSUS_DIR, ASSIGNMENT_CONSENSUS_FILE, ASSIGNMENT_CONSENSUS_FILE_VERSION,
-    METADATA_RAFT_DIR, METADATA_RAFT_FILE_VERSION, METADATA_RAFT_HARD_STATE_FILE,
-    METADATA_RAFT_LOG_FILE,
+    assignment_path, cluster_metadata_replicas, cluster_metadata_topic_env_enabled,
+    load_assignment_from_cluster_metadata, load_membership_overlay, membership_overlay_path,
+    save_membership_overlay, AssignmentConsensus, AssignmentConsensusFile, BrokerEndpoint,
+    ClusterConfig, MembershipOverlay, MetadataCommand, MetadataLogEntry, MetadataRaftHardState,
+    MetadataRaftState, ASSIGNMENT_COMMITTED_SNAPSHOT_FILE, ASSIGNMENT_CONSENSUS_DIR,
+    ASSIGNMENT_CONSENSUS_FILE, ASSIGNMENT_CONSENSUS_FILE_VERSION, CLUSTER_METADATA_HEADER,
+    CLUSTER_METADATA_HEADER_VALUE, CLUSTER_METADATA_TOPIC, METADATA_RAFT_DIR,
+    METADATA_RAFT_FILE_VERSION, METADATA_RAFT_HARD_STATE_FILE, METADATA_RAFT_LOG_FILE,
 };
 pub use cluster_admin::{
     ClusterAdminFile, ClusterAdminStore, CLUSTER_ADMIN_DIR, CLUSTER_ADMIN_FILE,
@@ -105,6 +107,11 @@ pub use net::{
     DEFAULT_INTER_BROKER_RPC_TIMEOUT_MS, MAX_INTER_BROKER_TIMEOUT_MS, MIN_INTER_BROKER_TIMEOUT_MS,
 };
 pub use offset_store::{OffsetStore, StoredOffset, OFFSET_UNKNOWN};
+pub use replica::{
+    partition_raft_env_enabled, PartitionAppendResult, PartitionRaftEntry, PartitionRaftGroup,
+    PartitionRaftHardState, PartitionRaftPayload, PartitionRaftState, PARTITION_RAFT_DIR,
+    PARTITION_RAFT_FILE_VERSION, PARTITION_RAFT_HARD_STATE_FILE, PARTITION_RAFT_LOG_FILE,
+};
 pub use scram::{
     client_proof_and_server_sig, client_proof_and_server_sig_for, generate_client_nonce,
     ScramChallenge, ScramCredential, ScramHash, ScramStore, DEFAULT_ITERATIONS,
