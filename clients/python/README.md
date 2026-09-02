@@ -158,8 +158,10 @@ DescribeConfigs / AlterConfigs / DeleteOffsets follow
 `NotController` (error 14) the same way (Metadata `controller_id`
 trailer when the message has no hint, else `controller_id=N` or the
 first other advertised broker; not Kafka FindCoordinator). AddBroker /
-RemoveBroker follow error 14 when the broker cannot forward. Still one
-TCP connection at a time.
+RemoveBroker follow error 14 when the broker cannot forward.
+Controller-gated admin shares ``max_retries`` for transient 6 / 7 /
+15 / 16 and TCP/IO (default 0); error 14 stays on ``max_redirects``.
+Still one TCP connection at a time.
 Produce and Fetch retry transient broker codes 6 / 7 / 15 / 16 and TCP
 I/O errors up to ``max_retries`` extra attempts (default 0). Sleep
 ``retry_backoff_ms`` (default 50) between attempts; tests may set 0.

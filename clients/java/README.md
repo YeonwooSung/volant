@@ -152,7 +152,9 @@ AddBroker / RemoveBroker / DescribeConfigs / AlterConfigs / DeleteOffsets follow
 `controller_id=N` hint in the Error message; admin 14 prefers
 Metadata.controller_id when the message has no hint; not Kafka
 FindCoordinator). AddBroker / RemoveBroker follow error 14 when the
-broker cannot forward. Still one TCP connection at a time.
+broker cannot forward. Controller-gated admin shares `setMaxRetries`
+for transient 6 / 7 / 15 / 16 and TCP/IO (default 0); error 14 stays
+on `setMaxRedirects`. Still one TCP connection at a time.
 Produce and Fetch follow `NotLeaderForPartition` (error 13) by default:
 Metadata, reconnect to the partition leader, retry once
 (`setMaxRedirects(1)` is the connect default). `setMaxRedirects(0)`

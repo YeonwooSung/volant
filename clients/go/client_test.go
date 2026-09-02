@@ -3221,3 +3221,154 @@ func TestDeleteOffsetsMaxRedirectsZeroRaisesOnFirst14(t *testing.T) {
 	}
 }
 
+func TestDefaultMaxRetriesZeroRaisesOnCreateTopicTimeout(t *testing.T) {
+	srv := &adminBroker{
+		createTopicReplies: []createTopicReply{{code: timeoutCode}},
+	}
+	addr, stop := startAdmin(t, srv)
+	defer stop()
+
+	c, err := volant.DialTimeout(addr, 5*time.Second)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer c.Close()
+	err = c.CreateTopic("events", 1)
+	if brokerCode(err) != timeoutCode {
+		t.Fatalf("err=%v want code 7", err)
+	}
+	ct, _, _, _, metas, _ := srv.snapshot()
+	if ct != 1 || metas != 0 {
+		t.Fatalf("create_topic=%d metadata=%d want 1,0", ct, metas)
+	}
+}
+
+func TestCreateTopicRetriesTimeoutThenOk(t *testing.T) {
+	srv := &adminBroker{
+		createTopicReplies: []createTopicReply{{code: timeoutCode}, {code: 0}},
+	}
+	addr, stop := startAdmin(t, srv)
+	defer stop()
+
+	c, err := volant.DialTimeout(addr, 5*time.Second)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer c.Close()
+	c.SetMaxRetries(2)
+	c.SetRetryBackoff(0)
+	if err := c.CreateTopic("events", 1); err != nil {
+		t.Fatal(err)
+	}
+	ct, _, _, _, metas, _ := srv.snapshot()
+	if ct != 2 || metas != 0 {
+		t.Fatalf("create_topic=%d metadata=%d want 2,0", ct, metas)
+	}
+}
+
+func TestCreateTopic14RedirectNotCountedAsRetry(t *testing.T) {
+	leader := &adminBroker{}
+	_, stopL := startAdmin(t, leader)
+	defer stopL()
+	follower := &adminBroker{
+		createTopicReplies: []createTopicReply{{
+			code: notController, message: "not controller; controller_id=2", asError: true,
+		}},
+		meta: controllerMeta(2, "127.0.0.1", leader.port()),
+	}
+	fAddr, stopF := startAdmin(t, follower)
+	defer stopF()
+
+	c, err := volant.DialTimeout(fAddr, 5*time.Second)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer c.Close()
+	if err := c.CreateTopic("events", 1); err != nil {
+		t.Fatal(err)
+	}
+	ct, _, _, _, metas, _ := follower.snapshot()
+	if ct != 1 || metas != 1 {
+		t.Fatalf("follower create_topic=%d metadata=%d want 1,1", ct, metas)
+	}
+	lct, _, _, _, _, _ := leader.snapshot()
+	if lct != 1 {
+		t.Fatalf("leader create_topic=%d want 1", lct)
+	}
+}
+
+func TestCreateTopicNotFoundNotRetried(t *testing.T) {
+	srv := &adminBroker{
+		createTopicReplies: []createTopicReply{{code: notFoundCode}},
+	}
+	addr, stop := startAdmin(t, srv)
+	defer stop()
+
+	c, err := volant.DialTimeout(addr, 5*time.Second)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer c.Close()
+	c.SetMaxRetries(2)
+	c.SetRetryBackoff(0)
+	err = c.CreateTopic("events", 1)
+	if brokerCode(err) != notFoundCode {
+		t.Fatalf("err=%v want code 2", err)
+	}
+	ct, _, _, _, metas, _ := srv.snapshot()
+	if ct != 1 || metas != 0 {
+		t.Fatalf("create_topic=%d metadata=%d want 1,0", ct, metas)
+	}
+}
+
+func TestCreateTopicExhaustedRetriesRaises(t *testing.T) {
+	srv := &adminBroker{
+		createTopicReplies: []createTopicReply{
+			{code: timeoutCode}, {code: timeoutCode}, {code: timeoutCode},
+		},
+	}
+	addr, stop := startAdmin(t, srv)
+	defer stop()
+
+	c, err := volant.DialTimeout(addr, 5*time.Second)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer c.Close()
+	c.SetMaxRetries(2)
+	c.SetRetryBackoff(0)
+	err = c.CreateTopic("events", 1)
+	if brokerCode(err) != timeoutCode {
+		t.Fatalf("err=%v want code 7", err)
+	}
+	ct, _, _, _, metas, _ := srv.snapshot()
+	if ct != 3 || metas != 0 {
+		t.Fatalf("create_topic=%d metadata=%d want 3,0", ct, metas)
+	}
+}
+
+func TestCreateAclsRetriesTimeoutThenOk(t *testing.T) {
+	srv := &adminBroker{
+		createAclsCodes: []uint16{timeoutCode, 0},
+	}
+	addr, stop := startAdmin(t, srv)
+	defer stop()
+
+	c, err := volant.DialTimeout(addr, 5*time.Second)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer c.Close()
+	c.SetMaxRetries(2)
+	c.SetRetryBackoff(0)
+	if err := c.CreateAcls([]codec.AclBinding{{
+		Principal: "User:alice", ResourceType: 0, Resource: "events", Operation: 3, Permission: 1,
+	}}); err != nil {
+		t.Fatal(err)
+	}
+	_, _, ca, _, metas, _ := srv.snapshot()
+	if ca != 2 || metas != 0 {
+		t.Fatalf("create_acls=%d metadata=%d want 2,0", ca, metas)
+	}
+}
+
