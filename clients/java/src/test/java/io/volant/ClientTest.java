@@ -127,6 +127,71 @@ class ClientTest {
         }
     }
 
+    @Test
+    void idempotentOnInitsThenSequences() throws Exception {
+        try (ScriptedBroker srv = ScriptedBroker.start()) {
+            try (Client c = Client.connect("127.0.0.1", srv.port, 5_000)) {
+                c.setEnableIdempotence(true);
+                c.produce("t", 0, null, "a".getBytes(StandardCharsets.UTF_8));
+                c.produce("t", 0, null, "b".getBytes(StandardCharsets.UTF_8));
+            }
+            assertEquals(1, srv.initCount.get());
+            assertEquals(List.of(""), srv.initTxnIds);
+            assertEquals(
+                    List.of(Codec.OP_INIT_PRODUCER_ID, Codec.OP_PRODUCE, Codec.OP_PRODUCE), srv.opcodes);
+            assertEquals(2, srv.produceReqs.size());
+            Codec.ProduceRequest first = srv.produceReqs.get(0);
+            Codec.ProduceRequest second = srv.produceReqs.get(1);
+            assertEquals(42L, first.producerId);
+            assertEquals(1, first.producerEpoch);
+            assertEquals(0, first.baseSequence);
+            assertEquals(42L, second.producerId);
+            assertEquals(1, second.producerEpoch);
+            assertEquals(1, second.baseSequence);
+        }
+    }
+
+    @Test
+    void idempotentOffDefaultTrailer() throws Exception {
+        try (ScriptedBroker srv = ScriptedBroker.start()) {
+            try (Client c = Client.connect("127.0.0.1", srv.port, 5_000)) {
+                c.produce("t", 0, null, "a".getBytes(StandardCharsets.UTF_8));
+                c.produce("t", 0, null, "b".getBytes(StandardCharsets.UTF_8));
+            }
+            assertEquals(0, srv.initCount.get());
+            assertEquals(List.of(Codec.OP_PRODUCE, Codec.OP_PRODUCE), srv.opcodes);
+            for (Codec.ProduceRequest req : srv.produceReqs) {
+                assertEquals(0L, req.producerId);
+                assertEquals(0, req.producerEpoch);
+                assertEquals(-1, req.baseSequence);
+            }
+        }
+    }
+
+    @Test
+    void idempotentRedirectKeepsSequence() throws Exception {
+        try (ScriptedBroker leader = ScriptedBroker.start();
+                ScriptedBroker follower = ScriptedBroker.start()) {
+            follower.produceCodes.add(NOT_LEADER);
+            follower.meta = leaderMeta("t", 0, 2, "127.0.0.1", leader.port);
+            try (Client c = Client.connect("127.0.0.1", follower.port, 5_000)) {
+                c.setEnableIdempotence(true);
+                c.produce("t", 0, null, "hello".getBytes(StandardCharsets.UTF_8));
+                c.produce("t", 0, null, "again".getBytes(StandardCharsets.UTF_8));
+                assertEquals("127.0.0.1:" + leader.port, c.addr());
+            }
+            assertEquals(1, follower.initCount.get());
+            assertEquals(0, leader.initCount.get());
+            assertEquals(1, follower.produceCount.get());
+            assertEquals(2, leader.produceCount.get());
+            assertEquals(0, follower.produceReqs.get(0).baseSequence);
+            assertEquals(42L, follower.produceReqs.get(0).producerId);
+            assertEquals(0, leader.produceReqs.get(0).baseSequence);
+            assertEquals(1, leader.produceReqs.get(1).baseSequence);
+            assertEquals(42L, leader.produceReqs.get(0).producerId);
+        }
+    }
+
     private static Metadata leaderMeta(String topic, int partition, int leaderId, String host, int port) {
         List<Metadata.BrokerInfo> brokers = new ArrayList<>();
         brokers.add(new Metadata.BrokerInfo(1, "127.0.0.1", 1));
@@ -151,10 +216,16 @@ class ClientTest {
         final List<Integer> produceCodes = new CopyOnWriteArrayList<>();
         final List<Integer> fetchCodes = new CopyOnWriteArrayList<>();
         volatile Metadata meta = new Metadata(Collections.emptyList(), Collections.emptyList());
+        final List<Integer> opcodes = new CopyOnWriteArrayList<>();
+        final List<Codec.ProduceRequest> produceReqs = new CopyOnWriteArrayList<>();
+        final List<String> initTxnIds = new CopyOnWriteArrayList<>();
+        final AtomicInteger initCount = new AtomicInteger();
         final AtomicInteger produceCount = new AtomicInteger();
         final AtomicInteger fetchCount = new AtomicInteger();
         final AtomicInteger metadataCount = new AtomicInteger();
         final AtomicInteger acceptCount = new AtomicInteger();
+        volatile long initPid = 42L;
+        volatile int initEpoch = 1;
 
         private final ServerSocket listen;
         private final Thread acceptThread;
@@ -207,8 +278,9 @@ class ClientTest {
                         continue;
                     }
                     buf = d.rest;
-                    byte[] payload = handle(d.frame);
-                    out.write(Frame.encode(d.frame.opcode, d.frame.correlationId, payload));
+                    int[] replyOp = new int[1];
+                    byte[] payload = handle(d.frame, replyOp);
+                    out.write(Frame.encode(replyOp[0], d.frame.correlationId, payload));
                     out.flush();
                 }
             } catch (Exception ignored) {
@@ -222,17 +294,29 @@ class ClientTest {
             }
         }
 
-        private byte[] handle(Frame frame) {
+        private byte[] handle(Frame frame, int[] replyOp) {
+            opcodes.add(frame.opcode);
+            replyOp[0] = frame.opcode;
+            if (frame.opcode == Codec.OP_INIT_PRODUCER_ID) {
+                initCount.incrementAndGet();
+                Codec.InitProducerIdRequest req = Codec.decodeInitProducerIdRequest(frame.payload);
+                initTxnIds.add(req.transactionalId);
+                replyOp[0] = Codec.OP_INIT_PRODUCER_ID_RESPONSE;
+                return Codec.encodeInitProducerIdResponse(
+                        new Codec.InitProducerIdResponse(initPid, initEpoch, 0));
+            }
             if (frame.opcode == Codec.OP_PRODUCE) {
                 produceCount.incrementAndGet();
                 Codec.ProduceRequest req = Codec.decodeProduceRequest(frame.payload);
+                produceReqs.add(req);
                 int code = 0;
                 if (!produceCodes.isEmpty()) {
                     code = produceCodes.remove(0);
                 }
                 long part = req.partition >= 0 ? req.partition : 0;
                 return Codec.encodeProduceResponse(
-                        new Codec.ProduceResponse(req.topic, part, code == 0 ? 7 : 0, code == 0 ? 1 : 0, code));
+                        new Codec.ProduceResponse(
+                                req.topic, part, code == 0 ? 7 : 0, code == 0 ? req.messages.size() : 0, code));
             }
             if (frame.opcode == Codec.OP_FETCH) {
                 fetchCount.incrementAndGet();

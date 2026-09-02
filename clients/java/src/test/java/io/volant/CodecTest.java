@@ -589,4 +589,29 @@ class CodecTest {
                 assertInstanceOf(Codec.AuthResponse.class, Codec.decodeResponse(Codec.OP_AUTH_RESPONSE, fail));
         assertEquals(17, dispatchedFail.errorCode);
     }
+
+    @Test
+    void initProducerIdEmptyId() {
+        byte[] raw = Codec.encodeInitProducerIdRequest(new Codec.InitProducerIdRequest(""));
+        assertArrayEquals(hx("0000"), raw);
+        Codec.InitProducerIdRequest decoded = Codec.decodeInitProducerIdRequest(raw);
+        assertEquals("", decoded.transactionalId);
+        Codec.InitProducerIdRequest legacy = Codec.decodeInitProducerIdRequest(new byte[0]);
+        assertEquals("", legacy.transactionalId);
+    }
+
+    @Test
+    void initProducerIdResponseRoundtrip() {
+        Codec.InitProducerIdResponse resp = new Codec.InitProducerIdResponse(42L, 1, 0);
+        byte[] raw = Codec.encodeInitProducerIdResponse(resp);
+        assertArrayEquals(hx("2a00000000000000" + "0100" + "0000"), raw);
+        Codec.InitProducerIdResponse decoded = Codec.decodeInitProducerIdResponse(raw);
+        assertEquals(42L, decoded.producerId);
+        assertEquals(1, decoded.epoch);
+        assertEquals(0, decoded.errorCode);
+        Codec.InitProducerIdResponse dispatched = assertInstanceOf(
+                Codec.InitProducerIdResponse.class,
+                Codec.decodeResponse(Codec.OP_INIT_PRODUCER_ID_RESPONSE, raw));
+        assertEquals(42L, dispatched.producerId);
+    }
 }

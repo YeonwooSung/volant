@@ -54,6 +54,10 @@ Client.connectTls(
 // Optional shared-token Auth (v0.42). null / empty skips Auth.
 Client.connect("127.0.0.1", 9092, "s3cret");
 Client.connectTls("127.0.0.1", 9092, TlsOptions.ca("ca.pem"), "s3cret");
+// Optional idempotent produce (v0.47). Default off (trailer (0, 0, -1)).
+try (Client c = Client.connect("127.0.0.1", 9092)) {
+  c.setEnableIdempotence(true);
+}
 ```
 
 `produce(..., null, value)` sends a null key. `fetch` returns `List<Record>`
@@ -115,6 +119,13 @@ Shared-token Auth (v0.42): `connect(..., authToken)` /
 the token is non-empty. A rejected token throws `BrokerException` with
 code 17 and closes the socket. Existing overloads are unchanged.
 
+Idempotent produce (v0.47) is opt-in via `setEnableIdempotence(true)`.
+The first produce sends native InitProducerId (opcode 32) with an
+empty transactional_id; later produces attach pid/epoch/seq. Default
+off keeps trailer `(0, 0, -1)`. Redirect keeps the same pid. If the
+broker returns UnknownProducerId (21), the client re-Inits once and
+resets sequences. Not Kafka idempotent produce v2; no transactions.
+
 ## Honesty
 
 `GroupConsumer` starts a background heartbeat executor after join
@@ -123,8 +134,10 @@ Pass `heartbeat=false` for the v0.33 poll-only loop. Not a fully
 concurrent API: do not share the `Client` while the consumer is open.
 
 Not implemented: `kafka-clients`, Kafka cooperative-sticky / SyncGroup,
-seeing other group members on the wire, SCRAM, async I/O, idempotent
-produce. Local `assignor="range"` cannot split across
+seeing other group members on the wire, SCRAM, async I/O, transactions
+(BeginTxn/EndTxn). Idempotent produce is opt-in
+(`setEnableIdempotence(true)`); default off. Local `assignor="range"`
+cannot split across
 live members. Sync only; one TCP connection; acks=1 by default. Thin
 `joinGroup` still sends empty `group_instance_id`; use
 `GroupConsumer.joinStatic` for static membership. Convenience
@@ -142,5 +155,6 @@ See [docs/V23_SPEC.md](../../docs/V23_SPEC.md),
 [docs/V36_SPEC.md](../../docs/V36_SPEC.md),
 [docs/V37_SPEC.md](../../docs/V37_SPEC.md),
 [docs/V41_SPEC.md](../../docs/V41_SPEC.md),
-[docs/V42_SPEC.md](../../docs/V42_SPEC.md), and
-[docs/V43_SPEC.md](../../docs/V43_SPEC.md).
+[docs/V42_SPEC.md](../../docs/V42_SPEC.md),
+[docs/V43_SPEC.md](../../docs/V43_SPEC.md), and
+[docs/V47_SPEC.md](../../docs/V47_SPEC.md).

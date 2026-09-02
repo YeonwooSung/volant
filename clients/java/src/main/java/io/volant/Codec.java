@@ -10,7 +10,7 @@ import java.util.List;
  *
  * <p>Matches {@code crates/volant-protocol/src/payload.rs} for the MVP opcodes:
  * Produce, Fetch, CreateTopic, Metadata, DeleteTopic, OffsetCommit,
- * OffsetFetch, JoinGroup, Heartbeat, LeaveGroup, Auth.
+ * OffsetFetch, JoinGroup, Heartbeat, LeaveGroup, Auth, InitProducerId.
  *
  * <p>Header fields are big-endian (see {@link Frame}); <strong>payload</strong>
  * integers and length prefixes are little-endian.
@@ -28,6 +28,8 @@ public final class Codec {
     public static final int OP_LEAVE_GROUP = 10;
     public static final int OP_AUTH = 30;
     public static final int OP_AUTH_RESPONSE = 31;
+    public static final int OP_INIT_PRODUCER_ID = 32;
+    public static final int OP_INIT_PRODUCER_ID_RESPONSE = 33;
     public static final int OP_ERROR = 0xFFFF;
 
     static final long NULL_LEN = 0xFFFFFFFFL;
@@ -405,6 +407,28 @@ public final class Codec {
         public final int errorCode;
 
         public AuthResponse(int errorCode) {
+            this.errorCode = errorCode;
+        }
+    }
+
+    /** InitProducerId request (opcode 32). Empty transactionalId = non-transactional PID. */
+    public static final class InitProducerIdRequest {
+        public final String transactionalId;
+
+        public InitProducerIdRequest(String transactionalId) {
+            this.transactionalId = transactionalId == null ? "" : transactionalId;
+        }
+    }
+
+    /** InitProducerId reply (opcode 33). */
+    public static final class InitProducerIdResponse {
+        public final long producerId;
+        public final int epoch;
+        public final int errorCode;
+
+        public InitProducerIdResponse(long producerId, int epoch, int errorCode) {
+            this.producerId = producerId;
+            this.epoch = epoch;
             this.errorCode = errorCode;
         }
     }
@@ -1140,6 +1164,33 @@ public final class Codec {
         return new AuthResponse(new Reader(payload).u16());
     }
 
+    public static byte[] encodeInitProducerIdRequest(InitProducerIdRequest req) {
+        Writer w = new Writer();
+        // Always write the string; empty transactional_id = non-transactional PID.
+        // Legacy empty body still decodes as "".
+        putString(w, req.transactionalId);
+        return w.finish();
+    }
+
+    public static InitProducerIdRequest decodeInitProducerIdRequest(byte[] payload) {
+        Reader r = new Reader(payload);
+        String txn = r.remaining() > 0 ? getString(r) : "";
+        return new InitProducerIdRequest(txn);
+    }
+
+    public static byte[] encodeInitProducerIdResponse(InitProducerIdResponse resp) {
+        Writer w = new Writer();
+        w.u64(resp.producerId);
+        w.u16(resp.epoch);
+        w.u16(resp.errorCode);
+        return w.finish();
+    }
+
+    public static InitProducerIdResponse decodeInitProducerIdResponse(byte[] payload) {
+        Reader r = new Reader(payload);
+        return new InitProducerIdResponse(r.u64(), r.u16(), r.u16());
+    }
+
     // --- error opcode ------------------------------------------------------
 
     public static byte[] encodeErrorResponse(ErrorResponse resp) {
@@ -1179,6 +1230,8 @@ public final class Codec {
                 return decodeLeaveGroupResponse(payload);
             case OP_AUTH_RESPONSE:
                 return decodeAuthResponse(payload);
+            case OP_INIT_PRODUCER_ID_RESPONSE:
+                return decodeInitProducerIdResponse(payload);
             case OP_ERROR:
                 return decodeErrorResponse(payload);
             default:

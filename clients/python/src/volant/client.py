@@ -47,6 +47,8 @@ from .frame import (
 
 # Native ErrorCode::NotLeaderForPartition (crates/volant-protocol).
 _NOT_LEADER = 13
+# Native ErrorCode::UnknownProducerId — pid not allocated via InitProducerId.
+_UNKNOWN_PRODUCER = 21
 
 
 def _parse_addr(addr: str) -> tuple[str, int]:
@@ -178,6 +180,12 @@ class Client:
 
         c = Client("127.0.0.1:9092", auth_token="s3cret")
         c = Client("127.0.0.1:9092", tls=True, tls_ca="ca.pem", auth_token="s3cret")
+
+    Optional idempotent produce (v0.47) sends InitProducerId (opcode 32)
+    with an empty transactional_id on the first produce and attaches a
+    per-partition sequence trailer. Default is off (trailer ``(0, 0, -1)``)::
+
+        c = Client("127.0.0.1:9092", enable_idempotence=True)
     """
 
     def __init__(
@@ -192,6 +200,7 @@ class Client:
         tls_key: Optional[str] = None,
         auth_token: Optional[str] = None,
         max_redirects: int = 1,
+        enable_idempotence: bool = False,
     ) -> None:
         if tls and (tls_cert is None) != (tls_key is None):
             raise ValueError("tls_cert and tls_key must both be set or both unset")
@@ -204,6 +213,11 @@ class Client:
         self.auth_token = auth_token or None
         # 0 = never redirect (raise on the first NotLeaderForPartition).
         self.max_redirects = max(0, int(max_redirects))
+        self.enable_idempotence = bool(enable_idempotence)
+        self._producer_id = 0
+        self._producer_epoch = 0
+        self._producer_ready = False
+        self._next_seq: dict[tuple[str, int], int] = {}
         self._next_corr = 1
         self._buf = bytearray()
         self._sock = None  # type: ignore[assignment]
@@ -360,6 +374,42 @@ class Client:
             raise ProtocolError(f"unexpected response for auth: {type(resp)}")
         self._check(resp.error_code, "auth")
 
+    def _reset_producer_id(self) -> None:
+        self._producer_ready = False
+        self._producer_id = 0
+        self._producer_epoch = 0
+        self._next_seq.clear()
+
+    def _ensure_producer_id(self) -> None:
+        if self._producer_ready:
+            return
+        payload = codec.encode_init_producer_id_request(
+            codec.InitProducerIdRequest(transactional_id="")
+        )
+        resp = self._round_trip(codec.OP_INIT_PRODUCER_ID, payload)
+        if not isinstance(resp, codec.InitProducerIdResponse):
+            raise ProtocolError(
+                f"unexpected response for init_producer_id: {type(resp)}"
+            )
+        self._check(resp.error_code, "init_producer_id")
+        self._producer_id = resp.producer_id
+        self._producer_epoch = resp.epoch
+        self._producer_ready = True
+
+    def _produce_trailer(self, topic: str, partition: int) -> tuple[int, int, int]:
+        if not self.enable_idempotence:
+            return 0, 0, -1
+        self._ensure_producer_id()
+        seq = self._next_seq.get((topic, partition), 0)
+        return self._producer_id, self._producer_epoch, seq
+
+    def _note_produce_success(self, topic: str, partition: int, count: int) -> None:
+        if not self.enable_idempotence:
+            return
+        key = (topic, partition)
+        cur = self._next_seq.get(key, 0)
+        self._next_seq[key] = cur + max(0, int(count))
+
     def create_topic(
         self,
         name: str,
@@ -398,7 +448,9 @@ class Client:
         """Produce one value-only (or keyed) message, or an explicit batch.
 
         ``partition`` is sent as ``i32`` (use ``-1`` to let the broker assign).
-        Idempotent produce is **not** implemented; trailer is ``(0, 0, -1)``.
+        With ``enable_idempotence=False`` (default) the trailer is
+        ``(0, 0, -1)``. When on, the first produce sends InitProducerId
+        (empty transactional_id) and later produces attach pid/epoch/seq.
         """
         batch: list[ProduceMessage]
         if messages is not None:
@@ -421,47 +473,71 @@ class Client:
             ]
         else:
             raise ValueError("produce() requires value= or messages=")
-        payload = codec.encode_produce_request(
-            ProduceRequest(
-                topic=topic,
-                partition=partition,
-                acks=acks,
-                messages=batch,
-                producer_id=0,
-                producer_epoch=0,
-                base_sequence=-1,
-            )
-        )
-        max_attempts = 1 + self.max_redirects
-        attempt = 0
+
+        reinit_budget = 1 if self.enable_idempotence else 0
         while True:
-            attempt += 1
-            try:
-                resp = self._round_trip(codec.OP_PRODUCE, payload)
-            except BrokerError as e:
+            producer_id, producer_epoch, base_sequence = self._produce_trailer(
+                topic, partition
+            )
+            payload = codec.encode_produce_request(
+                ProduceRequest(
+                    topic=topic,
+                    partition=partition,
+                    acks=acks,
+                    messages=batch,
+                    producer_id=producer_id,
+                    producer_epoch=producer_epoch,
+                    base_sequence=base_sequence,
+                )
+            )
+            max_attempts = 1 + self.max_redirects
+            attempt = 0
+            while True:
+                attempt += 1
+                try:
+                    resp = self._round_trip(codec.OP_PRODUCE, payload)
+                except BrokerError as e:
+                    if (
+                        e.code == _UNKNOWN_PRODUCER
+                        and reinit_budget > 0
+                    ):
+                        reinit_budget -= 1
+                        self._reset_producer_id()
+                        break
+                    if (
+                        e.code == _NOT_LEADER
+                        and attempt < max_attempts
+                        and partition >= 0
+                        and self._redirect_to_leader(topic, partition)
+                    ):
+                        continue
+                    raise
+                if not isinstance(resp, ProduceResponse):
+                    raise ProtocolError(
+                        f"unexpected response for produce: {type(resp)}"
+                    )
                 if (
-                    e.code == _NOT_LEADER
+                    resp.error_code == _UNKNOWN_PRODUCER
+                    and reinit_budget > 0
+                ):
+                    reinit_budget -= 1
+                    self._reset_producer_id()
+                    break
+                if (
+                    resp.error_code == _NOT_LEADER
                     and attempt < max_attempts
-                    and partition >= 0
-                    and self._redirect_to_leader(topic, partition)
+                    and self._redirect_to_leader(resp.topic or topic, resp.partition)
                 ):
                     continue
-                raise
-            if not isinstance(resp, ProduceResponse):
-                raise ProtocolError(f"unexpected response for produce: {type(resp)}")
-            if (
-                resp.error_code == _NOT_LEADER
-                and attempt < max_attempts
-                and self._redirect_to_leader(resp.topic or topic, resp.partition)
-            ):
-                continue
-            self._check(resp.error_code, "produce")
-            return ProduceResult(
-                topic=resp.topic,
-                partition=resp.partition,
-                base_offset=resp.base_offset,
-                count=resp.count,
-            )
+                self._check(resp.error_code, "produce")
+                seq_part = resp.partition if partition < 0 else partition
+                self._note_produce_success(topic, seq_part, len(batch))
+                return ProduceResult(
+                    topic=resp.topic,
+                    partition=resp.partition,
+                    base_offset=resp.base_offset,
+                    count=resp.count,
+                )
 
     def fetch(
         self,

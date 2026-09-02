@@ -67,6 +67,8 @@ c, err = volant.DialTLS("127.0.0.1:9092", volant.TLSConfig{
 // Optional shared-token Auth (v0.42). Empty token skips Auth.
 c, err = volant.DialAuth("127.0.0.1:9092", "s3cret")
 c, err = volant.DialTLSAuth("127.0.0.1:9092", volant.TLSConfig{CAFile: "ca.pem"}, "s3cret")
+// Optional idempotent produce (v0.47). Default off (trailer (0, 0, -1)).
+c.EnableIdempotence()
 ```
 
 `Produce(..., nil, value)` sends a null key. `Fetch` returns `[]Record`
@@ -130,6 +132,13 @@ opcode 30 after connect when the token is non-empty. A rejected token
 returns `BrokerError` with code 17 and closes the socket. `Dial` /
 `DialTLS` are unchanged.
 
+Idempotent produce (v0.47) is opt-in via `EnableIdempotence()`. The
+first Produce sends native InitProducerId (opcode 32) with an empty
+transactional_id; later produces attach pid/epoch/seq. Default off
+keeps trailer `(0, 0, -1)`. Redirect keeps the same pid. UnknownProducerId
+(21) re-Inits once and resets sequences. Not Kafka idempotent produce
+v2; no transactions.
+
 ## Honesty
 
 `JoinGroupConsumer` starts a background heartbeat goroutine after
@@ -139,8 +148,9 @@ Not a fully concurrent API: do not share the `Client` while the
 consumer is open.
 
 Not implemented: `kafka-go`, Kafka cooperative-sticky / SyncGroup,
-seeing other group members on the wire, SCRAM, async I/O, idempotent
-produce. Local `WithAssignor("range")` cannot split
+seeing other group members on the wire, SCRAM, async I/O, transactions
+(BeginTxn/EndTxn). Idempotent produce is opt-in (`EnableIdempotence()`);
+default off. Local `WithAssignor("range")` cannot split
 across live members. Thin `Client.JoinGroup` still sends empty
 `group_instance_id`; use `JoinGroupConsumerStatic` for static
 membership. Thin `OffsetCommit` is still the admin path (empty member,
@@ -157,5 +167,6 @@ See [docs/V19_SPEC.md](../../docs/V19_SPEC.md),
 [docs/V36_SPEC.md](../../docs/V36_SPEC.md),
 [docs/V37_SPEC.md](../../docs/V37_SPEC.md),
 [docs/V41_SPEC.md](../../docs/V41_SPEC.md),
-[docs/V42_SPEC.md](../../docs/V42_SPEC.md), and
-[docs/V43_SPEC.md](../../docs/V43_SPEC.md).
+[docs/V42_SPEC.md](../../docs/V42_SPEC.md),
+[docs/V43_SPEC.md](../../docs/V43_SPEC.md), and
+[docs/V47_SPEC.md](../../docs/V47_SPEC.md).

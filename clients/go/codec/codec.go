@@ -2,7 +2,7 @@
 //
 // Matches crates/volant-protocol/src/payload.rs for Produce, Fetch,
 // CreateTopic, Metadata, DeleteTopic, OffsetCommit, OffsetFetch,
-// JoinGroup, Heartbeat, LeaveGroup, and Auth.
+// JoinGroup, Heartbeat, LeaveGroup, Auth, and InitProducerId.
 // Frame headers are big-endian (see package frame); payload integers and
 // length prefixes are little-endian.
 package codec
@@ -15,19 +15,21 @@ import (
 )
 
 const (
-	OpProduce      uint16 = 1
-	OpFetch        uint16 = 2
-	OpCreateTopic  uint16 = 3
-	OpMetadata     uint16 = 4
-	OpDeleteTopic  uint16 = 5
-	OpOffsetCommit uint16 = 6
-	OpOffsetFetch  uint16 = 7
-	OpJoinGroup    uint16 = 8
-	OpHeartbeat    uint16 = 9
-	OpLeaveGroup   uint16 = 10
-	OpAuth         uint16 = 30
-	OpAuthResponse uint16 = 31
-	OpError        uint16 = 0xFFFF
+	OpProduce                uint16 = 1
+	OpFetch                  uint16 = 2
+	OpCreateTopic            uint16 = 3
+	OpMetadata               uint16 = 4
+	OpDeleteTopic            uint16 = 5
+	OpOffsetCommit           uint16 = 6
+	OpOffsetFetch            uint16 = 7
+	OpJoinGroup              uint16 = 8
+	OpHeartbeat              uint16 = 9
+	OpLeaveGroup             uint16 = 10
+	OpAuth                   uint16 = 30
+	OpAuthResponse           uint16 = 31
+	OpInitProducerId         uint16 = 32
+	OpInitProducerIdResponse uint16 = 33
+	OpError                  uint16 = 0xFFFF
 
 	nullLen = 0xFFFFFFFF
 )
@@ -474,6 +476,19 @@ type AuthRequest struct {
 // AuthResponse is the Auth reply (opcode 31).
 type AuthResponse struct {
 	ErrorCode uint16
+}
+
+// InitProducerIdRequest is the InitProducerId opcode (32) body.
+// Empty TransactionalID is a non-transactional PID.
+type InitProducerIdRequest struct {
+	TransactionalID string
+}
+
+// InitProducerIdResponse is the InitProducerId reply (opcode 33).
+type InitProducerIdResponse struct {
+	ProducerID uint64
+	Epoch      uint16
+	ErrorCode  uint16
 }
 
 func EncodeProduceRequest(req ProduceRequest) ([]byte, error) {
@@ -1464,6 +1479,53 @@ func EncodeAuthResponse(resp AuthResponse) ([]byte, error) {
 	return w.buf, nil
 }
 
+func EncodeInitProducerIdRequest(req InitProducerIdRequest) ([]byte, error) {
+	w := &writer{}
+	// Always write the string; empty transactional_id = non-transactional PID.
+	// Legacy empty body still decodes as "".
+	if err := putString(w, req.TransactionalID); err != nil {
+		return nil, err
+	}
+	return w.buf, nil
+}
+
+func DecodeInitProducerIdRequest(payload []byte) (InitProducerIdRequest, error) {
+	r := &reader{data: payload}
+	if r.remaining() == 0 {
+		return InitProducerIdRequest{TransactionalID: ""}, nil
+	}
+	txn, err := getString(r)
+	if err != nil {
+		return InitProducerIdRequest{}, err
+	}
+	return InitProducerIdRequest{TransactionalID: txn}, nil
+}
+
+func EncodeInitProducerIdResponse(resp InitProducerIdResponse) ([]byte, error) {
+	w := &writer{}
+	w.u64(resp.ProducerID)
+	w.u16(resp.Epoch)
+	w.u16(resp.ErrorCode)
+	return w.buf, nil
+}
+
+func DecodeInitProducerIdResponse(payload []byte) (InitProducerIdResponse, error) {
+	r := &reader{data: payload}
+	pid, err := r.u64()
+	if err != nil {
+		return InitProducerIdResponse{}, err
+	}
+	epoch, err := r.u16()
+	if err != nil {
+		return InitProducerIdResponse{}, err
+	}
+	code, err := r.u16()
+	if err != nil {
+		return InitProducerIdResponse{}, err
+	}
+	return InitProducerIdResponse{ProducerID: pid, Epoch: epoch, ErrorCode: code}, nil
+}
+
 func DecodeAuthResponse(payload []byte) (AuthResponse, error) {
 	r := &reader{data: payload}
 	code, err := r.u16()
@@ -1520,6 +1582,8 @@ func DecodeResponse(opcode uint16, payload []byte) (any, error) {
 		return DecodeLeaveGroupResponse(payload)
 	case OpAuthResponse:
 		return DecodeAuthResponse(payload)
+	case OpInitProducerIdResponse:
+		return DecodeInitProducerIdResponse(payload)
 	case OpError:
 		return DecodeErrorResponse(payload)
 	default:

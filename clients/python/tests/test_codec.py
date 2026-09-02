@@ -18,6 +18,8 @@ from volant.codec import (
     FetchResponse,
     HeartbeatRequest,
     HeartbeatResponse,
+    InitProducerIdRequest,
+    InitProducerIdResponse,
     JoinGroupRequest,
     JoinGroupResponse,
     LeaveGroupRequest,
@@ -46,6 +48,8 @@ from volant.codec import (
     decode_fetch_response,
     decode_heartbeat_request,
     decode_heartbeat_response,
+    decode_init_producer_id_request,
+    decode_init_producer_id_response,
     decode_join_group_request,
     decode_join_group_response,
     decode_leave_group_request,
@@ -69,6 +73,8 @@ from volant.codec import (
     encode_fetch_response,
     encode_heartbeat_request,
     encode_heartbeat_response,
+    encode_init_producer_id_request,
+    encode_init_producer_id_response,
     encode_join_group_request,
     encode_join_group_response,
     encode_leave_group_request,
@@ -82,6 +88,7 @@ from volant.codec import (
     encode_produce_request,
     encode_produce_response,
     OP_AUTH_RESPONSE,
+    OP_INIT_PRODUCER_ID_RESPONSE,
     OP_HEARTBEAT,
     OP_JOIN_GROUP,
     OP_LEAVE_GROUP,
@@ -622,6 +629,26 @@ class TestAuthCodec(unittest.TestCase):
         self.assertEqual(raw, bytes.fromhex("1100"))
         self.assertEqual(decode_auth_response(raw), fail)
         self.assertEqual(decode_response(OP_AUTH_RESPONSE, raw), fail)
+
+
+class TestInitProducerIdCodec(unittest.TestCase):
+    def test_empty_transactional_id_roundtrip(self) -> None:
+        req = InitProducerIdRequest(transactional_id="")
+        raw = encode_init_producer_id_request(req)
+        self.assertEqual(raw, bytes.fromhex("0000"))
+        self.assertEqual(decode_init_producer_id_request(raw), req)
+        # Legacy empty body still decodes as empty transactional_id.
+        self.assertEqual(
+            decode_init_producer_id_request(b""),
+            InitProducerIdRequest(transactional_id=""),
+        )
+
+    def test_response_roundtrip(self) -> None:
+        resp = InitProducerIdResponse(producer_id=42, epoch=1, error_code=0)
+        raw = encode_init_producer_id_response(resp)
+        self.assertEqual(raw, bytes.fromhex("2a00000000000000" "0100" "0000"))
+        self.assertEqual(decode_init_producer_id_response(raw), resp)
+        self.assertEqual(decode_response(OP_INIT_PRODUCER_ID_RESPONSE, raw), resp)
 
 
 if __name__ == "__main__":

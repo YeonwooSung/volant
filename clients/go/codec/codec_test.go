@@ -912,3 +912,55 @@ func TestAuthResponseOkAndFailed(t *testing.T) {
 		t.Fatalf("dispatch fail %#v", got)
 	}
 }
+
+func TestInitProducerIdEmptyId(t *testing.T) {
+	req := InitProducerIdRequest{TransactionalID: ""}
+	raw, err := EncodeInitProducerIdRequest(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	expected := mustHex(t, "0000")
+	if !bytes.Equal(raw, expected) {
+		t.Fatalf("encode:\n got %x\nwant %x", raw, expected)
+	}
+	decoded, err := DecodeInitProducerIdRequest(raw)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if decoded != req {
+		t.Fatalf("decoded %+v", decoded)
+	}
+	legacy, err := DecodeInitProducerIdRequest(nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if legacy.TransactionalID != "" {
+		t.Fatalf("legacy empty body: %+v", legacy)
+	}
+}
+
+func TestInitProducerIdResponseRoundtrip(t *testing.T) {
+	resp := InitProducerIdResponse{ProducerID: 42, Epoch: 1, ErrorCode: 0}
+	raw, err := EncodeInitProducerIdResponse(resp)
+	if err != nil {
+		t.Fatal(err)
+	}
+	expected := mustHex(t, "2a0000000000000001000000")
+	if !bytes.Equal(raw, expected) {
+		t.Fatalf("encode:\n got %x\nwant %x", raw, expected)
+	}
+	decoded, err := DecodeInitProducerIdResponse(raw)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if decoded != resp {
+		t.Fatalf("decoded %+v", decoded)
+	}
+	got, err := DecodeResponse(OpInitProducerIdResponse, raw)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if ir, ok := got.(InitProducerIdResponse); !ok || ir != resp {
+		t.Fatalf("dispatch %#v", got)
+	}
+}

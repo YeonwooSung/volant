@@ -9,17 +9,23 @@ import unittest
 from volant import BrokerError, Client
 from volant.codec import (
     OP_FETCH,
+    OP_INIT_PRODUCER_ID,
+    OP_INIT_PRODUCER_ID_RESPONSE,
     OP_METADATA,
     OP_PRODUCE,
     BrokerInfo,
     FetchResponse,
+    InitProducerIdResponse,
     MetadataResponse,
     PartitionInfo,
+    ProduceRequest,
     ProduceResponse,
     TopicInfo,
     decode_fetch_request,
+    decode_init_producer_id_request,
     decode_produce_request,
     encode_fetch_response,
+    encode_init_producer_id_response,
     encode_metadata_response,
     encode_produce_response,
 )
@@ -41,10 +47,15 @@ class ScriptedBroker:
         self.fetch_codes: list[int] = []
         self.metadata: MetadataResponse | None = None
         self.opcodes: list[int] = []
+        self.produce_reqs: list[ProduceRequest] = []
+        self.init_txn_ids: list[str] = []
+        self.init_count = 0
         self.produce_count = 0
         self.fetch_count = 0
         self.metadata_count = 0
         self.accept_count = 0
+        self.init_pid = 42
+        self.init_epoch = 1
         self.error: BaseException | None = None
         self._lsock: socket.socket | None = None
         self._thread: threading.Thread | None = None
@@ -107,8 +118,8 @@ class ScriptedBroker:
                     continue
                 buf = bytearray(rest)
                 self.opcodes.append(frame.opcode)
-                payload = self._handle(frame.opcode, frame.payload)
-                conn.sendall(encode_frame(frame.opcode, frame.correlation_id, payload))
+                payload, reply_op = self._handle(frame.opcode, frame.payload)
+                conn.sendall(encode_frame(reply_op, frame.correlation_id, payload))
         except BaseException as e:
             self.error = e
         finally:
@@ -117,32 +128,53 @@ class ScriptedBroker:
             except OSError:
                 pass
 
-    def _handle(self, opcode: int, raw: bytes) -> bytes:
+    def _handle(self, opcode: int, raw: bytes) -> tuple[bytes, int]:
+        if opcode == OP_INIT_PRODUCER_ID:
+            self.init_count += 1
+            req = decode_init_producer_id_request(raw)
+            self.init_txn_ids.append(req.transactional_id)
+            return (
+                encode_init_producer_id_response(
+                    InitProducerIdResponse(
+                        producer_id=self.init_pid,
+                        epoch=self.init_epoch,
+                        error_code=0,
+                    )
+                ),
+                OP_INIT_PRODUCER_ID_RESPONSE,
+            )
         if opcode == OP_PRODUCE:
             self.produce_count += 1
             req = decode_produce_request(raw)
+            self.produce_reqs.append(req)
             code = self.produce_codes.pop(0) if self.produce_codes else 0
-            return encode_produce_response(
-                ProduceResponse(
-                    topic=req.topic,
-                    partition=req.partition if req.partition >= 0 else 0,
-                    base_offset=7 if code == 0 else 0,
-                    count=1 if code == 0 else 0,
-                    error_code=code,
-                )
+            return (
+                encode_produce_response(
+                    ProduceResponse(
+                        topic=req.topic,
+                        partition=req.partition if req.partition >= 0 else 0,
+                        base_offset=7 if code == 0 else 0,
+                        count=len(req.messages) if code == 0 else 0,
+                        error_code=code,
+                    )
+                ),
+                OP_PRODUCE,
             )
         if opcode == OP_FETCH:
             self.fetch_count += 1
             req = decode_fetch_request(raw)
             code = self.fetch_codes.pop(0) if self.fetch_codes else 0
-            return encode_fetch_response(
-                FetchResponse(
-                    topic=req.topic,
-                    partition=req.partition,
-                    high_watermark=0,
-                    error_code=code,
-                    records=[],
-                )
+            return (
+                encode_fetch_response(
+                    FetchResponse(
+                        topic=req.topic,
+                        partition=req.partition,
+                        high_watermark=0,
+                        error_code=code,
+                        records=[],
+                    )
+                ),
+                OP_FETCH,
             )
         if opcode == OP_METADATA:
             self.metadata_count += 1
@@ -151,7 +183,7 @@ class ScriptedBroker:
                 meta = meta()
             if meta is None:
                 meta = MetadataResponse(brokers=[], topics=[])
-            return encode_metadata_response(meta)
+            return encode_metadata_response(meta), OP_METADATA
         raise ProtocolErrorForTest(f"unexpected opcode {opcode}")
 
 
@@ -288,6 +320,72 @@ class TestLeaderRedirect(unittest.TestCase):
             self.assertEqual(follower.produce_count, 1)
             self.assertEqual(follower.metadata_count, 1)
             self.assertEqual(follower.accept_count, 1)
+
+
+class TestIdempotentProduce(unittest.TestCase):
+    def test_enable_on_inits_then_sequences(self) -> None:
+        with ScriptedBroker() as srv:
+            with Client(srv.addr, timeout=5.0, enable_idempotence=True) as c:
+                c.produce("t", 0, value=b"a")
+                c.produce("t", 0, value=b"b")
+            self.assertEqual(srv.init_count, 1)
+            self.assertEqual(srv.init_txn_ids, [""])
+            self.assertEqual(srv.opcodes, [OP_INIT_PRODUCER_ID, OP_PRODUCE, OP_PRODUCE])
+            self.assertEqual(len(srv.produce_reqs), 2)
+            first, second = srv.produce_reqs
+            self.assertEqual(
+                (first.producer_id, first.producer_epoch, first.base_sequence),
+                (42, 1, 0),
+            )
+            self.assertEqual(
+                (second.producer_id, second.producer_epoch, second.base_sequence),
+                (42, 1, 1),
+            )
+
+    def test_enable_off_no_init_default_trailer(self) -> None:
+        with ScriptedBroker() as srv:
+            with Client(srv.addr, timeout=5.0) as c:
+                c.produce("t", 0, value=b"a")
+                c.produce("t", 0, value=b"b")
+            self.assertEqual(srv.init_count, 0)
+            self.assertEqual(srv.opcodes, [OP_PRODUCE, OP_PRODUCE])
+            for req in srv.produce_reqs:
+                self.assertEqual(
+                    (req.producer_id, req.producer_epoch, req.base_sequence),
+                    (0, 0, -1),
+                )
+
+    def test_batch_increments_by_message_count(self) -> None:
+        with ScriptedBroker() as srv:
+            with Client(srv.addr, timeout=5.0, enable_idempotence=True) as c:
+                c.produce("t", 0, messages=[b"a", b"b"])
+                c.produce("t", 0, value=b"c")
+            self.assertEqual(srv.produce_reqs[0].base_sequence, 0)
+            self.assertEqual(srv.produce_reqs[1].base_sequence, 2)
+
+    def test_redirect_keeps_pid_and_sequence(self) -> None:
+        with ScriptedBroker() as leader, ScriptedBroker() as follower:
+            follower.produce_codes = [NOT_LEADER]
+            follower.metadata = _leader_meta("t", 0, 2, "127.0.0.1", leader.port)
+            with Client(follower.addr, timeout=5.0, enable_idempotence=True) as c:
+                c.produce("t", 0, value=b"hello")
+                c.produce("t", 0, value=b"again")
+            self.assertEqual(follower.init_count, 1)
+            self.assertEqual(leader.init_count, 0)
+            self.assertEqual(follower.produce_count, 1)
+            self.assertEqual(leader.produce_count, 2)
+            self.assertEqual(
+                (
+                    follower.produce_reqs[0].producer_id,
+                    follower.produce_reqs[0].producer_epoch,
+                    follower.produce_reqs[0].base_sequence,
+                ),
+                (42, 1, 0),
+            )
+            self.assertEqual(leader.produce_reqs[0].base_sequence, 0)
+            self.assertEqual(leader.produce_reqs[1].base_sequence, 1)
+            self.assertEqual(leader.produce_reqs[0].producer_id, 42)
+            self.assertEqual(c.addr, leader.addr)
 
 
 if __name__ == "__main__":

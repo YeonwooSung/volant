@@ -2,7 +2,7 @@
 
 Matches `crates/volant-protocol/src/payload.rs` for the MVP opcodes:
 Produce, Fetch, CreateTopic, Metadata, DeleteTopic, OffsetCommit,
-OffsetFetch, JoinGroup, Heartbeat, LeaveGroup, Auth.
+OffsetFetch, JoinGroup, Heartbeat, LeaveGroup, Auth, InitProducerId.
 
 Header fields are big-endian (see :mod:`volant.frame`); **payload** integers
 and length prefixes are little-endian.
@@ -28,6 +28,8 @@ OP_HEARTBEAT = 9
 OP_LEAVE_GROUP = 10
 OP_AUTH = 30
 OP_AUTH_RESPONSE = 31
+OP_INIT_PRODUCER_ID = 32
+OP_INIT_PRODUCER_ID_RESPONSE = 33
 OP_ERROR = 0xFFFF
 
 _NULL_LEN = 0xFFFFFFFF
@@ -420,6 +422,18 @@ class AuthRequest:
 
 @dataclass
 class AuthResponse:
+    error_code: int
+
+
+@dataclass
+class InitProducerIdRequest:
+    transactional_id: str = ""
+
+
+@dataclass
+class InitProducerIdResponse:
+    producer_id: int
+    epoch: int
     error_code: int
 
 
@@ -987,6 +1001,40 @@ def decode_auth_response(payload: bytes) -> AuthResponse:
     return AuthResponse(error_code=r.u16_le())
 
 
+# --- init producer id ------------------------------------------------------
+
+
+def encode_init_producer_id_request(req: InitProducerIdRequest) -> bytes:
+    w = _Writer()
+    # Always write the string; empty transactional_id = non-transactional PID.
+    # Legacy empty body still decodes as "".
+    _put_string(w, req.transactional_id)
+    return w.finish()
+
+
+def decode_init_producer_id_request(payload: bytes) -> InitProducerIdRequest:
+    r = _Reader(payload)
+    txn = _get_string(r) if r.remaining() > 0 else ""
+    return InitProducerIdRequest(transactional_id=txn)
+
+
+def encode_init_producer_id_response(resp: InitProducerIdResponse) -> bytes:
+    w = _Writer()
+    w.u64_le(resp.producer_id)
+    w.u16_le(resp.epoch)
+    w.u16_le(resp.error_code)
+    return w.finish()
+
+
+def decode_init_producer_id_response(payload: bytes) -> InitProducerIdResponse:
+    r = _Reader(payload)
+    return InitProducerIdResponse(
+        producer_id=r.u64_le(),
+        epoch=r.u16_le(),
+        error_code=r.u16_le(),
+    )
+
+
 # --- error opcode ----------------------------------------------------------
 
 
@@ -1026,6 +1074,8 @@ def decode_response(opcode: int, payload: bytes):
         return decode_leave_group_response(payload)
     if opcode == OP_AUTH_RESPONSE:
         return decode_auth_response(payload)
+    if opcode == OP_INIT_PRODUCER_ID_RESPONSE:
+        return decode_init_producer_id_response(payload)
     if opcode == OP_ERROR:
         return decode_error_response(payload)
     raise ProtocolError(f"unknown response opcode {opcode}")
