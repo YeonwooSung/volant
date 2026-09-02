@@ -29,6 +29,11 @@
 //! (or solo-range over `[self]` when that assignment is empty). Still no
 //! SyncGroup.
 //!
+//! Poll Fetch size is 100 messages / 4 MiB by default. Opt in with
+//! [`GroupConsumer::join_with_fetch_knobs`]. Zero clamps to those
+//! defaults. [`GroupConsumer::poll`] still passes `max_wait_ms = 0` on
+//! the Fetch RPC.
+//!
 //! The join lock serializes the heartbeat task against `poll` / `commit` /
 //! `leave`. This is **not** a fully concurrent consumer — do not call `poll`
 //! from two tasks. [`GroupConsumer::leave`] stops the task and sends
@@ -111,6 +116,27 @@ fn parse_assignor(name: &str) -> Result<Assignor> {
     }
 }
 
+/// Historical poll Fetch `max_messages` (not Client fetch's 128).
+const POLL_MAX_MESSAGES: u32 = 100;
+/// Historical poll Fetch `max_bytes` (same as [`Client::fetch`]).
+const POLL_MAX_BYTES: u32 = 4 * 1024 * 1024;
+
+fn clamp_fetch_max_messages(n: u32) -> u32 {
+    if n == 0 {
+        POLL_MAX_MESSAGES
+    } else {
+        n
+    }
+}
+
+fn clamp_fetch_max_bytes(n: u32) -> u32 {
+    if n == 0 {
+        POLL_MAX_BYTES
+    } else {
+        n
+    }
+}
+
 /// Minimum background heartbeat period (ms).
 const HEARTBEAT_INTERVAL_MIN_MS: u32 = 100;
 /// Maximum background heartbeat period (ms).
@@ -149,6 +175,10 @@ struct Shared {
     auto_offset_reset: AutoOffsetReset,
     /// Fetch-set assignor; reused on heartbeat-driven rejoin.
     assignor: Assignor,
+    /// Poll Fetch `max_messages`; reused after rejoin.
+    fetch_max_messages: u32,
+    /// Poll Fetch `max_bytes`; reused after rejoin.
+    fetch_max_bytes: u32,
 }
 
 /// High-level consumer that joins a group, polls assigned partitions, and commits.
@@ -344,7 +374,7 @@ impl GroupConsumer {
     /// [`join_with_auto_commit`](Self::join_with_auto_commit) /
     /// [`join_with_auto_offset_reset`](Self::join_with_auto_offset_reset)
     /// keep `"broker"`. Rejoin / heartbeat-driven rebalance reuse the same
-    /// policy. Still no SyncGroup.
+    /// policy. Still no SyncGroup. Poll Fetch size stays 100 / 4 MiB.
     pub async fn join_with_assignor(
         client: Arc<Client>,
         group_id: impl Into<String>,
@@ -357,8 +387,55 @@ impl GroupConsumer {
         auto_offset_reset: &str,
         assignor: &str,
     ) -> Result<Self> {
+        Self::join_with_fetch_knobs(
+            client,
+            group_id,
+            topics,
+            session_timeout_ms,
+            group_instance_id,
+            heartbeat,
+            auto_commit,
+            auto_commit_interval,
+            auto_offset_reset,
+            assignor,
+            POLL_MAX_MESSAGES,
+            POLL_MAX_BYTES,
+        )
+        .await
+    }
+
+    /// Join with opt-in poll Fetch knobs (v0.76).
+    ///
+    /// Same arguments as [`join_with_assignor`](Self::join_with_assignor)
+    /// plus `fetch_max_messages` / `fetch_max_bytes`. `0` clamps to the
+    /// historical poll defaults (100 / 4 MiB). Existing
+    /// [`join`](Self::join) / [`join_static`](Self::join_static) /
+    /// [`join_with_heartbeat`](Self::join_with_heartbeat) /
+    /// [`join_static_with_heartbeat`](Self::join_static_with_heartbeat) /
+    /// [`join_with_auto_commit`](Self::join_with_auto_commit) /
+    /// [`join_with_auto_offset_reset`](Self::join_with_auto_offset_reset) /
+    /// [`join_with_assignor`](Self::join_with_assignor) keep those
+    /// defaults. Rejoin reuses the same knobs. [`poll`](Self::poll)
+    /// still passes `max_wait_ms = 0` on the Fetch RPC. Not Kafka
+    /// `max.poll.records`.
+    pub async fn join_with_fetch_knobs(
+        client: Arc<Client>,
+        group_id: impl Into<String>,
+        topics: Vec<String>,
+        session_timeout_ms: u32,
+        group_instance_id: impl Into<String>,
+        heartbeat: bool,
+        auto_commit: bool,
+        auto_commit_interval: Duration,
+        auto_offset_reset: &str,
+        assignor: &str,
+        fetch_max_messages: u32,
+        fetch_max_bytes: u32,
+    ) -> Result<Self> {
         let assignor = parse_assignor(assignor)?;
         let auto_offset_reset = parse_auto_offset_reset(auto_offset_reset)?;
+        let fetch_max_messages = clamp_fetch_max_messages(fetch_max_messages);
+        let fetch_max_bytes = clamp_fetch_max_bytes(fetch_max_bytes);
         let group_id = group_id.into();
         let group_instance_id = group_instance_id.into();
         let timeout = if session_timeout_ms == 0 {
@@ -388,6 +465,8 @@ impl GroupConsumer {
                 heartbeat_count: AtomicU64::new(0),
                 auto_offset_reset,
                 assignor,
+                fetch_max_messages,
+                fetch_max_bytes,
             }),
             hb_stop: None,
             hb_task: None,
@@ -481,9 +560,18 @@ impl GroupConsumer {
                 .get(&(topic.clone(), partition))
                 .copied()
                 .unwrap_or(0);
+            let max_messages = clamp_fetch_max_messages(self.shared.fetch_max_messages);
+            let max_bytes = clamp_fetch_max_bytes(self.shared.fetch_max_bytes);
             let result = self
                 .client
-                .fetch(&topic, partition, Offset::new(from), 100, 0)
+                .fetch_opts(
+                    &topic,
+                    partition,
+                    Offset::new(from),
+                    max_messages,
+                    0,
+                    max_bytes,
+                )
                 .await?;
             for r in result.records {
                 let next = r.offset.saturating_add(1);
@@ -607,6 +695,16 @@ impl GroupConsumer {
     /// Current fetch-set assignor (`broker` or `range`).
     pub fn assignor(&self) -> &'static str {
         self.shared.assignor.as_str()
+    }
+
+    /// Poll Fetch `max_messages` (default 100).
+    pub fn fetch_max_messages(&self) -> u32 {
+        self.shared.fetch_max_messages
+    }
+
+    /// Poll Fetch `max_bytes` (default 4 MiB).
+    pub fn fetch_max_bytes(&self) -> u32 {
+        self.shared.fetch_max_bytes
     }
 
     /// Heartbeat RPCs issued by this consumer (poll + background).
@@ -1021,5 +1119,13 @@ mod tests {
         let err = parse_assignor("banana").unwrap_err();
         assert!(err.to_string().contains("unknown assignor"));
         assert!(err.to_string().contains("banana"));
+    }
+
+    #[test]
+    fn fetch_knobs_clamp_zero_to_defaults() {
+        assert_eq!(clamp_fetch_max_messages(0), POLL_MAX_MESSAGES);
+        assert_eq!(clamp_fetch_max_bytes(0), POLL_MAX_BYTES);
+        assert_eq!(clamp_fetch_max_messages(10), 10);
+        assert_eq!(clamp_fetch_max_bytes(4096), 4096);
     }
 }
