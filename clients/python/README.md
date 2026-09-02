@@ -83,6 +83,11 @@ fetch set with a **solo** local range (this member only — JoinGroup
 does not return the live member list). Default `assignor="broker"`
 keeps the broker assignment as SoT.
 
+Produce and Fetch follow `NotLeaderForPartition` (error 13) by default:
+Metadata, reconnect to the partition leader, retry once
+(`max_redirects=1`). `max_redirects=0` raises on the first 13. Still
+one TCP connection at a time.
+
 Correlation ids increment per request. Decode verifies magic `V` (0x56),
 protocol version 1, and IEEE CRC32 of the **payload only**.
 
@@ -130,14 +135,15 @@ concurrent API: do not share the `Client` while the consumer is open.
 
 Not implemented: `kafka-python`, Kafka cooperative-sticky / SyncGroup,
 seeing other group members on the wire, SCRAM, async I/O, idempotent
-produce, leader redirect, auto-commit. Local `assignor="range"` cannot
+produce, auto-commit. Local `assignor="range"` cannot
 split across live members. Thin `join_group` still defaults to empty
 `group_instance_id` unless the caller (or `GroupConsumer.join`) passes
 one. Offset commit/fetch is the
 admin path only (empty member, generation 0) unless the caller (or
 `GroupConsumer.commit`) passes a joined `member_id` / `generation`.
 Sync only; one TCP connection; acks=1 by default. TLS does not change
-broker TLS (Phase 8/19) and does not add Kafka API keys.
+broker TLS (Phase 8/19) and does not add Kafka API keys. Leader
+redirect is Produce/Fetch only (default one extra attempt).
 
 See [docs/V14_SPEC.md](../../docs/V14_SPEC.md),
 [docs/V24_SPEC.md](../../docs/V24_SPEC.md),
@@ -146,5 +152,6 @@ See [docs/V14_SPEC.md](../../docs/V14_SPEC.md),
 [docs/V31_SPEC.md](../../docs/V31_SPEC.md),
 [docs/V36_SPEC.md](../../docs/V36_SPEC.md),
 [docs/V37_SPEC.md](../../docs/V37_SPEC.md),
-[docs/V41_SPEC.md](../../docs/V41_SPEC.md), and
-[docs/V42_SPEC.md](../../docs/V42_SPEC.md).
+[docs/V41_SPEC.md](../../docs/V41_SPEC.md),
+[docs/V42_SPEC.md](../../docs/V42_SPEC.md), and
+[docs/V43_SPEC.md](../../docs/V43_SPEC.md).

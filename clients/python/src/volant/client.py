@@ -45,6 +45,10 @@ from .frame import (
 )
 
 
+# Native ErrorCode::NotLeaderForPartition (crates/volant-protocol).
+_NOT_LEADER = 13
+
+
 def _parse_addr(addr: str) -> tuple[str, int]:
     if addr.startswith("["):
         # [ipv6]:port
@@ -56,6 +60,12 @@ def _parse_addr(addr: str) -> tuple[str, int]:
     if not sep or not host:
         raise ValueError(f"invalid address: {addr!r} (expected host:port)")
     return host, int(port_s)
+
+
+def _format_addr(host: str, port: int) -> str:
+    if ":" in host and not host.startswith("["):
+        return f"[{host}]:{port}"
+    return f"{host}:{port}"
 
 
 @dataclass
@@ -181,23 +191,45 @@ class Client:
         tls_cert: Optional[str] = None,
         tls_key: Optional[str] = None,
         auth_token: Optional[str] = None,
+        max_redirects: int = 1,
     ) -> None:
-        host, port = _parse_addr(addr)
-        self.addr = f"{host}:{port}"
-        self.tls = bool(tls)
         if tls and (tls_cert is None) != (tls_key is None):
             raise ValueError("tls_cert and tls_key must both be set or both unset")
-        raw = socket.create_connection((host, port), timeout=timeout)
-        raw.settimeout(timeout)
-        if tls:
+        self.tls = bool(tls)
+        self._timeout = timeout
+        self._tls_insecure = tls_insecure
+        self._tls_ca = tls_ca
+        self._tls_cert = tls_cert
+        self._tls_key = tls_key
+        self.auth_token = auth_token or None
+        # 0 = never redirect (raise on the first NotLeaderForPartition).
+        self.max_redirects = max(0, int(max_redirects))
+        self._next_corr = 1
+        self._buf = bytearray()
+        self._sock = None  # type: ignore[assignment]
+        self.addr = ""
+        self._open(addr)
+        if self.auth_token:
+            try:
+                self._authenticate(self.auth_token)
+            except Exception:
+                self.close()
+                raise
+
+    def _open(self, addr: str) -> None:
+        host, port = _parse_addr(addr)
+        self.addr = _format_addr(host, port)
+        raw = socket.create_connection((host, port), timeout=self._timeout)
+        raw.settimeout(self._timeout)
+        if self.tls:
             try:
                 self._sock = wrap_tls(
                     raw,
                     host,
-                    tls_insecure=tls_insecure,
-                    tls_ca=tls_ca,
-                    tls_cert=tls_cert,
-                    tls_key=tls_key,
+                    tls_insecure=self._tls_insecure,
+                    tls_ca=self._tls_ca,
+                    tls_cert=self._tls_cert,
+                    tls_key=self._tls_key,
                 )
             except Exception:
                 try:
@@ -207,16 +239,53 @@ class Client:
                 raise
         else:
             self._sock = raw
-        self._sock.settimeout(timeout)
-        self._next_corr = 1
+        self._sock.settimeout(self._timeout)
+
+    def _reconnect(self, addr: str) -> None:
+        old = getattr(self, "_sock", None)
+        self._sock = None  # type: ignore[assignment]
         self._buf = bytearray()
-        self.auth_token = auth_token or None
-        if self.auth_token:
+        if old is not None:
             try:
-                self._authenticate(self.auth_token)
-            except Exception:
-                self.close()
-                raise
+                old.close()
+            except OSError:
+                pass
+        self._open(addr)
+        if self.auth_token:
+            self._authenticate(self.auth_token)
+
+    def _redirect_to_leader(self, topic: str, partition: int) -> bool:
+        """Metadata → reconnect to the partition leader.
+
+        Returns True when the caller should retry (redirected or already
+        on that host). Returns False when Metadata has no leader / unknown
+        broker / empty host — caller must raise the original error 13.
+        """
+        meta = self.metadata()
+        leader_id = None
+        for tinfo in meta.topics:
+            if tinfo.name != topic:
+                continue
+            for part in tinfo.partitions:
+                if part.partition_id == partition:
+                    leader_id = part.leader
+                    break
+            if leader_id is not None:
+                break
+        if leader_id is None:
+            return False
+        broker = None
+        for b in meta.brokers:
+            if b.node_id == leader_id:
+                broker = b
+                break
+        if broker is None or not broker.host:
+            return False
+        addr = _format_addr(broker.host, broker.port)
+        if addr == self.addr:
+            return True
+        self._reconnect(addr)
+        return True
 
     def close(self) -> None:
         sock = getattr(self, "_sock", None)
@@ -363,16 +432,36 @@ class Client:
                 base_sequence=-1,
             )
         )
-        resp = self._round_trip(codec.OP_PRODUCE, payload)
-        if not isinstance(resp, ProduceResponse):
-            raise ProtocolError(f"unexpected response for produce: {type(resp)}")
-        self._check(resp.error_code, "produce")
-        return ProduceResult(
-            topic=resp.topic,
-            partition=resp.partition,
-            base_offset=resp.base_offset,
-            count=resp.count,
-        )
+        max_attempts = 1 + self.max_redirects
+        attempt = 0
+        while True:
+            attempt += 1
+            try:
+                resp = self._round_trip(codec.OP_PRODUCE, payload)
+            except BrokerError as e:
+                if (
+                    e.code == _NOT_LEADER
+                    and attempt < max_attempts
+                    and partition >= 0
+                    and self._redirect_to_leader(topic, partition)
+                ):
+                    continue
+                raise
+            if not isinstance(resp, ProduceResponse):
+                raise ProtocolError(f"unexpected response for produce: {type(resp)}")
+            if (
+                resp.error_code == _NOT_LEADER
+                and attempt < max_attempts
+                and self._redirect_to_leader(resp.topic or topic, resp.partition)
+            ):
+                continue
+            self._check(resp.error_code, "produce")
+            return ProduceResult(
+                topic=resp.topic,
+                partition=resp.partition,
+                base_offset=resp.base_offset,
+                count=resp.count,
+            )
 
     def fetch(
         self,
@@ -394,16 +483,35 @@ class Client:
                 max_wait_ms=max_wait_ms,
             )
         )
-        resp = self._round_trip(codec.OP_FETCH, payload)
-        if not isinstance(resp, FetchResponse):
-            raise ProtocolError(f"unexpected response for fetch: {type(resp)}")
-        self._check(resp.error_code, "fetch")
-        return FetchResult(
-            topic=resp.topic,
-            partition=resp.partition,
-            high_watermark=resp.high_watermark,
-            records=resp.records,
-        )
+        max_attempts = 1 + self.max_redirects
+        attempt = 0
+        while True:
+            attempt += 1
+            try:
+                resp = self._round_trip(codec.OP_FETCH, payload)
+            except BrokerError as e:
+                if (
+                    e.code == _NOT_LEADER
+                    and attempt < max_attempts
+                    and self._redirect_to_leader(topic, partition)
+                ):
+                    continue
+                raise
+            if not isinstance(resp, FetchResponse):
+                raise ProtocolError(f"unexpected response for fetch: {type(resp)}")
+            if (
+                resp.error_code == _NOT_LEADER
+                and attempt < max_attempts
+                and self._redirect_to_leader(resp.topic or topic, resp.partition)
+            ):
+                continue
+            self._check(resp.error_code, "fetch")
+            return FetchResult(
+                topic=resp.topic,
+                partition=resp.partition,
+                high_watermark=resp.high_watermark,
+                records=resp.records,
+            )
 
     def metadata(self, topics: Optional[list[str]] = None) -> MetadataResponse:
         payload = codec.encode_metadata_request(
