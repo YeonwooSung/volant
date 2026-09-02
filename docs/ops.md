@@ -553,7 +553,7 @@ See [V13_SPEC.md](./V13_SPEC.md).
 
 ## Still deferred
 
-- Multi-language clients
+- Multi-language clients (Python MVP → **closed by v0.14**; Go MVP → **closed by v0.19**; Java still deferred)
 - Full chaos-mesh suites / long fuzz campaigns (corpus **smoke CI MVP** → **closed by Phase 112**; capped local `long` + operator Chaos Mesh YAMLs + in-process A→B isolate → **closed by v0.15**; multi-hour CI / ENOSPC mesh still deferred)
 - Full KIP-890/939 / Kafka `__transaction_state` topic (multi-broker Enable2Pc MVP → **closed by Phase 114**)
 - Multi-broker session affinity / durable sessions → **closed by Phase 115/119**; shared mirror + promote → **closed by Phase 138**; mirror polish (coalesce/debounce + optional durable + fence) → **closed by Phase 139** (best-effort residual: Raft registry / serve-without-promote / incremental put)
@@ -589,6 +589,15 @@ Native **sync** TCP client in [`clients/python/`](../clients/python/) (import
 `pip install -e "clients/python[dev]"` and run `pytest` (or
 `scripts/python_client_smoke.sh`). Live e2e: `VOLANT_E2E=1` after
 `cargo build -p volant-server`. See [V14_SPEC.md](./V14_SPEC.md).
+
+## v0.19 Go client
+
+Native **sync** TCP client in [`clients/go/`](../clients/go/) (module
+`github.com/volant-mq/volant/clients/go`, package `volant`). Same native
+wire as the Python MVP (not Kafka, not `--kafka-listen`). `go test ./...`
+or `scripts/go_client_smoke.sh` (skips if `go` is missing). Live e2e:
+`VOLANT_E2E=1` after `cargo build -p volant-server`. See
+[V19_SPEC.md](./V19_SPEC.md).
 
 ## Shipped (not gaps)
 
