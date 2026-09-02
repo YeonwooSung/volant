@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import socket
+import ssl
 from dataclasses import dataclass
 from typing import Iterable, Optional, Union
 
@@ -78,6 +79,40 @@ class FetchResult:
         return [(r.offset, r.key, r.value) for r in self.records]
 
 
+def wrap_tls(
+    sock: socket.socket,
+    host: str,
+    *,
+    tls_insecure: bool = False,
+    tls_ca: Optional[str] = None,
+    tls_cert: Optional[str] = None,
+    tls_key: Optional[str] = None,
+) -> ssl.SSLSocket:
+    """Wrap an already-connected TCP socket with TLS.
+
+    ``tls_ca`` is a PEM CA file added to the default trust store (system
+    roots, same idea as Rust ``webpki-roots`` + optional ``tls_ca``).
+    ``tls_insecure`` skips verification (tests / lab only). ``tls_cert``
+    and ``tls_key`` are optional client PEMs for mTLS and must be paired.
+    """
+    if (tls_cert is None) != (tls_key is None):
+        raise ValueError("tls_cert and tls_key must both be set or both unset")
+    if tls_insecure:
+        ctx = ssl.SSLContext(ssl.PROTOCOL_TLS_CLIENT)
+        ctx.check_hostname = False
+        ctx.verify_mode = ssl.CERT_NONE
+    else:
+        ctx = ssl.create_default_context(purpose=ssl.Purpose.SERVER_AUTH)
+        if tls_ca:
+            ctx.load_verify_locations(cafile=tls_ca)
+        ctx.verify_mode = ssl.CERT_REQUIRED
+        ctx.check_hostname = True
+    if tls_cert and tls_key:
+        ctx.load_cert_chain(certfile=tls_cert, keyfile=tls_key)
+    # SNI uses the dial host even when verification is off.
+    return ctx.wrap_socket(sock, server_hostname=host)
+
+
 class Client:
     """Sync TCP client for the native Volant protocol (MVP).
 
@@ -92,12 +127,48 @@ class Client:
         offs = c.offset_fetch(group="g", topic="t")
         meta = c.metadata()
         c.close()
+
+    Optional TLS (v0.27) wraps the socket after TCP connect::
+
+        c = Client("127.0.0.1:9092", tls=True, tls_ca="ca.pem")
     """
 
-    def __init__(self, addr: str, *, timeout: float = 10.0) -> None:
+    def __init__(
+        self,
+        addr: str,
+        *,
+        timeout: float = 10.0,
+        tls: bool = False,
+        tls_insecure: bool = False,
+        tls_ca: Optional[str] = None,
+        tls_cert: Optional[str] = None,
+        tls_key: Optional[str] = None,
+    ) -> None:
         host, port = _parse_addr(addr)
         self.addr = f"{host}:{port}"
-        self._sock = socket.create_connection((host, port), timeout=timeout)
+        self.tls = bool(tls)
+        if tls and (tls_cert is None) != (tls_key is None):
+            raise ValueError("tls_cert and tls_key must both be set or both unset")
+        raw = socket.create_connection((host, port), timeout=timeout)
+        raw.settimeout(timeout)
+        if tls:
+            try:
+                self._sock = wrap_tls(
+                    raw,
+                    host,
+                    tls_insecure=tls_insecure,
+                    tls_ca=tls_ca,
+                    tls_cert=tls_cert,
+                    tls_key=tls_key,
+                )
+            except Exception:
+                try:
+                    raw.close()
+                except OSError:
+                    pass
+                raise
+        else:
+            self._sock = raw
         self._sock.settimeout(timeout)
         self._next_corr = 1
         self._buf = bytearray()
@@ -352,4 +423,5 @@ __all__ = [
     "ProduceResult",
     "ProtocolError",
     "TopicInfo",
+    "wrap_tls",
 ]

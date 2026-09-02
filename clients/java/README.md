@@ -26,6 +26,18 @@ try (Client c = Client.connect("127.0.0.1", 9092)) {
   }
   Metadata meta = c.metadata();
 }
+
+// Optional TLS (v0.27). connect() stays plaintext.
+try (Client c = Client.connectTls("127.0.0.1", 9092, TlsOptions.ca("ca.pem"))) {
+  Metadata meta = c.metadata();
+}
+// Lab / tests only:
+Client.connectTls("127.0.0.1", 9092, TlsOptions.insecure());
+// Optional mTLS (client cert + key PEMs, both required):
+Client.connectTls(
+    "127.0.0.1",
+    9092,
+    TlsOptions.ca("ca.pem").clientCert("client.pem", "client.key"));
 ```
 
 `produce(..., null, value)` sends a null key. `fetch` returns `List<Record>`
@@ -59,10 +71,20 @@ VOLANT_E2E=1 mvn -q -f clients/java/pom.xml test
 Repo helper: `scripts/java_client_smoke.sh` (skips if `mvn` is missing).
 Not a required default-CI job.
 
+TLS knobs match the Rust client as closely as JDK `SSLSocket` allows:
+`connectTls` wraps after TCP connect; `TlsOptions.ca` trusts a PEM CA
+(replaces the JVM default store); `TlsOptions.insecure` skips verify
+(tests / lab only); `clientCert` is optional mTLS (PEM cert + PKCS#8
+or PKCS#1 RSA key, both required). Handshake failures close the TCP
+socket.
+
 ## Honesty
 
-Not implemented: `kafka-clients`, consumer groups, TLS / SCRAM /
-shared-token auth, async I/O, idempotent produce, leader redirect. Sync
-only; one TCP connection; acks=1 by default.
+Not implemented: `kafka-clients`, consumer groups, SCRAM / shared-token
+auth, async I/O, idempotent produce, leader redirect. Sync only; one
+TCP connection; acks=1 by default. TLS does not change broker TLS
+(Phase 8/19) and does not add Kafka API keys. Client private keys
+other than PKCS#8 / RSA PKCS#1 PEM are not loaded.
 
-See [docs/V23_SPEC.md](../../docs/V23_SPEC.md).
+See [docs/V23_SPEC.md](../../docs/V23_SPEC.md) and
+[docs/V27_SPEC.md](../../docs/V27_SPEC.md).

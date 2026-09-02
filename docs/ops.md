@@ -313,6 +313,7 @@ volant-server \
   - Lab: `ClientConfig { tls: true, tls_insecure: true, .. }`
   - Production: `tls: true`, `tls_insecure: false`, optional `tls_ca` PEM;
     public CAs via Mozilla roots (`webpki-roots`).
+  - Native Python / Go / Java clients: see [v0.27 client TLS](#v027-client-tls).
 
 ## Client leader redirect (Phase 8)
 
@@ -736,6 +737,28 @@ Metric: `volant_fetch_session_dual_epoch_converge_total`.
 Phase 147 single owner-miss serve-from-mirror is unchanged. Not Raft.
 
 See [V25_SPEC.md](./V25_SPEC.md).
+
+## v0.27 client TLS
+
+Python / Go / Java native clients can wrap the existing TCP socket with
+optional TLS. Plaintext `Client` / `Dial` / `connect` is unchanged.
+
+```python
+Client("127.0.0.1:9092", tls=True, tls_ca="ca.pem")
+```
+
+```go
+volant.DialTLS("127.0.0.1:9092", volant.TLSConfig{CAFile: "ca.pem"})
+```
+
+```java
+Client.connectTls("127.0.0.1", 9092, TlsOptions.ca("ca.pem"));
+```
+
+Lab: `tls_insecure` / `TLSConfig.Insecure` / `TlsOptions.insecure()`
+skips verify. Optional mTLS: paired `tls_cert` + `tls_key` PEMs.
+Does not change broker TLS (`--tls-cert` / `--tls-key`, feature `tls`).
+See [V27_SPEC.md](./V27_SPEC.md) and [examples/tls/](../examples/tls/).
 
 ## v0.29 wait-off safety
 

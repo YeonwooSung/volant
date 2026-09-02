@@ -21,6 +21,10 @@ import java.util.List;
  *   List&lt;Record&gt; recs = c.fetch("t", 0, 0);
  *   Metadata meta = c.metadata();
  * }
+ * // Optional TLS (v0.27):
+ * try (Client c = Client.connectTls("127.0.0.1", 9092, TlsOptions.ca("ca.pem"))) {
+ *   Metadata meta = c.metadata();
+ * }
  * </pre>
  */
 public final class Client implements AutoCloseable {
@@ -32,13 +36,15 @@ public final class Client implements AutoCloseable {
     private final String addr;
     private Socket socket;
     private final int timeoutMs;
+    private final boolean tls;
     private long nextCorr = 1;
     private byte[] buf = new byte[0];
 
-    private Client(String addr, Socket socket, int timeoutMs) {
+    private Client(String addr, Socket socket, int timeoutMs, boolean tls) {
         this.addr = addr;
         this.socket = socket;
         this.timeoutMs = timeoutMs;
+        this.tls = tls;
     }
 
     /** Connect to a native Volant listener with a 10s timeout. */
@@ -61,7 +67,48 @@ public final class Client implements AutoCloseable {
             }
             throw new ProtocolException("connect failed: " + e.getMessage(), e);
         }
-        return new Client(host + ":" + port, s, timeoutMs);
+        return new Client(host + ":" + port, s, timeoutMs, false);
+    }
+
+    /** Connect with TLS after TCP (v0.27). See {@link TlsOptions#ca}. */
+    public static Client connectTls(String host, int port, TlsOptions tls) {
+        return connectTls(host, port, tls, DEFAULT_TIMEOUT_MS);
+    }
+
+    /** Connect with TLS and an explicit dial / handshake / RPC timeout. */
+    public static Client connectTls(String host, int port, TlsOptions tls, int timeoutMs) {
+        if (tls == null) {
+            throw new IllegalArgumentException("tls options are required; use connect() for plaintext");
+        }
+        Socket s = new Socket();
+        try {
+            s.connect(new InetSocketAddress(host, port), timeoutMs);
+            s.setSoTimeout(timeoutMs);
+            s.setTcpNoDelay(true);
+            Socket wrapped = Tls.wrap(s, host, port, tls);
+            wrapped.setSoTimeout(timeoutMs);
+            try {
+                wrapped.setTcpNoDelay(true);
+            } catch (IOException ignored) {
+                // some SSL sockets reject this
+            }
+            return new Client(host + ":" + port, wrapped, timeoutMs, true);
+        } catch (IOException | RuntimeException e) {
+            try {
+                s.close();
+            } catch (IOException ignored) {
+                // best-effort
+            }
+            if (e instanceof ProtocolException) {
+                throw (ProtocolException) e;
+            }
+            throw new ProtocolException("tls connect failed: " + e.getMessage(), e);
+        }
+    }
+
+    /** Whether this connection is TLS-wrapped. */
+    public boolean isTls() {
+        return tls;
     }
 
     public String addr() {

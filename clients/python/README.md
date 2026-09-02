@@ -28,6 +28,19 @@ c.offset_commit(group="g", topic="t", partition=0, offset=5)
 offs = c.offset_fetch(group="g", topic="t")  # [(partition, offset), ...]
 meta = c.metadata()
 c.close()
+
+# Optional TLS (v0.27). Plain TCP is still the default.
+c = Client("127.0.0.1:9092", tls=True, tls_ca="ca.pem")
+# Lab / tests only:
+c = Client("127.0.0.1:9092", tls=True, tls_insecure=True)
+# Optional mTLS (client cert + key PEMs, both required):
+c = Client(
+    "127.0.0.1:9092",
+    tls=True,
+    tls_ca="ca.pem",
+    tls_cert="client.pem",
+    tls_key="client.key",
+)
 ```
 
 `Client` is also a context manager. `produce(..., key=b"...")` is supported;
@@ -65,13 +78,20 @@ VOLANT_E2E=1 python3 -m pytest clients/python/tests/test_e2e.py -q
 
 Repo helper: `scripts/python_client_smoke.sh` (skips if `python3` is missing).
 
+TLS knobs match the Rust client as closely as stdlib `ssl` allows:
+`tls` (wrap after TCP connect), `tls_ca` (PEM added to the default
+trust store), `tls_insecure` (skip verify; tests / lab only), optional
+`tls_cert` + `tls_key` for mTLS. `tls_cert` and `tls_key` must both be
+set or both unset. Handshake failures close the TCP socket.
+
 ## Honesty
 
-Not implemented: Java client, `kafka-python`, JoinGroup / Heartbeat /
-LeaveGroup, TLS / SCRAM / shared-token auth, async I/O, idempotent
-produce, leader redirect. Offset commit/fetch is the admin path only
-(empty member, generation 0). Sync only; one TCP connection; acks=1 by
-default.
+Not implemented: `kafka-python`, JoinGroup / Heartbeat / LeaveGroup,
+SCRAM / shared-token auth, async I/O, idempotent produce, leader
+redirect. Offset commit/fetch is the admin path only (empty member,
+generation 0). Sync only; one TCP connection; acks=1 by default. TLS
+does not change broker TLS (Phase 8/19) and does not add Kafka API keys.
 
-See [docs/V14_SPEC.md](../../docs/V14_SPEC.md) and
-[docs/V24_SPEC.md](../../docs/V24_SPEC.md).
+See [docs/V14_SPEC.md](../../docs/V14_SPEC.md),
+[docs/V24_SPEC.md](../../docs/V24_SPEC.md), and
+[docs/V27_SPEC.md](../../docs/V27_SPEC.md).
