@@ -40,6 +40,10 @@
 //! (default 0). Error 10 (`UnknownMemberId`) is success (already
 //! left). 9 / 11 / 13 / 14 / 2 and protocol are not retried.
 //! [`GroupConsumer::leave`] inherits.
+//! v0.88 redirects SCRAM-admin (`create_scram_user` /
+//! `delete_scram_user` / `list_scram_users`) and `list_acls` on error
+//! **14** using the same `redirect_to_controller` / `max_redirects`
+//! budget as v0.79.
 
 #![deny(missing_docs)]
 
