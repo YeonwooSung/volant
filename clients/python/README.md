@@ -42,6 +42,10 @@ g = GroupConsumer.join(
 recs = g.poll(max_wait_ms=500)
 g.commit()
 g.close()
+# Opt-in auto-commit (v0.48). Default off. interval 0 = after every poll.
+g = GroupConsumer.join(
+    c, group="g", topics=["t"], auto_commit=True, auto_commit_interval_ms=5000
+)
 
 meta = c.metadata()
 c.close()
@@ -133,9 +137,17 @@ raises `BrokerError` with code 17 and closes the socket.
 Pass `heartbeat=False` for the v0.31 poll-only loop. Not a fully
 concurrent API: do not share the `Client` while the consumer is open.
 
+Opt-in auto-commit (`auto_commit=True`, default **off**; v0.48)
+commits assigned positions after a successful `poll` that returned
+records. `auto_commit_interval_ms=0` commits every such poll; `> 0`
+commits on the first successful poll, then on the interval. Explicit
+`commit()` still works and resets the clock. `close` best-effort
+commits dirty positions then leaves. This is **not** Kafka
+`enable.auto.commit` (no background commit thread).
+
 Not implemented: `kafka-python`, Kafka cooperative-sticky / SyncGroup,
 seeing other group members on the wire, SCRAM, async I/O, idempotent
-produce, auto-commit. Local `assignor="range"` cannot
+produce. Local `assignor="range"` cannot
 split across live members. Thin `join_group` still defaults to empty
 `group_instance_id` unless the caller (or `GroupConsumer.join`) passes
 one. Offset commit/fetch is the
@@ -153,5 +165,6 @@ See [docs/V14_SPEC.md](../../docs/V14_SPEC.md),
 [docs/V36_SPEC.md](../../docs/V36_SPEC.md),
 [docs/V37_SPEC.md](../../docs/V37_SPEC.md),
 [docs/V41_SPEC.md](../../docs/V41_SPEC.md),
-[docs/V42_SPEC.md](../../docs/V42_SPEC.md), and
-[docs/V43_SPEC.md](../../docs/V43_SPEC.md).
+[docs/V42_SPEC.md](../../docs/V42_SPEC.md),
+[docs/V43_SPEC.md](../../docs/V43_SPEC.md), and
+[docs/V48_SPEC.md](../../docs/V48_SPEC.md).

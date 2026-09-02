@@ -38,6 +38,23 @@ type groupConsumerOptions struct {
 	backgroundHeartbeat bool
 	instanceID          string
 	assignor            string
+	autoCommit          bool
+	autoCommitInterval  time.Duration
+}
+
+// WithAutoCommit enables offset auto-commit after a successful Poll that
+// returned records. interval 0 commits after every such Poll; interval > 0
+// commits on the first successful Poll, then when at least interval has
+// elapsed since the last auto or explicit Commit. Default is off (explicit
+// Commit only). Not Kafka enable.auto.commit (no background commit goroutine).
+func WithAutoCommit(interval time.Duration) GroupConsumerOption {
+	return func(o *groupConsumerOptions) {
+		o.autoCommit = true
+		if interval < 0 {
+			interval = 0
+		}
+		o.autoCommitInterval = interval
+	}
 }
 
 // WithAssignor selects the fetch-set assignor: "broker" (default, honor
@@ -133,6 +150,10 @@ type GroupConsumer struct {
 	closed              bool
 	backgroundHeartbeat bool
 	assignor            string
+	autoCommit          bool
+	autoCommitInterval  time.Duration
+	lastAutoCommit      time.Time
+	dirty               bool
 
 	mu       sync.Mutex
 	stop     chan struct{}
@@ -195,6 +216,8 @@ func joinGroupConsumer(c *Client, group string, topics []string, sessionTimeoutM
 		positions:           make(map[topicPartition]uint64),
 		backgroundHeartbeat: o.backgroundHeartbeat,
 		assignor:            assignor,
+		autoCommit:          o.autoCommit,
+		autoCommitInterval:  o.autoCommitInterval,
 		stop:                make(chan struct{}),
 		hbDone:              make(chan struct{}),
 	}
@@ -394,6 +417,12 @@ func (g *GroupConsumer) Poll(timeout time.Duration) ([]FetchedRecord, error) {
 			})
 		}
 	}
+	if len(out) > 0 {
+		g.dirty = true
+		if err := g.maybeAutoCommit(); err != nil {
+			return out, err
+		}
+	}
 	return out, nil
 }
 
@@ -408,7 +437,13 @@ func (g *GroupConsumer) Commit() error {
 	if g.closed {
 		return ErrGroupClosed
 	}
+	return g.commitLocked()
+}
+
+func (g *GroupConsumer) commitLocked() error {
 	if len(g.positions) == 0 {
+		g.lastAutoCommit = time.Now()
+		g.dirty = false
 		return nil
 	}
 	entries := make([]codec.OffsetCommitEntry, 0, len(g.positions))
@@ -426,11 +461,30 @@ func (g *GroupConsumer) Commit() error {
 		}
 		return entries[i].Partition < entries[j].Partition
 	})
-	return g.client.commitOffsets(g.groupID, g.memberID, g.generation, entries)
+	if err := g.client.commitOffsets(g.groupID, g.memberID, g.generation, entries); err != nil {
+		return err
+	}
+	g.lastAutoCommit = time.Now()
+	g.dirty = false
+	return nil
+}
+
+func (g *GroupConsumer) maybeAutoCommit() error {
+	if !g.autoCommit {
+		return nil
+	}
+	now := time.Now()
+	if g.autoCommitInterval > 0 && !g.lastAutoCommit.IsZero() {
+		if now.Sub(g.lastAutoCommit) < g.autoCommitInterval {
+			return nil
+		}
+	}
+	return g.commitLocked()
 }
 
 // Close stops the heartbeat goroutine (if any) then leaves the group.
-// The Client is left open. Idempotent.
+// The Client is left open. Idempotent. Auto-commit on + uncommitted
+// positions: best-effort commit once (error ignored), then LeaveGroup.
 func (g *GroupConsumer) Close() error {
 	if g == nil {
 		return nil
@@ -447,6 +501,9 @@ func (g *GroupConsumer) Close() error {
 	defer g.mu.Unlock()
 	if g.closed {
 		return nil
+	}
+	if g.autoCommit && g.dirty {
+		_ = g.commitLocked()
 	}
 	g.closed = true
 	if g.memberID == "" || g.client == nil {

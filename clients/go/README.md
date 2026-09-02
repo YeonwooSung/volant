@@ -49,6 +49,8 @@ g, err = volant.JoinGroupConsumerStatic(c, "g", []string{"t"}, 10_000, "inst-1")
 batch, err := g.Poll(500 * time.Millisecond)
 err = g.Commit()
 err = g.Close()
+// Opt-in auto-commit (v0.48). Default off. interval 0 = after every Poll.
+g, err = volant.JoinGroupConsumer(c, "g", []string{"t"}, 10_000, volant.WithAutoCommit(5*time.Second))
 _ = batch
 meta, err := c.Metadata()
 _ = off
@@ -138,6 +140,14 @@ Pass `WithBackgroundHeartbeat(false)` for the v0.32 poll-only loop.
 Not a fully concurrent API: do not share the `Client` while the
 consumer is open.
 
+Opt-in auto-commit (`WithAutoCommit(interval)`, default **off**;
+v0.48) commits assigned positions after a successful `Poll` that
+returned records. Interval `0` commits every such Poll; `> 0`
+commits on the first successful Poll, then on the interval. Explicit
+`Commit()` still works and resets the clock. `Close` best-effort
+commits dirty positions then leaves. This is **not** Kafka
+`enable.auto.commit` (no background commit goroutine).
+
 Not implemented: `kafka-go`, Kafka cooperative-sticky / SyncGroup,
 seeing other group members on the wire, SCRAM, async I/O, idempotent
 produce. Local `WithAssignor("range")` cannot split
@@ -157,5 +167,6 @@ See [docs/V19_SPEC.md](../../docs/V19_SPEC.md),
 [docs/V36_SPEC.md](../../docs/V36_SPEC.md),
 [docs/V37_SPEC.md](../../docs/V37_SPEC.md),
 [docs/V41_SPEC.md](../../docs/V41_SPEC.md),
-[docs/V42_SPEC.md](../../docs/V42_SPEC.md), and
-[docs/V43_SPEC.md](../../docs/V43_SPEC.md).
+[docs/V42_SPEC.md](../../docs/V42_SPEC.md),
+[docs/V43_SPEC.md](../../docs/V43_SPEC.md), and
+[docs/V48_SPEC.md](../../docs/V48_SPEC.md).

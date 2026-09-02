@@ -59,6 +59,7 @@ class GroupConsumerTest {
         assertEquals(1, fake.heartbeatCount);
         assertEquals(1, fake.fetchCount);
         assertEquals(500L, fake.lastMaxWaitMs);
+        assertEquals(0, fake.commitCount);
 
         g.commit();
         assertEquals(1, fake.lastCommit.size());
@@ -253,6 +254,87 @@ class GroupConsumerTest {
     }
 
     @Test
+    void pollDoesNotAutoCommitByDefault() {
+        FakeBackend fake = new FakeBackend();
+        fake.nextJoin = joinResult("m1", 1, assign("t", 0));
+        fake.records.put(
+                tp("t", 0),
+                Collections.singletonList(
+                        new Record(0, -1L, null, "a".getBytes(StandardCharsets.UTF_8), Collections.emptyList())));
+        GroupConsumer g = GroupConsumer.join(fake, "g", List.of("t"), 10_000, false);
+        List<Record> recs = g.poll(0);
+        assertEquals(1, recs.size());
+        assertEquals(0, fake.commitCount);
+        g.close();
+        assertEquals(0, fake.commitCount);
+        assertEquals(1, fake.leaveCount);
+    }
+
+    @Test
+    void autoCommitIntervalZeroCommitsAfterPoll() {
+        FakeBackend fake = new FakeBackend();
+        fake.nextJoin = joinResult("m1", 1, assign("t", 0));
+        fake.records.put(
+                tp("t", 0),
+                Collections.singletonList(
+                        new Record(0, -1L, null, "a".getBytes(StandardCharsets.UTF_8), Collections.emptyList())));
+        GroupConsumer g = GroupConsumer.joinWithAutoCommit(fake, "g", List.of("t"), 10_000, 0);
+        List<Record> recs = g.poll(0);
+        assertEquals(1, recs.size());
+        assertEquals(1, fake.commitCount);
+        assertEquals("m1", fake.lastCommitMember);
+        assertEquals(1L, fake.lastCommitGeneration);
+        assertEquals(1, fake.lastCommit.size());
+        assertEquals(1L, fake.lastCommit.get(0).offset);
+        g.close();
+    }
+
+    @Test
+    void autoCommitIntervalFirstPollOnly() {
+        FakeBackend fake = new FakeBackend();
+        fake.nextJoin = joinResult("m1", 1, assign("t", 0));
+        fake.records.put(
+                tp("t", 0),
+                Collections.singletonList(
+                        new Record(0, -1L, null, "a".getBytes(StandardCharsets.UTF_8), Collections.emptyList())));
+        GroupConsumer g = GroupConsumer.joinWithAutoCommit(fake, "g", List.of("t"), 10_000, 10_000);
+        assertEquals(1, g.poll(0).size());
+        assertEquals(1, fake.commitCount);
+        fake.records.put(
+                tp("t", 0),
+                Collections.singletonList(
+                        new Record(1, -1L, null, "b".getBytes(StandardCharsets.UTF_8), Collections.emptyList())));
+        assertEquals(1, g.poll(0).size());
+        assertEquals(1, fake.commitCount);
+        g.close();
+    }
+
+    @Test
+    void autoCommitCloseCommitsPendingThenLeaves() {
+        FakeBackend fake = new FakeBackend();
+        fake.nextJoin = joinResult("m1", 1, assign("t", 0));
+        fake.records.put(
+                tp("t", 0),
+                Collections.singletonList(
+                        new Record(0, -1L, null, "a".getBytes(StandardCharsets.UTF_8), Collections.emptyList())));
+        GroupConsumer g = GroupConsumer.joinWithAutoCommit(fake, "g", List.of("t"), 10_000, 10_000);
+        g.poll(0);
+        assertEquals(1, fake.commitCount);
+        fake.records.put(
+                tp("t", 0),
+                Collections.singletonList(
+                        new Record(1, -1L, null, "b".getBytes(StandardCharsets.UTF_8), Collections.emptyList())));
+        g.poll(0);
+        assertEquals(1, fake.commitCount);
+        g.close();
+        assertEquals(2, fake.commitCount);
+        assertEquals(1L, fake.lastCommitGeneration);
+        assertEquals("m1", fake.lastCommitMember);
+        assertEquals(2L, fake.lastCommit.get(0).offset);
+        assertEquals(1, fake.leaveCount);
+    }
+
+    @Test
     void heartbeatFalseIsPollOnly() throws Exception {
         FakeBackend fake = new FakeBackend();
         fake.nextJoin = joinResult("m1", 1, assign("t", 0));
@@ -299,6 +381,7 @@ class GroupConsumerTest {
         final List<String> joinInstanceIds = new ArrayList<>();
         String lastCommitMember;
         long lastCommitGeneration;
+        int commitCount;
         List<Codec.OffsetCommitEntry> lastCommit = Collections.emptyList();
         final Map<String, Long> committed = new LinkedHashMap<>();
         final Map<String, List<Record>> records = new LinkedHashMap<>();
@@ -358,6 +441,7 @@ class GroupConsumerTest {
             lastCommitMember = memberId;
             lastCommitGeneration = generation;
             lastCommit = new ArrayList<>(entries);
+            commitCount++;
         }
 
         @Override
