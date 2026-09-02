@@ -74,6 +74,11 @@ Optional `group_instance_id=` is Phase 12 static membership (empty =
 dynamic); re-join resends the same instance id. `commit` sends the
 joined `member_id` + `generation`. `close` leaves the group and does
 not close the `Client`.
+`volant.range_assign` / `range_assign_multi` match the broker range
+algorithm. `GroupConsumer.join(..., assignor="range")` replaces the
+fetch set with a **solo** local range (this member only — JoinGroup
+does not return the live member list). Default `assignor="broker"`
+keeps the broker assignment as SoT.
 
 Correlation ids increment per request. Decode verifies magic `V` (0x56),
 protocol version 1, and IEEE CRC32 of the **payload only**.
@@ -116,10 +121,11 @@ set or both unset. Handshake failures close the TCP socket.
 Pass `heartbeat=False` for the v0.31 poll-only loop. Not a fully
 concurrent API: do not share the `Client` while the consumer is open.
 
-Not implemented: `kafka-python`, client-side assignor, SCRAM /
-shared-token auth, async I/O, idempotent produce, leader redirect,
-auto-commit. Thin `join_group` still
-defaults to empty `group_instance_id` unless the caller (or
+Not implemented: `kafka-python`, Kafka cooperative-sticky / SyncGroup,
+seeing other group members on the wire, SCRAM / shared-token auth,
+async I/O, idempotent produce, leader redirect, auto-commit. Local
+`assignor="range"` cannot split across live members. Thin `join_group`
+still defaults to empty `group_instance_id` unless the caller (or
 `GroupConsumer.join`) passes one. Offset commit/fetch is the
 admin path only (empty member, generation 0) unless the caller (or
 `GroupConsumer.commit`) passes a joined `member_id` / `generation`.
@@ -131,5 +137,6 @@ See [docs/V14_SPEC.md](../../docs/V14_SPEC.md),
 [docs/V27_SPEC.md](../../docs/V27_SPEC.md),
 [docs/V28_SPEC.md](../../docs/V28_SPEC.md),
 [docs/V31_SPEC.md](../../docs/V31_SPEC.md),
-[docs/V36_SPEC.md](../../docs/V36_SPEC.md), and
-[docs/V37_SPEC.md](../../docs/V37_SPEC.md).
+[docs/V36_SPEC.md](../../docs/V36_SPEC.md),
+[docs/V37_SPEC.md](../../docs/V37_SPEC.md), and
+[docs/V41_SPEC.md](../../docs/V41_SPEC.md).

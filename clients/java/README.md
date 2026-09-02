@@ -62,6 +62,10 @@ Client.connectTls(
 member+generation, and rejoins on heartbeat error 9.
 `joinStatic` sends Phase 12 `group_instance_id` (empty = dynamic) and
 resends it on rejoin.
+`RangeAssignor.rangeAssign` / `rangeAssignMulti` match the broker range
+algorithm. `GroupConsumer.join(..., "range")` replaces the fetch set
+with a **solo** local range (this member only — JoinGroup does not
+return the live member list). Default assignor is broker.
 
 Correlation ids increment per request. Decode verifies magic `V` (0x56),
 protocol version 1, and IEEE CRC32 of the **payload only**. Broker
@@ -105,9 +109,10 @@ socket.
 Pass `heartbeat=false` for the v0.33 poll-only loop. Not a fully
 concurrent API: do not share the `Client` while the consumer is open.
 
-Not implemented: `kafka-clients`, cooperative assignor client logic
-beyond sticky position retain, SCRAM / shared-token
-auth, async I/O, idempotent produce, leader redirect. Sync only; one
+Not implemented: `kafka-clients`, Kafka cooperative-sticky / SyncGroup,
+seeing other group members on the wire, SCRAM / shared-token
+auth, async I/O, idempotent produce, leader redirect. Local
+`assignor="range"` cannot split across live members. Sync only; one
 TCP connection; acks=1 by default. Thin `joinGroup` still sends empty
 `group_instance_id`; use `GroupConsumer.joinStatic` for static
 membership. Convenience `offsetCommit` is
@@ -120,5 +125,6 @@ See [docs/V23_SPEC.md](../../docs/V23_SPEC.md),
 [docs/V27_SPEC.md](../../docs/V27_SPEC.md),
 [docs/V28_SPEC.md](../../docs/V28_SPEC.md),
 [docs/V33_SPEC.md](../../docs/V33_SPEC.md),
-[docs/V36_SPEC.md](../../docs/V36_SPEC.md), and
-[docs/V37_SPEC.md](../../docs/V37_SPEC.md).
+[docs/V36_SPEC.md](../../docs/V36_SPEC.md),
+[docs/V37_SPEC.md](../../docs/V37_SPEC.md), and
+[docs/V41_SPEC.md](../../docs/V41_SPEC.md).

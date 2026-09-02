@@ -78,6 +78,10 @@ member+generation, rejoin on error 9, honor revoked).
 `JoinGroupConsumerStatic` sends Phase 12 `group_instance_id` (empty =
 dynamic) and resends it on rejoin. `Close` leaves the group and does
 not close the `Client`.
+`RangeAssign` / `RangeAssignMulti` match the broker range algorithm.
+`WithAssignor("range")` replaces the fetch set with a **solo** local
+range (this member only — JoinGroup does not return the live member
+list). Default assignor is broker.
 
 Correlation ids increment per request. Decode verifies magic `V` (0x56),
 protocol version 1, and IEEE CRC32 of the **payload only**. Broker
@@ -121,8 +125,10 @@ Pass `WithBackgroundHeartbeat(false)` for the v0.32 poll-only loop.
 Not a fully concurrent API: do not share the `Client` while the
 consumer is open.
 
-Not implemented: `kafka-go`, custom assignor, SCRAM / shared-token
-auth, async I/O, idempotent produce, leader redirect. Thin
+Not implemented: `kafka-go`, Kafka cooperative-sticky / SyncGroup,
+seeing other group members on the wire, SCRAM / shared-token auth,
+async I/O, idempotent produce, leader redirect. Local
+`WithAssignor("range")` cannot split across live members. Thin
 `Client.JoinGroup` still sends empty `group_instance_id`; use
 `JoinGroupConsumerStatic` for static membership. Thin `OffsetCommit`
 is still the admin path (empty member, generation 0);
@@ -135,5 +141,6 @@ See [docs/V19_SPEC.md](../../docs/V19_SPEC.md),
 [docs/V27_SPEC.md](../../docs/V27_SPEC.md),
 [docs/V28_SPEC.md](../../docs/V28_SPEC.md),
 [docs/V32_SPEC.md](../../docs/V32_SPEC.md),
-[docs/V36_SPEC.md](../../docs/V36_SPEC.md), and
-[docs/V37_SPEC.md](../../docs/V37_SPEC.md).
+[docs/V36_SPEC.md](../../docs/V36_SPEC.md),
+[docs/V37_SPEC.md](../../docs/V37_SPEC.md), and
+[docs/V41_SPEC.md](../../docs/V41_SPEC.md).

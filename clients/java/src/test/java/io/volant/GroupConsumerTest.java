@@ -302,6 +302,8 @@ class GroupConsumerTest {
         List<Codec.OffsetCommitEntry> lastCommit = Collections.emptyList();
         final Map<String, Long> committed = new LinkedHashMap<>();
         final Map<String, List<Record>> records = new LinkedHashMap<>();
+        Metadata metadata = new Metadata(Collections.emptyList(), Collections.emptyList());
+        int metadataCount;
 
         int heartbeats() {
             synchronized (lock) {
@@ -368,6 +370,12 @@ class GroupConsumerTest {
                         e.topic, e.partition, off == null ? GroupConsumer.OFFSET_UNKNOWN : off, ""));
             }
             return out;
+        }
+
+        @Override
+        public Metadata metadata() {
+            metadataCount++;
+            return metadata;
         }
     }
 }

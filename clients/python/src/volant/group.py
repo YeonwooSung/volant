@@ -15,6 +15,7 @@ import threading
 from dataclasses import dataclass, field
 from typing import Optional
 
+from .assignor import range_assign_multi
 from .client import Client, FetchResult, JoinGroupResult
 from .codec import BrokerError, FetchRecord
 
@@ -29,6 +30,8 @@ _DEFAULT_SESSION_TIMEOUT_MS = 10_000
 _POLL_MAX_MESSAGES = 100
 _HB_INTERVAL_MIN_MS = 100
 _HB_INTERVAL_MAX_MS = 3000
+_ASSIGNOR_BROKER = "broker"
+_ASSIGNOR_RANGE = "range"
 
 
 def heartbeat_interval_ms(session_timeout_ms: int) -> int:
@@ -39,6 +42,14 @@ def heartbeat_interval_ms(session_timeout_ms: int) -> int:
     if interval > _HB_INTERVAL_MAX_MS:
         return _HB_INTERVAL_MAX_MS
     return interval
+
+
+def _normalize_assignor(name: Optional[str]) -> str:
+    if name is None or name == "" or name == _ASSIGNOR_BROKER:
+        return _ASSIGNOR_BROKER
+    if name == _ASSIGNOR_RANGE:
+        return _ASSIGNOR_RANGE
+    raise ValueError(f"unknown assignor: {name!r}")
 
 
 @dataclass
@@ -98,6 +109,7 @@ class GroupConsumer:
         session_timeout_ms: int,
         group_instance_id: str = "",
         heartbeat: bool = True,
+        assignor: str = _ASSIGNOR_BROKER,
     ) -> None:
         self._client = client
         self._group_id = group_id
@@ -105,6 +117,7 @@ class GroupConsumer:
         self._session_timeout_ms = session_timeout_ms
         self._group_instance_id = group_instance_id
         self._heartbeat_enabled = heartbeat
+        self._assignor = _normalize_assignor(assignor)
         self._member_id = ""
         self._generation = 0
         self._assignment: list[tuple[str, int]] = []
@@ -125,6 +138,7 @@ class GroupConsumer:
         *,
         group_instance_id: str = "",
         heartbeat: bool = True,
+        assignor: str = _ASSIGNOR_BROKER,
     ) -> GroupConsumer:
         """Join ``group`` on ``topics``. Empty ``member_id`` on first join.
 
@@ -132,6 +146,9 @@ class GroupConsumer:
         Re-join after error 9/10/11 resends the same instance id.
         ``heartbeat=True`` (default) starts the v0.37 background loop.
         ``heartbeat=False`` keeps v0.31 poll-only heartbeats.
+        ``assignor`` is ``"broker"`` (default: honor JoinGroup assignment)
+        or ``"range"`` (replace the fetch set with a solo local range after
+        metadata). Unknown values raise ``ValueError``. Empty is ``"broker"``.
         """
         timeout = (
             _DEFAULT_SESSION_TIMEOUT_MS
@@ -145,10 +162,23 @@ class GroupConsumer:
             timeout,
             group_instance_id=group_instance_id,
             heartbeat=heartbeat,
+            assignor=assignor,
         )
         this._do_join()
         this._start_heartbeat()
         return this
+
+    def _local_range_assignment(self) -> list[tuple[str, int]]:
+        meta = self._client.metadata()
+        counts: dict[str, int] = {}
+        for topic in meta.topics:
+            counts[topic.name] = len(topic.partitions)
+        assigned = range_assign_multi(
+            [self._member_id],
+            [list(self._topics)],
+            counts,
+        )
+        return list(assigned[0]) if assigned else []
 
     def _do_join(self) -> None:
         previous = list(self._assignment)
@@ -162,16 +192,19 @@ class GroupConsumer:
         self._member_id = result.member_id
         self._generation = result.generation
         new_assignment = [(a.topic, int(a.partition)) for a in result.assignment]
+        if self._assignor == _ASSIGNOR_RANGE:
+            new_assignment = self._local_range_assignment()
 
         old_set = set(previous)
         new_set = set(new_assignment)
 
         revoked = sorted(old_set - new_set)
-        for a in result.revoked:
-            tp = (a.topic, int(a.partition))
-            if tp not in revoked:
-                revoked.append(tp)
-        revoked.sort()
+        if self._assignor != _ASSIGNOR_RANGE:
+            for a in result.revoked:
+                tp = (a.topic, int(a.partition))
+                if tp not in revoked:
+                    revoked.append(tp)
+            revoked.sort()
 
         added = sorted(new_set - old_set)
 
@@ -367,3 +400,7 @@ class GroupConsumer:
     @property
     def group_instance_id(self) -> str:
         return self._group_instance_id
+
+    @property
+    def assignor(self) -> str:
+        return self._assignor

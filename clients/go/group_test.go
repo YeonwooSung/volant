@@ -33,6 +33,8 @@ type fakeGroupBroker struct {
 	fetches       []codec.FetchRequest
 	leaves        []codec.LeaveGroupRequest
 	offsetFetches []codec.OffsetFetchRequest
+	topics        []codec.TopicInfo
+	metadatas     int
 }
 
 func newFakeGroupBroker() *fakeGroupBroker {
@@ -55,6 +57,16 @@ func (s *fakeGroupBroker) pushHeartbeat(code uint16) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	s.hbCodes = append(s.hbCodes, code)
+}
+
+func (s *fakeGroupBroker) setTopic(name string, n int) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	parts := make([]codec.PartitionInfo, n)
+	for i := 0; i < n; i++ {
+		parts[i] = codec.PartitionInfo{PartitionID: uint32(i)}
+	}
+	s.topics = append(s.topics, codec.TopicInfo{Name: name, Partitions: parts})
 }
 
 func (s *fakeGroupBroker) snapshot() (joins []codec.JoinGroupRequest, hbs []codec.HeartbeatRequest, commits []codec.OffsetCommitRequest, fetches []codec.FetchRequest, leaves []codec.LeaveGroupRequest, ofs []codec.OffsetFetchRequest) {
@@ -212,6 +224,11 @@ func (s *fakeGroupBroker) handle(f *frame.Frame) ([]byte, error) {
 			s.offsets[tpKey{e.Topic, e.Partition}] = e.Offset
 		}
 		payload, err = codec.EncodeOffsetCommitResponse(codec.OffsetCommitResponse{ErrorCode: 0})
+	case codec.OpMetadata:
+		s.metadatas++
+		payload, err = codec.EncodeMetadataResponse(codec.MetadataResponse{
+			Topics: append([]codec.TopicInfo(nil), s.topics...),
+		})
 	case codec.OpFetch:
 		req, e := codec.DecodeFetchRequest(f.Payload)
 		if e != nil {
