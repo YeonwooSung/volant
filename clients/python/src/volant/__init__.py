@@ -31,6 +31,7 @@ from .codec import (
 )
 from .frame import ProtocolError
 from .group import FetchedRecord, GroupConsumer
+from .txn import TransactionalProducer
 
 __version__ = "0.2.0"
 
@@ -60,6 +61,7 @@ __all__ = [
     "ProduceResult",
     "ProtocolError",
     "TopicInfo",
+    "TransactionalProducer",
     "TxnOffsetCommit",
     "TxnProduceResult",
     "range_assign",

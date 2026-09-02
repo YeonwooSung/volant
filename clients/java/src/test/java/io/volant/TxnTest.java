@@ -88,6 +88,101 @@ class TxnTest {
         }
     }
 
+    @Test
+    void transactionalProducerBeginProduceAddOffsetsCommit() throws Exception {
+        try (TxnServer srv = new TxnServer(0, 0)) {
+            try (Client c = Client.connect("127.0.0.1", srv.port, 5_000)) {
+                c.setTransactionalId("txn-1");
+                TransactionalProducer p = TransactionalProducer.from(c);
+                assertFalse(p.isOpen());
+                p.begin();
+                assertTrue(p.isOpen());
+                p.produce("t", 0, null, "x".getBytes(StandardCharsets.US_ASCII));
+                p.addOffsets("g", "t", 0, 1L);
+                List<TxnProduceResult> results = p.commit();
+                assertFalse(p.isOpen());
+                assertEquals(1, results.size());
+                assertEquals(10L, results.get(0).baseOffset);
+            }
+            assertEquals(List.of(
+                    Codec.OP_INIT_PRODUCER_ID,
+                    Codec.OP_BEGIN_TXN,
+                    Codec.OP_PRODUCE,
+                    Codec.OP_END_TXN), srv.opcodes);
+            assertTrue(srv.endReqs.get(0).committed);
+            assertEquals(1, srv.endReqs.get(0).offsets.size());
+            TxnOffsetCommit off = srv.endReqs.get(0).offsets.get(0);
+            assertEquals("g", off.groupId);
+            assertEquals("t", off.topic);
+            assertEquals(0, off.partition);
+            assertEquals(1L, off.offset);
+        }
+    }
+
+    @Test
+    void transactionalProducerAbortClearsQueue() throws Exception {
+        try (TxnServer srv = new TxnServer(0, 0)) {
+            try (Client c = Client.connect("127.0.0.1", srv.port, 5_000)) {
+                c.setTransactionalId("txn-1");
+                TransactionalProducer p = TransactionalProducer.from(c);
+                p.begin();
+                p.produce("t", 0, null, "x".getBytes(StandardCharsets.US_ASCII));
+                p.addOffsets("g", Collections.singletonList(new TxnOffsetCommit("ignored", "t", 0, 1L, "")));
+                p.abort();
+                assertFalse(p.isOpen());
+                p.begin();
+                p.commit();
+            }
+            assertFalse(srv.endReqs.get(0).committed);
+            assertTrue(srv.endReqs.get(0).offsets.isEmpty());
+            assertTrue(srv.endReqs.get(1).committed);
+            assertTrue(srv.endReqs.get(1).offsets.isEmpty());
+        }
+    }
+
+    @Test
+    void transactionalProducerMissingTransactionalId() throws Exception {
+        try (TxnServer srv = new TxnServer(0, 0)) {
+            try (Client c = Client.connect("127.0.0.1", srv.port, 5_000)) {
+                IllegalStateException ex =
+                        assertThrows(IllegalStateException.class, () -> TransactionalProducer.from(c));
+                assertTrue(ex.getMessage().contains("transactional_id"));
+            }
+            assertTrue(srv.opcodes.isEmpty());
+        }
+    }
+
+    @Test
+    void transactionalProducerCommitWhileNotOpen() throws Exception {
+        try (TxnServer srv = new TxnServer(0, 0)) {
+            try (Client c = Client.connect("127.0.0.1", srv.port, 5_000)) {
+                c.setTransactionalId("txn-1");
+                TransactionalProducer p = TransactionalProducer.from(c);
+                IllegalStateException commitEx =
+                        assertThrows(IllegalStateException.class, p::commit);
+                assertTrue(commitEx.getMessage().contains("not open"));
+                IllegalStateException abortEx =
+                        assertThrows(IllegalStateException.class, p::abort);
+                assertTrue(abortEx.getMessage().contains("not open"));
+            }
+            assertTrue(srv.opcodes.isEmpty());
+        }
+    }
+
+    @Test
+    void transactionalProducerDoubleBegin() throws Exception {
+        try (TxnServer srv = new TxnServer(0, 0)) {
+            try (Client c = Client.connect("127.0.0.1", srv.port, 5_000)) {
+                c.setTransactionalId("txn-1");
+                TransactionalProducer p = TransactionalProducer.from(c);
+                p.begin();
+                IllegalStateException ex = assertThrows(IllegalStateException.class, p::begin);
+                assertTrue(ex.getMessage().contains("already open"));
+            }
+            assertEquals(List.of(Codec.OP_INIT_PRODUCER_ID, Codec.OP_BEGIN_TXN), srv.opcodes);
+        }
+    }
+
     private static final class TxnServer implements AutoCloseable {
         final int port;
         final List<Integer> opcodes = Collections.synchronizedList(new ArrayList<>());

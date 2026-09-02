@@ -247,3 +247,163 @@ func TestBeginTxnError22Raises(t *testing.T) {
 		t.Fatalf("opcodes %v", got.opcodes)
 	}
 }
+
+func TestTransactionalProducerBeginProduceAddOffsetsCommit(t *testing.T) {
+	addr, got, stop := serveTxn(t, 0, 0)
+	defer stop()
+	c, err := volant.DialTimeout(addr, 5*time.Second)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer c.Close()
+	c.SetTransactionalID("txn-1")
+	p, err := volant.NewTransactionalProducer(c)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if p.IsOpen() {
+		t.Fatal("expected closed")
+	}
+	if err := p.Begin(); err != nil {
+		t.Fatal(err)
+	}
+	if !p.IsOpen() {
+		t.Fatal("expected open")
+	}
+	if _, err := p.Produce("t", 0, nil, []byte("x")); err != nil {
+		t.Fatal(err)
+	}
+	p.AddOffsets("g", []volant.TxnOffset{{Topic: "t", Partition: 0, Offset: 1}})
+	results, err := p.Commit()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if p.IsOpen() {
+		t.Fatal("expected closed after commit")
+	}
+	if len(got.opcodes) != 4 ||
+		got.opcodes[0] != codec.OpInitProducerId ||
+		got.opcodes[1] != codec.OpBeginTxn ||
+		got.opcodes[2] != codec.OpProduce ||
+		got.opcodes[3] != codec.OpEndTxn {
+		t.Fatalf("opcodes %v", got.opcodes)
+	}
+	if !got.endReqs[0].Committed || len(got.endReqs[0].Offsets) != 1 {
+		t.Fatalf("end %+v", got.endReqs[0])
+	}
+	off := got.endReqs[0].Offsets[0]
+	if off.GroupID != "g" || off.Topic != "t" || off.Partition != 0 || off.Offset != 1 {
+		t.Fatalf("offset %+v", off)
+	}
+	if len(results) != 1 || results[0].BaseOffset != 10 {
+		t.Fatalf("results %+v", results)
+	}
+}
+
+func TestTransactionalProducerAbortClearsQueue(t *testing.T) {
+	addr, got, stop := serveTxn(t, 0, 0)
+	defer stop()
+	c, err := volant.DialTimeout(addr, 5*time.Second)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer c.Close()
+	c.SetTransactionalID("txn-1")
+	p, err := volant.NewTransactionalProducer(c)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := p.Begin(); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := p.Produce("t", 0, nil, []byte("x")); err != nil {
+		t.Fatal(err)
+	}
+	p.AddOffset("g", "t", 0, 1)
+	if err := p.Abort(); err != nil {
+		t.Fatal(err)
+	}
+	if p.IsOpen() {
+		t.Fatal("expected closed after abort")
+	}
+	if err := p.Begin(); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := p.Commit(); err != nil {
+		t.Fatal(err)
+	}
+	if got.endReqs[0].Committed || len(got.endReqs[0].Offsets) != 0 {
+		t.Fatalf("abort end %+v", got.endReqs[0])
+	}
+	if !got.endReqs[1].Committed || len(got.endReqs[1].Offsets) != 0 {
+		t.Fatalf("second commit should not replay aborted offsets: %+v", got.endReqs[1])
+	}
+}
+
+func TestTransactionalProducerMissingTransactionalID(t *testing.T) {
+	addr, got, stop := serveTxn(t, 0, 0)
+	defer stop()
+	c, err := volant.DialTimeout(addr, 5*time.Second)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer c.Close()
+	_, err = volant.NewTransactionalProducer(c)
+	if err == nil || !strings.Contains(err.Error(), "transactional_id") {
+		t.Fatalf("err %v", err)
+	}
+	if len(got.opcodes) != 0 {
+		t.Fatalf("sent opcodes %v", got.opcodes)
+	}
+}
+
+func TestTransactionalProducerCommitWhileNotOpen(t *testing.T) {
+	addr, got, stop := serveTxn(t, 0, 0)
+	defer stop()
+	c, err := volant.DialTimeout(addr, 5*time.Second)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer c.Close()
+	c.SetTransactionalID("txn-1")
+	p, err := volant.NewTransactionalProducer(c)
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, err = p.Commit()
+	if err == nil || !strings.Contains(err.Error(), "not open") {
+		t.Fatalf("commit err %v", err)
+	}
+	err = p.Abort()
+	if err == nil || !strings.Contains(err.Error(), "not open") {
+		t.Fatalf("abort err %v", err)
+	}
+	if len(got.opcodes) != 0 {
+		t.Fatalf("sent opcodes %v", got.opcodes)
+	}
+}
+
+func TestTransactionalProducerDoubleBegin(t *testing.T) {
+	addr, got, stop := serveTxn(t, 0, 0)
+	defer stop()
+	c, err := volant.DialTimeout(addr, 5*time.Second)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer c.Close()
+	c.SetTransactionalID("txn-1")
+	p, err := volant.NewTransactionalProducer(c)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := p.Begin(); err != nil {
+		t.Fatal(err)
+	}
+	err = p.Begin()
+	if err == nil || !strings.Contains(err.Error(), "already open") {
+		t.Fatalf("err %v", err)
+	}
+	if len(got.opcodes) != 2 || got.opcodes[0] != codec.OpInitProducerId || got.opcodes[1] != codec.OpBeginTxn {
+		t.Fatalf("opcodes %v", got.opcodes)
+	}
+}
