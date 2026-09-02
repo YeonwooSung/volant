@@ -801,6 +801,12 @@ func (c *Client) ReassignPartitions(topic string, replicas []uint32, partition *
 // sends InitProducerId (empty transactional_id) and later produces attach
 // pid/epoch/seq. Returns the broker-assigned base offset.
 func (c *Client) Produce(topic string, partition int, key, value []byte) (int64, error) {
+	return c.ProduceAcks(topic, partition, key, value, 1)
+}
+
+// ProduceAcks is Produce with an explicit acks byte. 1 = leader only;
+// 255 = acks=all (ISR). Same as the Rust client / Python acks=.
+func (c *Client) ProduceAcks(topic string, partition int, key, value []byte, acks uint8) (int64, error) {
 	if value == nil {
 		value = []byte{}
 	}
@@ -809,7 +815,7 @@ func (c *Client) Produce(topic string, partition int, key, value []byte) (int64,
 		reinitBudget = 1
 	}
 	for {
-		payload, err := c.encodeProduce(topic, partition, key, value)
+		payload, err := c.encodeProduce(topic, partition, key, value, acks)
 		if err != nil {
 			return 0, err
 		}
@@ -870,7 +876,7 @@ func (c *Client) Produce(topic string, partition int, key, value []byte) (int64,
 	}
 }
 
-func (c *Client) encodeProduce(topic string, partition int, key, value []byte) ([]byte, error) {
+func (c *Client) encodeProduce(topic string, partition int, key, value []byte, acks uint8) ([]byte, error) {
 	pid, epoch, seq, err := c.produceTrailer(topic, int32(partition))
 	if err != nil {
 		return nil, err
@@ -878,7 +884,7 @@ func (c *Client) encodeProduce(topic string, partition int, key, value []byte) (
 	return codec.EncodeProduceRequest(codec.ProduceRequest{
 		Topic:     topic,
 		Partition: int32(partition),
-		Acks:      1,
+		Acks:      acks,
 		Messages: []codec.ProduceMessage{
 			{Key: key, Value: value, TimestampMs: -1},
 		},
@@ -947,19 +953,17 @@ func (c *Client) ensureProducerID() error {
 // Fetch reads records from topic/partition starting at offset.
 // Defaults match the Python client: max_messages=128, max_bytes=4MiB, max_wait_ms=0.
 func (c *Client) Fetch(topic string, partition int, offset int64) ([]Record, error) {
-	return c.fetchAt(topic, partition, offset, 128, 0)
+	return c.FetchOpts(topic, partition, offset, 128, 4*1024*1024, 0)
 }
 
-func (c *Client) fetchAt(topic string, partition int, offset int64, maxMessages, maxWaitMs uint32) ([]Record, error) {
-	if maxMessages == 0 {
-		maxMessages = 128
-	}
+// FetchOpts is Fetch with explicit max_messages, max_bytes, and max_wait_ms.
+func (c *Client) FetchOpts(topic string, partition int, offset int64, maxMessages, maxBytes, maxWaitMs uint32) ([]Record, error) {
 	payload, err := codec.EncodeFetchRequest(codec.FetchRequest{
 		Topic:       topic,
 		Partition:   uint32(partition),
 		FromOffset:  uint64(offset),
 		MaxMessages: maxMessages,
-		MaxBytes:    4 * 1024 * 1024,
+		MaxBytes:    maxBytes,
 		MaxWaitMs:   maxWaitMs,
 	})
 	if err != nil {
@@ -998,6 +1002,13 @@ func (c *Client) fetchAt(topic string, partition int, offset int64, maxMessages,
 		}
 		return resp.Records, nil
 	}
+}
+
+func (c *Client) fetchAt(topic string, partition int, offset int64, maxMessages, maxWaitMs uint32) ([]Record, error) {
+	if maxMessages == 0 {
+		maxMessages = 128
+	}
+	return c.FetchOpts(topic, partition, offset, maxMessages, 4*1024*1024, maxWaitMs)
 }
 
 // redirectToLeader refreshes Metadata and reconnects to the partition leader.

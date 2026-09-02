@@ -23,7 +23,11 @@ c.create_topic("t", partitions=1)
 c.create_partitions("t", 2)
 c.reassign_partitions("t", [1, 2])  # all partitions; or partition=0
 c.produce("t", 0, value=b"hello")
+# acks=1 by default; acks=255 is acks=all (already shipped).
+c.produce("t", 0, value=b"hello", acks=255)
 batch = c.fetch("t", 0, offset=0)
+# max_messages=128, max_bytes=4MiB, max_wait_ms=0 by default (already shipped).
+batch = c.fetch("t", 0, offset=0, max_messages=10, max_bytes=4096, max_wait_ms=100)
 for offset, key, value in batch.tuples():
     print(offset, key, value)
 c.offset_commit(group="g", topic="t", partition=0, offset=5)
@@ -226,7 +230,10 @@ split across live members. Thin `join_group` still defaults to empty
 one. Offset commit/fetch is the
 admin path only (empty member, generation 0) unless the caller (or
 `GroupConsumer.commit`) passes a joined `member_id` / `generation`.
-Sync only; one TCP connection; acks=1 by default. TLS does not change
+Sync only; one TCP connection; acks=1 by default (`acks=255` is
+acks=all). `fetch` already takes `max_messages` / `max_bytes` /
+`max_wait_ms`. Convenience batch is `messages=` only (not Kafka
+Produce; native opcode 1). TLS does not change
 broker TLS (Phase 8/19) and does not add Kafka API keys. Leader
 redirect is Produce/Fetch only (default one extra attempt).
 
@@ -255,4 +262,5 @@ See [docs/V14_SPEC.md](../../docs/V14_SPEC.md),
 [docs/V55_SPEC.md](../../docs/V55_SPEC.md),
 [docs/V56_SPEC.md](../../docs/V56_SPEC.md),
 [docs/V58_SPEC.md](../../docs/V58_SPEC.md),
-[docs/V59_SPEC.md](../../docs/V59_SPEC.md).
+[docs/V59_SPEC.md](../../docs/V59_SPEC.md),
+[docs/V64_SPEC.md](../../docs/V64_SPEC.md).

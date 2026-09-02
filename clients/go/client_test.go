@@ -20,6 +20,7 @@ type scriptedBroker struct {
 	meta          codec.MetadataResponse
 	opcodes       []uint16
 	produceReqs   []codec.ProduceRequest
+	fetchReqs     []codec.FetchRequest
 	initTxnIDs    []string
 	initCount     int
 	produceCount  int
@@ -88,6 +89,14 @@ func (s *scriptedBroker) copyProduces() []codec.ProduceRequest {
 	defer s.mu.Unlock()
 	out := make([]codec.ProduceRequest, len(s.produceReqs))
 	copy(out, s.produceReqs)
+	return out
+}
+
+func (s *scriptedBroker) copyFetches() []codec.FetchRequest {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	out := make([]codec.FetchRequest, len(s.fetchReqs))
+	copy(out, s.fetchReqs)
 	return out
 }
 
@@ -189,6 +198,7 @@ func (s *scriptedBroker) handle(f *frame.Frame) ([]byte, error) {
 		if e != nil {
 			return nil, e
 		}
+		s.fetchReqs = append(s.fetchReqs, req)
 		code := uint16(0)
 		if len(s.fetchCodes) > 0 {
 			code = s.fetchCodes[0]
@@ -516,5 +526,186 @@ func TestIdempotentProduceRedirectKeepsSequence(t *testing.T) {
 	}
 	if lReqs[0].ProducerID != 42 {
 		t.Fatalf("leader pid %d", lReqs[0].ProducerID)
+	}
+}
+
+func TestFetchOptsSendsKnobs(t *testing.T) {
+	srv := &scriptedBroker{}
+	addr, stop := startScripted(t, srv)
+	defer stop()
+
+	c, err := volant.DialTimeout(addr, 5*time.Second)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer c.Close()
+
+	if _, err := c.FetchOpts("t", 0, 0, 10, 4096, 100); err != nil {
+		t.Fatal(err)
+	}
+	reqs := srv.copyFetches()
+	if len(reqs) != 1 {
+		t.Fatalf("fetches %d want 1", len(reqs))
+	}
+	req := reqs[0]
+	if req.MaxMessages != 10 || req.MaxBytes != 4096 || req.MaxWaitMs != 100 {
+		t.Fatalf("knobs %+v want max_messages=10 max_bytes=4096 max_wait_ms=100", req)
+	}
+}
+
+func TestFetchDefaultKnobs(t *testing.T) {
+	srv := &scriptedBroker{}
+	addr, stop := startScripted(t, srv)
+	defer stop()
+
+	c, err := volant.DialTimeout(addr, 5*time.Second)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer c.Close()
+
+	if _, err := c.Fetch("t", 0, 0); err != nil {
+		t.Fatal(err)
+	}
+	reqs := srv.copyFetches()
+	if len(reqs) != 1 {
+		t.Fatalf("fetches %d want 1", len(reqs))
+	}
+	req := reqs[0]
+	if req.MaxMessages != 128 || req.MaxBytes != 4*1024*1024 || req.MaxWaitMs != 0 {
+		t.Fatalf("defaults %+v want 128 / 4MiB / 0", req)
+	}
+}
+
+func TestProduceAcksAll(t *testing.T) {
+	srv := &scriptedBroker{}
+	addr, stop := startScripted(t, srv)
+	defer stop()
+
+	c, err := volant.DialTimeout(addr, 5*time.Second)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer c.Close()
+
+	if _, err := c.ProduceAcks("t", 0, nil, []byte("hello"), 255); err != nil {
+		t.Fatal(err)
+	}
+	reqs := srv.copyProduces()
+	if len(reqs) != 1 {
+		t.Fatalf("produces %d want 1", len(reqs))
+	}
+	if reqs[0].Acks != 255 {
+		t.Fatalf("acks %d want 255", reqs[0].Acks)
+	}
+}
+
+func TestProduceDefaultAcks(t *testing.T) {
+	srv := &scriptedBroker{}
+	addr, stop := startScripted(t, srv)
+	defer stop()
+
+	c, err := volant.DialTimeout(addr, 5*time.Second)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer c.Close()
+
+	if _, err := c.Produce("t", 0, nil, []byte("hello")); err != nil {
+		t.Fatal(err)
+	}
+	reqs := srv.copyProduces()
+	if len(reqs) != 1 {
+		t.Fatalf("produces %d want 1", len(reqs))
+	}
+	if reqs[0].Acks != 1 {
+		t.Fatalf("acks %d want 1", reqs[0].Acks)
+	}
+}
+
+func TestFetchOptsRedirectsOnce(t *testing.T) {
+	leader := &scriptedBroker{}
+	_, stopL := startScripted(t, leader)
+	defer stopL()
+
+	follower := &scriptedBroker{
+		fetchCodes: []uint16{notLeader},
+		meta:       leaderMeta("t", 0, 2, "127.0.0.1", leader.port()),
+	}
+	addr, stopF := startScripted(t, follower)
+	defer stopF()
+
+	c, err := volant.DialTimeout(addr, 5*time.Second)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer c.Close()
+
+	recs, err := c.FetchOpts("t", 0, 0, 10, 4096, 100)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if recs == nil {
+		recs = []volant.Record{}
+	}
+	if len(recs) != 0 {
+		t.Fatalf("records: got %d want 0", len(recs))
+	}
+	_, ff, fm, _ := follower.snapshot()
+	_, lf, _, _ := leader.snapshot()
+	if ff != 1 || fm != 1 {
+		t.Fatalf("follower fetch/metadata = %d/%d want 1/1", ff, fm)
+	}
+	if lf != 1 {
+		t.Fatalf("leader fetch = %d want 1", lf)
+	}
+	fReq := follower.copyFetches()[0]
+	lReq := leader.copyFetches()[0]
+	if fReq.MaxMessages != 10 || fReq.MaxBytes != 4096 || fReq.MaxWaitMs != 100 {
+		t.Fatalf("follower knobs %+v", fReq)
+	}
+	if lReq.MaxMessages != 10 || lReq.MaxBytes != 4096 || lReq.MaxWaitMs != 100 {
+		t.Fatalf("leader knobs %+v", lReq)
+	}
+}
+
+func TestProduceAcksRedirectsToLeader(t *testing.T) {
+	leader := &scriptedBroker{}
+	_, stopL := startScripted(t, leader)
+	defer stopL()
+
+	follower := &scriptedBroker{
+		produceCodes: []uint16{notLeader},
+		meta:         leaderMeta("t", 0, 2, "127.0.0.1", leader.port()),
+	}
+	addr, stopF := startScripted(t, follower)
+	defer stopF()
+
+	c, err := volant.DialTimeout(addr, 5*time.Second)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer c.Close()
+
+	off, err := c.ProduceAcks("t", 0, nil, []byte("hello"), 255)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if off != 7 {
+		t.Fatalf("base offset: got %d want 7", off)
+	}
+	fp, _, fm, _ := follower.snapshot()
+	lp, _, _, _ := leader.snapshot()
+	if fp != 1 || fm != 1 {
+		t.Fatalf("follower produce/metadata = %d/%d want 1/1", fp, fm)
+	}
+	if lp != 1 {
+		t.Fatalf("leader produce = %d want 1", lp)
+	}
+	if follower.copyProduces()[0].Acks != 255 {
+		t.Fatalf("follower acks %d want 255", follower.copyProduces()[0].Acks)
+	}
+	if leader.copyProduces()[0].Acks != 255 {
+		t.Fatalf("leader acks %d want 255", leader.copyProduces()[0].Acks)
 	}
 }
