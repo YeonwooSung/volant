@@ -1906,23 +1906,27 @@ type adminBroker struct {
 	deleteScramCodes      []uint16
 	listScramCodes        []uint16
 	listAclsCodes         []uint16
-	addBrokerReplies      []createTopicReply
-	removeBrokerCodes     []uint16
-	meta                  codec.MetadataResponse
-	createTopicCount      int
-	createPartitionsCount int
-	createAclsCount       int
-	reassignCount         int
-	createScramCount      int
-	deleteScramCount      int
-	listScramCount        int
-	listAclsCount         int
-	addBrokerCount        int
-	removeBrokerCount     int
-	metadataCount         int
-	listMembersCount      int
-	acceptCount           int
-	ln                    net.Listener
+	addBrokerReplies       []createTopicReply
+	removeBrokerCodes      []uint16
+	describeConfigsReplies []createTopicReply
+	alterConfigsCodes      []uint16
+	meta                   codec.MetadataResponse
+	createTopicCount       int
+	createPartitionsCount  int
+	createAclsCount        int
+	reassignCount          int
+	createScramCount       int
+	deleteScramCount       int
+	listScramCount         int
+	listAclsCount          int
+	addBrokerCount         int
+	removeBrokerCount      int
+	describeConfigsCount   int
+	alterConfigsCount      int
+	metadataCount          int
+	listMembersCount       int
+	acceptCount            int
+	ln                     net.Listener
 }
 
 func startAdmin(t *testing.T, s *adminBroker) (addr string, stop func()) {
@@ -1975,6 +1979,12 @@ func (s *adminBroker) membershipSnapshot() (addBroker, removeBroker, metas, acce
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	return s.addBrokerCount, s.removeBrokerCount, s.metadataCount, s.acceptCount
+}
+
+func (s *adminBroker) configsSnapshot() (describe, alter, metas, accepts int) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.describeConfigsCount, s.alterConfigsCount, s.metadataCount, s.acceptCount
 }
 
 func (s *adminBroker) serve(conn net.Conn) {
@@ -2162,6 +2172,53 @@ func (s *adminBroker) handle(f *frame.Frame) ([]byte, error) {
 		}
 		payload, err = codec.EncodeRemoveBrokerResponse(codec.RemoveBrokerResponse{ErrorCode: code, Generation: gen})
 		replyOp = codec.OpRemoveBrokerResponse
+	case codec.OpDescribeConfigs:
+		s.describeConfigsCount++
+		req, e := codec.DecodeDescribeConfigsRequest(f.Payload)
+		if e != nil {
+			return nil, e
+		}
+		rep := createTopicReply{}
+		if len(s.describeConfigsReplies) > 0 {
+			rep = s.describeConfigsReplies[0]
+			s.describeConfigsReplies = s.describeConfigsReplies[1:]
+		}
+		if rep.asError {
+			payload, err = codec.EncodeErrorResponse(codec.ErrorResponse{Code: rep.code, Message: rep.message})
+			replyOp = codec.OpError
+			break
+		}
+		cfgs := [][2]string(nil)
+		tid := uint32(0)
+		parts := uint32(0)
+		if rep.code == 0 {
+			cfgs = [][2]string{{"retention.ms", "86400000"}}
+			tid = 1
+			parts = 1
+		}
+		payload, err = codec.EncodeDescribeConfigsResponse(codec.DescribeConfigsResponse{
+			ErrorCode:      rep.code,
+			Topic:          req.Topic,
+			TopicID:        tid,
+			PartitionCount: parts,
+			Configs:        cfgs,
+		})
+		replyOp = codec.OpDescribeConfigsResponse
+	case codec.OpAlterConfigs:
+		s.alterConfigsCount++
+		req, e := codec.DecodeAlterConfigsRequest(f.Payload)
+		if e != nil {
+			return nil, e
+		}
+		code := uint16(0)
+		if len(s.alterConfigsCodes) > 0 {
+			code = s.alterConfigsCodes[0]
+			s.alterConfigsCodes = s.alterConfigsCodes[1:]
+		}
+		payload, err = codec.EncodeAlterConfigsResponse(codec.AlterConfigsResponse{
+			ErrorCode: code, Topic: req.Topic,
+		})
+		replyOp = codec.OpAlterConfigsResponse
 	case codec.OpMetadata:
 		s.metadataCount++
 		payload, err = codec.EncodeMetadataResponse(s.meta)
@@ -2778,6 +2835,101 @@ func TestAddBrokerMaxRedirectsZeroRaisesOnFirst14(t *testing.T) {
 	ab, _, metas, accepts := follower.membershipSnapshot()
 	if ab != 1 || metas != 0 || accepts != 1 {
 		t.Fatalf("add_broker=%d metadata=%d accepts=%d want 1,0,1", ab, metas, accepts)
+	}
+}
+
+func TestDescribeConfigsError14RedirectsViaControllerID(t *testing.T) {
+	leader := &adminBroker{}
+	_, stopL := startAdmin(t, leader)
+	defer stopL()
+	follower := &adminBroker{
+		describeConfigsReplies: []createTopicReply{{
+			code: notController, message: "not controller; controller_id=2", asError: true,
+		}},
+		meta: controllerMeta(2, "127.0.0.1", leader.port()),
+	}
+	fAddr, stopF := startAdmin(t, follower)
+	defer stopF()
+
+	c, err := volant.DialTimeout(fAddr, 5*time.Second)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer c.Close()
+	got, err := c.DescribeConfigs("events")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.Topic != "events" || got.TopicID != 1 || got.PartitionCount != 1 {
+		t.Fatalf("got %+v want topic=events id=1 partitions=1", got)
+	}
+	if len(got.Configs) != 1 || got.Configs[0] != [2]string{"retention.ms", "86400000"} {
+		t.Fatalf("configs %+v", got.Configs)
+	}
+	dc, _, metas, _ := follower.configsSnapshot()
+	if dc != 1 || metas != 1 {
+		t.Fatalf("follower describe_configs=%d metadata=%d want 1,1", dc, metas)
+	}
+	ldc, _, _, _ := leader.configsSnapshot()
+	if ldc != 1 {
+		t.Fatalf("leader describe_configs=%d want 1", ldc)
+	}
+}
+
+func TestAlterConfigsTyped14NoHintThenOk(t *testing.T) {
+	leader := &adminBroker{}
+	_, stopL := startAdmin(t, leader)
+	defer stopL()
+	follower := &adminBroker{
+		alterConfigsCodes: []uint16{notController},
+	}
+	fAddr, stopF := startAdmin(t, follower)
+	defer stopF()
+	follower.mu.Lock()
+	follower.meta = otherBrokerMeta(follower.port(), "127.0.0.1", leader.port())
+	follower.mu.Unlock()
+
+	c, err := volant.DialTimeout(fAddr, 5*time.Second)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer c.Close()
+	if err := c.AlterConfigs("events", [][2]string{{"retention.ms", "86400000"}}); err != nil {
+		t.Fatal(err)
+	}
+	_, ac, metas, _ := follower.configsSnapshot()
+	if ac != 1 || metas != 1 {
+		t.Fatalf("follower alter_configs=%d metadata=%d want 1,1", ac, metas)
+	}
+	_, lac, _, _ := leader.configsSnapshot()
+	if lac != 1 {
+		t.Fatalf("leader alter_configs=%d want 1", lac)
+	}
+}
+
+func TestDescribeConfigsMaxRedirectsZeroRaisesOnFirst14(t *testing.T) {
+	follower := &adminBroker{
+		describeConfigsReplies: []createTopicReply{{
+			code: notController, message: "not controller; controller_id=2", asError: true,
+		}},
+		meta: controllerMeta(2, "127.0.0.1", 9),
+	}
+	fAddr, stopF := startAdmin(t, follower)
+	defer stopF()
+
+	c, err := volant.DialTimeout(fAddr, 5*time.Second)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer c.Close()
+	c.SetMaxRedirects(0)
+	_, err = c.DescribeConfigs("events")
+	if brokerCode(err) != notController {
+		t.Fatalf("err=%v want code 14", err)
+	}
+	dc, _, metas, accepts := follower.configsSnapshot()
+	if dc != 1 || metas != 0 || accepts != 1 {
+		t.Fatalf("describe_configs=%d metadata=%d accepts=%d want 1,0,1", dc, metas, accepts)
 	}
 }
 
