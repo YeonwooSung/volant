@@ -26,7 +26,11 @@ try (Client c = Client.connect("127.0.0.1", 9092)) {
   int parts = c.createPartitions("t", 2);
   int gen = c.reassignPartitions("t", new int[] {1, 2}); // all partitions
   long off = c.produce("t", 0, null, "hello".getBytes(UTF_8));
+  // produce(..., acks): 1 = leader, 255 = acks=all (v0.64). produce 4-arg stays acks=1.
+  off = c.produce("t", 0, null, "hello".getBytes(UTF_8), 255);
   List<Record> recs = c.fetch("t", 0, 0);
+  // fetch 6-arg: max_messages / max_bytes / max_wait_ms (v0.64). fetch 3-arg stays 128 / 4MiB / 0.
+  recs = c.fetch("t", 0, 0, 10, 4096L, 100);
   for (Record rec : recs) {
     System.out.println(rec.offset + " " + rec.key + " " + new String(rec.value, UTF_8));
   }
@@ -235,7 +239,11 @@ is opt-in (`setEnableIdempotence(true)`); default off. Local
 seeing other group members on the wire, SCRAM-SHA-512, Kafka SASL,
 async I/O, idempotent
 produce. Local `assignor="range"` cannot split across
-live members. Sync only; one TCP connection; acks=1 by default. Thin
+live members. Sync only; one TCP connection; acks=1 by default
+(`produce(..., acks)` / `acks=255` is acks=all; v0.64). Convenience
+Produce is still one message per RPC (not Kafka Produce; native
+opcode 1). Public 6-arg `fetch` exposes max_messages / max_bytes /
+max_wait_ms (not Kafka Fetch; native opcode 2). Thin
 `joinGroup` still sends empty `group_instance_id`; use
 `GroupConsumer.joinStatic` for static membership. Convenience
 `offsetCommit` is
@@ -272,3 +280,4 @@ See [docs/V23_SPEC.md](../../docs/V23_SPEC.md),
 [docs/V59_SPEC.md](../../docs/V59_SPEC.md),
 [docs/V63_SPEC.md](../../docs/V63_SPEC.md).
 [docs/V62_SPEC.md](../../docs/V62_SPEC.md).
+[docs/V64_SPEC.md](../../docs/V64_SPEC.md).

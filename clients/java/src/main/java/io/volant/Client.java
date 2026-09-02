@@ -676,12 +676,20 @@ public final class Client implements AutoCloseable {
      * @return the broker-assigned base offset
      */
     public long produce(String topic, int partition, byte[] key, byte[] value) {
+        return produce(topic, partition, key, value, 1);
+    }
+
+    /**
+     * Produce with an explicit acks byte. {@code 1} = leader only;
+     * {@code 255} = acks=all (ISR). Same as the Rust client / Python {@code acks=}.
+     */
+    public long produce(String topic, int partition, byte[] key, byte[] value, int acks) {
         if (value == null) {
             value = new byte[0];
         }
         int reinitBudget = usesPid() ? 1 : 0;
         while (true) {
-            byte[] payload = encodeProduce(topic, partition, key, value);
+            byte[] payload = encodeProduce(topic, partition, key, value, acks);
             int maxAttempts = 1 + maxRedirects;
             int attempt = 0;
             boolean retriedUnknown = false;
@@ -731,13 +739,13 @@ public final class Client implements AutoCloseable {
         }
     }
 
-    private byte[] encodeProduce(String topic, int partition, byte[] key, byte[] value) {
+    private byte[] encodeProduce(String topic, int partition, byte[] key, byte[] value, int acks) {
         long[] trailer = produceTrailer(topic, partition);
         return Codec.encodeProduceRequest(
                 new Codec.ProduceRequest(
                         topic,
                         partition,
-                        1,
+                        acks,
                         Collections.singletonList(new Codec.ProduceMessage(key, value, -1L, Collections.emptyList())),
                         trailer[0],
                         (int) trailer[1],
@@ -860,12 +868,26 @@ public final class Client implements AutoCloseable {
      * max_wait_ms=0.
      */
     public List<Record> fetch(String topic, int partition, long offset) {
-        return fetch(topic, partition, offset, 128, 0);
+        return fetch(topic, partition, offset, 128, 4L * 1024 * 1024, 0);
+    }
+
+    /**
+     * Fetch with explicit {@code max_messages}, {@code max_bytes}, and
+     * {@code max_wait_ms}.
+     */
+    public List<Record> fetch(
+            String topic, int partition, long offset, int maxMessages, long maxBytes, long maxWaitMs) {
+        return fetchAt(topic, partition, offset, maxMessages, maxBytes, maxWaitMs);
     }
 
     List<Record> fetch(String topic, int partition, long offset, int maxMessages, long maxWaitMs) {
+        return fetch(topic, partition, offset, maxMessages, 4L * 1024 * 1024, maxWaitMs);
+    }
+
+    private List<Record> fetchAt(
+            String topic, int partition, long offset, int maxMessages, long maxBytes, long maxWaitMs) {
         byte[] payload = Codec.encodeFetchRequest(
-                new Codec.FetchRequest(topic, partition, offset, maxMessages, 4L * 1024 * 1024, maxWaitMs));
+                new Codec.FetchRequest(topic, partition, offset, maxMessages, maxBytes, maxWaitMs));
         int maxAttempts = 1 + maxRedirects;
         int attempt = 0;
         while (true) {

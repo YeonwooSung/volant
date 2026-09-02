@@ -192,6 +192,99 @@ class ClientTest {
         }
     }
 
+    @Test
+    void fetchOptsSendsKnobs() throws Exception {
+        try (ScriptedBroker srv = ScriptedBroker.start()) {
+            try (Client c = Client.connect("127.0.0.1", srv.port, 5_000)) {
+                c.fetch("t", 0, 0, 10, 4096L, 100);
+            }
+            assertEquals(1, srv.fetchReqs.size());
+            Codec.FetchRequest req = srv.fetchReqs.get(0);
+            assertEquals(10, req.maxMessages);
+            assertEquals(4096, req.maxBytes);
+            assertEquals(100, req.maxWaitMs);
+        }
+    }
+
+    @Test
+    void fetchDefaultKnobs() throws Exception {
+        try (ScriptedBroker srv = ScriptedBroker.start()) {
+            try (Client c = Client.connect("127.0.0.1", srv.port, 5_000)) {
+                c.fetch("t", 0, 0);
+            }
+            assertEquals(1, srv.fetchReqs.size());
+            Codec.FetchRequest req = srv.fetchReqs.get(0);
+            assertEquals(128, req.maxMessages);
+            assertEquals(4L * 1024 * 1024, req.maxBytes);
+            assertEquals(0, req.maxWaitMs);
+        }
+    }
+
+    @Test
+    void produceAcksAll() throws Exception {
+        try (ScriptedBroker srv = ScriptedBroker.start()) {
+            try (Client c = Client.connect("127.0.0.1", srv.port, 5_000)) {
+                c.produce("t", 0, null, "hello".getBytes(StandardCharsets.UTF_8), 255);
+            }
+            assertEquals(1, srv.produceReqs.size());
+            assertEquals(255, srv.produceReqs.get(0).acks);
+        }
+    }
+
+    @Test
+    void produceDefaultAcks() throws Exception {
+        try (ScriptedBroker srv = ScriptedBroker.start()) {
+            try (Client c = Client.connect("127.0.0.1", srv.port, 5_000)) {
+                c.produce("t", 0, null, "hello".getBytes(StandardCharsets.UTF_8));
+            }
+            assertEquals(1, srv.produceReqs.size());
+            assertEquals(1, srv.produceReqs.get(0).acks);
+        }
+    }
+
+    @Test
+    void fetchOptsRedirectsOnce() throws Exception {
+        try (ScriptedBroker leader = ScriptedBroker.start();
+                ScriptedBroker follower = ScriptedBroker.start()) {
+            follower.fetchCodes.add(NOT_LEADER);
+            follower.meta = leaderMeta("t", 0, 2, "127.0.0.1", leader.port);
+
+            try (Client c = Client.connect("127.0.0.1", follower.port, 5_000)) {
+                List<Record> recs = c.fetch("t", 0, 0, 10, 4096L, 100);
+                assertTrue(recs.isEmpty());
+            }
+            assertEquals(1, follower.fetchCount.get());
+            assertEquals(1, follower.metadataCount.get());
+            assertEquals(1, leader.fetchCount.get());
+            assertEquals(10, follower.fetchReqs.get(0).maxMessages);
+            assertEquals(4096, follower.fetchReqs.get(0).maxBytes);
+            assertEquals(100, follower.fetchReqs.get(0).maxWaitMs);
+            assertEquals(10, leader.fetchReqs.get(0).maxMessages);
+            assertEquals(4096, leader.fetchReqs.get(0).maxBytes);
+            assertEquals(100, leader.fetchReqs.get(0).maxWaitMs);
+        }
+    }
+
+    @Test
+    void produceAcksRedirectsToLeader() throws Exception {
+        try (ScriptedBroker leader = ScriptedBroker.start();
+                ScriptedBroker follower = ScriptedBroker.start()) {
+            follower.produceCodes.add(NOT_LEADER);
+            follower.meta = leaderMeta("t", 0, 2, "127.0.0.1", leader.port);
+            leader.produceCodes.add(0);
+
+            try (Client c = Client.connect("127.0.0.1", follower.port, 5_000)) {
+                long off = c.produce("t", 0, null, "hello".getBytes(StandardCharsets.UTF_8), 255);
+                assertEquals(7L, off);
+            }
+            assertEquals(1, follower.produceCount.get());
+            assertEquals(1, follower.metadataCount.get());
+            assertEquals(1, leader.produceCount.get());
+            assertEquals(255, follower.produceReqs.get(0).acks);
+            assertEquals(255, leader.produceReqs.get(0).acks);
+        }
+    }
+
     private static Metadata leaderMeta(String topic, int partition, int leaderId, String host, int port) {
         List<Metadata.BrokerInfo> brokers = new ArrayList<>();
         brokers.add(new Metadata.BrokerInfo(1, "127.0.0.1", 1));
@@ -218,6 +311,7 @@ class ClientTest {
         volatile Metadata meta = new Metadata(Collections.emptyList(), Collections.emptyList());
         final List<Integer> opcodes = new CopyOnWriteArrayList<>();
         final List<Codec.ProduceRequest> produceReqs = new CopyOnWriteArrayList<>();
+        final List<Codec.FetchRequest> fetchReqs = new CopyOnWriteArrayList<>();
         final List<String> initTxnIds = new CopyOnWriteArrayList<>();
         final AtomicInteger initCount = new AtomicInteger();
         final AtomicInteger produceCount = new AtomicInteger();
@@ -321,6 +415,7 @@ class ClientTest {
             if (frame.opcode == Codec.OP_FETCH) {
                 fetchCount.incrementAndGet();
                 Codec.FetchRequest req = Codec.decodeFetchRequest(frame.payload);
+                fetchReqs.add(req);
                 int code = 0;
                 if (!fetchCodes.isEmpty()) {
                     code = fetchCodes.remove(0);
