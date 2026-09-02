@@ -7,9 +7,11 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
 import java.nio.charset.StandardCharsets;
 import java.util.ArrayList;
 import java.util.Collections;
+import java.util.HashSet;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.Set;
 import org.junit.jupiter.api.Test;
 
 /** GroupConsumer unit tests against a fake backend (no broker). */
@@ -32,7 +34,7 @@ class GroupConsumerTest {
     }
 
     @Test
-    void unknownOffsetStartsAtZero() {
+    void unknownOffsetUsesListOffsetsEarliest() {
         FakeBackend fake = new FakeBackend();
         fake.nextJoin = joinResult("m1", 1, assign("t", 0));
         fake.committed.put(tp("t", 0), GroupConsumer.OFFSET_UNKNOWN);
@@ -40,7 +42,9 @@ class GroupConsumerTest {
         GroupConsumer g = GroupConsumer.join(fake, "g", List.of("t"), 10_000, false);
         assertEquals(0L, g.positions().values().iterator().next());
         assertEquals("earliest", g.autoOffsetReset());
-        assertEquals(0, fake.listOffsetCount);
+        assertEquals(1, fake.listOffsetCount);
+        assertEquals("t", fake.lastListOffsetTopic);
+        assertEquals(List.of(0), fake.lastListOffsetPartitions);
         g.close();
     }
 
@@ -337,13 +341,42 @@ class GroupConsumerTest {
     }
 
     @Test
+    void earliestUnknownUsesListOffsetsEarliest() {
+        FakeBackend fake = new FakeBackend();
+        fake.nextJoin = joinResult("m1", 1, assign("t", 0));
+        fake.committed.put(tp("t", 0), GroupConsumer.OFFSET_UNKNOWN);
+        fake.listOffsetEntries.put(tp("t", 0), new OffsetListing(0, 7, 20));
+        GroupConsumer g = GroupConsumer.join(fake, "g", List.of("t"), 10_000, false);
+        assertEquals(7L, g.positions().values().iterator().next());
+        assertEquals(1, fake.listOffsetCount);
+        assertEquals("t", fake.lastListOffsetTopic);
+        assertEquals(List.of(0), fake.lastListOffsetPartitions);
+        assertEquals(0, fake.fetchCount);
+        g.close();
+    }
+
+    @Test
+    void earliestListOffsetsMissingPartitionRaises() {
+        FakeBackend fake = new FakeBackend();
+        fake.nextJoin = joinResult("m1", 1, assign("t", 0));
+        fake.committed.put(tp("t", 0), GroupConsumer.OFFSET_UNKNOWN);
+        fake.listOffsetOmit.add(tp("t", 0));
+        IllegalStateException ex = assertThrows(
+                IllegalStateException.class,
+                () -> GroupConsumer.join(fake, "g", List.of("t"), 10_000, false));
+        assertTrue(ex.getMessage().contains("list_offsets missing partition"));
+        assertEquals(1, fake.listOffsetCount);
+        assertEquals(0, fake.fetchCount);
+    }
+
+    @Test
     void latestUnknownUsesListOffsets() {
         FakeBackend fake = new FakeBackend();
         fake.nextJoin = joinResult("m1", 1, assign("t", 0));
         fake.committed.put(tp("t", 0), GroupConsumer.OFFSET_UNKNOWN);
-        fake.listOffsetEntries.put(tp("t", 0), new OffsetListing(0, 0, 10));
+        fake.listOffsetEntries.put(tp("t", 0), new OffsetListing(0, 7, 20));
         GroupConsumer g = GroupConsumer.joinWithOffsetReset(fake, "g", List.of("t"), 10_000, "latest");
-        assertEquals(10L, g.positions().values().iterator().next());
+        assertEquals(20L, g.positions().values().iterator().next());
         assertEquals(1, fake.listOffsetCount);
         assertEquals("t", fake.lastListOffsetTopic);
         assertEquals(List.of(0), fake.lastListOffsetPartitions);
@@ -356,9 +389,21 @@ class GroupConsumerTest {
         FakeBackend fake = new FakeBackend();
         fake.nextJoin = joinResult("m1", 1, assign("t", 0));
         fake.committed.put(tp("t", 0), 5L);
-        fake.listOffsetEntries.put(tp("t", 0), new OffsetListing(0, 0, 10));
+        fake.listOffsetEntries.put(tp("t", 0), new OffsetListing(0, 7, 20));
         GroupConsumer g = GroupConsumer.joinWithOffsetReset(fake, "g", List.of("t"), 10_000, "latest");
         assertEquals(5L, g.positions().values().iterator().next());
+        assertEquals(0, fake.listOffsetCount);
+        g.close();
+    }
+
+    @Test
+    void earliestCommittedSkipsListOffsets() {
+        FakeBackend fake = new FakeBackend();
+        fake.nextJoin = joinResult("m1", 1, assign("t", 0));
+        fake.committed.put(tp("t", 0), 3L);
+        fake.listOffsetEntries.put(tp("t", 0), new OffsetListing(0, 7, 20));
+        GroupConsumer g = GroupConsumer.join(fake, "g", List.of("t"), 10_000, false);
+        assertEquals(3L, g.positions().values().iterator().next());
         assertEquals(0, fake.listOffsetCount);
         g.close();
     }
@@ -442,6 +487,7 @@ class GroupConsumerTest {
         String lastListOffsetTopic = "";
         List<Integer> lastListOffsetPartitions = Collections.emptyList();
         final Map<String, OffsetListing> listOffsetEntries = new LinkedHashMap<>();
+        final Set<String> listOffsetOmit = new HashSet<>();
         long lastMaxWaitMs;
         int lastSessionTimeoutMs;
         String lastGroupInstanceId = "";
@@ -536,10 +582,14 @@ class GroupConsumerTest {
             if (partitions != null) {
                 for (int p : partitions) {
                     lastListOffsetPartitions.add(p);
-                    OffsetListing e = listOffsetEntries.get(tp(topic, p));
-                    if (e != null) {
-                        out.add(e);
+                    if (listOffsetOmit.contains(tp(topic, p))) {
+                        continue;
                     }
+                    OffsetListing e = listOffsetEntries.get(tp(topic, p));
+                    if (e == null) {
+                        e = new OffsetListing(p, 0, 0);
+                    }
+                    out.add(e);
                 }
             }
             return out;

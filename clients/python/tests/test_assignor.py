@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import unittest
 
-from volant import GroupConsumer, range_assign, range_assign_multi
+from volant import GroupConsumer, OffsetListing, range_assign, range_assign_multi
 from volant.client import DescribeGroupResult, FetchResult, JoinGroupResult
 from volant.codec import (
     Assignment,
@@ -193,6 +193,10 @@ class FakeClient:
         return [
             (p, off) for (t, p), off in self.committed.items() if t == topic
         ]
+
+    def list_offsets(self, topic: str, partitions=None) -> list[OffsetListing]:
+        parts = [int(p) for p in partitions] if partitions else []
+        return [OffsetListing(partition=p, earliest=0, latest=0) for p in parts]
 
 
 class TestGroupConsumerRangeAssignor(unittest.TestCase):

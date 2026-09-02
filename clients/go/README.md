@@ -72,7 +72,7 @@ err = g.Commit()
 err = g.Close()
 // Opt-in auto-commit (v0.48). Default off. interval 0 = after every Poll.
 g, err = volant.JoinGroupConsumer(c, "g", []string{"t"}, 10_000, volant.WithAutoCommit(5*time.Second))
-// Opt-in auto_offset_reset (v0.62). Default earliest (position 0).
+// Opt-in auto_offset_reset (v0.62/v0.70). Default earliest (ListOffsets earliest).
 g, err = volant.JoinGroupConsumer(c, "g", []string{"t"}, 10_000, volant.WithAutoOffsetReset("latest"))
 _ = batch
 meta, err := c.Metadata()
@@ -257,8 +257,8 @@ commits on the first successful Poll, then on the interval. Explicit
 commits dirty positions then leaves. This is **not** Kafka
 `enable.auto.commit` (no background commit goroutine).
 
-`WithAutoOffsetReset` (v0.62) is a tiny Kafka subset: `earliest`
-(default, position 0, no ListOffsets), `latest` (native ListOffsets
+`WithAutoOffsetReset` (v0.62/v0.70) is a tiny Kafka subset: `earliest`
+(default, native ListOffsets earliest), `latest` (ListOffsets latest /
 LEO), `none` (error if OffsetFetch is missing / `OFFSET_UNKNOWN`).
 Invalid strings fail Join before JoinGroup. Not Kafka
 `auto.offset.reset` (no timestamp). Rust GroupConsumer still starts

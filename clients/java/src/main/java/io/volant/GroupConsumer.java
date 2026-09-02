@@ -233,13 +233,13 @@ public final class GroupConsumer implements AutoCloseable {
     }
 
     /**
-     * Join with an explicit {@code auto_offset_reset} (v0.62). Default
-     * {@link #join} stays {@code earliest} (position 0, no ListOffsets).
+     * Join with an explicit {@code auto_offset_reset} (v0.62/v0.70). Default
+     * {@link #join} stays {@code earliest} (native ListOffsets earliest).
      *
-     * <p>{@code autoOffsetReset} is {@code "earliest"}, {@code "latest"}
-     * (native ListOffsets LEO), or {@code "none"} (raise if OffsetFetch is
-     * missing / {@link #OFFSET_UNKNOWN}). Empty / {@code null} is
-     * {@code earliest}. Unknown values throw
+     * <p>{@code autoOffsetReset} is {@code "earliest"} (ListOffsets earliest),
+     * {@code "latest"} (ListOffsets latest / LEO), or {@code "none"} (raise if
+     * OffsetFetch is missing / {@link #OFFSET_UNKNOWN}). Empty / {@code null}
+     * is {@code earliest}. Unknown values throw
      * {@link IllegalArgumentException} before JoinGroup. Not Kafka
      * {@code auto.offset.reset} (no timestamp).
      *
@@ -468,18 +468,13 @@ public final class GroupConsumer implements AutoCloseable {
         if (partitions.isEmpty()) {
             return;
         }
-        if (RESET_EARLIEST.equals(autoOffsetReset)) {
-            for (Tp tp : partitions) {
-                positions.put(tp, 0L);
-            }
-            return;
-        }
         if (RESET_NONE.equals(autoOffsetReset)) {
             Tp tp = partitions.get(0);
             throw new IllegalStateException(
                     "no committed offset for " + tp.topic + "-" + tp.partition
                             + " and auto_offset_reset=" + autoOffsetReset);
         }
+        boolean useEarliest = RESET_EARLIEST.equals(autoOffsetReset);
         Map<String, List<Integer>> byTopic = new LinkedHashMap<>();
         for (Tp tp : partitions) {
             byTopic.computeIfAbsent(tp.topic, k -> new ArrayList<>()).add(tp.partition);
@@ -494,16 +489,16 @@ public final class GroupConsumer implements AutoCloseable {
             Map<Integer, Long> got = new HashMap<>();
             if (listings != null) {
                 for (OffsetListing listing : listings) {
-                    got.put(listing.partition, listing.latest);
+                    got.put(listing.partition, useEarliest ? listing.earliest : listing.latest);
                 }
             }
             for (int part : wanted) {
-                Long latest = got.get(part);
-                if (latest == null) {
+                Long off = got.get(part);
+                if (off == null) {
                     throw new IllegalStateException(
                             "list_offsets missing partition " + e.getKey() + "-" + part);
                 }
-                positions.put(new Tp(e.getKey(), part), latest);
+                positions.put(new Tp(e.getKey(), part), off);
             }
         }
     }

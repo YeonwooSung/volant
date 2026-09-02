@@ -25,6 +25,7 @@ class FakeClient:
         self.offset_fetches: list[tuple[str, str]] = []
         self.list_offsets_calls: list[tuple[str, list[int]]] = []
         self.list_offset_entries: dict[tuple[str, int], tuple[int, int]] = {}
+        self.list_offsets_omit: set[tuple[str, int]] = set()
         self.list_offsets_error: BaseException | None = None
 
         self.join_queue: list[JoinGroupResult] = []
@@ -141,9 +142,9 @@ class FakeClient:
             raise self.list_offsets_error
         out: list[OffsetListing] = []
         for p in parts:
-            bounds = self.list_offset_entries.get((topic, p))
-            if bounds is None:
+            if (topic, p) in self.list_offsets_omit:
                 continue
+            bounds = self.list_offset_entries.get((topic, p), (0, 0))
             out.append(OffsetListing(partition=p, earliest=bounds[0], latest=bounds[1]))
         return out
 
@@ -186,21 +187,21 @@ class TestGroupConsumer(unittest.TestCase):
         self.assertEqual(c.joins[0]["member_id"], "")
         self.assertEqual(c.offset_fetches, [("g", "t")])
 
-    def test_join_unknown_offset_starts_at_zero(self) -> None:
+    def test_join_unknown_offset_uses_list_offsets_earliest(self) -> None:
         c = FakeClient()
         c.committed[("t", 0)] = OFFSET_UNKNOWN
         c.join_queue.append(_join([("t", 0)]))
         g = _gc(c, "g", ["t"])
         self.assertEqual(g.positions, {("t", 0): 0})
         self.assertEqual(g.auto_offset_reset, "earliest")
-        self.assertEqual(c.list_offsets_calls, [])
+        self.assertEqual(c.list_offsets_calls, [("t", [0])])
 
-    def test_join_missing_offset_starts_at_zero(self) -> None:
+    def test_join_missing_offset_uses_list_offsets_earliest(self) -> None:
         c = FakeClient()
         c.join_queue.append(_join([("t", 0), ("t", 1)]))
         g = _gc(c, "g", ["t"])
         self.assertEqual(g.positions, {("t", 0): 0, ("t", 1): 0})
-        self.assertEqual(c.list_offsets_calls, [])
+        self.assertEqual(c.list_offsets_calls, [("t", [0, 1])])
 
     def test_session_timeout_zero_defaults(self) -> None:
         c = FakeClient()
@@ -489,23 +490,53 @@ class TestGroupConsumer(unittest.TestCase):
         self.assertEqual(c.commits[1]["generation"], 1)
         self.assertEqual(c.leaves, [("g", "m1")])
 
+    def test_earliest_unknown_uses_list_offsets_earliest(self) -> None:
+        c = FakeClient()
+        c.committed[("t", 0)] = OFFSET_UNKNOWN
+        c.list_offset_entries[("t", 0)] = (7, 20)
+        c.join_queue.append(_join([("t", 0)]))
+        g = _gc(c, "g", ["t"])
+        self.assertEqual(g.positions, {("t", 0): 7})
+        self.assertEqual(c.list_offsets_calls, [("t", [0])])
+        self.assertEqual(c.fetches, [])
+
+    def test_earliest_list_offsets_missing_partition_raises(self) -> None:
+        c = FakeClient()
+        c.committed[("t", 0)] = OFFSET_UNKNOWN
+        c.list_offsets_omit.add(("t", 0))
+        c.join_queue.append(_join([("t", 0)]))
+        with self.assertRaises(ValueError) as ctx:
+            _gc(c, "g", ["t"])
+        self.assertIn("list_offsets missing partition", str(ctx.exception))
+        self.assertEqual(c.list_offsets_calls, [("t", [0])])
+        self.assertEqual(c.fetches, [])
+
     def test_latest_unknown_uses_list_offsets(self) -> None:
         c = FakeClient()
         c.committed[("t", 0)] = OFFSET_UNKNOWN
-        c.list_offset_entries[("t", 0)] = (0, 10)
+        c.list_offset_entries[("t", 0)] = (7, 20)
         c.join_queue.append(_join([("t", 0)]))
         g = _gc(c, "g", ["t"], auto_offset_reset="latest")
-        self.assertEqual(g.positions, {("t", 0): 10})
+        self.assertEqual(g.positions, {("t", 0): 20})
         self.assertEqual(c.list_offsets_calls, [("t", [0])])
         self.assertEqual(c.fetches, [])
 
     def test_latest_committed_skips_list_offsets(self) -> None:
         c = FakeClient()
         c.committed[("t", 0)] = 5
-        c.list_offset_entries[("t", 0)] = (0, 10)
+        c.list_offset_entries[("t", 0)] = (7, 20)
         c.join_queue.append(_join([("t", 0)]))
         g = _gc(c, "g", ["t"], auto_offset_reset="latest")
         self.assertEqual(g.positions, {("t", 0): 5})
+        self.assertEqual(c.list_offsets_calls, [])
+
+    def test_earliest_committed_skips_list_offsets(self) -> None:
+        c = FakeClient()
+        c.committed[("t", 0)] = 3
+        c.list_offset_entries[("t", 0)] = (7, 20)
+        c.join_queue.append(_join([("t", 0)]))
+        g = _gc(c, "g", ["t"])
+        self.assertEqual(g.positions, {("t", 0): 3})
         self.assertEqual(c.list_offsets_calls, [])
 
     def test_none_unknown_raises_without_fetch(self) -> None:
