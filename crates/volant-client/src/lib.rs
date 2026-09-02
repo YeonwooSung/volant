@@ -18,7 +18,7 @@ pub mod txn;
 pub use client::{
     produce_value, Client, DeleteOffsetsResult, DeleteRecordsResult, DescribeConfigsResult,
     DescribeGroupResult, FetchResult, HeartbeatResult, JoinGroupResult, ListOffsetsResult,
-    Metadata, PartitionOffsets, ProduceResult,
+    MembershipList, Metadata, PartitionOffsets, ProduceResult,
 };
 pub use config::ClientConfig;
 pub use consumer::Consumer;

@@ -614,11 +614,11 @@ impl Broker {
         self.admin_catchup.lock().in_flight.contains(&peer_id)
     }
 
-    /// Configured cluster size for majority (static membership).
+    /// Configured cluster size for majority (effective overlay or toml N).
     pub fn cluster_member_count(&self) -> usize {
         self.cluster
             .as_ref()
-            .map(|c| c.config.brokers.len().max(1))
+            .map(|c| c.config.read().brokers.len().max(1))
             .unwrap_or(1)
     }
 
@@ -1047,6 +1047,7 @@ impl Broker {
         self.cluster
             .as_ref()?
             .config
+            .read()
             .broker(broker_id)
             .and_then(|b| b.rack.clone())
     }
@@ -1094,8 +1095,8 @@ impl Broker {
             }
             // Usable endpoint gate (Phase 133): skip peers with no resolvable
             // configured address (missing broker, empty host, or empty addr).
-            let usable = cluster
-                .config
+            let cfg = cluster.config.read();
+            let usable = cfg
                 .broker(id)
                 .map(|b| !b.host.trim().is_empty() && b.port != 0)
                 .unwrap_or(false)
@@ -1106,8 +1107,7 @@ impl Broker {
             if !usable {
                 continue;
             }
-            let same_rack = cluster
-                .config
+            let same_rack = cfg
                 .broker(id)
                 .and_then(|b| b.rack.as_deref())
                 .map(|r| r.trim() == rack)
@@ -1163,7 +1163,7 @@ impl Broker {
         }
         self.cluster
             .as_ref()
-            .map(|c| c.config.replica_lag_max_ms)
+            .map(|c| c.config.read().replica_lag_max_ms)
             .unwrap_or(0)
     }
 

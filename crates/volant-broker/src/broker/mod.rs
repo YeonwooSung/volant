@@ -20,8 +20,8 @@ use volant_protocol::ErrorCode;
 use volant_storage::StorageConfig;
 
 use crate::cluster::{
-    load_assignment, AssignmentConsensus, AssignmentSnapshot, ClusterConfig, Membership,
-    MetadataRaftState,
+    load_assignment, load_membership_overlay, AssignmentConsensus, AssignmentSnapshot,
+    ClusterConfig, Membership, MetadataRaftState,
 };
 use crate::delete_records_outbox::DeleteRecordsOutbox;
 use crate::group::GroupCoordinator;
@@ -81,11 +81,24 @@ pub struct PartitionMetadata {
     pub leader_epoch: u32,
 }
 
+/// Configured + live membership snapshot (v0.10).
+#[derive(Debug, Clone)]
+pub struct MembershipSnapshot {
+    /// Overlay generation (`0` if still toml-only).
+    pub generation: u64,
+    /// Effective broker endpoints.
+    pub brokers: Vec<crate::cluster::BrokerEndpoint>,
+    /// Currently live broker ids (sorted).
+    pub live: Vec<u32>,
+}
+
 /// Shared cluster runtime state.
 #[derive(Debug)]
 pub struct ClusterState {
-    /// Static config.
-    pub config: ClusterConfig,
+    /// Cluster knobs + **effective** broker list (overlay SoT when present).
+    pub config: RwLock<ClusterConfig>,
+    /// Overlay generation (`0` = `cluster.toml` only; no overlay written yet).
+    pub membership_generation: AtomicU64,
     /// Live membership.
     pub membership: RwLock<Membership>,
     /// Assignment snapshot.
@@ -861,11 +874,19 @@ impl Broker {
     }
 
     /// Create a multi-node broker with static cluster config.
+    ///
+    /// If `{data_dir}/cluster/membership.json` exists it replaces `config.brokers`
+    /// (overlay is membership SoT). Otherwise toml brokers are used.
     pub fn with_cluster(
         storage: StorageConfig,
         node_id: u32,
-        config: ClusterConfig,
+        mut config: ClusterConfig,
     ) -> Result<Self> {
+        let mut membership_generation = 0u64;
+        if let Some(overlay) = load_membership_overlay(&storage.data_dir)? {
+            config.brokers = overlay.brokers;
+            membership_generation = overlay.generation;
+        }
         if config.broker(node_id).is_none() {
             return Err(Error::InvalidArgument(format!(
                 "node_id {node_id} not present in cluster config"
@@ -883,7 +904,8 @@ impl Broker {
         let n_configured = config.brokers.len().max(1);
         let data_dir = storage.data_dir.clone();
         let cluster = Arc::new(ClusterState {
-            config,
+            config: RwLock::new(config),
+            membership_generation: AtomicU64::new(membership_generation),
             membership: RwLock::new(membership),
             assignment: RwLock::new(assignment),
             data_dir,
@@ -1098,14 +1120,16 @@ impl Broker {
         self.node_id
     }
 
-    /// Cluster config if multi-node.
+    /// Cluster config if multi-node (effective broker list: overlay or toml).
     pub fn cluster_config(&self) -> Option<ClusterConfig> {
-        self.cluster.as_ref().map(|c| c.config.clone())
+        self.cluster.as_ref().map(|c| c.config.read().clone())
     }
 
-    /// Address of a peer broker.
+    /// Address of a peer broker (effective list).
     pub fn broker_addr(&self, id: u32) -> Option<String> {
-        self.cluster.as_ref().and_then(|c| c.config.addr_of(id))
+        self.cluster
+            .as_ref()
+            .and_then(|c| c.config.read().addr_of(id))
     }
 
     /// Whether this node is currently the controller.
@@ -1207,7 +1231,7 @@ impl Broker {
             // min_insync_replicas for acks=all.
             if acks == 255 {
                 if let Some(cluster) = &self.cluster {
-                    let min_isr = cluster.config.min_insync_replicas;
+                    let min_isr = cluster.config.read().min_insync_replicas;
                     if (part.isr.len() as u32) < min_isr {
                         return Ok((Vec::new(), ErrorCode::NotEnoughReplicas as u16));
                     }

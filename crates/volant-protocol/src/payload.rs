@@ -3,17 +3,17 @@
 use bytes::{Buf, BufMut, Bytes, BytesMut};
 use volant_core::{Error, Result};
 
+use crate::codec::checksum;
+use crate::frame::{Frame, FrameHeader, PROTOCOL_VERSION};
 use crate::request::{
-    AclBinding, OffsetCommitEntry, OffsetEntry, ProduceMessage, Request, RequestOpcode,
-    TxnOffsetCommit,
+    AclBinding, MembershipBroker, OffsetCommitEntry, OffsetEntry, ProduceMessage, Request,
+    RequestOpcode, TxnOffsetCommit,
 };
 use crate::response::{
     Assignment, BrokerInfo, ClusterPartitionState, ClusterTopicState, ErrorCode, FetchRecord,
     GroupListing, GroupMemberInfo, GroupState, OffsetFetchEntry, OffsetListing, PartitionInfo,
     Response, ResponseOpcode, TopicInfo, TxnProduceResult,
 };
-use crate::frame::{Frame, FrameHeader, PROTOCOL_VERSION};
-use crate::codec::checksum;
 
 /// Maximum accepted payload size (16 MiB).
 pub const MAX_PAYLOAD: usize = 16 * 1024 * 1024;
@@ -79,6 +79,46 @@ fn put_bytes(dst: &mut BytesMut, b: &[u8]) {
     dst.extend_from_slice(b);
 }
 
+fn put_membership_broker(dst: &mut BytesMut, b: &MembershipBroker) -> Result<()> {
+    dst.put_u32_le(b.id);
+    put_string(dst, &b.host)?;
+    dst.put_u16_le(b.port);
+    match &b.rack {
+        Some(r) => {
+            dst.put_u8(1);
+            put_string(dst, r)?;
+        }
+        None => dst.put_u8(0),
+    }
+    Ok(())
+}
+
+fn get_membership_broker(src: &mut impl Buf) -> Result<MembershipBroker> {
+    if src.remaining() < 4 {
+        return Err(Error::Protocol("truncated membership broker id".into()));
+    }
+    let id = src.get_u32_le();
+    let host = get_string(src)?;
+    if src.remaining() < 2 + 1 {
+        return Err(Error::Protocol(
+            "truncated membership broker port/rack".into(),
+        ));
+    }
+    let port = src.get_u16_le();
+    let has_rack = src.get_u8();
+    let rack = if has_rack != 0 {
+        Some(get_string(src)?)
+    } else {
+        None
+    };
+    Ok(MembershipBroker {
+        id,
+        host,
+        port,
+        rack,
+    })
+}
+
 fn put_optional_bytes(dst: &mut BytesMut, b: Option<&[u8]>) {
     match b {
         None => dst.put_u32_le(u32::MAX),
@@ -92,7 +132,9 @@ fn get_bytes(src: &mut impl Buf) -> Result<Bytes> {
     }
     let len = src.get_u32_le() as usize;
     if len == u32::MAX as usize {
-        return Err(Error::Protocol("unexpected optional null in required bytes".into()));
+        return Err(Error::Protocol(
+            "unexpected optional null in required bytes".into(),
+        ));
     }
     if src.remaining() < len {
         return Err(Error::Protocol("truncated bytes body".into()));
@@ -455,10 +497,7 @@ pub fn encode_request(req: &Request) -> Result<Bytes> {
             dst.put_u64_le(*before_offset);
             dst.put_u8(*wait_majority);
         }
-        Request::CreatePartitions {
-            topic,
-            total_count,
-        } => {
+        Request::CreatePartitions { topic, total_count } => {
             put_string(&mut dst, topic)?;
             dst.put_u32_le(*total_count);
         }
@@ -691,6 +730,36 @@ pub fn encode_request(req: &Request) -> Result<Bytes> {
             }
             dst.put_u64_le(*leader_commit);
         }
+        Request::MembershipPut {
+            generation,
+            brokers,
+        } => {
+            dst.put_u64_le(*generation);
+            dst.put_u32_le(brokers.len() as u32);
+            for b in brokers {
+                put_membership_broker(&mut dst, b)?;
+            }
+        }
+        Request::AddBroker {
+            id,
+            host,
+            port,
+            rack,
+        } => {
+            put_membership_broker(
+                &mut dst,
+                &MembershipBroker {
+                    id: *id,
+                    host: host.clone(),
+                    port: *port,
+                    rack: rack.clone(),
+                },
+            )?;
+        }
+        Request::RemoveBroker { id } => {
+            dst.put_u32_le(*id);
+        }
+        Request::ListMembers => {}
     }
     finish_payload(dst)
 }
@@ -1063,10 +1132,7 @@ pub fn decode_request(opcode: u16, payload: &[u8]) -> Result<Request> {
                 return Err(Error::Protocol("truncated create partitions".into()));
             }
             let total_count = src.get_u32_le();
-            Ok(Request::CreatePartitions {
-                topic,
-                total_count,
-            })
+            Ok(Request::CreatePartitions { topic, total_count })
         }
         RequestOpcode::ListOffsets => {
             let topic = get_string(&mut src)?;
@@ -1140,7 +1206,9 @@ pub fn decode_request(opcode: u16, payload: &[u8]) -> Result<Request> {
             let username = get_string(&mut src)?;
             let password = get_string(&mut src)?;
             if src.remaining() < 4 {
-                return Err(Error::Protocol("truncated create scram user iterations".into()));
+                return Err(Error::Protocol(
+                    "truncated create scram user iterations".into(),
+                ));
             }
             let iterations = src.get_u32_le();
             Ok(Request::CreateScramUser {
@@ -1167,7 +1235,9 @@ pub fn decode_request(opcode: u16, payload: &[u8]) -> Result<Request> {
         }
         RequestOpcode::ClusterBrokerConfig => {
             if src.remaining() < 8 + 2 {
-                return Err(Error::Protocol("truncated cluster broker config header".into()));
+                return Err(Error::Protocol(
+                    "truncated cluster broker config header".into(),
+                ));
             }
             let generation = src.get_u64_le();
             let n = src.get_u16_le() as usize;
@@ -1184,7 +1254,9 @@ pub fn decode_request(opcode: u16, payload: &[u8]) -> Result<Request> {
         }
         RequestOpcode::ClusterAclSnapshot => {
             if src.remaining() < 8 {
-                return Err(Error::Protocol("truncated cluster acl snapshot generation".into()));
+                return Err(Error::Protocol(
+                    "truncated cluster acl snapshot generation".into(),
+                ));
             }
             let generation = src.get_u64_le();
             let snapshot = get_bytes(&mut src)?;
@@ -1253,7 +1325,9 @@ pub fn decode_request(opcode: u16, payload: &[u8]) -> Result<Request> {
         }
         RequestOpcode::KafkaFetchForward => {
             if src.remaining() < 2 {
-                return Err(Error::Protocol("truncated kafka fetch forward version".into()));
+                return Err(Error::Protocol(
+                    "truncated kafka fetch forward version".into(),
+                ));
             }
             let api_version = src.get_i16_le();
             let principal = get_string(&mut src)?;
@@ -1337,7 +1411,9 @@ pub fn decode_request(opcode: u16, payload: &[u8]) -> Result<Request> {
             let leader_epoch = src.get_u32_le();
             let isr_count = src.get_u32_le() as usize;
             if src.remaining() < isr_count.saturating_mul(4).saturating_add(4) {
-                return Err(Error::Protocol("truncated isr update isr/generation".into()));
+                return Err(Error::Protocol(
+                    "truncated isr update isr/generation".into(),
+                ));
             }
             let mut isr = Vec::with_capacity(isr_count);
             for _ in 0..isr_count {
@@ -1416,6 +1492,39 @@ pub fn decode_request(opcode: u16, payload: &[u8]) -> Result<Request> {
                 leader_commit,
             })
         }
+        RequestOpcode::MembershipPut => {
+            if src.remaining() < 8 + 4 {
+                return Err(Error::Protocol("truncated membership put header".into()));
+            }
+            let generation = src.get_u64_le();
+            let count = src.get_u32_le() as usize;
+            let mut brokers = Vec::with_capacity(count);
+            for _ in 0..count {
+                brokers.push(get_membership_broker(&mut src)?);
+            }
+            Ok(Request::MembershipPut {
+                generation,
+                brokers,
+            })
+        }
+        RequestOpcode::AddBroker => {
+            let b = get_membership_broker(&mut src)?;
+            Ok(Request::AddBroker {
+                id: b.id,
+                host: b.host,
+                port: b.port,
+                rack: b.rack,
+            })
+        }
+        RequestOpcode::RemoveBroker => {
+            if src.remaining() < 4 {
+                return Err(Error::Protocol("truncated remove broker".into()));
+            }
+            Ok(Request::RemoveBroker {
+                id: src.get_u32_le(),
+            })
+        }
+        RequestOpcode::ListMembers => Ok(Request::ListMembers),
     }
 }
 
@@ -1845,6 +1954,41 @@ pub fn encode_response(resp: &Response) -> Result<Bytes> {
             dst.put_u8(*success);
             dst.put_u64_le(*match_index);
         }
+        Response::MembershipPut {
+            error_code,
+            applied_generation,
+        } => {
+            dst.put_u16_le(*error_code);
+            dst.put_u64_le(*applied_generation);
+        }
+        Response::AddBroker {
+            error_code,
+            generation,
+        }
+        | Response::RemoveBroker {
+            error_code,
+            generation,
+        } => {
+            dst.put_u16_le(*error_code);
+            dst.put_u64_le(*generation);
+        }
+        Response::ListMembers {
+            error_code,
+            generation,
+            brokers,
+            live,
+        } => {
+            dst.put_u16_le(*error_code);
+            dst.put_u64_le(*generation);
+            dst.put_u32_le(brokers.len() as u32);
+            for b in brokers {
+                put_membership_broker(&mut dst, b)?;
+            }
+            dst.put_u32_le(live.len() as u32);
+            for id in live {
+                dst.put_u32_le(*id);
+            }
+        }
         Response::Error { code, message } => {
             dst.put_u16_le(*code);
             put_string(&mut dst, message)?;
@@ -2066,7 +2210,9 @@ pub fn decode_response(opcode: u16, payload: &[u8]) -> Result<Response> {
             let generation = src.get_u32_le();
             let member_id = get_string(&mut src)?;
             if src.remaining() < 4 {
-                return Err(Error::Protocol("truncated join group assignment count".into()));
+                return Err(Error::Protocol(
+                    "truncated join group assignment count".into(),
+                ));
             }
             let assignment_count = src.get_u32_le() as usize;
             let mut assignment = Vec::with_capacity(assignment_count);
@@ -2088,7 +2234,9 @@ pub fn decode_response(opcode: u16, payload: &[u8]) -> Result<Response> {
                 for _ in 0..revoked_count {
                     let topic = get_string(&mut src)?;
                     if src.remaining() < 4 {
-                        return Err(Error::Protocol("truncated join group revoked partition".into()));
+                        return Err(Error::Protocol(
+                            "truncated join group revoked partition".into(),
+                        ));
                     }
                     revoked.push(Assignment {
                         topic,
@@ -2162,7 +2310,9 @@ pub fn decode_response(opcode: u16, payload: &[u8]) -> Result<Response> {
         }
         ResponseOpcode::HeartbeatBroker => {
             if src.remaining() < 2 + 4 + 4 + 4 {
-                return Err(Error::Protocol("truncated heartbeat broker response".into()));
+                return Err(Error::Protocol(
+                    "truncated heartbeat broker response".into(),
+                ));
             }
             let error_code = src.get_u16_le();
             let controller_id = src.get_u32_le();
@@ -2207,7 +2357,9 @@ pub fn decode_response(opcode: u16, payload: &[u8]) -> Result<Response> {
         }
         ResponseOpcode::InitProducerId => {
             if src.remaining() < 8 + 2 + 2 {
-                return Err(Error::Protocol("truncated init producer id response".into()));
+                return Err(Error::Protocol(
+                    "truncated init producer id response".into(),
+                ));
             }
             Ok(Response::InitProducerId {
                 producer_id: src.get_u64_le(),
@@ -2262,7 +2414,9 @@ pub fn decode_response(opcode: u16, payload: &[u8]) -> Result<Response> {
             for _ in 0..member_count {
                 let member_id = get_string(&mut src)?;
                 if src.remaining() < 4 {
-                    return Err(Error::Protocol("truncated describe group topic count".into()));
+                    return Err(Error::Protocol(
+                        "truncated describe group topic count".into(),
+                    ));
                 }
                 let topic_count = src.get_u32_le() as usize;
                 let mut topics = Vec::with_capacity(topic_count);
@@ -2323,10 +2477,7 @@ pub fn decode_response(opcode: u16, payload: &[u8]) -> Result<Response> {
                     generation,
                 });
             }
-            Ok(Response::ListGroups {
-                error_code,
-                groups,
-            })
+            Ok(Response::ListGroups { error_code, groups })
         }
         ResponseOpcode::DeleteOffsets => {
             if src.remaining() < 2 + 4 {
@@ -2526,7 +2677,9 @@ pub fn decode_response(opcode: u16, payload: &[u8]) -> Result<Response> {
         }
         ResponseOpcode::ReplicaDeleteRecords => {
             if src.remaining() < 2 + 8 {
-                return Err(Error::Protocol("truncated replica delete records response".into()));
+                return Err(Error::Protocol(
+                    "truncated replica delete records response".into(),
+                ));
             }
             Ok(Response::ReplicaDeleteRecords {
                 error_code: src.get_u16_le(),
@@ -2535,7 +2688,9 @@ pub fn decode_response(opcode: u16, payload: &[u8]) -> Result<Response> {
         }
         ResponseOpcode::ClusterBrokerConfig => {
             if src.remaining() < 2 + 8 {
-                return Err(Error::Protocol("truncated cluster broker config response".into()));
+                return Err(Error::Protocol(
+                    "truncated cluster broker config response".into(),
+                ));
             }
             Ok(Response::ClusterBrokerConfig {
                 error_code: src.get_u16_le(),
@@ -2544,7 +2699,9 @@ pub fn decode_response(opcode: u16, payload: &[u8]) -> Result<Response> {
         }
         ResponseOpcode::ClusterAclSnapshot => {
             if src.remaining() < 2 + 8 {
-                return Err(Error::Protocol("truncated cluster acl snapshot response".into()));
+                return Err(Error::Protocol(
+                    "truncated cluster acl snapshot response".into(),
+                ));
             }
             Ok(Response::ClusterAclSnapshot {
                 error_code: src.get_u16_le(),
@@ -2553,7 +2710,9 @@ pub fn decode_response(opcode: u16, payload: &[u8]) -> Result<Response> {
         }
         ResponseOpcode::TxnParticipantOpen => {
             if src.remaining() < 2 {
-                return Err(Error::Protocol("truncated txn participant open response".into()));
+                return Err(Error::Protocol(
+                    "truncated txn participant open response".into(),
+                ));
             }
             Ok(Response::TxnParticipantOpen {
                 error_code: src.get_u16_le(),
@@ -2673,6 +2832,62 @@ pub fn decode_response(opcode: u16, payload: &[u8]) -> Result<Response> {
                 match_index: src.get_u64_le(),
             })
         }
+        ResponseOpcode::MembershipPut => {
+            if src.remaining() < 2 + 8 {
+                return Err(Error::Protocol("truncated membership put response".into()));
+            }
+            Ok(Response::MembershipPut {
+                error_code: src.get_u16_le(),
+                applied_generation: src.get_u64_le(),
+            })
+        }
+        ResponseOpcode::AddBroker => {
+            if src.remaining() < 2 + 8 {
+                return Err(Error::Protocol("truncated add broker response".into()));
+            }
+            Ok(Response::AddBroker {
+                error_code: src.get_u16_le(),
+                generation: src.get_u64_le(),
+            })
+        }
+        ResponseOpcode::RemoveBroker => {
+            if src.remaining() < 2 + 8 {
+                return Err(Error::Protocol("truncated remove broker response".into()));
+            }
+            Ok(Response::RemoveBroker {
+                error_code: src.get_u16_le(),
+                generation: src.get_u64_le(),
+            })
+        }
+        ResponseOpcode::ListMembers => {
+            if src.remaining() < 2 + 8 + 4 {
+                return Err(Error::Protocol("truncated list members header".into()));
+            }
+            let error_code = src.get_u16_le();
+            let generation = src.get_u64_le();
+            let count = src.get_u32_le() as usize;
+            let mut brokers = Vec::with_capacity(count);
+            for _ in 0..count {
+                brokers.push(get_membership_broker(&mut src)?);
+            }
+            if src.remaining() < 4 {
+                return Err(Error::Protocol("truncated list members live count".into()));
+            }
+            let live_count = src.get_u32_le() as usize;
+            if src.remaining() < live_count.saturating_mul(4) {
+                return Err(Error::Protocol("truncated list members live ids".into()));
+            }
+            let mut live = Vec::with_capacity(live_count);
+            for _ in 0..live_count {
+                live.push(src.get_u32_le());
+            }
+            Ok(Response::ListMembers {
+                error_code,
+                generation,
+                brokers,
+                live,
+            })
+        }
         ResponseOpcode::Error => {
             if src.remaining() < 2 {
                 return Err(Error::Protocol("truncated error code".into()));
@@ -2784,8 +2999,7 @@ mod tests {
             req
         );
         // Legacy empty InitProducerId body.
-        let decoded =
-            decode_request(RequestOpcode::InitProducerId as u16, &Bytes::new()).unwrap();
+        let decoded = decode_request(RequestOpcode::InitProducerId as u16, &Bytes::new()).unwrap();
         assert_eq!(
             decoded,
             Request::InitProducerId {
@@ -2912,8 +3126,7 @@ mod tests {
         let mut legacy = BytesMut::new();
         put_string(&mut legacy, "t").unwrap();
         legacy.put_u32_le(2);
-        let decoded =
-            decode_request(RequestOpcode::CreateTopic as u16, &legacy.freeze()).unwrap();
+        let decoded = decode_request(RequestOpcode::CreateTopic as u16, &legacy.freeze()).unwrap();
         match decoded {
             Request::CreateTopic { configs, .. } => assert!(configs.is_empty()),
             other => panic!("unexpected {other:?}"),
@@ -3288,8 +3501,7 @@ mod tests {
         legacy.put_u32_le(5000);
         legacy.put_u32_le(1);
         put_string(&mut legacy, "t").unwrap();
-        let decoded =
-            decode_request(RequestOpcode::JoinGroup as u16, &legacy.freeze()).unwrap();
+        let decoded = decode_request(RequestOpcode::JoinGroup as u16, &legacy.freeze()).unwrap();
         match decoded {
             Request::JoinGroup {
                 group_instance_id, ..
@@ -3324,7 +3536,7 @@ mod tests {
         let create = Request::CreateTopic {
             name: "t".into(),
             partitions: 3,
-         configs: vec![],
+            configs: vec![],
         };
         let b = encode_request(&create).unwrap();
         assert_eq!(
@@ -3485,8 +3697,7 @@ mod tests {
         legacy.put_u32_le(1);
         put_string(&mut legacy, "events").unwrap();
         legacy.put_u32_le(0);
-        let decoded =
-            decode_response(ResponseOpcode::JoinGroup as u16, &legacy.freeze()).unwrap();
+        let decoded = decode_response(ResponseOpcode::JoinGroup as u16, &legacy.freeze()).unwrap();
         assert_eq!(
             decoded,
             Response::JoinGroup {
@@ -3591,8 +3802,7 @@ mod tests {
         legacy.put_u32_le(2);
         legacy.put_u32_le(1);
         legacy.put_u32_le(5);
-        let legacy_req =
-            decode_request(RequestOpcode::HeartbeatBroker as u16, &legacy).unwrap();
+        let legacy_req = decode_request(RequestOpcode::HeartbeatBroker as u16, &legacy).unwrap();
         assert_eq!(
             legacy_req,
             Request::HeartbeatBroker {
@@ -3611,8 +3821,7 @@ mod tests {
         p117.put_u32_le(5);
         p117.put_u64_le(3);
         p117.put_u64_le(2);
-        let p117_req =
-            decode_request(RequestOpcode::HeartbeatBroker as u16, &p117).unwrap();
+        let p117_req = decode_request(RequestOpcode::HeartbeatBroker as u16, &p117).unwrap();
         assert_eq!(
             p117_req,
             Request::HeartbeatBroker {
@@ -3671,10 +3880,7 @@ mod tests {
 
     #[test]
     fn phase6_error_codes() {
-        assert_eq!(
-            ErrorCode::from_u16(13),
-            ErrorCode::NotLeaderForPartition
-        );
+        assert_eq!(ErrorCode::from_u16(13), ErrorCode::NotLeaderForPartition);
         assert_eq!(ErrorCode::from_u16(14), ErrorCode::NotController);
         assert_eq!(ErrorCode::from_u16(15), ErrorCode::NotEnoughReplicas);
         assert_eq!(ErrorCode::from_u16(16), ErrorCode::BrokerNotAvailable);
@@ -3686,10 +3892,7 @@ mod tests {
             token: "s3cret".into(),
         };
         let b = encode_request(&req).unwrap();
-        assert_eq!(
-            decode_request(RequestOpcode::Auth as u16, &b).unwrap(),
-            req
-        );
+        assert_eq!(decode_request(RequestOpcode::Auth as u16, &b).unwrap(), req);
 
         let resp = Response::Auth { error_code: 0 };
         let b = encode_response(&resp).unwrap();
@@ -3710,14 +3913,8 @@ mod tests {
 
     #[test]
     fn phase7_auth_error_codes() {
-        assert_eq!(
-            ErrorCode::from_u16(17),
-            ErrorCode::AuthenticationFailed
-        );
-        assert_eq!(
-            ErrorCode::from_u16(18),
-            ErrorCode::AuthenticationRequired
-        );
+        assert_eq!(ErrorCode::from_u16(17), ErrorCode::AuthenticationFailed);
+        assert_eq!(ErrorCode::from_u16(18), ErrorCode::AuthenticationRequired);
     }
 
     /// Random / truncated / oversized inputs must not panic.
@@ -3734,12 +3931,10 @@ mod tests {
 
         // Empty / truncated payloads for every known opcode.
         let req_ops: &[u16] = &[
-            1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 20, 22, 24, 30, 32, 34, 36, 38, 40, 42, 99,
-            0xFFFF,
+            1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 20, 22, 24, 30, 32, 34, 36, 38, 40, 42, 99, 0xFFFF,
         ];
         let resp_ops: &[u16] = &[
-            1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 21, 23, 25, 31, 33, 35, 37, 39, 41, 43, 0xFFFF,
-            42,
+            1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 21, 23, 25, 31, 33, 35, 37, 39, 41, 43, 0xFFFF, 42,
         ];
 
         for op in req_ops {
@@ -3897,7 +4092,7 @@ mod tests {
     /// cargo-fuzz / nightly.
     #[test]
     fn corpus_smoke_decode_paths() {
-        use crate::codec::{checksum, encode_frame, decode_frame};
+        use crate::codec::{checksum, decode_frame, encode_frame};
         use crate::frame::{Frame, FrameHeader, FRAME_MAGIC, PROTOCOL_VERSION};
         use std::path::PathBuf;
 
@@ -4264,10 +4459,7 @@ mod tests {
 
         let del = Request::FetchSessionMirrorDelete { session_id: -7 };
         let db = encode_request(&del).unwrap();
-        assert_eq!(
-            del.opcode(),
-            RequestOpcode::FetchSessionMirrorDelete as u16
-        );
+        assert_eq!(del.opcode(), RequestOpcode::FetchSessionMirrorDelete as u16);
         assert_eq!(
             decode_request(RequestOpcode::FetchSessionMirrorDelete as u16, &db).unwrap(),
             del
@@ -4282,10 +4474,7 @@ mod tests {
         );
         let dr = Response::FetchSessionMirrorDelete { error_code: 14 };
         let drb = encode_response(&dr).unwrap();
-        assert_eq!(
-            dr.opcode(),
-            ResponseOpcode::FetchSessionMirrorDelete as u16
-        );
+        assert_eq!(dr.opcode(), ResponseOpcode::FetchSessionMirrorDelete as u16);
         assert_eq!(
             decode_response(ResponseOpcode::FetchSessionMirrorDelete as u16, &drb).unwrap(),
             dr
@@ -4314,10 +4503,7 @@ mod tests {
                 }],
             }],
         };
-        assert_eq!(
-            req.opcode(),
-            RequestOpcode::AssignmentConsensusNote as u16
-        );
+        assert_eq!(req.opcode(), RequestOpcode::AssignmentConsensusNote as u16);
         let bytes = encode_request(&req).unwrap();
         assert_eq!(
             decode_request(RequestOpcode::AssignmentConsensusNote as u16, &bytes).unwrap(),
@@ -4382,10 +4568,7 @@ mod tests {
             success: 1,
             match_index: 2,
         };
-        assert_eq!(
-            resp.opcode(),
-            ResponseOpcode::MetadataRaftAppend as u16
-        );
+        assert_eq!(resp.opcode(), ResponseOpcode::MetadataRaftAppend as u16);
         let rb = encode_response(&resp).unwrap();
         assert_eq!(
             decode_response(ResponseOpcode::MetadataRaftAppend as u16, &rb).unwrap(),
@@ -4539,5 +4722,110 @@ mod tests {
             }
             other => panic!("unexpected {other:?}"),
         }
+    }
+
+    #[test]
+    fn v10_membership_opcodes_roundtrip() {
+        use crate::request::MembershipBroker;
+        let put = Request::MembershipPut {
+            generation: 3,
+            brokers: vec![
+                MembershipBroker {
+                    id: 1,
+                    host: "127.0.0.1".into(),
+                    port: 9092,
+                    rack: None,
+                },
+                MembershipBroker {
+                    id: 2,
+                    host: "127.0.0.1".into(),
+                    port: 9093,
+                    rack: Some("r1".into()),
+                },
+            ],
+        };
+        let b = encode_request(&put).unwrap();
+        assert_eq!(put.opcode(), RequestOpcode::MembershipPut as u16);
+        assert_eq!(
+            decode_request(RequestOpcode::MembershipPut as u16, &b).unwrap(),
+            put
+        );
+        let pr = Response::MembershipPut {
+            error_code: 0,
+            applied_generation: 3,
+        };
+        let prb = encode_response(&pr).unwrap();
+        assert_eq!(
+            decode_response(ResponseOpcode::MembershipPut as u16, &prb).unwrap(),
+            pr
+        );
+
+        let add = Request::AddBroker {
+            id: 3,
+            host: "10.0.0.3".into(),
+            port: 9094,
+            rack: Some("r2".into()),
+        };
+        let ab = encode_request(&add).unwrap();
+        assert_eq!(
+            decode_request(RequestOpcode::AddBroker as u16, &ab).unwrap(),
+            add
+        );
+        let ar = Response::AddBroker {
+            error_code: 0,
+            generation: 4,
+        };
+        let arb = encode_response(&ar).unwrap();
+        assert_eq!(
+            decode_response(ResponseOpcode::AddBroker as u16, &arb).unwrap(),
+            ar
+        );
+
+        let rem = Request::RemoveBroker { id: 3 };
+        let rb = encode_request(&rem).unwrap();
+        assert_eq!(
+            decode_request(RequestOpcode::RemoveBroker as u16, &rb).unwrap(),
+            rem
+        );
+        let rr = Response::RemoveBroker {
+            error_code: 3,
+            generation: 0,
+        };
+        let rrb = encode_response(&rr).unwrap();
+        assert_eq!(
+            decode_response(ResponseOpcode::RemoveBroker as u16, &rrb).unwrap(),
+            rr
+        );
+
+        let list = Request::ListMembers;
+        let lb = encode_request(&list).unwrap();
+        assert_eq!(
+            decode_request(RequestOpcode::ListMembers as u16, &lb).unwrap(),
+            list
+        );
+        let lr = Response::ListMembers {
+            error_code: 0,
+            generation: 4,
+            brokers: vec![MembershipBroker {
+                id: 1,
+                host: "127.0.0.1".into(),
+                port: 9092,
+                rack: None,
+            }],
+            live: vec![1, 2],
+        };
+        let lrb = encode_response(&lr).unwrap();
+        assert_eq!(
+            decode_response(ResponseOpcode::ListMembers as u16, &lrb).unwrap(),
+            lr
+        );
+
+        assert!(decode_request(RequestOpcode::MembershipPut as u16, &[]).is_err());
+        assert!(decode_request(RequestOpcode::AddBroker as u16, &[]).is_err());
+        assert!(decode_request(RequestOpcode::RemoveBroker as u16, &[]).is_err());
+        assert!(decode_response(ResponseOpcode::MembershipPut as u16, &[]).is_err());
+        assert!(decode_response(ResponseOpcode::AddBroker as u16, &[]).is_err());
+        assert!(decode_response(ResponseOpcode::RemoveBroker as u16, &[]).is_err());
+        assert!(decode_response(ResponseOpcode::ListMembers as u16, &[]).is_err());
     }
 }

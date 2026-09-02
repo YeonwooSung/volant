@@ -104,6 +104,14 @@ pub enum RequestOpcode {
     AssignmentConsensusNote = 96,
     /// Controller → peers: KRaft-style metadata Raft AppendEntries (Phase 154).
     MetadataRaftAppend = 98,
+    /// Inter-broker membership overlay push (v0.10).
+    MembershipPut = 100,
+    /// Admin: add a broker endpoint (v0.10).
+    AddBroker = 102,
+    /// Admin: remove a broker by id (v0.10).
+    RemoveBroker = 104,
+    /// Admin: list configured + live membership (v0.10).
+    ListMembers = 106,
 }
 
 impl RequestOpcode {
@@ -158,6 +166,10 @@ impl RequestOpcode {
             94 => Self::IsrUpdate,
             96 => Self::AssignmentConsensusNote,
             98 => Self::MetadataRaftAppend,
+            100 => Self::MembershipPut,
+            102 => Self::AddBroker,
+            104 => Self::RemoveBroker,
+            106 => Self::ListMembers,
             _ => return None,
         })
     }
@@ -659,6 +671,44 @@ pub enum Request {
         /// Leader's commit index.
         leader_commit: u64,
     },
+    /// Inter-broker membership overlay push (v0.10).
+    MembershipPut {
+        /// Overlay generation. Peers apply only if `> local`.
+        generation: u64,
+        /// Full effective broker list.
+        brokers: Vec<MembershipBroker>,
+    },
+    /// Admin: add a broker endpoint (v0.10).
+    AddBroker {
+        /// New broker id (must be unique).
+        id: u32,
+        /// Host for inter-broker and client traffic.
+        host: String,
+        /// Port.
+        port: u16,
+        /// Optional rack.
+        rack: Option<String>,
+    },
+    /// Admin: remove a broker by id (v0.10).
+    RemoveBroker {
+        /// Broker id to drop from the overlay.
+        id: u32,
+    },
+    /// Admin: list configured + live membership (v0.10).
+    ListMembers,
+}
+
+/// One broker endpoint on the membership overlay wire (v0.10).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct MembershipBroker {
+    /// Unique broker id.
+    pub id: u32,
+    /// Host.
+    pub host: String,
+    /// Port.
+    pub port: u16,
+    /// Optional rack.
+    pub rack: Option<String>,
 }
 
 /// One metadata Raft log entry on the wire (Phase 154).
@@ -732,14 +782,14 @@ impl Request {
             Self::TruncateJournalNote { .. } => RequestOpcode::TruncateJournalNote as u16,
             Self::TruncateJournalPush { .. } => RequestOpcode::TruncateJournalPush as u16,
             Self::FetchSessionMirrorPut { .. } => RequestOpcode::FetchSessionMirrorPut as u16,
-            Self::FetchSessionMirrorDelete { .. } => {
-                RequestOpcode::FetchSessionMirrorDelete as u16
-            }
+            Self::FetchSessionMirrorDelete { .. } => RequestOpcode::FetchSessionMirrorDelete as u16,
             Self::IsrUpdate { .. } => RequestOpcode::IsrUpdate as u16,
-            Self::AssignmentConsensusNote { .. } => {
-                RequestOpcode::AssignmentConsensusNote as u16
-            }
+            Self::AssignmentConsensusNote { .. } => RequestOpcode::AssignmentConsensusNote as u16,
             Self::MetadataRaftAppend { .. } => RequestOpcode::MetadataRaftAppend as u16,
+            Self::MembershipPut { .. } => RequestOpcode::MembershipPut as u16,
+            Self::AddBroker { .. } => RequestOpcode::AddBroker as u16,
+            Self::RemoveBroker { .. } => RequestOpcode::RemoveBroker as u16,
+            Self::ListMembers => RequestOpcode::ListMembers as u16,
         }
     }
 }

@@ -751,7 +751,7 @@ fn broker_metrics_text(broker: &Broker) -> String {
     ));
     // Phase 141: N=2 majority ops / health gauges (configured vs live).
     text.push_str(
-        "# HELP volant_cluster_configured_brokers Configured static membership size (1 if single-node)\n",
+        "# HELP volant_cluster_configured_brokers Effective membership size (overlay or cluster.toml; 1 if single-node)\n",
     );
     text.push_str("# TYPE volant_cluster_configured_brokers gauge\n");
     text.push_str(&format!(

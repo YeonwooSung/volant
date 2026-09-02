@@ -102,6 +102,14 @@ pub enum ResponseOpcode {
     AssignmentConsensusNote = 97,
     /// Metadata Raft AppendEntries result (Phase 154).
     MetadataRaftAppend = 99,
+    /// Membership overlay push result (v0.10).
+    MembershipPut = 101,
+    /// Add broker result (v0.10).
+    AddBroker = 103,
+    /// Remove broker result (v0.10).
+    RemoveBroker = 105,
+    /// List membership result (v0.10).
+    ListMembers = 107,
     /// Error response.
     Error = 0xFFFF,
 }
@@ -158,6 +166,10 @@ impl ResponseOpcode {
             95 => Self::IsrUpdate,
             97 => Self::AssignmentConsensusNote,
             99 => Self::MetadataRaftAppend,
+            101 => Self::MembershipPut,
+            103 => Self::AddBroker,
+            105 => Self::RemoveBroker,
+            107 => Self::ListMembers,
             0xFFFF => Self::Error,
             _ => return None,
         })
@@ -780,6 +792,38 @@ pub enum Response {
         /// Highest matching log index on the peer.
         match_index: u64,
     },
+    /// Membership overlay push result (v0.10).
+    MembershipPut {
+        /// 0 = ok (including ignored stale generation).
+        error_code: u16,
+        /// Generation now stored on the peer.
+        applied_generation: u64,
+    },
+    /// Add broker result (v0.10).
+    AddBroker {
+        /// 0 = ok.
+        error_code: u16,
+        /// New overlay generation (`0` on error).
+        generation: u64,
+    },
+    /// Remove broker result (v0.10).
+    RemoveBroker {
+        /// 0 = ok.
+        error_code: u16,
+        /// New overlay generation (`0` on error).
+        generation: u64,
+    },
+    /// List membership result (v0.10).
+    ListMembers {
+        /// 0 = ok.
+        error_code: u16,
+        /// Overlay generation (`0` if toml-only).
+        generation: u64,
+        /// Effective configured brokers.
+        brokers: Vec<crate::request::MembershipBroker>,
+        /// Live broker ids.
+        live: Vec<u32>,
+    },
     /// Error response.
     Error {
         /// Error code.
@@ -865,10 +909,12 @@ impl Response {
                 ResponseOpcode::FetchSessionMirrorDelete as u16
             }
             Self::IsrUpdate { .. } => ResponseOpcode::IsrUpdate as u16,
-            Self::AssignmentConsensusNote { .. } => {
-                ResponseOpcode::AssignmentConsensusNote as u16
-            }
+            Self::AssignmentConsensusNote { .. } => ResponseOpcode::AssignmentConsensusNote as u16,
             Self::MetadataRaftAppend { .. } => ResponseOpcode::MetadataRaftAppend as u16,
+            Self::MembershipPut { .. } => ResponseOpcode::MembershipPut as u16,
+            Self::AddBroker { .. } => ResponseOpcode::AddBroker as u16,
+            Self::RemoveBroker { .. } => ResponseOpcode::RemoveBroker as u16,
+            Self::ListMembers { .. } => ResponseOpcode::ListMembers as u16,
             Self::Error { .. } => ResponseOpcode::Error as u16,
         }
     }

@@ -16,11 +16,11 @@ use crate::cluster::MetadataLogEntry;
 
 use super::fanout::{
     complete_assignment_mutation, fanout_assignment_consensus, fanout_cluster_acl_snapshot,
-    fanout_delete_records, fanout_delete_records_replicas_only, fanout_metadata_raft_append,
-    fanout_truncate_journal_note_provisional, metadata_entry_from_wire, put_end_txn_error_response,
-    run_txn_2pc_fanout, schedule_catch_up_peer_admin_state,
-    schedule_catch_up_peer_truncate_journal, schedule_isr_update_reports,
-    schedule_session_mirror_fanout, snapshot_if_must_wait,
+    fanout_delete_records, fanout_delete_records_replicas_only, fanout_membership_put,
+    fanout_metadata_raft_append, fanout_truncate_journal_note_provisional,
+    metadata_entry_from_wire, put_end_txn_error_response, run_txn_2pc_fanout,
+    schedule_catch_up_peer_admin_state, schedule_catch_up_peer_truncate_journal,
+    schedule_isr_update_reports, schedule_session_mirror_fanout, snapshot_if_must_wait,
 };
 
 /// Dispatch one framed request with connection auth / SCRAM state (plaintext + TLS).
@@ -236,6 +236,7 @@ fn authorize_request(broker: &Broker, req: &Request, principal: Option<&str>) ->
         | Request::IsrUpdate { .. }
         | Request::AssignmentConsensusNote { .. }
         | Request::MetadataRaftAppend { .. }
+        | Request::MembershipPut { .. }
         | Request::Auth { .. }
         | Request::ScramFirst { .. }
         | Request::ScramFinal { .. } => return None,
@@ -300,10 +301,13 @@ fn authorize_request(broker: &Broker, req: &Request, principal: Option<&str>) ->
         Request::InitProducerId { .. } | Request::BeginTxn { .. } | Request::EndTxn { .. } => {
             check(ResourceType::Cluster, CLUSTER_RESOURCE, AclOperation::Write)
         }
-        Request::CreateAcls { .. } | Request::DeleteAcls { .. } => {
+        Request::CreateAcls { .. }
+        | Request::DeleteAcls { .. }
+        | Request::AddBroker { .. }
+        | Request::RemoveBroker { .. } => {
             check(ResourceType::Cluster, CLUSTER_RESOURCE, AclOperation::Alter)
         }
-        Request::ListAcls { .. } => check(
+        Request::ListAcls { .. } | Request::ListMembers => check(
             ResourceType::Cluster,
             CLUSTER_RESOURCE,
             AclOperation::Describe,
@@ -339,6 +343,7 @@ fn authorize_request(broker: &Broker, req: &Request, principal: Option<&str>) ->
         | Request::IsrUpdate { .. }
         | Request::AssignmentConsensusNote { .. }
         | Request::MetadataRaftAppend { .. }
+        | Request::MembershipPut { .. }
         | Request::Auth { .. }
         | Request::ScramFirst { .. }
         | Request::ScramFinal { .. } => true,
@@ -426,7 +431,11 @@ fn record_response_metrics(broker: &Broker, resp: &Response) {
         | Response::FetchSessionMirrorPut { error_code }
         | Response::FetchSessionMirrorDelete { error_code }
         | Response::IsrUpdate { error_code, .. }
-        | Response::AssignmentConsensusNote { error_code, .. } => {
+        | Response::AssignmentConsensusNote { error_code, .. }
+        | Response::MembershipPut { error_code, .. }
+        | Response::AddBroker { error_code, .. }
+        | Response::RemoveBroker { error_code, .. }
+        | Response::ListMembers { error_code, .. } => {
             if *error_code != 0 {
                 m.record_error(*error_code);
             }
@@ -1264,6 +1273,79 @@ async fn handle_request(broker: &Arc<Broker>, req: Request) -> Result<Response> 
                 term: resp_term,
                 success: if success { 1 } else { 0 },
                 match_index,
+            })
+        }
+        Request::MembershipPut {
+            generation,
+            brokers,
+        } => {
+            let endpoints: Vec<crate::cluster::BrokerEndpoint> = brokers
+                .into_iter()
+                .map(|b| crate::cluster::BrokerEndpoint {
+                    id: b.id,
+                    host: b.host,
+                    port: b.port,
+                    rack: b.rack,
+                })
+                .collect();
+            match broker.apply_membership_put(generation, endpoints) {
+                Ok(applied_generation) => Ok(Response::MembershipPut {
+                    error_code: 0,
+                    applied_generation,
+                }),
+                Err(e) => Ok(Response::Error {
+                    code: ErrorCode::InvalidArg as u16,
+                    message: e.to_string(),
+                }),
+            }
+        }
+        Request::AddBroker {
+            id,
+            host,
+            port,
+            rack,
+        } => match broker.add_broker(id, host, port, rack) {
+            Ok(generation) => {
+                fanout_membership_put(broker).await;
+                Ok(Response::AddBroker {
+                    error_code: 0,
+                    generation,
+                })
+            }
+            Err(e) => Ok(Response::Error {
+                code: ErrorCode::InvalidArg as u16,
+                message: e.to_string(),
+            }),
+        },
+        Request::RemoveBroker { id } => match broker.remove_broker(id) {
+            Ok(generation) => {
+                fanout_membership_put(broker).await;
+                Ok(Response::RemoveBroker {
+                    error_code: 0,
+                    generation,
+                })
+            }
+            Err(e) => Ok(Response::Error {
+                code: ErrorCode::InvalidArg as u16,
+                message: e.to_string(),
+            }),
+        },
+        Request::ListMembers => {
+            let snap = broker.list_membership();
+            Ok(Response::ListMembers {
+                error_code: 0,
+                generation: snap.generation,
+                brokers: snap
+                    .brokers
+                    .into_iter()
+                    .map(|b| volant_protocol::MembershipBroker {
+                        id: b.id,
+                        host: b.host,
+                        port: b.port,
+                        rack: b.rack,
+                    })
+                    .collect(),
+                live: snap.live,
             })
         }
         Request::KafkaTxnForward {

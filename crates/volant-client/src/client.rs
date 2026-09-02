@@ -12,8 +12,8 @@ use volant_core::{Error, Message, Offset, Result, TopicId};
 use volant_protocol::codec::{decode_frame, encode_frame};
 use volant_protocol::{
     decode_response, pack_request, Assignment, BrokerInfo, ErrorCode, FetchRecord, GroupListing,
-    GroupMemberInfo, OffsetCommitEntry, OffsetEntry, OffsetFetchEntry, ProduceMessage, Request,
-    Response, TopicInfo, TxnOffsetCommit, TxnProduceResult,
+    GroupMemberInfo, MembershipBroker, OffsetCommitEntry, OffsetEntry, OffsetFetchEntry,
+    ProduceMessage, Request, Response, TopicInfo, TxnOffsetCommit, TxnProduceResult,
 };
 
 use crate::config::ClientConfig;
@@ -119,6 +119,17 @@ pub struct DescribeConfigsResult {
     pub partition_count: u32,
     /// Config key/value pairs (empty value = unset).
     pub configs: Vec<(String, String)>,
+}
+
+/// Cluster membership listing (v0.10).
+#[derive(Debug, Clone)]
+pub struct MembershipList {
+    /// Overlay generation (`0` if toml-only).
+    pub generation: u64,
+    /// Effective configured brokers.
+    pub brokers: Vec<MembershipBroker>,
+    /// Live broker ids.
+    pub live: Vec<u32>,
 }
 
 /// Result of DeleteRecords (Phase 14).
@@ -338,9 +349,7 @@ impl Client {
                     ));
                 }
                 if server_signature.as_ref() != expected_sig.as_slice() {
-                    return Err(Error::Protocol(
-                        "scram server signature mismatch".into(),
-                    ));
+                    return Err(Error::Protocol("scram server signature mismatch".into()));
                 }
                 Ok(())
             }
@@ -419,7 +428,8 @@ impl Client {
 
     /// Create a topic; returns assigned topic id.
     pub async fn create_topic(&self, name: &str, partitions: u32) -> Result<TopicId> {
-        self.create_topic_with_configs(name, partitions, vec![]).await
+        self.create_topic_with_configs(name, partitions, vec![])
+            .await
     }
 
     /// Create a topic with optional configs (Phase 13).
@@ -483,11 +493,7 @@ impl Client {
     }
 
     /// Alter topic configuration (Phase 13). Empty value clears a key.
-    pub async fn alter_configs(
-        &self,
-        topic: &str,
-        configs: Vec<(String, String)>,
-    ) -> Result<()> {
+    pub async fn alter_configs(&self, topic: &str, configs: Vec<(String, String)>) -> Result<()> {
         let resp = self
             .round_trip(Request::AlterConfigs {
                 topic: topic.to_owned(),
@@ -702,7 +708,10 @@ impl Client {
         let mut part = if idempotent {
             let p = match partition {
                 Some(p) => p,
-                None => self.resolve_partition(topic, wire[0].key.as_deref()).await?,
+                None => {
+                    self.resolve_partition(topic, wire[0].key.as_deref())
+                        .await?
+                }
             };
             p as i32
         } else {
@@ -822,11 +831,7 @@ impl Client {
                 return Ok(());
             }
         }
-        let transactional_id = self
-            .config
-            .transactional_id
-            .clone()
-            .unwrap_or_default();
+        let transactional_id = self.config.transactional_id.clone().unwrap_or_default();
         let resp = self
             .round_trip(Request::InitProducerId { transactional_id })
             .await?;
@@ -953,7 +958,9 @@ impl Client {
             .ok_or_else(|| Error::NotFound(format!("topic '{topic}' not found in metadata")))?;
         let n = tinfo.partitions.len() as u32;
         if n == 0 {
-            return Err(Error::NotFound(format!("topic '{topic}' has no partitions")));
+            return Err(Error::NotFound(format!(
+                "topic '{topic}' has no partitions"
+            )));
         }
         let p = match key {
             Some(k) => volant_broker_partition_for_key(k, n),
@@ -1188,10 +1195,7 @@ impl Client {
     pub async fn list_groups(&self) -> Result<Vec<GroupListing>> {
         let resp = self.round_trip(Request::ListGroups).await?;
         match resp {
-            Response::ListGroups {
-                error_code,
-                groups,
-            } => {
+            Response::ListGroups { error_code, groups } => {
                 check_ok(error_code, "list_groups")?;
                 Ok(groups)
             }
@@ -1233,9 +1237,7 @@ impl Client {
 
     /// Create ACL bindings (Phase 20). Enables enforcement on the broker.
     pub async fn create_acls(&self, entries: Vec<volant_protocol::AclBinding>) -> Result<()> {
-        let resp = self
-            .round_trip(Request::CreateAcls { entries })
-            .await?;
+        let resp = self.round_trip(Request::CreateAcls { entries }).await?;
         match resp {
             Response::CreateAcls { error_code } => check_ok(error_code, "create_acls"),
             Response::Error { code, message } => Err(error_from_code(code, message)),
@@ -1247,9 +1249,7 @@ impl Client {
 
     /// Delete exact-matching ACL bindings (Phase 20).
     pub async fn delete_acls(&self, entries: Vec<volant_protocol::AclBinding>) -> Result<u32> {
-        let resp = self
-            .round_trip(Request::DeleteAcls { entries })
-            .await?;
+        let resp = self.round_trip(Request::DeleteAcls { entries }).await?;
         match resp {
             Response::DeleteAcls {
                 error_code,
@@ -1292,6 +1292,79 @@ impl Client {
             Response::Error { code, message } => Err(error_from_code(code, message)),
             other => Err(Error::Protocol(format!(
                 "unexpected response for list_acls: {other:?}"
+            ))),
+        }
+    }
+
+    /// Add a broker endpoint to the membership overlay (v0.10).
+    pub async fn add_broker(
+        &self,
+        id: u32,
+        host: &str,
+        port: u16,
+        rack: Option<&str>,
+    ) -> Result<u64> {
+        let resp = self
+            .round_trip(Request::AddBroker {
+                id,
+                host: host.to_owned(),
+                port,
+                rack: rack.map(str::to_owned),
+            })
+            .await?;
+        match resp {
+            Response::AddBroker {
+                error_code,
+                generation,
+            } => {
+                check_ok(error_code, "add_broker")?;
+                Ok(generation)
+            }
+            Response::Error { code, message } => Err(error_from_code(code, message)),
+            other => Err(Error::Protocol(format!(
+                "unexpected response for add_broker: {other:?}"
+            ))),
+        }
+    }
+
+    /// Remove a broker from the membership overlay (v0.10).
+    pub async fn remove_broker(&self, id: u32) -> Result<u64> {
+        let resp = self.round_trip(Request::RemoveBroker { id }).await?;
+        match resp {
+            Response::RemoveBroker {
+                error_code,
+                generation,
+            } => {
+                check_ok(error_code, "remove_broker")?;
+                Ok(generation)
+            }
+            Response::Error { code, message } => Err(error_from_code(code, message)),
+            other => Err(Error::Protocol(format!(
+                "unexpected response for remove_broker: {other:?}"
+            ))),
+        }
+    }
+
+    /// List configured + live membership (v0.10).
+    pub async fn list_members(&self) -> Result<MembershipList> {
+        let resp = self.round_trip(Request::ListMembers).await?;
+        match resp {
+            Response::ListMembers {
+                error_code,
+                generation,
+                brokers,
+                live,
+            } => {
+                check_ok(error_code, "list_members")?;
+                Ok(MembershipList {
+                    generation,
+                    brokers,
+                    live,
+                })
+            }
+            Response::Error { code, message } => Err(error_from_code(code, message)),
+            other => Err(Error::Protocol(format!(
+                "unexpected response for list_members: {other:?}"
             ))),
         }
     }
