@@ -2,6 +2,7 @@ package io.volant;
 
 import java.util.ArrayList;
 import java.util.Collections;
+import java.util.HashMap;
 import java.util.HashSet;
 import java.util.LinkedHashMap;
 import java.util.List;
@@ -33,11 +34,14 @@ public final class GroupConsumer implements AutoCloseable {
     static final int ERR_ILLEGAL_GENERATION = 11;
 
     private static final int POLL_MAX_MESSAGES = 100;
+    static final String ASSIGNOR_BROKER = "broker";
+    static final String ASSIGNOR_RANGE = "range";
 
     private final Backend backend;
     private final String groupId;
     private final List<String> topics;
     private final int sessionTimeoutMs;
+    private final String assignor;
     private String memberId = "";
     private long generation;
     private List<Codec.Assignment> assignment = Collections.emptyList();
@@ -46,22 +50,45 @@ public final class GroupConsumer implements AutoCloseable {
     private boolean closed;
 
     GroupConsumer(Backend backend, String groupId, List<String> topics, int sessionTimeoutMs) {
+        this(backend, groupId, topics, sessionTimeoutMs, ASSIGNOR_BROKER);
+    }
+
+    GroupConsumer(Backend backend, String groupId, List<String> topics, int sessionTimeoutMs, String assignor) {
         this.backend = backend;
         this.groupId = groupId;
         this.topics = topics == null
                 ? Collections.emptyList()
                 : Collections.unmodifiableList(new ArrayList<>(topics));
         this.sessionTimeoutMs = sessionTimeoutMs;
+        this.assignor = normalizeAssignor(assignor);
     }
 
     /** Join a consumer group on the given topics. {@code sessionTimeoutMs} 0 defaults to 10000. */
     public static GroupConsumer join(Client client, String group, List<String> topics, int sessionTimeoutMs) {
-        return join(new ClientBackend(client), group, topics, sessionTimeoutMs);
+        return join(new ClientBackend(client), group, topics, sessionTimeoutMs, ASSIGNOR_BROKER);
+    }
+
+    /**
+     * Join a consumer group with an explicit assignor.
+     *
+     * <p>{@code assignor} is {@code "broker"} (default: honor JoinGroup) or
+     * {@code "range"} (replace the fetch set with a solo local range after
+     * metadata). Empty / {@code null} is {@code "broker"}. Unknown values
+     * throw {@link IllegalArgumentException}.
+     */
+    public static GroupConsumer join(
+            Client client, String group, List<String> topics, int sessionTimeoutMs, String assignor) {
+        return join(new ClientBackend(client), group, topics, sessionTimeoutMs, assignor);
     }
 
     static GroupConsumer join(Backend backend, String group, List<String> topics, int sessionTimeoutMs) {
+        return join(backend, group, topics, sessionTimeoutMs, ASSIGNOR_BROKER);
+    }
+
+    static GroupConsumer join(
+            Backend backend, String group, List<String> topics, int sessionTimeoutMs, String assignor) {
         int timeout = sessionTimeoutMs == 0 ? 10_000 : sessionTimeoutMs;
-        GroupConsumer g = new GroupConsumer(backend, group, topics, timeout);
+        GroupConsumer g = new GroupConsumer(backend, group, topics, timeout, assignor);
         g.doJoin();
         return g;
     }
@@ -72,6 +99,9 @@ public final class GroupConsumer implements AutoCloseable {
         memberId = result.memberId;
         generation = result.generation;
         List<Codec.Assignment> newAssignment = new ArrayList<>(result.assignment);
+        if (ASSIGNOR_RANGE.equals(assignor)) {
+            newAssignment = localRangeAssignment();
+        }
 
         Set<Tp> oldSet = toSet(previous);
         Set<Tp> newSet = toSet(newAssignment);
@@ -82,10 +112,12 @@ public final class GroupConsumer implements AutoCloseable {
                 revoked.add(tp);
             }
         }
-        for (Codec.Assignment a : result.revoked) {
-            Tp tp = new Tp(a.topic, a.partition);
-            if (!revoked.contains(tp)) {
-                revoked.add(tp);
+        if (!ASSIGNOR_RANGE.equals(assignor)) {
+            for (Codec.Assignment a : result.revoked) {
+                Tp tp = new Tp(a.topic, a.partition);
+                if (!revoked.contains(tp)) {
+                    revoked.add(tp);
+                }
             }
         }
         Collections.sort(revoked);
@@ -131,6 +163,24 @@ public final class GroupConsumer implements AutoCloseable {
             long pos = e.offset == OFFSET_UNKNOWN ? 0L : e.offset;
             positions.put(new Tp(e.topic, e.partition), pos);
         }
+    }
+
+    private List<Codec.Assignment> localRangeAssignment() {
+        Metadata meta = backend.metadata();
+        Map<String, Integer> counts = new HashMap<>();
+        if (meta != null) {
+            for (Metadata.TopicInfo topic : meta.topics) {
+                counts.put(topic.name, topic.partitions.size());
+            }
+        }
+        List<List<Codec.Assignment>> assigned = RangeAssignor.rangeAssignMulti(
+                Collections.singletonList(memberId),
+                Collections.singletonList(topics),
+                counts);
+        if (assigned.isEmpty()) {
+            return Collections.emptyList();
+        }
+        return new ArrayList<>(assigned.get(0));
     }
 
     /**
@@ -236,6 +286,16 @@ public final class GroupConsumer implements AutoCloseable {
         return code == ERR_REBALANCE || code == ERR_UNKNOWN_MEMBER || code == ERR_ILLEGAL_GENERATION;
     }
 
+    static String normalizeAssignor(String name) {
+        if (name == null || name.isEmpty() || ASSIGNOR_BROKER.equals(name)) {
+            return ASSIGNOR_BROKER;
+        }
+        if (ASSIGNOR_RANGE.equals(name)) {
+            return ASSIGNOR_RANGE;
+        }
+        throw new IllegalArgumentException("unknown assignor: " + name);
+    }
+
     private static Set<Tp> toSet(List<Codec.Assignment> items) {
         Set<Tp> out = new HashSet<>();
         for (Codec.Assignment a : items) {
@@ -297,6 +357,8 @@ public final class GroupConsumer implements AutoCloseable {
         void commitOffsets(String group, String memberId, long generation, List<Codec.OffsetCommitEntry> entries);
 
         List<Codec.OffsetFetchEntry> fetchOffsets(String group, List<Codec.OffsetEntry> entries);
+
+        Metadata metadata();
     }
 
     static final class ClientBackend implements Backend {
@@ -335,6 +397,11 @@ public final class GroupConsumer implements AutoCloseable {
         @Override
         public List<Codec.OffsetFetchEntry> fetchOffsets(String group, List<Codec.OffsetEntry> entries) {
             return client.offsetFetchEntries(group, entries);
+        }
+
+        @Override
+        public Metadata metadata() {
+            return client.metadata();
         }
     }
 }

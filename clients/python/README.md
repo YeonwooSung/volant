@@ -68,6 +68,11 @@ for the given topic. `join_group` sends empty `member_id` on first join
 loop (heartbeat on poll, re-join on error 9/10/11, cooperative revoke).
 `commit` sends the joined `member_id` + `generation`. `close` leaves
 the group and does not close the `Client`.
+`volant.range_assign` / `range_assign_multi` match the broker range
+algorithm. `GroupConsumer.join(..., assignor="range")` replaces the
+fetch set with a **solo** local range (this member only — JoinGroup
+does not return the live member list). Default `assignor="broker"`
+keeps the broker assignment as SoT.
 
 Correlation ids increment per request. Decode verifies magic `V` (0x56),
 protocol version 1, and IEEE CRC32 of the **payload only**.
@@ -105,16 +110,19 @@ set or both unset. Handshake failures close the TCP socket.
 
 ## Honesty
 
-Not implemented: `kafka-python`, client-side assignor, SCRAM /
-shared-token auth, async I/O, idempotent produce, leader redirect,
-background heartbeat thread, auto-commit. Offset commit/fetch is the
-admin path only (empty member, generation 0) unless the caller (or
-`GroupConsumer.commit`) passes a joined `member_id` / `generation`.
-Sync only; one TCP connection; acks=1 by default. TLS does not change
-broker TLS (Phase 8/19) and does not add Kafka API keys.
+Not implemented: `kafka-python`, Kafka cooperative-sticky / SyncGroup,
+seeing other group members on the wire, SCRAM / shared-token auth,
+async I/O, idempotent produce, leader redirect, background heartbeat
+thread, auto-commit. Local `assignor="range"` cannot split across live
+members. Offset commit/fetch is the admin path only (empty member,
+generation 0) unless the caller (or `GroupConsumer.commit`) passes a
+joined `member_id` / `generation`. Sync only; one TCP connection;
+acks=1 by default. TLS does not change broker TLS (Phase 8/19) and
+does not add Kafka API keys.
 
 See [docs/V14_SPEC.md](../../docs/V14_SPEC.md),
 [docs/V24_SPEC.md](../../docs/V24_SPEC.md),
 [docs/V27_SPEC.md](../../docs/V27_SPEC.md),
-[docs/V28_SPEC.md](../../docs/V28_SPEC.md), and
-[docs/V31_SPEC.md](../../docs/V31_SPEC.md).
+[docs/V28_SPEC.md](../../docs/V28_SPEC.md),
+[docs/V31_SPEC.md](../../docs/V31_SPEC.md), and
+[docs/V41_SPEC.md](../../docs/V41_SPEC.md).

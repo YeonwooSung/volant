@@ -1,5 +1,6 @@
 """Volant native protocol client (sync TCP MVP)."""
 
+from .assignor import range_assign, range_assign_multi
 from .client import Client, FetchResult, JoinGroupResult, ProduceResult
 from .codec import (
     Assignment,
@@ -32,5 +33,7 @@ __all__ = [
     "ProduceResult",
     "ProtocolError",
     "TopicInfo",
+    "range_assign",
+    "range_assign_multi",
     "__version__",
 ]

@@ -10,6 +10,7 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from typing import Optional
 
+from .assignor import range_assign_multi
 from .client import Client, FetchResult, JoinGroupResult
 from .codec import BrokerError, FetchRecord
 
@@ -22,6 +23,16 @@ _REJOIN_CODES = frozenset({9, 10, 11})
 
 _DEFAULT_SESSION_TIMEOUT_MS = 10_000
 _POLL_MAX_MESSAGES = 100
+_ASSIGNOR_BROKER = "broker"
+_ASSIGNOR_RANGE = "range"
+
+
+def _normalize_assignor(name: Optional[str]) -> str:
+    if name is None or name == "" or name == _ASSIGNOR_BROKER:
+        return _ASSIGNOR_BROKER
+    if name == _ASSIGNOR_RANGE:
+        return _ASSIGNOR_RANGE
+    raise ValueError(f"unknown assignor: {name!r}")
 
 
 @dataclass
@@ -73,12 +84,14 @@ class GroupConsumer:
         topics: list[str],
         session_timeout_ms: int,
         group_instance_id: str = "",
+        assignor: str = _ASSIGNOR_BROKER,
     ) -> None:
         self._client = client
         self._group_id = group_id
         self._topics = list(topics)
         self._session_timeout_ms = session_timeout_ms
         self._group_instance_id = group_instance_id
+        self._assignor = _normalize_assignor(assignor)
         self._member_id = ""
         self._generation = 0
         self._assignment: list[tuple[str, int]] = []
@@ -95,8 +108,14 @@ class GroupConsumer:
         session_timeout_ms: int = _DEFAULT_SESSION_TIMEOUT_MS,
         *,
         group_instance_id: str = "",
+        assignor: str = _ASSIGNOR_BROKER,
     ) -> GroupConsumer:
-        """Join ``group`` on ``topics``. Empty ``member_id`` on first join."""
+        """Join ``group`` on ``topics``. Empty ``member_id`` on first join.
+
+        ``assignor`` is ``"broker"`` (default: honor JoinGroup assignment)
+        or ``"range"`` (replace the fetch set with a solo local range after
+        metadata). Unknown values raise ``ValueError``. Empty is ``"broker"``.
+        """
         timeout = (
             _DEFAULT_SESSION_TIMEOUT_MS
             if session_timeout_ms == 0
@@ -108,9 +127,22 @@ class GroupConsumer:
             list(topics) if topics else [],
             timeout,
             group_instance_id=group_instance_id,
+            assignor=assignor,
         )
         this._do_join()
         return this
+
+    def _local_range_assignment(self) -> list[tuple[str, int]]:
+        meta = self._client.metadata()
+        counts: dict[str, int] = {}
+        for topic in meta.topics:
+            counts[topic.name] = len(topic.partitions)
+        assigned = range_assign_multi(
+            [self._member_id],
+            [list(self._topics)],
+            counts,
+        )
+        return list(assigned[0]) if assigned else []
 
     def _do_join(self) -> None:
         previous = list(self._assignment)
@@ -124,16 +156,19 @@ class GroupConsumer:
         self._member_id = result.member_id
         self._generation = result.generation
         new_assignment = [(a.topic, int(a.partition)) for a in result.assignment]
+        if self._assignor == _ASSIGNOR_RANGE:
+            new_assignment = self._local_range_assignment()
 
         old_set = set(previous)
         new_set = set(new_assignment)
 
         revoked = sorted(old_set - new_set)
-        for a in result.revoked:
-            tp = (a.topic, int(a.partition))
-            if tp not in revoked:
-                revoked.append(tp)
-        revoked.sort()
+        if self._assignor != _ASSIGNOR_RANGE:
+            for a in result.revoked:
+                tp = (a.topic, int(a.partition))
+                if tp not in revoked:
+                    revoked.append(tp)
+            revoked.sort()
 
         added = sorted(new_set - old_set)
 
@@ -280,3 +315,7 @@ class GroupConsumer:
     @property
     def session_timeout_ms(self) -> int:
         return self._session_timeout_ms
+
+    @property
+    def assignor(self) -> str:
+        return self._assignor

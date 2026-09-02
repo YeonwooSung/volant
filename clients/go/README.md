@@ -74,6 +74,10 @@ c, err = volant.DialTLS("127.0.0.1:9092", volant.TLSConfig{
 positions or 0, poll = heartbeat + fetch assigned, commit with
 member+generation, rejoin on error 9, honor revoked). `Close` leaves
 the group and does not close the `Client`.
+`RangeAssign` / `RangeAssignMulti` match the broker range algorithm.
+`WithAssignor("range")` replaces the fetch set with a **solo** local
+range (this member only — JoinGroup does not return the live member
+list). Default assignor is broker.
 
 Correlation ids increment per request. Decode verifies magic `V` (0x56),
 protocol version 1, and IEEE CRC32 of the **payload only**. Broker
@@ -111,9 +115,11 @@ must be paired. Handshake failures close the TCP socket.
 
 ## Honesty
 
-Not implemented: `kafka-go`, custom assignor, static membership,
+Not implemented: `kafka-go`, Kafka cooperative-sticky / SyncGroup,
+seeing other group members on the wire, static membership,
 SCRAM / shared-token auth, async I/O, idempotent produce, leader
-redirect. Thin `OffsetCommit` is still the admin path (empty member,
+redirect. Local `WithAssignor("range")` cannot split across live
+members. Thin `OffsetCommit` is still the admin path (empty member,
 generation 0); `GroupConsumer.Commit` sends member+generation.
 Sync only; one TCP connection; acks=1 by default. TLS
 does not change broker TLS (Phase 8/19) and does not add Kafka API keys.
@@ -121,5 +127,6 @@ does not change broker TLS (Phase 8/19) and does not add Kafka API keys.
 See [docs/V19_SPEC.md](../../docs/V19_SPEC.md),
 [docs/V24_SPEC.md](../../docs/V24_SPEC.md),
 [docs/V27_SPEC.md](../../docs/V27_SPEC.md),
-[docs/V28_SPEC.md](../../docs/V28_SPEC.md), and
-[docs/V32_SPEC.md](../../docs/V32_SPEC.md).
+[docs/V28_SPEC.md](../../docs/V28_SPEC.md),
+[docs/V32_SPEC.md](../../docs/V32_SPEC.md), and
+[docs/V41_SPEC.md](../../docs/V41_SPEC.md).

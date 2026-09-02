@@ -2,6 +2,7 @@ package volant
 
 import (
 	"errors"
+	"fmt"
 	"sort"
 	"time"
 
@@ -23,6 +24,38 @@ const (
 
 // ErrGroupClosed is returned by Poll/Commit after Close.
 var ErrGroupClosed = errors.New("group consumer closed")
+
+const (
+	assignorBroker = "broker"
+	assignorRange  = "range"
+)
+
+// GroupConsumerOption configures [JoinGroupConsumer].
+type GroupConsumerOption func(*groupConsumerConfig)
+
+type groupConsumerConfig struct {
+	assignor string
+}
+
+// WithAssignor selects the fetch-set assignor: "broker" (default, honor
+// JoinGroup) or "range" (solo local range after Metadata). Empty is
+// "broker". Unknown values fail JoinGroupConsumer.
+func WithAssignor(name string) GroupConsumerOption {
+	return func(cfg *groupConsumerConfig) {
+		cfg.assignor = name
+	}
+}
+
+func normalizeAssignor(name string) (string, error) {
+	switch name {
+	case "", assignorBroker:
+		return assignorBroker, nil
+	case assignorRange:
+		return assignorRange, nil
+	default:
+		return "", fmt.Errorf("unknown assignor %q", name)
+	}
+}
 
 type topicPartition struct {
 	topic     string
@@ -59,15 +92,26 @@ type GroupConsumer struct {
 	lastRevoked      []Assignment
 	positions        map[topicPartition]uint64
 	closed           bool
+	assignor         string
 }
 
 // JoinGroupConsumer joins a consumer group on the given topics.
 // sessionTimeoutMs 0 defaults to 10000.
-func JoinGroupConsumer(c *Client, group string, topics []string, sessionTimeoutMs int) (*GroupConsumer, error) {
-	return joinGroupConsumer(c, group, topics, sessionTimeoutMs, "")
+func JoinGroupConsumer(c *Client, group string, topics []string, sessionTimeoutMs int, opts ...GroupConsumerOption) (*GroupConsumer, error) {
+	cfg := groupConsumerConfig{assignor: assignorBroker}
+	for _, opt := range opts {
+		if opt != nil {
+			opt(&cfg)
+		}
+	}
+	assignor, err := normalizeAssignor(cfg.assignor)
+	if err != nil {
+		return nil, err
+	}
+	return joinGroupConsumer(c, group, topics, sessionTimeoutMs, "", assignor)
 }
 
-func joinGroupConsumer(c *Client, group string, topics []string, sessionTimeoutMs int, instanceID string) (*GroupConsumer, error) {
+func joinGroupConsumer(c *Client, group string, topics []string, sessionTimeoutMs int, instanceID, assignor string) (*GroupConsumer, error) {
 	if c == nil {
 		return nil, errors.New("nil client")
 	}
@@ -85,6 +129,7 @@ func joinGroupConsumer(c *Client, group string, topics []string, sessionTimeoutM
 		sessionTimeoutMs: timeout,
 		groupInstanceID:  instanceID,
 		positions:        make(map[topicPartition]uint64),
+		assignor:         assignor,
 	}
 	if err := g.doJoin(); err != nil {
 		return nil, err
@@ -101,6 +146,13 @@ func (g *GroupConsumer) doJoin() error {
 	g.memberID = result.MemberID
 	g.generation = result.Generation
 	newAssignment := copyAssignment(result.Assignment)
+	if g.assignor == assignorRange {
+		local, err := g.localRangeAssignment()
+		if err != nil {
+			return err
+		}
+		newAssignment = local
+	}
 
 	oldSet := assignmentSet(previous)
 	newSet := assignmentSet(newAssignment)
@@ -111,17 +163,19 @@ func (g *GroupConsumer) doJoin() error {
 			revoked = append(revoked, Assignment{Topic: tp.topic, Partition: tp.partition})
 		}
 	}
-	for _, a := range result.Revoked {
-		tp := topicPartition{a.Topic, a.Partition}
-		found := false
-		for _, r := range revoked {
-			if r.Topic == tp.topic && r.Partition == tp.partition {
-				found = true
-				break
+	if g.assignor != assignorRange {
+		for _, a := range result.Revoked {
+			tp := topicPartition{a.Topic, a.Partition}
+			found := false
+			for _, r := range revoked {
+				if r.Topic == tp.topic && r.Partition == tp.partition {
+					found = true
+					break
+				}
 			}
-		}
-		if !found {
-			revoked = append(revoked, Assignment{Topic: tp.topic, Partition: tp.partition})
+			if !found {
+				revoked = append(revoked, Assignment{Topic: tp.topic, Partition: tp.partition})
+			}
 		}
 	}
 	sort.Slice(revoked, func(i, j int) bool {
@@ -190,6 +244,22 @@ func (g *GroupConsumer) fetchPositionsFor(partitions []topicPartition) error {
 		g.positions[topicPartition{e.Topic, e.Partition}] = pos
 	}
 	return nil
+}
+
+func (g *GroupConsumer) localRangeAssignment() ([]Assignment, error) {
+	meta, err := g.client.Metadata()
+	if err != nil {
+		return nil, err
+	}
+	counts := make(map[string]uint32, len(meta.Topics))
+	for _, t := range meta.Topics {
+		counts[t.Name] = uint32(len(t.Partitions))
+	}
+	assigned := RangeAssignMulti([]string{g.memberID}, [][]string{append([]string(nil), g.topics...)}, counts)
+	if len(assigned) == 0 {
+		return nil, nil
+	}
+	return assigned[0], nil
 }
 
 // Poll heartbeats, rejoins on error 9/10/11, and fetches assigned partitions.
