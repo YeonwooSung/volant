@@ -1,15 +1,19 @@
 //! Opt-in openraft metadata election (v0.11) + assignment apply (v0.16)
-//! + InstallSnapshot (v0.17).
+//! + InstallSnapshot (v0.17) + durable log / hard state (v0.21).
 //!
 //! When `VOLANT_OPENRAFT_METADATA=1`, the leader replicates
 //! [`MetaRequest::SetAssignment`] via opcodes 108/109. Apply writes
 //! `assignment.json` and installs cluster state. Snapshots use opcodes
-//! 112/113. Homemade 154 is unchanged. Hard state / log remain in-memory.
+//! 112/113. Homemade 154 is unchanged. Vote, log, and last snapshot persist
+//! under `{data_dir}/__openraft/` (JSON files; not Rocks). Flag off does
+//! not create that directory.
 
 use std::collections::BTreeMap;
 use std::fmt;
-use std::io::Cursor;
+use std::fs::{self, File, OpenOptions};
+use std::io::{Cursor, Read, Write};
 use std::ops::RangeBounds;
+use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU32, AtomicU64, Ordering};
 use std::sync::{Arc, Weak};
 use std::time::Duration;
@@ -25,9 +29,10 @@ use openraft::storage::{LogFlushed, RaftLogStorage, RaftStateMachine, Snapshot};
 use openraft::{
     BasicNode, Config, Entry, EntryPayload, LogId, LogState, Raft, RaftLogId, RaftLogReader,
     RaftNetwork, RaftNetworkFactory, RaftSnapshotBuilder, SnapshotMeta, SnapshotPolicy,
-    StorageError, StoredMembership, Vote,
+    StorageError, StorageIOError, StoredMembership, Vote,
 };
 use parking_lot::Mutex;
+use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
 use tracing::warn;
 use volant_core::{Error, Result};
@@ -36,6 +41,15 @@ use volant_protocol::{ClusterTopicState, Request, Response};
 use crate::broker::Broker;
 use crate::cluster::state::AssignmentSnapshot;
 use crate::net::inter_broker_rpc;
+
+/// On-disk directory under `data_dir` for the opt-in openraft store (v0.21).
+pub const OPENRAFT_DIR: &str = "__openraft";
+/// Durable vote / committed / last_purged file name.
+pub const OPENRAFT_HARD_STATE_FILE: &str = "hard_state.json";
+/// Durable log entries file name.
+pub const OPENRAFT_LOG_FILE: &str = "log.json";
+/// Last snapshot meta + payload (and last_applied checkpoint).
+pub const OPENRAFT_SNAPSHOT_FILE: &str = "snapshot.json";
 
 /// How long the mutating leader waits for `client_write` (commit + local apply).
 const CLIENT_WRITE_TIMEOUT: Duration = Duration::from_secs(5);
@@ -115,6 +129,8 @@ impl Default for OpenraftMetricsCache {
 #[derive(Clone, Default)]
 struct LogStore {
     inner: Arc<Mutex<LogStoreInner>>,
+    /// `{data_dir}/__openraft` when the flag is on; `None` = memory-only.
+    dir: Option<PathBuf>,
 }
 
 #[derive(Default)]
@@ -123,6 +139,67 @@ struct LogStoreInner {
     committed: Option<LogId<u32>>,
     vote: Option<Vote<u32>>,
     log: BTreeMap<u64, Entry<TypeConfig>>,
+}
+
+/// On-disk hard state (vote + commit pointers).
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+struct OpenraftHardStateFile {
+    #[serde(default)]
+    vote: Option<Vote<u32>>,
+    #[serde(default)]
+    committed: Option<LogId<u32>>,
+    #[serde(default)]
+    last_purged: Option<LogId<u32>>,
+}
+
+/// On-disk log (JSON array of openraft entries).
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+struct OpenraftLogFile {
+    #[serde(default)]
+    entries: Vec<Entry<TypeConfig>>,
+}
+
+impl LogStore {
+    fn open(dir: &Path) -> Self {
+        let hard = load_json::<OpenraftHardStateFile>(&dir.join(OPENRAFT_HARD_STATE_FILE))
+            .unwrap_or_default();
+        let file = load_json::<OpenraftLogFile>(&dir.join(OPENRAFT_LOG_FILE)).unwrap_or_default();
+        let mut log = BTreeMap::new();
+        for e in file.entries {
+            log.insert(e.get_log_id().index, e);
+        }
+        Self {
+            inner: Arc::new(Mutex::new(LogStoreInner {
+                last_purged: hard.last_purged,
+                committed: hard.committed,
+                vote: hard.vote,
+                log,
+            })),
+            dir: Some(dir.to_path_buf()),
+        }
+    }
+
+    fn persist_hard(&self, inner: &LogStoreInner) -> std::io::Result<()> {
+        let Some(dir) = self.dir.as_ref() else {
+            return Ok(());
+        };
+        let file = OpenraftHardStateFile {
+            vote: inner.vote,
+            committed: inner.committed,
+            last_purged: inner.last_purged,
+        };
+        atomic_write_json(&dir.join(OPENRAFT_HARD_STATE_FILE), &file)
+    }
+
+    fn persist_log(&self, inner: &LogStoreInner) -> std::io::Result<()> {
+        let Some(dir) = self.dir.as_ref() else {
+            return Ok(());
+        };
+        let file = OpenraftLogFile {
+            entries: inner.log.values().cloned().collect(),
+        };
+        atomic_write_json(&dir.join(OPENRAFT_LOG_FILE), &file)
+    }
 }
 
 impl RaftLogReader<TypeConfig> for LogStore {
@@ -153,7 +230,10 @@ impl RaftLogStorage<TypeConfig> for LogStore {
         &mut self,
         committed: Option<LogId<u32>>,
     ) -> std::result::Result<(), StorageError<u32>> {
-        self.inner.lock().committed = committed;
+        let mut inner = self.inner.lock();
+        inner.committed = committed;
+        self.persist_hard(&inner)
+            .map_err(|e| StorageError::from(StorageIOError::write_logs(&e)))?;
         Ok(())
     }
 
@@ -164,7 +244,10 @@ impl RaftLogStorage<TypeConfig> for LogStore {
     }
 
     async fn save_vote(&mut self, vote: &Vote<u32>) -> std::result::Result<(), StorageError<u32>> {
-        self.inner.lock().vote = Some(*vote);
+        let mut inner = self.inner.lock();
+        inner.vote = Some(*vote);
+        self.persist_hard(&inner)
+            .map_err(|e| StorageError::from(StorageIOError::write_vote(&e)))?;
         Ok(())
     }
 
@@ -186,6 +269,8 @@ impl RaftLogStorage<TypeConfig> for LogStore {
             for e in entries {
                 inner.log.insert(e.get_log_id().index, e);
             }
+            self.persist_log(&inner)
+                .map_err(|e| StorageError::from(StorageIOError::write_logs(&e)))?;
         }
         callback.log_io_completed(Ok(()));
         Ok(())
@@ -194,6 +279,8 @@ impl RaftLogStorage<TypeConfig> for LogStore {
     async fn truncate(&mut self, log_id: LogId<u32>) -> std::result::Result<(), StorageError<u32>> {
         let mut inner = self.inner.lock();
         inner.log.split_off(&log_id.index);
+        self.persist_log(&inner)
+            .map_err(|e| StorageError::from(StorageIOError::write_logs(&e)))?;
         Ok(())
     }
 
@@ -201,6 +288,10 @@ impl RaftLogStorage<TypeConfig> for LogStore {
         let mut inner = self.inner.lock();
         inner.last_purged = Some(log_id);
         inner.log = inner.log.split_off(&(log_id.index.saturating_add(1)));
+        self.persist_hard(&inner)
+            .map_err(|e| StorageError::from(StorageIOError::write_logs(&e)))?;
+        self.persist_log(&inner)
+            .map_err(|e| StorageError::from(StorageIOError::write_logs(&e)))?;
         Ok(())
     }
 
@@ -217,11 +308,33 @@ struct MetaSnapshotPayload {
     assignment: AssignmentSnapshot,
 }
 
+/// On-disk last snapshot + last_applied checkpoint (v0.21).
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+struct OpenraftSnapshotFile {
+    #[serde(default)]
+    last_applied: Option<LogId<u32>>,
+    #[serde(default)]
+    last_membership: StoredMembership<u32, BasicNode>,
+    #[serde(default)]
+    snapshot_seq: u64,
+    #[serde(default)]
+    snapshot: Option<OpenraftSnapshotBlob>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct OpenraftSnapshotBlob {
+    meta: SnapshotMeta<u32, BasicNode>,
+    /// Raw JSON of [`MetaSnapshotPayload`].
+    payload: MetaSnapshotPayload,
+}
+
 #[derive(Clone, Default)]
 struct StateMachine {
     inner: Arc<Mutex<SmInner>>,
     /// Weak so apply can install assignment without a Broker↔Raft cycle.
     broker: Option<Weak<Broker>>,
+    /// `{data_dir}/__openraft` when the flag is on; `None` = memory-only.
+    dir: Option<PathBuf>,
 }
 
 #[derive(Default)]
@@ -233,10 +346,29 @@ struct SmInner {
 }
 
 impl StateMachine {
-    fn with_broker(broker: &Arc<Broker>) -> Self {
+    fn open(dir: &Path, broker: &Arc<Broker>) -> Self {
+        let file = load_json::<OpenraftSnapshotFile>(&dir.join(OPENRAFT_SNAPSHOT_FILE))
+            .unwrap_or_default();
+        let mut inner = SmInner {
+            last_applied: file.last_applied,
+            last_membership: file.last_membership,
+            snapshot: None,
+            snapshot_seq: file.snapshot_seq,
+        };
+        if let Some(blob) = file.snapshot {
+            if inner.last_applied.is_none() {
+                inner.last_applied = blob.meta.last_log_id;
+            }
+            if inner.last_membership == StoredMembership::default() {
+                inner.last_membership = blob.meta.last_membership.clone();
+            }
+            let bytes = serde_json::to_vec(&blob.payload).unwrap_or_else(|_| b"{}".to_vec());
+            inner.snapshot = Some((blob.meta, bytes));
+        }
         Self {
-            inner: Arc::new(Mutex::new(SmInner::default())),
+            inner: Arc::new(Mutex::new(inner)),
             broker: Some(Arc::downgrade(broker)),
+            dir: Some(dir.to_path_buf()),
         }
     }
 
@@ -246,6 +378,32 @@ impl StateMachine {
             .and_then(|w| w.upgrade())
             .and_then(|b| b.clone_live_assignment())
             .unwrap_or_default()
+    }
+
+    fn persist_sm(&self, inner: &SmInner) {
+        let Some(dir) = self.dir.as_ref() else {
+            return;
+        };
+        let snapshot = inner.snapshot.as_ref().and_then(|(meta, bytes)| {
+            let payload = serde_json::from_slice::<MetaSnapshotPayload>(bytes).ok()?;
+            Some(OpenraftSnapshotBlob {
+                meta: meta.clone(),
+                payload,
+            })
+        });
+        let file = OpenraftSnapshotFile {
+            last_applied: inner.last_applied,
+            last_membership: inner.last_membership.clone(),
+            snapshot_seq: inner.snapshot_seq,
+            snapshot,
+        };
+        if let Err(e) = atomic_write_json(&dir.join(OPENRAFT_SNAPSHOT_FILE), &file) {
+            warn!(
+                path = %dir.join(OPENRAFT_SNAPSHOT_FILE).display(),
+                error = %e,
+                "openraft snapshot persist failed"
+            );
+        }
     }
 }
 
@@ -270,6 +428,7 @@ impl RaftSnapshotBuilder<TypeConfig> for StateMachine {
             snapshot_id: format!("v17-{index}-{seq}"),
         };
         inner.snapshot = Some((meta.clone(), bytes.clone()));
+        self.persist_sm(&inner);
         Ok(Snapshot {
             meta,
             snapshot: Box::new(Cursor::new(bytes)),
@@ -334,6 +493,10 @@ impl RaftStateMachine<TypeConfig> for StateMachine {
             };
             out.push(MetaResponse { ok });
         }
+        {
+            let inner = self.inner.lock();
+            self.persist_sm(&inner);
+        }
         Ok(out)
     }
 
@@ -356,13 +519,15 @@ impl RaftStateMachine<TypeConfig> for StateMachine {
         if let Ok(payload) = serde_json::from_slice::<MetaSnapshotPayload>(&bytes) {
             // last_applied / membership come from SnapshotMeta (source of
             // truth). Payload assignment is stored only; live assignment.json
-            // apply stays on the Phase 6 / 154 path.
+            // apply stays on the Phase 6 / 154 path. v0.22 owns snapshot →
+            // assignment apply — do not install topics here.
             let _ = payload;
         }
         let mut inner = self.inner.lock();
         inner.last_applied = meta.last_log_id;
         inner.last_membership = meta.last_membership.clone();
         inner.snapshot = Some((meta.clone(), bytes));
+        self.persist_sm(&inner);
         Ok(())
     }
 
@@ -504,8 +669,7 @@ async fn rpc_peer_install(
     broker: &Broker,
     target: u32,
     req: Request,
-) -> std::result::Result<Response, RPCError<u32, BasicNode, RaftError<u32, InstallSnapshotError>>>
-{
+) -> std::result::Result<Response, RPCError<u32, BasicNode, RaftError<u32, InstallSnapshotError>>> {
     let addr = broker
         .broker_addr(target)
         .ok_or_else(|| unreachable_install_err(&format!("no addr for broker {target}")))?;
@@ -645,12 +809,23 @@ impl Broker {
         let network = MetaNetworkFactory {
             broker: Arc::clone(self),
         };
-        let log_store = LogStore::default();
-        let state_machine = StateMachine::with_broker(self);
+        let dir = match self.cluster_state() {
+            Some(c) => c.data_dir.join(OPENRAFT_DIR),
+            None => return Ok(()),
+        };
+        let log_store = LogStore::open(&dir);
+        let state_machine = StateMachine::open(&dir, self);
         let raft = Raft::new(self.node_id(), config, network, log_store, state_machine)
             .await
             .map_err(|e| Error::InvalidArgument(format!("openraft new: {e}")))?;
         *self.openraft_meta.lock() = Some(OpenraftMetaHandle { raft: raft.clone() });
+
+        // Restored vote/log already counts as initialized; skip a second
+        // initialize() so restart does not rewrite membership.
+        let already = raft.is_initialized().await.unwrap_or(false);
+        if already {
+            return Ok(());
+        }
 
         // Lowest configured id initializes. Others retry if no leader appears
         // (initializer may have been slow to bind).
@@ -933,4 +1108,31 @@ pub fn default_openraft_metadata_enabled() -> bool {
         }
         Err(_) => false,
     }
+}
+
+fn load_json<T: DeserializeOwned>(path: &Path) -> Option<T> {
+    let mut f = File::open(path).ok()?;
+    let mut s = String::new();
+    f.read_to_string(&mut s).ok()?;
+    serde_json::from_str(&s).ok()
+}
+
+fn atomic_write_json(path: &Path, value: &impl Serialize) -> std::io::Result<()> {
+    if let Some(parent) = path.parent() {
+        fs::create_dir_all(parent)?;
+    }
+    let tmp = path.with_extension("json.tmp");
+    let json = serde_json::to_vec_pretty(value)
+        .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))?;
+    {
+        let mut f = OpenOptions::new()
+            .create(true)
+            .write(true)
+            .truncate(true)
+            .open(&tmp)?;
+        f.write_all(&json)?;
+        f.sync_all()?;
+    }
+    fs::rename(&tmp, path)?;
+    Ok(())
 }

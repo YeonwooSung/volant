@@ -456,6 +456,17 @@ in-memory log prefix. A node that was down can catch up via InstallSnapshot
 and then vote / append. This is **not** homemade 154 snapshot/compaction.
 See [V17_SPEC.md](./V17_SPEC.md).
 
+## v0.21 durable openraft
+
+When `VOLANT_OPENRAFT_METADATA=1`, vote, log, and last snapshot persist
+under `{data_dir}/__openraft/` (`hard_state.json`, `log.json`,
+`snapshot.json`). A process restart on the same data dir reloads those
+files, skips a second `initialize()`, and can re-elect. Flag **off**
+does **not** create `__openraft/`. This is JSON atomic-replace, **not**
+Rocks. Homemade `{data_dir}/__metadata_raft/` is a different store.
+Live topics after restart still come from `cluster/assignment.json`
+(snapshot → assignment apply is v0.22). See [V21_SPEC.md](./V21_SPEC.md).
+
 **Cluster sharp edges:** Truncate-journal majority (Phase 130), assignment
 majority (Phase 150/154), and Phase 135/137/148 wait mode use **configured N**
 (`floor(N/2)+1`), not live-only. For **N=2**, majority
