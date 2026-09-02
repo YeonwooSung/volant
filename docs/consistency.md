@@ -184,7 +184,10 @@ Without `--cluster-config`, the broker runs as a single node:
     a durable ordered log (`{data_dir}/__metadata_raft/`) with `(term, index)`,
     replicate via `MetadataRaftAppend` (98/99), and advance `commit_index` only
     after majority match_index; apply runs only then (also bumps Phase 152
-    committed snapshot). **Not** full openraft/KRaft election — controller remains
+    committed snapshot). **v0.40:** `VOLANT_METADATA_RAFT_WAIT_COMMIT` default
+    **on** — client ok waits for that `commit_index` (miss → native **15** /
+    Kafka **19** + live `assignment.json` rollback); `0` restores 154
+    mutate-first. **Not** full openraft/KRaft election — controller remains
     lowest live id; no InstallSnapshot; static N.
 - **Multi-broker 2PC (Phase 114 + 120 + 121 + 122 + 124):** Enable2Pc prepare/complete is coordinated
   over inter-broker RPC (opcodes 76–81). Init owner is the txn coordinator;

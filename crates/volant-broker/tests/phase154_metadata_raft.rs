@@ -5,9 +5,9 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use volant_broker::{
-    fanout_assignment_consensus, fanout_metadata_raft_append, start_background_tasks,
-    serve_listener, Broker, BrokerEndpoint, ClusterConfig, MetadataCommand, MetadataLogEntry,
-    MetadataRaftState,
+    fanout_assignment_consensus, fanout_metadata_raft_append, serve_listener,
+    start_background_tasks, Broker, BrokerEndpoint, ClusterConfig, MetadataCommand,
+    MetadataLogEntry, MetadataRaftState,
 };
 use volant_core::TopicName;
 use volant_protocol::{ClusterPartitionState, ClusterTopicState};
@@ -113,6 +113,8 @@ fn single_node_append_commit_create_topic() {
         ..StorageConfig::default()
     });
     b.set_metadata_raft_enabled(true);
+    // v0.40: keep 154 mutate-first / uncommitted-lead for these unit paths.
+    b.set_metadata_raft_wait_commit(false);
     b.create_topic("solo", 1).unwrap();
     let rt = tokio::runtime::Builder::new_current_thread()
         .enable_all()
@@ -153,6 +155,8 @@ async fn three_node_create_topic_raft() {
         .unwrap();
         b.set_advertised("127.0.0.1", port);
         b.set_metadata_raft_enabled(true);
+        // v0.40: this test fans out AppendEntries directly (uncommitted-lead ok).
+        b.set_metadata_raft_wait_commit(false);
         b.set_assignment_metadata_committed_only(true);
         Arc::new(b)
     };
@@ -252,6 +256,8 @@ async fn n2_one_dead_append_fails() {
         .unwrap();
         b.set_advertised("127.0.0.1", p1);
         b.set_metadata_raft_enabled(true);
+        // v0.40: expect uncommitted-lead (local assignment retained on miss).
+        b.set_metadata_raft_wait_commit(false);
         Arc::new(b)
     };
     let _bg1 = start_background_tasks(Arc::clone(&b1));
@@ -345,12 +351,13 @@ async fn phase150_path_with_raft_off() {
         );
     }
     // Metadata still lists topic name when requested.
-    assert!(b1
-        .metadata(Some(&[TopicName::new("legacy")]))
-        .topics
-        .iter()
-        .any(|t| t.name.as_str() == "legacy")
-        || b1.assignment_committed_generation() >= 1);
+    assert!(
+        b1.metadata(Some(&[TopicName::new("legacy")]))
+            .topics
+            .iter()
+            .any(|t| t.name.as_str() == "legacy")
+            || b1.assignment_committed_generation() >= 1
+    );
 
     s1.abort();
     s2.abort();
