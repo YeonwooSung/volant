@@ -32,6 +32,8 @@ subtle = { workspace = true }
 base64 = { workspace = true }
 crc32fast = { workspace = true }
 crc32c = "0.6"
+# v0.11 opt-in metadata leader election. 0.9.21 advertises MSRV 1.75.
+openraft = { version = "0.9.21", features = ["serde", "storage-v2"] }
 # RecordBatch compression (Phase 28)
 flate2 = "1"
 snap = "1"

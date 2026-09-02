@@ -422,7 +422,29 @@ pub fn start_background_tasks(broker: Arc<Broker>) -> BackgroundTasks {
         }
 
         // Follower ReplicaFetch loops.
-        handles.push(run_follower_loops(broker, stop_tx.subscribe()));
+        handles.push(run_follower_loops(Arc::clone(&broker), stop_tx.subscribe()));
+
+        // v0.11: opt-in openraft metadata election. Dropping the task (or
+        // aborting serve_listener) drops the raft node so the node is isolated.
+        if broker.openraft_metadata_enabled() {
+            let b = Arc::clone(&broker);
+            let mut stop_rx = stop_tx.subscribe();
+            handles.push(tokio::spawn(async move {
+                let _guard = crate::cluster::OpenraftGuard(Arc::clone(&b));
+                if let Err(e) = b.boot_openraft_metadata().await {
+                    warn!(error = %e, "openraft metadata boot failed");
+                    return;
+                }
+                loop {
+                    tokio::select! {
+                        _ = stop_rx.changed() => break,
+                        _ = tokio::time::sleep(Duration::from_millis(50)) => {
+                            b.refresh_openraft_metrics();
+                        }
+                    }
+                }
+            }));
+        }
     }
 
     BackgroundTasks { stop_tx, handles }

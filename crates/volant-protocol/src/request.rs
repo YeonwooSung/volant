@@ -112,6 +112,10 @@ pub enum RequestOpcode {
     RemoveBroker = 104,
     /// Admin: list configured + live membership (v0.10).
     ListMembers = 106,
+    /// Inter-broker openraft AppendEntries (v0.11).
+    OpenraftAppend = 108,
+    /// Inter-broker openraft RequestVote (v0.11).
+    OpenraftVote = 110,
 }
 
 impl RequestOpcode {
@@ -170,6 +174,8 @@ impl RequestOpcode {
             102 => Self::AddBroker,
             104 => Self::RemoveBroker,
             106 => Self::ListMembers,
+            108 => Self::OpenraftAppend,
+            110 => Self::OpenraftVote,
             _ => return None,
         })
     }
@@ -696,6 +702,16 @@ pub enum Request {
     },
     /// Admin: list configured + live membership (v0.10).
     ListMembers,
+    /// Inter-broker openraft AppendEntries (v0.11). JSON body of the raft RPC.
+    OpenraftAppend {
+        /// `serde_json` of openraft `AppendEntriesRequest`.
+        payload: Bytes,
+    },
+    /// Inter-broker openraft RequestVote (v0.11). JSON body of the raft RPC.
+    OpenraftVote {
+        /// `serde_json` of openraft `VoteRequest`.
+        payload: Bytes,
+    },
 }
 
 /// One broker endpoint on the membership overlay wire (v0.10).
@@ -790,6 +806,8 @@ impl Request {
             Self::AddBroker { .. } => RequestOpcode::AddBroker as u16,
             Self::RemoveBroker { .. } => RequestOpcode::RemoveBroker as u16,
             Self::ListMembers => RequestOpcode::ListMembers as u16,
+            Self::OpenraftAppend { .. } => RequestOpcode::OpenraftAppend as u16,
+            Self::OpenraftVote { .. } => RequestOpcode::OpenraftVote as u16,
         }
     }
 }
