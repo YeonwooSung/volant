@@ -1,6 +1,6 @@
 //! Opt-in openraft metadata election (v0.11) + assignment apply (v0.16)
 //! + InstallSnapshot (v0.17) + durable log / hard state (v0.21)
-//! + snapshot assignment apply (v0.22).
+//! + snapshot assignment apply (v0.22) + joint membership (v0.26).
 //!
 //! When `VOLANT_OPENRAFT_METADATA=1`, the leader replicates
 //! [`MetaRequest::SetAssignment`] via opcodes 108/109. Apply writes
@@ -10,7 +10,7 @@
 //! (JSON files; not Rocks). Flag off does not create that directory.
 //! Homemade 154 is unchanged.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::fmt;
 use std::fs::{self, File, OpenOptions};
 use std::io::{Cursor, Read, Write};
@@ -29,9 +29,9 @@ use openraft::raft::{
 };
 use openraft::storage::{LogFlushed, RaftLogStorage, RaftStateMachine, Snapshot};
 use openraft::{
-    BasicNode, Config, Entry, EntryPayload, LogId, LogState, Raft, RaftLogId, RaftLogReader,
-    RaftNetwork, RaftNetworkFactory, RaftSnapshotBuilder, SnapshotMeta, SnapshotPolicy,
-    StorageError, StorageIOError, StoredMembership, Vote,
+    BasicNode, ChangeMembers, Config, Entry, EntryPayload, LogId, LogState, Raft, RaftLogId,
+    RaftLogReader, RaftNetwork, RaftNetworkFactory, RaftSnapshotBuilder, SnapshotMeta,
+    SnapshotPolicy, StorageError, StorageIOError, StoredMembership, Vote,
 };
 use parking_lot::Mutex;
 use serde::de::DeserializeOwned;
@@ -811,6 +811,112 @@ impl Broker {
             return h.raft.metrics().borrow().current_term;
         }
         self.openraft_metrics.term.load(Ordering::Relaxed)
+    }
+
+    /// Effective openraft voter ids (sorted). Empty when raft is not started.
+    pub fn openraft_voter_ids(&self) -> Vec<u32> {
+        let g = self.openraft_meta.lock();
+        let Some(h) = g.as_ref() else {
+            return Vec::new();
+        };
+        let mut ids: Vec<u32> = h
+            .raft
+            .metrics()
+            .borrow()
+            .membership_config
+            .voter_ids()
+            .collect();
+        ids.sort_unstable();
+        ids
+    }
+
+    /// Last intended voter set after overlay add/remove (v0.26 test hook).
+    pub fn test_last_openraft_membership_target(&self) -> Option<Vec<u32>> {
+        self.openraft_last_membership_target.lock().clone()
+    }
+
+    /// Record configured broker ids as the intended openraft voter set.
+    ///
+    /// No-op when the openraft flag is off (v0.10 overlay-only).
+    pub fn note_openraft_membership_target(&self) {
+        if !self.openraft_metadata_enabled() {
+            return;
+        }
+        let ids = self
+            .cluster_config()
+            .map(|c| c.broker_ids())
+            .unwrap_or_default();
+        *self.openraft_last_membership_target.lock() = Some(ids);
+    }
+
+    /// Propose openraft joint membership to the configured broker ids.
+    ///
+    /// Only the openraft leader calls `change_membership`. Overlay add/remove
+    /// is already persisted; a raft failure is logged and does **not** roll
+    /// back `{data_dir}/cluster/membership.json`.
+    ///
+    /// Returns `true` when the flag is off, this node is not the leader, the
+    /// voter set already matches, or the wait succeeds.
+    pub async fn change_openraft_membership(&self) -> bool {
+        if !self.openraft_metadata_enabled() {
+            return true;
+        }
+        if self.cluster_config().is_none() {
+            return true;
+        }
+        self.note_openraft_membership_target();
+        if !self.is_controller() {
+            return true;
+        }
+        let nodes = membership_nodes(self);
+        if nodes.is_empty() {
+            return true;
+        }
+        let target: Vec<u32> = nodes.keys().copied().collect();
+        let current = self.openraft_voter_ids();
+        if current == target {
+            return true;
+        }
+        let raft = {
+            let g = self.openraft_meta.lock();
+            match g.as_ref() {
+                Some(h) => h.raft.clone(),
+                None => {
+                    warn!("openraft change_membership: raft not started");
+                    return false;
+                }
+            }
+        };
+        // openraft 0.9 ReplaceAllVoters requires a Node record for every new
+        // voter. AddNodes first (learner), then replace voters (joint).
+        let add = ChangeMembers::AddNodes(nodes);
+        match tokio::time::timeout(CLIENT_WRITE_TIMEOUT, raft.change_membership(add, true)).await {
+            Ok(Ok(_)) => {}
+            Ok(Err(e)) => {
+                warn!(error = %e, "openraft AddNodes (learner) failed");
+            }
+            Err(_) => {
+                warn!(
+                    timeout_secs = CLIENT_WRITE_TIMEOUT.as_secs(),
+                    "openraft AddNodes (learner) timed out"
+                );
+            }
+        }
+        let ids: BTreeSet<u32> = target.iter().copied().collect();
+        match tokio::time::timeout(CLIENT_WRITE_TIMEOUT, raft.change_membership(ids, false)).await {
+            Ok(Ok(_)) => true,
+            Ok(Err(e)) => {
+                warn!(error = %e, "openraft change_membership failed");
+                false
+            }
+            Err(_) => {
+                warn!(
+                    timeout_secs = CLIENT_WRITE_TIMEOUT.as_secs(),
+                    "openraft change_membership timed out"
+                );
+                false
+            }
+        }
     }
 
     /// Start the local openraft node (idempotent).

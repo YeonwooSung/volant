@@ -476,6 +476,16 @@ node does not wipe existing topics. Apply errors are logged; raft
 `last_applied` / membership still install. Default flag remains **off**.
 See [V22_SPEC.md](./V22_SPEC.md).
 
+## v0.26 openraft joint
+
+Same opt-in (`VOLANT_OPENRAFT_METADATA=1`). After overlay AddBroker /
+RemoveBroker the openraft **leader** proposes `change_membership` to the
+configured broker ids (joint consensus, opcodes **108/109**, 5s wait).
+Flag **off** keeps v0.10 overlay-only. Overlay is SoT: a raft fail does
+**not** roll back `{data_dir}/cluster/membership.json` (client still
+succeeds). Remove of the last voter is rejected. No new opcodes. See
+[V26_SPEC.md](./V26_SPEC.md).
+
 **Cluster sharp edges:** Truncate-journal majority (Phase 130), assignment
 majority (Phase 150/154), and Phase 135/137/148 wait mode use **configured N**
 (`floor(N/2)+1`), not live-only. For **N=2**, majority

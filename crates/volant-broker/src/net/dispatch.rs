@@ -1300,10 +1300,14 @@ async fn handle_request(broker: &Arc<Broker>, req: Request) -> Result<Response> 
                 })
                 .collect();
             match broker.apply_membership_put(generation, endpoints) {
-                Ok(applied_generation) => Ok(Response::MembershipPut {
-                    error_code: 0,
-                    applied_generation,
-                }),
+                Ok(applied_generation) => {
+                    // Leader-only; no-op when flag off or voter set already matches.
+                    let _ = broker.change_openraft_membership().await;
+                    Ok(Response::MembershipPut {
+                        error_code: 0,
+                        applied_generation,
+                    })
+                }
                 Err(e) => Ok(Response::Error {
                     code: ErrorCode::InvalidArg as u16,
                     message: e.to_string(),
@@ -1318,6 +1322,8 @@ async fn handle_request(broker: &Arc<Broker>, req: Request) -> Result<Response> 
         } => match broker.add_broker(id, host, port, rack) {
             Ok(generation) => {
                 fanout_membership_put(broker).await;
+                // Overlay is SoT. change_membership is best-effort (no rollback).
+                let _ = broker.change_openraft_membership().await;
                 Ok(Response::AddBroker {
                     error_code: 0,
                     generation,
@@ -1331,6 +1337,7 @@ async fn handle_request(broker: &Arc<Broker>, req: Request) -> Result<Response> 
         Request::RemoveBroker { id } => match broker.remove_broker(id) {
             Ok(generation) => {
                 fanout_membership_put(broker).await;
+                let _ = broker.change_openraft_membership().await;
                 Ok(Response::RemoveBroker {
                     error_code: 0,
                     generation,
