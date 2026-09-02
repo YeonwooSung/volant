@@ -279,6 +279,11 @@ docs for day-to-day reading: [ops](../ops.md), [consistency](../consistency.md),
 | v0.78 | ✅ | OffsetCommit/Fetch/DeleteOffsets retry on Python/Go/Java | [V78_SPEC.md](../V78_SPEC.md) |
 | v0.79 | ✅ | Rust admin NotController redirect | [V79_SPEC.md](../V79_SPEC.md) |
 | v0.80 | ✅ | Rust heartbeat retry | [V80_SPEC.md](../V80_SPEC.md) |
+| v0.81 | ✅ | Language admin-14 prefers Metadata.controller_id | [V81_SPEC.md](../V81_SPEC.md) |
+| v0.82 | ✅ | ListOffsets retry on Python/Go/Java | [V82_SPEC.md](../V82_SPEC.md) |
+| v0.83 | ✅ | Rust OffsetCommit/Fetch/DeleteOffsets retry | [V83_SPEC.md](../V83_SPEC.md) |
+| v0.84 | ✅ | Rust ListOffsets retry | [V84_SPEC.md](../V84_SPEC.md) |
+| v0.85 | ✅ | SCRAM-admin/ListAcls NotController redirect on Python/Go/Java | [V85_SPEC.md](../V85_SPEC.md) |
 
 ---
 
