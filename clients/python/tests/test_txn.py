@@ -32,15 +32,34 @@ from volant.codec import (
 )
 from volant.frame import ProtocolError, encode_frame, try_decode_frame
 
+# Native ErrorCode::Timeout / InvalidTxnState (crates/volant-protocol).
+TIMEOUT = 7
+INVALID_TXN_STATE = 22
+
+
+def _next_code(codes: list[int]) -> int:
+    if not codes:
+        return 0
+    if len(codes) == 1:
+        return codes[0]
+    return codes.pop(0)
+
 
 class _TxnServer:
     """Accept one connection and reply to Init / BeginTxn / Produce / EndTxn."""
 
-    def __init__(self, *, begin_error: int = 0, end_error: int = 0) -> None:
+    def __init__(
+        self,
+        *,
+        begin_error: int = 0,
+        end_error: int = 0,
+        begin_codes: Optional[list[int]] = None,
+        end_codes: Optional[list[int]] = None,
+    ) -> None:
         self.host = "127.0.0.1"
         self.port = 0
-        self.begin_error = begin_error
-        self.end_error = end_error
+        self.begin_codes = list(begin_codes) if begin_codes is not None else [begin_error]
+        self.end_codes = list(end_codes) if end_codes is not None else [end_error]
         self.opcodes: list[int] = []
         self.init_txn_ids: list[str] = []
         self.begin_reqs = []
@@ -120,8 +139,9 @@ class _TxnServer:
         if opcode == OP_BEGIN_TXN:
             req = decode_begin_txn_request(raw)
             self.begin_reqs.append(req)
+            begin_error = _next_code(self.begin_codes)
             return (
-                encode_begin_txn_response(BeginTxnResponse(error_code=self.begin_error)),
+                encode_begin_txn_response(BeginTxnResponse(error_code=begin_error)),
                 OP_BEGIN_TXN_RESPONSE,
             )
         if opcode == OP_PRODUCE:
@@ -142,8 +162,9 @@ class _TxnServer:
         if opcode == OP_END_TXN:
             req = decode_end_txn_request(raw)
             self.end_reqs.append(req)
+            end_error = _next_code(self.end_codes)
             results = []
-            if req.committed and self.end_error == 0:
+            if req.committed and end_error == 0:
                 results = [
                     WireTxnProduceResult(
                         topic="t", partition=0, base_offset=10, count=1
@@ -151,7 +172,7 @@ class _TxnServer:
                 ]
             return (
                 encode_end_txn_response(
-                    EndTxnResponse(error_code=self.end_error, results=results)
+                    EndTxnResponse(error_code=end_error, results=results)
                 ),
                 OP_END_TXN_RESPONSE,
             )
@@ -213,13 +234,75 @@ class TestTxnClient(unittest.TestCase):
             self.assertEqual(srv.opcodes, [])
 
     def test_error_22_raises_begin_txn(self) -> None:
-        with _TxnServer(begin_error=22) as srv:
+        with _TxnServer(begin_error=INVALID_TXN_STATE) as srv:
             with Client(srv.addr, timeout=5.0, transactional_id="txn-1") as c:
                 with self.assertRaises(BrokerError) as ctx:
                     c.begin_transaction()
-            self.assertEqual(ctx.exception.code, 22)
+            self.assertEqual(ctx.exception.code, INVALID_TXN_STATE)
             self.assertEqual(ctx.exception.op, "begin_txn")
             self.assertEqual(srv.opcodes, [OP_INIT_PRODUCER_ID, OP_BEGIN_TXN])
+
+    def test_default_max_retries_zero_raises_on_begin_timeout(self) -> None:
+        with _TxnServer(begin_error=TIMEOUT) as srv:
+            with Client(srv.addr, timeout=5.0, transactional_id="txn-1") as c:
+                self.assertEqual(c.max_retries, 0)
+                with self.assertRaises(BrokerError) as ctx:
+                    c.begin_transaction()
+            self.assertEqual(ctx.exception.code, TIMEOUT)
+            self.assertEqual(ctx.exception.op, "begin_txn")
+            self.assertEqual(len(srv.begin_reqs), 1)
+            self.assertEqual(srv.opcodes, [OP_INIT_PRODUCER_ID, OP_BEGIN_TXN])
+
+    def test_end_txn_retries_timeout_then_ok(self) -> None:
+        with _TxnServer(end_codes=[TIMEOUT, 0]) as srv:
+            with Client(
+                srv.addr, timeout=5.0, transactional_id="txn-1",
+                max_retries=2, retry_backoff_ms=0,
+            ) as c:
+                c.begin_transaction()
+                results = c.commit_transaction()
+            self.assertEqual(results, [TxnProduceResult("t", 0, 10, 1)])
+            self.assertEqual(len(srv.end_reqs), 2)
+            self.assertTrue(all(r.committed for r in srv.end_reqs))
+            self.assertFalse(c._in_transaction)
+
+    def test_abort_retries_timeout_then_ok(self) -> None:
+        with _TxnServer(end_codes=[TIMEOUT, 0]) as srv:
+            with Client(
+                srv.addr, timeout=5.0, transactional_id="txn-1",
+                max_retries=2, retry_backoff_ms=0,
+            ) as c:
+                c.begin_transaction()
+                c.abort_transaction()
+            self.assertEqual(len(srv.end_reqs), 2)
+            self.assertTrue(all(not r.committed for r in srv.end_reqs))
+            self.assertFalse(c._in_transaction)
+
+    def test_invalid_txn_state_is_not_retried(self) -> None:
+        with _TxnServer(begin_error=INVALID_TXN_STATE) as srv:
+            with Client(
+                srv.addr, timeout=5.0, transactional_id="txn-1",
+                max_retries=2, retry_backoff_ms=0,
+            ) as c:
+                with self.assertRaises(BrokerError) as ctx:
+                    c.begin_transaction()
+            self.assertEqual(ctx.exception.code, INVALID_TXN_STATE)
+            self.assertEqual(ctx.exception.op, "begin_txn")
+            self.assertEqual(len(srv.begin_reqs), 1)
+            self.assertEqual(srv.opcodes, [OP_INIT_PRODUCER_ID, OP_BEGIN_TXN])
+
+    def test_end_txn_exhausted_retries_raises(self) -> None:
+        with _TxnServer(end_error=TIMEOUT) as srv:
+            with Client(
+                srv.addr, timeout=5.0, transactional_id="txn-1",
+                max_retries=2, retry_backoff_ms=0,
+            ) as c:
+                c.begin_transaction()
+                with self.assertRaises(BrokerError) as ctx:
+                    c.commit_transaction()
+            self.assertEqual(ctx.exception.code, TIMEOUT)
+            self.assertEqual(ctx.exception.op, "end_txn")
+            self.assertEqual(len(srv.end_reqs), 3)
 
 
 class TestTransactionalProducer(unittest.TestCase):

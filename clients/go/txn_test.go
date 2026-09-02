@@ -13,22 +13,47 @@ import (
 	"github.com/volant-mq/volant/clients/go/frame"
 )
 
+// Native ErrorCode::Timeout / InvalidTxnState (crates/volant-protocol).
+const (
+	txnTimeoutCode     uint16 = 7
+	txnInvalidTxnState uint16 = 22
+)
+
 type txnServerState struct {
 	opcodes     []uint16
 	initTxnIDs  []string
 	beginReqs   []codec.BeginTxnRequest
 	produceReqs []codec.ProduceRequest
 	endReqs     []codec.EndTxnRequest
+	beginCodes  []uint16
+	endCodes    []uint16
 	err         error
 }
 
+func nextTxnCode(codes *[]uint16) uint16 {
+	if len(*codes) == 0 {
+		return 0
+	}
+	if len(*codes) == 1 {
+		return (*codes)[0]
+	}
+	c := (*codes)[0]
+	*codes = (*codes)[1:]
+	return c
+}
+
 func serveTxn(t *testing.T, beginError, endError uint16) (addr string, got *txnServerState, stop func()) {
+	t.Helper()
+	return serveTxnCodes(t, []uint16{beginError}, []uint16{endError})
+}
+
+func serveTxnCodes(t *testing.T, beginCodes, endCodes []uint16) (addr string, got *txnServerState, stop func()) {
 	t.Helper()
 	ln, err := net.Listen("tcp", "127.0.0.1:0")
 	if err != nil {
 		t.Fatal(err)
 	}
-	res := &txnServerState{}
+	res := &txnServerState{beginCodes: append([]uint16(nil), beginCodes...), endCodes: append([]uint16(nil), endCodes...)}
 	done := make(chan struct{})
 	go func() {
 		defer close(done)
@@ -59,7 +84,7 @@ func serveTxn(t *testing.T, beginError, endError uint16) (addr string, got *txnS
 			}
 			buf = append([]byte(nil), rest...)
 			res.opcodes = append(res.opcodes, f.Opcode)
-			payload, replyOp, herr := handleTxn(f, res, beginError, endError)
+			payload, replyOp, herr := handleTxn(f, res)
 			if herr != nil {
 				res.err = herr
 				return
@@ -84,7 +109,7 @@ func serveTxn(t *testing.T, beginError, endError uint16) (addr string, got *txnS
 	}
 }
 
-func handleTxn(f *frame.Frame, got *txnServerState, beginError, endError uint16) ([]byte, uint16, error) {
+func handleTxn(f *frame.Frame, got *txnServerState) ([]byte, uint16, error) {
 	switch f.Opcode {
 	case codec.OpInitProducerId:
 		req, err := codec.DecodeInitProducerIdRequest(f.Payload)
@@ -102,7 +127,7 @@ func handleTxn(f *frame.Frame, got *txnServerState, beginError, endError uint16)
 			return nil, 0, err
 		}
 		got.beginReqs = append(got.beginReqs, req)
-		payload, err := codec.EncodeBeginTxnResponse(codec.BeginTxnResponse{ErrorCode: beginError})
+		payload, err := codec.EncodeBeginTxnResponse(codec.BeginTxnResponse{ErrorCode: nextTxnCode(&got.beginCodes)})
 		return payload, codec.OpBeginTxnResponse, err
 	case codec.OpProduce:
 		req, err := codec.DecodeProduceRequest(f.Payload)
@@ -124,6 +149,7 @@ func handleTxn(f *frame.Frame, got *txnServerState, beginError, endError uint16)
 			return nil, 0, err
 		}
 		got.endReqs = append(got.endReqs, req)
+		endError := nextTxnCode(&got.endCodes)
 		var results []codec.TxnProduceResult
 		if req.Committed && endError == 0 {
 			results = []codec.TxnProduceResult{{Topic: "t", Partition: 0, BaseOffset: 10, Count: 1}}
@@ -230,7 +256,7 @@ func TestMissingTransactionalIDErrorsBeforeSend(t *testing.T) {
 }
 
 func TestBeginTxnError22Raises(t *testing.T) {
-	addr, got, stop := serveTxn(t, 22, 0)
+	addr, got, stop := serveTxn(t, txnInvalidTxnState, 0)
 	defer stop()
 	c, err := volant.DialTimeout(addr, 5*time.Second)
 	if err != nil {
@@ -240,11 +266,135 @@ func TestBeginTxnError22Raises(t *testing.T) {
 	c.SetTransactionalID("txn-1")
 	err = c.BeginTransaction()
 	var be *volant.BrokerError
-	if !errors.As(err, &be) || be.Code != 22 || be.Op != "begin_txn" {
+	if !errors.As(err, &be) || be.Code != txnInvalidTxnState || be.Op != "begin_txn" {
 		t.Fatalf("err %#v", err)
 	}
 	if len(got.opcodes) != 2 || got.opcodes[0] != codec.OpInitProducerId || got.opcodes[1] != codec.OpBeginTxn {
 		t.Fatalf("opcodes %v", got.opcodes)
+	}
+}
+
+func TestDefaultMaxRetriesZeroRaisesOnBeginTimeout(t *testing.T) {
+	addr, got, stop := serveTxn(t, txnTimeoutCode, 0)
+	defer stop()
+	c, err := volant.DialTimeout(addr, 5*time.Second)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer c.Close()
+	c.SetTransactionalID("txn-1")
+	err = c.BeginTransaction()
+	var be *volant.BrokerError
+	if !errors.As(err, &be) || be.Code != txnTimeoutCode || be.Op != "begin_txn" {
+		t.Fatalf("err %#v", err)
+	}
+	if len(got.beginReqs) != 1 {
+		t.Fatalf("begin count %d want 1", len(got.beginReqs))
+	}
+	if len(got.opcodes) != 2 || got.opcodes[0] != codec.OpInitProducerId || got.opcodes[1] != codec.OpBeginTxn {
+		t.Fatalf("opcodes %v", got.opcodes)
+	}
+}
+
+func TestEndTxnRetriesTimeoutThenOk(t *testing.T) {
+	addr, got, stop := serveTxnCodes(t, []uint16{0}, []uint16{txnTimeoutCode, 0})
+	defer stop()
+	c, err := volant.DialTimeout(addr, 5*time.Second)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer c.Close()
+	c.SetTransactionalID("txn-1")
+	c.SetMaxRetries(2)
+	c.SetRetryBackoff(0)
+	if err := c.BeginTransaction(); err != nil {
+		t.Fatal(err)
+	}
+	results, err := c.CommitTransaction(nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(results) != 1 || results[0].BaseOffset != 10 {
+		t.Fatalf("results %+v", results)
+	}
+	if len(got.endReqs) != 2 {
+		t.Fatalf("end count %d want 2", len(got.endReqs))
+	}
+	if !got.endReqs[0].Committed || !got.endReqs[1].Committed {
+		t.Fatalf("end %+v", got.endReqs)
+	}
+}
+
+func TestAbortRetriesTimeoutThenOk(t *testing.T) {
+	addr, got, stop := serveTxnCodes(t, []uint16{0}, []uint16{txnTimeoutCode, 0})
+	defer stop()
+	c, err := volant.DialTimeout(addr, 5*time.Second)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer c.Close()
+	c.SetTransactionalID("txn-1")
+	c.SetMaxRetries(2)
+	c.SetRetryBackoff(0)
+	if err := c.BeginTransaction(); err != nil {
+		t.Fatal(err)
+	}
+	if err := c.AbortTransaction(); err != nil {
+		t.Fatal(err)
+	}
+	if len(got.endReqs) != 2 {
+		t.Fatalf("end count %d want 2", len(got.endReqs))
+	}
+	if got.endReqs[0].Committed || got.endReqs[1].Committed {
+		t.Fatalf("end %+v", got.endReqs)
+	}
+}
+
+func TestInvalidTxnStateIsNotRetried(t *testing.T) {
+	addr, got, stop := serveTxn(t, txnInvalidTxnState, 0)
+	defer stop()
+	c, err := volant.DialTimeout(addr, 5*time.Second)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer c.Close()
+	c.SetTransactionalID("txn-1")
+	c.SetMaxRetries(2)
+	c.SetRetryBackoff(0)
+	err = c.BeginTransaction()
+	var be *volant.BrokerError
+	if !errors.As(err, &be) || be.Code != txnInvalidTxnState || be.Op != "begin_txn" {
+		t.Fatalf("err %#v", err)
+	}
+	if len(got.beginReqs) != 1 {
+		t.Fatalf("begin count %d want 1", len(got.beginReqs))
+	}
+	if len(got.opcodes) != 2 || got.opcodes[0] != codec.OpInitProducerId || got.opcodes[1] != codec.OpBeginTxn {
+		t.Fatalf("opcodes %v", got.opcodes)
+	}
+}
+
+func TestEndTxnExhaustedRetriesRaises(t *testing.T) {
+	addr, got, stop := serveTxn(t, 0, txnTimeoutCode)
+	defer stop()
+	c, err := volant.DialTimeout(addr, 5*time.Second)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer c.Close()
+	c.SetTransactionalID("txn-1")
+	c.SetMaxRetries(2)
+	c.SetRetryBackoff(0)
+	if err := c.BeginTransaction(); err != nil {
+		t.Fatal(err)
+	}
+	_, err = c.CommitTransaction(nil)
+	var be *volant.BrokerError
+	if !errors.As(err, &be) || be.Code != txnTimeoutCode || be.Op != "end_txn" {
+		t.Fatalf("err %#v", err)
+	}
+	if len(got.endReqs) != 3 {
+		t.Fatalf("end count %d want 3", len(got.endReqs))
 	}
 }
 

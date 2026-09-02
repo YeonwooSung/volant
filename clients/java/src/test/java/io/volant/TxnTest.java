@@ -77,14 +77,95 @@ class TxnTest {
 
     @Test
     void error22RaisesBeginTxn() throws Exception {
-        try (TxnServer srv = new TxnServer(22, 0)) {
+        try (TxnServer srv = new TxnServer(Client.INVALID_TXN_STATE, 0)) {
             try (Client c = Client.connect("127.0.0.1", srv.port, 5_000)) {
                 c.setTransactionalId("txn-1");
                 BrokerException ex = assertThrows(BrokerException.class, c::beginTransaction);
-                assertEquals(22, ex.code);
+                assertEquals(Client.INVALID_TXN_STATE, ex.code);
                 assertEquals("begin_txn", ex.op);
             }
             assertEquals(List.of(Codec.OP_INIT_PRODUCER_ID, Codec.OP_BEGIN_TXN), srv.opcodes);
+        }
+    }
+
+    @Test
+    void defaultMaxRetriesZeroRaisesOnBeginTimeout() throws Exception {
+        try (TxnServer srv = new TxnServer(TIMEOUT, 0)) {
+            try (Client c = Client.connect("127.0.0.1", srv.port, 5_000)) {
+                c.setTransactionalId("txn-1");
+                assertEquals(0, c.maxRetries());
+                BrokerException ex = assertThrows(BrokerException.class, c::beginTransaction);
+                assertEquals(TIMEOUT, ex.code);
+                assertEquals("begin_txn", ex.op);
+            }
+            assertEquals(1, srv.beginCount());
+            assertEquals(List.of(Codec.OP_INIT_PRODUCER_ID, Codec.OP_BEGIN_TXN), srv.opcodes);
+        }
+    }
+
+    @Test
+    void endTxnRetriesTimeoutThenOk() throws Exception {
+        try (TxnServer srv = new TxnServer(new int[] {0}, new int[] {TIMEOUT, 0})) {
+            try (Client c = Client.connect("127.0.0.1", srv.port, 5_000)) {
+                c.setTransactionalId("txn-1");
+                c.setMaxRetries(2);
+                c.setRetryBackoffMs(0);
+                c.beginTransaction();
+                List<TxnProduceResult> results = c.commitTransaction();
+                assertEquals(1, results.size());
+                assertEquals(10L, results.get(0).baseOffset);
+            }
+            assertEquals(2, srv.endReqs.size());
+            assertTrue(srv.endReqs.get(0).committed);
+            assertTrue(srv.endReqs.get(1).committed);
+        }
+    }
+
+    @Test
+    void abortRetriesTimeoutThenOk() throws Exception {
+        try (TxnServer srv = new TxnServer(new int[] {0}, new int[] {TIMEOUT, 0})) {
+            try (Client c = Client.connect("127.0.0.1", srv.port, 5_000)) {
+                c.setTransactionalId("txn-1");
+                c.setMaxRetries(2);
+                c.setRetryBackoffMs(0);
+                c.beginTransaction();
+                c.abortTransaction();
+            }
+            assertEquals(2, srv.endReqs.size());
+            assertFalse(srv.endReqs.get(0).committed);
+            assertFalse(srv.endReqs.get(1).committed);
+        }
+    }
+
+    @Test
+    void invalidTxnStateIsNotRetried() throws Exception {
+        try (TxnServer srv = new TxnServer(Client.INVALID_TXN_STATE, 0)) {
+            try (Client c = Client.connect("127.0.0.1", srv.port, 5_000)) {
+                c.setTransactionalId("txn-1");
+                c.setMaxRetries(2);
+                c.setRetryBackoffMs(0);
+                BrokerException ex = assertThrows(BrokerException.class, c::beginTransaction);
+                assertEquals(Client.INVALID_TXN_STATE, ex.code);
+                assertEquals("begin_txn", ex.op);
+            }
+            assertEquals(1, srv.beginCount());
+            assertEquals(List.of(Codec.OP_INIT_PRODUCER_ID, Codec.OP_BEGIN_TXN), srv.opcodes);
+        }
+    }
+
+    @Test
+    void endTxnExhaustedRetriesRaises() throws Exception {
+        try (TxnServer srv = new TxnServer(0, TIMEOUT)) {
+            try (Client c = Client.connect("127.0.0.1", srv.port, 5_000)) {
+                c.setTransactionalId("txn-1");
+                c.setMaxRetries(2);
+                c.setRetryBackoffMs(0);
+                c.beginTransaction();
+                BrokerException ex = assertThrows(BrokerException.class, c::commitTransaction);
+                assertEquals(TIMEOUT, ex.code);
+                assertEquals("end_txn", ex.op);
+            }
+            assertEquals(3, srv.endReqs.size());
         }
     }
 
@@ -183,27 +264,59 @@ class TxnTest {
         }
     }
 
+    private static final int TIMEOUT = 7;
+
     private static final class TxnServer implements AutoCloseable {
         final int port;
         final List<Integer> opcodes = Collections.synchronizedList(new ArrayList<>());
         final List<String> initTxnIds = Collections.synchronizedList(new ArrayList<>());
         final List<Codec.ProduceRequest> produceReqs = Collections.synchronizedList(new ArrayList<>());
         final List<Codec.EndTxnRequest> endReqs = Collections.synchronizedList(new ArrayList<>());
-        private final int beginError;
-        private final int endError;
+        private final List<Integer> beginCodes;
+        private final List<Integer> endCodes;
         private final ServerSocket listen;
         private final Thread thread;
         private final AtomicReference<Exception> error = new AtomicReference<>();
 
         TxnServer(int beginError, int endError) throws IOException {
-            this.beginError = beginError;
-            this.endError = endError;
+            this(new int[] {beginError}, new int[] {endError});
+        }
+
+        TxnServer(int[] beginCodes, int[] endCodes) throws IOException {
+            this.beginCodes = new ArrayList<>();
+            for (int c : beginCodes) {
+                this.beginCodes.add(c);
+            }
+            this.endCodes = new ArrayList<>();
+            for (int c : endCodes) {
+                this.endCodes.add(c);
+            }
             listen = new ServerSocket(0, 8, InetAddress.getByName("127.0.0.1"));
             listen.setSoTimeout(8_000);
             port = listen.getLocalPort();
             thread = new Thread(this::serve, "volant-txn");
             thread.setDaemon(true);
             thread.start();
+        }
+
+        int beginCount() {
+            int n = 0;
+            for (int op : opcodes) {
+                if (op == Codec.OP_BEGIN_TXN) {
+                    n++;
+                }
+            }
+            return n;
+        }
+
+        private static int nextCode(List<Integer> codes) {
+            if (codes.isEmpty()) {
+                return 0;
+            }
+            if (codes.size() == 1) {
+                return codes.get(0);
+            }
+            return codes.remove(0);
         }
 
         private void serve() {
@@ -237,7 +350,8 @@ class TxnTest {
                                 new Codec.InitProducerIdResponse(7L, 0, 0));
                         replyOp = Codec.OP_INIT_PRODUCER_ID_RESPONSE;
                     } else if (d.frame.opcode == Codec.OP_BEGIN_TXN) {
-                        payload = Codec.encodeBeginTxnResponse(new Codec.BeginTxnResponse(beginError));
+                        payload = Codec.encodeBeginTxnResponse(
+                                new Codec.BeginTxnResponse(nextCode(beginCodes)));
                         replyOp = Codec.OP_BEGIN_TXN_RESPONSE;
                     } else if (d.frame.opcode == Codec.OP_PRODUCE) {
                         Codec.ProduceRequest req = Codec.decodeProduceRequest(d.frame.payload);
@@ -249,6 +363,7 @@ class TxnTest {
                     } else if (d.frame.opcode == Codec.OP_END_TXN) {
                         Codec.EndTxnRequest req = Codec.decodeEndTxnRequest(d.frame.payload);
                         endReqs.add(req);
+                        int endError = nextCode(endCodes);
                         List<TxnProduceResult> results = Collections.emptyList();
                         if (req.committed && endError == 0) {
                             results = Collections.singletonList(new TxnProduceResult("t", 0, 10L, 1));
