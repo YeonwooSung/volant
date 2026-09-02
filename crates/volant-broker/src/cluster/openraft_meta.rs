@@ -1,6 +1,7 @@
 //! Opt-in openraft metadata election (v0.11) + assignment apply (v0.16)
 //! + InstallSnapshot (v0.17) + durable log / hard state (v0.21)
-//! + snapshot assignment apply (v0.22) + joint membership (v0.26).
+//! + snapshot assignment apply (v0.22) + joint membership (v0.26)
+//! + overlay rollback on joint fail (v0.34).
 //!
 //! When `VOLANT_OPENRAFT_METADATA=1`, the leader replicates
 //! [`MetaRequest::SetAssignment`] via opcodes 108/109. Apply writes
@@ -9,6 +10,10 @@
 //! Vote, log, and last snapshot persist under `{data_dir}/__openraft/`
 //! (JSON files; not Rocks). Flag off does not create that directory.
 //! Homemade 154 is unchanged.
+//!
+//! v0.34: leader AddBroker / RemoveBroker rolls back
+//! `{data_dir}/cluster/membership.json` when `change_membership` fails
+//! (`VOLANT_OPENRAFT_JOINT_ROLLBACK` default **on**).
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::fmt;
@@ -849,11 +854,38 @@ impl Broker {
         *self.openraft_last_membership_target.lock() = Some(ids);
     }
 
+    /// Whether v0.34 overlay rollback is on (default **on**; independent of
+    /// whether this process is currently the openraft leader).
+    pub fn openraft_joint_rollback_enabled(&self) -> bool {
+        self.openraft_joint_rollback_enabled.load(Ordering::Relaxed)
+    }
+
+    /// Runtime setter for [`Self::openraft_joint_rollback_enabled`].
+    pub fn set_openraft_joint_rollback(&self, on: bool) {
+        self.openraft_joint_rollback_enabled
+            .store(on, Ordering::Relaxed);
+    }
+
+    /// Leader + openraft + rollback knob: dispatch gates fan-out on joint commit.
+    pub fn openraft_joint_rollback_armed(&self) -> bool {
+        self.openraft_metadata_enabled()
+            && self.openraft_joint_rollback_enabled()
+            && self.is_controller()
+    }
+
+    /// Test hook: next leader `change_membership` attempt returns fail.
+    pub fn fail_next_change_membership(&self) {
+        self.openraft_fail_next_change_membership
+            .store(true, Ordering::SeqCst);
+    }
+
     /// Propose openraft joint membership to the configured broker ids.
     ///
     /// Only the openraft leader calls `change_membership`. Overlay add/remove
-    /// is already persisted; a raft failure is logged and does **not** roll
-    /// back `{data_dir}/cluster/membership.json`.
+    /// is already persisted here; the client dispatch path (v0.34) rolls back
+    /// `{data_dir}/cluster/membership.json` when this returns `false` and
+    /// [`Self::openraft_joint_rollback_armed`] is set. Direct callers (v0.26
+    /// tests) stay best-effort.
     ///
     /// Returns `true` when the flag is off, this node is not the leader, the
     /// voter set already matches, or the wait succeeds.
@@ -876,6 +908,13 @@ impl Broker {
         let current = self.openraft_voter_ids();
         if current == target {
             return true;
+        }
+        if self
+            .openraft_fail_next_change_membership
+            .swap(false, Ordering::SeqCst)
+        {
+            warn!("openraft change_membership: test hook fail_next");
+            return false;
         }
         let raft = {
             let g = self.openraft_meta.lock();
@@ -1266,6 +1305,23 @@ pub fn default_openraft_metadata_enabled() -> bool {
                 || t.eq_ignore_ascii_case("on")
         }
         Err(_) => false,
+    }
+}
+
+/// Parse `VOLANT_OPENRAFT_JOINT_ROLLBACK`. Default **on**.
+///
+/// `0` / `false` / `no` / `off` restores v0.26 best-effort (overlay stays
+/// when `change_membership` fails). Unset and any other value keep rollback.
+pub fn default_openraft_joint_rollback_enabled() -> bool {
+    match std::env::var("VOLANT_OPENRAFT_JOINT_ROLLBACK") {
+        Ok(s) => {
+            let t = s.trim();
+            !(t == "0"
+                || t.eq_ignore_ascii_case("false")
+                || t.eq_ignore_ascii_case("no")
+                || t.eq_ignore_ascii_case("off"))
+        }
+        Err(_) => true,
     }
 }
 
