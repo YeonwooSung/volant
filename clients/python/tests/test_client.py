@@ -13,6 +13,7 @@ from volant.codec import (
     OP_FETCH,
     OP_HEARTBEAT,
     OP_INIT_PRODUCER_ID,
+    OP_LEAVE_GROUP,
     OP_INIT_PRODUCER_ID_RESPONSE,
     OP_LIST_OFFSETS,
     OP_LIST_OFFSETS_RESPONSE,
@@ -25,6 +26,7 @@ from volant.codec import (
     FetchResponse,
     HeartbeatResponse,
     InitProducerIdResponse,
+    LeaveGroupResponse,
     ListOffsetsResponse,
     MetadataResponse,
     OffsetCommitResponse,
@@ -40,6 +42,7 @@ from volant.codec import (
     encode_fetch_response,
     encode_heartbeat_response,
     encode_init_producer_id_response,
+    encode_leave_group_response,
     encode_list_offsets_response,
     encode_metadata_response,
     encode_offset_commit_response,
@@ -55,7 +58,7 @@ class ScriptedBroker:
     """Accepts connections and replies to Produce / Fetch / Metadata.
 
     ``produce_codes`` / ``fetch_codes`` / ``heartbeat_codes`` /
-    ``offset_commit_codes`` / ``offset_fetch_codes`` /
+    ``leave_group_codes`` / ``offset_commit_codes`` / ``offset_fetch_codes`` /
     ``delete_offsets_codes`` / ``list_offsets_codes`` are queues of
     error_code values consumed across connections. Metadata is a fixed
     response (or a callable of ``() -> MetadataResponse``).
@@ -65,6 +68,7 @@ class ScriptedBroker:
         self.produce_codes: list[int] = []
         self.fetch_codes: list[int] = []
         self.heartbeat_codes: list[int] = []
+        self.leave_group_codes: list[int] = []
         self.offset_commit_codes: list[int] = []
         self.offset_fetch_codes: list[int] = []
         self.delete_offsets_codes: list[int] = []
@@ -77,6 +81,7 @@ class ScriptedBroker:
         self.produce_count = 0
         self.fetch_count = 0
         self.heartbeat_count = 0
+        self.leave_group_count = 0
         self.offset_commit_count = 0
         self.offset_fetch_count = 0
         self.delete_offsets_count = 0
@@ -211,6 +216,13 @@ class ScriptedBroker:
             return (
                 encode_heartbeat_response(HeartbeatResponse(error_code=code)),
                 OP_HEARTBEAT,
+            )
+        if opcode == OP_LEAVE_GROUP:
+            self.leave_group_count += 1
+            code = self.leave_group_codes.pop(0) if self.leave_group_codes else 0
+            return (
+                encode_leave_group_response(LeaveGroupResponse(error_code=code)),
+                OP_LEAVE_GROUP,
             )
         if opcode == OP_OFFSET_COMMIT:
             self.offset_commit_count += 1
@@ -652,6 +664,51 @@ class TestHeartbeatRetry(unittest.TestCase):
                     c.heartbeat("g", "m1", 1)
             self.assertEqual(ctx.exception.code, TIMEOUT)
             self.assertEqual(srv.heartbeat_count, 3)
+
+
+UNKNOWN_MEMBER = 10
+
+
+class TestLeaveGroupRetry(unittest.TestCase):
+    def test_default_max_retries_zero_raises_on_timeout(self) -> None:
+        with ScriptedBroker() as srv:
+            srv.leave_group_codes = [TIMEOUT]
+            with Client(srv.addr, timeout=5.0) as c:
+                self.assertEqual(c.max_retries, 0)
+                with self.assertRaises(BrokerError) as ctx:
+                    c.leave_group("g", "m1")
+            self.assertEqual(ctx.exception.code, TIMEOUT)
+            self.assertEqual(srv.leave_group_count, 1)
+
+    def test_retries_timeout_then_ok(self) -> None:
+        with ScriptedBroker() as srv:
+            srv.leave_group_codes = [TIMEOUT, 0]
+            with Client(srv.addr, timeout=5.0, max_retries=2, retry_backoff_ms=0) as c:
+                c.leave_group("g", "m1")
+            self.assertEqual(srv.leave_group_count, 2)
+
+    def test_unknown_member_is_success(self) -> None:
+        with ScriptedBroker() as srv:
+            srv.leave_group_codes = [UNKNOWN_MEMBER]
+            with Client(srv.addr, timeout=5.0) as c:
+                c.leave_group("g", "m1")
+            self.assertEqual(srv.leave_group_count, 1)
+
+    def test_retries_timeout_then_unknown_member(self) -> None:
+        with ScriptedBroker() as srv:
+            srv.leave_group_codes = [TIMEOUT, UNKNOWN_MEMBER]
+            with Client(srv.addr, timeout=5.0, max_retries=2, retry_backoff_ms=0) as c:
+                c.leave_group("g", "m1")
+            self.assertEqual(srv.leave_group_count, 2)
+
+    def test_rebalance_is_not_retried(self) -> None:
+        with ScriptedBroker() as srv:
+            srv.leave_group_codes = [REBALANCE, 0]
+            with Client(srv.addr, timeout=5.0, max_retries=2, retry_backoff_ms=0) as c:
+                with self.assertRaises(BrokerError) as ctx:
+                    c.leave_group("g", "m1")
+            self.assertEqual(ctx.exception.code, REBALANCE)
+            self.assertEqual(srv.leave_group_count, 1)
 
 
 NOT_FOUND = 2

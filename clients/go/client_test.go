@@ -19,6 +19,7 @@ type scriptedBroker struct {
 	produceCodes       []uint16
 	fetchCodes         []uint16
 	heartbeatCodes     []uint16
+	leaveGroupCodes    []uint16
 	offsetCommitCodes  []uint16
 	offsetFetchCodes   []uint16
 	deleteOffsetsCodes []uint16
@@ -32,6 +33,7 @@ type scriptedBroker struct {
 	produceCount       int
 	fetchCount         int
 	heartbeatCount     int
+	leaveGroupCount    int
 	offsetCommitCount  int
 	offsetFetchCount   int
 	deleteOffsetsCount int
@@ -93,6 +95,12 @@ func (s *scriptedBroker) heartbeats() int {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	return s.heartbeatCount
+}
+
+func (s *scriptedBroker) leaveGroups() int {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.leaveGroupCount
 }
 
 func (s *scriptedBroker) offsetCommits() int {
@@ -256,6 +264,14 @@ func (s *scriptedBroker) handle(f *frame.Frame) ([]byte, error) {
 			s.heartbeatCodes = s.heartbeatCodes[1:]
 		}
 		payload, err = codec.EncodeHeartbeatResponse(codec.HeartbeatResponse{ErrorCode: code})
+	case codec.OpLeaveGroup:
+		s.leaveGroupCount++
+		code := uint16(0)
+		if len(s.leaveGroupCodes) > 0 {
+			code = s.leaveGroupCodes[0]
+			s.leaveGroupCodes = s.leaveGroupCodes[1:]
+		}
+		payload, err = codec.EncodeLeaveGroupResponse(codec.LeaveGroupResponse{ErrorCode: code})
 	case codec.OpOffsetCommit:
 		s.offsetCommitCount++
 		code := uint16(0)
@@ -1148,6 +1164,119 @@ func TestHeartbeatExhaustedRetriesRaises(t *testing.T) {
 	}
 	if n := srv.heartbeats(); n != 3 {
 		t.Fatalf("heartbeat count %d want 3", n)
+	}
+}
+
+const unknownMemberCode uint16 = 10
+
+func TestLeaveGroupDefaultMaxRetriesZeroRaisesOnTimeout(t *testing.T) {
+	srv := &scriptedBroker{leaveGroupCodes: []uint16{timeoutCode}}
+	addr, stop := startScripted(t, srv)
+	defer stop()
+
+	c, err := volant.DialTimeout(addr, 5*time.Second)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer c.Close()
+
+	err = c.LeaveGroup("g", "m1")
+	if err == nil {
+		t.Fatal("expected BrokerError 7")
+	}
+	be, ok := err.(*volant.BrokerError)
+	if !ok || be.Code != timeoutCode {
+		t.Fatalf("got %v want BrokerError code=7", err)
+	}
+	if n := srv.leaveGroups(); n != 1 {
+		t.Fatalf("leave group count %d want 1", n)
+	}
+}
+
+func TestLeaveGroupRetriesTimeoutThenOk(t *testing.T) {
+	srv := &scriptedBroker{leaveGroupCodes: []uint16{timeoutCode, 0}}
+	addr, stop := startScripted(t, srv)
+	defer stop()
+
+	c, err := volant.DialTimeout(addr, 5*time.Second)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer c.Close()
+	c.SetMaxRetries(2)
+	c.SetRetryBackoff(0)
+
+	if err := c.LeaveGroup("g", "m1"); err != nil {
+		t.Fatal(err)
+	}
+	if n := srv.leaveGroups(); n != 2 {
+		t.Fatalf("leave group count %d want 2", n)
+	}
+}
+
+func TestLeaveGroupUnknownMemberIsSuccess(t *testing.T) {
+	srv := &scriptedBroker{leaveGroupCodes: []uint16{unknownMemberCode}}
+	addr, stop := startScripted(t, srv)
+	defer stop()
+
+	c, err := volant.DialTimeout(addr, 5*time.Second)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer c.Close()
+
+	if err := c.LeaveGroup("g", "m1"); err != nil {
+		t.Fatal(err)
+	}
+	if n := srv.leaveGroups(); n != 1 {
+		t.Fatalf("leave group count %d want 1", n)
+	}
+}
+
+func TestLeaveGroupRetriesTimeoutThenUnknownMember(t *testing.T) {
+	srv := &scriptedBroker{leaveGroupCodes: []uint16{timeoutCode, unknownMemberCode}}
+	addr, stop := startScripted(t, srv)
+	defer stop()
+
+	c, err := volant.DialTimeout(addr, 5*time.Second)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer c.Close()
+	c.SetMaxRetries(2)
+	c.SetRetryBackoff(0)
+
+	if err := c.LeaveGroup("g", "m1"); err != nil {
+		t.Fatal(err)
+	}
+	if n := srv.leaveGroups(); n != 2 {
+		t.Fatalf("leave group count %d want 2", n)
+	}
+}
+
+func TestLeaveGroupRebalanceIsNotRetried(t *testing.T) {
+	srv := &scriptedBroker{leaveGroupCodes: []uint16{rebalanceCode, 0}}
+	addr, stop := startScripted(t, srv)
+	defer stop()
+
+	c, err := volant.DialTimeout(addr, 5*time.Second)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer c.Close()
+	c.SetMaxRetries(2)
+	c.SetRetryBackoff(0)
+
+	err = c.LeaveGroup("g", "m1")
+	if err == nil {
+		t.Fatal("expected BrokerError 9")
+	}
+	be, ok := err.(*volant.BrokerError)
+	if !ok || be.Code != rebalanceCode {
+		t.Fatalf("got %v want BrokerError code=9", err)
+	}
+	if n := srv.leaveGroups(); n != 1 {
+		t.Fatalf("leave group count %d want 1", n)
 	}
 }
 

@@ -2081,7 +2081,10 @@ func (c *Client) ListAcls(principal string, resourceType uint8, resource string)
 	}
 }
 
-// LeaveGroup leaves a consumer group.
+// LeaveGroup leaves a consumer group. Transient broker/transport errors
+// retry up to maxRetries extra times (default 0). Error 10
+// (UnknownMemberId) is success (already left). Rebalance 9 /
+// IllegalGeneration 11 / 13 / 14 / not-found 2 are not retried.
 func (c *Client) LeaveGroup(group, memberID string) error {
 	payload, err := codec.EncodeLeaveGroupRequest(codec.LeaveGroupRequest{
 		GroupID:  group,
@@ -2090,13 +2093,36 @@ func (c *Client) LeaveGroup(group, memberID string) error {
 	if err != nil {
 		return err
 	}
-	decoded, err := c.roundTrip(codec.OpLeaveGroup, payload)
-	if err != nil {
-		return err
+	maxRetries := c.maxRetries
+	if maxRetries < 0 {
+		maxRetries = 0
 	}
-	resp, ok := decoded.(codec.LeaveGroupResponse)
-	if !ok {
-		return &frame.ProtocolError{Msg: fmt.Sprintf("unexpected response for leave_group: %T", decoded)}
+	retryAttempt := 0
+	for {
+		decoded, err := c.roundTrip(codec.OpLeaveGroup, payload)
+		if err != nil {
+			if be, ok := err.(*codec.BrokerError); ok && be.Code == 10 {
+				return nil
+			}
+			if isTransientProduceErr(err) && retryAttempt < maxRetries {
+				retryAttempt++
+				c.sleepProduceRetry()
+				continue
+			}
+			return err
+		}
+		resp, ok := decoded.(codec.LeaveGroupResponse)
+		if !ok {
+			return &frame.ProtocolError{Msg: fmt.Sprintf("unexpected response for leave_group: %T", decoded)}
+		}
+		if resp.ErrorCode == 10 {
+			return nil
+		}
+		if isTransientBroker(resp.ErrorCode) && retryAttempt < maxRetries {
+			retryAttempt++
+			c.sleepProduceRetry()
+			continue
+		}
+		return check(resp.ErrorCode, "leave_group")
 	}
-	return check(resp.ErrorCode, "leave_group")
 }

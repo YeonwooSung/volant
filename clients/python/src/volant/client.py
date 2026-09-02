@@ -1473,14 +1473,50 @@ class Client:
             return resp.error_code
 
     def leave_group(self, group: str, member_id: str) -> None:
-        """Leave a consumer group."""
+        """Leave a consumer group.
+
+        Transient broker/transport errors retry up to ``max_retries``
+        extra times (default 0). Error 10 (UnknownMemberId) is success
+        (already left). Rebalance 9 / IllegalGeneration 11 / 13 / 14 /
+        not-found 2 are not retried.
+        """
         payload = codec.encode_leave_group_request(
             LeaveGroupRequest(group_id=group, member_id=member_id)
         )
-        resp = self._round_trip(codec.OP_LEAVE_GROUP, payload)
-        if not isinstance(resp, LeaveGroupResponse):
-            raise ProtocolError(f"unexpected response for leave_group: {type(resp)}")
-        self._check(resp.error_code, "leave_group")
+        max_retries = max(0, int(self.max_retries))
+        retry_attempt = 0
+        while True:
+            try:
+                resp = self._round_trip(codec.OP_LEAVE_GROUP, payload)
+            except BrokerError as e:
+                if e.code == 10:
+                    return
+                if _is_transient_broker(e.code) and retry_attempt < max_retries:
+                    retry_attempt += 1
+                    self._sleep_produce_retry()
+                    continue
+                raise
+            except OSError:
+                if retry_attempt < max_retries:
+                    retry_attempt += 1
+                    self._sleep_produce_retry()
+                    continue
+                raise
+            if not isinstance(resp, LeaveGroupResponse):
+                raise ProtocolError(
+                    f"unexpected response for leave_group: {type(resp)}"
+                )
+            if resp.error_code == 10:
+                return
+            if (
+                _is_transient_broker(resp.error_code)
+                and retry_attempt < max_retries
+            ):
+                retry_attempt += 1
+                self._sleep_produce_retry()
+                continue
+            self._check(resp.error_code, "leave_group")
+            return
 
     def describe_group(self, group: str) -> DescribeGroupResult:
         """Describe a live consumer group (native opcode 34/35).

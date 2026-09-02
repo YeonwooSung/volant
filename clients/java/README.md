@@ -160,9 +160,10 @@ I/O errors up to `setMaxRetries` extra attempts (default 0). Sleep
 `setRetryBackoffMs` (default 50) between attempts; 0 is allowed in
 tests. Error 13 stays on the redirect budget; error 21 stays on the
 one re-Init. Heartbeat shares produce/fetch `setMaxRetries` (default
-0); rebalance codes 9 / 10 / 11 are not retried. OffsetCommit /
-OffsetFetch / DeleteOffsets / ListOffsets share the same
-`setMaxRetries` (default 0).
+0); rebalance codes 9 / 10 / 11 are not retried. LeaveGroup shares
+`setMaxRetries`; error 10 is success (already left). JoinGroup is not
+retried. OffsetCommit / OffsetFetch / DeleteOffsets / ListOffsets
+share the same `setMaxRetries` (default 0).
 This is not Kafka `retries`.
 
 Correlation ids increment per request. Decode verifies magic `V` (0x56),
