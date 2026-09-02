@@ -617,17 +617,41 @@ class Client:
         payload = codec.encode_init_producer_id_request(
             codec.InitProducerIdRequest(transactional_id=txn)
         )
-        resp = self._round_trip(codec.OP_INIT_PRODUCER_ID, payload)
-        if not isinstance(resp, codec.InitProducerIdResponse):
-            raise ProtocolError(
-                f"unexpected response for init_producer_id: {type(resp)}"
-            )
-        self._check(resp.error_code, "init_producer_id")
-        self._producer_id = resp.producer_id
-        self._producer_epoch = resp.epoch
-        self._producer_ready = True
-        self._in_transaction = False
-        self._next_seq.clear()
+        max_retries = max(0, int(self.max_retries))
+        retry_attempt = 0
+        while True:
+            try:
+                resp = self._round_trip(codec.OP_INIT_PRODUCER_ID, payload)
+            except BrokerError as e:
+                if _is_transient_broker(e.code) and retry_attempt < max_retries:
+                    retry_attempt += 1
+                    self._sleep_produce_retry()
+                    continue
+                raise
+            except OSError:
+                if retry_attempt < max_retries:
+                    retry_attempt += 1
+                    self._sleep_produce_retry()
+                    continue
+                raise
+            if not isinstance(resp, codec.InitProducerIdResponse):
+                raise ProtocolError(
+                    f"unexpected response for init_producer_id: {type(resp)}"
+                )
+            if (
+                _is_transient_broker(resp.error_code)
+                and retry_attempt < max_retries
+            ):
+                retry_attempt += 1
+                self._sleep_produce_retry()
+                continue
+            self._check(resp.error_code, "init_producer_id")
+            self._producer_id = resp.producer_id
+            self._producer_epoch = resp.epoch
+            self._producer_ready = True
+            self._in_transaction = False
+            self._next_seq.clear()
+            return
 
     def _produce_trailer(self, topic: str, partition: int) -> tuple[int, int, int]:
         if not self._uses_pid():

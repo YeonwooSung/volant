@@ -25,6 +25,7 @@ class ClientTest {
     private static final int REBALANCE = 9;
     private static final int UNKNOWN_MEMBER = 10;
     private static final int NOT_FOUND = 2;
+    private static final int UNKNOWN_PRODUCER = 21;
 
     @Test
     void produceRedirectsToLeader() throws Exception {
@@ -197,6 +198,78 @@ class ClientTest {
     }
 
     @Test
+    void defaultMaxRetriesZeroRaisesOnInitTimeout() throws Exception {
+        try (ScriptedBroker srv = ScriptedBroker.start()) {
+            srv.initCodes.add(TIMEOUT);
+            try (Client c = Client.connect("127.0.0.1", srv.port, 5_000)) {
+                c.setEnableIdempotence(true);
+                assertEquals(0, c.maxRetries());
+                BrokerException ex = assertThrows(
+                        BrokerException.class,
+                        () -> c.produce("t", 0, null, "hello".getBytes(StandardCharsets.UTF_8)));
+                assertEquals(TIMEOUT, ex.code);
+            }
+            assertEquals(1, srv.initCount.get());
+            assertEquals(0, srv.produceCount.get());
+        }
+    }
+
+    @Test
+    void retriesInitTimeoutThenOk() throws Exception {
+        try (ScriptedBroker srv = ScriptedBroker.start()) {
+            srv.initCodes.add(TIMEOUT);
+            srv.initCodes.add(0);
+            try (Client c = Client.connect("127.0.0.1", srv.port, 5_000)) {
+                c.setEnableIdempotence(true);
+                c.setMaxRetries(2);
+                c.setRetryBackoffMs(0);
+                long off = c.produce("t", 0, null, "hello".getBytes(StandardCharsets.UTF_8));
+                assertEquals(7L, off);
+            }
+            assertEquals(2, srv.initCount.get());
+            assertEquals(1, srv.produceCount.get());
+        }
+    }
+
+    @Test
+    void initUnknownProducerIdNotRetried() throws Exception {
+        try (ScriptedBroker srv = ScriptedBroker.start()) {
+            srv.initCodes.add(UNKNOWN_PRODUCER);
+            try (Client c = Client.connect("127.0.0.1", srv.port, 5_000)) {
+                c.setEnableIdempotence(true);
+                c.setMaxRetries(2);
+                c.setRetryBackoffMs(0);
+                BrokerException ex = assertThrows(
+                        BrokerException.class,
+                        () -> c.produce("t", 0, null, "hello".getBytes(StandardCharsets.UTF_8)));
+                assertEquals(UNKNOWN_PRODUCER, ex.code);
+            }
+            assertEquals(1, srv.initCount.get());
+            assertEquals(0, srv.produceCount.get());
+        }
+    }
+
+    @Test
+    void initExhaustedRetriesRaises() throws Exception {
+        try (ScriptedBroker srv = ScriptedBroker.start()) {
+            srv.initCodes.add(TIMEOUT);
+            srv.initCodes.add(TIMEOUT);
+            srv.initCodes.add(TIMEOUT);
+            try (Client c = Client.connect("127.0.0.1", srv.port, 5_000)) {
+                c.setEnableIdempotence(true);
+                c.setMaxRetries(2);
+                c.setRetryBackoffMs(0);
+                BrokerException ex = assertThrows(
+                        BrokerException.class,
+                        () -> c.produce("t", 0, null, "hello".getBytes(StandardCharsets.UTF_8)));
+                assertEquals(TIMEOUT, ex.code);
+            }
+            assertEquals(3, srv.initCount.get());
+            assertEquals(0, srv.produceCount.get());
+        }
+    }
+
+    @Test
     void fetchOptsSendsKnobs() throws Exception {
         try (ScriptedBroker srv = ScriptedBroker.start()) {
             try (Client c = Client.connect("127.0.0.1", srv.port, 5_000)) {
@@ -311,6 +384,7 @@ class ClientTest {
     static final class ScriptedBroker implements AutoCloseable {
         final int port;
         final List<Integer> produceCodes = new CopyOnWriteArrayList<>();
+        final List<Integer> initCodes = new CopyOnWriteArrayList<>();
         final List<Integer> fetchCodes = new CopyOnWriteArrayList<>();
         final List<Integer> heartbeatCodes = new CopyOnWriteArrayList<>();
         final List<Integer> leaveGroupCodes = new CopyOnWriteArrayList<>();
@@ -418,9 +492,13 @@ class ClientTest {
                 initCount.incrementAndGet();
                 Codec.InitProducerIdRequest req = Codec.decodeInitProducerIdRequest(frame.payload);
                 initTxnIds.add(req.transactionalId);
+                int code = 0;
+                if (!initCodes.isEmpty()) {
+                    code = initCodes.remove(0);
+                }
                 replyOp[0] = Codec.OP_INIT_PRODUCER_ID_RESPONSE;
                 return Codec.encodeInitProducerIdResponse(
-                        new Codec.InitProducerIdResponse(initPid, initEpoch, 0));
+                        new Codec.InitProducerIdResponse(initPid, initEpoch, code));
             }
             if (frame.opcode == Codec.OP_PRODUCE) {
                 produceCount.incrementAndGet();

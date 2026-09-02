@@ -17,6 +17,7 @@ const timeoutCode uint16 = 7
 type scriptedBroker struct {
 	mu                 sync.Mutex
 	produceCodes       []uint16
+	initCodes          []uint16
 	fetchCodes         []uint16
 	heartbeatCodes     []uint16
 	leaveGroupCodes    []uint16
@@ -243,8 +244,13 @@ func (s *scriptedBroker) handle(f *frame.Frame) ([]byte, error) {
 			return nil, e
 		}
 		s.initTxnIDs = append(s.initTxnIDs, req.TransactionalID)
+		code := uint16(0)
+		if len(s.initCodes) > 0 {
+			code = s.initCodes[0]
+			s.initCodes = s.initCodes[1:]
+		}
 		payload, err = codec.EncodeInitProducerIdResponse(codec.InitProducerIdResponse{
-			ProducerID: s.initPID, Epoch: s.initEpoch, ErrorCode: 0,
+			ProducerID: s.initPID, Epoch: s.initEpoch, ErrorCode: code,
 		})
 		replyOp = codec.OpInitProducerIdResponse
 	case codec.OpProduce:
@@ -693,6 +699,129 @@ func TestIdempotentProduceRedirectKeepsSequence(t *testing.T) {
 	}
 	if lReqs[0].ProducerID != 42 {
 		t.Fatalf("leader pid %d", lReqs[0].ProducerID)
+	}
+}
+
+const unknownProducer uint16 = 21
+
+func TestDefaultMaxRetriesZeroRaisesOnInitTimeout(t *testing.T) {
+	srv := &scriptedBroker{initCodes: []uint16{timeoutCode}}
+	addr, stop := startScripted(t, srv)
+	defer stop()
+
+	c, err := volant.DialTimeout(addr, 5*time.Second)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer c.Close()
+	c.EnableIdempotence()
+
+	_, err = c.Produce("t", 0, nil, []byte("hello"))
+	if err == nil {
+		t.Fatal("expected BrokerError 7")
+	}
+	be, ok := err.(*volant.BrokerError)
+	if !ok || be.Code != timeoutCode {
+		t.Fatalf("got %v want BrokerError code=7", err)
+	}
+	if srv.inits() != 1 {
+		t.Fatalf("init count %d want 1", srv.inits())
+	}
+	fp, _, _, _ := srv.snapshot()
+	if fp != 0 {
+		t.Fatalf("produce count %d want 0", fp)
+	}
+}
+
+func TestRetriesInitTimeoutThenOk(t *testing.T) {
+	srv := &scriptedBroker{initCodes: []uint16{timeoutCode, 0}}
+	addr, stop := startScripted(t, srv)
+	defer stop()
+
+	c, err := volant.DialTimeout(addr, 5*time.Second)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer c.Close()
+	c.EnableIdempotence()
+	c.SetMaxRetries(2)
+	c.SetRetryBackoff(0)
+
+	off, err := c.Produce("t", 0, nil, []byte("hello"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if off != 7 {
+		t.Fatalf("base offset: got %d want 7", off)
+	}
+	if srv.inits() != 2 {
+		t.Fatalf("init count %d want 2", srv.inits())
+	}
+	fp, _, _, _ := srv.snapshot()
+	if fp != 1 {
+		t.Fatalf("produce count %d want 1", fp)
+	}
+}
+
+func TestInitUnknownProducerIdNotRetried(t *testing.T) {
+	srv := &scriptedBroker{initCodes: []uint16{unknownProducer}}
+	addr, stop := startScripted(t, srv)
+	defer stop()
+
+	c, err := volant.DialTimeout(addr, 5*time.Second)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer c.Close()
+	c.EnableIdempotence()
+	c.SetMaxRetries(2)
+	c.SetRetryBackoff(0)
+
+	_, err = c.Produce("t", 0, nil, []byte("hello"))
+	if err == nil {
+		t.Fatal("expected BrokerError 21")
+	}
+	be, ok := err.(*volant.BrokerError)
+	if !ok || be.Code != unknownProducer {
+		t.Fatalf("got %v want BrokerError code=21", err)
+	}
+	if srv.inits() != 1 {
+		t.Fatalf("init count %d want 1", srv.inits())
+	}
+	fp, _, _, _ := srv.snapshot()
+	if fp != 0 {
+		t.Fatalf("produce count %d want 0", fp)
+	}
+}
+
+func TestInitExhaustedRetriesRaises(t *testing.T) {
+	srv := &scriptedBroker{initCodes: []uint16{timeoutCode, timeoutCode, timeoutCode}}
+	addr, stop := startScripted(t, srv)
+	defer stop()
+
+	c, err := volant.DialTimeout(addr, 5*time.Second)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer c.Close()
+	c.EnableIdempotence()
+	c.SetMaxRetries(2)
+	c.SetRetryBackoff(0)
+
+	_, err = c.Produce("t", 0, nil, []byte("hello"))
+	if err == nil {
+		t.Fatal("expected BrokerError 7")
+	}
+	be, ok := err.(*volant.BrokerError)
+	if !ok || be.Code != timeoutCode {
+		t.Fatalf("got %v want BrokerError code=7", err)
+	}
+	if srv.inits() != 3 {
+		t.Fatalf("init count %d want 3", srv.inits())
+	}
+	fp, _, _, _ := srv.snapshot()
+	if fp != 0 {
+		t.Fatalf("produce count %d want 0", fp)
 	}
 }
 
