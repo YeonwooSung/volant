@@ -1,5 +1,6 @@
 //! Stream operator trait.
 
+use bytes::Bytes;
 use volant_core::{Record, Result};
 
 /// A pure or stateful transform over records.
@@ -29,4 +30,14 @@ pub trait Operator: Send {
 
     /// Discard staged state after txn abort or empty step. Default no-op.
     fn abort_checkpoint(&mut self) {}
+
+    /// Staged store deltas for the changelog (`None` value = delete).
+    ///
+    /// Default empty. Stateful operators forward to their [`crate::state::KeyValueStore`].
+    fn staged_changelog(&self) -> Vec<(Bytes, Option<Bytes>)> {
+        Vec::new()
+    }
+
+    /// Apply a changelog record during replay. Default no-op.
+    fn apply_changelog(&mut self, _key: Bytes, _value: Option<Bytes>) {}
 }

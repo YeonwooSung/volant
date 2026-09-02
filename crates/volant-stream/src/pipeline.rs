@@ -1,8 +1,11 @@
 //! Composable processing pipeline.
 
+use bytes::Bytes;
+use volant_client::Client;
 use volant_core::{Record, Result};
 
 use crate::operator::Operator;
+use crate::state::fetch_changelog_records;
 
 /// Ordered chain of operators.
 pub struct Pipeline {
@@ -91,6 +94,33 @@ impl Pipeline {
         for op in &mut self.operators {
             op.abort_checkpoint();
         }
+    }
+
+    /// Collect staged changelog deltas from every operator.
+    pub fn staged_changelog(&self) -> Vec<(Bytes, Option<Bytes>)> {
+        let mut out = Vec::new();
+        for op in &self.operators {
+            out.extend(op.staged_changelog());
+        }
+        out
+    }
+
+    /// Apply a changelog record to every operator (last-write-wins per store).
+    pub fn apply_changelog(&mut self, key: Bytes, value: Option<Bytes>) {
+        for op in &mut self.operators {
+            op.apply_changelog(key.clone(), value.clone());
+        }
+    }
+
+    /// Replay committed changelog records onto every operator store.
+    ///
+    /// Best-effort last-write-wins per key. Shared topic is applied to all
+    /// stores (MVP: not per-store namespaced).
+    pub async fn replay_changelog(&mut self, client: &Client, topic: &str) -> Result<()> {
+        for (key, value) in fetch_changelog_records(client, topic).await? {
+            self.apply_changelog(key, value);
+        }
+        Ok(())
     }
 }
 

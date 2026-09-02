@@ -4,13 +4,21 @@
 //! - [`DurableStore`] — redb-backed, survives process restart (Phase 149)
 //! - Checkpoint staging (Phase 153): optional begin/commit/abort so EOS can
 //!   stage durable puts until the broker transaction succeeds
+//! - Changelog (v0.9, opt-in): staged deltas ride the EOS txn; replay rebuilds
+//!   a store from a broker topic. Local redb is a cache.
 //!
 //! Window buckets use the same store + overlay. Restart restore is
 //! in-process only — not distributed EOS / 2PC.
 
+mod changelog;
 mod durable;
 mod memory;
 
+pub use changelog::{
+    changelog_message, decode_changelog_record, ensure_changelog_topic, fetch_changelog_records,
+    produce_changelog_in_txn, replay_changelog, CHANGELOG_HEADER, CHANGELOG_VERSION,
+    DEFAULT_CHANGELOG_TOPIC,
+};
 pub use durable::{DurableStore, StreamStateError};
 pub use memory::MemoryStore;
 
@@ -57,5 +65,23 @@ pub trait KeyValueStore: Send {
     /// Whether a checkpoint is open (staging active).
     fn in_checkpoint(&self) -> bool {
         false
+    }
+
+    /// Staged put/delete deltas for the open checkpoint (`None` value = delete).
+    ///
+    /// Default empty (no staging). [`DurableStore`] returns the overlay only —
+    /// committed disk state is not included.
+    fn staged_changelog(&self) -> Vec<(Bytes, Option<Bytes>)> {
+        Vec::new()
+    }
+
+    /// Apply a changelog record (put, or delete when `value` is `None`).
+    ///
+    /// Default forwards to [`put`](Self::put) / [`delete`](Self::delete).
+    fn apply_changelog(&mut self, key: Bytes, value: Option<Bytes>) {
+        match value {
+            Some(v) => self.put(key, v),
+            None => self.delete(&key),
+        }
     }
 }

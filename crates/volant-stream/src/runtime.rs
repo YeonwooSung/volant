@@ -3,12 +3,14 @@
 use std::sync::Arc;
 use std::time::{SystemTime, UNIX_EPOCH};
 
+use bytes::Bytes;
 use volant_client::{Client, TransactionalProducer};
 use volant_core::{Error, Result};
 
 use crate::pipeline::Pipeline;
 use crate::sink::TopicSink;
 use crate::source::TopicSource;
+use crate::state::{ensure_changelog_topic, produce_changelog_in_txn};
 use crate::topology::Topology;
 
 /// Delivery / offset-commit guarantee for a stream application (Phase 151).
@@ -41,10 +43,11 @@ impl Default for ProcessingGuarantee {
 /// sink produce. A crash between produce and commit may redeliver input
 /// records (duplicate outputs).
 ///
-/// **Exactly-once (Phase 151 / 153):** each non-empty step stages durable
-/// state, begins a transaction, produces sink records transactionally, adds
-/// consumer group offsets, commits the txn, then commits the state checkpoint.
-/// Empty polls (no input, no output) abort the checkpoint and skip the txn.
+/// **Exactly-once (Phase 151 / 153 / v0.9):** each non-empty step stages durable
+/// state, begins a transaction, produces sink records, optionally produces
+/// changelog deltas, adds consumer group offsets, commits the txn, then
+/// commits the state checkpoint. Empty polls abort the checkpoint and skip
+/// the txn. Changelog is opt-in ([`crate::topology::StreamBuilder::changelog_topic`]).
 pub struct StreamApp {
     /// Topology name.
     pub name: String,
@@ -54,6 +57,8 @@ pub struct StreamApp {
     guarantee: ProcessingGuarantee,
     /// Present when `guarantee` is [`ProcessingGuarantee::ExactlyOnce`].
     txn: Option<TransactionalProducer>,
+    /// Opt-in changelog topic (v0.9). `None` = Phase 153 process-local only.
+    changelog_topic: Option<String>,
 }
 
 impl StreamApp {
@@ -86,13 +91,23 @@ impl StreamApp {
                 Some(tp)
             }
         };
+        let changelog_topic = topology.changelog_topic;
+        let mut pipeline = topology.pipeline;
+        // Replay only when EOS + changelog are both configured (opt-in).
+        if matches!(guarantee, ProcessingGuarantee::ExactlyOnce { .. }) {
+            if let Some(ref topic) = changelog_topic {
+                ensure_changelog_topic(&client, topic).await?;
+                pipeline.replay_changelog(&client, topic).await?;
+            }
+        }
         Ok(Self {
             name: topology.name,
             source,
             sink,
-            pipeline: topology.pipeline,
+            pipeline,
             guarantee,
             txn,
+            changelog_topic,
         })
     }
 
@@ -115,6 +130,11 @@ impl StreamApp {
     /// Active processing guarantee.
     pub fn processing_guarantee(&self) -> &ProcessingGuarantee {
         &self.guarantee
+    }
+
+    /// Opt-in changelog topic, if configured.
+    pub fn changelog_topic(&self) -> Option<&str> {
+        self.changelog_topic.as_deref()
     }
 
     /// Run until `max_polls` is reached (if `Some`) or forever.
@@ -156,17 +176,19 @@ impl StreamApp {
     }
 
     /// Exactly-once: transactional produce + deferred group offsets (Phase 151)
-    /// with durable state checkpoint after EndTxn (Phase 153).
+    /// with durable state checkpoint after EndTxn (Phase 153) and optional
+    /// changelog produce in the same txn (v0.9).
     ///
     /// Order:
     /// 1. `pipeline.begin_checkpoint()` — durable puts stage only
     /// 2. poll → process → punctuate
     /// 3. empty skip → `abort_checkpoint` (no txn)
-    /// 4. txn begin → produce → add_offsets → commit
+    /// 4. txn begin → sink produce → **changelog produce** → add_offsets → EndTxn
     /// 5. on success → `pipeline.commit_checkpoint()`
     /// 6. on fail → abort txn + `abort_checkpoint`
     ///
     /// ALO path does not use checkpoints (DurableStore remains immediate-put).
+    /// Changelog produce is skipped when no topic is configured or no staged deltas.
     async fn step_exactly_once(&mut self) -> Result<()> {
         self.pipeline.begin_checkpoint();
 
@@ -218,7 +240,18 @@ impl StreamApp {
             }
         };
 
-        if let Err(e) = eos_try_commit(txn, &self.sink, &group_id, pending, &out).await {
+        let deltas = self.pipeline.staged_changelog();
+        if let Err(e) = eos_try_commit(
+            txn,
+            &self.sink,
+            &group_id,
+            pending,
+            &out,
+            self.changelog_topic.as_deref(),
+            &deltas,
+        )
+        .await
+        {
             if txn.is_open() {
                 let _ = txn.abort().await;
             }
@@ -261,9 +294,14 @@ async fn eos_try_commit(
     group_id: &str,
     pending: Vec<(String, u32, u64)>,
     out: &[volant_core::Record],
+    changelog_topic: Option<&str>,
+    deltas: &[(Bytes, Option<Bytes>)],
 ) -> Result<()> {
     txn.begin().await?;
     sink.send_all_in_txn(txn, out).await?;
+    if let Some(topic) = changelog_topic {
+        produce_changelog_in_txn(txn, topic, deltas).await?;
+    }
     if !pending.is_empty() {
         txn.add_offsets(group_id, pending);
     }
