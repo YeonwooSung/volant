@@ -100,6 +100,11 @@ socket.
 
 ## Honesty
 
+`GroupConsumer` starts a background heartbeat executor after join
+(interval `sessionTimeoutMs / 3`, clamped 100–3000 ms; v0.37).
+Pass `heartbeat=false` for the v0.33 poll-only loop. Not a fully
+concurrent API: do not share the `Client` while the consumer is open.
+
 Not implemented: `kafka-clients`, cooperative assignor client logic
 beyond sticky position retain, SCRAM / shared-token
 auth, async I/O, idempotent produce, leader redirect. Sync only; one
@@ -114,5 +119,6 @@ RSA PKCS#1 PEM are not loaded.
 See [docs/V23_SPEC.md](../../docs/V23_SPEC.md),
 [docs/V27_SPEC.md](../../docs/V27_SPEC.md),
 [docs/V28_SPEC.md](../../docs/V28_SPEC.md),
-[docs/V33_SPEC.md](../../docs/V33_SPEC.md), and
-[docs/V36_SPEC.md](../../docs/V36_SPEC.md).
+[docs/V33_SPEC.md](../../docs/V33_SPEC.md),
+[docs/V36_SPEC.md](../../docs/V36_SPEC.md), and
+[docs/V37_SPEC.md](../../docs/V37_SPEC.md).

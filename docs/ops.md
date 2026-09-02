@@ -893,6 +893,16 @@ Unit / fake tests need no broker; live `member_id = static:inst-1` is
 `VOLANT_E2E=1`. Does not change the broker. See
 [V36_SPEC.md](./V36_SPEC.md).
 
+## v0.37 background heartbeat
+
+Python / Go / Java `GroupConsumer` starts a background heartbeat after
+join so a silent consumer does not expire. Interval is
+`session_timeout_ms / 3`, clamped to 100–3000 ms. Default **on**.
+Escape: Python `heartbeat=False`, Go `WithBackgroundHeartbeat(false)`,
+Java `join(..., false)`. `close` stops the loop then LeaveGroup.
+Not a fully concurrent API. Rust `volant-client` is unchanged. See
+[V37_SPEC.md](./V37_SPEC.md).
+
 ## Shipped (not gaps)
 
 Kafka wire shim **Phases 23–109** (ApiVersions **0–5**, Fetch **0–18**, ACL admin

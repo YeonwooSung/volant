@@ -115,6 +115,12 @@ must be paired. Handshake failures close the TCP socket.
 
 ## Honesty
 
+`JoinGroupConsumer` starts a background heartbeat goroutine after
+join (interval `sessionTimeoutMs/3`, clamped 100–3000 ms; v0.37).
+Pass `WithBackgroundHeartbeat(false)` for the v0.32 poll-only loop.
+Not a fully concurrent API: do not share the `Client` while the
+consumer is open.
+
 Not implemented: `kafka-go`, custom assignor, SCRAM / shared-token
 auth, async I/O, idempotent produce, leader redirect. Thin
 `Client.JoinGroup` still sends empty `group_instance_id`; use
@@ -128,5 +134,6 @@ See [docs/V19_SPEC.md](../../docs/V19_SPEC.md),
 [docs/V24_SPEC.md](../../docs/V24_SPEC.md),
 [docs/V27_SPEC.md](../../docs/V27_SPEC.md),
 [docs/V28_SPEC.md](../../docs/V28_SPEC.md),
-[docs/V32_SPEC.md](../../docs/V32_SPEC.md), and
-[docs/V36_SPEC.md](../../docs/V36_SPEC.md).
+[docs/V32_SPEC.md](../../docs/V32_SPEC.md),
+[docs/V36_SPEC.md](../../docs/V36_SPEC.md), and
+[docs/V37_SPEC.md](../../docs/V37_SPEC.md).
