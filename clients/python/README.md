@@ -122,8 +122,8 @@ partitions; native opcode 48, not Kafka timestamp ListOffsets).
 `delete_records(topic, partition, before_offset, wait_majority=0)`
 returns `DeleteRecordsResult` (`topic`, `partition`, `low_watermark`);
 native opcode 44, not Kafka DeleteRecords (API key 21). `wait_majority`
-0 = broker default, 1 = force wait, 2 = force no-wait. Error 13 is
-not redirected (Produce/Fetch only).
+0 = broker default, 1 = force wait, 2 = force no-wait. Error 13 follows
+Produce/Fetch redirect.
 `join_group` sends empty `member_id` on first join
 (broker assigns one) and unpacks as
 `(member_id, generation, assignment)`.
@@ -139,10 +139,11 @@ fetch set with a **solo** local range (this member only — JoinGroup
 does not return the live member list). Default `assignor="broker"`
 keeps the broker assignment as SoT.
 
-Produce and Fetch follow `NotLeaderForPartition` (error 13) by default:
-Metadata, reconnect to the partition leader, retry once
-(`max_redirects=1`). `max_redirects=0` raises on the first 13. Still
-one TCP connection at a time.
+Produce, Fetch, and DeleteRecords follow `NotLeaderForPartition`
+(error 13) by default: Metadata, reconnect to the partition leader,
+retry once (`max_redirects=1`). `max_redirects=0` raises on the first
+13. Still one TCP connection at a time. Other admin RPCs do not
+redirect.
 
 Correlation ids increment per request. Decode verifies magic `V` (0x56),
 protocol version 1, and IEEE CRC32 of the **payload only**.

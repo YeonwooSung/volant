@@ -1039,8 +1039,8 @@ class Client:
         (``low_watermark``). ``wait_majority`` is the Phase 137 trailer:
         0 = broker default, 1 = force wait, 2 = force no-wait. Always
         written on the wire. Non-zero ``error_code`` raises
-        :class:`BrokerError`. Error 13 is **not** redirected (Produce/Fetch
-        only). This is not Kafka DeleteRecords (API key 21).
+        :class:`BrokerError`. Error 13 follows Produce/Fetch redirect
+        (``max_redirects``). This is not Kafka DeleteRecords (API key 21).
         """
         payload = codec.encode_delete_records_request(
             DeleteRecordsRequest(
@@ -1050,17 +1050,36 @@ class Client:
                 wait_majority=wait_majority,
             )
         )
-        resp = self._round_trip(codec.OP_DELETE_RECORDS, payload)
-        if not isinstance(resp, DeleteRecordsResponse):
-            raise ProtocolError(
-                f"unexpected response for delete_records: {type(resp)}"
+        max_attempts = 1 + self.max_redirects
+        attempt = 0
+        while True:
+            attempt += 1
+            try:
+                resp = self._round_trip(codec.OP_DELETE_RECORDS, payload)
+            except BrokerError as e:
+                if (
+                    e.code == _NOT_LEADER
+                    and attempt < max_attempts
+                    and self._redirect_to_leader(topic, partition)
+                ):
+                    continue
+                raise
+            if not isinstance(resp, DeleteRecordsResponse):
+                raise ProtocolError(
+                    f"unexpected response for delete_records: {type(resp)}"
+                )
+            if (
+                resp.error_code == _NOT_LEADER
+                and attempt < max_attempts
+                and self._redirect_to_leader(resp.topic or topic, resp.partition)
+            ):
+                continue
+            self._check(resp.error_code, "delete_records")
+            return DeleteRecordsResult(
+                topic=resp.topic,
+                partition=resp.partition,
+                low_watermark=resp.low_watermark,
             )
-        self._check(resp.error_code, "delete_records")
-        return DeleteRecordsResult(
-            topic=resp.topic,
-            partition=resp.partition,
-            low_watermark=resp.low_watermark,
-        )
 
     def offset_fetch(self, group: str, topic: str) -> list[tuple[int, int]]:
         """Fetch committed offsets for ``topic``.

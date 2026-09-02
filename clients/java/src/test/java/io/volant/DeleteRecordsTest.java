@@ -9,6 +9,8 @@ import java.io.OutputStream;
 import java.net.InetAddress;
 import java.net.ServerSocket;
 import java.net.Socket;
+import java.util.ArrayList;
+import java.util.Collections;
 import java.util.List;
 import java.util.concurrent.CopyOnWriteArrayList;
 import java.util.concurrent.atomic.AtomicInteger;
@@ -18,6 +20,8 @@ import org.junit.jupiter.api.Test;
 
 /** DeleteRecords client tests against a scripted TCP broker (no live server). */
 class DeleteRecordsTest {
+    private static final int NOT_LEADER = Client.NOT_LEADER_FOR_PARTITION;
+
     @Test
     void successReturnsLowWatermark() throws Exception {
         try (DeleteRecordsServer srv = DeleteRecordsServer.ok(96)) {
@@ -36,16 +40,75 @@ class DeleteRecordsTest {
     }
 
     @Test
-    void error13RaisesWithoutRedirect() throws Exception {
+    void error13MaxRedirectsZeroRaises() throws Exception {
         try (DeleteRecordsServer srv = DeleteRecordsServer.error(13)) {
             try (Client c = Client.connect("127.0.0.1", srv.port, 5_000)) {
+                c.setMaxRedirects(0);
                 BrokerException ex =
                         assertThrows(BrokerException.class, () -> c.deleteRecords("events", 0, 10));
-                assertEquals(13, ex.code);
+                assertEquals(NOT_LEADER, ex.code);
                 assertEquals("delete_records", ex.op);
             }
             assertEquals(List.of(Codec.OP_DELETE_RECORDS), srv.opcodes);
+            assertEquals(1, srv.deleteCount.get());
+            assertEquals(0, srv.metadataCount.get());
         }
+    }
+
+    @Test
+    void error13RedirectsToLeader() throws Exception {
+        try (DeleteRecordsServer leader = DeleteRecordsServer.ok(96);
+                DeleteRecordsServer follower = DeleteRecordsServer.error(13)) {
+            follower.meta = leaderMeta("events", 2, 2, "127.0.0.1", leader.port);
+            try (Client c = Client.connect("127.0.0.1", follower.port, 5_000)) {
+                DeleteRecordsResult got = c.deleteRecords("events", 2, 100, 1);
+                assertEquals(new DeleteRecordsResult("events", 2, 96), got);
+                assertEquals("127.0.0.1:" + leader.port, c.addr());
+            }
+            assertEquals(1, follower.deleteCount.get());
+            assertEquals(1, follower.metadataCount.get());
+            assertEquals(1, leader.deleteCount.get());
+            assertEquals(1, leader.waitMajority.get());
+            assertEquals(100, leader.beforeOffset.get());
+        }
+    }
+
+    @Test
+    void error13UnknownTopicRaises() throws Exception {
+        try (DeleteRecordsServer srv = DeleteRecordsServer.error(13)) {
+            srv.meta = new Metadata(
+                    Collections.singletonList(new Metadata.BrokerInfo(1, "127.0.0.1", srv.port)),
+                    Collections.emptyList());
+            try (Client c = Client.connect("127.0.0.1", srv.port, 5_000)) {
+                BrokerException ex =
+                        assertThrows(BrokerException.class, () -> c.deleteRecords("events", 0, 10));
+                assertEquals(NOT_LEADER, ex.code);
+                assertEquals("delete_records", ex.op);
+                assertEquals("127.0.0.1:" + srv.port, c.addr());
+            }
+            assertEquals(1, srv.deleteCount.get());
+            assertEquals(1, srv.metadataCount.get());
+            assertEquals(1, srv.acceptCount.get());
+        }
+    }
+
+    private static Metadata leaderMeta(String topic, int partition, int leaderId, String host, int port) {
+        List<Metadata.BrokerInfo> brokers = new ArrayList<>();
+        brokers.add(new Metadata.BrokerInfo(1, "127.0.0.1", 1));
+        brokers.add(new Metadata.BrokerInfo(leaderId, host, port));
+        return new Metadata(
+                brokers,
+                Collections.singletonList(new Metadata.TopicInfo(
+                        topic,
+                        1,
+                        0,
+                        Collections.singletonList(new Metadata.PartitionInfo(
+                                partition,
+                                leaderId,
+                                0,
+                                List.of(1L, (long) leaderId),
+                                Collections.singletonList((long) leaderId),
+                                1)))));
     }
 
     private static final class DeleteRecordsServer implements AutoCloseable {
@@ -55,11 +118,14 @@ class DeleteRecordsTest {
         final AtomicLong beforeOffset = new AtomicLong();
         final AtomicInteger waitMajority = new AtomicInteger();
         final List<Integer> opcodes = new CopyOnWriteArrayList<>();
-        private final int errorCode;
+        final List<Integer> errorCodes = new CopyOnWriteArrayList<>();
+        final AtomicInteger deleteCount = new AtomicInteger();
+        final AtomicInteger metadataCount = new AtomicInteger();
+        final AtomicInteger acceptCount = new AtomicInteger();
+        volatile Metadata meta = new Metadata(Collections.emptyList(), Collections.emptyList());
         private final long lowWatermark;
         private final ServerSocket listen;
-        private final Thread thread;
-        private final AtomicReference<Exception> error = new AtomicReference<>();
+        private final Thread acceptThread;
 
         static DeleteRecordsServer ok(long lowWatermark) throws IOException {
             return new DeleteRecordsServer(0, lowWatermark);
@@ -70,18 +136,32 @@ class DeleteRecordsTest {
         }
 
         private DeleteRecordsServer(int errorCode, long lowWatermark) throws IOException {
-            this.errorCode = errorCode;
             this.lowWatermark = lowWatermark;
+            this.errorCodes.add(errorCode);
             listen = new ServerSocket(0, 8, InetAddress.getByName("127.0.0.1"));
             listen.setSoTimeout(8_000);
             port = listen.getLocalPort();
-            thread = new Thread(this::serve, "volant-delete-records");
-            thread.setDaemon(true);
-            thread.start();
+            acceptThread = new Thread(
+                    () -> {
+                        while (!listen.isClosed()) {
+                            try {
+                                Socket conn = listen.accept();
+                                acceptCount.incrementAndGet();
+                                Thread t = new Thread(() -> serve(conn), "volant-delete-records-conn");
+                                t.setDaemon(true);
+                                t.start();
+                            } catch (IOException e) {
+                                return;
+                            }
+                        }
+                    },
+                    "volant-delete-records-accept");
+            acceptThread.setDaemon(true);
+            acceptThread.start();
         }
 
-        private void serve() {
-            try (Socket conn = listen.accept()) {
+        private void serve(Socket conn) {
+            try {
                 conn.setSoTimeout(5_000);
                 InputStream in = conn.getInputStream();
                 OutputStream out = conn.getOutputStream();
@@ -101,25 +181,46 @@ class DeleteRecordsTest {
                         continue;
                     }
                     buf = d.rest;
-                    opcodes.add(d.frame.opcode);
-                    if (d.frame.opcode != Codec.OP_DELETE_RECORDS) {
-                        error.set(new ProtocolException("unexpected opcode " + d.frame.opcode));
-                        return;
-                    }
-                    Codec.DeleteRecordsRequest req = Codec.decodeDeleteRecordsRequest(d.frame.payload);
-                    topic.set(req.topic);
-                    partition.set((int) req.partition);
-                    beforeOffset.set(req.beforeOffset);
-                    waitMajority.set(req.waitMajority);
-                    byte[] payload = Codec.encodeDeleteRecordsResponse(
-                            new Codec.DeleteRecordsResponse(
-                                    errorCode, req.topic, req.partition, lowWatermark));
-                    out.write(Frame.encode(Codec.OP_DELETE_RECORDS_RESPONSE, d.frame.correlationId, payload));
+                    int[] replyOp = new int[1];
+                    byte[] payload = handle(d.frame, replyOp);
+                    out.write(Frame.encode(replyOp[0], d.frame.correlationId, payload));
                     out.flush();
                 }
-            } catch (Exception e) {
-                error.set(e);
+            } catch (Exception ignored) {
+                // client closed or timeout
+            } finally {
+                try {
+                    conn.close();
+                } catch (IOException ignored) {
+                    // best-effort
+                }
             }
+        }
+
+        private byte[] handle(Frame frame, int[] replyOp) {
+            opcodes.add(frame.opcode);
+            replyOp[0] = frame.opcode;
+            if (frame.opcode == Codec.OP_DELETE_RECORDS) {
+                deleteCount.incrementAndGet();
+                Codec.DeleteRecordsRequest req = Codec.decodeDeleteRecordsRequest(frame.payload);
+                topic.set(req.topic);
+                partition.set((int) req.partition);
+                beforeOffset.set(req.beforeOffset);
+                waitMajority.set(req.waitMajority);
+                int code = 0;
+                if (!errorCodes.isEmpty()) {
+                    code = errorCodes.remove(0);
+                }
+                replyOp[0] = Codec.OP_DELETE_RECORDS_RESPONSE;
+                return Codec.encodeDeleteRecordsResponse(
+                        new Codec.DeleteRecordsResponse(
+                                code, req.topic, req.partition, code == 0 ? lowWatermark : 0));
+            }
+            if (frame.opcode == Codec.OP_METADATA) {
+                metadataCount.incrementAndGet();
+                return Codec.encodeMetadataResponse(meta);
+            }
+            throw new ProtocolException("unexpected opcode " + frame.opcode);
         }
 
         @Override
@@ -130,7 +231,7 @@ class DeleteRecordsTest {
                 // best-effort
             }
             try {
-                thread.join(2_000);
+                acceptThread.join(2_000);
             } catch (InterruptedException e) {
                 Thread.currentThread().interrupt();
             }
