@@ -455,8 +455,9 @@ type TopicInfo struct {
 
 // MetadataResponse is the Metadata opcode reply.
 type MetadataResponse struct {
-	Brokers []BrokerInfo
-	Topics  []TopicInfo
+	Brokers      []BrokerInfo
+	Topics       []TopicInfo
+	ControllerID uint32 // v0.77 trailer; 0 = unknown / omitted legacy payload
 }
 
 // ErrorResponse is the Error opcode body.
@@ -1376,6 +1377,8 @@ func EncodeMetadataResponse(resp MetadataResponse) ([]byte, error) {
 			w.u32(p.LeaderEpoch)
 		}
 	}
+	// v0.77 trailing controller_id (always written by current encoders).
+	w.u32(resp.ControllerID)
 	return w.buf, nil
 }
 
@@ -1479,7 +1482,15 @@ func DecodeMetadataResponse(payload []byte) (MetadataResponse, error) {
 			Partitions: parts,
 		})
 	}
-	return MetadataResponse{Brokers: brokers, Topics: topics}, nil
+	// v0.77 trailing controller_id; legacy payloads omit it → 0.
+	var controllerID uint32
+	if r.remaining() >= 4 {
+		controllerID, err = r.u32()
+		if err != nil {
+			return MetadataResponse{}, err
+		}
+	}
+	return MetadataResponse{Brokers: brokers, Topics: topics, ControllerID: controllerID}, nil
 }
 
 func EncodeOffsetCommitRequest(req OffsetCommitRequest) ([]byte, error) {

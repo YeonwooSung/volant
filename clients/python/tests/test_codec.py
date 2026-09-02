@@ -385,9 +385,62 @@ class TestCreateMetadataCodec(unittest.TestCase):
             "01000000"  # 1 isr
             "01000000"
             "00000000"  # leader_epoch
+            "00000000"  # v0.77 controller_id=0
         )
         self.assertEqual(_hx(raw), _hx(expected))
         self.assertEqual(decode_metadata_response(raw), resp)
+
+    def test_metadata_response_controller_id(self) -> None:
+        resp = MetadataResponse(
+            brokers=[BrokerInfo(node_id=1, host="127.0.0.1", port=9092)],
+            topics=[
+                TopicInfo(
+                    name="t",
+                    topic_id=1,
+                    error_code=0,
+                    partitions=[
+                        PartitionInfo(
+                            partition_id=0,
+                            leader=1,
+                            hwm=0,
+                            replicas=[1],
+                            isr=[1],
+                            leader_epoch=0,
+                        )
+                    ],
+                )
+            ],
+            controller_id=2,
+        )
+        raw = encode_metadata_response(resp)
+        self.assertEqual(raw[-4:], bytes.fromhex("02000000"))
+        self.assertEqual(decode_metadata_response(raw), resp)
+
+    def test_metadata_response_legacy_without_controller_id(self) -> None:
+        raw = bytes.fromhex(
+            "01000000"  # 1 broker
+            "01000000"  # node 1
+            "0900"  # host len 9
+            "3132372e302e302e31"  # 127.0.0.1
+            "8423"  # port 9092 le
+            "01000000"  # 1 topic
+            "010074"
+            "01000000"  # topic_id
+            "0000"  # error
+            "01000000"  # 1 partition
+            "00000000"  # id 0
+            "01000000"  # leader 1
+            "0000000000000000"  # hwm
+            "01000000"  # 1 replica
+            "01000000"
+            "01000000"  # 1 isr
+            "01000000"
+            "00000000"  # leader_epoch
+        )
+        decoded = decode_metadata_response(raw)
+        self.assertEqual(decoded.controller_id, 0)
+        self.assertEqual(decoded.topics[0].name, "t")
+        self.assertEqual(decoded.topics[0].partitions[0].leader, 1)
 
 
 class TestOffsetCodec(unittest.TestCase):

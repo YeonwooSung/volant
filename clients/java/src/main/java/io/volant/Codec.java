@@ -1435,6 +1435,8 @@ public final class Codec {
                 w.u32(p.leaderEpoch);
             }
         }
+        // v0.77 trailing controller_id (always written by current encoders).
+        w.u32(resp.controllerId);
         return w.finish();
     }
 
@@ -1475,7 +1477,9 @@ public final class Codec {
             }
             topics.add(new Metadata.TopicInfo(name, topicId, errorCode, parts));
         }
-        return new Metadata(brokers, topics);
+        // v0.77 trailing controller_id; legacy payloads omit it → 0.
+        long controllerId = r.remaining() >= 4 ? r.u32() : 0;
+        return new Metadata(brokers, topics, controllerId);
     }
 
     // --- offset commit / fetch ---------------------------------------------

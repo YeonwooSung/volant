@@ -66,6 +66,9 @@ pub struct Metadata {
     pub brokers: Vec<BrokerInfo>,
     /// Topics.
     pub topics: Vec<TopicInfo>,
+    /// Controller node id from the Metadata trailer (v0.77).
+    /// `0` means unknown / single-node / no openraft leader.
+    pub controller_id: u32,
 }
 
 /// Result of a successful JoinGroup.
@@ -654,7 +657,15 @@ impl Client {
             .round_trip(Request::Metadata { topics: vec![] })
             .await?;
         match resp {
-            Response::Metadata { brokers, topics } => Ok(Metadata { brokers, topics }),
+            Response::Metadata {
+                brokers,
+                topics,
+                controller_id,
+            } => Ok(Metadata {
+                brokers,
+                topics,
+                controller_id,
+            }),
             Response::Error { code, message } => Err(error_from_code(code, message)),
             other => Err(Error::Protocol(format!(
                 "unexpected response for metadata: {other:?}"

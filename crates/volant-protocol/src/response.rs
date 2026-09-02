@@ -481,6 +481,9 @@ pub enum Response {
         brokers: Vec<BrokerInfo>,
         /// Topic metadata.
         topics: Vec<TopicInfo>,
+        /// Controller node id (v0.77 trailer). `0` = unknown / single-node /
+        /// no openraft leader. Legacy payloads omit the trailer and decode as `0`.
+        controller_id: u32,
     },
     /// Offset commit result.
     OffsetCommit {

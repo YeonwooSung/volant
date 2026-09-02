@@ -78,6 +78,8 @@ async fn create_produce_fetch() {
     // Metadata lists the topic.
     let meta = client.metadata().await.expect("metadata");
     assert!(meta.topics.iter().any(|t| t.name == "events"));
+    // v0.77 trailer is present; single-node controller_id is 0.
+    assert_eq!(meta.controller_id, 0);
 
     // Delete cleans up.
     client.delete_topic("events").await.expect("delete");

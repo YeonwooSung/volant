@@ -228,6 +228,7 @@ async fn serve_stub(
                             Response::Metadata {
                                 brokers: vec![],
                                 topics: topics.lock().expect("topics").clone(),
+                                controller_id: 0,
                             }
                         }
                         Request::OffsetFetch { .. } => Response::OffsetFetch {
