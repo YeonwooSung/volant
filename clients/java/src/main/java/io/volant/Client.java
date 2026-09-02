@@ -71,6 +71,8 @@ public final class Client implements AutoCloseable {
     private final String scramUsername;
     private final String scramPassword;
     private int maxRedirects = 1;
+    private int maxRetries = 0;
+    private long retryBackoffMs = 50;
     private boolean enableIdempotence = false;
     private String transactionalId = null;
     private long producerId = 0L;
@@ -205,6 +207,28 @@ public final class Client implements AutoCloseable {
 
     public int maxRedirects() {
         return maxRedirects;
+    }
+
+    /**
+     * Extra Produce attempts after the first on transient broker/transport
+     * errors. Default is 0. Error 13 stays on {@link #setMaxRedirects};
+     * error 21 stays on the one re-Init. Fetch is not retried.
+     */
+    public void setMaxRetries(int n) {
+        this.maxRetries = Math.max(0, n);
+    }
+
+    public int maxRetries() {
+        return maxRetries;
+    }
+
+    /** Sleep between produce retries, milliseconds. Default 50. Zero allowed. */
+    public void setRetryBackoffMs(long ms) {
+        this.retryBackoffMs = Math.max(0, ms);
+    }
+
+    public long retryBackoffMs() {
+        return retryBackoffMs;
     }
 
     /**
@@ -688,6 +712,7 @@ public final class Client implements AutoCloseable {
             value = new byte[0];
         }
         int reinitBudget = usesPid() ? 1 : 0;
+        int retryAttempt = 0;
         while (true) {
             byte[] payload = encodeProduce(topic, partition, key, value, acks);
             int maxAttempts = 1 + maxRedirects;
@@ -711,6 +736,20 @@ public final class Client implements AutoCloseable {
                             && redirectToLeader(topic, partition)) {
                         continue;
                     }
+                    if (isTransientBroker(e.code) && retryAttempt < maxRetries) {
+                        retryAttempt++;
+                        attempt--;
+                        sleepProduceRetry();
+                        continue;
+                    }
+                    throw e;
+                } catch (RuntimeException e) {
+                    if (isTransientTransport(e) && retryAttempt < maxRetries) {
+                        retryAttempt++;
+                        attempt--;
+                        sleepProduceRetry();
+                        continue;
+                    }
                     throw e;
                 }
                 if (!(decoded instanceof Codec.ProduceResponse)) {
@@ -728,6 +767,12 @@ public final class Client implements AutoCloseable {
                         && redirectToLeader(resp.topic, (int) resp.partition)) {
                     continue;
                 }
+                if (isTransientBroker(resp.errorCode) && retryAttempt < maxRetries) {
+                    retryAttempt++;
+                    attempt--;
+                    sleepProduceRetry();
+                    continue;
+                }
                 check(resp.errorCode, "produce");
                 int seqPart = partition < 0 ? (int) resp.partition : partition;
                 noteProduceSuccess(topic, seqPart, 1);
@@ -736,6 +781,29 @@ public final class Client implements AutoCloseable {
             if (!retriedUnknown) {
                 throw new ProtocolException("produce loop exited");
             }
+        }
+    }
+
+    static boolean isTransientBroker(int code) {
+        return code == 6 || code == 7 || code == 15 || code == 16;
+    }
+
+    static boolean isTransientTransport(Throwable e) {
+        if (e instanceof BrokerException || e instanceof ProtocolException) {
+            return false;
+        }
+        return e instanceof java.io.UncheckedIOException
+                || e instanceof RuntimeException && e.getCause() instanceof java.io.IOException;
+    }
+
+    private void sleepProduceRetry() {
+        if (retryBackoffMs <= 0) {
+            return;
+        }
+        try {
+            Thread.sleep(retryBackoffMs);
+        } catch (InterruptedException ie) {
+            Thread.currentThread().interrupt();
         }
     }
 

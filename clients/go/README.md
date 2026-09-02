@@ -92,6 +92,9 @@ c, err = volant.DialAuth("127.0.0.1:9092", "s3cret")
 c, err = volant.DialTLSAuth("127.0.0.1:9092", volant.TLSConfig{CAFile: "ca.pem"}, "s3cret")
 // Optional idempotent produce (v0.47). Default off (trailer (0, 0, -1)).
 c.EnableIdempotence()
+// Optional produce retry (v0.61). Default 0 extra attempts. Not Kafka retries.
+c.SetMaxRetries(3)
+c.SetRetryBackoff(50 * time.Millisecond)
 // Optional native transactions (v0.57). Opcodes 50–53; not Kafka txns.
 c.SetTransactionalID("txn-1")
 _ = c.BeginTransaction()
@@ -159,6 +162,15 @@ Produce, Fetch, and DeleteRecords follow `NotLeaderForPartition`
 retry once (`SetMaxRedirects(1)` is the Dial default).
 `SetMaxRedirects(0)` raises on the first 13. Still one TCP connection
 at a time. Other admin RPCs do not redirect.
+Produce and Fetch follow `NotLeaderForPartition` (error 13) by default:
+Metadata, reconnect to the partition leader, retry once
+(`SetMaxRedirects(1)` is the Dial default). `SetMaxRedirects(0)`
+raises on the first 13. Still one TCP connection at a time.
+Produce also retries transient broker codes 6 / 7 / 15 / 16 and TCP
+I/O errors up to `SetMaxRetries` extra attempts (default 0). Sleep
+`SetRetryBackoff` (default 50ms) between attempts; 0 is allowed in
+tests. Error 13 stays on the redirect budget; error 21 stays on the
+one re-Init. Fetch is not retried. This is not Kafka `retries`.
 
 Correlation ids increment per request. Decode verifies magic `V` (0x56),
 protocol version 1, and IEEE CRC32 of the **payload only**. Broker
@@ -300,5 +312,6 @@ See [docs/V19_SPEC.md](../../docs/V19_SPEC.md),
 [docs/V63_SPEC.md](../../docs/V63_SPEC.md).
 [docs/V62_SPEC.md](../../docs/V62_SPEC.md).
 [docs/V59_SPEC.md](../../docs/V59_SPEC.md),
-[docs/V64_SPEC.md](../../docs/V64_SPEC.md).
+[docs/V64_SPEC.md](../../docs/V64_SPEC.md),
+[docs/V61_SPEC.md](../../docs/V61_SPEC.md).
 [docs/V57_SPEC.md](../../docs/V57_SPEC.md).

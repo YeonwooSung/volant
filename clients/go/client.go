@@ -8,6 +8,7 @@ import (
 	"crypto/tls"
 	"crypto/x509"
 	"encoding/binary"
+	"errors"
 	"fmt"
 	"io"
 	"net"
@@ -29,6 +30,14 @@ const notLeaderForPartition uint16 = 13
 
 // unknownProducerID is native ErrorCode::UnknownProducerId.
 const unknownProducerID uint16 = 21
+
+// Transient produce retry codes (match Rust is_transient_error_code).
+const (
+	errIO                 uint16 = 6
+	errTimeout            uint16 = 7
+	errNotEnoughReplicas  uint16 = 15
+	errBrokerNotAvailable uint16 = 16
+)
 
 type seqKey struct {
 	topic     string
@@ -105,6 +114,8 @@ type Client struct {
 	scramUser         string
 	scramPass         string
 	maxRedirects      int
+	maxRetries        int
+	retryBackoff      time.Duration
 	enableIdempotence bool
 	transactionalID   string
 	producerID        uint64
@@ -172,6 +183,7 @@ func dialPlain(addr string, timeout time.Duration, token, scramUser, scramPass s
 		scramUser:    scramUser,
 		scramPass:    scramPass,
 		maxRedirects: 1,
+		retryBackoff: 50 * time.Millisecond,
 	}
 	if err := c.maybeAuthenticate(); err != nil {
 		return nil, err
@@ -236,6 +248,7 @@ func dialTLS(addr string, cfg TLSConfig, timeout time.Duration, token, scramUser
 		scramUser:    scramUser,
 		scramPass:    scramPass,
 		maxRedirects: 1,
+		retryBackoff: 50 * time.Millisecond,
 	}
 	if err := c.maybeAuthenticate(); err != nil {
 		return nil, err
@@ -252,6 +265,26 @@ func (c *Client) SetMaxRedirects(n int) {
 		n = 0
 	}
 	c.maxRedirects = n
+}
+
+// SetMaxRetries sets extra Produce attempts after the first on transient
+// broker/transport errors. Default is 0 (no extra attempts). Negative
+// values are treated as 0. Error 13 stays on the redirect budget; error
+// 21 stays on the one re-Init. Fetch is not retried.
+func (c *Client) SetMaxRetries(n int) {
+	if n < 0 {
+		n = 0
+	}
+	c.maxRetries = n
+}
+
+// SetRetryBackoff sets the sleep between produce retries. Default is
+// 50ms. Zero is allowed (tests). Negative values are treated as 0.
+func (c *Client) SetRetryBackoff(d time.Duration) {
+	if d < 0 {
+		d = 0
+	}
+	c.retryBackoff = d
 }
 
 // EnableIdempotence turns on InitProducerId + per-partition produce sequences.
@@ -815,6 +848,11 @@ func (c *Client) ProduceAcks(topic string, partition int, key, value []byte, ack
 	if c.enableIdempotence {
 		reinitBudget = 1
 	}
+	maxRetries := c.maxRetries
+	if maxRetries < 0 {
+		maxRetries = 0
+	}
+	retryAttempt := 0
 	for {
 		payload, err := c.encodeProduce(topic, partition, key, value, acks)
 		if err != nil {
@@ -840,6 +878,12 @@ func (c *Client) ProduceAcks(topic string, partition int, key, value []byte, ack
 						continue
 					}
 				}
+				if isTransientProduceErr(err) && retryAttempt < maxRetries {
+					retryAttempt++
+					attempt--
+					c.sleepProduceRetry()
+					continue
+				}
 				return 0, err
 			}
 			resp, ok := decoded.(codec.ProduceResponse)
@@ -861,6 +905,12 @@ func (c *Client) ProduceAcks(topic string, partition int, key, value []byte, ack
 					continue
 				}
 			}
+			if isTransientBroker(resp.ErrorCode) && retryAttempt < maxRetries {
+				retryAttempt++
+				attempt--
+				c.sleepProduceRetry()
+				continue
+			}
 			if err := check(resp.ErrorCode, "produce"); err != nil {
 				return 0, err
 			}
@@ -874,6 +924,42 @@ func (c *Client) ProduceAcks(topic string, partition int, key, value []byte, ack
 		if !retriedUnknown {
 			return 0, &frame.ProtocolError{Msg: "produce loop exited"}
 		}
+	}
+}
+
+func isTransientBroker(code uint16) bool {
+	switch code {
+	case errIO, errTimeout, errNotEnoughReplicas, errBrokerNotAvailable:
+		return true
+	default:
+		return false
+	}
+}
+
+func isTransientTransport(err error) bool {
+	if err == nil {
+		return false
+	}
+	if _, ok := err.(*codec.BrokerError); ok {
+		return false
+	}
+	if _, ok := err.(*frame.ProtocolError); ok {
+		return false
+	}
+	var ne net.Error
+	return errors.As(err, &ne)
+}
+
+func isTransientProduceErr(err error) bool {
+	if be, ok := err.(*codec.BrokerError); ok {
+		return isTransientBroker(be.Code)
+	}
+	return isTransientTransport(err)
+}
+
+func (c *Client) sleepProduceRetry() {
+	if c.retryBackoff > 0 {
+		time.Sleep(c.retryBackoff)
 	}
 }
 

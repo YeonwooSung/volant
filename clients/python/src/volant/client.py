@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import socket
 import ssl
+import time
 from dataclasses import dataclass, field
 from typing import Iterable, Optional, Union
 
@@ -70,6 +71,15 @@ from .frame import (
 _NOT_LEADER = 13
 # Native ErrorCode::UnknownProducerId — pid not allocated via InitProducerId.
 _UNKNOWN_PRODUCER = 21
+# Transient produce codes (Rust is_transient_error_code). Not 13 / 21.
+_IO = 6
+_TIMEOUT = 7
+_NOT_ENOUGH_REPLICAS = 15
+_BROKER_NOT_AVAILABLE = 16
+
+
+def _is_transient_broker(code: int) -> bool:
+    return code in (_IO, _TIMEOUT, _NOT_ENOUGH_REPLICAS, _BROKER_NOT_AVAILABLE)
 
 
 def _parse_addr(addr: str) -> tuple[str, int]:
@@ -239,6 +249,15 @@ class Client:
 
         c = Client("127.0.0.1:9092", enable_idempotence=True)
 
+    Optional produce retry (v0.61) retries transient broker codes 6, 7,
+    15, 16 and TCP I/O errors. Default ``max_retries=0`` (no extra
+    attempts). ``retry_backoff_ms`` defaults to 50; tests may set 0.
+    Error 13 stays on the redirect budget; error 21 stays on the one
+    re-Init. Fetch is not retried::
+
+        c = Client("127.0.0.1:9092", max_retries=3, retry_backoff_ms=50)
+        c.max_retries = 3
+
     Optional native transactions (v0.57) send InitProducerId with a
     non-empty ``transactional_id``, then BeginTxn / EndTxn (opcodes
     50–53). Produce during an open txn reuses the v0.47 idempotent
@@ -287,6 +306,8 @@ class Client:
         auth_token: Optional[str] = None,
         max_redirects: int = 1,
         enable_idempotence: bool = False,
+        max_retries: int = 0,
+        retry_backoff_ms: int = 50,
         transactional_id: Optional[str] = None,
         scram_username: Optional[str] = None,
         scram_password: Optional[str] = None,
@@ -309,6 +330,9 @@ class Client:
         # 0 = never redirect (raise on the first NotLeaderForPartition).
         self.max_redirects = max(0, int(max_redirects))
         self.enable_idempotence = bool(enable_idempotence)
+        # Extra produce attempts on transient broker/transport errors.
+        self.max_retries = max(0, int(max_retries))
+        self.retry_backoff_ms = max(0, int(retry_backoff_ms))
         self.transactional_id = transactional_id or None
         self._producer_id = 0
         self._producer_epoch = 0
@@ -521,6 +545,11 @@ class Client:
         cur = self._next_seq.get(key, 0)
         self._next_seq[key] = cur + max(0, int(count))
 
+    def _sleep_produce_retry(self) -> None:
+        ms = max(0, int(self.retry_backoff_ms))
+        if ms:
+            time.sleep(ms / 1000.0)
+
     def _authenticate_scram(self, username: str, password: str) -> None:
         from .scram import client_proof_and_server_sig, generate_client_nonce
 
@@ -707,6 +736,10 @@ class Client:
         With ``enable_idempotence=False`` (default) the trailer is
         ``(0, 0, -1)``. When on, the first produce sends InitProducerId
         (empty transactional_id) and later produces attach pid/epoch/seq.
+        Transient broker/transport errors retry up to ``max_retries``
+        extra times (default 0). Error 13 uses ``max_redirects`` only;
+        error 21 uses the one re-Init only. Failed produce does not
+        increment the idempotent sequence.
         """
         batch: list[ProduceMessage]
         if messages is not None:
@@ -731,6 +764,8 @@ class Client:
             raise ValueError("produce() requires value= or messages=")
 
         reinit_budget = 1 if self._uses_pid() else 0
+        max_retries = max(0, int(self.max_retries))
+        retry_attempt = 0
         while True:
             producer_id, producer_epoch, base_sequence = self._produce_trailer(
                 topic, partition
@@ -746,10 +781,10 @@ class Client:
                     base_sequence=base_sequence,
                 )
             )
-            max_attempts = 1 + self.max_redirects
-            attempt = 0
+            max_redirect_attempts = 1 + self.max_redirects
+            redirect_attempt = 0
             while True:
-                attempt += 1
+                redirect_attempt += 1
                 try:
                     resp = self._round_trip(codec.OP_PRODUCE, payload)
                 except BrokerError as e:
@@ -762,10 +797,25 @@ class Client:
                         break
                     if (
                         e.code == _NOT_LEADER
-                        and attempt < max_attempts
+                        and redirect_attempt < max_redirect_attempts
                         and partition >= 0
                         and self._redirect_to_leader(topic, partition)
                     ):
+                        continue
+                    if (
+                        _is_transient_broker(e.code)
+                        and retry_attempt < max_retries
+                    ):
+                        retry_attempt += 1
+                        redirect_attempt -= 1
+                        self._sleep_produce_retry()
+                        continue
+                    raise
+                except OSError:
+                    if retry_attempt < max_retries:
+                        retry_attempt += 1
+                        redirect_attempt -= 1
+                        self._sleep_produce_retry()
                         continue
                     raise
                 if not isinstance(resp, ProduceResponse):
@@ -781,9 +831,17 @@ class Client:
                     break
                 if (
                     resp.error_code == _NOT_LEADER
-                    and attempt < max_attempts
+                    and redirect_attempt < max_redirect_attempts
                     and self._redirect_to_leader(resp.topic or topic, resp.partition)
                 ):
+                    continue
+                if (
+                    _is_transient_broker(resp.error_code)
+                    and retry_attempt < max_retries
+                ):
+                    retry_attempt += 1
+                    redirect_attempt -= 1
+                    self._sleep_produce_retry()
                     continue
                 self._check(resp.error_code, "produce")
                 seq_part = resp.partition if partition < 0 else partition
