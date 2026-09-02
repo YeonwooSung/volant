@@ -685,4 +685,39 @@ class CodecTest {
         assertEquals(2, dispatched.groups.size());
         assertEquals(Codec.GROUP_STATE_EMPTY, new Codec.GroupListing("x", 99, 0, 0).state);
     }
+
+    @Test
+    void deleteOffsetsRequestOneEntry() {
+        Codec.DeleteOffsetsRequest req = new Codec.DeleteOffsetsRequest(
+                "g", Collections.singletonList(new Codec.OffsetEntry("events", 0)));
+        byte[] raw = Codec.encodeDeleteOffsetsRequest(req);
+        assertArrayEquals(hx("010067" + "01000000" + "06006576656e7473" + "00000000"), raw);
+        Codec.DeleteOffsetsRequest decoded = Codec.decodeDeleteOffsetsRequest(raw);
+        assertEquals("g", decoded.groupId);
+        assertEquals(1, decoded.entries.size());
+        assertEquals("events", decoded.entries.get(0).topic);
+        assertEquals(0, decoded.entries.get(0).partition);
+    }
+
+    @Test
+    void deleteOffsetsRequestEmptyEntries() {
+        Codec.DeleteOffsetsRequest req = new Codec.DeleteOffsetsRequest("g", Collections.emptyList());
+        byte[] raw = Codec.encodeDeleteOffsetsRequest(req);
+        assertArrayEquals(hx("010067" + "00000000"), raw);
+        Codec.DeleteOffsetsRequest decoded = Codec.decodeDeleteOffsetsRequest(raw);
+        assertEquals("g", decoded.groupId);
+        assertTrue(decoded.entries.isEmpty());
+    }
+
+    @Test
+    void deleteOffsetsResponseDeletedOne() {
+        byte[] raw = Codec.encodeDeleteOffsetsResponse(new Codec.DeleteOffsetsResponse(0, 1));
+        assertArrayEquals(hx("0000" + "01000000"), raw);
+        Codec.DeleteOffsetsResponse decoded = Codec.decodeDeleteOffsetsResponse(raw);
+        assertEquals(0, decoded.errorCode);
+        assertEquals(1, decoded.deletedCount);
+        Object got = Codec.decodeResponse(Codec.OP_DELETE_OFFSETS_RESPONSE, raw);
+        Codec.DeleteOffsetsResponse dispatched = assertInstanceOf(Codec.DeleteOffsetsResponse.class, got);
+        assertEquals(1, dispatched.deletedCount);
+    }
 }

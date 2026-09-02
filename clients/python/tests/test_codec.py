@@ -11,6 +11,8 @@ from volant.codec import (
     BrokerInfo,
     CreateTopicRequest,
     CreateTopicResponse,
+    DeleteOffsetsRequest,
+    DeleteOffsetsResponse,
     DeleteTopicRequest,
     DeleteTopicResponse,
     DescribeGroupRequest,
@@ -49,6 +51,8 @@ from volant.codec import (
     decode_auth_response,
     decode_create_topic_request,
     decode_create_topic_response,
+    decode_delete_offsets_request,
+    decode_delete_offsets_response,
     decode_delete_topic_request,
     decode_delete_topic_response,
     decode_describe_group_request,
@@ -78,6 +82,8 @@ from volant.codec import (
     encode_auth_response,
     encode_create_topic_request,
     encode_create_topic_response,
+    encode_delete_offsets_request,
+    encode_delete_offsets_response,
     encode_delete_topic_request,
     encode_delete_topic_response,
     encode_describe_group_request,
@@ -108,6 +114,7 @@ from volant.codec import (
     OP_JOIN_GROUP,
     OP_LEAVE_GROUP,
     OP_LIST_GROUPS_RESPONSE,
+    OP_DELETE_OFFSETS_RESPONSE,
     OP_LIST_OFFSETS_RESPONSE,
     OP_OFFSET_COMMIT,
     OP_OFFSET_FETCH,
@@ -784,6 +791,38 @@ class TestListOffsetsCodec(unittest.TestCase):
         self.assertEqual(_hx(raw), _hx(expected))
         self.assertEqual(decode_list_offsets_response(raw), resp)
         self.assertEqual(decode_response(OP_LIST_OFFSETS_RESPONSE, raw), resp)
+
+
+class TestDeleteOffsetsCodec(unittest.TestCase):
+    def test_delete_offsets_request_one_entry(self) -> None:
+        req = DeleteOffsetsRequest(
+            group_id="g", entries=[OffsetEntry(topic="events", partition=0)]
+        )
+        raw = encode_delete_offsets_request(req)
+        expected = bytes.fromhex(
+            "0100"
+            "67"  # "g"
+            "01000000"  # count 1
+            "06006576656e7473"  # "events"
+            "00000000"  # partition 0
+        )
+        self.assertEqual(_hx(raw), _hx(expected))
+        self.assertEqual(decode_delete_offsets_request(raw), req)
+
+    def test_delete_offsets_request_empty_entries(self) -> None:
+        req = DeleteOffsetsRequest(group_id="g", entries=[])
+        raw = encode_delete_offsets_request(req)
+        expected = bytes.fromhex("010067" "00000000")
+        self.assertEqual(_hx(raw), _hx(expected))
+        self.assertEqual(decode_delete_offsets_request(raw), req)
+
+    def test_delete_offsets_response_deleted_one(self) -> None:
+        resp = DeleteOffsetsResponse(error_code=0, deleted_count=1)
+        raw = encode_delete_offsets_response(resp)
+        expected = bytes.fromhex("0000" "01000000")
+        self.assertEqual(_hx(raw), _hx(expected))
+        self.assertEqual(decode_delete_offsets_response(raw), resp)
+        self.assertEqual(decode_response(OP_DELETE_OFFSETS_RESPONSE, raw), resp)
 
 
 if __name__ == "__main__":

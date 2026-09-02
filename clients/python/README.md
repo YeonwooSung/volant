@@ -27,6 +27,7 @@ for offset, key, value in batch.tuples():
 c.offset_commit(group="g", topic="t", partition=0, offset=5)
 offs = c.offset_fetch(group="g", topic="t")  # [(partition, offset), ...]
 bounds = c.list_offsets("t")  # [OffsetListing(partition, earliest, latest), ...]
+n = c.delete_offsets("g")  # all offsets; or delete_offsets("g", [("t", 0)])
 member_id, generation, assignment = c.join_group(
     "g", topics=["t"], session_timeout_ms=10000
 )
@@ -80,6 +81,9 @@ overridden). `offset_fetch` returns committed `(partition, offset)` pairs
 for the given topic. `list_offsets(topic, partitions=None)` returns
 earliest/latest (`OffsetListing`) for the topic (`None` / `[]` = all
 partitions; native opcode 48, not Kafka timestamp ListOffsets).
+`delete_offsets(group, entries=None)` returns how many offset files
+were removed (`None` / `[]` = all committed offsets for the group;
+native opcode 38, not Kafka OffsetDelete).
 `join_group` sends empty `member_id` on first join
 (broker assigns one) and unpacks as
 `(member_id, generation, assignment)`.
@@ -194,5 +198,6 @@ See [docs/V14_SPEC.md](../../docs/V14_SPEC.md),
 [docs/V47_SPEC.md](../../docs/V47_SPEC.md),
 [docs/V48_SPEC.md](../../docs/V48_SPEC.md),
 [docs/V49_SPEC.md](../../docs/V49_SPEC.md),
-[docs/V50_SPEC.md](../../docs/V50_SPEC.md).,
+[docs/V50_SPEC.md](../../docs/V50_SPEC.md),
+[docs/V54_SPEC.md](../../docs/V54_SPEC.md),
 [docs/V46_SPEC.md](../../docs/V46_SPEC.md).

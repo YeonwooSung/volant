@@ -25,6 +25,7 @@ import java.util.Map;
  *   c.offsetCommit("g", "t", 0, 5);
  *   List&lt;Offset&gt; offs = c.offsetFetch("g", "t");
  *   List&lt;OffsetListing&gt; bounds = c.listOffsets("t");
+ *   int n = c.deleteOffsets("g");
  *   JoinGroupResult j = c.joinGroup("g", java.util.List.of("t"), 10000);
  *   c.heartbeat("g", j.memberId, j.generation);
  *   c.leaveGroup("g", j.memberId);
@@ -751,6 +752,33 @@ public final class Client implements AutoCloseable {
         Codec.ListOffsetsResponse resp = (Codec.ListOffsetsResponse) decoded;
         check(resp.errorCode, "list_offsets");
         return resp.entries;
+    }
+
+    /**
+     * Delete every committed offset for {@code group} (native opcode 38;
+     * empty entry list on the wire).
+     */
+    public int deleteOffsets(String group) {
+        return deleteOffsets(group, Collections.emptyList());
+    }
+
+    /**
+     * Delete committed offsets for {@code group} (native opcode 38).
+     *
+     * <p>{@code null} or empty {@code entries} deletes all offsets for the
+     * group (wire count 0). Returns the number of offset files removed.
+     * Non-zero {@code error_code} is {@link BrokerException}. This is not
+     * Kafka OffsetDelete.
+     */
+    public int deleteOffsets(String group, List<Codec.OffsetEntry> entries) {
+        byte[] payload = Codec.encodeDeleteOffsetsRequest(new Codec.DeleteOffsetsRequest(group, entries));
+        Object decoded = roundTrip(Codec.OP_DELETE_OFFSETS, payload);
+        if (!(decoded instanceof Codec.DeleteOffsetsResponse)) {
+            throw new ProtocolException("unexpected response for delete_offsets: " + typeName(decoded));
+        }
+        Codec.DeleteOffsetsResponse resp = (Codec.DeleteOffsetsResponse) decoded;
+        check(resp.errorCode, "delete_offsets");
+        return resp.deletedCount;
     }
 
     /**

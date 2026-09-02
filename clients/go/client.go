@@ -915,6 +915,35 @@ func (c *Client) ListOffsets(topic string, partitions []uint32) ([]OffsetListing
 	return resp.Entries, nil
 }
 
+// DeleteOffsets deletes committed offsets for group (native opcode 38).
+// Nil or empty entries deletes all offsets for the group (wire count 0).
+// Returns the number of offset files removed. Non-zero error_code is
+// BrokerError. This is not Kafka OffsetDelete.
+func (c *Client) DeleteOffsets(group string, entries []codec.OffsetEntry) (uint32, error) {
+	if entries == nil {
+		entries = []codec.OffsetEntry{}
+	}
+	payload, err := codec.EncodeDeleteOffsetsRequest(codec.DeleteOffsetsRequest{
+		GroupID: group,
+		Entries: entries,
+	})
+	if err != nil {
+		return 0, err
+	}
+	decoded, err := c.roundTrip(codec.OpDeleteOffsets, payload)
+	if err != nil {
+		return 0, err
+	}
+	resp, ok := decoded.(codec.DeleteOffsetsResponse)
+	if !ok {
+		return 0, &frame.ProtocolError{Msg: fmt.Sprintf("unexpected response for delete_offsets: %T", decoded)}
+	}
+	if err := check(resp.ErrorCode, "delete_offsets"); err != nil {
+		return 0, err
+	}
+	return resp.DeletedCount, nil
+}
+
 // OffsetFetch returns committed offsets for topic as []Offset.
 // Empty wire entries mean all offsets for the group; this method filters
 // to topic client-side (same as the CLI).

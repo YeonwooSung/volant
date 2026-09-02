@@ -39,6 +39,8 @@ offs, err := c.OffsetFetch("g", "t")
 _ = offs
 bounds, err := c.ListOffsets("t", nil) // all partitions; or []uint32{0}
 _ = bounds
+n, err := c.DeleteOffsets("g", nil) // all offsets; or []codec.OffsetEntry{{Topic: "t", Partition: 0}}
+_ = n
 j, err := c.JoinGroup("g", []string{"t"}, 10000)
 if err != nil {
     log.Fatal(err)
@@ -85,6 +87,9 @@ c, err = volant.DialTLSScram("127.0.0.1:9092", volant.TLSConfig{CAFile: "ca.pem"
 `ListOffsets` returns `[]OffsetListing` (`Partition`, `Earliest`,
 `Latest`); nil / empty partitions means all (native opcode 48, not
 Kafka timestamp ListOffsets).
+`DeleteOffsets` returns how many offset files were removed; nil /
+empty entries deletes all committed offsets for the group (native
+opcode 38, not Kafka OffsetDelete).
 `JoinGroup` sends empty `member_id` on first join; the result has
 `MemberID`, `Generation`, and `Assignment`.
 `JoinGroupConsumer` is the high-level loop (join, OffsetFetch
@@ -197,5 +202,6 @@ See [docs/V19_SPEC.md](../../docs/V19_SPEC.md),
 [docs/V47_SPEC.md](../../docs/V47_SPEC.md),
 [docs/V48_SPEC.md](../../docs/V48_SPEC.md),
 [docs/V49_SPEC.md](../../docs/V49_SPEC.md),
-[docs/V50_SPEC.md](../../docs/V50_SPEC.md).,
+[docs/V50_SPEC.md](../../docs/V50_SPEC.md),
+[docs/V54_SPEC.md](../../docs/V54_SPEC.md),
 [docs/V46_SPEC.md](../../docs/V46_SPEC.md).

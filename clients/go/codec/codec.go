@@ -2,7 +2,7 @@
 //
 // Matches crates/volant-protocol/src/payload.rs for Produce, Fetch,
 // CreateTopic, Metadata, DeleteTopic, OffsetCommit, OffsetFetch,
-// JoinGroup, Heartbeat, LeaveGroup, Auth, DescribeGroup, ListGroups, ListOffsets, InitProducerId, and Scram.
+// JoinGroup, Heartbeat, LeaveGroup, Auth, DescribeGroup, ListGroups, DeleteOffsets, ListOffsets, InitProducerId, and Scram.
 // Frame headers are big-endian (see package frame); payload integers and
 // length prefixes are little-endian.
 package codec
@@ -37,6 +37,8 @@ const (
 	OpDescribeGroupResponse uint16 = 35
 	OpListGroups            uint16 = 36
 	OpListGroupsResponse    uint16 = 37
+	OpDeleteOffsets         uint16 = 38
+	OpDeleteOffsetsResponse uint16 = 39
 	OpListOffsets           uint16 = 48
 	OpListOffsetsResponse   uint16 = 49
 	OpError                 uint16 = 0xFFFF
@@ -405,7 +407,7 @@ type OffsetCommitResponse struct {
 	ErrorCode uint16
 }
 
-// OffsetEntry is one topic/partition selector in an OffsetFetch request.
+// OffsetEntry is one topic/partition selector in OffsetFetch and DeleteOffsets.
 type OffsetEntry struct {
 	Topic     string
 	Partition uint32
@@ -593,6 +595,19 @@ type ListOffsetsResponse struct {
 	ErrorCode uint16
 	Topic     string
 	Entries   []OffsetListing
+}
+
+// DeleteOffsetsRequest is the DeleteOffsets opcode (38) body.
+// Empty Entries deletes all offsets for the group.
+type DeleteOffsetsRequest struct {
+	GroupID string
+	Entries []OffsetEntry
+}
+
+// DeleteOffsetsResponse is the DeleteOffsets reply (opcode 39).
+type DeleteOffsetsResponse struct {
+	ErrorCode    uint16
+	DeletedCount uint32
 }
 
 
@@ -1832,6 +1847,70 @@ func DecodeListOffsetsResponse(payload []byte) (ListOffsetsResponse, error) {
 	return ListOffsetsResponse{ErrorCode: code, Topic: topic, Entries: entries}, nil
 }
 
+func EncodeDeleteOffsetsRequest(req DeleteOffsetsRequest) ([]byte, error) {
+	w := &writer{}
+	if err := putString(w, req.GroupID); err != nil {
+		return nil, err
+	}
+	entries := req.Entries
+	if entries == nil {
+		entries = []OffsetEntry{}
+	}
+	w.u32(uint32(len(entries)))
+	for _, e := range entries {
+		if err := putString(w, e.Topic); err != nil {
+			return nil, err
+		}
+		w.u32(e.Partition)
+	}
+	return w.buf, nil
+}
+
+func DecodeDeleteOffsetsRequest(payload []byte) (DeleteOffsetsRequest, error) {
+	r := &reader{data: payload}
+	groupID, err := getString(r)
+	if err != nil {
+		return DeleteOffsetsRequest{}, err
+	}
+	n, err := r.u32()
+	if err != nil {
+		return DeleteOffsetsRequest{}, err
+	}
+	entries := make([]OffsetEntry, 0, n)
+	for i := uint32(0); i < n; i++ {
+		topic, err := getString(r)
+		if err != nil {
+			return DeleteOffsetsRequest{}, err
+		}
+		part, err := r.u32()
+		if err != nil {
+			return DeleteOffsetsRequest{}, err
+		}
+		entries = append(entries, OffsetEntry{Topic: topic, Partition: part})
+	}
+	return DeleteOffsetsRequest{GroupID: groupID, Entries: entries}, nil
+}
+
+func EncodeDeleteOffsetsResponse(resp DeleteOffsetsResponse) ([]byte, error) {
+	w := &writer{}
+	w.u16(resp.ErrorCode)
+	w.u32(resp.DeletedCount)
+	return w.buf, nil
+}
+
+func DecodeDeleteOffsetsResponse(payload []byte) (DeleteOffsetsResponse, error) {
+	r := &reader{data: payload}
+	code, err := r.u16()
+	if err != nil {
+		return DeleteOffsetsResponse{}, err
+	}
+	n, err := r.u32()
+	if err != nil {
+		return DeleteOffsetsResponse{}, err
+	}
+	return DeleteOffsetsResponse{ErrorCode: code, DeletedCount: n}, nil
+}
+
 func EncodeInitProducerIdRequest(req InitProducerIdRequest) ([]byte, error) {
 	w := &writer{}
 	// Always write the string; empty transactional_id = non-transactional PID.
@@ -2051,6 +2130,8 @@ func DecodeResponse(opcode uint16, payload []byte) (any, error) {
 		return DecodeListGroupsResponse(payload)
 	case OpListOffsetsResponse:
 		return DecodeListOffsetsResponse(payload)
+	case OpDeleteOffsetsResponse:
+		return DecodeDeleteOffsetsResponse(payload)
 	case OpError:
 		return DecodeErrorResponse(payload)
 	default:

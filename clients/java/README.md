@@ -30,6 +30,7 @@ try (Client c = Client.connect("127.0.0.1", 9092)) {
   c.offsetCommit("g", "t", 0, 5);
   List<Offset> offs = c.offsetFetch("g", "t");
   List<OffsetListing> bounds = c.listOffsets("t"); // all; or listOffsets("t", 0)
+  int n = c.deleteOffsets("g"); // all; or deleteOffsets("g", List.of(new Codec.OffsetEntry("t", 0)))
   JoinGroupResult j = c.joinGroup("g", List.of("t"), 10000);
   c.heartbeat("g", j.memberId, j.generation);
   c.leaveGroup("g", j.memberId);
@@ -74,6 +75,9 @@ Client.connectTlsScram("127.0.0.1", 9092, TlsOptions.ca("ca.pem"), "alice", "s3c
 `listOffsets` returns `List<OffsetListing>` (`partition`, `earliest`,
 `latest`); no / empty partitions means all (native opcode 48, not
 Kafka timestamp ListOffsets).
+`deleteOffsets` returns how many offset files were removed; no /
+empty entries deletes all committed offsets for the group (native
+opcode 38, not Kafka OffsetDelete).
 `joinGroup` sends empty `memberId` on first join.
 `GroupConsumer` joins, polls assigned partitions, heartbeats, commits with
 member+generation, and rejoins on heartbeat error 9.
@@ -188,5 +192,6 @@ See [docs/V23_SPEC.md](../../docs/V23_SPEC.md),
 [docs/V47_SPEC.md](../../docs/V47_SPEC.md),
 [docs/V48_SPEC.md](../../docs/V48_SPEC.md),
 [docs/V49_SPEC.md](../../docs/V49_SPEC.md),
-[docs/V50_SPEC.md](../../docs/V50_SPEC.md).,
+[docs/V50_SPEC.md](../../docs/V50_SPEC.md),
+[docs/V54_SPEC.md](../../docs/V54_SPEC.md),
 [docs/V46_SPEC.md](../../docs/V46_SPEC.md).

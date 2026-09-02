@@ -1143,3 +1143,70 @@ func TestListOffsetsResponsePayloadRS(t *testing.T) {
 		t.Fatalf("dispatch %#v", got)
 	}
 }
+
+func TestDeleteOffsetsRequestOneEntry(t *testing.T) {
+	req := DeleteOffsetsRequest{
+		GroupID: "g",
+		Entries: []OffsetEntry{{Topic: "events", Partition: 0}},
+	}
+	raw, err := EncodeDeleteOffsetsRequest(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	expected := mustHex(t, "010067"+"01000000"+"06006576656e7473"+"00000000")
+	if !bytes.Equal(raw, expected) {
+		t.Fatalf("encode:\n got %x\nwant %x", raw, expected)
+	}
+	decoded, err := DecodeDeleteOffsetsRequest(raw)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if decoded.GroupID != "g" || len(decoded.Entries) != 1 || decoded.Entries[0] != req.Entries[0] {
+		t.Fatalf("decoded %+v", decoded)
+	}
+}
+
+func TestDeleteOffsetsRequestEmptyEntries(t *testing.T) {
+	req := DeleteOffsetsRequest{GroupID: "g", Entries: []OffsetEntry{}}
+	raw, err := EncodeDeleteOffsetsRequest(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	expected := mustHex(t, "010067"+"00000000")
+	if !bytes.Equal(raw, expected) {
+		t.Fatalf("encode:\n got %x\nwant %x", raw, expected)
+	}
+	decoded, err := DecodeDeleteOffsetsRequest(raw)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if decoded.GroupID != "g" || len(decoded.Entries) != 0 {
+		t.Fatalf("decoded %+v", decoded)
+	}
+}
+
+func TestDeleteOffsetsResponseDeletedOne(t *testing.T) {
+	resp := DeleteOffsetsResponse{ErrorCode: 0, DeletedCount: 1}
+	raw, err := EncodeDeleteOffsetsResponse(resp)
+	if err != nil {
+		t.Fatal(err)
+	}
+	expected := mustHex(t, "0000"+"01000000")
+	if !bytes.Equal(raw, expected) {
+		t.Fatalf("encode:\n got %x\nwant %x", raw, expected)
+	}
+	decoded, err := DecodeDeleteOffsetsResponse(raw)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if decoded != resp {
+		t.Fatalf("decoded %+v", decoded)
+	}
+	got, err := DecodeResponse(OpDeleteOffsetsResponse, raw)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if dr, ok := got.(DeleteOffsetsResponse); !ok || dr.DeletedCount != 1 {
+		t.Fatalf("dispatch %#v", got)
+	}
+}

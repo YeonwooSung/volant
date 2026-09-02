@@ -3,7 +3,7 @@
 Matches `crates/volant-protocol/src/payload.rs` for the MVP opcodes:
 Produce, Fetch, CreateTopic, Metadata, DeleteTopic, OffsetCommit,
 OffsetFetch, JoinGroup, Heartbeat, LeaveGroup, Auth, DescribeGroup,
-ListGroups, ListOffsets, InitProducerId, Scram.
+ListGroups, DeleteOffsets, ListOffsets, InitProducerId, Scram.
 
 Header fields are big-endian (see :mod:`volant.frame`); **payload** integers
 and length prefixes are little-endian.
@@ -40,6 +40,8 @@ OP_DESCRIBE_GROUP = 34
 OP_DESCRIBE_GROUP_RESPONSE = 35
 OP_LIST_GROUPS = 36
 OP_LIST_GROUPS_RESPONSE = 37
+OP_DELETE_OFFSETS = 38
+OP_DELETE_OFFSETS_RESPONSE = 39
 OP_LIST_OFFSETS = 48
 OP_LIST_OFFSETS_RESPONSE = 49
 OP_ERROR = 0xFFFF
@@ -356,6 +358,8 @@ class OffsetCommitResponse:
 
 @dataclass
 class OffsetEntry:
+    """Topic/partition pair for OffsetFetch and DeleteOffsets."""
+
     topic: str
     partition: int
 
@@ -543,6 +547,18 @@ class ListOffsetsResponse:
     error_code: int
     topic: str
     entries: list[OffsetListing]
+
+
+@dataclass
+class DeleteOffsetsRequest:
+    group_id: str
+    entries: list[OffsetEntry] = field(default_factory=list)
+
+
+@dataclass
+class DeleteOffsetsResponse:
+    error_code: int
+    deleted_count: int
 
 
 # --- produce ---------------------------------------------------------------
@@ -1246,6 +1262,44 @@ def decode_list_offsets_response(payload: bytes) -> ListOffsetsResponse:
     return ListOffsetsResponse(error_code=error_code, topic=topic, entries=entries)
 
 
+# --- delete offsets --------------------------------------------------------
+
+
+def encode_delete_offsets_request(req: DeleteOffsetsRequest) -> bytes:
+    w = _Writer()
+    _put_string(w, req.group_id)
+    entries = req.entries or []
+    w.u32_le(len(entries))
+    for e in entries:
+        _put_string(w, e.topic)
+        w.u32_le(e.partition)
+    return w.finish()
+
+
+def decode_delete_offsets_request(payload: bytes) -> DeleteOffsetsRequest:
+    r = _Reader(payload)
+    group_id = _get_string(r)
+    n = r.u32_le()
+    entries: list[OffsetEntry] = []
+    for _ in range(n):
+        topic = _get_string(r)
+        partition = r.u32_le()
+        entries.append(OffsetEntry(topic=topic, partition=partition))
+    return DeleteOffsetsRequest(group_id=group_id, entries=entries)
+
+
+def encode_delete_offsets_response(resp: DeleteOffsetsResponse) -> bytes:
+    w = _Writer()
+    w.u16_le(resp.error_code)
+    w.u32_le(resp.deleted_count)
+    return w.finish()
+
+
+def decode_delete_offsets_response(payload: bytes) -> DeleteOffsetsResponse:
+    r = _Reader(payload)
+    return DeleteOffsetsResponse(error_code=r.u16_le(), deleted_count=r.u32_le())
+
+
 # --- error opcode ----------------------------------------------------------
 
 
@@ -1390,6 +1444,8 @@ def decode_response(opcode: int, payload: bytes):
         return decode_list_groups_response(payload)
     if opcode == OP_LIST_OFFSETS_RESPONSE:
         return decode_list_offsets_response(payload)
+    if opcode == OP_DELETE_OFFSETS_RESPONSE:
+        return decode_delete_offsets_response(payload)
     if opcode == OP_ERROR:
         return decode_error_response(payload)
     raise ProtocolError(f"unknown response opcode {opcode}")
