@@ -912,3 +912,145 @@ func TestAuthResponseOkAndFailed(t *testing.T) {
 		t.Fatalf("dispatch fail %#v", got)
 	}
 }
+
+func TestDescribeGroupRequestCg1(t *testing.T) {
+	req := DescribeGroupRequest{GroupID: "cg-1"}
+	raw, err := EncodeDescribeGroupRequest(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	expected := mustHex(t, "040063672d31")
+	if !bytes.Equal(raw, expected) {
+		t.Fatalf("encode:\n got %x\nwant %x", raw, expected)
+	}
+	decoded, err := DecodeDescribeGroupRequest(raw)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if decoded != req {
+		t.Fatalf("decoded %+v", decoded)
+	}
+}
+
+func TestDescribeGroupResponseMembers(t *testing.T) {
+	resp := DescribeGroupResponse{
+		ErrorCode:  0,
+		GroupID:    "cg-1",
+		Generation: 3,
+		Members: []GroupMemberInfo{
+			{
+				MemberID: "m-a",
+				Topics:   []string{"events"},
+				Assignment: []Assignment{
+					{Topic: "events", Partition: 0},
+					{Topic: "events", Partition: 2},
+				},
+			},
+		},
+	}
+	raw, err := EncodeDescribeGroupResponse(resp)
+	if err != nil {
+		t.Fatal(err)
+	}
+	expected := mustHex(t,
+		"0000"+
+			"040063672d31"+
+			"03000000"+
+			"01000000"+
+			"03006d2d61"+
+			"01000000"+
+			"06006576656e7473"+
+			"02000000"+
+			"06006576656e7473"+
+			"00000000"+
+			"06006576656e7473"+
+			"02000000",
+	)
+	if !bytes.Equal(raw, expected) {
+		t.Fatalf("encode:\n got %x\nwant %x", raw, expected)
+	}
+	decoded, err := DecodeDescribeGroupResponse(raw)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if decoded.ErrorCode != 0 || decoded.GroupID != "cg-1" || decoded.Generation != 3 {
+		t.Fatalf("decoded header %+v", decoded)
+	}
+	if len(decoded.Members) != 1 || decoded.Members[0].MemberID != "m-a" {
+		t.Fatalf("members %+v", decoded.Members)
+	}
+	if len(decoded.Members[0].Topics) != 1 || decoded.Members[0].Topics[0] != "events" {
+		t.Fatalf("topics %+v", decoded.Members[0].Topics)
+	}
+	if len(decoded.Members[0].Assignment) != 2 || decoded.Members[0].Assignment[1].Partition != 2 {
+		t.Fatalf("assignment %+v", decoded.Members[0].Assignment)
+	}
+	got, err := DecodeResponse(OpDescribeGroupResponse, raw)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, ok := got.(DescribeGroupResponse); !ok {
+		t.Fatalf("dispatch %#v", got)
+	}
+
+	nf := DescribeGroupResponse{ErrorCode: 2, GroupID: "missing", Generation: 0}
+	nfRaw, err := EncodeDescribeGroupResponse(nf)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.Equal(nfRaw, mustHex(t, "020007006d697373696e670000000000000000")) {
+		t.Fatalf("not-found raw %x", nfRaw)
+	}
+}
+
+func TestListGroupsRoundTrip(t *testing.T) {
+	if len(EncodeListGroupsRequest()) != 0 {
+		t.Fatalf("list request should be empty")
+	}
+	resp := ListGroupsResponse{
+		ErrorCode: 0,
+		Groups: []GroupListing{
+			{GroupID: "g1", State: GroupStateStable, MemberCount: 2, Generation: 5},
+			{GroupID: "g2", State: GroupStateEmpty, MemberCount: 0, Generation: 0},
+		},
+	}
+	raw, err := EncodeListGroupsResponse(resp)
+	if err != nil {
+		t.Fatal(err)
+	}
+	expected := mustHex(t,
+		"0000"+
+			"02000000"+
+			"02006731"+
+			"01"+
+			"02000000"+
+			"05000000"+
+			"02006732"+
+			"00"+
+			"00000000"+
+			"00000000",
+	)
+	if !bytes.Equal(raw, expected) {
+		t.Fatalf("encode:\n got %x\nwant %x", raw, expected)
+	}
+	decoded, err := DecodeListGroupsResponse(raw)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(decoded.Groups) != 2 {
+		t.Fatalf("groups %+v", decoded.Groups)
+	}
+	if decoded.Groups[0] != resp.Groups[0] || decoded.Groups[1] != resp.Groups[1] {
+		t.Fatalf("decoded %+v", decoded)
+	}
+	got, err := DecodeResponse(OpListGroupsResponse, raw)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, ok := got.(ListGroupsResponse); !ok {
+		t.Fatalf("dispatch %#v", got)
+	}
+	if GroupStateFromU8(99) != GroupStateEmpty {
+		t.Fatalf("unknown state should decode as empty")
+	}
+}

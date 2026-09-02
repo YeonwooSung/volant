@@ -589,4 +589,100 @@ class CodecTest {
                 assertInstanceOf(Codec.AuthResponse.class, Codec.decodeResponse(Codec.OP_AUTH_RESPONSE, fail));
         assertEquals(17, dispatchedFail.errorCode);
     }
+
+    @Test
+    void describeGroupRequestCg1() {
+        byte[] raw = Codec.encodeDescribeGroupRequest(new Codec.DescribeGroupRequest("cg-1"));
+        assertArrayEquals(hx("040063672d31"), raw);
+        assertEquals("cg-1", Codec.decodeDescribeGroupRequest(raw).groupId);
+    }
+
+    @Test
+    void describeGroupResponseMembers() {
+        Codec.DescribeGroupResponse resp = new Codec.DescribeGroupResponse(
+                0,
+                "cg-1",
+                3,
+                Collections.singletonList(
+                        new Codec.GroupMemberInfo(
+                                "m-a",
+                                Collections.singletonList("events"),
+                                Arrays.asList(
+                                        new Codec.Assignment("events", 0),
+                                        new Codec.Assignment("events", 2)))));
+        byte[] raw = Codec.encodeDescribeGroupResponse(resp);
+        byte[] expected = hx(
+                "0000"
+                        + "040063672d31"
+                        + "03000000"
+                        + "01000000"
+                        + "03006d2d61"
+                        + "01000000"
+                        + "06006576656e7473"
+                        + "02000000"
+                        + "06006576656e7473"
+                        + "00000000"
+                        + "06006576656e7473"
+                        + "02000000");
+        assertArrayEquals(expected, raw);
+        Codec.DescribeGroupResponse decoded = Codec.decodeDescribeGroupResponse(raw);
+        assertEquals(0, decoded.errorCode);
+        assertEquals("cg-1", decoded.groupId);
+        assertEquals(3, decoded.generation);
+        assertEquals(1, decoded.members.size());
+        assertEquals("m-a", decoded.members.get(0).memberId);
+        assertEquals(Collections.singletonList("events"), decoded.members.get(0).topics);
+        assertEquals(2, decoded.members.get(0).assignment.size());
+        assertEquals(2, decoded.members.get(0).assignment.get(1).partition);
+        Codec.DescribeGroupResponse dispatched = assertInstanceOf(
+                Codec.DescribeGroupResponse.class, Codec.decodeResponse(Codec.OP_DESCRIBE_GROUP_RESPONSE, raw));
+        assertEquals("cg-1", dispatched.groupId);
+    }
+
+    @Test
+    void describeGroupResponseNotFound() {
+        byte[] raw = Codec.encodeDescribeGroupResponse(
+                new Codec.DescribeGroupResponse(2, "missing", 0, Collections.emptyList()));
+        assertArrayEquals(hx("020007006d697373696e670000000000000000"), raw);
+        assertEquals(2, Codec.decodeDescribeGroupResponse(raw).errorCode);
+    }
+
+    @Test
+    void listGroupsRequestEmpty() {
+        assertArrayEquals(new byte[0], Codec.encodeListGroupsRequest());
+    }
+
+    @Test
+    void listGroupsResponseEmptyAndStable() {
+        Codec.ListGroupsResponse resp = new Codec.ListGroupsResponse(
+                0,
+                Arrays.asList(
+                        new Codec.GroupListing("g1", Codec.GROUP_STATE_STABLE, 2, 5),
+                        new Codec.GroupListing("g2", Codec.GROUP_STATE_EMPTY, 0, 0)));
+        byte[] raw = Codec.encodeListGroupsResponse(resp);
+        byte[] expected = hx(
+                "0000"
+                        + "02000000"
+                        + "02006731"
+                        + "01"
+                        + "02000000"
+                        + "05000000"
+                        + "02006732"
+                        + "00"
+                        + "00000000"
+                        + "00000000");
+        assertArrayEquals(expected, raw);
+        Codec.ListGroupsResponse decoded = Codec.decodeListGroupsResponse(raw);
+        assertEquals(2, decoded.groups.size());
+        assertEquals("g1", decoded.groups.get(0).groupId);
+        assertEquals(Codec.GROUP_STATE_STABLE, decoded.groups.get(0).state);
+        assertEquals(2, decoded.groups.get(0).memberCount);
+        assertEquals(5, decoded.groups.get(0).generation);
+        assertEquals("g2", decoded.groups.get(1).groupId);
+        assertEquals(Codec.GROUP_STATE_EMPTY, decoded.groups.get(1).state);
+        Codec.ListGroupsResponse dispatched = assertInstanceOf(
+                Codec.ListGroupsResponse.class, Codec.decodeResponse(Codec.OP_LIST_GROUPS_RESPONSE, raw));
+        assertEquals(2, dispatched.groups.size());
+        assertEquals(Codec.GROUP_STATE_EMPTY, new Codec.GroupListing("x", 99, 0, 0).state);
+    }
 }

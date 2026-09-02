@@ -13,15 +13,21 @@ from volant.codec import (
     CreateTopicResponse,
     DeleteTopicRequest,
     DeleteTopicResponse,
+    DescribeGroupRequest,
+    DescribeGroupResponse,
     FetchRecord,
     FetchRequest,
     FetchResponse,
+    GroupListing,
+    GroupMemberInfo,
+    GroupState,
     HeartbeatRequest,
     HeartbeatResponse,
     JoinGroupRequest,
     JoinGroupResponse,
     LeaveGroupRequest,
     LeaveGroupResponse,
+    ListGroupsResponse,
     MetadataRequest,
     MetadataResponse,
     OffsetCommitEntry,
@@ -42,6 +48,8 @@ from volant.codec import (
     decode_create_topic_response,
     decode_delete_topic_request,
     decode_delete_topic_response,
+    decode_describe_group_request,
+    decode_describe_group_response,
     decode_fetch_request,
     decode_fetch_response,
     decode_heartbeat_request,
@@ -50,6 +58,8 @@ from volant.codec import (
     decode_join_group_response,
     decode_leave_group_request,
     decode_leave_group_response,
+    decode_list_groups_request,
+    decode_list_groups_response,
     decode_metadata_request,
     decode_metadata_response,
     decode_offset_commit_request,
@@ -65,6 +75,8 @@ from volant.codec import (
     encode_create_topic_response,
     encode_delete_topic_request,
     encode_delete_topic_response,
+    encode_describe_group_request,
+    encode_describe_group_response,
     encode_fetch_request,
     encode_fetch_response,
     encode_heartbeat_request,
@@ -73,6 +85,8 @@ from volant.codec import (
     encode_join_group_response,
     encode_leave_group_request,
     encode_leave_group_response,
+    encode_list_groups_request,
+    encode_list_groups_response,
     encode_metadata_request,
     encode_metadata_response,
     encode_offset_commit_request,
@@ -82,9 +96,11 @@ from volant.codec import (
     encode_produce_request,
     encode_produce_response,
     OP_AUTH_RESPONSE,
+    OP_DESCRIBE_GROUP_RESPONSE,
     OP_HEARTBEAT,
     OP_JOIN_GROUP,
     OP_LEAVE_GROUP,
+    OP_LIST_GROUPS_RESPONSE,
     OP_OFFSET_COMMIT,
     OP_OFFSET_FETCH,
 )
@@ -622,6 +638,97 @@ class TestAuthCodec(unittest.TestCase):
         self.assertEqual(raw, bytes.fromhex("1100"))
         self.assertEqual(decode_auth_response(raw), fail)
         self.assertEqual(decode_response(OP_AUTH_RESPONSE, raw), fail)
+
+
+class TestGroupAdminCodec(unittest.TestCase):
+    def test_describe_group_request_cg1(self) -> None:
+        req = DescribeGroupRequest(group_id="cg-1")
+        raw = encode_describe_group_request(req)
+        self.assertEqual(raw, bytes.fromhex("040063672d31"))
+        self.assertEqual(decode_describe_group_request(raw), req)
+
+    def test_describe_group_response_members(self) -> None:
+        resp = DescribeGroupResponse(
+            error_code=0,
+            group_id="cg-1",
+            generation=3,
+            members=[
+                GroupMemberInfo(
+                    member_id="m-a",
+                    topics=["events"],
+                    assignment=[
+                        Assignment(topic="events", partition=0),
+                        Assignment(topic="events", partition=2),
+                    ],
+                )
+            ],
+        )
+        raw = encode_describe_group_response(resp)
+        expected = bytes.fromhex(
+            "0000"
+            "040063672d31"
+            "03000000"
+            "01000000"
+            "03006d2d61"
+            "01000000"
+            "06006576656e7473"
+            "02000000"
+            "06006576656e7473"
+            "00000000"
+            "06006576656e7473"
+            "02000000"
+        )
+        self.assertEqual(_hx(raw), _hx(expected))
+        self.assertEqual(decode_describe_group_response(raw), resp)
+        self.assertEqual(decode_response(OP_DESCRIBE_GROUP_RESPONSE, raw), resp)
+
+    def test_describe_group_response_not_found(self) -> None:
+        resp = DescribeGroupResponse(
+            error_code=2, group_id="missing", generation=0, members=[]
+        )
+        raw = encode_describe_group_response(resp)
+        self.assertEqual(raw, bytes.fromhex("020007006d697373696e670000000000000000"))
+        self.assertEqual(decode_describe_group_response(raw), resp)
+
+    def test_list_groups_request_empty(self) -> None:
+        self.assertEqual(encode_list_groups_request(), b"")
+        self.assertIsNone(decode_list_groups_request(b""))
+
+    def test_list_groups_response_empty_and_stable(self) -> None:
+        resp = ListGroupsResponse(
+            error_code=0,
+            groups=[
+                GroupListing(
+                    group_id="g1",
+                    state=GroupState.STABLE,
+                    member_count=2,
+                    generation=5,
+                ),
+                GroupListing(
+                    group_id="g2",
+                    state=GroupState.EMPTY,
+                    member_count=0,
+                    generation=0,
+                ),
+            ],
+        )
+        raw = encode_list_groups_response(resp)
+        expected = bytes.fromhex(
+            "0000"
+            "02000000"
+            "02006731"
+            "01"
+            "02000000"
+            "05000000"
+            "02006732"
+            "00"
+            "00000000"
+            "00000000"
+        )
+        self.assertEqual(_hx(raw), _hx(expected))
+        self.assertEqual(decode_list_groups_response(raw), resp)
+        self.assertEqual(decode_response(OP_LIST_GROUPS_RESPONSE, raw), resp)
+        self.assertEqual(GroupState.from_u8(99), GroupState.EMPTY)
 
 
 if __name__ == "__main__":

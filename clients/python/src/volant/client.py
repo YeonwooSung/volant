@@ -14,15 +14,21 @@ from .codec import (
     BrokerInfo,
     CreateTopicRequest,
     DeleteTopicRequest,
+    DescribeGroupRequest,
+    DescribeGroupResponse,
     FetchRecord,
     FetchRequest,
     FetchResponse,
+    GroupListing,
+    GroupMemberInfo,
+    GroupState,
     HeartbeatRequest,
     HeartbeatResponse,
     JoinGroupRequest,
     JoinGroupResponse,
     LeaveGroupRequest,
     LeaveGroupResponse,
+    ListGroupsResponse,
     MetadataRequest,
     MetadataResponse,
     OffsetCommitEntry,
@@ -93,6 +99,15 @@ class JoinGroupResult:
         yield self.member_id
         yield self.generation
         yield self.assignment
+
+
+@dataclass
+class DescribeGroupResult:
+    """Result of a successful DescribeGroup (Phase 11 / v0.49)."""
+
+    group_id: str
+    generation: int
+    members: list[GroupMemberInfo]
 
 
 @dataclass
@@ -628,6 +643,32 @@ class Client:
             raise ProtocolError(f"unexpected response for leave_group: {type(resp)}")
         self._check(resp.error_code, "leave_group")
 
+    def describe_group(self, group: str) -> DescribeGroupResult:
+        """Describe a live consumer group (native opcode 34/35).
+
+        Error 2 (NotFound, no live members) raises :class:`BrokerError`.
+        """
+        payload = codec.encode_describe_group_request(
+            DescribeGroupRequest(group_id=group)
+        )
+        resp = self._round_trip(codec.OP_DESCRIBE_GROUP, payload)
+        if not isinstance(resp, DescribeGroupResponse):
+            raise ProtocolError(f"unexpected response for describe_group: {type(resp)}")
+        self._check(resp.error_code, "describe_group")
+        return DescribeGroupResult(
+            group_id=resp.group_id,
+            generation=resp.generation,
+            members=list(resp.members),
+        )
+
+    def list_groups(self) -> list[GroupListing]:
+        """List known consumer groups (native opcode 36/37)."""
+        resp = self._round_trip(codec.OP_LIST_GROUPS, codec.encode_list_groups_request())
+        if not isinstance(resp, ListGroupsResponse):
+            raise ProtocolError(f"unexpected response for list_groups: {type(resp)}")
+        self._check(resp.error_code, "list_groups")
+        return list(resp.groups)
+
 
 # Re-export result types used by callers.
 __all__ = [
@@ -635,8 +676,12 @@ __all__ = [
     "BrokerError",
     "BrokerInfo",
     "Client",
+    "DescribeGroupResult",
     "FetchRecord",
     "FetchResult",
+    "GroupListing",
+    "GroupMemberInfo",
+    "GroupState",
     "JoinGroupResult",
     "MetadataResponse",
     "ProduceMessage",
