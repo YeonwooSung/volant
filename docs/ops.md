@@ -792,6 +792,24 @@ Metric: `volant_fetch_session_mirror_converge_total`.
 
 See [V30_SPEC.md](./V30_SPEC.md).
 
+## v0.32 Go GroupConsumer
+
+The Go native client has a high-level `GroupConsumer`: join, positions
+from OffsetFetch (unknown → 0), poll = heartbeat + fetch assigned
+partitions, commit with `member_id` + `generation`, rejoin on error 9,
+honor revoked. `Close` leaves the group; the `Client` stays open.
+
+```go
+g, err := volant.JoinGroupConsumer(c, "g", []string{"t"}, 10_000)
+recs, err := g.Poll(500 * time.Millisecond)
+err = g.Commit()
+err = g.Close()
+```
+
+Codec / fake-loop tests need no broker; live join → poll → commit →
+resume is `VOLANT_E2E=1`. Does not change the broker. See
+[V32_SPEC.md](./V32_SPEC.md).
+
 ## v0.28 client groups
 
 Python, Go, and Java native clients now speak **JoinGroup** (opcode 8),

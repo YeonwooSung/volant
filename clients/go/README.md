@@ -43,6 +43,11 @@ if err != nil {
 }
 err = c.Heartbeat("g", j.MemberID, j.Generation)
 err = c.LeaveGroup("g", j.MemberID)
+g, err := volant.JoinGroupConsumer(c, "g", []string{"t"}, 10_000)
+batch, err := g.Poll(500 * time.Millisecond)
+err = g.Commit()
+err = g.Close()
+_ = batch
 meta, err := c.Metadata()
 _ = off
 _ = meta
@@ -65,6 +70,10 @@ c, err = volant.DialTLS("127.0.0.1:9092", volant.TLSConfig{
 `OffsetFetch` returns `[]Offset` (`Partition`, `Offset`) for the topic.
 `JoinGroup` sends empty `member_id` on first join; the result has
 `MemberID`, `Generation`, and `Assignment`.
+`JoinGroupConsumer` is the high-level loop (join, OffsetFetch
+positions or 0, poll = heartbeat + fetch assigned, commit with
+member+generation, rejoin on error 9, honor revoked). `Close` leaves
+the group and does not close the `Client`.
 
 Correlation ids increment per request. Decode verifies magic `V` (0x56),
 protocol version 1, and IEEE CRC32 of the **payload only**. Broker
@@ -102,13 +111,15 @@ must be paired. Handshake failures close the TCP socket.
 
 ## Honesty
 
-Not implemented: `kafka-go`, high-level GroupConsumer / assignor loop,
+Not implemented: `kafka-go`, custom assignor, static membership,
 SCRAM / shared-token auth, async I/O, idempotent produce, leader
-redirect. Offset commit/fetch is the admin path only (empty member,
-generation 0). Sync only; one TCP connection; acks=1 by default. TLS
+redirect. Thin `OffsetCommit` is still the admin path (empty member,
+generation 0); `GroupConsumer.Commit` sends member+generation.
+Sync only; one TCP connection; acks=1 by default. TLS
 does not change broker TLS (Phase 8/19) and does not add Kafka API keys.
 
 See [docs/V19_SPEC.md](../../docs/V19_SPEC.md),
 [docs/V24_SPEC.md](../../docs/V24_SPEC.md),
-[docs/V27_SPEC.md](../../docs/V27_SPEC.md), and
-[docs/V28_SPEC.md](../../docs/V28_SPEC.md).
+[docs/V27_SPEC.md](../../docs/V27_SPEC.md),
+[docs/V28_SPEC.md](../../docs/V28_SPEC.md), and
+[docs/V32_SPEC.md](../../docs/V32_SPEC.md).
