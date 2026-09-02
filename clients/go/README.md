@@ -34,6 +34,8 @@ if err != nil {
 }
 // ProduceAcks: 1 = leader, 255 = acks=all (v0.64). Produce stays acks=1.
 off, err = c.ProduceAcks("t", 0, nil, []byte("hello"), 255)
+// ProduceBatch: N messages in one Produce RPC (v0.68). Produce stays one message.
+off, err = c.ProduceBatch("t", 0, []codec.ProduceMessage{{Value: []byte("a")}, {Value: []byte("b")}}, 1)
 recs, err := c.Fetch("t", 0, 0)
 if err != nil {
     log.Fatal(err)
@@ -276,8 +278,9 @@ across live members. Thin `Client.JoinGroup` still sends empty
 membership. Thin `OffsetCommit` is still the admin path (empty member,
 generation 0); `GroupConsumer.Commit` sends member+generation.
 Sync only; one TCP connection; acks=1 by default (`ProduceAcks` /
-`acks=255` is acks=all; v0.64). Convenience Produce is still one
-message per RPC (not Kafka Produce; native opcode 1). `FetchOpts`
+`acks=255` is acks=all; v0.64). `Produce` stays one message;
+`ProduceBatch` sends N in one RPC (v0.68; not Kafka Produce; native
+opcode 1). `FetchOpts`
 exposes max_messages / max_bytes / max_wait_ms (not Kafka Fetch;
 native opcode 2). TLS
 does not change broker TLS (Phase 8/19) and does not add Kafka API keys.

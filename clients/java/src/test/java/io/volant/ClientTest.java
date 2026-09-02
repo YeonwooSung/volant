@@ -624,4 +624,112 @@ class ClientTest {
         }
     }
 
+
+    private static List<Codec.ProduceMessage> batchMsgs(String... values) {
+        List<Codec.ProduceMessage> out = new ArrayList<>();
+        for (String v : values) {
+            out.add(new Codec.ProduceMessage(null, v.getBytes(StandardCharsets.UTF_8)));
+        }
+        return out;
+    }
+
+    @Test
+    void produceBatchThreeMessages() throws Exception {
+        try (ScriptedBroker srv = ScriptedBroker.start()) {
+            try (Client c = Client.connect("127.0.0.1", srv.port, 5_000)) {
+                long off = c.produce("t", 0, batchMsgs("a", "b", "c"), 1);
+                assertEquals(7L, off);
+            }
+            assertEquals(1, srv.produceReqs.size());
+            Codec.ProduceRequest req = srv.produceReqs.get(0);
+            assertEquals(3, req.messages.size());
+            assertEquals(1, req.acks);
+            assertEquals("a", new String(req.messages.get(0).value, StandardCharsets.UTF_8));
+            assertEquals("b", new String(req.messages.get(1).value, StandardCharsets.UTF_8));
+            assertEquals("c", new String(req.messages.get(2).value, StandardCharsets.UTF_8));
+        }
+    }
+
+    @Test
+    void produceBatchEmpty() throws Exception {
+        try (ScriptedBroker srv = ScriptedBroker.start()) {
+            try (Client c = Client.connect("127.0.0.1", srv.port, 5_000)) {
+                assertThrows(
+                        IllegalArgumentException.class,
+                        () -> c.produce("t", 0, Collections.emptyList(), 1));
+                assertThrows(IllegalArgumentException.class, () -> c.produce("t", 0, null, 1));
+            }
+            assertEquals(0, srv.produceCount.get());
+        }
+    }
+
+    @Test
+    void produceStillOneMessage() throws Exception {
+        try (ScriptedBroker srv = ScriptedBroker.start()) {
+            try (Client c = Client.connect("127.0.0.1", srv.port, 5_000)) {
+                c.produce("t", 0, null, "hello".getBytes(StandardCharsets.UTF_8));
+            }
+            assertEquals(1, srv.produceReqs.size());
+            assertEquals(1, srv.produceReqs.get(0).messages.size());
+            assertEquals(
+                    "hello",
+                    new String(srv.produceReqs.get(0).messages.get(0).value, StandardCharsets.UTF_8));
+        }
+    }
+
+    @Test
+    void produceBatchRetriesTimeoutThenOk() throws Exception {
+        try (ScriptedBroker srv = ScriptedBroker.start()) {
+            srv.produceCodes.add(TIMEOUT);
+            srv.produceCodes.add(0);
+            try (Client c = Client.connect("127.0.0.1", srv.port, 5_000)) {
+                c.setMaxRetries(2);
+                c.setRetryBackoffMs(0);
+                long off = c.produce("t", 0, batchMsgs("a", "b", "c"), 1);
+                assertEquals(7L, off);
+            }
+            assertEquals(2, srv.produceReqs.size());
+            for (Codec.ProduceRequest req : srv.produceReqs) {
+                assertEquals(3, req.messages.size());
+                assertEquals("a", new String(req.messages.get(0).value, StandardCharsets.UTF_8));
+                assertEquals("b", new String(req.messages.get(1).value, StandardCharsets.UTF_8));
+                assertEquals("c", new String(req.messages.get(2).value, StandardCharsets.UTF_8));
+            }
+        }
+    }
+
+    @Test
+    void produceBatchRedirectsToLeader() throws Exception {
+        try (ScriptedBroker leader = ScriptedBroker.start();
+                ScriptedBroker follower = ScriptedBroker.start()) {
+            follower.produceCodes.add(NOT_LEADER);
+            follower.meta = leaderMeta("t", 0, 2, "127.0.0.1", leader.port);
+            leader.produceCodes.add(0);
+
+            try (Client c = Client.connect("127.0.0.1", follower.port, 5_000)) {
+                long off = c.produce("t", 0, batchMsgs("a", "b", "c"), 1);
+                assertEquals(7L, off);
+            }
+            assertEquals(1, follower.produceCount.get());
+            assertEquals(1, follower.metadataCount.get());
+            assertEquals(1, leader.produceCount.get());
+            assertEquals(3, follower.produceReqs.get(0).messages.size());
+            assertEquals(3, leader.produceReqs.get(0).messages.size());
+        }
+    }
+
+    @Test
+    void produceBatchIncrementsSequenceByCount() throws Exception {
+        try (ScriptedBroker srv = ScriptedBroker.start()) {
+            try (Client c = Client.connect("127.0.0.1", srv.port, 5_000)) {
+                c.setEnableIdempotence(true);
+                c.produce("t", 0, batchMsgs("a", "b", "c"), 1);
+                c.produce("t", 0, batchMsgs("d", "e"), 1);
+            }
+            assertEquals(2, srv.produceReqs.size());
+            assertEquals(0, srv.produceReqs.get(0).baseSequence);
+            assertEquals(3, srv.produceReqs.get(1).baseSequence);
+        }
+    }
+
 }

@@ -266,8 +266,9 @@ admin path only (empty member, generation 0) unless the caller (or
 `GroupConsumer.commit`) passes a joined `member_id` / `generation`.
 Sync only; one TCP connection; acks=1 by default (`acks=255` is
 acks=all). `fetch` already takes `max_messages` / `max_bytes` /
-`max_wait_ms`. Convenience batch is `messages=` only (not Kafka
-Produce; native opcode 1). TLS does not change
+`max_wait_ms`. Convenience batch is `messages=` (Go `ProduceBatch` /
+Java list `produce` now match; not Kafka Produce; native opcode 1).
+TLS does not change
 broker TLS (Phase 8/19) and does not add Kafka API keys. Leader
 redirect is Produce/Fetch only (default one extra attempt).
 

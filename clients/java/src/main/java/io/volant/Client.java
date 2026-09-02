@@ -713,10 +713,27 @@ public final class Client implements AutoCloseable {
         if (value == null) {
             value = new byte[0];
         }
+        return produce(
+                topic,
+                partition,
+                Collections.singletonList(new Codec.ProduceMessage(key, value, -1L, Collections.emptyList())),
+                acks);
+    }
+
+    /**
+     * Produce {@code messages} in one Produce RPC. {@code acks}: 1 = leader,
+     * 255 = all. Empty / null batch is an error (no opcode 1).
+     *
+     * @return the broker-assigned base offset of the batch
+     */
+    public long produce(String topic, int partition, List<Codec.ProduceMessage> messages, int acks) {
+        if (messages == null || messages.isEmpty()) {
+            throw new IllegalArgumentException("produce batch is empty");
+        }
         int reinitBudget = usesPid() ? 1 : 0;
         int retryAttempt = 0;
         while (true) {
-            byte[] payload = encodeProduce(topic, partition, key, value, acks);
+            byte[] payload = encodeProduce(topic, partition, messages, acks);
             int maxAttempts = 1 + maxRedirects;
             int attempt = 0;
             boolean retriedUnknown = false;
@@ -777,7 +794,7 @@ public final class Client implements AutoCloseable {
                 }
                 check(resp.errorCode, "produce");
                 int seqPart = partition < 0 ? (int) resp.partition : partition;
-                noteProduceSuccess(topic, seqPart, 1);
+                noteProduceSuccess(topic, seqPart, messages.size());
                 return resp.baseOffset;
             }
             if (!retriedUnknown) {
@@ -809,14 +826,14 @@ public final class Client implements AutoCloseable {
         }
     }
 
-    private byte[] encodeProduce(String topic, int partition, byte[] key, byte[] value, int acks) {
+    private byte[] encodeProduce(String topic, int partition, List<Codec.ProduceMessage> messages, int acks) {
         long[] trailer = produceTrailer(topic, partition);
         return Codec.encodeProduceRequest(
                 new Codec.ProduceRequest(
                         topic,
                         partition,
                         acks,
-                        Collections.singletonList(new Codec.ProduceMessage(key, value, -1L, Collections.emptyList())),
+                        messages,
                         trailer[0],
                         (int) trailer[1],
                         (int) trailer[2]));

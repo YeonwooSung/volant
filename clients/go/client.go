@@ -844,6 +844,16 @@ func (c *Client) ProduceAcks(topic string, partition int, key, value []byte, ack
 	if value == nil {
 		value = []byte{}
 	}
+	return c.ProduceBatch(topic, partition, []codec.ProduceMessage{
+		{Key: key, Value: value, TimestampMs: -1},
+	}, acks)
+}
+
+// ProduceBatch sends msgs in one Produce RPC. acks: 1 = leader, 255 = all.
+func (c *Client) ProduceBatch(topic string, partition int, msgs []codec.ProduceMessage, acks uint8) (int64, error) {
+	if len(msgs) == 0 {
+		return 0, fmt.Errorf("produce batch is empty")
+	}
 	reinitBudget := 0
 	if c.enableIdempotence {
 		reinitBudget = 1
@@ -854,7 +864,7 @@ func (c *Client) ProduceAcks(topic string, partition int, key, value []byte, ack
 	}
 	retryAttempt := 0
 	for {
-		payload, err := c.encodeProduce(topic, partition, key, value, acks)
+		payload, err := c.encodeProduce(topic, partition, msgs, acks)
 		if err != nil {
 			return 0, err
 		}
@@ -918,7 +928,7 @@ func (c *Client) ProduceAcks(topic string, partition int, key, value []byte, ack
 			if partition < 0 {
 				seqPart = int32(resp.Partition)
 			}
-			c.noteProduceSuccess(topic, seqPart, 1)
+			c.noteProduceSuccess(topic, seqPart, int32(len(msgs)))
 			return int64(resp.BaseOffset), nil
 		}
 		if !retriedUnknown {
@@ -963,18 +973,16 @@ func (c *Client) sleepProduceRetry() {
 	}
 }
 
-func (c *Client) encodeProduce(topic string, partition int, key, value []byte, acks uint8) ([]byte, error) {
+func (c *Client) encodeProduce(topic string, partition int, msgs []codec.ProduceMessage, acks uint8) ([]byte, error) {
 	pid, epoch, seq, err := c.produceTrailer(topic, int32(partition))
 	if err != nil {
 		return nil, err
 	}
 	return codec.EncodeProduceRequest(codec.ProduceRequest{
-		Topic:     topic,
-		Partition: int32(partition),
-		Acks:      acks,
-		Messages: []codec.ProduceMessage{
-			{Key: key, Value: value, TimestampMs: -1},
-		},
+		Topic:         topic,
+		Partition:     int32(partition),
+		Acks:          acks,
+		Messages:      msgs,
 		ProducerID:    pid,
 		ProducerEpoch: epoch,
 		BaseSequence:  seq,
