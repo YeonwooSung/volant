@@ -72,10 +72,13 @@ public final class Client implements AutoCloseable {
     private final String scramPassword;
     private int maxRedirects = 1;
     private boolean enableIdempotence = false;
+    private String transactionalId = null;
     private long producerId = 0L;
     private int producerEpoch = 0;
     private boolean producerReady = false;
+    private boolean inTransaction = false;
     private final Map<String, Integer> nextSeq = new HashMap<>();
+    private final Map<String, Integer> seqAtBegin = new HashMap<>();
     private long nextCorr = 1;
     private byte[] buf = new byte[0];
 
@@ -213,6 +216,19 @@ public final class Client implements AutoCloseable {
 
     public boolean enableIdempotence() {
         return enableIdempotence;
+    }
+
+    /**
+     * Native transactional_id used on InitProducerId (opcode 32) and
+     * required by {@link #beginTransaction}. Null or empty means
+     * non-transactional (v0.47 empty-id idempotence still works).
+     */
+    public void setTransactionalId(String id) {
+        this.transactionalId = (id == null || id.isEmpty()) ? null : id;
+    }
+
+    public String transactionalId() {
+        return transactionalId;
     }
 
     private static Client finishConnect(Client c) {
@@ -662,7 +678,7 @@ public final class Client implements AutoCloseable {
         if (value == null) {
             value = new byte[0];
         }
-        int reinitBudget = enableIdempotence ? 1 : 0;
+        int reinitBudget = usesPid() ? 1 : 0;
         while (true) {
             byte[] payload = encodeProduce(topic, partition, key, value);
             int maxAttempts = 1 + maxRedirects;
@@ -727,8 +743,12 @@ public final class Client implements AutoCloseable {
                         (int) trailer[2]));
     }
 
+    private boolean usesPid() {
+        return enableIdempotence || (transactionalId != null && !transactionalId.isEmpty());
+    }
+
     private long[] produceTrailer(String topic, int partition) {
-        if (!enableIdempotence) {
+        if (!usesPid()) {
             return new long[] {0L, 0L, -1L};
         }
         ensureProducerId();
@@ -737,7 +757,7 @@ public final class Client implements AutoCloseable {
     }
 
     private void noteProduceSuccess(String topic, int partition, int count) {
-        if (!enableIdempotence) {
+        if (!usesPid()) {
             return;
         }
         String key = seqKey(topic, partition);
@@ -749,14 +769,17 @@ public final class Client implements AutoCloseable {
         producerReady = false;
         producerId = 0L;
         producerEpoch = 0;
+        inTransaction = false;
         nextSeq.clear();
+        seqAtBegin.clear();
     }
 
     private void ensureProducerId() {
         if (producerReady) {
             return;
         }
-        byte[] payload = Codec.encodeInitProducerIdRequest(new Codec.InitProducerIdRequest(""));
+        String txn = transactionalId == null ? "" : transactionalId;
+        byte[] payload = Codec.encodeInitProducerIdRequest(new Codec.InitProducerIdRequest(txn));
         Object decoded = roundTrip(Codec.OP_INIT_PRODUCER_ID, payload);
         if (!(decoded instanceof Codec.InitProducerIdResponse)) {
             throw new ProtocolException("unexpected response for init_producer_id: " + typeName(decoded));
@@ -766,6 +789,64 @@ public final class Client implements AutoCloseable {
         producerId = resp.producerId;
         producerEpoch = resp.epoch;
         producerReady = true;
+        inTransaction = false;
+        nextSeq.clear();
+    }
+
+    /**
+     * Open a native transaction (opcode 50). Requires {@link #setTransactionalId}.
+     */
+    public void beginTransaction() {
+        if (transactionalId == null || transactionalId.isEmpty()) {
+            throw new IllegalStateException("transactional_id not configured");
+        }
+        ensureProducerId();
+        byte[] payload = Codec.encodeBeginTxnRequest(new Codec.BeginTxnRequest(producerId, producerEpoch));
+        Object decoded = roundTrip(Codec.OP_BEGIN_TXN, payload);
+        if (!(decoded instanceof Codec.BeginTxnResponse)) {
+            throw new ProtocolException("unexpected response for begin_txn: " + typeName(decoded));
+        }
+        Codec.BeginTxnResponse resp = (Codec.BeginTxnResponse) decoded;
+        check(resp.errorCode, "begin_txn");
+        seqAtBegin.clear();
+        seqAtBegin.putAll(nextSeq);
+        inTransaction = true;
+    }
+
+    /** Commit the open transaction (opcode 52, committed=1). */
+    public List<TxnProduceResult> commitTransaction() {
+        return commitTransaction(Collections.emptyList());
+    }
+
+    /** Commit the open transaction with optional deferred offset commits. */
+    public List<TxnProduceResult> commitTransaction(List<TxnOffsetCommit> offsets) {
+        return endTransaction(true, offsets);
+    }
+
+    /** Abort the open transaction (opcode 52, committed=0) and rewind sequences. */
+    public void abortTransaction() {
+        endTransaction(false, Collections.emptyList());
+    }
+
+    private List<TxnProduceResult> endTransaction(boolean committed, List<TxnOffsetCommit> offsets) {
+        if (!producerReady) {
+            throw new IllegalStateException("producer id not initialized");
+        }
+        byte[] payload = Codec.encodeEndTxnRequest(
+                new Codec.EndTxnRequest(producerId, producerEpoch, committed, offsets));
+        Object decoded = roundTrip(Codec.OP_END_TXN, payload);
+        if (!(decoded instanceof Codec.EndTxnResponse)) {
+            throw new ProtocolException("unexpected response for end_txn: " + typeName(decoded));
+        }
+        Codec.EndTxnResponse resp = (Codec.EndTxnResponse) decoded;
+        check(resp.errorCode, "end_txn");
+        inTransaction = false;
+        if (!committed) {
+            nextSeq.clear();
+            nextSeq.putAll(seqAtBegin);
+        }
+        seqAtBegin.clear();
+        return resp.results;
     }
 
     private static String seqKey(String topic, int partition) {

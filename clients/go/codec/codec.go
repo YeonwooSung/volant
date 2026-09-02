@@ -49,6 +49,10 @@ const (
 	OpCreatePartitionsResponse   uint16 = 47
 	OpListOffsets                uint16 = 48
 	OpListOffsetsResponse        uint16 = 49
+	OpBeginTxn                   uint16 = 50
+	OpBeginTxnResponse           uint16 = 51
+	OpEndTxn                     uint16 = 52
+	OpEndTxnResponse             uint16 = 53
 	OpCreateAcls                 uint16 = 54
 	OpCreateAclsResponse         uint16 = 55
 	OpDeleteAcls                 uint16 = 56
@@ -821,6 +825,48 @@ type CreatePartitionsResponse struct {
 // Empty Replicas means auto-place with current membership.
 // MembershipBroker is one overlay broker endpoint (v0.10 / v0.58).
 // Rack nil is absent (flag 0).
+// BeginTxnRequest is opcode 50 (Phase 18 / v0.57).
+type BeginTxnRequest struct {
+	ProducerID    uint64
+	ProducerEpoch uint16
+}
+
+// BeginTxnResponse is opcode 51.
+type BeginTxnResponse struct {
+	ErrorCode uint16
+}
+
+// TxnOffsetCommit is one deferred offset inside EndTxn.
+type TxnOffsetCommit struct {
+	GroupID   string
+	Topic     string
+	Partition uint32
+	Offset    uint64
+	Metadata  string
+}
+
+// TxnProduceResult is one flushed produce batch from EndTxn commit.
+type TxnProduceResult struct {
+	Topic      string
+	Partition  uint32
+	BaseOffset uint64
+	Count      uint32
+}
+
+// EndTxnRequest is opcode 52.
+type EndTxnRequest struct {
+	ProducerID    uint64
+	ProducerEpoch uint16
+	Committed     bool
+	Offsets       []TxnOffsetCommit
+}
+
+// EndTxnResponse is opcode 53.
+type EndTxnResponse struct {
+	ErrorCode uint16
+	Results   []TxnProduceResult
+}
+
 type MembershipBroker struct {
 	ID   uint32
 	Host string
@@ -2772,6 +2818,184 @@ func getMembershipBroker(r *reader) (MembershipBroker, error) {
 }
 
 
+
+func EncodeBeginTxnRequest(req BeginTxnRequest) ([]byte, error) {
+	w := &writer{}
+	w.u64(req.ProducerID)
+	w.u16(req.ProducerEpoch)
+	return w.buf, nil
+}
+
+
+func DecodeBeginTxnRequest(payload []byte) (BeginTxnRequest, error) {
+	r := &reader{data: payload}
+	pid, err := r.u64()
+	if err != nil {
+		return BeginTxnRequest{}, err
+	}
+	epoch, err := r.u16()
+	if err != nil {
+		return BeginTxnRequest{}, err
+	}
+	return BeginTxnRequest{ProducerID: pid, ProducerEpoch: epoch}, nil
+}
+
+
+func EncodeBeginTxnResponse(resp BeginTxnResponse) ([]byte, error) {
+	w := &writer{}
+	w.u16(resp.ErrorCode)
+	return w.buf, nil
+}
+
+
+func DecodeBeginTxnResponse(payload []byte) (BeginTxnResponse, error) {
+	r := &reader{data: payload}
+	code, err := r.u16()
+	if err != nil {
+		return BeginTxnResponse{}, err
+	}
+	return BeginTxnResponse{ErrorCode: code}, nil
+}
+
+
+func EncodeEndTxnRequest(req EndTxnRequest) ([]byte, error) {
+	w := &writer{}
+	w.u64(req.ProducerID)
+	w.u16(req.ProducerEpoch)
+	if req.Committed {
+		w.u8(1)
+	} else {
+		w.u8(0)
+	}
+	w.u32(uint32(len(req.Offsets)))
+	for _, o := range req.Offsets {
+		if err := putString(w, o.GroupID); err != nil {
+			return nil, err
+		}
+		if err := putString(w, o.Topic); err != nil {
+			return nil, err
+		}
+		w.u32(o.Partition)
+		w.u64(o.Offset)
+		if err := putString(w, o.Metadata); err != nil {
+			return nil, err
+		}
+	}
+	return w.buf, nil
+}
+
+
+func DecodeEndTxnRequest(payload []byte) (EndTxnRequest, error) {
+	r := &reader{data: payload}
+	pid, err := r.u64()
+	if err != nil {
+		return EndTxnRequest{}, err
+	}
+	epoch, err := r.u16()
+	if err != nil {
+		return EndTxnRequest{}, err
+	}
+	committed, err := r.u8()
+	if err != nil {
+		return EndTxnRequest{}, err
+	}
+	n, err := r.u32()
+	if err != nil {
+		return EndTxnRequest{}, err
+	}
+	offsets := make([]TxnOffsetCommit, 0, n)
+	for i := uint32(0); i < n; i++ {
+		groupID, err := getString(r)
+		if err != nil {
+			return EndTxnRequest{}, err
+		}
+		topic, err := getString(r)
+		if err != nil {
+			return EndTxnRequest{}, err
+		}
+		part, err := r.u32()
+		if err != nil {
+			return EndTxnRequest{}, err
+		}
+		off, err := r.u64()
+		if err != nil {
+			return EndTxnRequest{}, err
+		}
+		meta, err := getString(r)
+		if err != nil {
+			return EndTxnRequest{}, err
+		}
+		offsets = append(offsets, TxnOffsetCommit{
+			GroupID:   groupID,
+			Topic:     topic,
+			Partition: part,
+			Offset:    off,
+			Metadata:  meta,
+		})
+	}
+	return EndTxnRequest{
+		ProducerID:    pid,
+		ProducerEpoch: epoch,
+		Committed:     committed != 0,
+		Offsets:       offsets,
+	}, nil
+}
+
+
+func EncodeEndTxnResponse(resp EndTxnResponse) ([]byte, error) {
+	w := &writer{}
+	w.u16(resp.ErrorCode)
+	w.u32(uint32(len(resp.Results)))
+	for _, row := range resp.Results {
+		if err := putString(w, row.Topic); err != nil {
+			return nil, err
+		}
+		w.u32(row.Partition)
+		w.u64(row.BaseOffset)
+		w.u32(row.Count)
+	}
+	return w.buf, nil
+}
+
+
+func DecodeEndTxnResponse(payload []byte) (EndTxnResponse, error) {
+	r := &reader{data: payload}
+	code, err := r.u16()
+	if err != nil {
+		return EndTxnResponse{}, err
+	}
+	n, err := r.u32()
+	if err != nil {
+		return EndTxnResponse{}, err
+	}
+	results := make([]TxnProduceResult, 0, n)
+	for i := uint32(0); i < n; i++ {
+		topic, err := getString(r)
+		if err != nil {
+			return EndTxnResponse{}, err
+		}
+		part, err := r.u32()
+		if err != nil {
+			return EndTxnResponse{}, err
+		}
+		base, err := r.u64()
+		if err != nil {
+			return EndTxnResponse{}, err
+		}
+		count, err := r.u32()
+		if err != nil {
+			return EndTxnResponse{}, err
+		}
+		results = append(results, TxnProduceResult{
+			Topic:      topic,
+			Partition:  part,
+			BaseOffset: base,
+			Count:      count,
+		})
+	}
+	return EndTxnResponse{ErrorCode: code, Results: results}, nil
+}
+
 func EncodeAddBrokerRequest(req AddBrokerRequest) ([]byte, error) {
 	w := &writer{}
 	if err := putMembershipBroker(w, MembershipBroker{
@@ -3215,6 +3439,10 @@ func DecodeResponse(opcode uint16, payload []byte) (any, error) {
 		return DecodeCreatePartitionsResponse(payload)
 	case OpListOffsetsResponse:
 		return DecodeListOffsetsResponse(payload)
+	case OpBeginTxnResponse:
+		return DecodeBeginTxnResponse(payload)
+	case OpEndTxnResponse:
+		return DecodeEndTxnResponse(payload)
 	case OpCreateAclsResponse:
 		return DecodeCreateAclsResponse(payload)
 	case OpDeleteAclsResponse:

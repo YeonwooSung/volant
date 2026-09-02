@@ -52,6 +52,10 @@ public final class Codec {
     public static final int OP_CREATE_PARTITIONS_RESPONSE = 47;
     public static final int OP_LIST_OFFSETS = 48;
     public static final int OP_LIST_OFFSETS_RESPONSE = 49;
+    public static final int OP_BEGIN_TXN = 50;
+    public static final int OP_BEGIN_TXN_RESPONSE = 51;
+    public static final int OP_END_TXN = 52;
+    public static final int OP_END_TXN_RESPONSE = 53;
     public static final int OP_CREATE_ACLS = 54;
     public static final int OP_CREATE_ACLS_RESPONSE = 55;
     public static final int OP_DELETE_ACLS = 56;
@@ -840,6 +844,49 @@ public final class Codec {
         }
     }
 
+    public static final class BeginTxnRequest {
+        public final long producerId;
+        public final int producerEpoch;
+
+        public BeginTxnRequest(long producerId, int producerEpoch) {
+            this.producerId = producerId;
+            this.producerEpoch = producerEpoch;
+        }
+    }
+    public static final class BeginTxnResponse {
+        public final int errorCode;
+
+        public BeginTxnResponse(int errorCode) {
+            this.errorCode = errorCode;
+        }
+    }
+    public static final class EndTxnRequest {
+        public final long producerId;
+        public final int producerEpoch;
+        public final boolean committed;
+        public final List<TxnOffsetCommit> offsets;
+
+        public EndTxnRequest(
+                long producerId, int producerEpoch, boolean committed, List<TxnOffsetCommit> offsets) {
+            this.producerId = producerId;
+            this.producerEpoch = producerEpoch;
+            this.committed = committed;
+            this.offsets = offsets == null
+                    ? Collections.emptyList()
+                    : Collections.unmodifiableList(new ArrayList<>(offsets));
+        }
+    }
+    public static final class EndTxnResponse {
+        public final int errorCode;
+        public final List<TxnProduceResult> results;
+
+        public EndTxnResponse(int errorCode, List<TxnProduceResult> results) {
+            this.errorCode = errorCode;
+            this.results = results == null
+                    ? Collections.emptyList()
+                    : Collections.unmodifiableList(new ArrayList<>(results));
+        }
+    }
     public static final class AddBrokerRequest {
         public final int id;
         public final String host;
@@ -2148,6 +2195,93 @@ public final class Codec {
     }
 
 
+    public static byte[] encodeBeginTxnRequest(BeginTxnRequest req) {
+        Writer w = new Writer();
+        w.u64(req.producerId);
+        w.u16(req.producerEpoch);
+        return w.finish();
+    }
+
+    public static BeginTxnRequest decodeBeginTxnRequest(byte[] payload) {
+        Reader r = new Reader(payload);
+        return new BeginTxnRequest(r.u64(), r.u16());
+    }
+
+    public static byte[] encodeBeginTxnResponse(BeginTxnResponse resp) {
+        Writer w = new Writer();
+        w.u16(resp.errorCode);
+        return w.finish();
+    }
+
+    public static BeginTxnResponse decodeBeginTxnResponse(byte[] payload) {
+        Reader r = new Reader(payload);
+        return new BeginTxnResponse(r.u16());
+    }
+
+    public static byte[] encodeEndTxnRequest(EndTxnRequest req) {
+        Writer w = new Writer();
+        w.u64(req.producerId);
+        w.u16(req.producerEpoch);
+        w.u8(req.committed ? 1 : 0);
+        List<TxnOffsetCommit> offsets = req.offsets;
+        w.u32(offsets.size());
+        for (TxnOffsetCommit o : offsets) {
+            putString(w, o.groupId);
+            putString(w, o.topic);
+            w.u32(o.partition);
+            w.u64(o.offset);
+            putString(w, o.metadata);
+        }
+        return w.finish();
+    }
+
+    public static EndTxnRequest decodeEndTxnRequest(byte[] payload) {
+        Reader r = new Reader(payload);
+        long producerId = r.u64();
+        int producerEpoch = r.u16();
+        boolean committed = r.u8() != 0;
+        long n = r.u32();
+        List<TxnOffsetCommit> offsets = new ArrayList<>();
+        for (long i = 0; i < n; i++) {
+            String groupId = getString(r);
+            String topic = getString(r);
+            int partition = (int) r.u32();
+            long offset = r.u64();
+            String metadata = getString(r);
+            offsets.add(new TxnOffsetCommit(groupId, topic, partition, offset, metadata));
+        }
+        return new EndTxnRequest(producerId, producerEpoch, committed, offsets);
+    }
+
+    public static byte[] encodeEndTxnResponse(EndTxnResponse resp) {
+        Writer w = new Writer();
+        w.u16(resp.errorCode);
+        List<TxnProduceResult> results = resp.results;
+        w.u32(results.size());
+        for (TxnProduceResult row : results) {
+            putString(w, row.topic);
+            w.u32(row.partition);
+            w.u64(row.baseOffset);
+            w.u32(row.count);
+        }
+        return w.finish();
+    }
+
+    public static EndTxnResponse decodeEndTxnResponse(byte[] payload) {
+        Reader r = new Reader(payload);
+        int errorCode = r.u16();
+        long n = r.u32();
+        List<TxnProduceResult> results = new ArrayList<>();
+        for (long i = 0; i < n; i++) {
+            String topic = getString(r);
+            int partition = (int) r.u32();
+            long baseOffset = r.u64();
+            int count = (int) r.u32();
+            results.add(new TxnProduceResult(topic, partition, baseOffset, count));
+        }
+        return new EndTxnResponse(errorCode, results);
+    }
+
     public static byte[] encodeAddBrokerRequest(AddBrokerRequest req) {
         Writer w = new Writer();
         putMembershipBroker(w, new MembershipBroker(req.id, req.host, req.port, req.rack));
@@ -2435,6 +2569,10 @@ public final class Codec {
                 return decodeCreatePartitionsResponse(payload);
             case OP_LIST_OFFSETS_RESPONSE:
                 return decodeListOffsetsResponse(payload);
+            case OP_BEGIN_TXN_RESPONSE:
+                return decodeBeginTxnResponse(payload);
+            case OP_END_TXN_RESPONSE:
+                return decodeEndTxnResponse(payload);
             case OP_CREATE_ACLS_RESPONSE:
                 return decodeCreateAclsResponse(payload);
             case OP_DELETE_ACLS_RESPONSE:

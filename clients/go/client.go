@@ -106,10 +106,13 @@ type Client struct {
 	scramPass         string
 	maxRedirects      int
 	enableIdempotence bool
+	transactionalID   string
 	producerID        uint64
 	producerEpoch     uint16
 	producerReady     bool
 	nextSeq           map[seqKey]int32
+	seqAtBegin        map[seqKey]int32
+	inTransaction     bool
 }
 
 // TLSConfig is optional TLS for [DialTLS]. Zero value uses system roots
@@ -602,6 +605,105 @@ func (c *Client) CreatePartitions(topic string, totalCount uint32) (uint32, erro
 // AddBroker adds a broker endpoint to the membership overlay (native 102/103).
 // rack nil is absent on the wire (flag 0). Returns the overlay generation.
 // Overlay is still SoT; this is not Kafka broker catalog.
+
+// SetTransactionalID sets the native transactional_id used on InitProducerId
+// (opcode 32) and required by BeginTransaction. Empty / unset means
+// non-transactional (v0.47 empty-id idempotence still works).
+func (c *Client) SetTransactionalID(id string) {
+	c.transactionalID = id
+	if id != "" && c.nextSeq == nil {
+		c.nextSeq = make(map[seqKey]int32)
+	}
+}
+
+
+// BeginTransaction opens a native transaction (opcode 50). Requires SetTransactionalID.
+func (c *Client) BeginTransaction() error {
+	if c.transactionalID == "" {
+		return fmt.Errorf("transactional_id not configured")
+	}
+	if err := c.ensureProducerID(); err != nil {
+		return err
+	}
+	payload, err := codec.EncodeBeginTxnRequest(codec.BeginTxnRequest{
+		ProducerID:    c.producerID,
+		ProducerEpoch: c.producerEpoch,
+	})
+	if err != nil {
+		return err
+	}
+	decoded, err := c.roundTrip(codec.OpBeginTxn, payload)
+	if err != nil {
+		return err
+	}
+	resp, ok := decoded.(codec.BeginTxnResponse)
+	if !ok {
+		return &frame.ProtocolError{Msg: fmt.Sprintf("unexpected response for begin_txn: %T", decoded)}
+	}
+	if err := check(resp.ErrorCode, "begin_txn"); err != nil {
+		return err
+	}
+	c.seqAtBegin = make(map[seqKey]int32, len(c.nextSeq))
+	for k, v := range c.nextSeq {
+		c.seqAtBegin[k] = v
+	}
+	c.inTransaction = true
+	return nil
+}
+
+
+// CommitTransaction ends the open transaction with committed=1 (opcode 52).
+// offsets may be nil. Returns per-batch TxnProduceResult rows.
+func (c *Client) CommitTransaction(offsets []codec.TxnOffsetCommit) ([]codec.TxnProduceResult, error) {
+	return c.endTransaction(true, offsets)
+}
+
+
+// AbortTransaction ends the open transaction with committed=0 and rewinds sequences.
+func (c *Client) AbortTransaction() error {
+	_, err := c.endTransaction(false, nil)
+	return err
+}
+
+
+func (c *Client) endTransaction(committed bool, offsets []codec.TxnOffsetCommit) ([]codec.TxnProduceResult, error) {
+	if !c.producerReady {
+		return nil, fmt.Errorf("producer id not initialized")
+	}
+	if offsets == nil {
+		offsets = []codec.TxnOffsetCommit{}
+	}
+	payload, err := codec.EncodeEndTxnRequest(codec.EndTxnRequest{
+		ProducerID:    c.producerID,
+		ProducerEpoch: c.producerEpoch,
+		Committed:     committed,
+		Offsets:       offsets,
+	})
+	if err != nil {
+		return nil, err
+	}
+	decoded, err := c.roundTrip(codec.OpEndTxn, payload)
+	if err != nil {
+		return nil, err
+	}
+	resp, ok := decoded.(codec.EndTxnResponse)
+	if !ok {
+		return nil, &frame.ProtocolError{Msg: fmt.Sprintf("unexpected response for end_txn: %T", decoded)}
+	}
+	if err := check(resp.ErrorCode, "end_txn"); err != nil {
+		return nil, err
+	}
+	c.inTransaction = false
+	if !committed {
+		c.nextSeq = make(map[seqKey]int32, len(c.seqAtBegin))
+		for k, v := range c.seqAtBegin {
+			c.nextSeq[k] = v
+		}
+	}
+	c.seqAtBegin = make(map[seqKey]int32)
+	return resp.Results, nil
+}
+
 func (c *Client) AddBroker(id uint32, host string, port uint16, rack *string) (uint64, error) {
 	payload, err := codec.EncodeAddBrokerRequest(codec.AddBrokerRequest{
 		ID: id, Host: host, Port: port, Rack: rack,
@@ -787,7 +889,7 @@ func (c *Client) encodeProduce(topic string, partition int, key, value []byte) (
 }
 
 func (c *Client) produceTrailer(topic string, partition int32) (uint64, uint16, int32, error) {
-	if !c.enableIdempotence {
+	if !c.enableIdempotence && c.transactionalID == "" {
 		return 0, 0, -1, nil
 	}
 	if err := c.ensureProducerID(); err != nil {
@@ -800,7 +902,7 @@ func (c *Client) produceTrailer(topic string, partition int32) (uint64, uint16, 
 }
 
 func (c *Client) noteProduceSuccess(topic string, partition int32, count int32) {
-	if !c.enableIdempotence {
+	if !c.enableIdempotence && c.transactionalID == "" {
 		return
 	}
 	if c.nextSeq == nil {
@@ -821,7 +923,7 @@ func (c *Client) ensureProducerID() error {
 	if c.producerReady {
 		return nil
 	}
-	payload, err := codec.EncodeInitProducerIdRequest(codec.InitProducerIdRequest{TransactionalID: ""})
+	payload, err := codec.EncodeInitProducerIdRequest(codec.InitProducerIdRequest{TransactionalID: c.transactionalID})
 	if err != nil {
 		return err
 	}

@@ -239,6 +239,16 @@ class Client:
 
         c = Client("127.0.0.1:9092", enable_idempotence=True)
 
+    Optional native transactions (v0.57) send InitProducerId with a
+    non-empty ``transactional_id``, then BeginTxn / EndTxn (opcodes
+    50–53). Produce during an open txn reuses the v0.47 idempotent
+    trailer. This is not Kafka transactions::
+
+        c = Client("127.0.0.1:9092", transactional_id="txn-1")
+        c.begin_transaction()
+        c.produce("t", 0, value=b"hello")
+        c.commit_transaction()
+
     Optional SCRAM-SHA-256 (v0.46) runs after connect when both
     ``scram_username`` and ``scram_password`` are set and ``auth_token``
     is unset. Token wins if both are provided. Username without
@@ -277,6 +287,7 @@ class Client:
         auth_token: Optional[str] = None,
         max_redirects: int = 1,
         enable_idempotence: bool = False,
+        transactional_id: Optional[str] = None,
         scram_username: Optional[str] = None,
         scram_password: Optional[str] = None,
     ) -> None:
@@ -298,10 +309,13 @@ class Client:
         # 0 = never redirect (raise on the first NotLeaderForPartition).
         self.max_redirects = max(0, int(max_redirects))
         self.enable_idempotence = bool(enable_idempotence)
+        self.transactional_id = transactional_id or None
         self._producer_id = 0
         self._producer_epoch = 0
         self._producer_ready = False
+        self._in_transaction = False
         self._next_seq: dict[tuple[str, int], int] = {}
+        self._seq_at_begin: dict[tuple[str, int], int] = {}
         self._next_corr = 1
         self._buf = bytearray()
         self._sock = None  # type: ignore[assignment]
@@ -463,17 +477,23 @@ class Client:
             raise ProtocolError(f"unexpected response for auth: {type(resp)}")
         self._check(resp.error_code, "auth")
 
+    def _uses_pid(self) -> bool:
+        return bool(self.enable_idempotence or self.transactional_id)
+
     def _reset_producer_id(self) -> None:
         self._producer_ready = False
         self._producer_id = 0
         self._producer_epoch = 0
+        self._in_transaction = False
         self._next_seq.clear()
+        self._seq_at_begin.clear()
 
     def _ensure_producer_id(self) -> None:
         if self._producer_ready:
             return
+        txn = self.transactional_id or ""
         payload = codec.encode_init_producer_id_request(
-            codec.InitProducerIdRequest(transactional_id="")
+            codec.InitProducerIdRequest(transactional_id=txn)
         )
         resp = self._round_trip(codec.OP_INIT_PRODUCER_ID, payload)
         if not isinstance(resp, codec.InitProducerIdResponse):
@@ -484,16 +504,18 @@ class Client:
         self._producer_id = resp.producer_id
         self._producer_epoch = resp.epoch
         self._producer_ready = True
+        self._in_transaction = False
+        self._next_seq.clear()
 
     def _produce_trailer(self, topic: str, partition: int) -> tuple[int, int, int]:
-        if not self.enable_idempotence:
+        if not self._uses_pid():
             return 0, 0, -1
         self._ensure_producer_id()
         seq = self._next_seq.get((topic, partition), 0)
         return self._producer_id, self._producer_epoch, seq
 
     def _note_produce_success(self, topic: str, partition: int, count: int) -> None:
-        if not self.enable_idempotence:
+        if not self._uses_pid():
             return
         key = (topic, partition)
         cur = self._next_seq.get(key, 0)
@@ -708,7 +730,7 @@ class Client:
         else:
             raise ValueError("produce() requires value= or messages=")
 
-        reinit_budget = 1 if self.enable_idempotence else 0
+        reinit_budget = 1 if self._uses_pid() else 0
         while True:
             producer_id, producer_epoch, base_sequence = self._produce_trailer(
                 topic, partition
@@ -772,6 +794,56 @@ class Client:
                     base_offset=resp.base_offset,
                     count=resp.count,
                 )
+
+    def begin_transaction(self) -> None:
+        """Open a native transaction (opcode 50). Requires ``transactional_id``."""
+        if not self.transactional_id:
+            raise ValueError("transactional_id not configured")
+        self._ensure_producer_id()
+        payload = codec.encode_begin_txn_request(
+            codec.BeginTxnRequest(
+                producer_id=self._producer_id, producer_epoch=self._producer_epoch
+            )
+        )
+        resp = self._round_trip(codec.OP_BEGIN_TXN, payload)
+        if not isinstance(resp, codec.BeginTxnResponse):
+            raise ProtocolError(f"unexpected response for begin_txn: {type(resp)}")
+        self._check(resp.error_code, "begin_txn")
+        self._seq_at_begin = dict(self._next_seq)
+        self._in_transaction = True
+
+    def commit_transaction(
+        self, offsets: Optional[Iterable[codec.TxnOffsetCommit]] = None
+    ) -> list[codec.TxnProduceResult]:
+        """Commit the open transaction (opcode 52, committed=1)."""
+        return self._end_transaction(True, list(offsets) if offsets else [])
+
+    def abort_transaction(self) -> None:
+        """Abort the open transaction (opcode 52, committed=0) and rewind sequences."""
+        self._end_transaction(False, [])
+
+    def _end_transaction(
+        self, committed: bool, offsets: list[codec.TxnOffsetCommit]
+    ) -> list[codec.TxnProduceResult]:
+        if not self._producer_ready:
+            raise ValueError("producer id not initialized")
+        payload = codec.encode_end_txn_request(
+            codec.EndTxnRequest(
+                producer_id=self._producer_id,
+                producer_epoch=self._producer_epoch,
+                committed=committed,
+                offsets=offsets,
+            )
+        )
+        resp = self._round_trip(codec.OP_END_TXN, payload)
+        if not isinstance(resp, codec.EndTxnResponse):
+            raise ProtocolError(f"unexpected response for end_txn: {type(resp)}")
+        self._check(resp.error_code, "end_txn")
+        self._in_transaction = False
+        if not committed:
+            self._next_seq = dict(self._seq_at_begin)
+        self._seq_at_begin.clear()
+        return list(resp.results)
 
     def fetch(
         self,
