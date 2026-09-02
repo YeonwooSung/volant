@@ -10,7 +10,10 @@ Crate / client version **0.2.0**.
 ## Usage
 
 ```go
-import volant "github.com/volant-mq/volant/clients/go"
+import (
+    volant "github.com/volant-mq/volant/clients/go"
+    "github.com/volant-mq/volant/clients/go/codec"
+)
 
 c, err := volant.Dial("127.0.0.1:9092")
 if err != nil {
@@ -89,6 +92,13 @@ err = c.CreateScramUser("alice", "s3cret", 0) // 0 = broker default 4096
 names, err := c.ListScramUsers()
 err = c.DeleteScramUser("alice")
 _ = names
+// ACL admin (v0.56). Opcodes 54–59; exact-match delete. Not Kafka CreateAcls.
+e := codec.AclBinding{Principal: "User:alice", ResourceType: 0, Resource: "events", Operation: 3, Permission: 1}
+err = c.CreateAcls([]codec.AclBinding{e})
+listed, err := c.ListAcls("", 255, "")
+removed, err := c.DeleteAcls([]codec.AclBinding{e})
+_ = listed
+_ = removed
 ```
 
 `Produce(..., nil, value)` sends a null key. `Fetch` returns `[]Record`
@@ -175,6 +185,12 @@ Leader redirect re-runs the same auth path.
 Create/Delete/ListScramUsers (v0.55) are admin RPCs (opcodes 64–69),
 not the handshake. `CreateScramUser` sends the password in the clear
 (use TLS). Not Kafka AlterUserScramCredentials.
+Create/Delete/ListAcls (v0.56) are admin RPCs (opcodes 54–59).
+`CreateAcls([]codec.AclBinding)` / `DeleteAcls(...)` (returns
+removed) / `ListAcls(principal, resourceType, resource)`. Empty
+principal/resource and `resourceType=255` list any. Delete is
+exact-match only. Not Kafka CreateAcls / DeleteAcls / DescribeAcls
+(API keys 30/31/29).
 
 ## Honesty
 
@@ -228,4 +244,5 @@ See [docs/V19_SPEC.md](../../docs/V19_SPEC.md),
 [docs/V46_SPEC.md](../../docs/V46_SPEC.md).
 [docs/V50_SPEC.md](../../docs/V50_SPEC.md).,
 [docs/V46_SPEC.md](../../docs/V46_SPEC.md),
-[docs/V55_SPEC.md](../../docs/V55_SPEC.md).
+[docs/V55_SPEC.md](../../docs/V55_SPEC.md),
+[docs/V56_SPEC.md](../../docs/V56_SPEC.md).

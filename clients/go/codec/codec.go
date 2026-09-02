@@ -2,7 +2,7 @@
 //
 // Matches crates/volant-protocol/src/payload.rs for Produce, Fetch,
 // CreateTopic, Metadata, DeleteTopic, OffsetCommit, OffsetFetch,
-// JoinGroup, Heartbeat, LeaveGroup, Auth, DescribeGroup, ListGroups, CreatePartitions, ListOffsets, InitProducerId, and Scram.
+// JoinGroup, Heartbeat, LeaveGroup, Auth, DescribeGroup, ListGroups, CreatePartitions, ListOffsets, CreateAcls, DeleteAcls, ListAcls, InitProducerId, and Scram.
 // Frame headers are big-endian (see package frame); payload integers and
 // length prefixes are little-endian.
 package codec
@@ -49,6 +49,12 @@ const (
 	OpCreatePartitionsResponse   uint16 = 47
 	OpListOffsets                uint16 = 48
 	OpListOffsetsResponse        uint16 = 49
+	OpCreateAcls                 uint16 = 54
+	OpCreateAclsResponse         uint16 = 55
+	OpDeleteAcls                 uint16 = 56
+	OpDeleteAclsResponse         uint16 = 57
+	OpListAcls                   uint16 = 58
+	OpListAclsResponse           uint16 = 59
 	OpCreateScramUser            uint16 = 64
 	OpCreateScramUserResponse    uint16 = 65
 	OpDeleteScramUser            uint16 = 66
@@ -199,6 +205,49 @@ func getString(r *reader) (string, error) {
 		return "", err
 	}
 	return string(raw), nil
+}
+
+func putAclBinding(w *writer, e AclBinding) error {
+	if err := putString(w, e.Principal); err != nil {
+		return err
+	}
+	w.u8(e.ResourceType)
+	if err := putString(w, e.Resource); err != nil {
+		return err
+	}
+	w.u8(e.Operation)
+	w.u8(e.Permission)
+	return nil
+}
+
+func getAclBinding(r *reader) (AclBinding, error) {
+	principal, err := getString(r)
+	if err != nil {
+		return AclBinding{}, err
+	}
+	resourceType, err := r.u8()
+	if err != nil {
+		return AclBinding{}, err
+	}
+	resource, err := getString(r)
+	if err != nil {
+		return AclBinding{}, err
+	}
+	operation, err := r.u8()
+	if err != nil {
+		return AclBinding{}, err
+	}
+	permission, err := r.u8()
+	if err != nil {
+		return AclBinding{}, err
+	}
+	return AclBinding{
+		Principal:    principal,
+		ResourceType: resourceType,
+		Resource:     resource,
+		Operation:    operation,
+		Permission:   permission,
+	}, nil
 }
 
 func putBytes(w *writer, b []byte) {
@@ -609,6 +658,53 @@ type ListOffsetsResponse struct {
 	ErrorCode uint16
 	Topic     string
 	Entries   []OffsetListing
+}
+
+// AclBinding is one ACL entry on the wire (Phase 20 / v0.56).
+// ResourceType: 0=Topic, 1=Group, 2=Cluster.
+// Operation: 0=All … 7=ClusterAction.
+// Permission: 0=Deny, 1=Allow.
+type AclBinding struct {
+	Principal    string
+	ResourceType uint8
+	Resource     string
+	Operation    uint8
+	Permission   uint8
+}
+
+// CreateAclsRequest is the CreateAcls opcode (54) body.
+type CreateAclsRequest struct {
+	Entries []AclBinding
+}
+
+// CreateAclsResponse is the CreateAcls reply (opcode 55).
+type CreateAclsResponse struct {
+	ErrorCode uint16
+}
+
+// DeleteAclsRequest is the DeleteAcls opcode (56) body (exact-match).
+type DeleteAclsRequest struct {
+	Entries []AclBinding
+}
+
+// DeleteAclsResponse is the DeleteAcls reply (opcode 57).
+type DeleteAclsResponse struct {
+	ErrorCode uint16
+	Removed   uint32
+}
+
+// ListAclsRequest is the ListAcls opcode (58) body.
+// Empty Principal/Resource = any. ResourceType 255 = any type.
+type ListAclsRequest struct {
+	Principal    string
+	ResourceType uint8
+	Resource     string
+}
+
+// ListAclsResponse is the ListAcls reply (opcode 59).
+type ListAclsResponse struct {
+	ErrorCode uint16
+	Entries   []AclBinding
 }
 
 // CreatePartitionsRequest is the CreatePartitions opcode (46) body.
@@ -1981,6 +2077,158 @@ func getConfigPairs(r *reader) ([][2]string, error) {
 	return configs, nil
 }
 
+func encodeAclEntries(w *writer, entries []AclBinding) error {
+	if entries == nil {
+		entries = []AclBinding{}
+	}
+	w.u32(uint32(len(entries)))
+	for _, e := range entries {
+		if err := putAclBinding(w, e); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func decodeAclEntries(r *reader) ([]AclBinding, error) {
+	n, err := r.u32()
+	if err != nil {
+		return nil, err
+	}
+	entries := make([]AclBinding, 0, n)
+	for i := uint32(0); i < n; i++ {
+		e, err := getAclBinding(r)
+		if err != nil {
+			return nil, err
+		}
+		entries = append(entries, e)
+	}
+	return entries, nil
+}
+
+func EncodeCreateAclsRequest(req CreateAclsRequest) ([]byte, error) {
+	w := &writer{}
+	if err := encodeAclEntries(w, req.Entries); err != nil {
+		return nil, err
+	}
+	return w.buf, nil
+}
+
+func DecodeCreateAclsRequest(payload []byte) (CreateAclsRequest, error) {
+	r := &reader{data: payload}
+	entries, err := decodeAclEntries(r)
+	if err != nil {
+		return CreateAclsRequest{}, err
+	}
+	return CreateAclsRequest{Entries: entries}, nil
+}
+
+func EncodeCreateAclsResponse(resp CreateAclsResponse) ([]byte, error) {
+	w := &writer{}
+	w.u16(resp.ErrorCode)
+	return w.buf, nil
+}
+
+func DecodeCreateAclsResponse(payload []byte) (CreateAclsResponse, error) {
+	r := &reader{data: payload}
+	code, err := r.u16()
+	if err != nil {
+		return CreateAclsResponse{}, err
+	}
+	return CreateAclsResponse{ErrorCode: code}, nil
+}
+
+func EncodeDeleteAclsRequest(req DeleteAclsRequest) ([]byte, error) {
+	w := &writer{}
+	if err := encodeAclEntries(w, req.Entries); err != nil {
+		return nil, err
+	}
+	return w.buf, nil
+}
+
+func DecodeDeleteAclsRequest(payload []byte) (DeleteAclsRequest, error) {
+	r := &reader{data: payload}
+	entries, err := decodeAclEntries(r)
+	if err != nil {
+		return DeleteAclsRequest{}, err
+	}
+	return DeleteAclsRequest{Entries: entries}, nil
+}
+
+func EncodeDeleteAclsResponse(resp DeleteAclsResponse) ([]byte, error) {
+	w := &writer{}
+	w.u16(resp.ErrorCode)
+	w.u32(resp.Removed)
+	return w.buf, nil
+}
+
+func DecodeDeleteAclsResponse(payload []byte) (DeleteAclsResponse, error) {
+	r := &reader{data: payload}
+	code, err := r.u16()
+	if err != nil {
+		return DeleteAclsResponse{}, err
+	}
+	removed, err := r.u32()
+	if err != nil {
+		return DeleteAclsResponse{}, err
+	}
+	return DeleteAclsResponse{ErrorCode: code, Removed: removed}, nil
+}
+
+func EncodeListAclsRequest(req ListAclsRequest) ([]byte, error) {
+	w := &writer{}
+	if err := putString(w, req.Principal); err != nil {
+		return nil, err
+	}
+	w.u8(req.ResourceType)
+	if err := putString(w, req.Resource); err != nil {
+		return nil, err
+	}
+	return w.buf, nil
+}
+
+func DecodeListAclsRequest(payload []byte) (ListAclsRequest, error) {
+	r := &reader{data: payload}
+	principal, err := getString(r)
+	if err != nil {
+		return ListAclsRequest{}, err
+	}
+	resourceType, err := r.u8()
+	if err != nil {
+		return ListAclsRequest{}, err
+	}
+	resource, err := getString(r)
+	if err != nil {
+		return ListAclsRequest{}, err
+	}
+	return ListAclsRequest{
+		Principal:    principal,
+		ResourceType: resourceType,
+		Resource:     resource,
+	}, nil
+}
+
+func EncodeListAclsResponse(resp ListAclsResponse) ([]byte, error) {
+	w := &writer{}
+	w.u16(resp.ErrorCode)
+	if err := encodeAclEntries(w, resp.Entries); err != nil {
+		return nil, err
+	}
+	return w.buf, nil
+}
+
+func DecodeListAclsResponse(payload []byte) (ListAclsResponse, error) {
+	r := &reader{data: payload}
+	code, err := r.u16()
+	if err != nil {
+		return ListAclsResponse{}, err
+	}
+	entries, err := decodeAclEntries(r)
+	if err != nil {
+		return ListAclsResponse{}, err
+	}
+	return ListAclsResponse{ErrorCode: code, Entries: entries}, nil
+}
 
 func EncodeCreateScramUserRequest(req CreateScramUserRequest) ([]byte, error) {
 	w := &writer{}
@@ -2623,6 +2871,12 @@ func DecodeResponse(opcode uint16, payload []byte) (any, error) {
 		return DecodeCreatePartitionsResponse(payload)
 	case OpListOffsetsResponse:
 		return DecodeListOffsetsResponse(payload)
+	case OpCreateAclsResponse:
+		return DecodeCreateAclsResponse(payload)
+	case OpDeleteAclsResponse:
+		return DecodeDeleteAclsResponse(payload)
+	case OpListAclsResponse:
+		return DecodeListAclsResponse(payload)
 	case OpCreateScramUserResponse:
 		return DecodeCreateScramUserResponse(payload)
 	case OpDeleteScramUserResponse:

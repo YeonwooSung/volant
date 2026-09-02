@@ -26,6 +26,9 @@ import java.util.Map;
  *   c.offsetCommit("g", "t", 0, 5);
  *   List&lt;Offset&gt; offs = c.offsetFetch("g", "t");
  *   List&lt;OffsetListing&gt; bounds = c.listOffsets("t");
+ *   c.createAcls(java.util.List.of(new AclBinding("User:alice", 0, "events", 3, 1)));
+ *   List&lt;AclBinding&gt; acls = c.listAcls();
+ *   int removed = c.deleteAcls(acls);
  *   DeleteRecordsResult cut = c.deleteRecords("t", 0, 100);
  *   JoinGroupResult j = c.joinGroup("g", java.util.List.of("t"), 10000);
  *   c.heartbeat("g", j.memberId, j.generation);
@@ -1012,6 +1015,57 @@ public final class Client implements AutoCloseable {
         Codec.ListScramUsersResponse resp = (Codec.ListScramUsersResponse) decoded;
         check(resp.errorCode, "list_scram_users");
         return resp.usernames;
+    }
+
+    /**
+     * Create ACL bindings (native opcode 54/55). This is not Kafka CreateAcls
+     * (API key 30).
+     */
+    public void createAcls(List<AclBinding> entries) {
+        byte[] payload = Codec.encodeCreateAclsRequest(new Codec.CreateAclsRequest(entries));
+        Object decoded = roundTrip(Codec.OP_CREATE_ACLS, payload);
+        if (!(decoded instanceof Codec.CreateAclsResponse)) {
+            throw new ProtocolException("unexpected response for create_acls: " + typeName(decoded));
+        }
+        Codec.CreateAclsResponse resp = (Codec.CreateAclsResponse) decoded;
+        check(resp.errorCode, "create_acls");
+    }
+
+    /**
+     * Delete exact-matching ACL bindings (native opcode 56/57). Returns the
+     * number of entries removed. No filter-delete.
+     */
+    public int deleteAcls(List<AclBinding> entries) {
+        byte[] payload = Codec.encodeDeleteAclsRequest(new Codec.DeleteAclsRequest(entries));
+        Object decoded = roundTrip(Codec.OP_DELETE_ACLS, payload);
+        if (!(decoded instanceof Codec.DeleteAclsResponse)) {
+            throw new ProtocolException("unexpected response for delete_acls: " + typeName(decoded));
+        }
+        Codec.DeleteAclsResponse resp = (Codec.DeleteAclsResponse) decoded;
+        check(resp.errorCode, "delete_acls");
+        return resp.removed;
+    }
+
+    /** List all ACL bindings (empty filters: any principal / type / resource). */
+    public List<AclBinding> listAcls() {
+        return listAcls("", 255, "");
+    }
+
+    /**
+     * List ACL bindings with optional filters (native opcode 58/59). Empty
+     * {@code principal} / {@code resource} = any. {@code resourceType} 255 =
+     * any type.
+     */
+    public List<AclBinding> listAcls(String principal, int resourceType, String resource) {
+        byte[] payload = Codec.encodeListAclsRequest(
+                new Codec.ListAclsRequest(principal, resourceType, resource));
+        Object decoded = roundTrip(Codec.OP_LIST_ACLS, payload);
+        if (!(decoded instanceof Codec.ListAclsResponse)) {
+            throw new ProtocolException("unexpected response for list_acls: " + typeName(decoded));
+        }
+        Codec.ListAclsResponse resp = (Codec.ListAclsResponse) decoded;
+        check(resp.errorCode, "list_acls");
+        return resp.entries;
     }
 
     /** Leave a consumer group. */

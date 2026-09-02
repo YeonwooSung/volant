@@ -248,6 +248,16 @@ class Client:
         c.create_scram_user("alice", "s3cret")
         names = c.list_scram_users()
         c.delete_scram_user("alice")
+
+    Create/Delete/ListAcls (v0.56) are admin RPCs (opcodes 54–59).
+    Delete is exact-match only. Empty principal/resource and
+    ``resource_type=255`` list any. This is not Kafka CreateAcls::
+
+        from volant.codec import AclBinding
+        e = AclBinding("User:alice", 0, "events", 3, 1)
+        c.create_acls([e])
+        listed = c.list_acls()
+        n = c.delete_acls([e])
     """
 
     def __init__(
@@ -1025,6 +1035,60 @@ class Client:
             )
         self._check(resp.error_code, "list_scram_users")
         return list(resp.usernames)
+
+    def create_acls(self, entries: list[codec.AclBinding]) -> None:
+        """Create ACL bindings (native opcode 54/55).
+
+        Enables enforcement on the broker. This is not Kafka CreateAcls
+        (API key 30). Non-zero ``error_code`` raises :class:`BrokerError`
+        with ``op="create_acls"``.
+        """
+        payload = codec.encode_create_acls_request(
+            codec.CreateAclsRequest(entries=list(entries or []))
+        )
+        resp = self._round_trip(codec.OP_CREATE_ACLS, payload)
+        if not isinstance(resp, codec.CreateAclsResponse):
+            raise ProtocolError(f"unexpected response for create_acls: {type(resp)}")
+        self._check(resp.error_code, "create_acls")
+
+    def delete_acls(self, entries: list[codec.AclBinding]) -> int:
+        """Delete exact-matching ACL bindings (native opcode 56/57).
+
+        Returns the number of entries removed. No filter-delete. This is
+        not Kafka DeleteAcls (API key 31). Non-zero ``error_code`` raises
+        :class:`BrokerError` with ``op="delete_acls"``.
+        """
+        payload = codec.encode_delete_acls_request(
+            codec.DeleteAclsRequest(entries=list(entries or []))
+        )
+        resp = self._round_trip(codec.OP_DELETE_ACLS, payload)
+        if not isinstance(resp, codec.DeleteAclsResponse):
+            raise ProtocolError(f"unexpected response for delete_acls: {type(resp)}")
+        self._check(resp.error_code, "delete_acls")
+        return resp.removed
+
+    def list_acls(
+        self,
+        principal: str = "",
+        resource_type: int = 255,
+        resource: str = "",
+    ) -> list[codec.AclBinding]:
+        """List ACL bindings with optional filters (native opcode 58/59).
+
+        Empty ``principal`` / ``resource`` = any. ``resource_type=255`` =
+        any type. This is not Kafka DescribeAcls (API key 29). Non-zero
+        ``error_code`` raises :class:`BrokerError` with ``op="list_acls"``.
+        """
+        payload = codec.encode_list_acls_request(
+            codec.ListAclsRequest(
+                principal=principal, resource_type=resource_type, resource=resource
+            )
+        )
+        resp = self._round_trip(codec.OP_LIST_ACLS, payload)
+        if not isinstance(resp, codec.ListAclsResponse):
+            raise ProtocolError(f"unexpected response for list_acls: {type(resp)}")
+        self._check(resp.error_code, "list_acls")
+        return list(resp.entries)
 
 
 # Re-export result types used by callers.
