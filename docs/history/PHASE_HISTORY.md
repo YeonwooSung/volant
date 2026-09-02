@@ -274,7 +274,11 @@ docs for day-to-day reading: [ops](../ops.md), [consistency](../consistency.md),
 | v0.73 | ✅ | Rust GroupConsumer range via DescribeGroup | [V73_SPEC.md](../V73_SPEC.md) |
 | v0.74 | ✅ | Heartbeat retry on Python/Go/Java | [V74_SPEC.md](../V74_SPEC.md) |
 | v0.75 | ✅ | GroupConsumer poll fetch knobs on Python/Go/Java | [V75_SPEC.md](../V75_SPEC.md) |
+| v0.76 | ✅ | Rust GroupConsumer poll fetch knobs | [V76_SPEC.md](../V76_SPEC.md) |
 | v0.77 | ✅ | Metadata controller_id trailer | [V77_SPEC.md](../V77_SPEC.md) |
+| v0.78 | ✅ | OffsetCommit/Fetch/DeleteOffsets retry on Python/Go/Java | [V78_SPEC.md](../V78_SPEC.md) |
+| v0.79 | ✅ | Rust admin NotController redirect | [V79_SPEC.md](../V79_SPEC.md) |
+| v0.80 | ✅ | Rust heartbeat retry | [V80_SPEC.md](../V80_SPEC.md) |
 
 ---
 

@@ -344,7 +344,7 @@ Binding: **[docs/PHASE7_SPEC.md](./docs/PHASE7_SPEC.md)**. Ops runbook: **[docs/
 - [x] Docker image + docker-compose + systemd unit (`deploy/`)
 - [x] Protocol chaos tests (random/truncated decode must not panic)
 - [x] Auth required / wrong token / metrics smoke integration tests
-- [ ] Multi-language clients (Rust first; Go / Python FFI or REST gateway) — **deferred** (Python/Go/Java through v0.75; Rust admin 14 **v0.79**)
+- [ ] Multi-language clients (Rust first; Go / Python FFI or REST gateway) — **deferred** (Python/Go/Java through v0.78; Rust **v0.76–v0.80**)
 - [ ] Kafka protocol compatibility shim — **deferred**
 - [ ] Full chaos mesh (partition loss, disk full, slow disk) — **deferred** (protocol chaos only)
 - [ ] SCRAM / full SASL — **deferred** (mTLS identity mapping: **Phase 19**)
@@ -3696,8 +3696,9 @@ Binding: **[docs/PHASE154_SPEC.md](./docs/PHASE154_SPEC.md)**.
 InstallSnapshot / log compaction; static N; full-snapshot SetAssignment; local
 assignment may lead commit until majority (Metadata committed-only hides).
 Native Metadata now carries a trailing `controller_id` (**v0.77**; `0` =
-unknown); admin 14 redirect still uses the v0.72 hunt. Spec:
-[docs/V77_SPEC.md](./docs/V77_SPEC.md).
+unknown). Rust admin 14 (**v0.79**) prefers that trailer when the
+error message has no hint; language clients still use the v0.72 hunt.
+Spec: [docs/V77_SPEC.md](./docs/V77_SPEC.md).
 **v0.2 product freeze** → [docs/V02_FREEZE.md](./docs/V02_FREEZE.md).
 
 **Still deferred:** full openraft election + dynamic membership; multi-lang;
@@ -3914,7 +3915,7 @@ no/single rack; `VOLANT_RACK_AWARE_ASSIGNMENT=0` off);
 **N=2 majority health gauges** Phase 141 (`volant_cluster_*` configured/live/quorum/impossible);
 **Metadata ISR overlay + leader→controller IsrUpdate** Phase 142;
 **txn coordinator registry TTL GC** Phase 127 + **BROKER config surface** Phase 128; **truncate journal** Phase 129 + **majority multi-controller consensus** Phase 130 + **journal rejoin catch-up** Phase 131 + **catch-up hardening** Phase 132 + **p2p heartbeat mesh** Phase 134 + **optional DeleteRecords majority wait** Phase 135 + **non-blocking admin catch-up** Phase 136 + **native DeleteRecords request wait trailer + journal topic GC** Phase 137).
-Still deferred: multi-language clients (Python/Go/Java through v0.75; Rust admin 14 **v0.79**), full chaos-mesh suites / long fuzz
+Still deferred: multi-language clients (Python/Go/Java through v0.78; Rust **v0.76–v0.80**), full chaos-mesh suites / long fuzz
 campaigns, Kafka client-quota preferred throttling (v0.7 closed opt-in
 redirect throttle + TCP probe), full
 KIP-890/939, rollback local truncate on majority fail (wait-off still
