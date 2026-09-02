@@ -1,12 +1,17 @@
-"""High-level group-coordinated consumer (v0.31).
+"""High-level group-coordinated consumer (v0.31 + v0.37 heartbeat).
 
 Mirrors ``crates/volant-client/src/group.rs`` on the existing sync
 ``Client`` RPCs: JoinGroup, Heartbeat, LeaveGroup, OffsetFetch,
 OffsetCommit, Fetch. The broker still assigns partitions.
+
+v0.37 starts a background heartbeat thread after a successful join
+(interval ``session_timeout_ms / 3``, clamped to 100–3000 ms). Pass
+``heartbeat=False`` to keep the v0.31 poll-only loop.
 """
 
 from __future__ import annotations
 
+import threading
 from dataclasses import dataclass, field
 from typing import Optional
 
@@ -22,6 +27,18 @@ _REJOIN_CODES = frozenset({9, 10, 11})
 
 _DEFAULT_SESSION_TIMEOUT_MS = 10_000
 _POLL_MAX_MESSAGES = 100
+_HB_INTERVAL_MIN_MS = 100
+_HB_INTERVAL_MAX_MS = 3000
+
+
+def heartbeat_interval_ms(session_timeout_ms: int) -> int:
+    """Background heartbeat period: ``session_timeout_ms / 3``, clamped."""
+    interval = session_timeout_ms // 3
+    if interval < _HB_INTERVAL_MIN_MS:
+        return _HB_INTERVAL_MIN_MS
+    if interval > _HB_INTERVAL_MAX_MS:
+        return _HB_INTERVAL_MAX_MS
+    return interval
 
 
 @dataclass
@@ -56,6 +73,13 @@ def _is_rejoin(exc: BaseException) -> bool:
 class GroupConsumer:
     """Join a group, poll assigned partitions, commit positions, leave.
 
+    After a successful join a background thread heartbeats at
+    :func:`heartbeat_interval_ms` so a silent consumer does not expire.
+    ``poll`` / ``commit`` share an internal lock with that thread (join
+    state + GroupConsumer RPCs) but are **not** a fully concurrent API:
+    do not call them from multiple threads, and do not use the same
+    ``Client`` for other RPCs while the consumer is open.
+
     Example::
 
         from volant import Client, GroupConsumer
@@ -73,18 +97,23 @@ class GroupConsumer:
         topics: list[str],
         session_timeout_ms: int,
         group_instance_id: str = "",
+        heartbeat: bool = True,
     ) -> None:
         self._client = client
         self._group_id = group_id
         self._topics = list(topics)
         self._session_timeout_ms = session_timeout_ms
         self._group_instance_id = group_instance_id
+        self._heartbeat_enabled = heartbeat
         self._member_id = ""
         self._generation = 0
         self._assignment: list[tuple[str, int]] = []
         self._last_revoked: list[tuple[str, int]] = []
         self._positions: dict[tuple[str, int], int] = {}
         self._closed = False
+        self._lock = threading.Lock()
+        self._stop = threading.Event()
+        self._hb_thread: Optional[threading.Thread] = None
 
     @classmethod
     def join(
@@ -95,8 +124,13 @@ class GroupConsumer:
         session_timeout_ms: int = _DEFAULT_SESSION_TIMEOUT_MS,
         *,
         group_instance_id: str = "",
+        heartbeat: bool = True,
     ) -> GroupConsumer:
-        """Join ``group`` on ``topics``. Empty ``member_id`` on first join."""
+        """Join ``group`` on ``topics``. Empty ``member_id`` on first join.
+
+        ``heartbeat=True`` (default) starts the v0.37 background loop.
+        ``heartbeat=False`` keeps v0.31 poll-only heartbeats.
+        """
         timeout = (
             _DEFAULT_SESSION_TIMEOUT_MS
             if session_timeout_ms == 0
@@ -108,8 +142,10 @@ class GroupConsumer:
             list(topics) if topics else [],
             timeout,
             group_instance_id=group_instance_id,
+            heartbeat=heartbeat,
         )
         this._do_join()
+        this._start_heartbeat()
         return this
 
     def _do_join(self) -> None:
@@ -198,50 +234,90 @@ class GroupConsumer:
         On broker error 9/10/11 (rebalance / unknown member / illegal
         generation) re-joins and retries the fetch once.
         """
-        self._ensure_open()
-        try:
-            self._heartbeat()
-        except BrokerError as exc:
-            if not _is_rejoin(exc):
-                raise
-            self._do_join()
-        try:
-            return self._fetch_assigned(max_wait_ms)
-        except BrokerError as exc:
-            if not _is_rejoin(exc):
-                raise
-            self._do_join()
-            return self._fetch_assigned(max_wait_ms)
+        with self._lock:
+            self._ensure_open()
+            try:
+                self._heartbeat()
+            except BrokerError as exc:
+                if not _is_rejoin(exc):
+                    raise
+                self._do_join()
+            try:
+                return self._fetch_assigned(max_wait_ms)
+            except BrokerError as exc:
+                if not _is_rejoin(exc):
+                    raise
+                self._do_join()
+                return self._fetch_assigned(max_wait_ms)
 
     def commit(self) -> None:
         """Commit current positions with the joined member_id + generation."""
-        self._ensure_open()
-        if not self._positions:
-            return
-        assigned = set(self._assignment)
-        for (topic, partition), offset in self._positions.items():
-            if assigned and (topic, partition) not in assigned:
-                continue
-            self._client.offset_commit(
-                self._group_id,
-                topic,
-                partition,
-                offset,
-                member_id=self._member_id,
-                generation=self._generation,
-            )
+        with self._lock:
+            self._ensure_open()
+            if not self._positions:
+                return
+            assigned = set(self._assignment)
+            for (topic, partition), offset in self._positions.items():
+                if assigned and (topic, partition) not in assigned:
+                    continue
+                self._client.offset_commit(
+                    self._group_id,
+                    topic,
+                    partition,
+                    offset,
+                    member_id=self._member_id,
+                    generation=self._generation,
+                )
 
     def close(self) -> None:
-        """Leave the group. Does not close the underlying :class:`Client`."""
-        if self._closed:
-            return
-        self._closed = True
-        if self._member_id:
-            self._client.leave_group(self._group_id, self._member_id)
+        """Stop the heartbeat thread (if any), then LeaveGroup.
+
+        Does not close the underlying :class:`Client`. Idempotent.
+        """
+        self._stop.set()
+        t = self._hb_thread
+        if t is not None and t is not threading.current_thread():
+            t.join(timeout=5.0)
+        with self._lock:
+            if self._closed:
+                return
+            self._closed = True
+            if self._member_id:
+                self._client.leave_group(self._group_id, self._member_id)
 
     def leave(self) -> None:
         """Alias for :meth:`close` (Rust ``GroupConsumer::leave``)."""
         self.close()
+
+    def _start_heartbeat(self) -> None:
+        if not self._heartbeat_enabled:
+            return
+        self._stop.clear()
+        self._hb_thread = threading.Thread(
+            target=self._heartbeat_loop,
+            name="volant-group-heartbeat",
+            daemon=True,
+        )
+        self._hb_thread.start()
+
+    def _heartbeat_loop(self) -> None:
+        interval = heartbeat_interval_ms(self._session_timeout_ms) / 1000.0
+        while not self._stop.wait(interval):
+            try:
+                self._heartbeat_once()
+            except Exception:
+                continue
+
+    def _heartbeat_once(self) -> None:
+        with self._lock:
+            if self._closed or self._stop.is_set():
+                return
+            try:
+                self._heartbeat()
+            except BrokerError as exc:
+                if not _is_rejoin(exc):
+                    return
+                self._do_join()
 
     def _ensure_open(self) -> None:
         if self._closed:
@@ -259,23 +335,28 @@ class GroupConsumer:
 
     @property
     def member_id(self) -> str:
-        return self._member_id
+        with self._lock:
+            return self._member_id
 
     @property
     def generation(self) -> int:
-        return self._generation
+        with self._lock:
+            return self._generation
 
     @property
     def assignment(self) -> list[tuple[str, int]]:
-        return list(self._assignment)
+        with self._lock:
+            return list(self._assignment)
 
     @property
     def last_revoked(self) -> list[tuple[str, int]]:
-        return list(self._last_revoked)
+        with self._lock:
+            return list(self._last_revoked)
 
     @property
     def positions(self) -> dict[tuple[str, int], int]:
-        return dict(self._positions)
+        with self._lock:
+            return dict(self._positions)
 
     @property
     def session_timeout_ms(self) -> int:

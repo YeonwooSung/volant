@@ -3,6 +3,7 @@ package volant
 import (
 	"errors"
 	"sort"
+	"sync"
 	"time"
 
 	"github.com/volant-mq/volant/clients/go/codec"
@@ -43,31 +44,88 @@ type Position struct {
 	Offset    uint64
 }
 
+const (
+	hbIntervalMin = 100 * time.Millisecond
+	hbIntervalMax = 3000 * time.Millisecond
+)
+
+// HeartbeatInterval is sessionTimeoutMs/3, clamped to [100ms, 3000ms].
+func HeartbeatInterval(sessionTimeoutMs int) time.Duration {
+	if sessionTimeoutMs < 0 {
+		sessionTimeoutMs = 0
+	}
+	d := time.Duration(sessionTimeoutMs) * time.Millisecond / 3
+	if d < hbIntervalMin {
+		return hbIntervalMin
+	}
+	if d > hbIntervalMax {
+		return hbIntervalMax
+	}
+	return d
+}
+
+// GroupConsumerOption configures JoinGroupConsumer.
+type GroupConsumerOption func(*groupConsumerOptions)
+
+type groupConsumerOptions struct {
+	backgroundHeartbeat bool
+	instanceID          string
+}
+
+// WithBackgroundHeartbeat enables or disables the post-join heartbeat
+// goroutine. Default is true. Pass false to keep v0.32 poll-only heartbeats.
+func WithBackgroundHeartbeat(enabled bool) GroupConsumerOption {
+	return func(o *groupConsumerOptions) {
+		o.backgroundHeartbeat = enabled
+	}
+}
+
 // GroupConsumer joins a group, polls assigned partitions, and commits.
 //
-// Not safe for concurrent use. The Client must stay open for the lifetime
-// of the consumer; Close leaves the group and does not close the Client.
+// After a successful join a background goroutine heartbeats at
+// HeartbeatInterval so a silent consumer does not expire. Poll, Commit,
+// rejoin, and that loop share an internal mutex around join state and
+// GroupConsumer RPCs, but this is not a fully concurrent consumer: do
+// not call Poll/Commit from multiple goroutines, and do not use the
+// same Client for other RPCs while the consumer is open.
+//
+// The Client must stay open for the lifetime of the consumer; Close
+// stops the heartbeat goroutine, leaves the group, and does not close
+// the Client.
 type GroupConsumer struct {
-	client           *Client
-	groupID          string
-	topics           []string
-	sessionTimeoutMs uint32
-	memberID         string
-	groupInstanceID  string
-	generation       uint32
-	assignment       []Assignment
-	lastRevoked      []Assignment
-	positions        map[topicPartition]uint64
-	closed           bool
+	client              *Client
+	groupID             string
+	topics              []string
+	sessionTimeoutMs    uint32
+	memberID            string
+	groupInstanceID     string
+	generation          uint32
+	assignment          []Assignment
+	lastRevoked         []Assignment
+	positions           map[topicPartition]uint64
+	closed              bool
+	backgroundHeartbeat bool
+
+	mu      sync.Mutex
+	stop    chan struct{}
+	stopOnce sync.Once
+	hbDone  chan struct{}
 }
 
 // JoinGroupConsumer joins a consumer group on the given topics.
-// sessionTimeoutMs 0 defaults to 10000.
-func JoinGroupConsumer(c *Client, group string, topics []string, sessionTimeoutMs int) (*GroupConsumer, error) {
-	return joinGroupConsumer(c, group, topics, sessionTimeoutMs, "")
+// sessionTimeoutMs 0 defaults to 10000. Background heartbeat is on
+// unless WithBackgroundHeartbeat(false) is passed.
+func JoinGroupConsumer(c *Client, group string, topics []string, sessionTimeoutMs int, opts ...GroupConsumerOption) (*GroupConsumer, error) {
+	o := groupConsumerOptions{backgroundHeartbeat: true}
+	for _, opt := range opts {
+		if opt != nil {
+			opt(&o)
+		}
+	}
+	return joinGroupConsumer(c, group, topics, sessionTimeoutMs, o)
 }
 
-func joinGroupConsumer(c *Client, group string, topics []string, sessionTimeoutMs int, instanceID string) (*GroupConsumer, error) {
+func joinGroupConsumer(c *Client, group string, topics []string, sessionTimeoutMs int, o groupConsumerOptions) (*GroupConsumer, error) {
 	if c == nil {
 		return nil, errors.New("nil client")
 	}
@@ -79,15 +137,24 @@ func joinGroupConsumer(c *Client, group string, topics []string, sessionTimeoutM
 		topics = []string{}
 	}
 	g := &GroupConsumer{
-		client:           c,
-		groupID:          group,
-		topics:           append([]string(nil), topics...),
-		sessionTimeoutMs: timeout,
-		groupInstanceID:  instanceID,
-		positions:        make(map[topicPartition]uint64),
+		client:              c,
+		groupID:             group,
+		topics:              append([]string(nil), topics...),
+		sessionTimeoutMs:    timeout,
+		groupInstanceID:     o.instanceID,
+		positions:           make(map[topicPartition]uint64),
+		backgroundHeartbeat: o.backgroundHeartbeat,
+		stop:                make(chan struct{}),
+		hbDone:              make(chan struct{}),
 	}
 	if err := g.doJoin(); err != nil {
+		close(g.hbDone)
 		return nil, err
+	}
+	if g.backgroundHeartbeat {
+		go g.heartbeatLoop()
+	} else {
+		close(g.hbDone)
 	}
 	return g, nil
 }
@@ -198,7 +265,12 @@ func (g *GroupConsumer) fetchPositionsFor(partitions []topicPartition) error {
 // One heartbeat plus one fetch pass; remaining time is used as max_wait_ms
 // on each partition fetch until it runs out.
 func (g *GroupConsumer) Poll(timeout time.Duration) ([]FetchedRecord, error) {
-	if g == nil || g.closed {
+	if g == nil {
+		return nil, ErrGroupClosed
+	}
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	if g.closed {
 		return nil, ErrGroupClosed
 	}
 	if err := g.client.Heartbeat(g.groupID, g.memberID, g.generation); err != nil {
@@ -252,7 +324,12 @@ func (g *GroupConsumer) Poll(timeout time.Duration) ([]FetchedRecord, error) {
 // Commit commits last+1 positions for assigned partitions with
 // member_id + generation (not the admin empty-member path).
 func (g *GroupConsumer) Commit() error {
-	if g == nil || g.closed {
+	if g == nil {
+		return ErrGroupClosed
+	}
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	if g.closed {
 		return ErrGroupClosed
 	}
 	if len(g.positions) == 0 {
@@ -276,9 +353,23 @@ func (g *GroupConsumer) Commit() error {
 	return g.client.commitOffsets(g.groupID, g.memberID, g.generation, entries)
 }
 
-// Close leaves the group. The Client is left open. Idempotent.
+// Close stops the heartbeat goroutine (if any) then leaves the group.
+// The Client is left open. Idempotent.
 func (g *GroupConsumer) Close() error {
-	if g == nil || g.closed {
+	if g == nil {
+		return nil
+	}
+	g.stopOnce.Do(func() {
+		if g.stop != nil {
+			close(g.stop)
+		}
+	})
+	if g.hbDone != nil {
+		<-g.hbDone
+	}
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	if g.closed {
 		return nil
 	}
 	g.closed = true
@@ -288,11 +379,42 @@ func (g *GroupConsumer) Close() error {
 	return g.client.LeaveGroup(g.groupID, g.memberID)
 }
 
+func (g *GroupConsumer) heartbeatLoop() {
+	defer close(g.hbDone)
+	ticker := time.NewTicker(HeartbeatInterval(int(g.sessionTimeoutMs)))
+	defer ticker.Stop()
+	for {
+		select {
+		case <-g.stop:
+			return
+		case <-ticker.C:
+			g.heartbeatOnce()
+		}
+	}
+}
+
+func (g *GroupConsumer) heartbeatOnce() {
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	if g.closed {
+		return
+	}
+	err := g.client.Heartbeat(g.groupID, g.memberID, g.generation)
+	if err == nil {
+		return
+	}
+	if needsRebalance(err) {
+		_ = g.doJoin()
+	}
+}
+
 // Assignment is the current (topic, partition) list.
 func (g *GroupConsumer) Assignment() []Assignment {
 	if g == nil {
 		return nil
 	}
+	g.mu.Lock()
+	defer g.mu.Unlock()
 	return copyAssignment(g.assignment)
 }
 
@@ -301,6 +423,8 @@ func (g *GroupConsumer) LastRevoked() []Assignment {
 	if g == nil {
 		return nil
 	}
+	g.mu.Lock()
+	defer g.mu.Unlock()
 	return copyAssignment(g.lastRevoked)
 }
 
@@ -309,6 +433,8 @@ func (g *GroupConsumer) MemberID() string {
 	if g == nil {
 		return ""
 	}
+	g.mu.Lock()
+	defer g.mu.Unlock()
 	return g.memberID
 }
 
@@ -317,6 +443,8 @@ func (g *GroupConsumer) Generation() uint32 {
 	if g == nil {
 		return 0
 	}
+	g.mu.Lock()
+	defer g.mu.Unlock()
 	return g.generation
 }
 
@@ -330,7 +458,12 @@ func (g *GroupConsumer) GroupID() string {
 
 // Positions returns next-read offsets for assigned partitions.
 func (g *GroupConsumer) Positions() []Position {
-	if g == nil || len(g.positions) == 0 {
+	if g == nil {
+		return nil
+	}
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	if len(g.positions) == 0 {
 		return nil
 	}
 	out := make([]Position, 0, len(g.positions))

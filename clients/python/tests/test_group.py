@@ -2,18 +2,21 @@
 
 from __future__ import annotations
 
+import threading
+import time
 import unittest
 
 from volant import FetchedRecord, GroupConsumer
 from volant.client import FetchResult, JoinGroupResult
 from volant.codec import Assignment, BrokerError, FetchRecord
-from volant.group import OFFSET_UNKNOWN
+from volant.group import OFFSET_UNKNOWN, heartbeat_interval_ms
 
 
 class FakeClient:
     """Duck-typed Client: records calls, serves scripted replies."""
 
     def __init__(self) -> None:
+        self._lock = threading.Lock()
         self.joins: list[dict] = []
         self.heartbeats: list[tuple[str, str, int]] = []
         self.leaves: list[tuple[str, str]] = []
@@ -28,6 +31,10 @@ class FakeClient:
         self.log: dict[tuple[str, int], list[FetchRecord]] = {}
         self.committed: dict[tuple[str, int], int] = {}
 
+    def heartbeat_snapshot(self) -> list[tuple[str, str, int]]:
+        with self._lock:
+            return list(self.heartbeats)
+
     def join_group(
         self,
         group: str,
@@ -37,17 +44,18 @@ class FakeClient:
         member_id: str = "",
         group_instance_id: str = "",
     ) -> JoinGroupResult:
-        self.joins.append(
-            {
-                "group": group,
-                "topics": list(topics) if topics else [],
-                "session_timeout_ms": session_timeout_ms,
-                "member_id": member_id,
-                "group_instance_id": group_instance_id,
-            }
-        )
-        if self.join_queue:
-            return self.join_queue.pop(0)
+        with self._lock:
+            self.joins.append(
+                {
+                    "group": group,
+                    "topics": list(topics) if topics else [],
+                    "session_timeout_ms": session_timeout_ms,
+                    "member_id": member_id,
+                    "group_instance_id": group_instance_id,
+                }
+            )
+            if self.join_queue:
+                return self.join_queue.pop(0)
         return JoinGroupResult(
             member_id="m1",
             generation=1,
@@ -55,8 +63,9 @@ class FakeClient:
         )
 
     def heartbeat(self, group: str, member_id: str, generation: int) -> int:
-        self.heartbeats.append((group, member_id, generation))
-        code = self.heartbeat_codes.pop(0) if self.heartbeat_codes else 0
+        with self._lock:
+            self.heartbeats.append((group, member_id, generation))
+            code = self.heartbeat_codes.pop(0) if self.heartbeat_codes else 0
         if code != 0:
             raise BrokerError(code, op="heartbeat")
         return 0
@@ -142,12 +151,18 @@ def _join(
     )
 
 
+def _gc(c, *args, **kwargs):
+    """Join with poll-only heartbeats (v0.31) so unit tests stay deterministic."""
+    kwargs.setdefault("heartbeat", False)
+    return GroupConsumer.join(c, *args, **kwargs)
+
+
 class TestGroupConsumer(unittest.TestCase):
     def test_join_fetches_committed_positions(self) -> None:
         c = FakeClient()
         c.committed[("t", 0)] = 5
         c.join_queue.append(_join([("t", 0)]))
-        g = GroupConsumer.join(c, group="g", topics=["t"], session_timeout_ms=10_000)
+        g = _gc(c, group="g", topics=["t"], session_timeout_ms=10_000)
         self.assertEqual(g.member_id, "m1")
         self.assertEqual(g.generation, 1)
         self.assertEqual(g.assignment, [("t", 0)])
@@ -159,18 +174,18 @@ class TestGroupConsumer(unittest.TestCase):
         c = FakeClient()
         c.committed[("t", 0)] = OFFSET_UNKNOWN
         c.join_queue.append(_join([("t", 0)]))
-        g = GroupConsumer.join(c, "g", ["t"])
+        g = _gc(c, "g", ["t"])
         self.assertEqual(g.positions, {("t", 0): 0})
 
     def test_join_missing_offset_starts_at_zero(self) -> None:
         c = FakeClient()
         c.join_queue.append(_join([("t", 0), ("t", 1)]))
-        g = GroupConsumer.join(c, "g", ["t"])
+        g = _gc(c, "g", ["t"])
         self.assertEqual(g.positions, {("t", 0): 0, ("t", 1): 0})
 
     def test_session_timeout_zero_defaults(self) -> None:
         c = FakeClient()
-        g = GroupConsumer.join(c, "g", ["t"], session_timeout_ms=0)
+        g = _gc(c, "g", ["t"], session_timeout_ms=0)
         self.assertEqual(g.session_timeout_ms, 10_000)
         self.assertEqual(c.joins[0]["session_timeout_ms"], 10_000)
 
@@ -178,7 +193,7 @@ class TestGroupConsumer(unittest.TestCase):
         c = FakeClient()
         c.join_queue.append(_join([("t", 0)]))
         c.log[("t", 0)] = [_rec(0, b"a"), _rec(1, b"b")]
-        g = GroupConsumer.join(c, "g", ["t"])
+        g = _gc(c, "g", ["t"])
         recs = g.poll(max_wait_ms=500)
         self.assertEqual(len(recs), 2)
         self.assertIsInstance(recs[0], FetchedRecord)
@@ -194,7 +209,7 @@ class TestGroupConsumer(unittest.TestCase):
         c = FakeClient()
         c.join_queue.append(_join([("t", 0)]))
         c.log[("t", 0)] = [_rec(0, b"a")]
-        g = GroupConsumer.join(c, "g", ["t"])
+        g = _gc(c, "g", ["t"])
         g.poll()
         g.commit()
         self.assertEqual(len(c.commits), 1)
@@ -209,7 +224,7 @@ class TestGroupConsumer(unittest.TestCase):
 
     def test_close_leaves_group(self) -> None:
         c = FakeClient()
-        g = GroupConsumer.join(c, "g", ["t"])
+        g = _gc(c, "g", ["t"])
         g.close()
         self.assertEqual(c.leaves, [("g", "m1")])
         g.close()
@@ -219,7 +234,7 @@ class TestGroupConsumer(unittest.TestCase):
 
     def test_context_manager_leaves(self) -> None:
         c = FakeClient()
-        with GroupConsumer.join(c, "g", ["t"]) as g:
+        with _gc(c, "g", ["t"]) as g:
             self.assertEqual(g.member_id, "m1")
         self.assertEqual(c.leaves, [("g", "m1")])
 
@@ -232,7 +247,7 @@ class TestGroupConsumer(unittest.TestCase):
         c.heartbeat_codes.append(9)
         c.log[("t", 0)] = [_rec(0, b"keep")]
         c.log[("t", 1)] = [_rec(0, b"revoked")]
-        g = GroupConsumer.join(c, "g", ["t"])
+        g = _gc(c, "g", ["t"])
         self.assertEqual(set(g.assignment), {("t", 0), ("t", 1)})
         recs = g.poll()
         self.assertEqual(g.generation, 2)
@@ -249,7 +264,7 @@ class TestGroupConsumer(unittest.TestCase):
         c.join_queue.append(_join([("t", 0)], generation=1))
         c.join_queue.append(_join([("t", 0)], member_id="m2", generation=2))
         c.heartbeat_codes.append(10)
-        g = GroupConsumer.join(c, "g", ["t"])
+        g = _gc(c, "g", ["t"])
         g.poll()
         self.assertEqual(g.member_id, "m2")
         self.assertEqual(g.generation, 2)
@@ -260,7 +275,7 @@ class TestGroupConsumer(unittest.TestCase):
         c.join_queue.append(_join([("t", 0)], generation=2))
         c.fetch_error_once = BrokerError(9, op="fetch")
         c.log[("t", 0)] = [_rec(0, b"x")]
-        g = GroupConsumer.join(c, "g", ["t"])
+        g = _gc(c, "g", ["t"])
         recs = g.poll()
         self.assertEqual([r.value for r in recs], [b"x"])
         self.assertEqual(g.generation, 2)
@@ -271,7 +286,7 @@ class TestGroupConsumer(unittest.TestCase):
         c.join_queue.append(_join([("t", 0)], generation=1))
         c.join_queue.append(_join([("t", 0)], generation=2))
         c.fetch_error = BrokerError(9, op="fetch")
-        g = GroupConsumer.join(c, "g", ["t"])
+        g = _gc(c, "g", ["t"])
         with self.assertRaises(BrokerError) as ctx:
             g.poll()
         self.assertEqual(ctx.exception.code, 9)
@@ -281,7 +296,7 @@ class TestGroupConsumer(unittest.TestCase):
         c = FakeClient()
         c.join_queue.append(_join([("t", 0)]))
         c.heartbeat_codes.append(15)
-        g = GroupConsumer.join(c, "g", ["t"])
+        g = _gc(c, "g", ["t"])
         with self.assertRaises(BrokerError) as ctx:
             g.poll()
         self.assertEqual(ctx.exception.code, 15)
@@ -292,7 +307,7 @@ class TestGroupConsumer(unittest.TestCase):
         c.join_queue.append(_join([("t", 0), ("t", 1)], generation=1))
         c.log[("t", 0)] = [_rec(0, b"p0")]
         c.log[("t", 1)] = [_rec(0, b"p1")]
-        g = GroupConsumer.join(c, "g", ["t"])
+        g = _gc(c, "g", ["t"])
         recs = g.poll()
         self.assertEqual(len(recs), 2)
         self.assertEqual(g.positions, {("t", 0): 1, ("t", 1): 1})
@@ -314,7 +329,7 @@ class TestGroupConsumer(unittest.TestCase):
     def test_cooperative_offset_fetch_only_added(self) -> None:
         c = FakeClient()
         c.join_queue.append(_join([("t", 0)], generation=1))
-        g = GroupConsumer.join(c, "g", ["t"])
+        g = _gc(c, "g", ["t"])
         self.assertEqual(c.offset_fetches, [("g", "t")])
         c.committed[("t", 1)] = 7
         c.heartbeat_codes.append(9)
@@ -324,6 +339,56 @@ class TestGroupConsumer(unittest.TestCase):
         self.assertEqual(g.positions[("t", 1)], 7)
         # First join fetched t; rejoin fetches t again for the added partition.
         self.assertEqual(c.offset_fetches, [("g", "t"), ("g", "t")])
+
+    def test_heartbeat_interval_clamped(self) -> None:
+        self.assertEqual(heartbeat_interval_ms(0), 100)
+        self.assertEqual(heartbeat_interval_ms(150), 100)
+        self.assertEqual(heartbeat_interval_ms(300), 100)
+        self.assertEqual(heartbeat_interval_ms(900), 300)
+        self.assertEqual(heartbeat_interval_ms(10_000), 3000)
+
+    def test_background_heartbeat_without_poll(self) -> None:
+        c = FakeClient()
+        c.join_queue.append(_join([("t", 0)]))
+        g = GroupConsumer.join(
+            c, "g", ["t"], session_timeout_ms=300, heartbeat=True
+        )
+        try:
+            deadline = time.time() + 1.0
+            while time.time() < deadline and not c.heartbeat_snapshot():
+                time.sleep(0.02)
+            self.assertGreater(len(c.heartbeat_snapshot()), 0)
+            self.assertEqual(c.fetches, [])
+        finally:
+            g.close()
+        n = len(c.heartbeat_snapshot())
+        time.sleep(0.35)
+        self.assertEqual(len(c.heartbeat_snapshot()), n)
+        self.assertEqual(c.leaves, [("g", "m1")])
+
+    def test_background_heartbeat_rejoins_on_error_9(self) -> None:
+        c = FakeClient()
+        c.join_queue.append(_join([("t", 0)], generation=1))
+        c.join_queue.append(_join([("t", 0)], member_id="m1", generation=2))
+        c.heartbeat_codes.append(9)
+        g = GroupConsumer.join(
+            c, "g", ["t"], session_timeout_ms=300, heartbeat=True
+        )
+        try:
+            deadline = time.time() + 1.0
+            while time.time() < deadline and g.generation < 2:
+                time.sleep(0.02)
+            self.assertEqual(g.generation, 2)
+            self.assertEqual(len(c.joins), 2)
+        finally:
+            g.close()
+
+    def test_heartbeat_false_is_poll_only(self) -> None:
+        c = FakeClient()
+        g = _gc(c, "g", ["t"], session_timeout_ms=300)
+        time.sleep(0.35)
+        self.assertEqual(c.heartbeat_snapshot(), [])
+        g.close()
 
 
 if __name__ == "__main__":

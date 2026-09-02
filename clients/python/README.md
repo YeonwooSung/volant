@@ -105,9 +105,14 @@ set or both unset. Handshake failures close the TCP socket.
 
 ## Honesty
 
+`GroupConsumer` starts a background heartbeat thread after join
+(interval `session_timeout_ms / 3`, clamped 100–3000 ms; v0.37).
+Pass `heartbeat=False` for the v0.31 poll-only loop. Not a fully
+concurrent API: do not share the `Client` while the consumer is open.
+
 Not implemented: `kafka-python`, client-side assignor, SCRAM /
 shared-token auth, async I/O, idempotent produce, leader redirect,
-background heartbeat thread, auto-commit. Offset commit/fetch is the
+auto-commit. Offset commit/fetch is the
 admin path only (empty member, generation 0) unless the caller (or
 `GroupConsumer.commit`) passes a joined `member_id` / `generation`.
 Sync only; one TCP connection; acks=1 by default. TLS does not change
@@ -117,4 +122,5 @@ See [docs/V14_SPEC.md](../../docs/V14_SPEC.md),
 [docs/V24_SPEC.md](../../docs/V24_SPEC.md),
 [docs/V27_SPEC.md](../../docs/V27_SPEC.md),
 [docs/V28_SPEC.md](../../docs/V28_SPEC.md), and
-[docs/V31_SPEC.md](../../docs/V31_SPEC.md).
+[docs/V31_SPEC.md](../../docs/V31_SPEC.md), and
+[docs/V37_SPEC.md](../../docs/V37_SPEC.md).

@@ -258,7 +258,7 @@ func TestJoinGroupConsumerPositionsFromOffsetFetch(t *testing.T) {
 	}
 	defer c.Close()
 
-	g, err := volant.JoinGroupConsumer(c, "g", []string{"t"}, 10_000)
+	g, err := volant.JoinGroupConsumer(c, "g", []string{"t"}, 10_000, volant.WithBackgroundHeartbeat(false))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -300,7 +300,7 @@ func TestJoinGroupConsumerUnknownOffsetStartsAtZero(t *testing.T) {
 	}
 	defer c.Close()
 
-	g, err := volant.JoinGroupConsumer(c, "g", []string{"t"}, 0)
+	g, err := volant.JoinGroupConsumer(c, "g", []string{"t"}, 0, volant.WithBackgroundHeartbeat(false))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -329,7 +329,7 @@ func TestPollHeartbeatAndFetchAdvancesPositions(t *testing.T) {
 	}
 	defer c.Close()
 
-	g, err := volant.JoinGroupConsumer(c, "g", []string{"t"}, 10_000)
+	g, err := volant.JoinGroupConsumer(c, "g", []string{"t"}, 10_000, volant.WithBackgroundHeartbeat(false))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -375,7 +375,7 @@ func TestPollZeroTimeoutIsNonBlocking(t *testing.T) {
 	}
 	defer c.Close()
 
-	g, err := volant.JoinGroupConsumer(c, "g", []string{"t"}, 10_000)
+	g, err := volant.JoinGroupConsumer(c, "g", []string{"t"}, 10_000, volant.WithBackgroundHeartbeat(false))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -404,7 +404,7 @@ func TestCommitUsesMemberAndGeneration(t *testing.T) {
 	}
 	defer c.Close()
 
-	g, err := volant.JoinGroupConsumer(c, "g", []string{"t"}, 10_000)
+	g, err := volant.JoinGroupConsumer(c, "g", []string{"t"}, 10_000, volant.WithBackgroundHeartbeat(false))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -449,7 +449,7 @@ func TestPollRejoinsOnError9AndHonorsRevoked(t *testing.T) {
 	}
 	defer c.Close()
 
-	g, err := volant.JoinGroupConsumer(c, "g", []string{"t"}, 10_000)
+	g, err := volant.JoinGroupConsumer(c, "g", []string{"t"}, 10_000, volant.WithBackgroundHeartbeat(false))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -518,7 +518,7 @@ func TestCloseLeavesGroup(t *testing.T) {
 	}
 	defer c.Close()
 
-	g, err := volant.JoinGroupConsumer(c, "g", []string{"t"}, 10_000)
+	g, err := volant.JoinGroupConsumer(c, "g", []string{"t"}, 10_000, volant.WithBackgroundHeartbeat(false))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -544,6 +544,134 @@ func TestJoinGroupConsumerNilClient(t *testing.T) {
 	_, err := volant.JoinGroupConsumer(nil, "g", []string{"t"}, 10_000)
 	if err == nil {
 		t.Fatal("expected error")
+	}
+}
+
+func TestHeartbeatIntervalClamped(t *testing.T) {
+	if got := volant.HeartbeatInterval(0); got != 100*time.Millisecond {
+		t.Fatalf("0 → %v want 100ms", got)
+	}
+	if got := volant.HeartbeatInterval(300); got != 100*time.Millisecond {
+		t.Fatalf("300 → %v want 100ms", got)
+	}
+	if got := volant.HeartbeatInterval(900); got != 300*time.Millisecond {
+		t.Fatalf("900 → %v want 300ms", got)
+	}
+	if got := volant.HeartbeatInterval(10_000); got != 3*time.Second {
+		t.Fatalf("10000 → %v want 3s", got)
+	}
+}
+
+func TestBackgroundHeartbeatWithoutPoll(t *testing.T) {
+	s := newFakeGroupBroker()
+	s.setAssignment([]codec.Assignment{{Topic: "t", Partition: 0}}, nil)
+	addr, stop := startFakeGroup(t, s)
+	defer stop()
+
+	c, err := volant.DialTimeout(addr, 5*time.Second)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer c.Close()
+
+	g, err := volant.JoinGroupConsumer(c, "g", []string{"t"}, 300)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	deadline := time.Now().Add(time.Second)
+	var hbs []codec.HeartbeatRequest
+	for time.Now().Before(deadline) {
+		_, hbs, _, _, _, _ = s.snapshot()
+		if len(hbs) > 0 {
+			break
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+	if len(hbs) == 0 {
+		t.Fatal("expected background heartbeats without Poll")
+	}
+	_, _, _, fetches, _, _ := s.snapshot()
+	if len(fetches) != 0 {
+		t.Fatalf("unexpected fetches %+v", fetches)
+	}
+
+	if err := g.Close(); err != nil {
+		t.Fatal(err)
+	}
+	var leaves []codec.LeaveGroupRequest
+	_, hbs, _, _, leaves, _ = s.snapshot()
+	n := len(hbs)
+	time.Sleep(350 * time.Millisecond)
+	_, hbs2, _, _, leaves2, _ := s.snapshot()
+	if len(hbs2) != n {
+		t.Fatalf("heartbeats after Close: %d → %d", n, len(hbs2))
+	}
+	if len(leaves) != 1 || leaves[0].MemberID != "m-1" {
+		t.Fatalf("leaves %+v", leaves)
+	}
+	if len(leaves2) != 1 {
+		t.Fatalf("extra leaves after Close: %+v", leaves2)
+	}
+}
+
+func TestBackgroundHeartbeatRejoinsOnError9(t *testing.T) {
+	s := newFakeGroupBroker()
+	s.setAssignment([]codec.Assignment{{Topic: "t", Partition: 0}}, nil)
+	s.pushHeartbeat(volant.RebalanceInProgress)
+	addr, stop := startFakeGroup(t, s)
+	defer stop()
+
+	c, err := volant.DialTimeout(addr, 5*time.Second)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer c.Close()
+
+	g, err := volant.JoinGroupConsumer(c, "g", []string{"t"}, 300)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer g.Close()
+
+	deadline := time.Now().Add(time.Second)
+	for time.Now().Before(deadline) {
+		if g.Generation() >= 2 {
+			break
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+	if g.Generation() < 2 {
+		t.Fatalf("generation=%d want >= 2 after background rejoin", g.Generation())
+	}
+	joins, _, _, _, _, _ := s.snapshot()
+	if len(joins) < 2 {
+		t.Fatalf("joins=%d want >= 2", len(joins))
+	}
+}
+
+func TestBackgroundHeartbeatDisabledIsPollOnly(t *testing.T) {
+	s := newFakeGroupBroker()
+	s.setAssignment([]codec.Assignment{{Topic: "t", Partition: 0}}, nil)
+	addr, stop := startFakeGroup(t, s)
+	defer stop()
+
+	c, err := volant.DialTimeout(addr, 5*time.Second)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer c.Close()
+
+	g, err := volant.JoinGroupConsumer(c, "g", []string{"t"}, 300, volant.WithBackgroundHeartbeat(false))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer g.Close()
+
+	time.Sleep(350 * time.Millisecond)
+	_, hbs, _, _, _, _ := s.snapshot()
+	if len(hbs) != 0 {
+		t.Fatalf("heartbeats=%d want 0 with heartbeat disabled", len(hbs))
 	}
 }
 

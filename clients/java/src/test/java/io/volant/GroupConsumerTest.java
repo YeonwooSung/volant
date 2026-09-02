@@ -20,7 +20,7 @@ class GroupConsumerTest {
         fake.nextJoin = joinResult("m1", 1, assign("t", 0));
         fake.committed.put(tp("t", 0), 5L);
 
-        GroupConsumer g = GroupConsumer.join(fake, "g", List.of("t"), 10_000);
+        GroupConsumer g = GroupConsumer.join(fake, "g", List.of("t"), 10_000, false);
         assertEquals("m1", g.memberId());
         assertEquals(1, g.generation());
         assertEquals(1, g.assignment().size());
@@ -37,7 +37,7 @@ class GroupConsumerTest {
         fake.nextJoin = joinResult("m1", 1, assign("t", 0));
         fake.committed.put(tp("t", 0), GroupConsumer.OFFSET_UNKNOWN);
 
-        GroupConsumer g = GroupConsumer.join(fake, "g", List.of("t"), 10_000);
+        GroupConsumer g = GroupConsumer.join(fake, "g", List.of("t"), 10_000, false);
         assertEquals(0L, g.positions().values().iterator().next());
         g.close();
     }
@@ -51,7 +51,7 @@ class GroupConsumerTest {
                 Collections.singletonList(
                         new Record(0, -1L, null, "hello".getBytes(StandardCharsets.UTF_8), Collections.emptyList())));
 
-        GroupConsumer g = GroupConsumer.join(fake, "g", List.of("t"), 10_000);
+        GroupConsumer g = GroupConsumer.join(fake, "g", List.of("t"), 10_000, false);
         List<Record> recs = g.poll(500);
         assertEquals(1, recs.size());
         assertEquals(0L, recs.get(0).offset);
@@ -74,7 +74,7 @@ class GroupConsumerTest {
     void pollRejoinsOnError9() {
         FakeBackend fake = new FakeBackend();
         fake.nextJoin = joinResult("m1", 1, assign("t", 0));
-        GroupConsumer g = GroupConsumer.join(fake, "g", List.of("t"), 10_000);
+        GroupConsumer g = GroupConsumer.join(fake, "g", List.of("t"), 10_000, false);
         assertEquals(1, fake.joinCount);
 
         fake.heartbeatCode = 9;
@@ -94,7 +94,7 @@ class GroupConsumerTest {
     void pollRejoinsOnIllegalGeneration() {
         FakeBackend fake = new FakeBackend();
         fake.nextJoin = joinResult("m1", 1, assign("t", 0));
-        GroupConsumer g = GroupConsumer.join(fake, "g", List.of("t"), 10_000);
+        GroupConsumer g = GroupConsumer.join(fake, "g", List.of("t"), 10_000, false);
         fake.heartbeatCode = 11;
         fake.nextJoin = joinResult("m1", 3, assign("t", 0));
         g.poll(0);
@@ -107,7 +107,7 @@ class GroupConsumerTest {
     void pollOtherBrokerErrorPropagates() {
         FakeBackend fake = new FakeBackend();
         fake.nextJoin = joinResult("m1", 1, assign("t", 0));
-        GroupConsumer g = GroupConsumer.join(fake, "g", List.of("t"), 10_000);
+        GroupConsumer g = GroupConsumer.join(fake, "g", List.of("t"), 10_000, false);
         fake.heartbeatCode = 1;
         BrokerException ex = assertThrows(BrokerException.class, () -> g.poll(0));
         assertEquals(1, ex.code);
@@ -124,7 +124,7 @@ class GroupConsumerTest {
                 List.of(new Codec.Assignment("t", 0), new Codec.Assignment("t", 1)));
         fake.committed.put(tp("t", 0), 10L);
         fake.committed.put(tp("t", 1), 20L);
-        GroupConsumer g = GroupConsumer.join(fake, "g", List.of("t"), 10_000);
+        GroupConsumer g = GroupConsumer.join(fake, "g", List.of("t"), 10_000, false);
         assertEquals(10L, pos(g, "t", 0));
         assertEquals(20L, pos(g, "t", 1));
 
@@ -150,7 +150,7 @@ class GroupConsumerTest {
     void pollAfterCloseThrows() {
         FakeBackend fake = new FakeBackend();
         fake.nextJoin = joinResult("m1", 1, assign("t", 0));
-        GroupConsumer g = GroupConsumer.join(fake, "g", List.of("t"), 10_000);
+        GroupConsumer g = GroupConsumer.join(fake, "g", List.of("t"), 10_000, false);
         g.close();
         assertThrows(ProtocolException.class, () -> g.poll(0));
         g.close();
@@ -161,8 +161,67 @@ class GroupConsumerTest {
     void sessionTimeoutZeroDefaultsTo10000() {
         FakeBackend fake = new FakeBackend();
         fake.nextJoin = joinResult("m1", 1, assign("t", 0));
-        GroupConsumer g = GroupConsumer.join(fake, "g", List.of("t"), 0);
+        GroupConsumer g = GroupConsumer.join(fake, "g", List.of("t"), 0, false);
         assertEquals(10_000, fake.lastSessionTimeoutMs);
+        g.close();
+    }
+
+    @Test
+    void heartbeatIntervalClamped() {
+        assertEquals(100L, GroupConsumer.heartbeatIntervalMs(0));
+        assertEquals(100L, GroupConsumer.heartbeatIntervalMs(150));
+        assertEquals(100L, GroupConsumer.heartbeatIntervalMs(300));
+        assertEquals(300L, GroupConsumer.heartbeatIntervalMs(900));
+        assertEquals(3000L, GroupConsumer.heartbeatIntervalMs(10_000));
+    }
+
+    @Test
+    void backgroundHeartbeatWithoutPoll() throws Exception {
+        FakeBackend fake = new FakeBackend();
+        fake.nextJoin = joinResult("m1", 1, assign("t", 0));
+        GroupConsumer g = GroupConsumer.join(fake, "g", List.of("t"), 300, true);
+        try {
+            long deadline = System.nanoTime() + 1_000_000_000L;
+            while (System.nanoTime() < deadline && fake.heartbeats() == 0) {
+                Thread.sleep(20);
+            }
+            assertTrue(fake.heartbeats() > 0);
+            assertEquals(0, fake.fetchCount);
+        } finally {
+            g.close();
+        }
+        int n = fake.heartbeats();
+        Thread.sleep(350);
+        assertEquals(n, fake.heartbeats());
+        assertEquals(1, fake.leaveCount);
+    }
+
+    @Test
+    void backgroundHeartbeatRejoinsOnError9() throws Exception {
+        FakeBackend fake = new FakeBackend();
+        fake.nextJoin = joinResult("m1", 1, assign("t", 0));
+        GroupConsumer g = GroupConsumer.join(fake, "g", List.of("t"), 300, true);
+        fake.heartbeatCode = 9;
+        fake.nextJoin = joinResult("m1", 2, assign("t", 0));
+        try {
+            long deadline = System.nanoTime() + 1_000_000_000L;
+            while (System.nanoTime() < deadline && g.generation() < 2) {
+                Thread.sleep(20);
+            }
+            assertEquals(2, g.generation());
+            assertEquals(2, fake.joinCount);
+        } finally {
+            g.close();
+        }
+    }
+
+    @Test
+    void heartbeatFalseIsPollOnly() throws Exception {
+        FakeBackend fake = new FakeBackend();
+        fake.nextJoin = joinResult("m1", 1, assign("t", 0));
+        GroupConsumer g = GroupConsumer.join(fake, "g", List.of("t"), 300, false);
+        Thread.sleep(350);
+        assertEquals(0, fake.heartbeats());
         g.close();
     }
 
@@ -188,6 +247,7 @@ class GroupConsumerTest {
     }
 
     static final class FakeBackend implements GroupConsumer.Backend {
+        private final Object lock = new Object();
         JoinGroupResult nextJoin;
         int heartbeatCode;
         int joinCount;
@@ -203,26 +263,39 @@ class GroupConsumerTest {
         final Map<String, Long> committed = new LinkedHashMap<>();
         final Map<String, List<Record>> records = new LinkedHashMap<>();
 
+        int heartbeats() {
+            synchronized (lock) {
+                return heartbeatCount;
+            }
+        }
+
         @Override
         public JoinGroupResult joinGroup(String group, String memberId, List<String> topics, int sessionTimeoutMs) {
-            joinCount++;
-            lastSessionTimeoutMs = sessionTimeoutMs;
-            return nextJoin;
+            synchronized (lock) {
+                joinCount++;
+                lastSessionTimeoutMs = sessionTimeoutMs;
+                return nextJoin;
+            }
         }
 
         @Override
         public void heartbeat(String group, String memberId, long generation) {
-            heartbeatCount++;
-            if (heartbeatCode != 0) {
-                int code = heartbeatCode;
+            int code;
+            synchronized (lock) {
+                heartbeatCount++;
+                code = heartbeatCode;
                 heartbeatCode = 0;
+            }
+            if (code != 0) {
                 throw new BrokerException(code, "", "heartbeat");
             }
         }
 
         @Override
         public void leaveGroup(String group, String memberId) {
-            leaveCount++;
+            synchronized (lock) {
+                leaveCount++;
+            }
         }
 
         @Override

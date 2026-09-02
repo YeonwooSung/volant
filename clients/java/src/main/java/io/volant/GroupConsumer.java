@@ -8,6 +8,11 @@ import java.util.List;
 import java.util.Map;
 import java.util.Objects;
 import java.util.Set;
+import java.util.concurrent.Executors;
+import java.util.concurrent.ScheduledExecutorService;
+import java.util.concurrent.ScheduledFuture;
+import java.util.concurrent.TimeUnit;
+import java.util.concurrent.locks.ReentrantLock;
 
 /**
  * High-level consumer that joins a group, polls assigned partitions, and commits.
@@ -15,6 +20,15 @@ import java.util.Set;
  * <p>Same semantics as the Rust {@code GroupConsumer}: join, OffsetFetch
  * assigned partitions, heartbeat on {@link #poll(int)}, commit with
  * member+generation, rejoin on heartbeat error 9 (and 10/11, matching Rust).
+ *
+ * <p>v0.37 starts a background heartbeat executor after a successful join
+ * (interval {@code sessionTimeoutMs / 3}, clamped to 100–3000 ms). Pass
+ * {@code heartbeat=false} to keep the v0.33 poll-only loop.
+ *
+ * <p>{@link #poll(int)} / {@link #commit()} share an internal lock with that
+ * loop (join state + GroupConsumer RPCs) but are <strong>not</strong> a fully
+ * concurrent API: do not call them from multiple threads, and do not use the
+ * same {@link Client} for other RPCs while the consumer is open.
  *
  * <pre>
  * GroupConsumer g = GroupConsumer.join(c, "g", List.of("t"), 10_000);
@@ -33,36 +47,76 @@ public final class GroupConsumer implements AutoCloseable {
     static final int ERR_ILLEGAL_GENERATION = 11;
 
     private static final int POLL_MAX_MESSAGES = 100;
+    private static final long HB_INTERVAL_MIN_MS = 100L;
+    private static final long HB_INTERVAL_MAX_MS = 3000L;
 
     private final Backend backend;
     private final String groupId;
     private final List<String> topics;
     private final int sessionTimeoutMs;
+    private final boolean backgroundHeartbeat;
+    private final ReentrantLock lock = new ReentrantLock();
     private String memberId = "";
     private long generation;
     private List<Codec.Assignment> assignment = Collections.emptyList();
     private List<Codec.Assignment> lastRevoked = Collections.emptyList();
     private final Map<Tp, Long> positions = new LinkedHashMap<>();
     private boolean closed;
+    private ScheduledExecutorService hbExecutor;
+    private ScheduledFuture<?> hbFuture;
 
     GroupConsumer(Backend backend, String groupId, List<String> topics, int sessionTimeoutMs) {
+        this(backend, groupId, topics, sessionTimeoutMs, true);
+    }
+
+    GroupConsumer(
+            Backend backend, String groupId, List<String> topics, int sessionTimeoutMs, boolean heartbeat) {
         this.backend = backend;
         this.groupId = groupId;
         this.topics = topics == null
                 ? Collections.emptyList()
                 : Collections.unmodifiableList(new ArrayList<>(topics));
         this.sessionTimeoutMs = sessionTimeoutMs;
+        this.backgroundHeartbeat = heartbeat;
+    }
+
+    /** Background heartbeat period: {@code sessionTimeoutMs / 3}, clamped to 100–3000 ms. */
+    static long heartbeatIntervalMs(int sessionTimeoutMs) {
+        long interval = sessionTimeoutMs / 3L;
+        if (interval < HB_INTERVAL_MIN_MS) {
+            return HB_INTERVAL_MIN_MS;
+        }
+        if (interval > HB_INTERVAL_MAX_MS) {
+            return HB_INTERVAL_MAX_MS;
+        }
+        return interval;
     }
 
     /** Join a consumer group on the given topics. {@code sessionTimeoutMs} 0 defaults to 10000. */
     public static GroupConsumer join(Client client, String group, List<String> topics, int sessionTimeoutMs) {
-        return join(new ClientBackend(client), group, topics, sessionTimeoutMs);
+        return join(new ClientBackend(client), group, topics, sessionTimeoutMs, true);
+    }
+
+    /**
+     * Join a consumer group. {@code heartbeat} starts the v0.37 background loop
+     * (default {@code true} on {@link #join(Client, String, List, int)}).
+     * {@code false} keeps v0.33 poll-only heartbeats.
+     */
+    public static GroupConsumer join(
+            Client client, String group, List<String> topics, int sessionTimeoutMs, boolean heartbeat) {
+        return join(new ClientBackend(client), group, topics, sessionTimeoutMs, heartbeat);
     }
 
     static GroupConsumer join(Backend backend, String group, List<String> topics, int sessionTimeoutMs) {
+        return join(backend, group, topics, sessionTimeoutMs, true);
+    }
+
+    static GroupConsumer join(
+            Backend backend, String group, List<String> topics, int sessionTimeoutMs, boolean heartbeat) {
         int timeout = sessionTimeoutMs == 0 ? 10_000 : sessionTimeoutMs;
-        GroupConsumer g = new GroupConsumer(backend, group, topics, timeout);
+        GroupConsumer g = new GroupConsumer(backend, group, topics, timeout, heartbeat);
         g.doJoin();
+        g.startHeartbeat();
         return g;
     }
 
@@ -140,60 +194,139 @@ public final class GroupConsumer implements AutoCloseable {
      * partition (0 = non-blocking). Rejoins on heartbeat error 9/10/11.
      */
     public List<Record> poll(int timeoutMs) {
-        ensureOpen();
+        lock.lock();
         try {
-            backend.heartbeat(groupId, memberId, generation);
-        } catch (BrokerException e) {
-            if (needsRebalance(e.code)) {
-                doJoin();
-            } else {
-                throw e;
+            ensureOpen();
+            try {
+                backend.heartbeat(groupId, memberId, generation);
+            } catch (BrokerException e) {
+                if (needsRebalance(e.code)) {
+                    doJoin();
+                } else {
+                    throw e;
+                }
             }
-        }
 
-        List<Record> out = new ArrayList<>();
-        List<Codec.Assignment> assigned = new ArrayList<>(assignment);
-        boolean waited = false;
-        long wait = timeoutMs < 0 ? 0 : timeoutMs;
-        for (Codec.Assignment a : assigned) {
-            long from = positions.getOrDefault(new Tp(a.topic, a.partition), 0L);
-            long maxWait = 0;
-            if (!waited && wait > 0) {
-                maxWait = wait;
-                waited = true;
+            List<Record> out = new ArrayList<>();
+            List<Codec.Assignment> assigned = new ArrayList<>(assignment);
+            boolean waited = false;
+            long wait = timeoutMs < 0 ? 0 : timeoutMs;
+            for (Codec.Assignment a : assigned) {
+                long from = positions.getOrDefault(new Tp(a.topic, a.partition), 0L);
+                long maxWait = 0;
+                if (!waited && wait > 0) {
+                    maxWait = wait;
+                    waited = true;
+                }
+                List<Record> recs = backend.fetch(a.topic, a.partition, from, POLL_MAX_MESSAGES, maxWait);
+                for (Record r : recs) {
+                    long next = r.offset == Long.MAX_VALUE ? Long.MAX_VALUE : r.offset + 1;
+                    positions.put(new Tp(a.topic, a.partition), next);
+                    out.add(r);
+                }
             }
-            List<Record> recs = backend.fetch(a.topic, a.partition, from, POLL_MAX_MESSAGES, maxWait);
-            for (Record r : recs) {
-                long next = r.offset == Long.MAX_VALUE ? Long.MAX_VALUE : r.offset + 1;
-                positions.put(new Tp(a.topic, a.partition), next);
-                out.add(r);
-            }
+            return out;
+        } finally {
+            lock.unlock();
         }
-        return out;
     }
 
     /** Commit last+1 positions for all assigned partitions (member + generation). */
     public void commit() {
-        ensureOpen();
-        if (positions.isEmpty()) {
-            return;
+        lock.lock();
+        try {
+            ensureOpen();
+            if (positions.isEmpty()) {
+                return;
+            }
+            List<Codec.OffsetCommitEntry> entries = new ArrayList<>();
+            for (Map.Entry<Tp, Long> e : positions.entrySet()) {
+                entries.add(new Codec.OffsetCommitEntry(e.getKey().topic, e.getKey().partition, e.getValue(), ""));
+            }
+            backend.commitOffsets(groupId, memberId, generation, entries);
+        } finally {
+            lock.unlock();
         }
-        List<Codec.OffsetCommitEntry> entries = new ArrayList<>();
-        for (Map.Entry<Tp, Long> e : positions.entrySet()) {
-            entries.add(new Codec.OffsetCommitEntry(e.getKey().topic, e.getKey().partition, e.getValue(), ""));
-        }
-        backend.commitOffsets(groupId, memberId, generation, entries);
     }
 
-    /** Leave the group. Does not close the underlying {@link Client}. */
+    /**
+     * Stop the heartbeat executor (if any), then LeaveGroup. Does not close
+     * the underlying {@link Client}. Idempotent.
+     */
     @Override
     public void close() {
-        if (closed) {
+        stopHeartbeat();
+        lock.lock();
+        try {
+            if (closed) {
+                return;
+            }
+            closed = true;
+            if (memberId != null && !memberId.isEmpty()) {
+                backend.leaveGroup(groupId, memberId);
+            }
+        } finally {
+            lock.unlock();
+        }
+    }
+
+    private void startHeartbeat() {
+        if (!backgroundHeartbeat) {
             return;
         }
-        closed = true;
-        if (memberId != null && !memberId.isEmpty()) {
-            backend.leaveGroup(groupId, memberId);
+        long interval = heartbeatIntervalMs(sessionTimeoutMs);
+        hbExecutor = Executors.newSingleThreadScheduledExecutor(r -> {
+            Thread t = new Thread(r, "volant-group-heartbeat");
+            t.setDaemon(true);
+            return t;
+        });
+        hbFuture = hbExecutor.scheduleWithFixedDelay(this::heartbeatOnce, interval, interval, TimeUnit.MILLISECONDS);
+    }
+
+    private void stopHeartbeat() {
+        ScheduledExecutorService exec;
+        lock.lock();
+        try {
+            if (hbFuture != null) {
+                hbFuture.cancel(false);
+                hbFuture = null;
+            }
+            exec = hbExecutor;
+            hbExecutor = null;
+        } finally {
+            lock.unlock();
+        }
+        if (exec != null) {
+            exec.shutdown();
+            try {
+                if (!exec.awaitTermination(5, TimeUnit.SECONDS)) {
+                    exec.shutdownNow();
+                    exec.awaitTermination(1, TimeUnit.SECONDS);
+                }
+            } catch (InterruptedException e) {
+                exec.shutdownNow();
+                Thread.currentThread().interrupt();
+            }
+        }
+    }
+
+    private void heartbeatOnce() {
+        lock.lock();
+        try {
+            if (closed) {
+                return;
+            }
+            try {
+                backend.heartbeat(groupId, memberId, generation);
+            } catch (BrokerException e) {
+                if (needsRebalance(e.code)) {
+                    doJoin();
+                }
+            }
+        } catch (RuntimeException ignored) {
+            // keep the loop alive
+        } finally {
+            lock.unlock();
         }
     }
 
@@ -202,28 +335,53 @@ public final class GroupConsumer implements AutoCloseable {
     }
 
     public String memberId() {
-        return memberId;
+        lock.lock();
+        try {
+            return memberId;
+        } finally {
+            lock.unlock();
+        }
     }
 
     public long generation() {
-        return generation;
+        lock.lock();
+        try {
+            return generation;
+        } finally {
+            lock.unlock();
+        }
     }
 
     public List<Codec.Assignment> assignment() {
-        return assignment;
+        lock.lock();
+        try {
+            return assignment;
+        } finally {
+            lock.unlock();
+        }
     }
 
     public List<Codec.Assignment> lastRevoked() {
-        return lastRevoked;
+        lock.lock();
+        try {
+            return lastRevoked;
+        } finally {
+            lock.unlock();
+        }
     }
 
     /** Current next-read positions as an unmodifiable snapshot. */
     public Map<Codec.Assignment, Long> positions() {
-        Map<Codec.Assignment, Long> out = new LinkedHashMap<>();
-        for (Map.Entry<Tp, Long> e : positions.entrySet()) {
-            out.put(new Codec.Assignment(e.getKey().topic, e.getKey().partition), e.getValue());
+        lock.lock();
+        try {
+            Map<Codec.Assignment, Long> out = new LinkedHashMap<>();
+            for (Map.Entry<Tp, Long> e : positions.entrySet()) {
+                out.put(new Codec.Assignment(e.getKey().topic, e.getKey().partition), e.getValue());
+            }
+            return Collections.unmodifiableMap(out);
+        } finally {
+            lock.unlock();
         }
-        return Collections.unmodifiableMap(out);
     }
 
     private void ensureOpen() {
