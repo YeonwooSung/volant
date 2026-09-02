@@ -15,9 +15,11 @@
 //! After join / rebalance, OffsetFetch seeds each newly assigned partition.
 //! A committed offset that is not `OFFSET_UNKNOWN` is used as-is. Otherwise
 //! [`GroupConsumer::join_with_auto_offset_reset`] applies `earliest` (default:
-//! position **0**, no ListOffsets), `latest` (native ListOffsets LEO), or
-//! `none` (error). Invalid reset strings fail before JoinGroup. This is
-//! **not** Kafka `auto.offset.reset` (no timestamp / isolation selector).
+//! native ListOffsets earliest), `latest` (native ListOffsets LEO), or
+//! `none` (error). If ListOffsets fails or a wanted partition is missing,
+//! join returns `Err` (no silent 0). Invalid reset strings fail before
+//! JoinGroup. This is **not** Kafka `auto.offset.reset` (no timestamp /
+//! isolation selector).
 //!
 //! The join lock serializes the heartbeat task against `poll` / `commit` /
 //! `leave`. This is **not** a fully concurrent consumer — do not call `poll`
@@ -43,7 +45,7 @@ const OFFSET_UNKNOWN: u64 = u64::MAX;
 /// Fetch position when OffsetFetch is missing or [`OFFSET_UNKNOWN`].
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum AutoOffsetReset {
-    /// Position 0; no ListOffsets (default).
+    /// Native ListOffsets earliest (default).
     Earliest,
     /// Native ListOffsets latest (LEO).
     Latest,
@@ -249,11 +251,12 @@ impl GroupConsumer {
     /// Join with opt-in `auto_offset_reset` (v0.67).
     ///
     /// Same arguments as [`join_with_auto_commit`](Self::join_with_auto_commit)
-    /// plus `auto_offset_reset`: `"earliest"` (default; position 0, no
-    /// ListOffsets), `"latest"` (native ListOffsets LEO), or `"none"` (error
-    /// if OffsetFetch is missing / `OFFSET_UNKNOWN`). Invalid strings return
-    /// an `InvalidArgument` error **before** JoinGroup. Empty string is
-    /// `"earliest"`.
+    /// plus `auto_offset_reset`: `"earliest"` (default; native ListOffsets
+    /// earliest), `"latest"` (native ListOffsets LEO), or `"none"` (error
+    /// if OffsetFetch is missing / `OFFSET_UNKNOWN`). If ListOffsets fails
+    /// or a wanted partition is missing, join returns `Err` (no silent 0).
+    /// Invalid strings return an `InvalidArgument` error **before** JoinGroup.
+    /// Empty string is `"earliest"`.
     ///
     /// Existing [`join`](Self::join) / [`join_static`](Self::join_static) /
     /// [`join_with_heartbeat`](Self::join_with_heartbeat) /
@@ -668,14 +671,14 @@ async fn apply_reset(
         return Ok(Vec::new());
     }
     match policy {
-        AutoOffsetReset::Earliest => Ok(partitions.iter().cloned().map(|tp| (tp, 0)).collect()),
         AutoOffsetReset::None => {
             let (topic, partition) = &partitions[0];
             Err(Error::InvalidArgument(format!(
                 "no committed offset for {topic}-{partition} and auto_offset_reset=\"none\""
             )))
         }
-        AutoOffsetReset::Latest => {
+        AutoOffsetReset::Earliest | AutoOffsetReset::Latest => {
+            let use_earliest = matches!(policy, AutoOffsetReset::Earliest);
             let mut by_topic: HashMap<String, Vec<u32>> = HashMap::new();
             for (topic, partition) in partitions {
                 by_topic.entry(topic.clone()).or_default().push(*partition);
@@ -686,15 +689,20 @@ async fn apply_reset(
                 let got: HashMap<u32, u64> = listing
                     .entries
                     .into_iter()
-                    .map(|e| (e.partition, e.latest))
+                    .map(|e| {
+                        (
+                            e.partition,
+                            if use_earliest { e.earliest } else { e.latest },
+                        )
+                    })
                     .collect();
                 for partition in parts {
-                    let latest = got.get(&partition).copied().ok_or_else(|| {
+                    let pos = got.get(&partition).copied().ok_or_else(|| {
                         Error::InvalidArgument(format!(
                             "list_offsets missing partition {topic}-{partition}"
                         ))
                     })?;
-                    out.push(((topic.clone(), partition), latest));
+                    out.push(((topic.clone(), partition), pos));
                 }
             }
             Ok(out)

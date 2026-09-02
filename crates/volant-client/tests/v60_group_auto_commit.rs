@@ -11,7 +11,8 @@ use tokio::net::{TcpListener, TcpStream};
 use volant_client::{Client, GroupConsumer};
 use volant_protocol::codec::{decode_frame, encode_frame};
 use volant_protocol::{
-    decode_request, pack_response, Assignment, FetchRecord, OffsetCommitEntry, Request, Response,
+    decode_request, pack_response, Assignment, FetchRecord, OffsetCommitEntry, OffsetListing,
+    Request, Response,
 };
 
 #[derive(Clone, Debug)]
@@ -147,6 +148,18 @@ async fn serve_stub(
                         Request::OffsetFetch { .. } => Response::OffsetFetch {
                             error_code: 0,
                             entries: vec![],
+                        },
+                        Request::ListOffsets { topic, partitions } => Response::ListOffsets {
+                            error_code: 0,
+                            topic,
+                            entries: partitions
+                                .into_iter()
+                                .map(|partition| OffsetListing {
+                                    partition,
+                                    earliest: 0,
+                                    latest: 0,
+                                })
+                                .collect(),
                         },
                         Request::Heartbeat { .. } => Response::Heartbeat { error_code: 0 },
                         Request::LeaveGroup { .. } => {

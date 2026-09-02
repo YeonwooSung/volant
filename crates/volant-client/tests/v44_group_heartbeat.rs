@@ -9,7 +9,9 @@ use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::{TcpListener, TcpStream};
 use volant_client::{heartbeat_interval, Client, GroupConsumer};
 use volant_protocol::codec::{decode_frame, encode_frame};
-use volant_protocol::{decode_request, pack_response, Assignment, Request, Response};
+use volant_protocol::{
+    decode_request, pack_response, Assignment, OffsetListing, Request, Response,
+};
 
 #[test]
 fn heartbeat_interval_clamps() {
@@ -98,6 +100,18 @@ async fn serve_stub(mut stream: TcpStream, heartbeats: Arc<AtomicU64>) -> std::i
                         Request::OffsetFetch { .. } => Response::OffsetFetch {
                             error_code: 0,
                             entries: vec![],
+                        },
+                        Request::ListOffsets { topic, partitions } => Response::ListOffsets {
+                            error_code: 0,
+                            topic,
+                            entries: partitions
+                                .into_iter()
+                                .map(|partition| OffsetListing {
+                                    partition,
+                                    earliest: 0,
+                                    latest: 0,
+                                })
+                                .collect(),
                         },
                         Request::Heartbeat { .. } => {
                             heartbeats.fetch_add(1, Ordering::Relaxed);
