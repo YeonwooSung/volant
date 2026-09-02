@@ -294,6 +294,11 @@ docs for day-to-day reading: [ops](../ops.md), [consistency](../consistency.md),
 | v0.93 | ✅ | Describe/AlterConfigs NotController redirect on Python/Go/Java | [V93_SPEC.md](../V93_SPEC.md) |
 | v0.94 | ✅ | Rust Describe/AlterConfigs NotController redirect | [V94_SPEC.md](../V94_SPEC.md) |
 | v0.95 | ✅ | Metadata/ListMembers retry on Python/Go/Java | [V95_SPEC.md](../V95_SPEC.md) |
+| v0.96 | ✅ | Rust Metadata/ListMembers retry | [V96_SPEC.md](../V96_SPEC.md) |
+| v0.97 | ✅ | DeleteOffsets NotController redirect on Python/Go/Java | [V97_SPEC.md](../V97_SPEC.md) |
+| v0.98 | ✅ | Rust DeleteOffsets NotController redirect | [V98_SPEC.md](../V98_SPEC.md) |
+| v0.99 | ✅ | BeginTxn/EndTxn retry on Python/Go/Java | [V99_SPEC.md](../V99_SPEC.md) |
+| v0.100 | ✅ | Rust BeginTxn/EndTxn retry | [V100_SPEC.md](../V100_SPEC.md) |
 
 ---
 
