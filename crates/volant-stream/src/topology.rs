@@ -133,11 +133,58 @@ impl StreamBuilder {
     ///
     /// Sink produces and source group offsets are committed atomically via
     /// [`volant_client::TransactionalProducer`]. Fences prior owners of the
-    /// same id. Default remains [`ProcessingGuarantee::AtLeastOnce`].
+    /// same id. No application fence (`application_id = None`). Default remains
+    /// [`ProcessingGuarantee::AtLeastOnce`].
+    ///
+    /// Chain [`.application_id`](Self::application_id) or use
+    /// [`Self::exactly_once_app`] for cross-app fencing (v0.8).
     pub fn exactly_once(mut self, transactional_id: impl Into<String>) -> Self {
         self.processing_guarantee = ProcessingGuarantee::ExactlyOnce {
             transactional_id: transactional_id.into(),
+            application_id: None,
         };
+        self
+    }
+
+    /// Exactly-once with a cross-app fence on `application_id` (v0.8).
+    ///
+    /// Per-task transactional id remains `transactional_id` (not namespaced).
+    /// Empty `application_id` is treated as absent (same as [`Self::exactly_once`]).
+    pub fn exactly_once_app(
+        mut self,
+        application_id: impl Into<String>,
+        transactional_id: impl Into<String>,
+    ) -> Self {
+        let application_id = application_id.into();
+        self.processing_guarantee = ProcessingGuarantee::ExactlyOnce {
+            transactional_id: transactional_id.into(),
+            application_id: if application_id.is_empty() {
+                None
+            } else {
+                Some(application_id)
+            },
+        };
+        self
+    }
+
+    /// Set / clear the EOS `application_id` fence (v0.8).
+    ///
+    /// Only applies when the guarantee is already
+    /// [`ProcessingGuarantee::ExactlyOnce`] (call after [`Self::exactly_once`]).
+    /// Empty string clears the fence (`None`).
+    pub fn application_id(mut self, application_id: impl Into<String>) -> Self {
+        if let ProcessingGuarantee::ExactlyOnce {
+            application_id: slot,
+            ..
+        } = &mut self.processing_guarantee
+        {
+            let application_id = application_id.into();
+            *slot = if application_id.is_empty() {
+                None
+            } else {
+                Some(application_id)
+            };
+        }
         self
     }
 

@@ -107,6 +107,7 @@ fn builder_exactly_once_sets_guarantee() {
         topo.processing_guarantee,
         ProcessingGuarantee::ExactlyOnce {
             transactional_id: "txn-app-1".into(),
+            application_id: None,
         }
     );
 }
@@ -264,8 +265,12 @@ async fn eos_path_produce_and_commit_offsets() {
         .await
         .expect("start eos");
     match app.processing_guarantee() {
-        ProcessingGuarantee::ExactlyOnce { transactional_id } => {
+        ProcessingGuarantee::ExactlyOnce {
+            transactional_id,
+            application_id,
+        } => {
             assert_eq!(transactional_id, "stream-eos-txn-1");
+            assert_eq!(application_id, &None);
         }
         other => panic!("expected ExactlyOnce, got {other:?}"),
     }

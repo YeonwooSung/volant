@@ -13,6 +13,9 @@
 //!   [`StreamBuilder::exactly_once`]
 //! - EOS + durable checkpoint (Phase 153): stage [`DurableStore`] puts until
 //!   EndTxn succeeds; abort on empty step / txn fail
+//! - Cross-app EOS fence (v0.8): optional `application_id` claims
+//!   `{application_id}::__volant_app_fence` so a second runtime with the
+//!   same app id (even a different `transactional_id`) fences the first
 //!
 //! # At-least-once (default)
 //!
@@ -30,6 +33,16 @@
 //! markers. Durable state is process-local staging (not distributed 2PC with
 //! the broker). Fence via `transactional_id`. Empty polls abort the checkpoint
 //! and skip the txn.
+//!
+//! Optional **cross-app** fencing (v0.8): [`StreamBuilder::exactly_once_app`]
+//! or [`StreamBuilder::application_id`] stores `application_id`. At start the
+//! runtime `InitProducerId`s `{application_id}::__volant_app_fence` and
+//! heartbeats that id (BeginTxn + abort) every EOS step. A second process
+//! with the same `application_id` bumps the fence epoch; the first app's next
+//! step fails with a fenced / invalid-epoch error. This is **not** Kafka
+//! Streams `application.server`, distributed workers, or KIP-890 — one fence
+//! id per application, in-process only. Empty / absent `application_id` is
+//! identical to Phase 151/153.
 //!
 //! Durable window buckets and reduce aggregates survive restart in **one
 //! process** when configured. This is not cluster EOS or distributed 2PC.
@@ -57,7 +70,10 @@ pub use ops::{
     reduce, reduce_with_store, Reduce,
 };
 pub use pipeline::Pipeline;
-pub use runtime::{process_pipeline, ProcessingGuarantee, StreamApp};
+pub use runtime::{
+    app_fence_transactional_id, process_pipeline, ProcessingGuarantee, StreamApp,
+    APP_FENCE_TXN_SUFFIX,
+};
 pub use sink::TopicSink;
 pub use source::{record_from_value, SourceConfig, TopicSource};
 pub use state::{DurableStore, KeyValueStore, MemoryStore, StreamStateError};
