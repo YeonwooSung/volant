@@ -103,14 +103,13 @@ impl Broker {
             }
         }
 
-        let broker_ids = cluster.config.broker_ids();
-        let rf = cluster
-            .config
+        let cfg = cluster.config.read();
+        let broker_ids = cfg.broker_ids();
+        let rf = cfg
             .default_replication_factor
             .min(broker_ids.len() as u32)
             .max(1);
-        let broker_racks: Vec<(u32, Option<&str>)> = cluster
-            .config
+        let broker_racks: Vec<(u32, Option<&str>)> = cfg
             .brokers
             .iter()
             .map(|b| (b.id, b.rack.as_deref()))
@@ -298,14 +297,13 @@ impl Broker {
             (current, ta.topic_id, sets)
         };
 
-        let broker_ids = cluster.config.broker_ids();
-        let rf = cluster
-            .config
+        let cfg = cluster.config.read();
+        let broker_ids = cfg.broker_ids();
+        let rf = cfg
             .default_replication_factor
             .min(broker_ids.len() as u32)
             .max(1);
-        let broker_racks: Vec<(u32, Option<&str>)> = cluster
-            .config
+        let broker_racks: Vec<(u32, Option<&str>)> = cfg
             .brokers
             .iter()
             .map(|b| (b.id, b.rack.as_deref()))

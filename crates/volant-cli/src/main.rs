@@ -75,6 +75,11 @@ enum Commands {
         #[command(subcommand)]
         action: UserCmd,
     },
+    /// Cluster membership administration (v0.10).
+    Cluster {
+        #[command(subcommand)]
+        action: ClusterCmd,
+    },
     /// Consume (fetch) messages from a topic partition, or via a consumer group.
     Consume {
         /// Topic name.
@@ -400,6 +405,43 @@ enum UserCmd {
 }
 
 #[derive(Debug, Subcommand)]
+enum ClusterCmd {
+    /// Add a broker endpoint to the membership overlay.
+    AddBroker {
+        /// New broker id (must be unique).
+        #[arg(long)]
+        id: u32,
+        /// Host.
+        #[arg(long)]
+        host: String,
+        /// Port.
+        #[arg(long)]
+        port: u16,
+        /// Optional rack.
+        #[arg(long)]
+        rack: Option<String>,
+        /// Broker address.
+        #[arg(long, default_value = "127.0.0.1:9092")]
+        broker: String,
+    },
+    /// Remove a broker from the membership overlay.
+    RemoveBroker {
+        /// Broker id to remove (not self; not the last remaining).
+        #[arg(long)]
+        id: u32,
+        /// Broker address.
+        #[arg(long, default_value = "127.0.0.1:9092")]
+        broker: String,
+    },
+    /// List configured + live membership.
+    Members {
+        /// Broker address.
+        #[arg(long, default_value = "127.0.0.1:9092")]
+        broker: String,
+    },
+}
+
+#[derive(Debug, Subcommand)]
 enum TxnCmd {
     /// Produce one or more messages in a single transaction then commit.
     Produce {
@@ -485,10 +527,7 @@ async fn main() -> Result<()> {
                     .create_topic_with_configs(&name, partitions, configs)
                     .await
                     .with_context(|| format!("create topic '{name}'"))?;
-                println!(
-                    "created topic '{name}' id={} partitions={partitions}",
-                    id.0
-                );
+                println!("created topic '{name}' id={} partitions={partitions}", id.0);
             }
             TopicCmd::Delete { name, broker } => {
                 let client = connect(&broker, auth).await?;
@@ -622,10 +661,7 @@ async fn main() -> Result<()> {
                             .fetch_offsets(&group, vec![])
                             .await
                             .context("fetch_offsets")?;
-                        let filtered: Vec<_> = all
-                            .into_iter()
-                            .filter(|e| e.topic == t)
-                            .collect();
+                        let filtered: Vec<_> = all.into_iter().filter(|e| e.topic == t).collect();
                         print_offsets(&group, &filtered);
                         return Ok(());
                     }
@@ -799,6 +835,42 @@ async fn main() -> Result<()> {
                 );
             }
         },
+        Commands::Cluster { action } => match action {
+            ClusterCmd::AddBroker {
+                id,
+                host,
+                port,
+                rack,
+                broker,
+            } => {
+                let client = connect(&broker, auth).await?;
+                let gen = client
+                    .add_broker(id, &host, port, rack.as_deref())
+                    .await
+                    .context("add-broker")?;
+                println!("added broker id={id} host={host} port={port} generation={gen}");
+            }
+            ClusterCmd::RemoveBroker { id, broker } => {
+                let client = connect(&broker, auth).await?;
+                let gen = client.remove_broker(id).await.context("remove-broker")?;
+                println!("removed broker id={id} generation={gen}");
+            }
+            ClusterCmd::Members { broker } => {
+                let client = connect(&broker, auth).await?;
+                let list = client.list_members().await.context("cluster members")?;
+                println!("generation={}", list.generation);
+                println!("id\thost\tport\track\tlive");
+                for b in &list.brokers {
+                    let rack = b.rack.as_deref().unwrap_or("-");
+                    let live = if list.live.contains(&b.id) {
+                        "yes"
+                    } else {
+                        "no"
+                    };
+                    println!("{}\t{}\t{}\t{}\t{live}", b.id, b.host, b.port, rack);
+                }
+            }
+        },
         Commands::Acl { action } => match action {
             AclCmd::Create {
                 principal,
@@ -897,7 +969,10 @@ async fn main() -> Result<()> {
             }
             UserCmd::List { broker } => {
                 let client = connect(&broker, auth).await?;
-                let users = client.list_scram_users().await.context("list_scram_users")?;
+                let users = client
+                    .list_scram_users()
+                    .await
+                    .context("list_scram_users")?;
                 if users.is_empty() {
                     println!("(no scram users)");
                 } else {

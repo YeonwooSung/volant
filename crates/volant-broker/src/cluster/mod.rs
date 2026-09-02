@@ -5,12 +5,13 @@ pub mod assignment_consensus;
 pub mod config;
 pub mod membership;
 pub mod metadata_raft;
+pub mod overlay;
 pub mod state;
 
 pub use assignment::{
     assign_replicas, assign_replicas_round_robin, compute_hwm, distinct_configured_racks,
-    elect_leader, expand_isr, isr_rejoin_eligible, rack_aware_assignment_enabled,
-    reconcile_isr, shrink_isr, shrink_isr_by_time, topic_hash, will_use_rack_aware_assignment,
+    elect_leader, expand_isr, isr_rejoin_eligible, rack_aware_assignment_enabled, reconcile_isr,
+    shrink_isr, shrink_isr_by_time, topic_hash, will_use_rack_aware_assignment,
 };
 pub use assignment_consensus::{
     AssignmentConsensus, AssignmentConsensusFile, ASSIGNMENT_COMMITTED_SNAPSHOT_FILE,
@@ -20,8 +21,12 @@ pub use config::{BrokerEndpoint, ClusterConfig};
 pub use membership::Membership;
 pub use metadata_raft::{
     AppendEntriesResult, MetadataCommand, MetadataLogEntry, MetadataRaftHardState,
-    MetadataRaftState, METADATA_RAFT_DIR, METADATA_RAFT_FILE_VERSION, METADATA_RAFT_HARD_STATE_FILE,
-    METADATA_RAFT_LOG_FILE,
+    MetadataRaftState, METADATA_RAFT_DIR, METADATA_RAFT_FILE_VERSION,
+    METADATA_RAFT_HARD_STATE_FILE, METADATA_RAFT_LOG_FILE,
+};
+pub use overlay::{
+    load_membership_overlay, membership_overlay_path, save_membership_overlay,
+    validate_membership_overlay, MembershipOverlay, MEMBERSHIP_OVERLAY_FILE,
 };
 pub use state::{
     load_assignment, save_assignment, AssignmentSnapshot, PartitionAssignment, TopicAssignment,

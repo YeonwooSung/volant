@@ -554,6 +554,48 @@ pub async fn fanout_cluster_broker_config(
     }
 }
 
+/// Best-effort membership overlay push (v0.10). No majority wait.
+pub async fn fanout_membership_put(broker: &Broker) {
+    let Some(cfg) = broker.cluster_config() else {
+        return;
+    };
+    let generation = broker.membership_generation();
+    if generation == 0 {
+        return;
+    }
+    let brokers: Vec<volant_protocol::MembershipBroker> = cfg
+        .brokers
+        .iter()
+        .map(|b| volant_protocol::MembershipBroker {
+            id: b.id,
+            host: b.host.clone(),
+            port: b.port,
+            rack: b.rack.clone(),
+        })
+        .collect();
+    let req = Request::MembershipPut {
+        generation,
+        brokers,
+    };
+    for (peer_id, addr) in broker.membership_fanout_peers() {
+        match inter_broker_rpc(broker, &addr, &req).await {
+            Ok(Response::MembershipPut { error_code: 0, .. }) => {}
+            Ok(other) => {
+                warn!(
+                    peer_id,
+                    %addr,
+                    ?other,
+                    generation,
+                    "membership put fan-out peer error"
+                );
+            }
+            Err(e) => {
+                debug!(peer_id, %addr, error = %e, generation, "membership put fan-out rpc failed");
+            }
+        }
+    }
+}
+
 /// Phase 129/130/135: multi-controller majority note + best-effort full-snapshot push.
 ///
 /// 1. Durable **local** note (counts as 1 ack).

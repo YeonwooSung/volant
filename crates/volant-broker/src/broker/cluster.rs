@@ -26,6 +26,7 @@ impl Broker {
         let brokers = if let Some(cluster) = &self.cluster {
             cluster
                 .config
+                .read()
                 .brokers
                 .iter()
                 .map(|b| {
@@ -221,7 +222,7 @@ impl Broker {
 
             // Phase 118/125: offset + time lag shrink + catch-up rejoin.
             if let Some(cluster) = &self.cluster {
-                let max_lag = cluster.config.replica_lag_max_messages;
+                let max_lag = cluster.config.read().replica_lag_max_messages;
                 let max_lag_ms = self.effective_replica_lag_max_ms();
                 let leader_leo = part.leo();
                 // Stamp last-caught-up when lag is within the message threshold.
@@ -449,7 +450,7 @@ impl Broker {
             return Ok(());
         };
         let asg = cluster.assignment.read().clone();
-        let max_lag = cluster.config.replica_lag_max_messages;
+        let max_lag = cluster.config.read().replica_lag_max_messages;
         let max_lag_ms = self.effective_replica_lag_max_ms();
         let live: HashSet<u32> = cluster
             .membership
@@ -1044,7 +1045,7 @@ impl Broker {
         let max_lag = self
             .cluster
             .as_ref()
-            .map(|c| c.config.replica_lag_max_messages)
+            .map(|c| c.config.read().replica_lag_max_messages)
             .unwrap_or(u64::MAX);
         let leader_leo = part.leo();
         if leader_leo.saturating_sub(leo) <= max_lag {

@@ -76,7 +76,10 @@ impl Membership {
 
     /// Controller = lowest live broker id.
     pub fn controller_id(&self) -> u32 {
-        self.live_brokers().into_iter().next().unwrap_or(self.self_id)
+        self.live_brokers()
+            .into_iter()
+            .next()
+            .unwrap_or(self.self_id)
     }
 
     /// Whether this node is the controller.
@@ -89,6 +92,23 @@ impl Membership {
         if id != self.self_id {
             self.last_seen.remove(&id);
         }
+    }
+
+    /// Drop a configured id from the live set (dynamic remove).
+    pub fn remove_id(&mut self, id: u32) {
+        if id != self.self_id {
+            self.last_seen.remove(&id);
+        }
+    }
+
+    /// Reconcile last-seen with a new configured id set.
+    ///
+    /// Removed ids are dropped. Newly added ids are **not** marked live
+    /// (they become live on heartbeat). Self always stays live.
+    pub fn apply_configured_ids(&mut self, configured: &[u32]) {
+        let set: std::collections::HashSet<u32> = configured.iter().copied().collect();
+        self.last_seen
+            .retain(|id, _| *id == self.self_id || set.contains(id));
     }
 }
 
@@ -103,5 +123,17 @@ mod tests {
         assert!(!m.is_controller());
         let m1 = Membership::new(1, 3000, &[1, 2, 3]);
         assert!(m1.is_controller());
+    }
+
+    #[test]
+    fn apply_configured_ids_drops_removed_keeps_new_offline() {
+        let mut m = Membership::new(1, 3000, &[1, 2, 3]);
+        assert!(m.is_live(3));
+        m.apply_configured_ids(&[1, 2, 4]);
+        assert!(!m.is_live(3));
+        assert!(!m.is_live(4), "added id stays offline until heartbeat");
+        assert!(m.is_live(1));
+        m.heartbeat(4);
+        assert!(m.is_live(4));
     }
 }

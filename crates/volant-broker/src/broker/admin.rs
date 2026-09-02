@@ -17,6 +17,179 @@ use super::{
 };
 
 impl Broker {
+    /// Overlay generation (`0` if no `membership.json` has been written).
+    pub fn membership_generation(&self) -> u64 {
+        self.cluster
+            .as_ref()
+            .map(|c| c.membership_generation.load(Ordering::Relaxed))
+            .unwrap_or(0)
+    }
+
+    /// Path to `{data_dir}/cluster/membership.json`.
+    pub fn membership_overlay_path(&self) -> std::path::PathBuf {
+        crate::cluster::membership_overlay_path(&self.storage.data_dir)
+    }
+
+    /// Configured brokers + live ids + overlay generation.
+    pub fn list_membership(&self) -> MembershipSnapshot {
+        match &self.cluster {
+            None => MembershipSnapshot {
+                generation: 0,
+                brokers: vec![crate::cluster::BrokerEndpoint {
+                    id: self.node_id,
+                    host: self.advertised_host.read().clone(),
+                    port: self.advertised_port.load(Ordering::Relaxed) as u16,
+                    rack: None,
+                }],
+                live: vec![self.node_id],
+            },
+            Some(c) => MembershipSnapshot {
+                generation: c.membership_generation.load(Ordering::Relaxed),
+                brokers: c.config.read().brokers.clone(),
+                live: c.membership.read().live_brokers(),
+            },
+        }
+    }
+
+    /// Add a broker endpoint. Persist overlay (generation+1). Not marked live
+    /// until heartbeat. Rejects duplicate id.
+    pub fn add_broker(
+        &self,
+        id: u32,
+        host: String,
+        port: u16,
+        rack: Option<String>,
+    ) -> Result<u64> {
+        let cluster = self
+            .cluster
+            .as_ref()
+            .ok_or_else(|| Error::InvalidArgument("add-broker requires cluster mode".into()))?;
+        if host.trim().is_empty() || port == 0 {
+            return Err(Error::InvalidArgument(
+                "add-broker requires non-empty host and non-zero port".into(),
+            ));
+        }
+        let mut cfg = cluster.config.write();
+        if cfg.broker(id).is_some() {
+            return Err(Error::InvalidArgument(format!("duplicate broker id {id}")));
+        }
+        let mut brokers = cfg.brokers.clone();
+        brokers.push(crate::cluster::BrokerEndpoint {
+            id,
+            host,
+            port,
+            rack,
+        });
+        brokers.sort_by_key(|b| b.id);
+        let generation = cluster
+            .membership_generation
+            .load(Ordering::Relaxed)
+            .saturating_add(1);
+        let overlay = crate::cluster::MembershipOverlay {
+            generation,
+            brokers: brokers.clone(),
+        };
+        crate::cluster::save_membership_overlay(&cluster.data_dir, &overlay)?;
+        cfg.brokers = brokers;
+        cluster
+            .membership_generation
+            .store(generation, Ordering::Relaxed);
+        // Endpoint is configured immediately; live only after heartbeat.
+        Ok(generation)
+    }
+
+    /// Remove a broker by id. Rejects self and the last remaining broker.
+    pub fn remove_broker(&self, id: u32) -> Result<u64> {
+        let cluster = self
+            .cluster
+            .as_ref()
+            .ok_or_else(|| Error::InvalidArgument("remove-broker requires cluster mode".into()))?;
+        let mut cfg = cluster.config.write();
+        if cfg.brokers.len() <= 1 {
+            return Err(Error::InvalidArgument(
+                "cannot remove the last remaining broker".into(),
+            ));
+        }
+        if id == self.node_id {
+            return Err(Error::InvalidArgument(
+                "cannot remove self from membership".into(),
+            ));
+        }
+        if cfg.broker(id).is_none() {
+            return Err(Error::InvalidArgument(format!(
+                "broker id {id} is not in membership"
+            )));
+        }
+        let brokers: Vec<_> = cfg.brokers.iter().filter(|b| b.id != id).cloned().collect();
+        let generation = cluster
+            .membership_generation
+            .load(Ordering::Relaxed)
+            .saturating_add(1);
+        let overlay = crate::cluster::MembershipOverlay {
+            generation,
+            brokers: brokers.clone(),
+        };
+        crate::cluster::save_membership_overlay(&cluster.data_dir, &overlay)?;
+        cfg.brokers = brokers;
+        cluster
+            .membership_generation
+            .store(generation, Ordering::Relaxed);
+        drop(cfg);
+        cluster.membership.write().remove_id(id);
+        Ok(generation)
+    }
+
+    /// Apply a peer `MembershipPut` overlay. Ignores stale generation
+    /// (`incoming <= local`). New ids are not marked live.
+    ///
+    /// Returns the applied generation (local gen when ignored).
+    pub fn apply_membership_put(
+        &self,
+        generation: u64,
+        brokers: Vec<crate::cluster::BrokerEndpoint>,
+    ) -> Result<u64> {
+        let cluster = self
+            .cluster
+            .as_ref()
+            .ok_or_else(|| Error::InvalidArgument("membership put requires cluster mode".into()))?;
+        let local = cluster.membership_generation.load(Ordering::Relaxed);
+        if generation <= local {
+            return Ok(local);
+        }
+        let overlay = crate::cluster::MembershipOverlay {
+            generation,
+            brokers,
+        };
+        crate::cluster::validate_membership_overlay(&overlay)?;
+        crate::cluster::save_membership_overlay(&cluster.data_dir, &overlay)?;
+        let ids: Vec<u32> = overlay.brokers.iter().map(|b| b.id).collect();
+        {
+            let mut cfg = cluster.config.write();
+            cfg.brokers = overlay.brokers;
+        }
+        cluster
+            .membership_generation
+            .store(generation, Ordering::Relaxed);
+        cluster.membership.write().apply_configured_ids(&ids);
+        Ok(generation)
+    }
+
+    /// Peers for membership overlay fan-out: configured brokers except self.
+    pub fn membership_fanout_peers(&self) -> Vec<(u32, String)> {
+        let Some(c) = &self.cluster else {
+            return Vec::new();
+        };
+        let cfg = c.config.read();
+        let mut out = Vec::new();
+        for b in &cfg.brokers {
+            if b.id == self.node_id {
+                continue;
+            }
+            out.push((b.id, format!("{}:{}", b.host, b.port)));
+        }
+        out
+    }
+
     /// Peers for BROKER config fan-out: live brokers except self (Phase 113 PR3).
     pub fn cluster_broker_config_fanout_peers(&self) -> Vec<(u32, String)> {
         let Some(c) = &self.cluster else {
@@ -176,7 +349,7 @@ impl Broker {
             }
         }
 
-        let ring = cluster.config.broker_ids();
+        let ring = cluster.config.read().broker_ids();
         let live = cluster.membership.read().live_brokers();
         let chosen = sticky_coordinator_id(key.as_bytes(), &ring, &live).unwrap_or(self.node_id);
         self.coordinator_endpoint(chosen)
@@ -191,8 +364,8 @@ impl Broker {
             return Some((node_id, host, port));
         }
         let cluster = self.cluster.as_ref()?;
-        let b = cluster.config.broker(node_id)?;
-        Some((b.id, b.host.clone(), b.port))
+        let b = cluster.config.read().broker(node_id)?.clone();
+        Some((b.id, b.host, b.port))
     }
 
     /// Phase 120: Init registration fan-out (producer + coordinator, no open).

@@ -457,6 +457,24 @@ Closes the three v0.2 holes operators actually hit. Honest limits: **EACCES not 
 
 Long chaos-mesh suites and uncapped fuzz remain deferred (Phase 112 is corpus smoke only).
 
+## v0.10 dynamic membership
+
+Add or remove a broker without rewriting `cluster.toml` and restarting
+every node. Overlay SoT: `{data_dir}/cluster/membership.json`. First
+add/remove seeds the file from the current list.
+
+```bash
+volant cluster add-broker --id 3 --host 127.0.0.1 --port 9094 --broker 127.0.0.1:9092
+volant cluster remove-broker --id 3 --broker 127.0.0.1:9092
+volant cluster members --broker 127.0.0.1:9092
+```
+
+- New brokers are **configured immediately**, **live on heartbeat**.
+- Majority N follows the overlay (add increases N; remove decreases N).
+- Existing topic replicas are **not** moved onto a new broker.
+- Push is **best-effort** (`MembershipPut` 100/101); no majority wait.
+- Not Raft joint consensus. Isolated nodes can both accept add.
+
 ## Metrics auth (Phase 21)
 
 ```bash
