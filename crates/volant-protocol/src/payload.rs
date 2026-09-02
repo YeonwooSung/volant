@@ -1630,7 +1630,11 @@ pub fn encode_response(resp: &Response) -> Result<Bytes> {
             put_string(&mut dst, name)?;
             dst.put_u16_le(*error_code);
         }
-        Response::Metadata { brokers, topics } => {
+        Response::Metadata {
+            brokers,
+            topics,
+            controller_id,
+        } => {
             dst.put_u32_le(brokers.len() as u32);
             for b in brokers {
                 dst.put_u32_le(b.node_id);
@@ -1658,6 +1662,8 @@ pub fn encode_response(resp: &Response) -> Result<Bytes> {
                     dst.put_u32_le(p.leader_epoch);
                 }
             }
+            // v0.77 trailing controller_id (always written by current encoders).
+            dst.put_u32_le(*controller_id);
         }
         Response::OffsetCommit { error_code } => {
             dst.put_u16_le(*error_code);
@@ -2227,7 +2233,17 @@ pub fn decode_response(opcode: u16, payload: &[u8]) -> Result<Response> {
                     partitions,
                 });
             }
-            Ok(Response::Metadata { brokers, topics })
+            // v0.77 trailing controller_id; legacy payloads omit it → 0.
+            let controller_id = if src.remaining() >= 4 {
+                src.get_u32_le()
+            } else {
+                0
+            };
+            Ok(Response::Metadata {
+                brokers,
+                topics,
+                controller_id,
+            })
         }
         ResponseOpcode::OffsetCommit => {
             if src.remaining() < 2 {
@@ -3648,12 +3664,53 @@ mod tests {
                     leader_epoch: 1,
                 }],
             }],
+            controller_id: 2,
         };
         let b = encode_response(&resp).unwrap();
         assert_eq!(
             decode_response(ResponseOpcode::Metadata as u16, &b).unwrap(),
             resp
         );
+    }
+
+    #[test]
+    fn metadata_response_legacy_without_controller_id() {
+        let topics = vec![TopicInfo {
+            name: "events".into(),
+            topic_id: 7,
+            error_code: 0,
+            partitions: vec![PartitionInfo {
+                partition_id: 0,
+                leader: 1,
+                hwm: 42,
+                replicas: vec![1, 2, 3],
+                isr: vec![1, 2],
+                leader_epoch: 1,
+            }],
+        }];
+        let encoded = encode_response(&Response::Metadata {
+            brokers: vec![BrokerInfo {
+                node_id: 1,
+                host: "127.0.0.1".into(),
+                port: 9092,
+            }],
+            topics: topics.clone(),
+            controller_id: 2,
+        })
+        .unwrap();
+        assert!(encoded.len() >= 4);
+        let legacy = &encoded[..encoded.len() - 4];
+        match decode_response(ResponseOpcode::Metadata as u16, legacy).unwrap() {
+            Response::Metadata {
+                controller_id,
+                topics: decoded_topics,
+                ..
+            } => {
+                assert_eq!(controller_id, 0);
+                assert_eq!(decoded_topics, topics);
+            }
+            other => panic!("expected Metadata, got {other:?}"),
+        }
     }
 
     #[test]

@@ -274,6 +274,7 @@ docs for day-to-day reading: [ops](../ops.md), [consistency](../consistency.md),
 | v0.73 | ✅ | Rust GroupConsumer range via DescribeGroup | [V73_SPEC.md](../V73_SPEC.md) |
 | v0.74 | ✅ | Heartbeat retry on Python/Go/Java | [V74_SPEC.md](../V74_SPEC.md) |
 | v0.75 | ✅ | GroupConsumer poll fetch knobs on Python/Go/Java | [V75_SPEC.md](../V75_SPEC.md) |
+| v0.77 | ✅ | Metadata controller_id trailer | [V77_SPEC.md](../V77_SPEC.md) |
 
 ---
 

@@ -386,6 +386,7 @@ class TopicInfo:
 class MetadataResponse:
     brokers: list[BrokerInfo]
     topics: list[TopicInfo]
+    controller_id: int = 0
 
 
 @dataclass
@@ -1205,6 +1206,8 @@ def encode_metadata_response(resp: MetadataResponse) -> bytes:
             for replica in p.isr:
                 w.u32_le(replica)
             w.u32_le(p.leader_epoch)
+    # v0.77 trailing controller_id (always written by current encoders).
+    w.u32_le(resp.controller_id)
     return w.finish()
 
 
@@ -1252,7 +1255,11 @@ def decode_metadata_response(payload: bytes) -> MetadataResponse:
                 partitions=parts,
             )
         )
-    return MetadataResponse(brokers=brokers, topics=topics)
+    # v0.77 trailing controller_id; legacy payloads omit it → 0.
+    controller_id = r.u32_le() if r.remaining() >= 4 else 0
+    return MetadataResponse(
+        brokers=brokers, topics=topics, controller_id=controller_id
+    )
 
 
 # --- offset commit / fetch -------------------------------------------------

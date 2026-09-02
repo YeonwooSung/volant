@@ -3695,6 +3695,9 @@ Binding: **[docs/PHASE154_SPEC.md](./docs/PHASE154_SPEC.md)**.
 **Honest residual:** no true Raft election (lowest-id controller); no
 InstallSnapshot / log compaction; static N; full-snapshot SetAssignment; local
 assignment may lead commit until majority (Metadata committed-only hides).
+Native Metadata now carries a trailing `controller_id` (**v0.77**; `0` =
+unknown); admin 14 redirect still uses the v0.72 hunt. Spec:
+[docs/V77_SPEC.md](./docs/V77_SPEC.md).
 **v0.2 product freeze** → [docs/V02_FREEZE.md](./docs/V02_FREEZE.md).
 
 **Still deferred:** full openraft election + dynamic membership; multi-lang;

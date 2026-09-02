@@ -568,6 +568,7 @@ async fn handle_request(broker: &Arc<Broker>, req: Request) -> Result<Response> 
                             .collect(),
                     })
                     .collect(),
+                controller_id: broker.controller_id(),
             })
         }
         Request::Produce {

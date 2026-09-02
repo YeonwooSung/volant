@@ -280,12 +280,69 @@ class CodecTest {
                         + "01000000"
                         + "01000000" // 1 isr
                         + "01000000"
-                        + "00000000"); // leader_epoch
+                        + "00000000" // leader_epoch
+                        + "00000000"); // v0.77 controller_id=0
         assertArrayEquals(expected, raw);
         Metadata decoded = Codec.decodeMetadataResponse(raw);
         assertEquals(1, decoded.brokers.get(0).nodeId);
         assertEquals("127.0.0.1", decoded.brokers.get(0).host);
         assertEquals(9092, decoded.brokers.get(0).port);
+        assertEquals("t", decoded.topics.get(0).name);
+        assertEquals(1, decoded.topics.get(0).partitions.get(0).leader);
+        assertEquals(0, decoded.controllerId);
+    }
+
+    @Test
+    void metadataResponseControllerId() {
+        Metadata resp = new Metadata(
+                Collections.singletonList(new Metadata.BrokerInfo(1, "127.0.0.1", 9092)),
+                Collections.singletonList(
+                        new Metadata.TopicInfo(
+                                "t",
+                                1,
+                                0,
+                                Collections.singletonList(
+                                        new Metadata.PartitionInfo(
+                                                0,
+                                                1,
+                                                0,
+                                                Collections.singletonList(1L),
+                                                Collections.singletonList(1L),
+                                                0)))),
+                2);
+        byte[] raw = Codec.encodeMetadataResponse(resp);
+        assertEquals(2, raw[raw.length - 4] & 0xFF);
+        assertEquals(0, raw[raw.length - 3]);
+        assertEquals(0, raw[raw.length - 2]);
+        assertEquals(0, raw[raw.length - 1]);
+        Metadata decoded = Codec.decodeMetadataResponse(raw);
+        assertEquals(2, decoded.controllerId);
+        assertEquals("t", decoded.topics.get(0).name);
+    }
+
+    @Test
+    void metadataResponseLegacyWithoutControllerId() {
+        byte[] raw = hx(
+                "01000000" // 1 broker
+                        + "01000000" // node 1
+                        + "0900" // host len 9
+                        + "3132372e302e302e31" // 127.0.0.1
+                        + "8423" // port 9092 le
+                        + "01000000" // 1 topic
+                        + "010074"
+                        + "01000000" // topic_id
+                        + "0000" // error
+                        + "01000000" // 1 partition
+                        + "00000000" // id 0
+                        + "01000000" // leader 1
+                        + "0000000000000000" // hwm
+                        + "01000000" // 1 replica
+                        + "01000000"
+                        + "01000000" // 1 isr
+                        + "01000000"
+                        + "00000000"); // leader_epoch, no trailer
+        Metadata decoded = Codec.decodeMetadataResponse(raw);
+        assertEquals(0, decoded.controllerId);
         assertEquals("t", decoded.topics.get(0).name);
         assertEquals(1, decoded.topics.get(0).partitions.get(0).leader);
     }

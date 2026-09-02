@@ -8,10 +8,17 @@ import java.util.List;
 public final class Metadata {
     public final List<BrokerInfo> brokers;
     public final List<TopicInfo> topics;
+    /** Controller node id (v0.77 trailer). 0 = unknown / omitted legacy payload. */
+    public final long controllerId;
 
     public Metadata(List<BrokerInfo> brokers, List<TopicInfo> topics) {
+        this(brokers, topics, 0);
+    }
+
+    public Metadata(List<BrokerInfo> brokers, List<TopicInfo> topics, long controllerId) {
         this.brokers = copy(brokers);
         this.topics = copy(topics);
+        this.controllerId = controllerId;
     }
 
     public static final class BrokerInfo {

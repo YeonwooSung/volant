@@ -380,7 +380,8 @@ func TestMetadataResponseOneBrokerOnePartition(t *testing.T) {
 			"01000000"+
 			"01000000"+ // 1 isr
 			"01000000"+
-			"00000000", // leader_epoch
+			"00000000"+ // leader_epoch
+			"00000000", // v0.77 controller_id=0
 	)
 	if !bytes.Equal(raw, expected) {
 		t.Fatalf("encode:\n got %x\nwant %x", raw, expected)
@@ -391,6 +392,83 @@ func TestMetadataResponseOneBrokerOnePartition(t *testing.T) {
 	}
 	if decoded.Brokers[0] != resp.Brokers[0] {
 		t.Fatalf("broker %+v", decoded.Brokers[0])
+	}
+	if decoded.Topics[0].Name != "t" || decoded.Topics[0].Partitions[0].Leader != 1 {
+		t.Fatalf("topic %+v", decoded.Topics[0])
+	}
+	if decoded.ControllerID != 0 {
+		t.Fatalf("controller_id %d", decoded.ControllerID)
+	}
+}
+
+func TestMetadataResponseControllerID(t *testing.T) {
+	resp := MetadataResponse{
+		Brokers: []BrokerInfo{{NodeID: 1, Host: "127.0.0.1", Port: 9092}},
+		Topics: []TopicInfo{
+			{
+				Name:      "t",
+				TopicID:   1,
+				ErrorCode: 0,
+				Partitions: []PartitionInfo{
+					{
+						PartitionID: 0,
+						Leader:      1,
+						HWM:         0,
+						Replicas:    []uint32{1},
+						ISR:         []uint32{1},
+						LeaderEpoch: 0,
+					},
+				},
+			},
+		},
+		ControllerID: 2,
+	}
+	raw, err := EncodeMetadataResponse(resp)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(raw) < 4 || raw[len(raw)-4] != 2 || raw[len(raw)-3] != 0 || raw[len(raw)-2] != 0 || raw[len(raw)-1] != 0 {
+		t.Fatalf("trailer %x", raw[len(raw)-4:])
+	}
+	decoded, err := DecodeMetadataResponse(raw)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if decoded.ControllerID != 2 {
+		t.Fatalf("controller_id %d", decoded.ControllerID)
+	}
+	if decoded.Topics[0].Name != "t" {
+		t.Fatalf("topic %+v", decoded.Topics[0])
+	}
+}
+
+func TestMetadataResponseLegacyWithoutControllerID(t *testing.T) {
+	raw := mustHex(t,
+		"01000000"+ // 1 broker
+			"01000000"+ // node 1
+			"0900"+ // host len 9
+			"3132372e302e302e31"+ // 127.0.0.1
+			"8423"+ // port 9092 le
+			"01000000"+ // 1 topic
+			"010074"+
+			"01000000"+ // topic_id
+			"0000"+ // error
+			"01000000"+ // 1 partition
+			"00000000"+ // id 0
+			"01000000"+ // leader 1
+			"0000000000000000"+ // hwm
+			"01000000"+ // 1 replica
+			"01000000"+
+			"01000000"+ // 1 isr
+			"01000000"+
+			"00000000", // leader_epoch, no trailer
+	)
+	decoded, err := DecodeMetadataResponse(raw)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if decoded.ControllerID != 0 {
+		t.Fatalf("controller_id %d", decoded.ControllerID)
 	}
 	if decoded.Topics[0].Name != "t" || decoded.Topics[0].Partitions[0].Leader != 1 {
 		t.Fatalf("topic %+v", decoded.Topics[0])
