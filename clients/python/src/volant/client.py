@@ -14,6 +14,8 @@ from .codec import (
     BrokerInfo,
     CreatePartitionsRequest,
     CreateTopicRequest,
+    DeleteOffsetsRequest,
+    DeleteOffsetsResponse,
     DescribeConfigsRequest,
     DescribeConfigsResponse,
     AlterConfigsRequest,
@@ -767,6 +769,33 @@ class Client:
             raise ProtocolError(f"unexpected response for list_offsets: {type(resp)}")
         self._check(resp.error_code, "list_offsets")
         return list(resp.entries)
+
+
+
+    def delete_offsets(
+        self,
+        group: str,
+        entries: Optional[list[tuple[str, int]]] = None,
+    ) -> int:
+        """Delete committed offsets for ``group`` (native opcode 38).
+
+        ``None`` or ``[]`` deletes all offsets for the group (wire count 0).
+        Returns the number of offset files removed. Non-zero ``error_code``
+        raises :class:`BrokerError`. This is not Kafka OffsetDelete.
+        """
+        wire = (
+            [codec.OffsetEntry(topic=t, partition=int(p)) for t, p in entries]
+            if entries
+            else []
+        )
+        payload = codec.encode_delete_offsets_request(
+            DeleteOffsetsRequest(group_id=group, entries=wire)
+        )
+        resp = self._round_trip(codec.OP_DELETE_OFFSETS, payload)
+        if not isinstance(resp, DeleteOffsetsResponse):
+            raise ProtocolError(f"unexpected response for delete_offsets: {type(resp)}")
+        self._check(resp.error_code, "delete_offsets")
+        return resp.deleted_count
 
 
     def describe_configs(self, topic: str) -> DescribeConfigsResult:

@@ -216,4 +216,5 @@ See [docs/V19_SPEC.md](../../docs/V19_SPEC.md),
 [docs/V51_SPEC.md](../../docs/V51_SPEC.md),
 [docs/V52_SPEC.md](../../docs/V52_SPEC.md),
 [docs/V53_SPEC.md](../../docs/V53_SPEC.md),
+[docs/V54_SPEC.md](../../docs/V54_SPEC.md),
 [docs/V46_SPEC.md](../../docs/V46_SPEC.md).

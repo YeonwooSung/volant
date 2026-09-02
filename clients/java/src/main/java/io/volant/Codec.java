@@ -39,6 +39,8 @@ public final class Codec {
     public static final int OP_DESCRIBE_GROUP_RESPONSE = 35;
     public static final int OP_LIST_GROUPS = 36;
     public static final int OP_LIST_GROUPS_RESPONSE = 37;
+    public static final int OP_DELETE_OFFSETS = 38;
+    public static final int OP_DELETE_OFFSETS_RESPONSE = 39;
     public static final int OP_DESCRIBE_CONFIGS = 40;
     public static final int OP_DESCRIBE_CONFIGS_RESPONSE = 41;
     public static final int OP_ALTER_CONFIGS = 42;
@@ -596,6 +598,26 @@ public final class Codec {
         }
     }
 
+    public static final class DeleteOffsetsRequest {
+        public final String groupId;
+        public final List<OffsetEntry> entries;
+
+        public DeleteOffsetsRequest(String groupId, List<OffsetEntry> entries) {
+            this.groupId = groupId;
+            this.entries = entries == null
+                    ? Collections.emptyList()
+                    : Collections.unmodifiableList(new ArrayList<>(entries));
+        }
+    }
+    public static final class DeleteOffsetsResponse {
+        public final int errorCode;
+        public final int deletedCount;
+
+        public DeleteOffsetsResponse(int errorCode, int deletedCount) {
+            this.errorCode = errorCode;
+            this.deletedCount = deletedCount;
+        }
+    }
     public static final class DescribeConfigsRequest {
         public final String topic;
 
@@ -1563,6 +1585,48 @@ public final class Codec {
         return configs;
     }
 
+
+    // --- delete offsets ----------------------------------------------------
+
+    public static byte[] encodeDeleteOffsetsRequest(DeleteOffsetsRequest req) {
+        Writer w = new Writer();
+        putString(w, req.groupId);
+        w.u32(req.entries.size());
+        for (OffsetEntry e : req.entries) {
+            putString(w, e.topic);
+            w.u32(e.partition);
+        }
+        return w.finish();
+    }
+
+
+    public static DeleteOffsetsRequest decodeDeleteOffsetsRequest(byte[] payload) {
+        Reader r = new Reader(payload);
+        String groupId = getString(r);
+        long n = r.u32();
+        List<OffsetEntry> entries = new ArrayList<>();
+        for (int i = 0; i < n; i++) {
+            String topic = getString(r);
+            int partition = (int) r.u32();
+            entries.add(new OffsetEntry(topic, partition));
+        }
+        return new DeleteOffsetsRequest(groupId, entries);
+    }
+
+
+    public static byte[] encodeDeleteOffsetsResponse(DeleteOffsetsResponse resp) {
+        Writer w = new Writer();
+        w.u16(resp.errorCode);
+        w.u32(resp.deletedCount);
+        return w.finish();
+    }
+
+
+    public static DeleteOffsetsResponse decodeDeleteOffsetsResponse(byte[] payload) {
+        Reader r = new Reader(payload);
+        return new DeleteOffsetsResponse(r.u16(), (int) r.u32());
+    }
+
     public static byte[] encodeDescribeConfigsRequest(DescribeConfigsRequest req) {
         Writer w = new Writer();
         putString(w, req.topic);
@@ -1820,6 +1884,8 @@ public final class Codec {
                 return decodeCreatePartitionsResponse(payload);
             case OP_LIST_OFFSETS_RESPONSE:
                 return decodeListOffsetsResponse(payload);
+            case OP_DELETE_OFFSETS_RESPONSE:
+                return decodeDeleteOffsetsResponse(payload);
             case OP_DESCRIBE_CONFIGS_RESPONSE:
                 return decodeDescribeConfigsResponse(payload);
             case OP_ALTER_CONFIGS_RESPONSE:
