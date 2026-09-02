@@ -595,40 +595,71 @@ impl Client {
     /// List earliest/latest offsets for a topic (Phase 15).
     ///
     /// Empty `partitions` means all partitions.
+    /// Transient broker/transport errors retry up to
+    /// [`ClientConfig::max_retries`] extra times (default 0).
     pub async fn list_offsets(
         &self,
         topic: &str,
         partitions: Vec<u32>,
     ) -> Result<ListOffsetsResult> {
-        let resp = self
-            .round_trip(Request::ListOffsets {
-                topic: topic.to_owned(),
-                partitions,
-            })
-            .await?;
-        match resp {
-            Response::ListOffsets {
-                error_code,
-                topic,
-                entries,
-            } => {
-                check_ok(error_code, "list_offsets")?;
-                Ok(ListOffsetsResult {
-                    topic,
-                    entries: entries
-                        .into_iter()
-                        .map(|e| PartitionOffsets {
-                            partition: e.partition,
-                            earliest: e.earliest,
-                            latest: e.latest,
-                        })
-                        .collect(),
+        let max_retries = self.config.max_retries;
+        let mut retry_attempt = 0u32;
+        loop {
+            let resp = match self
+                .round_trip(Request::ListOffsets {
+                    topic: topic.to_owned(),
+                    partitions: partitions.clone(),
                 })
+                .await
+            {
+                Ok(r) => r,
+                Err(e) if is_transient_transport(&e) && retry_attempt < max_retries => {
+                    retry_attempt += 1;
+                    tokio::time::sleep(Duration::from_millis(self.config.retry_backoff_ms)).await;
+                    continue;
+                }
+                Err(e) => return Err(e),
+            };
+            match resp {
+                Response::ListOffsets {
+                    error_code,
+                    topic,
+                    entries,
+                } => {
+                    if is_transient_error_code(error_code) && retry_attempt < max_retries {
+                        retry_attempt += 1;
+                        tokio::time::sleep(Duration::from_millis(self.config.retry_backoff_ms))
+                            .await;
+                        continue;
+                    }
+                    check_ok(error_code, "list_offsets")?;
+                    return Ok(ListOffsetsResult {
+                        topic,
+                        entries: entries
+                            .into_iter()
+                            .map(|e| PartitionOffsets {
+                                partition: e.partition,
+                                earliest: e.earliest,
+                                latest: e.latest,
+                            })
+                            .collect(),
+                    });
+                }
+                Response::Error { code, message } => {
+                    if is_transient_error_code(code) && retry_attempt < max_retries {
+                        retry_attempt += 1;
+                        tokio::time::sleep(Duration::from_millis(self.config.retry_backoff_ms))
+                            .await;
+                        continue;
+                    }
+                    return Err(error_from_code(code, message));
+                }
+                other => {
+                    return Err(Error::Protocol(format!(
+                        "unexpected response for list_offsets: {other:?}"
+                    )))
+                }
             }
-            Response::Error { code, message } => Err(error_from_code(code, message)),
-            other => Err(Error::Protocol(format!(
-                "unexpected response for list_offsets: {other:?}"
-            ))),
         }
     }
 

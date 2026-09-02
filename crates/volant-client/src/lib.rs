@@ -29,6 +29,9 @@
 //! v0.80 retries [`Client::heartbeat`] on the same transient set as
 //! produce ([`ClientConfig::max_retries`], default 0). Rebalance 9/10/11
 //! is not retried. GroupConsumer poll / background heartbeat inherit.
+//! v0.84 retries [`Client::list_offsets`] on that same transient set
+//! (default 0). Error 2 (NotFound) is not retried. GroupConsumer
+//! earliest/latest reset inherit.
 
 #![deny(missing_docs)]
 
