@@ -36,12 +36,13 @@ pub struct ClientConfig {
     pub transactional_id: Option<String>,
     /// Extra produce / heartbeat / offset-admin / ListOffsets /
     /// LeaveGroup / DescribeGroup / ListGroups / Metadata /
-    /// ListMembers / BeginTxn / EndTxn attempts after the first on
-    /// transient broker/transport errors.
+    /// ListMembers / BeginTxn / EndTxn / controller-gated admin
+    /// attempts after the first on transient broker/transport errors.
     pub max_retries: u32,
     /// Sleep between produce / heartbeat / offset-admin / ListOffsets /
     /// LeaveGroup / DescribeGroup / ListGroups / Metadata /
-    /// ListMembers / BeginTxn / EndTxn retries (milliseconds).
+    /// ListMembers / BeginTxn / EndTxn / controller-gated admin
+    /// retries (milliseconds).
     pub retry_backoff_ms: u64,
 }
 

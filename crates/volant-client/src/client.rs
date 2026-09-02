@@ -1265,17 +1265,30 @@ impl Client {
         self.reconnect(&addr).await.is_ok()
     }
 
-    /// Round-trip a controller-gated admin RPC, redirecting on error 14.
+    /// Round-trip a controller-gated admin RPC.
+    ///
+    /// Error **14** (`NotController`) uses [`ClientConfig::max_redirects`]
+    /// via [`Self::redirect_to_controller`] (independent of retry). Transient
+    /// 6 / 7 / 15 / 16 and [`Error::Io`] retry up to
+    /// [`ClientConfig::max_retries`] extra times (default 0). 13 / 9 / 10 /
+    /// 11 / 2 / 21 / InvalidTxnState (22) and protocol are not retried.
     async fn admin_round_trip(&self, req: Request) -> Result<Response> {
-        let max_attempts = 1 + self.config.max_redirects;
-        let mut attempt = 0u32;
+        let max_retries = self.config.max_retries;
+        let max_redirects = self.config.max_redirects;
+        let mut retry_attempt = 0u32;
+        let mut redirects = 0u32;
         loop {
-            attempt += 1;
-            let resp = self.round_trip(req.clone()).await?;
-            let (is_not_controller, hint) = match &resp {
-                Response::Error { code, message } if *code == ErrorCode::NotController as u16 => {
-                    (true, parse_controller_id(message))
+            let resp = match self.round_trip(req.clone()).await {
+                Ok(r) => r,
+                Err(e) if is_transient_transport(&e) && retry_attempt < max_retries => {
+                    retry_attempt += 1;
+                    tokio::time::sleep(Duration::from_millis(self.config.retry_backoff_ms)).await;
+                    continue;
                 }
+                Err(e) => return Err(e),
+            };
+            let (code, hint) = match &resp {
+                Response::Error { code, message } => (*code, parse_controller_id(message)),
                 Response::CreateTopic { error_code, .. }
                 | Response::DeleteTopic { error_code, .. }
                 | Response::CreatePartitions { error_code, .. }
@@ -1289,17 +1302,19 @@ impl Client {
                 | Response::AddBroker { error_code, .. }
                 | Response::RemoveBroker { error_code, .. }
                 | Response::DescribeConfigs { error_code, .. }
-                | Response::AlterConfigs { error_code, .. }
-                    if *error_code == ErrorCode::NotController as u16 =>
-                {
-                    (true, None)
-                }
-                _ => (false, None),
+                | Response::AlterConfigs { error_code, .. } => (*error_code, None),
+                _ => return Ok(resp),
             };
-            if is_not_controller
-                && attempt < max_attempts
+            if code == ErrorCode::NotController as u16
+                && redirects < max_redirects
                 && self.redirect_to_controller(hint).await
             {
+                redirects += 1;
+                continue;
+            }
+            if is_transient_error_code(code) && retry_attempt < max_retries {
+                retry_attempt += 1;
+                tokio::time::sleep(Duration::from_millis(self.config.retry_backoff_ms)).await;
                 continue;
             }
             return Ok(resp);

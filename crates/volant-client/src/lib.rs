@@ -67,6 +67,11 @@
 //! abort inherit) on that same transient set (default 0). InvalidTxnState
 //! (22), fence / epoch / abortable, 13 / 14 / 9 / 10 / 11 / 2, and
 //! protocol are not retried. [`TransactionalProducer`] inherits.
+//! v0.104 retries controller-gated admin (`create_topic` / ACLs /
+//! SCRAM-admin / Add/RemoveBroker / Describe/AlterConfigs, which share
+//! `admin_round_trip`) on that same transient set (default 0). Error
+//! **14** stays on `max_redirects` (independent counter). 13 / 9 / 10 /
+//! 11 / 2 / 21 / InvalidTxnState (22) and protocol are not retried.
 
 #![deny(missing_docs)]
 
