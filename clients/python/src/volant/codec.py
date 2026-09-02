@@ -40,6 +40,8 @@ OP_DESCRIBE_GROUP = 34
 OP_DESCRIBE_GROUP_RESPONSE = 35
 OP_LIST_GROUPS = 36
 OP_LIST_GROUPS_RESPONSE = 37
+OP_DELETE_RECORDS = 44
+OP_DELETE_RECORDS_RESPONSE = 45
 OP_CREATE_PARTITIONS = 46
 OP_CREATE_PARTITIONS_RESPONSE = 47
 OP_LIST_OFFSETS = 48
@@ -545,6 +547,25 @@ class ListOffsetsResponse:
     error_code: int
     topic: str
     entries: list[OffsetListing]
+
+
+
+@dataclass
+class DeleteRecordsRequest:
+    """DeleteRecords opcode 44 body (Phase 14 + Phase 137 wait trailer)."""
+
+    topic: str
+    partition: int
+    before_offset: int
+    wait_majority: int = 0
+
+
+@dataclass
+class DeleteRecordsResponse:
+    error_code: int
+    topic: str
+    partition: int
+    low_watermark: int
 
 
 @dataclass
@@ -1298,6 +1319,58 @@ def decode_create_partitions_response(payload: bytes) -> CreatePartitionsRespons
     )
 
 
+
+# --- delete records --------------------------------------------------------
+
+
+def encode_delete_records_request(req: DeleteRecordsRequest) -> bytes:
+    w = _Writer()
+    _put_string(w, req.topic)
+    w.u32_le(req.partition)
+    w.u64_le(req.before_offset)
+    # Phase 137: always write the wait_majority trailer.
+    w.u8(req.wait_majority)
+    return w.finish()
+
+
+def decode_delete_records_request(payload: bytes) -> DeleteRecordsRequest:
+    r = _Reader(payload)
+    topic = _get_string(r)
+    partition = r.u32_le()
+    before_offset = r.u64_le()
+    # Phase 137: optional wait_majority trailer (absent → 0).
+    wait_majority = r.u8() if r.remaining() >= 1 else 0
+    return DeleteRecordsRequest(
+        topic=topic,
+        partition=partition,
+        before_offset=before_offset,
+        wait_majority=wait_majority,
+    )
+
+
+def encode_delete_records_response(resp: DeleteRecordsResponse) -> bytes:
+    w = _Writer()
+    w.u16_le(resp.error_code)
+    _put_string(w, resp.topic)
+    w.u32_le(resp.partition)
+    w.u64_le(resp.low_watermark)
+    return w.finish()
+
+
+def decode_delete_records_response(payload: bytes) -> DeleteRecordsResponse:
+    r = _Reader(payload)
+    error_code = r.u16_le()
+    topic = _get_string(r)
+    partition = r.u32_le()
+    low_watermark = r.u64_le()
+    return DeleteRecordsResponse(
+        error_code=error_code,
+        topic=topic,
+        partition=partition,
+        low_watermark=low_watermark,
+    )
+
+
 # --- error opcode ----------------------------------------------------------
 
 
@@ -1444,6 +1517,8 @@ def decode_response(opcode: int, payload: bytes):
         return decode_create_partitions_response(payload)
     if opcode == OP_LIST_OFFSETS_RESPONSE:
         return decode_list_offsets_response(payload)
+    if opcode == OP_DELETE_RECORDS_RESPONSE:
+        return decode_delete_records_response(payload)
     if opcode == OP_ERROR:
         return decode_error_response(payload)
     raise ProtocolError(f"unknown response opcode {opcode}")

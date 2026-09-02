@@ -41,6 +41,9 @@ offs, err := c.OffsetFetch("g", "t")
 _ = offs
 bounds, err := c.ListOffsets("t", nil) // all partitions; or []uint32{0}
 _ = bounds
+cut, err := c.DeleteRecords("t", 0, 100) // wait_majority=0
+// cut, err = c.DeleteRecordsWithWaitFlag("t", 0, 100, 1) // force majority wait
+_ = cut
 j, err := c.JoinGroup("g", []string{"t"}, 10000)
 if err != nil {
     log.Fatal(err)
@@ -89,6 +92,11 @@ returns the new total (native opcode 46, not Kafka CreatePartitions).
 `ListOffsets` returns `[]OffsetListing` (`Partition`, `Earliest`,
 `Latest`); nil / empty partitions means all (native opcode 48, not
 Kafka timestamp ListOffsets).
+`DeleteRecords` / `DeleteRecordsWithWaitFlag` return
+`DeleteRecordsResult` (`Topic`, `Partition`, `LowWatermark`); native
+opcode 44, not Kafka DeleteRecords (API key 21). `waitMajority` 0 =
+broker default, 1 = force wait, 2 = force no-wait. Error 13 is not
+redirected (Produce/Fetch only).
 `JoinGroup` sends empty `member_id` on first join; the result has
 `MemberID`, `Generation`, and `Assignment`.
 `JoinGroupConsumer` is the high-level loop (join, OffsetFetch
@@ -203,4 +211,5 @@ See [docs/V19_SPEC.md](../../docs/V19_SPEC.md),
 [docs/V49_SPEC.md](../../docs/V49_SPEC.md),
 [docs/V50_SPEC.md](../../docs/V50_SPEC.md),
 [docs/V51_SPEC.md](../../docs/V51_SPEC.md),
+[docs/V52_SPEC.md](../../docs/V52_SPEC.md),
 [docs/V46_SPEC.md](../../docs/V46_SPEC.md).

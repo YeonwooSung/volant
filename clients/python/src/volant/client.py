@@ -14,6 +14,8 @@ from .codec import (
     BrokerInfo,
     CreatePartitionsRequest,
     CreateTopicRequest,
+    DeleteRecordsRequest,
+    DeleteRecordsResponse,
     DeleteTopicRequest,
     DescribeGroupRequest,
     DescribeGroupResponse,
@@ -86,6 +88,15 @@ class ProduceResult:
     partition: int
     base_offset: int
     count: int
+
+
+@dataclass
+class DeleteRecordsResult:
+    """Result of DeleteRecords (Phase 14 / v0.52)."""
+
+    topic: str
+    partition: int
+    low_watermark: int
 
 
 @dataclass
@@ -743,6 +754,42 @@ class Client:
         self._check(resp.error_code, "list_offsets")
         return list(resp.entries)
 
+    def delete_records(
+        self,
+        topic: str,
+        partition: int,
+        before_offset: int,
+        wait_majority: int = 0,
+    ) -> DeleteRecordsResult:
+        """Delete records before ``before_offset`` (native opcode 44).
+
+        Returns :class:`DeleteRecordsResult` with the new log start
+        (``low_watermark``). ``wait_majority`` is the Phase 137 trailer:
+        0 = broker default, 1 = force wait, 2 = force no-wait. Always
+        written on the wire. Non-zero ``error_code`` raises
+        :class:`BrokerError`. Error 13 is **not** redirected (Produce/Fetch
+        only). This is not Kafka DeleteRecords (API key 21).
+        """
+        payload = codec.encode_delete_records_request(
+            DeleteRecordsRequest(
+                topic=topic,
+                partition=partition,
+                before_offset=before_offset,
+                wait_majority=wait_majority,
+            )
+        )
+        resp = self._round_trip(codec.OP_DELETE_RECORDS, payload)
+        if not isinstance(resp, DeleteRecordsResponse):
+            raise ProtocolError(
+                f"unexpected response for delete_records: {type(resp)}"
+            )
+        self._check(resp.error_code, "delete_records")
+        return DeleteRecordsResult(
+            topic=resp.topic,
+            partition=resp.partition,
+            low_watermark=resp.low_watermark,
+        )
+
     def offset_fetch(self, group: str, topic: str) -> list[tuple[int, int]]:
         """Fetch committed offsets for ``topic``.
 
@@ -850,6 +897,7 @@ __all__ = [
     "BrokerError",
     "BrokerInfo",
     "Client",
+    "DeleteRecordsResult",
     "DescribeGroupResult",
     "FetchRecord",
     "FetchResult",

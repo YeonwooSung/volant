@@ -26,6 +26,7 @@ import java.util.Map;
  *   c.offsetCommit("g", "t", 0, 5);
  *   List&lt;Offset&gt; offs = c.offsetFetch("g", "t");
  *   List&lt;OffsetListing&gt; bounds = c.listOffsets("t");
+ *   DeleteRecordsResult cut = c.deleteRecords("t", 0, 100);
  *   JoinGroupResult j = c.joinGroup("g", java.util.List.of("t"), 10000);
  *   c.heartbeat("g", j.memberId, j.generation);
  *   c.leaveGroup("g", j.memberId);
@@ -772,6 +773,34 @@ public final class Client implements AutoCloseable {
         Codec.ListOffsetsResponse resp = (Codec.ListOffsetsResponse) decoded;
         check(resp.errorCode, "list_offsets");
         return resp.entries;
+    }
+
+    /**
+     * Delete records before {@code beforeOffset} (native opcode 44).
+     * Sends {@code wait_majority=0} (broker default). Error 13 is not
+     * redirected (Produce/Fetch only). This is not Kafka DeleteRecords.
+     */
+    public DeleteRecordsResult deleteRecords(String topic, int partition, long beforeOffset) {
+        return deleteRecords(topic, partition, beforeOffset, 0);
+    }
+
+    /**
+     * Delete records with the Phase 137 majority-wait trailer.
+     *
+     * <p>{@code waitMajority}: 0 = broker default, 1 = force wait, 2 = force
+     * no-wait. Always written on the wire. Non-zero {@code error_code} is
+     * {@link BrokerException} with {@code op="delete_records"}.
+     */
+    public DeleteRecordsResult deleteRecords(String topic, int partition, long beforeOffset, int waitMajority) {
+        byte[] payload = Codec.encodeDeleteRecordsRequest(
+                new Codec.DeleteRecordsRequest(topic, partition & 0xFFFFFFFFL, beforeOffset, waitMajority));
+        Object decoded = roundTrip(Codec.OP_DELETE_RECORDS, payload);
+        if (!(decoded instanceof Codec.DeleteRecordsResponse)) {
+            throw new ProtocolException("unexpected response for delete_records: " + typeName(decoded));
+        }
+        Codec.DeleteRecordsResponse resp = (Codec.DeleteRecordsResponse) decoded;
+        check(resp.errorCode, "delete_records");
+        return new DeleteRecordsResult(resp.topic, (int) resp.partition, resp.lowWatermark);
     }
 
     /**
