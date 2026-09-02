@@ -39,6 +39,7 @@ type (
 	ProduceMessage   = codec.ProduceMessage
 	MetadataResponse = codec.MetadataResponse
 	Assignment       = codec.Assignment
+	OffsetListing    = codec.OffsetListing
 )
 
 // Offset is one committed (partition, offset) pair from OffsetFetch.
@@ -655,6 +656,35 @@ func (c *Client) commitOffsets(group, memberID string, generation uint32, entrie
 		return &frame.ProtocolError{Msg: fmt.Sprintf("unexpected response for offset_commit: %T", decoded)}
 	}
 	return check(resp.ErrorCode, "offset_commit")
+}
+
+// ListOffsets returns earliest/latest offsets for topic (native opcode 48).
+// Nil or empty partitions means all partitions (wire count 0). Non-zero
+// error_code is BrokerError. This is not Kafka ListOffsets (no timestamp
+// or isolation); both ends of each log are returned.
+func (c *Client) ListOffsets(topic string, partitions []uint32) ([]OffsetListing, error) {
+	if partitions == nil {
+		partitions = []uint32{}
+	}
+	payload, err := codec.EncodeListOffsetsRequest(codec.ListOffsetsRequest{
+		Topic:      topic,
+		Partitions: partitions,
+	})
+	if err != nil {
+		return nil, err
+	}
+	decoded, err := c.roundTrip(codec.OpListOffsets, payload)
+	if err != nil {
+		return nil, err
+	}
+	resp, ok := decoded.(codec.ListOffsetsResponse)
+	if !ok {
+		return nil, &frame.ProtocolError{Msg: fmt.Sprintf("unexpected response for list_offsets: %T", decoded)}
+	}
+	if err := check(resp.ErrorCode, "list_offsets"); err != nil {
+		return nil, err
+	}
+	return resp.Entries, nil
 }
 
 // OffsetFetch returns committed offsets for topic as []Offset.

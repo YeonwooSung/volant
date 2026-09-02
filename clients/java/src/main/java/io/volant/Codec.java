@@ -10,7 +10,7 @@ import java.util.List;
  *
  * <p>Matches {@code crates/volant-protocol/src/payload.rs} for the MVP opcodes:
  * Produce, Fetch, CreateTopic, Metadata, DeleteTopic, OffsetCommit,
- * OffsetFetch, JoinGroup, Heartbeat, LeaveGroup, Auth.
+ * OffsetFetch, JoinGroup, Heartbeat, LeaveGroup, ListOffsets, Auth.
  *
  * <p>Header fields are big-endian (see {@link Frame}); <strong>payload</strong>
  * integers and length prefixes are little-endian.
@@ -28,6 +28,8 @@ public final class Codec {
     public static final int OP_LEAVE_GROUP = 10;
     public static final int OP_AUTH = 30;
     public static final int OP_AUTH_RESPONSE = 31;
+    public static final int OP_LIST_OFFSETS = 48;
+    public static final int OP_LIST_OFFSETS_RESPONSE = 49;
     public static final int OP_ERROR = 0xFFFF;
 
     static final long NULL_LEN = 0xFFFFFFFFL;
@@ -406,6 +408,32 @@ public final class Codec {
 
         public AuthResponse(int errorCode) {
             this.errorCode = errorCode;
+        }
+    }
+
+    public static final class ListOffsetsRequest {
+        public final String topic;
+        public final List<Integer> partitions;
+
+        public ListOffsetsRequest(String topic, List<Integer> partitions) {
+            this.topic = topic;
+            this.partitions = partitions == null
+                    ? Collections.emptyList()
+                    : Collections.unmodifiableList(new ArrayList<>(partitions));
+        }
+    }
+
+    public static final class ListOffsetsResponse {
+        public final int errorCode;
+        public final String topic;
+        public final List<OffsetListing> entries;
+
+        public ListOffsetsResponse(int errorCode, String topic, List<OffsetListing> entries) {
+            this.errorCode = errorCode;
+            this.topic = topic;
+            this.entries = entries == null
+                    ? Collections.emptyList()
+                    : Collections.unmodifiableList(new ArrayList<>(entries));
         }
     }
 
@@ -1140,6 +1168,54 @@ public final class Codec {
         return new AuthResponse(new Reader(payload).u16());
     }
 
+    // --- list offsets ------------------------------------------------------
+
+    public static byte[] encodeListOffsetsRequest(ListOffsetsRequest req) {
+        Writer w = new Writer();
+        putString(w, req.topic);
+        w.u32(req.partitions.size());
+        for (Integer p : req.partitions) {
+            w.u32(p);
+        }
+        return w.finish();
+    }
+
+    public static ListOffsetsRequest decodeListOffsetsRequest(byte[] payload) {
+        Reader r = new Reader(payload);
+        String topic = getString(r);
+        long n = r.u32();
+        List<Integer> partitions = new ArrayList<>();
+        for (int i = 0; i < n; i++) {
+            partitions.add((int) r.u32());
+        }
+        return new ListOffsetsRequest(topic, partitions);
+    }
+
+    public static byte[] encodeListOffsetsResponse(ListOffsetsResponse resp) {
+        Writer w = new Writer();
+        w.u16(resp.errorCode);
+        putString(w, resp.topic);
+        w.u32(resp.entries.size());
+        for (OffsetListing e : resp.entries) {
+            w.u32(e.partition);
+            w.u64(e.earliest);
+            w.u64(e.latest);
+        }
+        return w.finish();
+    }
+
+    public static ListOffsetsResponse decodeListOffsetsResponse(byte[] payload) {
+        Reader r = new Reader(payload);
+        int errorCode = r.u16();
+        String topic = getString(r);
+        long n = r.u32();
+        List<OffsetListing> entries = new ArrayList<>();
+        for (int i = 0; i < n; i++) {
+            entries.add(new OffsetListing((int) r.u32(), r.u64(), r.u64()));
+        }
+        return new ListOffsetsResponse(errorCode, topic, entries);
+    }
+
     // --- error opcode ------------------------------------------------------
 
     public static byte[] encodeErrorResponse(ErrorResponse resp) {
@@ -1179,6 +1255,8 @@ public final class Codec {
                 return decodeLeaveGroupResponse(payload);
             case OP_AUTH_RESPONSE:
                 return decodeAuthResponse(payload);
+            case OP_LIST_OFFSETS_RESPONSE:
+                return decodeListOffsetsResponse(payload);
             case OP_ERROR:
                 return decodeErrorResponse(payload);
             default:

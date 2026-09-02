@@ -26,6 +26,7 @@ for offset, key, value in batch.tuples():
     print(offset, key, value)
 c.offset_commit(group="g", topic="t", partition=0, offset=5)
 offs = c.offset_fetch(group="g", topic="t")  # [(partition, offset), ...]
+bounds = c.list_offsets("t")  # [OffsetListing(partition, earliest, latest), ...]
 member_id, generation, assignment = c.join_group(
     "g", topics=["t"], session_timeout_ms=10000
 )
@@ -68,7 +69,10 @@ null key is the default. `fetch` returns a `FetchResult` (iterable of records
 with `offset`, `key`, `value`). `metadata()` returns brokers + topics.
 `offset_commit` is an admin commit (`member_id=""`, `generation=0` unless
 overridden). `offset_fetch` returns committed `(partition, offset)` pairs
-for the given topic. `join_group` sends empty `member_id` on first join
+for the given topic. `list_offsets(topic, partitions=None)` returns
+earliest/latest (`OffsetListing`) for the topic (`None` / `[]` = all
+partitions; native opcode 48, not Kafka timestamp ListOffsets).
+`join_group` sends empty `member_id` on first join
 (broker assigns one) and unpacks as
 `(member_id, generation, assignment)`.
 `GroupConsumer.join` / `poll` / `commit` / `close` is the high-level
@@ -153,5 +157,6 @@ See [docs/V14_SPEC.md](../../docs/V14_SPEC.md),
 [docs/V36_SPEC.md](../../docs/V36_SPEC.md),
 [docs/V37_SPEC.md](../../docs/V37_SPEC.md),
 [docs/V41_SPEC.md](../../docs/V41_SPEC.md),
-[docs/V42_SPEC.md](../../docs/V42_SPEC.md), and
-[docs/V43_SPEC.md](../../docs/V43_SPEC.md).
+[docs/V42_SPEC.md](../../docs/V42_SPEC.md),
+[docs/V43_SPEC.md](../../docs/V43_SPEC.md), and
+[docs/V50_SPEC.md](../../docs/V50_SPEC.md).

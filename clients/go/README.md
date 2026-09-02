@@ -37,6 +37,8 @@ if err := c.OffsetCommit("g", "t", 0, 5); err != nil {
 }
 offs, err := c.OffsetFetch("g", "t")
 _ = offs
+bounds, err := c.ListOffsets("t", nil) // all partitions; or []uint32{0}
+_ = bounds
 j, err := c.JoinGroup("g", []string{"t"}, 10000)
 if err != nil {
     log.Fatal(err)
@@ -73,6 +75,9 @@ c, err = volant.DialTLSAuth("127.0.0.1:9092", volant.TLSConfig{CAFile: "ca.pem"}
 (`Offset`, `Key`, `Value`). `Metadata()` returns brokers + topics.
 `OffsetCommit` is an admin commit (empty member, generation 0).
 `OffsetFetch` returns `[]Offset` (`Partition`, `Offset`) for the topic.
+`ListOffsets` returns `[]OffsetListing` (`Partition`, `Earliest`,
+`Latest`); nil / empty partitions means all (native opcode 48, not
+Kafka timestamp ListOffsets).
 `JoinGroup` sends empty `member_id` on first join; the result has
 `MemberID`, `Generation`, and `Assignment`.
 `JoinGroupConsumer` is the high-level loop (join, OffsetFetch
@@ -157,5 +162,6 @@ See [docs/V19_SPEC.md](../../docs/V19_SPEC.md),
 [docs/V36_SPEC.md](../../docs/V36_SPEC.md),
 [docs/V37_SPEC.md](../../docs/V37_SPEC.md),
 [docs/V41_SPEC.md](../../docs/V41_SPEC.md),
-[docs/V42_SPEC.md](../../docs/V42_SPEC.md), and
-[docs/V43_SPEC.md](../../docs/V43_SPEC.md).
+[docs/V42_SPEC.md](../../docs/V42_SPEC.md),
+[docs/V43_SPEC.md](../../docs/V43_SPEC.md), and
+[docs/V50_SPEC.md](../../docs/V50_SPEC.md).

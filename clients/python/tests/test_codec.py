@@ -22,6 +22,8 @@ from volant.codec import (
     JoinGroupResponse,
     LeaveGroupRequest,
     LeaveGroupResponse,
+    ListOffsetsRequest,
+    ListOffsetsResponse,
     MetadataRequest,
     MetadataResponse,
     OffsetCommitEntry,
@@ -31,6 +33,7 @@ from volant.codec import (
     OffsetFetchEntry,
     OffsetFetchRequest,
     OffsetFetchResponse,
+    OffsetListing,
     PartitionInfo,
     ProduceMessage,
     ProduceRequest,
@@ -50,6 +53,8 @@ from volant.codec import (
     decode_join_group_response,
     decode_leave_group_request,
     decode_leave_group_response,
+    decode_list_offsets_request,
+    decode_list_offsets_response,
     decode_metadata_request,
     decode_metadata_response,
     decode_offset_commit_request,
@@ -73,6 +78,8 @@ from volant.codec import (
     encode_join_group_response,
     encode_leave_group_request,
     encode_leave_group_response,
+    encode_list_offsets_request,
+    encode_list_offsets_response,
     encode_metadata_request,
     encode_metadata_response,
     encode_offset_commit_request,
@@ -85,6 +92,7 @@ from volant.codec import (
     OP_HEARTBEAT,
     OP_JOIN_GROUP,
     OP_LEAVE_GROUP,
+    OP_LIST_OFFSETS_RESPONSE,
     OP_OFFSET_COMMIT,
     OP_OFFSET_FETCH,
 )
@@ -622,6 +630,55 @@ class TestAuthCodec(unittest.TestCase):
         self.assertEqual(raw, bytes.fromhex("1100"))
         self.assertEqual(decode_auth_response(raw), fail)
         self.assertEqual(decode_response(OP_AUTH_RESPONSE, raw), fail)
+
+
+class TestListOffsetsCodec(unittest.TestCase):
+    def test_list_offsets_request_payload_rs_fixture(self) -> None:
+        # crates/volant-protocol/src/payload.rs
+        # phase15_create_partitions_list_offsets_roundtrip
+        req = ListOffsetsRequest(topic="events", partitions=[0, 1])
+        raw = encode_list_offsets_request(req)
+        expected = bytes.fromhex(
+            "0600"
+            "6576656e7473"  # "events"
+            "02000000"  # count 2
+            "00000000"  # partition 0
+            "01000000"  # partition 1
+        )
+        self.assertEqual(_hx(raw), _hx(expected))
+        self.assertEqual(decode_list_offsets_request(raw), req)
+
+    def test_list_offsets_request_empty_partitions(self) -> None:
+        req = ListOffsetsRequest(topic="events", partitions=[])
+        raw = encode_list_offsets_request(req)
+        expected = bytes.fromhex("06006576656e7473" "00000000")
+        self.assertEqual(_hx(raw), _hx(expected))
+        self.assertEqual(decode_list_offsets_request(raw), req)
+
+    def test_list_offsets_response_payload_rs_fixture(self) -> None:
+        resp = ListOffsetsResponse(
+            error_code=0,
+            topic="events",
+            entries=[
+                OffsetListing(partition=0, earliest=0, latest=10),
+                OffsetListing(partition=1, earliest=2, latest=5),
+            ],
+        )
+        raw = encode_list_offsets_response(resp)
+        expected = bytes.fromhex(
+            "0000"  # error_code
+            "06006576656e7473"
+            "02000000"  # 2 entries
+            "00000000"  # partition 0
+            "0000000000000000"  # earliest 0
+            "0a00000000000000"  # latest 10
+            "01000000"  # partition 1
+            "0200000000000000"  # earliest 2
+            "0500000000000000"  # latest 5
+        )
+        self.assertEqual(_hx(raw), _hx(expected))
+        self.assertEqual(decode_list_offsets_response(raw), resp)
+        self.assertEqual(decode_response(OP_LIST_OFFSETS_RESPONSE, raw), resp)
 
 
 if __name__ == "__main__":

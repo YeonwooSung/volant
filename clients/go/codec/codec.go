@@ -2,7 +2,7 @@
 //
 // Matches crates/volant-protocol/src/payload.rs for Produce, Fetch,
 // CreateTopic, Metadata, DeleteTopic, OffsetCommit, OffsetFetch,
-// JoinGroup, Heartbeat, LeaveGroup, and Auth.
+// JoinGroup, Heartbeat, LeaveGroup, ListOffsets, and Auth.
 // Frame headers are big-endian (see package frame); payload integers and
 // length prefixes are little-endian.
 package codec
@@ -15,19 +15,21 @@ import (
 )
 
 const (
-	OpProduce      uint16 = 1
-	OpFetch        uint16 = 2
-	OpCreateTopic  uint16 = 3
-	OpMetadata     uint16 = 4
-	OpDeleteTopic  uint16 = 5
-	OpOffsetCommit uint16 = 6
-	OpOffsetFetch  uint16 = 7
-	OpJoinGroup    uint16 = 8
-	OpHeartbeat    uint16 = 9
-	OpLeaveGroup   uint16 = 10
-	OpAuth         uint16 = 30
-	OpAuthResponse uint16 = 31
-	OpError        uint16 = 0xFFFF
+	OpProduce             uint16 = 1
+	OpFetch               uint16 = 2
+	OpCreateTopic         uint16 = 3
+	OpMetadata            uint16 = 4
+	OpDeleteTopic         uint16 = 5
+	OpOffsetCommit        uint16 = 6
+	OpOffsetFetch         uint16 = 7
+	OpJoinGroup           uint16 = 8
+	OpHeartbeat           uint16 = 9
+	OpLeaveGroup          uint16 = 10
+	OpAuth                uint16 = 30
+	OpAuthResponse        uint16 = 31
+	OpListOffsets         uint16 = 48
+	OpListOffsetsResponse uint16 = 49
+	OpError               uint16 = 0xFFFF
 
 	nullLen = 0xFFFFFFFF
 )
@@ -474,6 +476,28 @@ type AuthRequest struct {
 // AuthResponse is the Auth reply (opcode 31).
 type AuthResponse struct {
 	ErrorCode uint16
+}
+
+// OffsetListing is one partition earliest/latest pair from ListOffsets
+// (Phase 15 / v0.50).
+type OffsetListing struct {
+	Partition uint32
+	Earliest  uint64
+	Latest    uint64
+}
+
+// ListOffsetsRequest is the ListOffsets opcode (48) body.
+// Empty Partitions means all partitions of the topic.
+type ListOffsetsRequest struct {
+	Topic      string
+	Partitions []uint32
+}
+
+// ListOffsetsResponse is the ListOffsets reply (opcode 49).
+type ListOffsetsResponse struct {
+	ErrorCode uint16
+	Topic     string
+	Entries   []OffsetListing
 }
 
 func EncodeProduceRequest(req ProduceRequest) ([]byte, error) {
@@ -1473,6 +1497,93 @@ func DecodeAuthResponse(payload []byte) (AuthResponse, error) {
 	return AuthResponse{ErrorCode: code}, nil
 }
 
+func EncodeListOffsetsRequest(req ListOffsetsRequest) ([]byte, error) {
+	w := &writer{}
+	if err := putString(w, req.Topic); err != nil {
+		return nil, err
+	}
+	parts := req.Partitions
+	if parts == nil {
+		parts = []uint32{}
+	}
+	w.u32(uint32(len(parts)))
+	for _, p := range parts {
+		w.u32(p)
+	}
+	return w.buf, nil
+}
+
+func DecodeListOffsetsRequest(payload []byte) (ListOffsetsRequest, error) {
+	r := &reader{data: payload}
+	topic, err := getString(r)
+	if err != nil {
+		return ListOffsetsRequest{}, err
+	}
+	n, err := r.u32()
+	if err != nil {
+		return ListOffsetsRequest{}, err
+	}
+	parts := make([]uint32, 0, n)
+	for i := uint32(0); i < n; i++ {
+		p, err := r.u32()
+		if err != nil {
+			return ListOffsetsRequest{}, err
+		}
+		parts = append(parts, p)
+	}
+	return ListOffsetsRequest{Topic: topic, Partitions: parts}, nil
+}
+
+func EncodeListOffsetsResponse(resp ListOffsetsResponse) ([]byte, error) {
+	w := &writer{}
+	w.u16(resp.ErrorCode)
+	if err := putString(w, resp.Topic); err != nil {
+		return nil, err
+	}
+	w.u32(uint32(len(resp.Entries)))
+	for _, e := range resp.Entries {
+		w.u32(e.Partition)
+		w.u64(e.Earliest)
+		w.u64(e.Latest)
+	}
+	return w.buf, nil
+}
+
+func DecodeListOffsetsResponse(payload []byte) (ListOffsetsResponse, error) {
+	r := &reader{data: payload}
+	code, err := r.u16()
+	if err != nil {
+		return ListOffsetsResponse{}, err
+	}
+	topic, err := getString(r)
+	if err != nil {
+		return ListOffsetsResponse{}, err
+	}
+	n, err := r.u32()
+	if err != nil {
+		return ListOffsetsResponse{}, err
+	}
+	entries := make([]OffsetListing, 0, n)
+	for i := uint32(0); i < n; i++ {
+		part, err := r.u32()
+		if err != nil {
+			return ListOffsetsResponse{}, err
+		}
+		earliest, err := r.u64()
+		if err != nil {
+			return ListOffsetsResponse{}, err
+		}
+		latest, err := r.u64()
+		if err != nil {
+			return ListOffsetsResponse{}, err
+		}
+		entries = append(entries, OffsetListing{
+			Partition: part, Earliest: earliest, Latest: latest,
+		})
+	}
+	return ListOffsetsResponse{ErrorCode: code, Topic: topic, Entries: entries}, nil
+}
+
 func EncodeErrorResponse(resp ErrorResponse) ([]byte, error) {
 	w := &writer{}
 	w.u16(resp.Code)
@@ -1520,6 +1631,8 @@ func DecodeResponse(opcode uint16, payload []byte) (any, error) {
 		return DecodeLeaveGroupResponse(payload)
 	case OpAuthResponse:
 		return DecodeAuthResponse(payload)
+	case OpListOffsetsResponse:
+		return DecodeListOffsetsResponse(payload)
 	case OpError:
 		return DecodeErrorResponse(payload)
 	default:

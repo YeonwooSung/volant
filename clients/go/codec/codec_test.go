@@ -912,3 +912,92 @@ func TestAuthResponseOkAndFailed(t *testing.T) {
 		t.Fatalf("dispatch fail %#v", got)
 	}
 }
+
+func TestListOffsetsRequestPayloadRS(t *testing.T) {
+	// crates/volant-protocol/src/payload.rs
+	// phase15_create_partitions_list_offsets_roundtrip
+	req := ListOffsetsRequest{Topic: "events", Partitions: []uint32{0, 1}}
+	raw, err := EncodeListOffsetsRequest(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	expected := mustHex(t, "0600"+"6576656e7473"+"02000000"+"00000000"+"01000000")
+	if !bytes.Equal(raw, expected) {
+		t.Fatalf("encode:\n got %x\nwant %x", raw, expected)
+	}
+	decoded, err := DecodeListOffsetsRequest(raw)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if decoded.Topic != "events" || len(decoded.Partitions) != 2 || decoded.Partitions[0] != 0 || decoded.Partitions[1] != 1 {
+		t.Fatalf("decoded %+v", decoded)
+	}
+}
+
+func TestListOffsetsRequestEmptyPartitions(t *testing.T) {
+	req := ListOffsetsRequest{Topic: "events", Partitions: []uint32{}}
+	raw, err := EncodeListOffsetsRequest(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	expected := mustHex(t, "06006576656e7473"+"00000000")
+	if !bytes.Equal(raw, expected) {
+		t.Fatalf("encode:\n got %x\nwant %x", raw, expected)
+	}
+	decoded, err := DecodeListOffsetsRequest(raw)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if decoded.Topic != "events" || len(decoded.Partitions) != 0 {
+		t.Fatalf("decoded %+v", decoded)
+	}
+}
+
+func TestListOffsetsResponsePayloadRS(t *testing.T) {
+	resp := ListOffsetsResponse{
+		ErrorCode: 0,
+		Topic:     "events",
+		Entries: []OffsetListing{
+			{Partition: 0, Earliest: 0, Latest: 10},
+			{Partition: 1, Earliest: 2, Latest: 5},
+		},
+	}
+	raw, err := EncodeListOffsetsResponse(resp)
+	if err != nil {
+		t.Fatal(err)
+	}
+	expected := mustHex(t,
+		"0000"+
+			"06006576656e7473"+
+			"02000000"+
+			"00000000"+
+			"0000000000000000"+
+			"0a00000000000000"+
+			"01000000"+
+			"0200000000000000"+
+			"0500000000000000",
+	)
+	if !bytes.Equal(raw, expected) {
+		t.Fatalf("encode:\n got %x\nwant %x", raw, expected)
+	}
+	decoded, err := DecodeListOffsetsResponse(raw)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if decoded.ErrorCode != 0 || decoded.Topic != "events" || len(decoded.Entries) != 2 {
+		t.Fatalf("decoded %+v", decoded)
+	}
+	if decoded.Entries[0] != (OffsetListing{Partition: 0, Earliest: 0, Latest: 10}) {
+		t.Fatalf("entry0 %+v", decoded.Entries[0])
+	}
+	if decoded.Entries[1] != (OffsetListing{Partition: 1, Earliest: 2, Latest: 5}) {
+		t.Fatalf("entry1 %+v", decoded.Entries[1])
+	}
+	got, err := DecodeResponse(OpListOffsetsResponse, raw)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if lr, ok := got.(ListOffsetsResponse); !ok || lr.Entries[1].Latest != 5 {
+		t.Fatalf("dispatch %#v", got)
+	}
+}

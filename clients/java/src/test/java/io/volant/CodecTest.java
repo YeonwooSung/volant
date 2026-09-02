@@ -589,4 +589,55 @@ class CodecTest {
                 assertInstanceOf(Codec.AuthResponse.class, Codec.decodeResponse(Codec.OP_AUTH_RESPONSE, fail));
         assertEquals(17, dispatchedFail.errorCode);
     }
+
+    @Test
+    void listOffsetsRequestPayloadRsFixture() {
+        // crates/volant-protocol/src/payload.rs
+        // phase15_create_partitions_list_offsets_roundtrip
+        Codec.ListOffsetsRequest req = new Codec.ListOffsetsRequest("events", Arrays.asList(0, 1));
+        byte[] raw = Codec.encodeListOffsetsRequest(req);
+        assertArrayEquals(hx("0600" + "6576656e7473" + "02000000" + "00000000" + "01000000"), raw);
+        Codec.ListOffsetsRequest decoded = Codec.decodeListOffsetsRequest(raw);
+        assertEquals("events", decoded.topic);
+        assertEquals(Arrays.asList(0, 1), decoded.partitions);
+    }
+
+    @Test
+    void listOffsetsRequestEmptyPartitions() {
+        Codec.ListOffsetsRequest req = new Codec.ListOffsetsRequest("events", Collections.emptyList());
+        byte[] raw = Codec.encodeListOffsetsRequest(req);
+        assertArrayEquals(hx("06006576656e7473" + "00000000"), raw);
+        Codec.ListOffsetsRequest decoded = Codec.decodeListOffsetsRequest(raw);
+        assertEquals("events", decoded.topic);
+        assertTrue(decoded.partitions.isEmpty());
+    }
+
+    @Test
+    void listOffsetsResponsePayloadRsFixture() {
+        Codec.ListOffsetsResponse resp = new Codec.ListOffsetsResponse(
+                0,
+                "events",
+                Arrays.asList(new OffsetListing(0, 0, 10), new OffsetListing(1, 2, 5)));
+        byte[] raw = Codec.encodeListOffsetsResponse(resp);
+        byte[] expected = hx(
+                "0000"
+                        + "06006576656e7473"
+                        + "02000000"
+                        + "00000000"
+                        + "0000000000000000"
+                        + "0a00000000000000"
+                        + "01000000"
+                        + "0200000000000000"
+                        + "0500000000000000");
+        assertArrayEquals(expected, raw);
+        Codec.ListOffsetsResponse decoded = Codec.decodeListOffsetsResponse(raw);
+        assertEquals(0, decoded.errorCode);
+        assertEquals("events", decoded.topic);
+        assertEquals(2, decoded.entries.size());
+        assertEquals(new OffsetListing(0, 0, 10), decoded.entries.get(0));
+        assertEquals(new OffsetListing(1, 2, 5), decoded.entries.get(1));
+        Object got = Codec.decodeResponse(Codec.OP_LIST_OFFSETS_RESPONSE, raw);
+        Codec.ListOffsetsResponse dispatched = assertInstanceOf(Codec.ListOffsetsResponse.class, got);
+        assertEquals(5, dispatched.entries.get(1).latest);
+    }
 }
