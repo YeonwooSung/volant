@@ -1,4 +1,4 @@
-//! v0.67: Rust GroupConsumer auto_offset_reset.
+//! v0.67 / v0.71: Rust GroupConsumer auto_offset_reset.
 
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -264,26 +264,38 @@ fn pos(g: &GroupConsumer, topic: &str, partition: u32) -> Option<u64> {
 }
 
 #[tokio::test]
-async fn default_join_offset_fetch_miss_is_zero_without_list_offsets() {
+async fn default_join_offset_fetch_miss_uses_list_offsets_earliest() {
     let stub = GroupStub::boot().await;
+    stub.set_list_offset("t", 0, 0, 0);
     let client = connect(&stub).await;
     let g = GroupConsumer::join_with_heartbeat(client, "g", vec!["t".into()], 10_000, false)
         .await
         .expect("join");
     assert_eq!(g.auto_offset_reset(), "earliest");
     assert_eq!(pos(&g, "t", 0), Some(0));
-    assert!(stub.list_offsets_calls().is_empty());
+    assert_eq!(stub.list_offsets_calls(), vec![("t".into(), vec![0])]);
     assert_eq!(stub.offset_fetch_count(), 1);
+    g.leave().await.expect("leave");
+}
+
+#[tokio::test]
+async fn earliest_unknown_uses_list_offsets_earliest() {
+    let stub = GroupStub::boot().await;
+    stub.set_list_offset("t", 0, 7, 20);
+    let g = join_reset(&stub, "earliest").await.expect("join");
+    assert_eq!(g.auto_offset_reset(), "earliest");
+    assert_eq!(pos(&g, "t", 0), Some(7));
+    assert_eq!(stub.list_offsets_calls(), vec![("t".into(), vec![0])]);
     g.leave().await.expect("leave");
 }
 
 #[tokio::test]
 async fn latest_unknown_uses_list_offsets_leo() {
     let stub = GroupStub::boot().await;
-    stub.set_list_offset("t", 0, 0, 5);
+    stub.set_list_offset("t", 0, 7, 20);
     let g = join_reset(&stub, "latest").await.expect("join");
     assert_eq!(g.auto_offset_reset(), "latest");
-    assert_eq!(pos(&g, "t", 0), Some(5));
+    assert_eq!(pos(&g, "t", 0), Some(20));
     assert_eq!(stub.list_offsets_calls(), vec![("t".into(), vec![0])]);
     g.leave().await.expect("leave");
 }
@@ -295,6 +307,17 @@ async fn latest_offset_unknown_sentinel_uses_list_offsets() {
     stub.set_list_offset("t", 0, 0, 5);
     let g = join_reset(&stub, "latest").await.expect("join");
     assert_eq!(pos(&g, "t", 0), Some(5));
+    assert_eq!(stub.list_offsets_calls(), vec![("t".into(), vec![0])]);
+    g.leave().await.expect("leave");
+}
+
+#[tokio::test]
+async fn earliest_offset_unknown_sentinel_uses_list_offsets() {
+    let stub = GroupStub::boot().await;
+    stub.set_committed("t", 0, OFFSET_UNKNOWN);
+    stub.set_list_offset("t", 0, 7, 20);
+    let g = join_reset(&stub, "earliest").await.expect("join");
+    assert_eq!(pos(&g, "t", 0), Some(7));
     assert_eq!(stub.list_offsets_calls(), vec![("t".into(), vec![0])]);
     g.leave().await.expect("leave");
 }
@@ -353,10 +376,35 @@ async fn latest_list_offsets_missing_partition_errors() {
 }
 
 #[tokio::test]
+async fn earliest_list_offsets_missing_partition_errors() {
+    let stub = GroupStub::boot().await;
+    let err = join_reset(&stub, "earliest")
+        .await
+        .expect_err("missing partition");
+    assert!(
+        err.to_string().contains("list_offsets missing partition"),
+        "err={err}"
+    );
+    assert_eq!(stub.list_offsets_calls(), vec![("t".into(), vec![0])]);
+}
+
+#[tokio::test]
 async fn latest_empty_assignment_skips_list_offsets() {
     let stub = GroupStub::boot().await;
     stub.set_assignment(vec![]);
     let g = join_reset(&stub, "latest").await.expect("join");
+    assert!(g.positions().is_empty());
+    assert!(g.assignment().is_empty());
+    assert!(stub.list_offsets_calls().is_empty());
+    assert_eq!(stub.offset_fetch_count(), 0);
+    g.leave().await.expect("leave");
+}
+
+#[tokio::test]
+async fn earliest_empty_assignment_skips_list_offsets() {
+    let stub = GroupStub::boot().await;
+    stub.set_assignment(vec![]);
+    let g = join_reset(&stub, "earliest").await.expect("join");
     assert!(g.positions().is_empty());
     assert!(g.assignment().is_empty());
     assert!(stub.list_offsets_calls().is_empty());
