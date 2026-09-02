@@ -83,7 +83,7 @@ pub fn delete_records_fanout_budget() -> Duration {
 /// Bounded by [`inter_broker_rpc_timeout`] (default **5s**) so a black-holed
 /// peer cannot stall client paths that await fan-out.
 pub async fn inter_broker_rpc(broker: &Broker, addr: &str, req: &Request) -> Result<Response> {
-    if broker.test_inter_broker_blocked() {
+    if broker.test_inter_broker_blocked() || broker.test_inter_broker_blocked_to(addr) {
         return Err(Error::Protocol("inter-broker rpc blocked".into()));
     }
     inter_broker_rpc_owned(addr, req, broker.auth_token(), broker.inter_broker_tls()).await

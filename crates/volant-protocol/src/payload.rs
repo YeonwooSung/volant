@@ -4247,6 +4247,18 @@ mod tests {
                     }
                 }
             }
+            // v0.15: membership/txn seeds also replay through opcode LE + payload.
+            let ext = root.join("fuzz/corpus/decode_extended");
+            if let Ok(entries) = std::fs::read_dir(&ext) {
+                for ent in entries.flatten() {
+                    let path = ent.path();
+                    if path.is_file() {
+                        if let Ok(bytes) = std::fs::read(&path) {
+                            request_seeds.push(bytes);
+                        }
+                    }
+                }
+            }
         }
 
         assert!(
@@ -4265,6 +4277,110 @@ mod tests {
         let huge = vec![0u8; MAX_PAYLOAD + 1];
         assert!(decode_request(1, &huge).is_err());
         assert!(decode_response(1, &huge).is_err());
+    }
+
+    /// v0.15: replay membership (100–107) + txn (32/50/52) seeds the same way
+    /// as `fuzz/fuzz_targets/decode_extended.rs`. No nightly / cargo-fuzz.
+    #[test]
+    fn corpus_smoke_extended() {
+        use std::path::PathBuf;
+
+        const FOCUS: &[u16] = &[32, 50, 52, 100, 101, 102, 103, 104, 105, 106, 107];
+
+        fn smoke_extended(data: &[u8]) {
+            if !data.is_empty() {
+                let op = FOCUS[(data[0] as usize) % FOCUS.len()];
+                let payload = &data[1..];
+                let _ = decode_request(op, payload);
+                let _ = decode_response(op, payload);
+            }
+            if data.len() >= 2 {
+                let opcode = u16::from_le_bytes([data[0], data[1]]);
+                let payload = &data[2..];
+                let _ = decode_request(opcode, payload);
+                let _ = decode_response(opcode, payload);
+            } else if data.len() == 1 {
+                let opcode = u16::from_le_bytes([data[0], 0]);
+                let _ = decode_request(opcode, &[]);
+                let _ = decode_response(opcode, &[]);
+            }
+        }
+
+        let mut seeds: Vec<Vec<u8>> = vec![
+            vec![],
+            vec![0x64],
+            32u16.to_le_bytes().to_vec(),
+            50u16.to_le_bytes().to_vec(),
+            52u16.to_le_bytes().to_vec(),
+            100u16.to_le_bytes().to_vec(),
+            102u16.to_le_bytes().to_vec(),
+            104u16.to_le_bytes().to_vec(),
+            106u16.to_le_bytes().to_vec(),
+            {
+                let mut v = 32u16.to_le_bytes().to_vec();
+                v.extend_from_slice(&5u16.to_le_bytes());
+                v.extend_from_slice(b"txn-1");
+                v
+            },
+            {
+                let mut v = 50u16.to_le_bytes().to_vec();
+                v.extend_from_slice(&7u64.to_le_bytes());
+                v.extend_from_slice(&1u16.to_le_bytes());
+                v
+            },
+            {
+                let mut v = 52u16.to_le_bytes().to_vec();
+                v.extend_from_slice(&7u64.to_le_bytes());
+                v.extend_from_slice(&1u16.to_le_bytes());
+                v.push(1);
+                v.extend_from_slice(&0u32.to_le_bytes());
+                v
+            },
+            {
+                // MembershipPut gen=1, one broker, truncated host
+                let mut v = 100u16.to_le_bytes().to_vec();
+                v.extend_from_slice(&1u64.to_le_bytes());
+                v.extend_from_slice(&1u32.to_le_bytes());
+                v.extend_from_slice(&1u32.to_le_bytes());
+                v.extend_from_slice(&0xFFFFu16.to_le_bytes());
+                v.push(b'x');
+                v
+            },
+            vec![0xff; 64],
+            vec![0u8; 256],
+        ];
+
+        let workspace = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("../..")
+            .canonicalize()
+            .ok();
+        if let Some(root) = workspace {
+            let dir = root.join("fuzz/corpus/decode_extended");
+            if let Ok(entries) = std::fs::read_dir(&dir) {
+                for ent in entries.flatten() {
+                    let path = ent.path();
+                    if path.is_file() {
+                        if let Ok(bytes) = std::fs::read(&path) {
+                            seeds.push(bytes);
+                        }
+                    }
+                }
+            }
+        }
+
+        assert!(!seeds.is_empty(), "extended corpus smoke requires seeds");
+        for seed in &seeds {
+            smoke_extended(seed);
+        }
+        for op in FOCUS {
+            let _ = decode_request(*op, &[]);
+            let _ = decode_request(*op, &[0xff; 16]);
+            let _ = decode_response(*op, &[]);
+            let _ = decode_response(*op, &[0xff; 16]);
+        }
+        let huge = vec![0u8; MAX_PAYLOAD + 1];
+        assert!(decode_request(100, &huge).is_err());
+        assert!(decode_response(101, &huge).is_err());
     }
 
     #[test]

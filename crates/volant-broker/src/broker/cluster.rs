@@ -1022,6 +1022,29 @@ impl Broker {
             .load(std::sync::atomic::Ordering::Relaxed)
     }
 
+    /// Block outbound inter-broker RPC to `peer_id` only (asymmetric isolate).
+    ///
+    /// Reverse direction and other peers stay open. Default is unblocked.
+    pub fn test_block_inter_broker_peer(&self, peer_id: u32, blocked: bool) {
+        let mut set = self.inter_broker_blocked_peers.write();
+        if blocked {
+            set.insert(peer_id);
+        } else {
+            set.remove(&peer_id);
+        }
+    }
+
+    /// Whether outbound RPC to `addr` is dest-blocked (test hook).
+    pub fn test_inter_broker_blocked_to(&self, addr: &str) -> bool {
+        let peers = self.inter_broker_blocked_peers.read();
+        if peers.is_empty() {
+            return false;
+        }
+        peers
+            .iter()
+            .any(|id| self.broker_addr(*id).as_deref() == Some(addr))
+    }
+
     /// Force-set follower LEO and recompute HWM (unit tests).
     ///
     /// Also stamps last-caught-up when lag ≤ `replica_lag_max_messages` so Phase

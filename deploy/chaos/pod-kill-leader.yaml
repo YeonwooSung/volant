@@ -1,0 +1,29 @@
+# Chaos Mesh: kill one broker pod (lowest-id controller / typical p0 leader).
+#
+# Matches deploy/helm/volant labels. Default release name `volant` → pods
+# `volant-0` (node-id 1), `volant-1` (2), `volant-2` (3).
+# `volant-0` is the lowest-id controller, not a guaranteed partition leader
+# after failover. Retarget `spec.selector.pods` if the leader has moved.
+#
+# Not applied by GitHub Actions. See README.md.
+apiVersion: chaos-mesh.org/v1alpha1
+kind: PodChaos
+metadata:
+  name: volant-pod-kill-leader
+  labels:
+    app.kubernetes.io/name: volant
+    app.kubernetes.io/instance: volant
+    app.kubernetes.io/part-of: volant
+spec:
+  action: pod-kill
+  mode: one
+  gracePeriod: 0
+  selector:
+    namespaces:
+      - default
+    labelSelectors:
+      app.kubernetes.io/name: volant
+      app.kubernetes.io/instance: volant
+    pods:
+      default:
+        - volant-0

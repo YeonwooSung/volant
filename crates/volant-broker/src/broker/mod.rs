@@ -633,6 +633,8 @@ pub struct Broker {
     metadata_raft_enabled: AtomicBool,
     /// Test hook: when true, outbound inter-broker RPC fails without connecting.
     inter_broker_blocked: AtomicBool,
+    /// Test hook: dest peer ids whose outbound RPC fails (asymmetric isolate).
+    inter_broker_blocked_peers: RwLock<HashSet<u32>>,
 }
 
 /// One pending leader→controller ISR report (Phase 142).
@@ -862,6 +864,7 @@ impl Broker {
             // metadata raft default off (cluster and single-node).
             metadata_raft_enabled: AtomicBool::new(default_metadata_raft_enabled(false)),
             inter_broker_blocked: AtomicBool::new(false),
+            inter_broker_blocked_peers: RwLock::new(HashSet::new()),
         };
         broker
             .reload_single_node_topics()
@@ -1040,6 +1043,7 @@ impl Broker {
             metadata_raft,
             metadata_raft_enabled: AtomicBool::new(default_metadata_raft_enabled(true)),
             inter_broker_blocked: AtomicBool::new(false),
+            inter_broker_blocked_peers: RwLock::new(HashSet::new()),
         };
         // Open local partitions from persisted assignment.
         broker.apply_local_assignment()?;

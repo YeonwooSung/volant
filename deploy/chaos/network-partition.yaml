@@ -1,0 +1,43 @@
+# Chaos Mesh: asymmetric / partial mesh — drop A→B only.
+#
+# `direction: to` + one-pod target: packets from `volant-0` (A, node 1) to
+# `volant-1` (B, node 2) are dropped. B→A and C (volant-2) stay open.
+# This is the operator-side counterpart of the in-process v0.15 isolate test.
+#
+# Matches deploy/helm/volant labels. Edit namespace / instance / pod names
+# if the Helm release is not `volant` in `default`.
+#
+# Not applied by GitHub Actions. See README.md.
+apiVersion: chaos-mesh.org/v1alpha1
+kind: NetworkChaos
+metadata:
+  name: volant-network-partition
+  labels:
+    app.kubernetes.io/name: volant
+    app.kubernetes.io/instance: volant
+    app.kubernetes.io/part-of: volant
+spec:
+  action: partition
+  mode: one
+  direction: to
+  duration: 60s
+  selector:
+    namespaces:
+      - default
+    labelSelectors:
+      app.kubernetes.io/name: volant
+      app.kubernetes.io/instance: volant
+    pods:
+      default:
+        - volant-0
+  target:
+    mode: one
+    selector:
+      namespaces:
+        - default
+      labelSelectors:
+        app.kubernetes.io/name: volant
+        app.kubernetes.io/instance: volant
+      pods:
+        default:
+          - volant-1
