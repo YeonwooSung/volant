@@ -36,6 +36,10 @@
 //! v0.84 retries [`Client::list_offsets`] on that same transient set
 //! (default 0). Error 2 (NotFound) is not retried. GroupConsumer
 //! earliest/latest reset inherit.
+//! v0.88 redirects SCRAM-admin (`create_scram_user` /
+//! `delete_scram_user` / `list_scram_users`) and `list_acls` on error
+//! **14** using the same `redirect_to_controller` / `max_redirects`
+//! budget as v0.79.
 
 #![deny(missing_docs)]
 

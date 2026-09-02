@@ -371,7 +371,7 @@ impl Client {
         iterations: u32,
     ) -> Result<()> {
         let resp = self
-            .round_trip(Request::CreateScramUser {
+            .admin_round_trip(Request::CreateScramUser {
                 username: username.to_owned(),
                 password: password.to_owned(),
                 iterations,
@@ -393,7 +393,7 @@ impl Client {
     /// Delete a SCRAM user (Phase 22).
     pub async fn delete_scram_user(&self, username: &str) -> Result<()> {
         let resp = self
-            .round_trip(Request::DeleteScramUser {
+            .admin_round_trip(Request::DeleteScramUser {
                 username: username.to_owned(),
             })
             .await?;
@@ -412,7 +412,7 @@ impl Client {
 
     /// List SCRAM usernames (Phase 22).
     pub async fn list_scram_users(&self) -> Result<Vec<String>> {
-        let resp = self.round_trip(Request::ListScramUsers).await?;
+        let resp = self.admin_round_trip(Request::ListScramUsers).await?;
         match resp {
             Response::ListScramUsers {
                 error_code,
@@ -1211,6 +1211,10 @@ impl Client {
                 | Response::ReassignPartitions { error_code, .. }
                 | Response::CreateAcls { error_code }
                 | Response::DeleteAcls { error_code, .. }
+                | Response::CreateScramUser { error_code }
+                | Response::DeleteScramUser { error_code }
+                | Response::ListScramUsers { error_code, .. }
+                | Response::ListAcls { error_code, .. }
                     if *error_code == ErrorCode::NotController as u16 =>
                 {
                     (true, None)
@@ -1478,7 +1482,7 @@ impl Client {
         resource: &str,
     ) -> Result<Vec<volant_protocol::AclBinding>> {
         let resp = self
-            .round_trip(Request::ListAcls {
+            .admin_round_trip(Request::ListAcls {
                 principal: principal.to_owned(),
                 resource_type,
                 resource: resource.to_owned(),
