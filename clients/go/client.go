@@ -381,13 +381,20 @@ func (c *Client) Produce(topic string, partition int, key, value []byte) (int64,
 // Fetch reads records from topic/partition starting at offset.
 // Defaults match the Python client: max_messages=128, max_bytes=4MiB, max_wait_ms=0.
 func (c *Client) Fetch(topic string, partition int, offset int64) ([]Record, error) {
+	return c.fetchAt(topic, partition, offset, 128, 0)
+}
+
+func (c *Client) fetchAt(topic string, partition int, offset int64, maxMessages, maxWaitMs uint32) ([]Record, error) {
+	if maxMessages == 0 {
+		maxMessages = 128
+	}
 	payload, err := codec.EncodeFetchRequest(codec.FetchRequest{
 		Topic:       topic,
 		Partition:   uint32(partition),
 		FromOffset:  uint64(offset),
-		MaxMessages: 128,
+		MaxMessages: maxMessages,
 		MaxBytes:    4 * 1024 * 1024,
-		MaxWaitMs:   0,
+		MaxWaitMs:   maxWaitMs,
 	})
 	if err != nil {
 		return nil, err
@@ -425,13 +432,20 @@ func (c *Client) Metadata() (Metadata, error) {
 
 // OffsetCommit commits one group offset (admin path: empty member, generation 0).
 func (c *Client) OffsetCommit(group, topic string, partition int, offset int64) error {
+	return c.commitOffsets(group, "", 0, []codec.OffsetCommitEntry{
+		{Topic: topic, Partition: uint32(partition), Offset: uint64(offset), Metadata: ""},
+	})
+}
+
+func (c *Client) commitOffsets(group, memberID string, generation uint32, entries []codec.OffsetCommitEntry) error {
+	if entries == nil {
+		entries = []codec.OffsetCommitEntry{}
+	}
 	payload, err := codec.EncodeOffsetCommitRequest(codec.OffsetCommitRequest{
 		GroupID:    group,
-		MemberID:   "",
-		Generation: 0,
-		Entries: []codec.OffsetCommitEntry{
-			{Topic: topic, Partition: uint32(partition), Offset: uint64(offset), Metadata: ""},
-		},
+		MemberID:   memberID,
+		Generation: generation,
+		Entries:    entries,
 	})
 	if err != nil {
 		return err
@@ -451,9 +465,26 @@ func (c *Client) OffsetCommit(group, topic string, partition int, offset int64) 
 // Empty wire entries mean all offsets for the group; this method filters
 // to topic client-side (same as the CLI).
 func (c *Client) OffsetFetch(group, topic string) ([]Offset, error) {
+	entries, err := c.fetchOffsets(group, nil)
+	if err != nil {
+		return nil, err
+	}
+	out := make([]Offset, 0, len(entries))
+	for _, e := range entries {
+		if e.Topic == topic {
+			out = append(out, Offset{Partition: e.Partition, Offset: e.Offset})
+		}
+	}
+	return out, nil
+}
+
+func (c *Client) fetchOffsets(group string, entries []codec.OffsetEntry) ([]codec.OffsetFetchEntry, error) {
+	if entries == nil {
+		entries = []codec.OffsetEntry{}
+	}
 	payload, err := codec.EncodeOffsetFetchRequest(codec.OffsetFetchRequest{
 		GroupID: group,
-		Entries: []codec.OffsetEntry{},
+		Entries: entries,
 	})
 	if err != nil {
 		return nil, err
@@ -469,18 +500,16 @@ func (c *Client) OffsetFetch(group, topic string) ([]Offset, error) {
 	if err := check(resp.ErrorCode, "offset_fetch"); err != nil {
 		return nil, err
 	}
-	out := make([]Offset, 0, len(resp.Entries))
-	for _, e := range resp.Entries {
-		if e.Topic == topic {
-			out = append(out, Offset{Partition: e.Partition, Offset: e.Offset})
-		}
-	}
-	return out, nil
+	return resp.Entries, nil
 }
 
 // JoinGroup joins a consumer group. First join sends empty member_id
 // (broker assigns one). sessionTimeoutMs 0 defaults to 10000.
 func (c *Client) JoinGroup(group string, topics []string, sessionTimeoutMs int) (JoinGroupResult, error) {
+	return c.joinGroup(group, "", topics, sessionTimeoutMs, "")
+}
+
+func (c *Client) joinGroup(group, memberID string, topics []string, sessionTimeoutMs int, instanceID string) (JoinGroupResult, error) {
 	timeout := uint32(sessionTimeoutMs)
 	if timeout == 0 {
 		timeout = 10_000
@@ -490,10 +519,10 @@ func (c *Client) JoinGroup(group string, topics []string, sessionTimeoutMs int) 
 	}
 	payload, err := codec.EncodeJoinGroupRequest(codec.JoinGroupRequest{
 		GroupID:          group,
-		MemberID:         "",
+		MemberID:         memberID,
 		SessionTimeoutMs: timeout,
 		Topics:           topics,
-		GroupInstanceID:  "",
+		GroupInstanceID:  instanceID,
 	})
 	if err != nil {
 		return JoinGroupResult{}, err
