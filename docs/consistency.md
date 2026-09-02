@@ -85,6 +85,9 @@ are **owned by one broker** and **durable under** `{data_dir}/__fetch_sessions`
 **Phase 119:** cluster session_ids encode the owner; a non-owner that receives
 an incremental Fetch transparent-forwards to the owner (single SoT for epoch /
 omit cache). Unreachable owner ⇒ **70**. Not a replicated session table.
+**v0.25:** unclaimed dual-primary (two peers serving the same session id without
+a promote claim) converges best-effort on MirrorPut — not a Raft session
+registry; Phase 147 serve-from-mirror on a single owner-miss is unchanged.
 **Phase 126:** Fetch PreferredReadReplica (KIP-392 subset) may redirect reads to
 a same-rack ISR follower when LEO ≥ HWM; not a shared session store / not full
 Kafka preferred selector.
