@@ -15,24 +15,30 @@ const notLeader = 13
 const timeoutCode uint16 = 7
 
 type scriptedBroker struct {
-	mu             sync.Mutex
-	produceCodes   []uint16
-	fetchCodes     []uint16
-	heartbeatCodes []uint16
-	meta           codec.MetadataResponse
-	opcodes        []uint16
-	produceReqs    []codec.ProduceRequest
-	fetchReqs      []codec.FetchRequest
-	initTxnIDs     []string
-	initCount      int
-	produceCount   int
-	fetchCount     int
-	heartbeatCount int
-	metadataCount  int
-	acceptCount    int
-	initPID        uint64
-	initEpoch      uint16
-	ln             net.Listener
+	mu                 sync.Mutex
+	produceCodes       []uint16
+	fetchCodes         []uint16
+	heartbeatCodes     []uint16
+	offsetCommitCodes  []uint16
+	offsetFetchCodes   []uint16
+	deleteOffsetsCodes []uint16
+	meta               codec.MetadataResponse
+	opcodes            []uint16
+	produceReqs        []codec.ProduceRequest
+	fetchReqs          []codec.FetchRequest
+	initTxnIDs         []string
+	initCount          int
+	produceCount       int
+	fetchCount         int
+	heartbeatCount     int
+	offsetCommitCount  int
+	offsetFetchCount   int
+	deleteOffsetsCount int
+	metadataCount      int
+	acceptCount        int
+	initPID            uint64
+	initEpoch          uint16
+	ln                 net.Listener
 }
 
 func startScripted(t *testing.T, s *scriptedBroker) (addr string, stop func()) {
@@ -85,6 +91,24 @@ func (s *scriptedBroker) heartbeats() int {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	return s.heartbeatCount
+}
+
+func (s *scriptedBroker) offsetCommits() int {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.offsetCommitCount
+}
+
+func (s *scriptedBroker) offsetFetches() int {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.offsetFetchCount
+}
+
+func (s *scriptedBroker) deleteOffsets() int {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.deleteOffsetsCount
 }
 
 func (s *scriptedBroker) inits() int {
@@ -224,6 +248,31 @@ func (s *scriptedBroker) handle(f *frame.Frame) ([]byte, error) {
 			s.heartbeatCodes = s.heartbeatCodes[1:]
 		}
 		payload, err = codec.EncodeHeartbeatResponse(codec.HeartbeatResponse{ErrorCode: code})
+	case codec.OpOffsetCommit:
+		s.offsetCommitCount++
+		code := uint16(0)
+		if len(s.offsetCommitCodes) > 0 {
+			code = s.offsetCommitCodes[0]
+			s.offsetCommitCodes = s.offsetCommitCodes[1:]
+		}
+		payload, err = codec.EncodeOffsetCommitResponse(codec.OffsetCommitResponse{ErrorCode: code})
+	case codec.OpOffsetFetch:
+		s.offsetFetchCount++
+		code := uint16(0)
+		if len(s.offsetFetchCodes) > 0 {
+			code = s.offsetFetchCodes[0]
+			s.offsetFetchCodes = s.offsetFetchCodes[1:]
+		}
+		payload, err = codec.EncodeOffsetFetchResponse(codec.OffsetFetchResponse{ErrorCode: code})
+	case codec.OpDeleteOffsets:
+		s.deleteOffsetsCount++
+		code := uint16(0)
+		if len(s.deleteOffsetsCodes) > 0 {
+			code = s.deleteOffsetsCodes[0]
+			s.deleteOffsetsCodes = s.deleteOffsetsCodes[1:]
+		}
+		payload, err = codec.EncodeDeleteOffsetsResponse(codec.DeleteOffsetsResponse{ErrorCode: code})
+		replyOp = codec.OpDeleteOffsetsResponse
 	case codec.OpMetadata:
 		s.metadataCount++
 		payload, err = codec.EncodeMetadataResponse(s.meta)
@@ -1082,6 +1131,155 @@ func TestHeartbeatExhaustedRetriesRaises(t *testing.T) {
 	}
 	if n := srv.heartbeats(); n != 3 {
 		t.Fatalf("heartbeat count %d want 3", n)
+	}
+}
+
+const notFoundCode uint16 = 2
+
+func TestOffsetCommitDefaultMaxRetriesZeroRaisesOnTimeout(t *testing.T) {
+	srv := &scriptedBroker{offsetCommitCodes: []uint16{timeoutCode}}
+	addr, stop := startScripted(t, srv)
+	defer stop()
+
+	c, err := volant.DialTimeout(addr, 5*time.Second)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer c.Close()
+
+	err = c.OffsetCommit("g", "t", 0, 5)
+	if err == nil {
+		t.Fatal("expected BrokerError 7")
+	}
+	be, ok := err.(*volant.BrokerError)
+	if !ok || be.Code != timeoutCode {
+		t.Fatalf("got %v want BrokerError code=7", err)
+	}
+	if n := srv.offsetCommits(); n != 1 {
+		t.Fatalf("offset commit count %d want 1", n)
+	}
+}
+
+func TestOffsetCommitRetriesTimeoutThenOk(t *testing.T) {
+	srv := &scriptedBroker{offsetCommitCodes: []uint16{timeoutCode, 0}}
+	addr, stop := startScripted(t, srv)
+	defer stop()
+
+	c, err := volant.DialTimeout(addr, 5*time.Second)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer c.Close()
+	c.SetMaxRetries(2)
+	c.SetRetryBackoff(0)
+
+	if err := c.OffsetCommit("g", "t", 0, 5); err != nil {
+		t.Fatal(err)
+	}
+	if n := srv.offsetCommits(); n != 2 {
+		t.Fatalf("offset commit count %d want 2", n)
+	}
+}
+
+func TestOffsetFetchRetriesTimeoutThenOk(t *testing.T) {
+	srv := &scriptedBroker{offsetFetchCodes: []uint16{timeoutCode, 0}}
+	addr, stop := startScripted(t, srv)
+	defer stop()
+
+	c, err := volant.DialTimeout(addr, 5*time.Second)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer c.Close()
+	c.SetMaxRetries(2)
+	c.SetRetryBackoff(0)
+
+	offs, err := c.OffsetFetch("g", "t")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(offs) != 0 {
+		t.Fatalf("offsets %v want empty", offs)
+	}
+	if n := srv.offsetFetches(); n != 2 {
+		t.Fatalf("offset fetch count %d want 2", n)
+	}
+}
+
+func TestDeleteOffsetsRetriesTimeoutThenOk(t *testing.T) {
+	srv := &scriptedBroker{deleteOffsetsCodes: []uint16{timeoutCode, 0}}
+	addr, stop := startScripted(t, srv)
+	defer stop()
+
+	c, err := volant.DialTimeout(addr, 5*time.Second)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer c.Close()
+	c.SetMaxRetries(2)
+	c.SetRetryBackoff(0)
+
+	n, err := c.DeleteOffsets("g", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if n != 0 {
+		t.Fatalf("deleted %d want 0", n)
+	}
+	if got := srv.deleteOffsets(); got != 2 {
+		t.Fatalf("delete offsets count %d want 2", got)
+	}
+}
+
+func TestOffsetCommitNotFoundIsNotRetried(t *testing.T) {
+	srv := &scriptedBroker{offsetCommitCodes: []uint16{notFoundCode, 0}}
+	addr, stop := startScripted(t, srv)
+	defer stop()
+
+	c, err := volant.DialTimeout(addr, 5*time.Second)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer c.Close()
+	c.SetMaxRetries(2)
+	c.SetRetryBackoff(0)
+
+	err = c.OffsetCommit("g", "t", 0, 5)
+	if err == nil {
+		t.Fatal("expected BrokerError 2")
+	}
+	be, ok := err.(*volant.BrokerError)
+	if !ok || be.Code != notFoundCode {
+		t.Fatalf("got %v want BrokerError code=2", err)
+	}
+	if n := srv.offsetCommits(); n != 1 {
+		t.Fatalf("offset commit count %d want 1", n)
+	}
+}
+
+func TestOffsetCommitExhaustedRetriesRaises(t *testing.T) {
+	srv := &scriptedBroker{offsetCommitCodes: []uint16{timeoutCode, timeoutCode, timeoutCode}}
+	addr, stop := startScripted(t, srv)
+	defer stop()
+
+	c, err := volant.DialTimeout(addr, 5*time.Second)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer c.Close()
+	c.SetMaxRetries(2)
+	c.SetRetryBackoff(0)
+
+	err = c.OffsetCommit("g", "t", 0, 5)
+	if err == nil {
+		t.Fatal("expected BrokerError 7")
+	}
+	be, ok := err.(*volant.BrokerError)
+	if !ok || be.Code != timeoutCode {
+		t.Fatalf("got %v want BrokerError code=7", err)
+	}
+	if n := srv.offsetCommits(); n != 3 {
+		t.Fatalf("offset commit count %d want 3", n)
 	}
 }
 

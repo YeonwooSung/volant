@@ -23,6 +23,7 @@ class ClientTest {
     private static final int NOT_LEADER = Client.NOT_LEADER_FOR_PARTITION;
     private static final int TIMEOUT = 7;
     private static final int REBALANCE = 9;
+    private static final int NOT_FOUND = 2;
 
     @Test
     void produceRedirectsToLeader() throws Exception {
@@ -311,6 +312,9 @@ class ClientTest {
         final List<Integer> produceCodes = new CopyOnWriteArrayList<>();
         final List<Integer> fetchCodes = new CopyOnWriteArrayList<>();
         final List<Integer> heartbeatCodes = new CopyOnWriteArrayList<>();
+        final List<Integer> offsetCommitCodes = new CopyOnWriteArrayList<>();
+        final List<Integer> offsetFetchCodes = new CopyOnWriteArrayList<>();
+        final List<Integer> deleteOffsetsCodes = new CopyOnWriteArrayList<>();
         volatile Metadata meta = new Metadata(Collections.emptyList(), Collections.emptyList());
         final List<Integer> opcodes = new CopyOnWriteArrayList<>();
         final List<Codec.ProduceRequest> produceReqs = new CopyOnWriteArrayList<>();
@@ -320,6 +324,9 @@ class ClientTest {
         final AtomicInteger produceCount = new AtomicInteger();
         final AtomicInteger fetchCount = new AtomicInteger();
         final AtomicInteger heartbeatCount = new AtomicInteger();
+        final AtomicInteger offsetCommitCount = new AtomicInteger();
+        final AtomicInteger offsetFetchCount = new AtomicInteger();
+        final AtomicInteger deleteOffsetsCount = new AtomicInteger();
         final AtomicInteger metadataCount = new AtomicInteger();
         final AtomicInteger acceptCount = new AtomicInteger();
         volatile long initPid = 42L;
@@ -434,6 +441,32 @@ class ClientTest {
                     code = heartbeatCodes.remove(0);
                 }
                 return Codec.encodeHeartbeatResponse(new Codec.HeartbeatResponse(code));
+            }
+            if (frame.opcode == Codec.OP_OFFSET_COMMIT) {
+                offsetCommitCount.incrementAndGet();
+                int code = 0;
+                if (!offsetCommitCodes.isEmpty()) {
+                    code = offsetCommitCodes.remove(0);
+                }
+                return Codec.encodeOffsetCommitResponse(new Codec.OffsetCommitResponse(code));
+            }
+            if (frame.opcode == Codec.OP_OFFSET_FETCH) {
+                offsetFetchCount.incrementAndGet();
+                int code = 0;
+                if (!offsetFetchCodes.isEmpty()) {
+                    code = offsetFetchCodes.remove(0);
+                }
+                return Codec.encodeOffsetFetchResponse(
+                        new Codec.OffsetFetchResponse(code, Collections.emptyList()));
+            }
+            if (frame.opcode == Codec.OP_DELETE_OFFSETS) {
+                deleteOffsetsCount.incrementAndGet();
+                int code = 0;
+                if (!deleteOffsetsCodes.isEmpty()) {
+                    code = deleteOffsetsCodes.remove(0);
+                }
+                replyOp[0] = Codec.OP_DELETE_OFFSETS_RESPONSE;
+                return Codec.encodeDeleteOffsetsResponse(new Codec.DeleteOffsetsResponse(code, 0));
             }
             if (frame.opcode == Codec.OP_METADATA) {
                 metadataCount.incrementAndGet();
@@ -706,6 +739,96 @@ class ClientTest {
                 assertEquals(TIMEOUT, ex.code);
             }
             assertEquals(3, srv.heartbeatCount.get());
+        }
+    }
+
+    @Test
+    void offsetCommitDefaultMaxRetriesZeroRaisesOnTimeout() throws Exception {
+        try (ScriptedBroker srv = ScriptedBroker.start()) {
+            srv.offsetCommitCodes.add(TIMEOUT);
+            try (Client c = Client.connect("127.0.0.1", srv.port, 5_000)) {
+                assertEquals(0, c.maxRetries());
+                BrokerException ex =
+                        assertThrows(BrokerException.class, () -> c.offsetCommit("g", "t", 0, 5));
+                assertEquals(TIMEOUT, ex.code);
+            }
+            assertEquals(1, srv.offsetCommitCount.get());
+        }
+    }
+
+    @Test
+    void offsetCommitRetriesTimeoutThenOk() throws Exception {
+        try (ScriptedBroker srv = ScriptedBroker.start()) {
+            srv.offsetCommitCodes.add(TIMEOUT);
+            srv.offsetCommitCodes.add(0);
+            try (Client c = Client.connect("127.0.0.1", srv.port, 5_000)) {
+                c.setMaxRetries(2);
+                c.setRetryBackoffMs(0);
+                c.offsetCommit("g", "t", 0, 5);
+            }
+            assertEquals(2, srv.offsetCommitCount.get());
+        }
+    }
+
+    @Test
+    void offsetFetchRetriesTimeoutThenOk() throws Exception {
+        try (ScriptedBroker srv = ScriptedBroker.start()) {
+            srv.offsetFetchCodes.add(TIMEOUT);
+            srv.offsetFetchCodes.add(0);
+            try (Client c = Client.connect("127.0.0.1", srv.port, 5_000)) {
+                c.setMaxRetries(2);
+                c.setRetryBackoffMs(0);
+                List<Offset> offs = c.offsetFetch("g", "t");
+                assertTrue(offs.isEmpty());
+            }
+            assertEquals(2, srv.offsetFetchCount.get());
+        }
+    }
+
+    @Test
+    void deleteOffsetsRetriesTimeoutThenOk() throws Exception {
+        try (ScriptedBroker srv = ScriptedBroker.start()) {
+            srv.deleteOffsetsCodes.add(TIMEOUT);
+            srv.deleteOffsetsCodes.add(0);
+            try (Client c = Client.connect("127.0.0.1", srv.port, 5_000)) {
+                c.setMaxRetries(2);
+                c.setRetryBackoffMs(0);
+                assertEquals(0, c.deleteOffsets("g"));
+            }
+            assertEquals(2, srv.deleteOffsetsCount.get());
+        }
+    }
+
+    @Test
+    void offsetCommitNotFoundIsNotRetried() throws Exception {
+        try (ScriptedBroker srv = ScriptedBroker.start()) {
+            srv.offsetCommitCodes.add(NOT_FOUND);
+            srv.offsetCommitCodes.add(0);
+            try (Client c = Client.connect("127.0.0.1", srv.port, 5_000)) {
+                c.setMaxRetries(2);
+                c.setRetryBackoffMs(0);
+                BrokerException ex =
+                        assertThrows(BrokerException.class, () -> c.offsetCommit("g", "t", 0, 5));
+                assertEquals(NOT_FOUND, ex.code);
+            }
+            assertEquals(1, srv.offsetCommitCount.get());
+        }
+    }
+
+    @Test
+    void offsetCommitExhaustedRetriesRaises() throws Exception {
+        try (ScriptedBroker srv = ScriptedBroker.start()) {
+            srv.offsetCommitCodes.add(TIMEOUT);
+            srv.offsetCommitCodes.add(TIMEOUT);
+            srv.offsetCommitCodes.add(TIMEOUT);
+            try (Client c = Client.connect("127.0.0.1", srv.port, 5_000)) {
+                c.setMaxRetries(2);
+                c.setRetryBackoffMs(0);
+                BrokerException ex =
+                        assertThrows(BrokerException.class, () -> c.offsetCommit("g", "t", 0, 5));
+                assertEquals(TIMEOUT, ex.code);
+            }
+            assertEquals(3, srv.offsetCommitCount.get());
         }
     }
 

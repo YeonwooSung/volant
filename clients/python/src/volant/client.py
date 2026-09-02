@@ -1099,7 +1099,12 @@ class Client:
         generation: int = 0,
         metadata: str = "",
     ) -> None:
-        """Commit one group offset (admin path: empty member, generation 0)."""
+        """Commit one group offset (admin path: empty member, generation 0).
+
+        Transient broker/transport errors retry up to ``max_retries``
+        extra times (default 0). Error 2 / 9 / 10 / 11 / 13 / 14 are
+        not retried.
+        """
         payload = codec.encode_offset_commit_request(
             OffsetCommitRequest(
                 group_id=group,
@@ -1115,10 +1120,36 @@ class Client:
                 ],
             )
         )
-        resp = self._round_trip(codec.OP_OFFSET_COMMIT, payload)
-        if not isinstance(resp, OffsetCommitResponse):
-            raise ProtocolError(f"unexpected response for offset_commit: {type(resp)}")
-        self._check(resp.error_code, "offset_commit")
+        max_retries = max(0, int(self.max_retries))
+        retry_attempt = 0
+        while True:
+            try:
+                resp = self._round_trip(codec.OP_OFFSET_COMMIT, payload)
+            except BrokerError as e:
+                if _is_transient_broker(e.code) and retry_attempt < max_retries:
+                    retry_attempt += 1
+                    self._sleep_produce_retry()
+                    continue
+                raise
+            except OSError:
+                if retry_attempt < max_retries:
+                    retry_attempt += 1
+                    self._sleep_produce_retry()
+                    continue
+                raise
+            if not isinstance(resp, OffsetCommitResponse):
+                raise ProtocolError(
+                    f"unexpected response for offset_commit: {type(resp)}"
+                )
+            if (
+                _is_transient_broker(resp.error_code)
+                and retry_attempt < max_retries
+            ):
+                retry_attempt += 1
+                self._sleep_produce_retry()
+                continue
+            self._check(resp.error_code, "offset_commit")
+            return
 
     def list_offsets(
         self, topic: str, partitions: Optional[Iterable[int]] = None
@@ -1152,7 +1183,9 @@ class Client:
 
         ``None`` or ``[]`` deletes all offsets for the group (wire count 0).
         Returns the number of offset files removed. Non-zero ``error_code``
-        raises :class:`BrokerError`. This is not Kafka OffsetDelete.
+        raises :class:`BrokerError`. Transient broker/transport errors
+        retry up to ``max_retries`` extra times (default 0). This is not
+        Kafka OffsetDelete.
         """
         wire = (
             [codec.OffsetEntry(topic=t, partition=int(p)) for t, p in entries]
@@ -1162,11 +1195,36 @@ class Client:
         payload = codec.encode_delete_offsets_request(
             DeleteOffsetsRequest(group_id=group, entries=wire)
         )
-        resp = self._round_trip(codec.OP_DELETE_OFFSETS, payload)
-        if not isinstance(resp, DeleteOffsetsResponse):
-            raise ProtocolError(f"unexpected response for delete_offsets: {type(resp)}")
-        self._check(resp.error_code, "delete_offsets")
-        return resp.deleted_count
+        max_retries = max(0, int(self.max_retries))
+        retry_attempt = 0
+        while True:
+            try:
+                resp = self._round_trip(codec.OP_DELETE_OFFSETS, payload)
+            except BrokerError as e:
+                if _is_transient_broker(e.code) and retry_attempt < max_retries:
+                    retry_attempt += 1
+                    self._sleep_produce_retry()
+                    continue
+                raise
+            except OSError:
+                if retry_attempt < max_retries:
+                    retry_attempt += 1
+                    self._sleep_produce_retry()
+                    continue
+                raise
+            if not isinstance(resp, DeleteOffsetsResponse):
+                raise ProtocolError(
+                    f"unexpected response for delete_offsets: {type(resp)}"
+                )
+            if (
+                _is_transient_broker(resp.error_code)
+                and retry_attempt < max_retries
+            ):
+                retry_attempt += 1
+                self._sleep_produce_retry()
+                continue
+            self._check(resp.error_code, "delete_offsets")
+            return resp.deleted_count
 
 
     def describe_configs(self, topic: str) -> DescribeConfigsResult:
@@ -1270,16 +1328,42 @@ class Client:
 
         Returns ``[(partition, offset), ...]``. Empty wire entries mean all
         offsets for the group; this method filters to ``topic`` client-side
-        (same as the CLI).
+        (same as the CLI). Transient broker/transport errors retry up to
+        ``max_retries`` extra times (default 0).
         """
         payload = codec.encode_offset_fetch_request(
             OffsetFetchRequest(group_id=group, entries=[])
         )
-        resp = self._round_trip(codec.OP_OFFSET_FETCH, payload)
-        if not isinstance(resp, OffsetFetchResponse):
-            raise ProtocolError(f"unexpected response for offset_fetch: {type(resp)}")
-        self._check(resp.error_code, "offset_fetch")
-        return [(e.partition, e.offset) for e in resp.entries if e.topic == topic]
+        max_retries = max(0, int(self.max_retries))
+        retry_attempt = 0
+        while True:
+            try:
+                resp = self._round_trip(codec.OP_OFFSET_FETCH, payload)
+            except BrokerError as e:
+                if _is_transient_broker(e.code) and retry_attempt < max_retries:
+                    retry_attempt += 1
+                    self._sleep_produce_retry()
+                    continue
+                raise
+            except OSError:
+                if retry_attempt < max_retries:
+                    retry_attempt += 1
+                    self._sleep_produce_retry()
+                    continue
+                raise
+            if not isinstance(resp, OffsetFetchResponse):
+                raise ProtocolError(
+                    f"unexpected response for offset_fetch: {type(resp)}"
+                )
+            if (
+                _is_transient_broker(resp.error_code)
+                and retry_attempt < max_retries
+            ):
+                retry_attempt += 1
+                self._sleep_produce_retry()
+                continue
+            self._check(resp.error_code, "offset_fetch")
+            return [(e.partition, e.offset) for e in resp.entries if e.topic == topic]
 
     def join_group(
         self,
