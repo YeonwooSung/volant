@@ -299,6 +299,11 @@ docs for day-to-day reading: [ops](../ops.md), [consistency](../consistency.md),
 | v0.98 | ✅ | Rust DeleteOffsets NotController redirect | [V98_SPEC.md](../V98_SPEC.md) |
 | v0.99 | ✅ | BeginTxn/EndTxn retry on Python/Go/Java | [V99_SPEC.md](../V99_SPEC.md) |
 | v0.100 | ✅ | Rust BeginTxn/EndTxn retry | [V100_SPEC.md](../V100_SPEC.md) |
+| v0.101 | ✅ | InitProducerId retry on Python/Go/Java | [V101_SPEC.md](../V101_SPEC.md) |
+| v0.102 | ✅ | Rust InitProducerId retry | [V102_SPEC.md](../V102_SPEC.md) |
+| v0.103 | ✅ | admin_round_trip transient retry on Python/Go/Java | [V103_SPEC.md](../V103_SPEC.md) |
+| v0.104 | ✅ | Rust admin_round_trip transient retry | [V104_SPEC.md](../V104_SPEC.md) |
+| v0.105 | ✅ | OffsetCommit/Fetch NotController redirect on Python/Go/Java | [V105_SPEC.md](../V105_SPEC.md) |
 
 ---
 
