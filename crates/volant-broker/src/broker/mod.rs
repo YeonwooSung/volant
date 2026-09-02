@@ -655,6 +655,8 @@ pub struct Broker {
     partition_rafts: Mutex<HashMap<(String, u32), PartitionRaftState>>,
     /// Test hook: when true, outbound inter-broker RPC fails without connecting.
     inter_broker_blocked: AtomicBool,
+    /// Test hook: dest peer ids whose outbound RPC fails (asymmetric isolate).
+    inter_broker_blocked_peers: RwLock<HashSet<u32>>,
 }
 
 /// One pending leader→controller ISR report (Phase 142).
@@ -900,6 +902,7 @@ impl Broker {
             partition_raft_new_topics: AtomicBool::new(partition_raft_env_enabled()),
             partition_rafts: Mutex::new(HashMap::new()),
             inter_broker_blocked: AtomicBool::new(false),
+            inter_broker_blocked_peers: RwLock::new(HashSet::new()),
         };
         broker.reopen_existing_partition_rafts();
         broker
@@ -1097,6 +1100,7 @@ impl Broker {
             partition_raft_new_topics: AtomicBool::new(partition_raft_env_enabled()),
             partition_rafts: Mutex::new(HashMap::new()),
             inter_broker_blocked: AtomicBool::new(false),
+            inter_broker_blocked_peers: RwLock::new(HashSet::new()),
         };
         // Open local partitions from persisted assignment.
         broker.apply_local_assignment()?;

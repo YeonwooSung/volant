@@ -329,7 +329,7 @@ Deploys a StatefulSet, headless Service, and ConfigMap `cluster.toml`
 (`node-id = ordinal + 1`). Single-node Deployment remains the default
 (`cluster.enabled=false`).
 
-## Protocol fuzz + corpus smoke (Phase 9 / 112)
+## Protocol fuzz + corpus smoke (Phase 9 / 112 / v0.15)
 
 Deterministic chaos tests always run with `cargo test -p volant-protocol`
 (`chaos_decode_does_not_panic`, `chaos_frame_decode_extended`).
@@ -343,16 +343,21 @@ cargo test -p volant-protocol corpus_smoke
 ./scripts/fuzz_corpus_smoke.sh test
 ```
 
-Seed corpus: `fuzz/corpus/{decode_frame,decode_request}/`. GitHub Actions:
-[`.github/workflows/ci.yml`](../.github/workflows/ci.yml).
+Seed corpus: `fuzz/corpus/{decode_frame,decode_request,decode_extended}/`.
+GitHub Actions: [`.github/workflows/ci.yml`](../.github/workflows/ci.yml).
+Default CI is stable `corpus_smoke` only (includes `corpus_smoke_extended`).
 
 **Optional local cargo-fuzz** (nightly; short capped runs only):
 
 ```bash
 FUZZ_SMOKE_RUNS=200 ./scripts/fuzz_corpus_smoke.sh fuzz
+# Capped wall-clock campaign (default 30s/target). CI does **not** run this
+# on push/PR; optional workflow_dispatch job `fuzz-nightly` only.
+FUZZ_LONG_SECS=30 ./scripts/fuzz_corpus_smoke.sh long
 ```
 
-Details: [fuzz/README.md](../fuzz/README.md), [PHASE112_SPEC.md](./PHASE112_SPEC.md).
+Details: [fuzz/README.md](../fuzz/README.md), [PHASE112_SPEC.md](./PHASE112_SPEC.md),
+[V15_SPEC.md](./V15_SPEC.md).
 
 ## Native features after core (Phases 8–22)
 
@@ -451,8 +456,10 @@ What v0.2 **proves** in CI (do not re-open as new work):
 
 **Wontfix in v0.2** (not a test gap to close here):
 
-- Long chaos-mesh suites and uncapped fuzz campaigns (corpus smoke is Phase 112)
-- Asymmetric / partial network-partition mesh (v0.5 isolate is in-process, not chaos-mesh)
+- Long chaos-mesh suites and uncapped fuzz campaigns (corpus smoke is Phase 112;
+  v0.15 adds a capped local `long` campaign + operator Chaos Mesh YAMLs, not CI)
+- Asymmetric / partial network-partition mesh → **closed by v0.15** in-process
+  (`v15_asymmetric_isolate`) + `deploy/chaos/network-partition.yaml` (operator)
 
 CLI examples: [features.md](./features.md), [../README.md](../README.md).
 
@@ -466,7 +473,9 @@ Closes the three v0.2 holes operators actually hit. Honest limits: **EACCES not 
 | Minority isolate of the partition leader (split-brain honesty) | `v05_ops_confidence::minority_isolate_leader_split_brain_honesty` | Abort `serve_listener` + outbound `inter_broker_rpc` hook. Process stays up. Survivors expire past `session_timeout`, elect, and accept `acks=all`. Isolated `acks=all` does not commit within the 10s HWM wait. Isolated `acks=1` may append locally (not cluster-committed). Not chaos-mesh; no asymmetric partial mesh. |
 | Leader dies while `acks=all` is in flight | `v05_ops_confidence::leader_abort_mid_inflight_acks_all` | Pre-kill successful `acks=all` responses are present on the new leader. The in-flight batch may timeout or fail and is **not** required to be committed. |
 
-Long chaos-mesh suites and uncapped fuzz remain deferred (Phase 112 is corpus smoke only).
+Long chaos-mesh suites and uncapped fuzz remain deferred. v0.15 adds a capped
+local `long` fuzz helper + operator Chaos Mesh YAMLs (not default CI) and an
+in-process A→B isolate test. See [V15_SPEC.md](./V15_SPEC.md).
 
 ## v0.10 dynamic membership
 
@@ -499,6 +508,24 @@ Kafka KRaft record schemas and not a Raft metadata log.
 ISR + `assignment.json` stay the data-plane / assignment SoT when the
 flags are off (and remain SoT for produce even when they are on).
 
+## v0.15 fuzz / chaos
+
+Closes the Phase 112 “corpus smoke only” leftover and the v0.5 “no
+asymmetric / partial mesh” leftover **without** a multi-hour CI job.
+
+| Path | What it is | CI? |
+|------|------------|-----|
+| `cargo test -p volant-protocol corpus_smoke` | Deterministic replay of `fuzz/corpus/*` including `decode_extended` (membership 100–107, txn 32/50/52) | Yes (stable) |
+| `./scripts/fuzz_corpus_smoke.sh long` | `cargo +nightly fuzz run -max_total_time=$FUZZ_LONG_SECS` (default 30s/target) | **No** on push/PR. Optional `workflow_dispatch` job `fuzz-nightly` only |
+| `deploy/chaos/*.yaml` | Chaos Mesh `PodChaos` (kill `volant-0`) + `NetworkChaos` (A→B `direction: to`) matching Helm labels | **No.** Operator-applied. See [deploy/chaos/README.md](../deploy/chaos/README.md) |
+| `v15_asymmetric_isolate` | In-process A→B dest-block via `test_block_inter_broker_peer`. Listeners stay up | Yes |
+
+Honesty: A→B RPC fails; B→A and C stay open. Phase 134 marks live on
+successful **outbound**, so B does **not** expire A (unlike v0.5
+symmetric isolate). Controller stays lowest-id. `acks=1` to a leader
+that still reaches a majority of ISR still appends. Not a full Chaos
+Mesh suite (no ENOSPC / slow-disk). Not a security-audit fuzz campaign.
+
 ## Metrics auth (Phase 21)
 
 ```bash
@@ -527,7 +554,7 @@ See [V13_SPEC.md](./V13_SPEC.md).
 ## Still deferred
 
 - Multi-language clients
-- Full chaos-mesh suites / long fuzz campaigns (corpus **smoke CI MVP** → **closed by Phase 112**)
+- Full chaos-mesh suites / long fuzz campaigns (corpus **smoke CI MVP** → **closed by Phase 112**; capped local `long` + operator Chaos Mesh YAMLs + in-process A→B isolate → **closed by v0.15**; multi-hour CI / ENOSPC mesh still deferred)
 - Full KIP-890/939 / Kafka `__transaction_state` topic (multi-broker Enable2Pc MVP → **closed by Phase 114**)
 - Multi-broker session affinity / durable sessions → **closed by Phase 115/119**; shared mirror + promote → **closed by Phase 138**; mirror polish (coalesce/debounce + optional durable + fence) → **closed by Phase 139** (best-effort residual: Raft registry / serve-without-promote / incremental put)
 - Full preferred-replica selector / throttling residual (beyond 126/133/140/144; rack-aware create assignment → **closed by Phase 145**)

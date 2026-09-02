@@ -31,6 +31,30 @@ jobs:
       - name: Workspace tests
         run: cargo test --workspace --all-targets --no-fail-fast
 
-      # Explicit label for the Phase 112 deterministic seed replay (also covered above).
+      # Explicit label for the Phase 112 / v0.15 deterministic seed replay (also covered above).
       - name: Protocol fuzz corpus smoke
         run: cargo test -p volant-protocol corpus_smoke -- --nocapture
+
+  # Optional only: not on push/PR. Default CI time is unchanged.
+  fuzz-nightly:
+    name: optional cargo-fuzz (workflow_dispatch)
+    if: github.event_name == 'workflow_dispatch'
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install Rust (nightly)
+        uses: dtolnay/rust-toolchain@nightly
+
+      - name: Cache cargo
+        uses: Swatinem/rust-cache@v2
+
+      - name: Install cargo-fuzz
+        run: cargo install cargo-fuzz --locked
+
+      - name: Capped long fuzz (not default CI)
+        env:
+          FUZZ_LONG_SECS: "30"
+        run: ./scripts/fuzz_corpus_smoke.sh long
