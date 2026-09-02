@@ -714,4 +714,87 @@ class CodecTest {
                 Codec.decodeResponse(Codec.OP_CREATE_PARTITIONS_RESPONSE, raw));
         assertEquals(4, dispatched.partitions);
     }
+
+    @Test
+    void addBrokerWithRack() {
+        Codec.AddBrokerRequest req = new Codec.AddBrokerRequest(2, "10.0.0.2", 9092, "r1");
+        byte[] raw = Codec.encodeAddBrokerRequest(req);
+        byte[] expected = hx("02000000" + "0800" + "31302e302e302e32" + "8423" + "01" + "0200" + "7231");
+        assertArrayEquals(expected, raw);
+        Codec.AddBrokerRequest decoded = Codec.decodeAddBrokerRequest(raw);
+        assertEquals(2, decoded.id);
+        assertEquals("10.0.0.2", decoded.host);
+        assertEquals(9092, decoded.port);
+        assertEquals("r1", decoded.rack);
+        byte[] rraw = Codec.encodeAddBrokerResponse(new Codec.AddBrokerResponse(0, 5L));
+        assertArrayEquals(hx("00000500000000000000"), rraw);
+        Codec.AddBrokerResponse dispatched = assertInstanceOf(
+                Codec.AddBrokerResponse.class, Codec.decodeResponse(Codec.OP_ADD_BROKER_RESPONSE, rraw));
+        assertEquals(5L, dispatched.generation);
+    }
+
+    @Test
+    void addBrokerNoRack() {
+        Codec.AddBrokerRequest req = new Codec.AddBrokerRequest(2, "10.0.0.2", 9092, null);
+        byte[] raw = Codec.encodeAddBrokerRequest(req);
+        assertArrayEquals(hx("02000000080031302e302e302e32842300"), raw);
+        Codec.AddBrokerRequest decoded = Codec.decodeAddBrokerRequest(raw);
+        assertEquals(2, decoded.id);
+        assertEquals("10.0.0.2", decoded.host);
+        assertEquals(9092, decoded.port);
+        assertNull(decoded.rack);
+    }
+
+    @Test
+    void removeBroker() {
+        byte[] raw = Codec.encodeRemoveBrokerRequest(new Codec.RemoveBrokerRequest(2));
+        assertArrayEquals(hx("02000000"), raw);
+        assertEquals(2, Codec.decodeRemoveBrokerRequest(raw).id);
+        byte[] rraw = Codec.encodeRemoveBrokerResponse(new Codec.RemoveBrokerResponse(0, 6L));
+        assertArrayEquals(hx("00000600000000000000"), rraw);
+        Codec.RemoveBrokerResponse dispatched = assertInstanceOf(
+                Codec.RemoveBrokerResponse.class, Codec.decodeResponse(Codec.OP_REMOVE_BROKER_RESPONSE, rraw));
+        assertEquals(6L, dispatched.generation);
+    }
+
+    @Test
+    void listMembersTwoBrokersLive() {
+        assertArrayEquals(new byte[0], Codec.encodeListMembersRequest());
+        Codec.ListMembersResponse resp = new Codec.ListMembersResponse(
+                0,
+                4L,
+                Arrays.asList(
+                        new MembershipBroker(1, "10.0.0.1", 9092, null),
+                        new MembershipBroker(2, "10.0.0.2", 9092, "r1")),
+                Arrays.asList(1, 2));
+        byte[] raw = Codec.encodeListMembersResponse(resp);
+        byte[] expected = hx(
+                "0000"
+                        + "0400000000000000"
+                        + "02000000"
+                        + "01000000"
+                        + "080031302e302e302e31"
+                        + "8423"
+                        + "00"
+                        + "02000000"
+                        + "080031302e302e302e32"
+                        + "8423"
+                        + "01"
+                        + "02007231"
+                        + "02000000"
+                        + "01000000"
+                        + "02000000");
+        assertArrayEquals(expected, raw);
+        Codec.ListMembersResponse decoded = Codec.decodeListMembersResponse(raw);
+        assertEquals(4L, decoded.generation);
+        assertEquals(2, decoded.brokers.size());
+        assertEquals(1, decoded.brokers.get(0).id);
+        assertNull(decoded.brokers.get(0).rack);
+        assertEquals(2, decoded.brokers.get(1).id);
+        assertEquals("r1", decoded.brokers.get(1).rack);
+        assertEquals(Arrays.asList(1, 2), decoded.live);
+        Codec.ListMembersResponse dispatched = assertInstanceOf(
+                Codec.ListMembersResponse.class, Codec.decodeResponse(Codec.OP_LIST_MEMBERS_RESPONSE, raw));
+        assertEquals(4L, dispatched.generation);
+    }
 }

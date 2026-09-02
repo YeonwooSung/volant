@@ -5,6 +5,8 @@ from __future__ import annotations
 import unittest
 
 from volant.codec import (
+    AddBrokerRequest,
+    AddBrokerResponse,
     Assignment,
     AuthRequest,
     AuthResponse,
@@ -30,8 +32,10 @@ from volant.codec import (
     ListGroupsResponse,
     CreatePartitionsRequest,
     CreatePartitionsResponse,
+    ListMembersResponse,
     ListOffsetsRequest,
     ListOffsetsResponse,
+    MembershipBroker,
     MetadataRequest,
     MetadataResponse,
     OffsetCommitEntry,
@@ -46,6 +50,8 @@ from volant.codec import (
     ProduceMessage,
     ProduceRequest,
     ProduceResponse,
+    RemoveBrokerRequest,
+    RemoveBrokerResponse,
     TopicInfo,
     decode_auth_request,
     decode_auth_response,
@@ -67,8 +73,14 @@ from volant.codec import (
     decode_list_groups_response,
     decode_create_partitions_request,
     decode_create_partitions_response,
+    decode_add_broker_request,
+    decode_add_broker_response,
+    decode_list_members_request,
+    decode_list_members_response,
     decode_list_offsets_request,
     decode_list_offsets_response,
+    decode_remove_broker_request,
+    decode_remove_broker_response,
     decode_metadata_request,
     decode_metadata_response,
     decode_offset_commit_request,
@@ -98,8 +110,14 @@ from volant.codec import (
     encode_list_groups_response,
     encode_create_partitions_request,
     encode_create_partitions_response,
+    encode_add_broker_request,
+    encode_add_broker_response,
+    encode_list_members_request,
+    encode_list_members_response,
     encode_list_offsets_request,
     encode_list_offsets_response,
+    encode_remove_broker_request,
+    encode_remove_broker_response,
     encode_metadata_request,
     encode_metadata_response,
     encode_offset_commit_request,
@@ -115,9 +133,12 @@ from volant.codec import (
     OP_LEAVE_GROUP,
     OP_CREATE_PARTITIONS_RESPONSE,
     OP_LIST_GROUPS_RESPONSE,
+    OP_ADD_BROKER_RESPONSE,
+    OP_LIST_MEMBERS_RESPONSE,
     OP_LIST_OFFSETS_RESPONSE,
     OP_OFFSET_COMMIT,
     OP_OFFSET_FETCH,
+    OP_REMOVE_BROKER_RESPONSE,
 )
 
 
@@ -818,6 +839,82 @@ class TestCreatePartitionsCodec(unittest.TestCase):
         self.assertEqual(_hx(raw), _hx(expected))
         self.assertEqual(decode_create_partitions_response(raw), resp)
         self.assertEqual(decode_response(OP_CREATE_PARTITIONS_RESPONSE, raw), resp)
+
+
+class TestMembershipCodec(unittest.TestCase):
+    def test_add_broker_with_rack(self) -> None:
+        req = AddBrokerRequest(id=2, host="10.0.0.2", port=9092, rack="r1")
+        raw = encode_add_broker_request(req)
+        expected = bytes.fromhex(
+            "02000000"
+            "0800"
+            "31302e302e302e32"
+            "8423"
+            "01"
+            "0200"
+            "7231"
+        )
+        self.assertEqual(_hx(raw), _hx(expected))
+        self.assertEqual(decode_add_broker_request(raw), req)
+        resp = AddBrokerResponse(error_code=0, generation=5)
+        rraw = encode_add_broker_response(resp)
+        self.assertEqual(_hx(rraw), _hx(bytes.fromhex("00000500000000000000")))
+        self.assertEqual(decode_add_broker_response(rraw), resp)
+        self.assertEqual(decode_response(OP_ADD_BROKER_RESPONSE, rraw), resp)
+
+    def test_add_broker_no_rack(self) -> None:
+        req = AddBrokerRequest(id=2, host="10.0.0.2", port=9092, rack=None)
+        raw = encode_add_broker_request(req)
+        expected = bytes.fromhex("02000000080031302e302e302e32842300")
+        self.assertEqual(_hx(raw), _hx(expected))
+        decoded = decode_add_broker_request(raw)
+        self.assertEqual(decoded, req)
+        self.assertIsNone(decoded.rack)
+
+    def test_remove_broker(self) -> None:
+        req = RemoveBrokerRequest(id=2)
+        raw = encode_remove_broker_request(req)
+        self.assertEqual(_hx(raw), _hx(bytes.fromhex("02000000")))
+        self.assertEqual(decode_remove_broker_request(raw), req)
+        resp = RemoveBrokerResponse(error_code=0, generation=6)
+        rraw = encode_remove_broker_response(resp)
+        self.assertEqual(_hx(rraw), _hx(bytes.fromhex("00000600000000000000")))
+        self.assertEqual(decode_remove_broker_response(rraw), resp)
+        self.assertEqual(decode_response(OP_REMOVE_BROKER_RESPONSE, rraw), resp)
+
+    def test_list_members_two_brokers_live(self) -> None:
+        self.assertEqual(encode_list_members_request(), b"")
+        self.assertIsNone(decode_list_members_request(b""))
+        resp = ListMembersResponse(
+            error_code=0,
+            generation=4,
+            brokers=[
+                MembershipBroker(id=1, host="10.0.0.1", port=9092, rack=None),
+                MembershipBroker(id=2, host="10.0.0.2", port=9092, rack="r1"),
+            ],
+            live=[1, 2],
+        )
+        raw = encode_list_members_response(resp)
+        expected = bytes.fromhex(
+            "0000"
+            "0400000000000000"
+            "02000000"
+            "01000000"
+            "080031302e302e302e31"
+            "8423"
+            "00"
+            "02000000"
+            "080031302e302e302e32"
+            "8423"
+            "01"
+            "02007231"
+            "02000000"
+            "01000000"
+            "02000000"
+        )
+        self.assertEqual(_hx(raw), _hx(expected))
+        self.assertEqual(decode_list_members_response(raw), resp)
+        self.assertEqual(decode_response(OP_LIST_MEMBERS_RESPONSE, raw), resp)
 
 
 if __name__ == "__main__":

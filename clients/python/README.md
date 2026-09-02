@@ -79,6 +79,10 @@ c = Client("127.0.0.1:9092", scram_username="alice", scram_password="s3cret")
 c.create_scram_user("alice", "s3cret")  # iterations=0 → broker default 4096
 names = c.list_scram_users()
 c.delete_scram_user("alice")
+# Membership overlay admin (v0.58). Opcodes 102–107. Overlay is still SoT.
+gen = c.add_broker(2, "10.0.0.2", 9092, rack="r1")
+members = c.list_members()  # MembershipList(generation, brokers, live)
+gen = c.remove_broker(2)
 ```
 
 `Client` is also a context manager. `produce(..., key=b"...")` is supported;
@@ -170,6 +174,10 @@ Create/Delete/ListScramUsers (v0.55) are admin RPCs (opcodes 64–69),
 not the handshake. `create_scram_user(user, password, iterations=0)`
 sends the password in the clear (use TLS). Not Kafka
 AlterUserScramCredentials.
+AddBroker / RemoveBroker / ListMembers (v0.58) are overlay admin
+RPCs (opcodes 102–107). `rack=None` is absent on the wire. Overlay
+is still SoT; follower forward is broker-side (v0.38). Not Kafka
+AlterPartitionReassignments / broker catalog.
 
 ## Honesty
 
@@ -223,4 +231,5 @@ See [docs/V14_SPEC.md](../../docs/V14_SPEC.md),
 [docs/V46_SPEC.md](../../docs/V46_SPEC.md).
 [docs/V50_SPEC.md](../../docs/V50_SPEC.md).,
 [docs/V46_SPEC.md](../../docs/V46_SPEC.md),
-[docs/V55_SPEC.md](../../docs/V55_SPEC.md).
+[docs/V55_SPEC.md](../../docs/V55_SPEC.md),
+[docs/V58_SPEC.md](../../docs/V58_SPEC.md).

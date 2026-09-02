@@ -17,6 +17,7 @@ import io.volant.GroupConsumer;
 import io.volant.Metadata;
 import io.volant.Offset;
 import io.volant.DeleteRecordsResult;
+import io.volant.MembershipList;
 import io.volant.OffsetListing;
 import io.volant.Record;
 import java.util.List;
@@ -73,6 +74,10 @@ Client.connectTlsScram("127.0.0.1", 9092, TlsOptions.ca("ca.pem"), "alice", "s3c
 c.createScramUser("alice", "s3cret"); // iterations=0 → broker default 4096
 List<String> names = c.listScramUsers();
 c.deleteScramUser("alice");
+// Membership overlay admin (v0.58). Opcodes 102–107. Overlay is still SoT.
+long gen = c.addBroker(2, "10.0.0.2", 9092, "r1");
+MembershipList members = c.listMembers(); // generation, brokers, live
+gen = c.removeBroker(2);
 ```
 
 `produce(..., null, value)` sends a null key. `fetch` returns `List<Record>`
@@ -157,6 +162,10 @@ re-runs the same auth path.
 Create/Delete/ListScramUsers (v0.55) are admin RPCs (opcodes 64–69),
 not the handshake. `createScramUser` sends the password in the clear
 (use TLS). Not Kafka AlterUserScramCredentials.
+AddBroker / RemoveBroker / ListMembers (v0.58) are overlay admin
+RPCs (opcodes 102–107). `rack == null` is absent on the wire. Overlay
+is still SoT; follower forward is broker-side (v0.38). Not Kafka
+AlterPartitionReassignments / broker catalog.
 
 ## Honesty
 
@@ -213,4 +222,5 @@ See [docs/V23_SPEC.md](../../docs/V23_SPEC.md),
 [docs/V46_SPEC.md](../../docs/V46_SPEC.md).
 [docs/V50_SPEC.md](../../docs/V50_SPEC.md).,
 [docs/V46_SPEC.md](../../docs/V46_SPEC.md),
-[docs/V55_SPEC.md](../../docs/V55_SPEC.md).
+[docs/V55_SPEC.md](../../docs/V55_SPEC.md),
+[docs/V58_SPEC.md](../../docs/V58_SPEC.md).

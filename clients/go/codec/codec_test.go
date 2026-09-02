@@ -1190,3 +1190,145 @@ func TestCreatePartitionsResponsePayloadRS(t *testing.T) {
 		t.Fatalf("dispatch %#v", got)
 	}
 }
+
+func rackPtr(s string) *string { return &s }
+
+func TestAddBrokerWithRack(t *testing.T) {
+	req := AddBrokerRequest{ID: 2, Host: "10.0.0.2", Port: 9092, Rack: rackPtr("r1")}
+	raw, err := EncodeAddBrokerRequest(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	expected := mustHex(t, "02000000"+"0800"+"31302e302e302e32"+"8423"+"01"+"0200"+"7231")
+	if !bytes.Equal(raw, expected) {
+		t.Fatalf("encode:\n got %x\nwant %x", raw, expected)
+	}
+	decoded, err := DecodeAddBrokerRequest(raw)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if decoded.ID != 2 || decoded.Host != "10.0.0.2" || decoded.Port != 9092 || decoded.Rack == nil || *decoded.Rack != "r1" {
+		t.Fatalf("decoded %+v", decoded)
+	}
+	resp := AddBrokerResponse{ErrorCode: 0, Generation: 5}
+	rraw, err := EncodeAddBrokerResponse(resp)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.Equal(rraw, mustHex(t, "00000500000000000000")) {
+		t.Fatalf("resp %x", rraw)
+	}
+	got, err := DecodeResponse(OpAddBrokerResponse, rraw)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if ar, ok := got.(AddBrokerResponse); !ok || ar.Generation != 5 {
+		t.Fatalf("dispatch %#v", got)
+	}
+}
+
+func TestAddBrokerNoRack(t *testing.T) {
+	req := AddBrokerRequest{ID: 2, Host: "10.0.0.2", Port: 9092, Rack: nil}
+	raw, err := EncodeAddBrokerRequest(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	expected := mustHex(t, "02000000080031302e302e302e32842300")
+	if !bytes.Equal(raw, expected) {
+		t.Fatalf("encode:\n got %x\nwant %x", raw, expected)
+	}
+	decoded, err := DecodeAddBrokerRequest(raw)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if decoded.ID != 2 || decoded.Host != "10.0.0.2" || decoded.Port != 9092 || decoded.Rack != nil {
+		t.Fatalf("decoded %+v", decoded)
+	}
+}
+
+func TestRemoveBroker(t *testing.T) {
+	req := RemoveBrokerRequest{ID: 2}
+	raw, err := EncodeRemoveBrokerRequest(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.Equal(raw, mustHex(t, "02000000")) {
+		t.Fatalf("encode %x", raw)
+	}
+	decoded, err := DecodeRemoveBrokerRequest(raw)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if decoded.ID != 2 {
+		t.Fatalf("decoded %+v", decoded)
+	}
+	resp := RemoveBrokerResponse{ErrorCode: 0, Generation: 6}
+	rraw, err := EncodeRemoveBrokerResponse(resp)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.Equal(rraw, mustHex(t, "00000600000000000000")) {
+		t.Fatalf("resp %x", rraw)
+	}
+	got, err := DecodeResponse(OpRemoveBrokerResponse, rraw)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if rr, ok := got.(RemoveBrokerResponse); !ok || rr.Generation != 6 {
+		t.Fatalf("dispatch %#v", got)
+	}
+}
+
+func TestListMembersTwoBrokersLive(t *testing.T) {
+	if len(EncodeListMembersRequest()) != 0 {
+		t.Fatal("list request must be empty")
+	}
+	resp := ListMembersResponse{
+		ErrorCode:  0,
+		Generation: 4,
+		Brokers: []MembershipBroker{
+			{ID: 1, Host: "10.0.0.1", Port: 9092, Rack: nil},
+			{ID: 2, Host: "10.0.0.2", Port: 9092, Rack: rackPtr("r1")},
+		},
+		Live: []uint32{1, 2},
+	}
+	raw, err := EncodeListMembersResponse(resp)
+	if err != nil {
+		t.Fatal(err)
+	}
+	expected := mustHex(t,
+		"0000"+
+			"0400000000000000"+
+			"02000000"+
+			"01000000"+"080031302e302e302e31"+"8423"+"00"+
+			"02000000"+"080031302e302e302e32"+"8423"+"01"+"02007231"+
+			"02000000"+
+			"01000000"+
+			"02000000")
+	if !bytes.Equal(raw, expected) {
+		t.Fatalf("encode:\n got %x\nwant %x", raw, expected)
+	}
+	decoded, err := DecodeListMembersResponse(raw)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if decoded.Generation != 4 || len(decoded.Brokers) != 2 || len(decoded.Live) != 2 {
+		t.Fatalf("decoded %+v", decoded)
+	}
+	if decoded.Brokers[0].ID != 1 || decoded.Brokers[0].Rack != nil {
+		t.Fatalf("broker0 %+v", decoded.Brokers[0])
+	}
+	if decoded.Brokers[1].ID != 2 || decoded.Brokers[1].Rack == nil || *decoded.Brokers[1].Rack != "r1" {
+		t.Fatalf("broker1 %+v", decoded.Brokers[1])
+	}
+	if decoded.Live[0] != 1 || decoded.Live[1] != 2 {
+		t.Fatalf("live %+v", decoded.Live)
+	}
+	got, err := DecodeResponse(OpListMembersResponse, raw)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if lr, ok := got.(ListMembersResponse); !ok || lr.Generation != 4 {
+		t.Fatalf("dispatch %#v", got)
+	}
+}

@@ -3,7 +3,8 @@
 Matches `crates/volant-protocol/src/payload.rs` for the MVP opcodes:
 Produce, Fetch, CreateTopic, Metadata, DeleteTopic, OffsetCommit,
 OffsetFetch, JoinGroup, Heartbeat, LeaveGroup, Auth, DescribeGroup,
-ListGroups, CreatePartitions, ListOffsets, InitProducerId, Scram.
+ListGroups, CreatePartitions, ListOffsets, InitProducerId, Scram,
+AddBroker, RemoveBroker, ListMembers.
 
 Header fields are big-endian (see :mod:`volant.frame`); **payload** integers
 and length prefixes are little-endian.
@@ -58,6 +59,12 @@ OP_DELETE_SCRAM_USER = 66
 OP_DELETE_SCRAM_USER_RESPONSE = 67
 OP_LIST_SCRAM_USERS = 68
 OP_LIST_SCRAM_USERS_RESPONSE = 69
+OP_ADD_BROKER = 102
+OP_ADD_BROKER_RESPONSE = 103
+OP_REMOVE_BROKER = 104
+OP_REMOVE_BROKER_RESPONSE = 105
+OP_LIST_MEMBERS = 106
+OP_LIST_MEMBERS_RESPONSE = 107
 OP_ERROR = 0xFFFF
 
 _NULL_LEN = 0xFFFFFFFF
@@ -220,6 +227,26 @@ def _get_headers(r: _Reader) -> list[tuple[str, bytes]]:
         value = _get_bytes(r)
         out.append((name, value))
     return out
+
+
+def _put_membership_broker(w: _Writer, b: MembershipBroker) -> None:
+    w.u32_le(b.id)
+    _put_string(w, b.host)
+    w.u16_le(b.port)
+    if b.rack is None:
+        w.u8(0)
+    else:
+        w.u8(1)
+        _put_string(w, b.rack)
+
+
+def _get_membership_broker(r: _Reader) -> MembershipBroker:
+    broker_id = r.u32_le()
+    host = _get_string(r)
+    port = r.u16_le()
+    has_rack = r.u8()
+    rack = _get_string(r) if has_rack != 0 else None
+    return MembershipBroker(id=broker_id, host=host, port=port, rack=rack)
 
 
 # --- request / response types ----------------------------------------------
@@ -606,6 +633,58 @@ class DeleteScramUserResponse:
 class ListScramUsersResponse:
     error_code: int
     usernames: list[str] = field(default_factory=list)
+
+
+@dataclass
+class MembershipBroker:
+    """One overlay broker endpoint (v0.10 / v0.58). ``rack=None`` is absent."""
+
+    id: int
+    host: str
+    port: int
+    rack: Optional[str] = None
+
+
+@dataclass
+class MembershipList:
+    """Configured + live membership (v0.10 / v0.58)."""
+
+    generation: int
+    brokers: list[MembershipBroker] = field(default_factory=list)
+    live: list[int] = field(default_factory=list)
+
+
+@dataclass
+class AddBrokerRequest:
+    id: int
+    host: str
+    port: int
+    rack: Optional[str] = None
+
+
+@dataclass
+class AddBrokerResponse:
+    error_code: int
+    generation: int
+
+
+@dataclass
+class RemoveBrokerRequest:
+    id: int
+
+
+@dataclass
+class RemoveBrokerResponse:
+    error_code: int
+    generation: int
+
+
+@dataclass
+class ListMembersResponse:
+    error_code: int
+    generation: int
+    brokers: list[MembershipBroker] = field(default_factory=list)
+    live: list[int] = field(default_factory=list)
 
 
 
@@ -1527,6 +1606,94 @@ def decode_list_scram_users_request(payload: bytes) -> None:
     return None
 
 
+def encode_add_broker_request(req: AddBrokerRequest) -> bytes:
+    w = _Writer()
+    _put_membership_broker(
+        w,
+        MembershipBroker(id=req.id, host=req.host, port=req.port, rack=req.rack),
+    )
+    return w.finish()
+
+
+def decode_add_broker_request(payload: bytes) -> AddBrokerRequest:
+    b = _get_membership_broker(_Reader(payload))
+    return AddBrokerRequest(id=b.id, host=b.host, port=b.port, rack=b.rack)
+
+
+def encode_add_broker_response(resp: AddBrokerResponse) -> bytes:
+    w = _Writer()
+    w.u16_le(resp.error_code)
+    w.u64_le(resp.generation)
+    return w.finish()
+
+
+def decode_add_broker_response(payload: bytes) -> AddBrokerResponse:
+    r = _Reader(payload)
+    return AddBrokerResponse(error_code=r.u16_le(), generation=r.u64_le())
+
+
+def encode_remove_broker_request(req: RemoveBrokerRequest) -> bytes:
+    w = _Writer()
+    w.u32_le(req.id)
+    return w.finish()
+
+
+def decode_remove_broker_request(payload: bytes) -> RemoveBrokerRequest:
+    r = _Reader(payload)
+    return RemoveBrokerRequest(id=r.u32_le())
+
+
+def encode_remove_broker_response(resp: RemoveBrokerResponse) -> bytes:
+    w = _Writer()
+    w.u16_le(resp.error_code)
+    w.u64_le(resp.generation)
+    return w.finish()
+
+
+def decode_remove_broker_response(payload: bytes) -> RemoveBrokerResponse:
+    r = _Reader(payload)
+    return RemoveBrokerResponse(error_code=r.u16_le(), generation=r.u64_le())
+
+
+def encode_list_members_request() -> bytes:
+    return b""
+
+
+def decode_list_members_request(payload: bytes) -> None:
+    return None
+
+
+def encode_list_members_response(resp: ListMembersResponse) -> bytes:
+    w = _Writer()
+    w.u16_le(resp.error_code)
+    w.u64_le(resp.generation)
+    brokers = resp.brokers or []
+    w.u32_le(len(brokers))
+    for b in brokers:
+        _put_membership_broker(w, b)
+    live = resp.live or []
+    w.u32_le(len(live))
+    for broker_id in live:
+        w.u32_le(broker_id)
+    return w.finish()
+
+
+def decode_list_members_response(payload: bytes) -> ListMembersResponse:
+    r = _Reader(payload)
+    error_code = r.u16_le()
+    generation = r.u64_le()
+    n = r.u32_le()
+    brokers = [_get_membership_broker(r) for _ in range(n)]
+    live_n = r.u32_le()
+    live = [r.u32_le() for _ in range(live_n)]
+    return ListMembersResponse(
+        error_code=error_code,
+        generation=generation,
+        brokers=brokers,
+        live=live,
+    )
+
+
 
 def encode_list_scram_users_response(resp: ListScramUsersResponse) -> bytes:
     w = _Writer()
@@ -1887,6 +2054,12 @@ def decode_response(opcode: int, payload: bytes):
         return decode_alter_configs_response(payload)
     if opcode == OP_DELETE_RECORDS_RESPONSE:
         return decode_delete_records_response(payload)
+    if opcode == OP_ADD_BROKER_RESPONSE:
+        return decode_add_broker_response(payload)
+    if opcode == OP_REMOVE_BROKER_RESPONSE:
+        return decode_remove_broker_response(payload)
+    if opcode == OP_LIST_MEMBERS_RESPONSE:
+        return decode_list_members_response(payload)
     if opcode == OP_ERROR:
         return decode_error_response(payload)
     raise ProtocolError(f"unknown response opcode {opcode}")

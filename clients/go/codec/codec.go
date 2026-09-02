@@ -2,7 +2,8 @@
 //
 // Matches crates/volant-protocol/src/payload.rs for Produce, Fetch,
 // CreateTopic, Metadata, DeleteTopic, OffsetCommit, OffsetFetch,
-// JoinGroup, Heartbeat, LeaveGroup, Auth, DescribeGroup, ListGroups, CreatePartitions, ListOffsets, InitProducerId, and Scram.
+// JoinGroup, Heartbeat, LeaveGroup, Auth, DescribeGroup, ListGroups, CreatePartitions, ListOffsets, InitProducerId, Scram,
+// AddBroker, RemoveBroker, and ListMembers.
 // Frame headers are big-endian (see package frame); payload integers and
 // length prefixes are little-endian.
 package codec
@@ -15,47 +16,53 @@ import (
 )
 
 const (
-	OpProduce               uint16 = 1
-	OpFetch                 uint16 = 2
-	OpCreateTopic           uint16 = 3
-	OpMetadata              uint16 = 4
-	OpDeleteTopic           uint16 = 5
-	OpOffsetCommit          uint16 = 6
-	OpOffsetFetch           uint16 = 7
-	OpJoinGroup             uint16 = 8
-	OpHeartbeat             uint16 = 9
-	OpLeaveGroup            uint16 = 10
-	OpAuth                  uint16 = 30
-	OpAuthResponse          uint16 = 31
-	OpInitProducerId        uint16 = 32
-	OpInitProducerIdResponse uint16 = 33
-	OpScramFirst            uint16 = 60
-	OpScramFirstResponse    uint16 = 61
-	OpScramFinal            uint16 = 62
-	OpScramFinalResponse    uint16 = 63
-	OpDescribeGroup         uint16 = 34
-	OpDescribeGroupResponse uint16 = 35
-	OpListGroups                 uint16 = 36
-	OpListGroupsResponse         uint16 = 37
-	OpDeleteOffsets              uint16 = 38
-	OpDeleteOffsetsResponse      uint16 = 39
-	OpDescribeConfigs            uint16 = 40
-	OpDescribeConfigsResponse    uint16 = 41
-	OpAlterConfigs               uint16 = 42
-	OpAlterConfigsResponse       uint16 = 43
-	OpDeleteRecords              uint16 = 44
-	OpDeleteRecordsResponse      uint16 = 45
-	OpCreatePartitions           uint16 = 46
-	OpCreatePartitionsResponse   uint16 = 47
-	OpListOffsets                uint16 = 48
-	OpListOffsetsResponse        uint16 = 49
-	OpCreateScramUser            uint16 = 64
-	OpCreateScramUserResponse    uint16 = 65
-	OpDeleteScramUser            uint16 = 66
-	OpDeleteScramUserResponse    uint16 = 67
-	OpListScramUsers             uint16 = 68
-	OpListScramUsersResponse     uint16 = 69
-	OpError                 uint16 = 0xFFFF
+	OpProduce                  uint16 = 1
+	OpFetch                    uint16 = 2
+	OpCreateTopic              uint16 = 3
+	OpMetadata                 uint16 = 4
+	OpDeleteTopic              uint16 = 5
+	OpOffsetCommit             uint16 = 6
+	OpOffsetFetch              uint16 = 7
+	OpJoinGroup                uint16 = 8
+	OpHeartbeat                uint16 = 9
+	OpLeaveGroup               uint16 = 10
+	OpAuth                     uint16 = 30
+	OpAuthResponse             uint16 = 31
+	OpInitProducerId           uint16 = 32
+	OpInitProducerIdResponse   uint16 = 33
+	OpScramFirst               uint16 = 60
+	OpScramFirstResponse       uint16 = 61
+	OpScramFinal               uint16 = 62
+	OpScramFinalResponse       uint16 = 63
+	OpDescribeGroup            uint16 = 34
+	OpDescribeGroupResponse    uint16 = 35
+	OpListGroups               uint16 = 36
+	OpListGroupsResponse       uint16 = 37
+	OpDeleteOffsets            uint16 = 38
+	OpDeleteOffsetsResponse    uint16 = 39
+	OpDescribeConfigs          uint16 = 40
+	OpDescribeConfigsResponse  uint16 = 41
+	OpAlterConfigs             uint16 = 42
+	OpAlterConfigsResponse     uint16 = 43
+	OpDeleteRecords            uint16 = 44
+	OpDeleteRecordsResponse    uint16 = 45
+	OpCreatePartitions         uint16 = 46
+	OpCreatePartitionsResponse uint16 = 47
+	OpListOffsets              uint16 = 48
+	OpListOffsetsResponse      uint16 = 49
+	OpCreateScramUser          uint16 = 64
+	OpCreateScramUserResponse  uint16 = 65
+	OpDeleteScramUser          uint16 = 66
+	OpDeleteScramUserResponse  uint16 = 67
+	OpListScramUsers           uint16 = 68
+	OpListScramUsersResponse   uint16 = 69
+	OpAddBroker                uint16 = 102
+	OpAddBrokerResponse        uint16 = 103
+	OpRemoveBroker             uint16 = 104
+	OpRemoveBrokerResponse     uint16 = 105
+	OpListMembers              uint16 = 106
+	OpListMembersResponse      uint16 = 107
+	OpError                    uint16 = 0xFFFF
 
 	nullLen = 0xFFFFFFFF
 )
@@ -237,6 +244,48 @@ func getOptionalBytes(r *reader) ([]byte, error) {
 		return nil, nil
 	}
 	return r.take(int(n), "truncated optional bytes body")
+}
+
+func putMembershipBroker(w *writer, b MembershipBroker) error {
+	w.u32(b.ID)
+	if err := putString(w, b.Host); err != nil {
+		return err
+	}
+	w.u16(b.Port)
+	if b.Rack == nil {
+		w.u8(0)
+		return nil
+	}
+	w.u8(1)
+	return putString(w, *b.Rack)
+}
+
+func getMembershipBroker(r *reader) (MembershipBroker, error) {
+	id, err := r.u32()
+	if err != nil {
+		return MembershipBroker{}, err
+	}
+	host, err := getString(r)
+	if err != nil {
+		return MembershipBroker{}, err
+	}
+	port, err := r.u16()
+	if err != nil {
+		return MembershipBroker{}, err
+	}
+	flag, err := r.u8()
+	if err != nil {
+		return MembershipBroker{}, err
+	}
+	var rack *string
+	if flag != 0 {
+		s, err := getString(r)
+		if err != nil {
+			return MembershipBroker{}, err
+		}
+		rack = &s
+	}
+	return MembershipBroker{ID: id, Host: host, Port: port, Rack: rack}, nil
 }
 
 // Header is a single produce/fetch record header.
@@ -514,6 +563,7 @@ type InitProducerIdResponse struct {
 	Epoch      uint16
 	ErrorCode  uint16
 }
+
 // GroupState is the ListGroups state byte (Phase 12).
 type GroupState uint8
 
@@ -643,6 +693,55 @@ type ListScramUsersResponse struct {
 	Usernames []string
 }
 
+// MembershipBroker is one overlay broker endpoint (v0.10 / v0.58).
+// Rack nil is absent (flag 0).
+type MembershipBroker struct {
+	ID   uint32
+	Host string
+	Port uint16
+	Rack *string
+}
+
+// MembershipList is configured + live membership (v0.10 / v0.58).
+type MembershipList struct {
+	Generation uint64
+	Brokers    []MembershipBroker
+	Live       []uint32
+}
+
+// AddBrokerRequest is the AddBroker opcode (102) body.
+type AddBrokerRequest struct {
+	ID   uint32
+	Host string
+	Port uint16
+	Rack *string
+}
+
+// AddBrokerResponse is the AddBroker reply (opcode 103).
+type AddBrokerResponse struct {
+	ErrorCode  uint16
+	Generation uint64
+}
+
+// RemoveBrokerRequest is the RemoveBroker opcode (104) body.
+type RemoveBrokerRequest struct {
+	ID uint32
+}
+
+// RemoveBrokerResponse is the RemoveBroker reply (opcode 105).
+type RemoveBrokerResponse struct {
+	ErrorCode  uint16
+	Generation uint64
+}
+
+// ListMembersResponse is the ListMembers reply (opcode 107).
+type ListMembersResponse struct {
+	ErrorCode  uint16
+	Generation uint64
+	Brokers    []MembershipBroker
+	Live       []uint32
+}
+
 type DeleteOffsetsRequest struct {
 	GroupID string
 	Entries []OffsetEntry
@@ -707,7 +806,6 @@ type CreatePartitionsResponse struct {
 	Topic      string
 	Partitions uint32
 }
-
 
 func EncodeProduceRequest(req ProduceRequest) ([]byte, error) {
 	w := &writer{}
@@ -1981,7 +2079,6 @@ func getConfigPairs(r *reader) ([][2]string, error) {
 	return configs, nil
 }
 
-
 func EncodeCreateScramUserRequest(req CreateScramUserRequest) ([]byte, error) {
 	w := &writer{}
 	if err := putString(w, req.Username); err != nil {
@@ -2066,6 +2163,155 @@ func DecodeListScramUsersRequest(payload []byte) error {
 	return nil
 }
 
+func EncodeAddBrokerRequest(req AddBrokerRequest) ([]byte, error) {
+	w := &writer{}
+	if err := putMembershipBroker(w, MembershipBroker{
+		ID: req.ID, Host: req.Host, Port: req.Port, Rack: req.Rack,
+	}); err != nil {
+		return nil, err
+	}
+	return w.buf, nil
+}
+
+func DecodeAddBrokerRequest(payload []byte) (AddBrokerRequest, error) {
+	r := &reader{data: payload}
+	b, err := getMembershipBroker(r)
+	if err != nil {
+		return AddBrokerRequest{}, err
+	}
+	return AddBrokerRequest{ID: b.ID, Host: b.Host, Port: b.Port, Rack: b.Rack}, nil
+}
+
+func EncodeAddBrokerResponse(resp AddBrokerResponse) ([]byte, error) {
+	w := &writer{}
+	w.u16(resp.ErrorCode)
+	w.u64(resp.Generation)
+	return w.buf, nil
+}
+
+func DecodeAddBrokerResponse(payload []byte) (AddBrokerResponse, error) {
+	r := &reader{data: payload}
+	code, err := r.u16()
+	if err != nil {
+		return AddBrokerResponse{}, err
+	}
+	gen, err := r.u64()
+	if err != nil {
+		return AddBrokerResponse{}, err
+	}
+	return AddBrokerResponse{ErrorCode: code, Generation: gen}, nil
+}
+
+func EncodeRemoveBrokerRequest(req RemoveBrokerRequest) ([]byte, error) {
+	w := &writer{}
+	w.u32(req.ID)
+	return w.buf, nil
+}
+
+func DecodeRemoveBrokerRequest(payload []byte) (RemoveBrokerRequest, error) {
+	r := &reader{data: payload}
+	id, err := r.u32()
+	if err != nil {
+		return RemoveBrokerRequest{}, err
+	}
+	return RemoveBrokerRequest{ID: id}, nil
+}
+
+func EncodeRemoveBrokerResponse(resp RemoveBrokerResponse) ([]byte, error) {
+	w := &writer{}
+	w.u16(resp.ErrorCode)
+	w.u64(resp.Generation)
+	return w.buf, nil
+}
+
+func DecodeRemoveBrokerResponse(payload []byte) (RemoveBrokerResponse, error) {
+	r := &reader{data: payload}
+	code, err := r.u16()
+	if err != nil {
+		return RemoveBrokerResponse{}, err
+	}
+	gen, err := r.u64()
+	if err != nil {
+		return RemoveBrokerResponse{}, err
+	}
+	return RemoveBrokerResponse{ErrorCode: code, Generation: gen}, nil
+}
+
+func EncodeListMembersRequest() []byte {
+	return []byte{}
+}
+
+func DecodeListMembersRequest(payload []byte) error {
+	return nil
+}
+
+func EncodeListMembersResponse(resp ListMembersResponse) ([]byte, error) {
+	w := &writer{}
+	w.u16(resp.ErrorCode)
+	w.u64(resp.Generation)
+	brokers := resp.Brokers
+	if brokers == nil {
+		brokers = []MembershipBroker{}
+	}
+	w.u32(uint32(len(brokers)))
+	for _, b := range brokers {
+		if err := putMembershipBroker(w, b); err != nil {
+			return nil, err
+		}
+	}
+	live := resp.Live
+	if live == nil {
+		live = []uint32{}
+	}
+	w.u32(uint32(len(live)))
+	for _, id := range live {
+		w.u32(id)
+	}
+	return w.buf, nil
+}
+
+func DecodeListMembersResponse(payload []byte) (ListMembersResponse, error) {
+	r := &reader{data: payload}
+	code, err := r.u16()
+	if err != nil {
+		return ListMembersResponse{}, err
+	}
+	gen, err := r.u64()
+	if err != nil {
+		return ListMembersResponse{}, err
+	}
+	n, err := r.u32()
+	if err != nil {
+		return ListMembersResponse{}, err
+	}
+	brokers := make([]MembershipBroker, 0, n)
+	for i := uint32(0); i < n; i++ {
+		b, err := getMembershipBroker(r)
+		if err != nil {
+			return ListMembersResponse{}, err
+		}
+		brokers = append(brokers, b)
+	}
+	liveN, err := r.u32()
+	if err != nil {
+		return ListMembersResponse{}, err
+	}
+	live := make([]uint32, 0, liveN)
+	for i := uint32(0); i < liveN; i++ {
+		id, err := r.u32()
+		if err != nil {
+			return ListMembersResponse{}, err
+		}
+		live = append(live, id)
+	}
+	return ListMembersResponse{
+		ErrorCode:  code,
+		Generation: gen,
+		Brokers:    brokers,
+		Live:       live,
+	}, nil
+}
+
 func EncodeListScramUsersResponse(resp ListScramUsersResponse) ([]byte, error) {
 	w := &writer{}
 	w.u16(resp.ErrorCode)
@@ -2118,7 +2364,6 @@ func EncodeDeleteOffsetsRequest(req DeleteOffsetsRequest) ([]byte, error) {
 	return w.buf, nil
 }
 
-
 func DecodeDeleteOffsetsRequest(payload []byte) (DeleteOffsetsRequest, error) {
 	r := &reader{data: payload}
 	groupID, err := getString(r)
@@ -2144,14 +2389,12 @@ func DecodeDeleteOffsetsRequest(payload []byte) (DeleteOffsetsRequest, error) {
 	return DeleteOffsetsRequest{GroupID: groupID, Entries: entries}, nil
 }
 
-
 func EncodeDeleteOffsetsResponse(resp DeleteOffsetsResponse) ([]byte, error) {
 	w := &writer{}
 	w.u16(resp.ErrorCode)
 	w.u32(resp.DeletedCount)
 	return w.buf, nil
 }
-
 
 func DecodeDeleteOffsetsResponse(payload []byte) (DeleteOffsetsResponse, error) {
 	r := &reader{data: payload}
@@ -2637,6 +2880,12 @@ func DecodeResponse(opcode uint16, payload []byte) (any, error) {
 		return DecodeAlterConfigsResponse(payload)
 	case OpDeleteRecordsResponse:
 		return DecodeDeleteRecordsResponse(payload)
+	case OpAddBrokerResponse:
+		return DecodeAddBrokerResponse(payload)
+	case OpRemoveBrokerResponse:
+		return DecodeRemoveBrokerResponse(payload)
+	case OpListMembersResponse:
+		return DecodeListMembersResponse(payload)
 	case OpError:
 		return DecodeErrorResponse(payload)
 	default:

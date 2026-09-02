@@ -52,6 +52,8 @@ type (
 	GroupMemberInfo  = codec.GroupMemberInfo
 	GroupState       = codec.GroupState
 	OffsetListing    = codec.OffsetListing
+	MembershipBroker = codec.MembershipBroker
+	MembershipList   = codec.MembershipList
 )
 
 // DeleteRecordsResult is the successful DeleteRecords reply (Phase 14 / v0.52).
@@ -959,7 +961,6 @@ type DescribeConfigsResult struct {
 	Configs        [][2]string
 }
 
-
 // DescribeConfigs returns topic configuration (native opcode 40/41).
 // Topic configs only (not Kafka DescribeConfigs / BROKER). Empty values
 // mean the key is unset. Non-zero error_code is BrokerError with
@@ -1017,7 +1018,6 @@ func (c *Client) DescribeConfigs(topic string) (DescribeConfigsResult, error) {
 		Configs:        resp.Configs,
 	}, nil
 }
-
 
 // AlterConfigs updates topic configuration (native opcode 42/43).
 // Empty value clears that key (same as Rust). Topic configs only.
@@ -1280,6 +1280,72 @@ func (c *Client) ListScramUsers() ([]string, error) {
 		return nil, err
 	}
 	return resp.Usernames, nil
+}
+
+// AddBroker adds a broker endpoint to the membership overlay (native 102/103).
+// rack nil is absent on the wire (flag 0). Returns the overlay generation.
+// Overlay is still SoT; this is not Kafka broker catalog.
+func (c *Client) AddBroker(id uint32, host string, port uint16, rack *string) (uint64, error) {
+	payload, err := codec.EncodeAddBrokerRequest(codec.AddBrokerRequest{
+		ID: id, Host: host, Port: port, Rack: rack,
+	})
+	if err != nil {
+		return 0, err
+	}
+	decoded, err := c.roundTrip(codec.OpAddBroker, payload)
+	if err != nil {
+		return 0, err
+	}
+	resp, ok := decoded.(codec.AddBrokerResponse)
+	if !ok {
+		return 0, &frame.ProtocolError{Msg: fmt.Sprintf("unexpected response for add_broker: %T", decoded)}
+	}
+	if err := check(resp.ErrorCode, "add_broker"); err != nil {
+		return 0, err
+	}
+	return resp.Generation, nil
+}
+
+// RemoveBroker removes a broker from the membership overlay (native 104/105).
+// Returns the overlay generation.
+func (c *Client) RemoveBroker(id uint32) (uint64, error) {
+	payload, err := codec.EncodeRemoveBrokerRequest(codec.RemoveBrokerRequest{ID: id})
+	if err != nil {
+		return 0, err
+	}
+	decoded, err := c.roundTrip(codec.OpRemoveBroker, payload)
+	if err != nil {
+		return 0, err
+	}
+	resp, ok := decoded.(codec.RemoveBrokerResponse)
+	if !ok {
+		return 0, &frame.ProtocolError{Msg: fmt.Sprintf("unexpected response for remove_broker: %T", decoded)}
+	}
+	if err := check(resp.ErrorCode, "remove_broker"); err != nil {
+		return 0, err
+	}
+	return resp.Generation, nil
+}
+
+// ListMembers lists configured + live membership (native opcode 106/107).
+// Overlay is still SoT.
+func (c *Client) ListMembers() (MembershipList, error) {
+	decoded, err := c.roundTrip(codec.OpListMembers, codec.EncodeListMembersRequest())
+	if err != nil {
+		return MembershipList{}, err
+	}
+	resp, ok := decoded.(codec.ListMembersResponse)
+	if !ok {
+		return MembershipList{}, &frame.ProtocolError{Msg: fmt.Sprintf("unexpected response for list_members: %T", decoded)}
+	}
+	if err := check(resp.ErrorCode, "list_members"); err != nil {
+		return MembershipList{}, err
+	}
+	return MembershipList{
+		Generation: resp.Generation,
+		Brokers:    resp.Brokers,
+		Live:       resp.Live,
+	}, nil
 }
 
 // LeaveGroup leaves a consumer group.

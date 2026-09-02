@@ -89,6 +89,13 @@ err = c.CreateScramUser("alice", "s3cret", 0) // 0 = broker default 4096
 names, err := c.ListScramUsers()
 err = c.DeleteScramUser("alice")
 _ = names
+// Membership overlay admin (v0.58). Opcodes 102–107. Overlay is still SoT.
+rack := "r1"
+gen, err := c.AddBroker(2, "10.0.0.2", 9092, &rack)
+members, err := c.ListMembers() // Generation, Brokers, Live
+gen, err = c.RemoveBroker(2)
+_ = gen
+_ = members
 ```
 
 `Produce(..., nil, value)` sends a null key. `Fetch` returns `[]Record`
@@ -175,6 +182,10 @@ Leader redirect re-runs the same auth path.
 Create/Delete/ListScramUsers (v0.55) are admin RPCs (opcodes 64–69),
 not the handshake. `CreateScramUser` sends the password in the clear
 (use TLS). Not Kafka AlterUserScramCredentials.
+AddBroker / RemoveBroker / ListMembers (v0.58) are overlay admin
+RPCs (opcodes 102–107). `rack == nil` is absent on the wire. Overlay
+is still SoT; follower forward is broker-side (v0.38). Not Kafka
+AlterPartitionReassignments / broker catalog.
 
 ## Honesty
 
@@ -228,4 +239,5 @@ See [docs/V19_SPEC.md](../../docs/V19_SPEC.md),
 [docs/V46_SPEC.md](../../docs/V46_SPEC.md).
 [docs/V50_SPEC.md](../../docs/V50_SPEC.md).,
 [docs/V46_SPEC.md](../../docs/V46_SPEC.md),
-[docs/V55_SPEC.md](../../docs/V55_SPEC.md).
+[docs/V55_SPEC.md](../../docs/V55_SPEC.md),
+[docs/V58_SPEC.md](../../docs/V58_SPEC.md).
