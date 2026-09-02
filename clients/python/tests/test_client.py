@@ -9,12 +9,14 @@ import unittest
 from volant import BrokerError, Client
 from volant.codec import (
     OP_FETCH,
+    OP_HEARTBEAT,
     OP_INIT_PRODUCER_ID,
     OP_INIT_PRODUCER_ID_RESPONSE,
     OP_METADATA,
     OP_PRODUCE,
     BrokerInfo,
     FetchResponse,
+    HeartbeatResponse,
     InitProducerIdResponse,
     MetadataResponse,
     PartitionInfo,
@@ -25,6 +27,7 @@ from volant.codec import (
     decode_init_producer_id_request,
     decode_produce_request,
     encode_fetch_response,
+    encode_heartbeat_response,
     encode_init_producer_id_response,
     encode_metadata_response,
     encode_produce_response,
@@ -37,14 +40,15 @@ NOT_LEADER = 13
 class ScriptedBroker:
     """Accepts connections and replies to Produce / Fetch / Metadata.
 
-    ``produce_codes`` / ``fetch_codes`` are queues of error_code values
-    consumed across connections. Metadata is a fixed response (or a
-    callable of ``() -> MetadataResponse``).
+    ``produce_codes`` / ``fetch_codes`` / ``heartbeat_codes`` are queues
+    of error_code values consumed across connections. Metadata is a
+    fixed response (or a callable of ``() -> MetadataResponse``).
     """
 
     def __init__(self) -> None:
         self.produce_codes: list[int] = []
         self.fetch_codes: list[int] = []
+        self.heartbeat_codes: list[int] = []
         self.metadata: MetadataResponse | None = None
         self.opcodes: list[int] = []
         self.produce_reqs: list[ProduceRequest] = []
@@ -52,6 +56,7 @@ class ScriptedBroker:
         self.init_count = 0
         self.produce_count = 0
         self.fetch_count = 0
+        self.heartbeat_count = 0
         self.metadata_count = 0
         self.accept_count = 0
         self.init_pid = 42
@@ -175,6 +180,13 @@ class ScriptedBroker:
                     )
                 ),
                 OP_FETCH,
+            )
+        if opcode == OP_HEARTBEAT:
+            self.heartbeat_count += 1
+            code = self.heartbeat_codes.pop(0) if self.heartbeat_codes else 0
+            return (
+                encode_heartbeat_response(HeartbeatResponse(error_code=code)),
+                OP_HEARTBEAT,
             )
         if opcode == OP_METADATA:
             self.metadata_count += 1
@@ -519,6 +531,69 @@ class TestFetchRetry(unittest.TestCase):
                     c.fetch("t", 0, offset=0)
             self.assertEqual(ctx.exception.code, TIMEOUT)
             self.assertEqual(srv.fetch_count, 3)
+
+
+REBALANCE = 9
+
+
+class TestHeartbeatRetry(unittest.TestCase):
+    def test_default_max_retries_zero_raises_on_timeout(self) -> None:
+        with ScriptedBroker() as srv:
+            srv.heartbeat_codes = [TIMEOUT]
+            with Client(srv.addr, timeout=5.0) as c:
+                self.assertEqual(c.max_retries, 0)
+                with self.assertRaises(BrokerError) as ctx:
+                    c.heartbeat("g", "m1", 1)
+            self.assertEqual(ctx.exception.code, TIMEOUT)
+            self.assertEqual(srv.heartbeat_count, 1)
+
+    def test_retries_timeout_then_ok(self) -> None:
+        with ScriptedBroker() as srv:
+            srv.heartbeat_codes = [TIMEOUT, 0]
+            with Client(srv.addr, timeout=5.0, max_retries=2, retry_backoff_ms=0) as c:
+                code = c.heartbeat("g", "m1", 1)
+            self.assertEqual(code, 0)
+            self.assertEqual(srv.heartbeat_count, 2)
+
+    def test_rebalance_is_not_retried(self) -> None:
+        with ScriptedBroker() as srv:
+            srv.heartbeat_codes = [REBALANCE, 0]
+            with Client(srv.addr, timeout=5.0, max_retries=2, retry_backoff_ms=0) as c:
+                with self.assertRaises(BrokerError) as ctx:
+                    c.heartbeat("g", "m1", 1)
+            self.assertEqual(ctx.exception.code, REBALANCE)
+            self.assertEqual(srv.heartbeat_count, 1)
+
+    def test_transport_fail_then_ok(self) -> None:
+        with ScriptedBroker() as srv:
+            orig = Client._round_trip
+            calls = {"n": 0}
+
+            def flaky(self, opcode, payload):  # type: ignore[no-untyped-def]
+                if opcode == OP_HEARTBEAT:
+                    calls["n"] += 1
+                    if calls["n"] == 1:
+                        raise OSError("injected transport")
+                return orig(self, opcode, payload)
+
+            with Client(srv.addr, timeout=5.0, max_retries=1, retry_backoff_ms=0) as c:
+                Client._round_trip = flaky  # type: ignore[method-assign]
+                try:
+                    code = c.heartbeat("g", "m1", 1)
+                finally:
+                    Client._round_trip = orig  # type: ignore[method-assign]
+            self.assertEqual(code, 0)
+            self.assertEqual(srv.heartbeat_count, 1)
+            self.assertEqual(calls["n"], 2)
+
+    def test_exhausted_retries_raises(self) -> None:
+        with ScriptedBroker() as srv:
+            srv.heartbeat_codes = [TIMEOUT, TIMEOUT, TIMEOUT]
+            with Client(srv.addr, timeout=5.0, max_retries=2, retry_backoff_ms=0) as c:
+                with self.assertRaises(BrokerError) as ctx:
+                    c.heartbeat("g", "m1", 1)
+            self.assertEqual(ctx.exception.code, TIMEOUT)
+            self.assertEqual(srv.heartbeat_count, 3)
 
 
 if __name__ == "__main__":

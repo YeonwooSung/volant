@@ -249,11 +249,12 @@ class Client:
 
         c = Client("127.0.0.1:9092", enable_idempotence=True)
 
-    Optional produce/fetch retry (v0.61 / v0.66) retries transient
-    broker codes 6, 7, 15, 16 and TCP I/O errors. Default
-    ``max_retries=0`` (no extra attempts). ``retry_backoff_ms``
+    Optional produce/fetch/heartbeat retry (v0.61 / v0.66 / v0.74)
+    retries transient broker codes 6, 7, 15, 16 and TCP I/O errors.
+    Default ``max_retries=0`` (no extra attempts). ``retry_backoff_ms``
     defaults to 50; tests may set 0. Error 13 stays on the redirect
-    budget; error 21 stays on the one re-Init::
+    budget; error 21 stays on the one re-Init. Heartbeat rebalance
+    codes 9 / 10 / 11 are not retried::
 
         c = Client("127.0.0.1:9092", max_retries=3, retry_backoff_ms=50)
         c.max_retries = 3
@@ -1221,17 +1222,47 @@ class Client:
         )
 
     def heartbeat(self, group: str, member_id: str, generation: int) -> int:
-        """Heartbeat for group membership. Returns the broker error_code."""
+        """Heartbeat for group membership. Returns the broker error_code.
+
+        Transient broker/transport errors retry up to ``max_retries``
+        extra times (default 0). Rebalance codes 9 / 10 / 11 are not
+        retried.
+        """
         payload = codec.encode_heartbeat_request(
             HeartbeatRequest(
                 group_id=group, member_id=member_id, generation=generation
             )
         )
-        resp = self._round_trip(codec.OP_HEARTBEAT, payload)
-        if not isinstance(resp, HeartbeatResponse):
-            raise ProtocolError(f"unexpected response for heartbeat: {type(resp)}")
-        self._check(resp.error_code, "heartbeat")
-        return resp.error_code
+        max_retries = max(0, int(self.max_retries))
+        retry_attempt = 0
+        while True:
+            try:
+                resp = self._round_trip(codec.OP_HEARTBEAT, payload)
+            except BrokerError as e:
+                if _is_transient_broker(e.code) and retry_attempt < max_retries:
+                    retry_attempt += 1
+                    self._sleep_produce_retry()
+                    continue
+                raise
+            except OSError:
+                if retry_attempt < max_retries:
+                    retry_attempt += 1
+                    self._sleep_produce_retry()
+                    continue
+                raise
+            if not isinstance(resp, HeartbeatResponse):
+                raise ProtocolError(
+                    f"unexpected response for heartbeat: {type(resp)}"
+                )
+            if (
+                _is_transient_broker(resp.error_code)
+                and retry_attempt < max_retries
+            ):
+                retry_attempt += 1
+                self._sleep_produce_retry()
+                continue
+            self._check(resp.error_code, "heartbeat")
+            return resp.error_code
 
     def leave_group(self, group: str, member_id: str) -> None:
         """Leave a consumer group."""

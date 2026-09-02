@@ -267,10 +267,11 @@ func (c *Client) SetMaxRedirects(n int) {
 	c.maxRedirects = n
 }
 
-// SetMaxRetries sets extra Produce/Fetch attempts after the first on
-// transient broker/transport errors. Default is 0 (no extra attempts).
-// Negative values are treated as 0. Error 13 stays on the redirect
-// budget; error 21 stays on the one re-Init.
+// SetMaxRetries sets extra Produce/Fetch/Heartbeat attempts after the
+// first on transient broker/transport errors. Default is 0 (no extra
+// attempts). Negative values are treated as 0. Error 13 stays on the
+// redirect budget; error 21 stays on the one re-Init. Heartbeat
+// rebalance codes 9 / 10 / 11 are not retried.
 func (c *Client) SetMaxRetries(n int) {
 	if n < 0 {
 		n = 0
@@ -1524,7 +1525,9 @@ func (c *Client) joinGroup(group, memberID string, topics []string, sessionTimeo
 }
 
 // Heartbeat keeps a group member alive. Non-zero error_code is BrokerError
-// (9 = rebalance in progress).
+// (9 = rebalance in progress). Transient broker/transport errors retry
+// up to maxRetries extra times (default 0). Rebalance codes 9 / 10 / 11
+// are not retried.
 func (c *Client) Heartbeat(group, memberID string, generation uint32) error {
 	payload, err := codec.EncodeHeartbeatRequest(codec.HeartbeatRequest{
 		GroupID:    group,
@@ -1534,15 +1537,32 @@ func (c *Client) Heartbeat(group, memberID string, generation uint32) error {
 	if err != nil {
 		return err
 	}
-	decoded, err := c.roundTrip(codec.OpHeartbeat, payload)
-	if err != nil {
-		return err
+	maxRetries := c.maxRetries
+	if maxRetries < 0 {
+		maxRetries = 0
 	}
-	resp, ok := decoded.(codec.HeartbeatResponse)
-	if !ok {
-		return &frame.ProtocolError{Msg: fmt.Sprintf("unexpected response for heartbeat: %T", decoded)}
+	retryAttempt := 0
+	for {
+		decoded, err := c.roundTrip(codec.OpHeartbeat, payload)
+		if err != nil {
+			if isTransientProduceErr(err) && retryAttempt < maxRetries {
+				retryAttempt++
+				c.sleepProduceRetry()
+				continue
+			}
+			return err
+		}
+		resp, ok := decoded.(codec.HeartbeatResponse)
+		if !ok {
+			return &frame.ProtocolError{Msg: fmt.Sprintf("unexpected response for heartbeat: %T", decoded)}
+		}
+		if isTransientBroker(resp.ErrorCode) && retryAttempt < maxRetries {
+			retryAttempt++
+			c.sleepProduceRetry()
+			continue
+		}
+		return check(resp.ErrorCode, "heartbeat")
 	}
-	return check(resp.ErrorCode, "heartbeat")
 }
 
 // DescribeGroup describes a live consumer group (native opcode 34/35).
