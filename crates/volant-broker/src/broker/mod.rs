@@ -23,10 +23,10 @@ use volant_protocol::ErrorCode;
 use volant_storage::StorageConfig;
 
 use crate::cluster::{
-    cluster_metadata_topic_env_enabled, default_openraft_metadata_enabled, load_assignment,
-    load_assignment_from_cluster_metadata, load_membership_overlay, save_assignment,
-    AssignmentConsensus, AssignmentSnapshot, ClusterConfig, Membership, MetadataRaftState,
-    OpenraftMetaHandle, OpenraftMetricsCache,
+    cluster_metadata_topic_env_enabled, default_openraft_joint_rollback_enabled,
+    default_openraft_metadata_enabled, load_assignment, load_assignment_from_cluster_metadata,
+    load_membership_overlay, save_assignment, AssignmentConsensus, AssignmentSnapshot,
+    ClusterConfig, Membership, MetadataRaftState, OpenraftMetaHandle, OpenraftMetricsCache,
 };
 use crate::delete_records_outbox::DeleteRecordsOutbox;
 use crate::group::GroupCoordinator;
@@ -96,6 +96,19 @@ pub struct MembershipSnapshot {
     pub brokers: Vec<crate::cluster::BrokerEndpoint>,
     /// Currently live broker ids (sorted).
     pub live: Vec<u32>,
+}
+
+/// Pre-mutation membership checkpoint for v0.34 joint rollback.
+#[derive(Debug, Clone)]
+pub struct MembershipOverlaySnapshot {
+    /// Overlay generation (`0` if still toml-only).
+    pub generation: u64,
+    /// Effective broker endpoints.
+    pub brokers: Vec<crate::cluster::BrokerEndpoint>,
+    /// Whether `{data_dir}/cluster/membership.json` existed.
+    pub file_present: bool,
+    /// v0.26 intended voter-set hook at checkpoint.
+    pub last_membership_target: Option<Vec<u32>>,
 }
 
 /// Shared cluster runtime state.
@@ -657,6 +670,10 @@ pub struct Broker {
     pub(crate) openraft_install_snapshot_rx: AtomicU64,
     /// v0.26: last intended openraft voter set after overlay add/remove.
     pub(crate) openraft_last_membership_target: Mutex<Option<Vec<u32>>>,
+    /// v0.34: roll back overlay when leader `change_membership` fails. Default **on**.
+    pub(crate) openraft_joint_rollback_enabled: AtomicBool,
+    /// v0.34 test hook: next leader `change_membership` returns fail.
+    pub(crate) openraft_fail_next_change_membership: AtomicBool,
     /// v0.12: append assignment snapshots to `__cluster_metadata`. Default **off**
     /// (`VOLANT_CLUSTER_METADATA_TOPIC`).
     cluster_metadata_topic_enabled: AtomicBool,
@@ -917,6 +934,10 @@ impl Broker {
             openraft_metrics: OpenraftMetricsCache::default(),
             openraft_install_snapshot_rx: AtomicU64::new(0),
             openraft_last_membership_target: Mutex::new(None),
+            openraft_joint_rollback_enabled: AtomicBool::new(
+                default_openraft_joint_rollback_enabled(),
+            ),
+            openraft_fail_next_change_membership: AtomicBool::new(false),
             cluster_metadata_topic_enabled: AtomicBool::new(cluster_metadata_topic_env_enabled()),
             partition_raft_new_topics: AtomicBool::new(partition_raft_env_enabled()),
             partition_rafts: Mutex::new(HashMap::new()),
@@ -1122,6 +1143,10 @@ impl Broker {
             openraft_metrics: OpenraftMetricsCache::default(),
             openraft_install_snapshot_rx: AtomicU64::new(0),
             openraft_last_membership_target: Mutex::new(None),
+            openraft_joint_rollback_enabled: AtomicBool::new(
+                default_openraft_joint_rollback_enabled(),
+            ),
+            openraft_fail_next_change_membership: AtomicBool::new(false),
             cluster_metadata_topic_enabled: AtomicBool::new(cluster_metadata_topic_env_enabled()),
             partition_raft_new_topics: AtomicBool::new(partition_raft_env_enabled()),
             partition_rafts: Mutex::new(HashMap::new()),

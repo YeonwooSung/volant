@@ -30,6 +30,60 @@ impl Broker {
         crate::cluster::membership_overlay_path(&self.storage.data_dir)
     }
 
+    /// Checkpoint overlay generation, brokers, file presence, and voter hook.
+    ///
+    /// Used by the v0.34 leader dispatch path so a failed `change_membership`
+    /// can restore `{data_dir}/cluster/membership.json` and in-memory N.
+    pub fn snapshot_membership_overlay(&self) -> MembershipOverlaySnapshot {
+        let generation = self.membership_generation();
+        let brokers = match &self.cluster {
+            Some(c) => c.config.read().brokers.clone(),
+            None => Vec::new(),
+        };
+        MembershipOverlaySnapshot {
+            generation,
+            brokers,
+            file_present: self.membership_overlay_path().exists(),
+            last_membership_target: self.test_last_openraft_membership_target(),
+        }
+    }
+
+    /// Restore overlay file + in-memory config + generation + voter hook.
+    ///
+    /// Generation `0` / no previous file removes `membership.json` so toml is
+    /// SoT again. Live heartbeats are reconciled via `apply_configured_ids`
+    /// (a re-added id is not marked live).
+    pub fn restore_membership_overlay(&self, prev: &MembershipOverlaySnapshot) -> Result<()> {
+        let cluster = self.cluster.as_ref().ok_or_else(|| {
+            Error::InvalidArgument("restore membership overlay requires cluster mode".into())
+        })?;
+        if prev.file_present && prev.generation > 0 {
+            let overlay = crate::cluster::MembershipOverlay {
+                generation: prev.generation,
+                brokers: prev.brokers.clone(),
+            };
+            crate::cluster::save_membership_overlay(&cluster.data_dir, &overlay)?;
+        } else {
+            let path = crate::cluster::membership_overlay_path(&cluster.data_dir);
+            if path.exists() {
+                fs::remove_file(&path).map_err(|e| {
+                    Error::Storage(format!("remove membership overlay {}: {e}", path.display()))
+                })?;
+            }
+        }
+        {
+            let mut cfg = cluster.config.write();
+            cfg.brokers = prev.brokers.clone();
+        }
+        cluster
+            .membership_generation
+            .store(prev.generation, Ordering::Relaxed);
+        let ids: Vec<u32> = prev.brokers.iter().map(|b| b.id).collect();
+        cluster.membership.write().apply_configured_ids(&ids);
+        *self.openraft_last_membership_target.lock() = prev.last_membership_target.clone();
+        Ok(())
+    }
+
     /// Configured brokers + live ids + overlay generation.
     pub fn list_membership(&self) -> MembershipSnapshot {
         match &self.cluster {
@@ -106,8 +160,8 @@ impl Broker {
                 );
             }
         }
-        // v0.26: record intended voter set. Leader `change_membership` is
-        // best-effort and does not roll back this overlay.
+        // v0.26: record intended voter set. Leader dispatch (v0.34) rolls
+        // this overlay back when `change_membership` fails.
         self.note_openraft_membership_target();
         Ok(generation)
     }
@@ -159,8 +213,8 @@ impl Broker {
             .store(generation, Ordering::Relaxed);
         drop(cfg);
         cluster.membership.write().remove_id(id);
-        // v0.26: record intended voter set. Leader `change_membership` is
-        // best-effort and does not roll back this overlay.
+        // v0.26: record intended voter set. Leader dispatch (v0.34) rolls
+        // this overlay back when `change_membership` fails.
         self.note_openraft_membership_target();
         Ok(generation)
     }

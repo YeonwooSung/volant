@@ -4,14 +4,14 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use bytes::{Bytes, BytesMut};
-use tracing::{info_span, Instrument};
+use tracing::{info_span, warn, Instrument};
 use volant_core::{Error, Message, MessageBatch, Offset, PartitionId, Result, TopicName};
 use volant_protocol::{
     decode_request, Assignment, BrokerInfo, ErrorCode, FetchRecord, Frame, OffsetFetchEntry,
     PartitionInfo, Request, Response, TopicInfo,
 };
 
-use crate::broker::{Broker, Txn2pcFanout};
+use crate::broker::{Broker, MembershipOverlaySnapshot, Txn2pcFanout};
 use crate::cluster::MetadataLogEntry;
 
 use super::fanout::{
@@ -1319,35 +1319,40 @@ async fn handle_request(broker: &Arc<Broker>, req: Request) -> Result<Response> 
             host,
             port,
             rack,
-        } => match broker.add_broker(id, host, port, rack) {
-            Ok(generation) => {
-                fanout_membership_put(broker).await;
-                // Overlay is SoT. change_membership is best-effort (no rollback).
-                let _ = broker.change_openraft_membership().await;
-                Ok(Response::AddBroker {
-                    error_code: 0,
-                    generation,
-                })
+        } => {
+            let prev = broker.snapshot_membership_overlay();
+            match broker.add_broker(id, host, port, rack) {
+                Ok(generation) => {
+                    let (error_code, generation) =
+                        after_overlay_mutation(broker, &prev, generation).await;
+                    Ok(Response::AddBroker {
+                        error_code,
+                        generation,
+                    })
+                }
+                Err(e) => Ok(Response::Error {
+                    code: ErrorCode::InvalidArg as u16,
+                    message: e.to_string(),
+                }),
             }
-            Err(e) => Ok(Response::Error {
-                code: ErrorCode::InvalidArg as u16,
-                message: e.to_string(),
-            }),
-        },
-        Request::RemoveBroker { id } => match broker.remove_broker(id) {
-            Ok(generation) => {
-                fanout_membership_put(broker).await;
-                let _ = broker.change_openraft_membership().await;
-                Ok(Response::RemoveBroker {
-                    error_code: 0,
-                    generation,
-                })
+        }
+        Request::RemoveBroker { id } => {
+            let prev = broker.snapshot_membership_overlay();
+            match broker.remove_broker(id) {
+                Ok(generation) => {
+                    let (error_code, generation) =
+                        after_overlay_mutation(broker, &prev, generation).await;
+                    Ok(Response::RemoveBroker {
+                        error_code,
+                        generation,
+                    })
+                }
+                Err(e) => Ok(Response::Error {
+                    code: ErrorCode::InvalidArg as u16,
+                    message: e.to_string(),
+                }),
             }
-            Err(e) => Ok(Response::Error {
-                code: ErrorCode::InvalidArg as u16,
-                message: e.to_string(),
-            }),
-        },
+        }
         Request::OpenraftAppend { payload } => {
             let out = broker.handle_openraft_append(&payload).await?;
             Ok(Response::OpenraftAppend { payload: out })
@@ -1899,6 +1904,36 @@ fn acl_entry_to_wire(e: crate::acl::AclEntry) -> volant_protocol::AclBinding {
         resource: e.resource,
         operation: e.operation.as_u8(),
         permission: e.permission.as_u8(),
+    }
+}
+
+/// After overlay add/remove: leader joint-sync (rollback on fail) or v0.26
+/// best-effort. Followers and flag-off keep persist + MembershipPut.
+async fn after_overlay_mutation(
+    broker: &Broker,
+    prev: &MembershipOverlaySnapshot,
+    generation: u64,
+) -> (u16, u64) {
+    if broker.openraft_joint_rollback_armed() {
+        if broker.change_openraft_membership().await {
+            fanout_membership_put(broker).await;
+            (0, generation)
+        } else {
+            if let Err(e) = broker.restore_membership_overlay(prev) {
+                warn!(
+                    error = %e,
+                    "openraft joint rollback failed to restore overlay"
+                );
+            }
+            (
+                ErrorCode::NotEnoughReplicas as u16,
+                broker.membership_generation(),
+            )
+        }
+    } else {
+        fanout_membership_put(broker).await;
+        let _ = broker.change_openraft_membership().await;
+        (0, generation)
     }
 }
 
