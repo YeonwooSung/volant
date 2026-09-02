@@ -34,10 +34,11 @@ pub struct ClientConfig {
     /// Transactional id (Phase 18). When set, enables idempotence and fences
     /// prior owners of the same id. Use with [`crate::TransactionalProducer`].
     pub transactional_id: Option<String>,
-    /// Extra produce / heartbeat attempts after the first on transient
-    /// broker/transport errors.
+    /// Extra produce / heartbeat / offset-admin attempts after the first
+    /// on transient broker/transport errors.
     pub max_retries: u32,
-    /// Sleep between produce / heartbeat retries (milliseconds).
+    /// Sleep between produce / heartbeat / offset-admin retries
+    /// (milliseconds).
     pub retry_backoff_ms: u64,
 }
 
