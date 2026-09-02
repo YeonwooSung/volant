@@ -29,6 +29,10 @@
 //! v0.80 retries [`Client::heartbeat`] on the same transient set as
 //! produce ([`ClientConfig::max_retries`], default 0). Rebalance 9/10/11
 //! is not retried. GroupConsumer poll / background heartbeat inherit.
+//! v0.83 retries [`Client::commit_offsets`] / [`Client::fetch_offsets`] /
+//! [`Client::delete_offsets`] on that same set. Error 13 / 14 / 9 / 10 /
+//! 11 / 2 is not retried. [`GroupConsumer::commit`] inherits via
+//! `commit_offsets`. ListOffsets is unchanged.
 
 #![deny(missing_docs)]
 

@@ -1375,13 +1375,15 @@ impl Client {
     /// Delete committed offsets for a group (Phase 12).
     ///
     /// Empty `entries` deletes all offsets for the group.
+    /// Transient broker/transport errors retry up to
+    /// [`ClientConfig::max_retries`] extra times (default 0).
     pub async fn delete_offsets(
         &self,
         group_id: &str,
         entries: Vec<OffsetEntry>,
     ) -> Result<DeleteOffsetsResult> {
         let resp = self
-            .round_trip(Request::DeleteOffsets {
+            .offset_admin_round_trip(Request::DeleteOffsets {
                 group_id: group_id.to_owned(),
                 entries,
             })
@@ -1574,6 +1576,8 @@ impl Client {
     /// Commit offsets for a consumer group.
     ///
     /// Pass `generation = 0` for admin/CLI commits that skip generation checks.
+    /// Transient broker/transport errors retry up to
+    /// [`ClientConfig::max_retries`] extra times (default 0).
     pub async fn commit_offsets(
         &self,
         group_id: &str,
@@ -1582,7 +1586,7 @@ impl Client {
         entries: Vec<OffsetCommitEntry>,
     ) -> Result<()> {
         let resp = self
-            .round_trip(Request::OffsetCommit {
+            .offset_admin_round_trip(Request::OffsetCommit {
                 group_id: group_id.to_owned(),
                 member_id: member_id.to_owned(),
                 generation,
@@ -1602,13 +1606,16 @@ impl Client {
     }
 
     /// Fetch committed offsets. Empty `entries` returns all offsets for the group.
+    ///
+    /// Transient broker/transport errors retry up to
+    /// [`ClientConfig::max_retries`] extra times (default 0).
     pub async fn fetch_offsets(
         &self,
         group_id: &str,
         entries: Vec<OffsetEntry>,
     ) -> Result<Vec<OffsetFetchEntry>> {
         let resp = self
-            .round_trip(Request::OffsetFetch {
+            .offset_admin_round_trip(Request::OffsetFetch {
                 group_id: group_id.to_owned(),
                 entries,
             })
@@ -1625,6 +1632,41 @@ impl Client {
             other => Err(Error::Protocol(format!(
                 "unexpected response for fetch_offsets: {other:?}"
             ))),
+        }
+    }
+
+    /// OffsetCommit / OffsetFetch / DeleteOffsets share produce/heartbeat
+    /// [`ClientConfig::max_retries`]. Transient 6 / 7 / 15 / 16 and
+    /// [`Error::Io`] are retried; 13 / 14 / 9 / 10 / 11 / 2 and protocol
+    /// errors are not.
+    async fn offset_admin_round_trip(&self, req: Request) -> Result<Response> {
+        let max_retries = self.config.max_retries;
+        let mut retry_attempt = 0u32;
+        loop {
+            let resp = match self.round_trip(req.clone()).await {
+                Ok(r) => r,
+                Err(e) if is_transient_transport(&e) && retry_attempt < max_retries => {
+                    retry_attempt += 1;
+                    tokio::time::sleep(Duration::from_millis(self.config.retry_backoff_ms)).await;
+                    continue;
+                }
+                Err(e) => return Err(e),
+            };
+            let code = match &resp {
+                Response::OffsetCommit { error_code }
+                | Response::OffsetFetch { error_code, .. }
+                | Response::DeleteOffsets { error_code, .. }
+                | Response::Error {
+                    code: error_code, ..
+                } => *error_code,
+                _ => return Ok(resp),
+            };
+            if is_transient_error_code(code) && retry_attempt < max_retries {
+                retry_attempt += 1;
+                tokio::time::sleep(Duration::from_millis(self.config.retry_backoff_ms)).await;
+                continue;
+            }
+            return Ok(resp);
         }
     }
 
