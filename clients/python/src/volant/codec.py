@@ -3,7 +3,8 @@
 Matches `crates/volant-protocol/src/payload.rs` for the MVP opcodes:
 Produce, Fetch, CreateTopic, Metadata, DeleteTopic, OffsetCommit,
 OffsetFetch, JoinGroup, Heartbeat, LeaveGroup, Auth, DescribeGroup,
-ListGroups, ListOffsets, InitProducerId, Scram.
+ListGroups, ListOffsets, DescribeConfigs, AlterConfigs, InitProducerId,
+Scram.
 
 Header fields are big-endian (see :mod:`volant.frame`); **payload** integers
 and length prefixes are little-endian.
@@ -42,6 +43,10 @@ OP_LIST_GROUPS = 36
 OP_LIST_GROUPS_RESPONSE = 37
 OP_LIST_OFFSETS = 48
 OP_LIST_OFFSETS_RESPONSE = 49
+OP_DESCRIBE_CONFIGS = 40
+OP_DESCRIBE_CONFIGS_RESPONSE = 41
+OP_ALTER_CONFIGS = 42
+OP_ALTER_CONFIGS_RESPONSE = 43
 OP_ERROR = 0xFFFF
 
 _NULL_LEN = 0xFFFFFFFF
@@ -204,6 +209,18 @@ def _get_headers(r: _Reader) -> list[tuple[str, bytes]]:
         value = _get_bytes(r)
         out.append((name, value))
     return out
+
+
+def _put_config_pairs(w: _Writer, configs: list[tuple[str, str]]) -> None:
+    w.u32_le(len(configs))
+    for k, v in configs:
+        _put_string(w, k)
+        _put_string(w, v)
+
+
+def _get_config_pairs(r: _Reader) -> list[tuple[str, str]]:
+    n = r.u32_le()
+    return [(_get_string(r), _get_string(r)) for _ in range(n)]
 
 
 # --- request / response types ----------------------------------------------
@@ -545,6 +562,32 @@ class ListOffsetsResponse:
     entries: list[OffsetListing]
 
 
+@dataclass
+class DescribeConfigsRequest:
+    topic: str
+
+
+@dataclass
+class DescribeConfigsResponse:
+    error_code: int
+    topic: str
+    topic_id: int
+    partition_count: int
+    configs: list[tuple[str, str]]
+
+
+@dataclass
+class AlterConfigsRequest:
+    topic: str
+    configs: list[tuple[str, str]]
+
+
+@dataclass
+class AlterConfigsResponse:
+    error_code: int
+    topic: str
+
+
 # --- produce ---------------------------------------------------------------
 
 
@@ -697,10 +740,7 @@ def encode_create_topic_request(req: CreateTopicRequest) -> bytes:
     _put_string(w, req.name)
     w.u32_le(req.partitions)
     # Phase 13 config trailer (always written by current encoders).
-    w.u32_le(len(req.configs))
-    for k, v in req.configs:
-        _put_string(w, k)
-        _put_string(w, v)
+    _put_config_pairs(w, req.configs)
     return w.finish()
 
 
@@ -710,9 +750,7 @@ def decode_create_topic_request(payload: bytes) -> CreateTopicRequest:
     partitions = r.u32_le()
     configs: list[tuple[str, str]] = []
     if r.remaining() >= 4:
-        n = r.u32_le()
-        for _ in range(n):
-            configs.append((_get_string(r), _get_string(r)))
+        configs = _get_config_pairs(r)
     return CreateTopicRequest(name=name, partitions=partitions, configs=configs)
 
 
@@ -1246,6 +1284,71 @@ def decode_list_offsets_response(payload: bytes) -> ListOffsetsResponse:
     return ListOffsetsResponse(error_code=error_code, topic=topic, entries=entries)
 
 
+# --- describe / alter configs ----------------------------------------------
+
+
+def encode_describe_configs_request(req: DescribeConfigsRequest) -> bytes:
+    w = _Writer()
+    _put_string(w, req.topic)
+    return w.finish()
+
+
+def decode_describe_configs_request(payload: bytes) -> DescribeConfigsRequest:
+    return DescribeConfigsRequest(topic=_get_string(_Reader(payload)))
+
+
+def encode_describe_configs_response(resp: DescribeConfigsResponse) -> bytes:
+    w = _Writer()
+    w.u16_le(resp.error_code)
+    _put_string(w, resp.topic)
+    w.u32_le(resp.topic_id)
+    w.u32_le(resp.partition_count)
+    _put_config_pairs(w, resp.configs)
+    return w.finish()
+
+
+def decode_describe_configs_response(payload: bytes) -> DescribeConfigsResponse:
+    r = _Reader(payload)
+    error_code = r.u16_le()
+    topic = _get_string(r)
+    topic_id = r.u32_le()
+    partition_count = r.u32_le()
+    configs = _get_config_pairs(r)
+    return DescribeConfigsResponse(
+        error_code=error_code,
+        topic=topic,
+        topic_id=topic_id,
+        partition_count=partition_count,
+        configs=configs,
+    )
+
+
+def encode_alter_configs_request(req: AlterConfigsRequest) -> bytes:
+    w = _Writer()
+    _put_string(w, req.topic)
+    _put_config_pairs(w, req.configs)
+    return w.finish()
+
+
+def decode_alter_configs_request(payload: bytes) -> AlterConfigsRequest:
+    r = _Reader(payload)
+    topic = _get_string(r)
+    configs = _get_config_pairs(r)
+    return AlterConfigsRequest(topic=topic, configs=configs)
+
+
+def encode_alter_configs_response(resp: AlterConfigsResponse) -> bytes:
+    w = _Writer()
+    w.u16_le(resp.error_code)
+    _put_string(w, resp.topic)
+    return w.finish()
+
+
+def decode_alter_configs_response(payload: bytes) -> AlterConfigsResponse:
+    r = _Reader(payload)
+    return AlterConfigsResponse(error_code=r.u16_le(), topic=_get_string(r))
+
+
 # --- error opcode ----------------------------------------------------------
 
 
@@ -1390,6 +1493,10 @@ def decode_response(opcode: int, payload: bytes):
         return decode_list_groups_response(payload)
     if opcode == OP_LIST_OFFSETS_RESPONSE:
         return decode_list_offsets_response(payload)
+    if opcode == OP_DESCRIBE_CONFIGS_RESPONSE:
+        return decode_describe_configs_response(payload)
+    if opcode == OP_ALTER_CONFIGS_RESPONSE:
+        return decode_alter_configs_response(payload)
     if opcode == OP_ERROR:
         return decode_error_response(payload)
     raise ProtocolError(f"unknown response opcode {opcode}")

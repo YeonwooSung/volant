@@ -6,6 +6,8 @@ import unittest
 
 from volant.codec import (
     Assignment,
+    AlterConfigsRequest,
+    AlterConfigsResponse,
     AuthRequest,
     AuthResponse,
     BrokerInfo,
@@ -13,6 +15,8 @@ from volant.codec import (
     CreateTopicResponse,
     DeleteTopicRequest,
     DeleteTopicResponse,
+    DescribeConfigsRequest,
+    DescribeConfigsResponse,
     DescribeGroupRequest,
     DescribeGroupResponse,
     FetchRecord,
@@ -47,10 +51,14 @@ from volant.codec import (
     TopicInfo,
     decode_auth_request,
     decode_auth_response,
+    decode_alter_configs_request,
+    decode_alter_configs_response,
     decode_create_topic_request,
     decode_create_topic_response,
     decode_delete_topic_request,
     decode_delete_topic_response,
+    decode_describe_configs_request,
+    decode_describe_configs_response,
     decode_describe_group_request,
     decode_describe_group_response,
     decode_fetch_request,
@@ -76,10 +84,14 @@ from volant.codec import (
     decode_response,
     encode_auth_request,
     encode_auth_response,
+    encode_alter_configs_request,
+    encode_alter_configs_response,
     encode_create_topic_request,
     encode_create_topic_response,
     encode_delete_topic_request,
     encode_delete_topic_response,
+    encode_describe_configs_request,
+    encode_describe_configs_response,
     encode_describe_group_request,
     encode_describe_group_response,
     encode_fetch_request,
@@ -102,7 +114,9 @@ from volant.codec import (
     encode_offset_fetch_response,
     encode_produce_request,
     encode_produce_response,
+    OP_ALTER_CONFIGS_RESPONSE,
     OP_AUTH_RESPONSE,
+    OP_DESCRIBE_CONFIGS_RESPONSE,
     OP_DESCRIBE_GROUP_RESPONSE,
     OP_HEARTBEAT,
     OP_JOIN_GROUP,
@@ -784,6 +798,57 @@ class TestListOffsetsCodec(unittest.TestCase):
         self.assertEqual(_hx(raw), _hx(expected))
         self.assertEqual(decode_list_offsets_response(raw), resp)
         self.assertEqual(decode_response(OP_LIST_OFFSETS_RESPONSE, raw), resp)
+
+
+class TestDescribeAlterConfigsCodec(unittest.TestCase):
+    def test_describe_configs_request_events(self) -> None:
+        req = DescribeConfigsRequest(topic="events")
+        raw = encode_describe_configs_request(req)
+        expected = bytes.fromhex("0600" "6576656e7473")
+        self.assertEqual(_hx(raw), _hx(expected))
+        self.assertEqual(decode_describe_configs_request(raw), req)
+
+    def test_describe_configs_response_retention_ms(self) -> None:
+        resp = DescribeConfigsResponse(
+            error_code=0,
+            topic="events",
+            topic_id=1,
+            partition_count=1,
+            configs=[("retention.ms", "86400000")],
+        )
+        raw = encode_describe_configs_response(resp)
+        expected = bytes.fromhex(
+            "0000"
+            "06006576656e7473"
+            "01000000"
+            "01000000"
+            "01000000"
+            "0c00726574656e74696f6e2e6d73"
+            "08003836343030303030"
+        )
+        self.assertEqual(_hx(raw), _hx(expected))
+        self.assertEqual(decode_describe_configs_response(raw), resp)
+        self.assertEqual(decode_response(OP_DESCRIBE_CONFIGS_RESPONSE, raw), resp)
+
+    def test_alter_configs_empty_value_clears(self) -> None:
+        req = AlterConfigsRequest(topic="events", configs=[("retention.ms", "")])
+        raw = encode_alter_configs_request(req)
+        expected = bytes.fromhex(
+            "06006576656e7473"
+            "01000000"
+            "0c00726574656e74696f6e2e6d73"
+            "0000"
+        )
+        self.assertEqual(_hx(raw), _hx(expected))
+        self.assertEqual(decode_alter_configs_request(raw), req)
+
+    def test_alter_configs_response_ok(self) -> None:
+        resp = AlterConfigsResponse(error_code=0, topic="events")
+        raw = encode_alter_configs_response(resp)
+        expected = bytes.fromhex("0000" "06006576656e7473")
+        self.assertEqual(_hx(raw), _hx(expected))
+        self.assertEqual(decode_alter_configs_response(raw), resp)
+        self.assertEqual(decode_response(OP_ALTER_CONFIGS_RESPONSE, raw), resp)
 
 
 if __name__ == "__main__":

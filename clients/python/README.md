@@ -27,6 +27,9 @@ for offset, key, value in batch.tuples():
 c.offset_commit(group="g", topic="t", partition=0, offset=5)
 offs = c.offset_fetch(group="g", topic="t")  # [(partition, offset), ...]
 bounds = c.list_offsets("t")  # [OffsetListing(partition, earliest, latest), ...]
+cfg = c.describe_configs("t")  # DescribeConfigsResult(topic, topic_id, partition_count, configs)
+c.alter_configs("t", [("retention.ms", "86400000")])
+c.alter_configs("t", [("retention.ms", "")])  # empty value clears
 member_id, generation, assignment = c.join_group(
     "g", topics=["t"], session_timeout_ms=10000
 )
@@ -80,6 +83,10 @@ overridden). `offset_fetch` returns committed `(partition, offset)` pairs
 for the given topic. `list_offsets(topic, partitions=None)` returns
 earliest/latest (`OffsetListing`) for the topic (`None` / `[]` = all
 partitions; native opcode 48, not Kafka timestamp ListOffsets).
+`describe_configs(topic)` returns `DescribeConfigsResult` (`topic`,
+`topic_id`, `partition_count`, `configs` pairs). `alter_configs(topic,
+configs)` sets topic keys; empty value clears (native 40–43, not Kafka
+Describe/AlterConfigs; topic only).
 `join_group` sends empty `member_id` on first join
 (broker assigns one) and unpacks as
 `(member_id, generation, assignment)`.
@@ -194,5 +201,6 @@ See [docs/V14_SPEC.md](../../docs/V14_SPEC.md),
 [docs/V47_SPEC.md](../../docs/V47_SPEC.md),
 [docs/V48_SPEC.md](../../docs/V48_SPEC.md),
 [docs/V49_SPEC.md](../../docs/V49_SPEC.md),
-[docs/V50_SPEC.md](../../docs/V50_SPEC.md).,
+[docs/V50_SPEC.md](../../docs/V50_SPEC.md),
+[docs/V53_SPEC.md](../../docs/V53_SPEC.md).,
 [docs/V46_SPEC.md](../../docs/V46_SPEC.md).

@@ -3,6 +3,7 @@
 from .assignor import range_assign, range_assign_multi
 from .client import (
     Client,
+    DescribeConfigsResult,
     DescribeGroupResult,
     FetchResult,
     JoinGroupResult,
@@ -32,6 +33,7 @@ __all__ = [
     "BrokerError",
     "BrokerInfo",
     "Client",
+    "DescribeConfigsResult",
     "DescribeGroupResult",
     "FetchedRecord",
     "FetchRecord",

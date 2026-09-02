@@ -2,7 +2,8 @@
 //
 // Matches crates/volant-protocol/src/payload.rs for Produce, Fetch,
 // CreateTopic, Metadata, DeleteTopic, OffsetCommit, OffsetFetch,
-// JoinGroup, Heartbeat, LeaveGroup, Auth, DescribeGroup, ListGroups, ListOffsets, InitProducerId, and Scram.
+// JoinGroup, Heartbeat, LeaveGroup, Auth, DescribeGroup, ListGroups, ListOffsets,
+// DescribeConfigs, AlterConfigs, InitProducerId, and Scram.
 // Frame headers are big-endian (see package frame); payload integers and
 // length prefixes are little-endian.
 package codec
@@ -15,31 +16,35 @@ import (
 )
 
 const (
-	OpProduce               uint16 = 1
-	OpFetch                 uint16 = 2
-	OpCreateTopic           uint16 = 3
-	OpMetadata              uint16 = 4
-	OpDeleteTopic           uint16 = 5
-	OpOffsetCommit          uint16 = 6
-	OpOffsetFetch           uint16 = 7
-	OpJoinGroup             uint16 = 8
-	OpHeartbeat             uint16 = 9
-	OpLeaveGroup            uint16 = 10
-	OpAuth                  uint16 = 30
-	OpAuthResponse          uint16 = 31
-	OpInitProducerId        uint16 = 32
-	OpInitProducerIdResponse uint16 = 33
-	OpScramFirst            uint16 = 60
-	OpScramFirstResponse    uint16 = 61
-	OpScramFinal            uint16 = 62
-	OpScramFinalResponse    uint16 = 63
-	OpDescribeGroup         uint16 = 34
-	OpDescribeGroupResponse uint16 = 35
-	OpListGroups            uint16 = 36
-	OpListGroupsResponse    uint16 = 37
-	OpListOffsets           uint16 = 48
-	OpListOffsetsResponse   uint16 = 49
-	OpError                 uint16 = 0xFFFF
+	OpProduce                 uint16 = 1
+	OpFetch                   uint16 = 2
+	OpCreateTopic             uint16 = 3
+	OpMetadata                uint16 = 4
+	OpDeleteTopic             uint16 = 5
+	OpOffsetCommit            uint16 = 6
+	OpOffsetFetch             uint16 = 7
+	OpJoinGroup               uint16 = 8
+	OpHeartbeat               uint16 = 9
+	OpLeaveGroup              uint16 = 10
+	OpAuth                    uint16 = 30
+	OpAuthResponse            uint16 = 31
+	OpInitProducerId          uint16 = 32
+	OpInitProducerIdResponse  uint16 = 33
+	OpScramFirst              uint16 = 60
+	OpScramFirstResponse      uint16 = 61
+	OpScramFinal              uint16 = 62
+	OpScramFinalResponse      uint16 = 63
+	OpDescribeGroup           uint16 = 34
+	OpDescribeGroupResponse   uint16 = 35
+	OpListGroups              uint16 = 36
+	OpListGroupsResponse      uint16 = 37
+	OpListOffsets             uint16 = 48
+	OpListOffsetsResponse     uint16 = 49
+	OpDescribeConfigs         uint16 = 40
+	OpDescribeConfigsResponse uint16 = 41
+	OpAlterConfigs            uint16 = 42
+	OpAlterConfigsResponse    uint16 = 43
+	OpError                   uint16 = 0xFFFF
 
 	nullLen = 0xFFFFFFFF
 )
@@ -183,6 +188,42 @@ func getString(r *reader) (string, error) {
 		return "", err
 	}
 	return string(raw), nil
+}
+
+func putConfigPairs(w *writer, configs [][2]string) error {
+	if configs == nil {
+		configs = [][2]string{}
+	}
+	w.u32(uint32(len(configs)))
+	for _, kv := range configs {
+		if err := putString(w, kv[0]); err != nil {
+			return err
+		}
+		if err := putString(w, kv[1]); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func getConfigPairs(r *reader) ([][2]string, error) {
+	n, err := r.u32()
+	if err != nil {
+		return nil, err
+	}
+	configs := make([][2]string, 0, n)
+	for i := uint32(0); i < n; i++ {
+		k, err := getString(r)
+		if err != nil {
+			return nil, err
+		}
+		v, err := getString(r)
+		if err != nil {
+			return nil, err
+		}
+		configs = append(configs, [2]string{k, v})
+	}
+	return configs, nil
 }
 
 func putBytes(w *writer, b []byte) {
@@ -498,6 +539,7 @@ type InitProducerIdResponse struct {
 	Epoch      uint16
 	ErrorCode  uint16
 }
+
 // GroupState is the ListGroups state byte (Phase 12).
 type GroupState uint8
 
@@ -595,6 +637,32 @@ type ListOffsetsResponse struct {
 	Entries   []OffsetListing
 }
 
+// DescribeConfigsRequest is the DescribeConfigs opcode (40) body.
+type DescribeConfigsRequest struct {
+	Topic string
+}
+
+// DescribeConfigsResponse is the DescribeConfigs reply (opcode 41).
+type DescribeConfigsResponse struct {
+	ErrorCode      uint16
+	Topic          string
+	TopicID        uint32
+	PartitionCount uint32
+	Configs        [][2]string
+}
+
+// AlterConfigsRequest is the AlterConfigs opcode (42) body.
+// Empty value clears that key.
+type AlterConfigsRequest struct {
+	Topic   string
+	Configs [][2]string
+}
+
+// AlterConfigsResponse is the AlterConfigs reply (opcode 43).
+type AlterConfigsResponse struct {
+	ErrorCode uint16
+	Topic     string
+}
 
 func EncodeProduceRequest(req ProduceRequest) ([]byte, error) {
 	w := &writer{}
@@ -866,14 +934,8 @@ func EncodeCreateTopicRequest(req CreateTopicRequest) ([]byte, error) {
 	}
 	w.u32(req.Partitions)
 	// Phase 13 config trailer (always written by current encoders).
-	w.u32(uint32(len(req.Configs)))
-	for _, kv := range req.Configs {
-		if err := putString(w, kv[0]); err != nil {
-			return nil, err
-		}
-		if err := putString(w, kv[1]); err != nil {
-			return nil, err
-		}
+	if err := putConfigPairs(w, req.Configs); err != nil {
+		return nil, err
 	}
 	return w.buf, nil
 }
@@ -890,21 +952,10 @@ func DecodeCreateTopicRequest(payload []byte) (CreateTopicRequest, error) {
 	}
 	var configs [][2]string
 	if r.remaining() >= 4 {
-		n, err := r.u32()
+		var err error
+		configs, err = getConfigPairs(r)
 		if err != nil {
 			return CreateTopicRequest{}, err
-		}
-		configs = make([][2]string, 0, n)
-		for i := uint32(0); i < n; i++ {
-			k, err := getString(r)
-			if err != nil {
-				return CreateTopicRequest{}, err
-			}
-			v, err := getString(r)
-			if err != nil {
-				return CreateTopicRequest{}, err
-			}
-			configs = append(configs, [2]string{k, v})
 		}
 	}
 	if configs == nil {
@@ -1832,6 +1883,114 @@ func DecodeListOffsetsResponse(payload []byte) (ListOffsetsResponse, error) {
 	return ListOffsetsResponse{ErrorCode: code, Topic: topic, Entries: entries}, nil
 }
 
+func EncodeDescribeConfigsRequest(req DescribeConfigsRequest) ([]byte, error) {
+	w := &writer{}
+	if err := putString(w, req.Topic); err != nil {
+		return nil, err
+	}
+	return w.buf, nil
+}
+
+func DecodeDescribeConfigsRequest(payload []byte) (DescribeConfigsRequest, error) {
+	r := &reader{data: payload}
+	topic, err := getString(r)
+	if err != nil {
+		return DescribeConfigsRequest{}, err
+	}
+	return DescribeConfigsRequest{Topic: topic}, nil
+}
+
+func EncodeDescribeConfigsResponse(resp DescribeConfigsResponse) ([]byte, error) {
+	w := &writer{}
+	w.u16(resp.ErrorCode)
+	if err := putString(w, resp.Topic); err != nil {
+		return nil, err
+	}
+	w.u32(resp.TopicID)
+	w.u32(resp.PartitionCount)
+	if err := putConfigPairs(w, resp.Configs); err != nil {
+		return nil, err
+	}
+	return w.buf, nil
+}
+
+func DecodeDescribeConfigsResponse(payload []byte) (DescribeConfigsResponse, error) {
+	r := &reader{data: payload}
+	code, err := r.u16()
+	if err != nil {
+		return DescribeConfigsResponse{}, err
+	}
+	topic, err := getString(r)
+	if err != nil {
+		return DescribeConfigsResponse{}, err
+	}
+	topicID, err := r.u32()
+	if err != nil {
+		return DescribeConfigsResponse{}, err
+	}
+	parts, err := r.u32()
+	if err != nil {
+		return DescribeConfigsResponse{}, err
+	}
+	configs, err := getConfigPairs(r)
+	if err != nil {
+		return DescribeConfigsResponse{}, err
+	}
+	return DescribeConfigsResponse{
+		ErrorCode:      code,
+		Topic:          topic,
+		TopicID:        topicID,
+		PartitionCount: parts,
+		Configs:        configs,
+	}, nil
+}
+
+func EncodeAlterConfigsRequest(req AlterConfigsRequest) ([]byte, error) {
+	w := &writer{}
+	if err := putString(w, req.Topic); err != nil {
+		return nil, err
+	}
+	if err := putConfigPairs(w, req.Configs); err != nil {
+		return nil, err
+	}
+	return w.buf, nil
+}
+
+func DecodeAlterConfigsRequest(payload []byte) (AlterConfigsRequest, error) {
+	r := &reader{data: payload}
+	topic, err := getString(r)
+	if err != nil {
+		return AlterConfigsRequest{}, err
+	}
+	configs, err := getConfigPairs(r)
+	if err != nil {
+		return AlterConfigsRequest{}, err
+	}
+	return AlterConfigsRequest{Topic: topic, Configs: configs}, nil
+}
+
+func EncodeAlterConfigsResponse(resp AlterConfigsResponse) ([]byte, error) {
+	w := &writer{}
+	w.u16(resp.ErrorCode)
+	if err := putString(w, resp.Topic); err != nil {
+		return nil, err
+	}
+	return w.buf, nil
+}
+
+func DecodeAlterConfigsResponse(payload []byte) (AlterConfigsResponse, error) {
+	r := &reader{data: payload}
+	code, err := r.u16()
+	if err != nil {
+		return AlterConfigsResponse{}, err
+	}
+	topic, err := getString(r)
+	if err != nil {
+		return AlterConfigsResponse{}, err
+	}
+	return AlterConfigsResponse{ErrorCode: code, Topic: topic}, nil
+}
+
 func EncodeInitProducerIdRequest(req InitProducerIdRequest) ([]byte, error) {
 	w := &writer{}
 	// Always write the string; empty transactional_id = non-transactional PID.
@@ -2051,6 +2210,10 @@ func DecodeResponse(opcode uint16, payload []byte) (any, error) {
 		return DecodeListGroupsResponse(payload)
 	case OpListOffsetsResponse:
 		return DecodeListOffsetsResponse(payload)
+	case OpDescribeConfigsResponse:
+		return DecodeDescribeConfigsResponse(payload)
+	case OpAlterConfigsResponse:
+		return DecodeAlterConfigsResponse(payload)
 	case OpError:
 		return DecodeErrorResponse(payload)
 	default:

@@ -526,6 +526,41 @@ public final class Client implements AutoCloseable {
     }
 
     /**
+     * Describe topic configuration (native opcode 40/41).
+     *
+     * <p>Topic configs only (not Kafka DescribeConfigs / BROKER). Empty values
+     * mean the key is unset. Non-zero {@code error_code} is
+     * {@link BrokerException} with {@code op="describe_configs"}.
+     */
+    public DescribeConfigsResult describeConfigs(String topic) {
+        byte[] payload = Codec.encodeDescribeConfigsRequest(new Codec.DescribeConfigsRequest(topic));
+        Object decoded = roundTrip(Codec.OP_DESCRIBE_CONFIGS, payload);
+        if (!(decoded instanceof Codec.DescribeConfigsResponse)) {
+            throw new ProtocolException("unexpected response for describe_configs: " + typeName(decoded));
+        }
+        Codec.DescribeConfigsResponse resp = (Codec.DescribeConfigsResponse) decoded;
+        check(resp.errorCode, "describe_configs");
+        return new DescribeConfigsResult(resp.topic, resp.topicId, resp.partitionCount, resp.configs);
+    }
+
+    /**
+     * Alter topic configuration (native opcode 42/43).
+     *
+     * <p>Empty value clears that key (same as Rust). Topic configs only.
+     * Non-zero {@code error_code} is {@link BrokerException} with
+     * {@code op="alter_configs"}.
+     */
+    public void alterConfigs(String topic, List<String[]> configs) {
+        byte[] payload = Codec.encodeAlterConfigsRequest(new Codec.AlterConfigsRequest(topic, configs));
+        Object decoded = roundTrip(Codec.OP_ALTER_CONFIGS, payload);
+        if (!(decoded instanceof Codec.AlterConfigsResponse)) {
+            throw new ProtocolException("unexpected response for alter_configs: " + typeName(decoded));
+        }
+        Codec.AlterConfigsResponse resp = (Codec.AlterConfigsResponse) decoded;
+        check(resp.errorCode, "alter_configs");
+    }
+
+    /**
      * Produce one message (null key when {@code key} is null) with acks=1.
      * Default trailer is {@code (0, 0, -1)}. After {@link #setEnableIdempotence}
      * the first produce sends InitProducerId (empty transactional_id) and later

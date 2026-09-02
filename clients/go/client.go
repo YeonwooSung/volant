@@ -82,6 +82,14 @@ type DescribeGroupResult struct {
 	Members    []GroupMemberInfo
 }
 
+// DescribeConfigsResult is the successful DescribeConfigs reply (Phase 13 / v0.53).
+type DescribeConfigsResult struct {
+	Topic          string
+	TopicID        uint32
+	PartitionCount uint32
+	Configs        [][2]string
+}
+
 // Client is a sync TCP client for the native Volant protocol (MVP).
 type Client struct {
 	addr              string
@@ -555,6 +563,59 @@ func (c *Client) DeleteTopic(name string) error {
 		return &frame.ProtocolError{Msg: fmt.Sprintf("unexpected response for delete_topic: %T", decoded)}
 	}
 	return check(resp.ErrorCode, "delete_topic")
+}
+
+// DescribeConfigs returns topic configuration (native opcode 40/41).
+// Topic configs only (not Kafka DescribeConfigs / BROKER). Empty values
+// mean the key is unset. Non-zero error_code is BrokerError with
+// Op "describe_configs".
+func (c *Client) DescribeConfigs(topic string) (DescribeConfigsResult, error) {
+	payload, err := codec.EncodeDescribeConfigsRequest(codec.DescribeConfigsRequest{Topic: topic})
+	if err != nil {
+		return DescribeConfigsResult{}, err
+	}
+	decoded, err := c.roundTrip(codec.OpDescribeConfigs, payload)
+	if err != nil {
+		return DescribeConfigsResult{}, err
+	}
+	resp, ok := decoded.(codec.DescribeConfigsResponse)
+	if !ok {
+		return DescribeConfigsResult{}, &frame.ProtocolError{Msg: fmt.Sprintf("unexpected response for describe_configs: %T", decoded)}
+	}
+	if err := check(resp.ErrorCode, "describe_configs"); err != nil {
+		return DescribeConfigsResult{}, err
+	}
+	return DescribeConfigsResult{
+		Topic:          resp.Topic,
+		TopicID:        resp.TopicID,
+		PartitionCount: resp.PartitionCount,
+		Configs:        resp.Configs,
+	}, nil
+}
+
+// AlterConfigs updates topic configuration (native opcode 42/43).
+// Empty value clears that key (same as Rust). Topic configs only.
+// Non-zero error_code is BrokerError with Op "alter_configs".
+func (c *Client) AlterConfigs(topic string, configs [][2]string) error {
+	if configs == nil {
+		configs = [][2]string{}
+	}
+	payload, err := codec.EncodeAlterConfigsRequest(codec.AlterConfigsRequest{
+		Topic:   topic,
+		Configs: configs,
+	})
+	if err != nil {
+		return err
+	}
+	decoded, err := c.roundTrip(codec.OpAlterConfigs, payload)
+	if err != nil {
+		return err
+	}
+	resp, ok := decoded.(codec.AlterConfigsResponse)
+	if !ok {
+		return &frame.ProtocolError{Msg: fmt.Sprintf("unexpected response for alter_configs: %T", decoded)}
+	}
+	return check(resp.ErrorCode, "alter_configs")
 }
 
 // Produce sends one message (null key when key is nil) with acks=1.

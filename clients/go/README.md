@@ -39,6 +39,10 @@ offs, err := c.OffsetFetch("g", "t")
 _ = offs
 bounds, err := c.ListOffsets("t", nil) // all partitions; or []uint32{0}
 _ = bounds
+cfg, err := c.DescribeConfigs("t")
+_ = cfg
+err = c.AlterConfigs("t", [][2]string{{"retention.ms", "86400000"}})
+err = c.AlterConfigs("t", [][2]string{{"retention.ms", ""}}) // empty value clears
 j, err := c.JoinGroup("g", []string{"t"}, 10000)
 if err != nil {
     log.Fatal(err)
@@ -85,6 +89,10 @@ c, err = volant.DialTLSScram("127.0.0.1:9092", volant.TLSConfig{CAFile: "ca.pem"
 `ListOffsets` returns `[]OffsetListing` (`Partition`, `Earliest`,
 `Latest`); nil / empty partitions means all (native opcode 48, not
 Kafka timestamp ListOffsets).
+`DescribeConfigs` returns `DescribeConfigsResult` (`Topic`, `TopicID`,
+`PartitionCount`, `Configs` pairs). `AlterConfigs` sets topic keys;
+empty value clears (native 40–43, not Kafka Describe/AlterConfigs;
+topic only).
 `JoinGroup` sends empty `member_id` on first join; the result has
 `MemberID`, `Generation`, and `Assignment`.
 `JoinGroupConsumer` is the high-level loop (join, OffsetFetch
@@ -197,5 +205,6 @@ See [docs/V19_SPEC.md](../../docs/V19_SPEC.md),
 [docs/V47_SPEC.md](../../docs/V47_SPEC.md),
 [docs/V48_SPEC.md](../../docs/V48_SPEC.md),
 [docs/V49_SPEC.md](../../docs/V49_SPEC.md),
-[docs/V50_SPEC.md](../../docs/V50_SPEC.md).,
+[docs/V50_SPEC.md](../../docs/V50_SPEC.md),
+[docs/V53_SPEC.md](../../docs/V53_SPEC.md).,
 [docs/V46_SPEC.md](../../docs/V46_SPEC.md).

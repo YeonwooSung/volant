@@ -685,4 +685,71 @@ class CodecTest {
         assertEquals(2, dispatched.groups.size());
         assertEquals(Codec.GROUP_STATE_EMPTY, new Codec.GroupListing("x", 99, 0, 0).state);
     }
+
+    @Test
+    void describeConfigsRequestEvents() {
+        Codec.DescribeConfigsRequest req = new Codec.DescribeConfigsRequest("events");
+        byte[] raw = Codec.encodeDescribeConfigsRequest(req);
+        assertArrayEquals(hx("06006576656e7473"), raw);
+        assertEquals("events", Codec.decodeDescribeConfigsRequest(raw).topic);
+    }
+
+    @Test
+    void describeConfigsResponseRetentionMs() {
+        Codec.DescribeConfigsResponse resp = new Codec.DescribeConfigsResponse(
+                0,
+                "events",
+                1,
+                1,
+                Collections.singletonList(new String[] {"retention.ms", "86400000"}));
+        byte[] raw = Codec.encodeDescribeConfigsResponse(resp);
+        byte[] expected = hx(
+                "0000"
+                        + "06006576656e7473"
+                        + "01000000"
+                        + "01000000"
+                        + "01000000"
+                        + "0c00726574656e74696f6e2e6d73"
+                        + "08003836343030303030");
+        assertArrayEquals(expected, raw);
+        Codec.DescribeConfigsResponse decoded = Codec.decodeDescribeConfigsResponse(raw);
+        assertEquals(0, decoded.errorCode);
+        assertEquals("events", decoded.topic);
+        assertEquals(1, decoded.topicId);
+        assertEquals(1, decoded.partitionCount);
+        assertEquals(1, decoded.configs.size());
+        assertEquals("retention.ms", decoded.configs.get(0)[0]);
+        assertEquals("86400000", decoded.configs.get(0)[1]);
+        Codec.DescribeConfigsResponse dispatched = assertInstanceOf(
+                Codec.DescribeConfigsResponse.class, Codec.decodeResponse(Codec.OP_DESCRIBE_CONFIGS_RESPONSE, raw));
+        assertEquals("86400000", dispatched.configs.get(0)[1]);
+    }
+
+    @Test
+    void alterConfigsEmptyValueClears() {
+        Codec.AlterConfigsRequest req = new Codec.AlterConfigsRequest(
+                "events", Collections.singletonList(new String[] {"retention.ms", ""}));
+        byte[] raw = Codec.encodeAlterConfigsRequest(req);
+        byte[] expected = hx(
+                "06006576656e7473" + "01000000" + "0c00726574656e74696f6e2e6d73" + "0000");
+        assertArrayEquals(expected, raw);
+        Codec.AlterConfigsRequest decoded = Codec.decodeAlterConfigsRequest(raw);
+        assertEquals("events", decoded.topic);
+        assertEquals(1, decoded.configs.size());
+        assertEquals("retention.ms", decoded.configs.get(0)[0]);
+        assertEquals("", decoded.configs.get(0)[1]);
+    }
+
+    @Test
+    void alterConfigsResponseOk() {
+        Codec.AlterConfigsResponse resp = new Codec.AlterConfigsResponse(0, "events");
+        byte[] raw = Codec.encodeAlterConfigsResponse(resp);
+        assertArrayEquals(hx("000006006576656e7473"), raw);
+        Codec.AlterConfigsResponse decoded = Codec.decodeAlterConfigsResponse(raw);
+        assertEquals(0, decoded.errorCode);
+        assertEquals("events", decoded.topic);
+        Codec.AlterConfigsResponse dispatched = assertInstanceOf(
+                Codec.AlterConfigsResponse.class, Codec.decodeResponse(Codec.OP_ALTER_CONFIGS_RESPONSE, raw));
+        assertEquals("events", dispatched.topic);
+    }
 }

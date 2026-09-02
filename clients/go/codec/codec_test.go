@@ -1143,3 +1143,115 @@ func TestListOffsetsResponsePayloadRS(t *testing.T) {
 		t.Fatalf("dispatch %#v", got)
 	}
 }
+
+func TestDescribeConfigsRequestEvents(t *testing.T) {
+	req := DescribeConfigsRequest{Topic: "events"}
+	raw, err := EncodeDescribeConfigsRequest(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	expected := mustHex(t, "0600"+"6576656e7473")
+	if !bytes.Equal(raw, expected) {
+		t.Fatalf("encode:\n got %x\nwant %x", raw, expected)
+	}
+	decoded, err := DecodeDescribeConfigsRequest(raw)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if decoded.Topic != "events" {
+		t.Fatalf("decoded %+v", decoded)
+	}
+}
+
+func TestDescribeConfigsResponseRetentionMs(t *testing.T) {
+	resp := DescribeConfigsResponse{
+		ErrorCode:      0,
+		Topic:          "events",
+		TopicID:        1,
+		PartitionCount: 1,
+		Configs:        [][2]string{{"retention.ms", "86400000"}},
+	}
+	raw, err := EncodeDescribeConfigsResponse(resp)
+	if err != nil {
+		t.Fatal(err)
+	}
+	expected := mustHex(t,
+		"0000"+
+			"06006576656e7473"+
+			"01000000"+
+			"01000000"+
+			"01000000"+
+			"0c00726574656e74696f6e2e6d73"+
+			"08003836343030303030",
+	)
+	if !bytes.Equal(raw, expected) {
+		t.Fatalf("encode:\n got %x\nwant %x", raw, expected)
+	}
+	decoded, err := DecodeDescribeConfigsResponse(raw)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if decoded.ErrorCode != 0 || decoded.Topic != "events" || decoded.TopicID != 1 || decoded.PartitionCount != 1 {
+		t.Fatalf("decoded %+v", decoded)
+	}
+	if len(decoded.Configs) != 1 || decoded.Configs[0] != [2]string{"retention.ms", "86400000"} {
+		t.Fatalf("configs %+v", decoded.Configs)
+	}
+	got, err := DecodeResponse(OpDescribeConfigsResponse, raw)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if dr, ok := got.(DescribeConfigsResponse); !ok || dr.Configs[0][1] != "86400000" {
+		t.Fatalf("dispatch %#v", got)
+	}
+}
+
+func TestAlterConfigsEmptyValueClears(t *testing.T) {
+	req := AlterConfigsRequest{Topic: "events", Configs: [][2]string{{"retention.ms", ""}}}
+	raw, err := EncodeAlterConfigsRequest(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	expected := mustHex(t,
+		"06006576656e7473"+
+			"01000000"+
+			"0c00726574656e74696f6e2e6d73"+
+			"0000",
+	)
+	if !bytes.Equal(raw, expected) {
+		t.Fatalf("encode:\n got %x\nwant %x", raw, expected)
+	}
+	decoded, err := DecodeAlterConfigsRequest(raw)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if decoded.Topic != "events" || len(decoded.Configs) != 1 || decoded.Configs[0] != [2]string{"retention.ms", ""} {
+		t.Fatalf("decoded %+v", decoded)
+	}
+}
+
+func TestAlterConfigsResponseOk(t *testing.T) {
+	resp := AlterConfigsResponse{ErrorCode: 0, Topic: "events"}
+	raw, err := EncodeAlterConfigsResponse(resp)
+	if err != nil {
+		t.Fatal(err)
+	}
+	expected := mustHex(t, "0000"+"06006576656e7473")
+	if !bytes.Equal(raw, expected) {
+		t.Fatalf("encode:\n got %x\nwant %x", raw, expected)
+	}
+	decoded, err := DecodeAlterConfigsResponse(raw)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if decoded.ErrorCode != 0 || decoded.Topic != "events" {
+		t.Fatalf("decoded %+v", decoded)
+	}
+	got, err := DecodeResponse(OpAlterConfigsResponse, raw)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if ar, ok := got.(AlterConfigsResponse); !ok || ar.Topic != "events" {
+		t.Fatalf("dispatch %#v", got)
+	}
+}

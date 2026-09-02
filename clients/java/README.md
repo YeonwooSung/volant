@@ -16,6 +16,7 @@ import io.volant.Client;
 import io.volant.GroupConsumer;
 import io.volant.Metadata;
 import io.volant.Offset;
+import io.volant.DescribeConfigsResult;
 import io.volant.OffsetListing;
 import io.volant.Record;
 import java.util.List;
@@ -30,6 +31,9 @@ try (Client c = Client.connect("127.0.0.1", 9092)) {
   c.offsetCommit("g", "t", 0, 5);
   List<Offset> offs = c.offsetFetch("g", "t");
   List<OffsetListing> bounds = c.listOffsets("t"); // all; or listOffsets("t", 0)
+  DescribeConfigsResult cfg = c.describeConfigs("t");
+  c.alterConfigs("t", List.of(new String[] {"retention.ms", "86400000"}));
+  c.alterConfigs("t", List.of(new String[] {"retention.ms", ""})); // empty value clears
   JoinGroupResult j = c.joinGroup("g", List.of("t"), 10000);
   c.heartbeat("g", j.memberId, j.generation);
   c.leaveGroup("g", j.memberId);
@@ -74,6 +78,10 @@ Client.connectTlsScram("127.0.0.1", 9092, TlsOptions.ca("ca.pem"), "alice", "s3c
 `listOffsets` returns `List<OffsetListing>` (`partition`, `earliest`,
 `latest`); no / empty partitions means all (native opcode 48, not
 Kafka timestamp ListOffsets).
+`describeConfigs` returns `DescribeConfigsResult` (`topic`, `topicId`,
+`partitionCount`, `configs` pairs). `alterConfigs` sets topic keys;
+empty value clears (native 40–43, not Kafka Describe/AlterConfigs;
+topic only).
 `joinGroup` sends empty `memberId` on first join.
 `GroupConsumer` joins, polls assigned partitions, heartbeats, commits with
 member+generation, and rejoins on heartbeat error 9.
@@ -188,5 +196,6 @@ See [docs/V23_SPEC.md](../../docs/V23_SPEC.md),
 [docs/V47_SPEC.md](../../docs/V47_SPEC.md),
 [docs/V48_SPEC.md](../../docs/V48_SPEC.md),
 [docs/V49_SPEC.md](../../docs/V49_SPEC.md),
-[docs/V50_SPEC.md](../../docs/V50_SPEC.md).,
+[docs/V50_SPEC.md](../../docs/V50_SPEC.md),
+[docs/V53_SPEC.md](../../docs/V53_SPEC.md).,
 [docs/V46_SPEC.md](../../docs/V46_SPEC.md).
