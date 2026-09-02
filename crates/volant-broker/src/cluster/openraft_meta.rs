@@ -1,14 +1,18 @@
-//! Opt-in openraft metadata leader election (v0.11).
+//! Opt-in openraft metadata election (v0.11) + assignment apply (v0.16).
 //!
-//! Election only: assignment.json / Phase 154 log apply are unchanged.
+//! When `VOLANT_OPENRAFT_METADATA=1`, the leader replicates [`MetaRequest::SetAssignment`]
+//! via existing opcodes 108/109. Apply writes `assignment.json` and installs
+//! cluster state so followers learn topics. Homemade 154 / 150 paths stay.
 //! InstallSnapshot is not implemented (snapshot policy never fires).
+//! Hard state / log remain in-memory.
 
 use std::collections::BTreeMap;
 use std::fmt;
 use std::io::Cursor;
 use std::ops::RangeBounds;
 use std::sync::atomic::{AtomicU32, AtomicU64, Ordering};
-use std::sync::Arc;
+use std::sync::{Arc, Weak};
+use std::time::Duration;
 
 use bytes::Bytes;
 use openraft::error::{RPCError, RaftError, Unreachable};
@@ -27,10 +31,13 @@ use parking_lot::Mutex;
 use serde::{Deserialize, Serialize};
 use tracing::warn;
 use volant_core::{Error, Result};
-use volant_protocol::{Request, Response};
+use volant_protocol::{ClusterTopicState, Request, Response};
 
 use crate::broker::Broker;
 use crate::net::inter_broker_rpc;
+
+/// How long the mutating leader waits for `client_write` (commit + local apply).
+const CLIENT_WRITE_TIMEOUT: Duration = Duration::from_secs(5);
 
 openraft::declare_raft_types!(
     /// Metadata-election type config (broker id = node id).
@@ -44,18 +51,25 @@ openraft::declare_raft_types!(
         AsyncRuntime = openraft::TokioRuntime
 );
 
-/// Client log payload. Election-only MVP uses `Noop`.
+/// Client log payload.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Default)]
 pub enum MetaRequest {
     /// Empty command (election / heartbeat filler).
     #[default]
     Noop,
+    /// Full assignment snapshot (CreateTopic / DeleteTopic / CreatePartitions).
+    SetAssignment {
+        /// Assignment generation for this snapshot.
+        generation: u32,
+        /// Wire topics (leaders / replicas / ISR).
+        topics: Vec<ClusterTopicState>,
+    },
 }
 
 /// Apply result.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Default)]
 pub struct MetaResponse {
-    /// Always true for `Noop`.
+    /// True when apply succeeded (or the entry was `Noop` / membership).
     pub ok: bool,
 }
 
@@ -194,9 +208,11 @@ impl RaftLogStorage<TypeConfig> for LogStore {
     }
 }
 
-#[derive(Clone, Default)]
+#[derive(Clone)]
 struct StateMachine {
     inner: Arc<Mutex<SmInner>>,
+    /// Weak so apply can install assignment without a Broker↔Raft cycle.
+    broker: Weak<Broker>,
 }
 
 #[derive(Default)]
@@ -214,7 +230,7 @@ impl RaftSnapshotBuilder<TypeConfig> for StateMachine {
         let meta = SnapshotMeta {
             last_log_id: inner.last_applied,
             last_membership: inner.last_membership.clone(),
-            snapshot_id: "v11-empty".into(),
+            snapshot_id: "v16-empty".into(),
         };
         Ok(Snapshot {
             meta,
@@ -245,13 +261,40 @@ impl RaftStateMachine<TypeConfig> for StateMachine {
         I::IntoIter: Send,
     {
         let mut out = Vec::new();
-        let mut inner = self.inner.lock();
+        let broker = self.broker.upgrade();
         for e in entries {
-            inner.last_applied = Some(*e.get_log_id());
-            if let EntryPayload::Membership(ref m) = e.payload {
-                inner.last_membership = StoredMembership::new(Some(*e.get_log_id()), m.clone());
+            {
+                let mut inner = self.inner.lock();
+                inner.last_applied = Some(*e.get_log_id());
+                if let EntryPayload::Membership(ref m) = e.payload {
+                    inner.last_membership = StoredMembership::new(Some(*e.get_log_id()), m.clone());
+                }
             }
-            out.push(MetaResponse { ok: true });
+            let ok = match &e.payload {
+                EntryPayload::Normal(MetaRequest::SetAssignment { generation, topics }) => {
+                    match &broker {
+                        Some(b) => {
+                            match b.apply_cluster_state(*generation, b.controller_id(), topics) {
+                                Ok(()) => true,
+                                Err(err) => {
+                                    warn!(
+                                        error = %err,
+                                        generation,
+                                        "openraft apply SetAssignment failed"
+                                    );
+                                    false
+                                }
+                            }
+                        }
+                        None => {
+                            warn!("openraft apply SetAssignment: broker dropped");
+                            false
+                        }
+                    }
+                }
+                _ => true,
+            };
+            out.push(MetaResponse { ok });
         }
         Ok(out)
     }
@@ -482,7 +525,10 @@ impl Broker {
             broker: Arc::clone(self),
         };
         let log_store = LogStore::default();
-        let state_machine = StateMachine::default();
+        let state_machine = StateMachine {
+            inner: Arc::new(Mutex::new(SmInner::default())),
+            broker: Arc::downgrade(self),
+        };
         let raft = Raft::new(self.node_id(), config, network, log_store, state_machine)
             .await
             .map_err(|e| Error::InvalidArgument(format!("openraft new: {e}")))?;
@@ -510,6 +556,60 @@ impl Broker {
             });
         }
         Ok(())
+    }
+
+    /// Replicate the live assignment as [`MetaRequest::SetAssignment`] and wait
+    /// for local apply (timeout). Returns `true` on success.
+    ///
+    /// No-op success when the flag is off or this process is not clustered.
+    /// Fail (and do not call `client_write`) when this node is not the
+    /// openraft leader or the raft node is not started.
+    pub async fn client_write_set_assignment(&self) -> bool {
+        if !self.openraft_metadata_enabled() {
+            return true;
+        }
+        if self.cluster_config().is_none() {
+            return true;
+        }
+        if !self.is_controller() {
+            warn!(
+                node = self.node_id(),
+                leader = self.controller_id(),
+                "openraft client_write skipped; not leader"
+            );
+            return false;
+        }
+        let raft = {
+            let g = self.openraft_meta.lock();
+            match g.as_ref() {
+                Some(h) => h.raft.clone(),
+                None => {
+                    warn!("openraft client_write: raft not started");
+                    return false;
+                }
+            }
+        };
+        let Some(asg) = self.clone_live_assignment() else {
+            return true;
+        };
+        let req = MetaRequest::SetAssignment {
+            generation: asg.generation,
+            topics: asg.to_wire_topics(),
+        };
+        match tokio::time::timeout(CLIENT_WRITE_TIMEOUT, raft.client_write(req)).await {
+            Ok(Ok(resp)) => resp.data.ok,
+            Ok(Err(e)) => {
+                warn!(error = %e, "openraft client_write SetAssignment failed");
+                false
+            }
+            Err(_) => {
+                warn!(
+                    timeout_secs = CLIENT_WRITE_TIMEOUT.as_secs(),
+                    "openraft client_write SetAssignment timed out"
+                );
+                false
+            }
+        }
     }
 
     /// Drop the local raft node (isolate / shutdown).

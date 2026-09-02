@@ -414,9 +414,26 @@ Opt-in only (`VOLANT_OPENRAFT_METADATA=1`). Default **off**: controller stays
 lowest live id. When on, a 3+ node cluster runs an in-process **openraft**
 group over native opcodes **108/109** (AppendEntries) and **110/111**
 (RequestVote). `controller_id()` / Metadata controller is that leader.
-Gauges: `volant_openraft_leader_id`, `volant_openraft_term`. This does **not**
-replicate `assignment.json` through openraft and does **not** implement
-InstallSnapshot. Homemade 154 log is unchanged. See [V11_SPEC.md](./V11_SPEC.md).
+Gauges: `volant_openraft_leader_id`, `volant_openraft_term`. v0.11 did **not**
+replicate `assignment.json` through openraft (election only). v0.16 does
+when the same flag is on (see below). InstallSnapshot is still unimplemented.
+Homemade 154 log is unchanged. See [V11_SPEC.md](./V11_SPEC.md) and
+[V16_SPEC.md](./V16_SPEC.md).
+
+## v0.16 openraft assignment apply
+
+Same opt-in (`VOLANT_OPENRAFT_METADATA=1`). After CreateTopic / DeleteTopic /
+CreatePartitions the openraft leader `client_write`s `SetAssignment` on
+opcodes **108/109** and waits for local apply (5s). Followers apply the
+snapshot to `{data_dir}/cluster/assignment.json` and live cluster state.
+Default **off**: lowest-id controller and 150/154 paths are unchanged.
+
+When **both** `VOLANT_METADATA_RAFT` and the openraft flag are on, prefer
+openraft apply (skip 154 fan-out for that mutation). Wait
+(`VOLANT_ASSIGNMENT_CONSENSUS_WAIT` / committed-only) still uses native
+**15** / Kafka **19** + live rollback; wait **off** is best-effort (local
+write is SoT if `client_write` fails). Log store stays in-memory; not full
+KRaft; no InstallSnapshot (v0.17). See [V16_SPEC.md](./V16_SPEC.md).
 
 **Cluster sharp edges:** Truncate-journal majority (Phase 130), assignment
 majority (Phase 150/154), and Phase 135/137/148 wait mode use **configured N**

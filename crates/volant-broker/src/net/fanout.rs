@@ -854,11 +854,23 @@ pub async fn fanout_assignment_consensus(broker: &Broker) -> bool {
 /// for the client response; `Some(false)` when majority failed and either
 /// **wait** or **metadata committed-only** (Phase 152) is on.
 ///
-/// Phase 154: when metadata Raft is enabled, prefers
+/// v0.16: when `VOLANT_OPENRAFT_METADATA` is on, prefer openraft
+/// `SetAssignment` (`client_write`, opcodes 108/109) over homemade 154
+/// and Phase 150 notes. Wait off → still write/apply with a timeout
+/// (best-effort; client success does not depend on the result).
+///
+/// Phase 154: when metadata Raft is enabled (and openraft is off), prefers
 /// [`fanout_metadata_raft_append`] over Phase 150 notes.
 pub async fn maybe_fanout_assignment_consensus(broker: &Broker) -> Option<bool> {
     if broker.cluster_config().is_none() {
         return None;
+    }
+    // v0.16: prefer openraft assignment apply when the flag is on.
+    if broker.openraft_metadata_enabled() {
+        let ok = broker.client_write_set_assignment().await;
+        let must_wait =
+            broker.assignment_consensus_wait() || broker.assignment_metadata_committed_only();
+        return if must_wait { Some(ok) } else { None };
     }
     // Phase 154: prefer KRaft-style metadata log when enabled.
     if broker.metadata_raft_enabled() {
