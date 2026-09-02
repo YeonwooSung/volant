@@ -1850,44 +1850,83 @@ func (c *Client) Heartbeat(group, memberID string, generation uint32) error {
 }
 
 // DescribeGroup describes a live consumer group (native opcode 34/35).
-// Error 2 (NotFound, no live members) is a BrokerError.
+// Error 2 (NotFound, no live members) is a BrokerError. Transient
+// broker/transport errors retry up to maxRetries extra times (default
+// 0). Error 2 / 9 / 10 / 11 / 13 / 14 are not retried.
 func (c *Client) DescribeGroup(id string) (DescribeGroupResult, error) {
 	payload, err := codec.EncodeDescribeGroupRequest(codec.DescribeGroupRequest{GroupID: id})
 	if err != nil {
 		return DescribeGroupResult{}, err
 	}
-	decoded, err := c.roundTrip(codec.OpDescribeGroup, payload)
-	if err != nil {
-		return DescribeGroupResult{}, err
+	maxRetries := c.maxRetries
+	if maxRetries < 0 {
+		maxRetries = 0
 	}
-	resp, ok := decoded.(codec.DescribeGroupResponse)
-	if !ok {
-		return DescribeGroupResult{}, &frame.ProtocolError{Msg: fmt.Sprintf("unexpected response for describe_group: %T", decoded)}
+	retryAttempt := 0
+	for {
+		decoded, err := c.roundTrip(codec.OpDescribeGroup, payload)
+		if err != nil {
+			if isTransientProduceErr(err) && retryAttempt < maxRetries {
+				retryAttempt++
+				c.sleepProduceRetry()
+				continue
+			}
+			return DescribeGroupResult{}, err
+		}
+		resp, ok := decoded.(codec.DescribeGroupResponse)
+		if !ok {
+			return DescribeGroupResult{}, &frame.ProtocolError{Msg: fmt.Sprintf("unexpected response for describe_group: %T", decoded)}
+		}
+		if isTransientBroker(resp.ErrorCode) && retryAttempt < maxRetries {
+			retryAttempt++
+			c.sleepProduceRetry()
+			continue
+		}
+		if err := check(resp.ErrorCode, "describe_group"); err != nil {
+			return DescribeGroupResult{}, err
+		}
+		return DescribeGroupResult{
+			GroupID:    resp.GroupID,
+			Generation: resp.Generation,
+			Members:    resp.Members,
+		}, nil
 	}
-	if err := check(resp.ErrorCode, "describe_group"); err != nil {
-		return DescribeGroupResult{}, err
-	}
-	return DescribeGroupResult{
-		GroupID:    resp.GroupID,
-		Generation: resp.Generation,
-		Members:    resp.Members,
-	}, nil
 }
 
 // ListGroups lists known consumer groups (native opcode 36/37).
+// Transient broker/transport errors retry up to maxRetries extra times
+// (default 0). Error 2 / 9 / 10 / 11 / 13 / 14 are not retried.
 func (c *Client) ListGroups() ([]GroupListing, error) {
-	decoded, err := c.roundTrip(codec.OpListGroups, codec.EncodeListGroupsRequest())
-	if err != nil {
-		return nil, err
+	payload := codec.EncodeListGroupsRequest()
+	maxRetries := c.maxRetries
+	if maxRetries < 0 {
+		maxRetries = 0
 	}
-	resp, ok := decoded.(codec.ListGroupsResponse)
-	if !ok {
-		return nil, &frame.ProtocolError{Msg: fmt.Sprintf("unexpected response for list_groups: %T", decoded)}
+	retryAttempt := 0
+	for {
+		decoded, err := c.roundTrip(codec.OpListGroups, payload)
+		if err != nil {
+			if isTransientProduceErr(err) && retryAttempt < maxRetries {
+				retryAttempt++
+				c.sleepProduceRetry()
+				continue
+			}
+			return nil, err
+		}
+		resp, ok := decoded.(codec.ListGroupsResponse)
+		if !ok {
+			return nil, &frame.ProtocolError{Msg: fmt.Sprintf("unexpected response for list_groups: %T", decoded)}
+		}
+		if isTransientBroker(resp.ErrorCode) && retryAttempt < maxRetries {
+			retryAttempt++
+			c.sleepProduceRetry()
+			continue
+		}
+		if err := check(resp.ErrorCode, "list_groups"); err != nil {
+			return nil, err
+		}
+		return resp.Groups, nil
 	}
-	if err := check(resp.ErrorCode, "list_groups"); err != nil {
-		return nil, err
-	}
-	return resp.Groups, nil
 }
 
 // CreateScramUser creates or replaces a SCRAM user (native opcode 64/65).

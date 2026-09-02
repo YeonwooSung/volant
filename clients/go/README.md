@@ -184,7 +184,8 @@ tests. Error 13 stays on the redirect budget; error 21 stays on the
 one re-Init. Heartbeat shares produce/fetch `SetMaxRetries` (default
 0); rebalance codes 9 / 10 / 11 are not retried. LeaveGroup shares
 `SetMaxRetries`; error 10 is success (already left). JoinGroup is not
-retried. OffsetCommit / OffsetFetch / DeleteOffsets / ListOffsets
+retried. OffsetCommit / OffsetFetch / DeleteOffsets / ListOffsets /
+DescribeGroup / ListGroups
 share the same `SetMaxRetries` (default 0).
 This is not Kafka `retries`.
 

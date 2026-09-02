@@ -318,6 +318,8 @@ class ClientTest {
         final List<Integer> offsetFetchCodes = new CopyOnWriteArrayList<>();
         final List<Integer> deleteOffsetsCodes = new CopyOnWriteArrayList<>();
         final List<Integer> listOffsetsCodes = new CopyOnWriteArrayList<>();
+        final List<Integer> describeGroupCodes = new CopyOnWriteArrayList<>();
+        final List<Integer> listGroupsCodes = new CopyOnWriteArrayList<>();
         volatile Metadata meta = new Metadata(Collections.emptyList(), Collections.emptyList());
         final List<Integer> opcodes = new CopyOnWriteArrayList<>();
         final List<Codec.ProduceRequest> produceReqs = new CopyOnWriteArrayList<>();
@@ -332,6 +334,8 @@ class ClientTest {
         final AtomicInteger offsetFetchCount = new AtomicInteger();
         final AtomicInteger deleteOffsetsCount = new AtomicInteger();
         final AtomicInteger listOffsetsCount = new AtomicInteger();
+        final AtomicInteger describeGroupCount = new AtomicInteger();
+        final AtomicInteger listGroupsCount = new AtomicInteger();
         final AtomicInteger metadataCount = new AtomicInteger();
         final AtomicInteger acceptCount = new AtomicInteger();
         volatile long initPid = 42L;
@@ -490,6 +494,26 @@ class ClientTest {
                 replyOp[0] = Codec.OP_LIST_OFFSETS_RESPONSE;
                 return Codec.encodeListOffsetsResponse(
                         new Codec.ListOffsetsResponse(code, "", Collections.emptyList()));
+            }
+            if (frame.opcode == Codec.OP_DESCRIBE_GROUP) {
+                describeGroupCount.incrementAndGet();
+                int code = 0;
+                if (!describeGroupCodes.isEmpty()) {
+                    code = describeGroupCodes.remove(0);
+                }
+                replyOp[0] = Codec.OP_DESCRIBE_GROUP_RESPONSE;
+                return Codec.encodeDescribeGroupResponse(
+                        new Codec.DescribeGroupResponse(code, "", 0, Collections.emptyList()));
+            }
+            if (frame.opcode == Codec.OP_LIST_GROUPS) {
+                listGroupsCount.incrementAndGet();
+                int code = 0;
+                if (!listGroupsCodes.isEmpty()) {
+                    code = listGroupsCodes.remove(0);
+                }
+                replyOp[0] = Codec.OP_LIST_GROUPS_RESPONSE;
+                return Codec.encodeListGroupsResponse(
+                        new Codec.ListGroupsResponse(code, Collections.emptyList()));
             }
             if (frame.opcode == Codec.OP_METADATA) {
                 metadataCount.incrementAndGet();
@@ -983,6 +1007,84 @@ class ClientTest {
                 assertEquals(TIMEOUT, ex.code);
             }
             assertEquals(3, srv.listOffsetsCount.get());
+        }
+    }
+
+    @Test
+    void describeGroupDefaultMaxRetriesZeroRaisesOnTimeout() throws Exception {
+        try (ScriptedBroker srv = ScriptedBroker.start()) {
+            srv.describeGroupCodes.add(TIMEOUT);
+            try (Client c = Client.connect("127.0.0.1", srv.port, 5_000)) {
+                assertEquals(0, c.maxRetries());
+                BrokerException ex =
+                        assertThrows(BrokerException.class, () -> c.describeGroup("g"));
+                assertEquals(TIMEOUT, ex.code);
+            }
+            assertEquals(1, srv.describeGroupCount.get());
+        }
+    }
+
+    @Test
+    void describeGroupRetriesTimeoutThenOk() throws Exception {
+        try (ScriptedBroker srv = ScriptedBroker.start()) {
+            srv.describeGroupCodes.add(TIMEOUT);
+            srv.describeGroupCodes.add(0);
+            try (Client c = Client.connect("127.0.0.1", srv.port, 5_000)) {
+                c.setMaxRetries(2);
+                c.setRetryBackoffMs(0);
+                DescribeGroupResult got = c.describeGroup("g");
+                assertEquals("", got.groupId);
+                assertTrue(got.members.isEmpty());
+            }
+            assertEquals(2, srv.describeGroupCount.get());
+        }
+    }
+
+    @Test
+    void describeGroupNotFoundIsNotRetried() throws Exception {
+        try (ScriptedBroker srv = ScriptedBroker.start()) {
+            srv.describeGroupCodes.add(NOT_FOUND);
+            srv.describeGroupCodes.add(0);
+            try (Client c = Client.connect("127.0.0.1", srv.port, 5_000)) {
+                c.setMaxRetries(2);
+                c.setRetryBackoffMs(0);
+                BrokerException ex =
+                        assertThrows(BrokerException.class, () -> c.describeGroup("missing"));
+                assertEquals(NOT_FOUND, ex.code);
+            }
+            assertEquals(1, srv.describeGroupCount.get());
+        }
+    }
+
+    @Test
+    void listGroupsRetriesTimeoutThenOk() throws Exception {
+        try (ScriptedBroker srv = ScriptedBroker.start()) {
+            srv.listGroupsCodes.add(TIMEOUT);
+            srv.listGroupsCodes.add(0);
+            try (Client c = Client.connect("127.0.0.1", srv.port, 5_000)) {
+                c.setMaxRetries(2);
+                c.setRetryBackoffMs(0);
+                List<Codec.GroupListing> got = c.listGroups();
+                assertTrue(got.isEmpty());
+            }
+            assertEquals(2, srv.listGroupsCount.get());
+        }
+    }
+
+    @Test
+    void describeGroupExhaustedRetriesRaises() throws Exception {
+        try (ScriptedBroker srv = ScriptedBroker.start()) {
+            srv.describeGroupCodes.add(TIMEOUT);
+            srv.describeGroupCodes.add(TIMEOUT);
+            srv.describeGroupCodes.add(TIMEOUT);
+            try (Client c = Client.connect("127.0.0.1", srv.port, 5_000)) {
+                c.setMaxRetries(2);
+                c.setRetryBackoffMs(0);
+                BrokerException ex =
+                        assertThrows(BrokerException.class, () -> c.describeGroup("g"));
+                assertEquals(TIMEOUT, ex.code);
+            }
+            assertEquals(3, srv.describeGroupCount.get());
         }
     }
 

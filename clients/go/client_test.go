@@ -20,24 +20,28 @@ type scriptedBroker struct {
 	fetchCodes         []uint16
 	heartbeatCodes     []uint16
 	leaveGroupCodes    []uint16
-	offsetCommitCodes  []uint16
-	offsetFetchCodes   []uint16
-	deleteOffsetsCodes []uint16
-	listOffsetsCodes   []uint16
-	meta               codec.MetadataResponse
-	opcodes            []uint16
-	produceReqs        []codec.ProduceRequest
-	fetchReqs          []codec.FetchRequest
-	initTxnIDs         []string
-	initCount          int
-	produceCount       int
-	fetchCount         int
-	heartbeatCount     int
-	leaveGroupCount    int
-	offsetCommitCount  int
-	offsetFetchCount   int
-	deleteOffsetsCount int
-	listOffsetsCount   int
+	offsetCommitCodes   []uint16
+	offsetFetchCodes    []uint16
+	deleteOffsetsCodes  []uint16
+	listOffsetsCodes    []uint16
+	describeGroupCodes  []uint16
+	listGroupsCodes     []uint16
+	meta                codec.MetadataResponse
+	opcodes             []uint16
+	produceReqs         []codec.ProduceRequest
+	fetchReqs           []codec.FetchRequest
+	initTxnIDs          []string
+	initCount           int
+	produceCount        int
+	fetchCount          int
+	heartbeatCount      int
+	leaveGroupCount     int
+	offsetCommitCount   int
+	offsetFetchCount    int
+	deleteOffsetsCount  int
+	listOffsetsCount    int
+	describeGroupCount  int
+	listGroupsCount     int
 	metadataCount      int
 	acceptCount        int
 	initPID            uint64
@@ -125,6 +129,18 @@ func (s *scriptedBroker) listOffsets() int {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	return s.listOffsetsCount
+}
+
+func (s *scriptedBroker) describeGroups() int {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.describeGroupCount
+}
+
+func (s *scriptedBroker) listGroups() int {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.listGroupsCount
 }
 
 func (s *scriptedBroker) inits() int {
@@ -306,6 +322,24 @@ func (s *scriptedBroker) handle(f *frame.Frame) ([]byte, error) {
 		}
 		payload, err = codec.EncodeListOffsetsResponse(codec.ListOffsetsResponse{ErrorCode: code})
 		replyOp = codec.OpListOffsetsResponse
+	case codec.OpDescribeGroup:
+		s.describeGroupCount++
+		code := uint16(0)
+		if len(s.describeGroupCodes) > 0 {
+			code = s.describeGroupCodes[0]
+			s.describeGroupCodes = s.describeGroupCodes[1:]
+		}
+		payload, err = codec.EncodeDescribeGroupResponse(codec.DescribeGroupResponse{ErrorCode: code})
+		replyOp = codec.OpDescribeGroupResponse
+	case codec.OpListGroups:
+		s.listGroupsCount++
+		code := uint16(0)
+		if len(s.listGroupsCodes) > 0 {
+			code = s.listGroupsCodes[0]
+			s.listGroupsCodes = s.listGroupsCodes[1:]
+		}
+		payload, err = codec.EncodeListGroupsResponse(codec.ListGroupsResponse{ErrorCode: code})
+		replyOp = codec.OpListGroupsResponse
 	case codec.OpMetadata:
 		s.metadataCount++
 		payload, err = codec.EncodeMetadataResponse(s.meta)
@@ -1527,6 +1561,132 @@ func TestListOffsetsExhaustedRetriesRaises(t *testing.T) {
 	}
 	if n := srv.listOffsets(); n != 3 {
 		t.Fatalf("list offsets count %d want 3", n)
+	}
+}
+
+func TestDescribeGroupDefaultMaxRetriesZeroRaisesOnTimeout(t *testing.T) {
+	srv := &scriptedBroker{describeGroupCodes: []uint16{timeoutCode}}
+	addr, stop := startScripted(t, srv)
+	defer stop()
+
+	c, err := volant.DialTimeout(addr, 5*time.Second)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer c.Close()
+
+	_, err = c.DescribeGroup("g")
+	if err == nil {
+		t.Fatal("expected BrokerError 7")
+	}
+	be, ok := err.(*volant.BrokerError)
+	if !ok || be.Code != timeoutCode {
+		t.Fatalf("got %v want BrokerError code=7", err)
+	}
+	if n := srv.describeGroups(); n != 1 {
+		t.Fatalf("describe group count %d want 1", n)
+	}
+}
+
+func TestDescribeGroupRetriesTimeoutThenOk(t *testing.T) {
+	srv := &scriptedBroker{describeGroupCodes: []uint16{timeoutCode, 0}}
+	addr, stop := startScripted(t, srv)
+	defer stop()
+
+	c, err := volant.DialTimeout(addr, 5*time.Second)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer c.Close()
+	c.SetMaxRetries(2)
+	c.SetRetryBackoff(0)
+
+	got, err := c.DescribeGroup("g")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.GroupID != "" || len(got.Members) != 0 {
+		t.Fatalf("describe %v want empty", got)
+	}
+	if n := srv.describeGroups(); n != 2 {
+		t.Fatalf("describe group count %d want 2", n)
+	}
+}
+
+func TestDescribeGroupNotFoundIsNotRetried(t *testing.T) {
+	srv := &scriptedBroker{describeGroupCodes: []uint16{notFoundCode, 0}}
+	addr, stop := startScripted(t, srv)
+	defer stop()
+
+	c, err := volant.DialTimeout(addr, 5*time.Second)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer c.Close()
+	c.SetMaxRetries(2)
+	c.SetRetryBackoff(0)
+
+	_, err = c.DescribeGroup("missing")
+	if err == nil {
+		t.Fatal("expected BrokerError 2")
+	}
+	be, ok := err.(*volant.BrokerError)
+	if !ok || be.Code != notFoundCode {
+		t.Fatalf("got %v want BrokerError code=2", err)
+	}
+	if n := srv.describeGroups(); n != 1 {
+		t.Fatalf("describe group count %d want 1", n)
+	}
+}
+
+func TestListGroupsRetriesTimeoutThenOk(t *testing.T) {
+	srv := &scriptedBroker{listGroupsCodes: []uint16{timeoutCode, 0}}
+	addr, stop := startScripted(t, srv)
+	defer stop()
+
+	c, err := volant.DialTimeout(addr, 5*time.Second)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer c.Close()
+	c.SetMaxRetries(2)
+	c.SetRetryBackoff(0)
+
+	out, err := c.ListGroups()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(out) != 0 {
+		t.Fatalf("listings %v want empty", out)
+	}
+	if n := srv.listGroups(); n != 2 {
+		t.Fatalf("list groups count %d want 2", n)
+	}
+}
+
+func TestDescribeGroupExhaustedRetriesRaises(t *testing.T) {
+	srv := &scriptedBroker{describeGroupCodes: []uint16{timeoutCode, timeoutCode, timeoutCode}}
+	addr, stop := startScripted(t, srv)
+	defer stop()
+
+	c, err := volant.DialTimeout(addr, 5*time.Second)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer c.Close()
+	c.SetMaxRetries(2)
+	c.SetRetryBackoff(0)
+
+	_, err = c.DescribeGroup("g")
+	if err == nil {
+		t.Fatal("expected BrokerError 7")
+	}
+	be, ok := err.(*volant.BrokerError)
+	if !ok || be.Code != timeoutCode {
+		t.Fatalf("got %v want BrokerError code=7", err)
+	}
+	if n := srv.describeGroups(); n != 3 {
+		t.Fatalf("describe group count %d want 3", n)
 	}
 }
 

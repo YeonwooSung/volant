@@ -1579,27 +1579,85 @@ public final class Client implements AutoCloseable {
     /**
      * Describe a live consumer group (native opcode 34/35).
      * Error 2 (NotFound, no live members) is a {@link BrokerException}.
+     * Transient broker/transport errors retry up to {@code maxRetries}
+     * extra times (default 0). Error 2 / 9 / 10 / 11 / 13 / 14 are not
+     * retried.
      */
     public DescribeGroupResult describeGroup(String group) {
         byte[] payload = Codec.encodeDescribeGroupRequest(new Codec.DescribeGroupRequest(group));
-        Object decoded = roundTrip(Codec.OP_DESCRIBE_GROUP, payload);
-        if (!(decoded instanceof Codec.DescribeGroupResponse)) {
-            throw new ProtocolException("unexpected response for describe_group: " + typeName(decoded));
+        int retryAttempt = 0;
+        while (true) {
+            Object decoded;
+            try {
+                decoded = roundTrip(Codec.OP_DESCRIBE_GROUP, payload);
+            } catch (BrokerException e) {
+                if (isTransientBroker(e.code) && retryAttempt < maxRetries) {
+                    retryAttempt++;
+                    sleepProduceRetry();
+                    continue;
+                }
+                throw e;
+            } catch (RuntimeException e) {
+                if (isTransientTransport(e) && retryAttempt < maxRetries) {
+                    retryAttempt++;
+                    sleepProduceRetry();
+                    continue;
+                }
+                throw e;
+            }
+            if (!(decoded instanceof Codec.DescribeGroupResponse)) {
+                throw new ProtocolException("unexpected response for describe_group: " + typeName(decoded));
+            }
+            Codec.DescribeGroupResponse resp = (Codec.DescribeGroupResponse) decoded;
+            if (isTransientBroker(resp.errorCode) && retryAttempt < maxRetries) {
+                retryAttempt++;
+                sleepProduceRetry();
+                continue;
+            }
+            check(resp.errorCode, "describe_group");
+            return new DescribeGroupResult(resp.groupId, resp.generation, resp.members);
         }
-        Codec.DescribeGroupResponse resp = (Codec.DescribeGroupResponse) decoded;
-        check(resp.errorCode, "describe_group");
-        return new DescribeGroupResult(resp.groupId, resp.generation, resp.members);
     }
 
-    /** List known consumer groups (native opcode 36/37). */
+    /**
+     * List known consumer groups (native opcode 36/37). Transient
+     * broker/transport errors retry up to {@code maxRetries} extra times
+     * (default 0). Error 2 / 9 / 10 / 11 / 13 / 14 are not retried.
+     */
     public List<Codec.GroupListing> listGroups() {
-        Object decoded = roundTrip(Codec.OP_LIST_GROUPS, Codec.encodeListGroupsRequest());
-        if (!(decoded instanceof Codec.ListGroupsResponse)) {
-            throw new ProtocolException("unexpected response for list_groups: " + typeName(decoded));
+        byte[] payload = Codec.encodeListGroupsRequest();
+        int retryAttempt = 0;
+        while (true) {
+            Object decoded;
+            try {
+                decoded = roundTrip(Codec.OP_LIST_GROUPS, payload);
+            } catch (BrokerException e) {
+                if (isTransientBroker(e.code) && retryAttempt < maxRetries) {
+                    retryAttempt++;
+                    sleepProduceRetry();
+                    continue;
+                }
+                throw e;
+            } catch (RuntimeException e) {
+                if (isTransientTransport(e) && retryAttempt < maxRetries) {
+                    retryAttempt++;
+                    sleepProduceRetry();
+                    continue;
+                }
+                throw e;
+            }
+            if (!(decoded instanceof Codec.ListGroupsResponse)) {
+                throw new ProtocolException("unexpected response for list_groups: " + typeName(decoded));
+            }
+            Codec.ListGroupsResponse resp = (Codec.ListGroupsResponse) decoded;
+            if (isTransientBroker(resp.errorCode) && retryAttempt < maxRetries) {
+                retryAttempt++;
+                sleepProduceRetry();
+                continue;
+            }
+            check(resp.errorCode, "list_groups");
+            return resp.groups;
         }
-        Codec.ListGroupsResponse resp = (Codec.ListGroupsResponse) decoded;
-        check(resp.errorCode, "list_groups");
-        return resp.groups;
     }
 
     /**
