@@ -1856,7 +1856,8 @@ func (c *Client) ListGroups() ([]GroupListing, error) {
 
 // CreateScramUser creates or replaces a SCRAM user (native opcode 64/65).
 // iterations 0 means the broker default (4096). Password is sent in the
-// clear (use TLS). This is not the v0.46 handshake (60–63).
+// clear (use TLS). This is not the v0.46 handshake (60–63). Error 14
+// follows maxRedirects.
 func (c *Client) CreateScramUser(username, password string, iterations uint32) error {
 	payload, err := codec.EncodeCreateScramUserRequest(codec.CreateScramUserRequest{
 		Username:   username,
@@ -1866,48 +1867,101 @@ func (c *Client) CreateScramUser(username, password string, iterations uint32) e
 	if err != nil {
 		return err
 	}
-	decoded, err := c.roundTrip(codec.OpCreateScramUser, payload)
-	if err != nil {
-		return err
+	maxAttempts := 1 + c.maxRedirects
+	for attempt := 1; ; attempt++ {
+		decoded, err := c.roundTrip(codec.OpCreateScramUser, payload)
+		if err != nil {
+			ok, rerr := c.maybeRedirectController(err, attempt, maxAttempts)
+			if rerr != nil {
+				return rerr
+			}
+			if ok {
+				continue
+			}
+			return err
+		}
+		resp, ok := decoded.(codec.CreateScramUserResponse)
+		if !ok {
+			return &frame.ProtocolError{Msg: fmt.Sprintf("unexpected response for create_scram_user: %T", decoded)}
+		}
+		ok, rerr := c.maybeRedirectControllerCode(resp.ErrorCode, "", attempt, maxAttempts)
+		if rerr != nil {
+			return rerr
+		}
+		if ok {
+			continue
+		}
+		return check(resp.ErrorCode, "create_scram_user")
 	}
-	resp, ok := decoded.(codec.CreateScramUserResponse)
-	if !ok {
-		return &frame.ProtocolError{Msg: fmt.Sprintf("unexpected response for create_scram_user: %T", decoded)}
-	}
-	return check(resp.ErrorCode, "create_scram_user")
 }
 
-// DeleteScramUser deletes a SCRAM user (native opcode 66/67).
+// DeleteScramUser deletes a SCRAM user (native opcode 66/67). Error 14
+// follows maxRedirects.
 func (c *Client) DeleteScramUser(username string) error {
 	payload, err := codec.EncodeDeleteScramUserRequest(codec.DeleteScramUserRequest{Username: username})
 	if err != nil {
 		return err
 	}
-	decoded, err := c.roundTrip(codec.OpDeleteScramUser, payload)
-	if err != nil {
-		return err
+	maxAttempts := 1 + c.maxRedirects
+	for attempt := 1; ; attempt++ {
+		decoded, err := c.roundTrip(codec.OpDeleteScramUser, payload)
+		if err != nil {
+			ok, rerr := c.maybeRedirectController(err, attempt, maxAttempts)
+			if rerr != nil {
+				return rerr
+			}
+			if ok {
+				continue
+			}
+			return err
+		}
+		resp, ok := decoded.(codec.DeleteScramUserResponse)
+		if !ok {
+			return &frame.ProtocolError{Msg: fmt.Sprintf("unexpected response for delete_scram_user: %T", decoded)}
+		}
+		ok, rerr := c.maybeRedirectControllerCode(resp.ErrorCode, "", attempt, maxAttempts)
+		if rerr != nil {
+			return rerr
+		}
+		if ok {
+			continue
+		}
+		return check(resp.ErrorCode, "delete_scram_user")
 	}
-	resp, ok := decoded.(codec.DeleteScramUserResponse)
-	if !ok {
-		return &frame.ProtocolError{Msg: fmt.Sprintf("unexpected response for delete_scram_user: %T", decoded)}
-	}
-	return check(resp.ErrorCode, "delete_scram_user")
 }
 
-// ListScramUsers lists SCRAM usernames (native opcode 68/69).
+// ListScramUsers lists SCRAM usernames (native opcode 68/69). Error 14
+// follows maxRedirects.
 func (c *Client) ListScramUsers() ([]string, error) {
-	decoded, err := c.roundTrip(codec.OpListScramUsers, codec.EncodeListScramUsersRequest())
-	if err != nil {
-		return nil, err
+	maxAttempts := 1 + c.maxRedirects
+	for attempt := 1; ; attempt++ {
+		decoded, err := c.roundTrip(codec.OpListScramUsers, codec.EncodeListScramUsersRequest())
+		if err != nil {
+			ok, rerr := c.maybeRedirectController(err, attempt, maxAttempts)
+			if rerr != nil {
+				return nil, rerr
+			}
+			if ok {
+				continue
+			}
+			return nil, err
+		}
+		resp, ok := decoded.(codec.ListScramUsersResponse)
+		if !ok {
+			return nil, &frame.ProtocolError{Msg: fmt.Sprintf("unexpected response for list_scram_users: %T", decoded)}
+		}
+		ok, rerr := c.maybeRedirectControllerCode(resp.ErrorCode, "", attempt, maxAttempts)
+		if rerr != nil {
+			return nil, rerr
+		}
+		if ok {
+			continue
+		}
+		if err := check(resp.ErrorCode, "list_scram_users"); err != nil {
+			return nil, err
+		}
+		return resp.Usernames, nil
 	}
-	resp, ok := decoded.(codec.ListScramUsersResponse)
-	if !ok {
-		return nil, &frame.ProtocolError{Msg: fmt.Sprintf("unexpected response for list_scram_users: %T", decoded)}
-	}
-	if err := check(resp.ErrorCode, "list_scram_users"); err != nil {
-		return nil, err
-	}
-	return resp.Usernames, nil
 }
 
 // CreateAcls creates ACL bindings (native opcode 54/55).
@@ -1985,7 +2039,8 @@ func (c *Client) DeleteAcls(entries []codec.AclBinding) (uint32, error) {
 }
 
 // ListAcls lists ACL bindings with optional filters (native opcode 58/59).
-// Empty principal/resource = any. resourceType 255 = any type.
+// Empty principal/resource = any. resourceType 255 = any type. Error 14
+// follows maxRedirects.
 func (c *Client) ListAcls(principal string, resourceType uint8, resource string) ([]codec.AclBinding, error) {
 	payload, err := codec.EncodeListAclsRequest(codec.ListAclsRequest{
 		Principal:    principal,
@@ -1995,18 +2050,35 @@ func (c *Client) ListAcls(principal string, resourceType uint8, resource string)
 	if err != nil {
 		return nil, err
 	}
-	decoded, err := c.roundTrip(codec.OpListAcls, payload)
-	if err != nil {
-		return nil, err
+	maxAttempts := 1 + c.maxRedirects
+	for attempt := 1; ; attempt++ {
+		decoded, err := c.roundTrip(codec.OpListAcls, payload)
+		if err != nil {
+			ok, rerr := c.maybeRedirectController(err, attempt, maxAttempts)
+			if rerr != nil {
+				return nil, rerr
+			}
+			if ok {
+				continue
+			}
+			return nil, err
+		}
+		resp, ok := decoded.(codec.ListAclsResponse)
+		if !ok {
+			return nil, &frame.ProtocolError{Msg: fmt.Sprintf("unexpected response for list_acls: %T", decoded)}
+		}
+		ok, rerr := c.maybeRedirectControllerCode(resp.ErrorCode, "", attempt, maxAttempts)
+		if rerr != nil {
+			return nil, rerr
+		}
+		if ok {
+			continue
+		}
+		if err := check(resp.ErrorCode, "list_acls"); err != nil {
+			return nil, err
+		}
+		return resp.Entries, nil
 	}
-	resp, ok := decoded.(codec.ListAclsResponse)
-	if !ok {
-		return nil, &frame.ProtocolError{Msg: fmt.Sprintf("unexpected response for list_acls: %T", decoded)}
-	}
-	if err := check(resp.ErrorCode, "list_acls"); err != nil {
-		return nil, err
-	}
-	return resp.Entries, nil
 }
 
 // LeaveGroup leaves a consumer group.

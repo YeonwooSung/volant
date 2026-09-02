@@ -697,6 +697,18 @@ public final class Client implements AutoCloseable {
         if (decoded instanceof Codec.DeleteAclsResponse) {
             return ((Codec.DeleteAclsResponse) decoded).errorCode;
         }
+        if (decoded instanceof Codec.CreateScramUserResponse) {
+            return ((Codec.CreateScramUserResponse) decoded).errorCode;
+        }
+        if (decoded instanceof Codec.DeleteScramUserResponse) {
+            return ((Codec.DeleteScramUserResponse) decoded).errorCode;
+        }
+        if (decoded instanceof Codec.ListScramUsersResponse) {
+            return ((Codec.ListScramUsersResponse) decoded).errorCode;
+        }
+        if (decoded instanceof Codec.ListAclsResponse) {
+            return ((Codec.ListAclsResponse) decoded).errorCode;
+        }
         return 0;
     }
 
@@ -1601,38 +1613,29 @@ public final class Client implements AutoCloseable {
     /**
      * Create or replace a SCRAM user (native opcode 64/65). {@code iterations}
      * 0 means the broker default (4096). This is not the v0.46 handshake
-     * (60–63).
+     * (60–63). Error 14 follows {@code maxRedirects}.
      */
     public void createScramUser(String username, String password, int iterations) {
         byte[] payload = Codec.encodeCreateScramUserRequest(
                 new Codec.CreateScramUserRequest(username, password, iterations));
-        Object decoded = roundTrip(Codec.OP_CREATE_SCRAM_USER, payload);
-        if (!(decoded instanceof Codec.CreateScramUserResponse)) {
-            throw new ProtocolException("unexpected response for create_scram_user: " + typeName(decoded));
-        }
-        Codec.CreateScramUserResponse resp = (Codec.CreateScramUserResponse) decoded;
-        check(resp.errorCode, "create_scram_user");
+        adminRoundTrip(
+                Codec.OP_CREATE_SCRAM_USER, payload, Codec.CreateScramUserResponse.class, "create_scram_user");
     }
 
-    /** Delete a SCRAM user (native opcode 66/67). */
+    /** Delete a SCRAM user (native opcode 66/67). Error 14 follows {@code maxRedirects}. */
     public void deleteScramUser(String username) {
         byte[] payload = Codec.encodeDeleteScramUserRequest(new Codec.DeleteScramUserRequest(username));
-        Object decoded = roundTrip(Codec.OP_DELETE_SCRAM_USER, payload);
-        if (!(decoded instanceof Codec.DeleteScramUserResponse)) {
-            throw new ProtocolException("unexpected response for delete_scram_user: " + typeName(decoded));
-        }
-        Codec.DeleteScramUserResponse resp = (Codec.DeleteScramUserResponse) decoded;
-        check(resp.errorCode, "delete_scram_user");
+        adminRoundTrip(
+                Codec.OP_DELETE_SCRAM_USER, payload, Codec.DeleteScramUserResponse.class, "delete_scram_user");
     }
 
-    /** List SCRAM usernames (native opcode 68/69). */
+    /** List SCRAM usernames (native opcode 68/69). Error 14 follows {@code maxRedirects}. */
     public List<String> listScramUsers() {
-        Object decoded = roundTrip(Codec.OP_LIST_SCRAM_USERS, Codec.encodeListScramUsersRequest());
-        if (!(decoded instanceof Codec.ListScramUsersResponse)) {
-            throw new ProtocolException("unexpected response for list_scram_users: " + typeName(decoded));
-        }
-        Codec.ListScramUsersResponse resp = (Codec.ListScramUsersResponse) decoded;
-        check(resp.errorCode, "list_scram_users");
+        Codec.ListScramUsersResponse resp = (Codec.ListScramUsersResponse) adminRoundTrip(
+                Codec.OP_LIST_SCRAM_USERS,
+                Codec.encodeListScramUsersRequest(),
+                Codec.ListScramUsersResponse.class,
+                "list_scram_users");
         return resp.usernames;
     }
 
@@ -1665,17 +1668,13 @@ public final class Client implements AutoCloseable {
     /**
      * List ACL bindings with optional filters (native opcode 58/59). Empty
      * {@code principal} / {@code resource} = any. {@code resourceType} 255 =
-     * any type.
+     * any type. Error 14 follows {@code maxRedirects}.
      */
     public List<AclBinding> listAcls(String principal, int resourceType, String resource) {
         byte[] payload = Codec.encodeListAclsRequest(
                 new Codec.ListAclsRequest(principal, resourceType, resource));
-        Object decoded = roundTrip(Codec.OP_LIST_ACLS, payload);
-        if (!(decoded instanceof Codec.ListAclsResponse)) {
-            throw new ProtocolException("unexpected response for list_acls: " + typeName(decoded));
-        }
-        Codec.ListAclsResponse resp = (Codec.ListAclsResponse) decoded;
-        check(resp.errorCode, "list_acls");
+        Codec.ListAclsResponse resp = (Codec.ListAclsResponse) adminRoundTrip(
+                Codec.OP_LIST_ACLS, payload, Codec.ListAclsResponse.class, "list_acls");
         return resp.entries;
     }
 

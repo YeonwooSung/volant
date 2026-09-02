@@ -1613,11 +1613,19 @@ type adminBroker struct {
 	createPartitionsCodes []uint16
 	createAclsCodes       []uint16
 	reassignCodes         []uint16
+	createScramReplies    []createTopicReply
+	deleteScramCodes      []uint16
+	listScramCodes        []uint16
+	listAclsCodes         []uint16
 	meta                  codec.MetadataResponse
 	createTopicCount      int
 	createPartitionsCount int
 	createAclsCount       int
 	reassignCount         int
+	createScramCount      int
+	deleteScramCount      int
+	listScramCount        int
+	listAclsCount         int
 	metadataCount         int
 	listMembersCount      int
 	acceptCount           int
@@ -1662,6 +1670,12 @@ func (s *adminBroker) snapshot() (createTopic, createParts, createAcls, reassign
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	return s.createTopicCount, s.createPartitionsCount, s.createAclsCount, s.reassignCount, s.metadataCount, s.acceptCount
+}
+
+func (s *adminBroker) scramAclSnapshot() (createScram, deleteScram, listScram, listAcls, metas, accepts int) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.createScramCount, s.deleteScramCount, s.listScramCount, s.listAclsCount, s.metadataCount, s.acceptCount
 }
 
 func (s *adminBroker) serve(conn net.Conn) {
@@ -1771,6 +1785,53 @@ func (s *adminBroker) handle(f *frame.Frame) ([]byte, error) {
 			ErrorCode: code, Generation: gen,
 		})
 		replyOp = codec.OpReassignPartitionsResponse
+	case codec.OpCreateScramUser:
+		s.createScramCount++
+		rep := createTopicReply{}
+		if len(s.createScramReplies) > 0 {
+			rep = s.createScramReplies[0]
+			s.createScramReplies = s.createScramReplies[1:]
+		}
+		if rep.asError {
+			payload, err = codec.EncodeErrorResponse(codec.ErrorResponse{Code: rep.code, Message: rep.message})
+			replyOp = codec.OpError
+			break
+		}
+		payload, err = codec.EncodeCreateScramUserResponse(codec.CreateScramUserResponse{ErrorCode: rep.code})
+		replyOp = codec.OpCreateScramUserResponse
+	case codec.OpDeleteScramUser:
+		s.deleteScramCount++
+		code := uint16(0)
+		if len(s.deleteScramCodes) > 0 {
+			code = s.deleteScramCodes[0]
+			s.deleteScramCodes = s.deleteScramCodes[1:]
+		}
+		payload, err = codec.EncodeDeleteScramUserResponse(codec.DeleteScramUserResponse{ErrorCode: code})
+		replyOp = codec.OpDeleteScramUserResponse
+	case codec.OpListScramUsers:
+		s.listScramCount++
+		code := uint16(0)
+		if len(s.listScramCodes) > 0 {
+			code = s.listScramCodes[0]
+			s.listScramCodes = s.listScramCodes[1:]
+		}
+		names := []string(nil)
+		if code == 0 {
+			names = []string{"alice"}
+		}
+		payload, err = codec.EncodeListScramUsersResponse(codec.ListScramUsersResponse{
+			ErrorCode: code, Usernames: names,
+		})
+		replyOp = codec.OpListScramUsersResponse
+	case codec.OpListAcls:
+		s.listAclsCount++
+		code := uint16(0)
+		if len(s.listAclsCodes) > 0 {
+			code = s.listAclsCodes[0]
+			s.listAclsCodes = s.listAclsCodes[1:]
+		}
+		payload, err = codec.EncodeListAclsResponse(codec.ListAclsResponse{ErrorCode: code})
+		replyOp = codec.OpListAclsResponse
 	case codec.OpMetadata:
 		s.metadataCount++
 		payload, err = codec.EncodeMetadataResponse(s.meta)
@@ -2166,6 +2227,131 @@ func TestReassignPartitionsError14ThenOk(t *testing.T) {
 	_, _, _, lrs, _, _ := leader.snapshot()
 	if lrs != 1 {
 		t.Fatalf("leader reassign=%d want 1", lrs)
+	}
+}
+
+func TestCreateScramUserError14RedirectsViaControllerID(t *testing.T) {
+	leader := &adminBroker{}
+	_, stopL := startAdmin(t, leader)
+	defer stopL()
+	follower := &adminBroker{
+		createScramReplies: []createTopicReply{{
+			code: notController, message: "not controller; controller_id=2", asError: true,
+		}},
+		meta: controllerMeta(2, "127.0.0.1", leader.port()),
+	}
+	fAddr, stopF := startAdmin(t, follower)
+	defer stopF()
+
+	c, err := volant.DialTimeout(fAddr, 5*time.Second)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer c.Close()
+	if err := c.CreateScramUser("alice", "s3cret", 0); err != nil {
+		t.Fatal(err)
+	}
+	cs, _, _, _, metas, _ := follower.scramAclSnapshot()
+	if cs != 1 || metas != 1 {
+		t.Fatalf("follower create_scram=%d metadata=%d want 1,1", cs, metas)
+	}
+	lcs, _, _, _, _, _ := leader.scramAclSnapshot()
+	if lcs != 1 {
+		t.Fatalf("leader create_scram=%d want 1", lcs)
+	}
+}
+
+func TestListAclsTyped14NoHintThenOk(t *testing.T) {
+	leader := &adminBroker{}
+	_, stopL := startAdmin(t, leader)
+	defer stopL()
+	follower := &adminBroker{
+		listAclsCodes: []uint16{notController},
+	}
+	fAddr, stopF := startAdmin(t, follower)
+	defer stopF()
+	follower.mu.Lock()
+	follower.meta = otherBrokerMeta(follower.port(), "127.0.0.1", leader.port())
+	follower.mu.Unlock()
+
+	c, err := volant.DialTimeout(fAddr, 5*time.Second)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer c.Close()
+	got, err := c.ListAcls("", 255, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(got) != 0 {
+		t.Fatalf("list_acls entries %d want 0", len(got))
+	}
+	_, _, _, la, metas, _ := follower.scramAclSnapshot()
+	if la != 1 || metas != 1 {
+		t.Fatalf("follower list_acls=%d metadata=%d want 1,1", la, metas)
+	}
+	_, _, _, lla, _, _ := leader.scramAclSnapshot()
+	if lla != 1 {
+		t.Fatalf("leader list_acls=%d want 1", lla)
+	}
+}
+
+func TestDeleteScramUserMaxRedirectsZeroRaisesOnFirst14(t *testing.T) {
+	follower := &adminBroker{
+		deleteScramCodes: []uint16{notController},
+		meta:             controllerMeta(2, "127.0.0.1", 9),
+	}
+	fAddr, stopF := startAdmin(t, follower)
+	defer stopF()
+
+	c, err := volant.DialTimeout(fAddr, 5*time.Second)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer c.Close()
+	c.SetMaxRedirects(0)
+	err = c.DeleteScramUser("alice")
+	if brokerCode(err) != notController {
+		t.Fatalf("err=%v want code 14", err)
+	}
+	_, ds, _, _, metas, accepts := follower.scramAclSnapshot()
+	if ds != 1 || metas != 0 || accepts != 1 {
+		t.Fatalf("delete_scram=%d metadata=%d accepts=%d want 1,0,1", ds, metas, accepts)
+	}
+}
+
+func TestListScramUsersError14ThenOk(t *testing.T) {
+	leader := &adminBroker{}
+	_, stopL := startAdmin(t, leader)
+	defer stopL()
+	follower := &adminBroker{
+		listScramCodes: []uint16{notController},
+	}
+	fAddr, stopF := startAdmin(t, follower)
+	defer stopF()
+	follower.mu.Lock()
+	follower.meta = otherBrokerMeta(follower.port(), "127.0.0.1", leader.port())
+	follower.mu.Unlock()
+
+	c, err := volant.DialTimeout(fAddr, 5*time.Second)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer c.Close()
+	names, err := c.ListScramUsers()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(names) != 1 || names[0] != "alice" {
+		t.Fatalf("usernames %v want [alice]", names)
+	}
+	_, _, ls, _, metas, _ := follower.scramAclSnapshot()
+	if ls != 1 || metas != 1 {
+		t.Fatalf("follower list_scram=%d metadata=%d want 1,1", ls, metas)
+	}
+	_, _, lls, _, _, _ := leader.scramAclSnapshot()
+	if lls != 1 {
+		t.Fatalf("leader list_scram=%d want 1", lls)
 	}
 }
 

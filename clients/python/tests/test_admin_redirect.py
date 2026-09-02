@@ -13,28 +13,44 @@ from volant.codec import (
     OP_CREATE_ACLS_RESPONSE,
     OP_CREATE_PARTITIONS,
     OP_CREATE_PARTITIONS_RESPONSE,
+    OP_CREATE_SCRAM_USER,
+    OP_CREATE_SCRAM_USER_RESPONSE,
     OP_CREATE_TOPIC,
+    OP_DELETE_SCRAM_USER,
+    OP_DELETE_SCRAM_USER_RESPONSE,
     OP_ERROR,
+    OP_LIST_ACLS,
+    OP_LIST_ACLS_RESPONSE,
     OP_LIST_MEMBERS,
     OP_LIST_MEMBERS_RESPONSE,
+    OP_LIST_SCRAM_USERS,
+    OP_LIST_SCRAM_USERS_RESPONSE,
     OP_METADATA,
     OP_REASSIGN_PARTITIONS,
     OP_REASSIGN_PARTITIONS_RESPONSE,
     BrokerInfo,
     CreateAclsResponse,
     CreatePartitionsResponse,
+    CreateScramUserResponse,
     CreateTopicResponse,
+    DeleteScramUserResponse,
     ErrorResponse,
+    ListAclsResponse,
     ListMembersResponse,
+    ListScramUsersResponse,
     MetadataResponse,
     ReassignPartitionsResponse,
     decode_create_partitions_request,
     decode_create_topic_request,
     encode_create_acls_response,
     encode_create_partitions_response,
+    encode_create_scram_user_response,
     encode_create_topic_response,
+    encode_delete_scram_user_response,
     encode_error_response,
+    encode_list_acls_response,
     encode_list_members_response,
+    encode_list_scram_users_response,
     encode_metadata_response,
     encode_reassign_partitions_response,
 )
@@ -54,12 +70,21 @@ class _AdminServer:
         self.create_partitions_codes: list[int] = []
         self.create_acls_codes: list[int] = []
         self.reassign_codes: list[int] = []
+        # CreateScramUser: (code, message, as_error_opcode). Empty queue → success.
+        self.create_scram_replies: list[tuple[int, str, bool]] = []
+        self.delete_scram_codes: list[int] = []
+        self.list_scram_codes: list[int] = []
+        self.list_acls_codes: list[int] = []
         self.metadata: Optional[MetadataResponse] = None
         self.opcodes: list[int] = []
         self.create_topic_count = 0
         self.create_partitions_count = 0
         self.create_acls_count = 0
         self.reassign_count = 0
+        self.create_scram_count = 0
+        self.delete_scram_count = 0
+        self.list_scram_count = 0
+        self.list_acls_count = 0
         self.metadata_count = 0
         self.list_members_count = 0
         self.accept_count = 0
@@ -190,6 +215,50 @@ class _AdminServer:
                         )
                     ),
                     OP_REASSIGN_PARTITIONS_RESPONSE,
+                )
+            if opcode == OP_CREATE_SCRAM_USER:
+                self.create_scram_count += 1
+                if self.create_scram_replies:
+                    code, message, as_error = self.create_scram_replies.pop(0)
+                else:
+                    code, message, as_error = 0, "", False
+                if as_error:
+                    return (
+                        encode_error_response(ErrorResponse(code=code, message=message)),
+                        OP_ERROR,
+                    )
+                return (
+                    encode_create_scram_user_response(
+                        CreateScramUserResponse(error_code=code)
+                    ),
+                    OP_CREATE_SCRAM_USER_RESPONSE,
+                )
+            if opcode == OP_DELETE_SCRAM_USER:
+                self.delete_scram_count += 1
+                code = self.delete_scram_codes.pop(0) if self.delete_scram_codes else 0
+                return (
+                    encode_delete_scram_user_response(
+                        DeleteScramUserResponse(error_code=code)
+                    ),
+                    OP_DELETE_SCRAM_USER_RESPONSE,
+                )
+            if opcode == OP_LIST_SCRAM_USERS:
+                self.list_scram_count += 1
+                code = self.list_scram_codes.pop(0) if self.list_scram_codes else 0
+                return (
+                    encode_list_scram_users_response(
+                        ListScramUsersResponse(
+                            error_code=code, usernames=[] if code else ["alice"]
+                        )
+                    ),
+                    OP_LIST_SCRAM_USERS_RESPONSE,
+                )
+            if opcode == OP_LIST_ACLS:
+                self.list_acls_count += 1
+                code = self.list_acls_codes.pop(0) if self.list_acls_codes else 0
+                return (
+                    encode_list_acls_response(ListAclsResponse(error_code=code, entries=[])),
+                    OP_LIST_ACLS_RESPONSE,
                 )
             if opcode == OP_METADATA:
                 self.metadata_count += 1
@@ -428,6 +497,63 @@ class TestAdminNotControllerRedirect(unittest.TestCase):
             self.assertEqual(ctx.exception.code, 2)
         self.assertEqual(follower.create_partitions_count, 1)
         self.assertEqual(follower.metadata_count, 0)
+
+    def test_create_scram_user_error_14_redirects_via_controller_id(self) -> None:
+        with _AdminServer() as leader, _AdminServer() as follower:
+            follower.create_scram_replies = [
+                (NOT_CONTROLLER, "not controller; controller_id=2", True)
+            ]
+            follower.metadata = _controller_meta(2, "127.0.0.1", leader.port)
+            leader.create_scram_replies = [(0, "", False)]
+            with Client(follower.addr, timeout=5.0) as c:
+                c.create_scram_user("alice", "s3cret")
+            self.assertEqual(c.addr, leader.addr)
+        self.assertEqual(follower.create_scram_count, 1)
+        self.assertEqual(follower.metadata_count, 1)
+        self.assertEqual(leader.create_scram_count, 1)
+        self.assertEqual(follower.list_members_count, 0)
+
+    def test_list_acls_typed_14_no_hint_then_ok(self) -> None:
+        with _AdminServer() as leader, _AdminServer() as follower:
+            follower.list_acls_codes = [NOT_CONTROLLER]
+            follower.metadata = _other_broker_meta(
+                follower.port, "127.0.0.1", leader.port
+            )
+            leader.list_acls_codes = [0]
+            with Client(follower.addr, timeout=5.0) as c:
+                listed = c.list_acls()
+            self.assertEqual(listed, [])
+            self.assertEqual(c.addr, leader.addr)
+        self.assertEqual(follower.list_acls_count, 1)
+        self.assertEqual(follower.metadata_count, 1)
+        self.assertEqual(leader.list_acls_count, 1)
+
+    def test_delete_scram_user_max_redirects_zero_raises_on_first_14(self) -> None:
+        with _AdminServer() as follower:
+            follower.delete_scram_codes = [NOT_CONTROLLER]
+            follower.metadata = _controller_meta(2, "127.0.0.1", 9)
+            with Client(follower.addr, timeout=5.0, max_redirects=0) as c:
+                with self.assertRaises(BrokerError) as ctx:
+                    c.delete_scram_user("alice")
+            self.assertEqual(ctx.exception.code, NOT_CONTROLLER)
+        self.assertEqual(follower.delete_scram_count, 1)
+        self.assertEqual(follower.metadata_count, 0)
+        self.assertEqual(follower.accept_count, 1)
+
+    def test_list_scram_users_error_14_then_ok(self) -> None:
+        with _AdminServer() as leader, _AdminServer() as follower:
+            follower.list_scram_codes = [NOT_CONTROLLER]
+            follower.metadata = _other_broker_meta(
+                follower.port, "127.0.0.1", leader.port
+            )
+            leader.list_scram_codes = [0]
+            with Client(follower.addr, timeout=5.0) as c:
+                names = c.list_scram_users()
+            self.assertEqual(names, ["alice"])
+            self.assertEqual(c.addr, leader.addr)
+        self.assertEqual(follower.list_scram_count, 1)
+        self.assertEqual(follower.metadata_count, 1)
+        self.assertEqual(leader.list_scram_count, 1)
 
 
 if __name__ == "__main__":

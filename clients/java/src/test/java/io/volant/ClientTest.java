@@ -1037,11 +1037,20 @@ class ClientTest {
         final List<Integer> createPartitionsCodes = new CopyOnWriteArrayList<>();
         final List<Integer> createAclsCodes = new CopyOnWriteArrayList<>();
         final List<Integer> reassignCodes = new CopyOnWriteArrayList<>();
+        final List<int[]> createScramReplies = new CopyOnWriteArrayList<>();
+        final List<String> createScramMessages = new CopyOnWriteArrayList<>();
+        final List<Integer> deleteScramCodes = new CopyOnWriteArrayList<>();
+        final List<Integer> listScramCodes = new CopyOnWriteArrayList<>();
+        final List<Integer> listAclsCodes = new CopyOnWriteArrayList<>();
         volatile Metadata meta = new Metadata(Collections.emptyList(), Collections.emptyList());
         final AtomicInteger createTopicCount = new AtomicInteger();
         final AtomicInteger createPartitionsCount = new AtomicInteger();
         final AtomicInteger createAclsCount = new AtomicInteger();
         final AtomicInteger reassignCount = new AtomicInteger();
+        final AtomicInteger createScramCount = new AtomicInteger();
+        final AtomicInteger deleteScramCount = new AtomicInteger();
+        final AtomicInteger listScramCount = new AtomicInteger();
+        final AtomicInteger listAclsCount = new AtomicInteger();
         final AtomicInteger metadataCount = new AtomicInteger();
         final AtomicInteger listMembersCount = new AtomicInteger();
         final AtomicInteger acceptCount = new AtomicInteger();
@@ -1084,6 +1093,16 @@ class ClientTest {
         void queueCreateTopicOk() {
             createTopicReplies.add(new int[] {0, 0});
             createTopicMessages.add("");
+        }
+
+        void queueCreateScramError(int code, String message) {
+            createScramReplies.add(new int[] {code, 1});
+            createScramMessages.add(message);
+        }
+
+        void queueCreateScramOk() {
+            createScramReplies.add(new int[] {0, 0});
+            createScramMessages.add("");
         }
 
         private void serve(Socket conn) {
@@ -1164,6 +1183,44 @@ class ClientTest {
                 replyOp[0] = Codec.OP_REASSIGN_PARTITIONS_RESPONSE;
                 return Codec.encodeReassignPartitionsResponse(
                         new Codec.ReassignPartitionsResponse(code, code == 0 ? 7 : 0));
+            }
+            if (frame.opcode == Codec.OP_CREATE_SCRAM_USER) {
+                createScramCount.incrementAndGet();
+                int code = 0;
+                boolean asError = false;
+                String message = "";
+                if (!createScramReplies.isEmpty()) {
+                    int[] spec = createScramReplies.remove(0);
+                    code = spec[0];
+                    asError = spec[1] != 0;
+                    message = createScramMessages.isEmpty() ? "" : createScramMessages.remove(0);
+                }
+                if (asError) {
+                    replyOp[0] = Codec.OP_ERROR;
+                    return Codec.encodeErrorResponse(new Codec.ErrorResponse(code, message));
+                }
+                replyOp[0] = Codec.OP_CREATE_SCRAM_USER_RESPONSE;
+                return Codec.encodeCreateScramUserResponse(new Codec.CreateScramUserResponse(code));
+            }
+            if (frame.opcode == Codec.OP_DELETE_SCRAM_USER) {
+                deleteScramCount.incrementAndGet();
+                int code = deleteScramCodes.isEmpty() ? 0 : deleteScramCodes.remove(0);
+                replyOp[0] = Codec.OP_DELETE_SCRAM_USER_RESPONSE;
+                return Codec.encodeDeleteScramUserResponse(new Codec.DeleteScramUserResponse(code));
+            }
+            if (frame.opcode == Codec.OP_LIST_SCRAM_USERS) {
+                listScramCount.incrementAndGet();
+                int code = listScramCodes.isEmpty() ? 0 : listScramCodes.remove(0);
+                replyOp[0] = Codec.OP_LIST_SCRAM_USERS_RESPONSE;
+                List<String> names = code == 0 ? Collections.singletonList("alice") : Collections.emptyList();
+                return Codec.encodeListScramUsersResponse(new Codec.ListScramUsersResponse(code, names));
+            }
+            if (frame.opcode == Codec.OP_LIST_ACLS) {
+                listAclsCount.incrementAndGet();
+                int code = listAclsCodes.isEmpty() ? 0 : listAclsCodes.remove(0);
+                replyOp[0] = Codec.OP_LIST_ACLS_RESPONSE;
+                return Codec.encodeListAclsResponse(
+                        new Codec.ListAclsResponse(code, Collections.emptyList()));
             }
             if (frame.opcode == Codec.OP_METADATA) {
                 metadataCount.incrementAndGet();
@@ -1380,6 +1437,73 @@ class ClientTest {
             assertEquals(1, follower.reassignCount.get());
             assertEquals(1, follower.metadataCount.get());
             assertEquals(1, leader.reassignCount.get());
+        }
+    }
+
+    @Test
+    void createScramUserError14RedirectsViaControllerId() throws Exception {
+        try (AdminBroker leader = AdminBroker.start();
+                AdminBroker follower = AdminBroker.start()) {
+            follower.queueCreateScramError(NOT_CONTROLLER, "not controller; controller_id=2");
+            follower.meta = controllerMeta(2, "127.0.0.1", leader.port);
+            leader.queueCreateScramOk();
+            try (Client c = Client.connect("127.0.0.1", follower.port, 5_000)) {
+                c.createScramUser("alice", "s3cret");
+                assertEquals(leader.port, Integer.parseInt(c.addr().substring(c.addr().indexOf(':') + 1)));
+            }
+            assertEquals(1, follower.createScramCount.get());
+            assertEquals(1, follower.metadataCount.get());
+            assertEquals(1, leader.createScramCount.get());
+        }
+    }
+
+    @Test
+    void listAclsTyped14NoHintThenOk() throws Exception {
+        try (AdminBroker leader = AdminBroker.start();
+                AdminBroker follower = AdminBroker.start()) {
+            follower.listAclsCodes.add(NOT_CONTROLLER);
+            follower.meta = otherBrokerMeta(follower.port, "127.0.0.1", leader.port);
+            try (Client c = Client.connect("127.0.0.1", follower.port, 5_000)) {
+                List<AclBinding> listed = c.listAcls();
+                assertEquals(0, listed.size());
+                assertEquals(leader.port, Integer.parseInt(c.addr().substring(c.addr().indexOf(':') + 1)));
+            }
+            assertEquals(1, follower.listAclsCount.get());
+            assertEquals(1, follower.metadataCount.get());
+            assertEquals(1, leader.listAclsCount.get());
+        }
+    }
+
+    @Test
+    void deleteScramUserMaxRedirectsZeroRaisesOnFirst14() throws Exception {
+        try (AdminBroker follower = AdminBroker.start()) {
+            follower.deleteScramCodes.add(NOT_CONTROLLER);
+            follower.meta = controllerMeta(2, "127.0.0.1", 9);
+            try (Client c = Client.connect("127.0.0.1", follower.port, 5_000)) {
+                c.setMaxRedirects(0);
+                BrokerException ex = assertThrows(BrokerException.class, () -> c.deleteScramUser("alice"));
+                assertEquals(NOT_CONTROLLER, ex.code);
+            }
+            assertEquals(1, follower.deleteScramCount.get());
+            assertEquals(0, follower.metadataCount.get());
+            assertEquals(1, follower.acceptCount.get());
+        }
+    }
+
+    @Test
+    void listScramUsersError14ThenOk() throws Exception {
+        try (AdminBroker leader = AdminBroker.start();
+                AdminBroker follower = AdminBroker.start()) {
+            follower.listScramCodes.add(NOT_CONTROLLER);
+            follower.meta = otherBrokerMeta(follower.port, "127.0.0.1", leader.port);
+            try (Client c = Client.connect("127.0.0.1", follower.port, 5_000)) {
+                List<String> names = c.listScramUsers();
+                assertEquals(Collections.singletonList("alice"), names);
+                assertEquals(leader.port, Integer.parseInt(c.addr().substring(c.addr().indexOf(':') + 1)));
+            }
+            assertEquals(1, follower.listScramCount.get());
+            assertEquals(1, follower.metadataCount.get());
+            assertEquals(1, leader.listScramCount.get());
         }
     }
 
