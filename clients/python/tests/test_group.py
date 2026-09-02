@@ -20,7 +20,7 @@ class FakeClient:
         self.joins: list[dict] = []
         self.heartbeats: list[tuple[str, str, int]] = []
         self.leaves: list[tuple[str, str]] = []
-        self.fetches: list[tuple[str, int, int, int]] = []
+        self.fetches: list[tuple[str, int, int, int, int, int]] = []
         self.commits: list[dict] = []
         self.offset_fetches: list[tuple[str, str]] = []
         self.list_offsets_calls: list[tuple[str, list[int]]] = []
@@ -87,8 +87,7 @@ class FakeClient:
         max_bytes: int = 4 * 1024 * 1024,
         max_wait_ms: int = 0,
     ) -> FetchResult:
-        del max_bytes
-        self.fetches.append((topic, partition, offset, max_wait_ms))
+        self.fetches.append((topic, partition, offset, max_wait_ms, max_messages, max_bytes))
         if self.fetch_error is not None:
             raise self.fetch_error
         if self.fetch_error_once is not None:
@@ -249,8 +248,10 @@ class TestGroupConsumer(unittest.TestCase):
         self.assertEqual(recs[1].value, b"b")
         self.assertEqual(g.positions, {("t", 0): 2})
         self.assertEqual(c.heartbeats, [("g", "m1", 1)])
-        self.assertEqual(c.fetches, [("t", 0, 0, 500)])
+        self.assertEqual(c.fetches, [("t", 0, 0, 500, 100, 4 * 1024 * 1024)])
         self.assertEqual(c.commits, [])
+        self.assertEqual(g.fetch_max_messages, 100)
+        self.assertEqual(g.fetch_max_bytes, 4 * 1024 * 1024)
 
     def test_commit_uses_joined_member_and_generation(self) -> None:
         c = FakeClient()
@@ -302,7 +303,7 @@ class TestGroupConsumer(unittest.TestCase):
         self.assertEqual(g.last_revoked, [("t", 1)])
         self.assertEqual([r.value for r in recs], [b"keep"])
         self.assertNotIn(("t", 1), g.positions)
-        fetched_tps = {(t, p) for t, p, _off, _w in c.fetches}
+        fetched_tps = {(t, p) for t, p, *_rest in c.fetches}
         self.assertEqual(fetched_tps, {("t", 0)})
         self.assertEqual(len(c.joins), 2)
 
@@ -577,6 +578,48 @@ class TestGroupConsumer(unittest.TestCase):
         c.log[("t", 0)].append(_rec(1, b"b"))
         g.poll()
         self.assertEqual(len(c.commits), 2)
+
+    def test_poll_fetch_max_messages_from_join(self) -> None:
+        c = FakeClient()
+        c.join_queue.append(_join([("t", 0)]))
+        c.log[("t", 0)] = [_rec(0, b"a")]
+        g = _gc(c, "g", ["t"], fetch_max_messages=10)
+        g.poll(max_wait_ms=0)
+        self.assertEqual(g.fetch_max_messages, 10)
+        self.assertEqual(c.fetches, [("t", 0, 0, 0, 10, 4 * 1024 * 1024)])
+
+    def test_poll_fetch_max_bytes_from_join(self) -> None:
+        c = FakeClient()
+        c.join_queue.append(_join([("t", 0)]))
+        c.log[("t", 0)] = [_rec(0, b"a")]
+        g = _gc(c, "g", ["t"], fetch_max_bytes=4096)
+        g.poll(max_wait_ms=0)
+        self.assertEqual(g.fetch_max_bytes, 4096)
+        self.assertEqual(c.fetches, [("t", 0, 0, 0, 100, 4096)])
+
+    def test_poll_fetch_knobs_clamp_non_positive(self) -> None:
+        c = FakeClient()
+        c.join_queue.append(_join([("t", 0)]))
+        c.log[("t", 0)] = [_rec(0, b"a")]
+        g = _gc(c, "g", ["t"], fetch_max_messages=0, fetch_max_bytes=-1)
+        self.assertEqual(g.fetch_max_messages, 100)
+        self.assertEqual(g.fetch_max_bytes, 4 * 1024 * 1024)
+        g.fetch_max_messages = -5
+        g.fetch_max_bytes = 0
+        g.poll(max_wait_ms=0)
+        self.assertEqual(g.fetch_max_messages, 100)
+        self.assertEqual(g.fetch_max_bytes, 4 * 1024 * 1024)
+        self.assertEqual(c.fetches, [("t", 0, 0, 0, 100, 4 * 1024 * 1024)])
+
+    def test_poll_fetch_knobs_via_attributes(self) -> None:
+        c = FakeClient()
+        c.join_queue.append(_join([("t", 0)]))
+        c.log[("t", 0)] = [_rec(0, b"a")]
+        g = _gc(c, "g", ["t"])
+        g.fetch_max_messages = 10
+        g.fetch_max_bytes = 4096
+        g.poll(max_wait_ms=0)
+        self.assertEqual(c.fetches, [("t", 0, 0, 0, 10, 4096)])
 
 
 if __name__ == "__main__":

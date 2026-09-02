@@ -57,6 +57,9 @@ try (Client c = Client.connect("127.0.0.1", 9092)) {
   GroupConsumer a = GroupConsumer.joinWithAutoCommit(c, "g", List.of("t"), 10_000, 5000);
   // Opt-in auto_offset_reset (v0.62/v0.70). Default earliest (ListOffsets earliest).
   GroupConsumer r = GroupConsumer.joinWithOffsetReset(c, "g", List.of("t"), 10_000, "latest");
+  // Poll fetch size (v0.75). Default 100 / 4MiB; not Kafka max.poll.records.
+  g.setFetchMaxMessages(10);
+  g.setFetchMaxBytes(4096);
   Metadata meta = c.metadata();
 }
 
@@ -246,6 +249,12 @@ subset: `earliest` (default, native ListOffsets earliest), `latest`
 before JoinGroup. Auto-commit stays off on this method. Not Kafka
 `auto.offset.reset` (no timestamp). Rust GroupConsumer still starts
 at 0 / OffsetFetch only.
+
+Poll fetch size is tunable (`setFetchMaxMessages` /
+`setFetchMaxBytes`, default **100 / 4MiB**; v0.75). `poll` still
+takes only a max-wait timeout. Values `<= 0` clamp to the defaults.
+This is **not** Kafka `max.poll.records` (and not `fetch`'s default
+128). Named setters so they do not collide with `join(..., int)`.
 
 Not implemented: `kafka-clients`, Kafka cooperative-sticky / SyncGroup,
 SCRAM-SHA-512, Kafka SASL, async I/O, Kafka

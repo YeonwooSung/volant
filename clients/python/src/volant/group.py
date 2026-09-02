@@ -30,6 +30,7 @@ _REJOIN_CODES = frozenset({9, 10, 11})
 _DEFAULT_SESSION_TIMEOUT_MS = 10_000
 _DEFAULT_AUTO_COMMIT_INTERVAL_MS = 5000
 _POLL_MAX_MESSAGES = 100
+_POLL_MAX_BYTES = 4 * 1024 * 1024
 _HB_INTERVAL_MIN_MS = 100
 _HB_INTERVAL_MAX_MS = 3000
 _ASSIGNOR_BROKER = "broker"
@@ -65,6 +66,18 @@ def _normalize_auto_offset_reset(name: Optional[str]) -> str:
     if name == _RESET_NONE:
         return _RESET_NONE
     raise ValueError(f"unknown auto_offset_reset: {name!r}")
+
+
+def _clamp_fetch_max_messages(n: int) -> int:
+    if n is None or n <= 0:
+        return _POLL_MAX_MESSAGES
+    return int(n)
+
+
+def _clamp_fetch_max_bytes(n: int) -> int:
+    if n is None or n <= 0:
+        return _POLL_MAX_BYTES
+    return int(n)
 
 
 @dataclass
@@ -120,6 +133,8 @@ class GroupConsumer:
         )
         # Opt-in auto_offset_reset (v0.62/v0.70). Default earliest (ListOffsets earliest).
         g = GroupConsumer.join(c, group="g", topics=["t"], auto_offset_reset="latest")
+        # Poll fetch size (v0.75). Default 100 / 4MiB; not Kafka max.poll.records.
+        g = GroupConsumer.join(c, group="g", topics=["t"], fetch_max_messages=10)
     """
 
     def __init__(
@@ -134,6 +149,8 @@ class GroupConsumer:
         auto_commit: bool = False,
         auto_commit_interval_ms: int = _DEFAULT_AUTO_COMMIT_INTERVAL_MS,
         auto_offset_reset: str = _RESET_EARLIEST,
+        fetch_max_messages: int = _POLL_MAX_MESSAGES,
+        fetch_max_bytes: int = _POLL_MAX_BYTES,
     ) -> None:
         self._client = client
         self._group_id = group_id
@@ -143,6 +160,8 @@ class GroupConsumer:
         self._heartbeat_enabled = heartbeat
         self._assignor = _normalize_assignor(assignor)
         self._auto_offset_reset = _normalize_auto_offset_reset(auto_offset_reset)
+        self._fetch_max_messages = _clamp_fetch_max_messages(fetch_max_messages)
+        self._fetch_max_bytes = _clamp_fetch_max_bytes(fetch_max_bytes)
         self._auto_commit = auto_commit
         self._auto_commit_interval_ms = max(0, auto_commit_interval_ms)
         self._last_auto_commit: Optional[float] = None
@@ -171,6 +190,8 @@ class GroupConsumer:
         auto_commit: bool = False,
         auto_commit_interval_ms: int = _DEFAULT_AUTO_COMMIT_INTERVAL_MS,
         auto_offset_reset: str = _RESET_EARLIEST,
+        fetch_max_messages: int = _POLL_MAX_MESSAGES,
+        fetch_max_bytes: int = _POLL_MAX_BYTES,
     ) -> GroupConsumer:
         """Join ``group`` on ``topics``. Empty ``member_id`` on first join.
 
@@ -192,6 +213,10 @@ class GroupConsumer:
         (raise if OffsetFetch is missing / ``OFFSET_UNKNOWN``). Invalid
         strings raise ``ValueError`` before JoinGroup. Not Kafka
         ``auto.offset.reset`` (no timestamp).
+        ``fetch_max_messages`` / ``fetch_max_bytes`` bound each assigned
+        ``fetch`` inside ``poll`` (default 100 / 4MiB). Values ``<= 0``
+        clamp to those defaults. Not Kafka ``max.poll.records``.
+        ``poll`` still takes only ``max_wait_ms``.
         """
         timeout = (
             _DEFAULT_SESSION_TIMEOUT_MS
@@ -209,6 +234,8 @@ class GroupConsumer:
             auto_commit=auto_commit,
             auto_commit_interval_ms=auto_commit_interval_ms,
             auto_offset_reset=auto_offset_reset,
+            fetch_max_messages=fetch_max_messages,
+            fetch_max_bytes=fetch_max_bytes,
         )
         this._do_join()
         this._start_heartbeat()
@@ -364,7 +391,8 @@ class GroupConsumer:
                 topic,
                 partition,
                 from_off,
-                max_messages=_POLL_MAX_MESSAGES,
+                max_messages=_clamp_fetch_max_messages(self._fetch_max_messages),
+                max_bytes=_clamp_fetch_max_bytes(self._fetch_max_bytes),
                 max_wait_ms=max_wait_ms,
             )
             for rec in batch.records:
@@ -543,3 +571,19 @@ class GroupConsumer:
     @property
     def auto_offset_reset(self) -> str:
         return self._auto_offset_reset
+
+    @property
+    def fetch_max_messages(self) -> int:
+        return self._fetch_max_messages
+
+    @fetch_max_messages.setter
+    def fetch_max_messages(self, value: int) -> None:
+        self._fetch_max_messages = _clamp_fetch_max_messages(value)
+
+    @property
+    def fetch_max_bytes(self) -> int:
+        return self._fetch_max_bytes
+
+    @fetch_max_bytes.setter
+    def fetch_max_bytes(self, value: int) -> None:
+        self._fetch_max_bytes = _clamp_fetch_max_bytes(value)

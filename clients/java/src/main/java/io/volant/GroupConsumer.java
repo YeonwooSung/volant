@@ -36,6 +36,7 @@ import java.util.concurrent.locks.ReentrantLock;
  * GroupConsumer s = GroupConsumer.joinStatic(c, "g", List.of("t"), 10_000, "inst-1");
  * GroupConsumer a = GroupConsumer.joinWithAutoCommit(c, "g", List.of("t"), 10_000, 5000);
  * GroupConsumer r = GroupConsumer.joinWithOffsetReset(c, "g", List.of("t"), 10_000, "latest");
+ * g.setFetchMaxMessages(10); // poll fetch size (v0.75); default 100 / 4MiB
  * List&lt;Record&gt; recs = g.poll(500);
  * g.commit();
  * g.close();
@@ -51,6 +52,7 @@ public final class GroupConsumer implements AutoCloseable {
     static final int ERR_ILLEGAL_GENERATION = 11;
 
     private static final int POLL_MAX_MESSAGES = 100;
+    private static final long POLL_MAX_BYTES = 4L * 1024 * 1024;
     private static final long HB_INTERVAL_MIN_MS = 100L;
     private static final long HB_INTERVAL_MAX_MS = 3000L;
     private static final long DEFAULT_AUTO_COMMIT_INTERVAL_MS = 5000L;
@@ -71,6 +73,8 @@ public final class GroupConsumer implements AutoCloseable {
     private final boolean autoCommit;
     private final long autoCommitIntervalMs;
     private final String autoOffsetReset;
+    private int fetchMaxMessages = POLL_MAX_MESSAGES;
+    private long fetchMaxBytes = POLL_MAX_BYTES;
     private long lastAutoCommitNanos;
     private boolean dirty;
     private final ReentrantLock lock = new ReentrantLock();
@@ -590,6 +594,8 @@ public final class GroupConsumer implements AutoCloseable {
             List<Codec.Assignment> assigned = new ArrayList<>(assignment);
             boolean waited = false;
             long wait = timeoutMs < 0 ? 0 : timeoutMs;
+            int maxMessages = fetchMaxMessages <= 0 ? POLL_MAX_MESSAGES : fetchMaxMessages;
+            long maxBytes = fetchMaxBytes <= 0 ? POLL_MAX_BYTES : fetchMaxBytes;
             for (Codec.Assignment a : assigned) {
                 long from = positions.getOrDefault(new Tp(a.topic, a.partition), 0L);
                 long maxWait = 0;
@@ -597,7 +603,7 @@ public final class GroupConsumer implements AutoCloseable {
                     maxWait = wait;
                     waited = true;
                 }
-                List<Record> recs = backend.fetch(a.topic, a.partition, from, POLL_MAX_MESSAGES, maxWait);
+                List<Record> recs = backend.fetch(a.topic, a.partition, from, maxMessages, maxBytes, maxWait);
                 for (Record r : recs) {
                     long next = r.offset == Long.MAX_VALUE ? Long.MAX_VALUE : r.offset + 1;
                     positions.put(new Tp(a.topic, a.partition), next);
@@ -782,6 +788,53 @@ public final class GroupConsumer implements AutoCloseable {
         return autoOffsetReset;
     }
 
+    /**
+     * Bound each assigned {@code fetch} inside {@link #poll} ({@code max_messages}).
+     * Default 100. Values {@code <= 0} clamp to 100. Not Kafka
+     * {@code max.poll.records}.
+     */
+    public void setFetchMaxMessages(int maxMessages) {
+        lock.lock();
+        try {
+            this.fetchMaxMessages = maxMessages <= 0 ? POLL_MAX_MESSAGES : maxMessages;
+        } finally {
+            lock.unlock();
+        }
+    }
+
+    /**
+     * Bound each assigned {@code fetch} inside {@link #poll} ({@code max_bytes}).
+     * Default 4MiB. Values {@code <= 0} clamp to 4MiB.
+     */
+    public void setFetchMaxBytes(long maxBytes) {
+        lock.lock();
+        try {
+            this.fetchMaxBytes = maxBytes <= 0 ? POLL_MAX_BYTES : maxBytes;
+        } finally {
+            lock.unlock();
+        }
+    }
+
+    /** Poll fetch {@code max_messages} (default 100). */
+    public int fetchMaxMessages() {
+        lock.lock();
+        try {
+            return fetchMaxMessages;
+        } finally {
+            lock.unlock();
+        }
+    }
+
+    /** Poll fetch {@code max_bytes} (default 4MiB). */
+    public long fetchMaxBytes() {
+        lock.lock();
+        try {
+            return fetchMaxBytes;
+        } finally {
+            lock.unlock();
+        }
+    }
+
     public List<Codec.Assignment> lastRevoked() {
         lock.lock();
         try {
@@ -895,7 +948,8 @@ public final class GroupConsumer implements AutoCloseable {
 
         void leaveGroup(String group, String memberId);
 
-        List<Record> fetch(String topic, int partition, long offset, int maxMessages, long maxWaitMs);
+        List<Record> fetch(
+                String topic, int partition, long offset, int maxMessages, long maxBytes, long maxWaitMs);
 
         void commitOffsets(String group, String memberId, long generation, List<Codec.OffsetCommitEntry> entries);
 
@@ -932,8 +986,9 @@ public final class GroupConsumer implements AutoCloseable {
         }
 
         @Override
-        public List<Record> fetch(String topic, int partition, long offset, int maxMessages, long maxWaitMs) {
-            return client.fetch(topic, partition, offset, maxMessages, maxWaitMs);
+        public List<Record> fetch(
+                String topic, int partition, long offset, int maxMessages, long maxBytes, long maxWaitMs) {
+            return client.fetch(topic, partition, offset, maxMessages, maxBytes, maxWaitMs);
         }
 
         @Override

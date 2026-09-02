@@ -458,9 +458,113 @@ func TestPollHeartbeatAndFetchAdvancesPositions(t *testing.T) {
 	if len(fetches) != 1 || fetches[0].FromOffset != 0 || fetches[0].MaxWaitMs == 0 {
 		t.Fatalf("fetches %+v (want from=0 and max_wait>0)", fetches)
 	}
+	if fetches[0].MaxMessages != 100 || fetches[0].MaxBytes != 4*1024*1024 {
+		t.Fatalf("fetch knobs %+v want max_messages=100 max_bytes=4MiB", fetches[0])
+	}
+	if g.FetchMaxMessages() != 100 || g.FetchMaxBytes() != 4*1024*1024 {
+		t.Fatalf("stored knobs messages=%d bytes=%d", g.FetchMaxMessages(), g.FetchMaxBytes())
+	}
 	_, _, commits, _, _, _ := s.snapshot()
 	if len(commits) != 0 {
 		t.Fatalf("commits=%d want 0 (auto-commit default off)", len(commits))
+	}
+}
+
+func TestPollFetchMaxMessagesFromOption(t *testing.T) {
+	s := newFakeGroupBroker()
+	s.setAssignment([]codec.Assignment{{Topic: "t", Partition: 0}}, nil)
+	s.records[tpKey{"t", 0}] = []codec.FetchRecord{{Offset: 0, Value: []byte("a")}}
+	addr, stop := startFakeGroup(t, s)
+	defer stop()
+
+	c, err := volant.DialTimeout(addr, 5*time.Second)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer c.Close()
+
+	g, err := volant.JoinGroupConsumer(c, "g", []string{"t"}, 10_000,
+		volant.WithBackgroundHeartbeat(false), volant.WithFetchMaxMessages(10))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer g.Close()
+
+	if _, err := g.Poll(0); err != nil {
+		t.Fatal(err)
+	}
+	_, _, _, fetches, _, _ := s.snapshot()
+	if len(fetches) != 1 || fetches[0].MaxMessages != 10 || fetches[0].MaxBytes != 4*1024*1024 {
+		t.Fatalf("fetches %+v want max_messages=10 max_bytes=4MiB", fetches)
+	}
+	if g.FetchMaxMessages() != 10 {
+		t.Fatalf("FetchMaxMessages=%d want 10", g.FetchMaxMessages())
+	}
+}
+
+func TestPollFetchMaxBytesFromOption(t *testing.T) {
+	s := newFakeGroupBroker()
+	s.setAssignment([]codec.Assignment{{Topic: "t", Partition: 0}}, nil)
+	s.records[tpKey{"t", 0}] = []codec.FetchRecord{{Offset: 0, Value: []byte("a")}}
+	addr, stop := startFakeGroup(t, s)
+	defer stop()
+
+	c, err := volant.DialTimeout(addr, 5*time.Second)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer c.Close()
+
+	g, err := volant.JoinGroupConsumer(c, "g", []string{"t"}, 10_000,
+		volant.WithBackgroundHeartbeat(false), volant.WithFetchMaxBytes(4096))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer g.Close()
+
+	if _, err := g.Poll(0); err != nil {
+		t.Fatal(err)
+	}
+	_, _, _, fetches, _, _ := s.snapshot()
+	if len(fetches) != 1 || fetches[0].MaxMessages != 100 || fetches[0].MaxBytes != 4096 {
+		t.Fatalf("fetches %+v want max_messages=100 max_bytes=4096", fetches)
+	}
+	if g.FetchMaxBytes() != 4096 {
+		t.Fatalf("FetchMaxBytes=%d want 4096", g.FetchMaxBytes())
+	}
+}
+
+func TestPollFetchKnobsClampNonPositive(t *testing.T) {
+	s := newFakeGroupBroker()
+	s.setAssignment([]codec.Assignment{{Topic: "t", Partition: 0}}, nil)
+	s.records[tpKey{"t", 0}] = []codec.FetchRecord{{Offset: 0, Value: []byte("a")}}
+	addr, stop := startFakeGroup(t, s)
+	defer stop()
+
+	c, err := volant.DialTimeout(addr, 5*time.Second)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer c.Close()
+
+	g, err := volant.JoinGroupConsumer(c, "g", []string{"t"}, 10_000,
+		volant.WithBackgroundHeartbeat(false),
+		volant.WithFetchMaxMessages(0),
+		volant.WithFetchMaxBytes(-1))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer g.Close()
+
+	if g.FetchMaxMessages() != 100 || g.FetchMaxBytes() != 4*1024*1024 {
+		t.Fatalf("clamped knobs messages=%d bytes=%d", g.FetchMaxMessages(), g.FetchMaxBytes())
+	}
+	if _, err := g.Poll(0); err != nil {
+		t.Fatal(err)
+	}
+	_, _, _, fetches, _, _ := s.snapshot()
+	if len(fetches) != 1 || fetches[0].MaxMessages != 100 || fetches[0].MaxBytes != 4*1024*1024 {
+		t.Fatalf("fetches %+v want defaults after clamp", fetches)
 	}
 }
 

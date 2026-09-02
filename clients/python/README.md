@@ -59,6 +59,8 @@ g = GroupConsumer.join(
 )
 # Opt-in auto_offset_reset (v0.62/v0.70). Default earliest (ListOffsets earliest).
 g = GroupConsumer.join(c, group="g", topics=["t"], auto_offset_reset="latest")
+# Poll fetch size (v0.75). Default 100 / 4MiB; not Kafka max.poll.records.
+g = GroupConsumer.join(c, group="g", topics=["t"], fetch_max_messages=10, fetch_max_bytes=4096)
 
 meta = c.metadata()
 c.close()
@@ -249,6 +251,11 @@ LEO), `none` (raise if OffsetFetch is missing / `OFFSET_UNKNOWN`).
 Invalid strings raise `ValueError` before JoinGroup. Not Kafka
 `auto.offset.reset` (no timestamp). Rust GroupConsumer still starts
 at 0 / OffsetFetch only.
+
+Poll fetch size is tunable (`fetch_max_messages` / `fetch_max_bytes`,
+default **100 / 4MiB**; v0.75). `poll` still takes only
+`max_wait_ms`. Values `<= 0` clamp to the defaults. This is **not**
+Kafka `max.poll.records` (and not Client `fetch`'s default 128).
 
 Not implemented: `kafka-python`, Kafka cooperative-sticky / SyncGroup,
 seeing other group members on the wire, SCRAM, async I/O,

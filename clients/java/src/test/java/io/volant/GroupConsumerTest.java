@@ -65,6 +65,10 @@ class GroupConsumerTest {
         assertEquals(1, fake.heartbeatCount);
         assertEquals(1, fake.fetchCount);
         assertEquals(500L, fake.lastMaxWaitMs);
+        assertEquals(100, fake.lastMaxMessages);
+        assertEquals(4L * 1024 * 1024, fake.lastMaxBytes);
+        assertEquals(100, g.fetchMaxMessages());
+        assertEquals(4L * 1024 * 1024, g.fetchMaxBytes());
         assertEquals(0, fake.commitCount);
 
         g.commit();
@@ -444,6 +448,59 @@ class GroupConsumerTest {
     }
 
     @Test
+    void pollFetchMaxMessagesFromSetter() {
+        FakeBackend fake = new FakeBackend();
+        fake.nextJoin = joinResult("m1", 1, assign("t", 0));
+        fake.records.put(
+                tp("t", 0),
+                Collections.singletonList(
+                        new Record(0, -1L, null, "a".getBytes(StandardCharsets.UTF_8), Collections.emptyList())));
+        GroupConsumer g = GroupConsumer.join(fake, "g", List.of("t"), 10_000, false);
+        g.setFetchMaxMessages(10);
+        g.poll(0);
+        assertEquals(10, g.fetchMaxMessages());
+        assertEquals(10, fake.lastMaxMessages);
+        assertEquals(4L * 1024 * 1024, fake.lastMaxBytes);
+        g.close();
+    }
+
+    @Test
+    void pollFetchMaxBytesFromSetter() {
+        FakeBackend fake = new FakeBackend();
+        fake.nextJoin = joinResult("m1", 1, assign("t", 0));
+        fake.records.put(
+                tp("t", 0),
+                Collections.singletonList(
+                        new Record(0, -1L, null, "a".getBytes(StandardCharsets.UTF_8), Collections.emptyList())));
+        GroupConsumer g = GroupConsumer.join(fake, "g", List.of("t"), 10_000, false);
+        g.setFetchMaxBytes(4096);
+        g.poll(0);
+        assertEquals(4096L, g.fetchMaxBytes());
+        assertEquals(100, fake.lastMaxMessages);
+        assertEquals(4096L, fake.lastMaxBytes);
+        g.close();
+    }
+
+    @Test
+    void pollFetchKnobsClampNonPositive() {
+        FakeBackend fake = new FakeBackend();
+        fake.nextJoin = joinResult("m1", 1, assign("t", 0));
+        fake.records.put(
+                tp("t", 0),
+                Collections.singletonList(
+                        new Record(0, -1L, null, "a".getBytes(StandardCharsets.UTF_8), Collections.emptyList())));
+        GroupConsumer g = GroupConsumer.join(fake, "g", List.of("t"), 10_000, false);
+        g.setFetchMaxMessages(0);
+        g.setFetchMaxBytes(-1);
+        assertEquals(100, g.fetchMaxMessages());
+        assertEquals(4L * 1024 * 1024, g.fetchMaxBytes());
+        g.poll(0);
+        assertEquals(100, fake.lastMaxMessages);
+        assertEquals(4L * 1024 * 1024, fake.lastMaxBytes);
+        g.close();
+    }
+
+    @Test
     void heartbeatFalseIsPollOnly() throws Exception {
         FakeBackend fake = new FakeBackend();
         fake.nextJoin = joinResult("m1", 1, assign("t", 0));
@@ -489,6 +546,8 @@ class GroupConsumerTest {
         final Map<String, OffsetListing> listOffsetEntries = new LinkedHashMap<>();
         final Set<String> listOffsetOmit = new HashSet<>();
         long lastMaxWaitMs;
+        int lastMaxMessages;
+        long lastMaxBytes;
         int lastSessionTimeoutMs;
         String lastGroupInstanceId = "";
         String lastJoinMemberId = "";
@@ -545,9 +604,12 @@ class GroupConsumerTest {
         }
 
         @Override
-        public List<Record> fetch(String topic, int partition, long offset, int maxMessages, long maxWaitMs) {
+        public List<Record> fetch(
+                String topic, int partition, long offset, int maxMessages, long maxBytes, long maxWaitMs) {
             fetchCount++;
             lastMaxWaitMs = maxWaitMs;
+            lastMaxMessages = maxMessages;
+            lastMaxBytes = maxBytes;
             List<Record> recs = records.remove(tp(topic, partition));
             return recs == null ? Collections.emptyList() : recs;
         }
