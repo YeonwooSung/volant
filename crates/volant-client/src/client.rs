@@ -683,9 +683,16 @@ impl Client {
     }
 
     /// Fetch cluster metadata (all topics).
+    ///
+    /// Transient broker/transport errors retry up to
+    /// [`ClientConfig::max_retries`] extra times (default 0). Native
+    /// Metadata has no top-level error_code; failures arrive as
+    /// [`Response::Error`] or transport. Error 2 / 9 / 10 / 11 / 13 /
+    /// 14 and protocol errors are not retried. Admin-14 and leader-13
+    /// redirect inherit via this method.
     pub async fn metadata(&self) -> Result<Metadata> {
         let resp = self
-            .round_trip(Request::Metadata { topics: vec![] })
+            .metadata_list_members_round_trip(Request::Metadata { topics: vec![] })
             .await?;
         match resp {
             Response::Metadata {
@@ -1675,8 +1682,15 @@ impl Client {
     }
 
     /// List configured + live membership (v0.10).
+    ///
+    /// Transient broker/transport errors retry up to
+    /// [`ClientConfig::max_retries`] extra times (default 0). Typed
+    /// error_code 2 / 9 / 10 / 11 / 13 / 14 and protocol errors are
+    /// not retried. Admin-14 redirect inherits via this method.
     pub async fn list_members(&self) -> Result<MembershipList> {
-        let resp = self.round_trip(Request::ListMembers).await?;
+        let resp = self
+            .metadata_list_members_round_trip(Request::ListMembers)
+            .await?;
         match resp {
             Response::ListMembers {
                 error_code,
@@ -1695,6 +1709,40 @@ impl Client {
             other => Err(Error::Protocol(format!(
                 "unexpected response for list_members: {other:?}"
             ))),
+        }
+    }
+
+    /// Metadata / ListMembers share produce/heartbeat
+    /// [`ClientConfig::max_retries`]. Transient 6 / 7 / 15 / 16 and
+    /// [`Error::Io`] are retried; 13 / 14 / 9 / 10 / 11 / 2 and protocol
+    /// errors are not. Native Metadata has no top-level error_code —
+    /// only [`Response::Error`] / transport are retry signals.
+    async fn metadata_list_members_round_trip(&self, req: Request) -> Result<Response> {
+        let max_retries = self.config.max_retries;
+        let mut retry_attempt = 0u32;
+        loop {
+            let resp = match self.round_trip(req.clone()).await {
+                Ok(r) => r,
+                Err(e) if is_transient_transport(&e) && retry_attempt < max_retries => {
+                    retry_attempt += 1;
+                    tokio::time::sleep(Duration::from_millis(self.config.retry_backoff_ms)).await;
+                    continue;
+                }
+                Err(e) => return Err(e),
+            };
+            let code = match &resp {
+                Response::ListMembers { error_code, .. }
+                | Response::Error {
+                    code: error_code, ..
+                } => *error_code,
+                _ => return Ok(resp),
+            };
+            if is_transient_error_code(code) && retry_attempt < max_retries {
+                retry_attempt += 1;
+                tokio::time::sleep(Duration::from_millis(self.config.retry_backoff_ms)).await;
+                continue;
+            }
+            return Ok(resp);
         }
     }
 
