@@ -11,6 +11,8 @@ from volant.codec import (
     BrokerInfo,
     CreateTopicRequest,
     CreateTopicResponse,
+    DeleteRecordsRequest,
+    DeleteRecordsResponse,
     DeleteTopicRequest,
     DeleteTopicResponse,
     DescribeGroupRequest,
@@ -49,6 +51,8 @@ from volant.codec import (
     decode_auth_response,
     decode_create_topic_request,
     decode_create_topic_response,
+    decode_delete_records_request,
+    decode_delete_records_response,
     decode_delete_topic_request,
     decode_delete_topic_response,
     decode_describe_group_request,
@@ -78,6 +82,8 @@ from volant.codec import (
     encode_auth_response,
     encode_create_topic_request,
     encode_create_topic_response,
+    encode_delete_records_request,
+    encode_delete_records_response,
     encode_delete_topic_request,
     encode_delete_topic_response,
     encode_describe_group_request,
@@ -108,6 +114,7 @@ from volant.codec import (
     OP_JOIN_GROUP,
     OP_LEAVE_GROUP,
     OP_LIST_GROUPS_RESPONSE,
+    OP_DELETE_RECORDS_RESPONSE,
     OP_LIST_OFFSETS_RESPONSE,
     OP_OFFSET_COMMIT,
     OP_OFFSET_FETCH,
@@ -784,6 +791,68 @@ class TestListOffsetsCodec(unittest.TestCase):
         self.assertEqual(_hx(raw), _hx(expected))
         self.assertEqual(decode_list_offsets_response(raw), resp)
         self.assertEqual(decode_response(OP_LIST_OFFSETS_RESPONSE, raw), resp)
+
+
+class TestDeleteRecordsCodec(unittest.TestCase):
+    def test_delete_records_request_wait_majority_0_and_1(self) -> None:
+        # crates/volant-protocol/src/payload.rs phase14_delete_records_roundtrip
+        req0 = DeleteRecordsRequest(
+            topic="events", partition=2, before_offset=100, wait_majority=0
+        )
+        raw0 = encode_delete_records_request(req0)
+        expected0 = bytes.fromhex(
+            "0600"
+            "6576656e7473"  # "events"
+            "02000000"  # partition 2
+            "6400000000000000"  # before_offset 100
+            "00"  # wait_majority 0
+        )
+        self.assertEqual(_hx(raw0), _hx(expected0))
+        self.assertEqual(decode_delete_records_request(raw0), req0)
+
+        req1 = DeleteRecordsRequest(
+            topic="events", partition=2, before_offset=100, wait_majority=1
+        )
+        raw1 = encode_delete_records_request(req1)
+        expected1 = bytes.fromhex(
+            "0600"
+            "6576656e7473"
+            "02000000"
+            "6400000000000000"
+            "01"  # wait_majority 1
+        )
+        self.assertEqual(_hx(raw1), _hx(expected1))
+        self.assertEqual(decode_delete_records_request(raw1), req1)
+
+    def test_delete_records_request_legacy_without_trailer(self) -> None:
+        # payload.rs phase137_delete_records_wait_majority_trailer
+        raw = bytes.fromhex(
+            "06006576656e7473"  # "events"
+            "01000000"  # partition 1
+            "2a00000000000000"  # before_offset 42
+        )
+        decoded = decode_delete_records_request(raw)
+        self.assertEqual(
+            decoded,
+            DeleteRecordsRequest(
+                topic="events", partition=1, before_offset=42, wait_majority=0
+            ),
+        )
+
+    def test_delete_records_response_roundtrip(self) -> None:
+        resp = DeleteRecordsResponse(
+            error_code=0, topic="events", partition=2, low_watermark=96
+        )
+        raw = encode_delete_records_response(resp)
+        expected = bytes.fromhex(
+            "0000"  # error_code
+            "06006576656e7473"
+            "02000000"  # partition 2
+            "6000000000000000"  # low_watermark 96
+        )
+        self.assertEqual(_hx(raw), _hx(expected))
+        self.assertEqual(decode_delete_records_response(raw), resp)
+        self.assertEqual(decode_response(OP_DELETE_RECORDS_RESPONSE, raw), resp)
 
 
 if __name__ == "__main__":

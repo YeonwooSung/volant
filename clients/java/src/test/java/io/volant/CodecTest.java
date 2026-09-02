@@ -685,4 +685,51 @@ class CodecTest {
         assertEquals(2, dispatched.groups.size());
         assertEquals(Codec.GROUP_STATE_EMPTY, new Codec.GroupListing("x", 99, 0, 0).state);
     }
+
+    @Test
+    void deleteRecordsRequestWaitMajority0And1() {
+        // crates/volant-protocol/src/payload.rs phase14_delete_records_roundtrip
+        Codec.DeleteRecordsRequest req0 = new Codec.DeleteRecordsRequest("events", 2, 100, 0);
+        byte[] raw0 = Codec.encodeDeleteRecordsRequest(req0);
+        assertArrayEquals(hx("0600" + "6576656e7473" + "02000000" + "6400000000000000" + "00"), raw0);
+        Codec.DeleteRecordsRequest decoded0 = Codec.decodeDeleteRecordsRequest(raw0);
+        assertEquals("events", decoded0.topic);
+        assertEquals(2, decoded0.partition);
+        assertEquals(100, decoded0.beforeOffset);
+        assertEquals(0, decoded0.waitMajority);
+
+        Codec.DeleteRecordsRequest req1 = new Codec.DeleteRecordsRequest("events", 2, 100, 1);
+        byte[] raw1 = Codec.encodeDeleteRecordsRequest(req1);
+        assertArrayEquals(hx("0600" + "6576656e7473" + "02000000" + "6400000000000000" + "01"), raw1);
+        Codec.DeleteRecordsRequest decoded1 = Codec.decodeDeleteRecordsRequest(raw1);
+        assertEquals(1, decoded1.waitMajority);
+        assertEquals(2, decoded1.partition);
+        assertEquals(100, decoded1.beforeOffset);
+    }
+
+    @Test
+    void deleteRecordsRequestLegacyWithoutTrailer() {
+        // payload.rs phase137_delete_records_wait_majority_trailer
+        byte[] raw = hx("06006576656e7473" + "01000000" + "2a00000000000000");
+        Codec.DeleteRecordsRequest decoded = Codec.decodeDeleteRecordsRequest(raw);
+        assertEquals("events", decoded.topic);
+        assertEquals(1, decoded.partition);
+        assertEquals(42, decoded.beforeOffset);
+        assertEquals(0, decoded.waitMajority);
+    }
+
+    @Test
+    void deleteRecordsResponseRoundtrip() {
+        Codec.DeleteRecordsResponse resp = new Codec.DeleteRecordsResponse(0, "events", 2, 96);
+        byte[] raw = Codec.encodeDeleteRecordsResponse(resp);
+        assertArrayEquals(hx("0000" + "06006576656e7473" + "02000000" + "6000000000000000"), raw);
+        Codec.DeleteRecordsResponse decoded = Codec.decodeDeleteRecordsResponse(raw);
+        assertEquals(0, decoded.errorCode);
+        assertEquals("events", decoded.topic);
+        assertEquals(2, decoded.partition);
+        assertEquals(96, decoded.lowWatermark);
+        Codec.DeleteRecordsResponse dispatched = assertInstanceOf(
+                Codec.DeleteRecordsResponse.class, Codec.decodeResponse(Codec.OP_DELETE_RECORDS_RESPONSE, raw));
+        assertEquals(96, dispatched.lowWatermark);
+    }
 }

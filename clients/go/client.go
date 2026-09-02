@@ -54,6 +54,13 @@ type (
 	OffsetListing    = codec.OffsetListing
 )
 
+// DeleteRecordsResult is the successful DeleteRecords reply (Phase 14 / v0.52).
+type DeleteRecordsResult struct {
+	Topic        string
+	Partition    uint32
+	LowWatermark uint64
+}
+
 const (
 	// GroupStateEmpty is offsets on disk only; no live members.
 	GroupStateEmpty = codec.GroupStateEmpty
@@ -913,6 +920,43 @@ func (c *Client) ListOffsets(topic string, partitions []uint32) ([]OffsetListing
 		return nil, err
 	}
 	return resp.Entries, nil
+}
+
+// DeleteRecords truncates records before beforeOffset (native opcode 44).
+// Sends wait_majority 0 (broker default; Phase 137). Error 13 is not
+// redirected (Produce/Fetch only). This is not Kafka DeleteRecords.
+func (c *Client) DeleteRecords(topic string, partition uint32, beforeOffset uint64) (DeleteRecordsResult, error) {
+	return c.DeleteRecordsWithWaitFlag(topic, partition, beforeOffset, 0)
+}
+
+// DeleteRecordsWithWaitFlag is DeleteRecords plus the Phase 137 trailer.
+// waitMajority: 0 = broker default, 1 = force wait, 2 = force no-wait.
+func (c *Client) DeleteRecordsWithWaitFlag(topic string, partition uint32, beforeOffset uint64, waitMajority uint8) (DeleteRecordsResult, error) {
+	payload, err := codec.EncodeDeleteRecordsRequest(codec.DeleteRecordsRequest{
+		Topic:        topic,
+		Partition:    partition,
+		BeforeOffset: beforeOffset,
+		WaitMajority: waitMajority,
+	})
+	if err != nil {
+		return DeleteRecordsResult{}, err
+	}
+	decoded, err := c.roundTrip(codec.OpDeleteRecords, payload)
+	if err != nil {
+		return DeleteRecordsResult{}, err
+	}
+	resp, ok := decoded.(codec.DeleteRecordsResponse)
+	if !ok {
+		return DeleteRecordsResult{}, &frame.ProtocolError{Msg: fmt.Sprintf("unexpected response for delete_records: %T", decoded)}
+	}
+	if err := check(resp.ErrorCode, "delete_records"); err != nil {
+		return DeleteRecordsResult{}, err
+	}
+	return DeleteRecordsResult{
+		Topic:        resp.Topic,
+		Partition:    resp.Partition,
+		LowWatermark: resp.LowWatermark,
+	}, nil
 }
 
 // OffsetFetch returns committed offsets for topic as []Offset.

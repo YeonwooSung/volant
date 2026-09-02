@@ -1143,3 +1143,79 @@ func TestListOffsetsResponsePayloadRS(t *testing.T) {
 		t.Fatalf("dispatch %#v", got)
 	}
 }
+
+func TestDeleteRecordsRequestWaitMajority0And1(t *testing.T) {
+	// crates/volant-protocol/src/payload.rs phase14_delete_records_roundtrip
+	req0 := DeleteRecordsRequest{Topic: "events", Partition: 2, BeforeOffset: 100, WaitMajority: 0}
+	raw0, err := EncodeDeleteRecordsRequest(req0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	expected0 := mustHex(t, "0600"+"6576656e7473"+"02000000"+"6400000000000000"+"00")
+	if !bytes.Equal(raw0, expected0) {
+		t.Fatalf("encode 0:\n got %x\nwant %x", raw0, expected0)
+	}
+	decoded0, err := DecodeDeleteRecordsRequest(raw0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if decoded0 != req0 {
+		t.Fatalf("decoded 0 %+v", decoded0)
+	}
+
+	req1 := DeleteRecordsRequest{Topic: "events", Partition: 2, BeforeOffset: 100, WaitMajority: 1}
+	raw1, err := EncodeDeleteRecordsRequest(req1)
+	if err != nil {
+		t.Fatal(err)
+	}
+	expected1 := mustHex(t, "0600"+"6576656e7473"+"02000000"+"6400000000000000"+"01")
+	if !bytes.Equal(raw1, expected1) {
+		t.Fatalf("encode 1:\n got %x\nwant %x", raw1, expected1)
+	}
+	decoded1, err := DecodeDeleteRecordsRequest(raw1)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if decoded1 != req1 {
+		t.Fatalf("decoded 1 %+v", decoded1)
+	}
+}
+
+func TestDeleteRecordsRequestLegacyWithoutTrailer(t *testing.T) {
+	// payload.rs phase137_delete_records_wait_majority_trailer
+	raw := mustHex(t, "06006576656e7473"+"01000000"+"2a00000000000000")
+	decoded, err := DecodeDeleteRecordsRequest(raw)
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := DeleteRecordsRequest{Topic: "events", Partition: 1, BeforeOffset: 42, WaitMajority: 0}
+	if decoded != want {
+		t.Fatalf("decoded %+v want %+v", decoded, want)
+	}
+}
+
+func TestDeleteRecordsResponseRoundtrip(t *testing.T) {
+	resp := DeleteRecordsResponse{ErrorCode: 0, Topic: "events", Partition: 2, LowWatermark: 96}
+	raw, err := EncodeDeleteRecordsResponse(resp)
+	if err != nil {
+		t.Fatal(err)
+	}
+	expected := mustHex(t, "0000"+"06006576656e7473"+"02000000"+"6000000000000000")
+	if !bytes.Equal(raw, expected) {
+		t.Fatalf("encode:\n got %x\nwant %x", raw, expected)
+	}
+	decoded, err := DecodeDeleteRecordsResponse(raw)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if decoded != resp {
+		t.Fatalf("decoded %+v", decoded)
+	}
+	got, err := DecodeResponse(OpDeleteRecordsResponse, raw)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if dr, ok := got.(DeleteRecordsResponse); !ok || dr.LowWatermark != 96 {
+		t.Fatalf("dispatch %#v", got)
+	}
+}

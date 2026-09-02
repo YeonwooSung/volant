@@ -11,7 +11,7 @@ import java.util.List;
  * <p>Matches {@code crates/volant-protocol/src/payload.rs} for the MVP opcodes:
  * Produce, Fetch, CreateTopic, Metadata, DeleteTopic, OffsetCommit,
  * OffsetFetch, JoinGroup, Heartbeat, LeaveGroup, Auth, DescribeGroup,
- * ListGroups, ListOffsets, InitProducerId, Scram.
+ * ListGroups, ListOffsets, DeleteRecords, InitProducerId, Scram.
  *
  * <p>Header fields are big-endian (see {@link Frame}); <strong>payload</strong>
  * integers and length prefixes are little-endian.
@@ -41,6 +41,8 @@ public final class Codec {
     public static final int OP_LIST_GROUPS_RESPONSE = 37;
     public static final int OP_LIST_OFFSETS = 48;
     public static final int OP_LIST_OFFSETS_RESPONSE = 49;
+    public static final int OP_DELETE_RECORDS = 44;
+    public static final int OP_DELETE_RECORDS_RESPONSE = 45;
     public static final int OP_ERROR = 0xFFFF;
 
     /** ListGroups state: offsets only, no live members. */
@@ -585,6 +587,34 @@ public final class Codec {
             this.entries = entries == null
                     ? Collections.emptyList()
                     : Collections.unmodifiableList(new ArrayList<>(entries));
+        }
+    }
+
+    public static final class DeleteRecordsRequest {
+        public final String topic;
+        public final long partition;
+        public final long beforeOffset;
+        public final int waitMajority;
+
+        public DeleteRecordsRequest(String topic, long partition, long beforeOffset, int waitMajority) {
+            this.topic = topic;
+            this.partition = partition;
+            this.beforeOffset = beforeOffset;
+            this.waitMajority = waitMajority;
+        }
+    }
+
+    public static final class DeleteRecordsResponse {
+        public final int errorCode;
+        public final String topic;
+        public final long partition;
+        public final long lowWatermark;
+
+        public DeleteRecordsResponse(int errorCode, String topic, long partition, long lowWatermark) {
+            this.errorCode = errorCode;
+            this.topic = topic;
+            this.partition = partition;
+            this.lowWatermark = lowWatermark;
         }
     }
 
@@ -1444,6 +1474,44 @@ public final class Codec {
         return new ListOffsetsResponse(errorCode, topic, entries);
     }
 
+    public static byte[] encodeDeleteRecordsRequest(DeleteRecordsRequest req) {
+        Writer w = new Writer();
+        putString(w, req.topic);
+        w.u32(req.partition);
+        w.u64(req.beforeOffset);
+        // Phase 137: always write the wait_majority trailer.
+        w.u8(req.waitMajority);
+        return w.finish();
+    }
+
+    public static DeleteRecordsRequest decodeDeleteRecordsRequest(byte[] payload) {
+        Reader r = new Reader(payload);
+        String topic = getString(r);
+        long partition = r.u32();
+        long beforeOffset = r.u64();
+        // Phase 137: optional wait_majority trailer (absent → 0).
+        int waitMajority = r.remaining() >= 1 ? r.u8() : 0;
+        return new DeleteRecordsRequest(topic, partition, beforeOffset, waitMajority);
+    }
+
+    public static byte[] encodeDeleteRecordsResponse(DeleteRecordsResponse resp) {
+        Writer w = new Writer();
+        w.u16(resp.errorCode);
+        putString(w, resp.topic);
+        w.u32(resp.partition);
+        w.u64(resp.lowWatermark);
+        return w.finish();
+    }
+
+    public static DeleteRecordsResponse decodeDeleteRecordsResponse(byte[] payload) {
+        Reader r = new Reader(payload);
+        int errorCode = r.u16();
+        String topic = getString(r);
+        long partition = r.u32();
+        long lowWatermark = r.u64();
+        return new DeleteRecordsResponse(errorCode, topic, partition, lowWatermark);
+    }
+
     // --- error opcode ------------------------------------------------------
 
     public static byte[] encodeErrorResponse(ErrorResponse resp) {
@@ -1577,6 +1645,8 @@ public final class Codec {
                 return decodeListGroupsResponse(payload);
             case OP_LIST_OFFSETS_RESPONSE:
                 return decodeListOffsetsResponse(payload);
+            case OP_DELETE_RECORDS_RESPONSE:
+                return decodeDeleteRecordsResponse(payload);
             case OP_ERROR:
                 return decodeErrorResponse(payload);
             default:

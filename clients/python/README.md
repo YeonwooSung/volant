@@ -27,6 +27,8 @@ for offset, key, value in batch.tuples():
 c.offset_commit(group="g", topic="t", partition=0, offset=5)
 offs = c.offset_fetch(group="g", topic="t")  # [(partition, offset), ...]
 bounds = c.list_offsets("t")  # [OffsetListing(partition, earliest, latest), ...]
+cut = c.delete_records("t", 0, 100)  # DeleteRecordsResult; wait_majority=0
+# cut = c.delete_records("t", 0, 100, wait_majority=1)  # force majority wait
 member_id, generation, assignment = c.join_group(
     "g", topics=["t"], session_timeout_ms=10000
 )
@@ -80,6 +82,11 @@ overridden). `offset_fetch` returns committed `(partition, offset)` pairs
 for the given topic. `list_offsets(topic, partitions=None)` returns
 earliest/latest (`OffsetListing`) for the topic (`None` / `[]` = all
 partitions; native opcode 48, not Kafka timestamp ListOffsets).
+`delete_records(topic, partition, before_offset, wait_majority=0)`
+returns `DeleteRecordsResult` (`topic`, `partition`, `low_watermark`);
+native opcode 44, not Kafka DeleteRecords (API key 21). `wait_majority`
+0 = broker default, 1 = force wait, 2 = force no-wait. Error 13 is
+not redirected (Produce/Fetch only).
 `join_group` sends empty `member_id` on first join
 (broker assigns one) and unpacks as
 `(member_id, generation, assignment)`.
@@ -194,5 +201,6 @@ See [docs/V14_SPEC.md](../../docs/V14_SPEC.md),
 [docs/V47_SPEC.md](../../docs/V47_SPEC.md),
 [docs/V48_SPEC.md](../../docs/V48_SPEC.md),
 [docs/V49_SPEC.md](../../docs/V49_SPEC.md),
-[docs/V50_SPEC.md](../../docs/V50_SPEC.md).,
+[docs/V50_SPEC.md](../../docs/V50_SPEC.md),
+[docs/V52_SPEC.md](../../docs/V52_SPEC.md),
 [docs/V46_SPEC.md](../../docs/V46_SPEC.md).

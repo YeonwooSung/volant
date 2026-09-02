@@ -2,7 +2,7 @@
 //
 // Matches crates/volant-protocol/src/payload.rs for Produce, Fetch,
 // CreateTopic, Metadata, DeleteTopic, OffsetCommit, OffsetFetch,
-// JoinGroup, Heartbeat, LeaveGroup, Auth, DescribeGroup, ListGroups, ListOffsets, InitProducerId, and Scram.
+// JoinGroup, Heartbeat, LeaveGroup, Auth, DescribeGroup, ListGroups, ListOffsets, DeleteRecords, InitProducerId, and Scram.
 // Frame headers are big-endian (see package frame); payload integers and
 // length prefixes are little-endian.
 package codec
@@ -15,31 +15,33 @@ import (
 )
 
 const (
-	OpProduce               uint16 = 1
-	OpFetch                 uint16 = 2
-	OpCreateTopic           uint16 = 3
-	OpMetadata              uint16 = 4
-	OpDeleteTopic           uint16 = 5
-	OpOffsetCommit          uint16 = 6
-	OpOffsetFetch           uint16 = 7
-	OpJoinGroup             uint16 = 8
-	OpHeartbeat             uint16 = 9
-	OpLeaveGroup            uint16 = 10
-	OpAuth                  uint16 = 30
-	OpAuthResponse          uint16 = 31
-	OpInitProducerId        uint16 = 32
+	OpProduce                uint16 = 1
+	OpFetch                  uint16 = 2
+	OpCreateTopic            uint16 = 3
+	OpMetadata               uint16 = 4
+	OpDeleteTopic            uint16 = 5
+	OpOffsetCommit           uint16 = 6
+	OpOffsetFetch            uint16 = 7
+	OpJoinGroup              uint16 = 8
+	OpHeartbeat              uint16 = 9
+	OpLeaveGroup             uint16 = 10
+	OpAuth                   uint16 = 30
+	OpAuthResponse           uint16 = 31
+	OpInitProducerId         uint16 = 32
 	OpInitProducerIdResponse uint16 = 33
-	OpScramFirst            uint16 = 60
-	OpScramFirstResponse    uint16 = 61
-	OpScramFinal            uint16 = 62
-	OpScramFinalResponse    uint16 = 63
-	OpDescribeGroup         uint16 = 34
-	OpDescribeGroupResponse uint16 = 35
-	OpListGroups            uint16 = 36
-	OpListGroupsResponse    uint16 = 37
-	OpListOffsets           uint16 = 48
-	OpListOffsetsResponse   uint16 = 49
-	OpError                 uint16 = 0xFFFF
+	OpScramFirst             uint16 = 60
+	OpScramFirstResponse     uint16 = 61
+	OpScramFinal             uint16 = 62
+	OpScramFinalResponse     uint16 = 63
+	OpDescribeGroup          uint16 = 34
+	OpDescribeGroupResponse  uint16 = 35
+	OpListGroups             uint16 = 36
+	OpListGroupsResponse     uint16 = 37
+	OpListOffsets            uint16 = 48
+	OpListOffsetsResponse    uint16 = 49
+	OpDeleteRecords          uint16 = 44
+	OpDeleteRecordsResponse  uint16 = 45
+	OpError                  uint16 = 0xFFFF
 
 	nullLen = 0xFFFFFFFF
 )
@@ -498,6 +500,7 @@ type InitProducerIdResponse struct {
 	Epoch      uint16
 	ErrorCode  uint16
 }
+
 // GroupState is the ListGroups state byte (Phase 12).
 type GroupState uint8
 
@@ -595,6 +598,24 @@ type ListOffsetsResponse struct {
 	Entries   []OffsetListing
 }
 
+// DeleteRecordsRequest is the DeleteRecords opcode (44) body.
+// WaitMajority is the Phase 137 trailer: 0 = broker default, 1 = force
+// wait, 2 = force no-wait. Encode always writes it; decode treats a
+// missing trailer as 0.
+type DeleteRecordsRequest struct {
+	Topic        string
+	Partition    uint32
+	BeforeOffset uint64
+	WaitMajority uint8
+}
+
+// DeleteRecordsResponse is the DeleteRecords reply (opcode 45).
+type DeleteRecordsResponse struct {
+	ErrorCode    uint16
+	Topic        string
+	Partition    uint32
+	LowWatermark uint64
+}
 
 func EncodeProduceRequest(req ProduceRequest) ([]byte, error) {
 	w := &writer{}
@@ -1832,6 +1853,85 @@ func DecodeListOffsetsResponse(payload []byte) (ListOffsetsResponse, error) {
 	return ListOffsetsResponse{ErrorCode: code, Topic: topic, Entries: entries}, nil
 }
 
+func EncodeDeleteRecordsRequest(req DeleteRecordsRequest) ([]byte, error) {
+	w := &writer{}
+	if err := putString(w, req.Topic); err != nil {
+		return nil, err
+	}
+	w.u32(req.Partition)
+	w.u64(req.BeforeOffset)
+	// Phase 137: always write the wait_majority trailer.
+	w.u8(req.WaitMajority)
+	return w.buf, nil
+}
+
+func DecodeDeleteRecordsRequest(payload []byte) (DeleteRecordsRequest, error) {
+	r := &reader{data: payload}
+	topic, err := getString(r)
+	if err != nil {
+		return DeleteRecordsRequest{}, err
+	}
+	part, err := r.u32()
+	if err != nil {
+		return DeleteRecordsRequest{}, err
+	}
+	before, err := r.u64()
+	if err != nil {
+		return DeleteRecordsRequest{}, err
+	}
+	// Phase 137: optional wait_majority trailer (absent → 0).
+	var wait uint8
+	if r.remaining() >= 1 {
+		wait, err = r.u8()
+		if err != nil {
+			return DeleteRecordsRequest{}, err
+		}
+	}
+	return DeleteRecordsRequest{
+		Topic:        topic,
+		Partition:    part,
+		BeforeOffset: before,
+		WaitMajority: wait,
+	}, nil
+}
+
+func EncodeDeleteRecordsResponse(resp DeleteRecordsResponse) ([]byte, error) {
+	w := &writer{}
+	w.u16(resp.ErrorCode)
+	if err := putString(w, resp.Topic); err != nil {
+		return nil, err
+	}
+	w.u32(resp.Partition)
+	w.u64(resp.LowWatermark)
+	return w.buf, nil
+}
+
+func DecodeDeleteRecordsResponse(payload []byte) (DeleteRecordsResponse, error) {
+	r := &reader{data: payload}
+	code, err := r.u16()
+	if err != nil {
+		return DeleteRecordsResponse{}, err
+	}
+	topic, err := getString(r)
+	if err != nil {
+		return DeleteRecordsResponse{}, err
+	}
+	part, err := r.u32()
+	if err != nil {
+		return DeleteRecordsResponse{}, err
+	}
+	low, err := r.u64()
+	if err != nil {
+		return DeleteRecordsResponse{}, err
+	}
+	return DeleteRecordsResponse{
+		ErrorCode:    code,
+		Topic:        topic,
+		Partition:    part,
+		LowWatermark: low,
+	}, nil
+}
+
 func EncodeInitProducerIdRequest(req InitProducerIdRequest) ([]byte, error) {
 	w := &writer{}
 	// Always write the string; empty transactional_id = non-transactional PID.
@@ -2051,6 +2151,8 @@ func DecodeResponse(opcode uint16, payload []byte) (any, error) {
 		return DecodeListGroupsResponse(payload)
 	case OpListOffsetsResponse:
 		return DecodeListOffsetsResponse(payload)
+	case OpDeleteRecordsResponse:
+		return DecodeDeleteRecordsResponse(payload)
 	case OpError:
 		return DecodeErrorResponse(payload)
 	default:
