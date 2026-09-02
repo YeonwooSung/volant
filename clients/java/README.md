@@ -144,8 +144,12 @@ describe failure falls back to solo). Default assignor is broker.
 Produce, Fetch, and DeleteRecords follow `NotLeaderForPartition`
 (error 13) by default: Metadata, reconnect to the partition leader,
 retry once (`setMaxRedirects(1)` is the connect default).
-`setMaxRedirects(0)` raises on the first 13. Still one TCP connection
-at a time. Other admin RPCs do not redirect.
+`setMaxRedirects(0)` raises on the first 13. CreateTopic / DeleteTopic /
+CreatePartitions / ReassignPartitions / CreateAcls / DeleteAcls follow
+`NotController` (error 14) the same way (Metadata brokers or a
+`controller_id=N` hint in the Error message; not Kafka FindCoordinator;
+native Metadata has no controller_id). Still one TCP connection at a
+time.
 Produce and Fetch follow `NotLeaderForPartition` (error 13) by default:
 Metadata, reconnect to the partition leader, retry once
 (`setMaxRedirects(1)` is the connect default). `setMaxRedirects(0)`
@@ -276,8 +280,9 @@ max_wait_ms (not Kafka Fetch; native opcode 2). Thin
 admin-only (`generation=0`); `GroupConsumer.commit` sends the joined
 member+generation. TLS does not change broker TLS (Phase 8/19) and
 does not add Kafka API keys. Client private keys other than PKCS#8 /
-RSA PKCS#1 PEM are not loaded. Leader redirect is Produce/Fetch only
-(default one extra attempt).
+RSA PKCS#1 PEM are not loaded. Leader redirect is
+Produce/Fetch/DeleteRecords (error 13) and the six controller-gated
+admin RPCs (error 14; default one extra attempt).
 
 See [docs/V23_SPEC.md](../../docs/V23_SPEC.md),
 [docs/V27_SPEC.md](../../docs/V27_SPEC.md),

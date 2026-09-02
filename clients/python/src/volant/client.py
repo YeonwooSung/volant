@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import re
 import socket
 import ssl
 import time
@@ -69,6 +70,9 @@ from .frame import (
 
 # Native ErrorCode::NotLeaderForPartition (crates/volant-protocol).
 _NOT_LEADER = 13
+# Native ErrorCode::NotController — controller-gated admin RPCs.
+_NOT_CONTROLLER = 14
+_CONTROLLER_ID_RE = re.compile(r"controller_id=(\d+)")
 # Native ErrorCode::UnknownProducerId — pid not allocated via InitProducerId.
 _UNKNOWN_PRODUCER = 21
 # Transient produce codes (Rust is_transient_error_code). Not 13 / 21.
@@ -99,6 +103,16 @@ def _format_addr(host: str, port: int) -> str:
     if ":" in host and not host.startswith("["):
         return f"[{host}]:{port}"
     return f"{host}:{port}"
+
+
+def _controller_id_hint(message: str) -> Optional[int]:
+    """Parse ``controller_id=N`` from a NotController Error message."""
+    if not message:
+        return None
+    m = _CONTROLLER_ID_RE.search(message)
+    if m is None:
+        return None
+    return int(m.group(1))
 
 
 @dataclass
@@ -422,6 +436,57 @@ class Client:
         self._reconnect(addr)
         return True
 
+    def _redirect_to_controller(self, controller_id: Optional[int] = None) -> bool:
+        """Metadata → reconnect to the controller.
+
+        If ``controller_id`` is known (parsed from ``controller_id=N`` in
+        a 14 Error message), look that node up in Metadata brokers, then
+        ``list_members()`` if Metadata has no matching id. Otherwise pick
+        the first advertised broker whose host:port is not this
+        connection. Native Metadata has no controller_id field.
+
+        Returns True when the caller should retry. Returns False on no
+        other broker / lookup miss / empty host / reconnect fail — caller
+        must raise the original error 14.
+        """
+        meta = self.metadata()
+        host: Optional[str] = None
+        port = 0
+        if controller_id is not None:
+            for b in meta.brokers:
+                if b.node_id == controller_id:
+                    host, port = b.host, b.port
+                    break
+            if host is None:
+                try:
+                    members = self.list_members()
+                except Exception:
+                    return False
+                for b in members.brokers:
+                    if b.id == controller_id:
+                        host, port = b.host, b.port
+                        break
+            if host is None or not host:
+                return False
+        else:
+            for b in meta.brokers:
+                if not b.host:
+                    continue
+                addr = _format_addr(b.host, b.port)
+                if addr != self.addr:
+                    host, port = b.host, b.port
+                    break
+            if host is None:
+                return False
+        addr = _format_addr(host, port)
+        if addr == self.addr:
+            return True
+        try:
+            self._reconnect(addr)
+        except Exception:
+            return False
+        return True
+
     def close(self) -> None:
         sock = getattr(self, "_sock", None)
         if sock is not None:
@@ -487,6 +552,33 @@ class Client:
     def _check(self, error_code: int, op: str) -> None:
         if error_code != 0:
             raise BrokerError(error_code, op=op)
+
+    def _admin_round_trip(self, opcode: int, payload: bytes, expect_type, op: str):
+        """Round-trip a controller-gated admin RPC, redirecting on error 14."""
+        max_attempts = 1 + self.max_redirects
+        attempt = 0
+        while True:
+            attempt += 1
+            try:
+                resp = self._round_trip(opcode, payload)
+            except BrokerError as e:
+                if (
+                    e.code == _NOT_CONTROLLER
+                    and attempt < max_attempts
+                    and self._redirect_to_controller(_controller_id_hint(e.message))
+                ):
+                    continue
+                raise
+            if not isinstance(resp, expect_type):
+                raise ProtocolError(f"unexpected response for {op}: {type(resp)}")
+            if (
+                resp.error_code == _NOT_CONTROLLER
+                and attempt < max_attempts
+                and self._redirect_to_controller(None)
+            ):
+                continue
+            self._check(resp.error_code, op)
+            return resp
 
     def _maybe_authenticate(self) -> None:
         if self.auth_token:
@@ -590,39 +682,41 @@ class Client:
         partitions: int = 1,
         configs: Optional[list[tuple[str, str]]] = None,
     ) -> int:
-        """Create a topic. Returns the broker-assigned topic id."""
+        """Create a topic. Returns the broker-assigned topic id.
+
+        Error 14 (NotController) follows ``max_redirects`` (same budget as
+        Produce/Fetch error 13).
+        """
         payload = codec.encode_create_topic_request(
             CreateTopicRequest(name=name, partitions=partitions, configs=configs or [])
         )
-        resp = self._round_trip(codec.OP_CREATE_TOPIC, payload)
-        if not isinstance(resp, codec.CreateTopicResponse):
-            raise ProtocolError(f"unexpected response for create_topic: {type(resp)}")
-        self._check(resp.error_code, "create_topic")
+        resp = self._admin_round_trip(
+            codec.OP_CREATE_TOPIC, payload, codec.CreateTopicResponse, "create_topic"
+        )
         return resp.topic_id
 
     def delete_topic(self, name: str) -> None:
         payload = codec.encode_delete_topic_request(DeleteTopicRequest(name=name))
-        resp = self._round_trip(codec.OP_DELETE_TOPIC, payload)
-        if not isinstance(resp, codec.DeleteTopicResponse):
-            raise ProtocolError(f"unexpected response for delete_topic: {type(resp)}")
-        self._check(resp.error_code, "delete_topic")
+        self._admin_round_trip(
+            codec.OP_DELETE_TOPIC, payload, codec.DeleteTopicResponse, "delete_topic"
+        )
 
     def create_partitions(self, topic: str, total_count: int) -> int:
         """Grow ``topic`` to ``total_count`` partitions (native opcode 46).
 
         ``total_count`` must exceed the current count. Returns the new total.
-        Non-zero ``error_code`` raises :class:`BrokerError`. This is not Kafka
-        CreatePartitions (API key 37).
+        Non-zero ``error_code`` raises :class:`BrokerError`. Error 14 follows
+        ``max_redirects``. This is not Kafka CreatePartitions (API key 37).
         """
         payload = codec.encode_create_partitions_request(
             CreatePartitionsRequest(topic=topic, total_count=total_count)
         )
-        resp = self._round_trip(codec.OP_CREATE_PARTITIONS, payload)
-        if not isinstance(resp, codec.CreatePartitionsResponse):
-            raise ProtocolError(
-                f"unexpected response for create_partitions: {type(resp)}"
-            )
-        self._check(resp.error_code, "create_partitions")
+        resp = self._admin_round_trip(
+            codec.OP_CREATE_PARTITIONS,
+            payload,
+            codec.CreatePartitionsResponse,
+            "create_partitions",
+        )
         return resp.partitions
 
 
@@ -698,8 +792,9 @@ class Client:
         ``partition=None`` updates every partition (wire ``u32::MAX``).
         Empty ``replicas`` asks the controller to auto-place with the current
         membership (same as CreateTopic). Returns the assignment generation.
-        Non-zero ``error_code`` raises :class:`BrokerError`. This is not Kafka
-        AlterPartitionReassignments (API key 45).
+        Non-zero ``error_code`` raises :class:`BrokerError`. Error 14 follows
+        ``max_redirects``. This is not Kafka AlterPartitionReassignments
+        (API key 45).
         """
         wire_partition = (
             codec.REASSIGN_ALL_PARTITIONS if partition is None else int(partition)
@@ -711,12 +806,12 @@ class Client:
                 replicas=list(replicas) if replicas else [],
             )
         )
-        resp = self._round_trip(codec.OP_REASSIGN_PARTITIONS, payload)
-        if not isinstance(resp, codec.ReassignPartitionsResponse):
-            raise ProtocolError(
-                f"unexpected response for reassign_partitions: {type(resp)}"
-            )
-        self._check(resp.error_code, "reassign_partitions")
+        resp = self._admin_round_trip(
+            codec.OP_REASSIGN_PARTITIONS,
+            payload,
+            codec.ReassignPartitionsResponse,
+            "reassign_partitions",
+        )
         return resp.generation
 
     def produce(
@@ -1349,30 +1444,29 @@ class Client:
 
         Enables enforcement on the broker. This is not Kafka CreateAcls
         (API key 30). Non-zero ``error_code`` raises :class:`BrokerError`
-        with ``op="create_acls"``.
+        with ``op="create_acls"``. Error 14 follows ``max_redirects``.
         """
         payload = codec.encode_create_acls_request(
             codec.CreateAclsRequest(entries=list(entries or []))
         )
-        resp = self._round_trip(codec.OP_CREATE_ACLS, payload)
-        if not isinstance(resp, codec.CreateAclsResponse):
-            raise ProtocolError(f"unexpected response for create_acls: {type(resp)}")
-        self._check(resp.error_code, "create_acls")
+        self._admin_round_trip(
+            codec.OP_CREATE_ACLS, payload, codec.CreateAclsResponse, "create_acls"
+        )
 
     def delete_acls(self, entries: list[codec.AclBinding]) -> int:
         """Delete exact-matching ACL bindings (native opcode 56/57).
 
         Returns the number of entries removed. No filter-delete. This is
         not Kafka DeleteAcls (API key 31). Non-zero ``error_code`` raises
-        :class:`BrokerError` with ``op="delete_acls"``.
+        :class:`BrokerError` with ``op="delete_acls"``. Error 14 follows
+        ``max_redirects``.
         """
         payload = codec.encode_delete_acls_request(
             codec.DeleteAclsRequest(entries=list(entries or []))
         )
-        resp = self._round_trip(codec.OP_DELETE_ACLS, payload)
-        if not isinstance(resp, codec.DeleteAclsResponse):
-            raise ProtocolError(f"unexpected response for delete_acls: {type(resp)}")
-        self._check(resp.error_code, "delete_acls")
+        resp = self._admin_round_trip(
+            codec.OP_DELETE_ACLS, payload, codec.DeleteAclsResponse, "delete_acls"
+        )
         return resp.removed
 
     def list_acls(

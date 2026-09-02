@@ -817,4 +817,303 @@ class ClientTest {
         }
     }
 
+    private static final int NOT_CONTROLLER = Client.NOT_CONTROLLER;
+
+    private static Metadata controllerMeta(int nodeId, String host, int port) {
+        List<Metadata.BrokerInfo> brokers = new ArrayList<>();
+        brokers.add(new Metadata.BrokerInfo(1, "127.0.0.1", 1));
+        brokers.add(new Metadata.BrokerInfo(nodeId, host, port));
+        return new Metadata(brokers, Collections.emptyList());
+    }
+
+    private static Metadata otherBrokerMeta(int currentPort, String host, int port) {
+        List<Metadata.BrokerInfo> brokers = new ArrayList<>();
+        brokers.add(new Metadata.BrokerInfo(1, "127.0.0.1", currentPort));
+        brokers.add(new Metadata.BrokerInfo(2, host, port));
+        return new Metadata(brokers, Collections.emptyList());
+    }
+
+    static final class AdminBroker implements AutoCloseable {
+        final int port;
+        final List<int[]> createTopicReplies = new CopyOnWriteArrayList<>();
+        final List<String> createTopicMessages = new CopyOnWriteArrayList<>();
+        final List<Integer> createPartitionsCodes = new CopyOnWriteArrayList<>();
+        final List<Integer> createAclsCodes = new CopyOnWriteArrayList<>();
+        final List<Integer> reassignCodes = new CopyOnWriteArrayList<>();
+        volatile Metadata meta = new Metadata(Collections.emptyList(), Collections.emptyList());
+        final AtomicInteger createTopicCount = new AtomicInteger();
+        final AtomicInteger createPartitionsCount = new AtomicInteger();
+        final AtomicInteger createAclsCount = new AtomicInteger();
+        final AtomicInteger reassignCount = new AtomicInteger();
+        final AtomicInteger metadataCount = new AtomicInteger();
+        final AtomicInteger listMembersCount = new AtomicInteger();
+        final AtomicInteger acceptCount = new AtomicInteger();
+
+        private final ServerSocket listen;
+        private final Thread acceptThread;
+
+        static AdminBroker start() throws IOException {
+            return new AdminBroker();
+        }
+
+        private AdminBroker() throws IOException {
+            listen = new ServerSocket(0, 8, InetAddress.getByName("127.0.0.1"));
+            listen.setSoTimeout(8_000);
+            port = listen.getLocalPort();
+            acceptThread = new Thread(
+                    () -> {
+                        while (!listen.isClosed()) {
+                            try {
+                                Socket conn = listen.accept();
+                                acceptCount.incrementAndGet();
+                                Thread t = new Thread(() -> serve(conn), "volant-admin-conn");
+                                t.setDaemon(true);
+                                t.start();
+                            } catch (IOException e) {
+                                return;
+                            }
+                        }
+                    },
+                    "volant-admin-accept");
+            acceptThread.setDaemon(true);
+            acceptThread.start();
+        }
+
+        void queueCreateTopicError(int code, String message) {
+            createTopicReplies.add(new int[] {code, 1});
+            createTopicMessages.add(message);
+        }
+
+        void queueCreateTopicOk() {
+            createTopicReplies.add(new int[] {0, 0});
+            createTopicMessages.add("");
+        }
+
+        private void serve(Socket conn) {
+            try {
+                conn.setSoTimeout(5_000);
+                InputStream in = conn.getInputStream();
+                OutputStream out = conn.getOutputStream();
+                byte[] buf = new byte[0];
+                while (true) {
+                    Frame.Decode d = Frame.tryDecode(buf);
+                    if (d.frame == null) {
+                        byte[] tmp = new byte[4096];
+                        int n = in.read(tmp);
+                        if (n < 0) {
+                            return;
+                        }
+                        byte[] next = new byte[buf.length + n];
+                        System.arraycopy(buf, 0, next, 0, buf.length);
+                        System.arraycopy(tmp, 0, next, buf.length, n);
+                        buf = next;
+                        continue;
+                    }
+                    buf = d.rest;
+                    int[] replyOp = new int[1];
+                    byte[] payload = handle(d.frame, replyOp);
+                    out.write(Frame.encode(replyOp[0], d.frame.correlationId, payload));
+                    out.flush();
+                }
+            } catch (Exception ignored) {
+                // client closed or timeout
+            } finally {
+                try {
+                    conn.close();
+                } catch (IOException ignored) {
+                    // best-effort
+                }
+            }
+        }
+
+        private byte[] handle(Frame frame, int[] replyOp) {
+            replyOp[0] = frame.opcode;
+            if (frame.opcode == Codec.OP_CREATE_TOPIC) {
+                createTopicCount.incrementAndGet();
+                Codec.CreateTopicRequest req = Codec.decodeCreateTopicRequest(frame.payload);
+                int code = 0;
+                boolean asError = false;
+                String message = "";
+                if (!createTopicReplies.isEmpty()) {
+                    int[] spec = createTopicReplies.remove(0);
+                    code = spec[0];
+                    asError = spec[1] != 0;
+                    message = createTopicMessages.isEmpty() ? "" : createTopicMessages.remove(0);
+                }
+                if (asError) {
+                    replyOp[0] = Codec.OP_ERROR;
+                    return Codec.encodeErrorResponse(new Codec.ErrorResponse(code, message));
+                }
+                return Codec.encodeCreateTopicResponse(
+                        new Codec.CreateTopicResponse(code == 0 ? 1 : 0, req.name, code == 0 ? req.partitions : 0, code));
+            }
+            if (frame.opcode == Codec.OP_CREATE_PARTITIONS) {
+                createPartitionsCount.incrementAndGet();
+                Codec.CreatePartitionsRequest req = Codec.decodeCreatePartitionsRequest(frame.payload);
+                int code = createPartitionsCodes.isEmpty() ? 0 : createPartitionsCodes.remove(0);
+                replyOp[0] = Codec.OP_CREATE_PARTITIONS_RESPONSE;
+                return Codec.encodeCreatePartitionsResponse(
+                        new Codec.CreatePartitionsResponse(code, req.topic, code == 0 ? req.totalCount : 0));
+            }
+            if (frame.opcode == Codec.OP_CREATE_ACLS) {
+                createAclsCount.incrementAndGet();
+                int code = createAclsCodes.isEmpty() ? 0 : createAclsCodes.remove(0);
+                replyOp[0] = Codec.OP_CREATE_ACLS_RESPONSE;
+                return Codec.encodeCreateAclsResponse(new Codec.CreateAclsResponse(code));
+            }
+            if (frame.opcode == Codec.OP_REASSIGN_PARTITIONS) {
+                reassignCount.incrementAndGet();
+                int code = reassignCodes.isEmpty() ? 0 : reassignCodes.remove(0);
+                replyOp[0] = Codec.OP_REASSIGN_PARTITIONS_RESPONSE;
+                return Codec.encodeReassignPartitionsResponse(
+                        new Codec.ReassignPartitionsResponse(code, code == 0 ? 7 : 0));
+            }
+            if (frame.opcode == Codec.OP_METADATA) {
+                metadataCount.incrementAndGet();
+                return Codec.encodeMetadataResponse(meta);
+            }
+            if (frame.opcode == Codec.OP_LIST_MEMBERS) {
+                listMembersCount.incrementAndGet();
+                replyOp[0] = Codec.OP_LIST_MEMBERS_RESPONSE;
+                return Codec.encodeListMembersResponse(
+                        new Codec.ListMembersResponse(0, 0, Collections.emptyList(), Collections.emptyList()));
+            }
+            throw new ProtocolException("unexpected opcode " + frame.opcode);
+        }
+
+        @Override
+        public void close() {
+            try {
+                listen.close();
+            } catch (IOException ignored) {
+                // best-effort
+            }
+            try {
+                acceptThread.join(2_000);
+            } catch (InterruptedException e) {
+                Thread.currentThread().interrupt();
+            }
+        }
+    }
+
+    @Test
+    void createTopicError14RedirectsViaControllerId() throws Exception {
+        try (AdminBroker leader = AdminBroker.start();
+                AdminBroker follower = AdminBroker.start()) {
+            follower.queueCreateTopicError(NOT_CONTROLLER, "not controller; controller_id=2");
+            follower.meta = controllerMeta(2, "127.0.0.1", leader.port);
+            leader.queueCreateTopicOk();
+            try (Client c = Client.connect("127.0.0.1", follower.port, 5_000)) {
+                int id = c.createTopic("events", 1);
+                assertEquals(1, id);
+                assertEquals(leader.port, Integer.parseInt(c.addr().substring(c.addr().indexOf(':') + 1)));
+            }
+            assertEquals(1, follower.createTopicCount.get());
+            assertEquals(1, follower.metadataCount.get());
+            assertEquals(1, leader.createTopicCount.get());
+        }
+    }
+
+    @Test
+    void createPartitionsError14NoHintPicksOtherBroker() throws Exception {
+        try (AdminBroker leader = AdminBroker.start();
+                AdminBroker follower = AdminBroker.start()) {
+            follower.createPartitionsCodes.add(NOT_CONTROLLER);
+            follower.meta = otherBrokerMeta(follower.port, "127.0.0.1", leader.port);
+            try (Client c = Client.connect("127.0.0.1", follower.port, 5_000)) {
+                int n = c.createPartitions("events", 4);
+                assertEquals(4, n);
+                assertEquals(leader.port, Integer.parseInt(c.addr().substring(c.addr().indexOf(':') + 1)));
+            }
+            assertEquals(1, follower.createPartitionsCount.get());
+            assertEquals(1, follower.metadataCount.get());
+            assertEquals(1, leader.createPartitionsCount.get());
+        }
+    }
+
+    @Test
+    void maxRedirectsZeroRaisesOnFirst14() throws Exception {
+        try (AdminBroker follower = AdminBroker.start()) {
+            follower.queueCreateTopicError(NOT_CONTROLLER, "not controller; controller_id=2");
+            follower.meta = controllerMeta(2, "127.0.0.1", 9);
+            try (Client c = Client.connect("127.0.0.1", follower.port, 5_000)) {
+                c.setMaxRedirects(0);
+                BrokerException ex = assertThrows(BrokerException.class, () -> c.createTopic("events", 1));
+                assertEquals(NOT_CONTROLLER, ex.code);
+            }
+            assertEquals(1, follower.createTopicCount.get());
+            assertEquals(0, follower.metadataCount.get());
+            assertEquals(1, follower.acceptCount.get());
+        }
+    }
+
+    @Test
+    void helperNoOtherBrokerRaises14() throws Exception {
+        try (AdminBroker follower = AdminBroker.start()) {
+            follower.createPartitionsCodes.add(NOT_CONTROLLER);
+            follower.meta = new Metadata(
+                    Collections.singletonList(new Metadata.BrokerInfo(1, "127.0.0.1", follower.port)),
+                    Collections.emptyList());
+            try (Client c = Client.connect("127.0.0.1", follower.port, 5_000)) {
+                BrokerException ex =
+                        assertThrows(BrokerException.class, () -> c.createPartitions("events", 4));
+                assertEquals(NOT_CONTROLLER, ex.code);
+                assertEquals("127.0.0.1:" + follower.port, c.addr());
+            }
+            assertEquals(1, follower.createPartitionsCount.get());
+            assertEquals(1, follower.metadataCount.get());
+            assertEquals(1, follower.acceptCount.get());
+        }
+    }
+
+    @Test
+    void helperEmptyHostRaises14() throws Exception {
+        try (AdminBroker follower = AdminBroker.start()) {
+            follower.createPartitionsCodes.add(NOT_CONTROLLER);
+            follower.meta = new Metadata(
+                    Collections.singletonList(new Metadata.BrokerInfo(2, "", 9092)),
+                    Collections.emptyList());
+            try (Client c = Client.connect("127.0.0.1", follower.port, 5_000)) {
+                BrokerException ex =
+                        assertThrows(BrokerException.class, () -> c.createPartitions("events", 4));
+                assertEquals(NOT_CONTROLLER, ex.code);
+            }
+            assertEquals(1, follower.createPartitionsCount.get());
+            assertEquals(1, follower.metadataCount.get());
+        }
+    }
+
+    @Test
+    void createAclsError14ThenOk() throws Exception {
+        try (AdminBroker leader = AdminBroker.start();
+                AdminBroker follower = AdminBroker.start()) {
+            follower.createAclsCodes.add(NOT_CONTROLLER);
+            follower.meta = otherBrokerMeta(follower.port, "127.0.0.1", leader.port);
+            try (Client c = Client.connect("127.0.0.1", follower.port, 5_000)) {
+                c.createAcls(List.of(new AclBinding("User:alice", 0, "events", 3, 1)));
+                assertEquals(leader.port, Integer.parseInt(c.addr().substring(c.addr().indexOf(':') + 1)));
+            }
+            assertEquals(1, follower.createAclsCount.get());
+            assertEquals(1, follower.metadataCount.get());
+            assertEquals(1, leader.createAclsCount.get());
+        }
+    }
+
+    @Test
+    void reassignPartitionsError14ThenOk() throws Exception {
+        try (AdminBroker leader = AdminBroker.start();
+                AdminBroker follower = AdminBroker.start()) {
+            follower.reassignCodes.add(NOT_CONTROLLER);
+            follower.meta = otherBrokerMeta(follower.port, "127.0.0.1", leader.port);
+            try (Client c = Client.connect("127.0.0.1", follower.port, 5_000)) {
+                int gen = c.reassignPartitions("events", new int[] {1, 2});
+                assertEquals(7, gen);
+                assertEquals(leader.port, Integer.parseInt(c.addr().substring(c.addr().indexOf(':') + 1)));
+            }
+            assertEquals(1, follower.reassignCount.get());
+            assertEquals(1, follower.metadataCount.get());
+            assertEquals(1, leader.reassignCount.get());
+        }
+    }
+
 }

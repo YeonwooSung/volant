@@ -10,6 +10,8 @@ import java.util.Collections;
 import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.regex.Matcher;
+import java.util.regex.Pattern;
 
 /**
  * Sync TCP client for the native Volant protocol (MVP).
@@ -59,6 +61,9 @@ public final class Client implements AutoCloseable {
     private static final int DEFAULT_TIMEOUT_MS = 10_000;
     /** Native {@code ErrorCode::NotLeaderForPartition}. */
     static final int NOT_LEADER_FOR_PARTITION = 13;
+    /** Native {@code ErrorCode::NotController} (controller-gated admin). */
+    static final int NOT_CONTROLLER = 14;
+    private static final Pattern CONTROLLER_ID = Pattern.compile("controller_id=(\\d+)");
     /** Native {@code ErrorCode::UnknownProducerId}. */
     static final int UNKNOWN_PRODUCER_ID = 21;
 
@@ -553,47 +558,177 @@ public final class Client implements AutoCloseable {
         return true;
     }
 
-    /** Create a topic. Returns the broker-assigned topic id. */
+    private static Long parseControllerId(String message) {
+        if (message == null || message.isEmpty()) {
+            return null;
+        }
+        Matcher m = CONTROLLER_ID.matcher(message);
+        if (!m.find()) {
+            return null;
+        }
+        try {
+            return Long.parseLong(m.group(1));
+        } catch (NumberFormatException e) {
+            return null;
+        }
+    }
+
+    private boolean maybeRedirectController(int code, String message, int attempt, int maxAttempts) {
+        if (code != NOT_CONTROLLER || attempt >= maxAttempts) {
+            return false;
+        }
+        return redirectToController(parseControllerId(message));
+    }
+
+    /**
+     * Metadata → reconnect to the controller.
+     *
+     * <p>If {@code controllerId} is known (parsed from {@code controller_id=N}
+     * in a 14 Error message), look that node up in Metadata brokers, then
+     * {@link #listMembers()} if Metadata has no matching id. Otherwise pick
+     * the first advertised broker whose host:port is not this connection.
+     * Native Metadata has no controller_id field.
+     *
+     * @return true when the caller should retry; false on no other broker /
+     *     lookup miss / empty host / reconnect fail (raise the original 14).
+     */
+    private boolean redirectToController(Long controllerId) {
+        Metadata meta = metadata();
+        String host = null;
+        int port = 0;
+        if (controllerId != null) {
+            for (Metadata.BrokerInfo b : meta.brokers) {
+                if (b.nodeId == controllerId) {
+                    host = b.host;
+                    port = b.port;
+                    break;
+                }
+            }
+            if (host == null) {
+                try {
+                    MembershipList members = listMembers();
+                    for (MembershipBroker b : members.brokers) {
+                        if ((b.id & 0xFFFFFFFFL) == controllerId) {
+                            host = b.host;
+                            port = b.port;
+                            break;
+                        }
+                    }
+                } catch (RuntimeException ignored) {
+                    return false;
+                }
+            }
+            if (host == null || host.isEmpty()) {
+                return false;
+            }
+        } else {
+            for (Metadata.BrokerInfo b : meta.brokers) {
+                if (b.host == null || b.host.isEmpty()) {
+                    continue;
+                }
+                String next = formatAddr(b.host, b.port);
+                if (!next.equals(addr)) {
+                    host = b.host;
+                    port = b.port;
+                    break;
+                }
+            }
+            if (host == null) {
+                return false;
+            }
+        }
+        String next = formatAddr(host, port);
+        if (next.equals(addr)) {
+            return true;
+        }
+        try {
+            reconnect(host, port);
+        } catch (RuntimeException e) {
+            return false;
+        }
+        return true;
+    }
+
+    private Object adminRoundTrip(int opcode, byte[] payload, Class<?> expect, String op) {
+        int maxAttempts = 1 + maxRedirects;
+        int attempt = 0;
+        while (true) {
+            attempt++;
+            Object decoded;
+            try {
+                decoded = roundTrip(opcode, payload);
+            } catch (BrokerException e) {
+                if (maybeRedirectController(e.code, e.message, attempt, maxAttempts)) {
+                    continue;
+                }
+                throw e;
+            }
+            if (!expect.isInstance(decoded)) {
+                throw new ProtocolException("unexpected response for " + op + ": " + typeName(decoded));
+            }
+            int code = typedAdminErrorCode(decoded);
+            if (maybeRedirectController(code, "", attempt, maxAttempts)) {
+                continue;
+            }
+            check(code, op);
+            return decoded;
+        }
+    }
+
+    private static int typedAdminErrorCode(Object decoded) {
+        if (decoded instanceof Codec.CreateTopicResponse) {
+            return ((Codec.CreateTopicResponse) decoded).errorCode;
+        }
+        if (decoded instanceof Codec.DeleteTopicResponse) {
+            return ((Codec.DeleteTopicResponse) decoded).errorCode;
+        }
+        if (decoded instanceof Codec.CreatePartitionsResponse) {
+            return ((Codec.CreatePartitionsResponse) decoded).errorCode;
+        }
+        if (decoded instanceof Codec.ReassignPartitionsResponse) {
+            return ((Codec.ReassignPartitionsResponse) decoded).errorCode;
+        }
+        if (decoded instanceof Codec.CreateAclsResponse) {
+            return ((Codec.CreateAclsResponse) decoded).errorCode;
+        }
+        if (decoded instanceof Codec.DeleteAclsResponse) {
+            return ((Codec.DeleteAclsResponse) decoded).errorCode;
+        }
+        return 0;
+    }
+
+    /** Create a topic. Returns the broker-assigned topic id.
+     * Error 14 (NotController) follows {@code maxRedirects}. */
     public int createTopic(String name, int partitions) {
         byte[] payload = Codec.encodeCreateTopicRequest(
                 new Codec.CreateTopicRequest(name, partitions, Collections.emptyList()));
-        Object decoded = roundTrip(Codec.OP_CREATE_TOPIC, payload);
-        if (!(decoded instanceof Codec.CreateTopicResponse)) {
-            throw new ProtocolException("unexpected response for create_topic: " + typeName(decoded));
-        }
-        Codec.CreateTopicResponse resp = (Codec.CreateTopicResponse) decoded;
-        check(resp.errorCode, "create_topic");
+        Codec.CreateTopicResponse resp = (Codec.CreateTopicResponse) adminRoundTrip(
+                Codec.OP_CREATE_TOPIC, payload, Codec.CreateTopicResponse.class, "create_topic");
         return (int) resp.topicId;
     }
 
-    /** Delete a topic by name. */
+    /** Delete a topic by name. Error 14 follows {@code maxRedirects}. */
     public void deleteTopic(String name) {
         byte[] payload = Codec.encodeDeleteTopicRequest(new Codec.DeleteTopicRequest(name));
-        Object decoded = roundTrip(Codec.OP_DELETE_TOPIC, payload);
-        if (!(decoded instanceof Codec.DeleteTopicResponse)) {
-            throw new ProtocolException("unexpected response for delete_topic: " + typeName(decoded));
-        }
-        Codec.DeleteTopicResponse resp = (Codec.DeleteTopicResponse) decoded;
-        check(resp.errorCode, "delete_topic");
+        adminRoundTrip(Codec.OP_DELETE_TOPIC, payload, Codec.DeleteTopicResponse.class, "delete_topic");
     }
 
     /**
      * Grow {@code topic} to {@code totalCount} partitions (native opcode 46).
      *
      * <p>{@code totalCount} must exceed the current count. Returns the new
-     * total. Non-zero {@code error_code} is {@link BrokerException}. This is
-     * not Kafka CreatePartitions (API key 37).
+     * total. Non-zero {@code error_code} is {@link BrokerException}. Error 14
+     * follows {@code maxRedirects}. This is not Kafka CreatePartitions (API
+     * key 37).
      */
     public int createPartitions(String topic, int totalCount) {
         byte[] payload = Codec.encodeCreatePartitionsRequest(
                 new Codec.CreatePartitionsRequest(topic, totalCount));
-        Object decoded = roundTrip(Codec.OP_CREATE_PARTITIONS, payload);
-        if (!(decoded instanceof Codec.CreatePartitionsResponse)) {
-            throw new ProtocolException(
-                    "unexpected response for create_partitions: " + typeName(decoded));
-        }
-        Codec.CreatePartitionsResponse resp = (Codec.CreatePartitionsResponse) decoded;
-        check(resp.errorCode, "create_partitions");
+        Codec.CreatePartitionsResponse resp = (Codec.CreatePartitionsResponse) adminRoundTrip(
+                Codec.OP_CREATE_PARTITIONS,
+                payload,
+                Codec.CreatePartitionsResponse.class,
+                "create_partitions");
         return (int) resp.partitions;
     }
 
@@ -671,8 +806,9 @@ public final class Client implements AutoCloseable {
      * <p>{@code partition == null} updates every partition (wire {@code
      * u32::MAX}). Empty {@code replicas} asks the controller to auto-place
      * with the current membership. Returns the assignment generation.
-     * Non-zero {@code error_code} is {@link BrokerException}. This is not
-     * Kafka AlterPartitionReassignments (API key 45).
+     * Non-zero {@code error_code} is {@link BrokerException}. Error 14
+     * follows {@code maxRedirects}. This is not Kafka
+     * AlterPartitionReassignments (API key 45).
      */
     public int reassignPartitions(String topic, Integer partition, int... replicas) {
         long wirePartition = partition == null
@@ -686,13 +822,11 @@ public final class Client implements AutoCloseable {
         }
         byte[] payload = Codec.encodeReassignPartitionsRequest(
                 new Codec.ReassignPartitionsRequest(topic, wirePartition, ids));
-        Object decoded = roundTrip(Codec.OP_REASSIGN_PARTITIONS, payload);
-        if (!(decoded instanceof Codec.ReassignPartitionsResponse)) {
-            throw new ProtocolException(
-                    "unexpected response for reassign_partitions: " + typeName(decoded));
-        }
-        Codec.ReassignPartitionsResponse resp = (Codec.ReassignPartitionsResponse) decoded;
-        check(resp.errorCode, "reassign_partitions");
+        Codec.ReassignPartitionsResponse resp = (Codec.ReassignPartitionsResponse) adminRoundTrip(
+                Codec.OP_REASSIGN_PARTITIONS,
+                payload,
+                Codec.ReassignPartitionsResponse.class,
+                "reassign_partitions");
         return (int) resp.generation;
     }
 
@@ -1398,30 +1532,22 @@ public final class Client implements AutoCloseable {
 
     /**
      * Create ACL bindings (native opcode 54/55). This is not Kafka CreateAcls
-     * (API key 30).
+     * (API key 30). Error 14 follows {@code maxRedirects}.
      */
     public void createAcls(List<AclBinding> entries) {
         byte[] payload = Codec.encodeCreateAclsRequest(new Codec.CreateAclsRequest(entries));
-        Object decoded = roundTrip(Codec.OP_CREATE_ACLS, payload);
-        if (!(decoded instanceof Codec.CreateAclsResponse)) {
-            throw new ProtocolException("unexpected response for create_acls: " + typeName(decoded));
-        }
-        Codec.CreateAclsResponse resp = (Codec.CreateAclsResponse) decoded;
-        check(resp.errorCode, "create_acls");
+        adminRoundTrip(Codec.OP_CREATE_ACLS, payload, Codec.CreateAclsResponse.class, "create_acls");
     }
 
     /**
      * Delete exact-matching ACL bindings (native opcode 56/57). Returns the
-     * number of entries removed. No filter-delete.
+     * number of entries removed. No filter-delete. Error 14 follows
+     * {@code maxRedirects}.
      */
     public int deleteAcls(List<AclBinding> entries) {
         byte[] payload = Codec.encodeDeleteAclsRequest(new Codec.DeleteAclsRequest(entries));
-        Object decoded = roundTrip(Codec.OP_DELETE_ACLS, payload);
-        if (!(decoded instanceof Codec.DeleteAclsResponse)) {
-            throw new ProtocolException("unexpected response for delete_acls: " + typeName(decoded));
-        }
-        Codec.DeleteAclsResponse resp = (Codec.DeleteAclsResponse) decoded;
-        check(resp.errorCode, "delete_acls");
+        Codec.DeleteAclsResponse resp = (Codec.DeleteAclsResponse) adminRoundTrip(
+                Codec.OP_DELETE_ACLS, payload, Codec.DeleteAclsResponse.class, "delete_acls");
         return resp.removed;
     }
 

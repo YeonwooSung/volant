@@ -1283,3 +1283,428 @@ func TestProduceBatchIncrementsSequenceByCount(t *testing.T) {
 	}
 }
 
+const notController uint16 = 14
+
+type createTopicReply struct {
+	code    uint16
+	message string
+	asError bool
+}
+
+type adminBroker struct {
+	mu                    sync.Mutex
+	createTopicReplies    []createTopicReply
+	createPartitionsCodes []uint16
+	createAclsCodes       []uint16
+	reassignCodes         []uint16
+	meta                  codec.MetadataResponse
+	createTopicCount      int
+	createPartitionsCount int
+	createAclsCount       int
+	reassignCount         int
+	metadataCount         int
+	listMembersCount      int
+	acceptCount           int
+	ln                    net.Listener
+}
+
+func startAdmin(t *testing.T, s *adminBroker) (addr string, stop func()) {
+	t.Helper()
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	s.ln = ln
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		for {
+			conn, err := ln.Accept()
+			if err != nil {
+				return
+			}
+			s.mu.Lock()
+			s.acceptCount++
+			s.mu.Unlock()
+			go s.serve(conn)
+		}
+	}()
+	return ln.Addr().String(), func() {
+		_ = ln.Close()
+		select {
+		case <-done:
+		case <-time.After(2 * time.Second):
+		}
+	}
+}
+
+func (s *adminBroker) port() int {
+	return s.ln.Addr().(*net.TCPAddr).Port
+}
+
+func (s *adminBroker) snapshot() (createTopic, createParts, createAcls, reassign, metas, accepts int) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.createTopicCount, s.createPartitionsCount, s.createAclsCount, s.reassignCount, s.metadataCount, s.acceptCount
+}
+
+func (s *adminBroker) serve(conn net.Conn) {
+	defer conn.Close()
+	_ = conn.SetDeadline(time.Now().Add(10 * time.Second))
+	buf := []byte{}
+	tmp := make([]byte, 4096)
+	for {
+		f, rest, err := frame.TryDecode(buf)
+		if err != nil {
+			return
+		}
+		if f == nil {
+			n, err := conn.Read(tmp)
+			if n > 0 {
+				buf = append(buf, tmp[:n]...)
+			}
+			if err != nil {
+				return
+			}
+			continue
+		}
+		buf = append([]byte(nil), rest...)
+		raw, err := s.handle(f)
+		if err != nil {
+			return
+		}
+		if _, err := conn.Write(raw); err != nil {
+			return
+		}
+		_ = conn.SetDeadline(time.Now().Add(10 * time.Second))
+	}
+}
+
+func (s *adminBroker) handle(f *frame.Frame) ([]byte, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	var payload []byte
+	var err error
+	replyOp := f.Opcode
+	switch f.Opcode {
+	case codec.OpCreateTopic:
+		s.createTopicCount++
+		req, e := codec.DecodeCreateTopicRequest(f.Payload)
+		if e != nil {
+			return nil, e
+		}
+		rep := createTopicReply{}
+		if len(s.createTopicReplies) > 0 {
+			rep = s.createTopicReplies[0]
+			s.createTopicReplies = s.createTopicReplies[1:]
+		}
+		if rep.asError {
+			payload, err = codec.EncodeErrorResponse(codec.ErrorResponse{Code: rep.code, Message: rep.message})
+			replyOp = codec.OpError
+			break
+		}
+		id := uint32(0)
+		parts := uint32(0)
+		if rep.code == 0 {
+			id = 1
+			parts = req.Partitions
+		}
+		payload, err = codec.EncodeCreateTopicResponse(codec.CreateTopicResponse{
+			TopicID: id, Name: req.Name, Partitions: parts, ErrorCode: rep.code,
+		})
+	case codec.OpCreatePartitions:
+		s.createPartitionsCount++
+		req, e := codec.DecodeCreatePartitionsRequest(f.Payload)
+		if e != nil {
+			return nil, e
+		}
+		code := uint16(0)
+		if len(s.createPartitionsCodes) > 0 {
+			code = s.createPartitionsCodes[0]
+			s.createPartitionsCodes = s.createPartitionsCodes[1:]
+		}
+		n := uint32(0)
+		if code == 0 {
+			n = req.TotalCount
+		}
+		payload, err = codec.EncodeCreatePartitionsResponse(codec.CreatePartitionsResponse{
+			ErrorCode: code, Topic: req.Topic, Partitions: n,
+		})
+		replyOp = codec.OpCreatePartitionsResponse
+	case codec.OpCreateAcls:
+		s.createAclsCount++
+		code := uint16(0)
+		if len(s.createAclsCodes) > 0 {
+			code = s.createAclsCodes[0]
+			s.createAclsCodes = s.createAclsCodes[1:]
+		}
+		payload, err = codec.EncodeCreateAclsResponse(codec.CreateAclsResponse{ErrorCode: code})
+		replyOp = codec.OpCreateAclsResponse
+	case codec.OpReassignPartitions:
+		s.reassignCount++
+		code := uint16(0)
+		if len(s.reassignCodes) > 0 {
+			code = s.reassignCodes[0]
+			s.reassignCodes = s.reassignCodes[1:]
+		}
+		gen := uint32(0)
+		if code == 0 {
+			gen = 7
+		}
+		payload, err = codec.EncodeReassignPartitionsResponse(codec.ReassignPartitionsResponse{
+			ErrorCode: code, Generation: gen,
+		})
+		replyOp = codec.OpReassignPartitionsResponse
+	case codec.OpMetadata:
+		s.metadataCount++
+		payload, err = codec.EncodeMetadataResponse(s.meta)
+	case codec.OpListMembers:
+		s.listMembersCount++
+		payload, err = codec.EncodeListMembersResponse(codec.ListMembersResponse{
+			ErrorCode: 0, Generation: 0, Brokers: nil, Live: nil,
+		})
+		replyOp = codec.OpListMembersResponse
+	default:
+		return nil, &frame.ProtocolError{Msg: "unexpected opcode"}
+	}
+	if err != nil {
+		return nil, err
+	}
+	return frame.Encode(replyOp, f.CorrelationID, payload)
+}
+
+func controllerMeta(nodeID uint32, host string, port int) codec.MetadataResponse {
+	return codec.MetadataResponse{
+		Brokers: []codec.BrokerInfo{
+			{NodeID: 1, Host: "127.0.0.1", Port: 1},
+			{NodeID: nodeID, Host: host, Port: uint16(port)},
+		},
+	}
+}
+
+func otherBrokerMeta(currentPort int, host string, port int) codec.MetadataResponse {
+	return codec.MetadataResponse{
+		Brokers: []codec.BrokerInfo{
+			{NodeID: 1, Host: "127.0.0.1", Port: uint16(currentPort)},
+			{NodeID: 2, Host: host, Port: uint16(port)},
+		},
+	}
+}
+
+func brokerCode(err error) uint16 {
+	be, ok := err.(*codec.BrokerError)
+	if !ok {
+		return 0
+	}
+	return be.Code
+}
+
+func TestCreateTopicError14RedirectsViaControllerID(t *testing.T) {
+	leader := &adminBroker{}
+	_, stopL := startAdmin(t, leader)
+	defer stopL()
+	follower := &adminBroker{
+		createTopicReplies: []createTopicReply{{
+			code: notController, message: "not controller; controller_id=2", asError: true,
+		}},
+		meta: controllerMeta(2, "127.0.0.1", leader.port()),
+	}
+	fAddr, stopF := startAdmin(t, follower)
+	defer stopF()
+
+	c, err := volant.DialTimeout(fAddr, 5*time.Second)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer c.Close()
+	if err := c.CreateTopic("events", 1); err != nil {
+		t.Fatal(err)
+	}
+	ct, _, _, _, metas, _ := follower.snapshot()
+	if ct != 1 || metas != 1 {
+		t.Fatalf("follower create_topic=%d metadata=%d want 1,1", ct, metas)
+	}
+	lct, _, _, _, _, _ := leader.snapshot()
+	if lct != 1 {
+		t.Fatalf("leader create_topic=%d want 1", lct)
+	}
+}
+
+func TestCreatePartitionsError14NoHintPicksOtherBroker(t *testing.T) {
+	leader := &adminBroker{}
+	_, stopL := startAdmin(t, leader)
+	defer stopL()
+	follower := &adminBroker{
+		createPartitionsCodes: []uint16{notController},
+	}
+	fAddr, stopF := startAdmin(t, follower)
+	defer stopF()
+	follower.mu.Lock()
+	follower.meta = otherBrokerMeta(follower.port(), "127.0.0.1", leader.port())
+	follower.mu.Unlock()
+
+	c, err := volant.DialTimeout(fAddr, 5*time.Second)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer c.Close()
+	n, err := c.CreatePartitions("events", 4)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if n != 4 {
+		t.Fatalf("partitions %d want 4", n)
+	}
+	_, cp, _, _, metas, _ := follower.snapshot()
+	if cp != 1 || metas != 1 {
+		t.Fatalf("follower create_partitions=%d metadata=%d want 1,1", cp, metas)
+	}
+	_, lcp, _, _, _, _ := leader.snapshot()
+	if lcp != 1 {
+		t.Fatalf("leader create_partitions=%d want 1", lcp)
+	}
+}
+
+func TestMaxRedirectsZeroRaisesOnFirst14(t *testing.T) {
+	follower := &adminBroker{
+		createTopicReplies: []createTopicReply{{
+			code: notController, message: "not controller; controller_id=2", asError: true,
+		}},
+		meta: controllerMeta(2, "127.0.0.1", 9),
+	}
+	fAddr, stopF := startAdmin(t, follower)
+	defer stopF()
+
+	c, err := volant.DialTimeout(fAddr, 5*time.Second)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer c.Close()
+	c.SetMaxRedirects(0)
+	err = c.CreateTopic("events", 1)
+	if brokerCode(err) != notController {
+		t.Fatalf("err=%v want code 14", err)
+	}
+	ct, _, _, _, metas, accepts := follower.snapshot()
+	if ct != 1 || metas != 0 || accepts != 1 {
+		t.Fatalf("create_topic=%d metadata=%d accepts=%d want 1,0,1", ct, metas, accepts)
+	}
+}
+
+func TestHelperNoOtherBrokerRaises14(t *testing.T) {
+	follower := &adminBroker{
+		createPartitionsCodes: []uint16{notController},
+	}
+	fAddr, stopF := startAdmin(t, follower)
+	defer stopF()
+	follower.meta = codec.MetadataResponse{
+		Brokers: []codec.BrokerInfo{{NodeID: 1, Host: "127.0.0.1", Port: uint16(follower.port())}},
+	}
+
+	c, err := volant.DialTimeout(fAddr, 5*time.Second)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer c.Close()
+	_, err = c.CreatePartitions("events", 4)
+	if brokerCode(err) != notController {
+		t.Fatalf("err=%v want code 14", err)
+	}
+	_, cp, _, _, metas, _ := follower.snapshot()
+	if cp != 1 || metas != 1 {
+		t.Fatalf("create_partitions=%d metadata=%d want 1,1", cp, metas)
+	}
+}
+
+func TestHelperEmptyHostRaises14(t *testing.T) {
+	follower := &adminBroker{
+		createPartitionsCodes: []uint16{notController},
+		meta: codec.MetadataResponse{
+			Brokers: []codec.BrokerInfo{{NodeID: 2, Host: "", Port: 9092}},
+		},
+	}
+	fAddr, stopF := startAdmin(t, follower)
+	defer stopF()
+
+	c, err := volant.DialTimeout(fAddr, 5*time.Second)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer c.Close()
+	_, err = c.CreatePartitions("events", 4)
+	if brokerCode(err) != notController {
+		t.Fatalf("err=%v want code 14", err)
+	}
+	_, cp, _, _, metas, _ := follower.snapshot()
+	if cp != 1 || metas != 1 {
+		t.Fatalf("create_partitions=%d metadata=%d want 1,1", cp, metas)
+	}
+}
+
+func TestCreateAclsError14ThenOk(t *testing.T) {
+	leader := &adminBroker{}
+	_, stopL := startAdmin(t, leader)
+	defer stopL()
+	follower := &adminBroker{
+		createAclsCodes: []uint16{notController},
+	}
+	fAddr, stopF := startAdmin(t, follower)
+	defer stopF()
+	follower.mu.Lock()
+	follower.meta = otherBrokerMeta(follower.port(), "127.0.0.1", leader.port())
+	follower.mu.Unlock()
+
+	c, err := volant.DialTimeout(fAddr, 5*time.Second)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer c.Close()
+	entry := codec.AclBinding{Principal: "User:alice", ResourceType: 0, Resource: "events", Operation: 3, Permission: 1}
+	if err := c.CreateAcls([]codec.AclBinding{entry}); err != nil {
+		t.Fatal(err)
+	}
+	_, _, ca, _, metas, _ := follower.snapshot()
+	if ca != 1 || metas != 1 {
+		t.Fatalf("follower create_acls=%d metadata=%d want 1,1", ca, metas)
+	}
+	_, _, lca, _, _, _ := leader.snapshot()
+	if lca != 1 {
+		t.Fatalf("leader create_acls=%d want 1", lca)
+	}
+}
+
+func TestReassignPartitionsError14ThenOk(t *testing.T) {
+	leader := &adminBroker{}
+	_, stopL := startAdmin(t, leader)
+	defer stopL()
+	follower := &adminBroker{
+		reassignCodes: []uint16{notController},
+	}
+	fAddr, stopF := startAdmin(t, follower)
+	defer stopF()
+	follower.mu.Lock()
+	follower.meta = otherBrokerMeta(follower.port(), "127.0.0.1", leader.port())
+	follower.mu.Unlock()
+
+	c, err := volant.DialTimeout(fAddr, 5*time.Second)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer c.Close()
+	gen, err := c.ReassignPartitions("events", []uint32{1, 2}, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if gen != 7 {
+		t.Fatalf("generation %d want 7", gen)
+	}
+	_, _, _, rs, metas, _ := follower.snapshot()
+	if rs != 1 || metas != 1 {
+		t.Fatalf("follower reassign=%d metadata=%d want 1,1", rs, metas)
+	}
+	_, _, _, lrs, _, _ := leader.snapshot()
+	if lrs != 1 {
+		t.Fatalf("leader reassign=%d want 1", lrs)
+	}
+}
+
