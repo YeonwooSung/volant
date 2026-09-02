@@ -23,10 +23,11 @@ use volant_protocol::ErrorCode;
 use volant_storage::StorageConfig;
 
 use crate::cluster::{
-    cluster_metadata_topic_env_enabled, default_openraft_joint_rollback_enabled,
-    default_openraft_metadata_enabled, load_assignment, load_assignment_from_cluster_metadata,
-    load_membership_overlay, save_assignment, AssignmentConsensus, AssignmentSnapshot,
-    ClusterConfig, Membership, MetadataRaftState, OpenraftMetaHandle, OpenraftMetricsCache,
+    cluster_metadata_topic_env_enabled, default_openraft_forward_membership_enabled,
+    default_openraft_joint_rollback_enabled, default_openraft_metadata_enabled, load_assignment,
+    load_assignment_from_cluster_metadata, load_membership_overlay, save_assignment,
+    AssignmentConsensus, AssignmentSnapshot, ClusterConfig, Membership, MetadataRaftState,
+    OpenraftMetaHandle, OpenraftMetricsCache,
 };
 use crate::delete_records_outbox::DeleteRecordsOutbox;
 use crate::group::GroupCoordinator;
@@ -674,6 +675,10 @@ pub struct Broker {
     pub(crate) openraft_joint_rollback_enabled: AtomicBool,
     /// v0.34 test hook: next leader `change_membership` returns fail.
     pub(crate) openraft_fail_next_change_membership: AtomicBool,
+    /// v0.38: followers forward Add/RemoveBroker to the openraft leader. Default **on**.
+    pub(crate) openraft_forward_membership_enabled: AtomicBool,
+    /// v0.38: in-flight membership forward (A↔B loop guard).
+    pub(crate) openraft_membership_forward_inflight: AtomicU32,
     /// v0.12: append assignment snapshots to `__cluster_metadata`. Default **off**
     /// (`VOLANT_CLUSTER_METADATA_TOPIC`).
     cluster_metadata_topic_enabled: AtomicBool,
@@ -938,6 +943,10 @@ impl Broker {
                 default_openraft_joint_rollback_enabled(),
             ),
             openraft_fail_next_change_membership: AtomicBool::new(false),
+            openraft_forward_membership_enabled: AtomicBool::new(
+                default_openraft_forward_membership_enabled(),
+            ),
+            openraft_membership_forward_inflight: AtomicU32::new(0),
             cluster_metadata_topic_enabled: AtomicBool::new(cluster_metadata_topic_env_enabled()),
             partition_raft_new_topics: AtomicBool::new(partition_raft_env_enabled()),
             partition_rafts: Mutex::new(HashMap::new()),
@@ -1147,6 +1156,10 @@ impl Broker {
                 default_openraft_joint_rollback_enabled(),
             ),
             openraft_fail_next_change_membership: AtomicBool::new(false),
+            openraft_forward_membership_enabled: AtomicBool::new(
+                default_openraft_forward_membership_enabled(),
+            ),
+            openraft_membership_forward_inflight: AtomicU32::new(0),
             cluster_metadata_topic_enabled: AtomicBool::new(cluster_metadata_topic_env_enabled()),
             partition_raft_new_topics: AtomicBool::new(partition_raft_env_enabled()),
             partition_rafts: Mutex::new(HashMap::new()),

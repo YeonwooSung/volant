@@ -22,6 +22,7 @@ use super::fanout::{
     schedule_catch_up_peer_admin_state, schedule_catch_up_peer_truncate_journal,
     schedule_isr_update_reports, schedule_session_mirror_fanout, snapshot_if_must_wait,
 };
+use super::inter_broker_rpc;
 
 /// Dispatch one framed request with connection auth / SCRAM state (plaintext + TLS).
 pub async fn dispatch_with_auth(
@@ -1320,6 +1321,18 @@ async fn handle_request(broker: &Arc<Broker>, req: Request) -> Result<Response> 
             port,
             rack,
         } => {
+            if broker.should_forward_membership() {
+                return Ok(forward_membership_to_leader(
+                    broker,
+                    Request::AddBroker {
+                        id,
+                        host,
+                        port,
+                        rack,
+                    },
+                )
+                .await);
+            }
             let prev = broker.snapshot_membership_overlay();
             match broker.add_broker(id, host, port, rack) {
                 Ok(generation) => {
@@ -1337,6 +1350,11 @@ async fn handle_request(broker: &Arc<Broker>, req: Request) -> Result<Response> 
             }
         }
         Request::RemoveBroker { id } => {
+            if broker.should_forward_membership() {
+                return Ok(
+                    forward_membership_to_leader(broker, Request::RemoveBroker { id }).await,
+                );
+            }
             let prev = broker.snapshot_membership_overlay();
             match broker.remove_broker(id) {
                 Ok(generation) => {
@@ -1907,8 +1925,81 @@ fn acl_entry_to_wire(e: crate::acl::AclEntry) -> volant_protocol::AclBinding {
     }
 }
 
+/// Native **NotController (14)** when there is no openraft leader or the
+/// forward RPC fails. Local overlay is unchanged. Distinct from leader
+/// joint-fail **NotEnoughReplicas (15)**.
+fn membership_forward_unavailable(broker: &Broker, req: &Request) -> Response {
+    let error_code = ErrorCode::NotController as u16;
+    let generation = broker.membership_generation();
+    match req {
+        Request::AddBroker { .. } => Response::AddBroker {
+            error_code,
+            generation,
+        },
+        Request::RemoveBroker { .. } => Response::RemoveBroker {
+            error_code,
+            generation,
+        },
+        _ => Response::Error {
+            code: error_code,
+            message: "not controller".into(),
+        },
+    }
+}
+
+/// v0.38: send the same AddBroker / RemoveBroker body to `controller_id()`.
+///
+/// Does not persist overlay on this (follower) node. A second inbound
+/// membership mutate while a forward is in flight returns 14 so A↔B
+/// leadership-split cannot recurse.
+async fn forward_membership_to_leader(broker: &Broker, req: Request) -> Response {
+    let leader = broker.controller_id();
+    if leader == 0 || leader == broker.node_id() {
+        return membership_forward_unavailable(broker, &req);
+    }
+    let Some(addr) = broker.broker_addr(leader) else {
+        return membership_forward_unavailable(broker, &req);
+    };
+    if !broker.membership_forward_try_enter() {
+        return membership_forward_unavailable(broker, &req);
+    }
+    struct ForwardGuard<'a>(&'a Broker);
+    impl Drop for ForwardGuard<'_> {
+        fn drop(&mut self) {
+            self.0.membership_forward_exit();
+        }
+    }
+    let _guard = ForwardGuard(broker);
+    let result = inter_broker_rpc(broker, &addr, &req).await;
+    match result {
+        Ok(resp) => match &resp {
+            Response::AddBroker { .. } | Response::RemoveBroker { .. } | Response::Error { .. } => {
+                resp
+            }
+            other => {
+                warn!(
+                    ?other,
+                    leader, "membership forward: unexpected leader response"
+                );
+                membership_forward_unavailable(broker, &req)
+            }
+        },
+        Err(e) => {
+            warn!(
+                error = %e,
+                leader,
+                %addr,
+                "membership forward to openraft leader failed"
+            );
+            membership_forward_unavailable(broker, &req)
+        }
+    }
+}
+
 /// After overlay add/remove: leader joint-sync (rollback on fail) or v0.26
-/// best-effort. Followers and flag-off keep persist + MembershipPut.
+/// best-effort. Followers with openraft + forward on never reach here
+/// (v0.38). Flag-off and `VOLANT_OPENRAFT_FORWARD_MEMBERSHIP=0` keep
+/// persist + MembershipPut.
 async fn after_overlay_mutation(
     broker: &Broker,
     prev: &MembershipOverlaySnapshot,

@@ -15,6 +15,10 @@
 //! v0.34: leader AddBroker / RemoveBroker rolls back
 //! `{data_dir}/cluster/membership.json` when `change_membership` fails
 //! (`VOLANT_OPENRAFT_JOINT_ROLLBACK` default **on**).
+//!
+//! v0.38: followers do not persist overlay; they forward AddBroker /
+//! RemoveBroker to the openraft leader (`VOLANT_OPENRAFT_FORWARD_MEMBERSHIP`
+//! default **on**).
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::fmt;
@@ -1142,6 +1146,45 @@ impl Broker {
             && self.is_controller()
     }
 
+    /// Whether followers forward Add/RemoveBroker to the openraft leader.
+    ///
+    /// Default **on**. `VOLANT_OPENRAFT_FORWARD_MEMBERSHIP=0` restores
+    /// follower-local overlay write (v0.10 split-brain).
+    pub fn openraft_forward_membership_enabled(&self) -> bool {
+        self.openraft_forward_membership_enabled
+            .load(Ordering::Relaxed)
+    }
+
+    /// Runtime setter for [`Self::openraft_forward_membership_enabled`].
+    pub fn set_openraft_forward_membership(&self, on: bool) {
+        self.openraft_forward_membership_enabled
+            .store(on, Ordering::Relaxed);
+    }
+
+    /// Openraft on, forward on, clustered, and this node is not the leader.
+    ///
+    /// Dispatch uses this to skip local overlay persist and RPC the same
+    /// AddBroker / RemoveBroker body to `controller_id()`.
+    pub fn should_forward_membership(&self) -> bool {
+        self.openraft_metadata_enabled()
+            && self.openraft_forward_membership_enabled()
+            && self.cluster_config().is_some()
+            && !self.is_controller()
+    }
+
+    /// True if this is the first in-flight membership forward (loop guard).
+    pub(crate) fn membership_forward_try_enter(&self) -> bool {
+        self.openraft_membership_forward_inflight
+            .compare_exchange(0, 1, Ordering::SeqCst, Ordering::SeqCst)
+            .is_ok()
+    }
+
+    /// Clear the v0.38 membership-forward in-flight flag.
+    pub(crate) fn membership_forward_exit(&self) {
+        self.openraft_membership_forward_inflight
+            .store(0, Ordering::SeqCst);
+    }
+
     /// Test hook: next leader `change_membership` attempt returns fail.
     pub fn fail_next_change_membership(&self) {
         self.openraft_fail_next_change_membership
@@ -1583,6 +1626,23 @@ pub fn default_openraft_metadata_enabled() -> bool {
 /// when `change_membership` fails). Unset and any other value keep rollback.
 pub fn default_openraft_joint_rollback_enabled() -> bool {
     match std::env::var("VOLANT_OPENRAFT_JOINT_ROLLBACK") {
+        Ok(s) => {
+            let t = s.trim();
+            !(t == "0"
+                || t.eq_ignore_ascii_case("false")
+                || t.eq_ignore_ascii_case("no")
+                || t.eq_ignore_ascii_case("off"))
+        }
+        Err(_) => true,
+    }
+}
+
+/// Parse `VOLANT_OPENRAFT_FORWARD_MEMBERSHIP`. Default **on**.
+///
+/// `0` / `false` / `no` / `off` restores follower-local overlay write
+/// (v0.10). Unset and any other value keep leader forward.
+pub fn default_openraft_forward_membership_enabled() -> bool {
+    match std::env::var("VOLANT_OPENRAFT_FORWARD_MEMBERSHIP") {
         Ok(s) => {
             let t = s.trim();
             !(t == "0"
