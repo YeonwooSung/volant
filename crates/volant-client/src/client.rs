@@ -972,9 +972,13 @@ impl Client {
         Ok(p)
     }
 
+    /// Default Fetch `max_bytes` (4 MiB).
+    const DEFAULT_FETCH_MAX_BYTES: u32 = 4 * 1024 * 1024;
+
     /// Fetch records from a partition.
     ///
     /// On `NotLeaderForPartition`, reconnects to the leader and retries.
+    /// `max_bytes` is the default 4 MiB; use [`Self::fetch_opts`] to set it.
     pub async fn fetch(
         &self,
         topic: &str,
@@ -982,6 +986,29 @@ impl Client {
         from: Offset,
         max_messages: u32,
         max_wait_ms: u32,
+    ) -> Result<FetchResult> {
+        self.fetch_opts(
+            topic,
+            partition,
+            from,
+            max_messages,
+            max_wait_ms,
+            Self::DEFAULT_FETCH_MAX_BYTES,
+        )
+        .await
+    }
+
+    /// Fetch records from a partition with an explicit `max_bytes`.
+    ///
+    /// Same leader-redirect behaviour as [`Self::fetch`].
+    pub async fn fetch_opts(
+        &self,
+        topic: &str,
+        partition: u32,
+        from: Offset,
+        max_messages: u32,
+        max_wait_ms: u32,
+        max_bytes: u32,
     ) -> Result<FetchResult> {
         let max_attempts = 1 + self.config.max_redirects;
         let mut attempt = 0u32;
@@ -993,7 +1020,7 @@ impl Client {
                     partition,
                     from_offset: from.raw(),
                     max_messages,
-                    max_bytes: 4 * 1024 * 1024,
+                    max_bytes,
                     max_wait_ms,
                 })
                 .await?;

@@ -17,6 +17,10 @@
 //! which replaces the fetch set from DescribeGroup members via
 //! `range_assign_multi`. Default remains broker JoinGroup assignment.
 //! Still no SyncGroup.
+//! v0.76 adds opt-in [`GroupConsumer::join_with_fetch_knobs`] so
+//! `poll` can set Fetch `max_messages` / `max_bytes` (default **100 /
+//! 4 MiB**; `0` clamps to those). [`Client::fetch_opts`] exposes
+//! `max_bytes`; [`Client::fetch`] still uses 4 MiB.
 
 #![deny(missing_docs)]
 
