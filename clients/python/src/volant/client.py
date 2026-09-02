@@ -1486,41 +1486,46 @@ class Client:
 
         ``iterations=0`` means the broker default (4096). Password is sent
         in the clear (use TLS). This is not the v0.46 handshake (60–63).
+        Error 14 follows ``max_redirects``.
         """
         payload = codec.encode_create_scram_user_request(
             codec.CreateScramUserRequest(
                 username=username, password=password, iterations=iterations
             )
         )
-        resp = self._round_trip(codec.OP_CREATE_SCRAM_USER, payload)
-        if not isinstance(resp, codec.CreateScramUserResponse):
-            raise ProtocolError(
-                f"unexpected response for create_scram_user: {type(resp)}"
-            )
-        self._check(resp.error_code, "create_scram_user")
+        self._admin_round_trip(
+            codec.OP_CREATE_SCRAM_USER,
+            payload,
+            codec.CreateScramUserResponse,
+            "create_scram_user",
+        )
 
     def delete_scram_user(self, username: str) -> None:
-        """Delete a SCRAM user (native opcode 66/67)."""
+        """Delete a SCRAM user (native opcode 66/67).
+
+        Error 14 follows ``max_redirects``.
+        """
         payload = codec.encode_delete_scram_user_request(
             codec.DeleteScramUserRequest(username=username)
         )
-        resp = self._round_trip(codec.OP_DELETE_SCRAM_USER, payload)
-        if not isinstance(resp, codec.DeleteScramUserResponse):
-            raise ProtocolError(
-                f"unexpected response for delete_scram_user: {type(resp)}"
-            )
-        self._check(resp.error_code, "delete_scram_user")
+        self._admin_round_trip(
+            codec.OP_DELETE_SCRAM_USER,
+            payload,
+            codec.DeleteScramUserResponse,
+            "delete_scram_user",
+        )
 
     def list_scram_users(self) -> list[str]:
-        """List SCRAM usernames (native opcode 68/69)."""
-        resp = self._round_trip(
-            codec.OP_LIST_SCRAM_USERS, codec.encode_list_scram_users_request()
+        """List SCRAM usernames (native opcode 68/69).
+
+        Error 14 follows ``max_redirects``.
+        """
+        resp = self._admin_round_trip(
+            codec.OP_LIST_SCRAM_USERS,
+            codec.encode_list_scram_users_request(),
+            codec.ListScramUsersResponse,
+            "list_scram_users",
         )
-        if not isinstance(resp, codec.ListScramUsersResponse):
-            raise ProtocolError(
-                f"unexpected response for list_scram_users: {type(resp)}"
-            )
-        self._check(resp.error_code, "list_scram_users")
         return list(resp.usernames)
 
     def create_acls(self, entries: list[codec.AclBinding]) -> None:
@@ -1564,16 +1569,16 @@ class Client:
         Empty ``principal`` / ``resource`` = any. ``resource_type=255`` =
         any type. This is not Kafka DescribeAcls (API key 29). Non-zero
         ``error_code`` raises :class:`BrokerError` with ``op="list_acls"``.
+        Error 14 follows ``max_redirects``.
         """
         payload = codec.encode_list_acls_request(
             codec.ListAclsRequest(
                 principal=principal, resource_type=resource_type, resource=resource
             )
         )
-        resp = self._round_trip(codec.OP_LIST_ACLS, payload)
-        if not isinstance(resp, codec.ListAclsResponse):
-            raise ProtocolError(f"unexpected response for list_acls: {type(resp)}")
-        self._check(resp.error_code, "list_acls")
+        resp = self._admin_round_trip(
+            codec.OP_LIST_ACLS, payload, codec.ListAclsResponse, "list_acls"
+        )
         return list(resp.entries)
 
 
