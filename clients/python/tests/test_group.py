@@ -174,6 +174,32 @@ class TestGroupConsumer(unittest.TestCase):
         self.assertEqual(g.session_timeout_ms, 10_000)
         self.assertEqual(c.joins[0]["session_timeout_ms"], 10_000)
 
+    def test_join_sends_group_instance_id(self) -> None:
+        c = FakeClient()
+        g = GroupConsumer.join(c, "g", ["t"], group_instance_id="inst-1")
+        self.assertEqual(c.joins[0]["group_instance_id"], "inst-1")
+        self.assertEqual(c.joins[0]["member_id"], "")
+        self.assertEqual(g.group_instance_id, "inst-1")
+
+    def test_join_default_is_dynamic(self) -> None:
+        c = FakeClient()
+        g = GroupConsumer.join(c, "g", ["t"])
+        self.assertEqual(c.joins[0]["group_instance_id"], "")
+        self.assertEqual(g.group_instance_id, "")
+
+    def test_rejoin_keeps_group_instance_id(self) -> None:
+        c = FakeClient()
+        c.join_queue.append(_join([("t", 0)], generation=1))
+        c.join_queue.append(_join([("t", 0)], member_id="m1", generation=2))
+        c.heartbeat_codes.append(9)
+        g = GroupConsumer.join(c, "g", ["t"], group_instance_id="inst-1")
+        g.poll()
+        self.assertEqual(len(c.joins), 2)
+        self.assertEqual(c.joins[0]["group_instance_id"], "inst-1")
+        self.assertEqual(c.joins[1]["group_instance_id"], "inst-1")
+        self.assertEqual(c.joins[1]["member_id"], "m1")
+        self.assertEqual(g.group_instance_id, "inst-1")
+
     def test_poll_fetches_and_advances(self) -> None:
         c = FakeClient()
         c.join_queue.append(_join([("t", 0)]))

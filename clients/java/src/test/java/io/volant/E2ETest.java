@@ -181,6 +181,20 @@ class E2ETest {
     }
 
     @Test
+    void groupConsumerStaticMembership() {
+        String topic = "java-static-" + ProcessHandle.current().pid() + "-" + System.nanoTime();
+        String group = "java-staticg-" + ProcessHandle.current().pid();
+        try (Client c = Client.connect(host, port, 5_000)) {
+            c.createTopic(topic, 1);
+            try (GroupConsumer g = GroupConsumer.joinStatic(c, group, List.of(topic), 10_000, "inst-1")) {
+                assertEquals("inst-1", g.groupInstanceId());
+                assertEquals("static:inst-1", g.memberId());
+            }
+            c.deleteTopic(topic);
+        }
+    }
+
+    @Test
     void joinHeartbeatLeave() {
         String topic = "java-grp-" + ProcessHandle.current().pid() + "-" + System.nanoTime();
         String group = "java-cg-" + ProcessHandle.current().pid();

@@ -96,7 +96,11 @@ class GroupConsumer:
         *,
         group_instance_id: str = "",
     ) -> GroupConsumer:
-        """Join ``group`` on ``topics``. Empty ``member_id`` on first join."""
+        """Join ``group`` on ``topics``. Empty ``member_id`` on first join.
+
+        ``group_instance_id`` is Phase 12 static membership (empty = dynamic).
+        Re-join after error 9/10/11 resends the same instance id.
+        """
         timeout = (
             _DEFAULT_SESSION_TIMEOUT_MS
             if session_timeout_ms == 0
@@ -280,3 +284,7 @@ class GroupConsumer:
     @property
     def session_timeout_ms(self) -> int:
         return self._session_timeout_ms
+
+    @property
+    def group_instance_id(self) -> str:
+        return self._group_instance_id

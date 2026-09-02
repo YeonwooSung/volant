@@ -870,6 +870,29 @@ with member+generation, rejoin on error 9. Codec and mock unit tests
 need no broker; live commit/fetch + resume is `VOLANT_E2E=1`. See
 [V33_SPEC.md](./V33_SPEC.md).
 
+## v0.36 static membership
+
+Python / Go / Java `GroupConsumer` can send Phase 12
+`group_instance_id` on JoinGroup. Empty id is dynamic (today). Re-join
+after error 9 resends the same instance id. Broker still assigns
+`static:{id}` when the instance is set and `member_id` is empty.
+
+```python
+GroupConsumer.join(c, "g", ["t"], 10_000, group_instance_id="inst-1")
+```
+
+```go
+g, err := volant.JoinGroupConsumerStatic(c, "g", []string{"t"}, 10_000, "inst-1")
+```
+
+```java
+GroupConsumer g = GroupConsumer.joinStatic(c, "g", List.of("t"), 10_000, "inst-1");
+```
+
+Unit / fake tests need no broker; live `member_id = static:inst-1` is
+`VOLANT_E2E=1`. Does not change the broker. See
+[V36_SPEC.md](./V36_SPEC.md).
+
 ## Shipped (not gaps)
 
 Kafka wire shim **Phases 23–109** (ApiVersions **0–5**, Fetch **0–18**, ACL admin

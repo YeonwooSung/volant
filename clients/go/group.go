@@ -62,9 +62,16 @@ type GroupConsumer struct {
 }
 
 // JoinGroupConsumer joins a consumer group on the given topics.
-// sessionTimeoutMs 0 defaults to 10000.
+// sessionTimeoutMs 0 defaults to 10000. Dynamic membership (empty instance id).
 func JoinGroupConsumer(c *Client, group string, topics []string, sessionTimeoutMs int) (*GroupConsumer, error) {
 	return joinGroupConsumer(c, group, topics, sessionTimeoutMs, "")
+}
+
+// JoinGroupConsumerStatic joins with Phase 12 static membership.
+// Empty groupInstanceID is dynamic (same as JoinGroupConsumer).
+// Re-join after error 9/10/11 resends the same instance id.
+func JoinGroupConsumerStatic(c *Client, group string, topics []string, sessionTimeoutMs int, groupInstanceID string) (*GroupConsumer, error) {
+	return joinGroupConsumer(c, group, topics, sessionTimeoutMs, groupInstanceID)
 }
 
 func joinGroupConsumer(c *Client, group string, topics []string, sessionTimeoutMs int, instanceID string) (*GroupConsumer, error) {
@@ -326,6 +333,14 @@ func (g *GroupConsumer) GroupID() string {
 		return ""
 	}
 	return g.groupID
+}
+
+// GroupInstanceID is the Phase 12 static membership id (empty = dynamic).
+func (g *GroupConsumer) GroupInstanceID() string {
+	if g == nil {
+		return ""
+	}
+	return g.groupInstanceID
 }
 
 // Positions returns next-read offsets for assigned partitions.

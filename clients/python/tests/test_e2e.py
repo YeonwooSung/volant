@@ -269,6 +269,23 @@ class TestE2E(unittest.TestCase):
             c1.close()
             c2.close()
 
+    def test_group_consumer_static_membership(self) -> None:
+        topic = f"py-static-{os.getpid()}-{int(time.time())}"
+        group = f"py-staticg-{os.getpid()}"
+        with Client(self.addr, timeout=5.0) as c:
+            c.create_topic(topic, partitions=1)
+            g = GroupConsumer.join(
+                c,
+                group=group,
+                topics=[topic],
+                session_timeout_ms=10_000,
+                group_instance_id="inst-1",
+            )
+            self.assertEqual(g.group_instance_id, "inst-1")
+            self.assertEqual(g.member_id, "static:inst-1")
+            g.close()
+            c.delete_topic(topic)
+
 
 if __name__ == "__main__":
     unittest.main()

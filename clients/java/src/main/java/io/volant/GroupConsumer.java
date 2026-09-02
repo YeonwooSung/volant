@@ -18,6 +18,7 @@ import java.util.Set;
  *
  * <pre>
  * GroupConsumer g = GroupConsumer.join(c, "g", List.of("t"), 10_000);
+ * GroupConsumer s = GroupConsumer.joinStatic(c, "g", List.of("t"), 10_000, "inst-1");
  * List&lt;Record&gt; recs = g.poll(500);
  * g.commit();
  * g.close();
@@ -38,6 +39,8 @@ public final class GroupConsumer implements AutoCloseable {
     private final String groupId;
     private final List<String> topics;
     private final int sessionTimeoutMs;
+    /** Phase 12 static membership; empty = dynamic. */
+    private final String groupInstanceId;
     private String memberId = "";
     private long generation;
     private List<Codec.Assignment> assignment = Collections.emptyList();
@@ -46,29 +49,50 @@ public final class GroupConsumer implements AutoCloseable {
     private boolean closed;
 
     GroupConsumer(Backend backend, String groupId, List<String> topics, int sessionTimeoutMs) {
+        this(backend, groupId, topics, sessionTimeoutMs, "");
+    }
+
+    GroupConsumer(
+            Backend backend, String groupId, List<String> topics, int sessionTimeoutMs, String groupInstanceId) {
         this.backend = backend;
         this.groupId = groupId;
         this.topics = topics == null
                 ? Collections.emptyList()
                 : Collections.unmodifiableList(new ArrayList<>(topics));
         this.sessionTimeoutMs = sessionTimeoutMs;
+        this.groupInstanceId = groupInstanceId == null ? "" : groupInstanceId;
     }
 
     /** Join a consumer group on the given topics. {@code sessionTimeoutMs} 0 defaults to 10000. */
     public static GroupConsumer join(Client client, String group, List<String> topics, int sessionTimeoutMs) {
-        return join(new ClientBackend(client), group, topics, sessionTimeoutMs);
+        return joinStatic(client, group, topics, sessionTimeoutMs, "");
+    }
+
+    /**
+     * Join with Phase 12 static membership. Empty {@code groupInstanceId} is
+     * dynamic (same as {@link #join}). Re-join after error 9/10/11 resends the
+     * same instance id.
+     */
+    public static GroupConsumer joinStatic(
+            Client client, String group, List<String> topics, int sessionTimeoutMs, String groupInstanceId) {
+        return join(new ClientBackend(client), group, topics, sessionTimeoutMs, groupInstanceId);
     }
 
     static GroupConsumer join(Backend backend, String group, List<String> topics, int sessionTimeoutMs) {
+        return join(backend, group, topics, sessionTimeoutMs, "");
+    }
+
+    static GroupConsumer join(
+            Backend backend, String group, List<String> topics, int sessionTimeoutMs, String groupInstanceId) {
         int timeout = sessionTimeoutMs == 0 ? 10_000 : sessionTimeoutMs;
-        GroupConsumer g = new GroupConsumer(backend, group, topics, timeout);
+        GroupConsumer g = new GroupConsumer(backend, group, topics, timeout, groupInstanceId);
         g.doJoin();
         return g;
     }
 
     private void doJoin() {
         List<Codec.Assignment> previous = new ArrayList<>(assignment);
-        JoinGroupResult result = backend.joinGroup(groupId, memberId, topics, sessionTimeoutMs);
+        JoinGroupResult result = backend.joinGroup(groupId, memberId, topics, sessionTimeoutMs, groupInstanceId);
         memberId = result.memberId;
         generation = result.generation;
         List<Codec.Assignment> newAssignment = new ArrayList<>(result.assignment);
@@ -201,6 +225,11 @@ public final class GroupConsumer implements AutoCloseable {
         return groupId;
     }
 
+    /** Phase 12 static membership id (empty = dynamic). */
+    public String groupInstanceId() {
+        return groupInstanceId;
+    }
+
     public String memberId() {
         return memberId;
     }
@@ -286,7 +315,8 @@ public final class GroupConsumer implements AutoCloseable {
 
     /** Package-visible so unit tests can inject a fake broker. */
     interface Backend {
-        JoinGroupResult joinGroup(String group, String memberId, List<String> topics, int sessionTimeoutMs);
+        JoinGroupResult joinGroup(
+                String group, String memberId, List<String> topics, int sessionTimeoutMs, String groupInstanceId);
 
         void heartbeat(String group, String memberId, long generation);
 
@@ -307,8 +337,9 @@ public final class GroupConsumer implements AutoCloseable {
         }
 
         @Override
-        public JoinGroupResult joinGroup(String group, String memberId, List<String> topics, int sessionTimeoutMs) {
-            return client.joinGroup(group, memberId, topics, sessionTimeoutMs);
+        public JoinGroupResult joinGroup(
+                String group, String memberId, List<String> topics, int sessionTimeoutMs, String groupInstanceId) {
+            return client.joinGroup(group, memberId, topics, sessionTimeoutMs, groupInstanceId);
         }
 
         @Override
