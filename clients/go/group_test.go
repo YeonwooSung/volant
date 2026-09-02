@@ -377,6 +377,10 @@ func TestPollHeartbeatAndFetchAdvancesPositions(t *testing.T) {
 	if len(fetches) != 1 || fetches[0].FromOffset != 0 || fetches[0].MaxWaitMs == 0 {
 		t.Fatalf("fetches %+v (want from=0 and max_wait>0)", fetches)
 	}
+	_, _, commits, _, _, _ := s.snapshot()
+	if len(commits) != 0 {
+		t.Fatalf("commits=%d want 0 (auto-commit default off)", len(commits))
+	}
 }
 
 func TestPollZeroTimeoutIsNonBlocking(t *testing.T) {
@@ -758,6 +762,175 @@ func TestBackgroundHeartbeatRejoinsOnError9(t *testing.T) {
 	joins, _, _, _, _, _ := s.snapshot()
 	if len(joins) < 2 {
 		t.Fatalf("joins=%d want >= 2", len(joins))
+	}
+}
+
+func TestPollDoesNotAutoCommitByDefault(t *testing.T) {
+	s := newFakeGroupBroker()
+	s.setAssignment([]codec.Assignment{{Topic: "t", Partition: 0}}, nil)
+	s.records[tpKey{"t", 0}] = []codec.FetchRecord{{Offset: 0, Value: []byte("a")}}
+	addr, stop := startFakeGroup(t, s)
+	defer stop()
+
+	c, err := volant.DialTimeout(addr, 5*time.Second)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer c.Close()
+
+	g, err := volant.JoinGroupConsumer(c, "g", []string{"t"}, 10_000, volant.WithBackgroundHeartbeat(false))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer g.Close()
+
+	recs, err := g.Poll(0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(recs) != 1 {
+		t.Fatalf("len(recs)=%d want 1", len(recs))
+	}
+	_, _, commits, _, _, _ := s.snapshot()
+	if len(commits) != 0 {
+		t.Fatalf("commits=%d want 0", len(commits))
+	}
+}
+
+func TestAutoCommitIntervalZeroCommitsAfterPoll(t *testing.T) {
+	s := newFakeGroupBroker()
+	s.setAssignment([]codec.Assignment{{Topic: "t", Partition: 0}}, nil)
+	s.records[tpKey{"t", 0}] = []codec.FetchRecord{{Offset: 0, Value: []byte("a")}}
+	addr, stop := startFakeGroup(t, s)
+	defer stop()
+
+	c, err := volant.DialTimeout(addr, 5*time.Second)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer c.Close()
+
+	g, err := volant.JoinGroupConsumer(c, "g", []string{"t"}, 10_000,
+		volant.WithBackgroundHeartbeat(false), volant.WithAutoCommit(0))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer g.Close()
+
+	recs, err := g.Poll(0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(recs) != 1 {
+		t.Fatalf("len(recs)=%d want 1", len(recs))
+	}
+	_, _, commits, _, _, _ := s.snapshot()
+	if len(commits) != 1 {
+		t.Fatalf("commits=%d want 1", len(commits))
+	}
+	cm := commits[0]
+	if cm.GroupID != "g" || cm.MemberID != "m-1" || cm.Generation != 1 {
+		t.Fatalf("commit meta %+v", cm)
+	}
+	if len(cm.Entries) != 1 || cm.Entries[0].Offset != 1 {
+		t.Fatalf("commit entries %+v", cm.Entries)
+	}
+}
+
+func TestAutoCommitIntervalFirstPollOnly(t *testing.T) {
+	s := newFakeGroupBroker()
+	s.setAssignment([]codec.Assignment{{Topic: "t", Partition: 0}}, nil)
+	s.records[tpKey{"t", 0}] = []codec.FetchRecord{{Offset: 0, Value: []byte("a")}}
+	addr, stop := startFakeGroup(t, s)
+	defer stop()
+
+	c, err := volant.DialTimeout(addr, 5*time.Second)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer c.Close()
+
+	g, err := volant.JoinGroupConsumer(c, "g", []string{"t"}, 10_000,
+		volant.WithBackgroundHeartbeat(false), volant.WithAutoCommit(10*time.Second))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer g.Close()
+
+	if _, err := g.Poll(0); err != nil {
+		t.Fatal(err)
+	}
+	_, _, commits, _, _, _ := s.snapshot()
+	if len(commits) != 1 {
+		t.Fatalf("after first poll commits=%d want 1", len(commits))
+	}
+
+	s.mu.Lock()
+	s.records[tpKey{"t", 0}] = append(s.records[tpKey{"t", 0}], codec.FetchRecord{Offset: 1, Value: []byte("b")})
+	s.mu.Unlock()
+
+	if recs, err := g.Poll(0); err != nil {
+		t.Fatal(err)
+	} else if len(recs) != 1 {
+		t.Fatalf("second poll recs=%d want 1", len(recs))
+	}
+	_, _, commits, _, _, _ = s.snapshot()
+	if len(commits) != 1 {
+		t.Fatalf("after second poll commits=%d want 1", len(commits))
+	}
+}
+
+func TestAutoCommitCloseCommitsPendingThenLeaves(t *testing.T) {
+	s := newFakeGroupBroker()
+	s.setAssignment([]codec.Assignment{{Topic: "t", Partition: 0}}, nil)
+	s.records[tpKey{"t", 0}] = []codec.FetchRecord{{Offset: 0, Value: []byte("a")}}
+	addr, stop := startFakeGroup(t, s)
+	defer stop()
+
+	c, err := volant.DialTimeout(addr, 5*time.Second)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer c.Close()
+
+	g, err := volant.JoinGroupConsumer(c, "g", []string{"t"}, 10_000,
+		volant.WithBackgroundHeartbeat(false), volant.WithAutoCommit(10*time.Second))
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	if _, err := g.Poll(0); err != nil {
+		t.Fatal(err)
+	}
+	s.mu.Lock()
+	s.records[tpKey{"t", 0}] = append(s.records[tpKey{"t", 0}], codec.FetchRecord{Offset: 1, Value: []byte("b")})
+	s.mu.Unlock()
+	if _, err := g.Poll(0); err != nil {
+		t.Fatal(err)
+	}
+	_, _, commits, _, leaves, _ := s.snapshot()
+	if len(commits) != 1 {
+		t.Fatalf("before Close commits=%d want 1", len(commits))
+	}
+	if len(leaves) != 0 {
+		t.Fatalf("leaves before Close: %+v", leaves)
+	}
+
+	if err := g.Close(); err != nil {
+		t.Fatal(err)
+	}
+	_, _, commits, _, leaves, _ = s.snapshot()
+	if len(commits) != 2 {
+		t.Fatalf("after Close commits=%d want 2", len(commits))
+	}
+	if len(commits[1].Entries) != 1 || commits[1].Entries[0].Offset != 2 {
+		t.Fatalf("close commit entries %+v", commits[1].Entries)
+	}
+	if commits[1].MemberID != "m-1" || commits[1].Generation != 1 {
+		t.Fatalf("close commit meta %+v", commits[1])
+	}
+	if len(leaves) != 1 || leaves[0].MemberID != "m-1" {
+		t.Fatalf("leaves %+v", leaves)
 	}
 }
 

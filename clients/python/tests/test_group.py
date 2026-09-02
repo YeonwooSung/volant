@@ -230,6 +230,7 @@ class TestGroupConsumer(unittest.TestCase):
         self.assertEqual(g.positions, {("t", 0): 2})
         self.assertEqual(c.heartbeats, [("g", "m1", 1)])
         self.assertEqual(c.fetches, [("t", 0, 0, 500)])
+        self.assertEqual(c.commits, [])
 
     def test_commit_uses_joined_member_and_generation(self) -> None:
         c = FakeClient()
@@ -415,6 +416,72 @@ class TestGroupConsumer(unittest.TestCase):
         time.sleep(0.35)
         self.assertEqual(c.heartbeat_snapshot(), [])
         g.close()
+
+    def test_poll_does_not_autocommit_by_default(self) -> None:
+        c = FakeClient()
+        c.join_queue.append(_join([("t", 0)]))
+        c.log[("t", 0)] = [_rec(0, b"a")]
+        g = _gc(c, "g", ["t"])
+        recs = g.poll()
+        self.assertEqual(len(recs), 1)
+        self.assertEqual(c.commits, [])
+        g.close()
+        self.assertEqual(c.commits, [])
+
+    def test_autocommit_interval_zero_commits_after_poll(self) -> None:
+        c = FakeClient()
+        c.join_queue.append(_join([("t", 0)]))
+        c.log[("t", 0)] = [_rec(0, b"a")]
+        g = _gc(c, "g", ["t"], auto_commit=True, auto_commit_interval_ms=0)
+        recs = g.poll()
+        self.assertEqual(len(recs), 1)
+        self.assertEqual(len(c.commits), 1)
+        commit = c.commits[0]
+        self.assertEqual(commit["member_id"], "m1")
+        self.assertEqual(commit["generation"], 1)
+        self.assertEqual(commit["offset"], 1)
+        self.assertEqual(commit["group"], "g")
+
+    def test_autocommit_interval_first_poll_only(self) -> None:
+        c = FakeClient()
+        c.join_queue.append(_join([("t", 0)]))
+        c.log[("t", 0)] = [_rec(0, b"a")]
+        g = _gc(c, "g", ["t"], auto_commit=True, auto_commit_interval_ms=10_000)
+        self.assertEqual(len(g.poll()), 1)
+        self.assertEqual(len(c.commits), 1)
+        c.log[("t", 0)].append(_rec(1, b"b"))
+        self.assertEqual(len(g.poll()), 1)
+        self.assertEqual(len(c.commits), 1)
+
+    def test_autocommit_close_commits_pending_then_leaves(self) -> None:
+        c = FakeClient()
+        c.join_queue.append(_join([("t", 0)]))
+        c.log[("t", 0)] = [_rec(0, b"a")]
+        g = _gc(c, "g", ["t"], auto_commit=True, auto_commit_interval_ms=10_000)
+        g.poll()
+        self.assertEqual(len(c.commits), 1)
+        c.log[("t", 0)].append(_rec(1, b"b"))
+        g.poll()
+        self.assertEqual(len(c.commits), 1)
+        g.close()
+        self.assertEqual(len(c.commits), 2)
+        self.assertEqual(c.commits[1]["offset"], 2)
+        self.assertEqual(c.commits[1]["member_id"], "m1")
+        self.assertEqual(c.commits[1]["generation"], 1)
+        self.assertEqual(c.leaves, [("g", "m1")])
+
+    def test_explicit_commit_resets_autocommit_clock(self) -> None:
+        c = FakeClient()
+        c.join_queue.append(_join([("t", 0)]))
+        c.log[("t", 0)] = [_rec(0, b"a")]
+        g = _gc(c, "g", ["t"], auto_commit=True, auto_commit_interval_ms=10_000)
+        g.poll()
+        self.assertEqual(len(c.commits), 1)
+        g.commit()
+        self.assertEqual(len(c.commits), 2)
+        c.log[("t", 0)].append(_rec(1, b"b"))
+        g.poll()
+        self.assertEqual(len(c.commits), 2)
 
 
 if __name__ == "__main__":

@@ -12,6 +12,7 @@ v0.37 starts a background heartbeat thread after a successful join
 from __future__ import annotations
 
 import threading
+import time
 from dataclasses import dataclass, field
 from typing import Optional
 
@@ -27,6 +28,7 @@ OFFSET_UNKNOWN = (1 << 64) - 1
 _REJOIN_CODES = frozenset({9, 10, 11})
 
 _DEFAULT_SESSION_TIMEOUT_MS = 10_000
+_DEFAULT_AUTO_COMMIT_INTERVAL_MS = 5000
 _POLL_MAX_MESSAGES = 100
 _HB_INTERVAL_MIN_MS = 100
 _HB_INTERVAL_MAX_MS = 3000
@@ -99,6 +101,10 @@ class GroupConsumer:
         recs = g.poll(max_wait_ms=500)
         g.commit()
         g.close()
+        # Opt-in auto-commit (v0.48). Default off. interval 0 = after every poll.
+        g = GroupConsumer.join(
+            c, group="g", topics=["t"], auto_commit=True, auto_commit_interval_ms=5000
+        )
     """
 
     def __init__(
@@ -110,6 +116,8 @@ class GroupConsumer:
         group_instance_id: str = "",
         heartbeat: bool = True,
         assignor: str = _ASSIGNOR_BROKER,
+        auto_commit: bool = False,
+        auto_commit_interval_ms: int = _DEFAULT_AUTO_COMMIT_INTERVAL_MS,
     ) -> None:
         self._client = client
         self._group_id = group_id
@@ -118,6 +126,10 @@ class GroupConsumer:
         self._group_instance_id = group_instance_id
         self._heartbeat_enabled = heartbeat
         self._assignor = _normalize_assignor(assignor)
+        self._auto_commit = auto_commit
+        self._auto_commit_interval_ms = max(0, auto_commit_interval_ms)
+        self._last_auto_commit: Optional[float] = None
+        self._dirty = False
         self._member_id = ""
         self._generation = 0
         self._assignment: list[tuple[str, int]] = []
@@ -139,6 +151,8 @@ class GroupConsumer:
         group_instance_id: str = "",
         heartbeat: bool = True,
         assignor: str = _ASSIGNOR_BROKER,
+        auto_commit: bool = False,
+        auto_commit_interval_ms: int = _DEFAULT_AUTO_COMMIT_INTERVAL_MS,
     ) -> GroupConsumer:
         """Join ``group`` on ``topics``. Empty ``member_id`` on first join.
 
@@ -149,6 +163,11 @@ class GroupConsumer:
         ``assignor`` is ``"broker"`` (default: honor JoinGroup assignment)
         or ``"range"`` (replace the fetch set with a solo local range after
         metadata). Unknown values raise ``ValueError``. Empty is ``"broker"``.
+        ``auto_commit=False`` (default) keeps explicit ``commit()``. When
+        on, a successful ``poll`` that returned records commits assigned
+        positions (interval 0 = every such poll; else first successful
+        poll, then every ``auto_commit_interval_ms``). Not Kafka
+        ``enable.auto.commit`` (no background commit thread).
         """
         timeout = (
             _DEFAULT_SESSION_TIMEOUT_MS
@@ -163,6 +182,8 @@ class GroupConsumer:
             group_instance_id=group_instance_id,
             heartbeat=heartbeat,
             assignor=assignor,
+            auto_commit=auto_commit,
+            auto_commit_interval_ms=auto_commit_interval_ms,
         )
         this._do_join()
         this._start_heartbeat()
@@ -278,19 +299,25 @@ class GroupConsumer:
                     raise
                 self._do_join()
             try:
-                return self._fetch_assigned(max_wait_ms)
+                recs = self._fetch_assigned(max_wait_ms)
             except BrokerError as exc:
                 if not _is_rejoin(exc):
                     raise
                 self._do_join()
-                return self._fetch_assigned(max_wait_ms)
+                recs = self._fetch_assigned(max_wait_ms)
+            if recs:
+                self._dirty = True
+                self._maybe_auto_commit()
+            return recs
 
     def commit(self) -> None:
         """Commit current positions with the joined member_id + generation."""
         with self._lock:
             self._ensure_open()
-            if not self._positions:
-                return
+            self._commit_unlocked()
+
+    def _commit_unlocked(self) -> None:
+        if self._positions:
             assigned = set(self._assignment)
             for (topic, partition), offset in self._positions.items():
                 if assigned and (topic, partition) not in assigned:
@@ -303,11 +330,25 @@ class GroupConsumer:
                     member_id=self._member_id,
                     generation=self._generation,
                 )
+        self._last_auto_commit = time.monotonic()
+        self._dirty = False
+
+    def _maybe_auto_commit(self) -> None:
+        if not self._auto_commit:
+            return
+        now = time.monotonic()
+        if self._auto_commit_interval_ms > 0 and self._last_auto_commit is not None:
+            elapsed_ms = (now - self._last_auto_commit) * 1000.0
+            if elapsed_ms < self._auto_commit_interval_ms:
+                return
+        self._commit_unlocked()
 
     def close(self) -> None:
         """Stop the heartbeat thread (if any), then LeaveGroup.
 
         Does not close the underlying :class:`Client`. Idempotent.
+        Auto-commit on + uncommitted positions: best-effort commit once
+        (errors swallowed), then leave.
         """
         self._stop.set()
         t = self._hb_thread
@@ -316,6 +357,11 @@ class GroupConsumer:
         with self._lock:
             if self._closed:
                 return
+            if self._auto_commit and self._dirty:
+                try:
+                    self._commit_unlocked()
+                except Exception:
+                    pass
             self._closed = True
             if self._member_id:
                 self._client.leave_group(self._group_id, self._member_id)

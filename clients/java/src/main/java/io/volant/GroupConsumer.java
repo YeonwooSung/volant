@@ -34,6 +34,7 @@ import java.util.concurrent.locks.ReentrantLock;
  * <pre>
  * GroupConsumer g = GroupConsumer.join(c, "g", List.of("t"), 10_000);
  * GroupConsumer s = GroupConsumer.joinStatic(c, "g", List.of("t"), 10_000, "inst-1");
+ * GroupConsumer a = GroupConsumer.joinWithAutoCommit(c, "g", List.of("t"), 10_000, 5000);
  * List&lt;Record&gt; recs = g.poll(500);
  * g.commit();
  * g.close();
@@ -51,6 +52,7 @@ public final class GroupConsumer implements AutoCloseable {
     private static final int POLL_MAX_MESSAGES = 100;
     private static final long HB_INTERVAL_MIN_MS = 100L;
     private static final long HB_INTERVAL_MAX_MS = 3000L;
+    private static final long DEFAULT_AUTO_COMMIT_INTERVAL_MS = 5000L;
     static final String ASSIGNOR_BROKER = "broker";
     static final String ASSIGNOR_RANGE = "range";
 
@@ -62,6 +64,10 @@ public final class GroupConsumer implements AutoCloseable {
     private final String groupInstanceId;
     private final boolean backgroundHeartbeat;
     private final String assignor;
+    private final boolean autoCommit;
+    private final long autoCommitIntervalMs;
+    private long lastAutoCommitNanos;
+    private boolean dirty;
     private final ReentrantLock lock = new ReentrantLock();
     private String memberId = "";
     private long generation;
@@ -99,6 +105,20 @@ public final class GroupConsumer implements AutoCloseable {
             String groupInstanceId,
             boolean heartbeat,
             String assignor) {
+        this(backend, groupId, topics, sessionTimeoutMs, groupInstanceId, heartbeat, assignor, false,
+                DEFAULT_AUTO_COMMIT_INTERVAL_MS);
+    }
+
+    GroupConsumer(
+            Backend backend,
+            String groupId,
+            List<String> topics,
+            int sessionTimeoutMs,
+            String groupInstanceId,
+            boolean heartbeat,
+            String assignor,
+            boolean autoCommit,
+            long autoCommitIntervalMs) {
         this.backend = backend;
         this.groupId = groupId;
         this.topics = topics == null
@@ -108,6 +128,8 @@ public final class GroupConsumer implements AutoCloseable {
         this.groupInstanceId = groupInstanceId == null ? "" : groupInstanceId;
         this.backgroundHeartbeat = heartbeat;
         this.assignor = normalizeAssignor(assignor);
+        this.autoCommit = autoCommit;
+        this.autoCommitIntervalMs = autoCommitIntervalMs < 0 ? 0L : autoCommitIntervalMs;
     }
 
     /** Background heartbeat period: {@code sessionTimeoutMs / 3}, clamped to 100–3000 ms. */
@@ -160,6 +182,35 @@ public final class GroupConsumer implements AutoCloseable {
         return join(new ClientBackend(client), group, topics, sessionTimeoutMs, groupInstanceId, true, ASSIGNOR_BROKER);
     }
 
+    /**
+     * Join with opt-in auto-commit (v0.48). Default {@link #join} stays
+     * explicit-commit only.
+     *
+     * <p>{@code intervalMs} 0 commits after every successful {@link #poll}
+     * that returned records. {@code intervalMs > 0} commits on the first
+     * such poll, then when at least {@code intervalMs} has elapsed since
+     * the last auto or explicit {@link #commit()}. Not Kafka
+     * {@code enable.auto.commit} (no background commit thread).
+     *
+     * <p>Named method (not a {@code boolean} overload) so it does not
+     * collide with {@link #join(Client, String, List, int, boolean)}
+     * heartbeat or {@link #join(Client, String, List, int, String)}
+     * assignor.
+     */
+    public static GroupConsumer joinWithAutoCommit(
+            Client client, String group, List<String> topics, int sessionTimeoutMs, long intervalMs) {
+        return join(
+                new ClientBackend(client),
+                group,
+                topics,
+                sessionTimeoutMs,
+                "",
+                true,
+                ASSIGNOR_BROKER,
+                true,
+                intervalMs);
+    }
+
     static GroupConsumer join(Backend backend, String group, List<String> topics, int sessionTimeoutMs) {
         return join(backend, group, topics, sessionTimeoutMs, "", true, ASSIGNOR_BROKER);
     }
@@ -197,9 +248,37 @@ public final class GroupConsumer implements AutoCloseable {
             String groupInstanceId,
             boolean heartbeat,
             String assignor) {
+        return join(backend, group, topics, sessionTimeoutMs, groupInstanceId, heartbeat, assignor, false,
+                DEFAULT_AUTO_COMMIT_INTERVAL_MS);
+    }
+
+    /** Package-visible: unit tests keep {@code heartbeat=false}. */
+    static GroupConsumer joinWithAutoCommit(
+            Backend backend, String group, List<String> topics, int sessionTimeoutMs, long intervalMs) {
+        return join(backend, group, topics, sessionTimeoutMs, "", false, ASSIGNOR_BROKER, true, intervalMs);
+    }
+
+    static GroupConsumer join(
+            Backend backend,
+            String group,
+            List<String> topics,
+            int sessionTimeoutMs,
+            String groupInstanceId,
+            boolean heartbeat,
+            String assignor,
+            boolean autoCommit,
+            long autoCommitIntervalMs) {
         int timeout = sessionTimeoutMs == 0 ? 10_000 : sessionTimeoutMs;
-        GroupConsumer g =
-                new GroupConsumer(backend, group, topics, timeout, groupInstanceId, heartbeat, assignor);
+        GroupConsumer g = new GroupConsumer(
+                backend,
+                group,
+                topics,
+                timeout,
+                groupInstanceId,
+                heartbeat,
+                assignor,
+                autoCommit,
+                autoCommitIntervalMs);
         g.doJoin();
         g.startHeartbeat();
         return g;
@@ -333,6 +412,10 @@ public final class GroupConsumer implements AutoCloseable {
                     out.add(r);
                 }
             }
+            if (!out.isEmpty()) {
+                dirty = true;
+                maybeAutoCommit();
+            }
             return out;
         } finally {
             lock.unlock();
@@ -344,22 +427,43 @@ public final class GroupConsumer implements AutoCloseable {
         lock.lock();
         try {
             ensureOpen();
-            if (positions.isEmpty()) {
-                return;
-            }
-            List<Codec.OffsetCommitEntry> entries = new ArrayList<>();
-            for (Map.Entry<Tp, Long> e : positions.entrySet()) {
-                entries.add(new Codec.OffsetCommitEntry(e.getKey().topic, e.getKey().partition, e.getValue(), ""));
-            }
-            backend.commitOffsets(groupId, memberId, generation, entries);
+            doCommit();
         } finally {
             lock.unlock();
         }
     }
 
+    private void doCommit() {
+        if (!positions.isEmpty()) {
+            List<Codec.OffsetCommitEntry> entries = new ArrayList<>();
+            for (Map.Entry<Tp, Long> e : positions.entrySet()) {
+                entries.add(new Codec.OffsetCommitEntry(e.getKey().topic, e.getKey().partition, e.getValue(), ""));
+            }
+            backend.commitOffsets(groupId, memberId, generation, entries);
+        }
+        lastAutoCommitNanos = System.nanoTime();
+        dirty = false;
+    }
+
+    private void maybeAutoCommit() {
+        if (!autoCommit) {
+            return;
+        }
+        long now = System.nanoTime();
+        if (autoCommitIntervalMs > 0 && lastAutoCommitNanos != 0) {
+            long elapsedMs = (now - lastAutoCommitNanos) / 1_000_000L;
+            if (elapsedMs < autoCommitIntervalMs) {
+                return;
+            }
+        }
+        doCommit();
+    }
+
     /**
      * Stop the heartbeat executor (if any), then LeaveGroup. Does not close
-     * the underlying {@link Client}. Idempotent.
+     * the underlying {@link Client}. Idempotent. Auto-commit on +
+     * uncommitted positions: best-effort commit once (errors ignored),
+     * then leave.
      */
     @Override
     public void close() {
@@ -368,6 +472,13 @@ public final class GroupConsumer implements AutoCloseable {
         try {
             if (closed) {
                 return;
+            }
+            if (autoCommit && dirty) {
+                try {
+                    doCommit();
+                } catch (RuntimeException ignored) {
+                    // best-effort
+                }
             }
             closed = true;
             if (memberId != null && !memberId.isEmpty()) {
