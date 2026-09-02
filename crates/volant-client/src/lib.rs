@@ -32,7 +32,10 @@
 //! v0.83 retries [`Client::commit_offsets`] / [`Client::fetch_offsets`] /
 //! [`Client::delete_offsets`] on that same set. Error 13 / 14 / 9 / 10 /
 //! 11 / 2 is not retried. [`GroupConsumer::commit`] inherits via
-//! `commit_offsets`. ListOffsets is unchanged.
+//! `commit_offsets`.
+//! v0.84 retries [`Client::list_offsets`] on that same transient set
+//! (default 0). Error 2 (NotFound) is not retried. GroupConsumer
+//! earliest/latest reset inherit.
 
 #![deny(missing_docs)]
 
