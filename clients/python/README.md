@@ -154,7 +154,8 @@ retry once (`max_redirects=1`). `max_redirects=0` raises on the first
 13. CreateTopic / DeleteTopic / CreatePartitions / ReassignPartitions /
 CreateAcls / DeleteAcls / CreateScramUser / DeleteScramUser /
 ListScramUsers / ListAcls / AddBroker / RemoveBroker /
-DescribeConfigs / AlterConfigs / DeleteOffsets follow
+DescribeConfigs / AlterConfigs / DeleteOffsets / OffsetCommit /
+OffsetFetch follow
 `NotController` (error 14) the same way (Metadata `controller_id`
 trailer when the message has no hint, else `controller_id=N` or the
 first other advertised broker; not Kafka FindCoordinator). AddBroker /

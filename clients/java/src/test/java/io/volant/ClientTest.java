@@ -1335,6 +1335,12 @@ class ClientTest {
         final List<int[]> deleteOffsetsReplies = new CopyOnWriteArrayList<>();
         final List<String> deleteOffsetsMessages = new CopyOnWriteArrayList<>();
         final List<Integer> deleteOffsetsCodes = new CopyOnWriteArrayList<>();
+        final List<int[]> offsetCommitReplies = new CopyOnWriteArrayList<>();
+        final List<String> offsetCommitMessages = new CopyOnWriteArrayList<>();
+        final List<Integer> offsetCommitCodes = new CopyOnWriteArrayList<>();
+        final List<int[]> offsetFetchReplies = new CopyOnWriteArrayList<>();
+        final List<String> offsetFetchMessages = new CopyOnWriteArrayList<>();
+        final List<Integer> offsetFetchCodes = new CopyOnWriteArrayList<>();
         volatile Metadata meta = new Metadata(Collections.emptyList(), Collections.emptyList());
         final AtomicInteger createTopicCount = new AtomicInteger();
         final AtomicInteger createPartitionsCount = new AtomicInteger();
@@ -1349,6 +1355,8 @@ class ClientTest {
         final AtomicInteger describeConfigsCount = new AtomicInteger();
         final AtomicInteger alterConfigsCount = new AtomicInteger();
         final AtomicInteger deleteOffsetsCount = new AtomicInteger();
+        final AtomicInteger offsetCommitCount = new AtomicInteger();
+        final AtomicInteger offsetFetchCount = new AtomicInteger();
         final AtomicInteger metadataCount = new AtomicInteger();
         final AtomicInteger listMembersCount = new AtomicInteger();
         final AtomicInteger acceptCount = new AtomicInteger();
@@ -1431,6 +1439,26 @@ class ClientTest {
         void queueDeleteOffsetsOk() {
             deleteOffsetsReplies.add(new int[] {0, 0});
             deleteOffsetsMessages.add("");
+        }
+
+        void queueOffsetCommitError(int code, String message) {
+            offsetCommitReplies.add(new int[] {code, 1});
+            offsetCommitMessages.add(message);
+        }
+
+        void queueOffsetCommitOk() {
+            offsetCommitReplies.add(new int[] {0, 0});
+            offsetCommitMessages.add("");
+        }
+
+        void queueOffsetFetchError(int code, String message) {
+            offsetFetchReplies.add(new int[] {code, 1});
+            offsetFetchMessages.add(message);
+        }
+
+        void queueOffsetFetchOk() {
+            offsetFetchReplies.add(new int[] {0, 0});
+            offsetFetchMessages.add("");
         }
 
         private void serve(Socket conn) {
@@ -1627,6 +1655,47 @@ class ClientTest {
                 replyOp[0] = Codec.OP_DELETE_OFFSETS_RESPONSE;
                 return Codec.encodeDeleteOffsetsResponse(
                         new Codec.DeleteOffsetsResponse(code, code == 0 ? 3 : 0));
+            }
+            if (frame.opcode == Codec.OP_OFFSET_COMMIT) {
+                offsetCommitCount.incrementAndGet();
+                int code = 0;
+                boolean asError = false;
+                String message = "";
+                if (!offsetCommitReplies.isEmpty()) {
+                    int[] spec = offsetCommitReplies.remove(0);
+                    code = spec[0];
+                    asError = spec[1] != 0;
+                    message = offsetCommitMessages.isEmpty() ? "" : offsetCommitMessages.remove(0);
+                } else if (!offsetCommitCodes.isEmpty()) {
+                    code = offsetCommitCodes.remove(0);
+                }
+                if (asError) {
+                    replyOp[0] = Codec.OP_ERROR;
+                    return Codec.encodeErrorResponse(new Codec.ErrorResponse(code, message));
+                }
+                replyOp[0] = Codec.OP_OFFSET_COMMIT;
+                return Codec.encodeOffsetCommitResponse(new Codec.OffsetCommitResponse(code));
+            }
+            if (frame.opcode == Codec.OP_OFFSET_FETCH) {
+                offsetFetchCount.incrementAndGet();
+                int code = 0;
+                boolean asError = false;
+                String message = "";
+                if (!offsetFetchReplies.isEmpty()) {
+                    int[] spec = offsetFetchReplies.remove(0);
+                    code = spec[0];
+                    asError = spec[1] != 0;
+                    message = offsetFetchMessages.isEmpty() ? "" : offsetFetchMessages.remove(0);
+                } else if (!offsetFetchCodes.isEmpty()) {
+                    code = offsetFetchCodes.remove(0);
+                }
+                if (asError) {
+                    replyOp[0] = Codec.OP_ERROR;
+                    return Codec.encodeErrorResponse(new Codec.ErrorResponse(code, message));
+                }
+                replyOp[0] = Codec.OP_OFFSET_FETCH;
+                return Codec.encodeOffsetFetchResponse(
+                        new Codec.OffsetFetchResponse(code, Collections.emptyList()));
             }
             if (frame.opcode == Codec.OP_METADATA) {
                 metadataCount.incrementAndGet();
@@ -2071,6 +2140,57 @@ class ClientTest {
                 assertEquals(NOT_CONTROLLER, ex.code);
             }
             assertEquals(1, follower.deleteOffsetsCount.get());
+            assertEquals(0, follower.metadataCount.get());
+            assertEquals(1, follower.acceptCount.get());
+        }
+    }
+
+    @Test
+    void offsetCommitError14RedirectsViaControllerId() throws Exception {
+        try (AdminBroker leader = AdminBroker.start();
+                AdminBroker follower = AdminBroker.start()) {
+            follower.queueOffsetCommitError(NOT_CONTROLLER, "not controller; controller_id=2");
+            follower.meta = controllerMeta(2, "127.0.0.1", leader.port);
+            leader.queueOffsetCommitOk();
+            try (Client c = Client.connect("127.0.0.1", follower.port, 5_000)) {
+                c.offsetCommit("g", "t", 0, 5);
+                assertEquals(leader.port, Integer.parseInt(c.addr().substring(c.addr().indexOf(':') + 1)));
+            }
+            assertEquals(1, follower.offsetCommitCount.get());
+            assertEquals(1, follower.metadataCount.get());
+            assertEquals(1, leader.offsetCommitCount.get());
+        }
+    }
+
+    @Test
+    void offsetFetchTyped14NoHintThenOk() throws Exception {
+        try (AdminBroker leader = AdminBroker.start();
+                AdminBroker follower = AdminBroker.start()) {
+            follower.offsetFetchCodes.add(NOT_CONTROLLER);
+            follower.meta = otherBrokerMeta(follower.port, "127.0.0.1", leader.port);
+            try (Client c = Client.connect("127.0.0.1", follower.port, 5_000)) {
+                List<Offset> offs = c.offsetFetch("g", "t");
+                assertTrue(offs.isEmpty());
+                assertEquals(leader.port, Integer.parseInt(c.addr().substring(c.addr().indexOf(':') + 1)));
+            }
+            assertEquals(1, follower.offsetFetchCount.get());
+            assertEquals(1, follower.metadataCount.get());
+            assertEquals(1, leader.offsetFetchCount.get());
+        }
+    }
+
+    @Test
+    void offsetCommitMaxRedirectsZeroRaisesOnFirst14() throws Exception {
+        try (AdminBroker follower = AdminBroker.start()) {
+            follower.queueOffsetCommitError(NOT_CONTROLLER, "not controller; controller_id=2");
+            follower.meta = controllerMeta(2, "127.0.0.1", 9);
+            try (Client c = Client.connect("127.0.0.1", follower.port, 5_000)) {
+                c.setMaxRedirects(0);
+                BrokerException ex =
+                        assertThrows(BrokerException.class, () -> c.offsetCommit("g", "t", 0, 5));
+                assertEquals(NOT_CONTROLLER, ex.code);
+            }
+            assertEquals(1, follower.offsetCommitCount.get());
             assertEquals(0, follower.metadataCount.get());
             assertEquals(1, follower.acceptCount.get());
         }

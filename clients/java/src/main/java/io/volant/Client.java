@@ -1285,7 +1285,9 @@ public final class Client implements AutoCloseable {
 
     /**
      * Admin OffsetCommit (empty {@code memberId}, {@code generation = 0}).
-     * Commits the next offset to read for one topic/partition.
+     * Commits the next offset to read for one topic/partition. Error 14
+     * follows {@code maxRedirects}. Transient 6 / 7 / 15 / 16 follow
+     * {@code maxRetries}.
      */
     public void offsetCommit(String group, String topic, int partition, long offset) {
         offsetCommit(group, topic, partition, offset, "", 0);
@@ -1308,11 +1310,17 @@ public final class Client implements AutoCloseable {
         byte[] payload = Codec.encodeOffsetCommitRequest(
                 new Codec.OffsetCommitRequest(group, memberId, generation, entries));
         int retryAttempt = 0;
+        int redirectAttempt = 0;
+        int maxAttempts = 1 + maxRedirects;
         while (true) {
             Object decoded;
             try {
                 decoded = roundTrip(Codec.OP_OFFSET_COMMIT, payload);
             } catch (BrokerException e) {
+                if (maybeRedirectController(e.code, e.message, redirectAttempt + 1, maxAttempts)) {
+                    redirectAttempt++;
+                    continue;
+                }
                 if (isTransientBroker(e.code) && retryAttempt < maxRetries) {
                     retryAttempt++;
                     sleepProduceRetry();
@@ -1331,6 +1339,10 @@ public final class Client implements AutoCloseable {
                 throw new ProtocolException("unexpected response for offset_commit: " + typeName(decoded));
             }
             Codec.OffsetCommitResponse resp = (Codec.OffsetCommitResponse) decoded;
+            if (maybeRedirectController(resp.errorCode, null, redirectAttempt + 1, maxAttempts)) {
+                redirectAttempt++;
+                continue;
+            }
             if (isTransientBroker(resp.errorCode) && retryAttempt < maxRetries) {
                 retryAttempt++;
                 sleepProduceRetry();
@@ -1551,7 +1563,9 @@ public final class Client implements AutoCloseable {
      * Fetch committed offsets for {@code topic}.
      *
      * <p>Sends empty OffsetFetch entries (all group offsets) and filters to
-     * {@code topic} client-side (same as the CLI / Python / Go).
+     * {@code topic} client-side (same as the CLI / Python / Go). Error 14
+     * follows {@code maxRedirects}. Transient 6 / 7 / 15 / 16 follow
+     * {@code maxRetries}.
      */
     public List<Offset> offsetFetch(String group, String topic) {
         List<Codec.OffsetFetchEntry> entries = offsetFetchEntries(group, Collections.emptyList());
@@ -1567,11 +1581,17 @@ public final class Client implements AutoCloseable {
     List<Codec.OffsetFetchEntry> offsetFetchEntries(String group, List<Codec.OffsetEntry> entries) {
         byte[] payload = Codec.encodeOffsetFetchRequest(new Codec.OffsetFetchRequest(group, entries));
         int retryAttempt = 0;
+        int redirectAttempt = 0;
+        int maxAttempts = 1 + maxRedirects;
         while (true) {
             Object decoded;
             try {
                 decoded = roundTrip(Codec.OP_OFFSET_FETCH, payload);
             } catch (BrokerException e) {
+                if (maybeRedirectController(e.code, e.message, redirectAttempt + 1, maxAttempts)) {
+                    redirectAttempt++;
+                    continue;
+                }
                 if (isTransientBroker(e.code) && retryAttempt < maxRetries) {
                     retryAttempt++;
                     sleepProduceRetry();
@@ -1590,6 +1610,10 @@ public final class Client implements AutoCloseable {
                 throw new ProtocolException("unexpected response for offset_fetch: " + typeName(decoded));
             }
             Codec.OffsetFetchResponse resp = (Codec.OffsetFetchResponse) decoded;
+            if (maybeRedirectController(resp.errorCode, null, redirectAttempt + 1, maxAttempts)) {
+                redirectAttempt++;
+                continue;
+            }
             if (isTransientBroker(resp.errorCode) && retryAttempt < maxRetries) {
                 retryAttempt++;
                 sleepProduceRetry();
