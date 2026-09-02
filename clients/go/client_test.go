@@ -22,6 +22,7 @@ type scriptedBroker struct {
 	offsetCommitCodes  []uint16
 	offsetFetchCodes   []uint16
 	deleteOffsetsCodes []uint16
+	listOffsetsCodes   []uint16
 	meta               codec.MetadataResponse
 	opcodes            []uint16
 	produceReqs        []codec.ProduceRequest
@@ -34,6 +35,7 @@ type scriptedBroker struct {
 	offsetCommitCount  int
 	offsetFetchCount   int
 	deleteOffsetsCount int
+	listOffsetsCount   int
 	metadataCount      int
 	acceptCount        int
 	initPID            uint64
@@ -109,6 +111,12 @@ func (s *scriptedBroker) deleteOffsets() int {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	return s.deleteOffsetsCount
+}
+
+func (s *scriptedBroker) listOffsets() int {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.listOffsetsCount
 }
 
 func (s *scriptedBroker) inits() int {
@@ -273,6 +281,15 @@ func (s *scriptedBroker) handle(f *frame.Frame) ([]byte, error) {
 		}
 		payload, err = codec.EncodeDeleteOffsetsResponse(codec.DeleteOffsetsResponse{ErrorCode: code})
 		replyOp = codec.OpDeleteOffsetsResponse
+	case codec.OpListOffsets:
+		s.listOffsetsCount++
+		code := uint16(0)
+		if len(s.listOffsetsCodes) > 0 {
+			code = s.listOffsetsCodes[0]
+			s.listOffsetsCodes = s.listOffsetsCodes[1:]
+		}
+		payload, err = codec.EncodeListOffsetsResponse(codec.ListOffsetsResponse{ErrorCode: code})
+		replyOp = codec.OpListOffsetsResponse
 	case codec.OpMetadata:
 		s.metadataCount++
 		payload, err = codec.EncodeMetadataResponse(s.meta)
@@ -1280,6 +1297,107 @@ func TestOffsetCommitExhaustedRetriesRaises(t *testing.T) {
 	}
 	if n := srv.offsetCommits(); n != 3 {
 		t.Fatalf("offset commit count %d want 3", n)
+	}
+}
+
+func TestListOffsetsDefaultMaxRetriesZeroRaisesOnTimeout(t *testing.T) {
+	srv := &scriptedBroker{listOffsetsCodes: []uint16{timeoutCode}}
+	addr, stop := startScripted(t, srv)
+	defer stop()
+
+	c, err := volant.DialTimeout(addr, 5*time.Second)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer c.Close()
+
+	_, err = c.ListOffsets("t", nil)
+	if err == nil {
+		t.Fatal("expected BrokerError 7")
+	}
+	be, ok := err.(*volant.BrokerError)
+	if !ok || be.Code != timeoutCode {
+		t.Fatalf("got %v want BrokerError code=7", err)
+	}
+	if n := srv.listOffsets(); n != 1 {
+		t.Fatalf("list offsets count %d want 1", n)
+	}
+}
+
+func TestListOffsetsRetriesTimeoutThenOk(t *testing.T) {
+	srv := &scriptedBroker{listOffsetsCodes: []uint16{timeoutCode, 0}}
+	addr, stop := startScripted(t, srv)
+	defer stop()
+
+	c, err := volant.DialTimeout(addr, 5*time.Second)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer c.Close()
+	c.SetMaxRetries(2)
+	c.SetRetryBackoff(0)
+
+	out, err := c.ListOffsets("t", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(out) != 0 {
+		t.Fatalf("listings %v want empty", out)
+	}
+	if n := srv.listOffsets(); n != 2 {
+		t.Fatalf("list offsets count %d want 2", n)
+	}
+}
+
+func TestListOffsetsNotFoundIsNotRetried(t *testing.T) {
+	srv := &scriptedBroker{listOffsetsCodes: []uint16{notFoundCode, 0}}
+	addr, stop := startScripted(t, srv)
+	defer stop()
+
+	c, err := volant.DialTimeout(addr, 5*time.Second)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer c.Close()
+	c.SetMaxRetries(2)
+	c.SetRetryBackoff(0)
+
+	_, err = c.ListOffsets("missing", nil)
+	if err == nil {
+		t.Fatal("expected BrokerError 2")
+	}
+	be, ok := err.(*volant.BrokerError)
+	if !ok || be.Code != notFoundCode {
+		t.Fatalf("got %v want BrokerError code=2", err)
+	}
+	if n := srv.listOffsets(); n != 1 {
+		t.Fatalf("list offsets count %d want 1", n)
+	}
+}
+
+func TestListOffsetsExhaustedRetriesRaises(t *testing.T) {
+	srv := &scriptedBroker{listOffsetsCodes: []uint16{timeoutCode, timeoutCode, timeoutCode}}
+	addr, stop := startScripted(t, srv)
+	defer stop()
+
+	c, err := volant.DialTimeout(addr, 5*time.Second)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer c.Close()
+	c.SetMaxRetries(2)
+	c.SetRetryBackoff(0)
+
+	_, err = c.ListOffsets("t", nil)
+	if err == nil {
+		t.Fatal("expected BrokerError 7")
+	}
+	be, ok := err.(*volant.BrokerError)
+	if !ok || be.Code != timeoutCode {
+		t.Fatalf("got %v want BrokerError code=7", err)
+	}
+	if n := srv.listOffsets(); n != 3 {
+		t.Fatalf("list offsets count %d want 3", n)
 	}
 }
 

@@ -14,6 +14,8 @@ from volant.codec import (
     OP_HEARTBEAT,
     OP_INIT_PRODUCER_ID,
     OP_INIT_PRODUCER_ID_RESPONSE,
+    OP_LIST_OFFSETS,
+    OP_LIST_OFFSETS_RESPONSE,
     OP_METADATA,
     OP_OFFSET_COMMIT,
     OP_OFFSET_FETCH,
@@ -23,6 +25,7 @@ from volant.codec import (
     FetchResponse,
     HeartbeatResponse,
     InitProducerIdResponse,
+    ListOffsetsResponse,
     MetadataResponse,
     OffsetCommitResponse,
     OffsetFetchResponse,
@@ -37,6 +40,7 @@ from volant.codec import (
     encode_fetch_response,
     encode_heartbeat_response,
     encode_init_producer_id_response,
+    encode_list_offsets_response,
     encode_metadata_response,
     encode_offset_commit_response,
     encode_offset_fetch_response,
@@ -52,9 +56,9 @@ class ScriptedBroker:
 
     ``produce_codes`` / ``fetch_codes`` / ``heartbeat_codes`` /
     ``offset_commit_codes`` / ``offset_fetch_codes`` /
-    ``delete_offsets_codes`` are queues of error_code values consumed
-    across connections. Metadata is a fixed response (or a callable of
-    ``() -> MetadataResponse``).
+    ``delete_offsets_codes`` / ``list_offsets_codes`` are queues of
+    error_code values consumed across connections. Metadata is a fixed
+    response (or a callable of ``() -> MetadataResponse``).
     """
 
     def __init__(self) -> None:
@@ -64,6 +68,7 @@ class ScriptedBroker:
         self.offset_commit_codes: list[int] = []
         self.offset_fetch_codes: list[int] = []
         self.delete_offsets_codes: list[int] = []
+        self.list_offsets_codes: list[int] = []
         self.metadata: MetadataResponse | None = None
         self.opcodes: list[int] = []
         self.produce_reqs: list[ProduceRequest] = []
@@ -75,6 +80,7 @@ class ScriptedBroker:
         self.offset_commit_count = 0
         self.offset_fetch_count = 0
         self.delete_offsets_count = 0
+        self.list_offsets_count = 0
         self.metadata_count = 0
         self.accept_count = 0
         self.init_pid = 42
@@ -230,6 +236,15 @@ class ScriptedBroker:
                     DeleteOffsetsResponse(error_code=code, deleted_count=0)
                 ),
                 OP_DELETE_OFFSETS_RESPONSE,
+            )
+        if opcode == OP_LIST_OFFSETS:
+            self.list_offsets_count += 1
+            code = self.list_offsets_codes.pop(0) if self.list_offsets_codes else 0
+            return (
+                encode_list_offsets_response(
+                    ListOffsetsResponse(error_code=code, topic="", entries=[])
+                ),
+                OP_LIST_OFFSETS_RESPONSE,
             )
         if opcode == OP_METADATA:
             self.metadata_count += 1
@@ -693,6 +708,44 @@ class TestOffsetAdminRetry(unittest.TestCase):
                     c.offset_commit("g", "t", 0, 5)
             self.assertEqual(ctx.exception.code, TIMEOUT)
             self.assertEqual(srv.offset_commit_count, 3)
+
+
+class TestListOffsetsRetry(unittest.TestCase):
+    def test_default_max_retries_zero_raises_on_timeout(self) -> None:
+        with ScriptedBroker() as srv:
+            srv.list_offsets_codes = [TIMEOUT]
+            with Client(srv.addr, timeout=5.0) as c:
+                self.assertEqual(c.max_retries, 0)
+                with self.assertRaises(BrokerError) as ctx:
+                    c.list_offsets("t")
+            self.assertEqual(ctx.exception.code, TIMEOUT)
+            self.assertEqual(srv.list_offsets_count, 1)
+
+    def test_retries_timeout_then_ok(self) -> None:
+        with ScriptedBroker() as srv:
+            srv.list_offsets_codes = [TIMEOUT, 0]
+            with Client(srv.addr, timeout=5.0, max_retries=2, retry_backoff_ms=0) as c:
+                got = c.list_offsets("t")
+            self.assertEqual(got, [])
+            self.assertEqual(srv.list_offsets_count, 2)
+
+    def test_not_found_is_not_retried(self) -> None:
+        with ScriptedBroker() as srv:
+            srv.list_offsets_codes = [NOT_FOUND, 0]
+            with Client(srv.addr, timeout=5.0, max_retries=2, retry_backoff_ms=0) as c:
+                with self.assertRaises(BrokerError) as ctx:
+                    c.list_offsets("missing")
+            self.assertEqual(ctx.exception.code, NOT_FOUND)
+            self.assertEqual(srv.list_offsets_count, 1)
+
+    def test_exhausted_retries_raises(self) -> None:
+        with ScriptedBroker() as srv:
+            srv.list_offsets_codes = [TIMEOUT, TIMEOUT, TIMEOUT]
+            with Client(srv.addr, timeout=5.0, max_retries=2, retry_backoff_ms=0) as c:
+                with self.assertRaises(BrokerError) as ctx:
+                    c.list_offsets("t")
+            self.assertEqual(ctx.exception.code, TIMEOUT)
+            self.assertEqual(srv.list_offsets_count, 3)
 
 
 if __name__ == "__main__":

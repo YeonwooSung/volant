@@ -1158,19 +1158,46 @@ class Client:
 
         ``None`` or ``[]`` means all partitions (wire count 0). Returns
         :class:`OffsetListing` rows. Non-zero ``error_code`` raises
-        :class:`BrokerError`. This is not Kafka ListOffsets (no timestamp
-        or isolation); both ends of each log are returned.
+        :class:`BrokerError`. Transient broker/transport errors retry
+        up to ``max_retries`` extra times (default 0). Error 2 / 9 / 10
+        / 11 / 13 / 14 are not retried. This is not Kafka ListOffsets
+        (no timestamp or isolation); both ends of each log are returned.
         """
         payload = codec.encode_list_offsets_request(
             ListOffsetsRequest(
                 topic=topic, partitions=list(partitions) if partitions else []
             )
         )
-        resp = self._round_trip(codec.OP_LIST_OFFSETS, payload)
-        if not isinstance(resp, ListOffsetsResponse):
-            raise ProtocolError(f"unexpected response for list_offsets: {type(resp)}")
-        self._check(resp.error_code, "list_offsets")
-        return list(resp.entries)
+        max_retries = max(0, int(self.max_retries))
+        retry_attempt = 0
+        while True:
+            try:
+                resp = self._round_trip(codec.OP_LIST_OFFSETS, payload)
+            except BrokerError as e:
+                if _is_transient_broker(e.code) and retry_attempt < max_retries:
+                    retry_attempt += 1
+                    self._sleep_produce_retry()
+                    continue
+                raise
+            except OSError:
+                if retry_attempt < max_retries:
+                    retry_attempt += 1
+                    self._sleep_produce_retry()
+                    continue
+                raise
+            if not isinstance(resp, ListOffsetsResponse):
+                raise ProtocolError(
+                    f"unexpected response for list_offsets: {type(resp)}"
+                )
+            if (
+                _is_transient_broker(resp.error_code)
+                and retry_attempt < max_retries
+            ):
+                retry_attempt += 1
+                self._sleep_produce_retry()
+                continue
+            self._check(resp.error_code, "list_offsets")
+            return list(resp.entries)
 
 
 

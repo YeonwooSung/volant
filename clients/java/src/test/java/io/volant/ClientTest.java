@@ -315,6 +315,7 @@ class ClientTest {
         final List<Integer> offsetCommitCodes = new CopyOnWriteArrayList<>();
         final List<Integer> offsetFetchCodes = new CopyOnWriteArrayList<>();
         final List<Integer> deleteOffsetsCodes = new CopyOnWriteArrayList<>();
+        final List<Integer> listOffsetsCodes = new CopyOnWriteArrayList<>();
         volatile Metadata meta = new Metadata(Collections.emptyList(), Collections.emptyList());
         final List<Integer> opcodes = new CopyOnWriteArrayList<>();
         final List<Codec.ProduceRequest> produceReqs = new CopyOnWriteArrayList<>();
@@ -327,6 +328,7 @@ class ClientTest {
         final AtomicInteger offsetCommitCount = new AtomicInteger();
         final AtomicInteger offsetFetchCount = new AtomicInteger();
         final AtomicInteger deleteOffsetsCount = new AtomicInteger();
+        final AtomicInteger listOffsetsCount = new AtomicInteger();
         final AtomicInteger metadataCount = new AtomicInteger();
         final AtomicInteger acceptCount = new AtomicInteger();
         volatile long initPid = 42L;
@@ -467,6 +469,16 @@ class ClientTest {
                 }
                 replyOp[0] = Codec.OP_DELETE_OFFSETS_RESPONSE;
                 return Codec.encodeDeleteOffsetsResponse(new Codec.DeleteOffsetsResponse(code, 0));
+            }
+            if (frame.opcode == Codec.OP_LIST_OFFSETS) {
+                listOffsetsCount.incrementAndGet();
+                int code = 0;
+                if (!listOffsetsCodes.isEmpty()) {
+                    code = listOffsetsCodes.remove(0);
+                }
+                replyOp[0] = Codec.OP_LIST_OFFSETS_RESPONSE;
+                return Codec.encodeListOffsetsResponse(
+                        new Codec.ListOffsetsResponse(code, "", Collections.emptyList()));
             }
             if (frame.opcode == Codec.OP_METADATA) {
                 metadataCount.incrementAndGet();
@@ -829,6 +841,68 @@ class ClientTest {
                 assertEquals(TIMEOUT, ex.code);
             }
             assertEquals(3, srv.offsetCommitCount.get());
+        }
+    }
+
+    @Test
+    void listOffsetsDefaultMaxRetriesZeroRaisesOnTimeout() throws Exception {
+        try (ScriptedBroker srv = ScriptedBroker.start()) {
+            srv.listOffsetsCodes.add(TIMEOUT);
+            try (Client c = Client.connect("127.0.0.1", srv.port, 5_000)) {
+                assertEquals(0, c.maxRetries());
+                BrokerException ex =
+                        assertThrows(BrokerException.class, () -> c.listOffsets("t"));
+                assertEquals(TIMEOUT, ex.code);
+            }
+            assertEquals(1, srv.listOffsetsCount.get());
+        }
+    }
+
+    @Test
+    void listOffsetsRetriesTimeoutThenOk() throws Exception {
+        try (ScriptedBroker srv = ScriptedBroker.start()) {
+            srv.listOffsetsCodes.add(TIMEOUT);
+            srv.listOffsetsCodes.add(0);
+            try (Client c = Client.connect("127.0.0.1", srv.port, 5_000)) {
+                c.setMaxRetries(2);
+                c.setRetryBackoffMs(0);
+                List<OffsetListing> got = c.listOffsets("t");
+                assertTrue(got.isEmpty());
+            }
+            assertEquals(2, srv.listOffsetsCount.get());
+        }
+    }
+
+    @Test
+    void listOffsetsNotFoundIsNotRetried() throws Exception {
+        try (ScriptedBroker srv = ScriptedBroker.start()) {
+            srv.listOffsetsCodes.add(NOT_FOUND);
+            srv.listOffsetsCodes.add(0);
+            try (Client c = Client.connect("127.0.0.1", srv.port, 5_000)) {
+                c.setMaxRetries(2);
+                c.setRetryBackoffMs(0);
+                BrokerException ex =
+                        assertThrows(BrokerException.class, () -> c.listOffsets("missing"));
+                assertEquals(NOT_FOUND, ex.code);
+            }
+            assertEquals(1, srv.listOffsetsCount.get());
+        }
+    }
+
+    @Test
+    void listOffsetsExhaustedRetriesRaises() throws Exception {
+        try (ScriptedBroker srv = ScriptedBroker.start()) {
+            srv.listOffsetsCodes.add(TIMEOUT);
+            srv.listOffsetsCodes.add(TIMEOUT);
+            srv.listOffsetsCodes.add(TIMEOUT);
+            try (Client c = Client.connect("127.0.0.1", srv.port, 5_000)) {
+                c.setMaxRetries(2);
+                c.setRetryBackoffMs(0);
+                BrokerException ex =
+                        assertThrows(BrokerException.class, () -> c.listOffsets("t"));
+                assertEquals(TIMEOUT, ex.code);
+            }
+            assertEquals(3, srv.listOffsetsCount.get());
         }
     }
 

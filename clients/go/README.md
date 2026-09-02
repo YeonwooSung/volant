@@ -180,7 +180,8 @@ I/O errors up to `SetMaxRetries` extra attempts (default 0). Sleep
 tests. Error 13 stays on the redirect budget; error 21 stays on the
 one re-Init. Heartbeat shares produce/fetch `SetMaxRetries` (default
 0); rebalance codes 9 / 10 / 11 are not retried. OffsetCommit /
-OffsetFetch / DeleteOffsets share the same `SetMaxRetries` (default 0).
+OffsetFetch / DeleteOffsets / ListOffsets share the same
+`SetMaxRetries` (default 0).
 This is not Kafka `retries`.
 
 Correlation ids increment per request. Decode verifies magic `V` (0x56),

@@ -1242,9 +1242,10 @@ public final class Client implements AutoCloseable {
      * List earliest/latest offsets for {@code topic} (native opcode 48).
      *
      * <p>An empty {@code partitions} array means all partitions (wire count 0).
-     * Non-zero {@code error_code} is {@link BrokerException}. This is not Kafka
-     * ListOffsets (no timestamp or isolation); both ends of each log are
-     * returned.
+     * Non-zero {@code error_code} is {@link BrokerException}. Transient
+     * broker/transport errors retry up to {@code maxRetries} extra times
+     * (default 0). This is not Kafka ListOffsets (no timestamp or isolation);
+     * both ends of each log are returned.
      */
     public List<OffsetListing> listOffsets(String topic, int... partitions) {
         List<Integer> parts = new ArrayList<>();
@@ -1254,13 +1255,38 @@ public final class Client implements AutoCloseable {
             }
         }
         byte[] payload = Codec.encodeListOffsetsRequest(new Codec.ListOffsetsRequest(topic, parts));
-        Object decoded = roundTrip(Codec.OP_LIST_OFFSETS, payload);
-        if (!(decoded instanceof Codec.ListOffsetsResponse)) {
-            throw new ProtocolException("unexpected response for list_offsets: " + typeName(decoded));
+        int retryAttempt = 0;
+        while (true) {
+            Object decoded;
+            try {
+                decoded = roundTrip(Codec.OP_LIST_OFFSETS, payload);
+            } catch (BrokerException e) {
+                if (isTransientBroker(e.code) && retryAttempt < maxRetries) {
+                    retryAttempt++;
+                    sleepProduceRetry();
+                    continue;
+                }
+                throw e;
+            } catch (RuntimeException e) {
+                if (isTransientTransport(e) && retryAttempt < maxRetries) {
+                    retryAttempt++;
+                    sleepProduceRetry();
+                    continue;
+                }
+                throw e;
+            }
+            if (!(decoded instanceof Codec.ListOffsetsResponse)) {
+                throw new ProtocolException("unexpected response for list_offsets: " + typeName(decoded));
+            }
+            Codec.ListOffsetsResponse resp = (Codec.ListOffsetsResponse) decoded;
+            if (isTransientBroker(resp.errorCode) && retryAttempt < maxRetries) {
+                retryAttempt++;
+                sleepProduceRetry();
+                continue;
+            }
+            check(resp.errorCode, "list_offsets");
+            return resp.entries;
         }
-        Codec.ListOffsetsResponse resp = (Codec.ListOffsetsResponse) decoded;
-        check(resp.errorCode, "list_offsets");
-        return resp.entries;
     }
 
     /**
