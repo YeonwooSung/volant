@@ -166,6 +166,43 @@ class GroupConsumerTest {
         g.close();
     }
 
+    @Test
+    void joinStaticSendsGroupInstanceId() {
+        FakeBackend fake = new FakeBackend();
+        fake.nextJoin = joinResult("m1", 1, assign("t", 0));
+        GroupConsumer g = GroupConsumer.join(fake, "g", List.of("t"), 10_000, "inst-1");
+        assertEquals("inst-1", g.groupInstanceId());
+        assertEquals("inst-1", fake.lastGroupInstanceId);
+        assertEquals("", fake.lastJoinMemberId);
+        assertEquals(1, fake.joinCount);
+        g.close();
+    }
+
+    @Test
+    void joinDefaultIsDynamic() {
+        FakeBackend fake = new FakeBackend();
+        fake.nextJoin = joinResult("m1", 1, assign("t", 0));
+        GroupConsumer g = GroupConsumer.join(fake, "g", List.of("t"), 10_000);
+        assertEquals("", g.groupInstanceId());
+        assertEquals("", fake.lastGroupInstanceId);
+        g.close();
+    }
+
+    @Test
+    void rejoinKeepsGroupInstanceId() {
+        FakeBackend fake = new FakeBackend();
+        fake.nextJoin = joinResult("m1", 1, assign("t", 0));
+        GroupConsumer g = GroupConsumer.join(fake, "g", List.of("t"), 10_000, "inst-1");
+        fake.heartbeatCode = 9;
+        fake.nextJoin = joinResult("m1", 2, assign("t", 0));
+        g.poll(0);
+        assertEquals(2, fake.joinCount);
+        assertEquals(List.of("inst-1", "inst-1"), fake.joinInstanceIds);
+        assertEquals("m1", fake.lastJoinMemberId);
+        assertEquals("inst-1", g.groupInstanceId());
+        g.close();
+    }
+
     private static long pos(GroupConsumer g, String topic, int partition) {
         for (Map.Entry<Codec.Assignment, Long> e : g.positions().entrySet()) {
             if (topic.equals(e.getKey().topic) && e.getKey().partition == partition) {
@@ -197,6 +234,9 @@ class GroupConsumerTest {
         int fetchOffsetCount;
         long lastMaxWaitMs;
         int lastSessionTimeoutMs;
+        String lastGroupInstanceId = "";
+        String lastJoinMemberId = "";
+        final List<String> joinInstanceIds = new ArrayList<>();
         String lastCommitMember;
         long lastCommitGeneration;
         List<Codec.OffsetCommitEntry> lastCommit = Collections.emptyList();
@@ -204,9 +244,13 @@ class GroupConsumerTest {
         final Map<String, List<Record>> records = new LinkedHashMap<>();
 
         @Override
-        public JoinGroupResult joinGroup(String group, String memberId, List<String> topics, int sessionTimeoutMs) {
+        public JoinGroupResult joinGroup(
+                String group, String memberId, List<String> topics, int sessionTimeoutMs, String groupInstanceId) {
             joinCount++;
             lastSessionTimeoutMs = sessionTimeoutMs;
+            lastGroupInstanceId = groupInstanceId == null ? "" : groupInstanceId;
+            lastJoinMemberId = memberId == null ? "" : memberId;
+            joinInstanceIds.add(lastGroupInstanceId);
             return nextJoin;
         }
 

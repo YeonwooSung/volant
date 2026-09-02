@@ -32,6 +32,8 @@ try (Client c = Client.connect("127.0.0.1", 9092)) {
   c.heartbeat("g", j.memberId, j.generation);
   c.leaveGroup("g", j.memberId);
   GroupConsumer g = GroupConsumer.join(c, "g", List.of("t"), 10_000);
+  // Phase 12 static membership (empty instance id = dynamic):
+  GroupConsumer s = GroupConsumer.joinStatic(c, "g", List.of("t"), 10_000, "inst-1");
   List<Record> polled = g.poll(500);
   g.commit();
   g.close();
@@ -58,6 +60,8 @@ Client.connectTls(
 `joinGroup` sends empty `memberId` on first join.
 `GroupConsumer` joins, polls assigned partitions, heartbeats, commits with
 member+generation, and rejoins on heartbeat error 9.
+`joinStatic` sends Phase 12 `group_instance_id` (empty = dynamic) and
+resends it on rejoin.
 
 Correlation ids increment per request. Decode verifies magic `V` (0x56),
 protocol version 1, and IEEE CRC32 of the **payload only**. Broker
@@ -97,9 +101,11 @@ socket.
 ## Honesty
 
 Not implemented: `kafka-clients`, cooperative assignor client logic
-beyond sticky position retain, static membership, SCRAM / shared-token
+beyond sticky position retain, SCRAM / shared-token
 auth, async I/O, idempotent produce, leader redirect. Sync only; one
-TCP connection; acks=1 by default. Convenience `offsetCommit` is
+TCP connection; acks=1 by default. Thin `joinGroup` still sends empty
+`group_instance_id`; use `GroupConsumer.joinStatic` for static
+membership. Convenience `offsetCommit` is
 admin-only (`generation=0`); `GroupConsumer.commit` sends the joined
 member+generation. TLS does not change broker TLS (Phase 8/19) and
 does not add Kafka API keys. Client private keys other than PKCS#8 /
@@ -107,5 +113,6 @@ RSA PKCS#1 PEM are not loaded.
 
 See [docs/V23_SPEC.md](../../docs/V23_SPEC.md),
 [docs/V27_SPEC.md](../../docs/V27_SPEC.md),
-[docs/V28_SPEC.md](../../docs/V28_SPEC.md), and
-[docs/V33_SPEC.md](../../docs/V33_SPEC.md).
+[docs/V28_SPEC.md](../../docs/V28_SPEC.md),
+[docs/V33_SPEC.md](../../docs/V33_SPEC.md), and
+[docs/V36_SPEC.md](../../docs/V36_SPEC.md).

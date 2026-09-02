@@ -369,16 +369,26 @@ public final class Client implements AutoCloseable {
      * (broker assigns one). {@code sessionTimeoutMs} 0 defaults to 10000.
      */
     public JoinGroupResult joinGroup(String group, List<String> topics, int sessionTimeoutMs) {
-        return joinGroup(group, "", topics, sessionTimeoutMs);
+        return joinGroup(group, "", topics, sessionTimeoutMs, "");
     }
 
     JoinGroupResult joinGroup(String group, String memberId, List<String> topics, int sessionTimeoutMs) {
+        return joinGroup(group, memberId, topics, sessionTimeoutMs, "");
+    }
+
+    JoinGroupResult joinGroup(
+            String group, String memberId, List<String> topics, int sessionTimeoutMs, String groupInstanceId) {
         long timeout = sessionTimeoutMs == 0 ? 10_000L : sessionTimeoutMs;
         if (topics == null) {
             topics = Collections.emptyList();
         }
         byte[] payload = Codec.encodeJoinGroupRequest(
-                new Codec.JoinGroupRequest(group, memberId == null ? "" : memberId, timeout, topics, ""));
+                new Codec.JoinGroupRequest(
+                        group,
+                        memberId == null ? "" : memberId,
+                        timeout,
+                        topics,
+                        groupInstanceId == null ? "" : groupInstanceId));
         Object decoded = roundTrip(Codec.OP_JOIN_GROUP, payload);
         if (!(decoded instanceof Codec.JoinGroupResponse)) {
             throw new ProtocolException("unexpected response for join_group: " + typeName(decoded));

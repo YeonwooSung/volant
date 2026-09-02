@@ -547,6 +547,100 @@ func TestJoinGroupConsumerNilClient(t *testing.T) {
 	}
 }
 
+func TestJoinGroupConsumerStaticSendsInstanceID(t *testing.T) {
+	s := newFakeGroupBroker()
+	s.setAssignment([]codec.Assignment{{Topic: "t", Partition: 0}}, nil)
+	addr, stop := startFakeGroup(t, s)
+	defer stop()
+
+	c, err := volant.DialTimeout(addr, 5*time.Second)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer c.Close()
+
+	g, err := volant.JoinGroupConsumerStatic(c, "g", []string{"t"}, 10_000, "inst-1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer g.Close()
+
+	if g.GroupInstanceID() != "inst-1" {
+		t.Fatalf("instance=%q want inst-1", g.GroupInstanceID())
+	}
+	joins, _, _, _, _, _ := s.snapshot()
+	if len(joins) != 1 {
+		t.Fatalf("joins=%d want 1", len(joins))
+	}
+	if joins[0].GroupInstanceID != "inst-1" {
+		t.Fatalf("join instance=%q want inst-1", joins[0].GroupInstanceID)
+	}
+	if joins[0].MemberID != "" {
+		t.Fatalf("first join member_id=%q want empty", joins[0].MemberID)
+	}
+}
+
+func TestJoinGroupConsumerDefaultIsDynamic(t *testing.T) {
+	s := newFakeGroupBroker()
+	s.setAssignment([]codec.Assignment{{Topic: "t", Partition: 0}}, nil)
+	addr, stop := startFakeGroup(t, s)
+	defer stop()
+
+	c, err := volant.DialTimeout(addr, 5*time.Second)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer c.Close()
+
+	g, err := volant.JoinGroupConsumer(c, "g", []string{"t"}, 10_000)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer g.Close()
+
+	if g.GroupInstanceID() != "" {
+		t.Fatalf("instance=%q want empty", g.GroupInstanceID())
+	}
+	joins, _, _, _, _, _ := s.snapshot()
+	if len(joins) != 1 || joins[0].GroupInstanceID != "" {
+		t.Fatalf("joins %+v want empty instance", joins)
+	}
+}
+
+func TestJoinGroupConsumerStaticRejoinKeepsInstanceID(t *testing.T) {
+	s := newFakeGroupBroker()
+	s.setAssignment([]codec.Assignment{{Topic: "t", Partition: 0}}, nil)
+	s.pushHeartbeat(volant.RebalanceInProgress)
+	addr, stop := startFakeGroup(t, s)
+	defer stop()
+
+	c, err := volant.DialTimeout(addr, 5*time.Second)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer c.Close()
+
+	g, err := volant.JoinGroupConsumerStatic(c, "g", []string{"t"}, 10_000, "inst-1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer g.Close()
+
+	if _, err := g.Poll(0); err != nil {
+		t.Fatal(err)
+	}
+	joins, _, _, _, _, _ := s.snapshot()
+	if len(joins) != 2 {
+		t.Fatalf("joins=%d want 2 (initial + rejoin)", len(joins))
+	}
+	if joins[0].GroupInstanceID != "inst-1" || joins[1].GroupInstanceID != "inst-1" {
+		t.Fatalf("instance ids %+v want inst-1 on both", []string{joins[0].GroupInstanceID, joins[1].GroupInstanceID})
+	}
+	if joins[1].MemberID != "m-1" {
+		t.Fatalf("rejoin member_id=%q want m-1", joins[1].MemberID)
+	}
+}
+
 func TestE2EGroupConsumerJoinPollCommitResume(t *testing.T) {
 	if os.Getenv("VOLANT_E2E") != "1" {
 		t.Skip("set VOLANT_E2E=1 to run live broker e2e")
@@ -700,4 +794,38 @@ func TestE2EGroupConsumerSplitAssignment(t *testing.T) {
 		}
 	}
 	t.Fatalf("assignments not disjoint+cover: g1=%+v g2=%+v", g1.Assignment(), g2.Assignment())
+}
+
+func TestE2EGroupConsumerStaticMembership(t *testing.T) {
+	if os.Getenv("VOLANT_E2E") != "1" {
+		t.Skip("set VOLANT_E2E=1 to run live broker e2e")
+	}
+	addr, cleanup := startBroker(t)
+	defer cleanup()
+
+	c, err := volant.DialTimeout(addr, 5*time.Second)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer c.Close()
+
+	topic := fmt.Sprintf("go-static-%d-%d", os.Getpid(), time.Now().UnixNano())
+	group := fmt.Sprintf("go-staticg-%d", os.Getpid())
+	if err := c.CreateTopic(topic, 1); err != nil {
+		t.Fatalf("CreateTopic: %v", err)
+	}
+	g, err := volant.JoinGroupConsumerStatic(c, group, []string{topic}, 10_000, "inst-1")
+	if err != nil {
+		t.Fatalf("JoinGroupConsumerStatic: %v", err)
+	}
+	defer g.Close()
+	if g.GroupInstanceID() != "inst-1" {
+		t.Fatalf("instance=%q want inst-1", g.GroupInstanceID())
+	}
+	if g.MemberID() != "static:inst-1" {
+		t.Fatalf("member=%q want static:inst-1", g.MemberID())
+	}
+	if err := c.DeleteTopic(topic); err != nil {
+		t.Fatalf("DeleteTopic: %v", err)
+	}
 }
