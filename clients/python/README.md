@@ -28,6 +28,8 @@ for offset, key, value in batch.tuples():
 c.offset_commit(group="g", topic="t", partition=0, offset=5)
 offs = c.offset_fetch(group="g", topic="t")  # [(partition, offset), ...]
 bounds = c.list_offsets("t")  # [OffsetListing(partition, earliest, latest), ...]
+cfg = c.describe_configs("t")
+c.alter_configs("t", [("retention.ms", "86400000")])
 cut = c.delete_records("t", 0, 100)  # DeleteRecordsResult; wait_majority=0
 # cut = c.delete_records("t", 0, 100, wait_majority=1)  # force majority wait
 member_id, generation, assignment = c.join_group(
@@ -208,4 +210,5 @@ See [docs/V14_SPEC.md](../../docs/V14_SPEC.md),
 [docs/V50_SPEC.md](../../docs/V50_SPEC.md),
 [docs/V51_SPEC.md](../../docs/V51_SPEC.md),
 [docs/V52_SPEC.md](../../docs/V52_SPEC.md),
+[docs/V53_SPEC.md](../../docs/V53_SPEC.md),
 [docs/V46_SPEC.md](../../docs/V46_SPEC.md).

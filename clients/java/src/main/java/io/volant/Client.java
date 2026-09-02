@@ -780,6 +780,43 @@ public final class Client implements AutoCloseable {
      * Sends {@code wait_majority=0} (broker default). Error 13 is not
      * redirected (Produce/Fetch only). This is not Kafka DeleteRecords.
      */
+
+    /**
+     * Describe topic configuration (native opcode 40/41).
+     *
+     * <p>Topic configs only (not Kafka DescribeConfigs / BROKER). Empty values
+     * mean the key is unset. Non-zero {@code error_code} is
+     * {@link BrokerException} with {@code op="describe_configs"}.
+     */
+    public DescribeConfigsResult describeConfigs(String topic) {
+        byte[] payload = Codec.encodeDescribeConfigsRequest(new Codec.DescribeConfigsRequest(topic));
+        Object decoded = roundTrip(Codec.OP_DESCRIBE_CONFIGS, payload);
+        if (!(decoded instanceof Codec.DescribeConfigsResponse)) {
+            throw new ProtocolException("unexpected response for describe_configs: " + typeName(decoded));
+        }
+        Codec.DescribeConfigsResponse resp = (Codec.DescribeConfigsResponse) decoded;
+        check(resp.errorCode, "describe_configs");
+        return new DescribeConfigsResult(resp.topic, resp.topicId, resp.partitionCount, resp.configs);
+    }
+
+
+    /**
+     * Alter topic configuration (native opcode 42/43).
+     *
+     * <p>Empty value clears that key (same as Rust). Topic configs only.
+     * Non-zero {@code error_code} is {@link BrokerException} with
+     * {@code op="alter_configs"}.
+     */
+    public void alterConfigs(String topic, List<String[]> configs) {
+        byte[] payload = Codec.encodeAlterConfigsRequest(new Codec.AlterConfigsRequest(topic, configs));
+        Object decoded = roundTrip(Codec.OP_ALTER_CONFIGS, payload);
+        if (!(decoded instanceof Codec.AlterConfigsResponse)) {
+            throw new ProtocolException("unexpected response for alter_configs: " + typeName(decoded));
+        }
+        Codec.AlterConfigsResponse resp = (Codec.AlterConfigsResponse) decoded;
+        check(resp.errorCode, "alter_configs");
+    }
+
     public DeleteRecordsResult deleteRecords(String topic, int partition, long beforeOffset) {
         return deleteRecords(topic, partition, beforeOffset, 0);
     }

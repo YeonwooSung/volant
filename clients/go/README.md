@@ -41,6 +41,9 @@ offs, err := c.OffsetFetch("g", "t")
 _ = offs
 bounds, err := c.ListOffsets("t", nil) // all partitions; or []uint32{0}
 _ = bounds
+cfg, err := c.DescribeConfigs("t")
+_ = cfg
+err = c.AlterConfigs("t", [][2]string{{"retention.ms", "86400000"}})
 cut, err := c.DeleteRecords("t", 0, 100) // wait_majority=0
 // cut, err = c.DeleteRecordsWithWaitFlag("t", 0, 100, 1) // force majority wait
 _ = cut
@@ -212,4 +215,5 @@ See [docs/V19_SPEC.md](../../docs/V19_SPEC.md),
 [docs/V50_SPEC.md](../../docs/V50_SPEC.md),
 [docs/V51_SPEC.md](../../docs/V51_SPEC.md),
 [docs/V52_SPEC.md](../../docs/V52_SPEC.md),
+[docs/V53_SPEC.md](../../docs/V53_SPEC.md),
 [docs/V46_SPEC.md](../../docs/V46_SPEC.md).

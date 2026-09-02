@@ -39,6 +39,10 @@ public final class Codec {
     public static final int OP_DESCRIBE_GROUP_RESPONSE = 35;
     public static final int OP_LIST_GROUPS = 36;
     public static final int OP_LIST_GROUPS_RESPONSE = 37;
+    public static final int OP_DESCRIBE_CONFIGS = 40;
+    public static final int OP_DESCRIBE_CONFIGS_RESPONSE = 41;
+    public static final int OP_ALTER_CONFIGS = 42;
+    public static final int OP_ALTER_CONFIGS_RESPONSE = 43;
     public static final int OP_DELETE_RECORDS = 44;
     public static final int OP_DELETE_RECORDS_RESPONSE = 45;
     public static final int OP_CREATE_PARTITIONS = 46;
@@ -592,6 +596,51 @@ public final class Codec {
         }
     }
 
+    public static final class DescribeConfigsRequest {
+        public final String topic;
+
+        public DescribeConfigsRequest(String topic) {
+            this.topic = topic == null ? "" : topic;
+        }
+    }
+    public static final class DescribeConfigsResponse {
+        public final int errorCode;
+        public final String topic;
+        public final long topicId;
+        public final long partitionCount;
+        public final List<String[]> configs;
+
+        public DescribeConfigsResponse(
+                int errorCode, String topic, long topicId, long partitionCount, List<String[]> configs) {
+            this.errorCode = errorCode;
+            this.topic = topic == null ? "" : topic;
+            this.topicId = topicId;
+            this.partitionCount = partitionCount;
+            this.configs = configs == null
+                    ? Collections.emptyList()
+                    : Collections.unmodifiableList(new ArrayList<>(configs));
+        }
+    }
+    public static final class AlterConfigsRequest {
+        public final String topic;
+        public final List<String[]> configs;
+
+        public AlterConfigsRequest(String topic, List<String[]> configs) {
+            this.topic = topic == null ? "" : topic;
+            this.configs = configs == null
+                    ? Collections.emptyList()
+                    : Collections.unmodifiableList(new ArrayList<>(configs));
+        }
+    }
+    public static final class AlterConfigsResponse {
+        public final int errorCode;
+        public final String topic;
+
+        public AlterConfigsResponse(int errorCode, String topic) {
+            this.errorCode = errorCode;
+            this.topic = topic == null ? "" : topic;
+        }
+    }
     public static final class DeleteRecordsRequest {
         public final String topic;
         public final long partition;
@@ -1496,6 +1545,78 @@ public final class Codec {
         return new ListOffsetsResponse(errorCode, topic, entries);
     }
 
+    static void putConfigPairs(Writer w, List<String[]> configs) {
+        List<String[]> pairs = configs == null ? Collections.emptyList() : configs;
+        w.u32(pairs.size());
+        for (String[] kv : pairs) {
+            putString(w, kv[0]);
+            putString(w, kv[1]);
+        }
+    }
+
+    static List<String[]> getConfigPairs(Reader r) {
+        long n = r.u32();
+        List<String[]> configs = new ArrayList<>();
+        for (int i = 0; i < n; i++) {
+            configs.add(new String[] {getString(r), getString(r)});
+        }
+        return configs;
+    }
+
+    public static byte[] encodeDescribeConfigsRequest(DescribeConfigsRequest req) {
+        Writer w = new Writer();
+        putString(w, req.topic);
+        return w.finish();
+    }
+
+    public static DescribeConfigsRequest decodeDescribeConfigsRequest(byte[] payload) {
+        return new DescribeConfigsRequest(getString(new Reader(payload)));
+    }
+
+    public static byte[] encodeDescribeConfigsResponse(DescribeConfigsResponse resp) {
+        Writer w = new Writer();
+        w.u16(resp.errorCode);
+        putString(w, resp.topic);
+        w.u32(resp.topicId);
+        w.u32(resp.partitionCount);
+        putConfigPairs(w, resp.configs);
+        return w.finish();
+    }
+
+    public static DescribeConfigsResponse decodeDescribeConfigsResponse(byte[] payload) {
+        Reader r = new Reader(payload);
+        int errorCode = r.u16();
+        String topic = getString(r);
+        long topicId = r.u32();
+        long partitionCount = r.u32();
+        return new DescribeConfigsResponse(errorCode, topic, topicId, partitionCount, getConfigPairs(r));
+    }
+
+    public static byte[] encodeAlterConfigsRequest(AlterConfigsRequest req) {
+        Writer w = new Writer();
+        putString(w, req.topic);
+        putConfigPairs(w, req.configs);
+        return w.finish();
+    }
+
+    public static AlterConfigsRequest decodeAlterConfigsRequest(byte[] payload) {
+        Reader r = new Reader(payload);
+        String topic = getString(r);
+        return new AlterConfigsRequest(topic, getConfigPairs(r));
+    }
+
+    public static byte[] encodeAlterConfigsResponse(AlterConfigsResponse resp) {
+        Writer w = new Writer();
+        w.u16(resp.errorCode);
+        putString(w, resp.topic);
+        return w.finish();
+    }
+
+    public static AlterConfigsResponse decodeAlterConfigsResponse(byte[] payload) {
+        Reader r = new Reader(payload);
+        return new AlterConfigsResponse(r.u16(), getString(r));
+    }
+
     public static byte[] encodeDeleteRecordsRequest(DeleteRecordsRequest req) {
         Writer w = new Writer();
         putString(w, req.topic);
@@ -1699,6 +1820,10 @@ public final class Codec {
                 return decodeCreatePartitionsResponse(payload);
             case OP_LIST_OFFSETS_RESPONSE:
                 return decodeListOffsetsResponse(payload);
+            case OP_DESCRIBE_CONFIGS_RESPONSE:
+                return decodeDescribeConfigsResponse(payload);
+            case OP_ALTER_CONFIGS_RESPONSE:
+                return decodeAlterConfigsResponse(payload);
             case OP_DELETE_RECORDS_RESPONSE:
                 return decodeDeleteRecordsResponse(payload);
             case OP_ERROR:

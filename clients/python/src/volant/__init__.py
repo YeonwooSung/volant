@@ -4,6 +4,7 @@ from .assignor import range_assign, range_assign_multi
 from .client import (
     Client,
     DeleteRecordsResult,
+    DescribeConfigsResult,
     DescribeGroupResult,
     FetchResult,
     JoinGroupResult,
@@ -34,6 +35,7 @@ __all__ = [
     "BrokerInfo",
     "Client",
     "DeleteRecordsResult",
+    "DescribeConfigsResult",
     "DescribeGroupResult",
     "FetchedRecord",
     "FetchRecord",

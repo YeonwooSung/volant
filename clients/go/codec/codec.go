@@ -37,6 +37,10 @@ const (
 	OpDescribeGroupResponse uint16 = 35
 	OpListGroups                 uint16 = 36
 	OpListGroupsResponse         uint16 = 37
+	OpDescribeConfigs            uint16 = 40
+	OpDescribeConfigsResponse    uint16 = 41
+	OpAlterConfigs               uint16 = 42
+	OpAlterConfigsResponse       uint16 = 43
 	OpDeleteRecords              uint16 = 44
 	OpDeleteRecordsResponse      uint16 = 45
 	OpCreatePartitions           uint16 = 46
@@ -605,6 +609,33 @@ type ListOffsetsResponse struct {
 // WaitMajority is the Phase 137 trailer: 0 = broker default, 1 = force
 // wait, 2 = force no-wait. Encode always writes it; decode treats a
 // missing trailer as 0.
+// DescribeConfigsRequest is the DescribeConfigs opcode (40) body.
+type DescribeConfigsRequest struct {
+	Topic string
+}
+
+// DescribeConfigsResponse is the DescribeConfigs reply (opcode 41).
+type DescribeConfigsResponse struct {
+	ErrorCode      uint16
+	Topic          string
+	TopicID        uint32
+	PartitionCount uint32
+	Configs        [][2]string
+}
+
+// AlterConfigsRequest is the AlterConfigs opcode (42) body.
+// Empty value clears that key.
+type AlterConfigsRequest struct {
+	Topic   string
+	Configs [][2]string
+}
+
+// AlterConfigsResponse is the AlterConfigs reply (opcode 43).
+type AlterConfigsResponse struct {
+	ErrorCode uint16
+	Topic     string
+}
+
 type DeleteRecordsRequest struct {
 	Topic        string
 	Partition    uint32
@@ -1870,6 +1901,150 @@ func DecodeListOffsetsResponse(payload []byte) (ListOffsetsResponse, error) {
 	return ListOffsetsResponse{ErrorCode: code, Topic: topic, Entries: entries}, nil
 }
 
+func putConfigPairs(w *writer, configs [][2]string) error {
+	if configs == nil {
+		configs = [][2]string{}
+	}
+	w.u32(uint32(len(configs)))
+	for _, kv := range configs {
+		if err := putString(w, kv[0]); err != nil {
+			return err
+		}
+		if err := putString(w, kv[1]); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func getConfigPairs(r *reader) ([][2]string, error) {
+	n, err := r.u32()
+	if err != nil {
+		return nil, err
+	}
+	configs := make([][2]string, 0, n)
+	for i := uint32(0); i < n; i++ {
+		k, err := getString(r)
+		if err != nil {
+			return nil, err
+		}
+		v, err := getString(r)
+		if err != nil {
+			return nil, err
+		}
+		configs = append(configs, [2]string{k, v})
+	}
+	return configs, nil
+}
+
+func EncodeDescribeConfigsRequest(req DescribeConfigsRequest) ([]byte, error) {
+	w := &writer{}
+	if err := putString(w, req.Topic); err != nil {
+		return nil, err
+	}
+	return w.buf, nil
+}
+
+func DecodeDescribeConfigsRequest(payload []byte) (DescribeConfigsRequest, error) {
+	r := &reader{data: payload}
+	topic, err := getString(r)
+	if err != nil {
+		return DescribeConfigsRequest{}, err
+	}
+	return DescribeConfigsRequest{Topic: topic}, nil
+}
+
+func EncodeDescribeConfigsResponse(resp DescribeConfigsResponse) ([]byte, error) {
+	w := &writer{}
+	w.u16(resp.ErrorCode)
+	if err := putString(w, resp.Topic); err != nil {
+		return nil, err
+	}
+	w.u32(resp.TopicID)
+	w.u32(resp.PartitionCount)
+	if err := putConfigPairs(w, resp.Configs); err != nil {
+		return nil, err
+	}
+	return w.buf, nil
+}
+
+func DecodeDescribeConfigsResponse(payload []byte) (DescribeConfigsResponse, error) {
+	r := &reader{data: payload}
+	code, err := r.u16()
+	if err != nil {
+		return DescribeConfigsResponse{}, err
+	}
+	topic, err := getString(r)
+	if err != nil {
+		return DescribeConfigsResponse{}, err
+	}
+	topicID, err := r.u32()
+	if err != nil {
+		return DescribeConfigsResponse{}, err
+	}
+	parts, err := r.u32()
+	if err != nil {
+		return DescribeConfigsResponse{}, err
+	}
+	configs, err := getConfigPairs(r)
+	if err != nil {
+		return DescribeConfigsResponse{}, err
+	}
+	return DescribeConfigsResponse{
+		ErrorCode:      code,
+		Topic:          topic,
+		TopicID:        topicID,
+		PartitionCount: parts,
+		Configs:        configs,
+	}, nil
+}
+
+func EncodeAlterConfigsRequest(req AlterConfigsRequest) ([]byte, error) {
+	w := &writer{}
+	if err := putString(w, req.Topic); err != nil {
+		return nil, err
+	}
+	if err := putConfigPairs(w, req.Configs); err != nil {
+		return nil, err
+	}
+	return w.buf, nil
+}
+
+func DecodeAlterConfigsRequest(payload []byte) (AlterConfigsRequest, error) {
+	r := &reader{data: payload}
+	topic, err := getString(r)
+	if err != nil {
+		return AlterConfigsRequest{}, err
+	}
+	configs, err := getConfigPairs(r)
+	if err != nil {
+		return AlterConfigsRequest{}, err
+	}
+	return AlterConfigsRequest{Topic: topic, Configs: configs}, nil
+}
+
+func EncodeAlterConfigsResponse(resp AlterConfigsResponse) ([]byte, error) {
+	w := &writer{}
+	w.u16(resp.ErrorCode)
+	if err := putString(w, resp.Topic); err != nil {
+		return nil, err
+	}
+	return w.buf, nil
+}
+
+func DecodeAlterConfigsResponse(payload []byte) (AlterConfigsResponse, error) {
+	r := &reader{data: payload}
+	code, err := r.u16()
+	if err != nil {
+		return AlterConfigsResponse{}, err
+	}
+	topic, err := getString(r)
+	if err != nil {
+		return AlterConfigsResponse{}, err
+	}
+	return AlterConfigsResponse{ErrorCode: code, Topic: topic}, nil
+}
+
 func EncodeDeleteRecordsRequest(req DeleteRecordsRequest) ([]byte, error) {
 	w := &writer{}
 	if err := putString(w, req.Topic); err != nil {
@@ -2219,6 +2394,10 @@ func DecodeResponse(opcode uint16, payload []byte) (any, error) {
 		return DecodeCreatePartitionsResponse(payload)
 	case OpListOffsetsResponse:
 		return DecodeListOffsetsResponse(payload)
+	case OpDescribeConfigsResponse:
+		return DecodeDescribeConfigsResponse(payload)
+	case OpAlterConfigsResponse:
+		return DecodeAlterConfigsResponse(payload)
 	case OpDeleteRecordsResponse:
 		return DecodeDeleteRecordsResponse(payload)
 	case OpError:

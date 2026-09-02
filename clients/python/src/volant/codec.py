@@ -40,6 +40,10 @@ OP_DESCRIBE_GROUP = 34
 OP_DESCRIBE_GROUP_RESPONSE = 35
 OP_LIST_GROUPS = 36
 OP_LIST_GROUPS_RESPONSE = 37
+OP_DESCRIBE_CONFIGS = 40
+OP_DESCRIBE_CONFIGS_RESPONSE = 41
+OP_ALTER_CONFIGS = 42
+OP_ALTER_CONFIGS_RESPONSE = 43
 OP_DELETE_RECORDS = 44
 OP_DELETE_RECORDS_RESPONSE = 45
 OP_CREATE_PARTITIONS = 46
@@ -547,6 +551,44 @@ class ListOffsetsResponse:
     error_code: int
     topic: str
     entries: list[OffsetListing]
+
+
+
+
+
+@dataclass
+class DescribeConfigsRequest:
+    topic: str
+
+
+
+
+
+@dataclass
+class DescribeConfigsResponse:
+    error_code: int
+    topic: str
+    topic_id: int
+    partition_count: int
+    configs: list[tuple[str, str]]
+
+
+
+
+
+@dataclass
+class AlterConfigsRequest:
+    topic: str
+    configs: list[tuple[str, str]]
+
+
+
+
+
+@dataclass
+class AlterConfigsResponse:
+    error_code: int
+    topic: str
 
 
 
@@ -1323,6 +1365,109 @@ def decode_create_partitions_response(payload: bytes) -> CreatePartitionsRespons
 # --- delete records --------------------------------------------------------
 
 
+
+
+# --- describe / alter configs ----------------------------------------------
+
+
+def _put_config_pairs(w: _Writer, configs: list[tuple[str, str]]) -> None:
+    w.u32_le(len(configs))
+    for k, v in configs:
+        _put_string(w, k)
+        _put_string(w, v)
+
+
+
+def _get_config_pairs(r: _Reader) -> list[tuple[str, str]]:
+    n = r.u32_le()
+    return [(_get_string(r), _get_string(r)) for _ in range(n)]
+
+
+
+def encode_describe_configs_request(req: DescribeConfigsRequest) -> bytes:
+    w = _Writer()
+    _put_string(w, req.topic)
+    return w.finish()
+
+
+
+
+
+def decode_describe_configs_request(payload: bytes) -> DescribeConfigsRequest:
+    return DescribeConfigsRequest(topic=_get_string(_Reader(payload)))
+
+
+
+
+
+def encode_describe_configs_response(resp: DescribeConfigsResponse) -> bytes:
+    w = _Writer()
+    w.u16_le(resp.error_code)
+    _put_string(w, resp.topic)
+    w.u32_le(resp.topic_id)
+    w.u32_le(resp.partition_count)
+    _put_config_pairs(w, resp.configs)
+    return w.finish()
+
+
+
+
+
+def decode_describe_configs_response(payload: bytes) -> DescribeConfigsResponse:
+    r = _Reader(payload)
+    error_code = r.u16_le()
+    topic = _get_string(r)
+    topic_id = r.u32_le()
+    partition_count = r.u32_le()
+    configs = _get_config_pairs(r)
+    return DescribeConfigsResponse(
+        error_code=error_code,
+        topic=topic,
+        topic_id=topic_id,
+        partition_count=partition_count,
+        configs=configs,
+    )
+
+
+
+
+
+def encode_alter_configs_request(req: AlterConfigsRequest) -> bytes:
+    w = _Writer()
+    _put_string(w, req.topic)
+    _put_config_pairs(w, req.configs)
+    return w.finish()
+
+
+
+
+
+def decode_alter_configs_request(payload: bytes) -> AlterConfigsRequest:
+    r = _Reader(payload)
+    topic = _get_string(r)
+    configs = _get_config_pairs(r)
+    return AlterConfigsRequest(topic=topic, configs=configs)
+
+
+
+
+
+def encode_alter_configs_response(resp: AlterConfigsResponse) -> bytes:
+    w = _Writer()
+    w.u16_le(resp.error_code)
+    _put_string(w, resp.topic)
+    return w.finish()
+
+
+
+
+
+def decode_alter_configs_response(payload: bytes) -> AlterConfigsResponse:
+    r = _Reader(payload)
+    return AlterConfigsResponse(error_code=r.u16_le(), topic=_get_string(r))
+
+
+
 def encode_delete_records_request(req: DeleteRecordsRequest) -> bytes:
     w = _Writer()
     _put_string(w, req.topic)
@@ -1517,6 +1662,10 @@ def decode_response(opcode: int, payload: bytes):
         return decode_create_partitions_response(payload)
     if opcode == OP_LIST_OFFSETS_RESPONSE:
         return decode_list_offsets_response(payload)
+    if opcode == OP_DESCRIBE_CONFIGS_RESPONSE:
+        return decode_describe_configs_response(payload)
+    if opcode == OP_ALTER_CONFIGS_RESPONSE:
+        return decode_alter_configs_response(payload)
     if opcode == OP_DELETE_RECORDS_RESPONSE:
         return decode_delete_records_response(payload)
     if opcode == OP_ERROR:

@@ -14,6 +14,10 @@ from .codec import (
     BrokerInfo,
     CreatePartitionsRequest,
     CreateTopicRequest,
+    DescribeConfigsRequest,
+    DescribeConfigsResponse,
+    AlterConfigsRequest,
+    AlterConfigsResponse,
     DeleteRecordsRequest,
     DeleteRecordsResponse,
     DeleteTopicRequest,
@@ -88,6 +92,16 @@ class ProduceResult:
     partition: int
     base_offset: int
     count: int
+
+
+@dataclass
+class DescribeConfigsResult:
+    """Result of a successful DescribeConfigs (Phase 13 / v0.53)."""
+
+    topic: str
+    topic_id: int
+    partition_count: int
+    configs: list[tuple[str, str]]
 
 
 @dataclass
@@ -754,6 +768,48 @@ class Client:
         self._check(resp.error_code, "list_offsets")
         return list(resp.entries)
 
+
+    def describe_configs(self, topic: str) -> DescribeConfigsResult:
+        """Describe topic configuration (native opcode 40/41).
+
+        Topic configs only (not Kafka DescribeConfigs / BROKER). Empty
+        values mean the key is unset. Non-zero ``error_code`` raises
+        :class:`BrokerError` with ``op="describe_configs"``.
+        """
+        payload = codec.encode_describe_configs_request(
+            DescribeConfigsRequest(topic=topic)
+        )
+        resp = self._round_trip(codec.OP_DESCRIBE_CONFIGS, payload)
+        if not isinstance(resp, DescribeConfigsResponse):
+            raise ProtocolError(
+                f"unexpected response for describe_configs: {type(resp)}"
+            )
+        self._check(resp.error_code, "describe_configs")
+        return DescribeConfigsResult(
+            topic=resp.topic,
+            topic_id=resp.topic_id,
+            partition_count=resp.partition_count,
+            configs=list(resp.configs),
+        )
+
+
+
+    def alter_configs(self, topic: str, configs: list[tuple[str, str]]) -> None:
+        """Alter topic configuration (native opcode 42/43).
+
+        Empty value clears that key (same as Rust). Topic configs only.
+        Non-zero ``error_code`` raises :class:`BrokerError` with
+        ``op="alter_configs"``.
+        """
+        payload = codec.encode_alter_configs_request(
+            AlterConfigsRequest(topic=topic, configs=list(configs or []))
+        )
+        resp = self._round_trip(codec.OP_ALTER_CONFIGS, payload)
+        if not isinstance(resp, AlterConfigsResponse):
+            raise ProtocolError(f"unexpected response for alter_configs: {type(resp)}")
+        self._check(resp.error_code, "alter_configs")
+
+
     def delete_records(
         self,
         topic: str,
@@ -897,6 +953,7 @@ __all__ = [
     "BrokerError",
     "BrokerInfo",
     "Client",
+    "DescribeConfigsResult",
     "DeleteRecordsResult",
     "DescribeGroupResult",
     "FetchRecord",
