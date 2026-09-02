@@ -265,13 +265,14 @@ class Client:
 
         c = Client("127.0.0.1:9092", enable_idempotence=True)
 
-    Optional produce/fetch/heartbeat/BeginTxn/EndTxn retry (v0.61 /
-    v0.66 / v0.74 / v0.99) retries transient broker codes 6, 7, 15,
-    16 and TCP I/O errors. Default ``max_retries=0`` (no extra
+    Optional produce/fetch/heartbeat/BeginTxn/EndTxn/admin retry (v0.61 /
+    v0.66 / v0.74 / v0.99 / v0.103) retries transient broker codes 6, 7,
+    15, 16 and TCP I/O errors. Default ``max_retries=0`` (no extra
     attempts). ``retry_backoff_ms`` defaults to 50; tests may set 0.
     Error 13 stays on the redirect budget; error 21 stays on the one
-    re-Init. Heartbeat rebalance codes 9 / 10 / 11 are not retried.
-    InvalidTxnState (22) is not retried::
+    re-Init. Controller-gated admin shares this budget; error 14 stays
+    on ``max_redirects``. Heartbeat rebalance codes 9 / 10 / 11 are not
+    retried. InvalidTxnState (22) is not retried::
 
         c = Client("127.0.0.1:9092", max_retries=3, retry_backoff_ms=50)
         c.max_retries = 3
@@ -559,8 +560,15 @@ class Client:
             raise BrokerError(error_code, op=op)
 
     def _admin_round_trip(self, opcode: int, payload: bytes, expect_type, op: str):
-        """Round-trip a controller-gated admin RPC, redirecting on error 14."""
+        """Round-trip a controller-gated admin RPC.
+
+        Error 14 follows ``max_redirects`` (not counted as a transient
+        retry). Transient 6 / 7 / 15 / 16 and TCP/IO retry up to
+        ``max_retries`` extra times (default 0).
+        """
         max_attempts = 1 + self.max_redirects
+        max_retries = max(0, int(self.max_retries))
+        retry_attempt = 0
         attempt = 0
         while True:
             attempt += 1
@@ -573,6 +581,18 @@ class Client:
                     and self._redirect_to_controller(_controller_id_hint(e.message))
                 ):
                     continue
+                if _is_transient_broker(e.code) and retry_attempt < max_retries:
+                    retry_attempt += 1
+                    attempt -= 1
+                    self._sleep_produce_retry()
+                    continue
+                raise
+            except OSError:
+                if retry_attempt < max_retries:
+                    retry_attempt += 1
+                    attempt -= 1
+                    self._sleep_produce_retry()
+                    continue
                 raise
             if not isinstance(resp, expect_type):
                 raise ProtocolError(f"unexpected response for {op}: {type(resp)}")
@@ -581,6 +601,14 @@ class Client:
                 and attempt < max_attempts
                 and self._redirect_to_controller(None)
             ):
+                continue
+            if (
+                _is_transient_broker(resp.error_code)
+                and retry_attempt < max_retries
+            ):
+                retry_attempt += 1
+                attempt -= 1
+                self._sleep_produce_retry()
                 continue
             self._check(resp.error_code, op)
             return resp
@@ -714,7 +742,8 @@ class Client:
         """Create a topic. Returns the broker-assigned topic id.
 
         Error 14 (NotController) follows ``max_redirects`` (same budget as
-        Produce/Fetch error 13).
+        Produce/Fetch error 13). Transient 6 / 7 / 15 / 16 and TCP/IO
+        follow ``max_retries`` (default 0); 14 is not a retry.
         """
         payload = codec.encode_create_topic_request(
             CreateTopicRequest(name=name, partitions=partitions, configs=configs or [])

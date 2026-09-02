@@ -2154,4 +2154,108 @@ class ClientTest {
         }
     }
 
+    @Test
+    void defaultMaxRetriesZeroRaisesOnCreateTopicTimeout() throws Exception {
+        try (AdminBroker srv = AdminBroker.start()) {
+            srv.createTopicReplies.add(new int[] {7, 0});
+            srv.createTopicMessages.add("");
+            try (Client c = Client.connect("127.0.0.1", srv.port, 5_000)) {
+                assertEquals(0, c.maxRetries());
+                BrokerException ex =
+                        assertThrows(BrokerException.class, () -> c.createTopic("events", 1));
+                assertEquals(7, ex.code);
+            }
+            assertEquals(1, srv.createTopicCount.get());
+            assertEquals(0, srv.metadataCount.get());
+        }
+    }
+
+    @Test
+    void createTopicRetriesTimeoutThenOk() throws Exception {
+        try (AdminBroker srv = AdminBroker.start()) {
+            srv.createTopicReplies.add(new int[] {7, 0});
+            srv.createTopicMessages.add("");
+            srv.queueCreateTopicOk();
+            try (Client c = Client.connect("127.0.0.1", srv.port, 5_000)) {
+                c.setMaxRetries(2);
+                c.setRetryBackoffMs(0);
+                assertEquals(1, c.createTopic("events", 1));
+            }
+            assertEquals(2, srv.createTopicCount.get());
+            assertEquals(0, srv.metadataCount.get());
+        }
+    }
+
+    @Test
+    void createTopic14RedirectNotCountedAsRetry() throws Exception {
+        try (AdminBroker leader = AdminBroker.start();
+                AdminBroker follower = AdminBroker.start()) {
+            follower.queueCreateTopicError(NOT_CONTROLLER, "not controller; controller_id=2");
+            follower.meta = controllerMeta(2, "127.0.0.1", leader.port);
+            leader.queueCreateTopicOk();
+            try (Client c = Client.connect("127.0.0.1", follower.port, 5_000)) {
+                assertEquals(0, c.maxRetries());
+                int id = c.createTopic("events", 1);
+                assertEquals(1, id);
+                assertEquals(leader.port, Integer.parseInt(c.addr().substring(c.addr().indexOf(':') + 1)));
+            }
+            assertEquals(1, follower.createTopicCount.get());
+            assertEquals(1, follower.metadataCount.get());
+            assertEquals(1, leader.createTopicCount.get());
+        }
+    }
+
+    @Test
+    void createTopicNotFoundNotRetried() throws Exception {
+        try (AdminBroker srv = AdminBroker.start()) {
+            srv.createTopicReplies.add(new int[] {2, 0});
+            srv.createTopicMessages.add("");
+            try (Client c = Client.connect("127.0.0.1", srv.port, 5_000)) {
+                c.setMaxRetries(2);
+                c.setRetryBackoffMs(0);
+                BrokerException ex =
+                        assertThrows(BrokerException.class, () -> c.createTopic("events", 1));
+                assertEquals(2, ex.code);
+            }
+            assertEquals(1, srv.createTopicCount.get());
+            assertEquals(0, srv.metadataCount.get());
+        }
+    }
+
+    @Test
+    void createTopicExhaustedRetriesRaises() throws Exception {
+        try (AdminBroker srv = AdminBroker.start()) {
+            srv.createTopicReplies.add(new int[] {7, 0});
+            srv.createTopicMessages.add("");
+            srv.createTopicReplies.add(new int[] {7, 0});
+            srv.createTopicMessages.add("");
+            srv.createTopicReplies.add(new int[] {7, 0});
+            srv.createTopicMessages.add("");
+            try (Client c = Client.connect("127.0.0.1", srv.port, 5_000)) {
+                c.setMaxRetries(2);
+                c.setRetryBackoffMs(0);
+                BrokerException ex =
+                        assertThrows(BrokerException.class, () -> c.createTopic("events", 1));
+                assertEquals(7, ex.code);
+            }
+            assertEquals(3, srv.createTopicCount.get());
+            assertEquals(0, srv.metadataCount.get());
+        }
+    }
+
+    @Test
+    void createAclsRetriesTimeoutThenOk() throws Exception {
+        try (AdminBroker srv = AdminBroker.start()) {
+            srv.createAclsCodes.add(7);
+            srv.createAclsCodes.add(0);
+            try (Client c = Client.connect("127.0.0.1", srv.port, 5_000)) {
+                c.setMaxRetries(2);
+                c.setRetryBackoffMs(0);
+                c.createAcls(List.of(new AclBinding("User:alice", 0, "events", 3, 1)));
+            }
+            assertEquals(2, srv.createAclsCount.get());
+            assertEquals(0, srv.metadataCount.get());
+        }
+    }
+
 }

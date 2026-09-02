@@ -589,8 +589,96 @@ func (c *Client) authenticateScram(username, password string) error {
 	return nil
 }
 
+// adminRoundTrip sends a controller-gated admin RPC. Error 14 follows
+// maxRedirects (not counted as a transient retry). Transient 6 / 7 /
+// 15 / 16 and TCP/IO retry up to maxRetries extra times (default 0).
+func (c *Client) adminRoundTrip(opcode uint16, payload []byte, op string) (any, error) {
+	maxRetries := c.maxRetries
+	if maxRetries < 0 {
+		maxRetries = 0
+	}
+	maxAttempts := 1 + c.maxRedirects
+	retryAttempt := 0
+	for attempt := 1; ; attempt++ {
+		decoded, err := c.roundTrip(opcode, payload)
+		if err != nil {
+			ok, rerr := c.maybeRedirectController(err, attempt, maxAttempts)
+			if rerr != nil {
+				return nil, rerr
+			}
+			if ok {
+				continue
+			}
+			if isTransientProduceErr(err) && retryAttempt < maxRetries {
+				retryAttempt++
+				attempt--
+				c.sleepProduceRetry()
+				continue
+			}
+			return nil, err
+		}
+		code, ok := typedAdminErrorCode(decoded)
+		if !ok {
+			return nil, &frame.ProtocolError{Msg: fmt.Sprintf("unexpected response for %s: %T", op, decoded)}
+		}
+		ok, rerr := c.maybeRedirectControllerCode(code, "", attempt, maxAttempts)
+		if rerr != nil {
+			return nil, rerr
+		}
+		if ok {
+			continue
+		}
+		if isTransientBroker(code) && retryAttempt < maxRetries {
+			retryAttempt++
+			attempt--
+			c.sleepProduceRetry()
+			continue
+		}
+		if err := check(code, op); err != nil {
+			return nil, err
+		}
+		return decoded, nil
+	}
+}
+
+func typedAdminErrorCode(decoded any) (uint16, bool) {
+	switch resp := decoded.(type) {
+	case codec.CreateTopicResponse:
+		return resp.ErrorCode, true
+	case codec.DeleteTopicResponse:
+		return resp.ErrorCode, true
+	case codec.CreatePartitionsResponse:
+		return resp.ErrorCode, true
+	case codec.ReassignPartitionsResponse:
+		return resp.ErrorCode, true
+	case codec.CreateAclsResponse:
+		return resp.ErrorCode, true
+	case codec.DeleteAclsResponse:
+		return resp.ErrorCode, true
+	case codec.CreateScramUserResponse:
+		return resp.ErrorCode, true
+	case codec.DeleteScramUserResponse:
+		return resp.ErrorCode, true
+	case codec.ListScramUsersResponse:
+		return resp.ErrorCode, true
+	case codec.ListAclsResponse:
+		return resp.ErrorCode, true
+	case codec.AddBrokerResponse:
+		return resp.ErrorCode, true
+	case codec.RemoveBrokerResponse:
+		return resp.ErrorCode, true
+	case codec.DescribeConfigsResponse:
+		return resp.ErrorCode, true
+	case codec.AlterConfigsResponse:
+		return resp.ErrorCode, true
+	default:
+		return 0, false
+	}
+}
+
 // CreateTopic creates a topic with the given partition count.
 // Error 14 (NotController) follows maxRedirects (same budget as Produce/Fetch 13).
+// Transient 6 / 7 / 15 / 16 and TCP/IO follow maxRetries (default 0); 14 is not a retry.
 func (c *Client) CreateTopic(name string, partitions int) error {
 	payload, err := codec.EncodeCreateTopicRequest(codec.CreateTopicRequest{
 		Name:       name,
@@ -600,32 +688,8 @@ func (c *Client) CreateTopic(name string, partitions int) error {
 	if err != nil {
 		return err
 	}
-	maxAttempts := 1 + c.maxRedirects
-	for attempt := 1; ; attempt++ {
-		decoded, err := c.roundTrip(codec.OpCreateTopic, payload)
-		if err != nil {
-			ok, rerr := c.maybeRedirectController(err, attempt, maxAttempts)
-			if rerr != nil {
-				return rerr
-			}
-			if ok {
-				continue
-			}
-			return err
-		}
-		resp, ok := decoded.(codec.CreateTopicResponse)
-		if !ok {
-			return &frame.ProtocolError{Msg: fmt.Sprintf("unexpected response for create_topic: %T", decoded)}
-		}
-		ok, rerr := c.maybeRedirectControllerCode(resp.ErrorCode, "", attempt, maxAttempts)
-		if rerr != nil {
-			return rerr
-		}
-		if ok {
-			continue
-		}
-		return check(resp.ErrorCode, "create_topic")
-	}
+	_, err = c.adminRoundTrip(codec.OpCreateTopic, payload, "create_topic")
+	return err
 }
 
 // DeleteTopic deletes a topic by name.
@@ -635,32 +699,8 @@ func (c *Client) DeleteTopic(name string) error {
 	if err != nil {
 		return err
 	}
-	maxAttempts := 1 + c.maxRedirects
-	for attempt := 1; ; attempt++ {
-		decoded, err := c.roundTrip(codec.OpDeleteTopic, payload)
-		if err != nil {
-			ok, rerr := c.maybeRedirectController(err, attempt, maxAttempts)
-			if rerr != nil {
-				return rerr
-			}
-			if ok {
-				continue
-			}
-			return err
-		}
-		resp, ok := decoded.(codec.DeleteTopicResponse)
-		if !ok {
-			return &frame.ProtocolError{Msg: fmt.Sprintf("unexpected response for delete_topic: %T", decoded)}
-		}
-		ok, rerr := c.maybeRedirectControllerCode(resp.ErrorCode, "", attempt, maxAttempts)
-		if rerr != nil {
-			return rerr
-		}
-		if ok {
-			continue
-		}
-		return check(resp.ErrorCode, "delete_topic")
-	}
+	_, err = c.adminRoundTrip(codec.OpDeleteTopic, payload, "delete_topic")
+	return err
 }
 
 // CreatePartitions grows topic to totalCount partitions (native opcode 46).
@@ -675,35 +715,11 @@ func (c *Client) CreatePartitions(topic string, totalCount uint32) (uint32, erro
 	if err != nil {
 		return 0, err
 	}
-	maxAttempts := 1 + c.maxRedirects
-	for attempt := 1; ; attempt++ {
-		decoded, err := c.roundTrip(codec.OpCreatePartitions, payload)
-		if err != nil {
-			ok, rerr := c.maybeRedirectController(err, attempt, maxAttempts)
-			if rerr != nil {
-				return 0, rerr
-			}
-			if ok {
-				continue
-			}
-			return 0, err
-		}
-		resp, ok := decoded.(codec.CreatePartitionsResponse)
-		if !ok {
-			return 0, &frame.ProtocolError{Msg: fmt.Sprintf("unexpected response for create_partitions: %T", decoded)}
-		}
-		ok, rerr := c.maybeRedirectControllerCode(resp.ErrorCode, "", attempt, maxAttempts)
-		if rerr != nil {
-			return 0, rerr
-		}
-		if ok {
-			continue
-		}
-		if err := check(resp.ErrorCode, "create_partitions"); err != nil {
-			return 0, err
-		}
-		return resp.Partitions, nil
+	decoded, err := c.adminRoundTrip(codec.OpCreatePartitions, payload, "create_partitions")
+	if err != nil {
+		return 0, err
 	}
+	return decoded.(codec.CreatePartitionsResponse).Partitions, nil
 }
 
 // ReassignPartitions reassigns replicas for topic (native opcode 114).
@@ -862,35 +878,11 @@ func (c *Client) AddBroker(id uint32, host string, port uint16, rack *string) (u
 	if err != nil {
 		return 0, err
 	}
-	maxAttempts := 1 + c.maxRedirects
-	for attempt := 1; ; attempt++ {
-		decoded, err := c.roundTrip(codec.OpAddBroker, payload)
-		if err != nil {
-			ok, rerr := c.maybeRedirectController(err, attempt, maxAttempts)
-			if rerr != nil {
-				return 0, rerr
-			}
-			if ok {
-				continue
-			}
-			return 0, err
-		}
-		resp, ok := decoded.(codec.AddBrokerResponse)
-		if !ok {
-			return 0, &frame.ProtocolError{Msg: fmt.Sprintf("unexpected response for add_broker: %T", decoded)}
-		}
-		ok, rerr := c.maybeRedirectControllerCode(resp.ErrorCode, "", attempt, maxAttempts)
-		if rerr != nil {
-			return 0, rerr
-		}
-		if ok {
-			continue
-		}
-		if err := check(resp.ErrorCode, "add_broker"); err != nil {
-			return 0, err
-		}
-		return resp.Generation, nil
+	decoded, err := c.adminRoundTrip(codec.OpAddBroker, payload, "add_broker")
+	if err != nil {
+		return 0, err
 	}
+	return decoded.(codec.AddBrokerResponse).Generation, nil
 }
 
 // RemoveBroker removes a broker from the membership overlay (native 104/105).
@@ -901,35 +893,11 @@ func (c *Client) RemoveBroker(id uint32) (uint64, error) {
 	if err != nil {
 		return 0, err
 	}
-	maxAttempts := 1 + c.maxRedirects
-	for attempt := 1; ; attempt++ {
-		decoded, err := c.roundTrip(codec.OpRemoveBroker, payload)
-		if err != nil {
-			ok, rerr := c.maybeRedirectController(err, attempt, maxAttempts)
-			if rerr != nil {
-				return 0, rerr
-			}
-			if ok {
-				continue
-			}
-			return 0, err
-		}
-		resp, ok := decoded.(codec.RemoveBrokerResponse)
-		if !ok {
-			return 0, &frame.ProtocolError{Msg: fmt.Sprintf("unexpected response for remove_broker: %T", decoded)}
-		}
-		ok, rerr := c.maybeRedirectControllerCode(resp.ErrorCode, "", attempt, maxAttempts)
-		if rerr != nil {
-			return 0, rerr
-		}
-		if ok {
-			continue
-		}
-		if err := check(resp.ErrorCode, "remove_broker"); err != nil {
-			return 0, err
-		}
-		return resp.Generation, nil
+	decoded, err := c.adminRoundTrip(codec.OpRemoveBroker, payload, "remove_broker")
+	if err != nil {
+		return 0, err
 	}
+	return decoded.(codec.RemoveBrokerResponse).Generation, nil
 }
 
 // ListMembers lists configured + live membership (native opcode 106/107).
@@ -986,35 +954,11 @@ func (c *Client) ReassignPartitions(topic string, replicas []uint32, partition *
 	if err != nil {
 		return 0, err
 	}
-	maxAttempts := 1 + c.maxRedirects
-	for attempt := 1; ; attempt++ {
-		decoded, err := c.roundTrip(codec.OpReassignPartitions, payload)
-		if err != nil {
-			ok, rerr := c.maybeRedirectController(err, attempt, maxAttempts)
-			if rerr != nil {
-				return 0, rerr
-			}
-			if ok {
-				continue
-			}
-			return 0, err
-		}
-		resp, ok := decoded.(codec.ReassignPartitionsResponse)
-		if !ok {
-			return 0, &frame.ProtocolError{Msg: fmt.Sprintf("unexpected response for reassign_partitions: %T", decoded)}
-		}
-		ok, rerr := c.maybeRedirectControllerCode(resp.ErrorCode, "", attempt, maxAttempts)
-		if rerr != nil {
-			return 0, rerr
-		}
-		if ok {
-			continue
-		}
-		if err := check(resp.ErrorCode, "reassign_partitions"); err != nil {
-			return 0, err
-		}
-		return resp.Generation, nil
+	decoded, err := c.adminRoundTrip(codec.OpReassignPartitions, payload, "reassign_partitions")
+	if err != nil {
+		return 0, err
 	}
+	return decoded.(codec.ReassignPartitionsResponse).Generation, nil
 }
 
 // Produce sends one message (null key when key is nil) with acks=1.
@@ -1716,40 +1660,17 @@ func (c *Client) DescribeConfigs(topic string) (DescribeConfigsResult, error) {
 	if err != nil {
 		return DescribeConfigsResult{}, err
 	}
-	maxAttempts := 1 + c.maxRedirects
-	for attempt := 1; ; attempt++ {
-		decoded, err := c.roundTrip(codec.OpDescribeConfigs, payload)
-		if err != nil {
-			ok, rerr := c.maybeRedirectController(err, attempt, maxAttempts)
-			if rerr != nil {
-				return DescribeConfigsResult{}, rerr
-			}
-			if ok {
-				continue
-			}
-			return DescribeConfigsResult{}, err
-		}
-		resp, ok := decoded.(codec.DescribeConfigsResponse)
-		if !ok {
-			return DescribeConfigsResult{}, &frame.ProtocolError{Msg: fmt.Sprintf("unexpected response for describe_configs: %T", decoded)}
-		}
-		ok, rerr := c.maybeRedirectControllerCode(resp.ErrorCode, "", attempt, maxAttempts)
-		if rerr != nil {
-			return DescribeConfigsResult{}, rerr
-		}
-		if ok {
-			continue
-		}
-		if err := check(resp.ErrorCode, "describe_configs"); err != nil {
-			return DescribeConfigsResult{}, err
-		}
-		return DescribeConfigsResult{
-			Topic:          resp.Topic,
-			TopicID:        resp.TopicID,
-			PartitionCount: resp.PartitionCount,
-			Configs:        resp.Configs,
-		}, nil
+	decoded, err := c.adminRoundTrip(codec.OpDescribeConfigs, payload, "describe_configs")
+	if err != nil {
+		return DescribeConfigsResult{}, err
 	}
+	resp := decoded.(codec.DescribeConfigsResponse)
+	return DescribeConfigsResult{
+		Topic:          resp.Topic,
+		TopicID:        resp.TopicID,
+		PartitionCount: resp.PartitionCount,
+		Configs:        resp.Configs,
+	}, nil
 }
 
 // AlterConfigs updates topic configuration (native opcode 42/43).
@@ -1767,32 +1688,8 @@ func (c *Client) AlterConfigs(topic string, configs [][2]string) error {
 	if err != nil {
 		return err
 	}
-	maxAttempts := 1 + c.maxRedirects
-	for attempt := 1; ; attempt++ {
-		decoded, err := c.roundTrip(codec.OpAlterConfigs, payload)
-		if err != nil {
-			ok, rerr := c.maybeRedirectController(err, attempt, maxAttempts)
-			if rerr != nil {
-				return rerr
-			}
-			if ok {
-				continue
-			}
-			return err
-		}
-		resp, ok := decoded.(codec.AlterConfigsResponse)
-		if !ok {
-			return &frame.ProtocolError{Msg: fmt.Sprintf("unexpected response for alter_configs: %T", decoded)}
-		}
-		ok, rerr := c.maybeRedirectControllerCode(resp.ErrorCode, "", attempt, maxAttempts)
-		if rerr != nil {
-			return rerr
-		}
-		if ok {
-			continue
-		}
-		return check(resp.ErrorCode, "alter_configs")
-	}
+	_, err = c.adminRoundTrip(codec.OpAlterConfigs, payload, "alter_configs")
+	return err
 }
 
 func (c *Client) DeleteRecords(topic string, partition uint32, beforeOffset uint64) (DeleteRecordsResult, error) {
@@ -2087,32 +1984,8 @@ func (c *Client) CreateScramUser(username, password string, iterations uint32) e
 	if err != nil {
 		return err
 	}
-	maxAttempts := 1 + c.maxRedirects
-	for attempt := 1; ; attempt++ {
-		decoded, err := c.roundTrip(codec.OpCreateScramUser, payload)
-		if err != nil {
-			ok, rerr := c.maybeRedirectController(err, attempt, maxAttempts)
-			if rerr != nil {
-				return rerr
-			}
-			if ok {
-				continue
-			}
-			return err
-		}
-		resp, ok := decoded.(codec.CreateScramUserResponse)
-		if !ok {
-			return &frame.ProtocolError{Msg: fmt.Sprintf("unexpected response for create_scram_user: %T", decoded)}
-		}
-		ok, rerr := c.maybeRedirectControllerCode(resp.ErrorCode, "", attempt, maxAttempts)
-		if rerr != nil {
-			return rerr
-		}
-		if ok {
-			continue
-		}
-		return check(resp.ErrorCode, "create_scram_user")
-	}
+	_, err = c.adminRoundTrip(codec.OpCreateScramUser, payload, "create_scram_user")
+	return err
 }
 
 // DeleteScramUser deletes a SCRAM user (native opcode 66/67). Error 14
@@ -2122,66 +1995,18 @@ func (c *Client) DeleteScramUser(username string) error {
 	if err != nil {
 		return err
 	}
-	maxAttempts := 1 + c.maxRedirects
-	for attempt := 1; ; attempt++ {
-		decoded, err := c.roundTrip(codec.OpDeleteScramUser, payload)
-		if err != nil {
-			ok, rerr := c.maybeRedirectController(err, attempt, maxAttempts)
-			if rerr != nil {
-				return rerr
-			}
-			if ok {
-				continue
-			}
-			return err
-		}
-		resp, ok := decoded.(codec.DeleteScramUserResponse)
-		if !ok {
-			return &frame.ProtocolError{Msg: fmt.Sprintf("unexpected response for delete_scram_user: %T", decoded)}
-		}
-		ok, rerr := c.maybeRedirectControllerCode(resp.ErrorCode, "", attempt, maxAttempts)
-		if rerr != nil {
-			return rerr
-		}
-		if ok {
-			continue
-		}
-		return check(resp.ErrorCode, "delete_scram_user")
-	}
+	_, err = c.adminRoundTrip(codec.OpDeleteScramUser, payload, "delete_scram_user")
+	return err
 }
 
 // ListScramUsers lists SCRAM usernames (native opcode 68/69). Error 14
 // follows maxRedirects.
 func (c *Client) ListScramUsers() ([]string, error) {
-	maxAttempts := 1 + c.maxRedirects
-	for attempt := 1; ; attempt++ {
-		decoded, err := c.roundTrip(codec.OpListScramUsers, codec.EncodeListScramUsersRequest())
-		if err != nil {
-			ok, rerr := c.maybeRedirectController(err, attempt, maxAttempts)
-			if rerr != nil {
-				return nil, rerr
-			}
-			if ok {
-				continue
-			}
-			return nil, err
-		}
-		resp, ok := decoded.(codec.ListScramUsersResponse)
-		if !ok {
-			return nil, &frame.ProtocolError{Msg: fmt.Sprintf("unexpected response for list_scram_users: %T", decoded)}
-		}
-		ok, rerr := c.maybeRedirectControllerCode(resp.ErrorCode, "", attempt, maxAttempts)
-		if rerr != nil {
-			return nil, rerr
-		}
-		if ok {
-			continue
-		}
-		if err := check(resp.ErrorCode, "list_scram_users"); err != nil {
-			return nil, err
-		}
-		return resp.Usernames, nil
+	decoded, err := c.adminRoundTrip(codec.OpListScramUsers, codec.EncodeListScramUsersRequest(), "list_scram_users")
+	if err != nil {
+		return nil, err
 	}
+	return decoded.(codec.ListScramUsersResponse).Usernames, nil
 }
 
 // CreateAcls creates ACL bindings (native opcode 54/55).
@@ -2191,32 +2016,8 @@ func (c *Client) CreateAcls(entries []codec.AclBinding) error {
 	if err != nil {
 		return err
 	}
-	maxAttempts := 1 + c.maxRedirects
-	for attempt := 1; ; attempt++ {
-		decoded, err := c.roundTrip(codec.OpCreateAcls, payload)
-		if err != nil {
-			ok, rerr := c.maybeRedirectController(err, attempt, maxAttempts)
-			if rerr != nil {
-				return rerr
-			}
-			if ok {
-				continue
-			}
-			return err
-		}
-		resp, ok := decoded.(codec.CreateAclsResponse)
-		if !ok {
-			return &frame.ProtocolError{Msg: fmt.Sprintf("unexpected response for create_acls: %T", decoded)}
-		}
-		ok, rerr := c.maybeRedirectControllerCode(resp.ErrorCode, "", attempt, maxAttempts)
-		if rerr != nil {
-			return rerr
-		}
-		if ok {
-			continue
-		}
-		return check(resp.ErrorCode, "create_acls")
-	}
+	_, err = c.adminRoundTrip(codec.OpCreateAcls, payload, "create_acls")
+	return err
 }
 
 // DeleteAcls deletes exact-matching ACL bindings (native opcode 56/57).
@@ -2227,35 +2028,11 @@ func (c *Client) DeleteAcls(entries []codec.AclBinding) (uint32, error) {
 	if err != nil {
 		return 0, err
 	}
-	maxAttempts := 1 + c.maxRedirects
-	for attempt := 1; ; attempt++ {
-		decoded, err := c.roundTrip(codec.OpDeleteAcls, payload)
-		if err != nil {
-			ok, rerr := c.maybeRedirectController(err, attempt, maxAttempts)
-			if rerr != nil {
-				return 0, rerr
-			}
-			if ok {
-				continue
-			}
-			return 0, err
-		}
-		resp, ok := decoded.(codec.DeleteAclsResponse)
-		if !ok {
-			return 0, &frame.ProtocolError{Msg: fmt.Sprintf("unexpected response for delete_acls: %T", decoded)}
-		}
-		ok, rerr := c.maybeRedirectControllerCode(resp.ErrorCode, "", attempt, maxAttempts)
-		if rerr != nil {
-			return 0, rerr
-		}
-		if ok {
-			continue
-		}
-		if err := check(resp.ErrorCode, "delete_acls"); err != nil {
-			return 0, err
-		}
-		return resp.Removed, nil
+	decoded, err := c.adminRoundTrip(codec.OpDeleteAcls, payload, "delete_acls")
+	if err != nil {
+		return 0, err
 	}
+	return decoded.(codec.DeleteAclsResponse).Removed, nil
 }
 
 // ListAcls lists ACL bindings with optional filters (native opcode 58/59).
@@ -2270,35 +2047,11 @@ func (c *Client) ListAcls(principal string, resourceType uint8, resource string)
 	if err != nil {
 		return nil, err
 	}
-	maxAttempts := 1 + c.maxRedirects
-	for attempt := 1; ; attempt++ {
-		decoded, err := c.roundTrip(codec.OpListAcls, payload)
-		if err != nil {
-			ok, rerr := c.maybeRedirectController(err, attempt, maxAttempts)
-			if rerr != nil {
-				return nil, rerr
-			}
-			if ok {
-				continue
-			}
-			return nil, err
-		}
-		resp, ok := decoded.(codec.ListAclsResponse)
-		if !ok {
-			return nil, &frame.ProtocolError{Msg: fmt.Sprintf("unexpected response for list_acls: %T", decoded)}
-		}
-		ok, rerr := c.maybeRedirectControllerCode(resp.ErrorCode, "", attempt, maxAttempts)
-		if rerr != nil {
-			return nil, rerr
-		}
-		if ok {
-			continue
-		}
-		if err := check(resp.ErrorCode, "list_acls"); err != nil {
-			return nil, err
-		}
-		return resp.Entries, nil
+	decoded, err := c.adminRoundTrip(codec.OpListAcls, payload, "list_acls")
+	if err != nil {
+		return nil, err
 	}
+	return decoded.(codec.ListAclsResponse).Entries, nil
 }
 
 // LeaveGroup leaves a consumer group. Transient broker/transport errors

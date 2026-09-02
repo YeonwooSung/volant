@@ -818,5 +818,72 @@ class TestAdminNotControllerRedirect(unittest.TestCase):
         self.assertEqual(follower.accept_count, 1)
 
 
+class TestAdminTransientRetry(unittest.TestCase):
+    def test_default_max_retries_zero_raises_on_create_topic_timeout(self) -> None:
+        with _AdminServer() as srv:
+            srv.create_topic_replies = [(7, "", False)]
+            with Client(srv.addr, timeout=5.0) as c:
+                self.assertEqual(c.max_retries, 0)
+                with self.assertRaises(BrokerError) as ctx:
+                    c.create_topic("events", partitions=1)
+            self.assertEqual(ctx.exception.code, 7)
+        self.assertEqual(srv.create_topic_count, 1)
+        self.assertEqual(srv.metadata_count, 0)
+
+    def test_create_topic_retries_timeout_then_ok(self) -> None:
+        with _AdminServer() as srv:
+            srv.create_topic_replies = [(7, "", False), (0, "", False)]
+            with Client(srv.addr, timeout=5.0, max_retries=2, retry_backoff_ms=0) as c:
+                topic_id = c.create_topic("events", partitions=1)
+            self.assertEqual(topic_id, 1)
+        self.assertEqual(srv.create_topic_count, 2)
+        self.assertEqual(srv.metadata_count, 0)
+
+    def test_create_topic_14_redirect_not_counted_as_retry(self) -> None:
+        with _AdminServer() as leader, _AdminServer() as follower:
+            follower.create_topic_replies = [
+                (NOT_CONTROLLER, "not controller; controller_id=2", True)
+            ]
+            follower.metadata = _controller_meta(2, "127.0.0.1", leader.port)
+            leader.create_topic_replies = [(0, "", False)]
+            with Client(follower.addr, timeout=5.0) as c:
+                self.assertEqual(c.max_retries, 0)
+                topic_id = c.create_topic("events", partitions=1)
+            self.assertEqual(topic_id, 1)
+            self.assertEqual(c.addr, leader.addr)
+        self.assertEqual(follower.create_topic_count, 1)
+        self.assertEqual(follower.metadata_count, 1)
+        self.assertEqual(leader.create_topic_count, 1)
+
+    def test_create_topic_not_found_not_retried(self) -> None:
+        with _AdminServer() as srv:
+            srv.create_topic_replies = [(2, "", False)]
+            with Client(srv.addr, timeout=5.0, max_retries=2, retry_backoff_ms=0) as c:
+                with self.assertRaises(BrokerError) as ctx:
+                    c.create_topic("events", partitions=1)
+            self.assertEqual(ctx.exception.code, 2)
+        self.assertEqual(srv.create_topic_count, 1)
+        self.assertEqual(srv.metadata_count, 0)
+
+    def test_create_topic_exhausted_retries_raises(self) -> None:
+        with _AdminServer() as srv:
+            srv.create_topic_replies = [(7, "", False), (7, "", False), (7, "", False)]
+            with Client(srv.addr, timeout=5.0, max_retries=2, retry_backoff_ms=0) as c:
+                with self.assertRaises(BrokerError) as ctx:
+                    c.create_topic("events", partitions=1)
+            self.assertEqual(ctx.exception.code, 7)
+        self.assertEqual(srv.create_topic_count, 3)
+        self.assertEqual(srv.metadata_count, 0)
+
+    def test_create_acls_retries_timeout_then_ok(self) -> None:
+        with _AdminServer() as srv:
+            srv.create_acls_codes = [7, 0]
+            entry = AclBinding("User:alice", 0, "events", 3, 1)
+            with Client(srv.addr, timeout=5.0, max_retries=2, retry_backoff_ms=0) as c:
+                c.create_acls([entry])
+        self.assertEqual(srv.create_acls_count, 2)
+        self.assertEqual(srv.metadata_count, 0)
+
+
 if __name__ == "__main__":
     unittest.main()

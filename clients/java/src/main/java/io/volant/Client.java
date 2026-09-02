@@ -654,9 +654,15 @@ public final class Client implements AutoCloseable {
         return true;
     }
 
+    /**
+     * Controller-gated admin RPC. Error 14 follows {@code maxRedirects}
+     * (not counted as a transient retry). Transient 6 / 7 / 15 / 16 and
+     * TCP/IO retry up to {@code maxRetries} extra times (default 0).
+     */
     private Object adminRoundTrip(int opcode, byte[] payload, Class<?> expect, String op) {
         int maxAttempts = 1 + maxRedirects;
         int attempt = 0;
+        int retryAttempt = 0;
         while (true) {
             attempt++;
             Object decoded;
@@ -666,6 +672,20 @@ public final class Client implements AutoCloseable {
                 if (maybeRedirectController(e.code, e.message, attempt, maxAttempts)) {
                     continue;
                 }
+                if (isTransientBroker(e.code) && retryAttempt < maxRetries) {
+                    retryAttempt++;
+                    attempt--;
+                    sleepProduceRetry();
+                    continue;
+                }
+                throw e;
+            } catch (RuntimeException e) {
+                if (isTransientTransport(e) && retryAttempt < maxRetries) {
+                    retryAttempt++;
+                    attempt--;
+                    sleepProduceRetry();
+                    continue;
+                }
                 throw e;
             }
             if (!expect.isInstance(decoded)) {
@@ -673,6 +693,12 @@ public final class Client implements AutoCloseable {
             }
             int code = typedAdminErrorCode(decoded);
             if (maybeRedirectController(code, "", attempt, maxAttempts)) {
+                continue;
+            }
+            if (isTransientBroker(code) && retryAttempt < maxRetries) {
+                retryAttempt++;
+                attempt--;
+                sleepProduceRetry();
                 continue;
             }
             check(code, op);
@@ -727,7 +753,9 @@ public final class Client implements AutoCloseable {
     }
 
     /** Create a topic. Returns the broker-assigned topic id.
-     * Error 14 (NotController) follows {@code maxRedirects}. */
+     * Error 14 (NotController) follows {@code maxRedirects}.
+     * Transient 6 / 7 / 15 / 16 and TCP/IO follow {@code maxRetries}
+     * (default 0); 14 is not a retry. */
     public int createTopic(String name, int partitions) {
         byte[] payload = Codec.encodeCreateTopicRequest(
                 new Codec.CreateTopicRequest(name, partitions, Collections.emptyList()));
