@@ -739,7 +739,7 @@ async fn handle_request(broker: &Arc<Broker>, req: Request) -> Result<Response> 
                     }
                 }
 
-                if acks != 0 {
+                if acks != 0 && !broker.group_commit_enabled() {
                     broker.flush(&topic_name, pid)?;
                 }
 

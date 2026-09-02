@@ -17,6 +17,8 @@
 | `--tls-ca` | | *unset* | CA PEM for inter-broker peer verify |
 | `--no-tls-inter-broker` | | off | Keep inter-broker plaintext when server TLS on |
 | `--cluster-config` / `--node-id` | | *unset* | Multi-node (Phase 6) |
+| | `VOLANT_GROUP_COMMIT_MS` | `0` (off) | Produce group-commit window (ms); shared fsync across concurrent appends |
+| | `VOLANT_GROUP_COMMIT_MAX_RECORDS` | inherit | Optional record threshold (else `flush_every_n` or 64) |
 
 Logging filter: `RUST_LOG` (e.g. `volant=info,volant_broker=debug`).
 
@@ -69,6 +71,7 @@ Key series (prefix `volant_`):
 - `volant_open_txns` / `volant_prepared_txns` (Phase 97 gauges)
 - `volant_open_txns_expired_total` / `volant_prepared_txns_expired_total` (Phase 97)
 - `volant_build_info{version=...}`
+- `volant_group_commit_flushes_total` / `volant_group_commit_records_total` (v0.20 produce group-commit; 0 when the window is off)
 
 Bind metrics to localhost in production; do not expose publicly without a proxy ACL.
 

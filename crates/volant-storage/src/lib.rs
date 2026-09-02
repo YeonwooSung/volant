@@ -8,6 +8,7 @@
 #![deny(missing_docs)]
 
 pub mod config;
+pub mod group_commit;
 pub mod index;
 pub mod io;
 pub mod log;
@@ -15,9 +16,13 @@ pub mod pool;
 pub mod record;
 pub mod segment;
 
-pub use config::StorageConfig;
+pub use config::{
+    StorageConfig, DEFAULT_GROUP_COMMIT_MAX_RECORDS, GROUP_COMMIT_MAX_RECORDS_ENV,
+    GROUP_COMMIT_MS_ENV,
+};
+pub use group_commit::{GroupCommit, GroupCommitTicket};
 pub use io::{create_io_backend, IoBackend, IoBackendKind, StdIoBackend};
-pub use log::{CompactStats, PartitionLog};
+pub use log::{CompactStats, PartitionLog, SharedPartitionLog};
 pub use pool::{BufferPool, PooledBuf};
 pub use segment::Segment;
 

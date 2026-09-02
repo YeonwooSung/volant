@@ -3,7 +3,10 @@
 //! # Batch produce coalescing
 //!
 //! [`Broker::produce`] accepts a [`MessageBatch`] and treats the whole batch as
-//! one critical section under the topics write lock.
+//! one critical section under the topics write lock. That in-lock batching is
+//! **not** time-based group commit. When `group_commit_max_ms > 0`, durability
+//! wait happens after the lock is released so concurrent produce callers share
+//! one `fsync` (v0.20; see `docs/V20_SPEC.md`).
 
 use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
@@ -777,7 +780,8 @@ impl Broker {
     ///
     /// Reloads topics from `{data_dir}/__topics/catalog.json` and opens existing
     /// partition logs (Phase 14).
-    pub fn new(storage: StorageConfig) -> Self {
+    pub fn new(mut storage: StorageConfig) -> Self {
+        storage.apply_group_commit_env();
         let groups = GroupCoordinator::new(&storage.data_dir)
             .expect("failed to initialize group coordinator / offset store");
         let producer_store = ProducerStateStore::open(&storage.data_dir)
@@ -933,10 +937,11 @@ impl Broker {
     /// If `{data_dir}/cluster/membership.json` exists it replaces `config.brokers`
     /// (overlay is membership SoT). Otherwise toml brokers are used.
     pub fn with_cluster(
-        storage: StorageConfig,
+        mut storage: StorageConfig,
         node_id: u32,
         mut config: ClusterConfig,
     ) -> Result<Self> {
+        storage.apply_group_commit_env();
         let mut membership_generation = 0u64;
         if let Some(overlay) = load_membership_overlay(&storage.data_dir)? {
             config.brokers = overlay.brokers;
@@ -1249,6 +1254,25 @@ impl Broker {
         self.messages_coalesced.load(Ordering::Relaxed)
     }
 
+    /// Whether time-based produce group-commit is enabled on this broker.
+    pub fn group_commit_enabled(&self) -> bool {
+        self.storage.group_commit_enabled()
+    }
+
+    /// Aggregated group-commit flush / record counters across local partitions.
+    pub fn group_commit_stats(&self) -> (u64, u64) {
+        let topics = self.topics.read();
+        let mut flushes = 0u64;
+        let mut records = 0u64;
+        for t in topics.values() {
+            for part in t.partitions.values() {
+                flushes = flushes.saturating_add(part.log.group_commit_flushes());
+                records = records.saturating_add(part.log.group_commit_records());
+            }
+        }
+        (flushes, records)
+    }
+
     /// Set the advertised address returned by metadata.
     pub fn set_advertised(&self, host: impl Into<String>, port: u16) {
         *self.advertised_host.write() = host.into();
@@ -1326,7 +1350,13 @@ impl Broker {
                 }
             }
 
-            let records = part.log.append_batch(batch.messages)?;
+            let records = if self.storage.group_commit_enabled() {
+                // Write under the topics lock; wait for a shared fsync after
+                // release so concurrent produce callers can coalesce.
+                part.log.append_batch_uncommitted(batch.messages)?
+            } else {
+                part.log.append_batch(batch.messages)?
+            };
             if n > 1 {
                 self.messages_coalesced
                     .fetch_add(n as u64, Ordering::Relaxed);
@@ -1363,6 +1393,12 @@ impl Broker {
             };
             (records, need_wait, target, raft_hook)
         };
+
+        // acks=1 / acks=all: join a shared group-commit fsync outside the
+        // topics lock. acks=0 stays fire-and-forget (may lose unflushed data).
+        if acks != 0 && self.storage.group_commit_enabled() && !records.is_empty() {
+            self.flush(topic, partition)?;
+        }
 
         if let Some((offset, crc, isr_len, raft_acks)) = raft_hook {
             self.partition_raft_on_produce(
@@ -1589,6 +1625,9 @@ impl Broker {
     }
 
     /// Flush durable state for a topic partition to stable storage.
+    ///
+    /// When group-commit is on, concurrent flushers share one `fsync` (the
+    /// wait happens **without** holding the topics write lock).
     pub fn flush(&self, topic: &TopicName, partition: PartitionId) -> Result<()> {
         let mut topics = self.topics.write();
         let t = topics
@@ -1598,6 +1637,25 @@ impl Broker {
             .partitions
             .get_mut(&partition)
             .ok_or_else(|| Error::NotFound(format!("partition {partition}")))?;
+        if part.log.group_commit_enabled() {
+            if !part.log.has_uncommitted() {
+                return Ok(());
+            }
+            let handle = part.log.group_commit_handle();
+            let ticket = handle.register_waiter();
+            drop(topics);
+            return handle.wait_or_lead(ticket, || {
+                let mut topics = self.topics.write();
+                let t = topics
+                    .get_mut(topic)
+                    .ok_or_else(|| Error::NotFound(format!("topic {}", topic.as_str())))?;
+                let part = t
+                    .partitions
+                    .get_mut(&partition)
+                    .ok_or_else(|| Error::NotFound(format!("partition {partition}")))?;
+                part.log.flush()
+            });
+        }
         part.log.flush()
     }
 

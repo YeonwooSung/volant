@@ -6,9 +6,11 @@ use std::sync::Arc;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use bytes::Bytes;
+use parking_lot::Mutex;
 use volant_core::{Error, Message, Offset, Record, Result};
 
 use crate::config::StorageConfig;
+use crate::group_commit::{GroupCommit, GroupCommitTicket};
 use crate::pool::BufferPool;
 use crate::record::encoded_record_size;
 use crate::segment::{list_segment_bases, Segment, SegmentOptions};
@@ -33,6 +35,10 @@ pub struct PartitionLog {
     appends_since_flush: u64,
     /// Shared encode buffer pool (`None` when `buffer_pool_blocks == 0`).
     pool: Option<Arc<BufferPool>>,
+    /// Group-commit coordinator (always present; no-op when `max_ms == 0`).
+    group: Arc<GroupCommit>,
+    /// Successful `flush()` / fsync count (test hook).
+    fsync_count: u64,
 }
 
 impl PartitionLog {
@@ -61,6 +67,11 @@ impl PartitionLog {
             pool: pool.clone(),
         };
 
+        let group = Arc::new(GroupCommit::new(
+            config.group_commit_max_ms,
+            config.effective_group_commit_max_records(),
+        ));
+
         if bases.is_empty() {
             let mut seg = Segment::create_with_options(
                 &config.data_dir,
@@ -77,6 +88,8 @@ impl PartitionLog {
                 next_offset,
                 appends_since_flush: 0,
                 pool,
+                group,
+                fsync_count: 0,
             });
         }
 
@@ -115,44 +128,77 @@ impl PartitionLog {
             next_offset,
             appends_since_flush: 0,
             pool,
+            group,
+            fsync_count: 0,
         })
     }
 
     /// Append a single message; returns the assigned record.
     ///
-    /// Honors `flush_every_n` after this message. Prefer [`Self::append_batch`]
-    /// when writing multiple messages so the flush policy runs once per batch.
+    /// Honors `flush_every_n` after this message when group-commit is off.
+    /// When `group_commit_max_ms > 0`, waits for a shared group-commit flush
+    /// (exclusive `&mut self` cannot coalesce with other appenders — use
+    /// [`SharedPartitionLog`] for cross-caller sharing).
+    /// Prefer [`Self::append_batch`] when writing multiple messages so the
+    /// flush policy runs once per batch.
     pub fn append(&mut self, message: Message) -> Result<Record> {
         let record = self.append_one(message)?;
-        self.appends_since_flush += 1;
-        if self.config.flush_every_n > 0 && self.appends_since_flush >= self.config.flush_every_n
-        {
-            self.flush()?;
-        }
+        self.finish_append(1, true)?;
         Ok(record)
     }
 
     /// Append a batch of messages with a single flush-policy check at the end.
     ///
     /// Messages receive contiguous offsets. No intermediate `fsync` is issued
-    /// between messages; `flush_every_n` is evaluated once after the whole
-    /// batch (using the cumulative `appends_since_flush` counter).
+    /// between messages; `flush_every_n` / group-commit is evaluated once after
+    /// the whole batch (using the cumulative `appends_since_flush` counter).
     pub fn append_batch(
         &mut self,
         messages: impl IntoIterator<Item = Message>,
     ) -> Result<Vec<Record>> {
+        self.append_batch_inner(messages, true)
+    }
+
+    /// Write a batch without waiting for group-commit (broker produce path).
+    ///
+    /// Still honors `flush_every_n` when group-commit is off. When group-commit
+    /// is on, records stay dirty until [`Self::await_group_commit`] or
+    /// [`Self::flush`].
+    pub fn append_batch_uncommitted(
+        &mut self,
+        messages: impl IntoIterator<Item = Message>,
+    ) -> Result<Vec<Record>> {
+        self.append_batch_inner(messages, false)
+    }
+
+    fn append_batch_inner(
+        &mut self,
+        messages: impl IntoIterator<Item = Message>,
+        wait_group: bool,
+    ) -> Result<Vec<Record>> {
         let mut records = Vec::new();
         for message in messages {
             records.push(self.append_one(message)?);
-            self.appends_since_flush = self.appends_since_flush.saturating_add(1);
         }
-        if !records.is_empty()
-            && self.config.flush_every_n > 0
+        if !records.is_empty() {
+            self.finish_append(records.len() as u64, wait_group)?;
+        }
+        Ok(records)
+    }
+
+    fn finish_append(&mut self, n: u64, wait_group: bool) -> Result<()> {
+        self.appends_since_flush = self.appends_since_flush.saturating_add(n);
+        if self.group_commit_enabled() {
+            self.group.add_pending(n);
+            if wait_group {
+                self.await_group_commit()?;
+            }
+        } else if self.config.flush_every_n > 0
             && self.appends_since_flush >= self.config.flush_every_n
         {
             self.flush()?;
         }
-        Ok(records)
+        Ok(())
     }
 
     /// Append a message at an exact offset (follower replication path).
@@ -168,8 +214,14 @@ impl PartitionLog {
             )));
         }
         let record = self.append_one(message)?;
+        // Replication path: honor flush_every_n only. Group-commit wait is for
+        // produce callers (`append` / `append_batch` / `SharedPartitionLog`).
         self.appends_since_flush = self.appends_since_flush.saturating_add(1);
-        if self.config.flush_every_n > 0 && self.appends_since_flush >= self.config.flush_every_n {
+        if self.group_commit_enabled() {
+            self.group.add_pending(1);
+        } else if self.config.flush_every_n > 0
+            && self.appends_since_flush >= self.config.flush_every_n
+        {
             self.flush()?;
         }
         Ok(record)
@@ -268,9 +320,7 @@ impl PartitionLog {
 
             let recs = seg.read_from(start, remaining_msgs, remaining_bytes)?;
             for r in recs {
-                let approx = r.value.len()
-                    + r.key.as_ref().map(|k| k.len()).unwrap_or(0)
-                    + 32;
+                let approx = r.value.len() + r.key.as_ref().map(|k| k.len()).unwrap_or(0) + 32;
                 bytes_acc = bytes_acc.saturating_add(approx);
                 out.push(r);
             }
@@ -297,8 +347,59 @@ impl PartitionLog {
         if let Some(active) = self.segments.last_mut() {
             active.flush()?;
         }
+        let n = self.appends_since_flush;
         self.appends_since_flush = 0;
+        self.fsync_count = self.fsync_count.saturating_add(1);
+        self.group.notify_flushed(n);
         Ok(())
+    }
+
+    /// Whether time-based group-commit is enabled for this log.
+    pub fn group_commit_enabled(&self) -> bool {
+        self.config.group_commit_enabled()
+    }
+
+    /// Records written since the last `flush()` (not yet group-committed).
+    pub fn has_uncommitted(&self) -> bool {
+        self.appends_since_flush > 0
+    }
+
+    /// Successful `fsync` count (includes explicit `flush` and group-commit).
+    pub fn fsync_count(&self) -> u64 {
+        self.fsync_count
+    }
+
+    /// Group-commit flush count (`0` when the window is off).
+    pub fn group_commit_flushes(&self) -> u64 {
+        self.group.flushes()
+    }
+
+    /// Records covered by group-commit flushes.
+    pub fn group_commit_records(&self) -> u64 {
+        self.group.records()
+    }
+
+    /// Cloneable handle to the group-commit coordinator.
+    pub fn group_commit_handle(&self) -> Arc<GroupCommit> {
+        Arc::clone(&self.group)
+    }
+
+    /// Register as a waiter for the next group-commit generation.
+    pub fn register_group_waiter(&self) -> GroupCommitTicket {
+        self.group.register_waiter()
+    }
+
+    /// Wait for a shared group-commit flush (no-op when the window is off).
+    ///
+    /// Exclusive `&mut self` cannot coalesce with other appenders; prefer
+    /// [`SharedPartitionLog`] or call this after releasing a higher-level lock.
+    pub fn await_group_commit(&mut self) -> Result<()> {
+        if !self.group_commit_enabled() {
+            return Ok(());
+        }
+        let handle = Arc::clone(&self.group);
+        let ticket = handle.register_waiter();
+        handle.wait_or_lead(ticket, || self.flush())
     }
 
     /// Shared buffer pool, if configured.
@@ -499,9 +600,8 @@ impl PartitionLog {
         let dir = self.config.data_dir.clone();
         let tmp_dir = dir.join(format!(".compact-{}", compact_base.raw()));
         if tmp_dir.exists() {
-            fs::remove_dir_all(&tmp_dir).map_err(|e| {
-                Error::Storage(format!("remove compact tmp: {e}"))
-            })?;
+            fs::remove_dir_all(&tmp_dir)
+                .map_err(|e| Error::Storage(format!("remove compact tmp: {e}")))?;
         }
         fs::create_dir_all(&tmp_dir)
             .map_err(|e| Error::Storage(format!("create compact tmp: {e}")))?;
@@ -589,6 +689,86 @@ impl PartitionLog {
     }
 }
 
+/// Shareable partition log: appenders release the log lock before waiting
+/// so concurrent callers on the same partition can share one `fsync`.
+#[derive(Debug, Clone)]
+pub struct SharedPartitionLog {
+    inner: Arc<Mutex<PartitionLog>>,
+}
+
+impl SharedPartitionLog {
+    /// Open or create a partition log under `config.data_dir`.
+    pub fn open(config: StorageConfig) -> Result<Self> {
+        Ok(Self {
+            inner: Arc::new(Mutex::new(PartitionLog::open(config)?)),
+        })
+    }
+
+    /// Wrap an existing exclusive log.
+    pub fn from_log(log: PartitionLog) -> Self {
+        Self {
+            inner: Arc::new(Mutex::new(log)),
+        }
+    }
+
+    /// Append one message; waits for group-commit when the window is on.
+    pub fn append(&self, message: Message) -> Result<Record> {
+        let mut log = self.inner.lock();
+        if !log.group_commit_enabled() {
+            return log.append(message);
+        }
+        let record = log.append_one(message)?;
+        log.finish_append(1, false)?;
+        let handle = log.group_commit_handle();
+        let ticket = handle.register_waiter();
+        drop(log);
+        handle.wait_or_lead(ticket, || self.inner.lock().flush())?;
+        Ok(record)
+    }
+
+    /// Append a batch with a single group-commit wait at the end.
+    pub fn append_batch(&self, messages: impl IntoIterator<Item = Message>) -> Result<Vec<Record>> {
+        let mut log = self.inner.lock();
+        if !log.group_commit_enabled() {
+            return log.append_batch(messages);
+        }
+        let records = log.append_batch_uncommitted(messages)?;
+        if records.is_empty() {
+            return Ok(records);
+        }
+        let handle = log.group_commit_handle();
+        let ticket = handle.register_waiter();
+        drop(log);
+        handle.wait_or_lead(ticket, || self.inner.lock().flush())?;
+        Ok(records)
+    }
+
+    /// Read records starting at `from`.
+    pub fn read(&self, from: Offset, max_messages: usize) -> Result<Vec<Record>> {
+        self.inner.lock().read(from, max_messages)
+    }
+
+    /// Immediate fsync of the active segment.
+    pub fn flush(&self) -> Result<()> {
+        self.inner.lock().flush()
+    }
+
+    /// Successful `fsync` count.
+    pub fn fsync_count(&self) -> u64 {
+        self.inner.lock().fsync_count()
+    }
+
+    /// Group-commit flush count.
+    pub fn group_commit_flushes(&self) -> u64 {
+        self.inner.lock().group_commit_flushes()
+    }
+
+    /// Records covered by group-commit flushes.
+    pub fn group_commit_records(&self) -> u64 {
+        self.inner.lock().group_commit_records()
+    }
+}
+
 fn now_ms() -> i64 {
     SystemTime::now()
         .duration_since(UNIX_EPOCH)
@@ -622,12 +802,8 @@ mod tests {
             .unwrap()
             .as_nanos();
         let n = N.fetch_add(1, Ordering::Relaxed);
-        let dir = std::env::temp_dir().join(format!(
-            "volant-log-{}-{}-{}",
-            std::process::id(),
-            n,
-            nanos
-        ));
+        let dir =
+            std::env::temp_dir().join(format!("volant-log-{}-{}-{}", std::process::id(), n, nanos));
         fs::create_dir_all(&dir).unwrap();
         dir
     }
