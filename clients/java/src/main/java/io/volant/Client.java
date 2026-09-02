@@ -73,6 +73,8 @@ public final class Client implements AutoCloseable {
     private int maxRedirects = 1;
     private int maxRetries = 0;
     private long retryBackoffMs = 50;
+    /** Test-only: next N fetch RPCs throw a transient transport error. */
+    int injectFetchTransportFails;
     private boolean enableIdempotence = false;
     private String transactionalId = null;
     private long producerId = 0L;
@@ -210,9 +212,9 @@ public final class Client implements AutoCloseable {
     }
 
     /**
-     * Extra Produce attempts after the first on transient broker/transport
-     * errors. Default is 0. Error 13 stays on {@link #setMaxRedirects};
-     * error 21 stays on the one re-Init. Fetch is not retried.
+     * Extra Produce/Fetch attempts after the first on transient
+     * broker/transport errors. Default is 0. Error 13 stays on
+     * {@link #setMaxRedirects}; error 21 stays on the one re-Init.
      */
     public void setMaxRetries(int n) {
         this.maxRetries = Math.max(0, n);
@@ -222,7 +224,7 @@ public final class Client implements AutoCloseable {
         return maxRetries;
     }
 
-    /** Sleep between produce retries, milliseconds. Default 50. Zero allowed. */
+    /** Sleep between produce/fetch retries, milliseconds. Default 50. Zero allowed. */
     public void setRetryBackoffMs(long ms) {
         this.retryBackoffMs = Math.max(0, ms);
     }
@@ -956,32 +958,63 @@ public final class Client implements AutoCloseable {
             String topic, int partition, long offset, int maxMessages, long maxBytes, long maxWaitMs) {
         byte[] payload = Codec.encodeFetchRequest(
                 new Codec.FetchRequest(topic, partition, offset, maxMessages, maxBytes, maxWaitMs));
-        int maxAttempts = 1 + maxRedirects;
-        int attempt = 0;
+        int retryAttempt = 0;
         while (true) {
-            attempt++;
-            Object decoded;
-            try {
-                decoded = roundTrip(Codec.OP_FETCH, payload);
-            } catch (BrokerException e) {
-                if (e.code == NOT_LEADER_FOR_PARTITION
+            int maxAttempts = 1 + maxRedirects;
+            int attempt = 0;
+            boolean retried = false;
+            while (true) {
+                attempt++;
+                Object decoded;
+                try {
+                    if (injectFetchTransportFails > 0) {
+                        injectFetchTransportFails--;
+                        throw new RuntimeException(new java.io.IOException("injected transport"));
+                    }
+                    decoded = roundTrip(Codec.OP_FETCH, payload);
+                } catch (BrokerException e) {
+                    if (e.code == NOT_LEADER_FOR_PARTITION
+                            && attempt < maxAttempts
+                            && redirectToLeader(topic, partition)) {
+                        continue;
+                    }
+                    if (isTransientBroker(e.code) && retryAttempt < maxRetries) {
+                        retryAttempt++;
+                        sleepProduceRetry();
+                        retried = true;
+                        break;
+                    }
+                    throw e;
+                } catch (RuntimeException e) {
+                    if (isTransientTransport(e) && retryAttempt < maxRetries) {
+                        retryAttempt++;
+                        sleepProduceRetry();
+                        retried = true;
+                        break;
+                    }
+                    throw e;
+                }
+                if (!(decoded instanceof Codec.FetchResponse)) {
+                    throw new ProtocolException("unexpected response for fetch: " + typeName(decoded));
+                }
+                Codec.FetchResponse resp = (Codec.FetchResponse) decoded;
+                if (resp.errorCode == NOT_LEADER_FOR_PARTITION
                         && attempt < maxAttempts
-                        && redirectToLeader(topic, partition)) {
+                        && redirectToLeader(resp.topic, (int) resp.partition)) {
                     continue;
                 }
-                throw e;
+                if (isTransientBroker(resp.errorCode) && retryAttempt < maxRetries) {
+                    retryAttempt++;
+                    sleepProduceRetry();
+                    retried = true;
+                    break;
+                }
+                check(resp.errorCode, "fetch");
+                return resp.records;
             }
-            if (!(decoded instanceof Codec.FetchResponse)) {
-                throw new ProtocolException("unexpected response for fetch: " + typeName(decoded));
+            if (!retried) {
+                throw new ProtocolException("fetch loop exited");
             }
-            Codec.FetchResponse resp = (Codec.FetchResponse) decoded;
-            if (resp.errorCode == NOT_LEADER_FOR_PARTITION
-                    && attempt < maxAttempts
-                    && redirectToLeader(resp.topic, (int) resp.partition)) {
-                continue;
-            }
-            check(resp.errorCode, "fetch");
-            return resp.records;
         }
     }
 

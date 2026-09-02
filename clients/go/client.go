@@ -267,10 +267,10 @@ func (c *Client) SetMaxRedirects(n int) {
 	c.maxRedirects = n
 }
 
-// SetMaxRetries sets extra Produce attempts after the first on transient
-// broker/transport errors. Default is 0 (no extra attempts). Negative
-// values are treated as 0. Error 13 stays on the redirect budget; error
-// 21 stays on the one re-Init. Fetch is not retried.
+// SetMaxRetries sets extra Produce/Fetch attempts after the first on
+// transient broker/transport errors. Default is 0 (no extra attempts).
+// Negative values are treated as 0. Error 13 stays on the redirect
+// budget; error 21 stays on the one re-Init.
 func (c *Client) SetMaxRetries(n int) {
 	if n < 0 {
 		n = 0
@@ -278,8 +278,8 @@ func (c *Client) SetMaxRetries(n int) {
 	c.maxRetries = n
 }
 
-// SetRetryBackoff sets the sleep between produce retries. Default is
-// 50ms. Zero is allowed (tests). Negative values are treated as 0.
+// SetRetryBackoff sets the sleep between produce/fetch retries. Default
+// is 50ms. Zero is allowed (tests). Negative values are treated as 0.
 func (c *Client) SetRetryBackoff(d time.Duration) {
 	if d < 0 {
 		d = 0
@@ -1044,6 +1044,8 @@ func (c *Client) Fetch(topic string, partition int, offset int64) ([]Record, err
 }
 
 // FetchOpts is Fetch with explicit max_messages, max_bytes, and max_wait_ms.
+// Transient broker/transport errors retry up to maxRetries extra times
+// (default 0). Error 13 uses maxRedirects only.
 func (c *Client) FetchOpts(topic string, partition int, offset int64, maxMessages, maxBytes, maxWaitMs uint32) ([]Record, error) {
 	payload, err := codec.EncodeFetchRequest(codec.FetchRequest{
 		Topic:       topic,
@@ -1056,12 +1058,40 @@ func (c *Client) FetchOpts(topic string, partition int, offset int64, maxMessage
 	if err != nil {
 		return nil, err
 	}
-	maxAttempts := 1 + c.maxRedirects
-	for attempt := 1; ; attempt++ {
-		decoded, err := c.roundTrip(codec.OpFetch, payload)
-		if err != nil {
-			if be, ok := err.(*codec.BrokerError); ok && be.Code == notLeaderForPartition && attempt < maxAttempts {
-				ok, rerr := c.redirectToLeader(topic, uint32(partition))
+	maxRetries := c.maxRetries
+	if maxRetries < 0 {
+		maxRetries = 0
+	}
+	retryAttempt := 0
+	for {
+		maxAttempts := 1 + c.maxRedirects
+		retried := false
+		for attempt := 1; ; attempt++ {
+			decoded, err := c.roundTrip(codec.OpFetch, payload)
+			if err != nil {
+				if be, ok := err.(*codec.BrokerError); ok && be.Code == notLeaderForPartition && attempt < maxAttempts {
+					ok, rerr := c.redirectToLeader(topic, uint32(partition))
+					if rerr != nil {
+						return nil, rerr
+					}
+					if ok {
+						continue
+					}
+				}
+				if isTransientProduceErr(err) && retryAttempt < maxRetries {
+					retryAttempt++
+					c.sleepProduceRetry()
+					retried = true
+					break
+				}
+				return nil, err
+			}
+			resp, ok := decoded.(codec.FetchResponse)
+			if !ok {
+				return nil, &frame.ProtocolError{Msg: fmt.Sprintf("unexpected response for fetch: %T", decoded)}
+			}
+			if resp.ErrorCode == notLeaderForPartition && attempt < maxAttempts {
+				ok, rerr := c.redirectToLeader(resp.Topic, resp.Partition)
 				if rerr != nil {
 					return nil, rerr
 				}
@@ -1069,25 +1099,20 @@ func (c *Client) FetchOpts(topic string, partition int, offset int64, maxMessage
 					continue
 				}
 			}
-			return nil, err
-		}
-		resp, ok := decoded.(codec.FetchResponse)
-		if !ok {
-			return nil, &frame.ProtocolError{Msg: fmt.Sprintf("unexpected response for fetch: %T", decoded)}
-		}
-		if resp.ErrorCode == notLeaderForPartition && attempt < maxAttempts {
-			ok, rerr := c.redirectToLeader(resp.Topic, resp.Partition)
-			if rerr != nil {
-				return nil, rerr
+			if isTransientBroker(resp.ErrorCode) && retryAttempt < maxRetries {
+				retryAttempt++
+				c.sleepProduceRetry()
+				retried = true
+				break
 			}
-			if ok {
-				continue
+			if err := check(resp.ErrorCode, "fetch"); err != nil {
+				return nil, err
 			}
+			return resp.Records, nil
 		}
-		if err := check(resp.ErrorCode, "fetch"); err != nil {
-			return nil, err
+		if !retried {
+			return nil, &frame.ProtocolError{Msg: "fetch loop exited"}
 		}
-		return resp.Records, nil
 	}
 }
 

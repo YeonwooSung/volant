@@ -855,3 +855,118 @@ func TestFailedRetriesDoNotIncrementSequence(t *testing.T) {
 	}
 }
 
+func TestFetchDefaultMaxRetriesZeroRaisesOnTimeout(t *testing.T) {
+	srv := &scriptedBroker{fetchCodes: []uint16{timeoutCode}}
+	addr, stop := startScripted(t, srv)
+	defer stop()
+
+	c, err := volant.DialTimeout(addr, 5*time.Second)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer c.Close()
+
+	_, err = c.Fetch("t", 0, 0)
+	if err == nil {
+		t.Fatal("expected BrokerError 7")
+	}
+	be, ok := err.(*volant.BrokerError)
+	if !ok || be.Code != timeoutCode {
+		t.Fatalf("got %v want BrokerError code=7", err)
+	}
+	_, ff, _, _ := srv.snapshot()
+	if ff != 1 {
+		t.Fatalf("fetch count %d want 1", ff)
+	}
+}
+
+func TestFetchRetriesTimeoutThenOk(t *testing.T) {
+	srv := &scriptedBroker{fetchCodes: []uint16{timeoutCode, 0}}
+	addr, stop := startScripted(t, srv)
+	defer stop()
+
+	c, err := volant.DialTimeout(addr, 5*time.Second)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer c.Close()
+	c.SetMaxRetries(2)
+	c.SetRetryBackoff(0)
+
+	recs, err := c.Fetch("t", 0, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(recs) != 0 {
+		t.Fatalf("records %d want 0", len(recs))
+	}
+	_, ff, _, _ := srv.snapshot()
+	if ff != 2 {
+		t.Fatalf("fetch count %d want 2", ff)
+	}
+}
+
+func TestFetchError13StillRedirectsNotRetry(t *testing.T) {
+	leader := &scriptedBroker{}
+	_, stopL := startScripted(t, leader)
+	defer stopL()
+
+	follower := &scriptedBroker{
+		fetchCodes: []uint16{notLeader},
+		meta:       leaderMeta("t", 0, 2, "127.0.0.1", leader.port()),
+	}
+	addr, stopF := startScripted(t, follower)
+	defer stopF()
+
+	c, err := volant.DialTimeout(addr, 5*time.Second)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer c.Close()
+	c.SetMaxRetries(2)
+	c.SetRetryBackoff(0)
+
+	recs, err := c.Fetch("t", 0, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(recs) != 0 {
+		t.Fatalf("records %d want 0", len(recs))
+	}
+	_, ff, fm, _ := follower.snapshot()
+	_, lf, _, _ := leader.snapshot()
+	if ff != 1 || fm != 1 {
+		t.Fatalf("follower fetch/metadata = %d/%d want 1/1", ff, fm)
+	}
+	if lf != 1 {
+		t.Fatalf("leader fetch = %d want 1", lf)
+	}
+}
+
+func TestFetchExhaustedRetriesRaises(t *testing.T) {
+	srv := &scriptedBroker{fetchCodes: []uint16{timeoutCode, timeoutCode, timeoutCode}}
+	addr, stop := startScripted(t, srv)
+	defer stop()
+
+	c, err := volant.DialTimeout(addr, 5*time.Second)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer c.Close()
+	c.SetMaxRetries(2)
+	c.SetRetryBackoff(0)
+
+	_, err = c.Fetch("t", 0, 0)
+	if err == nil {
+		t.Fatal("expected BrokerError 7")
+	}
+	be, ok := err.(*volant.BrokerError)
+	if !ok || be.Code != timeoutCode {
+		t.Fatalf("got %v want BrokerError code=7", err)
+	}
+	_, ff, _, _ := srv.snapshot()
+	if ff != 3 {
+		t.Fatalf("fetch count %d want 3", ff)
+	}
+}
+
