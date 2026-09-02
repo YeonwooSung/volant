@@ -486,6 +486,19 @@ volant cluster members --broker 127.0.0.1:9092
 - Push is **best-effort** (`MembershipPut` 100/101); no majority wait.
 - Not Raft joint consensus. Isolated nodes can both accept add.
 
+## v0.12 cluster metadata topic
+
+Opt-in KRaft-**shaped** assignment snapshot topic. Default **off**. Not
+Kafka KRaft record schemas and not a Raft metadata log.
+
+| Env | Default | Role |
+|-----|---------|------|
+| `VOLANT_CLUSTER_METADATA_TOPIC` | **off** | `1`/`true`/`yes`: controller ensures `__cluster_metadata` (1 partition, RF=`min(3,N)`). CreateTopic / DeleteTopic / CreatePartitions also append a JSON assignment snapshot (`key` = generation decimal, header `volant-cluster-metadata=1`). On start, if `assignment.json` is missing/empty, rebuild from the last record. |
+| `VOLANT_PARTITION_RAFT` | **off** | `1`/`true`/`yes`: new topics get a dual-write Raft log under `{data_dir}/__partition_raft/{topic}/{partition}/`. Does **not** replace ISR HWM. No second election (reuse partition leader). |
+
+ISR + `assignment.json` stay the data-plane / assignment SoT when the
+flags are off (and remain SoT for produce even when they are on).
+
 ## Metrics auth (Phase 21)
 
 ```bash

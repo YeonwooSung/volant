@@ -20,7 +20,8 @@ use volant_protocol::ErrorCode;
 use volant_storage::StorageConfig;
 
 use crate::cluster::{
-    default_openraft_metadata_enabled, load_assignment, load_membership_overlay,
+    cluster_metadata_topic_env_enabled, default_openraft_metadata_enabled, load_assignment,
+    load_assignment_from_cluster_metadata, load_membership_overlay, save_assignment,
     AssignmentConsensus, AssignmentSnapshot, ClusterConfig, Membership, MetadataRaftState,
     OpenraftMetaHandle, OpenraftMetricsCache,
 };
@@ -31,6 +32,7 @@ use crate::kafka::fetch_session::FetchSessionManager;
 use crate::leader_epoch::{EpochStart, LeaderEpochStore, LeaderEpochsFile};
 use crate::metrics::Metrics;
 use crate::producer_state::{parse_partition_key, ProducerStateStore};
+use crate::replica::{partition_raft_env_enabled, PartitionRaftState};
 use crate::topic::Topic;
 use crate::topic_catalog::TopicCatalogStore;
 use crate::topic_config::TopicConfigStore;
@@ -643,6 +645,14 @@ pub struct Broker {
     pub(crate) openraft_meta: Mutex<Option<OpenraftMetaHandle>>,
     /// Cached openraft leader / term for metrics.
     pub(crate) openraft_metrics: OpenraftMetricsCache,
+    /// v0.12: append assignment snapshots to `__cluster_metadata`. Default **off**
+    /// (`VOLANT_CLUSTER_METADATA_TOPIC`).
+    cluster_metadata_topic_enabled: AtomicBool,
+    /// v0.12: enable per-partition Raft logs for **new** topics. Default **off**
+    /// (`VOLANT_PARTITION_RAFT`).
+    partition_raft_new_topics: AtomicBool,
+    /// v0.12: open partition Raft logs (`(topic, partition)`).
+    partition_rafts: Mutex<HashMap<(String, u32), PartitionRaftState>>,
     /// Test hook: when true, outbound inter-broker RPC fails without connecting.
     inter_broker_blocked: AtomicBool,
 }
@@ -747,6 +757,7 @@ pub enum Txn2pcFanout {
 
 mod admin;
 mod cluster;
+mod cluster_metadata;
 mod delete_records;
 mod topics;
 mod txn;
@@ -885,8 +896,12 @@ impl Broker {
             openraft_metadata_enabled: AtomicBool::new(default_openraft_metadata_enabled()),
             openraft_meta: Mutex::new(None),
             openraft_metrics: OpenraftMetricsCache::default(),
+            cluster_metadata_topic_enabled: AtomicBool::new(cluster_metadata_topic_env_enabled()),
+            partition_raft_new_topics: AtomicBool::new(partition_raft_env_enabled()),
+            partition_rafts: Mutex::new(HashMap::new()),
             inter_broker_blocked: AtomicBool::new(false),
         };
+        broker.reopen_existing_partition_rafts();
         broker
             .reload_single_node_topics()
             .expect("failed to reload single-node topic catalog");
@@ -929,7 +944,17 @@ impl Broker {
                 "node_id {node_id} not present in cluster config"
             )));
         }
-        let assignment = load_assignment(&storage.data_dir)?;
+        let mut assignment = load_assignment(&storage.data_dir)?;
+        // v0.12: rebuild assignment from `__cluster_metadata` when the flag is
+        // on and assignment.json is missing/empty.
+        if cluster_metadata_topic_env_enabled() && assignment.topics.is_empty() {
+            if let Some(rebuilt) = load_assignment_from_cluster_metadata(&storage.data_dir) {
+                if !rebuilt.topics.is_empty() {
+                    let _ = save_assignment(&storage.data_dir, &rebuilt);
+                    assignment = rebuilt;
+                }
+            }
+        }
         let next_id = assignment
             .topics
             .values()
@@ -1068,10 +1093,17 @@ impl Broker {
             openraft_metadata_enabled: AtomicBool::new(default_openraft_metadata_enabled()),
             openraft_meta: Mutex::new(None),
             openraft_metrics: OpenraftMetricsCache::default(),
+            cluster_metadata_topic_enabled: AtomicBool::new(cluster_metadata_topic_env_enabled()),
+            partition_raft_new_topics: AtomicBool::new(partition_raft_env_enabled()),
+            partition_rafts: Mutex::new(HashMap::new()),
             inter_broker_blocked: AtomicBool::new(false),
         };
         // Open local partitions from persisted assignment.
         broker.apply_local_assignment()?;
+        broker.reopen_existing_partition_rafts();
+        if broker.cluster_metadata_topic_enabled() && broker.is_controller() {
+            broker.ensure_cluster_metadata_topic()?;
+        }
         broker.load_txn_markers();
         broker.load_prepared_txns();
         broker.replay_transaction_state_topic();
@@ -1265,7 +1297,7 @@ impl Broker {
             return Ok((Vec::new(), 0));
         }
 
-        let (records, need_wait, target_hwm) = {
+        let (records, need_wait, target_hwm, raft_hook) = {
             let mut topics = self.topics.write();
             let t = topics
                 .get_mut(topic)
@@ -1316,8 +1348,28 @@ impl Broker {
             let count = records.len() as u64;
             let target = base + count;
             let need_wait = acks == 255 && self.cluster.is_some() && part.committed_hwm < target;
-            (records, need_wait, target)
+            let last_off = records.last().map(|r| r.offset.raw()).unwrap_or(0);
+            let crc = records
+                .iter()
+                .fold(0u32, |a, r| a.wrapping_add(crc32fast::hash(&r.value)));
+            let raft_hook = if self.partition_raft_enabled_for(topic.as_str(), partition.0) {
+                Some((last_off, crc, part.isr.len(), acks))
+            } else {
+                None
+            };
+            (records, need_wait, target, raft_hook)
         };
+
+        if let Some((offset, crc, isr_len, raft_acks)) = raft_hook {
+            self.partition_raft_on_produce(
+                topic.as_str(),
+                partition.0,
+                offset,
+                crc,
+                isr_len,
+                raft_acks,
+            );
+        }
 
         // Blocking HWM wait only when an explicit timeout is provided.
         // Network path uses async polling (see net/dispatch.rs) to stay runtime-agnostic.
