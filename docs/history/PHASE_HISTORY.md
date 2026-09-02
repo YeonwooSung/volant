@@ -249,6 +249,11 @@ docs for day-to-day reading: [ops](../ops.md), [consistency](../consistency.md),
 | v0.48 | ✅ | GroupConsumer auto-commit on Python/Go/Java | [V48_SPEC.md](../V48_SPEC.md) |
 | v0.49 | ✅ | ListGroups and DescribeGroup on Python/Go/Java | [V49_SPEC.md](../V49_SPEC.md) |
 | v0.50 | ✅ | ListOffsets on Python/Go/Java clients | [V50_SPEC.md](../V50_SPEC.md) |
+| v0.51 | ✅ | CreatePartitions on Python/Go/Java clients | [V51_SPEC.md](../V51_SPEC.md) |
+| v0.52 | ✅ | DeleteRecords on Python/Go/Java clients | [V52_SPEC.md](../V52_SPEC.md) |
+| v0.53 | ✅ | DescribeConfigs and AlterConfigs on Python/Go/Java | [V53_SPEC.md](../V53_SPEC.md) |
+| v0.54 | ✅ | DeleteOffsets on Python/Go/Java clients | [V54_SPEC.md](../V54_SPEC.md) |
+| v0.55 | ✅ | Create/Delete/ListScramUsers on Python/Go/Java | [V55_SPEC.md](../V55_SPEC.md) |
 
 ---
 
