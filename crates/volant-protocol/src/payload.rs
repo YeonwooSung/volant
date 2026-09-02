@@ -760,6 +760,9 @@ pub fn encode_request(req: &Request) -> Result<Bytes> {
             dst.put_u32_le(*id);
         }
         Request::ListMembers => {}
+        Request::OpenraftAppend { payload } | Request::OpenraftVote { payload } => {
+            put_bytes(&mut dst, payload);
+        }
     }
     finish_payload(dst)
 }
@@ -1525,6 +1528,12 @@ pub fn decode_request(opcode: u16, payload: &[u8]) -> Result<Request> {
             })
         }
         RequestOpcode::ListMembers => Ok(Request::ListMembers),
+        RequestOpcode::OpenraftAppend => Ok(Request::OpenraftAppend {
+            payload: get_bytes(&mut src)?,
+        }),
+        RequestOpcode::OpenraftVote => Ok(Request::OpenraftVote {
+            payload: get_bytes(&mut src)?,
+        }),
     }
 }
 
@@ -1988,6 +1997,9 @@ pub fn encode_response(resp: &Response) -> Result<Bytes> {
             for id in live {
                 dst.put_u32_le(*id);
             }
+        }
+        Response::OpenraftAppend { payload } | Response::OpenraftVote { payload } => {
+            put_bytes(&mut dst, payload);
         }
         Response::Error { code, message } => {
             dst.put_u16_le(*code);
@@ -2888,6 +2900,12 @@ pub fn decode_response(opcode: u16, payload: &[u8]) -> Result<Response> {
                 live,
             })
         }
+        ResponseOpcode::OpenraftAppend => Ok(Response::OpenraftAppend {
+            payload: get_bytes(&mut src)?,
+        }),
+        ResponseOpcode::OpenraftVote => Ok(Response::OpenraftVote {
+            payload: get_bytes(&mut src)?,
+        }),
         ResponseOpcode::Error => {
             if src.remaining() < 2 {
                 return Err(Error::Protocol("truncated error code".into()));
@@ -4827,5 +4845,45 @@ mod tests {
         assert!(decode_response(ResponseOpcode::AddBroker as u16, &[]).is_err());
         assert!(decode_response(ResponseOpcode::RemoveBroker as u16, &[]).is_err());
         assert!(decode_response(ResponseOpcode::ListMembers as u16, &[]).is_err());
+    }
+
+    #[test]
+    fn openraft_rpc_roundtrip() {
+        let req = Request::OpenraftAppend {
+            payload: Bytes::from_static(b"{\"term\":1}"),
+        };
+        let b = encode_request(&req).unwrap();
+        assert_eq!(req.opcode(), RequestOpcode::OpenraftAppend as u16);
+        assert_eq!(
+            decode_request(RequestOpcode::OpenraftAppend as u16, &b).unwrap(),
+            req
+        );
+        let vote = Request::OpenraftVote {
+            payload: Bytes::from_static(b"{\"term\":2}"),
+        };
+        let vb = encode_request(&vote).unwrap();
+        assert_eq!(
+            decode_request(RequestOpcode::OpenraftVote as u16, &vb).unwrap(),
+            vote
+        );
+        let resp = Response::OpenraftAppend {
+            payload: Bytes::from_static(b"{\"success\":true}"),
+        };
+        let rb = encode_response(&resp).unwrap();
+        assert_eq!(resp.opcode(), ResponseOpcode::OpenraftAppend as u16);
+        assert_eq!(
+            decode_response(ResponseOpcode::OpenraftAppend as u16, &rb).unwrap(),
+            resp
+        );
+        let vr = Response::OpenraftVote {
+            payload: Bytes::from_static(b"{\"vote_granted\":true}"),
+        };
+        let vrb = encode_response(&vr).unwrap();
+        assert_eq!(
+            decode_response(ResponseOpcode::OpenraftVote as u16, &vrb).unwrap(),
+            vr
+        );
+        assert!(decode_request(RequestOpcode::OpenraftAppend as u16, &[]).is_err());
+        assert!(decode_response(ResponseOpcode::OpenraftVote as u16, &[]).is_err());
     }
 }

@@ -20,8 +20,9 @@ use volant_protocol::ErrorCode;
 use volant_storage::StorageConfig;
 
 use crate::cluster::{
-    load_assignment, load_membership_overlay, AssignmentConsensus, AssignmentSnapshot,
-    ClusterConfig, Membership, MetadataRaftState,
+    default_openraft_metadata_enabled, load_assignment, load_membership_overlay,
+    AssignmentConsensus, AssignmentSnapshot, ClusterConfig, Membership, MetadataRaftState,
+    OpenraftMetaHandle, OpenraftMetricsCache,
 };
 use crate::delete_records_outbox::DeleteRecordsOutbox;
 use crate::group::GroupCoordinator;
@@ -631,6 +632,12 @@ pub struct Broker {
     /// log (opcodes 98/99) instead of AssignmentConsensusNote. Default **off**
     /// (`VOLANT_METADATA_RAFT`).
     metadata_raft_enabled: AtomicBool,
+    /// v0.11: when true, `controller_id()` is the openraft leader. Default **off**.
+    pub(crate) openraft_metadata_enabled: AtomicBool,
+    /// Live openraft node (started from background tasks when the flag is on).
+    pub(crate) openraft_meta: Mutex<Option<OpenraftMetaHandle>>,
+    /// Cached openraft leader / term for metrics.
+    pub(crate) openraft_metrics: OpenraftMetricsCache,
     /// Test hook: when true, outbound inter-broker RPC fails without connecting.
     inter_broker_blocked: AtomicBool,
 }
@@ -861,6 +868,9 @@ impl Broker {
             metadata_raft,
             // metadata raft default off (cluster and single-node).
             metadata_raft_enabled: AtomicBool::new(default_metadata_raft_enabled(false)),
+            openraft_metadata_enabled: AtomicBool::new(default_openraft_metadata_enabled()),
+            openraft_meta: Mutex::new(None),
+            openraft_metrics: OpenraftMetricsCache::default(),
             inter_broker_blocked: AtomicBool::new(false),
         };
         broker
@@ -1039,6 +1049,9 @@ impl Broker {
             ),
             metadata_raft,
             metadata_raft_enabled: AtomicBool::new(default_metadata_raft_enabled(true)),
+            openraft_metadata_enabled: AtomicBool::new(default_openraft_metadata_enabled()),
+            openraft_meta: Mutex::new(None),
+            openraft_metrics: OpenraftMetricsCache::default(),
             inter_broker_blocked: AtomicBool::new(false),
         };
         // Open local partitions from persisted assignment.
@@ -1152,12 +1165,18 @@ impl Broker {
     pub fn is_controller(&self) -> bool {
         match &self.cluster {
             None => true, // single-node acts as controller
-            Some(c) => c.membership.read().is_controller(),
+            Some(_) => self.controller_id() == self.node_id,
         }
     }
 
     /// Current controller id.
+    ///
+    /// Default: lowest live broker id. When `VOLANT_OPENRAFT_METADATA` is on,
+    /// this is the openraft leader (`0` if no leader yet).
     pub fn controller_id(&self) -> u32 {
+        if self.openraft_metadata_enabled() {
+            return self.openraft_leader_id().unwrap_or(0);
+        }
         match &self.cluster {
             None => self.node_id,
             Some(c) => c.membership.read().controller_id(),

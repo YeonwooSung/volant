@@ -5,6 +5,7 @@ pub mod assignment_consensus;
 pub mod config;
 pub mod membership;
 pub mod metadata_raft;
+pub mod openraft_meta;
 pub mod overlay;
 pub mod state;
 
@@ -23,6 +24,9 @@ pub use metadata_raft::{
     AppendEntriesResult, MetadataCommand, MetadataLogEntry, MetadataRaftHardState,
     MetadataRaftState, METADATA_RAFT_DIR, METADATA_RAFT_FILE_VERSION,
     METADATA_RAFT_HARD_STATE_FILE, METADATA_RAFT_LOG_FILE,
+};
+pub use openraft_meta::{
+    default_openraft_metadata_enabled, OpenraftGuard, OpenraftMetaHandle, OpenraftMetricsCache,
 };
 pub use overlay::{
     load_membership_overlay, membership_overlay_path, save_membership_overlay,

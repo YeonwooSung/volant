@@ -767,6 +767,21 @@ fn broker_metrics_text(broker: &Broker) -> String {
         "volant_metadata_raft_append_fail_total {}\n",
         broker.metadata_raft_append_fail_total()
     ));
+    // v0.11: opt-in openraft metadata election.
+    text.push_str(
+        "# HELP volant_openraft_leader_id Openraft metadata leader broker id (0 if none)\n",
+    );
+    text.push_str("# TYPE volant_openraft_leader_id gauge\n");
+    text.push_str(&format!(
+        "volant_openraft_leader_id {}\n",
+        broker.openraft_leader_id().unwrap_or(0)
+    ));
+    text.push_str("# HELP volant_openraft_term Openraft metadata current term\n");
+    text.push_str("# TYPE volant_openraft_term gauge\n");
+    text.push_str(&format!(
+        "volant_openraft_term {}\n",
+        broker.openraft_term()
+    ));
     // Phase 141: N=2 majority ops / health gauges (configured vs live).
     text.push_str(
         "# HELP volant_cluster_configured_brokers Effective membership size (overlay or cluster.toml; 1 if single-node)\n",

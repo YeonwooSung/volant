@@ -378,6 +378,7 @@ specs. Ops-critical notes only:
 | Env | v0.2 default | Role |
 |-----|--------------|------|
 | `VOLANT_METADATA_RAFT` | **off** | `1`/`true`/`yes` prefers 154 AppendEntries 98/99; unset/`0` uses Phase 150 notes |
+| `VOLANT_OPENRAFT_METADATA` | **off** | `1`/`true`/`yes`/`on` → `controller_id()` is the openraft leader (opcodes 108–111). Unset keeps lowest-id. |
 | `VOLANT_ASSIGNMENT_METADATA_COMMITTED_ONLY` | **off** | `1` serves majority-committed Metadata snapshot + wait-like admin; unset/`0` is live assignment |
 | `VOLANT_ASSIGNMENT_CONSENSUS` | **on** | Best-effort 96/97 push. Must **not** gate Metadata or fail CreateTopic |
 | `VOLANT_ASSIGNMENT_CONSENSUS_WAIT` | **off** | `1` → native **15** on majority miss; **rolls back** live `assignment.json` (must_wait path only) |
@@ -397,7 +398,17 @@ committed snapshot. Majority = configured N same as journal. Committed-only
 snapshot lives under `__assignment_consensus/committed_snapshot.json`. Gauges:
 `volant_assignment_generation_lag`,
 `volant_metadata_raft_{term,commit_index,last_applied}`. **Not** full openraft
-election (lowest-id controller remains leader).
+election (lowest-id controller remains leader unless v0.11 is on).
+
+## v0.11 openraft metadata election
+
+Opt-in only (`VOLANT_OPENRAFT_METADATA=1`). Default **off**: controller stays
+lowest live id. When on, a 3+ node cluster runs an in-process **openraft**
+group over native opcodes **108/109** (AppendEntries) and **110/111**
+(RequestVote). `controller_id()` / Metadata controller is that leader.
+Gauges: `volant_openraft_leader_id`, `volant_openraft_term`. This does **not**
+replicate `assignment.json` through openraft and does **not** implement
+InstallSnapshot. Homemade 154 log is unchanged. See [V11_SPEC.md](./V11_SPEC.md).
 
 **Cluster sharp edges:** Truncate-journal majority (Phase 130), assignment
 majority (Phase 150/154), and Phase 135/137/148 wait mode use **configured N**

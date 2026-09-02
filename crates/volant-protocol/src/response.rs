@@ -110,6 +110,10 @@ pub enum ResponseOpcode {
     RemoveBroker = 105,
     /// List membership result (v0.10).
     ListMembers = 107,
+    /// Inter-broker openraft AppendEntries result (v0.11).
+    OpenraftAppend = 109,
+    /// Inter-broker openraft RequestVote result (v0.11).
+    OpenraftVote = 111,
     /// Error response.
     Error = 0xFFFF,
 }
@@ -170,6 +174,8 @@ impl ResponseOpcode {
             103 => Self::AddBroker,
             105 => Self::RemoveBroker,
             107 => Self::ListMembers,
+            109 => Self::OpenraftAppend,
+            111 => Self::OpenraftVote,
             0xFFFF => Self::Error,
             _ => return None,
         })
@@ -824,6 +830,16 @@ pub enum Response {
         /// Live broker ids.
         live: Vec<u32>,
     },
+    /// Inter-broker openraft AppendEntries result (v0.11).
+    OpenraftAppend {
+        /// `serde_json` of openraft `AppendEntriesResponse`.
+        payload: Bytes,
+    },
+    /// Inter-broker openraft RequestVote result (v0.11).
+    OpenraftVote {
+        /// `serde_json` of openraft `VoteResponse`.
+        payload: Bytes,
+    },
     /// Error response.
     Error {
         /// Error code.
@@ -915,6 +931,8 @@ impl Response {
             Self::AddBroker { .. } => ResponseOpcode::AddBroker as u16,
             Self::RemoveBroker { .. } => ResponseOpcode::RemoveBroker as u16,
             Self::ListMembers { .. } => ResponseOpcode::ListMembers as u16,
+            Self::OpenraftAppend { .. } => ResponseOpcode::OpenraftAppend as u16,
+            Self::OpenraftVote { .. } => ResponseOpcode::OpenraftVote as u16,
             Self::Error { .. } => ResponseOpcode::Error as u16,
         }
     }
