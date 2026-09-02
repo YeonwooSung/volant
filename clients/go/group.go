@@ -62,8 +62,8 @@ func WithAutoCommit(interval time.Duration) GroupConsumerOption {
 }
 
 // WithAssignor selects the fetch-set assignor: "broker" (default, honor
-// JoinGroup) or "range" (solo local range after Metadata). Empty is
-// "broker". Unknown values fail JoinGroupConsumer.
+// JoinGroup) or "range" (local range over DescribeGroup members; still
+// no SyncGroup). Empty is "broker". Unknown values fail JoinGroupConsumer.
 func WithAssignor(name string) GroupConsumerOption {
 	return func(o *groupConsumerOptions) {
 		o.assignor = name
@@ -426,6 +426,34 @@ func (g *GroupConsumer) applyReset(partitions []topicPartition) error {
 	}
 }
 
+func (g *GroupConsumer) rangeMembersFromDescribe() (ids []string, topics [][]string) {
+	desc, err := g.client.DescribeGroup(g.groupID)
+	if err != nil {
+		return nil, nil
+	}
+	seen := false
+	for _, m := range desc.Members {
+		ids = append(ids, m.MemberID)
+		topics = append(topics, append([]string(nil), m.Topics...))
+		if m.MemberID == g.memberID {
+			seen = true
+		}
+	}
+	if !seen {
+		ids = append(ids, g.memberID)
+		topics = append(topics, append([]string(nil), g.topics...))
+	}
+	if len(ids) == 0 {
+		return nil, nil
+	}
+	for _, id := range ids {
+		if id == g.memberID {
+			return ids, topics
+		}
+	}
+	return nil, nil
+}
+
 func (g *GroupConsumer) localRangeAssignment() ([]Assignment, error) {
 	meta, err := g.client.Metadata()
 	if err != nil {
@@ -435,11 +463,30 @@ func (g *GroupConsumer) localRangeAssignment() ([]Assignment, error) {
 	for _, t := range meta.Topics {
 		counts[t.Name] = uint32(len(t.Partitions))
 	}
-	assigned := RangeAssignMulti([]string{g.memberID}, [][]string{append([]string(nil), g.topics...)}, counts)
+	ids, memberTopics := g.rangeMembersFromDescribe()
+	if len(ids) == 0 {
+		ids = []string{g.memberID}
+		memberTopics = [][]string{append([]string(nil), g.topics...)}
+	}
+	assigned := RangeAssignMulti(ids, memberTopics, counts)
 	if len(assigned) == 0 {
 		return nil, nil
 	}
-	return assigned[0], nil
+	idx := -1
+	for i, id := range ids {
+		if id == g.memberID {
+			idx = i
+			break
+		}
+	}
+	if idx < 0 || idx >= len(assigned) {
+		solo := RangeAssignMulti([]string{g.memberID}, [][]string{append([]string(nil), g.topics...)}, counts)
+		if len(solo) == 0 {
+			return nil, nil
+		}
+		return solo[0], nil
+	}
+	return assigned[idx], nil
 }
 
 // Poll heartbeats, rejoins on error 9/10/11, and fetches assigned partitions.

@@ -155,9 +155,9 @@ member+generation, rejoin on error 9, honor revoked).
 dynamic) and resends it on rejoin. `Close` leaves the group and does
 not close the `Client`.
 `RangeAssign` / `RangeAssignMulti` match the broker range algorithm.
-`WithAssignor("range")` replaces the fetch set with a **solo** local
-range (this member only — JoinGroup does not return the live member
-list). Default assignor is broker.
+`WithAssignor("range")` replaces the fetch set with a local range over
+**DescribeGroup** members (still no SyncGroup; describe failure falls
+back to solo). Default assignor is broker.
 
 Produce, Fetch, and DeleteRecords follow `NotLeaderForPartition`
 (error 13) by default: Metadata, reconnect to the partition leader,
@@ -269,11 +269,11 @@ seeing other group members on the wire, SCRAM, async I/O, Kafka
 transactions (API keys 22/24/25/26/28). Native BeginTxn/EndTxn
 (opcodes 50–53) is opt-in via `SetTransactionalID`. Idempotent produce
 is opt-in (`EnableIdempotence()`); default off. Local
-`WithAssignor("range")` cannot split
+`WithAssignor("range")` uses DescribeGroup members (still no SyncGroup).
 seeing other group members on the wire, SCRAM-SHA-512, Kafka SASL,
 async I/O, idempotent
-produce. Local `WithAssignor("range")` cannot split
-across live members. Thin `Client.JoinGroup` still sends empty
+produce. Local `WithAssignor("range")` uses DescribeGroup members
+(still no SyncGroup). Thin `Client.JoinGroup` still sends empty
 `group_instance_id`; use `JoinGroupConsumerStatic` for static
 membership. Thin `OffsetCommit` is still the admin path (empty member,
 generation 0); `GroupConsumer.Commit` sends member+generation.

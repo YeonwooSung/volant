@@ -96,6 +96,7 @@ class RangeAssignorTest {
         assertEquals(1, g.assignment().get(1).partition);
         assertEquals(2, g.assignment().get(2).partition);
         assertEquals(1, fake.metadataCount);
+        assertEquals(1, fake.describeGroupCount);
 
         List<Record> recs = g.poll(0);
         assertEquals(3, recs.size());
@@ -113,6 +114,55 @@ class RangeAssignorTest {
         assertEquals(1, g.assignment().size());
         assertEquals(0, g.assignment().get(0).partition);
         assertEquals(0, fake.metadataCount);
+        assertEquals(0, fake.describeGroupCount);
+        g.close();
+    }
+
+    @Test
+    void groupConsumerRangeDescribeTwoMembersSplitsHalf() {
+        for (String member : List.of("m-a", "m-b")) {
+            GroupConsumerTest.FakeBackend fake = new GroupConsumerTest.FakeBackend();
+            fake.nextJoin = joinResult(member, 1, assign("t", 0));
+            fake.metadata = topicMeta("t", 4);
+            fake.describeGroupResult = new DescribeGroupResult(
+                    "g",
+                    1,
+                    List.of(
+                            new Codec.GroupMemberInfo("m-a", List.of("t"), List.of()),
+                            new Codec.GroupMemberInfo("m-b", List.of("t"), List.of())));
+            GroupConsumer g = GroupConsumer.joinWithAssignor(fake, "g", List.of("t"), 10_000, "range");
+            if (member.equals("m-a")) {
+                assertAssigns(g.assignment(), "t", 0, 1);
+            } else {
+                assertAssigns(g.assignment(), "t", 2, 3);
+            }
+            assertEquals(1, fake.describeGroupCount);
+            g.close();
+        }
+    }
+
+    @Test
+    void groupConsumerRangeDescribeErrorFallsBackToSolo() {
+        GroupConsumerTest.FakeBackend fake = new GroupConsumerTest.FakeBackend();
+        fake.nextJoin = joinResult("m-a", 1, assign("t", 0));
+        fake.metadata = topicMeta("t", 4);
+        fake.describeGroupError = new BrokerException(2, "", "describe_group");
+        GroupConsumer g = GroupConsumer.joinWithAssignor(fake, "g", List.of("t"), 10_000, "range");
+        assertAssigns(g.assignment(), "t", 0, 1, 2, 3);
+        assertEquals(1, fake.describeGroupCount);
+        g.close();
+    }
+
+    @Test
+    void groupConsumerRangeDescribeOmitsSelfStillIncludes() {
+        GroupConsumerTest.FakeBackend fake = new GroupConsumerTest.FakeBackend();
+        fake.nextJoin = joinResult("m-b", 1, assign("t", 0));
+        fake.metadata = topicMeta("t", 4);
+        fake.describeGroupResult = new DescribeGroupResult(
+                "g", 1, List.of(new Codec.GroupMemberInfo("m-a", List.of("t"), List.of())));
+        GroupConsumer g = GroupConsumer.joinWithAssignor(fake, "g", List.of("t"), 10_000, "range");
+        assertAssigns(g.assignment(), "t", 2, 3);
+        assertEquals(1, fake.describeGroupCount);
         g.close();
     }
 
@@ -123,6 +173,7 @@ class RangeAssignorTest {
         GroupConsumer g = GroupConsumer.join(fake, "g", List.of("t"), 10_000, "");
         assertEquals(1, g.assignment().size());
         assertEquals(0, fake.metadataCount);
+        assertEquals(0, fake.describeGroupCount);
         g.close();
     }
 

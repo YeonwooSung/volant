@@ -184,9 +184,9 @@ public final class GroupConsumer implements AutoCloseable {
      * Join a consumer group with an explicit assignor.
      *
      * <p>{@code assignor} is {@code "broker"} (default: honor JoinGroup) or
-     * {@code "range"} (replace the fetch set with a solo local range after
-     * metadata). Empty / {@code null} is {@code "broker"}. Unknown values
-     * throw {@link IllegalArgumentException}.
+     * {@code "range"} (replace the fetch set with a local range over
+     * DescribeGroup members; still no SyncGroup). Empty / {@code null} is
+     * {@code "broker"}. Unknown values throw {@link IllegalArgumentException}.
      */
     public static GroupConsumer join(
             Client client, String group, List<String> topics, int sessionTimeoutMs, String assignor) {
@@ -516,14 +516,59 @@ public final class GroupConsumer implements AutoCloseable {
                 counts.put(topic.name, topic.partitions.size());
             }
         }
+        List<String> memberIds = new ArrayList<>();
+        List<List<String>> memberTopics = new ArrayList<>();
+        if (!collectRangeMembers(memberIds, memberTopics)) {
+            memberIds = Collections.singletonList(memberId);
+            memberTopics = Collections.singletonList(topics);
+        }
         List<List<Codec.Assignment>> assigned = RangeAssignor.rangeAssignMulti(
-                Collections.singletonList(memberId),
-                Collections.singletonList(topics),
-                counts);
+                memberIds, memberTopics, counts);
         if (assigned.isEmpty()) {
             return Collections.emptyList();
         }
-        return new ArrayList<>(assigned.get(0));
+        int idx = memberIds.indexOf(memberId);
+        if (idx < 0 || idx >= assigned.size()) {
+            assigned = RangeAssignor.rangeAssignMulti(
+                    Collections.singletonList(memberId),
+                    Collections.singletonList(topics),
+                    counts);
+            if (assigned.isEmpty()) {
+                return Collections.emptyList();
+            }
+            return new ArrayList<>(assigned.get(0));
+        }
+        return new ArrayList<>(assigned.get(idx));
+    }
+
+    /** DescribeGroup members for local range. False means solo fallback. */
+    private boolean collectRangeMembers(List<String> ids, List<List<String>> topicsOut) {
+        DescribeGroupResult desc;
+        try {
+            desc = backend.describeGroup(groupId);
+        } catch (RuntimeException ignored) {
+            return false;
+        }
+        if (desc == null || desc.members == null) {
+            return false;
+        }
+        boolean seen = false;
+        for (Codec.GroupMemberInfo m : desc.members) {
+            String id = m.memberId == null ? "" : m.memberId;
+            List<String> subscribed = m.topics == null
+                    ? Collections.emptyList()
+                    : new ArrayList<>(m.topics);
+            ids.add(id);
+            topicsOut.add(subscribed);
+            if (id.equals(memberId)) {
+                seen = true;
+            }
+        }
+        if (!seen) {
+            ids.add(memberId);
+            topicsOut.add(new ArrayList<>(topics));
+        }
+        return !ids.isEmpty() && ids.contains(memberId);
     }
 
     /**
@@ -864,6 +909,8 @@ public final class GroupConsumer implements AutoCloseable {
         List<OffsetListing> listOffsets(String topic, int... partitions);
 
         Metadata metadata();
+
+        DescribeGroupResult describeGroup(String group);
     }
 
     static final class ClientBackend implements Backend {
@@ -913,6 +960,11 @@ public final class GroupConsumer implements AutoCloseable {
         @Override
         public Metadata metadata() {
             return client.metadata();
+        }
+
+        @Override
+        public DescribeGroupResult describeGroup(String group) {
+            return client.describeGroup(group);
         }
     }
 }

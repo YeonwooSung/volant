@@ -5,10 +5,12 @@ from __future__ import annotations
 import unittest
 
 from volant import GroupConsumer, range_assign, range_assign_multi
-from volant.client import FetchResult, JoinGroupResult
+from volant.client import DescribeGroupResult, FetchResult, JoinGroupResult
 from volant.codec import (
     Assignment,
+    BrokerError,
     FetchRecord,
+    GroupMemberInfo,
     MetadataResponse,
     PartitionInfo,
     TopicInfo,
@@ -88,6 +90,9 @@ class FakeClient:
         self.commits: list[dict] = []
         self.offset_fetches: list[tuple[str, str]] = []
         self.metadatas: int = 0
+        self.describes: list[str] = []
+        self.describe_result: DescribeGroupResult | None = None
+        self.describe_error: BaseException | None = None
         self.join_queue: list[JoinGroupResult] = []
         self.meta = MetadataResponse(brokers=[], topics=[])
         self.log: dict[tuple[str, int], list[FetchRecord]] = {}
@@ -130,6 +135,14 @@ class FakeClient:
         del topics
         self.metadatas += 1
         return self.meta
+
+    def describe_group(self, group: str) -> DescribeGroupResult:
+        self.describes.append(group)
+        if self.describe_error is not None:
+            raise self.describe_error
+        if self.describe_result is not None:
+            return self.describe_result
+        return DescribeGroupResult(group_id=group, generation=1, members=[])
 
     def fetch(
         self,
@@ -199,6 +212,7 @@ class TestGroupConsumerRangeAssignor(unittest.TestCase):
         self.assertEqual(g.assignor, "range")
         self.assertEqual(g.assignment, [("t", 0), ("t", 1), ("t", 2)])
         self.assertEqual(c.metadatas, 1)
+        self.assertEqual(c.describes, ["g"])
         recs = g.poll(max_wait_ms=0)
         self.assertEqual([(r.partition, r.value) for r in recs], [
             (0, b"\x00"),
@@ -217,6 +231,7 @@ class TestGroupConsumerRangeAssignor(unittest.TestCase):
         self.assertEqual(g.assignor, "broker")
         self.assertEqual(g.assignment, [("t", 0)])
         self.assertEqual(c.metadatas, 0)
+        self.assertEqual(c.describes, [])
         g.poll(max_wait_ms=0)
         fetched = {(t, p) for t, p, _off, _w in c.fetches}
         self.assertEqual(fetched, {("t", 0)})
@@ -227,6 +242,70 @@ class TestGroupConsumerRangeAssignor(unittest.TestCase):
         self.assertEqual(g.assignor, "broker")
         self.assertEqual(g.assignment, [("t", 0)])
         self.assertEqual(c.metadatas, 0)
+        self.assertEqual(c.describes, [])
+
+    def test_range_describe_two_members_splits_half(self) -> None:
+        for member, want in (
+            ("m-a", [("t", 0), ("t", 1)]),
+            ("m-b", [("t", 2), ("t", 3)]),
+        ):
+            c = FakeClient()
+            c.join_queue.append(
+                JoinGroupResult(
+                    member_id=member,
+                    generation=1,
+                    assignment=[Assignment(topic="t", partition=0)],
+                )
+            )
+            c.meta = MetadataResponse(brokers=[], topics=[_topic("t", 4)])
+            c.describe_result = DescribeGroupResult(
+                group_id="g",
+                generation=1,
+                members=[
+                    GroupMemberInfo(member_id="m-a", topics=["t"]),
+                    GroupMemberInfo(member_id="m-b", topics=["t"]),
+                ],
+            )
+            g = GroupConsumer.join(c, "g", ["t"], assignor="range")
+            self.assertEqual(g.assignment, want)
+            self.assertEqual(c.describes, ["g"])
+            g.close()
+
+    def test_range_describe_error_falls_back_to_solo(self) -> None:
+        c = FakeClient()
+        c.join_queue.append(
+            JoinGroupResult(
+                member_id="m-a",
+                generation=1,
+                assignment=[Assignment(topic="t", partition=0)],
+            )
+        )
+        c.meta = MetadataResponse(brokers=[], topics=[_topic("t", 4)])
+        c.describe_error = BrokerError(2, op="describe_group")
+        g = GroupConsumer.join(c, "g", ["t"], assignor="range")
+        self.assertEqual(g.assignment, [("t", 0), ("t", 1), ("t", 2), ("t", 3)])
+        self.assertEqual(c.describes, ["g"])
+        g.close()
+
+    def test_range_describe_omits_self_still_includes(self) -> None:
+        c = FakeClient()
+        c.join_queue.append(
+            JoinGroupResult(
+                member_id="m-b",
+                generation=1,
+                assignment=[Assignment(topic="t", partition=0)],
+            )
+        )
+        c.meta = MetadataResponse(brokers=[], topics=[_topic("t", 4)])
+        c.describe_result = DescribeGroupResult(
+            group_id="g",
+            generation=1,
+            members=[GroupMemberInfo(member_id="m-a", topics=["t"])],
+        )
+        g = GroupConsumer.join(c, "g", ["t"], assignor="range")
+        self.assertEqual(g.assignment, [("t", 2), ("t", 3)])
+        self.assertEqual(c.describes, ["g"])
+        g.close()
 
     def test_unknown_assignor_raises(self) -> None:
         c = FakeClient()

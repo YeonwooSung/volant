@@ -179,8 +179,9 @@ class GroupConsumer:
         ``heartbeat=True`` (default) starts the v0.37 background loop.
         ``heartbeat=False`` keeps v0.31 poll-only heartbeats.
         ``assignor`` is ``"broker"`` (default: honor JoinGroup assignment)
-        or ``"range"`` (replace the fetch set with a solo local range after
-        metadata). Unknown values raise ``ValueError``. Empty is ``"broker"``.
+        or ``"range"`` (replace the fetch set with a local range over
+        DescribeGroup members; still no SyncGroup). Unknown values raise
+        ``ValueError``. Empty is ``"broker"``.
         ``auto_commit=False`` (default) keeps explicit ``commit()``. When
         on, a successful ``poll`` that returned records commits assigned
         positions (interval 0 = every such poll; else first successful
@@ -213,17 +214,52 @@ class GroupConsumer:
         this._start_heartbeat()
         return this
 
+    def _range_members_from_describe(self) -> tuple[list[str], list[list[str]]]:
+        """DescribeGroup members for local range, or empty lists to solo-fallback."""
+        try:
+            desc = self._client.describe_group(self._group_id)
+        except Exception:
+            return [], []
+        members = getattr(desc, "members", None) or []
+        ids: list[str] = []
+        topics: list[list[str]] = []
+        seen = False
+        for member in members:
+            mid = getattr(member, "member_id", "")
+            subscribed = list(getattr(member, "topics", None) or [])
+            ids.append(mid)
+            topics.append(subscribed)
+            if mid == self._member_id:
+                seen = True
+        if not seen:
+            ids.append(self._member_id)
+            topics.append(list(self._topics))
+        if not ids or self._member_id not in ids:
+            return [], []
+        return ids, topics
+
     def _local_range_assignment(self) -> list[tuple[str, int]]:
         meta = self._client.metadata()
         counts: dict[str, int] = {}
         for topic in meta.topics:
             counts[topic.name] = len(topic.partitions)
-        assigned = range_assign_multi(
-            [self._member_id],
-            [list(self._topics)],
-            counts,
-        )
-        return list(assigned[0]) if assigned else []
+        member_ids, member_topics = self._range_members_from_describe()
+        if not member_ids:
+            member_ids = [self._member_id]
+            member_topics = [list(self._topics)]
+        assigned = range_assign_multi(member_ids, member_topics, counts)
+        if not assigned:
+            return []
+        try:
+            idx = member_ids.index(self._member_id)
+        except ValueError:
+            assigned = range_assign_multi(
+                [self._member_id],
+                [list(self._topics)],
+                counts,
+            )
+            return list(assigned[0]) if assigned else []
+        return list(assigned[idx])
 
     def _do_join(self) -> None:
         previous = list(self._assignment)

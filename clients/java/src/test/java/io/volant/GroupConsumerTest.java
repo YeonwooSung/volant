@@ -455,6 +455,9 @@ class GroupConsumerTest {
         final Map<String, List<Record>> records = new LinkedHashMap<>();
         Metadata metadata = new Metadata(Collections.emptyList(), Collections.emptyList());
         int metadataCount;
+        DescribeGroupResult describeGroupResult;
+        RuntimeException describeGroupError;
+        int describeGroupCount;
 
         int heartbeats() {
             synchronized (lock) {
@@ -546,6 +549,18 @@ class GroupConsumerTest {
         public Metadata metadata() {
             metadataCount++;
             return metadata;
+        }
+
+        @Override
+        public DescribeGroupResult describeGroup(String group) {
+            describeGroupCount++;
+            if (describeGroupError != null) {
+                throw describeGroupError;
+            }
+            if (describeGroupResult != null) {
+                return describeGroupResult;
+            }
+            return new DescribeGroupResult(group, 1, Collections.emptyList());
         }
     }
 }

@@ -121,9 +121,13 @@ func TestJoinGroupConsumerRangeFetchesEveryPartition(t *testing.T) {
 	}
 	s.mu.Lock()
 	metas := s.metadatas
+	describes := s.describeCount
 	s.mu.Unlock()
 	if metas != 1 {
 		t.Fatalf("metadata calls=%d want 1", metas)
+	}
+	if describes != 1 {
+		t.Fatalf("describe_group calls=%d want 1", describes)
 	}
 }
 
@@ -152,10 +156,108 @@ func TestJoinGroupConsumerBrokerDoesNotCallMetadata(t *testing.T) {
 	}
 	s.mu.Lock()
 	metas := s.metadatas
+	describes := s.describeCount
 	s.mu.Unlock()
 	if metas != 0 {
 		t.Fatalf("metadata calls=%d want 0", metas)
 	}
+	if describes != 0 {
+		t.Fatalf("describe_group calls=%d want 0", describes)
+	}
+}
+
+func TestJoinGroupConsumerRangeDescribeSplitsHalf(t *testing.T) {
+	cases := []struct {
+		member string
+		want   []uint32
+	}{
+		{"m-a", []uint32{0, 1}},
+		{"m-b", []uint32{2, 3}},
+	}
+	for _, tc := range cases {
+		t.Run(tc.member, func(t *testing.T) {
+			s := newFakeGroupBroker()
+			s.memberID = tc.member
+			s.setAssignment([]codec.Assignment{{Topic: "t", Partition: 0}}, nil)
+			s.setTopic("t", 4)
+			s.setDescribeMembers([]codec.GroupMemberInfo{
+				{MemberID: "m-a", Topics: []string{"t"}},
+				{MemberID: "m-b", Topics: []string{"t"}},
+			}, 0)
+			addr, stop := startFakeGroup(t, s)
+			defer stop()
+
+			c, err := volant.DialTimeout(addr, 5*time.Second)
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer c.Close()
+
+			g, err := volant.JoinGroupConsumer(c, "g", []string{"t"}, 10_000, volant.WithAssignor("range"), volant.WithBackgroundHeartbeat(false))
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer g.Close()
+
+			assertAssigns(t, g.Assignment(), "t", tc.want...)
+			s.mu.Lock()
+			describes := s.describeCount
+			s.mu.Unlock()
+			if describes != 1 {
+				t.Fatalf("describe_group calls=%d want 1", describes)
+			}
+		})
+	}
+}
+
+func TestJoinGroupConsumerRangeDescribeErrorFallsBackToSolo(t *testing.T) {
+	s := newFakeGroupBroker()
+	s.memberID = "m-a"
+	s.setAssignment([]codec.Assignment{{Topic: "t", Partition: 0}}, nil)
+	s.setTopic("t", 4)
+	s.setDescribeMembers(nil, 2)
+	addr, stop := startFakeGroup(t, s)
+	defer stop()
+
+	c, err := volant.DialTimeout(addr, 5*time.Second)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer c.Close()
+
+	g, err := volant.JoinGroupConsumer(c, "g", []string{"t"}, 10_000, volant.WithAssignor("range"), volant.WithBackgroundHeartbeat(false))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer g.Close()
+
+	assertAssigns(t, g.Assignment(), "t", 0, 1, 2, 3)
+}
+
+func TestJoinGroupConsumerRangeDescribeOmitsSelfStillIncludes(t *testing.T) {
+	s := newFakeGroupBroker()
+	s.memberID = "m-b"
+	s.setAssignment([]codec.Assignment{{Topic: "t", Partition: 0}}, nil)
+	s.setTopic("t", 4)
+	s.setDescribeMembers([]codec.GroupMemberInfo{
+		{MemberID: "m-a", Topics: []string{"t"}},
+	}, 0)
+	addr, stop := startFakeGroup(t, s)
+	defer stop()
+
+	c, err := volant.DialTimeout(addr, 5*time.Second)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer c.Close()
+
+	g, err := volant.JoinGroupConsumer(c, "g", []string{"t"}, 10_000, volant.WithAssignor("range"), volant.WithBackgroundHeartbeat(false))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer g.Close()
+
+	assertAssigns(t, g.Assignment(), "t", 2, 3)
 }
 
 func TestJoinGroupConsumerUnknownAssignor(t *testing.T) {
