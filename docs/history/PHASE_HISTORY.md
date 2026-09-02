@@ -259,6 +259,11 @@ docs for day-to-day reading: [ops](../ops.md), [consistency](../consistency.md),
 | v0.58 | ✅ | AddBroker/RemoveBroker/ListMembers on Python/Go/Java | [V58_SPEC.md](../V58_SPEC.md) |
 | v0.59 | ✅ | ReassignPartitions on Python/Go/Java | [V59_SPEC.md](../V59_SPEC.md) |
 | v0.60 | ✅ | Rust GroupConsumer auto-commit | [V60_SPEC.md](../V60_SPEC.md) |
+| v0.61 | ✅ | Produce retry on Python/Go/Java | [V61_SPEC.md](../V61_SPEC.md) |
+| v0.62 | ✅ | GroupConsumer auto_offset_reset on Python/Go/Java | [V62_SPEC.md](../V62_SPEC.md) |
+| v0.63 | ✅ | TransactionalProducer helper on Python/Go/Java | [V63_SPEC.md](../V63_SPEC.md) |
+| v0.64 | ✅ | Go/Java Fetch knobs and Produce acks | [V64_SPEC.md](../V64_SPEC.md) |
+| v0.65 | ✅ | DeleteRecords leader redirect on Python/Go/Java | [V65_SPEC.md](../V65_SPEC.md) |
 
 ---
 
