@@ -106,6 +106,9 @@ impl Broker {
                 );
             }
         }
+        // v0.26: record intended voter set. Leader `change_membership` is
+        // best-effort and does not roll back this overlay.
+        self.note_openraft_membership_target();
         Ok(generation)
     }
 
@@ -131,6 +134,15 @@ impl Broker {
                 "broker id {id} is not in membership"
             )));
         }
+        // v0.26: refuse to drop the last openraft voter (flag on).
+        if self.openraft_metadata_enabled() {
+            let voters = self.openraft_voter_ids();
+            if voters.len() == 1 && voters[0] == id {
+                return Err(Error::InvalidArgument(
+                    "cannot remove the last voter".into(),
+                ));
+            }
+        }
         let brokers: Vec<_> = cfg.brokers.iter().filter(|b| b.id != id).cloned().collect();
         let generation = cluster
             .membership_generation
@@ -147,6 +159,9 @@ impl Broker {
             .store(generation, Ordering::Relaxed);
         drop(cfg);
         cluster.membership.write().remove_id(id);
+        // v0.26: record intended voter set. Leader `change_membership` is
+        // best-effort and does not roll back this overlay.
+        self.note_openraft_membership_target();
         Ok(generation)
     }
 
