@@ -907,6 +907,12 @@ impl Client {
     }
 
     /// Begin a transaction (Phase 18). Requires `transactional_id` in config.
+    ///
+    /// Transient broker/transport errors retry up to
+    /// [`ClientConfig::max_retries`] extra times (default 0). InvalidTxnState
+    /// (22), fence / epoch / abortable codes, 13 / 14 / 9 / 10 / 11 / 2,
+    /// and protocol errors are not retried. [`crate::TransactionalProducer::begin`]
+    /// inherits via this method.
     pub async fn begin_transaction(&self) -> Result<()> {
         if self.config.transactional_id.is_none() {
             return Err(Error::InvalidArgument(
@@ -918,24 +924,53 @@ impl Client {
             let state = self.idempotent.lock().await;
             (state.producer_id, state.epoch)
         };
-        let resp = self
-            .round_trip(Request::BeginTxn {
-                producer_id,
-                producer_epoch,
-            })
-            .await?;
-        match resp {
-            Response::BeginTxn { error_code } => {
-                check_ok(error_code, "begin_txn")?;
-                let mut state = self.idempotent.lock().await;
-                state.seq_at_begin = state.next_seq.clone();
-                state.in_transaction = true;
-                Ok(())
+        let max_retries = self.config.max_retries;
+        let mut retry_attempt = 0u32;
+        loop {
+            let resp = match self
+                .round_trip(Request::BeginTxn {
+                    producer_id,
+                    producer_epoch,
+                })
+                .await
+            {
+                Ok(r) => r,
+                Err(e) if is_transient_transport(&e) && retry_attempt < max_retries => {
+                    retry_attempt += 1;
+                    tokio::time::sleep(Duration::from_millis(self.config.retry_backoff_ms)).await;
+                    continue;
+                }
+                Err(e) => return Err(e),
+            };
+            match resp {
+                Response::BeginTxn { error_code } => {
+                    if is_transient_error_code(error_code) && retry_attempt < max_retries {
+                        retry_attempt += 1;
+                        tokio::time::sleep(Duration::from_millis(self.config.retry_backoff_ms))
+                            .await;
+                        continue;
+                    }
+                    check_ok(error_code, "begin_txn")?;
+                    let mut state = self.idempotent.lock().await;
+                    state.seq_at_begin = state.next_seq.clone();
+                    state.in_transaction = true;
+                    return Ok(());
+                }
+                Response::Error { code, message } => {
+                    if is_transient_error_code(code) && retry_attempt < max_retries {
+                        retry_attempt += 1;
+                        tokio::time::sleep(Duration::from_millis(self.config.retry_backoff_ms))
+                            .await;
+                        continue;
+                    }
+                    return Err(error_from_code(code, message));
+                }
+                other => {
+                    return Err(Error::Protocol(format!(
+                        "unexpected response for begin_txn: {other:?}"
+                    )))
+                }
             }
-            Response::Error { code, message } => Err(error_from_code(code, message)),
-            other => Err(Error::Protocol(format!(
-                "unexpected response for begin_txn: {other:?}"
-            ))),
         }
     }
 
@@ -967,33 +1002,62 @@ impl Client {
             }
             (state.producer_id, state.epoch)
         };
-        let resp = self
-            .round_trip(Request::EndTxn {
-                producer_id,
-                producer_epoch,
-                committed,
-                offsets,
-            })
-            .await?;
-        match resp {
-            Response::EndTxn {
-                error_code,
-                results,
-            } => {
-                check_ok(error_code, "end_txn")?;
-                let mut state = self.idempotent.lock().await;
-                state.in_transaction = false;
-                if !committed {
-                    // Broker discarded pending sequences; rewind client counters.
-                    state.next_seq = state.seq_at_begin.clone();
+        let max_retries = self.config.max_retries;
+        let mut retry_attempt = 0u32;
+        loop {
+            let resp = match self
+                .round_trip(Request::EndTxn {
+                    producer_id,
+                    producer_epoch,
+                    committed,
+                    offsets: offsets.clone(),
+                })
+                .await
+            {
+                Ok(r) => r,
+                Err(e) if is_transient_transport(&e) && retry_attempt < max_retries => {
+                    retry_attempt += 1;
+                    tokio::time::sleep(Duration::from_millis(self.config.retry_backoff_ms)).await;
+                    continue;
                 }
-                state.seq_at_begin.clear();
-                Ok(results)
+                Err(e) => return Err(e),
+            };
+            match resp {
+                Response::EndTxn {
+                    error_code,
+                    results,
+                } => {
+                    if is_transient_error_code(error_code) && retry_attempt < max_retries {
+                        retry_attempt += 1;
+                        tokio::time::sleep(Duration::from_millis(self.config.retry_backoff_ms))
+                            .await;
+                        continue;
+                    }
+                    check_ok(error_code, "end_txn")?;
+                    let mut state = self.idempotent.lock().await;
+                    state.in_transaction = false;
+                    if !committed {
+                        // Broker discarded pending sequences; rewind client counters.
+                        state.next_seq = state.seq_at_begin.clone();
+                    }
+                    state.seq_at_begin.clear();
+                    return Ok(results);
+                }
+                Response::Error { code, message } => {
+                    if is_transient_error_code(code) && retry_attempt < max_retries {
+                        retry_attempt += 1;
+                        tokio::time::sleep(Duration::from_millis(self.config.retry_backoff_ms))
+                            .await;
+                        continue;
+                    }
+                    return Err(error_from_code(code, message));
+                }
+                other => {
+                    return Err(Error::Protocol(format!(
+                        "unexpected response for end_txn: {other:?}"
+                    )))
+                }
             }
-            Response::Error { code, message } => Err(error_from_code(code, message)),
-            other => Err(Error::Protocol(format!(
-                "unexpected response for end_txn: {other:?}"
-            ))),
         }
     }
 

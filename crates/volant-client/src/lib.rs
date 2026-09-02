@@ -63,6 +63,10 @@
 //! OffsetFetch, which share `offset_admin_round_trip`) on error **14**
 //! via `redirect_to_controller` / `max_redirects`. Transient 6/7/15/16
 //! stay on `max_retries`. `max_redirects=0` does not redirect.
+//! v0.100 retries [`Client::begin_transaction`] / EndTxn (commit /
+//! abort inherit) on that same transient set (default 0). InvalidTxnState
+//! (22), fence / epoch / abortable, 13 / 14 / 9 / 10 / 11 / 2, and
+//! protocol are not retried. [`TransactionalProducer`] inherits.
 
 #![deny(missing_docs)]
 
