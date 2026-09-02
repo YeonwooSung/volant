@@ -99,16 +99,34 @@ impl Broker {
             .store(allow, Ordering::Relaxed);
     }
 
-    /// Phase 137 + v0.29: merge request trailer with broker default wait knob,
-    /// then refuse irreversible wait-off on clustered brokers unless allowed.
+    /// v0.45: second ACK for clustered irreversible wait-off.
+    ///
+    /// Default **false** (`VOLANT_DELETE_RECORDS_IRREVERSIBLE_ACK` unset / `0`).
+    /// `1`/`true`/`yes`/`on` at construct. Clustered wait-off stays local-first
+    /// only when this **and** [`Self::delete_records_allow_irreversible`] are on.
+    /// Use [`Self::set_delete_records_irreversible_ack`] in tests.
+    pub fn delete_records_irreversible_ack(&self) -> bool {
+        self.delete_records_irreversible_ack.load(Ordering::Relaxed)
+    }
+
+    /// v0.45: runtime toggle for tests / operator tooling.
+    pub fn set_delete_records_irreversible_ack(&self, ack: bool) {
+        self.delete_records_irreversible_ack
+            .store(ack, Ordering::Relaxed);
+    }
+
+    /// Phase 137 + v0.29 + v0.45: merge request trailer with broker default wait
+    /// knob, then refuse irreversible wait-off on clustered brokers unless both
+    /// ALLOW and ACK are on.
     /// * 0 / other → `delete_records_wait_majority()`
     /// * 1 → true
     /// * 2 → false
     ///
     /// When the broker is clustered (`cluster` is `Some`), the merge would be
-    /// **off**, and [`Self::delete_records_allow_irreversible`] is false: treat
-    /// as wait-on (majority first; miss → error, no local truncate). Single-node
-    /// wait-off is unchanged (no majority exists).
+    /// **off**, and either [`Self::delete_records_allow_irreversible`] or
+    /// [`Self::delete_records_irreversible_ack`] is false: treat as wait-on
+    /// (majority first; miss → error, no local truncate). Single-node wait-off
+    /// is unchanged (no majority exists; ACK is not required).
     pub fn effective_delete_records_wait_majority(&self, request_flag: u8) -> bool {
         let raw = match request_flag {
             1 => true,
@@ -118,8 +136,13 @@ impl Broker {
         if raw {
             return true;
         }
-        if self.cluster.is_some() && !self.delete_records_allow_irreversible() {
+        if self.cluster.is_some()
+            && !(self.delete_records_allow_irreversible() && self.delete_records_irreversible_ack())
+        {
             self.note_delete_records_wait_off_upgraded();
+            if self.delete_records_allow_irreversible() && !self.delete_records_irreversible_ack() {
+                self.note_delete_records_wait_off_ack_missing();
+            }
             return true;
         }
         false
@@ -131,9 +154,21 @@ impl Broker {
             .load(Ordering::Relaxed)
     }
 
-    /// Increment wait-off → wait-on upgrade (v0.29; clustered, allow env off).
+    /// Increment wait-off → wait-on upgrade (v0.29; clustered, allow/ack incomplete).
     pub fn note_delete_records_wait_off_upgraded(&self) {
         self.delete_records_wait_off_upgraded_total
+            .fetch_add(1, Ordering::Relaxed);
+    }
+
+    /// v0.45: clustered wait-off upgraded because ACK was missing (ALLOW on).
+    pub fn delete_records_wait_off_ack_missing_total(&self) -> u64 {
+        self.delete_records_wait_off_ack_missing_total
+            .load(Ordering::Relaxed)
+    }
+
+    /// Increment wait-off upgrade attributed to missing ACK (v0.45).
+    pub fn note_delete_records_wait_off_ack_missing(&self) {
+        self.delete_records_wait_off_ack_missing_total
             .fetch_add(1, Ordering::Relaxed);
     }
 

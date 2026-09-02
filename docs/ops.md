@@ -71,7 +71,8 @@ Key series (prefix `volant_`):
 - `volant_admin_catchup_skipped_total` (Phase 136 admin ACL/config catch-up schedule skips: in-flight or min-interval; env `VOLANT_ADMIN_CATCHUP_MIN_INTERVAL_MS`, default 500ms, `0` disables time throttle)
 - `volant_delete_records_majority_wait_success_total` / `_fail_total` (Phase 135/137/148; only when **effective** wait is on — broker env `VOLANT_DELETE_RECORDS_WAIT_MAJORITY` and/or native request trailer `wait_majority=1`; **Phase 148:** wait fail no longer truncates local log)
 - `volant_delete_records_majority_first_success_total` / `_fail_total` (Phase 148: wait-mode majority-first path; fail = log_start unchanged)
-- `volant_delete_records_wait_off_upgraded_total` (v0.29: clustered wait-off upgraded to wait-on because `VOLANT_DELETE_RECORDS_ALLOW_IRREVERSIBLE` is off)
+- `volant_delete_records_wait_off_upgraded_total` (v0.29/v0.45: clustered wait-off upgraded to wait-on because ALLOW and/or ACK is off)
+- `volant_delete_records_wait_off_ack_missing_total` (v0.45: clustered wait-off upgraded because `VOLANT_DELETE_RECORDS_ALLOW_IRREVERSIBLE` is on but `VOLANT_DELETE_RECORDS_IRREVERSIBLE_ACK` is off)
 - `volant_cluster_configured_brokers` / `volant_cluster_live_brokers` / `volant_cluster_majority_quorum` / `volant_cluster_majority_impossible` (Phase 141: journal majority health; `impossible=1` when `live < floor(N/2)+1` for configured N — classic N=2 one-down)
 - `volant_open_txns` / `volant_prepared_txns` (Phase 97 gauges)
 - `volant_open_txns_expired_total` / `volant_prepared_txns_expired_total` (Phase 97)
@@ -799,10 +800,24 @@ Clustered DeleteRecords **wait-off** (flag `2`, or flag `0` + knob off) is
 **15** / Kafka **19**, no local truncate.
 
 Single-node wait-off is unchanged (no majority exists). Explicit
-`ALLOW_IRREVERSIBLE=1` keeps today's irreversible local-first path.
-Metric: `volant_delete_records_wait_off_upgraded_total`.
+`ALLOW_IRREVERSIBLE=1` keeps today's irreversible local-first path
+**only when** `VOLANT_DELETE_RECORDS_IRREVERSIBLE_ACK` is also on
+(v0.45). Metric: `volant_delete_records_wait_off_upgraded_total`.
 
 See [V29_SPEC.md](./V29_SPEC.md).
+
+## v0.45 wait-off second ACK
+
+Clustered wait-off stays local-first **only if both**
+`VOLANT_DELETE_RECORDS_ALLOW_IRREVERSIBLE` **and**
+`VOLANT_DELETE_RECORDS_IRREVERSIBLE_ACK` are `1`/`true`/`yes`/`on`.
+ALLOW alone (v0.29 explicit path) still upgrades to wait-on. ACK alone
+is not enough. Single-node wait-off does not require ACK.
+
+Both on is still **irreversible** (not Kafka; no rollback). Metric:
+`volant_delete_records_wait_off_ack_missing_total` (ALLOW on, ACK off).
+
+See [V45_SPEC.md](./V45_SPEC.md).
 
 ## v0.30 mirror converge
 

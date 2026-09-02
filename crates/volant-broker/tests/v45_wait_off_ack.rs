@@ -1,9 +1,10 @@
-//! v0.29: refuse irreversible DeleteRecords wait-off on clustered brokers.
+//! v0.45: clustered DeleteRecords wait-off requires a second ACK.
 //!
-//! Cluster + effective wait-off + `VOLANT_DELETE_RECORDS_ALLOW_IRREVERSIBLE`
-//! unset/off → upgrade to wait-on (majority first; miss → 15, no truncate).
-//! Env `1`/`true`/`yes`/`on` keeps today's local-first path. Single-node
-//! wait-off stays allowed (no majority exists).
+//! Cluster + effective wait-off stays local-first only when both
+//! `VOLANT_DELETE_RECORDS_ALLOW_IRREVERSIBLE` and
+//! `VOLANT_DELETE_RECORDS_IRREVERSIBLE_ACK` are on. ALLOW alone (v0.29
+//! explicit path) still upgrades to wait-on. Single-node wait-off does
+//! not require ACK (no majority exists).
 
 #[path = "common/mod.rs"]
 mod common;
@@ -92,77 +93,153 @@ impl Drop for EnvRestore {
     }
 }
 
-/// Unset env = off; `1`/`true`/`yes`/`on` enable; cluster wait-off upgrades.
+/// Default (no env): clustered wait-off still upgrades (v0.29 regression).
 #[test]
-fn allow_irreversible_default_off_cluster_upgrades() {
-    let _env = EnvRestore::remove("VOLANT_DELETE_RECORDS_ALLOW_IRREVERSIBLE");
+fn default_clustered_wait_off_still_upgrades() {
+    let _allow = EnvRestore::remove("VOLANT_DELETE_RECORDS_ALLOW_IRREVERSIBLE");
     let _ack = EnvRestore::remove("VOLANT_DELETE_RECORDS_IRREVERSIBLE_ACK");
-    let dir = unique_dir("v29", "knob");
+    let dir = unique_dir("v45", "default");
     let _g = Guard(dir.clone());
 
     let single = Broker::new(default_storage(dir.join("solo")));
     assert!(!single.delete_records_allow_irreversible());
+    assert!(!single.delete_records_irreversible_ack());
     assert!(!single.effective_delete_records_wait_majority(2));
-    assert!(!single.effective_delete_records_wait_majority(0));
     assert_eq!(single.delete_records_wait_off_upgraded_total(), 0);
+    assert_eq!(single.delete_records_wait_off_ack_missing_total(), 0);
 
-    let cfg = cluster_config_n2([19_001, 19_002]);
+    let cfg = cluster_config_n2([19_101, 19_102]);
     let clustered = Broker::with_cluster(default_storage(dir.join("c")), 1, cfg).unwrap();
     assert!(!clustered.delete_records_allow_irreversible());
+    assert!(!clustered.delete_records_irreversible_ack());
     assert!(
         clustered.effective_delete_records_wait_majority(2),
-        "cluster flag 2 + env unset must upgrade to wait-on"
+        "cluster flag 2 + both envs unset must upgrade to wait-on"
     );
     assert!(
         clustered.effective_delete_records_wait_majority(0),
-        "cluster flag 0 + knob off + env unset must upgrade to wait-on"
+        "cluster flag 0 + knob off + both envs unset must upgrade to wait-on"
     );
     assert!(clustered.delete_records_wait_off_upgraded_total() >= 2);
-
-    clustered.set_delete_records_allow_irreversible(true);
-    assert!(clustered.delete_records_allow_irreversible());
-    assert!(
-        clustered.effective_delete_records_wait_majority(2),
-        "allow=1 without ACK still upgrades (v0.45)"
-    );
-    clustered.set_delete_records_irreversible_ack(true);
-    assert!(
-        !clustered.effective_delete_records_wait_majority(2),
-        "allow+ack must keep flag 2 as wait-off"
+    assert_eq!(
+        clustered.delete_records_wait_off_ack_missing_total(),
+        0,
+        "ack-missing ticks only when ALLOW is on and ACK is off"
     );
 }
 
-/// Env `1` at construct enables irreversible wait-off (v0.45: both ALLOW and ACK).
+/// ALLOW=1, ACK unset: clustered wait-off still upgrades (honesty close).
 #[test]
-fn allow_irreversible_env_one_at_construct() {
-    let _env = EnvRestore::set("VOLANT_DELETE_RECORDS_ALLOW_IRREVERSIBLE", "1");
-    let _ack = EnvRestore::set("VOLANT_DELETE_RECORDS_IRREVERSIBLE_ACK", "1");
-    let dir = unique_dir("v29", "env1");
+fn allow_without_ack_clustered_wait_off_still_upgrades() {
+    let _allow = EnvRestore::set("VOLANT_DELETE_RECORDS_ALLOW_IRREVERSIBLE", "1");
+    let _ack = EnvRestore::remove("VOLANT_DELETE_RECORDS_IRREVERSIBLE_ACK");
+    let dir = unique_dir("v45", "allow_only");
     let _g = Guard(dir.clone());
-    let cfg = cluster_config_n2([19_011, 19_012]);
+    let cfg = cluster_config_n2([19_111, 19_112]);
+    let clustered = Broker::with_cluster(default_storage(dir.join("c")), 1, cfg).unwrap();
+    assert!(clustered.delete_records_allow_irreversible());
+    assert!(!clustered.delete_records_irreversible_ack());
+    assert!(
+        clustered.effective_delete_records_wait_majority(2),
+        "ALLOW=1 without ACK must still upgrade to wait-on"
+    );
+    assert!(clustered.delete_records_wait_off_upgraded_total() >= 1);
+    assert!(
+        clustered.delete_records_wait_off_ack_missing_total() >= 1,
+        "ALLOW-on ACK-off must tick ack-missing"
+    );
+}
+
+/// ALLOW=1, ACK=1: clustered wait-off stays wait-off (explicit double gate).
+#[test]
+fn allow_and_ack_clustered_wait_off_stays_off() {
+    let _allow = EnvRestore::set("VOLANT_DELETE_RECORDS_ALLOW_IRREVERSIBLE", "1");
+    let _ack = EnvRestore::set("VOLANT_DELETE_RECORDS_IRREVERSIBLE_ACK", "1");
+    let dir = unique_dir("v45", "both");
+    let _g = Guard(dir.clone());
+    let cfg = cluster_config_n2([19_121, 19_122]);
     let clustered = Broker::with_cluster(default_storage(dir.join("c")), 1, cfg).unwrap();
     assert!(clustered.delete_records_allow_irreversible());
     assert!(clustered.delete_records_irreversible_ack());
-    assert!(!clustered.effective_delete_records_wait_majority(2));
+    assert!(
+        !clustered.effective_delete_records_wait_majority(2),
+        "ALLOW+ACK must keep flag 2 as wait-off"
+    );
+    assert!(
+        !clustered.effective_delete_records_wait_majority(0),
+        "ALLOW+ACK must keep flag 0 + knob off as wait-off"
+    );
+    assert_eq!(clustered.delete_records_wait_off_upgraded_total(), 0);
+    assert_eq!(clustered.delete_records_wait_off_ack_missing_total(), 0);
 }
 
-/// Cluster N=2, one dead, force wait-off, env unset → no local truncate.
-#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-async fn cluster_force_wait_off_env_unset_no_truncate() {
-    let _env = EnvRestore::remove("VOLANT_DELETE_RECORDS_ALLOW_IRREVERSIBLE");
+/// ACK=1, ALLOW unset: clustered wait-off still upgrades (ACK alone is not enough).
+#[test]
+fn ack_without_allow_clustered_wait_off_still_upgrades() {
+    let _allow = EnvRestore::remove("VOLANT_DELETE_RECORDS_ALLOW_IRREVERSIBLE");
+    let _ack = EnvRestore::set("VOLANT_DELETE_RECORDS_IRREVERSIBLE_ACK", "1");
+    let dir = unique_dir("v45", "ack_only");
+    let _g = Guard(dir.clone());
+    let cfg = cluster_config_n2([19_131, 19_132]);
+    let clustered = Broker::with_cluster(default_storage(dir.join("c")), 1, cfg).unwrap();
+    assert!(!clustered.delete_records_allow_irreversible());
+    assert!(clustered.delete_records_irreversible_ack());
+    assert!(
+        clustered.effective_delete_records_wait_majority(2),
+        "ACK=1 without ALLOW must still upgrade to wait-on"
+    );
+    assert!(clustered.delete_records_wait_off_upgraded_total() >= 1);
+    assert_eq!(
+        clustered.delete_records_wait_off_ack_missing_total(),
+        0,
+        "ACK present: do not tick ack-missing"
+    );
+}
+
+/// Runtime setters: both required; either one off upgrades.
+#[test]
+fn setters_require_both_gates() {
+    let _allow = EnvRestore::remove("VOLANT_DELETE_RECORDS_ALLOW_IRREVERSIBLE");
     let _ack = EnvRestore::remove("VOLANT_DELETE_RECORDS_IRREVERSIBLE_ACK");
-    let base = unique_dir("v29", "upgrade");
+    let dir = unique_dir("v45", "setters");
+    let _g = Guard(dir.clone());
+    let cfg = cluster_config_n2([19_141, 19_142]);
+    let clustered = Broker::with_cluster(default_storage(dir.join("c")), 1, cfg).unwrap();
+
+    clustered.set_delete_records_allow_irreversible(true);
+    assert!(clustered.effective_delete_records_wait_majority(2));
+    let missing = clustered.delete_records_wait_off_ack_missing_total();
+    assert!(missing >= 1);
+
+    clustered.set_delete_records_irreversible_ack(true);
+    assert!(!clustered.effective_delete_records_wait_majority(2));
+
+    clustered.set_delete_records_allow_irreversible(false);
+    assert!(clustered.effective_delete_records_wait_majority(2));
+    assert_eq!(
+        clustered.delete_records_wait_off_ack_missing_total(),
+        missing,
+        "ACK on + ALLOW off must not tick ack-missing"
+    );
+}
+
+/// Cluster N=2, one dead, ALLOW=1 ACK unset, force wait-off → no local truncate.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn cluster_allow_without_ack_no_truncate() {
+    let _allow = EnvRestore::set("VOLANT_DELETE_RECORDS_ALLOW_IRREVERSIBLE", "1");
+    let _ack = EnvRestore::remove("VOLANT_DELETE_RECORDS_IRREVERSIBLE_ACK");
+    let base = unique_dir("v45", "allow_only_it");
     let _g = Guard(base.clone());
 
     let (l1, p1) = bind_port0().await;
-    let p2 = p1.saturating_add(100).max(37_100);
+    let p2 = p1.saturating_add(100).max(37_400);
     let cfg = cluster_config_n2([p1, p2]);
 
     let b1 = {
         let b = Broker::with_cluster(small_seg_storage(base.join("n1")), 1, cfg).unwrap();
         b.set_advertised("127.0.0.1", p1);
-        assert!(!b.delete_records_wait_majority());
-        assert!(!b.delete_records_allow_irreversible());
+        assert!(b.delete_records_allow_irreversible());
+        assert!(!b.delete_records_irreversible_ack());
         Arc::new(b)
     };
     let mut bgs: Vec<BackgroundTasks> = vec![start_background_tasks(Arc::clone(&b1))];
@@ -174,19 +251,19 @@ async fn cluster_force_wait_off_env_unset_no_truncate() {
     };
     tokio::time::sleep(Duration::from_millis(40)).await;
 
-    // "safe" → N=2 leader broker 1.
-    b1.create_topic("safe", 1).unwrap();
-    assert_is_leader(&b1, "safe");
-    fill_local(&b1, "safe", 40);
+    b1.create_topic("gated", 1).unwrap();
+    assert_is_leader(&b1, "gated");
+    fill_local(&b1, "gated", 40);
 
-    let earliest_before = earliest(&b1, "safe");
+    let earliest_before = earliest(&b1, "gated");
     let before_upgraded = b1.delete_records_wait_off_upgraded_total();
+    let before_missing = b1.delete_records_wait_off_ack_missing_total();
     let before_fail = b1.delete_records_majority_wait_fail_total();
 
     let resp = dispatch_request(
         &b1,
         Request::DeleteRecords {
-            topic: "safe".into(),
+            topic: "gated".into(),
             partition: 0,
             before_offset: 15,
             wait_majority: 2,
@@ -202,7 +279,7 @@ async fn cluster_force_wait_off_env_unset_no_truncate() {
             assert_eq!(
                 error_code,
                 ErrorCode::NotEnoughReplicas as u16,
-                "cluster force-off + env unset must upgrade to wait-on → 15 (got {error_code})"
+                "ALLOW without ACK must upgrade to wait-on → 15 (got {error_code})"
             );
             assert_eq!(
                 low_watermark, earliest_before,
@@ -212,13 +289,17 @@ async fn cluster_force_wait_off_env_unset_no_truncate() {
         other => panic!("unexpected: {other:?}"),
     }
     assert_eq!(
-        earliest(&b1, "safe"),
+        earliest(&b1, "gated"),
         earliest_before,
         "local log_start must stay put"
     );
     assert!(
         b1.delete_records_wait_off_upgraded_total() > before_upgraded,
         "upgrade metric must tick"
+    );
+    assert!(
+        b1.delete_records_wait_off_ack_missing_total() > before_missing,
+        "ack-missing metric must tick"
     );
     assert!(
         b1.delete_records_majority_wait_fail_total() > before_fail,
@@ -231,16 +312,16 @@ async fn cluster_force_wait_off_env_unset_no_truncate() {
     }
 }
 
-/// Same cluster + ALLOW=1 + ACK=1 → old wait-off (v0.45 double gate).
+/// Cluster N=2, one dead, ALLOW=1 ACK=1, force wait-off → local truncate.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-async fn cluster_force_wait_off_allow_env_truncates() {
-    let _env = EnvRestore::set("VOLANT_DELETE_RECORDS_ALLOW_IRREVERSIBLE", "1");
+async fn cluster_allow_and_ack_truncates() {
+    let _allow = EnvRestore::set("VOLANT_DELETE_RECORDS_ALLOW_IRREVERSIBLE", "1");
     let _ack = EnvRestore::set("VOLANT_DELETE_RECORDS_IRREVERSIBLE_ACK", "1");
-    let base = unique_dir("v29", "allow");
+    let base = unique_dir("v45", "both_it");
     let _g = Guard(base.clone());
 
     let (l1, p1) = bind_port0().await;
-    let p2 = p1.saturating_add(100).max(37_200);
+    let p2 = p1.saturating_add(100).max(37_500);
     let cfg = cluster_config_n2([p1, p2]);
 
     let b1 = {
@@ -259,19 +340,18 @@ async fn cluster_force_wait_off_allow_env_truncates() {
     };
     tokio::time::sleep(Duration::from_millis(40)).await;
 
-    // "allow" → N=2 leader broker 1.
-    b1.create_topic("allow", 1).unwrap();
-    assert_is_leader(&b1, "allow");
-    fill_local(&b1, "allow", 40);
+    b1.create_topic("double", 1).unwrap();
+    assert_is_leader(&b1, "double");
+    fill_local(&b1, "double", 40);
 
-    let earliest_before = earliest(&b1, "allow");
+    let earliest_before = earliest(&b1, "double");
     let before_upgraded = b1.delete_records_wait_off_upgraded_total();
-    let before_fail = b1.delete_records_majority_wait_fail_total();
+    let before_missing = b1.delete_records_wait_off_ack_missing_total();
 
     let resp = dispatch_request(
         &b1,
         Request::DeleteRecords {
-            topic: "allow".into(),
+            topic: "double".into(),
             partition: 0,
             before_offset: 15,
             wait_majority: 2,
@@ -286,7 +366,7 @@ async fn cluster_force_wait_off_allow_env_truncates() {
         } => {
             assert_eq!(
                 error_code, 0,
-                "allow+ack must keep irreversible wait-off (got {error_code})"
+                "ALLOW+ACK must keep irreversible wait-off (got {error_code})"
             );
             assert!(
                 low_watermark > earliest_before,
@@ -296,18 +376,18 @@ async fn cluster_force_wait_off_allow_env_truncates() {
         other => panic!("unexpected: {other:?}"),
     }
     assert!(
-        earliest(&b1, "allow") > earliest_before,
-        "allow+ack must advance log_start"
+        earliest(&b1, "double") > earliest_before,
+        "ALLOW+ACK must advance log_start"
     );
     assert_eq!(
         b1.delete_records_wait_off_upgraded_total(),
         before_upgraded,
-        "allow+ack must not tick upgrade metric"
+        "double gate must not tick upgrade metric"
     );
     assert_eq!(
-        b1.delete_records_majority_wait_fail_total(),
-        before_fail,
-        "allow+ack wait-off must not touch wait-fail metric"
+        b1.delete_records_wait_off_ack_missing_total(),
+        before_missing,
+        "double gate must not tick ack-missing"
     );
 
     s1.abort();
@@ -316,17 +396,18 @@ async fn cluster_force_wait_off_allow_env_truncates() {
     }
 }
 
-/// Single-node force wait-off, env unset: still truncates (no cluster).
+/// Single-node wait-off does not require ACK (truncate / no upgrade).
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-async fn single_node_force_wait_off_env_unset_truncates() {
-    let _env = EnvRestore::remove("VOLANT_DELETE_RECORDS_ALLOW_IRREVERSIBLE");
+async fn single_node_wait_off_does_not_require_ack() {
+    let _allow = EnvRestore::remove("VOLANT_DELETE_RECORDS_ALLOW_IRREVERSIBLE");
     let _ack = EnvRestore::remove("VOLANT_DELETE_RECORDS_IRREVERSIBLE_ACK");
-    let base = unique_dir("v29", "solo");
+    let base = unique_dir("v45", "solo");
     let _g = Guard(base.clone());
 
     let b1 = {
         let b = Broker::new(small_seg_storage(base.join("n1")));
         assert!(!b.delete_records_allow_irreversible());
+        assert!(!b.delete_records_irreversible_ack());
         assert!(!b.effective_delete_records_wait_majority(2));
         Arc::new(b)
     };
@@ -336,6 +417,7 @@ async fn single_node_force_wait_off_env_unset_truncates() {
 
     let earliest_before = earliest(&b1, "solo");
     let before_upgraded = b1.delete_records_wait_off_upgraded_total();
+    let before_missing = b1.delete_records_wait_off_ack_missing_total();
 
     let resp = dispatch_request(
         &b1,
@@ -355,7 +437,7 @@ async fn single_node_force_wait_off_env_unset_truncates() {
         } => {
             assert_eq!(
                 error_code, 0,
-                "single-node force-off must still truncate (got {error_code})"
+                "single-node force-off must still truncate without ACK (got {error_code})"
             );
             assert!(
                 low_watermark > earliest_before,
@@ -372,5 +454,10 @@ async fn single_node_force_wait_off_env_unset_truncates() {
         b1.delete_records_wait_off_upgraded_total(),
         before_upgraded,
         "single-node must not tick upgrade metric"
+    );
+    assert_eq!(
+        b1.delete_records_wait_off_ack_missing_total(),
+        before_missing,
+        "single-node must not tick ack-missing"
     );
 }

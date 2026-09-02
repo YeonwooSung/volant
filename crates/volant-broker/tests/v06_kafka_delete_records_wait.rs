@@ -163,9 +163,10 @@ impl N2Solo {
             let b = Broker::with_cluster(small_seg_storage(base.join("n1")), 1, cfg).unwrap();
             b.set_advertised("127.0.0.1", p1);
             b.set_delete_records_wait_majority(wait_knob);
-            // v0.29: keep v0.6 wait-off / force-off cases on the irreversible path.
-            // Production equivalent: VOLANT_DELETE_RECORDS_ALLOW_IRREVERSIBLE=1
+            // v0.29/v0.45: keep v0.6 wait-off / force-off cases on the irreversible path.
+            // Production equivalent: ALLOW=1 and ACK=1
             b.set_delete_records_allow_irreversible(true);
+            b.set_delete_records_irreversible_ack(true);
             Arc::new(b)
         };
         let bg = start_background_tasks(Arc::clone(&broker));
