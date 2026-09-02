@@ -17,6 +17,11 @@
 //! which replaces the fetch set from DescribeGroup members via
 //! `range_assign_multi`. Default remains broker JoinGroup assignment.
 //! Still no SyncGroup.
+//! v0.79 redirects controller-gated admin (`create_topic` / `delete_topic` /
+//! `create_partitions` / `reassign_partitions` / `create_acls` /
+//! `delete_acls`) on error **14** (`NotController`) using a
+//! `controller_id=N` message hint or the first other advertised broker.
+//! Native Metadata has no `controller_id`. Not Kafka FindCoordinator.
 
 #![deny(missing_docs)]
 
