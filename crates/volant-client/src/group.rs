@@ -19,6 +19,14 @@
 //! `none` (error). Invalid reset strings fail before JoinGroup. This is
 //! **not** Kafka `auto.offset.reset` (no timestamp / isolation selector).
 //!
+//! Fetch-set assignment is the broker JoinGroup result by default. Opt in
+//! with [`GroupConsumer::join_with_assignor`] (`"range"`): after JoinGroup,
+//! DescribeGroup members + `metadata()` feed `range_assign_multi`. Empty /
+//! `"broker"` keep today's assignment. Invalid assignor strings fail before
+//! JoinGroup. DescribeGroup errors fall back to the JoinGroup assignment
+//! (or solo-range over `[self]` when that assignment is empty). Still no
+//! SyncGroup.
+//!
 //! The join lock serializes the heartbeat task against `poll` / `commit` /
 //! `leave`. This is **not** a fully concurrent consumer — do not call `poll`
 //! from two tasks. [`GroupConsumer::leave`] stops the task and sends
@@ -35,6 +43,7 @@ use tokio::task::JoinHandle;
 use volant_core::{Error, Offset, Result};
 use volant_protocol::{FetchRecord, OffsetCommitEntry, OffsetEntry};
 
+use crate::assignor::range_assign_multi;
 use crate::client::Client;
 
 /// Wire sentinel: unknown / not-committed offset (`docs/PHASE3_SPEC.md`).
@@ -68,6 +77,34 @@ fn parse_auto_offset_reset(name: &str) -> Result<AutoOffsetReset> {
         "none" => Ok(AutoOffsetReset::None),
         other => Err(Error::InvalidArgument(format!(
             "unknown auto_offset_reset: {other:?}"
+        ))),
+    }
+}
+
+/// Fetch-set assignor after a successful JoinGroup.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Assignor {
+    /// Honor the broker JoinGroup assignment (default).
+    Broker,
+    /// Local range over DescribeGroup members (still no SyncGroup).
+    Range,
+}
+
+impl Assignor {
+    fn as_str(self) -> &'static str {
+        match self {
+            Self::Broker => "broker",
+            Self::Range => "range",
+        }
+    }
+}
+
+fn parse_assignor(name: &str) -> Result<Assignor> {
+    match name {
+        "" | "broker" => Ok(Assignor::Broker),
+        "range" => Ok(Assignor::Range),
+        other => Err(Error::InvalidArgument(format!(
+            "unknown assignor: {other:?}"
         ))),
     }
 }
@@ -108,6 +145,8 @@ struct Shared {
     heartbeat_count: AtomicU64,
     /// Offset reset when OffsetFetch is missing or `OFFSET_UNKNOWN`.
     auto_offset_reset: AutoOffsetReset,
+    /// Fetch-set assignor; reused on heartbeat-driven rejoin.
+    assignor: Assignor,
 }
 
 /// High-level consumer that joins a group, polls assigned partitions, and commits.
@@ -260,7 +299,7 @@ impl GroupConsumer {
     /// [`join_static_with_heartbeat`](Self::join_static_with_heartbeat) /
     /// [`join_with_auto_commit`](Self::join_with_auto_commit) keep
     /// `"earliest"`. Rejoin / heartbeat-driven rebalance reuse the same
-    /// policy. Not Kafka `auto.offset.reset`.
+    /// policy. Not Kafka `auto.offset.reset`. Broker JoinGroup assignment.
     pub async fn join_with_auto_offset_reset(
         client: Arc<Client>,
         group_id: impl Into<String>,
@@ -272,6 +311,50 @@ impl GroupConsumer {
         auto_commit_interval: Duration,
         auto_offset_reset: &str,
     ) -> Result<Self> {
+        Self::join_with_assignor(
+            client,
+            group_id,
+            topics,
+            session_timeout_ms,
+            group_instance_id,
+            heartbeat,
+            auto_commit,
+            auto_commit_interval,
+            auto_offset_reset,
+            "broker",
+        )
+        .await
+    }
+
+    /// Join with an opt-in fetch-set assignor (v0.73).
+    ///
+    /// Same arguments as
+    /// [`join_with_auto_offset_reset`](Self::join_with_auto_offset_reset)
+    /// plus `assignor`: `"broker"` (default; honor JoinGroup) or `"range"`
+    /// (DescribeGroup members + `range_assign_multi`). Invalid strings
+    /// return `InvalidArgument` **before** JoinGroup. Empty string is
+    /// `"broker"`.
+    ///
+    /// Existing [`join`](Self::join) / [`join_static`](Self::join_static) /
+    /// [`join_with_heartbeat`](Self::join_with_heartbeat) /
+    /// [`join_static_with_heartbeat`](Self::join_static_with_heartbeat) /
+    /// [`join_with_auto_commit`](Self::join_with_auto_commit) /
+    /// [`join_with_auto_offset_reset`](Self::join_with_auto_offset_reset)
+    /// keep `"broker"`. Rejoin / heartbeat-driven rebalance reuse the same
+    /// policy. Still no SyncGroup.
+    pub async fn join_with_assignor(
+        client: Arc<Client>,
+        group_id: impl Into<String>,
+        topics: Vec<String>,
+        session_timeout_ms: u32,
+        group_instance_id: impl Into<String>,
+        heartbeat: bool,
+        auto_commit: bool,
+        auto_commit_interval: Duration,
+        auto_offset_reset: &str,
+        assignor: &str,
+    ) -> Result<Self> {
+        let assignor = parse_assignor(assignor)?;
         let auto_offset_reset = parse_auto_offset_reset(auto_offset_reset)?;
         let group_id = group_id.into();
         let group_instance_id = group_instance_id.into();
@@ -301,6 +384,7 @@ impl GroupConsumer {
                 }),
                 heartbeat_count: AtomicU64::new(0),
                 auto_offset_reset,
+                assignor,
             }),
             hb_stop: None,
             hb_task: None,
@@ -517,6 +601,11 @@ impl GroupConsumer {
         self.shared.auto_offset_reset.as_str()
     }
 
+    /// Current fetch-set assignor (`broker` or `range`).
+    pub fn assignor(&self) -> &'static str {
+        self.shared.assignor.as_str()
+    }
+
     /// Heartbeat RPCs issued by this consumer (poll + background).
     pub fn heartbeat_count(&self) -> u64 {
         self.shared.heartbeat_count.load(Ordering::Relaxed)
@@ -581,20 +670,34 @@ async fn do_join(
             group_instance_id,
         )
         .await?;
-    let new_assignment: Vec<(String, u32)> = result
+    let join_assignment: Vec<(String, u32)> = result
         .assignment
         .into_iter()
         .map(|a| (a.topic, a.partition))
         .collect();
+    let new_assignment = if shared.assignor == Assignor::Range {
+        apply_range_override(
+            client,
+            group_id,
+            topics,
+            &result.member_id,
+            &join_assignment,
+        )
+        .await
+    } else {
+        join_assignment
+    };
 
     let old_set: HashSet<(String, u32)> = previous.iter().cloned().collect();
     let new_set: HashSet<(String, u32)> = new_assignment.iter().cloned().collect();
 
     let mut revoked: Vec<(String, u32)> = old_set.difference(&new_set).cloned().collect();
-    for a in result.revoked {
-        let tp = (a.topic, a.partition);
-        if !revoked.contains(&tp) {
-            revoked.push(tp);
+    if shared.assignor != Assignor::Range {
+        for a in result.revoked {
+            let tp = (a.topic, a.partition);
+            if !revoked.contains(&tp) {
+                revoked.push(tp);
+            }
         }
     }
     revoked.sort();
@@ -656,6 +759,80 @@ async fn do_join(
         }
     }
     Ok(())
+}
+
+/// DescribeGroup members for local range, or `None` to fall back.
+async fn range_members_from_describe(
+    client: &Client,
+    group_id: &str,
+    self_id: &str,
+    self_topics: &[String],
+) -> Option<(Vec<String>, Vec<Vec<String>>)> {
+    let desc = client.describe_group(group_id).await.ok()?;
+    let mut ids = Vec::new();
+    let mut topics = Vec::new();
+    let mut seen = false;
+    for member in desc.members {
+        if member.member_id == self_id {
+            seen = true;
+        }
+        ids.push(member.member_id);
+        topics.push(member.topics);
+    }
+    if !seen {
+        ids.push(self_id.to_string());
+        topics.push(self_topics.to_vec());
+    }
+    if ids.is_empty() || !ids.iter().any(|id| id == self_id) {
+        return None;
+    }
+    Some((ids, topics))
+}
+
+fn partition_counts_from_metadata(meta: crate::client::Metadata) -> HashMap<String, u32> {
+    meta.topics
+        .into_iter()
+        .map(|t| (t.name, t.partitions.len() as u32))
+        .collect()
+}
+
+/// Range fetch set after a successful JoinGroup. Never fails the join:
+/// DescribeGroup / empty-members / missing-self / metadata errors fall
+/// back to the JoinGroup assignment, or solo-range over `[self]` when
+/// that assignment is empty.
+async fn apply_range_override(
+    client: &Client,
+    group_id: &str,
+    self_topics: &[String],
+    self_id: &str,
+    join_assignment: &[(String, u32)],
+) -> Vec<(String, u32)> {
+    let described = range_members_from_describe(client, group_id, self_id, self_topics).await;
+    let (ids, member_topics) = match described {
+        Some(pair) => pair,
+        None if join_assignment.is_empty() => {
+            (vec![self_id.to_string()], vec![self_topics.to_vec()])
+        }
+        None => return join_assignment.to_vec(),
+    };
+
+    let counts = match client.metadata().await {
+        Ok(meta) => partition_counts_from_metadata(meta),
+        Err(_) if join_assignment.is_empty() => return Vec::new(),
+        Err(_) => return join_assignment.to_vec(),
+    };
+
+    let assigned = range_assign_multi(&ids, &member_topics, &counts);
+    match ids.iter().position(|id| id == self_id) {
+        Some(idx) => assigned.get(idx).cloned().unwrap_or_default(),
+        None if join_assignment.is_empty() => {
+            range_assign_multi(&[self_id.to_string()], &[self_topics.to_vec()], &counts)
+                .into_iter()
+                .next()
+                .unwrap_or_default()
+        }
+        None => join_assignment.to_vec(),
+    }
 }
 
 /// Seed positions for OffsetFetch miss / `OFFSET_UNKNOWN`.
@@ -825,6 +1002,16 @@ mod tests {
         );
         let err = parse_auto_offset_reset("banana").unwrap_err();
         assert!(err.to_string().contains("unknown auto_offset_reset"));
+        assert!(err.to_string().contains("banana"));
+    }
+
+    #[test]
+    fn assignor_parses() {
+        assert_eq!(parse_assignor("broker").unwrap(), Assignor::Broker);
+        assert_eq!(parse_assignor("").unwrap(), Assignor::Broker);
+        assert_eq!(parse_assignor("range").unwrap(), Assignor::Range);
+        let err = parse_assignor("banana").unwrap_err();
+        assert!(err.to_string().contains("unknown assignor"));
         assert!(err.to_string().contains("banana"));
     }
 }

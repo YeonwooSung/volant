@@ -13,9 +13,14 @@
 //! (`earliest` / `latest` / `none`) when OffsetFetch is missing or
 //! `OFFSET_UNKNOWN`. Default remains `earliest` (position 0, no ListOffsets).
 //! Not Kafka `auto.offset.reset`.
+//! v0.73 adds opt-in [`GroupConsumer::join_with_assignor`] (`"range"`)
+//! which replaces the fetch set from DescribeGroup members via
+//! `range_assign_multi`. Default remains broker JoinGroup assignment.
+//! Still no SyncGroup.
 
 #![deny(missing_docs)]
 
+mod assignor;
 pub mod client;
 pub mod config;
 mod conn;
