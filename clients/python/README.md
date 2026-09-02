@@ -57,7 +57,7 @@ g.close()
 g = GroupConsumer.join(
     c, group="g", topics=["t"], auto_commit=True, auto_commit_interval_ms=5000
 )
-# Opt-in auto_offset_reset (v0.62). Default earliest (position 0).
+# Opt-in auto_offset_reset (v0.62/v0.70). Default earliest (ListOffsets earliest).
 g = GroupConsumer.join(c, group="g", topics=["t"], auto_offset_reset="latest")
 
 meta = c.metadata()
@@ -243,8 +243,8 @@ commits on the first successful poll, then on the interval. Explicit
 commits dirty positions then leaves. This is **not** Kafka
 `enable.auto.commit` (no background commit thread).
 
-`auto_offset_reset` (v0.62) is a tiny Kafka subset: `earliest`
-(default, position 0, no ListOffsets), `latest` (native ListOffsets
+`auto_offset_reset` (v0.62/v0.70) is a tiny Kafka subset: `earliest`
+(default, native ListOffsets earliest), `latest` (ListOffsets latest /
 LEO), `none` (raise if OffsetFetch is missing / `OFFSET_UNKNOWN`).
 Invalid strings raise `ValueError` before JoinGroup. Not Kafka
 `auto.offset.reset` (no timestamp). Rust GroupConsumer still starts

@@ -118,7 +118,7 @@ class GroupConsumer:
         g = GroupConsumer.join(
             c, group="g", topics=["t"], auto_commit=True, auto_commit_interval_ms=5000
         )
-        # Opt-in auto_offset_reset (v0.62). Default earliest (position 0).
+        # Opt-in auto_offset_reset (v0.62/v0.70). Default earliest (ListOffsets earliest).
         g = GroupConsumer.join(c, group="g", topics=["t"], auto_offset_reset="latest")
     """
 
@@ -186,8 +186,8 @@ class GroupConsumer:
         positions (interval 0 = every such poll; else first successful
         poll, then every ``auto_commit_interval_ms``). Not Kafka
         ``enable.auto.commit`` (no background commit thread).
-        ``auto_offset_reset`` is ``"earliest"`` (default: position 0, no
-        ListOffsets), ``"latest"`` (native ListOffsets LEO), or ``"none"``
+        ``auto_offset_reset`` is ``"earliest"`` (default: native ListOffsets
+        earliest), ``"latest"`` (ListOffsets latest / LEO), or ``"none"``
         (raise if OffsetFetch is missing / ``OFFSET_UNKNOWN``). Invalid
         strings raise ``ValueError`` before JoinGroup. Not Kafka
         ``auto.offset.reset`` (no timestamp).
@@ -291,22 +291,22 @@ class GroupConsumer:
     def _apply_reset(self, partitions: list[tuple[str, int]]) -> None:
         if not partitions:
             return
-        if self._auto_offset_reset == _RESET_EARLIEST:
-            for tp in partitions:
-                self._positions[tp] = 0
-            return
         if self._auto_offset_reset == _RESET_NONE:
             topic, partition = partitions[0]
             raise ValueError(
                 f"no committed offset for {topic}-{partition} "
                 f"and auto_offset_reset={self._auto_offset_reset!r}"
             )
+        use_earliest = self._auto_offset_reset == _RESET_EARLIEST
         by_topic: dict[str, list[int]] = {}
         for topic, partition in partitions:
             by_topic.setdefault(topic, []).append(partition)
         for topic, wanted in by_topic.items():
             listings = self._client.list_offsets(topic, wanted)
-            found = {int(e.partition): int(e.latest) for e in listings}
+            found = {
+                int(e.partition): int(e.earliest if use_earliest else e.latest)
+                for e in listings
+            }
             for partition in wanted:
                 if partition not in found:
                     raise ValueError(

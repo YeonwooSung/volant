@@ -82,8 +82,8 @@ func normalizeAssignor(name string) (string, error) {
 }
 
 // WithAutoOffsetReset selects the fetch position when OffsetFetch is
-// missing or OFFSET_UNKNOWN: "earliest" (default, position 0, no
-// ListOffsets), "latest" (native ListOffsets LEO), or "none" (error).
+// missing or OFFSET_UNKNOWN: "earliest" (default, ListOffsets earliest),
+// "latest" (ListOffsets latest / LEO), or "none" (error).
 // Empty is "earliest". Unknown values fail Join.
 func WithAutoOffsetReset(name string) GroupConsumerOption {
 	return func(o *groupConsumerOptions) {
@@ -390,15 +390,10 @@ func (g *GroupConsumer) applyReset(partitions []topicPartition) error {
 		return nil
 	}
 	switch g.autoOffsetReset {
-	case resetEarliest:
-		for _, p := range partitions {
-			g.positions[p] = 0
-		}
-		return nil
 	case resetNone:
 		p := partitions[0]
 		return fmt.Errorf("no committed offset for %s-%d and auto_offset_reset=%q", p.topic, p.partition, resetNone)
-	case resetLatest:
+	case resetEarliest, resetLatest:
 		byTopic := make(map[string][]uint32)
 		for _, p := range partitions {
 			byTopic[p.topic] = append(byTopic[p.topic], p.partition)
@@ -410,14 +405,18 @@ func (g *GroupConsumer) applyReset(partitions []topicPartition) error {
 			}
 			got := make(map[uint32]uint64, len(listings))
 			for _, e := range listings {
-				got[e.Partition] = e.Latest
+				if g.autoOffsetReset == resetEarliest {
+					got[e.Partition] = e.Earliest
+				} else {
+					got[e.Partition] = e.Latest
+				}
 			}
 			for _, part := range parts {
-				latest, ok := got[part]
+				off, ok := got[part]
 				if !ok {
 					return fmt.Errorf("list_offsets missing partition %s-%d", topic, part)
 				}
-				g.positions[topicPartition{topic, part}] = latest
+				g.positions[topicPartition{topic, part}] = off
 			}
 		}
 		return nil
