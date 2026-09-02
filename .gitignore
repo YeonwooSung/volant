@@ -20,3 +20,7 @@ examples/tls/*.pem
 *.py[cod]
 *.egg-info/
 .pytest_cache/
+
+# Go client (v0.19)
+*.test
+clients/go/coverage.out
