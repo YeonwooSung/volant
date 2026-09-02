@@ -1,7 +1,8 @@
-//! v0.21 — durable openraft log + vote/hard state under `__openraft/`.
+//! v0.35 — openraft log store on redb (`{data_dir}/__openraft/raft.redb`).
 //!
-//! Flag off must not create the dir. Flag on persists after CreateTopic.
-//! Process restart on the same data_dirs re-elects and keeps the topic.
+//! Flag off must not create `__openraft/`. Flag on persists `raft.redb` after
+//! CreateTopic. Restart on the same data_dirs re-elects and keeps the topic.
+//! Many appends + snapshot purge still advance `last_purged`.
 
 #[path = "common/mod.rs"]
 mod common;
@@ -11,17 +12,17 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use common::cluster::{bind_port0, cluster_config, default_storage, unique_dir, Guard};
-use volant_broker::{
-    serve_listener, Broker, OPENRAFT_DIR, OPENRAFT_HARD_STATE_FILE, OPENRAFT_LOG_FILE,
-    OPENRAFT_REDB_FILE, OPENRAFT_SNAPSHOT_FILE,
-};
-use volant_client::{Client, ClientConfig};
+use volant_broker::{serve_listener, Broker, OPENRAFT_DIR, OPENRAFT_LOG_FILE, OPENRAFT_REDB_FILE};
 
-fn set_openraft_env(on: bool) {
+fn set_openraft_env(on: bool, snapshot_logs: Option<&str>) {
     if on {
         std::env::set_var("VOLANT_OPENRAFT_METADATA", "1");
     } else {
         std::env::remove_var("VOLANT_OPENRAFT_METADATA");
+    }
+    match snapshot_logs {
+        Some(v) => std::env::set_var("VOLANT_OPENRAFT_SNAPSHOT_LOGS", v),
+        None => std::env::remove_var("VOLANT_OPENRAFT_SNAPSHOT_LOGS"),
     }
 }
 
@@ -33,13 +34,6 @@ fn live_has_topic(b: &Broker, name: &str) -> bool {
 
 fn openraft_dir(base: &Path, id: u32) -> PathBuf {
     base.join(format!("n{id}")).join(OPENRAFT_DIR)
-}
-
-fn openraft_has_store_files(dir: &Path) -> bool {
-    dir.join(OPENRAFT_REDB_FILE).is_file()
-        || dir.join(OPENRAFT_LOG_FILE).is_file()
-        || dir.join(OPENRAFT_HARD_STATE_FILE).is_file()
-        || dir.join(OPENRAFT_SNAPSHOT_FILE).is_file()
 }
 
 struct Triple {
@@ -105,7 +99,7 @@ impl Triple {
     }
 
     async fn boot(label: &str) -> (Self, Guard) {
-        let base = unique_dir("v21", label);
+        let base = unique_dir("v35", label);
         let guard = Guard(base.clone());
         (Self::boot_at(base).await, guard)
     }
@@ -179,20 +173,76 @@ async fn wait_all_have_topic(nodes: &[Arc<Broker>], topic: &str, timeout: Durati
     panic!("topic {topic} not on all nodes within {timeout:?}: {got:?}");
 }
 
-async fn connect_leader(port: u16) -> Client {
-    Client::connect(ClientConfig {
+async fn connect_leader(port: u16) -> volant_client::Client {
+    volant_client::Client::connect(volant_client::ClientConfig {
         brokers: vec![format!("127.0.0.1:{port}")],
         acks: 1,
-        ..ClientConfig::default()
+        ..volant_client::ClientConfig::default()
     })
     .await
     .unwrap()
 }
 
+async fn write_noops(leader: &Broker, n: usize) {
+    for i in 0..n {
+        let mut last_err = None;
+        for _ in 0..20 {
+            match leader.test_openraft_client_write_noop().await {
+                Ok(()) => {
+                    last_err = None;
+                    break;
+                }
+                Err(e) => {
+                    last_err = Some(e.to_string());
+                    tokio::time::sleep(Duration::from_millis(50)).await;
+                }
+            }
+        }
+        if let Some(e) = last_err {
+            panic!("noop {i} failed: {e}");
+        }
+    }
+}
+
+async fn wait_snapshot(nodes: &[Arc<Broker>], timeout: Duration) {
+    let deadline = tokio::time::Instant::now() + timeout;
+    while tokio::time::Instant::now() < deadline {
+        for n in nodes {
+            if let Some((_, _, bytes)) = n.test_openraft_current_snapshot().await {
+                if !bytes.is_empty() {
+                    return;
+                }
+            }
+        }
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+    panic!("no snapshot within {timeout:?}");
+}
+
+async fn wait_purged(nodes: &[Arc<Broker>], timeout: Duration) -> u64 {
+    let deadline = tokio::time::Instant::now() + timeout;
+    while tokio::time::Instant::now() < deadline {
+        for n in nodes {
+            if let Some(idx) = n.test_openraft_last_purged_index() {
+                return idx;
+            }
+        }
+        for n in nodes {
+            let _ = n.test_openraft_trigger_purge().await;
+        }
+        tokio::time::sleep(Duration::from_millis(80)).await;
+    }
+    let seen: Vec<_> = nodes
+        .iter()
+        .map(|n| (n.node_id(), n.test_openraft_last_purged_index()))
+        .collect();
+    panic!("last_purged did not advance within {timeout:?}; seen={seen:?}");
+}
+
 /// Flag off: CreateTopic must not create `{data_dir}/__openraft/`.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn flag_off_does_not_create_openraft_dir() {
-    set_openraft_env(false);
+    set_openraft_env(false, None);
     let (t, _g) = Triple::boot("off").await;
     assert!(
         !t.b1.openraft_metadata_enabled(),
@@ -212,15 +262,19 @@ async fn flag_off_does_not_create_openraft_dir() {
             dir.display(),
             dir.exists()
         );
+        assert!(
+            !dir.join(OPENRAFT_REDB_FILE).exists(),
+            "flag off must not create raft.redb"
+        );
     }
 
     t.abort_all();
 }
 
-/// Flag on: after CreateTopic, `__openraft/` has log or snapshot files.
+/// Flag on: after CreateTopic, `{data_dir}/__openraft/raft.redb` exists.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-async fn flag_on_persists_openraft_files() {
-    set_openraft_env(true);
+async fn flag_on_create_topic_writes_raft_redb() {
+    set_openraft_env(true, None);
     let (t, _g) = Triple::boot("persist").await;
     assert!(t.b1.openraft_metadata_enabled());
     let nodes = t.live(&[1, 2, 3]);
@@ -237,14 +291,21 @@ async fn flag_on_persists_openraft_files() {
         leader_dir.display(),
         leader_dir.exists()
     );
+    let redb = leader_dir.join(OPENRAFT_REDB_FILE);
     assert!(
-        openraft_has_store_files(&leader_dir),
-        "leader {leader} {} has no log/hard_state/snapshot",
-        leader_dir.display()
+        redb.is_file(),
+        "leader {leader} missing raft.redb at {}",
+        redb.display()
+    );
+    // Incremental redb writes; do not rewrite the v0.21 full-file log.
+    assert!(
+        !leader_dir.join(OPENRAFT_LOG_FILE).exists(),
+        "v0.35 must not rewrite log.json"
     );
 
-    let any_files = (1u32..=3).any(|id| openraft_has_store_files(&openraft_dir(&t.base, id)));
-    assert!(any_files, "expected persist files on at least one node");
+    let any_redb =
+        (1u32..=3).any(|id| openraft_dir(&t.base, id).join(OPENRAFT_REDB_FILE).is_file());
+    assert!(any_redb, "expected raft.redb on at least one node");
 
     t.abort_all();
 }
@@ -252,7 +313,7 @@ async fn flag_on_persists_openraft_files() {
 /// 3-node restart: same data_dirs, re-elect, topic still present, live leader.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn restart_reelects_and_keeps_topic() {
-    set_openraft_env(true);
+    set_openraft_env(true, None);
     let (t, _g) = Triple::boot("restart").await;
     let nodes = t.live(&[1, 2, 3]);
     let leader = wait_agreed_leader(&nodes, Duration::from_secs(8)).await;
@@ -262,8 +323,8 @@ async fn restart_reelects_and_keeps_topic() {
     wait_all_have_topic(&nodes, "keep", Duration::from_secs(8)).await;
 
     assert!(
-        (1u32..=3).any(|id| openraft_has_store_files(&openraft_dir(&t.base, id))),
-        "pre-restart persist missing under __openraft/"
+        (1u32..=3).any(|id| openraft_dir(&t.base, id).join(OPENRAFT_REDB_FILE).is_file()),
+        "pre-restart raft.redb missing under __openraft/"
     );
 
     let t = t.restart().await;
@@ -294,6 +355,35 @@ async fn restart_reelects_and_keeps_topic() {
         t.broker(leader).is_controller(),
         "controller_id {leader} must be the live openraft leader"
     );
+    assert!(
+        openraft_dir(&t.base, leader)
+            .join(OPENRAFT_REDB_FILE)
+            .is_file(),
+        "raft.redb must still exist after restart"
+    );
 
+    t.abort_all();
+}
+
+/// Many appends + snapshot purge still work against the redb log.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn many_appends_snapshot_purge_still_works() {
+    set_openraft_env(true, Some("1"));
+    let (t, _g) = Triple::boot("purge").await;
+    let nodes = t.live(&[1, 2, 3]);
+    let leader_id = wait_agreed_leader(&nodes, Duration::from_secs(8)).await;
+    let leader = t.broker(leader_id);
+    write_noops(&leader, 12).await;
+    let _ = leader.test_openraft_trigger_snapshot().await;
+    wait_snapshot(&nodes, Duration::from_secs(8)).await;
+    let purged = wait_purged(&nodes, Duration::from_secs(10)).await;
+    assert!(purged > 0, "last_purged should advance, got {purged}");
+    write_noops(&leader, 4).await;
+    assert!(
+        openraft_dir(&t.base, leader_id)
+            .join(OPENRAFT_REDB_FILE)
+            .is_file(),
+        "raft.redb must survive snapshot purge"
+    );
     t.abort_all();
 }

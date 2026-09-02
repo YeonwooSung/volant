@@ -496,6 +496,21 @@ Flag **off** keeps v0.10 overlay-only. Overlay is SoT: a raft fail does
 succeeds). Remove of the last voter is rejected. No new opcodes. See
 [V26_SPEC.md](./V26_SPEC.md).
 
+## v0.35 openraft redb
+
+When `VOLANT_OPENRAFT_METADATA=1`, the openraft **log** (vote, committed,
+last_purged, entries) lives in `{data_dir}/__openraft/raft.redb` — a
+one-process redb file with Immediate (fsync) commits, same crate as
+stream `DurableStore`. This replaces the v0.21 full-file rewrite of
+`log.json` / `hard_state.json` on every append. `snapshot.json` is
+unchanged. Flag **off** still does **not** create `__openraft/`.
+
+Upgrade: if only the v0.21 JSON files exist, the first boot **imports**
+them into `raft.redb` and then prefers redb. Stale JSON is ignored while
+the redb file exists (safe to delete after import). Not RocksDB / not
+openraft-rocks. Homemade `{data_dir}/__metadata_raft/` is a different
+store. See [V35_SPEC.md](./V35_SPEC.md).
+
 **Cluster sharp edges:** Truncate-journal majority (Phase 130), assignment
 majority (Phase 150/154), and Phase 135/137/148 wait mode use **configured N**
 (`floor(N/2)+1`), not live-only. For **N=2**, majority

@@ -1,14 +1,16 @@
 //! Opt-in openraft metadata election (v0.11) + assignment apply (v0.16)
 //! + InstallSnapshot (v0.17) + durable log / hard state (v0.21)
-//! + snapshot assignment apply (v0.22) + joint membership (v0.26).
+//! + snapshot assignment apply (v0.22) + joint membership (v0.26)
+//! + redb log store (v0.35).
 //!
 //! When `VOLANT_OPENRAFT_METADATA=1`, the leader replicates
 //! [`MetaRequest::SetAssignment`] via opcodes 108/109. Apply writes
 //! `assignment.json` and installs cluster state. Snapshots use opcodes
 //! 112/113; a non-empty snapshot `assignment` is applied the same way.
-//! Vote, log, and last snapshot persist under `{data_dir}/__openraft/`
-//! (JSON files; not Rocks). Flag off does not create that directory.
-//! Homemade 154 is unchanged.
+//! Vote / committed / last_purged / log entries persist in
+//! `{data_dir}/__openraft/raft.redb` (redb, Immediate durability; not
+//! Rocks). Snapshot meta stays `{data_dir}/__openraft/snapshot.json`.
+//! Flag off does not create that directory. Homemade 154 is unchanged.
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::fmt;
@@ -34,6 +36,7 @@ use openraft::{
     SnapshotPolicy, StorageError, StorageIOError, StoredMembership, Vote,
 };
 use parking_lot::Mutex;
+use redb::{Database, Durability, ReadableTable, TableDefinition};
 use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
 use tracing::warn;
@@ -46,12 +49,20 @@ use crate::net::inter_broker_rpc;
 
 /// On-disk directory under `data_dir` for the opt-in openraft store (v0.21).
 pub const OPENRAFT_DIR: &str = "__openraft";
-/// Durable vote / committed / last_purged file name.
+/// Durable vote / committed / last_purged file name (v0.21; imported once by v0.35).
 pub const OPENRAFT_HARD_STATE_FILE: &str = "hard_state.json";
-/// Durable log entries file name.
+/// Durable log entries file name (v0.21; imported once by v0.35).
 pub const OPENRAFT_LOG_FILE: &str = "log.json";
 /// Last snapshot meta + payload (and last_applied checkpoint).
 pub const OPENRAFT_SNAPSHOT_FILE: &str = "snapshot.json";
+/// redb file for vote / committed / last_purged / log entries (v0.35).
+pub const OPENRAFT_REDB_FILE: &str = "raft.redb";
+
+const ENTRIES: TableDefinition<u64, &[u8]> = TableDefinition::new("entries");
+const META: TableDefinition<&str, &[u8]> = TableDefinition::new("meta");
+const META_VOTE: &str = "vote";
+const META_COMMITTED: &str = "committed";
+const META_LAST_PURGED: &str = "last_purged";
 
 /// How long the mutating leader waits for `client_write` (commit + local apply).
 const CLIENT_WRITE_TIMEOUT: Duration = Duration::from_secs(5);
@@ -131,8 +142,6 @@ impl Default for OpenraftMetricsCache {
 #[derive(Clone, Default)]
 struct LogStore {
     inner: Arc<Mutex<LogStoreInner>>,
-    /// `{data_dir}/__openraft` when the flag is on; `None` = memory-only.
-    dir: Option<PathBuf>,
 }
 
 #[derive(Default)]
@@ -141,9 +150,13 @@ struct LogStoreInner {
     committed: Option<LogId<u32>>,
     vote: Option<Vote<u32>>,
     log: BTreeMap<u64, Entry<TypeConfig>>,
+    /// `{data_dir}/__openraft` when the flag is on; `None` = memory-only.
+    dir: Option<PathBuf>,
+    /// Open `{dir}/raft.redb` after first persist or successful load/import.
+    db: Option<Database>,
 }
 
-/// On-disk hard state (vote + commit pointers).
+/// On-disk hard state (vote + commit pointers). v0.21 JSON; imported by v0.35.
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 struct OpenraftHardStateFile {
     #[serde(default)]
@@ -154,7 +167,7 @@ struct OpenraftHardStateFile {
     last_purged: Option<LogId<u32>>,
 }
 
-/// On-disk log (JSON array of openraft entries).
+/// On-disk log (JSON array of openraft entries). v0.21 JSON; imported by v0.35.
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 struct OpenraftLogFile {
     #[serde(default)]
@@ -163,6 +176,40 @@ struct OpenraftLogFile {
 
 impl LogStore {
     fn open(dir: &Path) -> Self {
+        let mut inner = LogStoreInner {
+            dir: Some(dir.to_path_buf()),
+            ..LogStoreInner::default()
+        };
+        if let Err(e) = inner.load_or_import() {
+            warn!(
+                path = %dir.display(),
+                error = %e,
+                "openraft redb load failed; starting empty"
+            );
+        }
+        Self {
+            inner: Arc::new(Mutex::new(inner)),
+        }
+    }
+}
+
+impl LogStoreInner {
+    fn load_or_import(&mut self) -> std::io::Result<()> {
+        let dir = match self.dir.as_ref() {
+            Some(d) => d.clone(),
+            None => return Ok(()),
+        };
+        let redb_path = dir.join(OPENRAFT_REDB_FILE);
+        if redb_path.is_file() {
+            let db = open_redb(&redb_path)?;
+            let loaded = load_from_redb(&db)?;
+            self.vote = loaded.vote;
+            self.committed = loaded.committed;
+            self.last_purged = loaded.last_purged;
+            self.log = loaded.log;
+            self.db = Some(db);
+            return Ok(());
+        }
         let hard = load_json::<OpenraftHardStateFile>(&dir.join(OPENRAFT_HARD_STATE_FILE))
             .unwrap_or_default();
         let file = load_json::<OpenraftLogFile>(&dir.join(OPENRAFT_LOG_FILE)).unwrap_or_default();
@@ -170,38 +217,257 @@ impl LogStore {
         for e in file.entries {
             log.insert(e.get_log_id().index, e);
         }
-        Self {
-            inner: Arc::new(Mutex::new(LogStoreInner {
-                last_purged: hard.last_purged,
-                committed: hard.committed,
-                vote: hard.vote,
-                log,
-            })),
-            dir: Some(dir.to_path_buf()),
+        self.vote = hard.vote;
+        self.committed = hard.committed;
+        self.last_purged = hard.last_purged;
+        self.log = log;
+        if self.vote.is_some()
+            || self.committed.is_some()
+            || self.last_purged.is_some()
+            || !self.log.is_empty()
+        {
+            self.import_to_redb()?;
+        }
+        Ok(())
+    }
+
+    fn import_to_redb(&mut self) -> std::io::Result<()> {
+        self.ensure_db()?;
+        let db = self.db.as_ref().ok_or_else(|| {
+            std::io::Error::new(
+                std::io::ErrorKind::Other,
+                "openraft redb missing after import",
+            )
+        })?;
+        let mut txn = db.begin_write().map_err(io_err)?;
+        txn.set_durability(Durability::Immediate);
+        {
+            let mut table = txn.open_table(ENTRIES).map_err(io_err)?;
+            for (idx, e) in &self.log {
+                let bytes = serde_json::to_vec(e).map_err(io_err)?;
+                table.insert(*idx, bytes.as_slice()).map_err(io_err)?;
+            }
+        }
+        {
+            let mut meta = txn.open_table(META).map_err(io_err)?;
+            put_meta_opt(&mut meta, META_VOTE, &self.vote)?;
+            put_meta_opt(&mut meta, META_COMMITTED, &self.committed)?;
+            put_meta_opt(&mut meta, META_LAST_PURGED, &self.last_purged)?;
+        }
+        txn.commit().map_err(io_err)?;
+        Ok(())
+    }
+
+    fn ensure_db(&mut self) -> std::io::Result<()> {
+        if self.db.is_some() {
+            return Ok(());
+        }
+        let dir = self.dir.as_ref().ok_or_else(|| {
+            std::io::Error::new(std::io::ErrorKind::Other, "openraft persist without dir")
+        })?;
+        fs::create_dir_all(dir)?;
+        let db = open_redb(&dir.join(OPENRAFT_REDB_FILE))?;
+        {
+            let txn = db.begin_write().map_err(io_err)?;
+            {
+                let _entries = txn.open_table(ENTRIES).map_err(io_err)?;
+            }
+            {
+                let _meta = txn.open_table(META).map_err(io_err)?;
+            }
+            txn.commit().map_err(io_err)?;
+        }
+        self.db = Some(db);
+        Ok(())
+    }
+
+    fn persist_hard(&mut self) -> std::io::Result<()> {
+        if self.dir.is_none() {
+            return Ok(());
+        }
+        self.ensure_db()?;
+        let db = self.db.as_ref().ok_or_else(|| {
+            std::io::Error::new(std::io::ErrorKind::Other, "openraft redb missing")
+        })?;
+        let mut txn = db.begin_write().map_err(io_err)?;
+        txn.set_durability(Durability::Immediate);
+        {
+            let mut meta = txn.open_table(META).map_err(io_err)?;
+            put_meta_opt(&mut meta, META_VOTE, &self.vote)?;
+            put_meta_opt(&mut meta, META_COMMITTED, &self.committed)?;
+            put_meta_opt(&mut meta, META_LAST_PURGED, &self.last_purged)?;
+        }
+        txn.commit().map_err(io_err)?;
+        Ok(())
+    }
+
+    fn persist_append(&mut self, entries: &[Entry<TypeConfig>]) -> std::io::Result<()> {
+        if self.dir.is_none() {
+            return Ok(());
+        }
+        if entries.is_empty() {
+            return Ok(());
+        }
+        self.ensure_db()?;
+        let db = self.db.as_ref().ok_or_else(|| {
+            std::io::Error::new(std::io::ErrorKind::Other, "openraft redb missing")
+        })?;
+        let mut txn = db.begin_write().map_err(io_err)?;
+        txn.set_durability(Durability::Immediate);
+        {
+            let mut table = txn.open_table(ENTRIES).map_err(io_err)?;
+            for e in entries {
+                let bytes = serde_json::to_vec(e).map_err(io_err)?;
+                table
+                    .insert(e.get_log_id().index, bytes.as_slice())
+                    .map_err(io_err)?;
+            }
+        }
+        txn.commit().map_err(io_err)?;
+        Ok(())
+    }
+
+    fn persist_truncate(&mut self, from_index: u64) -> std::io::Result<()> {
+        if self.dir.is_none() {
+            return Ok(());
+        }
+        self.ensure_db()?;
+        let db = self.db.as_ref().ok_or_else(|| {
+            std::io::Error::new(std::io::ErrorKind::Other, "openraft redb missing")
+        })?;
+        let mut txn = db.begin_write().map_err(io_err)?;
+        txn.set_durability(Durability::Immediate);
+        {
+            let mut table = txn.open_table(ENTRIES).map_err(io_err)?;
+            table
+                .retain_in(from_index.., |_, _| false)
+                .map_err(io_err)?;
+        }
+        txn.commit().map_err(io_err)?;
+        Ok(())
+    }
+
+    fn persist_purge(&mut self, log_id: LogId<u32>) -> std::io::Result<()> {
+        if self.dir.is_none() {
+            return Ok(());
+        }
+        self.ensure_db()?;
+        let db = self.db.as_ref().ok_or_else(|| {
+            std::io::Error::new(std::io::ErrorKind::Other, "openraft redb missing")
+        })?;
+        let mut txn = db.begin_write().map_err(io_err)?;
+        txn.set_durability(Durability::Immediate);
+        {
+            let mut table = txn.open_table(ENTRIES).map_err(io_err)?;
+            table
+                .retain_in(..=log_id.index, |_, _| false)
+                .map_err(io_err)?;
+        }
+        {
+            let mut meta = txn.open_table(META).map_err(io_err)?;
+            put_meta_opt(&mut meta, META_VOTE, &self.vote)?;
+            put_meta_opt(&mut meta, META_COMMITTED, &self.committed)?;
+            let bytes = serde_json::to_vec(&log_id).map_err(io_err)?;
+            meta.insert(META_LAST_PURGED, bytes.as_slice())
+                .map_err(io_err)?;
+        }
+        txn.commit().map_err(io_err)?;
+        Ok(())
+    }
+}
+
+struct LoadedLog {
+    vote: Option<Vote<u32>>,
+    committed: Option<LogId<u32>>,
+    last_purged: Option<LogId<u32>>,
+    log: BTreeMap<u64, Entry<TypeConfig>>,
+}
+
+fn load_from_redb(db: &Database) -> std::io::Result<LoadedLog> {
+    let txn = db.begin_read().map_err(io_err)?;
+    let mut log = BTreeMap::new();
+    match txn.open_table(ENTRIES) {
+        Ok(table) => {
+            for item in table.iter().map_err(io_err)? {
+                let (k, v) = item.map_err(io_err)?;
+                let entry: Entry<TypeConfig> = serde_json::from_slice(v.value()).map_err(io_err)?;
+                log.insert(k.value(), entry);
+            }
+        }
+        Err(redb::TableError::TableDoesNotExist(_)) => {}
+        Err(e) => return Err(io_err(e)),
+    }
+    let mut vote = None;
+    let mut committed = None;
+    let mut last_purged = None;
+    match txn.open_table(META) {
+        Ok(table) => {
+            vote = get_meta(&table, META_VOTE)?;
+            committed = get_meta(&table, META_COMMITTED)?;
+            last_purged = get_meta(&table, META_LAST_PURGED)?;
+        }
+        Err(redb::TableError::TableDoesNotExist(_)) => {}
+        Err(e) => return Err(io_err(e)),
+    }
+    Ok(LoadedLog {
+        vote,
+        committed,
+        last_purged,
+        log,
+    })
+}
+
+fn get_meta<T: DeserializeOwned>(
+    table: &redb::ReadOnlyTable<&str, &[u8]>,
+    key: &str,
+) -> std::io::Result<Option<T>> {
+    match table.get(key).map_err(io_err)? {
+        Some(v) => Ok(serde_json::from_slice(v.value()).ok()),
+        None => Ok(None),
+    }
+}
+
+fn put_meta_opt(
+    table: &mut redb::Table<'_, &str, &[u8]>,
+    key: &str,
+    value: &Option<impl Serialize>,
+) -> std::io::Result<()> {
+    match value {
+        Some(v) => {
+            let bytes = serde_json::to_vec(v).map_err(io_err)?;
+            table.insert(key, bytes.as_slice()).map_err(io_err)?;
+        }
+        None => {
+            table.remove(key).map_err(io_err)?;
         }
     }
+    Ok(())
+}
 
-    fn persist_hard(&self, inner: &LogStoreInner) -> std::io::Result<()> {
-        let Some(dir) = self.dir.as_ref() else {
-            return Ok(());
-        };
-        let file = OpenraftHardStateFile {
-            vote: inner.vote,
-            committed: inner.committed,
-            last_purged: inner.last_purged,
-        };
-        atomic_write_json(&dir.join(OPENRAFT_HARD_STATE_FILE), &file)
-    }
+fn io_err(e: impl fmt::Display) -> std::io::Error {
+    std::io::Error::new(std::io::ErrorKind::Other, e.to_string())
+}
 
-    fn persist_log(&self, inner: &LogStoreInner) -> std::io::Result<()> {
-        let Some(dir) = self.dir.as_ref() else {
-            return Ok(());
-        };
-        let file = OpenraftLogFile {
-            entries: inner.log.values().cloned().collect(),
-        };
-        atomic_write_json(&dir.join(OPENRAFT_LOG_FILE), &file)
+/// Open or create `raft.redb`, retrying exclusive-lock races on restart.
+fn open_redb(path: &Path) -> std::io::Result<Database> {
+    const ATTEMPTS: u32 = 40;
+    let mut last = String::from("openraft redb open failed");
+    for i in 0..ATTEMPTS {
+        match Database::create(path) {
+            Ok(db) => return Ok(db),
+            Err(e) => {
+                last = e.to_string();
+                let retryable = last.contains("already open")
+                    || last.contains("Cannot acquire lock")
+                    || last.contains("WouldBlock");
+                if !retryable || i + 1 == ATTEMPTS {
+                    return Err(io_err(last));
+                }
+                std::thread::sleep(Duration::from_millis(50));
+            }
+        }
     }
+    Err(io_err(last))
 }
 
 impl RaftLogReader<TypeConfig> for LogStore {
@@ -234,7 +500,8 @@ impl RaftLogStorage<TypeConfig> for LogStore {
     ) -> std::result::Result<(), StorageError<u32>> {
         let mut inner = self.inner.lock();
         inner.committed = committed;
-        self.persist_hard(&inner)
+        inner
+            .persist_hard()
             .map_err(|e| StorageError::from(StorageIOError::write_logs(&e)))?;
         Ok(())
     }
@@ -248,7 +515,8 @@ impl RaftLogStorage<TypeConfig> for LogStore {
     async fn save_vote(&mut self, vote: &Vote<u32>) -> std::result::Result<(), StorageError<u32>> {
         let mut inner = self.inner.lock();
         inner.vote = Some(*vote);
-        self.persist_hard(&inner)
+        inner
+            .persist_hard()
             .map_err(|e| StorageError::from(StorageIOError::write_vote(&e)))?;
         Ok(())
     }
@@ -268,11 +536,13 @@ impl RaftLogStorage<TypeConfig> for LogStore {
     {
         {
             let mut inner = self.inner.lock();
-            for e in entries {
+            let new_entries: Vec<Entry<TypeConfig>> = entries.into_iter().collect();
+            inner
+                .persist_append(&new_entries)
+                .map_err(|e| StorageError::from(StorageIOError::write_logs(&e)))?;
+            for e in new_entries {
                 inner.log.insert(e.get_log_id().index, e);
             }
-            self.persist_log(&inner)
-                .map_err(|e| StorageError::from(StorageIOError::write_logs(&e)))?;
         }
         callback.log_io_completed(Ok(()));
         Ok(())
@@ -280,20 +550,20 @@ impl RaftLogStorage<TypeConfig> for LogStore {
 
     async fn truncate(&mut self, log_id: LogId<u32>) -> std::result::Result<(), StorageError<u32>> {
         let mut inner = self.inner.lock();
-        inner.log.split_off(&log_id.index);
-        self.persist_log(&inner)
+        inner
+            .persist_truncate(log_id.index)
             .map_err(|e| StorageError::from(StorageIOError::write_logs(&e)))?;
+        inner.log.split_off(&log_id.index);
         Ok(())
     }
 
     async fn purge(&mut self, log_id: LogId<u32>) -> std::result::Result<(), StorageError<u32>> {
         let mut inner = self.inner.lock();
+        inner
+            .persist_purge(log_id)
+            .map_err(|e| StorageError::from(StorageIOError::write_logs(&e)))?;
         inner.last_purged = Some(log_id);
         inner.log = inner.log.split_off(&(log_id.index.saturating_add(1)));
-        self.persist_hard(&inner)
-            .map_err(|e| StorageError::from(StorageIOError::write_logs(&e)))?;
-        self.persist_log(&inner)
-            .map_err(|e| StorageError::from(StorageIOError::write_logs(&e)))?;
         Ok(())
     }
 
@@ -1294,4 +1564,144 @@ fn atomic_write_json(path: &Path, value: &impl Serialize) -> std::io::Result<()>
     }
     fs::rename(&tmp, path)?;
     Ok(())
+}
+
+#[cfg(test)]
+mod redb_store_tests {
+    use super::*;
+    use openraft::LeaderId;
+    use std::time::{SystemTime, UNIX_EPOCH};
+
+    fn temp_openraft_dir(label: &str) -> PathBuf {
+        let nanos = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let dir = std::env::temp_dir().join(format!(
+            "volant-v35-openraft-{label}-{}-{nanos}",
+            std::process::id()
+        ));
+        let _ = fs::remove_dir_all(&dir);
+        fs::create_dir_all(&dir).unwrap();
+        dir
+    }
+
+    fn sample_entry(index: u64) -> Entry<TypeConfig> {
+        Entry {
+            log_id: LogId::new(LeaderId::new(1, 1), index),
+            payload: EntryPayload::Normal(MetaRequest::Noop),
+        }
+    }
+
+    #[test]
+    fn import_legacy_json_creates_redb_and_reopen_prefers_it() {
+        let dir = temp_openraft_dir("import");
+        let vote = Vote::new(3, 1);
+        let log_id = LogId::new(LeaderId::new(3, 1), 1);
+        let entry = sample_entry(1);
+        atomic_write_json(
+            &dir.join(OPENRAFT_HARD_STATE_FILE),
+            &OpenraftHardStateFile {
+                vote: Some(vote),
+                committed: Some(log_id),
+                last_purged: None,
+            },
+        )
+        .unwrap();
+        atomic_write_json(
+            &dir.join(OPENRAFT_LOG_FILE),
+            &OpenraftLogFile {
+                entries: vec![entry.clone()],
+            },
+        )
+        .unwrap();
+
+        {
+            let store = LogStore::open(&dir);
+            assert!(
+                dir.join(OPENRAFT_REDB_FILE).is_file(),
+                "import must write raft.redb"
+            );
+            let inner = store.inner.lock();
+            assert_eq!(inner.vote, Some(vote));
+            assert_eq!(inner.committed, Some(log_id));
+            assert_eq!(inner.log.len(), 1);
+            assert_eq!(inner.log.get(&1).map(|e| e.get_log_id().index), Some(1));
+        }
+
+        // Stale JSON must not win over redb.
+        atomic_write_json(
+            &dir.join(OPENRAFT_LOG_FILE),
+            &OpenraftLogFile { entries: vec![] },
+        )
+        .unwrap();
+        atomic_write_json(
+            &dir.join(OPENRAFT_HARD_STATE_FILE),
+            &OpenraftHardStateFile::default(),
+        )
+        .unwrap();
+        let store = LogStore::open(&dir);
+        let inner = store.inner.lock();
+        assert_eq!(inner.vote, Some(vote));
+        assert_eq!(inner.committed, Some(log_id));
+        assert_eq!(inner.log.len(), 1);
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn append_truncate_purge_roundtrip_on_redb() {
+        let dir = temp_openraft_dir("mut");
+        {
+            let store = LogStore::open(&dir);
+            let mut inner = store.inner.lock();
+            let e1 = sample_entry(1);
+            let e2 = sample_entry(2);
+            let e3 = sample_entry(3);
+            inner
+                .persist_append(&[e1.clone(), e2.clone(), e3.clone()])
+                .unwrap();
+            inner.log.insert(1, e1);
+            inner.log.insert(2, e2);
+            inner.log.insert(3, e3);
+            inner.vote = Some(Vote::new(1, 1));
+            inner.persist_hard().unwrap();
+            inner.persist_truncate(3).unwrap();
+            inner.log.split_off(&3);
+            inner
+                .persist_purge(LogId::new(LeaderId::new(1, 1), 1))
+                .unwrap();
+            inner.last_purged = Some(LogId::new(LeaderId::new(1, 1), 1));
+            inner.log = inner.log.split_off(&2);
+        }
+        assert!(dir.join(OPENRAFT_REDB_FILE).is_file());
+        assert!(
+            !dir.join(OPENRAFT_LOG_FILE).exists(),
+            "v0.35 must not rewrite log.json"
+        );
+        let store = LogStore::open(&dir);
+        let inner = store.inner.lock();
+        assert_eq!(inner.vote, Some(Vote::new(1, 1)));
+        assert_eq!(inner.last_purged, Some(LogId::new(LeaderId::new(1, 1), 1)));
+        assert_eq!(inner.log.keys().copied().collect::<Vec<_>>(), vec![2]);
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn memory_only_does_not_create_redb() {
+        let dir = temp_openraft_dir("mem");
+        let store = LogStore::default();
+        {
+            let mut inner = store.inner.lock();
+            inner
+                .persist_append(&[sample_entry(1)])
+                .expect("memory persist is a no-op");
+            inner.vote = Some(Vote::new(1, 1));
+            inner.persist_hard().expect("memory persist is a no-op");
+        }
+        assert!(
+            !dir.join(OPENRAFT_REDB_FILE).exists(),
+            "memory-only LogStore must not create raft.redb"
+        );
+        let _ = fs::remove_dir_all(&dir);
+    }
 }
