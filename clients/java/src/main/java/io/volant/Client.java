@@ -35,6 +35,9 @@ import java.util.List;
  * try (Client c = Client.connectTls("127.0.0.1", 9092, TlsOptions.ca("ca.pem"))) {
  *   Metadata meta = c.metadata();
  * }
+ * // Optional shared-token Auth (v0.42):
+ * Client.connect("127.0.0.1", 9092, "s3cret");
+ * Client.connectTls("127.0.0.1", 9092, TlsOptions.ca("ca.pem"), "s3cret");
  * </pre>
  */
 public final class Client implements AutoCloseable {
@@ -47,23 +50,38 @@ public final class Client implements AutoCloseable {
     private Socket socket;
     private final int timeoutMs;
     private final boolean tls;
+    private final String authToken;
     private long nextCorr = 1;
     private byte[] buf = new byte[0];
 
-    private Client(String addr, Socket socket, int timeoutMs, boolean tls) {
+    private Client(String addr, Socket socket, int timeoutMs, boolean tls, String authToken) {
         this.addr = addr;
         this.socket = socket;
         this.timeoutMs = timeoutMs;
         this.tls = tls;
+        this.authToken = authToken;
     }
 
     /** Connect to a native Volant listener with a 10s timeout. */
     public static Client connect(String host, int port) {
-        return connect(host, port, DEFAULT_TIMEOUT_MS);
+        return connect(host, port, DEFAULT_TIMEOUT_MS, null);
     }
 
     /** Connect with an explicit dial / RPC timeout in milliseconds. */
     public static Client connect(String host, int port, int timeoutMs) {
+        return connect(host, port, timeoutMs, null);
+    }
+
+    /**
+     * Connect and send shared-token Auth when {@code authToken} is non-empty.
+     * Null or empty skips Auth (same as {@link #connect(String, int)}).
+     */
+    public static Client connect(String host, int port, String authToken) {
+        return connect(host, port, DEFAULT_TIMEOUT_MS, authToken);
+    }
+
+    /** Connect with timeout and optional shared-token Auth. */
+    public static Client connect(String host, int port, int timeoutMs, String authToken) {
         Socket s = new Socket();
         try {
             s.connect(new InetSocketAddress(host, port), timeoutMs);
@@ -77,16 +95,30 @@ public final class Client implements AutoCloseable {
             }
             throw new ProtocolException("connect failed: " + e.getMessage(), e);
         }
-        return new Client(host + ":" + port, s, timeoutMs, false);
+        Client c = new Client(host + ":" + port, s, timeoutMs, false, authToken);
+        return finishConnect(c);
     }
 
     /** Connect with TLS after TCP (v0.27). See {@link TlsOptions#ca}. */
     public static Client connectTls(String host, int port, TlsOptions tls) {
-        return connectTls(host, port, tls, DEFAULT_TIMEOUT_MS);
+        return connectTls(host, port, tls, DEFAULT_TIMEOUT_MS, null);
     }
 
     /** Connect with TLS and an explicit dial / handshake / RPC timeout. */
     public static Client connectTls(String host, int port, TlsOptions tls, int timeoutMs) {
+        return connectTls(host, port, tls, timeoutMs, null);
+    }
+
+    /**
+     * Connect with TLS and optional shared-token Auth after the handshake.
+     * Null or empty {@code authToken} skips Auth.
+     */
+    public static Client connectTls(String host, int port, TlsOptions tls, String authToken) {
+        return connectTls(host, port, tls, DEFAULT_TIMEOUT_MS, authToken);
+    }
+
+    /** Connect with TLS, timeout, and optional shared-token Auth. */
+    public static Client connectTls(String host, int port, TlsOptions tls, int timeoutMs, String authToken) {
         if (tls == null) {
             throw new IllegalArgumentException("tls options are required; use connect() for plaintext");
         }
@@ -102,7 +134,8 @@ public final class Client implements AutoCloseable {
             } catch (IOException ignored) {
                 // some SSL sockets reject this
             }
-            return new Client(host + ":" + port, wrapped, timeoutMs, true);
+            Client c = new Client(host + ":" + port, wrapped, timeoutMs, true, authToken);
+            return finishConnect(c);
         } catch (IOException | RuntimeException e) {
             try {
                 s.close();
@@ -112,7 +145,24 @@ public final class Client implements AutoCloseable {
             if (e instanceof ProtocolException) {
                 throw (ProtocolException) e;
             }
+            if (e instanceof BrokerException) {
+                throw (BrokerException) e;
+            }
             throw new ProtocolException("tls connect failed: " + e.getMessage(), e);
+        }
+    }
+
+    private static Client finishConnect(Client c) {
+        try {
+            c.maybeAuthenticate();
+            return c;
+        } catch (RuntimeException e) {
+            try {
+                c.close();
+            } catch (RuntimeException ignored) {
+                // best-effort
+            }
+            throw e;
         }
     }
 
@@ -229,6 +279,19 @@ public final class Client implements AutoCloseable {
         if (errorCode != 0) {
             throw new BrokerException(errorCode, "", op);
         }
+    }
+
+    private void maybeAuthenticate() {
+        if (authToken == null || authToken.isEmpty()) {
+            return;
+        }
+        byte[] payload = Codec.encodeAuthRequest(new Codec.AuthRequest(authToken));
+        Object decoded = roundTrip(Codec.OP_AUTH, payload);
+        if (!(decoded instanceof Codec.AuthResponse)) {
+            throw new ProtocolException("unexpected response for auth: " + typeName(decoded));
+        }
+        Codec.AuthResponse resp = (Codec.AuthResponse) decoded;
+        check(resp.errorCode, "auth");
     }
 
     /** Create a topic. Returns the broker-assigned topic id. */

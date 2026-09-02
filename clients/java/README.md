@@ -51,6 +51,9 @@ Client.connectTls(
     "127.0.0.1",
     9092,
     TlsOptions.ca("ca.pem").clientCert("client.pem", "client.key"));
+// Optional shared-token Auth (v0.42). null / empty skips Auth.
+Client.connect("127.0.0.1", 9092, "s3cret");
+Client.connectTls("127.0.0.1", 9092, TlsOptions.ca("ca.pem"), "s3cret");
 ```
 
 `produce(..., null, value)` sends a null key. `fetch` returns `List<Record>`
@@ -102,6 +105,11 @@ TLS knobs match the Rust client as closely as JDK `SSLSocket` allows:
 or PKCS#1 RSA key, both required). Handshake failures close the TCP
 socket.
 
+Shared-token Auth (v0.42): `connect(..., authToken)` /
+`connectTls(..., authToken)` send native opcode 30 after connect when
+the token is non-empty. A rejected token throws `BrokerException` with
+code 17 and closes the socket. Existing overloads are unchanged.
+
 ## Honesty
 
 `GroupConsumer` starts a background heartbeat executor after join
@@ -110,12 +118,12 @@ Pass `heartbeat=false` for the v0.33 poll-only loop. Not a fully
 concurrent API: do not share the `Client` while the consumer is open.
 
 Not implemented: `kafka-clients`, Kafka cooperative-sticky / SyncGroup,
-seeing other group members on the wire, SCRAM / shared-token
-auth, async I/O, idempotent produce, leader redirect. Local
-`assignor="range"` cannot split across live members. Sync only; one
-TCP connection; acks=1 by default. Thin `joinGroup` still sends empty
-`group_instance_id`; use `GroupConsumer.joinStatic` for static
-membership. Convenience `offsetCommit` is
+seeing other group members on the wire, SCRAM, async I/O, idempotent
+produce, leader redirect. Local `assignor="range"` cannot split across
+live members. Sync only; one TCP connection; acks=1 by default. Thin
+`joinGroup` still sends empty `group_instance_id`; use
+`GroupConsumer.joinStatic` for static membership. Convenience
+`offsetCommit` is
 admin-only (`generation=0`); `GroupConsumer.commit` sends the joined
 member+generation. TLS does not change broker TLS (Phase 8/19) and
 does not add Kafka API keys. Client private keys other than PKCS#8 /
@@ -126,5 +134,6 @@ See [docs/V23_SPEC.md](../../docs/V23_SPEC.md),
 [docs/V28_SPEC.md](../../docs/V28_SPEC.md),
 [docs/V33_SPEC.md](../../docs/V33_SPEC.md),
 [docs/V36_SPEC.md](../../docs/V36_SPEC.md),
-[docs/V37_SPEC.md](../../docs/V37_SPEC.md), and
-[docs/V41_SPEC.md](../../docs/V41_SPEC.md).
+[docs/V37_SPEC.md](../../docs/V37_SPEC.md),
+[docs/V41_SPEC.md](../../docs/V41_SPEC.md), and
+[docs/V42_SPEC.md](../../docs/V42_SPEC.md).

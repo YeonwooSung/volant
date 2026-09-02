@@ -2,7 +2,7 @@
 
 Matches `crates/volant-protocol/src/payload.rs` for the MVP opcodes:
 Produce, Fetch, CreateTopic, Metadata, DeleteTopic, OffsetCommit,
-OffsetFetch, JoinGroup, Heartbeat, LeaveGroup.
+OffsetFetch, JoinGroup, Heartbeat, LeaveGroup, Auth.
 
 Header fields are big-endian (see :mod:`volant.frame`); **payload** integers
 and length prefixes are little-endian.
@@ -26,6 +26,8 @@ OP_OFFSET_FETCH = 7
 OP_JOIN_GROUP = 8
 OP_HEARTBEAT = 9
 OP_LEAVE_GROUP = 10
+OP_AUTH = 30
+OP_AUTH_RESPONSE = 31
 OP_ERROR = 0xFFFF
 
 _NULL_LEN = 0xFFFFFFFF
@@ -408,6 +410,16 @@ class LeaveGroupRequest:
 
 @dataclass
 class LeaveGroupResponse:
+    error_code: int
+
+
+@dataclass
+class AuthRequest:
+    token: str
+
+
+@dataclass
+class AuthResponse:
     error_code: int
 
 
@@ -951,6 +963,30 @@ def decode_leave_group_response(payload: bytes) -> LeaveGroupResponse:
     return LeaveGroupResponse(error_code=r.u16_le())
 
 
+# --- auth ------------------------------------------------------------------
+
+
+def encode_auth_request(req: AuthRequest) -> bytes:
+    w = _Writer()
+    _put_string(w, req.token)
+    return w.finish()
+
+
+def decode_auth_request(payload: bytes) -> AuthRequest:
+    return AuthRequest(token=_get_string(_Reader(payload)))
+
+
+def encode_auth_response(resp: AuthResponse) -> bytes:
+    w = _Writer()
+    w.u16_le(resp.error_code)
+    return w.finish()
+
+
+def decode_auth_response(payload: bytes) -> AuthResponse:
+    r = _Reader(payload)
+    return AuthResponse(error_code=r.u16_le())
+
+
 # --- error opcode ----------------------------------------------------------
 
 
@@ -988,6 +1024,8 @@ def decode_response(opcode: int, payload: bytes):
         return decode_heartbeat_response(payload)
     if opcode == OP_LEAVE_GROUP:
         return decode_leave_group_response(payload)
+    if opcode == OP_AUTH_RESPONSE:
+        return decode_auth_response(payload)
     if opcode == OP_ERROR:
         return decode_error_response(payload)
     raise ProtocolError(f"unknown response opcode {opcode}")

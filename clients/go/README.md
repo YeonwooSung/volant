@@ -64,6 +64,9 @@ c, err = volant.DialTLS("127.0.0.1:9092", volant.TLSConfig{
     CertFile: "client.pem",
     KeyFile:  "client.key",
 })
+// Optional shared-token Auth (v0.42). Empty token skips Auth.
+c, err = volant.DialAuth("127.0.0.1:9092", "s3cret")
+c, err = volant.DialTLSAuth("127.0.0.1:9092", volant.TLSConfig{CAFile: "ca.pem"}, "s3cret")
 ```
 
 `Produce(..., nil, value)` sends a null key. `Fetch` returns `[]Record`
@@ -117,6 +120,11 @@ is a PEM added to the system trust store; `Insecure` skips verify
 (tests / lab only); `CertFile` + `KeyFile` are optional mTLS PEMs and
 must be paired. Handshake failures close the TCP socket.
 
+Shared-token Auth (v0.42): `DialAuth` / `DialTLSAuth` send native
+opcode 30 after connect when the token is non-empty. A rejected token
+returns `BrokerError` with code 17 and closes the socket. `Dial` /
+`DialTLS` are unchanged.
+
 ## Honesty
 
 `JoinGroupConsumer` starts a background heartbeat goroutine after
@@ -126,13 +134,12 @@ Not a fully concurrent API: do not share the `Client` while the
 consumer is open.
 
 Not implemented: `kafka-go`, Kafka cooperative-sticky / SyncGroup,
-seeing other group members on the wire, SCRAM / shared-token auth,
-async I/O, idempotent produce, leader redirect. Local
-`WithAssignor("range")` cannot split across live members. Thin
-`Client.JoinGroup` still sends empty `group_instance_id`; use
-`JoinGroupConsumerStatic` for static membership. Thin `OffsetCommit`
-is still the admin path (empty member, generation 0);
-`GroupConsumer.Commit` sends member+generation.
+seeing other group members on the wire, SCRAM, async I/O, idempotent
+produce, leader redirect. Local `WithAssignor("range")` cannot split
+across live members. Thin `Client.JoinGroup` still sends empty
+`group_instance_id`; use `JoinGroupConsumerStatic` for static
+membership. Thin `OffsetCommit` is still the admin path (empty member,
+generation 0); `GroupConsumer.Commit` sends member+generation.
 Sync only; one TCP connection; acks=1 by default. TLS
 does not change broker TLS (Phase 8/19) and does not add Kafka API keys.
 
@@ -142,5 +149,6 @@ See [docs/V19_SPEC.md](../../docs/V19_SPEC.md),
 [docs/V28_SPEC.md](../../docs/V28_SPEC.md),
 [docs/V32_SPEC.md](../../docs/V32_SPEC.md),
 [docs/V36_SPEC.md](../../docs/V36_SPEC.md),
-[docs/V37_SPEC.md](../../docs/V37_SPEC.md), and
-[docs/V41_SPEC.md](../../docs/V41_SPEC.md).
+[docs/V37_SPEC.md](../../docs/V37_SPEC.md),
+[docs/V41_SPEC.md](../../docs/V41_SPEC.md), and
+[docs/V42_SPEC.md](../../docs/V42_SPEC.md).

@@ -53,12 +53,13 @@ type JoinGroupResult struct {
 
 // Client is a sync TCP client for the native Volant protocol (MVP).
 type Client struct {
-	addr     string
-	conn     net.Conn
-	timeout  time.Duration
-	nextCorr uint32
-	buf      []byte
-	tls      bool
+	addr      string
+	conn      net.Conn
+	timeout   time.Duration
+	nextCorr  uint32
+	buf       []byte
+	tls       bool
+	authToken string
 }
 
 // TLSConfig is optional TLS for [DialTLS]. Zero value uses system roots
@@ -86,16 +87,31 @@ func Dial(addr string) (*Client, error) {
 
 // DialTimeout connects with an explicit dial / RPC timeout.
 func DialTimeout(addr string, timeout time.Duration) (*Client, error) {
+	return dialPlain(addr, timeout, "")
+}
+
+// DialAuth is [Dial] plus a shared-token Auth (opcode 30) after connect.
+// An empty token skips Auth (same as [Dial]).
+func DialAuth(addr, token string) (*Client, error) {
+	return dialPlain(addr, defaultTimeout, token)
+}
+
+func dialPlain(addr string, timeout time.Duration, token string) (*Client, error) {
 	conn, err := net.DialTimeout("tcp", addr, timeout)
 	if err != nil {
 		return nil, err
 	}
-	return &Client{
-		addr:     addr,
-		conn:     conn,
-		timeout:  timeout,
-		nextCorr: 1,
-	}, nil
+	c := &Client{
+		addr:      addr,
+		conn:      conn,
+		timeout:   timeout,
+		nextCorr:  1,
+		authToken: token,
+	}
+	if err := c.maybeAuthenticate(); err != nil {
+		return nil, err
+	}
+	return c, nil
 }
 
 // DialTLS connects with TLS after TCP (v0.27). Example:
@@ -107,6 +123,16 @@ func DialTLS(addr string, cfg TLSConfig) (*Client, error) {
 
 // DialTLSTimeout is [DialTLS] with an explicit dial / handshake / RPC timeout.
 func DialTLSTimeout(addr string, cfg TLSConfig, timeout time.Duration) (*Client, error) {
+	return dialTLS(addr, cfg, timeout, "")
+}
+
+// DialTLSAuth is [DialTLS] plus a shared-token Auth after the TLS handshake.
+// An empty token skips Auth (same as [DialTLS]).
+func DialTLSAuth(addr string, cfg TLSConfig, token string) (*Client, error) {
+	return dialTLS(addr, cfg, defaultTimeout, token)
+}
+
+func dialTLS(addr string, cfg TLSConfig, timeout time.Duration, token string) (*Client, error) {
 	if (cfg.CertFile == "") != (cfg.KeyFile == "") {
 		return nil, fmt.Errorf("tls_cert and tls_key must both be set or both unset")
 	}
@@ -125,13 +151,18 @@ func DialTLSTimeout(addr string, cfg TLSConfig, timeout time.Duration) (*Client,
 	if timeout > 0 {
 		_ = tlsConn.SetDeadline(time.Time{})
 	}
-	return &Client{
-		addr:     addr,
-		conn:     tlsConn,
-		timeout:  timeout,
-		nextCorr: 1,
-		tls:      true,
-	}, nil
+	c := &Client{
+		addr:      addr,
+		conn:      tlsConn,
+		timeout:   timeout,
+		nextCorr:  1,
+		tls:       true,
+		authToken: token,
+	}
+	if err := c.maybeAuthenticate(); err != nil {
+		return nil, err
+	}
+	return c, nil
 }
 
 // TLS reports whether the connection is TLS-wrapped.
@@ -303,6 +334,33 @@ func check(errorCode uint16, op string) error {
 		return &codec.BrokerError{Code: errorCode, Op: op}
 	}
 	return nil
+}
+
+func (c *Client) maybeAuthenticate() error {
+	if c.authToken == "" {
+		return nil
+	}
+	if err := c.authenticate(c.authToken); err != nil {
+		_ = c.Close()
+		return err
+	}
+	return nil
+}
+
+func (c *Client) authenticate(token string) error {
+	payload, err := codec.EncodeAuthRequest(codec.AuthRequest{Token: token})
+	if err != nil {
+		return err
+	}
+	decoded, err := c.roundTrip(codec.OpAuth, payload)
+	if err != nil {
+		return err
+	}
+	resp, ok := decoded.(codec.AuthResponse)
+	if !ok {
+		return &frame.ProtocolError{Msg: fmt.Sprintf("unexpected response for auth: %T", decoded)}
+	}
+	return check(resp.ErrorCode, "auth")
 }
 
 // CreateTopic creates a topic with the given partition count.

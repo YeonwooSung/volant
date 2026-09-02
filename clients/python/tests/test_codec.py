@@ -6,6 +6,8 @@ import unittest
 
 from volant.codec import (
     Assignment,
+    AuthRequest,
+    AuthResponse,
     BrokerInfo,
     CreateTopicRequest,
     CreateTopicResponse,
@@ -34,6 +36,8 @@ from volant.codec import (
     ProduceRequest,
     ProduceResponse,
     TopicInfo,
+    decode_auth_request,
+    decode_auth_response,
     decode_create_topic_request,
     decode_create_topic_response,
     decode_delete_topic_request,
@@ -55,6 +59,8 @@ from volant.codec import (
     decode_produce_request,
     decode_produce_response,
     decode_response,
+    encode_auth_request,
+    encode_auth_response,
     encode_create_topic_request,
     encode_create_topic_response,
     encode_delete_topic_request,
@@ -75,6 +81,7 @@ from volant.codec import (
     encode_offset_fetch_response,
     encode_produce_request,
     encode_produce_response,
+    OP_AUTH_RESPONSE,
     OP_HEARTBEAT,
     OP_JOIN_GROUP,
     OP_LEAVE_GROUP,
@@ -593,6 +600,28 @@ class TestGroupCodec(unittest.TestCase):
         self.assertEqual(raw, bytes.fromhex("0000"))
         self.assertEqual(decode_leave_group_response(raw), resp)
         self.assertEqual(decode_response(OP_LEAVE_GROUP, raw), resp)
+
+
+class TestAuthCodec(unittest.TestCase):
+    def test_auth_request_s3cret(self) -> None:
+        req = AuthRequest(token="s3cret")
+        raw = encode_auth_request(req)
+        expected = bytes.fromhex("0600733363726574")
+        self.assertEqual(_hx(raw), _hx(expected))
+        self.assertEqual(decode_auth_request(raw), req)
+
+    def test_auth_response_ok_and_failed(self) -> None:
+        ok = AuthResponse(error_code=0)
+        raw = encode_auth_response(ok)
+        self.assertEqual(raw, bytes.fromhex("0000"))
+        self.assertEqual(decode_auth_response(raw), ok)
+        self.assertEqual(decode_response(OP_AUTH_RESPONSE, raw), ok)
+
+        fail = AuthResponse(error_code=17)
+        raw = encode_auth_response(fail)
+        self.assertEqual(raw, bytes.fromhex("1100"))
+        self.assertEqual(decode_auth_response(raw), fail)
+        self.assertEqual(decode_response(OP_AUTH_RESPONSE, raw), fail)
 
 
 if __name__ == "__main__":

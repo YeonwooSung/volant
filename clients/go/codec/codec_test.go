@@ -847,3 +847,68 @@ func TestLeaveGroupResponse(t *testing.T) {
 		t.Fatalf("dispatch %#v", got)
 	}
 }
+
+func TestAuthRequestS3cret(t *testing.T) {
+	req := AuthRequest{Token: "s3cret"}
+	raw, err := EncodeAuthRequest(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	expected := mustHex(t, "0600733363726574")
+	if !bytes.Equal(raw, expected) {
+		t.Fatalf("encode:\n got %x\nwant %x", raw, expected)
+	}
+	decoded, err := DecodeAuthRequest(raw)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if decoded != req {
+		t.Fatalf("decoded %+v", decoded)
+	}
+}
+
+func TestAuthResponseOkAndFailed(t *testing.T) {
+	okRaw, err := EncodeAuthResponse(AuthResponse{ErrorCode: 0})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.Equal(okRaw, mustHex(t, "0000")) {
+		t.Fatalf("ok raw %x", okRaw)
+	}
+	ok, err := DecodeAuthResponse(okRaw)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if ok.ErrorCode != 0 {
+		t.Fatalf("ok %+v", ok)
+	}
+	got, err := DecodeResponse(OpAuthResponse, okRaw)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if ar, ok := got.(AuthResponse); !ok || ar.ErrorCode != 0 {
+		t.Fatalf("dispatch ok %#v", got)
+	}
+
+	failRaw, err := EncodeAuthResponse(AuthResponse{ErrorCode: 17})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.Equal(failRaw, mustHex(t, "1100")) {
+		t.Fatalf("fail raw %x", failRaw)
+	}
+	fail, err := DecodeAuthResponse(failRaw)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if fail.ErrorCode != 17 {
+		t.Fatalf("fail %+v", fail)
+	}
+	got, err = DecodeResponse(OpAuthResponse, failRaw)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if ar, ok := got.(AuthResponse); !ok || ar.ErrorCode != 17 {
+		t.Fatalf("dispatch fail %#v", got)
+	}
+}

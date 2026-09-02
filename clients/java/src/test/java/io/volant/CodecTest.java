@@ -564,4 +564,29 @@ class CodecTest {
         Codec.LeaveGroupResponse lr = assertInstanceOf(Codec.LeaveGroupResponse.class, got);
         assertEquals(0, lr.errorCode);
     }
+
+    @Test
+    void authRequestS3cret() {
+        byte[] raw = Codec.encodeAuthRequest(new Codec.AuthRequest("s3cret"));
+        assertArrayEquals(hx("0600733363726574"), raw);
+        Codec.AuthRequest decoded = Codec.decodeAuthRequest(raw);
+        assertEquals("s3cret", decoded.token);
+    }
+
+    @Test
+    void authResponseOkAndFailed() {
+        byte[] ok = Codec.encodeAuthResponse(new Codec.AuthResponse(0));
+        assertArrayEquals(hx("0000"), ok);
+        assertEquals(0, Codec.decodeAuthResponse(ok).errorCode);
+        Codec.AuthResponse dispatchedOk =
+                assertInstanceOf(Codec.AuthResponse.class, Codec.decodeResponse(Codec.OP_AUTH_RESPONSE, ok));
+        assertEquals(0, dispatchedOk.errorCode);
+
+        byte[] fail = Codec.encodeAuthResponse(new Codec.AuthResponse(17));
+        assertArrayEquals(hx("1100"), fail);
+        assertEquals(17, Codec.decodeAuthResponse(fail).errorCode);
+        Codec.AuthResponse dispatchedFail =
+                assertInstanceOf(Codec.AuthResponse.class, Codec.decodeResponse(Codec.OP_AUTH_RESPONSE, fail));
+        assertEquals(17, dispatchedFail.errorCode);
+    }
 }

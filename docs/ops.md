@@ -95,6 +95,9 @@ JSON fields include timestamp, level, target, message, and active span fields
 1. Start server with `VOLANT_AUTH_TOKEN=s3cret` (or `--auth-token s3cret`).
 2. Clients set `ClientConfig.auth_token = Some("s3cret".into())` — Auth is sent on connect.
    CLI: `volant --auth-token s3cret …` or `VOLANT_AUTH_TOKEN`.
+   Language clients (v0.42): Python `Client(..., auth_token="s3cret")`,
+   Go `DialAuth` / `DialTLSAuth`, Java `connect(..., authToken)` /
+   `connectTls(..., authToken)`. Empty / unset token skips Auth.
 3. Wrong token → error **17** `AuthenticationFailed`.
 4. Other opcodes before Auth → error **18** `AuthenticationRequired`.
 5. When the token is **unset**, auth is disabled (Auth is a no-op success).

@@ -58,6 +58,9 @@ c = Client(
     tls_cert="client.pem",
     tls_key="client.key",
 )
+# Optional shared-token Auth (v0.42). Empty / unset skips Auth.
+c = Client("127.0.0.1:9092", auth_token="s3cret")
+c = Client("127.0.0.1:9092", tls=True, tls_ca="ca.pem", auth_token="s3cret")
 ```
 
 `Client` is also a context manager. `produce(..., key=b"...")` is supported;
@@ -114,6 +117,10 @@ trust store), `tls_insecure` (skip verify; tests / lab only), optional
 `tls_cert` + `tls_key` for mTLS. `tls_cert` and `tls_key` must both be
 set or both unset. Handshake failures close the TCP socket.
 
+Shared-token Auth (v0.42) sends native opcode 30 after connect (and
+TLS, if any) when `auth_token` is a non-empty string. A rejected token
+raises `BrokerError` with code 17 and closes the socket.
+
 ## Honesty
 
 `GroupConsumer` starts a background heartbeat thread after join
@@ -122,11 +129,11 @@ Pass `heartbeat=False` for the v0.31 poll-only loop. Not a fully
 concurrent API: do not share the `Client` while the consumer is open.
 
 Not implemented: `kafka-python`, Kafka cooperative-sticky / SyncGroup,
-seeing other group members on the wire, SCRAM / shared-token auth,
-async I/O, idempotent produce, leader redirect, auto-commit. Local
-`assignor="range"` cannot split across live members. Thin `join_group`
-still defaults to empty `group_instance_id` unless the caller (or
-`GroupConsumer.join`) passes one. Offset commit/fetch is the
+seeing other group members on the wire, SCRAM, async I/O, idempotent
+produce, leader redirect, auto-commit. Local `assignor="range"` cannot
+split across live members. Thin `join_group` still defaults to empty
+`group_instance_id` unless the caller (or `GroupConsumer.join`) passes
+one. Offset commit/fetch is the
 admin path only (empty member, generation 0) unless the caller (or
 `GroupConsumer.commit`) passes a joined `member_id` / `generation`.
 Sync only; one TCP connection; acks=1 by default. TLS does not change
@@ -138,5 +145,6 @@ See [docs/V14_SPEC.md](../../docs/V14_SPEC.md),
 [docs/V28_SPEC.md](../../docs/V28_SPEC.md),
 [docs/V31_SPEC.md](../../docs/V31_SPEC.md),
 [docs/V36_SPEC.md](../../docs/V36_SPEC.md),
-[docs/V37_SPEC.md](../../docs/V37_SPEC.md), and
-[docs/V41_SPEC.md](../../docs/V41_SPEC.md).
+[docs/V37_SPEC.md](../../docs/V37_SPEC.md),
+[docs/V41_SPEC.md](../../docs/V41_SPEC.md), and
+[docs/V42_SPEC.md](../../docs/V42_SPEC.md).
