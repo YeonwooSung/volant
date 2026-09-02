@@ -38,11 +38,11 @@ impl Broker {
         }
         let topic_cfg = TopicConfig::from_entries(config_entries)?;
 
-        if let Some(cluster) = &self.cluster {
-            if !cluster.membership.read().is_controller() {
+        if self.cluster.is_some() {
+            if !self.is_controller() {
                 return Err(Error::InvalidArgument(format!(
                     "not controller; controller_id={}",
-                    cluster.membership.read().controller_id()
+                    self.controller_id()
                 )));
             }
             return self.create_topic_cluster(name, partitions, &topic_cfg, None);
@@ -93,11 +93,11 @@ impl Broker {
             ));
         }
         let topic_cfg = TopicConfig::default();
-        if let Some(cluster) = &self.cluster {
-            if !cluster.membership.read().is_controller() {
+        if self.cluster.is_some() {
+            if !self.is_controller() {
                 return Err(Error::InvalidArgument(format!(
                     "not controller; controller_id={}",
-                    cluster.membership.read().controller_id()
+                    self.controller_id()
                 )));
             }
             return self.create_topic_cluster(name, partitions, &topic_cfg, Some(rf));
@@ -255,11 +255,11 @@ impl Broker {
         }
         let name = TopicName::new(topic);
 
-        if let Some(cluster) = &self.cluster {
-            if !cluster.membership.read().is_controller() {
+        if self.cluster.is_some() {
+            if !self.is_controller() {
                 return Err(Error::InvalidArgument(format!(
                     "not controller; controller_id={}",
-                    cluster.membership.read().controller_id()
+                    self.controller_id()
                 )));
             }
             return self.create_partitions_cluster(name, total_count);

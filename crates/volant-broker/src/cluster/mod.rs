@@ -32,7 +32,8 @@ pub use metadata_raft::{
     METADATA_RAFT_HARD_STATE_FILE, METADATA_RAFT_LOG_FILE,
 };
 pub use openraft_meta::{
-    default_openraft_metadata_enabled, OpenraftGuard, OpenraftMetaHandle, OpenraftMetricsCache,
+    default_openraft_metadata_enabled, MetaRequest, MetaResponse, OpenraftGuard, OpenraftMetaHandle,
+    OpenraftMetricsCache,
 };
 pub use overlay::{
     load_membership_overlay, membership_overlay_path, save_membership_overlay,
