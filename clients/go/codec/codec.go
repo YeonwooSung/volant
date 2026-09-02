@@ -2,7 +2,7 @@
 //
 // Matches crates/volant-protocol/src/payload.rs for Produce, Fetch,
 // CreateTopic, Metadata, DeleteTopic, OffsetCommit, OffsetFetch,
-// JoinGroup, Heartbeat, and LeaveGroup.
+// JoinGroup, Heartbeat, LeaveGroup, and Auth.
 // Frame headers are big-endian (see package frame); payload integers and
 // length prefixes are little-endian.
 package codec
@@ -25,6 +25,8 @@ const (
 	OpJoinGroup    uint16 = 8
 	OpHeartbeat    uint16 = 9
 	OpLeaveGroup   uint16 = 10
+	OpAuth         uint16 = 30
+	OpAuthResponse uint16 = 31
 	OpError        uint16 = 0xFFFF
 
 	nullLen = 0xFFFFFFFF
@@ -461,6 +463,16 @@ type LeaveGroupRequest struct {
 
 // LeaveGroupResponse is the LeaveGroup opcode reply.
 type LeaveGroupResponse struct {
+	ErrorCode uint16
+}
+
+// AuthRequest is the Auth opcode (30) body: one put_string token.
+type AuthRequest struct {
+	Token string
+}
+
+// AuthResponse is the Auth reply (opcode 31).
+type AuthResponse struct {
 	ErrorCode uint16
 }
 
@@ -1430,6 +1442,37 @@ func DecodeLeaveGroupResponse(payload []byte) (LeaveGroupResponse, error) {
 	return LeaveGroupResponse{ErrorCode: code}, nil
 }
 
+func EncodeAuthRequest(req AuthRequest) ([]byte, error) {
+	w := &writer{}
+	if err := putString(w, req.Token); err != nil {
+		return nil, err
+	}
+	return w.buf, nil
+}
+
+func DecodeAuthRequest(payload []byte) (AuthRequest, error) {
+	token, err := getString(&reader{data: payload})
+	if err != nil {
+		return AuthRequest{}, err
+	}
+	return AuthRequest{Token: token}, nil
+}
+
+func EncodeAuthResponse(resp AuthResponse) ([]byte, error) {
+	w := &writer{}
+	w.u16(resp.ErrorCode)
+	return w.buf, nil
+}
+
+func DecodeAuthResponse(payload []byte) (AuthResponse, error) {
+	r := &reader{data: payload}
+	code, err := r.u16()
+	if err != nil {
+		return AuthResponse{}, err
+	}
+	return AuthResponse{ErrorCode: code}, nil
+}
+
 func EncodeErrorResponse(resp ErrorResponse) ([]byte, error) {
 	w := &writer{}
 	w.u16(resp.Code)
@@ -1475,6 +1518,8 @@ func DecodeResponse(opcode uint16, payload []byte) (any, error) {
 		return DecodeHeartbeatResponse(payload)
 	case OpLeaveGroup:
 		return DecodeLeaveGroupResponse(payload)
+	case OpAuthResponse:
+		return DecodeAuthResponse(payload)
 	case OpError:
 		return DecodeErrorResponse(payload)
 	default:

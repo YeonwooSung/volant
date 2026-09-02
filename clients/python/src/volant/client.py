@@ -162,6 +162,12 @@ class Client:
     Optional TLS (v0.27) wraps the socket after TCP connect::
 
         c = Client("127.0.0.1:9092", tls=True, tls_ca="ca.pem")
+
+    Optional shared-token Auth (v0.42) is sent once after TCP (and TLS,
+    if any) when ``auth_token`` is a non-empty string::
+
+        c = Client("127.0.0.1:9092", auth_token="s3cret")
+        c = Client("127.0.0.1:9092", tls=True, tls_ca="ca.pem", auth_token="s3cret")
     """
 
     def __init__(
@@ -174,6 +180,7 @@ class Client:
         tls_ca: Optional[str] = None,
         tls_cert: Optional[str] = None,
         tls_key: Optional[str] = None,
+        auth_token: Optional[str] = None,
     ) -> None:
         host, port = _parse_addr(addr)
         self.addr = f"{host}:{port}"
@@ -203,6 +210,13 @@ class Client:
         self._sock.settimeout(timeout)
         self._next_corr = 1
         self._buf = bytearray()
+        self.auth_token = auth_token or None
+        if self.auth_token:
+            try:
+                self._authenticate(self.auth_token)
+            except Exception:
+                self.close()
+                raise
 
     def close(self) -> None:
         sock = getattr(self, "_sock", None)
@@ -269,6 +283,13 @@ class Client:
     def _check(self, error_code: int, op: str) -> None:
         if error_code != 0:
             raise BrokerError(error_code, op=op)
+
+    def _authenticate(self, token: str) -> None:
+        payload = codec.encode_auth_request(codec.AuthRequest(token=token))
+        resp = self._round_trip(codec.OP_AUTH, payload)
+        if not isinstance(resp, codec.AuthResponse):
+            raise ProtocolError(f"unexpected response for auth: {type(resp)}")
+        self._check(resp.error_code, "auth")
 
     def create_topic(
         self,

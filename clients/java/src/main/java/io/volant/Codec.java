@@ -10,7 +10,7 @@ import java.util.List;
  *
  * <p>Matches {@code crates/volant-protocol/src/payload.rs} for the MVP opcodes:
  * Produce, Fetch, CreateTopic, Metadata, DeleteTopic, OffsetCommit,
- * OffsetFetch, JoinGroup, Heartbeat, LeaveGroup.
+ * OffsetFetch, JoinGroup, Heartbeat, LeaveGroup, Auth.
  *
  * <p>Header fields are big-endian (see {@link Frame}); <strong>payload</strong>
  * integers and length prefixes are little-endian.
@@ -26,6 +26,8 @@ public final class Codec {
     public static final int OP_JOIN_GROUP = 8;
     public static final int OP_HEARTBEAT = 9;
     public static final int OP_LEAVE_GROUP = 10;
+    public static final int OP_AUTH = 30;
+    public static final int OP_AUTH_RESPONSE = 31;
     public static final int OP_ERROR = 0xFFFF;
 
     static final long NULL_LEN = 0xFFFFFFFFL;
@@ -387,6 +389,22 @@ public final class Codec {
         public final int errorCode;
 
         public LeaveGroupResponse(int errorCode) {
+            this.errorCode = errorCode;
+        }
+    }
+
+    public static final class AuthRequest {
+        public final String token;
+
+        public AuthRequest(String token) {
+            this.token = token == null ? "" : token;
+        }
+    }
+
+    public static final class AuthResponse {
+        public final int errorCode;
+
+        public AuthResponse(int errorCode) {
             this.errorCode = errorCode;
         }
     }
@@ -1102,6 +1120,26 @@ public final class Codec {
         return new LeaveGroupResponse(new Reader(payload).u16());
     }
 
+    public static byte[] encodeAuthRequest(AuthRequest req) {
+        Writer w = new Writer();
+        putString(w, req.token);
+        return w.finish();
+    }
+
+    public static AuthRequest decodeAuthRequest(byte[] payload) {
+        return new AuthRequest(getString(new Reader(payload)));
+    }
+
+    public static byte[] encodeAuthResponse(AuthResponse resp) {
+        Writer w = new Writer();
+        w.u16(resp.errorCode);
+        return w.finish();
+    }
+
+    public static AuthResponse decodeAuthResponse(byte[] payload) {
+        return new AuthResponse(new Reader(payload).u16());
+    }
+
     // --- error opcode ------------------------------------------------------
 
     public static byte[] encodeErrorResponse(ErrorResponse resp) {
@@ -1139,6 +1177,8 @@ public final class Codec {
                 return decodeHeartbeatResponse(payload);
             case OP_LEAVE_GROUP:
                 return decodeLeaveGroupResponse(payload);
+            case OP_AUTH_RESPONSE:
+                return decodeAuthResponse(payload);
             case OP_ERROR:
                 return decodeErrorResponse(payload);
             default:

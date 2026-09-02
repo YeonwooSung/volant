@@ -54,6 +54,9 @@ c = Client(
     tls_cert="client.pem",
     tls_key="client.key",
 )
+# Optional shared-token Auth (v0.42). Empty / unset skips Auth.
+c = Client("127.0.0.1:9092", auth_token="s3cret")
+c = Client("127.0.0.1:9092", tls=True, tls_ca="ca.pem", auth_token="s3cret")
 ```
 
 `Client` is also a context manager. `produce(..., key=b"...")` is supported;
@@ -103,10 +106,14 @@ trust store), `tls_insecure` (skip verify; tests / lab only), optional
 `tls_cert` + `tls_key` for mTLS. `tls_cert` and `tls_key` must both be
 set or both unset. Handshake failures close the TCP socket.
 
+Shared-token Auth (v0.42) sends native opcode 30 after connect (and
+TLS, if any) when `auth_token` is a non-empty string. A rejected token
+raises `BrokerError` with code 17 and closes the socket.
+
 ## Honesty
 
-Not implemented: `kafka-python`, client-side assignor, SCRAM /
-shared-token auth, async I/O, idempotent produce, leader redirect,
+Not implemented: `kafka-python`, client-side assignor, SCRAM, async
+I/O, idempotent produce, leader redirect,
 background heartbeat thread, auto-commit. Offset commit/fetch is the
 admin path only (empty member, generation 0) unless the caller (or
 `GroupConsumer.commit`) passes a joined `member_id` / `generation`.
@@ -116,5 +123,6 @@ broker TLS (Phase 8/19) and does not add Kafka API keys.
 See [docs/V14_SPEC.md](../../docs/V14_SPEC.md),
 [docs/V24_SPEC.md](../../docs/V24_SPEC.md),
 [docs/V27_SPEC.md](../../docs/V27_SPEC.md),
-[docs/V28_SPEC.md](../../docs/V28_SPEC.md), and
-[docs/V31_SPEC.md](../../docs/V31_SPEC.md).
+[docs/V28_SPEC.md](../../docs/V28_SPEC.md),
+[docs/V31_SPEC.md](../../docs/V31_SPEC.md), and
+[docs/V42_SPEC.md](../../docs/V42_SPEC.md).

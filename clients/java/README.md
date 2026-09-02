@@ -49,6 +49,9 @@ Client.connectTls(
     "127.0.0.1",
     9092,
     TlsOptions.ca("ca.pem").clientCert("client.pem", "client.key"));
+// Optional shared-token Auth (v0.42). null / empty skips Auth.
+Client.connect("127.0.0.1", 9092, "s3cret");
+Client.connectTls("127.0.0.1", 9092, TlsOptions.ca("ca.pem"), "s3cret");
 ```
 
 `produce(..., null, value)` sends a null key. `fetch` returns `List<Record>`
@@ -94,11 +97,16 @@ TLS knobs match the Rust client as closely as JDK `SSLSocket` allows:
 or PKCS#1 RSA key, both required). Handshake failures close the TCP
 socket.
 
+Shared-token Auth (v0.42): `connect(..., authToken)` /
+`connectTls(..., authToken)` send native opcode 30 after connect when
+the token is non-empty. A rejected token throws `BrokerException` with
+code 17 and closes the socket. Existing overloads are unchanged.
+
 ## Honesty
 
 Not implemented: `kafka-clients`, cooperative assignor client logic
-beyond sticky position retain, static membership, SCRAM / shared-token
-auth, async I/O, idempotent produce, leader redirect. Sync only; one
+beyond sticky position retain, static membership, SCRAM, async I/O,
+idempotent produce, leader redirect. Sync only; one
 TCP connection; acks=1 by default. Convenience `offsetCommit` is
 admin-only (`generation=0`); `GroupConsumer.commit` sends the joined
 member+generation. TLS does not change broker TLS (Phase 8/19) and
@@ -107,5 +115,6 @@ RSA PKCS#1 PEM are not loaded.
 
 See [docs/V23_SPEC.md](../../docs/V23_SPEC.md),
 [docs/V27_SPEC.md](../../docs/V27_SPEC.md),
-[docs/V28_SPEC.md](../../docs/V28_SPEC.md), and
-[docs/V33_SPEC.md](../../docs/V33_SPEC.md).
+[docs/V28_SPEC.md](../../docs/V28_SPEC.md),
+[docs/V33_SPEC.md](../../docs/V33_SPEC.md), and
+[docs/V42_SPEC.md](../../docs/V42_SPEC.md).
