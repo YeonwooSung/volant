@@ -1332,6 +1332,9 @@ class ClientTest {
         final List<int[]> describeConfigsReplies = new CopyOnWriteArrayList<>();
         final List<String> describeConfigsMessages = new CopyOnWriteArrayList<>();
         final List<Integer> alterConfigsCodes = new CopyOnWriteArrayList<>();
+        final List<int[]> deleteOffsetsReplies = new CopyOnWriteArrayList<>();
+        final List<String> deleteOffsetsMessages = new CopyOnWriteArrayList<>();
+        final List<Integer> deleteOffsetsCodes = new CopyOnWriteArrayList<>();
         volatile Metadata meta = new Metadata(Collections.emptyList(), Collections.emptyList());
         final AtomicInteger createTopicCount = new AtomicInteger();
         final AtomicInteger createPartitionsCount = new AtomicInteger();
@@ -1345,6 +1348,7 @@ class ClientTest {
         final AtomicInteger removeBrokerCount = new AtomicInteger();
         final AtomicInteger describeConfigsCount = new AtomicInteger();
         final AtomicInteger alterConfigsCount = new AtomicInteger();
+        final AtomicInteger deleteOffsetsCount = new AtomicInteger();
         final AtomicInteger metadataCount = new AtomicInteger();
         final AtomicInteger listMembersCount = new AtomicInteger();
         final AtomicInteger acceptCount = new AtomicInteger();
@@ -1417,6 +1421,16 @@ class ClientTest {
         void queueDescribeConfigsOk() {
             describeConfigsReplies.add(new int[] {0, 0});
             describeConfigsMessages.add("");
+        }
+
+        void queueDeleteOffsetsError(int code, String message) {
+            deleteOffsetsReplies.add(new int[] {code, 1});
+            deleteOffsetsMessages.add(message);
+        }
+
+        void queueDeleteOffsetsOk() {
+            deleteOffsetsReplies.add(new int[] {0, 0});
+            deleteOffsetsMessages.add("");
         }
 
         private void serve(Socket conn) {
@@ -1592,6 +1606,27 @@ class ClientTest {
                 int code = alterConfigsCodes.isEmpty() ? 0 : alterConfigsCodes.remove(0);
                 replyOp[0] = Codec.OP_ALTER_CONFIGS_RESPONSE;
                 return Codec.encodeAlterConfigsResponse(new Codec.AlterConfigsResponse(code, req.topic));
+            }
+            if (frame.opcode == Codec.OP_DELETE_OFFSETS) {
+                deleteOffsetsCount.incrementAndGet();
+                int code = 0;
+                boolean asError = false;
+                String message = "";
+                if (!deleteOffsetsReplies.isEmpty()) {
+                    int[] spec = deleteOffsetsReplies.remove(0);
+                    code = spec[0];
+                    asError = spec[1] != 0;
+                    message = deleteOffsetsMessages.isEmpty() ? "" : deleteOffsetsMessages.remove(0);
+                } else if (!deleteOffsetsCodes.isEmpty()) {
+                    code = deleteOffsetsCodes.remove(0);
+                }
+                if (asError) {
+                    replyOp[0] = Codec.OP_ERROR;
+                    return Codec.encodeErrorResponse(new Codec.ErrorResponse(code, message));
+                }
+                replyOp[0] = Codec.OP_DELETE_OFFSETS_RESPONSE;
+                return Codec.encodeDeleteOffsetsResponse(
+                        new Codec.DeleteOffsetsResponse(code, code == 0 ? 3 : 0));
             }
             if (frame.opcode == Codec.OP_METADATA) {
                 metadataCount.incrementAndGet();
@@ -1983,6 +2018,59 @@ class ClientTest {
                 assertEquals(NOT_CONTROLLER, ex.code);
             }
             assertEquals(1, follower.describeConfigsCount.get());
+            assertEquals(0, follower.metadataCount.get());
+            assertEquals(1, follower.acceptCount.get());
+        }
+    }
+
+    @Test
+    void deleteOffsetsError14RedirectsViaControllerId() throws Exception {
+        try (AdminBroker leader = AdminBroker.start();
+                AdminBroker follower = AdminBroker.start()) {
+            follower.queueDeleteOffsetsError(NOT_CONTROLLER, "not controller; controller_id=2");
+            follower.meta = controllerMeta(2, "127.0.0.1", leader.port);
+            leader.queueDeleteOffsetsOk();
+            try (Client c = Client.connect("127.0.0.1", follower.port, 5_000)) {
+                int got = c.deleteOffsets("g");
+                assertEquals(3, got);
+                assertEquals(leader.port, Integer.parseInt(c.addr().substring(c.addr().indexOf(':') + 1)));
+            }
+            assertEquals(1, follower.deleteOffsetsCount.get());
+            assertEquals(1, follower.metadataCount.get());
+            assertEquals(1, leader.deleteOffsetsCount.get());
+        }
+    }
+
+    @Test
+    void deleteOffsetsTyped14NoHintThenOk() throws Exception {
+        try (AdminBroker leader = AdminBroker.start();
+                AdminBroker follower = AdminBroker.start()) {
+            follower.deleteOffsetsCodes.add(NOT_CONTROLLER);
+            follower.meta = otherBrokerMeta(follower.port, "127.0.0.1", leader.port);
+            try (Client c = Client.connect("127.0.0.1", follower.port, 5_000)) {
+                int got = c.deleteOffsets(
+                        "g", Collections.singletonList(new Codec.OffsetEntry("events", 0)));
+                assertEquals(3, got);
+                assertEquals(leader.port, Integer.parseInt(c.addr().substring(c.addr().indexOf(':') + 1)));
+            }
+            assertEquals(1, follower.deleteOffsetsCount.get());
+            assertEquals(1, follower.metadataCount.get());
+            assertEquals(1, leader.deleteOffsetsCount.get());
+        }
+    }
+
+    @Test
+    void deleteOffsetsMaxRedirectsZeroRaisesOnFirst14() throws Exception {
+        try (AdminBroker follower = AdminBroker.start()) {
+            follower.queueDeleteOffsetsError(NOT_CONTROLLER, "not controller; controller_id=2");
+            follower.meta = controllerMeta(2, "127.0.0.1", 9);
+            try (Client c = Client.connect("127.0.0.1", follower.port, 5_000)) {
+                c.setMaxRedirects(0);
+                BrokerException ex =
+                        assertThrows(BrokerException.class, () -> c.deleteOffsets("g"));
+                assertEquals(NOT_CONTROLLER, ex.code);
+            }
+            assertEquals(1, follower.deleteOffsetsCount.get());
             assertEquals(0, follower.metadataCount.get());
             assertEquals(1, follower.acceptCount.get());
         }

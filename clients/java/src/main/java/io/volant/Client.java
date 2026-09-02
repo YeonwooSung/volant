@@ -1360,18 +1360,25 @@ public final class Client implements AutoCloseable {
      *
      * <p>{@code null} or empty {@code entries} deletes all offsets for the
      * group (wire count 0). Returns the number of offset files removed.
-     * Non-zero {@code error_code} is {@link BrokerException}. Transient
-     * broker/transport errors retry up to {@code maxRetries} extra times
-     * (default 0). This is not Kafka OffsetDelete.
+     * Non-zero {@code error_code} is {@link BrokerException}. Error 14
+     * follows {@code maxRedirects}. Transient broker/transport errors
+     * retry up to {@code maxRetries} extra times (default 0). This is not
+     * Kafka OffsetDelete.
      */
     public int deleteOffsets(String group, List<Codec.OffsetEntry> entries) {
         byte[] payload = Codec.encodeDeleteOffsetsRequest(new Codec.DeleteOffsetsRequest(group, entries));
         int retryAttempt = 0;
+        int redirectAttempt = 0;
+        int maxAttempts = 1 + maxRedirects;
         while (true) {
             Object decoded;
             try {
                 decoded = roundTrip(Codec.OP_DELETE_OFFSETS, payload);
             } catch (BrokerException e) {
+                if (maybeRedirectController(e.code, e.message, redirectAttempt + 1, maxAttempts)) {
+                    redirectAttempt++;
+                    continue;
+                }
                 if (isTransientBroker(e.code) && retryAttempt < maxRetries) {
                     retryAttempt++;
                     sleepProduceRetry();
@@ -1390,6 +1397,10 @@ public final class Client implements AutoCloseable {
                 throw new ProtocolException("unexpected response for delete_offsets: " + typeName(decoded));
             }
             Codec.DeleteOffsetsResponse resp = (Codec.DeleteOffsetsResponse) decoded;
+            if (maybeRedirectController(resp.errorCode, null, redirectAttempt + 1, maxAttempts)) {
+                redirectAttempt++;
+                continue;
+            }
             if (isTransientBroker(resp.errorCode) && retryAttempt < maxRetries) {
                 retryAttempt++;
                 sleepProduceRetry();
