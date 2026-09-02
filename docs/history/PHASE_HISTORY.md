@@ -209,6 +209,11 @@ docs for day-to-day reading: [ops](../ops.md), [consistency](../consistency.md),
 | v0.8 | ✅ | Cross-app EOS fencing via `application_id` | [V08_SPEC.md](../V08_SPEC.md) |
 | v0.9 | ✅ | EOS changelog-backed durable state (txn 2PC MVP) | [V09_SPEC.md](../V09_SPEC.md) |
 | v0.10 | ✅ | Dynamic membership overlay (add/remove broker) | [V10_SPEC.md](../V10_SPEC.md) |
+| v0.11 | ✅ | openraft metadata leader election (opt-in; default lowest-id) | [V11_SPEC.md](../V11_SPEC.md) |
+| v0.12 | ✅ | `__cluster_metadata` topic + per-partition Raft log MVP | [V12_SPEC.md](../V12_SPEC.md) |
+| v0.13 | ✅ | `__transaction_state` topic (KIP-890 log MVP) | [V13_SPEC.md](../V13_SPEC.md) |
+| v0.14 | ✅ | Python native client (produce/fetch/metadata) | [V14_SPEC.md](../V14_SPEC.md) |
+| v0.15 | ✅ | Fuzz corpus expansion + chaos-mesh + A→B isolate | [V15_SPEC.md](../V15_SPEC.md) |
 
 ---
 

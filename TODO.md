@@ -1,6 +1,6 @@
 # Volant residual TODO (review loop)
 
-**Baseline:** HEAD product = **Phases 0–154** + residuals **v0.3–v0.10**.  
+**Baseline:** HEAD product = **Phases 0–154** + residuals **v0.3–v0.15**.  
 **Last review:** 2026-09-02  
 
 Living roadmap: [ROADMAP.md](./ROADMAP.md).  
@@ -17,9 +17,9 @@ Phase index: [docs/history/PHASE_HISTORY.md](./docs/history/PHASE_HISTORY.md).
 | **P2** (N=2 gauges, Metadata ISR, promote claim, preferred×session) | **Closed** (141–144) |
 | **P3** (rack assignment, delta mirror, serve-from-mirror, defer truncate) | **Closed** (145–148) |
 | **Product: streams durable + EOS** | **MVP closed** (149, 151, 153) + v0.8 fence + v0.9 changelog |
-| **Product: consensus / KRaft-style metadata** | **MVP closed** (150, 152, 154); membership overlay **v0.10** |
+| **Product: consensus / KRaft-style metadata** | **MVP closed** (150, 152, 154); overlay **v0.10**; openraft election **v0.11** (opt-in); `__cluster_metadata` **v0.12** |
 
-**Ceiling:** Phases **0–154**. Next free inter-broker opcode after **98/99** is **100+**.
+**Ceiling:** Phases **0–154**. Next free inter-broker opcode after **110/111** is **112+**.
 
 ---
 
@@ -61,14 +61,14 @@ Phase index: [docs/history/PHASE_HISTORY.md](./docs/history/PHASE_HISTORY.md).
 | **P3** | Preferred **throttling / TCP probe** | **closed (v0.7)** — opt-in `throttle_time_ms` + TCP connect probe |
 | **P3** | Kafka DeleteRecords **per-request** wait | **closed (v0.6)** — flex v2 tag 0; v0–1 env-only |
 | **P3** | Cross-app EOS fencing | **closed (v0.8)** — optional `application_id` fence id |
-| **Later** | Full **openraft** crate integration | Replace custom `__metadata_raft` when ready |
+| **Later** | Full **openraft** crate integration | **election MVP closed (v0.11)** — opt-in; log apply still 154 / `assignment.json` |
 | **Later** | **Dynamic membership** reconfiguration | **MVP closed (v0.10)** — overlay add/remove; not Raft joint consensus |
-| **Later** | Full **KIP-890 / `__transaction_state`** | Txn depth beyond 2PC MVP |
-| **Later** | **Multi-language clients** | Ecosystem |
-| **Later** | **Long fuzz + chaos-mesh** | Phase 112 is corpus smoke only |
+| **Later** | Full **KIP-890 / `__transaction_state`** | **log MVP closed (v0.13)** — opt-in JSON topic; not Kafka schemas |
+| **Later** | **Multi-language clients** | **Python native MVP closed (v0.14)** — produce/fetch/metadata; no Java/Go |
+| **Later** | **Long fuzz + chaos-mesh** | **MVP closed (v0.15)** — extended corpus + Chaos Mesh YAML + A→B isolate |
 | **Later** | **Perf campaign** vs aspirational targets | **closed (v0.2 PR2)** — measured table published; aspirational demoted; no group-commit |
 
-**Default next slice:** full **openraft** replace of 150/152/154 (not homemade election). Homemade Raft election / InstallSnapshot / Phase 155 is **not** the next product bet. Do not open Phase 155.
+**Default next slice:** finish **openraft replace** of 150/152/154 log apply (v0.11 is election-only). Homemade Raft election / InstallSnapshot-on-154 / Phase 155 is **not** the next product bet. Do not open Phase 155.
 
 ---
 
@@ -96,19 +96,24 @@ Phase index: [docs/history/PHASE_HISTORY.md](./docs/history/PHASE_HISTORY.md).
 - [x] Cross-app EOS fencing (`application_id`) → **v0.8**
 - [x] EOS changelog-backed durable state (txn 2PC MVP) → **v0.9**
 - [x] Dynamic membership overlay (add/remove broker) → **v0.10**
+- [x] openraft metadata leader election (opt-in) → **v0.11**
+- [x] `__cluster_metadata` topic + per-partition Raft log → **v0.12**
+- [x] `__transaction_state` topic (KIP-890 log MVP) → **v0.13**
+- [x] Python native client (produce/fetch/metadata) → **v0.14**
+- [x] Fuzz corpus expansion + chaos-mesh + asymmetric isolate → **v0.15**
 
 ---
 
 ## Still open (honest limitations)
 
 ### Metadata / consensus
-- [ ] True **openraft** leader election + term contests (154: lowest-id controller)
-- [ ] **InstallSnapshot** / log truncation for metadata Raft
+- [x] True **openraft** leader election + term contests (v0.11 opt-in; default still lowest-id)
+- [ ] **InstallSnapshot** / log truncation (frozen on homemade 154; openraft snapshot not wired)
 - [x] **Dynamic membership** overlay add/remove (v0.10; not Raft joint consensus; no replica move)
 - [x] Rollback **local** assignment file when wait/committed-only majority misses (v0.3 residual; `!must_wait` still retains local)
 - [x] Kafka CreateTopics / DeleteTopics / CreatePartitions honor the same wait/rollback (v0.4; majority miss → Kafka **19**)
 - [x] v0.5 ops confidence (unwritable dir / isolate leader / in-flight acks=all)
-- [ ] Per-partition Raft / full KRaft `__cluster_metadata` topic parity
+- [x] Per-partition Raft / `__cluster_metadata` topic MVP (v0.12; not Kafka KRaft schemas; ISR still SoT)
 
 ### Streams
 - [x] **Distributed** EOS changelog MVP (v0.9; state in the EOS txn; still one-process)
@@ -116,11 +121,11 @@ Phase index: [docs/history/PHASE_HISTORY.md](./docs/history/PHASE_HISTORY.md).
 - [x] Exactly-once **cross-app** fencing via `application_id` (v0.8; not Kafka Streams assignment)
 
 ### Kafka / txn / ops
-- [ ] Full **KIP-890 / 939** / `__transaction_state`
+- [x] `__transaction_state` log MVP (v0.13; Volant JSON; not Kafka KIP-890/939 schemas)
 - [x] Kafka DeleteRecords **per-request** wait flag (v0.6 flex v2 tag 0; v0–1 env-only)
 - [x] Preferred selector **throttling** / TCP probe (v0.7; opt-in, not Kafka quota)
-- [ ] Multi-language clients
-- [ ] Long fuzz campaigns + chaos-mesh
+- [x] Multi-language clients — Python native MVP (v0.14; not Java/Go/kafka-python)
+- [x] Long fuzz campaigns + chaos-mesh MVP (v0.15; corpus + YAML + A→B isolate; not multi-hour CI)
 - [x] Published perf numbers vs aspirational table; group-commit **not** implemented
 
 ### Wait-off / best-effort paths (by design)
@@ -142,5 +147,6 @@ Phase index: [docs/history/PHASE_HISTORY.md](./docs/history/PHASE_HISTORY.md).
 | Phases 141–148 | **Shipped** — prior P2/P3 residuals |
 | P0 / P1 code | **None open** |
 | v0.6–v0.10 | **Shipped** — Kafka DR wait tag; preferred throttle/probe; app fence; changelog EOS; membership overlay |
+| v0.11–v0.15 | **Shipped** — openraft election; cluster-metadata + partition raft; txn-state topic; Python client; fuzz/chaos |
 
 **How to use this file:** mark new work by phase number in ROADMAP + PHASE*_SPEC; fold completed rows into “Closed checklist”; keep “Still open” as the only honesty surface for operators and contributors.
