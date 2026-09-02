@@ -61,6 +61,12 @@ const (
 	OpDeleteScramUserResponse    uint16 = 67
 	OpListScramUsers             uint16 = 68
 	OpListScramUsersResponse     uint16 = 69
+	OpAddBroker                  uint16 = 102
+	OpAddBrokerResponse          uint16 = 103
+	OpRemoveBroker               uint16 = 104
+	OpRemoveBrokerResponse       uint16 = 105
+	OpListMembers                uint16 = 106
+	OpListMembersResponse        uint16 = 107
 	OpReassignPartitions         uint16 = 114
 	OpReassignPartitionsResponse uint16 = 115
 	OpError                 uint16 = 0xFFFF
@@ -813,6 +819,55 @@ type CreatePartitionsResponse struct {
 // ReassignPartitionsRequest is the ReassignPartitions opcode (114) body.
 // Partition == ReassignAllPartitions (u32::MAX) applies to every partition.
 // Empty Replicas means auto-place with current membership.
+// MembershipBroker is one overlay broker endpoint (v0.10 / v0.58).
+// Rack nil is absent (flag 0).
+type MembershipBroker struct {
+	ID   uint32
+	Host string
+	Port uint16
+	Rack *string
+}
+
+// AddBrokerRequest is the AddBroker opcode (102) body.
+type AddBrokerRequest struct {
+	ID   uint32
+	Host string
+	Port uint16
+	Rack *string
+}
+
+// AddBrokerResponse is the AddBroker reply (opcode 103).
+type AddBrokerResponse struct {
+	ErrorCode  uint16
+	Generation uint64
+}
+
+// RemoveBrokerRequest is the RemoveBroker opcode (104) body.
+type RemoveBrokerRequest struct {
+	ID uint32
+}
+
+// RemoveBrokerResponse is the RemoveBroker reply (opcode 105).
+type RemoveBrokerResponse struct {
+	ErrorCode  uint16
+	Generation uint64
+}
+
+// MembershipList is configured + live membership (v0.10 / v0.58).
+type MembershipList struct {
+	Generation uint64
+	Brokers    []MembershipBroker
+	Live       []uint32
+}
+
+// ListMembersResponse is the ListMembers reply (opcode 107).
+type ListMembersResponse struct {
+	ErrorCode  uint16
+	Generation uint64
+	Brokers    []MembershipBroker
+	Live       []uint32
+}
+
 type ReassignPartitionsRequest struct {
 	Topic     string
 	Partition uint32
@@ -2672,6 +2727,211 @@ func DecodeCreatePartitionsResponse(payload []byte) (CreatePartitionsResponse, e
 	return CreatePartitionsResponse{ErrorCode: code, Topic: topic, Partitions: n}, nil
 }
 
+
+func putMembershipBroker(w *writer, b MembershipBroker) error {
+	w.u32(b.ID)
+	if err := putString(w, b.Host); err != nil {
+		return err
+	}
+	w.u16(b.Port)
+	if b.Rack == nil {
+		w.u8(0)
+		return nil
+	}
+	w.u8(1)
+	return putString(w, *b.Rack)
+}
+
+
+func getMembershipBroker(r *reader) (MembershipBroker, error) {
+	id, err := r.u32()
+	if err != nil {
+		return MembershipBroker{}, err
+	}
+	host, err := getString(r)
+	if err != nil {
+		return MembershipBroker{}, err
+	}
+	port, err := r.u16()
+	if err != nil {
+		return MembershipBroker{}, err
+	}
+	flag, err := r.u8()
+	if err != nil {
+		return MembershipBroker{}, err
+	}
+	var rack *string
+	if flag != 0 {
+		s, err := getString(r)
+		if err != nil {
+			return MembershipBroker{}, err
+		}
+		rack = &s
+	}
+	return MembershipBroker{ID: id, Host: host, Port: port, Rack: rack}, nil
+}
+
+
+func EncodeAddBrokerRequest(req AddBrokerRequest) ([]byte, error) {
+	w := &writer{}
+	if err := putMembershipBroker(w, MembershipBroker{
+		ID: req.ID, Host: req.Host, Port: req.Port, Rack: req.Rack,
+	}); err != nil {
+		return nil, err
+	}
+	return w.buf, nil
+}
+
+
+func DecodeAddBrokerRequest(payload []byte) (AddBrokerRequest, error) {
+	r := &reader{data: payload}
+	b, err := getMembershipBroker(r)
+	if err != nil {
+		return AddBrokerRequest{}, err
+	}
+	return AddBrokerRequest{ID: b.ID, Host: b.Host, Port: b.Port, Rack: b.Rack}, nil
+}
+
+
+func EncodeAddBrokerResponse(resp AddBrokerResponse) ([]byte, error) {
+	w := &writer{}
+	w.u16(resp.ErrorCode)
+	w.u64(resp.Generation)
+	return w.buf, nil
+}
+
+
+func DecodeAddBrokerResponse(payload []byte) (AddBrokerResponse, error) {
+	r := &reader{data: payload}
+	code, err := r.u16()
+	if err != nil {
+		return AddBrokerResponse{}, err
+	}
+	gen, err := r.u64()
+	if err != nil {
+		return AddBrokerResponse{}, err
+	}
+	return AddBrokerResponse{ErrorCode: code, Generation: gen}, nil
+}
+
+
+func EncodeRemoveBrokerRequest(req RemoveBrokerRequest) ([]byte, error) {
+	w := &writer{}
+	w.u32(req.ID)
+	return w.buf, nil
+}
+
+
+func DecodeRemoveBrokerRequest(payload []byte) (RemoveBrokerRequest, error) {
+	r := &reader{data: payload}
+	id, err := r.u32()
+	if err != nil {
+		return RemoveBrokerRequest{}, err
+	}
+	return RemoveBrokerRequest{ID: id}, nil
+}
+
+
+func EncodeRemoveBrokerResponse(resp RemoveBrokerResponse) ([]byte, error) {
+	w := &writer{}
+	w.u16(resp.ErrorCode)
+	w.u64(resp.Generation)
+	return w.buf, nil
+}
+
+
+func DecodeRemoveBrokerResponse(payload []byte) (RemoveBrokerResponse, error) {
+	r := &reader{data: payload}
+	code, err := r.u16()
+	if err != nil {
+		return RemoveBrokerResponse{}, err
+	}
+	gen, err := r.u64()
+	if err != nil {
+		return RemoveBrokerResponse{}, err
+	}
+	return RemoveBrokerResponse{ErrorCode: code, Generation: gen}, nil
+}
+
+
+func EncodeListMembersRequest() []byte {
+	return []byte{}
+}
+
+
+func DecodeListMembersRequest(payload []byte) error {
+	return nil
+}
+
+
+func EncodeListMembersResponse(resp ListMembersResponse) ([]byte, error) {
+	w := &writer{}
+	w.u16(resp.ErrorCode)
+	w.u64(resp.Generation)
+	brokers := resp.Brokers
+	if brokers == nil {
+		brokers = []MembershipBroker{}
+	}
+	w.u32(uint32(len(brokers)))
+	for _, b := range brokers {
+		if err := putMembershipBroker(w, b); err != nil {
+			return nil, err
+		}
+	}
+	live := resp.Live
+	if live == nil {
+		live = []uint32{}
+	}
+	w.u32(uint32(len(live)))
+	for _, id := range live {
+		w.u32(id)
+	}
+	return w.buf, nil
+}
+
+
+func DecodeListMembersResponse(payload []byte) (ListMembersResponse, error) {
+	r := &reader{data: payload}
+	code, err := r.u16()
+	if err != nil {
+		return ListMembersResponse{}, err
+	}
+	gen, err := r.u64()
+	if err != nil {
+		return ListMembersResponse{}, err
+	}
+	n, err := r.u32()
+	if err != nil {
+		return ListMembersResponse{}, err
+	}
+	brokers := make([]MembershipBroker, 0, n)
+	for i := uint32(0); i < n; i++ {
+		b, err := getMembershipBroker(r)
+		if err != nil {
+			return ListMembersResponse{}, err
+		}
+		brokers = append(brokers, b)
+	}
+	liveN, err := r.u32()
+	if err != nil {
+		return ListMembersResponse{}, err
+	}
+	live := make([]uint32, 0, liveN)
+	for i := uint32(0); i < liveN; i++ {
+		id, err := r.u32()
+		if err != nil {
+			return ListMembersResponse{}, err
+		}
+		live = append(live, id)
+	}
+	return ListMembersResponse{
+		ErrorCode:  code,
+		Generation: gen,
+		Brokers:    brokers,
+		Live:       live,
+	}, nil
+}
+
 func EncodeReassignPartitionsRequest(req ReassignPartitionsRequest) ([]byte, error) {
 	w := &writer{}
 	if err := putString(w, req.Topic); err != nil {
@@ -2975,6 +3235,12 @@ func DecodeResponse(opcode uint16, payload []byte) (any, error) {
 		return DecodeAlterConfigsResponse(payload)
 	case OpDeleteRecordsResponse:
 		return DecodeDeleteRecordsResponse(payload)
+	case OpAddBrokerResponse:
+		return DecodeAddBrokerResponse(payload)
+	case OpRemoveBrokerResponse:
+		return DecodeRemoveBrokerResponse(payload)
+	case OpListMembersResponse:
+		return DecodeListMembersResponse(payload)
 	case OpReassignPartitionsResponse:
 		return DecodeReassignPartitionsResponse(payload)
 	case OpError:

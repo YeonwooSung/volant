@@ -38,8 +38,10 @@ from .codec import (
     LeaveGroupRequest,
     LeaveGroupResponse,
     ListGroupsResponse,
+    ListMembersResponse,
     ListOffsetsRequest,
     ListOffsetsResponse,
+    MembershipList,
     MetadataRequest,
     MetadataResponse,
     OffsetCommitEntry,
@@ -570,6 +572,68 @@ class Client:
             )
         self._check(resp.error_code, "create_partitions")
         return resp.partitions
+
+
+    def add_broker(
+        self, id: int, host: str, port: int, rack: Optional[str] = None
+    ) -> int:
+        """Add a broker endpoint to the membership overlay (native 102/103).
+
+        ``rack=None`` is absent on the wire (flag 0). Returns the overlay
+        generation. Non-zero ``error_code`` raises :class:`BrokerError`
+        with ``op="add_broker"``. Overlay is still SoT; this is not Kafka
+        broker catalog / AlterPartitionReassignments.
+        """
+        payload = codec.encode_add_broker_request(
+            codec.AddBrokerRequest(id=id, host=host, port=port, rack=rack)
+        )
+        resp = self._round_trip(codec.OP_ADD_BROKER, payload)
+        if not isinstance(resp, codec.AddBrokerResponse):
+            raise ProtocolError(f"unexpected response for add_broker: {type(resp)}")
+        self._check(resp.error_code, "add_broker")
+        return resp.generation
+
+
+
+    def remove_broker(self, id: int) -> int:
+        """Remove a broker from the membership overlay (native 104/105).
+
+        Returns the overlay generation. Non-zero ``error_code`` raises
+        :class:`BrokerError` with ``op="remove_broker"``.
+        """
+        payload = codec.encode_remove_broker_request(
+            codec.RemoveBrokerRequest(id=id)
+        )
+        resp = self._round_trip(codec.OP_REMOVE_BROKER, payload)
+        if not isinstance(resp, codec.RemoveBrokerResponse):
+            raise ProtocolError(
+                f"unexpected response for remove_broker: {type(resp)}"
+            )
+        self._check(resp.error_code, "remove_broker")
+        return resp.generation
+
+
+
+    def list_members(self) -> MembershipList:
+        """List configured + live membership (native opcode 106/107).
+
+        Returns :class:`MembershipList` (generation, brokers, live).
+        Non-zero ``error_code`` raises :class:`BrokerError` with
+        ``op="list_members"``. Overlay is still SoT.
+        """
+        resp = self._round_trip(
+            codec.OP_LIST_MEMBERS, codec.encode_list_members_request()
+        )
+        if not isinstance(resp, ListMembersResponse):
+            raise ProtocolError(
+                f"unexpected response for list_members: {type(resp)}"
+            )
+        self._check(resp.error_code, "list_members")
+        return MembershipList(
+            generation=resp.generation,
+            brokers=list(resp.brokers),
+            live=list(resp.live),
+        )
 
     def reassign_partitions(
         self,

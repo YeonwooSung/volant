@@ -558,6 +558,63 @@ public final class Client implements AutoCloseable {
      * membership. Returns the assignment generation. This is not Kafka
      * AlterPartitionReassignments (API key 45).
      */
+
+    /**
+     * Add a broker endpoint to the membership overlay (native 102/103) with no
+     * rack. Returns the overlay generation.
+     */
+    public long addBroker(int id, String host, int port) {
+        return addBroker(id, host, port, null);
+    }
+
+
+    /**
+     * Add a broker endpoint to the membership overlay (native 102/103).
+     * {@code rack == null} is absent on the wire (flag 0). Returns the overlay
+     * generation. Overlay is still SoT; this is not Kafka broker catalog.
+     */
+    public long addBroker(int id, String host, int port, String rack) {
+        byte[] payload = Codec.encodeAddBrokerRequest(new Codec.AddBrokerRequest(id, host, port, rack));
+        Object decoded = roundTrip(Codec.OP_ADD_BROKER, payload);
+        if (!(decoded instanceof Codec.AddBrokerResponse)) {
+            throw new ProtocolException("unexpected response for add_broker: " + typeName(decoded));
+        }
+        Codec.AddBrokerResponse resp = (Codec.AddBrokerResponse) decoded;
+        check(resp.errorCode, "add_broker");
+        return resp.generation;
+    }
+
+
+    /**
+     * Remove a broker from the membership overlay (native 104/105). Returns
+     * the overlay generation.
+     */
+    public long removeBroker(int id) {
+        byte[] payload = Codec.encodeRemoveBrokerRequest(new Codec.RemoveBrokerRequest(id));
+        Object decoded = roundTrip(Codec.OP_REMOVE_BROKER, payload);
+        if (!(decoded instanceof Codec.RemoveBrokerResponse)) {
+            throw new ProtocolException("unexpected response for remove_broker: " + typeName(decoded));
+        }
+        Codec.RemoveBrokerResponse resp = (Codec.RemoveBrokerResponse) decoded;
+        check(resp.errorCode, "remove_broker");
+        return resp.generation;
+    }
+
+
+    /**
+     * List configured + live membership (native opcode 106/107). Overlay is
+     * still SoT.
+     */
+    public MembershipList listMembers() {
+        Object decoded = roundTrip(Codec.OP_LIST_MEMBERS, Codec.encodeListMembersRequest());
+        if (!(decoded instanceof Codec.ListMembersResponse)) {
+            throw new ProtocolException("unexpected response for list_members: " + typeName(decoded));
+        }
+        Codec.ListMembersResponse resp = (Codec.ListMembersResponse) decoded;
+        check(resp.errorCode, "list_members");
+        return new MembershipList(resp.generation, resp.brokers, resp.live);
+    }
+
     public int reassignPartitions(String topic, int... replicas) {
         return reassignPartitions(topic, (Integer) null, replicas);
     }

@@ -64,6 +64,12 @@ public final class Codec {
     public static final int OP_DELETE_SCRAM_USER_RESPONSE = 67;
     public static final int OP_LIST_SCRAM_USERS = 68;
     public static final int OP_LIST_SCRAM_USERS_RESPONSE = 69;
+    public static final int OP_ADD_BROKER = 102;
+    public static final int OP_ADD_BROKER_RESPONSE = 103;
+    public static final int OP_REMOVE_BROKER = 104;
+    public static final int OP_REMOVE_BROKER_RESPONSE = 105;
+    public static final int OP_LIST_MEMBERS = 106;
+    public static final int OP_LIST_MEMBERS_RESPONSE = 107;
     public static final int OP_REASSIGN_PARTITIONS = 114;
     public static final int OP_REASSIGN_PARTITIONS_RESPONSE = 115;
     public static final int OP_ERROR = 0xFFFF;
@@ -834,6 +840,62 @@ public final class Codec {
         }
     }
 
+    public static final class AddBrokerRequest {
+        public final int id;
+        public final String host;
+        public final int port;
+        public final String rack;
+
+        public AddBrokerRequest(int id, String host, int port, String rack) {
+            this.id = id;
+            this.host = host == null ? "" : host;
+            this.port = port;
+            this.rack = rack;
+        }
+    }
+    public static final class AddBrokerResponse {
+        public final int errorCode;
+        public final long generation;
+
+        public AddBrokerResponse(int errorCode, long generation) {
+            this.errorCode = errorCode;
+            this.generation = generation;
+        }
+    }
+    public static final class RemoveBrokerRequest {
+        public final int id;
+
+        public RemoveBrokerRequest(int id) {
+            this.id = id;
+        }
+    }
+    public static final class RemoveBrokerResponse {
+        public final int errorCode;
+        public final long generation;
+
+        public RemoveBrokerResponse(int errorCode, long generation) {
+            this.errorCode = errorCode;
+            this.generation = generation;
+        }
+    }
+    public static final class ListMembersResponse {
+        public final int errorCode;
+        public final long generation;
+        public final List<MembershipBroker> brokers;
+        public final List<Integer> live;
+
+        public ListMembersResponse(
+                int errorCode, long generation, List<MembershipBroker> brokers, List<Integer> live) {
+            this.errorCode = errorCode;
+            this.generation = generation;
+            this.brokers = brokers == null
+                    ? Collections.emptyList()
+                    : Collections.unmodifiableList(new ArrayList<>(brokers));
+            this.live = live == null
+                    ? Collections.emptyList()
+                    : Collections.unmodifiableList(new ArrayList<>(live));
+        }
+    }
     public static final class ReassignPartitionsRequest {
         public final String topic;
         public final long partition;
@@ -2085,6 +2147,121 @@ public final class Codec {
         return new CreatePartitionsResponse(errorCode, topic, partitions);
     }
 
+
+    public static byte[] encodeAddBrokerRequest(AddBrokerRequest req) {
+        Writer w = new Writer();
+        putMembershipBroker(w, new MembershipBroker(req.id, req.host, req.port, req.rack));
+        return w.finish();
+    }
+
+
+    public static AddBrokerRequest decodeAddBrokerRequest(byte[] payload) {
+        MembershipBroker b = getMembershipBroker(new Reader(payload));
+        return new AddBrokerRequest(b.id, b.host, b.port, b.rack);
+    }
+
+
+    public static byte[] encodeAddBrokerResponse(AddBrokerResponse resp) {
+        Writer w = new Writer();
+        w.u16(resp.errorCode);
+        w.u64(resp.generation);
+        return w.finish();
+    }
+
+
+    public static AddBrokerResponse decodeAddBrokerResponse(byte[] payload) {
+        Reader r = new Reader(payload);
+        return new AddBrokerResponse(r.u16(), r.u64());
+    }
+
+
+    public static byte[] encodeRemoveBrokerRequest(RemoveBrokerRequest req) {
+        Writer w = new Writer();
+        w.u32(req.id);
+        return w.finish();
+    }
+
+
+    public static RemoveBrokerRequest decodeRemoveBrokerRequest(byte[] payload) {
+        Reader r = new Reader(payload);
+        return new RemoveBrokerRequest((int) r.u32());
+    }
+
+
+    public static byte[] encodeRemoveBrokerResponse(RemoveBrokerResponse resp) {
+        Writer w = new Writer();
+        w.u16(resp.errorCode);
+        w.u64(resp.generation);
+        return w.finish();
+    }
+
+
+    public static RemoveBrokerResponse decodeRemoveBrokerResponse(byte[] payload) {
+        Reader r = new Reader(payload);
+        return new RemoveBrokerResponse(r.u16(), r.u64());
+    }
+
+
+    public static byte[] encodeListMembersRequest() {
+        return new byte[0];
+    }
+
+
+    public static ListMembersResponse decodeListMembersResponse(byte[] payload) {
+        Reader r = new Reader(payload);
+        int errorCode = r.u16();
+        long generation = r.u64();
+        long n = r.u32();
+        List<MembershipBroker> brokers = new ArrayList<>();
+        for (int i = 0; i < n; i++) {
+            brokers.add(getMembershipBroker(r));
+        }
+        long liveN = r.u32();
+        List<Integer> live = new ArrayList<>();
+        for (int i = 0; i < liveN; i++) {
+            live.add((int) r.u32());
+        }
+        return new ListMembersResponse(errorCode, generation, brokers, live);
+    }
+
+
+    static void putMembershipBroker(Writer w, MembershipBroker b) {
+        w.u32(b.id);
+        putString(w, b.host);
+        w.u16(b.port);
+        if (b.rack == null) {
+            w.u8(0);
+            return;
+        }
+        w.u8(1);
+        putString(w, b.rack);
+    }
+
+
+    static MembershipBroker getMembershipBroker(Reader r) {
+        int id = (int) r.u32();
+        String host = getString(r);
+        int port = r.u16();
+        int flag = r.u8();
+        String rack = flag != 0 ? getString(r) : null;
+        return new MembershipBroker(id, host, port, rack);
+    }
+
+    public static byte[] encodeListMembersResponse(ListMembersResponse resp) {
+        Writer w = new Writer();
+        w.u16(resp.errorCode);
+        w.u64(resp.generation);
+        w.u32(resp.brokers.size());
+        for (MembershipBroker b : resp.brokers) {
+            putMembershipBroker(w, b);
+        }
+        w.u32(resp.live.size());
+        for (Integer id : resp.live) {
+            w.u32(id);
+        }
+        return w.finish();
+    }
+
     public static byte[] encodeReassignPartitionsRequest(ReassignPartitionsRequest req) {
         Writer w = new Writer();
         putString(w, req.topic);
@@ -2278,6 +2455,12 @@ public final class Codec {
                 return decodeAlterConfigsResponse(payload);
             case OP_DELETE_RECORDS_RESPONSE:
                 return decodeDeleteRecordsResponse(payload);
+            case OP_ADD_BROKER_RESPONSE:
+                return decodeAddBrokerResponse(payload);
+            case OP_REMOVE_BROKER_RESPONSE:
+                return decodeRemoveBrokerResponse(payload);
+            case OP_LIST_MEMBERS_RESPONSE:
+                return decodeListMembersResponse(payload);
             case OP_REASSIGN_PARTITIONS_RESPONSE:
                 return decodeReassignPartitionsResponse(payload);
             case OP_ERROR:

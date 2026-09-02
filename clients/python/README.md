@@ -240,5 +240,6 @@ See [docs/V14_SPEC.md](../../docs/V14_SPEC.md),
 [docs/V50_SPEC.md](../../docs/V50_SPEC.md).,
 [docs/V46_SPEC.md](../../docs/V46_SPEC.md),
 [docs/V55_SPEC.md](../../docs/V55_SPEC.md),
-[docs/V56_SPEC.md](../../docs/V56_SPEC.md).
+[docs/V56_SPEC.md](../../docs/V56_SPEC.md),
+[docs/V58_SPEC.md](../../docs/V58_SPEC.md),
 [docs/V59_SPEC.md](../../docs/V59_SPEC.md).
