@@ -21,6 +21,7 @@ from volant import Client
 c = Client("127.0.0.1:9092")
 c.create_topic("t", partitions=1)
 c.create_partitions("t", 2)
+c.reassign_partitions("t", [1, 2])  # all partitions; or partition=0
 c.produce("t", 0, value=b"hello")
 batch = c.fetch("t", 0, offset=0)
 for offset, key, value in batch.tuples():
@@ -95,6 +96,10 @@ overridden). `offset_fetch` returns committed `(partition, offset)` pairs
 for the given topic. `create_partitions(topic, total_count)` grows the topic to
 `total_count` partitions and returns the new total (native opcode 46,
 not Kafka CreatePartitions).
+`reassign_partitions(topic, replicas, partition=None)` reassigns
+replicas and returns the assignment generation (native opcode 114,
+not Kafka AlterPartitionReassignments). `partition=None` is all
+partitions (`u32::MAX`); `replicas=[]` is auto-place.
 `list_offsets(topic, partitions=None)` returns
 earliest/latest (`OffsetListing`) for the topic (`None` / `[]` = all
 partitions; native opcode 48, not Kafka timestamp ListOffsets).
@@ -236,3 +241,4 @@ See [docs/V14_SPEC.md](../../docs/V14_SPEC.md),
 [docs/V46_SPEC.md](../../docs/V46_SPEC.md),
 [docs/V55_SPEC.md](../../docs/V55_SPEC.md),
 [docs/V56_SPEC.md](../../docs/V56_SPEC.md).
+[docs/V59_SPEC.md](../../docs/V59_SPEC.md).

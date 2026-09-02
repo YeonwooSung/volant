@@ -49,6 +49,7 @@ from .codec import (
     OffsetFetchRequest,
     OffsetFetchResponse,
     ProduceMessage,
+    ReassignPartitionsRequest,
     ProduceRequest,
     ProduceResponse,
     TopicInfo,
@@ -206,6 +207,7 @@ class Client:
         c = Client("127.0.0.1:9092")
         c.create_topic("t", partitions=1)
         c.create_partitions("t", 2)
+        c.reassign_partitions("t", [1, 2])  # all partitions; or partition=0
         c.produce("t", 0, value=b"hello")
         batch = c.fetch("t", 0, offset=0)
         c.offset_commit(group="g", topic="t", partition=0, offset=5)
@@ -568,6 +570,38 @@ class Client:
             )
         self._check(resp.error_code, "create_partitions")
         return resp.partitions
+
+    def reassign_partitions(
+        self,
+        topic: str,
+        replicas: list[int],
+        partition: Optional[int] = None,
+    ) -> int:
+        """Reassign replicas for ``topic`` (native opcode 114).
+
+        ``partition=None`` updates every partition (wire ``u32::MAX``).
+        Empty ``replicas`` asks the controller to auto-place with the current
+        membership (same as CreateTopic). Returns the assignment generation.
+        Non-zero ``error_code`` raises :class:`BrokerError`. This is not Kafka
+        AlterPartitionReassignments (API key 45).
+        """
+        wire_partition = (
+            codec.REASSIGN_ALL_PARTITIONS if partition is None else int(partition)
+        )
+        payload = codec.encode_reassign_partitions_request(
+            ReassignPartitionsRequest(
+                topic=topic,
+                partition=wire_partition,
+                replicas=list(replicas) if replicas else [],
+            )
+        )
+        resp = self._round_trip(codec.OP_REASSIGN_PARTITIONS, payload)
+        if not isinstance(resp, codec.ReassignPartitionsResponse):
+            raise ProtocolError(
+                f"unexpected response for reassign_partitions: {type(resp)}"
+            )
+        self._check(resp.error_code, "reassign_partitions")
+        return resp.generation
 
     def produce(
         self,

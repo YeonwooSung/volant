@@ -65,7 +65,12 @@ OP_DELETE_SCRAM_USER = 66
 OP_DELETE_SCRAM_USER_RESPONSE = 67
 OP_LIST_SCRAM_USERS = 68
 OP_LIST_SCRAM_USERS_RESPONSE = 69
+OP_REASSIGN_PARTITIONS = 114
+OP_REASSIGN_PARTITIONS_RESPONSE = 115
 OP_ERROR = 0xFFFF
+
+# ReassignPartitions.partition sentinel: apply to every partition of the topic.
+REASSIGN_ALL_PARTITIONS = 0xFFFFFFFF
 
 _NULL_LEN = 0xFFFFFFFF
 
@@ -777,6 +782,28 @@ class CreatePartitionsResponse:
     error_code: int
     topic: str
     partitions: int
+
+
+@dataclass
+class ReassignPartitionsRequest:
+    """ReassignPartitions opcode 114 body (v0.18 / v0.59).
+
+    ``partition == REASSIGN_ALL_PARTITIONS`` (``u32::MAX``) applies to every
+    partition of the topic. Empty ``replicas`` means auto-place with current
+    membership (same as CreateTopic).
+    """
+
+    topic: str
+    partition: int
+    replicas: list[int] = field(default_factory=list)
+
+
+@dataclass
+class ReassignPartitionsResponse:
+    """ReassignPartitions reply (opcode 115). ``generation`` is 0 on error."""
+
+    error_code: int
+    generation: int
 
 
 # --- produce ---------------------------------------------------------------
@@ -1605,6 +1632,41 @@ def decode_create_partitions_response(payload: bytes) -> CreatePartitionsRespons
     )
 
 
+# --- reassign partitions ---------------------------------------------------
+
+
+def encode_reassign_partitions_request(req: ReassignPartitionsRequest) -> bytes:
+    w = _Writer()
+    _put_string(w, req.topic)
+    w.u32_le(req.partition)
+    replicas = req.replicas or []
+    w.u32_le(len(replicas))
+    for replica_id in replicas:
+        w.u32_le(replica_id)
+    return w.finish()
+
+
+def decode_reassign_partitions_request(payload: bytes) -> ReassignPartitionsRequest:
+    r = _Reader(payload)
+    topic = _get_string(r)
+    partition = r.u32_le()
+    n = r.u32_le()
+    replicas = [r.u32_le() for _ in range(n)]
+    return ReassignPartitionsRequest(topic=topic, partition=partition, replicas=replicas)
+
+
+def encode_reassign_partitions_response(resp: ReassignPartitionsResponse) -> bytes:
+    w = _Writer()
+    w.u16_le(resp.error_code)
+    w.u32_le(resp.generation)
+    return w.finish()
+
+
+def decode_reassign_partitions_response(payload: bytes) -> ReassignPartitionsResponse:
+    r = _Reader(payload)
+    return ReassignPartitionsResponse(error_code=r.u16_le(), generation=r.u32_le())
+
+
 
 # --- delete records --------------------------------------------------------
 
@@ -2065,6 +2127,8 @@ def decode_response(opcode: int, payload: bytes):
         return decode_alter_configs_response(payload)
     if opcode == OP_DELETE_RECORDS_RESPONSE:
         return decode_delete_records_response(payload)
+    if opcode == OP_REASSIGN_PARTITIONS_RESPONSE:
+        return decode_reassign_partitions_response(payload)
     if opcode == OP_ERROR:
         return decode_error_response(payload)
     raise ProtocolError(f"unknown response opcode {opcode}")
