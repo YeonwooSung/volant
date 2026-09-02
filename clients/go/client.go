@@ -8,6 +8,7 @@ import (
 	"crypto/tls"
 	"crypto/x509"
 	"encoding/binary"
+	"errors"
 	"fmt"
 	"io"
 	"net"
@@ -29,6 +30,14 @@ const notLeaderForPartition uint16 = 13
 
 // unknownProducerID is native ErrorCode::UnknownProducerId.
 const unknownProducerID uint16 = 21
+
+// Transient produce codes (Rust is_transient_error_code). Not 13 / 21.
+const (
+	errIO                 uint16 = 6
+	errTimeout            uint16 = 7
+	errNotEnoughReplicas  uint16 = 15
+	errBrokerNotAvailable uint16 = 16
+)
 
 type seqKey struct {
 	topic     string
@@ -106,6 +115,8 @@ type Client struct {
 	scramPass         string
 	maxRedirects      int
 	enableIdempotence bool
+	maxRetries        int
+	retryBackoff      time.Duration
 	transactionalID   string
 	producerID        uint64
 	producerEpoch     uint16
@@ -172,6 +183,7 @@ func dialPlain(addr string, timeout time.Duration, token, scramUser, scramPass s
 		scramUser:    scramUser,
 		scramPass:    scramPass,
 		maxRedirects: 1,
+		retryBackoff: 50 * time.Millisecond,
 	}
 	if err := c.maybeAuthenticate(); err != nil {
 		return nil, err
@@ -236,6 +248,7 @@ func dialTLS(addr string, cfg TLSConfig, timeout time.Duration, token, scramUser
 		scramUser:    scramUser,
 		scramPass:    scramPass,
 		maxRedirects: 1,
+		retryBackoff: 50 * time.Millisecond,
 	}
 	if err := c.maybeAuthenticate(); err != nil {
 		return nil, err
@@ -251,6 +264,26 @@ func (c *Client) SetMaxRedirects(n int) {
 		n = 0
 	}
 	c.maxRedirects = n
+}
+
+// SetMaxRetries sets extra Produce attempts after the first on transient
+// broker/transport errors. Default is 0 (no extra attempts). Negative
+// values are treated as 0. Error 13 stays on the redirect budget; error
+// 21 stays on the one re-Init. Fetch is not retried.
+func (c *Client) SetMaxRetries(n int) {
+	if n < 0 {
+		n = 0
+	}
+	c.maxRetries = n
+}
+
+// SetRetryBackoff sets the sleep between produce retries. Default is
+// 50ms. Zero is allowed (tests). Negative values are treated as 0.
+func (c *Client) SetRetryBackoff(d time.Duration) {
+	if d < 0 {
+		d = 0
+	}
+	c.retryBackoff = d
 }
 
 // EnableIdempotence turns on InitProducerId + per-partition produce sequences.
@@ -799,7 +832,10 @@ func (c *Client) ReassignPartitions(topic string, replicas []uint32, partition *
 // Produce sends one message (null key when key is nil) with acks=1.
 // Default trailer is (0, 0, -1). After EnableIdempotence the first produce
 // sends InitProducerId (empty transactional_id) and later produces attach
-// pid/epoch/seq. Returns the broker-assigned base offset.
+// pid/epoch/seq. Transient broker/transport errors retry up to maxRetries
+// extra times (default 0). Error 13 uses maxRedirects only; error 21 uses
+// the one re-Init only. Failed produce does not increment the sequence.
+// Returns the broker-assigned base offset.
 func (c *Client) Produce(topic string, partition int, key, value []byte) (int64, error) {
 	if value == nil {
 		value = []byte{}
@@ -808,14 +844,21 @@ func (c *Client) Produce(topic string, partition int, key, value []byte) (int64,
 	if c.enableIdempotence {
 		reinitBudget = 1
 	}
+	maxRetries := c.maxRetries
+	if maxRetries < 0 {
+		maxRetries = 0
+	}
+	retryAttempt := 0
 	for {
 		payload, err := c.encodeProduce(topic, partition, key, value)
 		if err != nil {
 			return 0, err
 		}
-		maxAttempts := 1 + c.maxRedirects
+		maxRedirectAttempts := 1 + c.maxRedirects
 		retriedUnknown := false
-		for attempt := 1; ; attempt++ {
+		redirectAttempt := 0
+		for {
+			redirectAttempt++
 			decoded, err := c.roundTrip(codec.OpProduce, payload)
 			if err != nil {
 				if be, ok := err.(*codec.BrokerError); ok && be.Code == unknownProducerID && reinitBudget > 0 {
@@ -824,7 +867,7 @@ func (c *Client) Produce(topic string, partition int, key, value []byte) (int64,
 					retriedUnknown = true
 					break
 				}
-				if be, ok := err.(*codec.BrokerError); ok && be.Code == notLeaderForPartition && attempt < maxAttempts && partition >= 0 {
+				if be, ok := err.(*codec.BrokerError); ok && be.Code == notLeaderForPartition && redirectAttempt < maxRedirectAttempts && partition >= 0 {
 					ok, rerr := c.redirectToLeader(topic, uint32(partition))
 					if rerr != nil {
 						return 0, rerr
@@ -832,6 +875,12 @@ func (c *Client) Produce(topic string, partition int, key, value []byte) (int64,
 					if ok {
 						continue
 					}
+				}
+				if isTransientProduceErr(err) && retryAttempt < maxRetries {
+					retryAttempt++
+					redirectAttempt--
+					c.sleepProduceRetry()
+					continue
 				}
 				return 0, err
 			}
@@ -845,7 +894,7 @@ func (c *Client) Produce(topic string, partition int, key, value []byte) (int64,
 				retriedUnknown = true
 				break
 			}
-			if resp.ErrorCode == notLeaderForPartition && attempt < maxAttempts {
+			if resp.ErrorCode == notLeaderForPartition && redirectAttempt < maxRedirectAttempts {
 				ok, rerr := c.redirectToLeader(resp.Topic, resp.Partition)
 				if rerr != nil {
 					return 0, rerr
@@ -853,6 +902,12 @@ func (c *Client) Produce(topic string, partition int, key, value []byte) (int64,
 				if ok {
 					continue
 				}
+			}
+			if isTransientBroker(resp.ErrorCode) && retryAttempt < maxRetries {
+				retryAttempt++
+				redirectAttempt--
+				c.sleepProduceRetry()
+				continue
 			}
 			if err := check(resp.ErrorCode, "produce"); err != nil {
 				return 0, err
@@ -867,6 +922,42 @@ func (c *Client) Produce(topic string, partition int, key, value []byte) (int64,
 		if !retriedUnknown {
 			return 0, &frame.ProtocolError{Msg: "produce loop exited"}
 		}
+	}
+}
+
+func isTransientBroker(code uint16) bool {
+	switch code {
+	case errIO, errTimeout, errNotEnoughReplicas, errBrokerNotAvailable:
+		return true
+	default:
+		return false
+	}
+}
+
+func isTransientTransport(err error) bool {
+	if err == nil {
+		return false
+	}
+	if _, ok := err.(*codec.BrokerError); ok {
+		return false
+	}
+	if _, ok := err.(*frame.ProtocolError); ok {
+		return false
+	}
+	var ne net.Error
+	return errors.As(err, &ne)
+}
+
+func isTransientProduceErr(err error) bool {
+	if be, ok := err.(*codec.BrokerError); ok {
+		return isTransientBroker(be.Code)
+	}
+	return isTransientTransport(err)
+}
+
+func (c *Client) sleepProduceRetry() {
+	if c.retryBackoff > 0 {
+		time.Sleep(c.retryBackoff)
 	}
 }
 

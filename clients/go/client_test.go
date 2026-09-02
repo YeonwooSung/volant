@@ -518,3 +518,149 @@ func TestIdempotentProduceRedirectKeepsSequence(t *testing.T) {
 		t.Fatalf("leader pid %d", lReqs[0].ProducerID)
 	}
 }
+
+const timeoutCode uint16 = 7
+
+func TestDefaultMaxRetriesZeroRaisesOnTimeout(t *testing.T) {
+	srv := &scriptedBroker{produceCodes: []uint16{timeoutCode}}
+	addr, stop := startScripted(t, srv)
+	defer stop()
+
+	c, err := volant.DialTimeout(addr, 5*time.Second)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer c.Close()
+
+	_, err = c.Produce("t", 0, nil, []byte("hello"))
+	if err == nil {
+		t.Fatal("expected BrokerError 7")
+	}
+	be, ok := err.(*volant.BrokerError)
+	if !ok || be.Code != timeoutCode {
+		t.Fatalf("got %v want BrokerError code=7", err)
+	}
+	fp, _, _, _ := srv.snapshot()
+	if fp != 1 {
+		t.Fatalf("produce count %d want 1", fp)
+	}
+}
+
+func TestRetriesTimeoutThenOk(t *testing.T) {
+	srv := &scriptedBroker{produceCodes: []uint16{timeoutCode, timeoutCode, 0}}
+	addr, stop := startScripted(t, srv)
+	defer stop()
+
+	c, err := volant.DialTimeout(addr, 5*time.Second)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer c.Close()
+	c.SetMaxRetries(2)
+	c.SetRetryBackoff(0)
+
+	off, err := c.Produce("t", 0, nil, []byte("hello"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if off != 7 {
+		t.Fatalf("base offset: got %d want 7", off)
+	}
+	fp, _, _, _ := srv.snapshot()
+	if fp != 3 {
+		t.Fatalf("produce count %d want 3", fp)
+	}
+}
+
+func TestExhaustedRetriesRaises(t *testing.T) {
+	srv := &scriptedBroker{produceCodes: []uint16{timeoutCode, timeoutCode, timeoutCode}}
+	addr, stop := startScripted(t, srv)
+	defer stop()
+
+	c, err := volant.DialTimeout(addr, 5*time.Second)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer c.Close()
+	c.SetMaxRetries(2)
+	c.SetRetryBackoff(0)
+
+	_, err = c.Produce("t", 0, nil, []byte("hello"))
+	if err == nil {
+		t.Fatal("expected BrokerError 7")
+	}
+	be, ok := err.(*volant.BrokerError)
+	if !ok || be.Code != timeoutCode {
+		t.Fatalf("got %v want BrokerError code=7", err)
+	}
+	fp, _, _, _ := srv.snapshot()
+	if fp != 3 {
+		t.Fatalf("produce count %d want 3", fp)
+	}
+}
+
+func TestError13DoesNotConsumeRetries(t *testing.T) {
+	follower := &scriptedBroker{
+		produceCodes: []uint16{notLeader},
+		meta:         leaderMeta("t", 0, 2, "127.0.0.1", 9),
+	}
+	addr, stop := startScripted(t, follower)
+	defer stop()
+
+	c, err := volant.DialTimeout(addr, 5*time.Second)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer c.Close()
+	c.SetMaxRedirects(0)
+	c.SetMaxRetries(2)
+	c.SetRetryBackoff(0)
+
+	_, err = c.Produce("t", 0, nil, []byte("hello"))
+	if err == nil {
+		t.Fatal("expected BrokerError 13")
+	}
+	be, ok := err.(*volant.BrokerError)
+	if !ok || be.Code != notLeader {
+		t.Fatalf("got %v want BrokerError code=13", err)
+	}
+	fp, _, fm, _ := follower.snapshot()
+	if fp != 1 || fm != 0 {
+		t.Fatalf("produce/metadata = %d/%d want 1/0", fp, fm)
+	}
+}
+
+func TestFailedRetriesDoNotIncrementSequence(t *testing.T) {
+	srv := &scriptedBroker{produceCodes: []uint16{0, timeoutCode, timeoutCode, timeoutCode, 0}}
+	addr, stop := startScripted(t, srv)
+	defer stop()
+
+	c, err := volant.DialTimeout(addr, 5*time.Second)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer c.Close()
+	c.EnableIdempotence()
+	c.SetMaxRetries(2)
+	c.SetRetryBackoff(0)
+
+	if _, err := c.Produce("t", 0, nil, []byte("a")); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := c.Produce("t", 0, nil, []byte("b")); err == nil {
+		t.Fatal("expected timeout")
+	}
+	if _, err := c.Produce("t", 0, nil, []byte("c")); err != nil {
+		t.Fatal(err)
+	}
+	reqs := srv.copyProduces()
+	if len(reqs) != 5 {
+		t.Fatalf("produces %d want 5", len(reqs))
+	}
+	want := []int32{0, 1, 1, 1, 1}
+	for i, seq := range want {
+		if reqs[i].BaseSequence != seq {
+			t.Fatalf("produce %d seq %d want %d", i, reqs[i].BaseSequence, seq)
+		}
+	}
+}

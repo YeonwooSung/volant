@@ -388,5 +388,72 @@ class TestIdempotentProduce(unittest.TestCase):
             self.assertEqual(c.addr, leader.addr)
 
 
+TIMEOUT = 7
+
+
+class TestProduceRetry(unittest.TestCase):
+    def test_default_max_retries_zero_raises_on_timeout(self) -> None:
+        with ScriptedBroker() as srv:
+            srv.produce_codes = [TIMEOUT]
+            with Client(srv.addr, timeout=5.0) as c:
+                self.assertEqual(c.max_retries, 0)
+                self.assertEqual(c.retry_backoff_ms, 50)
+                with self.assertRaises(BrokerError) as ctx:
+                    c.produce("t", 0, value=b"hello")
+            self.assertEqual(ctx.exception.code, TIMEOUT)
+            self.assertEqual(srv.produce_count, 1)
+
+    def test_retries_timeout_then_ok(self) -> None:
+        with ScriptedBroker() as srv:
+            srv.produce_codes = [TIMEOUT, TIMEOUT, 0]
+            with Client(srv.addr, timeout=5.0, max_retries=2, retry_backoff_ms=0) as c:
+                result = c.produce("t", 0, value=b"hello")
+            self.assertEqual(result.base_offset, 7)
+            self.assertEqual(srv.produce_count, 3)
+
+    def test_exhausted_retries_raises(self) -> None:
+        with ScriptedBroker() as srv:
+            srv.produce_codes = [TIMEOUT, TIMEOUT, TIMEOUT]
+            with Client(srv.addr, timeout=5.0, max_retries=2, retry_backoff_ms=0) as c:
+                with self.assertRaises(BrokerError) as ctx:
+                    c.produce("t", 0, value=b"hello")
+            self.assertEqual(ctx.exception.code, TIMEOUT)
+            self.assertEqual(srv.produce_count, 3)
+
+    def test_error_13_does_not_consume_retries(self) -> None:
+        with ScriptedBroker() as follower:
+            follower.produce_codes = [NOT_LEADER]
+            follower.metadata = _leader_meta("t", 0, 2, "127.0.0.1", 9)
+            with Client(
+                follower.addr,
+                timeout=5.0,
+                max_redirects=0,
+                max_retries=2,
+                retry_backoff_ms=0,
+            ) as c:
+                with self.assertRaises(BrokerError) as ctx:
+                    c.produce("t", 0, value=b"hello")
+            self.assertEqual(ctx.exception.code, NOT_LEADER)
+            self.assertEqual(follower.produce_count, 1)
+            self.assertEqual(follower.metadata_count, 0)
+
+    def test_failed_retries_do_not_increment_sequence(self) -> None:
+        with ScriptedBroker() as srv:
+            srv.produce_codes = [0, TIMEOUT, TIMEOUT, TIMEOUT, 0]
+            with Client(
+                srv.addr,
+                timeout=5.0,
+                enable_idempotence=True,
+                max_retries=2,
+                retry_backoff_ms=0,
+            ) as c:
+                c.produce("t", 0, value=b"a")
+                with self.assertRaises(BrokerError):
+                    c.produce("t", 0, value=b"b")
+                c.produce("t", 0, value=b"c")
+            seqs = [r.base_sequence for r in srv.produce_reqs]
+            self.assertEqual(seqs, [0, 1, 1, 1, 1])
+
+
 if __name__ == "__main__":
     unittest.main()

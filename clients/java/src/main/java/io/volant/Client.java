@@ -61,6 +61,11 @@ public final class Client implements AutoCloseable {
     static final int NOT_LEADER_FOR_PARTITION = 13;
     /** Native {@code ErrorCode::UnknownProducerId}. */
     static final int UNKNOWN_PRODUCER_ID = 21;
+    /** Transient produce codes (Rust {@code is_transient_error_code}). Not 13 / 21. */
+    static final int ERR_IO = 6;
+    static final int ERR_TIMEOUT = 7;
+    static final int ERR_NOT_ENOUGH_REPLICAS = 15;
+    static final int ERR_BROKER_NOT_AVAILABLE = 16;
 
     private String addr;
     private Socket socket;
@@ -72,6 +77,8 @@ public final class Client implements AutoCloseable {
     private final String scramPassword;
     private int maxRedirects = 1;
     private boolean enableIdempotence = false;
+    private int maxRetries = 0;
+    private long retryBackoffMs = 50;
     private String transactionalId = null;
     private long producerId = 0L;
     private int producerEpoch = 0;
@@ -204,6 +211,32 @@ public final class Client implements AutoCloseable {
 
     public int maxRedirects() {
         return maxRedirects;
+    }
+
+    /**
+     * Extra Produce attempts after the first on transient broker/transport
+     * errors. Default is 0 (no extra attempts). Negative values are treated
+     * as 0. Error 13 stays on the redirect budget; error 21 stays on the
+     * one re-Init. Fetch is not retried.
+     */
+    public void setMaxRetries(int n) {
+        this.maxRetries = Math.max(0, n);
+    }
+
+    public int maxRetries() {
+        return maxRetries;
+    }
+
+    /**
+     * Sleep between produce retries, in milliseconds. Default is 50. Zero
+     * is allowed (tests). Negative values are treated as 0.
+     */
+    public void setRetryBackoffMs(long ms) {
+        this.retryBackoffMs = Math.max(0, ms);
+    }
+
+    public long retryBackoffMs() {
+        return retryBackoffMs;
     }
 
     /**
@@ -670,7 +703,10 @@ public final class Client implements AutoCloseable {
      * Produce one message (null key when {@code key} is null) with acks=1.
      * Default trailer is {@code (0, 0, -1)}. After {@link #setEnableIdempotence}
      * the first produce sends InitProducerId (empty transactional_id) and later
-     * produces attach pid/epoch/seq.
+     * produces attach pid/epoch/seq. Transient broker/transport errors retry
+     * up to {@link #setMaxRetries} extra times (default 0). Error 13 uses
+     * {@code maxRedirects} only; error 21 uses the one re-Init only. Failed
+     * produce does not increment the sequence.
      *
      * @return the broker-assigned base offset
      */
@@ -679,13 +715,14 @@ public final class Client implements AutoCloseable {
             value = new byte[0];
         }
         int reinitBudget = usesPid() ? 1 : 0;
+        int retryAttempt = 0;
         while (true) {
             byte[] payload = encodeProduce(topic, partition, key, value);
-            int maxAttempts = 1 + maxRedirects;
-            int attempt = 0;
+            int maxRedirectAttempts = 1 + maxRedirects;
+            int redirectAttempt = 0;
             boolean retriedUnknown = false;
             while (true) {
-                attempt++;
+                redirectAttempt++;
                 Object decoded;
                 try {
                     decoded = roundTrip(Codec.OP_PRODUCE, payload);
@@ -697,9 +734,23 @@ public final class Client implements AutoCloseable {
                         break;
                     }
                     if (e.code == NOT_LEADER_FOR_PARTITION
-                            && attempt < maxAttempts
+                            && redirectAttempt < maxRedirectAttempts
                             && partition >= 0
                             && redirectToLeader(topic, partition)) {
+                        continue;
+                    }
+                    if (isTransientBroker(e.code) && retryAttempt < maxRetries) {
+                        retryAttempt++;
+                        redirectAttempt--;
+                        sleepProduceRetry();
+                        continue;
+                    }
+                    throw e;
+                } catch (ProtocolException e) {
+                    if (isTransientTransport(e) && retryAttempt < maxRetries) {
+                        retryAttempt++;
+                        redirectAttempt--;
+                        sleepProduceRetry();
                         continue;
                     }
                     throw e;
@@ -715,8 +766,14 @@ public final class Client implements AutoCloseable {
                     break;
                 }
                 if (resp.errorCode == NOT_LEADER_FOR_PARTITION
-                        && attempt < maxAttempts
+                        && redirectAttempt < maxRedirectAttempts
                         && redirectToLeader(resp.topic, (int) resp.partition)) {
+                    continue;
+                }
+                if (isTransientBroker(resp.errorCode) && retryAttempt < maxRetries) {
+                    retryAttempt++;
+                    redirectAttempt--;
+                    sleepProduceRetry();
                     continue;
                 }
                 check(resp.errorCode, "produce");
@@ -727,6 +784,29 @@ public final class Client implements AutoCloseable {
             if (!retriedUnknown) {
                 throw new ProtocolException("produce loop exited");
             }
+        }
+    }
+
+    static boolean isTransientBroker(int code) {
+        return code == ERR_IO
+                || code == ERR_TIMEOUT
+                || code == ERR_NOT_ENOUGH_REPLICAS
+                || code == ERR_BROKER_NOT_AVAILABLE;
+    }
+
+    static boolean isTransientTransport(Throwable e) {
+        return e instanceof ProtocolException && e.getCause() instanceof IOException;
+    }
+
+    private void sleepProduceRetry() {
+        if (retryBackoffMs <= 0) {
+            return;
+        }
+        try {
+            Thread.sleep(retryBackoffMs);
+        } catch (InterruptedException e) {
+            Thread.currentThread().interrupt();
+            throw new ProtocolException("produce retry interrupted", e);
         }
     }
 

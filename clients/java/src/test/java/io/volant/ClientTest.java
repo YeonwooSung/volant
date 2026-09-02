@@ -21,6 +21,7 @@ import org.junit.jupiter.api.Test;
 /** Leader-redirect tests against a scripted TCP broker (no live volant-server). */
 class ClientTest {
     private static final int NOT_LEADER = Client.NOT_LEADER_FOR_PARTITION;
+    private static final int TIMEOUT = Client.ERR_TIMEOUT;
 
     @Test
     void produceRedirectsToLeader() throws Exception {
@@ -189,6 +190,102 @@ class ClientTest {
             assertEquals(0, leader.produceReqs.get(0).baseSequence);
             assertEquals(1, leader.produceReqs.get(1).baseSequence);
             assertEquals(42L, leader.produceReqs.get(0).producerId);
+        }
+    }
+
+    @Test
+    void defaultMaxRetriesZeroRaisesOnTimeout() throws Exception {
+        try (ScriptedBroker srv = ScriptedBroker.start()) {
+            srv.produceCodes.add(TIMEOUT);
+            try (Client c = Client.connect("127.0.0.1", srv.port, 5_000)) {
+                assertEquals(0, c.maxRetries());
+                assertEquals(50, c.retryBackoffMs());
+                BrokerException ex = assertThrows(
+                        BrokerException.class,
+                        () -> c.produce("t", 0, null, "hello".getBytes(StandardCharsets.UTF_8)));
+                assertEquals(TIMEOUT, ex.code);
+            }
+            assertEquals(1, srv.produceCount.get());
+        }
+    }
+
+    @Test
+    void retriesTimeoutThenOk() throws Exception {
+        try (ScriptedBroker srv = ScriptedBroker.start()) {
+            srv.produceCodes.add(TIMEOUT);
+            srv.produceCodes.add(TIMEOUT);
+            srv.produceCodes.add(0);
+            try (Client c = Client.connect("127.0.0.1", srv.port, 5_000)) {
+                c.setMaxRetries(2);
+                c.setRetryBackoffMs(0);
+                long off = c.produce("t", 0, null, "hello".getBytes(StandardCharsets.UTF_8));
+                assertEquals(7L, off);
+            }
+            assertEquals(3, srv.produceCount.get());
+        }
+    }
+
+    @Test
+    void exhaustedRetriesRaises() throws Exception {
+        try (ScriptedBroker srv = ScriptedBroker.start()) {
+            srv.produceCodes.add(TIMEOUT);
+            srv.produceCodes.add(TIMEOUT);
+            srv.produceCodes.add(TIMEOUT);
+            try (Client c = Client.connect("127.0.0.1", srv.port, 5_000)) {
+                c.setMaxRetries(2);
+                c.setRetryBackoffMs(0);
+                BrokerException ex = assertThrows(
+                        BrokerException.class,
+                        () -> c.produce("t", 0, null, "hello".getBytes(StandardCharsets.UTF_8)));
+                assertEquals(TIMEOUT, ex.code);
+            }
+            assertEquals(3, srv.produceCount.get());
+        }
+    }
+
+    @Test
+    void error13DoesNotConsumeRetries() throws Exception {
+        try (ScriptedBroker follower = ScriptedBroker.start()) {
+            follower.produceCodes.add(NOT_LEADER);
+            follower.meta = leaderMeta("t", 0, 2, "127.0.0.1", 9);
+            try (Client c = Client.connect("127.0.0.1", follower.port, 5_000)) {
+                c.setMaxRedirects(0);
+                c.setMaxRetries(2);
+                c.setRetryBackoffMs(0);
+                BrokerException ex = assertThrows(
+                        BrokerException.class,
+                        () -> c.produce("t", 0, null, "hello".getBytes(StandardCharsets.UTF_8)));
+                assertEquals(NOT_LEADER, ex.code);
+            }
+            assertEquals(1, follower.produceCount.get());
+            assertEquals(0, follower.metadataCount.get());
+        }
+    }
+
+    @Test
+    void failedRetriesDoNotIncrementSequence() throws Exception {
+        try (ScriptedBroker srv = ScriptedBroker.start()) {
+            srv.produceCodes.add(0);
+            srv.produceCodes.add(TIMEOUT);
+            srv.produceCodes.add(TIMEOUT);
+            srv.produceCodes.add(TIMEOUT);
+            srv.produceCodes.add(0);
+            try (Client c = Client.connect("127.0.0.1", srv.port, 5_000)) {
+                c.setEnableIdempotence(true);
+                c.setMaxRetries(2);
+                c.setRetryBackoffMs(0);
+                c.produce("t", 0, null, "a".getBytes(StandardCharsets.UTF_8));
+                assertThrows(
+                        BrokerException.class,
+                        () -> c.produce("t", 0, null, "b".getBytes(StandardCharsets.UTF_8)));
+                c.produce("t", 0, null, "c".getBytes(StandardCharsets.UTF_8));
+            }
+            assertEquals(5, srv.produceReqs.size());
+            assertEquals(0, srv.produceReqs.get(0).baseSequence);
+            assertEquals(1, srv.produceReqs.get(1).baseSequence);
+            assertEquals(1, srv.produceReqs.get(2).baseSequence);
+            assertEquals(1, srv.produceReqs.get(3).baseSequence);
+            assertEquals(1, srv.produceReqs.get(4).baseSequence);
         }
     }
 
