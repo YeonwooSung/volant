@@ -59,6 +59,10 @@
 //! top-level error_code; failures arrive as [`volant_protocol::Response::Error`]
 //! or transport. Error 2 / 9 / 10 / 11 / 13 / 14 and protocol are
 //! not retried. Admin-14 and leader-13 redirect inherit.
+//! v0.98 redirects [`Client::delete_offsets`] (and OffsetCommit /
+//! OffsetFetch, which share `offset_admin_round_trip`) on error **14**
+//! via `redirect_to_controller` / `max_redirects`. Transient 6/7/15/16
+//! stay on `max_retries`. `max_redirects=0` does not redirect.
 
 #![deny(missing_docs)]
 
