@@ -24,3 +24,9 @@ examples/tls/*.pem
 # Go client (v0.19)
 *.test
 clients/go/coverage.out
+
+# Java client (v0.23)
+clients/java/target/
+clients/java/.classpath
+clients/java/.project
+clients/java/.settings/
