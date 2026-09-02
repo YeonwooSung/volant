@@ -1063,6 +1063,62 @@ func (c *Client) ListGroups() ([]GroupListing, error) {
 	return resp.Groups, nil
 }
 
+// CreateScramUser creates or replaces a SCRAM user (native opcode 64/65).
+// iterations 0 means the broker default (4096). Password is sent in the
+// clear (use TLS). This is not the v0.46 handshake (60–63).
+func (c *Client) CreateScramUser(username, password string, iterations uint32) error {
+	payload, err := codec.EncodeCreateScramUserRequest(codec.CreateScramUserRequest{
+		Username:   username,
+		Password:   password,
+		Iterations: iterations,
+	})
+	if err != nil {
+		return err
+	}
+	decoded, err := c.roundTrip(codec.OpCreateScramUser, payload)
+	if err != nil {
+		return err
+	}
+	resp, ok := decoded.(codec.CreateScramUserResponse)
+	if !ok {
+		return &frame.ProtocolError{Msg: fmt.Sprintf("unexpected response for create_scram_user: %T", decoded)}
+	}
+	return check(resp.ErrorCode, "create_scram_user")
+}
+
+// DeleteScramUser deletes a SCRAM user (native opcode 66/67).
+func (c *Client) DeleteScramUser(username string) error {
+	payload, err := codec.EncodeDeleteScramUserRequest(codec.DeleteScramUserRequest{Username: username})
+	if err != nil {
+		return err
+	}
+	decoded, err := c.roundTrip(codec.OpDeleteScramUser, payload)
+	if err != nil {
+		return err
+	}
+	resp, ok := decoded.(codec.DeleteScramUserResponse)
+	if !ok {
+		return &frame.ProtocolError{Msg: fmt.Sprintf("unexpected response for delete_scram_user: %T", decoded)}
+	}
+	return check(resp.ErrorCode, "delete_scram_user")
+}
+
+// ListScramUsers lists SCRAM usernames (native opcode 68/69).
+func (c *Client) ListScramUsers() ([]string, error) {
+	decoded, err := c.roundTrip(codec.OpListScramUsers, codec.EncodeListScramUsersRequest())
+	if err != nil {
+		return nil, err
+	}
+	resp, ok := decoded.(codec.ListScramUsersResponse)
+	if !ok {
+		return nil, &frame.ProtocolError{Msg: fmt.Sprintf("unexpected response for list_scram_users: %T", decoded)}
+	}
+	if err := check(resp.ErrorCode, "list_scram_users"); err != nil {
+		return nil, err
+	}
+	return resp.Usernames, nil
+}
+
 // LeaveGroup leaves a consumer group.
 func (c *Client) LeaveGroup(group, memberID string) error {
 	payload, err := codec.EncodeLeaveGroupRequest(codec.LeaveGroupRequest{

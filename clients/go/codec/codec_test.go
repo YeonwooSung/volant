@@ -1143,3 +1143,102 @@ func TestListOffsetsResponsePayloadRS(t *testing.T) {
 		t.Fatalf("dispatch %#v", got)
 	}
 }
+
+func TestCreateScramUserRoundTrip(t *testing.T) {
+	req := CreateScramUserRequest{Username: "alice", Password: "s3cret", Iterations: 4096}
+	raw, err := EncodeCreateScramUserRequest(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	expected := mustHex(t, "0500616c696365060073336372657400100000")
+	if !bytes.Equal(raw, expected) {
+		t.Fatalf("got %x want %x", raw, expected)
+	}
+	decoded, err := DecodeCreateScramUserRequest(raw)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if decoded != req {
+		t.Fatalf("decoded %#v", decoded)
+	}
+	resp := CreateScramUserResponse{ErrorCode: 0}
+	rraw, err := EncodeCreateScramUserResponse(resp)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.Equal(rraw, mustHex(t, "0000")) {
+		t.Fatalf("resp %x", rraw)
+	}
+	got, err := DecodeResponse(OpCreateScramUserResponse, rraw)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cr, ok := got.(CreateScramUserResponse); !ok || cr.ErrorCode != 0 {
+		t.Fatalf("dispatch %#v", got)
+	}
+}
+
+func TestDeleteScramUserRoundTrip(t *testing.T) {
+	req := DeleteScramUserRequest{Username: "alice"}
+	raw, err := EncodeDeleteScramUserRequest(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.Equal(raw, mustHex(t, "0500616c696365")) {
+		t.Fatalf("got %x", raw)
+	}
+	decoded, err := DecodeDeleteScramUserRequest(raw)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if decoded != req {
+		t.Fatalf("decoded %#v", decoded)
+	}
+	resp := DeleteScramUserResponse{ErrorCode: 0}
+	rraw, err := EncodeDeleteScramUserResponse(resp)
+	if err != nil {
+		t.Fatal(err)
+	}
+	got, err := DecodeResponse(OpDeleteScramUserResponse, rraw)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if dr, ok := got.(DeleteScramUserResponse); !ok || dr.ErrorCode != 0 {
+		t.Fatalf("dispatch %#v", got)
+	}
+}
+
+func TestListScramUsersRequestEmpty(t *testing.T) {
+	if len(EncodeListScramUsersRequest()) != 0 {
+		t.Fatal("list request must be empty")
+	}
+	if err := DecodeListScramUsersRequest(nil); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestListScramUsersResponseTwoNames(t *testing.T) {
+	resp := ListScramUsersResponse{ErrorCode: 0, Usernames: []string{"alice", "bob"}}
+	raw, err := EncodeListScramUsersResponse(resp)
+	if err != nil {
+		t.Fatal(err)
+	}
+	expected := mustHex(t, "0000020000000500616c6963650300626f62")
+	if !bytes.Equal(raw, expected) {
+		t.Fatalf("got %x want %x", raw, expected)
+	}
+	decoded, err := DecodeListScramUsersResponse(raw)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if decoded.ErrorCode != 0 || len(decoded.Usernames) != 2 || decoded.Usernames[0] != "alice" || decoded.Usernames[1] != "bob" {
+		t.Fatalf("decoded %#v", decoded)
+	}
+	got, err := DecodeResponse(OpListScramUsersResponse, raw)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if lr, ok := got.(ListScramUsersResponse); !ok || lr.Usernames[1] != "bob" {
+		t.Fatalf("dispatch %#v", got)
+	}
+}

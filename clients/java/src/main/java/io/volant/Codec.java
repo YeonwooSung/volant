@@ -11,7 +11,7 @@ import java.util.List;
  * <p>Matches {@code crates/volant-protocol/src/payload.rs} for the MVP opcodes:
  * Produce, Fetch, CreateTopic, Metadata, DeleteTopic, OffsetCommit,
  * OffsetFetch, JoinGroup, Heartbeat, LeaveGroup, Auth, DescribeGroup,
- * ListGroups, ListOffsets, InitProducerId, Scram.
+ * ListGroups, ListOffsets, InitProducerId, Scram, Create/Delete/ListScramUsers.
  *
  * <p>Header fields are big-endian (see {@link Frame}); <strong>payload</strong>
  * integers and length prefixes are little-endian.
@@ -35,6 +35,12 @@ public final class Codec {
     public static final int OP_SCRAM_FIRST_RESPONSE = 61;
     public static final int OP_SCRAM_FINAL = 62;
     public static final int OP_SCRAM_FINAL_RESPONSE = 63;
+    public static final int OP_CREATE_SCRAM_USER = 64;
+    public static final int OP_CREATE_SCRAM_USER_RESPONSE = 65;
+    public static final int OP_DELETE_SCRAM_USER = 66;
+    public static final int OP_DELETE_SCRAM_USER_RESPONSE = 67;
+    public static final int OP_LIST_SCRAM_USERS = 68;
+    public static final int OP_LIST_SCRAM_USERS_RESPONSE = 69;
     public static final int OP_DESCRIBE_GROUP = 34;
     public static final int OP_DESCRIBE_GROUP_RESPONSE = 35;
     public static final int OP_LIST_GROUPS = 36;
@@ -520,6 +526,54 @@ public final class Codec {
         public ScramFinalResponse(int errorCode, byte[] serverSignature) {
             this.errorCode = errorCode;
             this.serverSignature = serverSignature == null ? new byte[0] : serverSignature;
+        }
+    }
+
+    public static final class CreateScramUserRequest {
+        public final String username;
+        public final String password;
+        public final int iterations;
+
+        public CreateScramUserRequest(String username, String password, int iterations) {
+            this.username = username == null ? "" : username;
+            this.password = password == null ? "" : password;
+            this.iterations = iterations;
+        }
+    }
+
+    public static final class CreateScramUserResponse {
+        public final int errorCode;
+
+        public CreateScramUserResponse(int errorCode) {
+            this.errorCode = errorCode;
+        }
+    }
+
+    public static final class DeleteScramUserRequest {
+        public final String username;
+
+        public DeleteScramUserRequest(String username) {
+            this.username = username == null ? "" : username;
+        }
+    }
+
+    public static final class DeleteScramUserResponse {
+        public final int errorCode;
+
+        public DeleteScramUserResponse(int errorCode) {
+            this.errorCode = errorCode;
+        }
+    }
+
+    public static final class ListScramUsersResponse {
+        public final int errorCode;
+        public final List<String> usernames;
+
+        public ListScramUsersResponse(int errorCode, List<String> usernames) {
+            this.errorCode = errorCode;
+            this.usernames = usernames == null
+                    ? Collections.emptyList()
+                    : Collections.unmodifiableList(new ArrayList<>(usernames));
         }
     }
 
@@ -1539,6 +1593,77 @@ public final class Codec {
         return new ScramFinalResponse(r.u16(), getBytes(r));
     }
 
+    public static byte[] encodeCreateScramUserRequest(CreateScramUserRequest req) {
+        Writer w = new Writer();
+        putString(w, req.username);
+        putString(w, req.password);
+        w.u32(req.iterations);
+        return w.finish();
+    }
+
+    public static CreateScramUserRequest decodeCreateScramUserRequest(byte[] payload) {
+        Reader r = new Reader(payload);
+        return new CreateScramUserRequest(getString(r), getString(r), (int) r.u32());
+    }
+
+    public static byte[] encodeCreateScramUserResponse(CreateScramUserResponse resp) {
+        Writer w = new Writer();
+        w.u16(resp.errorCode);
+        return w.finish();
+    }
+
+    public static CreateScramUserResponse decodeCreateScramUserResponse(byte[] payload) {
+        Reader r = new Reader(payload);
+        return new CreateScramUserResponse(r.u16());
+    }
+
+    public static byte[] encodeDeleteScramUserRequest(DeleteScramUserRequest req) {
+        Writer w = new Writer();
+        putString(w, req.username);
+        return w.finish();
+    }
+
+    public static DeleteScramUserRequest decodeDeleteScramUserRequest(byte[] payload) {
+        Reader r = new Reader(payload);
+        return new DeleteScramUserRequest(getString(r));
+    }
+
+    public static byte[] encodeDeleteScramUserResponse(DeleteScramUserResponse resp) {
+        Writer w = new Writer();
+        w.u16(resp.errorCode);
+        return w.finish();
+    }
+
+    public static DeleteScramUserResponse decodeDeleteScramUserResponse(byte[] payload) {
+        Reader r = new Reader(payload);
+        return new DeleteScramUserResponse(r.u16());
+    }
+
+    public static byte[] encodeListScramUsersRequest() {
+        return new byte[0];
+    }
+
+    public static byte[] encodeListScramUsersResponse(ListScramUsersResponse resp) {
+        Writer w = new Writer();
+        w.u16(resp.errorCode);
+        w.u32(resp.usernames.size());
+        for (String name : resp.usernames) {
+            putString(w, name);
+        }
+        return w.finish();
+    }
+
+    public static ListScramUsersResponse decodeListScramUsersResponse(byte[] payload) {
+        Reader r = new Reader(payload);
+        int errorCode = r.u16();
+        long n = r.u32();
+        List<String> names = new ArrayList<>();
+        for (int i = 0; i < n; i++) {
+            names.add(getString(r));
+        }
+        return new ListScramUsersResponse(errorCode, names);
+    }
+
     // --- error opcode ------------------------------------------------------
 
     public static Object decodeResponse(int opcode, byte[] payload) {
@@ -1571,6 +1696,12 @@ public final class Codec {
                 return decodeScramFirstResponse(payload);
             case OP_SCRAM_FINAL_RESPONSE:
                 return decodeScramFinalResponse(payload);
+            case OP_CREATE_SCRAM_USER_RESPONSE:
+                return decodeCreateScramUserResponse(payload);
+            case OP_DELETE_SCRAM_USER_RESPONSE:
+                return decodeDeleteScramUserResponse(payload);
+            case OP_LIST_SCRAM_USERS_RESPONSE:
+                return decodeListScramUsersResponse(payload);
             case OP_DESCRIBE_GROUP_RESPONSE:
                 return decodeDescribeGroupResponse(payload);
             case OP_LIST_GROUPS_RESPONSE:

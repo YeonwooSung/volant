@@ -212,6 +212,13 @@ class Client:
     password (or vice versa) is a constructor error::
 
         c = Client("127.0.0.1:9092", scram_username="alice", scram_password="s3cret")
+
+    Create/Delete/ListScramUsers (v0.55) are admin RPCs (opcodes 64–69),
+    not the handshake. Password is sent in the clear on create (use TLS)::
+
+        c.create_scram_user("alice", "s3cret")
+        names = c.list_scram_users()
+        c.delete_scram_user("alice")
     """
 
     def __init__(
@@ -822,6 +829,50 @@ class Client:
             raise ProtocolError(f"unexpected response for list_groups: {type(resp)}")
         self._check(resp.error_code, "list_groups")
         return list(resp.groups)
+
+    def create_scram_user(
+        self, username: str, password: str, iterations: int = 0
+    ) -> None:
+        """Create or replace a SCRAM user (native opcode 64/65).
+
+        ``iterations=0`` means the broker default (4096). Password is sent
+        in the clear (use TLS). This is not the v0.46 handshake (60–63).
+        """
+        payload = codec.encode_create_scram_user_request(
+            codec.CreateScramUserRequest(
+                username=username, password=password, iterations=iterations
+            )
+        )
+        resp = self._round_trip(codec.OP_CREATE_SCRAM_USER, payload)
+        if not isinstance(resp, codec.CreateScramUserResponse):
+            raise ProtocolError(
+                f"unexpected response for create_scram_user: {type(resp)}"
+            )
+        self._check(resp.error_code, "create_scram_user")
+
+    def delete_scram_user(self, username: str) -> None:
+        """Delete a SCRAM user (native opcode 66/67)."""
+        payload = codec.encode_delete_scram_user_request(
+            codec.DeleteScramUserRequest(username=username)
+        )
+        resp = self._round_trip(codec.OP_DELETE_SCRAM_USER, payload)
+        if not isinstance(resp, codec.DeleteScramUserResponse):
+            raise ProtocolError(
+                f"unexpected response for delete_scram_user: {type(resp)}"
+            )
+        self._check(resp.error_code, "delete_scram_user")
+
+    def list_scram_users(self) -> list[str]:
+        """List SCRAM usernames (native opcode 68/69)."""
+        resp = self._round_trip(
+            codec.OP_LIST_SCRAM_USERS, codec.encode_list_scram_users_request()
+        )
+        if not isinstance(resp, codec.ListScramUsersResponse):
+            raise ProtocolError(
+                f"unexpected response for list_scram_users: {type(resp)}"
+            )
+        self._check(resp.error_code, "list_scram_users")
+        return list(resp.usernames)
 
 
 # Re-export result types used by callers.

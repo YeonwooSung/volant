@@ -76,6 +76,11 @@ c.EnableIdempotence()
 // Optional SCRAM-SHA-256 (v0.46). Dial / DialAuth / DialTLS stay.
 c, err = volant.DialScram("127.0.0.1:9092", "alice", "s3cret")
 c, err = volant.DialTLSScram("127.0.0.1:9092", volant.TLSConfig{CAFile: "ca.pem"}, "alice", "s3cret")
+// SCRAM admin (v0.55). Opcodes 64–69; not the handshake. Password in clear.
+err = c.CreateScramUser("alice", "s3cret", 0) // 0 = broker default 4096
+names, err := c.ListScramUsers()
+err = c.DeleteScramUser("alice")
+_ = names
 ```
 
 `Produce(..., nil, value)` sends a null key. `Fetch` returns `[]Record`
@@ -152,6 +157,9 @@ SCRAM-SHA-256 (v0.46): `DialScram` / `DialTLSScram` send opcodes 60
 then 62 after connect. Empty user or password is an error before
 dial. A rejected proof or server-signature mismatch fails Dial.
 Leader redirect re-runs the same auth path.
+Create/Delete/ListScramUsers (v0.55) are admin RPCs (opcodes 64–69),
+not the handshake. `CreateScramUser` sends the password in the clear
+(use TLS). Not Kafka AlterUserScramCredentials.
 
 ## Honesty
 
@@ -198,4 +206,5 @@ See [docs/V19_SPEC.md](../../docs/V19_SPEC.md),
 [docs/V48_SPEC.md](../../docs/V48_SPEC.md),
 [docs/V49_SPEC.md](../../docs/V49_SPEC.md),
 [docs/V50_SPEC.md](../../docs/V50_SPEC.md).,
-[docs/V46_SPEC.md](../../docs/V46_SPEC.md).
+[docs/V46_SPEC.md](../../docs/V46_SPEC.md),
+[docs/V55_SPEC.md](../../docs/V55_SPEC.md).

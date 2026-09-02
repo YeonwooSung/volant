@@ -685,4 +685,55 @@ class CodecTest {
         assertEquals(2, dispatched.groups.size());
         assertEquals(Codec.GROUP_STATE_EMPTY, new Codec.GroupListing("x", 99, 0, 0).state);
     }
+
+    @Test
+    void createScramUserRoundTrip() {
+        Codec.CreateScramUserRequest req = new Codec.CreateScramUserRequest("alice", "s3cret", 4096);
+        byte[] raw = Codec.encodeCreateScramUserRequest(req);
+        assertArrayEquals(hx("0500616c696365060073336372657400100000"), raw);
+        Codec.CreateScramUserRequest decoded = Codec.decodeCreateScramUserRequest(raw);
+        assertEquals("alice", decoded.username);
+        assertEquals("s3cret", decoded.password);
+        assertEquals(4096, decoded.iterations);
+        byte[] rraw = Codec.encodeCreateScramUserResponse(new Codec.CreateScramUserResponse(0));
+        assertArrayEquals(hx("0000"), rraw);
+        Codec.CreateScramUserResponse dispatched = assertInstanceOf(
+                Codec.CreateScramUserResponse.class,
+                Codec.decodeResponse(Codec.OP_CREATE_SCRAM_USER_RESPONSE, rraw));
+        assertEquals(0, dispatched.errorCode);
+    }
+
+    @Test
+    void deleteScramUserRoundTrip() {
+        Codec.DeleteScramUserRequest req = new Codec.DeleteScramUserRequest("alice");
+        byte[] raw = Codec.encodeDeleteScramUserRequest(req);
+        assertArrayEquals(hx("0500616c696365"), raw);
+        assertEquals("alice", Codec.decodeDeleteScramUserRequest(raw).username);
+        byte[] rraw = Codec.encodeDeleteScramUserResponse(new Codec.DeleteScramUserResponse(0));
+        assertArrayEquals(hx("0000"), rraw);
+        Codec.DeleteScramUserResponse dispatched = assertInstanceOf(
+                Codec.DeleteScramUserResponse.class,
+                Codec.decodeResponse(Codec.OP_DELETE_SCRAM_USER_RESPONSE, rraw));
+        assertEquals(0, dispatched.errorCode);
+    }
+
+    @Test
+    void listScramUsersRequestEmpty() {
+        assertArrayEquals(new byte[0], Codec.encodeListScramUsersRequest());
+    }
+
+    @Test
+    void listScramUsersResponseTwoNames() {
+        Codec.ListScramUsersResponse resp =
+                new Codec.ListScramUsersResponse(0, Arrays.asList("alice", "bob"));
+        byte[] raw = Codec.encodeListScramUsersResponse(resp);
+        assertArrayEquals(hx("0000020000000500616c6963650300626f62"), raw);
+        Codec.ListScramUsersResponse decoded = Codec.decodeListScramUsersResponse(raw);
+        assertEquals(0, decoded.errorCode);
+        assertEquals(Arrays.asList("alice", "bob"), decoded.usernames);
+        Codec.ListScramUsersResponse dispatched = assertInstanceOf(
+                Codec.ListScramUsersResponse.class,
+                Codec.decodeResponse(Codec.OP_LIST_SCRAM_USERS_RESPONSE, raw));
+        assertEquals("bob", dispatched.usernames.get(1));
+    }
 }

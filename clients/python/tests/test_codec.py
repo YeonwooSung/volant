@@ -28,8 +28,13 @@ from volant.codec import (
     LeaveGroupRequest,
     LeaveGroupResponse,
     ListGroupsResponse,
+    CreateScramUserRequest,
+    CreateScramUserResponse,
+    DeleteScramUserRequest,
+    DeleteScramUserResponse,
     ListOffsetsRequest,
     ListOffsetsResponse,
+    ListScramUsersResponse,
     MetadataRequest,
     MetadataResponse,
     OffsetCommitEntry,
@@ -63,8 +68,14 @@ from volant.codec import (
     decode_leave_group_response,
     decode_list_groups_request,
     decode_list_groups_response,
+    decode_create_scram_user_request,
+    decode_create_scram_user_response,
+    decode_delete_scram_user_request,
+    decode_delete_scram_user_response,
     decode_list_offsets_request,
     decode_list_offsets_response,
+    decode_list_scram_users_request,
+    decode_list_scram_users_response,
     decode_metadata_request,
     decode_metadata_response,
     decode_offset_commit_request,
@@ -92,8 +103,14 @@ from volant.codec import (
     encode_leave_group_response,
     encode_list_groups_request,
     encode_list_groups_response,
+    encode_create_scram_user_request,
+    encode_create_scram_user_response,
+    encode_delete_scram_user_request,
+    encode_delete_scram_user_response,
     encode_list_offsets_request,
     encode_list_offsets_response,
+    encode_list_scram_users_request,
+    encode_list_scram_users_response,
     encode_metadata_request,
     encode_metadata_response,
     encode_offset_commit_request,
@@ -108,7 +125,10 @@ from volant.codec import (
     OP_JOIN_GROUP,
     OP_LEAVE_GROUP,
     OP_LIST_GROUPS_RESPONSE,
+    OP_CREATE_SCRAM_USER_RESPONSE,
+    OP_DELETE_SCRAM_USER_RESPONSE,
     OP_LIST_OFFSETS_RESPONSE,
+    OP_LIST_SCRAM_USERS_RESPONSE,
     OP_OFFSET_COMMIT,
     OP_OFFSET_FETCH,
 )
@@ -784,6 +804,56 @@ class TestListOffsetsCodec(unittest.TestCase):
         self.assertEqual(_hx(raw), _hx(expected))
         self.assertEqual(decode_list_offsets_response(raw), resp)
         self.assertEqual(decode_response(OP_LIST_OFFSETS_RESPONSE, raw), resp)
+
+
+class TestScramAdminCodec(unittest.TestCase):
+    def test_create_scram_user_roundtrip(self) -> None:
+        req = CreateScramUserRequest(
+            username="alice", password="s3cret", iterations=4096
+        )
+        raw = encode_create_scram_user_request(req)
+        expected = bytes.fromhex(
+            "0500"
+            "616c696365"  # "alice"
+            "0600"
+            "733363726574"  # "s3cret"
+            "00100000"  # iterations 4096
+        )
+        self.assertEqual(_hx(raw), _hx(expected))
+        self.assertEqual(decode_create_scram_user_request(raw), req)
+        resp = CreateScramUserResponse(error_code=0)
+        rraw = encode_create_scram_user_response(resp)
+        self.assertEqual(rraw, bytes.fromhex("0000"))
+        self.assertEqual(decode_create_scram_user_response(rraw), resp)
+        self.assertEqual(decode_response(OP_CREATE_SCRAM_USER_RESPONSE, rraw), resp)
+
+    def test_delete_scram_user_roundtrip(self) -> None:
+        req = DeleteScramUserRequest(username="alice")
+        raw = encode_delete_scram_user_request(req)
+        self.assertEqual(raw, bytes.fromhex("0500616c696365"))
+        self.assertEqual(decode_delete_scram_user_request(raw), req)
+        resp = DeleteScramUserResponse(error_code=0)
+        rraw = encode_delete_scram_user_response(resp)
+        self.assertEqual(rraw, bytes.fromhex("0000"))
+        self.assertEqual(decode_delete_scram_user_response(rraw), resp)
+        self.assertEqual(decode_response(OP_DELETE_SCRAM_USER_RESPONSE, rraw), resp)
+
+    def test_list_scram_users_request_empty(self) -> None:
+        self.assertEqual(encode_list_scram_users_request(), b"")
+        self.assertIsNone(decode_list_scram_users_request(b""))
+
+    def test_list_scram_users_response_two_names(self) -> None:
+        resp = ListScramUsersResponse(error_code=0, usernames=["alice", "bob"])
+        raw = encode_list_scram_users_response(resp)
+        expected = bytes.fromhex(
+            "0000"
+            "02000000"
+            "0500616c696365"
+            "0300626f62"
+        )
+        self.assertEqual(_hx(raw), _hx(expected))
+        self.assertEqual(decode_list_scram_users_response(raw), resp)
+        self.assertEqual(decode_response(OP_LIST_SCRAM_USERS_RESPONSE, raw), resp)
 
 
 if __name__ == "__main__":

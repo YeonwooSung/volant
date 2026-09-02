@@ -70,6 +70,10 @@ c = Client("127.0.0.1:9092", tls=True, tls_ca="ca.pem", auth_token="s3cret")
 c = Client("127.0.0.1:9092", enable_idempotence=True)
 # Optional SCRAM-SHA-256 (v0.46). Token wins if both are set.
 c = Client("127.0.0.1:9092", scram_username="alice", scram_password="s3cret")
+# SCRAM admin (v0.55). Opcodes 64–69; not the handshake. Password in clear.
+c.create_scram_user("alice", "s3cret")  # iterations=0 → broker default 4096
+names = c.list_scram_users()
+c.delete_scram_user("alice")
 ```
 
 `Client` is also a context manager. `produce(..., key=b"...")` is supported;
@@ -149,6 +153,10 @@ SCRAM-SHA-256 (v0.46) sends opcodes 60 then 62 after connect when
 unset. Username without password (or vice versa) is a constructor
 error. A rejected proof or server-signature mismatch fails the
 constructor. Leader redirect re-runs the same auth path.
+Create/Delete/ListScramUsers (v0.55) are admin RPCs (opcodes 64–69),
+not the handshake. `create_scram_user(user, password, iterations=0)`
+sends the password in the clear (use TLS). Not Kafka
+AlterUserScramCredentials.
 
 ## Honesty
 
@@ -195,4 +203,5 @@ See [docs/V14_SPEC.md](../../docs/V14_SPEC.md),
 [docs/V48_SPEC.md](../../docs/V48_SPEC.md),
 [docs/V49_SPEC.md](../../docs/V49_SPEC.md),
 [docs/V50_SPEC.md](../../docs/V50_SPEC.md).,
-[docs/V46_SPEC.md](../../docs/V46_SPEC.md).
+[docs/V46_SPEC.md](../../docs/V46_SPEC.md),
+[docs/V55_SPEC.md](../../docs/V55_SPEC.md).

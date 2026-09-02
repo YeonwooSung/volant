@@ -2,7 +2,7 @@
 //
 // Matches crates/volant-protocol/src/payload.rs for Produce, Fetch,
 // CreateTopic, Metadata, DeleteTopic, OffsetCommit, OffsetFetch,
-// JoinGroup, Heartbeat, LeaveGroup, Auth, DescribeGroup, ListGroups, ListOffsets, InitProducerId, and Scram.
+// JoinGroup, Heartbeat, LeaveGroup, Auth, DescribeGroup, ListGroups, ListOffsets, InitProducerId, Scram, and Create/Delete/ListScramUsers.
 // Frame headers are big-endian (see package frame); payload integers and
 // length prefixes are little-endian.
 package codec
@@ -15,31 +15,37 @@ import (
 )
 
 const (
-	OpProduce               uint16 = 1
-	OpFetch                 uint16 = 2
-	OpCreateTopic           uint16 = 3
-	OpMetadata              uint16 = 4
-	OpDeleteTopic           uint16 = 5
-	OpOffsetCommit          uint16 = 6
-	OpOffsetFetch           uint16 = 7
-	OpJoinGroup             uint16 = 8
-	OpHeartbeat             uint16 = 9
-	OpLeaveGroup            uint16 = 10
-	OpAuth                  uint16 = 30
-	OpAuthResponse          uint16 = 31
-	OpInitProducerId        uint16 = 32
-	OpInitProducerIdResponse uint16 = 33
-	OpScramFirst            uint16 = 60
-	OpScramFirstResponse    uint16 = 61
-	OpScramFinal            uint16 = 62
-	OpScramFinalResponse    uint16 = 63
-	OpDescribeGroup         uint16 = 34
-	OpDescribeGroupResponse uint16 = 35
-	OpListGroups            uint16 = 36
-	OpListGroupsResponse    uint16 = 37
-	OpListOffsets           uint16 = 48
-	OpListOffsetsResponse   uint16 = 49
-	OpError                 uint16 = 0xFFFF
+	OpProduce                 uint16 = 1
+	OpFetch                   uint16 = 2
+	OpCreateTopic             uint16 = 3
+	OpMetadata                uint16 = 4
+	OpDeleteTopic             uint16 = 5
+	OpOffsetCommit            uint16 = 6
+	OpOffsetFetch             uint16 = 7
+	OpJoinGroup               uint16 = 8
+	OpHeartbeat               uint16 = 9
+	OpLeaveGroup              uint16 = 10
+	OpAuth                    uint16 = 30
+	OpAuthResponse            uint16 = 31
+	OpInitProducerId          uint16 = 32
+	OpInitProducerIdResponse  uint16 = 33
+	OpScramFirst              uint16 = 60
+	OpScramFirstResponse      uint16 = 61
+	OpScramFinal              uint16 = 62
+	OpScramFinalResponse      uint16 = 63
+	OpCreateScramUser         uint16 = 64
+	OpCreateScramUserResponse uint16 = 65
+	OpDeleteScramUser         uint16 = 66
+	OpDeleteScramUserResponse uint16 = 67
+	OpListScramUsers          uint16 = 68
+	OpListScramUsersResponse  uint16 = 69
+	OpDescribeGroup           uint16 = 34
+	OpDescribeGroupResponse   uint16 = 35
+	OpListGroups              uint16 = 36
+	OpListGroupsResponse      uint16 = 37
+	OpListOffsets             uint16 = 48
+	OpListOffsetsResponse     uint16 = 49
+	OpError                   uint16 = 0xFFFF
 
 	nullLen = 0xFFFFFFFF
 )
@@ -498,6 +504,7 @@ type InitProducerIdResponse struct {
 	Epoch      uint16
 	ErrorCode  uint16
 }
+
 // GroupState is the ListGroups state byte (Phase 12).
 type GroupState uint8
 
@@ -522,6 +529,29 @@ type ScramFinalRequest struct {
 type ScramFinalResponse struct {
 	ErrorCode       uint16
 	ServerSignature []byte
+}
+
+type CreateScramUserRequest struct {
+	Username   string
+	Password   string
+	Iterations uint32
+}
+
+type CreateScramUserResponse struct {
+	ErrorCode uint16
+}
+
+type DeleteScramUserRequest struct {
+	Username string
+}
+
+type DeleteScramUserResponse struct {
+	ErrorCode uint16
+}
+
+type ListScramUsersResponse struct {
+	ErrorCode uint16
+	Usernames []string
 }
 
 const (
@@ -594,7 +624,6 @@ type ListOffsetsResponse struct {
 	Topic     string
 	Entries   []OffsetListing
 }
-
 
 func EncodeProduceRequest(req ProduceRequest) ([]byte, error) {
 	w := &writer{}
@@ -1992,6 +2021,124 @@ func DecodeScramFinalResponse(payload []byte) (ScramFinalResponse, error) {
 	}
 	return ScramFinalResponse{ErrorCode: code, ServerSignature: sig}, nil
 }
+
+func EncodeCreateScramUserRequest(req CreateScramUserRequest) ([]byte, error) {
+	w := &writer{}
+	if err := putString(w, req.Username); err != nil {
+		return nil, err
+	}
+	if err := putString(w, req.Password); err != nil {
+		return nil, err
+	}
+	w.u32(req.Iterations)
+	return w.buf, nil
+}
+
+func DecodeCreateScramUserRequest(payload []byte) (CreateScramUserRequest, error) {
+	r := &reader{data: payload}
+	user, err := getString(r)
+	if err != nil {
+		return CreateScramUserRequest{}, err
+	}
+	pass, err := getString(r)
+	if err != nil {
+		return CreateScramUserRequest{}, err
+	}
+	iters, err := r.u32()
+	if err != nil {
+		return CreateScramUserRequest{}, err
+	}
+	return CreateScramUserRequest{Username: user, Password: pass, Iterations: iters}, nil
+}
+
+func EncodeCreateScramUserResponse(resp CreateScramUserResponse) ([]byte, error) {
+	w := &writer{}
+	w.u16(resp.ErrorCode)
+	return w.buf, nil
+}
+
+func DecodeCreateScramUserResponse(payload []byte) (CreateScramUserResponse, error) {
+	r := &reader{data: payload}
+	code, err := r.u16()
+	if err != nil {
+		return CreateScramUserResponse{}, err
+	}
+	return CreateScramUserResponse{ErrorCode: code}, nil
+}
+
+func EncodeDeleteScramUserRequest(req DeleteScramUserRequest) ([]byte, error) {
+	w := &writer{}
+	if err := putString(w, req.Username); err != nil {
+		return nil, err
+	}
+	return w.buf, nil
+}
+
+func DecodeDeleteScramUserRequest(payload []byte) (DeleteScramUserRequest, error) {
+	r := &reader{data: payload}
+	user, err := getString(r)
+	if err != nil {
+		return DeleteScramUserRequest{}, err
+	}
+	return DeleteScramUserRequest{Username: user}, nil
+}
+
+func EncodeDeleteScramUserResponse(resp DeleteScramUserResponse) ([]byte, error) {
+	w := &writer{}
+	w.u16(resp.ErrorCode)
+	return w.buf, nil
+}
+
+func DecodeDeleteScramUserResponse(payload []byte) (DeleteScramUserResponse, error) {
+	r := &reader{data: payload}
+	code, err := r.u16()
+	if err != nil {
+		return DeleteScramUserResponse{}, err
+	}
+	return DeleteScramUserResponse{ErrorCode: code}, nil
+}
+
+func EncodeListScramUsersRequest() []byte {
+	return []byte{}
+}
+
+func DecodeListScramUsersRequest(payload []byte) error {
+	return nil
+}
+
+func EncodeListScramUsersResponse(resp ListScramUsersResponse) ([]byte, error) {
+	w := &writer{}
+	w.u16(resp.ErrorCode)
+	w.u32(uint32(len(resp.Usernames)))
+	for _, name := range resp.Usernames {
+		if err := putString(w, name); err != nil {
+			return nil, err
+		}
+	}
+	return w.buf, nil
+}
+
+func DecodeListScramUsersResponse(payload []byte) (ListScramUsersResponse, error) {
+	r := &reader{data: payload}
+	code, err := r.u16()
+	if err != nil {
+		return ListScramUsersResponse{}, err
+	}
+	n, err := r.u32()
+	if err != nil {
+		return ListScramUsersResponse{}, err
+	}
+	names := make([]string, 0, n)
+	for i := uint32(0); i < n; i++ {
+		name, err := getString(r)
+		if err != nil {
+			return ListScramUsersResponse{}, err
+		}
+		names = append(names, name)
+	}
+	return ListScramUsersResponse{ErrorCode: code, Usernames: names}, nil
+}
+
 func EncodeErrorResponse(resp ErrorResponse) ([]byte, error) {
 	w := &writer{}
 	w.u16(resp.Code)
@@ -2045,6 +2192,12 @@ func DecodeResponse(opcode uint16, payload []byte) (any, error) {
 		return DecodeScramFirstResponse(payload)
 	case OpScramFinalResponse:
 		return DecodeScramFinalResponse(payload)
+	case OpCreateScramUserResponse:
+		return DecodeCreateScramUserResponse(payload)
+	case OpDeleteScramUserResponse:
+		return DecodeDeleteScramUserResponse(payload)
+	case OpListScramUsersResponse:
+		return DecodeListScramUsersResponse(payload)
 	case OpDescribeGroupResponse:
 		return DecodeDescribeGroupResponse(payload)
 	case OpListGroupsResponse:
