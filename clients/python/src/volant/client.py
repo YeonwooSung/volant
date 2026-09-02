@@ -249,11 +249,11 @@ class Client:
 
         c = Client("127.0.0.1:9092", enable_idempotence=True)
 
-    Optional produce retry (v0.61) retries transient broker codes 6, 7,
-    15, 16 and TCP I/O errors. Default ``max_retries=0`` (no extra
-    attempts). ``retry_backoff_ms`` defaults to 50; tests may set 0.
-    Error 13 stays on the redirect budget; error 21 stays on the one
-    re-Init. Fetch is not retried::
+    Optional produce/fetch retry (v0.61 / v0.66) retries transient
+    broker codes 6, 7, 15, 16 and TCP I/O errors. Default
+    ``max_retries=0`` (no extra attempts). ``retry_backoff_ms``
+    defaults to 50; tests may set 0. Error 13 stays on the redirect
+    budget; error 21 stays on the one re-Init::
 
         c = Client("127.0.0.1:9092", max_retries=3, retry_backoff_ms=50)
         c.max_retries = 3
@@ -330,7 +330,7 @@ class Client:
         # 0 = never redirect (raise on the first NotLeaderForPartition).
         self.max_redirects = max(0, int(max_redirects))
         self.enable_idempotence = bool(enable_idempotence)
-        # Extra produce attempts on transient broker/transport errors.
+        # Extra produce/fetch attempts on transient broker/transport errors.
         self.max_retries = max(0, int(max_retries))
         self.retry_backoff_ms = max(0, int(retry_backoff_ms))
         self.transactional_id = transactional_id or None
@@ -913,6 +913,11 @@ class Client:
         max_bytes: int = 4 * 1024 * 1024,
         max_wait_ms: int = 0,
     ) -> FetchResult:
+        """Fetch records from topic/partition starting at ``offset``.
+
+        Transient broker/transport errors retry up to ``max_retries``
+        extra times (default 0). Error 13 uses ``max_redirects`` only.
+        """
         payload = codec.encode_fetch_request(
             FetchRequest(
                 topic=topic,
@@ -923,35 +928,60 @@ class Client:
                 max_wait_ms=max_wait_ms,
             )
         )
-        max_attempts = 1 + self.max_redirects
-        attempt = 0
+        max_retries = max(0, int(self.max_retries))
+        retry_attempt = 0
         while True:
-            attempt += 1
-            try:
-                resp = self._round_trip(codec.OP_FETCH, payload)
-            except BrokerError as e:
+            max_redirect_attempts = 1 + self.max_redirects
+            redirect_attempt = 0
+            while True:
+                redirect_attempt += 1
+                try:
+                    resp = self._round_trip(codec.OP_FETCH, payload)
+                except BrokerError as e:
+                    if (
+                        e.code == _NOT_LEADER
+                        and redirect_attempt < max_redirect_attempts
+                        and self._redirect_to_leader(topic, partition)
+                    ):
+                        continue
+                    if (
+                        _is_transient_broker(e.code)
+                        and retry_attempt < max_retries
+                    ):
+                        retry_attempt += 1
+                        self._sleep_produce_retry()
+                        break
+                    raise
+                except OSError:
+                    if retry_attempt < max_retries:
+                        retry_attempt += 1
+                        self._sleep_produce_retry()
+                        break
+                    raise
+                if not isinstance(resp, FetchResponse):
+                    raise ProtocolError(
+                        f"unexpected response for fetch: {type(resp)}"
+                    )
                 if (
-                    e.code == _NOT_LEADER
-                    and attempt < max_attempts
-                    and self._redirect_to_leader(topic, partition)
+                    resp.error_code == _NOT_LEADER
+                    and redirect_attempt < max_redirect_attempts
+                    and self._redirect_to_leader(resp.topic or topic, resp.partition)
                 ):
                     continue
-                raise
-            if not isinstance(resp, FetchResponse):
-                raise ProtocolError(f"unexpected response for fetch: {type(resp)}")
-            if (
-                resp.error_code == _NOT_LEADER
-                and attempt < max_attempts
-                and self._redirect_to_leader(resp.topic or topic, resp.partition)
-            ):
-                continue
-            self._check(resp.error_code, "fetch")
-            return FetchResult(
-                topic=resp.topic,
-                partition=resp.partition,
-                high_watermark=resp.high_watermark,
-                records=resp.records,
-            )
+                if (
+                    _is_transient_broker(resp.error_code)
+                    and retry_attempt < max_retries
+                ):
+                    retry_attempt += 1
+                    self._sleep_produce_retry()
+                    break
+                self._check(resp.error_code, "fetch")
+                return FetchResult(
+                    topic=resp.topic,
+                    partition=resp.partition,
+                    high_watermark=resp.high_watermark,
+                    records=resp.records,
+                )
 
     def metadata(self, topics: Optional[list[str]] = None) -> MetadataResponse:
         payload = codec.encode_metadata_request(

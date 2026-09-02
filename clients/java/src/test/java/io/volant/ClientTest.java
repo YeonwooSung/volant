@@ -546,4 +546,82 @@ class ClientTest {
         }
     }
 
+    @Test
+    void fetchDefaultMaxRetriesZeroRaisesOnTimeout() throws Exception {
+        try (ScriptedBroker srv = ScriptedBroker.start()) {
+            srv.fetchCodes.add(TIMEOUT);
+            try (Client c = Client.connect("127.0.0.1", srv.port, 5_000)) {
+                assertEquals(0, c.maxRetries());
+                BrokerException ex =
+                        assertThrows(BrokerException.class, () -> c.fetch("t", 0, 0));
+                assertEquals(TIMEOUT, ex.code);
+            }
+            assertEquals(1, srv.fetchCount.get());
+        }
+    }
+
+    @Test
+    void fetchRetriesTimeoutThenOk() throws Exception {
+        try (ScriptedBroker srv = ScriptedBroker.start()) {
+            srv.fetchCodes.add(TIMEOUT);
+            srv.fetchCodes.add(0);
+            try (Client c = Client.connect("127.0.0.1", srv.port, 5_000)) {
+                c.setMaxRetries(2);
+                c.setRetryBackoffMs(0);
+                List<Record> recs = c.fetch("t", 0, 0);
+                assertTrue(recs.isEmpty());
+            }
+            assertEquals(2, srv.fetchCount.get());
+        }
+    }
+
+    @Test
+    void fetchError13StillRedirectsNotRetry() throws Exception {
+        try (ScriptedBroker leader = ScriptedBroker.start();
+                ScriptedBroker follower = ScriptedBroker.start()) {
+            follower.fetchCodes.add(NOT_LEADER);
+            follower.meta = leaderMeta("t", 0, 2, "127.0.0.1", leader.port);
+            try (Client c = Client.connect("127.0.0.1", follower.port, 5_000)) {
+                c.setMaxRetries(2);
+                c.setRetryBackoffMs(0);
+                List<Record> recs = c.fetch("t", 0, 0);
+                assertTrue(recs.isEmpty());
+            }
+            assertEquals(1, follower.fetchCount.get());
+            assertEquals(1, follower.metadataCount.get());
+            assertEquals(1, leader.fetchCount.get());
+        }
+    }
+
+    @Test
+    void fetchTransportFailThenOk() throws Exception {
+        try (ScriptedBroker srv = ScriptedBroker.start()) {
+            try (Client c = Client.connect("127.0.0.1", srv.port, 5_000)) {
+                c.setMaxRetries(1);
+                c.setRetryBackoffMs(0);
+                c.injectFetchTransportFails = 1;
+                List<Record> recs = c.fetch("t", 0, 0);
+                assertTrue(recs.isEmpty());
+            }
+            assertEquals(1, srv.fetchCount.get());
+        }
+    }
+
+    @Test
+    void fetchExhaustedRetriesRaises() throws Exception {
+        try (ScriptedBroker srv = ScriptedBroker.start()) {
+            srv.fetchCodes.add(TIMEOUT);
+            srv.fetchCodes.add(TIMEOUT);
+            srv.fetchCodes.add(TIMEOUT);
+            try (Client c = Client.connect("127.0.0.1", srv.port, 5_000)) {
+                c.setMaxRetries(2);
+                c.setRetryBackoffMs(0);
+                BrokerException ex =
+                        assertThrows(BrokerException.class, () -> c.fetch("t", 0, 0));
+                assertEquals(TIMEOUT, ex.code);
+            }
+            assertEquals(3, srv.fetchCount.get());
+        }
+    }
+
 }

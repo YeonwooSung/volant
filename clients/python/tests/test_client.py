@@ -455,5 +455,71 @@ class TestProduceRetry(unittest.TestCase):
             self.assertEqual(seqs, [0, 1, 1, 1, 1])
 
 
+class TestFetchRetry(unittest.TestCase):
+    def test_default_max_retries_zero_raises_on_timeout(self) -> None:
+        with ScriptedBroker() as srv:
+            srv.fetch_codes = [TIMEOUT]
+            with Client(srv.addr, timeout=5.0) as c:
+                self.assertEqual(c.max_retries, 0)
+                with self.assertRaises(BrokerError) as ctx:
+                    c.fetch("t", 0, offset=0)
+            self.assertEqual(ctx.exception.code, TIMEOUT)
+            self.assertEqual(srv.fetch_count, 1)
+
+    def test_retries_timeout_then_ok(self) -> None:
+        with ScriptedBroker() as srv:
+            srv.fetch_codes = [TIMEOUT, 0]
+            with Client(srv.addr, timeout=5.0, max_retries=2, retry_backoff_ms=0) as c:
+                batch = c.fetch("t", 0, offset=0)
+            self.assertEqual(len(batch), 0)
+            self.assertEqual(srv.fetch_count, 2)
+
+    def test_error_13_still_redirects_not_retry(self) -> None:
+        with ScriptedBroker() as leader, ScriptedBroker() as follower:
+            follower.fetch_codes = [NOT_LEADER]
+            follower.metadata = _leader_meta("t", 0, 2, "127.0.0.1", leader.port)
+            leader.fetch_codes = [0]
+            with Client(
+                follower.addr, timeout=5.0, max_retries=2, retry_backoff_ms=0
+            ) as c:
+                batch = c.fetch("t", 0, offset=0)
+            self.assertEqual(len(batch), 0)
+            self.assertEqual(follower.fetch_count, 1)
+            self.assertEqual(follower.metadata_count, 1)
+            self.assertEqual(leader.fetch_count, 1)
+            self.assertEqual(c.addr, leader.addr)
+
+    def test_transport_fail_then_ok(self) -> None:
+        with ScriptedBroker() as srv:
+            orig = Client._round_trip
+            calls = {"n": 0}
+
+            def flaky(self, opcode, payload):  # type: ignore[no-untyped-def]
+                if opcode == OP_FETCH:
+                    calls["n"] += 1
+                    if calls["n"] == 1:
+                        raise OSError("injected transport")
+                return orig(self, opcode, payload)
+
+            with Client(srv.addr, timeout=5.0, max_retries=1, retry_backoff_ms=0) as c:
+                Client._round_trip = flaky  # type: ignore[method-assign]
+                try:
+                    batch = c.fetch("t", 0, offset=0)
+                finally:
+                    Client._round_trip = orig  # type: ignore[method-assign]
+            self.assertEqual(len(batch), 0)
+            self.assertEqual(srv.fetch_count, 1)
+            self.assertEqual(calls["n"], 2)
+
+    def test_exhausted_retries_raises(self) -> None:
+        with ScriptedBroker() as srv:
+            srv.fetch_codes = [TIMEOUT, TIMEOUT, TIMEOUT]
+            with Client(srv.addr, timeout=5.0, max_retries=2, retry_backoff_ms=0) as c:
+                with self.assertRaises(BrokerError) as ctx:
+                    c.fetch("t", 0, offset=0)
+            self.assertEqual(ctx.exception.code, TIMEOUT)
+            self.assertEqual(srv.fetch_count, 3)
+
+
 if __name__ == "__main__":
     unittest.main()

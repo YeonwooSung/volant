@@ -80,7 +80,7 @@ c = Client("127.0.0.1:9092", auth_token="s3cret")
 c = Client("127.0.0.1:9092", tls=True, tls_ca="ca.pem", auth_token="s3cret")
 # Optional idempotent produce (v0.47). Default off (trailer (0, 0, -1)).
 c = Client("127.0.0.1:9092", enable_idempotence=True)
-# Optional produce retry (v0.61). Default 0 extra attempts. Not Kafka retries.
+# Optional produce/fetch retry (v0.61 / v0.66). Default 0 extra attempts.
 c = Client("127.0.0.1:9092", max_retries=3, retry_backoff_ms=50)
 c.max_retries = 3
 # Optional native transactions (v0.57). Opcodes 50–53; not Kafka txns.
@@ -155,11 +155,11 @@ Produce and Fetch follow `NotLeaderForPartition` (error 13) by default:
 Metadata, reconnect to the partition leader, retry once
 (`max_redirects=1`). `max_redirects=0` raises on the first 13. Still
 one TCP connection at a time.
-Produce also retries transient broker codes 6 / 7 / 15 / 16 and TCP
+Produce and Fetch retry transient broker codes 6 / 7 / 15 / 16 and TCP
 I/O errors up to ``max_retries`` extra attempts (default 0). Sleep
 ``retry_backoff_ms`` (default 50) between attempts; tests may set 0.
 Error 13 stays on the redirect budget; error 21 stays on the one
-re-Init. Fetch is not retried. This is not Kafka ``retries``.
+re-Init. This is not Kafka ``retries``.
 
 Correlation ids increment per request. Decode verifies magic `V` (0x56),
 protocol version 1, and IEEE CRC32 of the **payload only**.
