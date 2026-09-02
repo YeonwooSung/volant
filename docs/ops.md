@@ -407,6 +407,7 @@ specs. Ops-critical notes only:
 | `VOLANT_OPENRAFT_METADATA` | **off** | `1`/`true`/`yes`/`on` → `controller_id()` is the openraft leader (opcodes 108–111, snapshot 112/113). Unset keeps lowest-id. |
 | `VOLANT_OPENRAFT_SNAPSHOT_LOGS` | **1000** | openraft snapshot every N applied logs. `0`/`never`/`off` disables automatic snapshots. Tests use `1`. |
 | `VOLANT_OPENRAFT_JOINT_ROLLBACK` | **on** | Leader rolls back overlay when `change_membership` fails (native **15**). `0`/`false`/`no`/`off` → v0.26 best-effort. |
+| `VOLANT_OPENRAFT_FORWARD_MEMBERSHIP` | **on** | Followers forward Add/RemoveBroker to the openraft leader (native **14** if no leader / RPC fail). `0`/`false`/`no`/`off` → follower-local v0.10 write. |
 | `VOLANT_ASSIGNMENT_METADATA_COMMITTED_ONLY` | **off** | `1` serves majority-committed Metadata snapshot + wait-like admin; unset/`0` is live assignment |
 | `VOLANT_ASSIGNMENT_CONSENSUS` | **on** | Best-effort 96/97 push. Must **not** gate Metadata or fail CreateTopic |
 | `VOLANT_ASSIGNMENT_CONSENSUS_WAIT` | **off** | `1` → native **15** on majority miss; **rolls back** live `assignment.json` (must_wait path only) |
@@ -508,9 +509,22 @@ not change if voters did not change.
 
 Default **on** whenever the openraft flag is on. Escape
 `VOLANT_OPENRAFT_JOINT_ROLLBACK=0` (or `false` / `no` / `off`) restores
-v0.26 best-effort (overlay stays, client 0). Followers still persist
-overlay + `MembershipPut` (they cannot `change_membership`). Flag **off**
-is unchanged v0.10. See [V34_SPEC.md](./V34_SPEC.md).
+v0.26 best-effort (overlay stays, client 0). Followers **forward** to the
+leader by default (v0.38); they cannot `change_membership`. Flag **off**
+is unchanged v0.10. See [V34_SPEC.md](./V34_SPEC.md) and
+[V38_SPEC.md](./V38_SPEC.md).
+
+## v0.38 membership forward
+
+When `VOLANT_OPENRAFT_METADATA=1`, a follower does **not** write
+`membership.json` on AddBroker / RemoveBroker. It forwards the same
+request body to the current openraft leader (`controller_id()`) over
+`inter_broker_rpc` and returns the leader’s response. No leader
+(`controller_id()==0`) or RPC fail → native **`NotController` (14)**;
+local generation is unchanged. Escape
+`VOLANT_OPENRAFT_FORWARD_MEMBERSHIP=0` (or `false` / `no` / `off`)
+restores follower-local v0.10 write. Flag **off** is unchanged v0.10.
+See [V38_SPEC.md](./V38_SPEC.md).
 
 ## v0.35 openraft redb
 
