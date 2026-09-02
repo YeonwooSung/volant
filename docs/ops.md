@@ -19,6 +19,7 @@
 | `--cluster-config` / `--node-id` | | *unset* | Multi-node (Phase 6) |
 | | `VOLANT_GROUP_COMMIT_MS` | `0` (off) | Produce group-commit window (ms); shared fsync across concurrent appends |
 | | `VOLANT_GROUP_COMMIT_MAX_RECORDS` | inherit | Optional record threshold (else `flush_every_n` or 64) |
+| | `VOLANT_SESSION_DUAL_EPOCH_CONVERGE` | on (`1`) | Unclaimed dual-primary converge; `0`/`false`/`no`/`off` disables |
 
 Logging filter: `RUST_LOG` (e.g. `volant=info,volant_broker=debug`).
 
@@ -49,6 +50,7 @@ Key series (prefix `volant_`):
 - `volant_fetch_session_mirror_puts_coalesced_total` / `volant_fetch_session_mirror_stale_put_rejects_total` / `volant_fetch_session_promote_supersede_total` / `volant_fetch_session_mirror_restored` (Phase 139 coalesce / `mirror_gen` fence / durable restore)
 - `volant_fetch_session_promote_claim_reject_total` (Phase 143 dual-promote / claim-lose rejects)
 - `volant_fetch_session_serve_from_mirror_total` (Phase 147 owner-miss serve foreign mirror without promote)
+- `volant_fetch_session_dual_epoch_converge_total` (v0.25 unclaimed dual-primary demote; loser became mirror)
 - `volant_preferred_replica_redirect_total` (Phase 126 PreferredReadReplica redirects)
 - `volant_preferred_replica_suppressed_total` (Phase 140: READ_COMMITTED suppress when a preferred candidate existed)
 - `volant_preferred_replica_session_suppressed_total` (Phase 144: preferred suppress when client has established fetch session)
@@ -244,9 +246,15 @@ volant-server \
   `{data_dir}/__fetch_session_mirrors/state.json` (default **off**; load filters idle
   TTL); `mirror_gen` fences stale apply/promote. **Phase 143:** `promoted_by`
   lowest-id claim fence on equal-fresh dual-promote (claim travels in MirrorPut;
-  metric `volant_fetch_session_promote_claim_reject_total`). **Phase 147 residual:**
-  dual-epoch (two peers may both serve mirrors without single SoT). Best-effort only
-  (not Raft); put lag/fail still **70**; session_id owner bits are not re-encoded.
+  metric `volant_fetch_session_promote_claim_reject_total`). **v0.25 dual-epoch:**
+  when two peers both hold an **unclaimed** primary (`promoted_by == 0`) for the
+  same session id, inbound MirrorPut / `converge_dual_epoch` keeps the winner
+  (higher `mirror_gen`, then higher epoch, then lowest non-zero `promoted_by` /
+  owner id; `0` = no claim) and demotes the loser to a mirror (metric
+  `volant_fetch_session_dual_epoch_converge_total`). Default **on**;
+  `VOLANT_SESSION_DUAL_EPOCH_CONVERGE=0` disables. Phase 147 single owner-miss
+  serve-from-mirror is unchanged. Best-effort only (not Raft); put lag/fail still
+  **70**; session_id owner bits are not re-encoded.
   Sticky routing still preferred for latency (one extra RTT on forward when owner is up).
 - **PreferredReadReplica (Phase 126 + 133 + 140 + 144):** Fetch v11+ client
   `rack_id`; leader may redirect to same-rack live ISR peer with usable addr +
@@ -656,6 +664,22 @@ wire as the Python MVP (not Kafka, not `--kafka-listen`). `go test ./...`
 or `scripts/go_client_smoke.sh` (skips if `go` is missing). Live e2e:
 `VOLANT_E2E=1` after `cargo build -p volant-server`. See
 [V19_SPEC.md](./V19_SPEC.md).
+
+## v0.25 dual-epoch
+
+When two peers both hold an **unclaimed** fetch-session primary (`promoted_by == 0`)
+for the same session id (Phase 147 serve-without-promote can leave this hole),
+inbound MirrorPut or `converge_dual_epoch` keeps one winner and demotes the
+loser to a foreign mirror.
+
+Winner: higher `mirror_gen`, then higher epoch, then lowest non-zero
+`promoted_by` / owner id (`0` = no claim, loses). Tie keeps local.
+
+Default **on**. Escape hatch: `VOLANT_SESSION_DUAL_EPOCH_CONVERGE=0`.
+Metric: `volant_fetch_session_dual_epoch_converge_total`.
+Phase 147 single owner-miss serve-from-mirror is unchanged. Not Raft.
+
+See [V25_SPEC.md](./V25_SPEC.md).
 
 ## Shipped (not gaps)
 

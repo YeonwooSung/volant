@@ -333,6 +333,15 @@ fn broker_metrics_text(broker: &Broker) -> String {
         "volant_fetch_session_serve_from_mirror_total {}\n",
         sessions.serve_from_mirror_total()
     ));
+    // v0.25: unclaimed dual-primary converge (loser demoted to mirror).
+    text.push_str(
+        "# HELP volant_fetch_session_dual_epoch_converge_total Unclaimed dual-primary demotes (loser became mirror)\n",
+    );
+    text.push_str("# TYPE volant_fetch_session_dual_epoch_converge_total counter\n");
+    text.push_str(&format!(
+        "volant_fetch_session_dual_epoch_converge_total {}\n",
+        sessions.dual_epoch_converge_total()
+    ));
     // Phase 120/122: multi-broker EndTxn / AddOffsets / TxnOffsetCommit forward.
     text.push_str(
         "# HELP volant_txn_forward_total Successful Kafka txn API forwards to coordinator (EndTxn/AddOffsets/TxnOffsetCommit)\n",
