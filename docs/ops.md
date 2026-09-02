@@ -69,6 +69,7 @@ Key series (prefix `volant_`):
 - `volant_admin_catchup_skipped_total` (Phase 136 admin ACL/config catch-up schedule skips: in-flight or min-interval; env `VOLANT_ADMIN_CATCHUP_MIN_INTERVAL_MS`, default 500ms, `0` disables time throttle)
 - `volant_delete_records_majority_wait_success_total` / `_fail_total` (Phase 135/137/148; only when **effective** wait is on — broker env `VOLANT_DELETE_RECORDS_WAIT_MAJORITY` and/or native request trailer `wait_majority=1`; **Phase 148:** wait fail no longer truncates local log)
 - `volant_delete_records_majority_first_success_total` / `_fail_total` (Phase 148: wait-mode majority-first path; fail = log_start unchanged)
+- `volant_delete_records_wait_off_upgraded_total` (v0.29: clustered wait-off upgraded to wait-on because `VOLANT_DELETE_RECORDS_ALLOW_IRREVERSIBLE` is off)
 - `volant_cluster_configured_brokers` / `volant_cluster_live_brokers` / `volant_cluster_majority_quorum` / `volant_cluster_majority_impossible` (Phase 141: journal majority health; `impossible=1` when `live < floor(N/2)+1` for configured N — classic N=2 one-down)
 - `volant_open_txns` / `volant_prepared_txns` (Phase 97 gauges)
 - `volant_open_txns_expired_total` / `volant_prepared_txns_expired_total` (Phase 97)
@@ -717,6 +718,19 @@ Metric: `volant_fetch_session_dual_epoch_converge_total`.
 Phase 147 single owner-miss serve-from-mirror is unchanged. Not Raft.
 
 See [V25_SPEC.md](./V25_SPEC.md).
+
+## v0.29 wait-off safety
+
+Clustered DeleteRecords **wait-off** (flag `2`, or flag `0` + knob off) is
+**upgraded to wait-on** unless `VOLANT_DELETE_RECORDS_ALLOW_IRREVERSIBLE` is
+`1`/`true`/`yes`/`on`. Default unset = safe: majority first; miss → native
+**15** / Kafka **19**, no local truncate.
+
+Single-node wait-off is unchanged (no majority exists). Explicit
+`ALLOW_IRREVERSIBLE=1` keeps today's irreversible local-first path.
+Metric: `volant_delete_records_wait_off_upgraded_total`.
+
+See [V29_SPEC.md](./V29_SPEC.md).
 
 ## Shipped (not gaps)
 

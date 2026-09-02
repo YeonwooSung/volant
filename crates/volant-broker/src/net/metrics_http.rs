@@ -461,6 +461,15 @@ fn broker_metrics_text(broker: &Broker) -> String {
         "volant_delete_records_majority_first_fail_total {}\n",
         broker.delete_records_majority_first_fail_total()
     ));
+    // v0.29: clustered wait-off upgraded to wait-on (allow-irreversible off).
+    text.push_str(
+        "# HELP volant_delete_records_wait_off_upgraded_total DeleteRecords wait-off upgraded to wait-on on a cluster (v0.29)\n",
+    );
+    text.push_str("# TYPE volant_delete_records_wait_off_upgraded_total counter\n");
+    text.push_str(&format!(
+        "volant_delete_records_wait_off_upgraded_total {}\n",
+        broker.delete_records_wait_off_upgraded_total()
+    ));
     // Phase 116: durable DeleteRecords outbox for offline / failed peers.
     text.push_str(
         "# HELP volant_delete_records_outbox_depth Pending DeleteRecords truncates for peers\n",

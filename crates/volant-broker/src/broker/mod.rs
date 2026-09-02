@@ -551,6 +551,9 @@ pub struct Broker {
     /// Phase 148: wait mode **defers local truncate** until majority (no data
     /// loss on fail). Default **false** (`VOLANT_DELETE_RECORDS_WAIT_MAJORITY`).
     delete_records_wait_majority: AtomicBool,
+    /// v0.29: allow irreversible wait-off (local-first truncate) on clustered
+    /// brokers. Default **false** (`VOLANT_DELETE_RECORDS_ALLOW_IRREVERSIBLE`).
+    delete_records_allow_irreversible: AtomicBool,
     /// Phase 135/148: client wait path observed journal majority success.
     delete_records_majority_wait_success_total: AtomicU64,
     /// Phase 135/148: client wait path observed journal majority failure.
@@ -559,6 +562,8 @@ pub struct Broker {
     delete_records_majority_first_success_total: AtomicU64,
     /// Phase 148: wait-mode majority-first path failures (no local truncate).
     delete_records_majority_first_fail_total: AtomicU64,
+    /// v0.29: clustered wait-off upgraded to wait-on (env unset / off).
+    delete_records_wait_off_upgraded_total: AtomicU64,
     /// BROKER config push RPC failures (Phase 113).
     cluster_config_push_errors_total: AtomicU64,
     /// ACL snapshot push RPC failures (Phase 113).
@@ -857,10 +862,14 @@ impl Broker {
             applied_acl_generation: AtomicU64::new(0),
             delete_records_fanout_errors_total: AtomicU64::new(0),
             delete_records_wait_majority: AtomicBool::new(default_delete_records_wait_majority()),
+            delete_records_allow_irreversible: AtomicBool::new(
+                default_delete_records_allow_irreversible(),
+            ),
             delete_records_majority_wait_success_total: AtomicU64::new(0),
             delete_records_majority_wait_fail_total: AtomicU64::new(0),
             delete_records_majority_first_success_total: AtomicU64::new(0),
             delete_records_majority_first_fail_total: AtomicU64::new(0),
+            delete_records_wait_off_upgraded_total: AtomicU64::new(0),
             cluster_config_push_errors_total: AtomicU64::new(0),
             cluster_acl_push_errors_total: AtomicU64::new(0),
             txn_2pc_fanout_errors_total: AtomicU64::new(0),
@@ -1057,10 +1066,14 @@ impl Broker {
             applied_acl_generation: AtomicU64::new(0),
             delete_records_fanout_errors_total: AtomicU64::new(0),
             delete_records_wait_majority: AtomicBool::new(default_delete_records_wait_majority()),
+            delete_records_allow_irreversible: AtomicBool::new(
+                default_delete_records_allow_irreversible(),
+            ),
             delete_records_majority_wait_success_total: AtomicU64::new(0),
             delete_records_majority_wait_fail_total: AtomicU64::new(0),
             delete_records_majority_first_success_total: AtomicU64::new(0),
             delete_records_majority_first_fail_total: AtomicU64::new(0),
+            delete_records_wait_off_upgraded_total: AtomicU64::new(0),
             cluster_config_push_errors_total: AtomicU64::new(0),
             cluster_acl_push_errors_total: AtomicU64::new(0),
             txn_2pc_fanout_errors_total: AtomicU64::new(0),
@@ -1771,6 +1784,21 @@ fn default_delete_records_wait_majority() -> bool {
         Ok(s) => {
             let t = s.trim();
             t == "1" || t.eq_ignore_ascii_case("true") || t.eq_ignore_ascii_case("yes")
+        }
+        Err(_) => false,
+    }
+}
+
+/// v0.29: `VOLANT_DELETE_RECORDS_ALLOW_IRREVERSIBLE` → true for `1`/`true`/`yes`/`on`
+/// (case-insensitive); unset / anything else → **false** (cluster wait-off upgrades).
+fn default_delete_records_allow_irreversible() -> bool {
+    match std::env::var("VOLANT_DELETE_RECORDS_ALLOW_IRREVERSIBLE") {
+        Ok(s) => {
+            let t = s.trim();
+            t == "1"
+                || t.eq_ignore_ascii_case("true")
+                || t.eq_ignore_ascii_case("yes")
+                || t.eq_ignore_ascii_case("on")
         }
         Err(_) => false,
     }
