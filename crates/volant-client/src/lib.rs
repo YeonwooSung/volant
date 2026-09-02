@@ -54,6 +54,10 @@
 //! assignor inherits via `describe_group`.
 //! v0.94 redirects topic `describe_configs` / `alter_configs` on that
 //! same error **14** budget. Topic-only (not Kafka BROKER configs).
+//! v0.98 redirects [`Client::delete_offsets`] (and OffsetCommit /
+//! OffsetFetch, which share `offset_admin_round_trip`) on error **14**
+//! via `redirect_to_controller` / `max_redirects`. Transient 6/7/15/16
+//! stay on `max_retries`. `max_redirects=0` does not redirect.
 
 #![deny(missing_docs)]
 

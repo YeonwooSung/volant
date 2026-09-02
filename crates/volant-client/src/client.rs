@@ -1502,6 +1502,8 @@ impl Client {
     /// Empty `entries` deletes all offsets for the group.
     /// Transient broker/transport errors retry up to
     /// [`ClientConfig::max_retries`] extra times (default 0).
+    /// Error **14** (`NotController`) redirects via
+    /// [`ClientConfig::max_redirects`] (default 1; `0` does not redirect).
     pub async fn delete_offsets(
         &self,
         group_id: &str,
@@ -1762,11 +1764,16 @@ impl Client {
 
     /// OffsetCommit / OffsetFetch / DeleteOffsets share produce/heartbeat
     /// [`ClientConfig::max_retries`]. Transient 6 / 7 / 15 / 16 and
-    /// [`Error::Io`] are retried; 13 / 14 / 9 / 10 / 11 / 2 and protocol
-    /// errors are not.
+    /// [`Error::Io`] are retried; 13 / 9 / 10 / 11 / 2 and protocol
+    /// errors are not. Error **14** (`NotController`) uses
+    /// [`ClientConfig::max_redirects`] via [`Self::redirect_to_controller`]
+    /// (same budget as `admin_round_trip`). `max_redirects=0` does not
+    /// redirect.
     async fn offset_admin_round_trip(&self, req: Request) -> Result<Response> {
         let max_retries = self.config.max_retries;
+        let max_redirects = self.config.max_redirects;
         let mut retry_attempt = 0u32;
+        let mut redirects = 0u32;
         loop {
             let resp = match self.round_trip(req.clone()).await {
                 Ok(r) => r,
@@ -1777,15 +1784,20 @@ impl Client {
                 }
                 Err(e) => return Err(e),
             };
-            let code = match &resp {
+            let (code, hint) = match &resp {
+                Response::Error { code, message } => (*code, parse_controller_id(message)),
                 Response::OffsetCommit { error_code }
                 | Response::OffsetFetch { error_code, .. }
-                | Response::DeleteOffsets { error_code, .. }
-                | Response::Error {
-                    code: error_code, ..
-                } => *error_code,
+                | Response::DeleteOffsets { error_code, .. } => (*error_code, None),
                 _ => return Ok(resp),
             };
+            if code == ErrorCode::NotController as u16
+                && redirects < max_redirects
+                && self.redirect_to_controller(hint).await
+            {
+                redirects += 1;
+                continue;
+            }
             if is_transient_error_code(code) && retry_attempt < max_retries {
                 retry_attempt += 1;
                 tokio::time::sleep(Duration::from_millis(self.config.retry_backoff_ms)).await;
