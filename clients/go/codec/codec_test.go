@@ -1190,3 +1190,125 @@ func TestCreatePartitionsResponsePayloadRS(t *testing.T) {
 		t.Fatalf("dispatch %#v", got)
 	}
 }
+
+func sampleAclBinding() AclBinding {
+	return AclBinding{
+		Principal:    "User:alice",
+		ResourceType: 0,
+		Resource:     "events",
+		Operation:    3,
+		Permission:   1,
+	}
+}
+
+func TestAclBindingRoundtrip(t *testing.T) {
+	entry := sampleAclBinding()
+	req := CreateAclsRequest{Entries: []AclBinding{entry}}
+	raw, err := EncodeCreateAclsRequest(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	expected := mustHex(t,
+		"01000000"+
+			"0a00"+
+			"557365723a616c696365"+
+			"00"+
+			"0600"+
+			"6576656e7473"+
+			"03"+
+			"01",
+	)
+	if !bytes.Equal(raw, expected) {
+		t.Fatalf("encode:\n got %x\nwant %x", raw, expected)
+	}
+	decoded, err := DecodeCreateAclsRequest(raw)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(decoded.Entries) != 1 || decoded.Entries[0] != entry {
+		t.Fatalf("decoded %+v", decoded)
+	}
+	delReq := DeleteAclsRequest{Entries: []AclBinding{entry}}
+	delRaw, err := EncodeDeleteAclsRequest(delReq)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.Equal(delRaw, expected) {
+		t.Fatalf("delete encode:\n got %x\nwant %x", delRaw, expected)
+	}
+	gotDel, err := DecodeDeleteAclsRequest(delRaw)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(gotDel.Entries) != 1 || gotDel.Entries[0] != entry {
+		t.Fatalf("delete decoded %+v", gotDel)
+	}
+	ok := CreateAclsResponse{ErrorCode: 0}
+	okRaw, err := EncodeCreateAclsResponse(ok)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.Equal(okRaw, mustHex(t, "0000")) {
+		t.Fatalf("create resp %x", okRaw)
+	}
+	got, err := DecodeResponse(OpCreateAclsResponse, okRaw)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, ok := got.(CreateAclsResponse); !ok {
+		t.Fatalf("dispatch %#v", got)
+	}
+	listed := ListAclsResponse{ErrorCode: 0, Entries: []AclBinding{entry}}
+	listRaw, err := EncodeListAclsResponse(listed)
+	if err != nil {
+		t.Fatal(err)
+	}
+	gotList, err := DecodeListAclsResponse(listRaw)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if gotList.ErrorCode != 0 || len(gotList.Entries) != 1 || gotList.Entries[0] != entry {
+		t.Fatalf("list decoded %+v", gotList)
+	}
+	dispatched, err := DecodeResponse(OpListAclsResponse, listRaw)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if lr, ok := dispatched.(ListAclsResponse); !ok || lr.Entries[0] != entry {
+		t.Fatalf("list dispatch %#v", dispatched)
+	}
+	removed := DeleteAclsResponse{ErrorCode: 0, Removed: 1}
+	remRaw, err := EncodeDeleteAclsResponse(removed)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.Equal(remRaw, mustHex(t, "000001000000")) {
+		t.Fatalf("delete resp %x", remRaw)
+	}
+	gotRem, err := DecodeResponse(OpDeleteAclsResponse, remRaw)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if dr, ok := gotRem.(DeleteAclsResponse); !ok || dr.Removed != 1 {
+		t.Fatalf("delete dispatch %#v", gotRem)
+	}
+}
+
+func TestListAclsRequestEmptyFilters(t *testing.T) {
+	req := ListAclsRequest{Principal: "", ResourceType: 255, Resource: ""}
+	raw, err := EncodeListAclsRequest(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	expected := mustHex(t, "0000"+"ff"+"0000")
+	if !bytes.Equal(raw, expected) {
+		t.Fatalf("encode:\n got %x\nwant %x", raw, expected)
+	}
+	decoded, err := DecodeListAclsRequest(raw)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if decoded.Principal != "" || decoded.ResourceType != 255 || decoded.Resource != "" {
+		t.Fatalf("decoded %+v", decoded)
+	}
+}

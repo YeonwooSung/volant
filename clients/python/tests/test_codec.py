@@ -5,6 +5,7 @@ from __future__ import annotations
 import unittest
 
 from volant.codec import (
+    AclBinding,
     Assignment,
     AuthRequest,
     AuthResponse,
@@ -28,8 +29,14 @@ from volant.codec import (
     LeaveGroupRequest,
     LeaveGroupResponse,
     ListGroupsResponse,
+    CreateAclsRequest,
+    CreateAclsResponse,
     CreatePartitionsRequest,
     CreatePartitionsResponse,
+    DeleteAclsRequest,
+    DeleteAclsResponse,
+    ListAclsRequest,
+    ListAclsResponse,
     ListOffsetsRequest,
     ListOffsetsResponse,
     MetadataRequest,
@@ -65,8 +72,14 @@ from volant.codec import (
     decode_leave_group_response,
     decode_list_groups_request,
     decode_list_groups_response,
+    decode_create_acls_request,
+    decode_create_acls_response,
     decode_create_partitions_request,
     decode_create_partitions_response,
+    decode_delete_acls_request,
+    decode_delete_acls_response,
+    decode_list_acls_request,
+    decode_list_acls_response,
     decode_list_offsets_request,
     decode_list_offsets_response,
     decode_metadata_request,
@@ -96,8 +109,14 @@ from volant.codec import (
     encode_leave_group_response,
     encode_list_groups_request,
     encode_list_groups_response,
+    encode_create_acls_request,
+    encode_create_acls_response,
     encode_create_partitions_request,
     encode_create_partitions_response,
+    encode_delete_acls_request,
+    encode_delete_acls_response,
+    encode_list_acls_request,
+    encode_list_acls_response,
     encode_list_offsets_request,
     encode_list_offsets_response,
     encode_metadata_request,
@@ -113,7 +132,10 @@ from volant.codec import (
     OP_HEARTBEAT,
     OP_JOIN_GROUP,
     OP_LEAVE_GROUP,
+    OP_CREATE_ACLS_RESPONSE,
     OP_CREATE_PARTITIONS_RESPONSE,
+    OP_DELETE_ACLS_RESPONSE,
+    OP_LIST_ACLS_RESPONSE,
     OP_LIST_GROUPS_RESPONSE,
     OP_LIST_OFFSETS_RESPONSE,
     OP_OFFSET_COMMIT,
@@ -818,6 +840,57 @@ class TestCreatePartitionsCodec(unittest.TestCase):
         self.assertEqual(_hx(raw), _hx(expected))
         self.assertEqual(decode_create_partitions_response(raw), resp)
         self.assertEqual(decode_response(OP_CREATE_PARTITIONS_RESPONSE, raw), resp)
+
+
+class TestAclsCodec(unittest.TestCase):
+    def _binding(self) -> AclBinding:
+        return AclBinding(
+            principal="User:alice",
+            resource_type=0,
+            resource="events",
+            operation=3,
+            permission=1,
+        )
+
+    def test_acl_binding_roundtrip(self) -> None:
+        entry = self._binding()
+        req = CreateAclsRequest(entries=[entry])
+        raw = encode_create_acls_request(req)
+        expected = bytes.fromhex(
+            "01000000"  # count 1
+            "0a00"
+            "557365723a616c696365"  # "User:alice"
+            "00"  # Topic
+            "0600"
+            "6576656e7473"  # "events"
+            "03"  # operation
+            "01"  # Allow
+        )
+        self.assertEqual(_hx(raw), _hx(expected))
+        self.assertEqual(decode_create_acls_request(raw), req)
+        del_req = DeleteAclsRequest(entries=[entry])
+        self.assertEqual(decode_delete_acls_request(encode_delete_acls_request(del_req)), del_req)
+        resp = CreateAclsResponse(error_code=0)
+        raw_resp = encode_create_acls_response(resp)
+        self.assertEqual(_hx(raw_resp), "0000")
+        self.assertEqual(decode_create_acls_response(raw_resp), resp)
+        self.assertEqual(decode_response(OP_CREATE_ACLS_RESPONSE, raw_resp), resp)
+        listed = ListAclsResponse(error_code=0, entries=[entry])
+        raw_list = encode_list_acls_response(listed)
+        self.assertEqual(decode_list_acls_response(raw_list), listed)
+        self.assertEqual(decode_response(OP_LIST_ACLS_RESPONSE, raw_list), listed)
+        deleted = DeleteAclsResponse(error_code=0, removed=1)
+        raw_del = encode_delete_acls_response(deleted)
+        self.assertEqual(_hx(raw_del), "000001000000")
+        self.assertEqual(decode_delete_acls_response(raw_del), deleted)
+        self.assertEqual(decode_response(OP_DELETE_ACLS_RESPONSE, raw_del), deleted)
+
+    def test_list_acls_request_empty_filters(self) -> None:
+        req = ListAclsRequest(principal="", resource_type=255, resource="")
+        raw = encode_list_acls_request(req)
+        expected = bytes.fromhex("0000" "ff" "0000")
+        self.assertEqual(_hx(raw), _hx(expected))
+        self.assertEqual(decode_list_acls_request(raw), req)
 
 
 if __name__ == "__main__":

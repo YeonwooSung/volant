@@ -73,6 +73,11 @@ Client.connectTlsScram("127.0.0.1", 9092, TlsOptions.ca("ca.pem"), "alice", "s3c
 c.createScramUser("alice", "s3cret"); // iterations=0 → broker default 4096
 List<String> names = c.listScramUsers();
 c.deleteScramUser("alice");
+// ACL admin (v0.56). Opcodes 54–59; exact-match delete. Not Kafka CreateAcls.
+AclBinding e = new AclBinding("User:alice", 0, "events", 3, 1);
+c.createAcls(List.of(e));
+List<AclBinding> listed = c.listAcls(); // any/any/any
+int removed = c.deleteAcls(List.of(e));
 ```
 
 `produce(..., null, value)` sends a null key. `fetch` returns `List<Record>`
@@ -157,6 +162,12 @@ re-runs the same auth path.
 Create/Delete/ListScramUsers (v0.55) are admin RPCs (opcodes 64–69),
 not the handshake. `createScramUser` sends the password in the clear
 (use TLS). Not Kafka AlterUserScramCredentials.
+Create/Delete/ListAcls (v0.56) are admin RPCs (opcodes 54–59).
+`createAcls(List<AclBinding>)` / `deleteAcls(...)` (returns removed)
+/ `listAcls()` or `listAcls(principal, resourceType, resource)`.
+Empty principal/resource and `resourceType=255` list any. Delete is
+exact-match only. Not Kafka CreateAcls / DeleteAcls / DescribeAcls
+(API keys 30/31/29).
 
 ## Honesty
 
@@ -213,4 +224,5 @@ See [docs/V23_SPEC.md](../../docs/V23_SPEC.md),
 [docs/V46_SPEC.md](../../docs/V46_SPEC.md).
 [docs/V50_SPEC.md](../../docs/V50_SPEC.md).,
 [docs/V46_SPEC.md](../../docs/V46_SPEC.md),
-[docs/V55_SPEC.md](../../docs/V55_SPEC.md).
+[docs/V55_SPEC.md](../../docs/V55_SPEC.md),
+[docs/V56_SPEC.md](../../docs/V56_SPEC.md).

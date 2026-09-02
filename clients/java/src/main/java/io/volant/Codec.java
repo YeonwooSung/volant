@@ -11,7 +11,8 @@ import java.util.List;
  * <p>Matches {@code crates/volant-protocol/src/payload.rs} for the MVP opcodes:
  * Produce, Fetch, CreateTopic, Metadata, DeleteTopic, OffsetCommit,
  * OffsetFetch, JoinGroup, Heartbeat, LeaveGroup, Auth, DescribeGroup,
- * ListGroups, CreatePartitions, ListOffsets, InitProducerId, Scram.
+ * ListGroups, CreatePartitions, ListOffsets, CreateAcls, DeleteAcls,
+ * ListAcls, InitProducerId, Scram.
  *
  * <p>Header fields are big-endian (see {@link Frame}); <strong>payload</strong>
  * integers and length prefixes are little-endian.
@@ -51,6 +52,12 @@ public final class Codec {
     public static final int OP_CREATE_PARTITIONS_RESPONSE = 47;
     public static final int OP_LIST_OFFSETS = 48;
     public static final int OP_LIST_OFFSETS_RESPONSE = 49;
+    public static final int OP_CREATE_ACLS = 54;
+    public static final int OP_CREATE_ACLS_RESPONSE = 55;
+    public static final int OP_DELETE_ACLS = 56;
+    public static final int OP_DELETE_ACLS_RESPONSE = 57;
+    public static final int OP_LIST_ACLS = 58;
+    public static final int OP_LIST_ACLS_RESPONSE = 59;
     public static final int OP_CREATE_SCRAM_USER = 64;
     public static final int OP_CREATE_SCRAM_USER_RESPONSE = 65;
     public static final int OP_DELETE_SCRAM_USER = 66;
@@ -604,6 +611,68 @@ public final class Codec {
         }
     }
 
+    public static final class CreateAclsRequest {
+        public final List<AclBinding> entries;
+
+        public CreateAclsRequest(List<AclBinding> entries) {
+            this.entries = entries == null
+                    ? Collections.emptyList()
+                    : Collections.unmodifiableList(new ArrayList<>(entries));
+        }
+    }
+
+    public static final class CreateAclsResponse {
+        public final int errorCode;
+
+        public CreateAclsResponse(int errorCode) {
+            this.errorCode = errorCode;
+        }
+    }
+
+    public static final class DeleteAclsRequest {
+        public final List<AclBinding> entries;
+
+        public DeleteAclsRequest(List<AclBinding> entries) {
+            this.entries = entries == null
+                    ? Collections.emptyList()
+                    : Collections.unmodifiableList(new ArrayList<>(entries));
+        }
+    }
+
+    public static final class DeleteAclsResponse {
+        public final int errorCode;
+        public final int removed;
+
+        public DeleteAclsResponse(int errorCode, int removed) {
+            this.errorCode = errorCode;
+            this.removed = removed;
+        }
+    }
+
+    public static final class ListAclsRequest {
+        public final String principal;
+        public final int resourceType;
+        public final String resource;
+
+        public ListAclsRequest(String principal, int resourceType, String resource) {
+            this.principal = principal == null ? "" : principal;
+            this.resourceType = resourceType;
+            this.resource = resource == null ? "" : resource;
+        }
+    }
+
+    public static final class ListAclsResponse {
+        public final int errorCode;
+        public final List<AclBinding> entries;
+
+        public ListAclsResponse(int errorCode, List<AclBinding> entries) {
+            this.errorCode = errorCode;
+            this.entries = entries == null
+                    ? Collections.emptyList()
+                    : Collections.unmodifiableList(new ArrayList<>(entries));
+        }
+    }
+
     public static final class CreateScramUserRequest {
         public final String username;
         public final String password;
@@ -917,6 +986,23 @@ public final class Codec {
         int n = r.u16();
         byte[] raw = r.take(n, "truncated string body");
         return new String(raw, StandardCharsets.UTF_8);
+    }
+
+    static void putAclBinding(Writer w, AclBinding e) {
+        putString(w, e.principal);
+        w.u8(e.resourceType);
+        putString(w, e.resource);
+        w.u8(e.operation);
+        w.u8(e.permission);
+    }
+
+    static AclBinding getAclBinding(Reader r) {
+        String principal = getString(r);
+        int resourceType = r.u8();
+        String resource = getString(r);
+        int operation = r.u8();
+        int permission = r.u8();
+        return new AclBinding(principal, resourceType, resource, operation, permission);
     }
 
     static void putBytes(Writer w, byte[] b) {
@@ -1616,6 +1702,107 @@ public final class Codec {
         return new ListOffsetsResponse(errorCode, topic, entries);
     }
 
+    public static byte[] encodeCreateAclsRequest(CreateAclsRequest req) {
+        Writer w = new Writer();
+        List<AclBinding> entries = req.entries == null ? Collections.emptyList() : req.entries;
+        w.u32(entries.size());
+        for (AclBinding e : entries) {
+            putAclBinding(w, e);
+        }
+        return w.finish();
+    }
+
+    public static CreateAclsRequest decodeCreateAclsRequest(byte[] payload) {
+        Reader r = new Reader(payload);
+        long n = r.u32();
+        List<AclBinding> entries = new ArrayList<>();
+        for (int i = 0; i < n; i++) {
+            entries.add(getAclBinding(r));
+        }
+        return new CreateAclsRequest(entries);
+    }
+
+    public static byte[] encodeCreateAclsResponse(CreateAclsResponse resp) {
+        Writer w = new Writer();
+        w.u16(resp.errorCode);
+        return w.finish();
+    }
+
+    public static CreateAclsResponse decodeCreateAclsResponse(byte[] payload) {
+        Reader r = new Reader(payload);
+        return new CreateAclsResponse(r.u16());
+    }
+
+    public static byte[] encodeDeleteAclsRequest(DeleteAclsRequest req) {
+        Writer w = new Writer();
+        List<AclBinding> entries = req.entries == null ? Collections.emptyList() : req.entries;
+        w.u32(entries.size());
+        for (AclBinding e : entries) {
+            putAclBinding(w, e);
+        }
+        return w.finish();
+    }
+
+    public static DeleteAclsRequest decodeDeleteAclsRequest(byte[] payload) {
+        Reader r = new Reader(payload);
+        long n = r.u32();
+        List<AclBinding> entries = new ArrayList<>();
+        for (int i = 0; i < n; i++) {
+            entries.add(getAclBinding(r));
+        }
+        return new DeleteAclsRequest(entries);
+    }
+
+    public static byte[] encodeDeleteAclsResponse(DeleteAclsResponse resp) {
+        Writer w = new Writer();
+        w.u16(resp.errorCode);
+        w.u32(resp.removed);
+        return w.finish();
+    }
+
+    public static DeleteAclsResponse decodeDeleteAclsResponse(byte[] payload) {
+        Reader r = new Reader(payload);
+        return new DeleteAclsResponse(r.u16(), (int) r.u32());
+    }
+
+    public static byte[] encodeListAclsRequest(ListAclsRequest req) {
+        Writer w = new Writer();
+        putString(w, req.principal);
+        w.u8(req.resourceType);
+        putString(w, req.resource);
+        return w.finish();
+    }
+
+    public static ListAclsRequest decodeListAclsRequest(byte[] payload) {
+        Reader r = new Reader(payload);
+        String principal = getString(r);
+        int resourceType = r.u8();
+        String resource = getString(r);
+        return new ListAclsRequest(principal, resourceType, resource);
+    }
+
+    public static byte[] encodeListAclsResponse(ListAclsResponse resp) {
+        Writer w = new Writer();
+        w.u16(resp.errorCode);
+        List<AclBinding> entries = resp.entries == null ? Collections.emptyList() : resp.entries;
+        w.u32(entries.size());
+        for (AclBinding e : entries) {
+            putAclBinding(w, e);
+        }
+        return w.finish();
+    }
+
+    public static ListAclsResponse decodeListAclsResponse(byte[] payload) {
+        Reader r = new Reader(payload);
+        int errorCode = r.u16();
+        long n = r.u32();
+        List<AclBinding> entries = new ArrayList<>();
+        for (int i = 0; i < n; i++) {
+            entries.add(getAclBinding(r));
+        }
+        return new ListAclsResponse(errorCode, entries);
+    }
+
     static void putConfigPairs(Writer w, List<String[]> configs) {
         List<String[]> pairs = configs == null ? Collections.emptyList() : configs;
         w.u32(pairs.size());
@@ -2004,6 +2191,12 @@ public final class Codec {
                 return decodeCreatePartitionsResponse(payload);
             case OP_LIST_OFFSETS_RESPONSE:
                 return decodeListOffsetsResponse(payload);
+            case OP_CREATE_ACLS_RESPONSE:
+                return decodeCreateAclsResponse(payload);
+            case OP_DELETE_ACLS_RESPONSE:
+                return decodeDeleteAclsResponse(payload);
+            case OP_LIST_ACLS_RESPONSE:
+                return decodeListAclsResponse(payload);
             case OP_CREATE_SCRAM_USER_RESPONSE:
                 return decodeCreateScramUserResponse(payload);
             case OP_DELETE_SCRAM_USER_RESPONSE:

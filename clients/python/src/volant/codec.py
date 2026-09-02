@@ -3,7 +3,8 @@
 Matches `crates/volant-protocol/src/payload.rs` for the MVP opcodes:
 Produce, Fetch, CreateTopic, Metadata, DeleteTopic, OffsetCommit,
 OffsetFetch, JoinGroup, Heartbeat, LeaveGroup, Auth, DescribeGroup,
-ListGroups, CreatePartitions, ListOffsets, InitProducerId, Scram.
+ListGroups, CreatePartitions, ListOffsets, CreateAcls, DeleteAcls,
+ListAcls, InitProducerId, Scram.
 
 Header fields are big-endian (see :mod:`volant.frame`); **payload** integers
 and length prefixes are little-endian.
@@ -52,6 +53,12 @@ OP_CREATE_PARTITIONS = 46
 OP_CREATE_PARTITIONS_RESPONSE = 47
 OP_LIST_OFFSETS = 48
 OP_LIST_OFFSETS_RESPONSE = 49
+OP_CREATE_ACLS = 54
+OP_CREATE_ACLS_RESPONSE = 55
+OP_DELETE_ACLS = 56
+OP_DELETE_ACLS_RESPONSE = 57
+OP_LIST_ACLS = 58
+OP_LIST_ACLS_RESPONSE = 59
 OP_CREATE_SCRAM_USER = 64
 OP_CREATE_SCRAM_USER_RESPONSE = 65
 OP_DELETE_SCRAM_USER = 66
@@ -177,6 +184,29 @@ def _get_string(r: _Reader) -> str:
         return raw.decode("utf-8")
     except UnicodeDecodeError as e:
         raise ProtocolError(f"invalid utf-8: {e}") from e
+
+
+def _put_acl_binding(w: _Writer, e: "AclBinding") -> None:
+    _put_string(w, e.principal)
+    w.u8(e.resource_type)
+    _put_string(w, e.resource)
+    w.u8(e.operation)
+    w.u8(e.permission)
+
+
+def _get_acl_binding(r: _Reader) -> "AclBinding":
+    principal = _get_string(r)
+    resource_type = r.u8()
+    resource = _get_string(r)
+    operation = r.u8()
+    permission = r.u8()
+    return AclBinding(
+        principal=principal,
+        resource_type=resource_type,
+        resource=resource,
+        operation=operation,
+        permission=permission,
+    )
 
 
 def _put_bytes(w: _Writer, b: bytes) -> None:
@@ -559,6 +589,56 @@ class ListOffsetsResponse:
     error_code: int
     topic: str
     entries: list[OffsetListing]
+
+
+@dataclass
+class AclBinding:
+    """One ACL binding on the wire (Phase 20 / v0.56).
+
+    ``resource_type``: 0=Topic, 1=Group, 2=Cluster.
+    ``operation``: 0=All … 7=ClusterAction.
+    ``permission``: 0=Deny, 1=Allow.
+    """
+
+    principal: str
+    resource_type: int
+    resource: str
+    operation: int
+    permission: int
+
+
+@dataclass
+class CreateAclsRequest:
+    entries: list[AclBinding] = field(default_factory=list)
+
+
+@dataclass
+class CreateAclsResponse:
+    error_code: int
+
+
+@dataclass
+class DeleteAclsRequest:
+    entries: list[AclBinding] = field(default_factory=list)
+
+
+@dataclass
+class DeleteAclsResponse:
+    error_code: int
+    removed: int
+
+
+@dataclass
+class ListAclsRequest:
+    principal: str = ""
+    resource_type: int = 255
+    resource: str = ""
+
+
+@dataclass
+class ListAclsResponse:
+    error_code: int
+    entries: list[AclBinding] = field(default_factory=list)
 
 
 
@@ -1400,6 +1480,98 @@ def decode_list_offsets_response(payload: bytes) -> ListOffsetsResponse:
     return ListOffsetsResponse(error_code=error_code, topic=topic, entries=entries)
 
 
+# --- create / delete / list acls -------------------------------------------
+
+
+def encode_create_acls_request(req: CreateAclsRequest) -> bytes:
+    w = _Writer()
+    entries = req.entries or []
+    w.u32_le(len(entries))
+    for e in entries:
+        _put_acl_binding(w, e)
+    return w.finish()
+
+
+def decode_create_acls_request(payload: bytes) -> CreateAclsRequest:
+    r = _Reader(payload)
+    n = r.u32_le()
+    return CreateAclsRequest(entries=[_get_acl_binding(r) for _ in range(n)])
+
+
+def encode_create_acls_response(resp: CreateAclsResponse) -> bytes:
+    w = _Writer()
+    w.u16_le(resp.error_code)
+    return w.finish()
+
+
+def decode_create_acls_response(payload: bytes) -> CreateAclsResponse:
+    r = _Reader(payload)
+    return CreateAclsResponse(error_code=r.u16_le())
+
+
+def encode_delete_acls_request(req: DeleteAclsRequest) -> bytes:
+    w = _Writer()
+    entries = req.entries or []
+    w.u32_le(len(entries))
+    for e in entries:
+        _put_acl_binding(w, e)
+    return w.finish()
+
+
+def decode_delete_acls_request(payload: bytes) -> DeleteAclsRequest:
+    r = _Reader(payload)
+    n = r.u32_le()
+    return DeleteAclsRequest(entries=[_get_acl_binding(r) for _ in range(n)])
+
+
+def encode_delete_acls_response(resp: DeleteAclsResponse) -> bytes:
+    w = _Writer()
+    w.u16_le(resp.error_code)
+    w.u32_le(resp.removed)
+    return w.finish()
+
+
+def decode_delete_acls_response(payload: bytes) -> DeleteAclsResponse:
+    r = _Reader(payload)
+    return DeleteAclsResponse(error_code=r.u16_le(), removed=r.u32_le())
+
+
+def encode_list_acls_request(req: ListAclsRequest) -> bytes:
+    w = _Writer()
+    _put_string(w, req.principal)
+    w.u8(req.resource_type)
+    _put_string(w, req.resource)
+    return w.finish()
+
+
+def decode_list_acls_request(payload: bytes) -> ListAclsRequest:
+    r = _Reader(payload)
+    principal = _get_string(r)
+    resource_type = r.u8()
+    resource = _get_string(r)
+    return ListAclsRequest(
+        principal=principal, resource_type=resource_type, resource=resource
+    )
+
+
+def encode_list_acls_response(resp: ListAclsResponse) -> bytes:
+    w = _Writer()
+    w.u16_le(resp.error_code)
+    w.u32_le(len(resp.entries))
+    for e in resp.entries:
+        _put_acl_binding(w, e)
+    return w.finish()
+
+
+def decode_list_acls_response(payload: bytes) -> ListAclsResponse:
+    r = _Reader(payload)
+    error_code = r.u16_le()
+    n = r.u32_le()
+    return ListAclsResponse(
+        error_code=error_code, entries=[_get_acl_binding(r) for _ in range(n)]
+    )
+
+
 # --- create partitions -----------------------------------------------------
 
 
@@ -1873,6 +2045,12 @@ def decode_response(opcode: int, payload: bytes):
         return decode_create_partitions_response(payload)
     if opcode == OP_LIST_OFFSETS_RESPONSE:
         return decode_list_offsets_response(payload)
+    if opcode == OP_CREATE_ACLS_RESPONSE:
+        return decode_create_acls_response(payload)
+    if opcode == OP_DELETE_ACLS_RESPONSE:
+        return decode_delete_acls_response(payload)
+    if opcode == OP_LIST_ACLS_RESPONSE:
+        return decode_list_acls_response(payload)
     if opcode == OP_CREATE_SCRAM_USER_RESPONSE:
         return decode_create_scram_user_response(payload)
     if opcode == OP_DELETE_SCRAM_USER_RESPONSE:

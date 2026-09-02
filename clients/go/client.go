@@ -52,6 +52,7 @@ type (
 	GroupMemberInfo  = codec.GroupMemberInfo
 	GroupState       = codec.GroupState
 	OffsetListing    = codec.OffsetListing
+	AclBinding       = codec.AclBinding
 )
 
 // DeleteRecordsResult is the successful DeleteRecords reply (Phase 14 / v0.52).
@@ -1280,6 +1281,70 @@ func (c *Client) ListScramUsers() ([]string, error) {
 		return nil, err
 	}
 	return resp.Usernames, nil
+}
+
+// CreateAcls creates ACL bindings (native opcode 54/55).
+// This is not Kafka CreateAcls (API key 30).
+func (c *Client) CreateAcls(entries []codec.AclBinding) error {
+	payload, err := codec.EncodeCreateAclsRequest(codec.CreateAclsRequest{Entries: entries})
+	if err != nil {
+		return err
+	}
+	decoded, err := c.roundTrip(codec.OpCreateAcls, payload)
+	if err != nil {
+		return err
+	}
+	resp, ok := decoded.(codec.CreateAclsResponse)
+	if !ok {
+		return &frame.ProtocolError{Msg: fmt.Sprintf("unexpected response for create_acls: %T", decoded)}
+	}
+	return check(resp.ErrorCode, "create_acls")
+}
+
+// DeleteAcls deletes exact-matching ACL bindings (native opcode 56/57).
+// Returns the number of entries removed. No filter-delete.
+func (c *Client) DeleteAcls(entries []codec.AclBinding) (uint32, error) {
+	payload, err := codec.EncodeDeleteAclsRequest(codec.DeleteAclsRequest{Entries: entries})
+	if err != nil {
+		return 0, err
+	}
+	decoded, err := c.roundTrip(codec.OpDeleteAcls, payload)
+	if err != nil {
+		return 0, err
+	}
+	resp, ok := decoded.(codec.DeleteAclsResponse)
+	if !ok {
+		return 0, &frame.ProtocolError{Msg: fmt.Sprintf("unexpected response for delete_acls: %T", decoded)}
+	}
+	if err := check(resp.ErrorCode, "delete_acls"); err != nil {
+		return 0, err
+	}
+	return resp.Removed, nil
+}
+
+// ListAcls lists ACL bindings with optional filters (native opcode 58/59).
+// Empty principal/resource = any. resourceType 255 = any type.
+func (c *Client) ListAcls(principal string, resourceType uint8, resource string) ([]codec.AclBinding, error) {
+	payload, err := codec.EncodeListAclsRequest(codec.ListAclsRequest{
+		Principal:    principal,
+		ResourceType: resourceType,
+		Resource:     resource,
+	})
+	if err != nil {
+		return nil, err
+	}
+	decoded, err := c.roundTrip(codec.OpListAcls, payload)
+	if err != nil {
+		return nil, err
+	}
+	resp, ok := decoded.(codec.ListAclsResponse)
+	if !ok {
+		return nil, &frame.ProtocolError{Msg: fmt.Sprintf("unexpected response for list_acls: %T", decoded)}
+	}
+	if err := check(resp.ErrorCode, "list_acls"); err != nil {
+		return nil, err
+	}
+	return resp.Entries, nil
 }
 
 // LeaveGroup leaves a consumer group.

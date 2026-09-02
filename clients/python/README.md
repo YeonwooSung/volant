@@ -79,6 +79,12 @@ c = Client("127.0.0.1:9092", scram_username="alice", scram_password="s3cret")
 c.create_scram_user("alice", "s3cret")  # iterations=0 → broker default 4096
 names = c.list_scram_users()
 c.delete_scram_user("alice")
+# ACL admin (v0.56). Opcodes 54–59; exact-match delete. Not Kafka CreateAcls.
+from volant import AclBinding
+e = AclBinding("User:alice", 0, "events", 3, 1)  # Topic, op 3, Allow
+c.create_acls([e])
+listed = c.list_acls()  # any/any/any
+n = c.delete_acls([e])
 ```
 
 `Client` is also a context manager. `produce(..., key=b"...")` is supported;
@@ -170,6 +176,11 @@ Create/Delete/ListScramUsers (v0.55) are admin RPCs (opcodes 64–69),
 not the handshake. `create_scram_user(user, password, iterations=0)`
 sends the password in the clear (use TLS). Not Kafka
 AlterUserScramCredentials.
+Create/Delete/ListAcls (v0.56) are admin RPCs (opcodes 54–59).
+`create_acls([AclBinding(...)])` / `delete_acls(...)` (returns
+removed) / `list_acls(principal="", resource_type=255, resource="")`.
+Delete is exact-match only. Not Kafka CreateAcls / DeleteAcls /
+DescribeAcls (API keys 30/31/29).
 
 ## Honesty
 
@@ -223,4 +234,5 @@ See [docs/V14_SPEC.md](../../docs/V14_SPEC.md),
 [docs/V46_SPEC.md](../../docs/V46_SPEC.md).
 [docs/V50_SPEC.md](../../docs/V50_SPEC.md).,
 [docs/V46_SPEC.md](../../docs/V46_SPEC.md),
-[docs/V55_SPEC.md](../../docs/V55_SPEC.md).
+[docs/V55_SPEC.md](../../docs/V55_SPEC.md),
+[docs/V56_SPEC.md](../../docs/V56_SPEC.md).

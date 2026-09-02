@@ -714,4 +714,54 @@ class CodecTest {
                 Codec.decodeResponse(Codec.OP_CREATE_PARTITIONS_RESPONSE, raw));
         assertEquals(4, dispatched.partitions);
     }
+
+    private static AclBinding sampleAcl() {
+        return new AclBinding("User:alice", 0, "events", 3, 1);
+    }
+
+    @Test
+    void aclBindingRoundtrip() {
+        AclBinding entry = sampleAcl();
+        Codec.CreateAclsRequest req = new Codec.CreateAclsRequest(Collections.singletonList(entry));
+        byte[] raw = Codec.encodeCreateAclsRequest(req);
+        byte[] expected = hx(
+                "01000000"
+                        + "0a00"
+                        + "557365723a616c696365"
+                        + "00"
+                        + "0600"
+                        + "6576656e7473"
+                        + "03"
+                        + "01");
+        assertArrayEquals(expected, raw);
+        Codec.CreateAclsRequest decoded = Codec.decodeCreateAclsRequest(raw);
+        assertEquals(1, decoded.entries.size());
+        assertEquals(entry, decoded.entries.get(0));
+        assertEquals(entry, Codec.decodeDeleteAclsRequest(Codec.encodeDeleteAclsRequest(
+                new Codec.DeleteAclsRequest(Collections.singletonList(entry)))).entries.get(0));
+        byte[] ok = Codec.encodeCreateAclsResponse(new Codec.CreateAclsResponse(0));
+        assertArrayEquals(hx("0000"), ok);
+        assertInstanceOf(Codec.CreateAclsResponse.class, Codec.decodeResponse(Codec.OP_CREATE_ACLS_RESPONSE, ok));
+        Codec.ListAclsResponse listed = new Codec.ListAclsResponse(0, Collections.singletonList(entry));
+        byte[] listRaw = Codec.encodeListAclsResponse(listed);
+        Codec.ListAclsResponse listDecoded = Codec.decodeListAclsResponse(listRaw);
+        assertEquals(entry, listDecoded.entries.get(0));
+        assertInstanceOf(Codec.ListAclsResponse.class, Codec.decodeResponse(Codec.OP_LIST_ACLS_RESPONSE, listRaw));
+        byte[] delRaw = Codec.encodeDeleteAclsResponse(new Codec.DeleteAclsResponse(0, 1));
+        assertArrayEquals(hx("000001000000"), delRaw);
+        Codec.DeleteAclsResponse del = assertInstanceOf(
+                Codec.DeleteAclsResponse.class, Codec.decodeResponse(Codec.OP_DELETE_ACLS_RESPONSE, delRaw));
+        assertEquals(1, del.removed);
+    }
+
+    @Test
+    void listAclsRequestEmptyFilters() {
+        Codec.ListAclsRequest req = new Codec.ListAclsRequest("", 255, "");
+        byte[] raw = Codec.encodeListAclsRequest(req);
+        assertArrayEquals(hx("0000" + "ff" + "0000"), raw);
+        Codec.ListAclsRequest decoded = Codec.decodeListAclsRequest(raw);
+        assertEquals("", decoded.principal);
+        assertEquals(255, decoded.resourceType);
+        assertEquals("", decoded.resource);
+    }
 }
