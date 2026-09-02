@@ -244,6 +244,11 @@ docs for day-to-day reading: [ops](../ops.md), [consistency](../consistency.md),
 | v0.43 | ✅ | Leader redirect on Python/Go/Java produce/fetch | [V43_SPEC.md](../V43_SPEC.md) |
 | v0.44 | ✅ | Rust GroupConsumer background heartbeat | [V44_SPEC.md](../V44_SPEC.md) |
 | v0.45 | ✅ | Clustered DeleteRecords wait-off requires ACK | [V45_SPEC.md](../V45_SPEC.md) |
+| v0.46 | ✅ | SCRAM-SHA-256 on Python/Go/Java clients | [V46_SPEC.md](../V46_SPEC.md) |
+| v0.47 | ✅ | Idempotent produce on Python/Go/Java | [V47_SPEC.md](../V47_SPEC.md) |
+| v0.48 | ✅ | GroupConsumer auto-commit on Python/Go/Java | [V48_SPEC.md](../V48_SPEC.md) |
+| v0.49 | ✅ | ListGroups and DescribeGroup on Python/Go/Java | [V49_SPEC.md](../V49_SPEC.md) |
+| v0.50 | ✅ | ListOffsets on Python/Go/Java clients | [V50_SPEC.md](../V50_SPEC.md) |
 
 ---
 
