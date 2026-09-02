@@ -97,6 +97,9 @@ async fn wait_off_succeeds_without_majority() {
         b.set_advertised("127.0.0.1", p1);
         // Default wait off; assert explicitly.
         assert!(!b.delete_records_wait_majority());
+        // v0.29: keep this test on the irreversible wait-off path.
+        // Production equivalent: VOLANT_DELETE_RECORDS_ALLOW_IRREVERSIBLE=1
+        b.set_delete_records_allow_irreversible(true);
         Arc::new(b)
     };
     let mut bgs: Vec<BackgroundTasks> = vec![start_background_tasks(Arc::clone(&b1))];
@@ -166,8 +169,13 @@ async fn wait_off_succeeds_without_majority() {
     );
 
     // Direct fan-out API: majority_ok false, still no wait metrics.
-    let fan = fanout_delete_records(&b1, "t", 0, b1.truncate_journal().watermark("t", 0).unwrap_or(1))
-        .await;
+    let fan = fanout_delete_records(
+        &b1,
+        "t",
+        0,
+        b1.truncate_journal().watermark("t", 0).unwrap_or(1),
+    )
+    .await;
     assert!(
         !fan.majority_ok,
         "N=3 with only proposer live must report majority_ok=false"

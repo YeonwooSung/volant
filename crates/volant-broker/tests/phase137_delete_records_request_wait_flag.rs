@@ -186,6 +186,9 @@ async fn flag_0_uses_broker_default_off() {
         let b = Broker::with_cluster(small_seg_storage(base.join("n1")), 1, cfg).unwrap();
         b.set_advertised("127.0.0.1", p1);
         assert!(!b.delete_records_wait_majority());
+        // v0.29: keep this test on the irreversible wait-off path.
+        // Production equivalent: VOLANT_DELETE_RECORDS_ALLOW_IRREVERSIBLE=1
+        b.set_delete_records_allow_irreversible(true);
         Arc::new(b)
     };
     let mut bgs: Vec<BackgroundTasks> = vec![start_background_tasks(Arc::clone(&b1))];
@@ -249,6 +252,9 @@ async fn flag_2_forces_no_wait_when_env_on() {
         b.set_advertised("127.0.0.1", p1);
         b.set_delete_records_wait_majority(true);
         assert!(b.delete_records_wait_majority());
+        // v0.29: keep flag-2 on the irreversible wait-off path.
+        // Production equivalent: VOLANT_DELETE_RECORDS_ALLOW_IRREVERSIBLE=1
+        b.set_delete_records_allow_irreversible(true);
         Arc::new(b)
     };
     let mut bgs: Vec<BackgroundTasks> = vec![start_background_tasks(Arc::clone(&b1))];

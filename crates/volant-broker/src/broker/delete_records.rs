@@ -83,16 +83,58 @@ impl Broker {
             .store(wait, Ordering::Relaxed);
     }
 
-    /// Phase 137: merge request trailer with broker default wait knob.
+    /// v0.29: whether clustered wait-off (local-first truncate) is allowed.
+    ///
+    /// Default **false** (`VOLANT_DELETE_RECORDS_ALLOW_IRREVERSIBLE` unset / `0`).
+    /// `1`/`true`/`yes`/`on` at construct enables today's irreversible path.
+    /// Use [`Self::set_delete_records_allow_irreversible`] in tests.
+    pub fn delete_records_allow_irreversible(&self) -> bool {
+        self.delete_records_allow_irreversible
+            .load(Ordering::Relaxed)
+    }
+
+    /// v0.29: runtime toggle for tests / operator tooling.
+    pub fn set_delete_records_allow_irreversible(&self, allow: bool) {
+        self.delete_records_allow_irreversible
+            .store(allow, Ordering::Relaxed);
+    }
+
+    /// Phase 137 + v0.29: merge request trailer with broker default wait knob,
+    /// then refuse irreversible wait-off on clustered brokers unless allowed.
     /// * 0 / other → `delete_records_wait_majority()`
     /// * 1 → true
     /// * 2 → false
+    ///
+    /// When the broker is clustered (`cluster` is `Some`), the merge would be
+    /// **off**, and [`Self::delete_records_allow_irreversible`] is false: treat
+    /// as wait-on (majority first; miss → error, no local truncate). Single-node
+    /// wait-off is unchanged (no majority exists).
     pub fn effective_delete_records_wait_majority(&self, request_flag: u8) -> bool {
-        match request_flag {
+        let raw = match request_flag {
             1 => true,
             2 => false,
             _ => self.delete_records_wait_majority(),
+        };
+        if raw {
+            return true;
         }
+        if self.cluster.is_some() && !self.delete_records_allow_irreversible() {
+            self.note_delete_records_wait_off_upgraded();
+            return true;
+        }
+        false
+    }
+
+    /// v0.29: clustered wait-off upgraded to wait-on.
+    pub fn delete_records_wait_off_upgraded_total(&self) -> u64 {
+        self.delete_records_wait_off_upgraded_total
+            .load(Ordering::Relaxed)
+    }
+
+    /// Increment wait-off → wait-on upgrade (v0.29; clustered, allow env off).
+    pub fn note_delete_records_wait_off_upgraded(&self) {
+        self.delete_records_wait_off_upgraded_total
+            .fetch_add(1, Ordering::Relaxed);
     }
 
     /// Phase 135: wait-mode majority success counter.
