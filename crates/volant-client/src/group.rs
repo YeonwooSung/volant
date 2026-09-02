@@ -12,6 +12,13 @@
 //! poll and then every `auto_commit_interval`. This is **not** Kafka
 //! `enable.auto.commit` — there is no background commit timer.
 //!
+//! After join / rebalance, OffsetFetch seeds each newly assigned partition.
+//! A committed offset that is not `OFFSET_UNKNOWN` is used as-is. Otherwise
+//! [`GroupConsumer::join_with_auto_offset_reset`] applies `earliest` (default:
+//! position **0**, no ListOffsets), `latest` (native ListOffsets LEO), or
+//! `none` (error). Invalid reset strings fail before JoinGroup. This is
+//! **not** Kafka `auto.offset.reset` (no timestamp / isolation selector).
+//!
 //! The join lock serializes the heartbeat task against `poll` / `commit` /
 //! `leave`. This is **not** a fully concurrent consumer — do not call `poll`
 //! from two tasks. [`GroupConsumer::leave`] stops the task and sends
@@ -25,13 +32,45 @@ use std::time::{Duration, Instant};
 
 use tokio::sync::{watch, Mutex as AsyncMutex};
 use tokio::task::JoinHandle;
-use volant_core::{Offset, Result};
+use volant_core::{Error, Offset, Result};
 use volant_protocol::{FetchRecord, OffsetCommitEntry, OffsetEntry};
 
 use crate::client::Client;
 
 /// Wire sentinel: unknown / not-committed offset (`docs/PHASE3_SPEC.md`).
 const OFFSET_UNKNOWN: u64 = u64::MAX;
+
+/// Fetch position when OffsetFetch is missing or [`OFFSET_UNKNOWN`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum AutoOffsetReset {
+    /// Position 0; no ListOffsets (default).
+    Earliest,
+    /// Native ListOffsets latest (LEO).
+    Latest,
+    /// Error; do not start at 0.
+    None,
+}
+
+impl AutoOffsetReset {
+    fn as_str(self) -> &'static str {
+        match self {
+            Self::Earliest => "earliest",
+            Self::Latest => "latest",
+            Self::None => "none",
+        }
+    }
+}
+
+fn parse_auto_offset_reset(name: &str) -> Result<AutoOffsetReset> {
+    match name {
+        "" | "earliest" => Ok(AutoOffsetReset::Earliest),
+        "latest" => Ok(AutoOffsetReset::Latest),
+        "none" => Ok(AutoOffsetReset::None),
+        other => Err(Error::InvalidArgument(format!(
+            "unknown auto_offset_reset: {other:?}"
+        ))),
+    }
+}
 
 /// Minimum background heartbeat period (ms).
 const HEARTBEAT_INTERVAL_MIN_MS: u32 = 100;
@@ -67,6 +106,8 @@ struct Shared {
     gate: AsyncMutex<()>,
     state: Mutex<JoinState>,
     heartbeat_count: AtomicU64,
+    /// Offset reset when OffsetFetch is missing or `OFFSET_UNKNOWN`.
+    auto_offset_reset: AutoOffsetReset,
 }
 
 /// High-level consumer that joins a group, polls assigned partitions, and commits.
@@ -191,6 +232,47 @@ impl GroupConsumer {
         auto_commit: bool,
         auto_commit_interval: Duration,
     ) -> Result<Self> {
+        Self::join_with_auto_offset_reset(
+            client,
+            group_id,
+            topics,
+            session_timeout_ms,
+            group_instance_id,
+            heartbeat,
+            auto_commit,
+            auto_commit_interval,
+            "earliest",
+        )
+        .await
+    }
+
+    /// Join with opt-in `auto_offset_reset` (v0.67).
+    ///
+    /// Same arguments as [`join_with_auto_commit`](Self::join_with_auto_commit)
+    /// plus `auto_offset_reset`: `"earliest"` (default; position 0, no
+    /// ListOffsets), `"latest"` (native ListOffsets LEO), or `"none"` (error
+    /// if OffsetFetch is missing / `OFFSET_UNKNOWN`). Invalid strings return
+    /// an `InvalidArgument` error **before** JoinGroup. Empty string is
+    /// `"earliest"`.
+    ///
+    /// Existing [`join`](Self::join) / [`join_static`](Self::join_static) /
+    /// [`join_with_heartbeat`](Self::join_with_heartbeat) /
+    /// [`join_static_with_heartbeat`](Self::join_static_with_heartbeat) /
+    /// [`join_with_auto_commit`](Self::join_with_auto_commit) keep
+    /// `"earliest"`. Rejoin / heartbeat-driven rebalance reuse the same
+    /// policy. Not Kafka `auto.offset.reset`.
+    pub async fn join_with_auto_offset_reset(
+        client: Arc<Client>,
+        group_id: impl Into<String>,
+        topics: Vec<String>,
+        session_timeout_ms: u32,
+        group_instance_id: impl Into<String>,
+        heartbeat: bool,
+        auto_commit: bool,
+        auto_commit_interval: Duration,
+        auto_offset_reset: &str,
+    ) -> Result<Self> {
+        let auto_offset_reset = parse_auto_offset_reset(auto_offset_reset)?;
         let group_id = group_id.into();
         let group_instance_id = group_instance_id.into();
         let timeout = if session_timeout_ms == 0 {
@@ -218,6 +300,7 @@ impl GroupConsumer {
                     dirty: false,
                 }),
                 heartbeat_count: AtomicU64::new(0),
+                auto_offset_reset,
             }),
             hb_stop: None,
             hb_task: None,
@@ -429,6 +512,11 @@ impl GroupConsumer {
         lock_state(&self.shared).positions.clone()
     }
 
+    /// Current `auto_offset_reset` policy (`earliest`, `latest`, or `none`).
+    pub fn auto_offset_reset(&self) -> &'static str {
+        self.shared.auto_offset_reset.as_str()
+    }
+
     /// Heartbeat RPCs issued by this consumer (poll + background).
     pub fn heartbeat_count(&self) -> u64 {
         self.shared.heartbeat_count.load(Ordering::Relaxed)
@@ -537,27 +625,81 @@ async fn do_join(
         client.fetch_offsets(group_id, entries).await?
     };
 
-    let mut state = lock_state(shared);
-    for tp in &revoked {
-        state.positions.remove(tp);
-    }
-    state.member_id = result.member_id;
-    state.generation = result.generation;
-    state.assignment = new_assignment;
-    state.last_revoked = revoked;
-    for e in fetched {
-        let pos = if e.offset == OFFSET_UNKNOWN {
-            0
-        } else {
-            e.offset
-        };
-        state.positions.insert((e.topic, e.partition), pos);
-    }
-    let assigned = state.assignment.clone();
-    for (t, p) in assigned {
-        state.positions.entry((t, p)).or_insert(0);
+    let policy = shared.auto_offset_reset;
+    let missing = {
+        let mut state = lock_state(shared);
+        for tp in &revoked {
+            state.positions.remove(tp);
+        }
+        state.member_id = result.member_id;
+        state.generation = result.generation;
+        state.assignment = new_assignment;
+        state.last_revoked = revoked;
+        for e in fetched {
+            if e.offset != OFFSET_UNKNOWN {
+                state.positions.insert((e.topic, e.partition), e.offset);
+            }
+        }
+        state
+            .assignment
+            .iter()
+            .filter(|tp| !state.positions.contains_key(*tp))
+            .cloned()
+            .collect::<Vec<_>>()
+    };
+
+    let reset = apply_reset(client, policy, &missing).await?;
+    if !reset.is_empty() {
+        let mut state = lock_state(shared);
+        for (tp, pos) in reset {
+            state.positions.entry(tp).or_insert(pos);
+        }
     }
     Ok(())
+}
+
+/// Seed positions for OffsetFetch miss / `OFFSET_UNKNOWN`.
+async fn apply_reset(
+    client: &Client,
+    policy: AutoOffsetReset,
+    partitions: &[(String, u32)],
+) -> Result<Vec<((String, u32), u64)>> {
+    if partitions.is_empty() {
+        return Ok(Vec::new());
+    }
+    match policy {
+        AutoOffsetReset::Earliest => Ok(partitions.iter().cloned().map(|tp| (tp, 0)).collect()),
+        AutoOffsetReset::None => {
+            let (topic, partition) = &partitions[0];
+            Err(Error::InvalidArgument(format!(
+                "no committed offset for {topic}-{partition} and auto_offset_reset=\"none\""
+            )))
+        }
+        AutoOffsetReset::Latest => {
+            let mut by_topic: HashMap<String, Vec<u32>> = HashMap::new();
+            for (topic, partition) in partitions {
+                by_topic.entry(topic.clone()).or_default().push(*partition);
+            }
+            let mut out = Vec::with_capacity(partitions.len());
+            for (topic, parts) in by_topic {
+                let listing = client.list_offsets(&topic, parts.clone()).await?;
+                let got: HashMap<u32, u64> = listing
+                    .entries
+                    .into_iter()
+                    .map(|e| (e.partition, e.latest))
+                    .collect();
+                for partition in parts {
+                    let latest = got.get(&partition).copied().ok_or_else(|| {
+                        Error::InvalidArgument(format!(
+                            "list_offsets missing partition {topic}-{partition}"
+                        ))
+                    })?;
+                    out.push(((topic.clone(), partition), latest));
+                }
+            }
+            Ok(out)
+        }
+    }
 }
 
 async fn heartbeat_loop(
@@ -661,5 +803,28 @@ mod tests {
             t0 + Duration::from_millis(5)
         ));
         assert!(due_for_auto_commit(true, interval, Some(t0), t0 + interval));
+    }
+
+    #[test]
+    fn auto_offset_reset_parses() {
+        assert_eq!(
+            parse_auto_offset_reset("earliest").unwrap(),
+            AutoOffsetReset::Earliest
+        );
+        assert_eq!(
+            parse_auto_offset_reset("").unwrap(),
+            AutoOffsetReset::Earliest
+        );
+        assert_eq!(
+            parse_auto_offset_reset("latest").unwrap(),
+            AutoOffsetReset::Latest
+        );
+        assert_eq!(
+            parse_auto_offset_reset("none").unwrap(),
+            AutoOffsetReset::None
+        );
+        let err = parse_auto_offset_reset("banana").unwrap_err();
+        assert!(err.to_string().contains("unknown auto_offset_reset"));
+        assert!(err.to_string().contains("banana"));
     }
 }
