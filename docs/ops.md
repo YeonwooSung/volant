@@ -448,6 +448,16 @@ in-memory log prefix. A node that was down can catch up via InstallSnapshot
 and then vote / append. This is **not** homemade 154 snapshot/compaction.
 See [V17_SPEC.md](./V17_SPEC.md).
 
+## v0.22 openraft snapshot apply
+
+When `VOLANT_OPENRAFT_METADATA=1`, `InstallSnapshot` (opcodes **112/113**)
+applies a **non-empty** snapshot `assignment` to live cluster state and
+`{data_dir}/cluster/assignment.json` (same `apply_cluster_state` path as
+v0.16 `SetAssignment`). Empty snapshot assignment is a no-op so a lagging
+node does not wipe existing topics. Apply errors are logged; raft
+`last_applied` / membership still install. Default flag remains **off**.
+See [V22_SPEC.md](./V22_SPEC.md).
+
 **Cluster sharp edges:** Truncate-journal majority (Phase 130), assignment
 majority (Phase 150/154), and Phase 135/137/148 wait mode use **configured N**
 (`floor(N/2)+1`), not live-only. For **N=2**, majority
