@@ -714,4 +714,67 @@ class CodecTest {
                 Codec.decodeResponse(Codec.OP_CREATE_PARTITIONS_RESPONSE, raw));
         assertEquals(4, dispatched.partitions);
     }
+
+    @Test
+    void beginTxnRoundTripPid1Epoch0() {
+        Codec.BeginTxnRequest req = new Codec.BeginTxnRequest(1L, 0);
+        byte[] raw = Codec.encodeBeginTxnRequest(req);
+        assertArrayEquals(hx("01000000000000000000"), raw);
+        Codec.BeginTxnRequest decoded = Codec.decodeBeginTxnRequest(raw);
+        assertEquals(1L, decoded.producerId);
+        assertEquals(0, decoded.producerEpoch);
+        byte[] rraw = Codec.encodeBeginTxnResponse(new Codec.BeginTxnResponse(0));
+        assertArrayEquals(hx("0000"), rraw);
+        Codec.BeginTxnResponse dispatched = assertInstanceOf(
+                Codec.BeginTxnResponse.class, Codec.decodeResponse(Codec.OP_BEGIN_TXN_RESPONSE, rraw));
+        assertEquals(0, dispatched.errorCode);
+    }
+
+    @Test
+    void endTxnCommitOneOffset() {
+        Codec.EndTxnRequest req = new Codec.EndTxnRequest(
+                1L,
+                0,
+                true,
+                Collections.singletonList(new TxnOffsetCommit("g", "t", 0, 9L, "m")));
+        byte[] raw = Codec.encodeEndTxnRequest(req);
+        byte[] expected = hx(
+                "0100000000000000"
+                        + "0000"
+                        + "01"
+                        + "01000000"
+                        + "010067"
+                        + "010074"
+                        + "00000000"
+                        + "0900000000000000"
+                        + "01006d");
+        assertArrayEquals(expected, raw);
+        Codec.EndTxnRequest decoded = Codec.decodeEndTxnRequest(raw);
+        assertEquals(1L, decoded.producerId);
+        assertTrue(decoded.committed);
+        assertEquals(1, decoded.offsets.size());
+        assertEquals("g", decoded.offsets.get(0).groupId);
+        Codec.EndTxnResponse resp = new Codec.EndTxnResponse(
+                0, Collections.singletonList(new TxnProduceResult("t", 0, 10L, 1)));
+        byte[] rraw = Codec.encodeEndTxnResponse(resp);
+        assertArrayEquals(hx("000001000000010074000000000a0000000000000001000000"), rraw);
+        Codec.EndTxnResponse dispatched = assertInstanceOf(
+                Codec.EndTxnResponse.class, Codec.decodeResponse(Codec.OP_END_TXN_RESPONSE, rraw));
+        assertEquals(10L, dispatched.results.get(0).baseOffset);
+    }
+
+    @Test
+    void endTxnAbortEmpty() {
+        Codec.EndTxnRequest req = new Codec.EndTxnRequest(1L, 0, false, Collections.emptyList());
+        byte[] raw = Codec.encodeEndTxnRequest(req);
+        assertArrayEquals(hx("010000000000000000000000000000"), raw);
+        Codec.EndTxnRequest decoded = Codec.decodeEndTxnRequest(raw);
+        assertTrue(!decoded.committed);
+        assertTrue(decoded.offsets.isEmpty());
+        byte[] rraw = Codec.encodeEndTxnResponse(new Codec.EndTxnResponse(0, Collections.emptyList()));
+        assertArrayEquals(hx("000000000000"), rraw);
+        Codec.EndTxnResponse dispatched = assertInstanceOf(
+                Codec.EndTxnResponse.class, Codec.decodeResponse(Codec.OP_END_TXN_RESPONSE, rraw));
+        assertTrue(dispatched.results.isEmpty());
+    }
 }

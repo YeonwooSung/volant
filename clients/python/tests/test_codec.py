@@ -118,6 +118,22 @@ from volant.codec import (
     OP_LIST_OFFSETS_RESPONSE,
     OP_OFFSET_COMMIT,
     OP_OFFSET_FETCH,
+    OP_BEGIN_TXN_RESPONSE,
+    OP_END_TXN_RESPONSE,
+    BeginTxnRequest,
+    BeginTxnResponse,
+    EndTxnRequest,
+    EndTxnResponse,
+    TxnOffsetCommit,
+    TxnProduceResult,
+    decode_begin_txn_request,
+    decode_begin_txn_response,
+    decode_end_txn_request,
+    decode_end_txn_response,
+    encode_begin_txn_request,
+    encode_begin_txn_response,
+    encode_end_txn_request,
+    encode_end_txn_response,
 )
 
 
@@ -818,6 +834,78 @@ class TestCreatePartitionsCodec(unittest.TestCase):
         self.assertEqual(_hx(raw), _hx(expected))
         self.assertEqual(decode_create_partitions_response(raw), resp)
         self.assertEqual(decode_response(OP_CREATE_PARTITIONS_RESPONSE, raw), resp)
+
+
+class TestBeginEndTxnCodec(unittest.TestCase):
+    def test_begin_txn_roundtrip_pid1_epoch0(self) -> None:
+        req = BeginTxnRequest(producer_id=1, producer_epoch=0)
+        raw = encode_begin_txn_request(req)
+        expected = bytes.fromhex("0100000000000000" "0000")
+        self.assertEqual(_hx(raw), _hx(expected))
+        self.assertEqual(decode_begin_txn_request(raw), req)
+        resp = BeginTxnResponse(error_code=0)
+        rraw = encode_begin_txn_response(resp)
+        self.assertEqual(_hx(rraw), "0000")
+        self.assertEqual(decode_begin_txn_response(rraw), resp)
+        self.assertEqual(decode_response(OP_BEGIN_TXN_RESPONSE, rraw), resp)
+
+    def test_end_txn_commit_one_offset(self) -> None:
+        req = EndTxnRequest(
+            producer_id=1,
+            producer_epoch=0,
+            committed=True,
+            offsets=[
+                TxnOffsetCommit(
+                    group_id="g", topic="t", partition=0, offset=9, metadata="m"
+                )
+            ],
+        )
+        raw = encode_end_txn_request(req)
+        expected = bytes.fromhex(
+            "0100000000000000"  # pid 1
+            "0000"  # epoch 0
+            "01"  # committed
+            "01000000"  # 1 offset
+            "010067"  # "g"
+            "010074"  # "t"
+            "00000000"  # partition 0
+            "0900000000000000"  # offset 9
+            "01006d"  # "m"
+        )
+        self.assertEqual(_hx(raw), _hx(expected))
+        self.assertEqual(decode_end_txn_request(raw), req)
+        resp = EndTxnResponse(
+            error_code=0,
+            results=[
+                TxnProduceResult(topic="t", partition=0, base_offset=10, count=1)
+            ],
+        )
+        rraw = encode_end_txn_response(resp)
+        rexpected = bytes.fromhex(
+            "0000"
+            "01000000"
+            "010074"
+            "00000000"
+            "0a00000000000000"
+            "01000000"
+        )
+        self.assertEqual(_hx(rraw), _hx(rexpected))
+        self.assertEqual(decode_end_txn_response(rraw), resp)
+        self.assertEqual(decode_response(OP_END_TXN_RESPONSE, rraw), resp)
+
+    def test_end_txn_abort_empty(self) -> None:
+        req = EndTxnRequest(
+            producer_id=1, producer_epoch=0, committed=False, offsets=[]
+        )
+        raw = encode_end_txn_request(req)
+        expected = bytes.fromhex("0100000000000000" "0000" "00" "00000000")
+        self.assertEqual(_hx(raw), _hx(expected))
+        self.assertEqual(decode_end_txn_request(raw), req)
+        resp = EndTxnResponse(error_code=0, results=[])
+        rraw = encode_end_txn_response(resp)
+        self.assertEqual(_hx(rraw), "000000000000")
+        self.assertEqual(decode_end_txn_response(rraw), resp)
+        self.assertEqual(decode_response(OP_END_TXN_RESPONSE, rraw), resp)
 
 
 if __name__ == "__main__":

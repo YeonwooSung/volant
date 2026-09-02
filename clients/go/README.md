@@ -81,6 +81,12 @@ c, err = volant.DialAuth("127.0.0.1:9092", "s3cret")
 c, err = volant.DialTLSAuth("127.0.0.1:9092", volant.TLSConfig{CAFile: "ca.pem"}, "s3cret")
 // Optional idempotent produce (v0.47). Default off (trailer (0, 0, -1)).
 c.EnableIdempotence()
+// Optional native transactions (v0.57). Opcodes 50–53; not Kafka txns.
+c.SetTransactionalID("txn-1")
+_ = c.BeginTransaction()
+_ = c.Produce("t", 0, nil, []byte("hello"))
+_, _ = c.CommitTransaction(nil) // or []codec.TxnOffsetCommit
+_ = c.AbortTransaction()
 // Optional SCRAM-SHA-256 (v0.46). Dial / DialAuth / DialTLS stay.
 c, err = volant.DialScram("127.0.0.1:9092", "alice", "s3cret")
 c, err = volant.DialTLSScram("127.0.0.1:9092", volant.TLSConfig{CAFile: "ca.pem"}, "alice", "s3cret")
@@ -167,7 +173,11 @@ first Produce sends native InitProducerId (opcode 32) with an empty
 transactional_id; later produces attach pid/epoch/seq. Default off
 keeps trailer `(0, 0, -1)`. Redirect keeps the same pid. UnknownProducerId
 (21) re-Inits once and resets sequences. Not Kafka idempotent produce
-v2; no transactions.
+v2.
+Native transactions (v0.57) are opt-in via `SetTransactionalID`.
+`BeginTransaction` / `CommitTransaction` / `AbortTransaction` send
+opcodes 50–53. Init uses that id. Abort rewinds sequences. Not Kafka
+transactions (API keys 22/24/25/26/28).
 SCRAM-SHA-256 (v0.46): `DialScram` / `DialTLSScram` send opcodes 60
 then 62 after connect. Empty user or password is an error before
 dial. A rejected proof or server-signature mismatch fails Dial.
@@ -193,9 +203,11 @@ commits dirty positions then leaves. This is **not** Kafka
 `enable.auto.commit` (no background commit goroutine).
 
 Not implemented: `kafka-go`, Kafka cooperative-sticky / SyncGroup,
-seeing other group members on the wire, SCRAM, async I/O, transactions
-(BeginTxn/EndTxn). Idempotent produce is opt-in (`EnableIdempotence()`);
-default off. Local `WithAssignor("range")` cannot split
+seeing other group members on the wire, SCRAM, async I/O, Kafka
+transactions (API keys 22/24/25/26/28). Native BeginTxn/EndTxn
+(opcodes 50–53) is opt-in via `SetTransactionalID`. Idempotent produce
+is opt-in (`EnableIdempotence()`); default off. Local
+`WithAssignor("range")` cannot split
 seeing other group members on the wire, SCRAM-SHA-512, Kafka SASL,
 async I/O, idempotent
 produce. Local `WithAssignor("range")` cannot split
@@ -228,4 +240,5 @@ See [docs/V19_SPEC.md](../../docs/V19_SPEC.md),
 [docs/V46_SPEC.md](../../docs/V46_SPEC.md).
 [docs/V50_SPEC.md](../../docs/V50_SPEC.md).,
 [docs/V46_SPEC.md](../../docs/V46_SPEC.md),
-[docs/V55_SPEC.md](../../docs/V55_SPEC.md).
+[docs/V55_SPEC.md](../../docs/V55_SPEC.md),
+[docs/V57_SPEC.md](../../docs/V57_SPEC.md).

@@ -1190,3 +1190,127 @@ func TestCreatePartitionsResponsePayloadRS(t *testing.T) {
 		t.Fatalf("dispatch %#v", got)
 	}
 }
+
+func TestBeginTxnRoundTripPid1Epoch0(t *testing.T) {
+	req := BeginTxnRequest{ProducerID: 1, ProducerEpoch: 0}
+	raw, err := EncodeBeginTxnRequest(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	expected := mustHex(t, "0100000000000000"+"0000")
+	if !bytes.Equal(raw, expected) {
+		t.Fatalf("encode:\n got %x\nwant %x", raw, expected)
+	}
+	decoded, err := DecodeBeginTxnRequest(raw)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if decoded != req {
+		t.Fatalf("decoded %+v", decoded)
+	}
+	resp := BeginTxnResponse{ErrorCode: 0}
+	rraw, err := EncodeBeginTxnResponse(resp)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.Equal(rraw, mustHex(t, "0000")) {
+		t.Fatalf("resp encode %x", rraw)
+	}
+	got, err := DecodeResponse(OpBeginTxnResponse, rraw)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if br, ok := got.(BeginTxnResponse); !ok || br.ErrorCode != 0 {
+		t.Fatalf("dispatch %#v", got)
+	}
+}
+
+func TestEndTxnCommitOneOffset(t *testing.T) {
+	req := EndTxnRequest{
+		ProducerID:    1,
+		ProducerEpoch: 0,
+		Committed:     true,
+		Offsets: []TxnOffsetCommit{
+			{GroupID: "g", Topic: "t", Partition: 0, Offset: 9, Metadata: "m"},
+		},
+	}
+	raw, err := EncodeEndTxnRequest(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	expected := mustHex(t,
+		"0100000000000000"+
+			"0000"+
+			"01"+
+			"01000000"+
+			"010067"+
+			"010074"+
+			"00000000"+
+			"0900000000000000"+
+			"01006d")
+	if !bytes.Equal(raw, expected) {
+		t.Fatalf("encode:\n got %x\nwant %x", raw, expected)
+	}
+	decoded, err := DecodeEndTxnRequest(raw)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if decoded.ProducerID != 1 || !decoded.Committed || len(decoded.Offsets) != 1 || decoded.Offsets[0].GroupID != "g" {
+		t.Fatalf("decoded %+v", decoded)
+	}
+	resp := EndTxnResponse{
+		ErrorCode: 0,
+		Results: []TxnProduceResult{
+			{Topic: "t", Partition: 0, BaseOffset: 10, Count: 1},
+		},
+	}
+	rraw, err := EncodeEndTxnResponse(resp)
+	if err != nil {
+		t.Fatal(err)
+	}
+	rexpected := mustHex(t, "0000"+"01000000"+"010074"+"00000000"+"0a00000000000000"+"01000000")
+	if !bytes.Equal(rraw, rexpected) {
+		t.Fatalf("resp encode:\n got %x\nwant %x", rraw, rexpected)
+	}
+	got, err := DecodeResponse(OpEndTxnResponse, rraw)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if er, ok := got.(EndTxnResponse); !ok || len(er.Results) != 1 || er.Results[0].BaseOffset != 10 {
+		t.Fatalf("dispatch %#v", got)
+	}
+}
+
+func TestEndTxnAbortEmpty(t *testing.T) {
+	req := EndTxnRequest{ProducerID: 1, ProducerEpoch: 0, Committed: false, Offsets: nil}
+	raw, err := EncodeEndTxnRequest(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	expected := mustHex(t, "0100000000000000"+"0000"+"00"+"00000000")
+	if !bytes.Equal(raw, expected) {
+		t.Fatalf("encode:\n got %x\nwant %x", raw, expected)
+	}
+	decoded, err := DecodeEndTxnRequest(raw)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if decoded.Committed || len(decoded.Offsets) != 0 {
+		t.Fatalf("decoded %+v", decoded)
+	}
+	resp := EndTxnResponse{ErrorCode: 0, Results: nil}
+	rraw, err := EncodeEndTxnResponse(resp)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.Equal(rraw, mustHex(t, "000000000000")) {
+		t.Fatalf("resp encode %x", rraw)
+	}
+	got, err := DecodeResponse(OpEndTxnResponse, rraw)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if er, ok := got.(EndTxnResponse); !ok || len(er.Results) != 0 {
+		t.Fatalf("dispatch %#v", got)
+	}
+}

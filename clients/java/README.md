@@ -66,6 +66,14 @@ Client.connectTls("127.0.0.1", 9092, TlsOptions.ca("ca.pem"), "s3cret");
 try (Client c = Client.connect("127.0.0.1", 9092)) {
   c.setEnableIdempotence(true);
 }
+// Optional native transactions (v0.57). Opcodes 50–53; not Kafka txns.
+try (Client c = Client.connect("127.0.0.1", 9092)) {
+  c.setTransactionalId("txn-1");
+  c.beginTransaction();
+  c.produce("t", 0, null, "hello".getBytes(UTF_8));
+  c.commitTransaction(); // or List<TxnOffsetCommit>
+  c.abortTransaction();
+}
 // Optional SCRAM-SHA-256 (v0.46). Existing overloads stay.
 Client.connectScram("127.0.0.1", 9092, "alice", "s3cret");
 Client.connectTlsScram("127.0.0.1", 9092, TlsOptions.ca("ca.pem"), "alice", "s3cret");
@@ -148,7 +156,11 @@ The first produce sends native InitProducerId (opcode 32) with an
 empty transactional_id; later produces attach pid/epoch/seq. Default
 off keeps trailer `(0, 0, -1)`. Redirect keeps the same pid. If the
 broker returns UnknownProducerId (21), the client re-Inits once and
-resets sequences. Not Kafka idempotent produce v2; no transactions.
+resets sequences. Not Kafka idempotent produce v2.
+Native transactions (v0.57) are opt-in via `setTransactionalId`.
+`beginTransaction` / `commitTransaction` / `abortTransaction` send
+opcodes 50–53. Init uses that id. Abort rewinds sequences. Not Kafka
+transactions (API keys 22/24/25/26/28).
 SCRAM-SHA-256 (v0.46): `connectScram` / `connectTlsScram` send opcodes
 60 then 62 after connect. Null or empty user or password throws
 `IllegalArgumentException` before connect. A rejected proof or
@@ -176,10 +188,11 @@ it does not collide with `join(..., boolean heartbeat)` or
 `join(..., String assignor)`.
 
 Not implemented: `kafka-clients`, Kafka cooperative-sticky / SyncGroup,
-seeing other group members on the wire, SCRAM, async I/O, transactions
-(BeginTxn/EndTxn). Idempotent produce is opt-in
-(`setEnableIdempotence(true)`); default off. Local `assignor="range"`
-cannot split across
+seeing other group members on the wire, SCRAM, async I/O, Kafka
+transactions (API keys 22/24/25/26/28). Native BeginTxn/EndTxn
+(opcodes 50–53) is opt-in via `setTransactionalId`. Idempotent produce
+is opt-in (`setEnableIdempotence(true)`); default off. Local
+`assignor="range"` cannot split across
 seeing other group members on the wire, SCRAM-SHA-512, Kafka SASL,
 async I/O, idempotent
 produce. Local `assignor="range"` cannot split across
@@ -210,7 +223,8 @@ See [docs/V23_SPEC.md](../../docs/V23_SPEC.md),
 [docs/V52_SPEC.md](../../docs/V52_SPEC.md),
 [docs/V53_SPEC.md](../../docs/V53_SPEC.md),
 [docs/V54_SPEC.md](../../docs/V54_SPEC.md),
-[docs/V46_SPEC.md](../../docs/V46_SPEC.md).
+[docs/V46_SPEC.md](../../docs/V46_SPEC.md),
+[docs/V57_SPEC.md](../../docs/V57_SPEC.md).
 [docs/V50_SPEC.md](../../docs/V50_SPEC.md).,
 [docs/V46_SPEC.md](../../docs/V46_SPEC.md),
 [docs/V55_SPEC.md](../../docs/V55_SPEC.md).

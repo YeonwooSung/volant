@@ -23,6 +23,8 @@ from .codec import (
     PartitionInfo,
     ProduceMessage,
     TopicInfo,
+    TxnOffsetCommit,
+    TxnProduceResult,
 )
 from .frame import ProtocolError
 from .group import FetchedRecord, GroupConsumer
@@ -52,6 +54,8 @@ __all__ = [
     "ProduceResult",
     "ProtocolError",
     "TopicInfo",
+    "TxnOffsetCommit",
+    "TxnProduceResult",
     "range_assign",
     "range_assign_multi",
     "__version__",

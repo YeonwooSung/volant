@@ -52,6 +52,10 @@ OP_CREATE_PARTITIONS = 46
 OP_CREATE_PARTITIONS_RESPONSE = 47
 OP_LIST_OFFSETS = 48
 OP_LIST_OFFSETS_RESPONSE = 49
+OP_BEGIN_TXN = 50
+OP_BEGIN_TXN_RESPONSE = 51
+OP_END_TXN = 52
+OP_END_TXN_RESPONSE = 53
 OP_CREATE_SCRAM_USER = 64
 OP_CREATE_SCRAM_USER_RESPONSE = 65
 OP_DELETE_SCRAM_USER = 66
@@ -463,6 +467,48 @@ class InitProducerIdResponse:
     producer_id: int
     epoch: int
     error_code: int
+
+
+@dataclass
+class BeginTxnRequest:
+    producer_id: int
+    producer_epoch: int
+
+
+@dataclass
+class BeginTxnResponse:
+    error_code: int
+
+
+@dataclass
+class TxnOffsetCommit:
+    group_id: str
+    topic: str
+    partition: int
+    offset: int
+    metadata: str = ""
+
+
+@dataclass
+class EndTxnRequest:
+    producer_id: int
+    producer_epoch: int
+    committed: bool
+    offsets: list[TxnOffsetCommit] = field(default_factory=list)
+
+
+@dataclass
+class TxnProduceResult:
+    topic: str
+    partition: int
+    base_offset: int
+    count: int
+
+
+@dataclass
+class EndTxnResponse:
+    error_code: int
+    results: list[TxnProduceResult] = field(default_factory=list)
 
 
 @dataclass
@@ -1761,6 +1807,109 @@ def decode_init_producer_id_response(payload: bytes) -> InitProducerIdResponse:
     )
 
 
+def encode_begin_txn_request(req: BeginTxnRequest) -> bytes:
+    w = _Writer()
+    w.u64_le(req.producer_id)
+    w.u16_le(req.producer_epoch)
+    return w.finish()
+
+
+def decode_begin_txn_request(payload: bytes) -> BeginTxnRequest:
+    r = _Reader(payload)
+    return BeginTxnRequest(producer_id=r.u64_le(), producer_epoch=r.u16_le())
+
+
+def encode_begin_txn_response(resp: BeginTxnResponse) -> bytes:
+    w = _Writer()
+    w.u16_le(resp.error_code)
+    return w.finish()
+
+
+def decode_begin_txn_response(payload: bytes) -> BeginTxnResponse:
+    r = _Reader(payload)
+    return BeginTxnResponse(error_code=r.u16_le())
+
+
+def encode_end_txn_request(req: EndTxnRequest) -> bytes:
+    w = _Writer()
+    w.u64_le(req.producer_id)
+    w.u16_le(req.producer_epoch)
+    w.u8(1 if req.committed else 0)
+    offsets = req.offsets or []
+    w.u32_le(len(offsets))
+    for o in offsets:
+        _put_string(w, o.group_id)
+        _put_string(w, o.topic)
+        w.u32_le(o.partition)
+        w.u64_le(o.offset)
+        _put_string(w, o.metadata)
+    return w.finish()
+
+
+def decode_end_txn_request(payload: bytes) -> EndTxnRequest:
+    r = _Reader(payload)
+    producer_id = r.u64_le()
+    producer_epoch = r.u16_le()
+    committed = r.u8() != 0
+    n = r.u32_le()
+    offsets: list[TxnOffsetCommit] = []
+    for _ in range(n):
+        group_id = _get_string(r)
+        topic = _get_string(r)
+        partition = r.u32_le()
+        offset = r.u64_le()
+        metadata = _get_string(r)
+        offsets.append(
+            TxnOffsetCommit(
+                group_id=group_id,
+                topic=topic,
+                partition=partition,
+                offset=offset,
+                metadata=metadata,
+            )
+        )
+    return EndTxnRequest(
+        producer_id=producer_id,
+        producer_epoch=producer_epoch,
+        committed=committed,
+        offsets=offsets,
+    )
+
+
+def encode_end_txn_response(resp: EndTxnResponse) -> bytes:
+    w = _Writer()
+    w.u16_le(resp.error_code)
+    results = resp.results or []
+    w.u32_le(len(results))
+    for row in results:
+        _put_string(w, row.topic)
+        w.u32_le(row.partition)
+        w.u64_le(row.base_offset)
+        w.u32_le(row.count)
+    return w.finish()
+
+
+def decode_end_txn_response(payload: bytes) -> EndTxnResponse:
+    r = _Reader(payload)
+    error_code = r.u16_le()
+    n = r.u32_le()
+    results: list[TxnProduceResult] = []
+    for _ in range(n):
+        topic = _get_string(r)
+        partition = r.u32_le()
+        base_offset = r.u64_le()
+        count = r.u32_le()
+        results.append(
+            TxnProduceResult(
+                topic=topic,
+                partition=partition,
+                base_offset=base_offset,
+                count=count,
+            )
+        )
+    return EndTxnResponse(error_code=error_code, results=results)
+
+
 
 def encode_scram_first_request(req: ScramFirstRequest) -> bytes:
     w = _Writer()
@@ -1873,6 +2022,10 @@ def decode_response(opcode: int, payload: bytes):
         return decode_create_partitions_response(payload)
     if opcode == OP_LIST_OFFSETS_RESPONSE:
         return decode_list_offsets_response(payload)
+    if opcode == OP_BEGIN_TXN_RESPONSE:
+        return decode_begin_txn_response(payload)
+    if opcode == OP_END_TXN_RESPONSE:
+        return decode_end_txn_response(payload)
     if opcode == OP_CREATE_SCRAM_USER_RESPONSE:
         return decode_create_scram_user_response(payload)
     if opcode == OP_DELETE_SCRAM_USER_RESPONSE:
