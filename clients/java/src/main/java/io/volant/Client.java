@@ -194,9 +194,10 @@ public final class Client implements AutoCloseable {
     }
 
     /**
-     * Extra Produce/Fetch attempts after {@code NotLeaderForPartition} (13).
-     * Default is 1 (one initial send + one redirect). {@code 0} disables
-     * redirect and raises on the first 13. Negative values are treated as 0.
+     * Extra Produce/Fetch/DeleteRecords attempts after
+     * {@code NotLeaderForPartition} (13). Default is 1 (one initial send +
+     * one redirect). {@code 0} disables redirect and raises on the first
+     * 13. Negative values are treated as 0.
      */
     public void setMaxRedirects(int n) {
         this.maxRedirects = Math.max(0, n);
@@ -960,12 +961,6 @@ public final class Client implements AutoCloseable {
     }
 
     /**
-     * Delete records before {@code beforeOffset} (native opcode 44).
-     * Sends {@code wait_majority=0} (broker default). Error 13 is not
-     * redirected (Produce/Fetch only). This is not Kafka DeleteRecords.
-     */
-
-    /**
      * Describe topic configuration (native opcode 40/41).
      *
      * <p>Topic configs only (not Kafka DescribeConfigs / BROKER). Empty values
@@ -1030,6 +1025,11 @@ public final class Client implements AutoCloseable {
         check(resp.errorCode, "alter_configs");
     }
 
+    /**
+     * Delete records before {@code beforeOffset} (native opcode 44).
+     * Sends {@code wait_majority=0} (broker default). Error 13 follows
+     * Produce/Fetch redirect. This is not Kafka DeleteRecords.
+     */
     public DeleteRecordsResult deleteRecords(String topic, int partition, long beforeOffset) {
         return deleteRecords(topic, partition, beforeOffset, 0);
     }
@@ -1039,18 +1039,39 @@ public final class Client implements AutoCloseable {
      *
      * <p>{@code waitMajority}: 0 = broker default, 1 = force wait, 2 = force
      * no-wait. Always written on the wire. Non-zero {@code error_code} is
-     * {@link BrokerException} with {@code op="delete_records"}.
+     * {@link BrokerException} with {@code op="delete_records"}. Error 13
+     * follows Produce/Fetch redirect ({@code maxRedirects}).
      */
     public DeleteRecordsResult deleteRecords(String topic, int partition, long beforeOffset, int waitMajority) {
         byte[] payload = Codec.encodeDeleteRecordsRequest(
                 new Codec.DeleteRecordsRequest(topic, partition & 0xFFFFFFFFL, beforeOffset, waitMajority));
-        Object decoded = roundTrip(Codec.OP_DELETE_RECORDS, payload);
-        if (!(decoded instanceof Codec.DeleteRecordsResponse)) {
-            throw new ProtocolException("unexpected response for delete_records: " + typeName(decoded));
+        int maxAttempts = 1 + maxRedirects;
+        int attempt = 0;
+        while (true) {
+            attempt++;
+            Object decoded;
+            try {
+                decoded = roundTrip(Codec.OP_DELETE_RECORDS, payload);
+            } catch (BrokerException e) {
+                if (e.code == NOT_LEADER_FOR_PARTITION
+                        && attempt < maxAttempts
+                        && redirectToLeader(topic, partition)) {
+                    continue;
+                }
+                throw e;
+            }
+            if (!(decoded instanceof Codec.DeleteRecordsResponse)) {
+                throw new ProtocolException("unexpected response for delete_records: " + typeName(decoded));
+            }
+            Codec.DeleteRecordsResponse resp = (Codec.DeleteRecordsResponse) decoded;
+            if (resp.errorCode == NOT_LEADER_FOR_PARTITION
+                    && attempt < maxAttempts
+                    && redirectToLeader(resp.topic, (int) resp.partition)) {
+                continue;
+            }
+            check(resp.errorCode, "delete_records");
+            return new DeleteRecordsResult(resp.topic, (int) resp.partition, resp.lowWatermark);
         }
-        Codec.DeleteRecordsResponse resp = (Codec.DeleteRecordsResponse) decoded;
-        check(resp.errorCode, "delete_records");
-        return new DeleteRecordsResult(resp.topic, (int) resp.partition, resp.lowWatermark);
     }
 
     /**

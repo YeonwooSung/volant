@@ -243,9 +243,10 @@ func dialTLS(addr string, cfg TLSConfig, timeout time.Duration, token, scramUser
 	return c, nil
 }
 
-// SetMaxRedirects sets extra Produce/Fetch attempts after NotLeaderForPartition
-// (error 13). Default is 1 (one initial send + one redirect). 0 disables
-// redirect and raises on the first 13. Negative values are treated as 0.
+// SetMaxRedirects sets extra Produce/Fetch/DeleteRecords attempts after
+// NotLeaderForPartition (error 13). Default is 1 (one initial send + one
+// redirect). 0 disables redirect and raises on the first 13. Negative
+// values are treated as 0.
 func (c *Client) SetMaxRedirects(n int) {
 	if n < 0 {
 		n = 0
@@ -1257,6 +1258,7 @@ func (c *Client) DeleteRecords(topic string, partition uint32, beforeOffset uint
 
 // DeleteRecordsWithWaitFlag is DeleteRecords plus the Phase 137 trailer.
 // waitMajority: 0 = broker default, 1 = force wait, 2 = force no-wait.
+// Error 13 follows Produce/Fetch redirect (maxRedirects).
 func (c *Client) DeleteRecordsWithWaitFlag(topic string, partition uint32, beforeOffset uint64, waitMajority uint8) (DeleteRecordsResult, error) {
 	payload, err := codec.EncodeDeleteRecordsRequest(codec.DeleteRecordsRequest{
 		Topic:        topic,
@@ -1267,22 +1269,43 @@ func (c *Client) DeleteRecordsWithWaitFlag(topic string, partition uint32, befor
 	if err != nil {
 		return DeleteRecordsResult{}, err
 	}
-	decoded, err := c.roundTrip(codec.OpDeleteRecords, payload)
-	if err != nil {
-		return DeleteRecordsResult{}, err
+	maxAttempts := 1 + c.maxRedirects
+	for attempt := 1; ; attempt++ {
+		decoded, err := c.roundTrip(codec.OpDeleteRecords, payload)
+		if err != nil {
+			if be, ok := err.(*codec.BrokerError); ok && be.Code == notLeaderForPartition && attempt < maxAttempts {
+				ok, rerr := c.redirectToLeader(topic, partition)
+				if rerr != nil {
+					return DeleteRecordsResult{}, rerr
+				}
+				if ok {
+					continue
+				}
+			}
+			return DeleteRecordsResult{}, err
+		}
+		resp, ok := decoded.(codec.DeleteRecordsResponse)
+		if !ok {
+			return DeleteRecordsResult{}, &frame.ProtocolError{Msg: fmt.Sprintf("unexpected response for delete_records: %T", decoded)}
+		}
+		if resp.ErrorCode == notLeaderForPartition && attempt < maxAttempts {
+			ok, rerr := c.redirectToLeader(resp.Topic, resp.Partition)
+			if rerr != nil {
+				return DeleteRecordsResult{}, rerr
+			}
+			if ok {
+				continue
+			}
+		}
+		if err := check(resp.ErrorCode, "delete_records"); err != nil {
+			return DeleteRecordsResult{}, err
+		}
+		return DeleteRecordsResult{
+			Topic:        resp.Topic,
+			Partition:    resp.Partition,
+			LowWatermark: resp.LowWatermark,
+		}, nil
 	}
-	resp, ok := decoded.(codec.DeleteRecordsResponse)
-	if !ok {
-		return DeleteRecordsResult{}, &frame.ProtocolError{Msg: fmt.Sprintf("unexpected response for delete_records: %T", decoded)}
-	}
-	if err := check(resp.ErrorCode, "delete_records"); err != nil {
-		return DeleteRecordsResult{}, err
-	}
-	return DeleteRecordsResult{
-		Topic:        resp.Topic,
-		Partition:    resp.Partition,
-		LowWatermark: resp.LowWatermark,
-	}, nil
 }
 
 // OffsetFetch returns committed offsets for topic as []Offset.
