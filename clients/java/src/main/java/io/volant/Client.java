@@ -5,6 +5,7 @@ import java.io.InputStream;
 import java.io.OutputStream;
 import java.net.InetSocketAddress;
 import java.net.Socket;
+import java.util.ArrayList;
 import java.util.Collections;
 import java.util.List;
 
@@ -19,9 +20,15 @@ import java.util.List;
  *   c.createTopic("t", 1);
  *   long off = c.produce("t", 0, null, "hello".getBytes(UTF_8));
  *   List&lt;Record&gt; recs = c.fetch("t", 0, 0);
+ *   c.offsetCommit("g", "t", 0, 5);
+ *   List&lt;Offset&gt; offs = c.offsetFetch("g", "t");
  *   JoinGroupResult j = c.joinGroup("g", java.util.List.of("t"), 10000);
  *   c.heartbeat("g", j.memberId, j.generation);
  *   c.leaveGroup("g", j.memberId);
+ *   GroupConsumer g = GroupConsumer.join(c, "g", java.util.List.of("t"), 10_000);
+ *   List&lt;Record&gt; recs = g.poll(500);
+ *   g.commit();
+ *   g.close();
  *   Metadata meta = c.metadata();
  * }
  * // Optional TLS (v0.27):
@@ -282,8 +289,12 @@ public final class Client implements AutoCloseable {
      * max_wait_ms=0.
      */
     public List<Record> fetch(String topic, int partition, long offset) {
+        return fetch(topic, partition, offset, 128, 0);
+    }
+
+    List<Record> fetch(String topic, int partition, long offset, int maxMessages, long maxWaitMs) {
         byte[] payload = Codec.encodeFetchRequest(
-                new Codec.FetchRequest(topic, partition, offset, 128, 4L * 1024 * 1024, 0));
+                new Codec.FetchRequest(topic, partition, offset, maxMessages, 4L * 1024 * 1024, maxWaitMs));
         Object decoded = roundTrip(Codec.OP_FETCH, payload);
         if (!(decoded instanceof Codec.FetchResponse)) {
             throw new ProtocolException("unexpected response for fetch: " + typeName(decoded));
@@ -294,16 +305,80 @@ public final class Client implements AutoCloseable {
     }
 
     /**
+     * Admin OffsetCommit (empty {@code memberId}, {@code generation = 0}).
+     * Commits the next offset to read for one topic/partition.
+     */
+    public void offsetCommit(String group, String topic, int partition, long offset) {
+        offsetCommit(group, topic, partition, offset, "", 0);
+    }
+
+    /**
+     * OffsetCommit with member + generation (joined consumer path).
+     * {@code generation = 0} skips the broker generation check.
+     */
+    public void offsetCommit(
+            String group, String topic, int partition, long offset, String memberId, long generation) {
+        offsetCommit(
+                group,
+                memberId,
+                generation,
+                Collections.singletonList(new Codec.OffsetCommitEntry(topic, partition, offset, "")));
+    }
+
+    void offsetCommit(String group, String memberId, long generation, List<Codec.OffsetCommitEntry> entries) {
+        byte[] payload = Codec.encodeOffsetCommitRequest(
+                new Codec.OffsetCommitRequest(group, memberId, generation, entries));
+        Object decoded = roundTrip(Codec.OP_OFFSET_COMMIT, payload);
+        if (!(decoded instanceof Codec.OffsetCommitResponse)) {
+            throw new ProtocolException("unexpected response for offset_commit: " + typeName(decoded));
+        }
+        Codec.OffsetCommitResponse resp = (Codec.OffsetCommitResponse) decoded;
+        check(resp.errorCode, "offset_commit");
+    }
+
+    /**
+     * Fetch committed offsets for {@code topic}.
+     *
+     * <p>Sends empty OffsetFetch entries (all group offsets) and filters to
+     * {@code topic} client-side (same as the CLI / Python / Go).
+     */
+    public List<Offset> offsetFetch(String group, String topic) {
+        List<Codec.OffsetFetchEntry> entries = offsetFetchEntries(group, Collections.emptyList());
+        List<Offset> out = new ArrayList<>();
+        for (Codec.OffsetFetchEntry e : entries) {
+            if (topic.equals(e.topic)) {
+                out.add(new Offset(e.partition, e.offset));
+            }
+        }
+        return out;
+    }
+
+    List<Codec.OffsetFetchEntry> offsetFetchEntries(String group, List<Codec.OffsetEntry> entries) {
+        byte[] payload = Codec.encodeOffsetFetchRequest(new Codec.OffsetFetchRequest(group, entries));
+        Object decoded = roundTrip(Codec.OP_OFFSET_FETCH, payload);
+        if (!(decoded instanceof Codec.OffsetFetchResponse)) {
+            throw new ProtocolException("unexpected response for offset_fetch: " + typeName(decoded));
+        }
+        Codec.OffsetFetchResponse resp = (Codec.OffsetFetchResponse) decoded;
+        check(resp.errorCode, "offset_fetch");
+        return resp.entries;
+    }
+
+    /**
      * Join a consumer group. First join sends empty {@code memberId}
      * (broker assigns one). {@code sessionTimeoutMs} 0 defaults to 10000.
      */
     public JoinGroupResult joinGroup(String group, List<String> topics, int sessionTimeoutMs) {
+        return joinGroup(group, "", topics, sessionTimeoutMs);
+    }
+
+    JoinGroupResult joinGroup(String group, String memberId, List<String> topics, int sessionTimeoutMs) {
         long timeout = sessionTimeoutMs == 0 ? 10_000L : sessionTimeoutMs;
         if (topics == null) {
             topics = Collections.emptyList();
         }
         byte[] payload = Codec.encodeJoinGroupRequest(
-                new Codec.JoinGroupRequest(group, "", timeout, topics, ""));
+                new Codec.JoinGroupRequest(group, memberId == null ? "" : memberId, timeout, topics, ""));
         Object decoded = roundTrip(Codec.OP_JOIN_GROUP, payload);
         if (!(decoded instanceof Codec.JoinGroupResponse)) {
             throw new ProtocolException("unexpected response for join_group: " + typeName(decoded));

@@ -9,8 +9,8 @@ import java.util.List;
  * Little-endian native payload encode/decode.
  *
  * <p>Matches {@code crates/volant-protocol/src/payload.rs} for the MVP opcodes:
- * Produce, Fetch, CreateTopic, Metadata, DeleteTopic, JoinGroup, Heartbeat,
- * LeaveGroup.
+ * Produce, Fetch, CreateTopic, Metadata, DeleteTopic, OffsetCommit,
+ * OffsetFetch, JoinGroup, Heartbeat, LeaveGroup.
  *
  * <p>Header fields are big-endian (see {@link Frame}); <strong>payload</strong>
  * integers and length prefixes are little-endian.
@@ -21,6 +21,8 @@ public final class Codec {
     public static final int OP_CREATE_TOPIC = 3;
     public static final int OP_METADATA = 4;
     public static final int OP_DELETE_TOPIC = 5;
+    public static final int OP_OFFSET_COMMIT = 6;
+    public static final int OP_OFFSET_FETCH = 7;
     public static final int OP_JOIN_GROUP = 8;
     public static final int OP_HEARTBEAT = 9;
     public static final int OP_LEAVE_GROUP = 10;
@@ -203,6 +205,93 @@ public final class Codec {
         public ErrorResponse(int code, String message) {
             this.code = code;
             this.message = message == null ? "" : message;
+        }
+    }
+
+    public static final class OffsetCommitEntry {
+        public final String topic;
+        public final int partition;
+        public final long offset;
+        public final String metadata;
+
+        public OffsetCommitEntry(String topic, int partition, long offset, String metadata) {
+            this.topic = topic;
+            this.partition = partition;
+            this.offset = offset;
+            this.metadata = metadata == null ? "" : metadata;
+        }
+    }
+
+    public static final class OffsetCommitRequest {
+        public final String groupId;
+        public final String memberId;
+        public final long generation;
+        public final List<OffsetCommitEntry> entries;
+
+        public OffsetCommitRequest(
+                String groupId, String memberId, long generation, List<OffsetCommitEntry> entries) {
+            this.groupId = groupId;
+            this.memberId = memberId == null ? "" : memberId;
+            this.generation = generation;
+            this.entries = entries == null
+                    ? Collections.emptyList()
+                    : Collections.unmodifiableList(new ArrayList<>(entries));
+        }
+    }
+
+    public static final class OffsetCommitResponse {
+        public final int errorCode;
+
+        public OffsetCommitResponse(int errorCode) {
+            this.errorCode = errorCode;
+        }
+    }
+
+    public static final class OffsetEntry {
+        public final String topic;
+        public final int partition;
+
+        public OffsetEntry(String topic, int partition) {
+            this.topic = topic;
+            this.partition = partition;
+        }
+    }
+
+    public static final class OffsetFetchRequest {
+        public final String groupId;
+        public final List<OffsetEntry> entries;
+
+        public OffsetFetchRequest(String groupId, List<OffsetEntry> entries) {
+            this.groupId = groupId;
+            this.entries = entries == null
+                    ? Collections.emptyList()
+                    : Collections.unmodifiableList(new ArrayList<>(entries));
+        }
+    }
+
+    public static final class OffsetFetchEntry {
+        public final String topic;
+        public final int partition;
+        public final long offset;
+        public final String metadata;
+
+        public OffsetFetchEntry(String topic, int partition, long offset, String metadata) {
+            this.topic = topic;
+            this.partition = partition;
+            this.offset = offset;
+            this.metadata = metadata == null ? "" : metadata;
+        }
+    }
+
+    public static final class OffsetFetchResponse {
+        public final int errorCode;
+        public final List<OffsetFetchEntry> entries;
+
+        public OffsetFetchResponse(int errorCode, List<OffsetFetchEntry> entries) {
+            this.errorCode = errorCode;
+            this.entries = entries == null
+                    ? Collections.emptyList()
+                    : Collections.unmodifiableList(new ArrayList<>(entries));
         }
     }
 
@@ -798,6 +887,102 @@ public final class Codec {
         return new Metadata(brokers, topics);
     }
 
+    // --- offset commit / fetch ---------------------------------------------
+
+    public static byte[] encodeOffsetCommitRequest(OffsetCommitRequest req) {
+        Writer w = new Writer();
+        putString(w, req.groupId);
+        putString(w, req.memberId);
+        w.u32(req.generation);
+        w.u32(req.entries.size());
+        for (OffsetCommitEntry e : req.entries) {
+            putString(w, e.topic);
+            w.u32(e.partition);
+            w.u64(e.offset);
+            putString(w, e.metadata);
+        }
+        return w.finish();
+    }
+
+    public static OffsetCommitRequest decodeOffsetCommitRequest(byte[] payload) {
+        Reader r = new Reader(payload);
+        String groupId = getString(r);
+        String memberId = getString(r);
+        long generation = r.u32();
+        long n = r.u32();
+        List<OffsetCommitEntry> entries = new ArrayList<>();
+        for (int i = 0; i < n; i++) {
+            String topic = getString(r);
+            int partition = (int) r.u32();
+            long offset = r.u64();
+            String metadata = getString(r);
+            entries.add(new OffsetCommitEntry(topic, partition, offset, metadata));
+        }
+        return new OffsetCommitRequest(groupId, memberId, generation, entries);
+    }
+
+    public static byte[] encodeOffsetCommitResponse(OffsetCommitResponse resp) {
+        Writer w = new Writer();
+        w.u16(resp.errorCode);
+        return w.finish();
+    }
+
+    public static OffsetCommitResponse decodeOffsetCommitResponse(byte[] payload) {
+        return new OffsetCommitResponse(new Reader(payload).u16());
+    }
+
+    public static byte[] encodeOffsetFetchRequest(OffsetFetchRequest req) {
+        Writer w = new Writer();
+        putString(w, req.groupId);
+        w.u32(req.entries.size());
+        for (OffsetEntry e : req.entries) {
+            putString(w, e.topic);
+            w.u32(e.partition);
+        }
+        return w.finish();
+    }
+
+    public static OffsetFetchRequest decodeOffsetFetchRequest(byte[] payload) {
+        Reader r = new Reader(payload);
+        String groupId = getString(r);
+        long n = r.u32();
+        List<OffsetEntry> entries = new ArrayList<>();
+        for (int i = 0; i < n; i++) {
+            String topic = getString(r);
+            int partition = (int) r.u32();
+            entries.add(new OffsetEntry(topic, partition));
+        }
+        return new OffsetFetchRequest(groupId, entries);
+    }
+
+    public static byte[] encodeOffsetFetchResponse(OffsetFetchResponse resp) {
+        Writer w = new Writer();
+        w.u16(resp.errorCode);
+        w.u32(resp.entries.size());
+        for (OffsetFetchEntry e : resp.entries) {
+            putString(w, e.topic);
+            w.u32(e.partition);
+            w.u64(e.offset);
+            putString(w, e.metadata);
+        }
+        return w.finish();
+    }
+
+    public static OffsetFetchResponse decodeOffsetFetchResponse(byte[] payload) {
+        Reader r = new Reader(payload);
+        int errorCode = r.u16();
+        long n = r.u32();
+        List<OffsetFetchEntry> entries = new ArrayList<>();
+        for (int i = 0; i < n; i++) {
+            String topic = getString(r);
+            int partition = (int) r.u32();
+            long offset = r.u64();
+            String metadata = getString(r);
+            entries.add(new OffsetFetchEntry(topic, partition, offset, metadata));
+        }
+        return new OffsetFetchResponse(errorCode, entries);
+    }
+
     // --- join / heartbeat / leave ------------------------------------------
 
     static void putAssignments(Writer w, List<Assignment> items) {
@@ -944,6 +1129,10 @@ public final class Codec {
                 return decodeMetadataResponse(payload);
             case OP_DELETE_TOPIC:
                 return decodeDeleteTopicResponse(payload);
+            case OP_OFFSET_COMMIT:
+                return decodeOffsetCommitResponse(payload);
+            case OP_OFFSET_FETCH:
+                return decodeOffsetFetchResponse(payload);
             case OP_JOIN_GROUP:
                 return decodeJoinGroupResponse(payload);
             case OP_HEARTBEAT:

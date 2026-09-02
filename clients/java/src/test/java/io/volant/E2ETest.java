@@ -15,6 +15,7 @@ import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.nio.file.Paths;
+import java.util.ArrayList;
 import java.util.List;
 import java.util.concurrent.TimeUnit;
 import org.junit.jupiter.api.AfterAll;
@@ -118,6 +119,64 @@ class E2ETest {
             c.deleteTopic(topic);
             Metadata meta2 = c.metadata();
             assertTrue(meta2.topics.stream().noneMatch(t -> topic.equals(t.name)), "topic still present after delete");
+        }
+    }
+
+    @Test
+    void offsetCommitFetch() {
+        String topic = "java-off-" + ProcessHandle.current().pid() + "-" + System.nanoTime();
+        String group = "java-og-" + ProcessHandle.current().pid();
+        try (Client c = Client.connect(host, port, 5_000)) {
+            c.createTopic(topic, 1);
+            long produced = c.produce(topic, 0, null, "hello".getBytes(StandardCharsets.UTF_8));
+            assertEquals(0L, produced);
+            c.offsetCommit(group, topic, 0, 5);
+            List<Offset> offs = c.offsetFetch(group, topic);
+            assertEquals(1, offs.size());
+            assertEquals(0, offs.get(0).partition);
+            assertEquals(5L, offs.get(0).offset);
+            c.deleteTopic(topic);
+        }
+    }
+
+    @Test
+    void groupConsumerPollCommitResume() {
+        String topic = "java-gc-" + ProcessHandle.current().pid() + "-" + System.nanoTime();
+        String group = "java-gcg-" + ProcessHandle.current().pid();
+        try (Client c = Client.connect(host, port, 5_000)) {
+            c.createTopic(topic, 1);
+            c.produce(topic, 0, null, "hello".getBytes(StandardCharsets.UTF_8));
+
+            try (GroupConsumer g = GroupConsumer.join(c, group, List.of(topic), 10_000)) {
+                assertFalse(g.memberId().isEmpty());
+                assertTrue(g.generation() >= 1);
+                assertEquals(1, g.assignment().size());
+                assertEquals(topic, g.assignment().get(0).topic);
+                List<Record> recs = new ArrayList<>();
+                for (int i = 0; i < 8 && recs.isEmpty(); i++) {
+                    recs.addAll(g.poll(200));
+                }
+                assertEquals(1, recs.size(), "expected the produced record");
+                assertEquals(0L, recs.get(0).offset);
+                g.commit();
+            }
+
+            List<Offset> offs = c.offsetFetch(group, topic);
+            assertEquals(1, offs.size());
+            assertEquals(1L, offs.get(0).offset);
+
+            c.produce(topic, 0, null, "world".getBytes(StandardCharsets.UTF_8));
+            try (GroupConsumer g = GroupConsumer.join(c, group, List.of(topic), 10_000)) {
+                List<Record> recs = new ArrayList<>();
+                for (int i = 0; i < 8 && recs.isEmpty(); i++) {
+                    recs.addAll(g.poll(200));
+                }
+                assertEquals(1, recs.size(), "resume should see only the new record");
+                assertEquals(1L, recs.get(0).offset);
+                assertArrayEquals("world".getBytes(StandardCharsets.UTF_8), recs.get(0).value);
+                g.commit();
+            }
+            c.deleteTopic(topic);
         }
     }
 
