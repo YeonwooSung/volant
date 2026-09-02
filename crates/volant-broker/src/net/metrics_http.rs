@@ -470,14 +470,23 @@ fn broker_metrics_text(broker: &Broker) -> String {
         "volant_delete_records_majority_first_fail_total {}\n",
         broker.delete_records_majority_first_fail_total()
     ));
-    // v0.29: clustered wait-off upgraded to wait-on (allow-irreversible off).
+    // v0.29: clustered wait-off upgraded to wait-on (allow/ack incomplete).
     text.push_str(
-        "# HELP volant_delete_records_wait_off_upgraded_total DeleteRecords wait-off upgraded to wait-on on a cluster (v0.29)\n",
+        "# HELP volant_delete_records_wait_off_upgraded_total DeleteRecords wait-off upgraded to wait-on on a cluster (v0.29/v0.45)\n",
     );
     text.push_str("# TYPE volant_delete_records_wait_off_upgraded_total counter\n");
     text.push_str(&format!(
         "volant_delete_records_wait_off_upgraded_total {}\n",
         broker.delete_records_wait_off_upgraded_total()
+    ));
+    // v0.45: ALLOW on but ACK off — still upgraded.
+    text.push_str(
+        "# HELP volant_delete_records_wait_off_ack_missing_total DeleteRecords wait-off upgraded because ALLOW was on but ACK was off (v0.45)\n",
+    );
+    text.push_str("# TYPE volant_delete_records_wait_off_ack_missing_total counter\n");
+    text.push_str(&format!(
+        "volant_delete_records_wait_off_ack_missing_total {}\n",
+        broker.delete_records_wait_off_ack_missing_total()
     ));
     // Phase 116: durable DeleteRecords outbox for offline / failed peers.
     text.push_str(

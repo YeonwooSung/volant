@@ -287,9 +287,10 @@ async fn wait_off_majority_fail_still_truncates() {
         let b = Broker::with_cluster(small_seg_storage(base.join("n1")), 1, cfg).unwrap();
         b.set_advertised("127.0.0.1", p1);
         assert!(!b.delete_records_wait_majority());
-        // v0.29: keep this test on the irreversible wait-off path.
-        // Production equivalent: VOLANT_DELETE_RECORDS_ALLOW_IRREVERSIBLE=1
+        // v0.29/v0.45: keep this test on the irreversible wait-off path.
+        // Production equivalent: ALLOW=1 and ACK=1
         b.set_delete_records_allow_irreversible(true);
+        b.set_delete_records_irreversible_ack(true);
         Arc::new(b)
     };
     let mut bgs: Vec<BackgroundTasks> = vec![start_background_tasks(Arc::clone(&b1))];

@@ -568,6 +568,10 @@ pub struct Broker {
     /// v0.29: allow irreversible wait-off (local-first truncate) on clustered
     /// brokers. Default **false** (`VOLANT_DELETE_RECORDS_ALLOW_IRREVERSIBLE`).
     delete_records_allow_irreversible: AtomicBool,
+    /// v0.45: second ACK for clustered irreversible wait-off. Default **false**
+    /// (`VOLANT_DELETE_RECORDS_IRREVERSIBLE_ACK`). Both this and ALLOW must
+    /// be on; ACK alone is not enough.
+    delete_records_irreversible_ack: AtomicBool,
     /// Phase 135/148: client wait path observed journal majority success.
     delete_records_majority_wait_success_total: AtomicU64,
     /// Phase 135/148: client wait path observed journal majority failure.
@@ -578,6 +582,8 @@ pub struct Broker {
     delete_records_majority_first_fail_total: AtomicU64,
     /// v0.29: clustered wait-off upgraded to wait-on (env unset / off).
     delete_records_wait_off_upgraded_total: AtomicU64,
+    /// v0.45: clustered wait-off upgraded because ALLOW was on but ACK was off.
+    delete_records_wait_off_ack_missing_total: AtomicU64,
     /// BROKER config push RPC failures (Phase 113).
     cluster_config_push_errors_total: AtomicU64,
     /// ACL snapshot push RPC failures (Phase 113).
@@ -893,11 +899,15 @@ impl Broker {
             delete_records_allow_irreversible: AtomicBool::new(
                 default_delete_records_allow_irreversible(),
             ),
+            delete_records_irreversible_ack: AtomicBool::new(
+                default_delete_records_irreversible_ack(),
+            ),
             delete_records_majority_wait_success_total: AtomicU64::new(0),
             delete_records_majority_wait_fail_total: AtomicU64::new(0),
             delete_records_majority_first_success_total: AtomicU64::new(0),
             delete_records_majority_first_fail_total: AtomicU64::new(0),
             delete_records_wait_off_upgraded_total: AtomicU64::new(0),
+            delete_records_wait_off_ack_missing_total: AtomicU64::new(0),
             cluster_config_push_errors_total: AtomicU64::new(0),
             cluster_acl_push_errors_total: AtomicU64::new(0),
             txn_2pc_fanout_errors_total: AtomicU64::new(0),
@@ -1107,11 +1117,15 @@ impl Broker {
             delete_records_allow_irreversible: AtomicBool::new(
                 default_delete_records_allow_irreversible(),
             ),
+            delete_records_irreversible_ack: AtomicBool::new(
+                default_delete_records_irreversible_ack(),
+            ),
             delete_records_majority_wait_success_total: AtomicU64::new(0),
             delete_records_majority_wait_fail_total: AtomicU64::new(0),
             delete_records_majority_first_success_total: AtomicU64::new(0),
             delete_records_majority_first_fail_total: AtomicU64::new(0),
             delete_records_wait_off_upgraded_total: AtomicU64::new(0),
+            delete_records_wait_off_ack_missing_total: AtomicU64::new(0),
             cluster_config_push_errors_total: AtomicU64::new(0),
             cluster_acl_push_errors_total: AtomicU64::new(0),
             txn_2pc_fanout_errors_total: AtomicU64::new(0),
@@ -1841,6 +1855,22 @@ fn default_delete_records_wait_majority() -> bool {
 /// (case-insensitive); unset / anything else → **false** (cluster wait-off upgrades).
 fn default_delete_records_allow_irreversible() -> bool {
     match std::env::var("VOLANT_DELETE_RECORDS_ALLOW_IRREVERSIBLE") {
+        Ok(s) => {
+            let t = s.trim();
+            t == "1"
+                || t.eq_ignore_ascii_case("true")
+                || t.eq_ignore_ascii_case("yes")
+                || t.eq_ignore_ascii_case("on")
+        }
+        Err(_) => false,
+    }
+}
+
+/// v0.45: `VOLANT_DELETE_RECORDS_IRREVERSIBLE_ACK` → true for `1`/`true`/`yes`/`on`
+/// (case-insensitive); unset / anything else → **false**. Clustered wait-off
+/// needs this **and** ALLOW; ACK alone still upgrades.
+fn default_delete_records_irreversible_ack() -> bool {
+    match std::env::var("VOLANT_DELETE_RECORDS_IRREVERSIBLE_ACK") {
         Ok(s) => {
             let t = s.trim();
             t == "1"
