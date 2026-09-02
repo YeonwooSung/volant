@@ -1,12 +1,14 @@
 //! Opt-in openraft metadata election (v0.11) + assignment apply (v0.16)
-//! + InstallSnapshot (v0.17) + durable log / hard state (v0.21).
+//! + InstallSnapshot (v0.17) + durable log / hard state (v0.21)
+//! + snapshot assignment apply (v0.22).
 //!
 //! When `VOLANT_OPENRAFT_METADATA=1`, the leader replicates
 //! [`MetaRequest::SetAssignment`] via opcodes 108/109. Apply writes
 //! `assignment.json` and installs cluster state. Snapshots use opcodes
-//! 112/113. Homemade 154 is unchanged. Vote, log, and last snapshot persist
-//! under `{data_dir}/__openraft/` (JSON files; not Rocks). Flag off does
-//! not create that directory.
+//! 112/113; a non-empty snapshot `assignment` is applied the same way.
+//! Vote, log, and last snapshot persist under `{data_dir}/__openraft/`
+//! (JSON files; not Rocks). Flag off does not create that directory.
+//! Homemade 154 is unchanged.
 
 use std::collections::BTreeMap;
 use std::fmt;
@@ -517,11 +519,30 @@ impl RaftStateMachine<TypeConfig> for StateMachine {
     ) -> std::result::Result<(), StorageError<u32>> {
         let bytes = snapshot.into_inner();
         if let Ok(payload) = serde_json::from_slice::<MetaSnapshotPayload>(&bytes) {
-            // last_applied / membership come from SnapshotMeta (source of
-            // truth). Payload assignment is stored only; live assignment.json
-            // apply stays on the Phase 6 / 154 path. v0.22 owns snapshot →
-            // assignment apply — do not install topics here.
-            let _ = payload;
+            // last_applied / membership come from SnapshotMeta. A non-empty
+            // assignment is applied via the same path as SetAssignment (v0.16).
+            // Empty topics is a no-op so we never wipe a live assignment.json.
+            // Apply errors are logged; raft meta still installs.
+            if !payload.assignment.topics.is_empty() {
+                match self.broker.as_ref().and_then(|w| w.upgrade()) {
+                    Some(b) => {
+                        let generation = payload.assignment.generation;
+                        let topics = payload.assignment.to_wire_topics();
+                        if let Err(err) =
+                            b.apply_cluster_state(generation, b.controller_id(), &topics)
+                        {
+                            warn!(
+                                error = %err,
+                                generation,
+                                "openraft install_snapshot apply assignment failed"
+                            );
+                        }
+                    }
+                    None => {
+                        warn!("openraft install_snapshot: broker dropped; assignment not applied");
+                    }
+                }
+            }
         }
         let mut inner = self.inner.lock();
         inner.last_applied = meta.last_log_id;
@@ -1077,6 +1098,29 @@ impl Broker {
             .await
             .map_err(|e| Error::Protocol(format!("openraft trigger purge: {e}")))?;
         Ok(())
+    }
+
+    /// JSON `MetaSnapshotPayload` bytes (`last_applied` / membership empty).
+    pub fn test_openraft_snapshot_bytes(assignment: &AssignmentSnapshot) -> Vec<u8> {
+        let payload = MetaSnapshotPayload {
+            last_applied: None,
+            membership: StoredMembership::default(),
+            assignment: assignment.clone(),
+        };
+        serde_json::to_vec(&payload).unwrap_or_else(|_| b"{}".to_vec())
+    }
+
+    /// Drive [`RaftStateMachine::install_snapshot`] on this broker (no raft RPC).
+    pub async fn test_openraft_sm_install_snapshot(self: &Arc<Self>, bytes: Vec<u8>) {
+        let mut sm = StateMachine::with_broker(self);
+        let meta = SnapshotMeta {
+            last_log_id: None,
+            last_membership: StoredMembership::default(),
+            snapshot_id: "v22-test".into(),
+        };
+        sm.install_snapshot(&meta, Box::new(Cursor::new(bytes)))
+            .await
+            .expect("install_snapshot");
     }
 
     /// JSON body of a dummy InstallSnapshotRequest (vote term 0) for opcode tests.

@@ -464,8 +464,17 @@ under `{data_dir}/__openraft/` (`hard_state.json`, `log.json`,
 files, skips a second `initialize()`, and can re-elect. Flag **off**
 does **not** create `__openraft/`. This is JSON atomic-replace, **not**
 Rocks. Homemade `{data_dir}/__metadata_raft/` is a different store.
-Live topics after restart still come from `cluster/assignment.json`
-(snapshot → assignment apply is v0.22). See [V21_SPEC.md](./V21_SPEC.md).
+See [V21_SPEC.md](./V21_SPEC.md).
+
+## v0.22 openraft snapshot apply
+
+When `VOLANT_OPENRAFT_METADATA=1`, `InstallSnapshot` (opcodes **112/113**)
+applies a **non-empty** snapshot `assignment` to live cluster state and
+`{data_dir}/cluster/assignment.json` (same `apply_cluster_state` path as
+v0.16 `SetAssignment`). Empty snapshot assignment is a no-op so a lagging
+node does not wipe existing topics. Apply errors are logged; raft
+`last_applied` / membership still install. Default flag remains **off**.
+See [V22_SPEC.md](./V22_SPEC.md).
 
 **Cluster sharp edges:** Truncate-journal majority (Phase 130), assignment
 majority (Phase 150/154), and Phase 135/137/148 wait mode use **configured N**
