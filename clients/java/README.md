@@ -24,6 +24,9 @@ try (Client c = Client.connect("127.0.0.1", 9092)) {
   for (Record rec : recs) {
     System.out.println(rec.offset + " " + rec.key + " " + new String(rec.value, UTF_8));
   }
+  JoinGroupResult j = c.joinGroup("g", List.of("t"), 10000);
+  c.heartbeat("g", j.memberId, j.generation);
+  c.leaveGroup("g", j.memberId);
   Metadata meta = c.metadata();
 }
 
@@ -42,6 +45,7 @@ Client.connectTls(
 
 `produce(..., null, value)` sends a null key. `fetch` returns `List<Record>`
 (`offset`, `key`, `value`). `metadata()` returns brokers + topics.
+`joinGroup` sends empty `memberId` on first join.
 
 Correlation ids increment per request. Decode verifies magic `V` (0x56),
 protocol version 1, and IEEE CRC32 of the **payload only**. Broker
@@ -80,11 +84,13 @@ socket.
 
 ## Honesty
 
-Not implemented: `kafka-clients`, consumer groups, SCRAM / shared-token
-auth, async I/O, idempotent produce, leader redirect. Sync only; one
-TCP connection; acks=1 by default. TLS does not change broker TLS
-(Phase 8/19) and does not add Kafka API keys. Client private keys
-other than PKCS#8 / RSA PKCS#1 PEM are not loaded.
+Not implemented: `kafka-clients`, high-level GroupConsumer / assignor
+loop, offset commit/fetch, SCRAM / shared-token auth, async I/O,
+idempotent produce, leader redirect. Sync only; one TCP connection;
+acks=1 by default. TLS does not change broker TLS (Phase 8/19) and
+does not add Kafka API keys. Client private keys other than PKCS#8 /
+RSA PKCS#1 PEM are not loaded.
 
-See [docs/V23_SPEC.md](../../docs/V23_SPEC.md) and
-[docs/V27_SPEC.md](../../docs/V27_SPEC.md).
+See [docs/V23_SPEC.md](../../docs/V23_SPEC.md),
+[docs/V27_SPEC.md](../../docs/V27_SPEC.md), and
+[docs/V28_SPEC.md](../../docs/V28_SPEC.md).

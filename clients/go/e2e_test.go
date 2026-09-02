@@ -119,6 +119,48 @@ func TestE2EOffsetCommitFetch(t *testing.T) {
 	}
 }
 
+func TestE2EJoinHeartbeatLeave(t *testing.T) {
+	if os.Getenv("VOLANT_E2E") != "1" {
+		t.Skip("set VOLANT_E2E=1 to run live broker e2e")
+	}
+	addr, cleanup := startBroker(t)
+	defer cleanup()
+
+	c, err := volant.DialTimeout(addr, 5*time.Second)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer c.Close()
+
+	topic := fmt.Sprintf("go-grp-%d-%d", os.Getpid(), time.Now().UnixNano())
+	group := fmt.Sprintf("go-cg-%d", os.Getpid())
+	if err := c.CreateTopic(topic, 1); err != nil {
+		t.Fatalf("CreateTopic: %v", err)
+	}
+	j, err := c.JoinGroup(group, []string{topic}, 10000)
+	if err != nil {
+		t.Fatalf("JoinGroup: %v", err)
+	}
+	if j.MemberID == "" {
+		t.Fatal("expected broker-assigned member id")
+	}
+	if j.Generation < 1 {
+		t.Fatalf("generation=%d want >= 1", j.Generation)
+	}
+	if len(j.Assignment) != 1 || j.Assignment[0].Topic != topic || j.Assignment[0].Partition != 0 {
+		t.Fatalf("assignment %+v want [{%s 0}]", j.Assignment, topic)
+	}
+	if err := c.Heartbeat(group, j.MemberID, j.Generation); err != nil {
+		t.Fatalf("Heartbeat: %v", err)
+	}
+	if err := c.LeaveGroup(group, j.MemberID); err != nil {
+		t.Fatalf("LeaveGroup: %v", err)
+	}
+	if err := c.DeleteTopic(topic); err != nil {
+		t.Fatalf("DeleteTopic: %v", err)
+	}
+}
+
 func startBroker(t *testing.T) (addr string, cleanup func()) {
 	t.Helper()
 	if existing := os.Getenv("VOLANT_BROKER"); existing != "" {

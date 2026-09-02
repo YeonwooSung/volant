@@ -5,6 +5,7 @@ from __future__ import annotations
 import unittest
 
 from volant.codec import (
+    Assignment,
     BrokerInfo,
     CreateTopicRequest,
     CreateTopicResponse,
@@ -13,6 +14,12 @@ from volant.codec import (
     FetchRecord,
     FetchRequest,
     FetchResponse,
+    HeartbeatRequest,
+    HeartbeatResponse,
+    JoinGroupRequest,
+    JoinGroupResponse,
+    LeaveGroupRequest,
+    LeaveGroupResponse,
     MetadataRequest,
     MetadataResponse,
     OffsetCommitEntry,
@@ -33,6 +40,12 @@ from volant.codec import (
     decode_delete_topic_response,
     decode_fetch_request,
     decode_fetch_response,
+    decode_heartbeat_request,
+    decode_heartbeat_response,
+    decode_join_group_request,
+    decode_join_group_response,
+    decode_leave_group_request,
+    decode_leave_group_response,
     decode_metadata_request,
     decode_metadata_response,
     decode_offset_commit_request,
@@ -48,6 +61,12 @@ from volant.codec import (
     encode_delete_topic_response,
     encode_fetch_request,
     encode_fetch_response,
+    encode_heartbeat_request,
+    encode_heartbeat_response,
+    encode_join_group_request,
+    encode_join_group_response,
+    encode_leave_group_request,
+    encode_leave_group_response,
     encode_metadata_request,
     encode_metadata_response,
     encode_offset_commit_request,
@@ -56,6 +75,9 @@ from volant.codec import (
     encode_offset_fetch_response,
     encode_produce_request,
     encode_produce_response,
+    OP_HEARTBEAT,
+    OP_JOIN_GROUP,
+    OP_LEAVE_GROUP,
     OP_OFFSET_COMMIT,
     OP_OFFSET_FETCH,
 )
@@ -433,6 +455,144 @@ class TestOffsetCodec(unittest.TestCase):
         )
         self.assertEqual(_hx(raw), _hx(expected))
         self.assertEqual(decode_offset_fetch_response(raw), resp)
+
+
+class TestGroupCodec(unittest.TestCase):
+    def test_join_group_request_payload_rs_fixture(self) -> None:
+        # crates/volant-protocol/src/payload.rs group_request_roundtrips
+        req = JoinGroupRequest(
+            group_id="g1",
+            member_id="",
+            session_timeout_ms=10_000,
+            topics=["events", "logs"],
+            group_instance_id="",
+        )
+        raw = encode_join_group_request(req)
+        expected = bytes.fromhex(
+            "0200"
+            "6731"  # "g1"
+            "0000"  # empty member_id
+            "10270000"  # session_timeout_ms 10000
+            "02000000"  # 2 topics
+            "0600"
+            "6576656e7473"  # "events"
+            "0400"
+            "6c6f6773"  # "logs"
+            "0000"  # empty group_instance_id
+        )
+        self.assertEqual(_hx(raw), _hx(expected))
+        self.assertEqual(decode_join_group_request(raw), req)
+
+    def test_join_group_request_with_instance(self) -> None:
+        req = JoinGroupRequest(
+            group_id="g1",
+            member_id="",
+            session_timeout_ms=10_000,
+            topics=["events"],
+            group_instance_id="pod-1",
+        )
+        raw = encode_join_group_request(req)
+        expected = bytes.fromhex(
+            "02006731"
+            "0000"
+            "10270000"
+            "01000000"
+            "06006576656e7473"
+            "0500706f642d31"  # "pod-1"
+        )
+        self.assertEqual(_hx(raw), _hx(expected))
+        self.assertEqual(decode_join_group_request(raw), req)
+
+    def test_join_group_request_legacy_without_instance(self) -> None:
+        # payload.rs: legacy JoinGroup without instance trailer still decodes
+        raw = bytes.fromhex(
+            "02006731"  # "g1"
+            "02006d31"  # "m1"
+            "88130000"  # 5000
+            "01000000"
+            "010074"  # "t"
+        )
+        decoded = decode_join_group_request(raw)
+        self.assertEqual(decoded.group_id, "g1")
+        self.assertEqual(decoded.member_id, "m1")
+        self.assertEqual(decoded.session_timeout_ms, 5000)
+        self.assertEqual(decoded.topics, ["t"])
+        self.assertEqual(decoded.group_instance_id, "")
+
+    def test_join_group_response_payload_rs_fixture(self) -> None:
+        # payload.rs group_response_roundtrips
+        resp = JoinGroupResponse(
+            error_code=0,
+            generation=1,
+            member_id="uuid-1",
+            assignment=[
+                Assignment(topic="events", partition=0),
+                Assignment(topic="events", partition=1),
+            ],
+            revoked=[Assignment(topic="events", partition=2)],
+        )
+        raw = encode_join_group_response(resp)
+        expected = bytes.fromhex(
+            "0000"  # error_code
+            "01000000"  # generation 1
+            "0600"
+            "757569642d31"  # "uuid-1"
+            "02000000"  # 2 assignments
+            "06006576656e7473"
+            "00000000"
+            "06006576656e7473"
+            "01000000"
+            "01000000"  # 1 revoked
+            "06006576656e7473"
+            "02000000"
+        )
+        self.assertEqual(_hx(raw), _hx(expected))
+        self.assertEqual(decode_join_group_response(raw), resp)
+        self.assertEqual(decode_response(OP_JOIN_GROUP, raw), resp)
+
+    def test_join_group_response_legacy_without_revoked(self) -> None:
+        raw = bytes.fromhex(
+            "0000"
+            "01000000"
+            "0600757569642d31"
+            "01000000"
+            "06006576656e7473"
+            "00000000"
+        )
+        decoded = decode_join_group_response(raw)
+        self.assertEqual(decoded.error_code, 0)
+        self.assertEqual(decoded.generation, 1)
+        self.assertEqual(decoded.member_id, "uuid-1")
+        self.assertEqual(decoded.assignment, [Assignment(topic="events", partition=0)])
+        self.assertEqual(decoded.revoked, [])
+
+    def test_heartbeat_request_payload_rs_fixture(self) -> None:
+        req = HeartbeatRequest(group_id="g1", member_id="m1", generation=3)
+        raw = encode_heartbeat_request(req)
+        expected = bytes.fromhex("02006731" "02006d31" "03000000")
+        self.assertEqual(_hx(raw), _hx(expected))
+        self.assertEqual(decode_heartbeat_request(raw), req)
+
+    def test_heartbeat_response_rebalance(self) -> None:
+        resp = HeartbeatResponse(error_code=9)
+        raw = encode_heartbeat_response(resp)
+        self.assertEqual(raw, bytes.fromhex("0900"))
+        self.assertEqual(decode_heartbeat_response(raw), resp)
+        self.assertEqual(decode_response(OP_HEARTBEAT, raw), resp)
+
+    def test_leave_group_request_payload_rs_fixture(self) -> None:
+        req = LeaveGroupRequest(group_id="g1", member_id="m1")
+        raw = encode_leave_group_request(req)
+        expected = bytes.fromhex("02006731" "02006d31")
+        self.assertEqual(_hx(raw), _hx(expected))
+        self.assertEqual(decode_leave_group_request(raw), req)
+
+    def test_leave_group_response(self) -> None:
+        resp = LeaveGroupResponse(error_code=0)
+        raw = encode_leave_group_response(resp)
+        self.assertEqual(raw, bytes.fromhex("0000"))
+        self.assertEqual(decode_leave_group_response(raw), resp)
+        self.assertEqual(decode_response(OP_LEAVE_GROUP, raw), resp)
 
 
 if __name__ == "__main__":

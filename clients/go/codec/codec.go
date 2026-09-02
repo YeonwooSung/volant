@@ -1,7 +1,8 @@
 // Package codec encodes and decodes little-endian native payloads.
 //
 // Matches crates/volant-protocol/src/payload.rs for Produce, Fetch,
-// CreateTopic, Metadata, DeleteTopic, OffsetCommit, and OffsetFetch.
+// CreateTopic, Metadata, DeleteTopic, OffsetCommit, OffsetFetch,
+// JoinGroup, Heartbeat, and LeaveGroup.
 // Frame headers are big-endian (see package frame); payload integers and
 // length prefixes are little-endian.
 package codec
@@ -21,6 +22,9 @@ const (
 	OpDeleteTopic  uint16 = 5
 	OpOffsetCommit uint16 = 6
 	OpOffsetFetch  uint16 = 7
+	OpJoinGroup    uint16 = 8
+	OpHeartbeat    uint16 = 9
+	OpLeaveGroup   uint16 = 10
 	OpError        uint16 = 0xFFFF
 
 	nullLen = 0xFFFFFFFF
@@ -411,6 +415,53 @@ type OffsetFetchEntry struct {
 type OffsetFetchResponse struct {
 	ErrorCode uint16
 	Entries   []OffsetFetchEntry
+}
+
+// Assignment is one topic/partition pair from JoinGroup.
+type Assignment struct {
+	Topic     string
+	Partition uint32
+}
+
+// JoinGroupRequest is the JoinGroup opcode body.
+type JoinGroupRequest struct {
+	GroupID          string
+	MemberID         string
+	SessionTimeoutMs uint32
+	Topics           []string
+	GroupInstanceID  string
+}
+
+// JoinGroupResponse is the JoinGroup opcode reply.
+type JoinGroupResponse struct {
+	ErrorCode  uint16
+	Generation uint32
+	MemberID   string
+	Assignment []Assignment
+	Revoked    []Assignment
+}
+
+// HeartbeatRequest is the Heartbeat opcode body.
+type HeartbeatRequest struct {
+	GroupID    string
+	MemberID   string
+	Generation uint32
+}
+
+// HeartbeatResponse is the Heartbeat opcode reply.
+type HeartbeatResponse struct {
+	ErrorCode uint16
+}
+
+// LeaveGroupRequest is the LeaveGroup opcode body.
+type LeaveGroupRequest struct {
+	GroupID  string
+	MemberID string
+}
+
+// LeaveGroupResponse is the LeaveGroup opcode reply.
+type LeaveGroupResponse struct {
+	ErrorCode uint16
 }
 
 func EncodeProduceRequest(req ProduceRequest) ([]byte, error) {
@@ -1145,6 +1196,240 @@ func DecodeOffsetFetchResponse(payload []byte) (OffsetFetchResponse, error) {
 	return OffsetFetchResponse{ErrorCode: code, Entries: entries}, nil
 }
 
+func putAssignments(w *writer, items []Assignment) error {
+	w.u32(uint32(len(items)))
+	for _, a := range items {
+		if err := putString(w, a.Topic); err != nil {
+			return err
+		}
+		w.u32(a.Partition)
+	}
+	return nil
+}
+
+func getAssignments(r *reader) ([]Assignment, error) {
+	n, err := r.u32()
+	if err != nil {
+		return nil, err
+	}
+	out := make([]Assignment, 0, n)
+	for i := uint32(0); i < n; i++ {
+		topic, err := getString(r)
+		if err != nil {
+			return nil, err
+		}
+		part, err := r.u32()
+		if err != nil {
+			return nil, err
+		}
+		out = append(out, Assignment{Topic: topic, Partition: part})
+	}
+	return out, nil
+}
+
+func EncodeJoinGroupRequest(req JoinGroupRequest) ([]byte, error) {
+	w := &writer{}
+	if err := putString(w, req.GroupID); err != nil {
+		return nil, err
+	}
+	if err := putString(w, req.MemberID); err != nil {
+		return nil, err
+	}
+	w.u32(req.SessionTimeoutMs)
+	w.u32(uint32(len(req.Topics)))
+	for _, t := range req.Topics {
+		if err := putString(w, t); err != nil {
+			return nil, err
+		}
+	}
+	// Phase 12 trailing field (always written by current encoders).
+	if err := putString(w, req.GroupInstanceID); err != nil {
+		return nil, err
+	}
+	return w.buf, nil
+}
+
+func DecodeJoinGroupRequest(payload []byte) (JoinGroupRequest, error) {
+	r := &reader{data: payload}
+	groupID, err := getString(r)
+	if err != nil {
+		return JoinGroupRequest{}, err
+	}
+	memberID, err := getString(r)
+	if err != nil {
+		return JoinGroupRequest{}, err
+	}
+	timeout, err := r.u32()
+	if err != nil {
+		return JoinGroupRequest{}, err
+	}
+	n, err := r.u32()
+	if err != nil {
+		return JoinGroupRequest{}, err
+	}
+	topics := make([]string, 0, n)
+	for i := uint32(0); i < n; i++ {
+		t, err := getString(r)
+		if err != nil {
+			return JoinGroupRequest{}, err
+		}
+		topics = append(topics, t)
+	}
+	// Phase 12 trailing field; legacy payloads omit it.
+	instanceID := ""
+	if r.remaining() > 0 {
+		instanceID, err = getString(r)
+		if err != nil {
+			return JoinGroupRequest{}, err
+		}
+	}
+	return JoinGroupRequest{
+		GroupID:          groupID,
+		MemberID:         memberID,
+		SessionTimeoutMs: timeout,
+		Topics:           topics,
+		GroupInstanceID:  instanceID,
+	}, nil
+}
+
+func EncodeJoinGroupResponse(resp JoinGroupResponse) ([]byte, error) {
+	w := &writer{}
+	w.u16(resp.ErrorCode)
+	w.u32(resp.Generation)
+	if err := putString(w, resp.MemberID); err != nil {
+		return nil, err
+	}
+	if err := putAssignments(w, resp.Assignment); err != nil {
+		return nil, err
+	}
+	// Phase 17 trailing revoked list (always written by current encoders).
+	if err := putAssignments(w, resp.Revoked); err != nil {
+		return nil, err
+	}
+	return w.buf, nil
+}
+
+func DecodeJoinGroupResponse(payload []byte) (JoinGroupResponse, error) {
+	r := &reader{data: payload}
+	code, err := r.u16()
+	if err != nil {
+		return JoinGroupResponse{}, err
+	}
+	gen, err := r.u32()
+	if err != nil {
+		return JoinGroupResponse{}, err
+	}
+	memberID, err := getString(r)
+	if err != nil {
+		return JoinGroupResponse{}, err
+	}
+	assignment, err := getAssignments(r)
+	if err != nil {
+		return JoinGroupResponse{}, err
+	}
+	// Phase 17 trailing revoked list; legacy payloads omit it.
+	var revoked []Assignment
+	if r.remaining() >= 4 {
+		revoked, err = getAssignments(r)
+		if err != nil {
+			return JoinGroupResponse{}, err
+		}
+	}
+	if revoked == nil {
+		revoked = []Assignment{}
+	}
+	return JoinGroupResponse{
+		ErrorCode:  code,
+		Generation: gen,
+		MemberID:   memberID,
+		Assignment: assignment,
+		Revoked:    revoked,
+	}, nil
+}
+
+func EncodeHeartbeatRequest(req HeartbeatRequest) ([]byte, error) {
+	w := &writer{}
+	if err := putString(w, req.GroupID); err != nil {
+		return nil, err
+	}
+	if err := putString(w, req.MemberID); err != nil {
+		return nil, err
+	}
+	w.u32(req.Generation)
+	return w.buf, nil
+}
+
+func DecodeHeartbeatRequest(payload []byte) (HeartbeatRequest, error) {
+	r := &reader{data: payload}
+	groupID, err := getString(r)
+	if err != nil {
+		return HeartbeatRequest{}, err
+	}
+	memberID, err := getString(r)
+	if err != nil {
+		return HeartbeatRequest{}, err
+	}
+	gen, err := r.u32()
+	if err != nil {
+		return HeartbeatRequest{}, err
+	}
+	return HeartbeatRequest{GroupID: groupID, MemberID: memberID, Generation: gen}, nil
+}
+
+func EncodeHeartbeatResponse(resp HeartbeatResponse) ([]byte, error) {
+	w := &writer{}
+	w.u16(resp.ErrorCode)
+	return w.buf, nil
+}
+
+func DecodeHeartbeatResponse(payload []byte) (HeartbeatResponse, error) {
+	r := &reader{data: payload}
+	code, err := r.u16()
+	if err != nil {
+		return HeartbeatResponse{}, err
+	}
+	return HeartbeatResponse{ErrorCode: code}, nil
+}
+
+func EncodeLeaveGroupRequest(req LeaveGroupRequest) ([]byte, error) {
+	w := &writer{}
+	if err := putString(w, req.GroupID); err != nil {
+		return nil, err
+	}
+	if err := putString(w, req.MemberID); err != nil {
+		return nil, err
+	}
+	return w.buf, nil
+}
+
+func DecodeLeaveGroupRequest(payload []byte) (LeaveGroupRequest, error) {
+	r := &reader{data: payload}
+	groupID, err := getString(r)
+	if err != nil {
+		return LeaveGroupRequest{}, err
+	}
+	memberID, err := getString(r)
+	if err != nil {
+		return LeaveGroupRequest{}, err
+	}
+	return LeaveGroupRequest{GroupID: groupID, MemberID: memberID}, nil
+}
+
+func EncodeLeaveGroupResponse(resp LeaveGroupResponse) ([]byte, error) {
+	w := &writer{}
+	w.u16(resp.ErrorCode)
+	return w.buf, nil
+}
+
+func DecodeLeaveGroupResponse(payload []byte) (LeaveGroupResponse, error) {
+	r := &reader{data: payload}
+	code, err := r.u16()
+	if err != nil {
+		return LeaveGroupResponse{}, err
+	}
+	return LeaveGroupResponse{ErrorCode: code}, nil
+}
+
 func EncodeErrorResponse(resp ErrorResponse) ([]byte, error) {
 	w := &writer{}
 	w.u16(resp.Code)
@@ -1184,6 +1469,12 @@ func DecodeResponse(opcode uint16, payload []byte) (any, error) {
 		return DecodeOffsetCommitResponse(payload)
 	case OpOffsetFetch:
 		return DecodeOffsetFetchResponse(payload)
+	case OpJoinGroup:
+		return DecodeJoinGroupResponse(payload)
+	case OpHeartbeat:
+		return DecodeHeartbeatResponse(payload)
+	case OpLeaveGroup:
+		return DecodeLeaveGroupResponse(payload)
 	case OpError:
 		return DecodeErrorResponse(payload)
 	default:

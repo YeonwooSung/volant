@@ -792,6 +792,14 @@ Metric: `volant_fetch_session_mirror_converge_total`.
 
 See [V30_SPEC.md](./V30_SPEC.md).
 
+## v0.28 client groups
+
+Python, Go, and Java native clients now speak **JoinGroup** (opcode 8),
+**Heartbeat** (opcode 9), and **LeaveGroup** (opcode 10). First join sends
+an empty member id; the broker assigns one. Codec tests need no broker;
+live join → heartbeat → leave is `VOLANT_E2E=1`. See
+[V28_SPEC.md](./V28_SPEC.md).
+
 ## Shipped (not gaps)
 
 Kafka wire shim **Phases 23–109** (ApiVersions **0–5**, Fetch **0–18**, ACL admin

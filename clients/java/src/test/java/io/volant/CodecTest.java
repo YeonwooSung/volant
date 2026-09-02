@@ -307,4 +307,138 @@ class CodecTest {
         assertEquals(0, hx("").length);
         assertTrue(Arrays.equals(hx("0100"), new byte[] {0x01, 0x00}));
     }
+
+    @Test
+    void joinGroupRequestPayloadRsFixture() {
+        Codec.JoinGroupRequest req = new Codec.JoinGroupRequest(
+                "g1", "", 10_000, Arrays.asList("events", "logs"), "");
+        byte[] raw = Codec.encodeJoinGroupRequest(req);
+        byte[] expected = hx(
+                "0200"
+                        + "6731"
+                        + "0000"
+                        + "10270000"
+                        + "02000000"
+                        + "0600"
+                        + "6576656e7473"
+                        + "0400"
+                        + "6c6f6773"
+                        + "0000");
+        assertArrayEquals(expected, raw);
+        Codec.JoinGroupRequest decoded = Codec.decodeJoinGroupRequest(raw);
+        assertEquals("g1", decoded.groupId);
+        assertEquals("", decoded.memberId);
+        assertEquals(10_000, decoded.sessionTimeoutMs);
+        assertEquals(Arrays.asList("events", "logs"), decoded.topics);
+        assertEquals("", decoded.groupInstanceId);
+    }
+
+    @Test
+    void joinGroupRequestWithInstance() {
+        Codec.JoinGroupRequest req =
+                new Codec.JoinGroupRequest("g1", "", 10_000, Collections.singletonList("events"), "pod-1");
+        byte[] raw = Codec.encodeJoinGroupRequest(req);
+        assertArrayEquals(hx("02006731" + "0000" + "10270000" + "01000000" + "06006576656e7473" + "0500706f642d31"), raw);
+        Codec.JoinGroupRequest decoded = Codec.decodeJoinGroupRequest(raw);
+        assertEquals("pod-1", decoded.groupInstanceId);
+        assertEquals(Collections.singletonList("events"), decoded.topics);
+    }
+
+    @Test
+    void joinGroupRequestLegacyWithoutInstance() {
+        byte[] raw = hx("02006731" + "02006d31" + "88130000" + "01000000" + "010074");
+        Codec.JoinGroupRequest decoded = Codec.decodeJoinGroupRequest(raw);
+        assertEquals("g1", decoded.groupId);
+        assertEquals("m1", decoded.memberId);
+        assertEquals(5000, decoded.sessionTimeoutMs);
+        assertEquals(Collections.singletonList("t"), decoded.topics);
+        assertEquals("", decoded.groupInstanceId);
+    }
+
+    @Test
+    void joinGroupResponsePayloadRsFixture() {
+        Codec.JoinGroupResponse resp = new Codec.JoinGroupResponse(
+                0,
+                1,
+                "uuid-1",
+                Arrays.asList(new Codec.Assignment("events", 0), new Codec.Assignment("events", 1)),
+                Collections.singletonList(new Codec.Assignment("events", 2)));
+        byte[] raw = Codec.encodeJoinGroupResponse(resp);
+        byte[] expected = hx(
+                "0000"
+                        + "01000000"
+                        + "0600"
+                        + "757569642d31"
+                        + "02000000"
+                        + "06006576656e7473"
+                        + "00000000"
+                        + "06006576656e7473"
+                        + "01000000"
+                        + "01000000"
+                        + "06006576656e7473"
+                        + "02000000");
+        assertArrayEquals(expected, raw);
+        Codec.JoinGroupResponse decoded = Codec.decodeJoinGroupResponse(raw);
+        assertEquals("uuid-1", decoded.memberId);
+        assertEquals(1, decoded.generation);
+        assertEquals(2, decoded.assignment.size());
+        assertEquals(1, decoded.assignment.get(1).partition);
+        assertEquals(2, decoded.revoked.get(0).partition);
+        Object got = Codec.decodeResponse(Codec.OP_JOIN_GROUP, raw);
+        Codec.JoinGroupResponse dispatched = assertInstanceOf(Codec.JoinGroupResponse.class, got);
+        assertEquals("uuid-1", dispatched.memberId);
+    }
+
+    @Test
+    void joinGroupResponseLegacyWithoutRevoked() {
+        byte[] raw = hx("0000" + "01000000" + "0600757569642d31" + "01000000" + "06006576656e7473" + "00000000");
+        Codec.JoinGroupResponse decoded = Codec.decodeJoinGroupResponse(raw);
+        assertEquals("uuid-1", decoded.memberId);
+        assertEquals(1, decoded.generation);
+        assertEquals(1, decoded.assignment.size());
+        assertEquals("events", decoded.assignment.get(0).topic);
+        assertEquals(0, decoded.assignment.get(0).partition);
+        assertTrue(decoded.revoked.isEmpty());
+    }
+
+    @Test
+    void heartbeatRequestPayloadRsFixture() {
+        Codec.HeartbeatRequest req = new Codec.HeartbeatRequest("g1", "m1", 3);
+        byte[] raw = Codec.encodeHeartbeatRequest(req);
+        assertArrayEquals(hx("02006731" + "02006d31" + "03000000"), raw);
+        Codec.HeartbeatRequest decoded = Codec.decodeHeartbeatRequest(raw);
+        assertEquals("g1", decoded.groupId);
+        assertEquals("m1", decoded.memberId);
+        assertEquals(3, decoded.generation);
+    }
+
+    @Test
+    void heartbeatResponseRebalance() {
+        byte[] raw = Codec.encodeHeartbeatResponse(new Codec.HeartbeatResponse(9));
+        assertArrayEquals(hx("0900"), raw);
+        assertEquals(9, Codec.decodeHeartbeatResponse(raw).errorCode);
+        Object got = Codec.decodeResponse(Codec.OP_HEARTBEAT, raw);
+        Codec.HeartbeatResponse hr = assertInstanceOf(Codec.HeartbeatResponse.class, got);
+        assertEquals(9, hr.errorCode);
+    }
+
+    @Test
+    void leaveGroupRequestPayloadRsFixture() {
+        Codec.LeaveGroupRequest req = new Codec.LeaveGroupRequest("g1", "m1");
+        byte[] raw = Codec.encodeLeaveGroupRequest(req);
+        assertArrayEquals(hx("02006731" + "02006d31"), raw);
+        Codec.LeaveGroupRequest decoded = Codec.decodeLeaveGroupRequest(raw);
+        assertEquals("g1", decoded.groupId);
+        assertEquals("m1", decoded.memberId);
+    }
+
+    @Test
+    void leaveGroupResponse() {
+        byte[] raw = Codec.encodeLeaveGroupResponse(new Codec.LeaveGroupResponse(0));
+        assertArrayEquals(hx("0000"), raw);
+        assertEquals(0, Codec.decodeLeaveGroupResponse(raw).errorCode);
+        Object got = Codec.decodeResponse(Codec.OP_LEAVE_GROUP, raw);
+        Codec.LeaveGroupResponse lr = assertInstanceOf(Codec.LeaveGroupResponse.class, got);
+        assertEquals(0, lr.errorCode);
+    }
 }

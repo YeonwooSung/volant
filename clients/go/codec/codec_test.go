@@ -610,3 +610,240 @@ func TestOffsetFetchResponseCommitted(t *testing.T) {
 		t.Fatalf("decoded %+v", decoded)
 	}
 }
+
+func TestJoinGroupRequestPayloadRS(t *testing.T) {
+	req := JoinGroupRequest{
+		GroupID:          "g1",
+		MemberID:         "",
+		SessionTimeoutMs: 10_000,
+		Topics:           []string{"events", "logs"},
+		GroupInstanceID:  "",
+	}
+	raw, err := EncodeJoinGroupRequest(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	expected := mustHex(t,
+		"0200"+
+			"6731"+
+			"0000"+
+			"10270000"+
+			"02000000"+
+			"0600"+
+			"6576656e7473"+
+			"0400"+
+			"6c6f6773"+
+			"0000",
+	)
+	if !bytes.Equal(raw, expected) {
+		t.Fatalf("encode:\n got %x\nwant %x", raw, expected)
+	}
+	decoded, err := DecodeJoinGroupRequest(raw)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if decoded.GroupID != req.GroupID || decoded.MemberID != "" || decoded.SessionTimeoutMs != 10_000 {
+		t.Fatalf("decoded header %+v", decoded)
+	}
+	if len(decoded.Topics) != 2 || decoded.Topics[0] != "events" || decoded.Topics[1] != "logs" {
+		t.Fatalf("topics %+v", decoded.Topics)
+	}
+	if decoded.GroupInstanceID != "" {
+		t.Fatalf("instance %q", decoded.GroupInstanceID)
+	}
+}
+
+func TestJoinGroupRequestWithInstance(t *testing.T) {
+	req := JoinGroupRequest{
+		GroupID:          "g1",
+		MemberID:         "",
+		SessionTimeoutMs: 10_000,
+		Topics:           []string{"events"},
+		GroupInstanceID:  "pod-1",
+	}
+	raw, err := EncodeJoinGroupRequest(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	expected := mustHex(t, "02006731"+"0000"+"10270000"+"01000000"+"06006576656e7473"+"0500706f642d31")
+	if !bytes.Equal(raw, expected) {
+		t.Fatalf("encode:\n got %x\nwant %x", raw, expected)
+	}
+	decoded, err := DecodeJoinGroupRequest(raw)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if decoded.GroupInstanceID != "pod-1" || len(decoded.Topics) != 1 || decoded.Topics[0] != "events" {
+		t.Fatalf("decoded %+v", decoded)
+	}
+}
+
+func TestJoinGroupRequestLegacyWithoutInstance(t *testing.T) {
+	raw := mustHex(t, "02006731"+"02006d31"+"88130000"+"01000000"+"010074")
+	decoded, err := DecodeJoinGroupRequest(raw)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if decoded.GroupID != "g1" || decoded.MemberID != "m1" || decoded.SessionTimeoutMs != 5000 {
+		t.Fatalf("decoded %+v", decoded)
+	}
+	if len(decoded.Topics) != 1 || decoded.Topics[0] != "t" || decoded.GroupInstanceID != "" {
+		t.Fatalf("topics/instance %+v", decoded)
+	}
+}
+
+func TestJoinGroupResponsePayloadRS(t *testing.T) {
+	resp := JoinGroupResponse{
+		ErrorCode:  0,
+		Generation: 1,
+		MemberID:   "uuid-1",
+		Assignment: []Assignment{
+			{Topic: "events", Partition: 0},
+			{Topic: "events", Partition: 1},
+		},
+		Revoked: []Assignment{{Topic: "events", Partition: 2}},
+	}
+	raw, err := EncodeJoinGroupResponse(resp)
+	if err != nil {
+		t.Fatal(err)
+	}
+	expected := mustHex(t,
+		"0000"+
+			"01000000"+
+			"0600"+
+			"757569642d31"+
+			"02000000"+
+			"06006576656e7473"+
+			"00000000"+
+			"06006576656e7473"+
+			"01000000"+
+			"01000000"+
+			"06006576656e7473"+
+			"02000000",
+	)
+	if !bytes.Equal(raw, expected) {
+		t.Fatalf("encode:\n got %x\nwant %x", raw, expected)
+	}
+	decoded, err := DecodeJoinGroupResponse(raw)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if decoded.MemberID != "uuid-1" || decoded.Generation != 1 || len(decoded.Assignment) != 2 {
+		t.Fatalf("decoded %+v", decoded)
+	}
+	if decoded.Assignment[1].Partition != 1 || decoded.Revoked[0].Partition != 2 {
+		t.Fatalf("assignment/revoked %+v", decoded)
+	}
+	got, err := DecodeResponse(OpJoinGroup, raw)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if jr, ok := got.(JoinGroupResponse); !ok || jr.MemberID != "uuid-1" {
+		t.Fatalf("dispatch %#v", got)
+	}
+}
+
+func TestJoinGroupResponseLegacyWithoutRevoked(t *testing.T) {
+	raw := mustHex(t, "0000"+"01000000"+"0600757569642d31"+"01000000"+"06006576656e7473"+"00000000")
+	decoded, err := DecodeJoinGroupResponse(raw)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if decoded.MemberID != "uuid-1" || decoded.Generation != 1 || len(decoded.Assignment) != 1 {
+		t.Fatalf("decoded %+v", decoded)
+	}
+	if decoded.Assignment[0] != (Assignment{Topic: "events", Partition: 0}) {
+		t.Fatalf("assignment %+v", decoded.Assignment)
+	}
+	if len(decoded.Revoked) != 0 {
+		t.Fatalf("revoked %+v", decoded.Revoked)
+	}
+}
+
+func TestHeartbeatRequestPayloadRS(t *testing.T) {
+	req := HeartbeatRequest{GroupID: "g1", MemberID: "m1", Generation: 3}
+	raw, err := EncodeHeartbeatRequest(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	expected := mustHex(t, "02006731"+"02006d31"+"03000000")
+	if !bytes.Equal(raw, expected) {
+		t.Fatalf("encode:\n got %x\nwant %x", raw, expected)
+	}
+	decoded, err := DecodeHeartbeatRequest(raw)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if decoded != req {
+		t.Fatalf("decoded %+v", decoded)
+	}
+}
+
+func TestHeartbeatResponseRebalance(t *testing.T) {
+	resp := HeartbeatResponse{ErrorCode: 9}
+	raw, err := EncodeHeartbeatResponse(resp)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.Equal(raw, mustHex(t, "0900")) {
+		t.Fatalf("raw %x", raw)
+	}
+	decoded, err := DecodeHeartbeatResponse(raw)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if decoded != resp {
+		t.Fatalf("decoded %+v", decoded)
+	}
+	got, err := DecodeResponse(OpHeartbeat, raw)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if hr, ok := got.(HeartbeatResponse); !ok || hr.ErrorCode != 9 {
+		t.Fatalf("dispatch %#v", got)
+	}
+}
+
+func TestLeaveGroupRequestPayloadRS(t *testing.T) {
+	req := LeaveGroupRequest{GroupID: "g1", MemberID: "m1"}
+	raw, err := EncodeLeaveGroupRequest(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	expected := mustHex(t, "02006731"+"02006d31")
+	if !bytes.Equal(raw, expected) {
+		t.Fatalf("encode:\n got %x\nwant %x", raw, expected)
+	}
+	decoded, err := DecodeLeaveGroupRequest(raw)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if decoded != req {
+		t.Fatalf("decoded %+v", decoded)
+	}
+}
+
+func TestLeaveGroupResponse(t *testing.T) {
+	resp := LeaveGroupResponse{ErrorCode: 0}
+	raw, err := EncodeLeaveGroupResponse(resp)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.Equal(raw, mustHex(t, "0000")) {
+		t.Fatalf("raw %x", raw)
+	}
+	decoded, err := DecodeLeaveGroupResponse(raw)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if decoded != resp {
+		t.Fatalf("decoded %+v", decoded)
+	}
+	got, err := DecodeResponse(OpLeaveGroup, raw)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if lr, ok := got.(LeaveGroupResponse); !ok || lr.ErrorCode != 0 {
+		t.Fatalf("dispatch %#v", got)
+	}
+}

@@ -4,11 +4,12 @@ from __future__ import annotations
 
 import socket
 import ssl
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Iterable, Optional, Union
 
 from . import codec
 from .codec import (
+    Assignment,
     BrokerError,
     BrokerInfo,
     CreateTopicRequest,
@@ -16,6 +17,12 @@ from .codec import (
     FetchRecord,
     FetchRequest,
     FetchResponse,
+    HeartbeatRequest,
+    HeartbeatResponse,
+    JoinGroupRequest,
+    JoinGroupResponse,
+    LeaveGroupRequest,
+    LeaveGroupResponse,
     MetadataRequest,
     MetadataResponse,
     OffsetCommitEntry,
@@ -57,6 +64,25 @@ class ProduceResult:
     partition: int
     base_offset: int
     count: int
+
+
+@dataclass
+class JoinGroupResult:
+    """Result of a successful JoinGroup.
+
+    Unpacks as ``(member_id, generation, assignment)`` to match the advertised
+    client API. ``revoked`` is the Phase 17 cooperative trailer (may be empty).
+    """
+
+    member_id: str
+    generation: int
+    assignment: list[Assignment]
+    revoked: list[Assignment] = field(default_factory=list)
+
+    def __iter__(self):
+        yield self.member_id
+        yield self.generation
+        yield self.assignment
 
 
 @dataclass
@@ -125,6 +151,11 @@ class Client:
         batch = c.fetch("t", 0, offset=0)
         c.offset_commit(group="g", topic="t", partition=0, offset=5)
         offs = c.offset_fetch(group="g", topic="t")
+        member_id, generation, assignment = c.join_group(
+            "g", topics=["t"], session_timeout_ms=10000
+        )
+        c.heartbeat("g", member_id, generation)
+        c.leave_group("g", member_id)
         meta = c.metadata()
         c.close()
 
@@ -410,14 +441,74 @@ class Client:
         self._check(resp.error_code, "offset_fetch")
         return [(e.partition, e.offset) for e in resp.entries if e.topic == topic]
 
+    def join_group(
+        self,
+        group: str,
+        topics: Optional[list[str]] = None,
+        session_timeout_ms: int = 10_000,
+        *,
+        member_id: str = "",
+        group_instance_id: str = "",
+    ) -> JoinGroupResult:
+        """Join a consumer group.
+
+        First join sends empty ``member_id`` (broker assigns one). Returns a
+        result that unpacks as ``(member_id, generation, assignment)``.
+        """
+        timeout = 10_000 if session_timeout_ms == 0 else session_timeout_ms
+        payload = codec.encode_join_group_request(
+            JoinGroupRequest(
+                group_id=group,
+                member_id=member_id,
+                session_timeout_ms=timeout,
+                topics=list(topics) if topics else [],
+                group_instance_id=group_instance_id,
+            )
+        )
+        resp = self._round_trip(codec.OP_JOIN_GROUP, payload)
+        if not isinstance(resp, JoinGroupResponse):
+            raise ProtocolError(f"unexpected response for join_group: {type(resp)}")
+        self._check(resp.error_code, "join_group")
+        return JoinGroupResult(
+            member_id=resp.member_id,
+            generation=resp.generation,
+            assignment=list(resp.assignment),
+            revoked=list(resp.revoked),
+        )
+
+    def heartbeat(self, group: str, member_id: str, generation: int) -> int:
+        """Heartbeat for group membership. Returns the broker error_code."""
+        payload = codec.encode_heartbeat_request(
+            HeartbeatRequest(
+                group_id=group, member_id=member_id, generation=generation
+            )
+        )
+        resp = self._round_trip(codec.OP_HEARTBEAT, payload)
+        if not isinstance(resp, HeartbeatResponse):
+            raise ProtocolError(f"unexpected response for heartbeat: {type(resp)}")
+        self._check(resp.error_code, "heartbeat")
+        return resp.error_code
+
+    def leave_group(self, group: str, member_id: str) -> None:
+        """Leave a consumer group."""
+        payload = codec.encode_leave_group_request(
+            LeaveGroupRequest(group_id=group, member_id=member_id)
+        )
+        resp = self._round_trip(codec.OP_LEAVE_GROUP, payload)
+        if not isinstance(resp, LeaveGroupResponse):
+            raise ProtocolError(f"unexpected response for leave_group: {type(resp)}")
+        self._check(resp.error_code, "leave_group")
+
 
 # Re-export result types used by callers.
 __all__ = [
+    "Assignment",
     "BrokerError",
     "BrokerInfo",
     "Client",
     "FetchRecord",
     "FetchResult",
+    "JoinGroupResult",
     "MetadataResponse",
     "ProduceMessage",
     "ProduceResult",

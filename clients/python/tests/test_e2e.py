@@ -186,6 +186,21 @@ class TestE2E(unittest.TestCase):
             self.assertEqual(offs, [(0, 5)])
             c.delete_topic(topic)
 
+    def test_join_heartbeat_leave(self) -> None:
+        topic = f"py-grp-{os.getpid()}-{int(time.time())}"
+        group = f"py-cg-{os.getpid()}"
+        with Client(self.addr, timeout=5.0) as c:
+            c.create_topic(topic, partitions=1)
+            member_id, generation, assignment = c.join_group(
+                group, topics=[topic], session_timeout_ms=10000
+            )
+            self.assertTrue(member_id)
+            self.assertGreaterEqual(generation, 1)
+            self.assertEqual([(a.topic, a.partition) for a in assignment], [(topic, 0)])
+            self.assertEqual(c.heartbeat(group, member_id, generation), 0)
+            c.leave_group(group, member_id)
+            c.delete_topic(topic)
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -2,7 +2,7 @@
 
 Matches `crates/volant-protocol/src/payload.rs` for the MVP opcodes:
 Produce, Fetch, CreateTopic, Metadata, DeleteTopic, OffsetCommit,
-OffsetFetch.
+OffsetFetch, JoinGroup, Heartbeat, LeaveGroup.
 
 Header fields are big-endian (see :mod:`volant.frame`); **payload** integers
 and length prefixes are little-endian.
@@ -23,6 +23,9 @@ OP_METADATA = 4
 OP_DELETE_TOPIC = 5
 OP_OFFSET_COMMIT = 6
 OP_OFFSET_FETCH = 7
+OP_JOIN_GROUP = 8
+OP_HEARTBEAT = 9
+OP_LEAVE_GROUP = 10
 OP_ERROR = 0xFFFF
 
 _NULL_LEN = 0xFFFFFFFF
@@ -359,6 +362,53 @@ class OffsetFetchEntry:
 class OffsetFetchResponse:
     error_code: int
     entries: list[OffsetFetchEntry]
+
+
+@dataclass
+class Assignment:
+    topic: str
+    partition: int
+
+
+@dataclass
+class JoinGroupRequest:
+    group_id: str
+    member_id: str
+    session_timeout_ms: int
+    topics: list[str] = field(default_factory=list)
+    group_instance_id: str = ""
+
+
+@dataclass
+class JoinGroupResponse:
+    error_code: int
+    generation: int
+    member_id: str
+    assignment: list[Assignment] = field(default_factory=list)
+    revoked: list[Assignment] = field(default_factory=list)
+
+
+@dataclass
+class HeartbeatRequest:
+    group_id: str
+    member_id: str
+    generation: int
+
+
+@dataclass
+class HeartbeatResponse:
+    error_code: int
+
+
+@dataclass
+class LeaveGroupRequest:
+    group_id: str
+    member_id: str
+
+
+@dataclass
+class LeaveGroupResponse:
+    error_code: int
 
 
 # --- produce ---------------------------------------------------------------
@@ -771,6 +821,136 @@ def decode_offset_fetch_response(payload: bytes) -> OffsetFetchResponse:
     return OffsetFetchResponse(error_code=error_code, entries=entries)
 
 
+# --- join / heartbeat / leave ----------------------------------------------
+
+
+def _put_assignments(w: _Writer, items: list[Assignment]) -> None:
+    w.u32_le(len(items))
+    for a in items:
+        _put_string(w, a.topic)
+        w.u32_le(a.partition)
+
+
+def _get_assignments(r: _Reader) -> list[Assignment]:
+    n = r.u32_le()
+    out: list[Assignment] = []
+    for _ in range(n):
+        topic = _get_string(r)
+        partition = r.u32_le()
+        out.append(Assignment(topic=topic, partition=partition))
+    return out
+
+
+def encode_join_group_request(req: JoinGroupRequest) -> bytes:
+    w = _Writer()
+    _put_string(w, req.group_id)
+    _put_string(w, req.member_id)
+    w.u32_le(req.session_timeout_ms)
+    w.u32_le(len(req.topics))
+    for t in req.topics:
+        _put_string(w, t)
+    # Phase 12 trailing field (always written by current encoders).
+    _put_string(w, req.group_instance_id)
+    return w.finish()
+
+
+def decode_join_group_request(payload: bytes) -> JoinGroupRequest:
+    r = _Reader(payload)
+    group_id = _get_string(r)
+    member_id = _get_string(r)
+    session_timeout_ms = r.u32_le()
+    n = r.u32_le()
+    topics = [_get_string(r) for _ in range(n)]
+    # Phase 12 trailing field; legacy payloads omit it.
+    group_instance_id = _get_string(r) if r.remaining() > 0 else ""
+    return JoinGroupRequest(
+        group_id=group_id,
+        member_id=member_id,
+        session_timeout_ms=session_timeout_ms,
+        topics=topics,
+        group_instance_id=group_instance_id,
+    )
+
+
+def encode_join_group_response(resp: JoinGroupResponse) -> bytes:
+    w = _Writer()
+    w.u16_le(resp.error_code)
+    w.u32_le(resp.generation)
+    _put_string(w, resp.member_id)
+    _put_assignments(w, resp.assignment)
+    # Phase 17 trailing revoked list (always written by current encoders).
+    _put_assignments(w, resp.revoked)
+    return w.finish()
+
+
+def decode_join_group_response(payload: bytes) -> JoinGroupResponse:
+    r = _Reader(payload)
+    error_code = r.u16_le()
+    generation = r.u32_le()
+    member_id = _get_string(r)
+    assignment = _get_assignments(r)
+    # Phase 17 trailing revoked list; legacy payloads omit it.
+    revoked = _get_assignments(r) if r.remaining() >= 4 else []
+    return JoinGroupResponse(
+        error_code=error_code,
+        generation=generation,
+        member_id=member_id,
+        assignment=assignment,
+        revoked=revoked,
+    )
+
+
+def encode_heartbeat_request(req: HeartbeatRequest) -> bytes:
+    w = _Writer()
+    _put_string(w, req.group_id)
+    _put_string(w, req.member_id)
+    w.u32_le(req.generation)
+    return w.finish()
+
+
+def decode_heartbeat_request(payload: bytes) -> HeartbeatRequest:
+    r = _Reader(payload)
+    return HeartbeatRequest(
+        group_id=_get_string(r),
+        member_id=_get_string(r),
+        generation=r.u32_le(),
+    )
+
+
+def encode_heartbeat_response(resp: HeartbeatResponse) -> bytes:
+    w = _Writer()
+    w.u16_le(resp.error_code)
+    return w.finish()
+
+
+def decode_heartbeat_response(payload: bytes) -> HeartbeatResponse:
+    r = _Reader(payload)
+    return HeartbeatResponse(error_code=r.u16_le())
+
+
+def encode_leave_group_request(req: LeaveGroupRequest) -> bytes:
+    w = _Writer()
+    _put_string(w, req.group_id)
+    _put_string(w, req.member_id)
+    return w.finish()
+
+
+def decode_leave_group_request(payload: bytes) -> LeaveGroupRequest:
+    r = _Reader(payload)
+    return LeaveGroupRequest(group_id=_get_string(r), member_id=_get_string(r))
+
+
+def encode_leave_group_response(resp: LeaveGroupResponse) -> bytes:
+    w = _Writer()
+    w.u16_le(resp.error_code)
+    return w.finish()
+
+
+def decode_leave_group_response(payload: bytes) -> LeaveGroupResponse:
+    r = _Reader(payload)
+    return LeaveGroupResponse(error_code=r.u16_le())
+
+
 # --- error opcode ----------------------------------------------------------
 
 
@@ -802,6 +982,12 @@ def decode_response(opcode: int, payload: bytes):
         return decode_offset_commit_response(payload)
     if opcode == OP_OFFSET_FETCH:
         return decode_offset_fetch_response(payload)
+    if opcode == OP_JOIN_GROUP:
+        return decode_join_group_response(payload)
+    if opcode == OP_HEARTBEAT:
+        return decode_heartbeat_response(payload)
+    if opcode == OP_LEAVE_GROUP:
+        return decode_leave_group_response(payload)
     if opcode == OP_ERROR:
         return decode_error_response(payload)
     raise ProtocolError(f"unknown response opcode {opcode}")
