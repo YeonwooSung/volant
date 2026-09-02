@@ -893,24 +893,44 @@ func (c *Client) RemoveBroker(id uint32) (uint64, error) {
 
 
 // ListMembers lists configured + live membership (native opcode 106/107).
-// Overlay is still SoT.
+// Overlay is still SoT. Transient broker/transport errors retry up to
+// maxRetries extra times (default 0). Error 2 / 9 / 10 / 11 / 13 / 14
+// are not retried.
 func (c *Client) ListMembers() (MembershipList, error) {
-	decoded, err := c.roundTrip(codec.OpListMembers, codec.EncodeListMembersRequest())
-	if err != nil {
-		return MembershipList{}, err
+	payload := codec.EncodeListMembersRequest()
+	maxRetries := c.maxRetries
+	if maxRetries < 0 {
+		maxRetries = 0
 	}
-	resp, ok := decoded.(codec.ListMembersResponse)
-	if !ok {
-		return MembershipList{}, &frame.ProtocolError{Msg: fmt.Sprintf("unexpected response for list_members: %T", decoded)}
+	retryAttempt := 0
+	for {
+		decoded, err := c.roundTrip(codec.OpListMembers, payload)
+		if err != nil {
+			if isTransientProduceErr(err) && retryAttempt < maxRetries {
+				retryAttempt++
+				c.sleepProduceRetry()
+				continue
+			}
+			return MembershipList{}, err
+		}
+		resp, ok := decoded.(codec.ListMembersResponse)
+		if !ok {
+			return MembershipList{}, &frame.ProtocolError{Msg: fmt.Sprintf("unexpected response for list_members: %T", decoded)}
+		}
+		if isTransientBroker(resp.ErrorCode) && retryAttempt < maxRetries {
+			retryAttempt++
+			c.sleepProduceRetry()
+			continue
+		}
+		if err := check(resp.ErrorCode, "list_members"); err != nil {
+			return MembershipList{}, err
+		}
+		return MembershipList{
+			Generation: resp.Generation,
+			Brokers:    resp.Brokers,
+			Live:       resp.Live,
+		}, nil
 	}
-	if err := check(resp.ErrorCode, "list_members"); err != nil {
-		return MembershipList{}, err
-	}
-	return MembershipList{
-		Generation: resp.Generation,
-		Brokers:    resp.Brokers,
-		Live:       resp.Live,
-	}, nil
 }
 
 func (c *Client) ReassignPartitions(topic string, replicas []uint32, partition *uint32) (uint32, error) {
@@ -1424,20 +1444,36 @@ func (c *Client) reconnect(addr string) error {
 }
 
 // Metadata returns cluster brokers and topics (all topics when the list is empty).
+// Transient broker/transport errors retry up to maxRetries extra times
+// (default 0). Native Metadata has no top-level error_code; failures
+// arrive as Error opcode / transport. Error 2 / 9 / 10 / 11 / 13 / 14
+// are not retried.
 func (c *Client) Metadata() (Metadata, error) {
 	payload, err := codec.EncodeMetadataRequest(codec.MetadataRequest{Topics: []string{}})
 	if err != nil {
 		return Metadata{}, err
 	}
-	decoded, err := c.roundTrip(codec.OpMetadata, payload)
-	if err != nil {
-		return Metadata{}, err
+	maxRetries := c.maxRetries
+	if maxRetries < 0 {
+		maxRetries = 0
 	}
-	resp, ok := decoded.(codec.MetadataResponse)
-	if !ok {
-		return Metadata{}, &frame.ProtocolError{Msg: fmt.Sprintf("unexpected response for metadata: %T", decoded)}
+	retryAttempt := 0
+	for {
+		decoded, err := c.roundTrip(codec.OpMetadata, payload)
+		if err != nil {
+			if isTransientProduceErr(err) && retryAttempt < maxRetries {
+				retryAttempt++
+				c.sleepProduceRetry()
+				continue
+			}
+			return Metadata{}, err
+		}
+		resp, ok := decoded.(codec.MetadataResponse)
+		if !ok {
+			return Metadata{}, &frame.ProtocolError{Msg: fmt.Sprintf("unexpected response for metadata: %T", decoded)}
+		}
+		return resp, nil
 	}
-	return resp, nil
 }
 
 // OffsetCommit commits one group offset (admin path: empty member, generation 0).
