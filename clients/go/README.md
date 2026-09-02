@@ -40,6 +40,17 @@ _ = offs
 meta, err := c.Metadata()
 _ = off
 _ = meta
+
+// Optional TLS (v0.27). Dial stays plaintext.
+c, err = volant.DialTLS("127.0.0.1:9092", volant.TLSConfig{CAFile: "ca.pem"})
+// Lab / tests only:
+c, err = volant.DialTLS("127.0.0.1:9092", volant.TLSConfig{Insecure: true})
+// Optional mTLS (client cert + key PEMs, both required):
+c, err = volant.DialTLS("127.0.0.1:9092", volant.TLSConfig{
+    CAFile:   "ca.pem",
+    CertFile: "client.pem",
+    KeyFile:  "client.key",
+})
 ```
 
 `Produce(..., nil, value)` sends a null key. `Fetch` returns `[]Record`
@@ -75,13 +86,20 @@ VOLANT_E2E=1 go test ./clients/go -count=1
 Repo helper: `scripts/go_client_smoke.sh` (skips if `go` is missing).
 Not a required default-CI job.
 
+TLS knobs match the Rust client as closely as `crypto/tls` allows:
+`DialTLS` / `DialTLSTimeout` wrap after TCP connect; `TLSConfig.CAFile`
+is a PEM added to the system trust store; `Insecure` skips verify
+(tests / lab only); `CertFile` + `KeyFile` are optional mTLS PEMs and
+must be paired. Handshake failures close the TCP socket.
+
 ## Honesty
 
-Not implemented: Java client, `kafka-go`, JoinGroup / Heartbeat /
-LeaveGroup, TLS / SCRAM / shared-token auth, async I/O, idempotent
-produce, leader redirect. Offset commit/fetch is the admin path only
-(empty member, generation 0). Sync only; one TCP connection; acks=1 by
-default.
+Not implemented: `kafka-go`, JoinGroup / Heartbeat / LeaveGroup, SCRAM /
+shared-token auth, async I/O, idempotent produce, leader redirect.
+Offset commit/fetch is the admin path only (empty member, generation 0).
+Sync only; one TCP connection; acks=1 by default. TLS does not change
+broker TLS (Phase 8/19) and does not add Kafka API keys.
 
-See [docs/V19_SPEC.md](../../docs/V19_SPEC.md) and
-[docs/V24_SPEC.md](../../docs/V24_SPEC.md).
+See [docs/V19_SPEC.md](../../docs/V19_SPEC.md),
+[docs/V24_SPEC.md](../../docs/V24_SPEC.md), and
+[docs/V27_SPEC.md](../../docs/V27_SPEC.md).

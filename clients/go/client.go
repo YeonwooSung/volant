@@ -4,10 +4,13 @@
 package volant
 
 import (
+	"crypto/tls"
+	"crypto/x509"
 	"encoding/binary"
 	"fmt"
 	"io"
 	"net"
+	"os"
 	"time"
 
 	"github.com/volant-mq/volant/clients/go/codec"
@@ -46,6 +49,25 @@ type Client struct {
 	timeout  time.Duration
 	nextCorr uint32
 	buf      []byte
+	tls      bool
+}
+
+// TLSConfig is optional TLS for [DialTLS]. Zero value uses system roots
+// and no client certificate. Plaintext remains [Dial] / [DialTimeout].
+type TLSConfig struct {
+	// CAFile is a PEM CA bundle added to the system trust store (same
+	// idea as Rust webpki-roots + optional tls_ca). Empty = system roots
+	// only. Required in practice for a private / lab CA unless Insecure.
+	CAFile string
+	// Insecure skips certificate verification (tests / lab only).
+	Insecure bool
+	// CertFile is an optional client certificate PEM for mTLS.
+	CertFile string
+	// KeyFile is the client private key PEM. Must be paired with CertFile.
+	KeyFile string
+	// ServerName overrides the hostname used for SNI / verify
+	// (defaults to the dial host).
+	ServerName string
 }
 
 // Dial connects to a native Volant listener (host:port) with a 10s timeout.
@@ -65,6 +87,93 @@ func DialTimeout(addr string, timeout time.Duration) (*Client, error) {
 		timeout:  timeout,
 		nextCorr: 1,
 	}, nil
+}
+
+// DialTLS connects with TLS after TCP (v0.27). Example:
+//
+//	c, err := volant.DialTLS("127.0.0.1:9092", volant.TLSConfig{CAFile: "ca.pem"})
+func DialTLS(addr string, cfg TLSConfig) (*Client, error) {
+	return DialTLSTimeout(addr, cfg, defaultTimeout)
+}
+
+// DialTLSTimeout is [DialTLS] with an explicit dial / handshake / RPC timeout.
+func DialTLSTimeout(addr string, cfg TLSConfig, timeout time.Duration) (*Client, error) {
+	if (cfg.CertFile == "") != (cfg.KeyFile == "") {
+		return nil, fmt.Errorf("tls_cert and tls_key must both be set or both unset")
+	}
+	conn, err := net.DialTimeout("tcp", addr, timeout)
+	if err != nil {
+		return nil, err
+	}
+	if timeout > 0 {
+		_ = conn.SetDeadline(time.Now().Add(timeout))
+	}
+	tlsConn, err := wrapTLS(conn, addr, cfg)
+	if err != nil {
+		_ = conn.Close()
+		return nil, err
+	}
+	if timeout > 0 {
+		_ = tlsConn.SetDeadline(time.Time{})
+	}
+	return &Client{
+		addr:     addr,
+		conn:     tlsConn,
+		timeout:  timeout,
+		nextCorr: 1,
+		tls:      true,
+	}, nil
+}
+
+// TLS reports whether the connection is TLS-wrapped.
+func (c *Client) TLS() bool {
+	return c != nil && c.tls
+}
+
+func wrapTLS(conn net.Conn, addr string, cfg TLSConfig) (net.Conn, error) {
+	if (cfg.CertFile == "") != (cfg.KeyFile == "") {
+		return nil, fmt.Errorf("tls_cert and tls_key must both be set or both unset")
+	}
+	host, _, err := net.SplitHostPort(addr)
+	if err != nil {
+		host = addr
+	}
+	tc := &tls.Config{
+		MinVersion: tls.VersionTLS12,
+		ServerName: host,
+	}
+	if cfg.ServerName != "" {
+		tc.ServerName = cfg.ServerName
+	}
+	if cfg.Insecure {
+		tc.InsecureSkipVerify = true
+	}
+	if cfg.CAFile != "" {
+		pem, err := os.ReadFile(cfg.CAFile)
+		if err != nil {
+			return nil, fmt.Errorf("tls_ca: %w", err)
+		}
+		pool, err := x509.SystemCertPool()
+		if err != nil || pool == nil {
+			pool = x509.NewCertPool()
+		}
+		if !pool.AppendCertsFromPEM(pem) {
+			return nil, fmt.Errorf("tls_ca: no certificates in %s", cfg.CAFile)
+		}
+		tc.RootCAs = pool
+	}
+	if cfg.CertFile != "" {
+		cert, err := tls.LoadX509KeyPair(cfg.CertFile, cfg.KeyFile)
+		if err != nil {
+			return nil, fmt.Errorf("client TLS cert: %w", err)
+		}
+		tc.Certificates = []tls.Certificate{cert}
+	}
+	tconn := tls.Client(conn, tc)
+	if err := tconn.Handshake(); err != nil {
+		return nil, err
+	}
+	return tconn, nil
 }
 
 // Close closes the TCP connection. Subsequent RPCs return an error.

@@ -23,3 +23,29 @@ cargo run -p volant-server --features tls -- \
 ```
 
 Do not commit `*.crt` / `*.key` files.
+
+## Native multi-lang clients (v0.27)
+
+Same certs work with the Python / Go / Java clients (plain TCP is still
+the default). After the server is listening with `--tls-cert` /
+`--tls-key`:
+
+```python
+from volant import Client
+c = Client("127.0.0.1:9092", tls=True, tls_ca="server.crt")  # or a CA PEM
+```
+
+```go
+c, err := volant.DialTLS("127.0.0.1:9092", volant.TLSConfig{CAFile: "server.crt"})
+```
+
+```java
+try (Client c = Client.connectTls("127.0.0.1", 9092, TlsOptions.ca("server.crt"))) {
+  c.metadata();
+}
+```
+
+Self-signed lab certs need a SAN for the dial host (`localhost` /
+`127.0.0.1`). `tls_insecure` / `Insecure` / `TlsOptions.insecure()`
+skips verify (tests only). Optional mTLS: pass a client cert + key PEM
+pair. See [docs/V27_SPEC.md](../../docs/V27_SPEC.md).
