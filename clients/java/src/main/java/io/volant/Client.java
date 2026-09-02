@@ -19,6 +19,9 @@ import java.util.List;
  *   c.createTopic("t", 1);
  *   long off = c.produce("t", 0, null, "hello".getBytes(UTF_8));
  *   List&lt;Record&gt; recs = c.fetch("t", 0, 0);
+ *   JoinGroupResult j = c.joinGroup("g", java.util.List.of("t"), 10000);
+ *   c.heartbeat("g", j.memberId, j.generation);
+ *   c.leaveGroup("g", j.memberId);
  *   Metadata meta = c.metadata();
  * }
  * </pre>
@@ -241,6 +244,48 @@ public final class Client implements AutoCloseable {
         Codec.FetchResponse resp = (Codec.FetchResponse) decoded;
         check(resp.errorCode, "fetch");
         return resp.records;
+    }
+
+    /**
+     * Join a consumer group. First join sends empty {@code memberId}
+     * (broker assigns one). {@code sessionTimeoutMs} 0 defaults to 10000.
+     */
+    public JoinGroupResult joinGroup(String group, List<String> topics, int sessionTimeoutMs) {
+        long timeout = sessionTimeoutMs == 0 ? 10_000L : sessionTimeoutMs;
+        if (topics == null) {
+            topics = Collections.emptyList();
+        }
+        byte[] payload = Codec.encodeJoinGroupRequest(
+                new Codec.JoinGroupRequest(group, "", timeout, topics, ""));
+        Object decoded = roundTrip(Codec.OP_JOIN_GROUP, payload);
+        if (!(decoded instanceof Codec.JoinGroupResponse)) {
+            throw new ProtocolException("unexpected response for join_group: " + typeName(decoded));
+        }
+        Codec.JoinGroupResponse resp = (Codec.JoinGroupResponse) decoded;
+        check(resp.errorCode, "join_group");
+        return new JoinGroupResult(resp.memberId, resp.generation, resp.assignment, resp.revoked);
+    }
+
+    /** Heartbeat for group membership. Non-zero error_code is BrokerException. */
+    public void heartbeat(String group, String memberId, long generation) {
+        byte[] payload = Codec.encodeHeartbeatRequest(new Codec.HeartbeatRequest(group, memberId, generation));
+        Object decoded = roundTrip(Codec.OP_HEARTBEAT, payload);
+        if (!(decoded instanceof Codec.HeartbeatResponse)) {
+            throw new ProtocolException("unexpected response for heartbeat: " + typeName(decoded));
+        }
+        Codec.HeartbeatResponse resp = (Codec.HeartbeatResponse) decoded;
+        check(resp.errorCode, "heartbeat");
+    }
+
+    /** Leave a consumer group. */
+    public void leaveGroup(String group, String memberId) {
+        byte[] payload = Codec.encodeLeaveGroupRequest(new Codec.LeaveGroupRequest(group, memberId));
+        Object decoded = roundTrip(Codec.OP_LEAVE_GROUP, payload);
+        if (!(decoded instanceof Codec.LeaveGroupResponse)) {
+            throw new ProtocolException("unexpected response for leave_group: " + typeName(decoded));
+        }
+        Codec.LeaveGroupResponse resp = (Codec.LeaveGroupResponse) decoded;
+        check(resp.errorCode, "leave_group");
     }
 
     /** Cluster brokers and topics (all topics). */

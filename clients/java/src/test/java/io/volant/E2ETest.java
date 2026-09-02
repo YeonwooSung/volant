@@ -121,6 +121,24 @@ class E2ETest {
         }
     }
 
+    @Test
+    void joinHeartbeatLeave() {
+        String topic = "java-grp-" + ProcessHandle.current().pid() + "-" + System.nanoTime();
+        String group = "java-cg-" + ProcessHandle.current().pid();
+        try (Client c = Client.connect(host, port, 5_000)) {
+            c.createTopic(topic, 1);
+            JoinGroupResult j = c.joinGroup(group, List.of(topic), 10000);
+            assertFalse(j.memberId.isEmpty(), "expected broker-assigned member id");
+            assertTrue(j.generation >= 1, "generation=" + j.generation);
+            assertEquals(1, j.assignment.size());
+            assertEquals(topic, j.assignment.get(0).topic);
+            assertEquals(0, j.assignment.get(0).partition);
+            c.heartbeat(group, j.memberId, j.generation);
+            c.leaveGroup(group, j.memberId);
+            c.deleteTopic(topic);
+        }
+    }
+
     private static Path repoRoot() {
         Path dir = Paths.get("").toAbsolutePath();
         for (int i = 0; i < 8 && dir != null; i++) {

@@ -37,6 +37,12 @@ if err := c.OffsetCommit("g", "t", 0, 5); err != nil {
 }
 offs, err := c.OffsetFetch("g", "t")
 _ = offs
+j, err := c.JoinGroup("g", []string{"t"}, 10000)
+if err != nil {
+    log.Fatal(err)
+}
+err = c.Heartbeat("g", j.MemberID, j.Generation)
+err = c.LeaveGroup("g", j.MemberID)
 meta, err := c.Metadata()
 _ = off
 _ = meta
@@ -46,6 +52,8 @@ _ = meta
 (`Offset`, `Key`, `Value`). `Metadata()` returns brokers + topics.
 `OffsetCommit` is an admin commit (empty member, generation 0).
 `OffsetFetch` returns `[]Offset` (`Partition`, `Offset`) for the topic.
+`JoinGroup` sends empty `member_id` on first join; the result has
+`MemberID`, `Generation`, and `Assignment`.
 
 Correlation ids increment per request. Decode verifies magic `V` (0x56),
 protocol version 1, and IEEE CRC32 of the **payload only**. Broker
@@ -77,11 +85,11 @@ Not a required default-CI job.
 
 ## Honesty
 
-Not implemented: Java client, `kafka-go`, JoinGroup / Heartbeat /
-LeaveGroup, TLS / SCRAM / shared-token auth, async I/O, idempotent
-produce, leader redirect. Offset commit/fetch is the admin path only
-(empty member, generation 0). Sync only; one TCP connection; acks=1 by
-default.
+Not implemented: `kafka-go`, high-level GroupConsumer / assignor loop,
+TLS / SCRAM / shared-token auth, async I/O, idempotent produce, leader
+redirect. Offset commit/fetch is the admin path only (empty member,
+generation 0). Sync only; one TCP connection; acks=1 by default.
 
-See [docs/V19_SPEC.md](../../docs/V19_SPEC.md) and
-[docs/V24_SPEC.md](../../docs/V24_SPEC.md).
+See [docs/V19_SPEC.md](../../docs/V19_SPEC.md),
+[docs/V24_SPEC.md](../../docs/V24_SPEC.md), and
+[docs/V28_SPEC.md](../../docs/V28_SPEC.md).

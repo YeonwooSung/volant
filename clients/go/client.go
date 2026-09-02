@@ -31,12 +31,21 @@ type (
 	PartitionInfo    = codec.PartitionInfo
 	ProduceMessage   = codec.ProduceMessage
 	MetadataResponse = codec.MetadataResponse
+	Assignment       = codec.Assignment
 )
 
 // Offset is one committed (partition, offset) pair from OffsetFetch.
 type Offset struct {
 	Partition uint32
 	Offset    uint64
+}
+
+// JoinGroupResult is the successful JoinGroup reply (Rust client field names).
+type JoinGroupResult struct {
+	MemberID   string
+	Generation uint32
+	Assignment []Assignment
+	Revoked    []Assignment
 }
 
 // Client is a sync TCP client for the native Volant protocol (MVP).
@@ -358,4 +367,85 @@ func (c *Client) OffsetFetch(group, topic string) ([]Offset, error) {
 		}
 	}
 	return out, nil
+}
+
+// JoinGroup joins a consumer group. First join sends empty member_id
+// (broker assigns one). sessionTimeoutMs 0 defaults to 10000.
+func (c *Client) JoinGroup(group string, topics []string, sessionTimeoutMs int) (JoinGroupResult, error) {
+	timeout := uint32(sessionTimeoutMs)
+	if timeout == 0 {
+		timeout = 10_000
+	}
+	if topics == nil {
+		topics = []string{}
+	}
+	payload, err := codec.EncodeJoinGroupRequest(codec.JoinGroupRequest{
+		GroupID:          group,
+		MemberID:         "",
+		SessionTimeoutMs: timeout,
+		Topics:           topics,
+		GroupInstanceID:  "",
+	})
+	if err != nil {
+		return JoinGroupResult{}, err
+	}
+	decoded, err := c.roundTrip(codec.OpJoinGroup, payload)
+	if err != nil {
+		return JoinGroupResult{}, err
+	}
+	resp, ok := decoded.(codec.JoinGroupResponse)
+	if !ok {
+		return JoinGroupResult{}, &frame.ProtocolError{Msg: fmt.Sprintf("unexpected response for join_group: %T", decoded)}
+	}
+	if err := check(resp.ErrorCode, "join_group"); err != nil {
+		return JoinGroupResult{}, err
+	}
+	return JoinGroupResult{
+		MemberID:   resp.MemberID,
+		Generation: resp.Generation,
+		Assignment: resp.Assignment,
+		Revoked:    resp.Revoked,
+	}, nil
+}
+
+// Heartbeat keeps a group member alive. Non-zero error_code is BrokerError
+// (9 = rebalance in progress).
+func (c *Client) Heartbeat(group, memberID string, generation uint32) error {
+	payload, err := codec.EncodeHeartbeatRequest(codec.HeartbeatRequest{
+		GroupID:    group,
+		MemberID:   memberID,
+		Generation: generation,
+	})
+	if err != nil {
+		return err
+	}
+	decoded, err := c.roundTrip(codec.OpHeartbeat, payload)
+	if err != nil {
+		return err
+	}
+	resp, ok := decoded.(codec.HeartbeatResponse)
+	if !ok {
+		return &frame.ProtocolError{Msg: fmt.Sprintf("unexpected response for heartbeat: %T", decoded)}
+	}
+	return check(resp.ErrorCode, "heartbeat")
+}
+
+// LeaveGroup leaves a consumer group.
+func (c *Client) LeaveGroup(group, memberID string) error {
+	payload, err := codec.EncodeLeaveGroupRequest(codec.LeaveGroupRequest{
+		GroupID:  group,
+		MemberID: memberID,
+	})
+	if err != nil {
+		return err
+	}
+	decoded, err := c.roundTrip(codec.OpLeaveGroup, payload)
+	if err != nil {
+		return err
+	}
+	resp, ok := decoded.(codec.LeaveGroupResponse)
+	if !ok {
+		return &frame.ProtocolError{Msg: fmt.Sprintf("unexpected response for leave_group: %T", decoded)}
+	}
+	return check(resp.ErrorCode, "leave_group")
 }

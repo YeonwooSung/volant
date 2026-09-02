@@ -26,6 +26,11 @@ for offset, key, value in batch.tuples():
     print(offset, key, value)
 c.offset_commit(group="g", topic="t", partition=0, offset=5)
 offs = c.offset_fetch(group="g", topic="t")  # [(partition, offset), ...]
+member_id, generation, assignment = c.join_group(
+    "g", topics=["t"], session_timeout_ms=10000
+)
+c.heartbeat("g", member_id, generation)
+c.leave_group("g", member_id)
 meta = c.metadata()
 c.close()
 ```
@@ -35,7 +40,9 @@ null key is the default. `fetch` returns a `FetchResult` (iterable of records
 with `offset`, `key`, `value`). `metadata()` returns brokers + topics.
 `offset_commit` is an admin commit (`member_id=""`, `generation=0` unless
 overridden). `offset_fetch` returns committed `(partition, offset)` pairs
-for the given topic.
+for the given topic. `join_group` sends empty `member_id` on first join
+(broker assigns one) and unpacks as
+`(member_id, generation, assignment)`.
 
 Correlation ids increment per request. Decode verifies magic `V` (0x56),
 protocol version 1, and IEEE CRC32 of the **payload only**.
@@ -67,11 +74,12 @@ Repo helper: `scripts/python_client_smoke.sh` (skips if `python3` is missing).
 
 ## Honesty
 
-Not implemented: Java client, `kafka-python`, JoinGroup / Heartbeat /
-LeaveGroup, TLS / SCRAM / shared-token auth, async I/O, idempotent
-produce, leader redirect. Offset commit/fetch is the admin path only
-(empty member, generation 0). Sync only; one TCP connection; acks=1 by
-default.
+Not implemented: `kafka-python`, high-level GroupConsumer / assignor
+loop, TLS / SCRAM / shared-token auth, async I/O, idempotent produce,
+leader redirect. Offset commit/fetch is the admin path only (empty
+member, generation 0) unless the caller passes a joined `member_id` /
+`generation`. Sync only; one TCP connection; acks=1 by default.
 
-See [docs/V14_SPEC.md](../../docs/V14_SPEC.md) and
-[docs/V24_SPEC.md](../../docs/V24_SPEC.md).
+See [docs/V14_SPEC.md](../../docs/V14_SPEC.md),
+[docs/V24_SPEC.md](../../docs/V24_SPEC.md), and
+[docs/V28_SPEC.md](../../docs/V28_SPEC.md).

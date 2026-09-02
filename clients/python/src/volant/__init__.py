@@ -1,7 +1,8 @@
 """Volant native protocol client (sync TCP MVP)."""
 
-from .client import Client, FetchResult, ProduceResult
+from .client import Client, FetchResult, JoinGroupResult, ProduceResult
 from .codec import (
+    Assignment,
     BrokerError,
     BrokerInfo,
     FetchRecord,
@@ -15,11 +16,13 @@ from .frame import ProtocolError
 __version__ = "0.2.0"
 
 __all__ = [
+    "Assignment",
     "BrokerError",
     "BrokerInfo",
     "Client",
     "FetchRecord",
     "FetchResult",
+    "JoinGroupResult",
     "MetadataResponse",
     "PartitionInfo",
     "ProduceMessage",

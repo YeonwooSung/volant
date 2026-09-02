@@ -9,7 +9,8 @@ import java.util.List;
  * Little-endian native payload encode/decode.
  *
  * <p>Matches {@code crates/volant-protocol/src/payload.rs} for the MVP opcodes:
- * Produce, Fetch, CreateTopic, Metadata, DeleteTopic.
+ * Produce, Fetch, CreateTopic, Metadata, DeleteTopic, JoinGroup, Heartbeat,
+ * LeaveGroup.
  *
  * <p>Header fields are big-endian (see {@link Frame}); <strong>payload</strong>
  * integers and length prefixes are little-endian.
@@ -20,6 +21,9 @@ public final class Codec {
     public static final int OP_CREATE_TOPIC = 3;
     public static final int OP_METADATA = 4;
     public static final int OP_DELETE_TOPIC = 5;
+    public static final int OP_JOIN_GROUP = 8;
+    public static final int OP_HEARTBEAT = 9;
+    public static final int OP_LEAVE_GROUP = 10;
     public static final int OP_ERROR = 0xFFFF;
 
     static final long NULL_LEN = 0xFFFFFFFFL;
@@ -199,6 +203,102 @@ public final class Codec {
         public ErrorResponse(int code, String message) {
             this.code = code;
             this.message = message == null ? "" : message;
+        }
+    }
+
+    public static final class Assignment {
+        public final String topic;
+        public final int partition;
+
+        public Assignment(String topic, int partition) {
+            this.topic = topic;
+            this.partition = partition;
+        }
+    }
+
+    public static final class JoinGroupRequest {
+        public final String groupId;
+        public final String memberId;
+        public final long sessionTimeoutMs;
+        public final List<String> topics;
+        public final String groupInstanceId;
+
+        public JoinGroupRequest(
+                String groupId,
+                String memberId,
+                long sessionTimeoutMs,
+                List<String> topics,
+                String groupInstanceId) {
+            this.groupId = groupId;
+            this.memberId = memberId == null ? "" : memberId;
+            this.sessionTimeoutMs = sessionTimeoutMs;
+            this.topics = topics == null
+                    ? Collections.emptyList()
+                    : Collections.unmodifiableList(new ArrayList<>(topics));
+            this.groupInstanceId = groupInstanceId == null ? "" : groupInstanceId;
+        }
+    }
+
+    public static final class JoinGroupResponse {
+        public final int errorCode;
+        public final long generation;
+        public final String memberId;
+        public final List<Assignment> assignment;
+        public final List<Assignment> revoked;
+
+        public JoinGroupResponse(
+                int errorCode,
+                long generation,
+                String memberId,
+                List<Assignment> assignment,
+                List<Assignment> revoked) {
+            this.errorCode = errorCode;
+            this.generation = generation;
+            this.memberId = memberId;
+            this.assignment = assignment == null
+                    ? Collections.emptyList()
+                    : Collections.unmodifiableList(new ArrayList<>(assignment));
+            this.revoked = revoked == null
+                    ? Collections.emptyList()
+                    : Collections.unmodifiableList(new ArrayList<>(revoked));
+        }
+    }
+
+    public static final class HeartbeatRequest {
+        public final String groupId;
+        public final String memberId;
+        public final long generation;
+
+        public HeartbeatRequest(String groupId, String memberId, long generation) {
+            this.groupId = groupId;
+            this.memberId = memberId;
+            this.generation = generation;
+        }
+    }
+
+    public static final class HeartbeatResponse {
+        public final int errorCode;
+
+        public HeartbeatResponse(int errorCode) {
+            this.errorCode = errorCode;
+        }
+    }
+
+    public static final class LeaveGroupRequest {
+        public final String groupId;
+        public final String memberId;
+
+        public LeaveGroupRequest(String groupId, String memberId) {
+            this.groupId = groupId;
+            this.memberId = memberId;
+        }
+    }
+
+    public static final class LeaveGroupResponse {
+        public final int errorCode;
+
+        public LeaveGroupResponse(int errorCode) {
+            this.errorCode = errorCode;
         }
     }
 
@@ -698,6 +798,125 @@ public final class Codec {
         return new Metadata(brokers, topics);
     }
 
+    // --- join / heartbeat / leave ------------------------------------------
+
+    static void putAssignments(Writer w, List<Assignment> items) {
+        if (items == null) {
+            w.u32(0);
+            return;
+        }
+        w.u32(items.size());
+        for (Assignment a : items) {
+            putString(w, a.topic);
+            w.u32(a.partition);
+        }
+    }
+
+    static List<Assignment> getAssignments(Reader r) {
+        long n = r.u32();
+        List<Assignment> out = new ArrayList<>();
+        for (int i = 0; i < n; i++) {
+            String topic = getString(r);
+            int partition = (int) r.u32();
+            out.add(new Assignment(topic, partition));
+        }
+        return out;
+    }
+
+    public static byte[] encodeJoinGroupRequest(JoinGroupRequest req) {
+        Writer w = new Writer();
+        putString(w, req.groupId);
+        putString(w, req.memberId);
+        w.u32(req.sessionTimeoutMs);
+        w.u32(req.topics.size());
+        for (String t : req.topics) {
+            putString(w, t);
+        }
+        // Phase 12 trailing field (always written by current encoders).
+        putString(w, req.groupInstanceId);
+        return w.finish();
+    }
+
+    public static JoinGroupRequest decodeJoinGroupRequest(byte[] payload) {
+        Reader r = new Reader(payload);
+        String groupId = getString(r);
+        String memberId = getString(r);
+        long timeout = r.u32();
+        long n = r.u32();
+        List<String> topics = new ArrayList<>();
+        for (int i = 0; i < n; i++) {
+            topics.add(getString(r));
+        }
+        String instanceId = r.remaining() > 0 ? getString(r) : "";
+        return new JoinGroupRequest(groupId, memberId, timeout, topics, instanceId);
+    }
+
+    public static byte[] encodeJoinGroupResponse(JoinGroupResponse resp) {
+        Writer w = new Writer();
+        w.u16(resp.errorCode);
+        w.u32(resp.generation);
+        putString(w, resp.memberId);
+        putAssignments(w, resp.assignment);
+        // Phase 17 trailing revoked list (always written by current encoders).
+        putAssignments(w, resp.revoked);
+        return w.finish();
+    }
+
+    public static JoinGroupResponse decodeJoinGroupResponse(byte[] payload) {
+        Reader r = new Reader(payload);
+        int errorCode = r.u16();
+        long generation = r.u32();
+        String memberId = getString(r);
+        List<Assignment> assignment = getAssignments(r);
+        List<Assignment> revoked = r.remaining() >= 4 ? getAssignments(r) : Collections.emptyList();
+        return new JoinGroupResponse(errorCode, generation, memberId, assignment, revoked);
+    }
+
+    public static byte[] encodeHeartbeatRequest(HeartbeatRequest req) {
+        Writer w = new Writer();
+        putString(w, req.groupId);
+        putString(w, req.memberId);
+        w.u32(req.generation);
+        return w.finish();
+    }
+
+    public static HeartbeatRequest decodeHeartbeatRequest(byte[] payload) {
+        Reader r = new Reader(payload);
+        return new HeartbeatRequest(getString(r), getString(r), r.u32());
+    }
+
+    public static byte[] encodeHeartbeatResponse(HeartbeatResponse resp) {
+        Writer w = new Writer();
+        w.u16(resp.errorCode);
+        return w.finish();
+    }
+
+    public static HeartbeatResponse decodeHeartbeatResponse(byte[] payload) {
+        return new HeartbeatResponse(new Reader(payload).u16());
+    }
+
+    public static byte[] encodeLeaveGroupRequest(LeaveGroupRequest req) {
+        Writer w = new Writer();
+        putString(w, req.groupId);
+        putString(w, req.memberId);
+        return w.finish();
+    }
+
+    public static LeaveGroupRequest decodeLeaveGroupRequest(byte[] payload) {
+        Reader r = new Reader(payload);
+        return new LeaveGroupRequest(getString(r), getString(r));
+    }
+
+    public static byte[] encodeLeaveGroupResponse(LeaveGroupResponse resp) {
+        Writer w = new Writer();
+        w.u16(resp.errorCode);
+        return w.finish();
+    }
+
+    public static LeaveGroupResponse decodeLeaveGroupResponse(byte[] payload) {
+        return new LeaveGroupResponse(new Reader(payload).u16());
+    }
+
     // --- error opcode ------------------------------------------------------
 
     public static byte[] encodeErrorResponse(ErrorResponse resp) {
@@ -725,6 +944,12 @@ public final class Codec {
                 return decodeMetadataResponse(payload);
             case OP_DELETE_TOPIC:
                 return decodeDeleteTopicResponse(payload);
+            case OP_JOIN_GROUP:
+                return decodeJoinGroupResponse(payload);
+            case OP_HEARTBEAT:
+                return decodeHeartbeatResponse(payload);
+            case OP_LEAVE_GROUP:
+                return decodeLeaveGroupResponse(payload);
             case OP_ERROR:
                 return decodeErrorResponse(payload);
             default:

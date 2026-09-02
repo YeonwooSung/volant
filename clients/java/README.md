@@ -24,12 +24,16 @@ try (Client c = Client.connect("127.0.0.1", 9092)) {
   for (Record rec : recs) {
     System.out.println(rec.offset + " " + rec.key + " " + new String(rec.value, UTF_8));
   }
+  JoinGroupResult j = c.joinGroup("g", List.of("t"), 10000);
+  c.heartbeat("g", j.memberId, j.generation);
+  c.leaveGroup("g", j.memberId);
   Metadata meta = c.metadata();
 }
 ```
 
 `produce(..., null, value)` sends a null key. `fetch` returns `List<Record>`
 (`offset`, `key`, `value`). `metadata()` returns brokers + topics.
+`joinGroup` sends empty `memberId` on first join.
 
 Correlation ids increment per request. Decode verifies magic `V` (0x56),
 protocol version 1, and IEEE CRC32 of the **payload only**. Broker
@@ -61,8 +65,10 @@ Not a required default-CI job.
 
 ## Honesty
 
-Not implemented: `kafka-clients`, consumer groups, TLS / SCRAM /
-shared-token auth, async I/O, idempotent produce, leader redirect. Sync
-only; one TCP connection; acks=1 by default.
+Not implemented: `kafka-clients`, high-level GroupConsumer / assignor
+loop, offset commit/fetch, TLS / SCRAM / shared-token auth, async I/O,
+idempotent produce, leader redirect. Sync only; one TCP connection;
+acks=1 by default.
 
-See [docs/V23_SPEC.md](../../docs/V23_SPEC.md).
+See [docs/V23_SPEC.md](../../docs/V23_SPEC.md) and
+[docs/V28_SPEC.md](../../docs/V28_SPEC.md).
