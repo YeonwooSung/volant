@@ -730,15 +730,15 @@ class Client:
         ``rack=None`` is absent on the wire (flag 0). Returns the overlay
         generation. Non-zero ``error_code`` raises :class:`BrokerError`
         with ``op="add_broker"``. Overlay is still SoT; this is not Kafka
-        broker catalog / AlterPartitionReassignments.
+        broker catalog / AlterPartitionReassignments. Error 14 follows
+        ``max_redirects`` when the broker cannot forward.
         """
         payload = codec.encode_add_broker_request(
             codec.AddBrokerRequest(id=id, host=host, port=port, rack=rack)
         )
-        resp = self._round_trip(codec.OP_ADD_BROKER, payload)
-        if not isinstance(resp, codec.AddBrokerResponse):
-            raise ProtocolError(f"unexpected response for add_broker: {type(resp)}")
-        self._check(resp.error_code, "add_broker")
+        resp = self._admin_round_trip(
+            codec.OP_ADD_BROKER, payload, codec.AddBrokerResponse, "add_broker"
+        )
         return resp.generation
 
 
@@ -747,17 +747,18 @@ class Client:
         """Remove a broker from the membership overlay (native 104/105).
 
         Returns the overlay generation. Non-zero ``error_code`` raises
-        :class:`BrokerError` with ``op="remove_broker"``.
+        :class:`BrokerError` with ``op="remove_broker"``. Error 14 follows
+        ``max_redirects`` when the broker cannot forward.
         """
         payload = codec.encode_remove_broker_request(
             codec.RemoveBrokerRequest(id=id)
         )
-        resp = self._round_trip(codec.OP_REMOVE_BROKER, payload)
-        if not isinstance(resp, codec.RemoveBrokerResponse):
-            raise ProtocolError(
-                f"unexpected response for remove_broker: {type(resp)}"
-            )
-        self._check(resp.error_code, "remove_broker")
+        resp = self._admin_round_trip(
+            codec.OP_REMOVE_BROKER,
+            payload,
+            codec.RemoveBrokerResponse,
+            "remove_broker",
+        )
         return resp.generation
 
 
