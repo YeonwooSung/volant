@@ -553,7 +553,8 @@ impl Broker {
     /// For each partition, if `new_id` is not already a replica and
     /// `replicas.len() < min(default_rf, N)`, append `new_id`. Leader and ISR
     /// stay put (the new replica starts empty, not in ISR). Best-effort: no
-    /// generation bump when nothing changes.
+    /// generation bump when nothing changes. Leader dispatch (v0.39) restores
+    /// the pre-add assignment when joint overlay rollback runs.
     pub(super) fn auto_reassign_after_add(&self, new_id: u32) -> Result<Option<u32>> {
         let Some(cluster) = &self.cluster else {
             return Ok(None);

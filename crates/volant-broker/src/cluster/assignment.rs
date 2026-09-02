@@ -18,6 +18,9 @@ pub fn topic_hash(name: &str) -> u32 {
 /// Env flag: auto-expand under-replicated topics after `AddBroker` (v0.18).
 pub const ENV_REASSIGN_ON_ADD: &str = "VOLANT_REASSIGN_ON_ADD";
 
+/// Env flag: restore assignment when add-broker joint overlay rolls back (v0.39).
+pub const ENV_REASSIGN_ON_ADD_ROLLBACK: &str = "VOLANT_REASSIGN_ON_ADD_ROLLBACK";
+
 /// Whether the controller should expand replica sets after a successful add.
 ///
 /// Default **off**. Set `VOLANT_REASSIGN_ON_ADD=1` (or `true`/`yes`/`on`) to
@@ -32,6 +35,24 @@ pub fn reassign_on_add_enabled() -> bool {
                 || t.eq_ignore_ascii_case("on")
         }
         Err(_) => false,
+    }
+}
+
+/// Whether dispatch should restore the pre-add assignment if overlay rolls back.
+///
+/// Default **on**. Consulted only when [`reassign_on_add_enabled`] is on and
+/// v0.34 overlay rollback actually runs. `0` / `false` / `no` / `off` keeps the
+/// v0.18 assignment write even if joint membership fails.
+pub fn reassign_on_add_rollback_enabled() -> bool {
+    match std::env::var(ENV_REASSIGN_ON_ADD_ROLLBACK) {
+        Ok(s) => {
+            let t = s.trim();
+            !(t == "0"
+                || t.eq_ignore_ascii_case("false")
+                || t.eq_ignore_ascii_case("no")
+                || t.eq_ignore_ascii_case("off"))
+        }
+        Err(_) => true,
     }
 }
 
@@ -115,10 +136,8 @@ where
     list.dedup_by_key(|(id, _)| *id);
 
     let ids: Vec<u32> = list.iter().map(|(id, _)| *id).collect();
-    let rack_refs: Vec<(u32, Option<&str>)> = list
-        .iter()
-        .map(|(id, r)| (*id, r.as_deref()))
-        .collect();
+    let rack_refs: Vec<(u32, Option<&str>)> =
+        list.iter().map(|(id, r)| (*id, r.as_deref())).collect();
     let use_rack = will_use_rack_aware_assignment(rack_refs.iter().copied());
     if use_rack {
         (
@@ -381,8 +400,7 @@ pub fn reconcile_isr(
     last_caught_up: impl Fn(u32) -> Option<Instant>,
 ) -> (Vec<u32>, u64) {
     let after_offset = shrink_isr(leader, isr, leader_leo, max_lag, &leo_of);
-    let after_time =
-        shrink_isr_by_time(leader, &after_offset, max_lag_ms, now, &last_caught_up);
+    let after_time = shrink_isr_by_time(leader, &after_offset, max_lag_ms, now, &last_caught_up);
     let mut time_shrink = 0u64;
     for &id in &after_offset {
         if id != leader && !after_time.contains(&id) {
@@ -433,8 +451,7 @@ mod tests {
     #[test]
     fn round_robin_placement() {
         // No racks → legacy round-robin (identical to assign_replicas_round_robin).
-        let brokers: Vec<(u32, Option<&str>)> =
-            vec![(1, None), (2, None), (3, None)];
+        let brokers: Vec<(u32, Option<&str>)> = vec![(1, None), (2, None), (3, None)];
         let (parts, rack_aware) = assign_replicas("events", 3, brokers.iter().copied(), 3);
         assert!(!rack_aware);
         let legacy = assign_replicas_round_robin("events", 3, &[1, 2, 3], 3);
@@ -457,17 +474,13 @@ mod tests {
     #[test]
     fn multi_rack_spans_racks_when_possible() {
         // 3 brokers: racks a,a,b — RF=2 must span a and b on every partition.
-        let brokers: Vec<(u32, Option<&str>)> = vec![
-            (1, Some("a")),
-            (2, Some("a")),
-            (3, Some("b")),
-        ];
+        let brokers: Vec<(u32, Option<&str>)> =
+            vec![(1, Some("a")), (2, Some("a")), (3, Some("b"))];
         if !rack_aware_assignment_enabled() {
             // External env may disable; skip diversity assert.
             return;
         }
-        let (parts, rack_aware) =
-            assign_replicas("rack-topic", 6, brokers.iter().copied(), 2);
+        let (parts, rack_aware) = assign_replicas("rack-topic", 6, brokers.iter().copied(), 2);
         assert!(rack_aware);
         let rack_of = |id: u32| match id {
             1 | 2 => "a",
@@ -476,19 +489,19 @@ mod tests {
         };
         for p in &parts {
             assert_eq!(p.len(), 2);
-            assert_ne!(rack_of(p[0]), rack_of(p[1]), "replicas must span racks: {p:?}");
+            assert_ne!(
+                rack_of(p[0]),
+                rack_of(p[1]),
+                "replicas must span racks: {p:?}"
+            );
         }
     }
 
     #[test]
     fn single_rack_fills_rf() {
-        let brokers: Vec<(u32, Option<&str>)> = vec![
-            (1, Some("r1")),
-            (2, Some("r1")),
-            (3, Some("r1")),
-        ];
-        let (parts, rack_aware) =
-            assign_replicas("single-rack", 4, brokers.iter().copied(), 2);
+        let brokers: Vec<(u32, Option<&str>)> =
+            vec![(1, Some("r1")), (2, Some("r1")), (3, Some("r1"))];
+        let (parts, rack_aware) = assign_replicas("single-rack", 4, brokers.iter().copied(), 2);
         assert!(!rack_aware, "single configured rack → legacy");
         for p in &parts {
             assert_eq!(p.len(), 2);
@@ -513,8 +526,8 @@ mod tests {
         let isr = vec![1u32, 2, 3];
         let shrunk = shrink_isr(1, &isr, 100, 10, |id| match id {
             1 => 100,
-            2 => 95,  // lag 5 — ok
-            3 => 50,  // lag 50 — out
+            2 => 95, // lag 5 — ok
+            3 => 50, // lag 50 — out
             _ => 0,
         });
         assert_eq!(shrunk, vec![1, 2]);
@@ -626,8 +639,8 @@ mod tests {
             &replicas,
             100,
             90,
-            50,  // large message lag
-            50,  // 50ms time max
+            50, // large message lag
+            50, // 50ms time max
             now,
             Some((2, 100)),
             |id| match id {

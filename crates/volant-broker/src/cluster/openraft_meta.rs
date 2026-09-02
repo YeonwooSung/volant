@@ -1,7 +1,8 @@
 //! Opt-in openraft metadata election (v0.11) + assignment apply (v0.16)
 //! + InstallSnapshot (v0.17) + durable log / hard state (v0.21)
 //! + snapshot assignment apply (v0.22) + joint membership (v0.26)
-//! + overlay rollback on joint fail (v0.34) + redb log store (v0.35).
+//! + overlay rollback on joint fail (v0.34) + redb log store (v0.35)
+//! + assignment restore on add-broker joint fail (v0.39).
 //!
 //! When `VOLANT_OPENRAFT_METADATA=1`, the leader replicates
 //! [`MetaRequest::SetAssignment`] via opcodes 108/109. Apply writes
@@ -15,6 +16,9 @@
 //! v0.34: leader AddBroker / RemoveBroker rolls back
 //! `{data_dir}/cluster/membership.json` when `change_membership` fails
 //! (`VOLANT_OPENRAFT_JOINT_ROLLBACK` default **on**).
+//! v0.39: the same dispatch path also restores `assignment.json` when
+//! `VOLANT_REASSIGN_ON_ADD` expanded replicas before the failed joint
+//! (`VOLANT_REASSIGN_ON_ADD_ROLLBACK` default **on**).
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::fmt;
