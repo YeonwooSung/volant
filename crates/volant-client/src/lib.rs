@@ -17,6 +17,9 @@
 //! which replaces the fetch set from DescribeGroup members via
 //! `range_assign_multi`. Default remains broker JoinGroup assignment.
 //! Still no SyncGroup.
+//! v0.80 retries [`Client::heartbeat`] on the same transient set as
+//! produce ([`ClientConfig::max_retries`], default 0). Rebalance 9/10/11
+//! is not retried. GroupConsumer poll / background heartbeat inherit.
 
 #![deny(missing_docs)]
 
