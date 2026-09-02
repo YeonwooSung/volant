@@ -16,7 +16,7 @@ This guide covers **OS limits**, **page cache / dirty ratios**, **disk**,
 | Area | Default recommendation |
 |------|------------------------|
 | File descriptors | `ulimit -n` ≥ 65536 for many partitions / clients |
-| Durability vs throughput | v0.2: keep `flush_every_n = 0` + explicit flush (acks=1). Group-commit is not implemented. |
+| Durability vs throughput | Default: `flush_every_n = 0` + explicit flush (acks=1). Optional produce group-commit: `VOLANT_GROUP_COMMIT_MS` (default **off**). |
 | Reads | mmap sealed segments (always on by default) |
 | Writes | buffered sequential append (default); optional `direct-io` / `io-uring` on Linux |
 | CPU pinning | optional `thread-per-core` + `VOLANT_CPU_LIST` on dedicated hosts |
@@ -160,13 +160,28 @@ sudo sysctl -w vm.dirty_ratio=15
 | `0` (default, **v0.2 decision**) | Rely on OS + explicit `flush` (broker acks=1 path calls flush after produce) |
 | `N > 0` | fsync roughly every N appends on the hot path — lower throughput, smoother durability |
 
-There is **no group-commit window**. `flush_every_n` is a count of appends since
-the last fsync, not a time-based coalescer. v0.2 keeps the default at `0`:
-changing it was not justified by measurement (see benches below).
+## v0.20 group commit
 
-For **throughput benches**, keep `flush_every_n = 0` and measure with a single
-end-of-run flush (as `volant-bench` does). For **latency-sensitive production**,
-prefer explicit batch flush (acks=1) over huge dirty caches, and consider
+Time-based **produce** group-commit (not consumer group commit) is optional and
+**off by default**. When `VOLANT_GROUP_COMMIT_MS` / `group_commit_max_ms` is
+`> 0`, concurrent `acks=1`/`acks=all` produce callers on the same partition
+wait up to that many milliseconds (or until `group_commit_max_records`) for a
+shared `fsync`.
+
+| Knob | Default | Notes |
+|------|---------|-------|
+| `group_commit_max_ms` | `0` (off) | Env `VOLANT_GROUP_COMMIT_MS` |
+| `group_commit_max_records` | inherit | Env `VOLANT_GROUP_COMMIT_MAX_RECORDS`; else `flush_every_n` or 64 |
+
+`flush_every_n` remains a count of appends since the last fsync when the
+window is off. Both `flush_every_n = 0` and `group_commit_max_ms = 0` means
+no implicit fsync (today). Records not yet group-committed may be lost on
+crash — same honesty as unflushed `flush_every_n`.
+
+For **throughput benches**, keep `flush_every_n = 0` and the group-commit
+window off; measure with a single end-of-run flush (as `volant-bench` does).
+For **latency-sensitive production**, prefer explicit batch flush (acks=1)
+or a small group-commit window over huge dirty caches, and consider
 `O_DIRECT` if page-cache pollution from other processes is a problem.
 
 ---

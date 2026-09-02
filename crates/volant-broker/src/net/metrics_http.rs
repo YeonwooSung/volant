@@ -841,5 +841,17 @@ fn broker_metrics_text(broker: &Broker) -> String {
         "volant_journal_catchup_skipped_total {}\n",
         broker.journal_catchup_skipped_total()
     ));
+    // v0.20: produce group-commit (storage fsync coalescing).
+    let (gc_flushes, gc_records) = broker.group_commit_stats();
+    text.push_str(
+        "# HELP volant_group_commit_flushes_total Shared group-commit fsyncs (produce durability)\n",
+    );
+    text.push_str("# TYPE volant_group_commit_flushes_total counter\n");
+    text.push_str(&format!("volant_group_commit_flushes_total {gc_flushes}\n"));
+    text.push_str(
+        "# HELP volant_group_commit_records_total Records covered by group-commit fsyncs\n",
+    );
+    text.push_str("# TYPE volant_group_commit_records_total counter\n");
+    text.push_str(&format!("volant_group_commit_records_total {gc_records}\n"));
     text
 }
