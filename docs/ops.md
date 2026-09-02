@@ -943,8 +943,16 @@ join so a silent consumer does not expire. Interval is
 `session_timeout_ms / 3`, clamped to 100–3000 ms. Default **on**.
 Escape: Python `heartbeat=False`, Go `WithBackgroundHeartbeat(false)`,
 Java `join(..., false)`. `close` stops the loop then LeaveGroup.
-Not a fully concurrent API. Rust `volant-client` is unchanged. See
+Not a fully concurrent API. Rust `volant-client` is v0.44. See
 [V37_SPEC.md](./V37_SPEC.md).
+
+## v0.44 Rust GroupConsumer heartbeat
+
+Rust `GroupConsumer::join` now spawns a background heartbeat
+(`session_timeout_ms / 3`, clamped `[100ms, 3000ms]`) so a silent
+member does not expire. Escape: `join_with_heartbeat(..., false)`
+(poll-only). `leave().await` is required for LeaveGroup; `Drop` only
+aborts the task. See [V44_SPEC.md](./V44_SPEC.md).
 
 ## Shipped (not gaps)
 

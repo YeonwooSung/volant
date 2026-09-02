@@ -167,7 +167,7 @@ async fn group_consumer_retains_positions_on_sticky_partitions() {
     // Revoked partitions must not appear in positions.
     for tp in g1.last_revoked() {
         assert!(
-            !g1.positions().contains_key(tp),
+            !g1.positions().contains_key(&tp),
             "revoked {tp:?} should drop position"
         );
     }
