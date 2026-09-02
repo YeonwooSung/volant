@@ -69,6 +69,10 @@ try (Client c = Client.connect("127.0.0.1", 9092)) {
 // Optional SCRAM-SHA-256 (v0.46). Existing overloads stay.
 Client.connectScram("127.0.0.1", 9092, "alice", "s3cret");
 Client.connectTlsScram("127.0.0.1", 9092, TlsOptions.ca("ca.pem"), "alice", "s3cret");
+// SCRAM admin (v0.55). Opcodes 64–69; not the handshake. Password in clear.
+c.createScramUser("alice", "s3cret"); // iterations=0 → broker default 4096
+List<String> names = c.listScramUsers();
+c.deleteScramUser("alice");
 ```
 
 `produce(..., null, value)` sends a null key. `fetch` returns `List<Record>`
@@ -150,6 +154,9 @@ SCRAM-SHA-256 (v0.46): `connectScram` / `connectTlsScram` send opcodes
 `IllegalArgumentException` before connect. A rejected proof or
 server-signature mismatch fails the constructor. Leader redirect
 re-runs the same auth path.
+Create/Delete/ListScramUsers (v0.55) are admin RPCs (opcodes 64–69),
+not the handshake. `createScramUser` sends the password in the clear
+(use TLS). Not Kafka AlterUserScramCredentials.
 
 ## Honesty
 
@@ -204,3 +211,6 @@ See [docs/V23_SPEC.md](../../docs/V23_SPEC.md),
 [docs/V53_SPEC.md](../../docs/V53_SPEC.md),
 [docs/V54_SPEC.md](../../docs/V54_SPEC.md),
 [docs/V46_SPEC.md](../../docs/V46_SPEC.md).
+[docs/V50_SPEC.md](../../docs/V50_SPEC.md).,
+[docs/V46_SPEC.md](../../docs/V46_SPEC.md),
+[docs/V55_SPEC.md](../../docs/V55_SPEC.md).

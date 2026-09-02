@@ -52,6 +52,12 @@ OP_CREATE_PARTITIONS = 46
 OP_CREATE_PARTITIONS_RESPONSE = 47
 OP_LIST_OFFSETS = 48
 OP_LIST_OFFSETS_RESPONSE = 49
+OP_CREATE_SCRAM_USER = 64
+OP_CREATE_SCRAM_USER_RESPONSE = 65
+OP_DELETE_SCRAM_USER = 66
+OP_DELETE_SCRAM_USER_RESPONSE = 67
+OP_LIST_SCRAM_USERS = 68
+OP_LIST_SCRAM_USERS_RESPONSE = 69
 OP_ERROR = 0xFFFF
 
 _NULL_LEN = 0xFFFFFFFF
@@ -557,6 +563,49 @@ class ListOffsetsResponse:
 
 
 
+
+
+
+
+
+@dataclass
+class CreateScramUserRequest:
+    username: str
+    password: str
+    iterations: int = 0
+
+
+
+
+
+@dataclass
+class CreateScramUserResponse:
+    error_code: int
+
+
+
+
+
+@dataclass
+class DeleteScramUserRequest:
+    username: str
+
+
+
+
+
+@dataclass
+class DeleteScramUserResponse:
+    error_code: int
+
+
+
+
+
+@dataclass
+class ListScramUsersResponse:
+    error_code: int
+    usernames: list[str] = field(default_factory=list)
 
 
 
@@ -1412,6 +1461,92 @@ def _get_config_pairs(r: _Reader) -> list[tuple[str, str]]:
 # --- delete offsets --------------------------------------------------------
 
 
+def encode_create_scram_user_request(req: CreateScramUserRequest) -> bytes:
+    w = _Writer()
+    _put_string(w, req.username)
+    _put_string(w, req.password)
+    w.u32_le(req.iterations)
+    return w.finish()
+
+
+
+def decode_create_scram_user_request(payload: bytes) -> CreateScramUserRequest:
+    r = _Reader(payload)
+    return CreateScramUserRequest(
+        username=_get_string(r),
+        password=_get_string(r),
+        iterations=r.u32_le(),
+    )
+
+
+
+def encode_create_scram_user_response(resp: CreateScramUserResponse) -> bytes:
+    w = _Writer()
+    w.u16_le(resp.error_code)
+    return w.finish()
+
+
+
+def decode_create_scram_user_response(payload: bytes) -> CreateScramUserResponse:
+    r = _Reader(payload)
+    return CreateScramUserResponse(error_code=r.u16_le())
+
+
+
+def encode_delete_scram_user_request(req: DeleteScramUserRequest) -> bytes:
+    w = _Writer()
+    _put_string(w, req.username)
+    return w.finish()
+
+
+
+def decode_delete_scram_user_request(payload: bytes) -> DeleteScramUserRequest:
+    return DeleteScramUserRequest(username=_get_string(_Reader(payload)))
+
+
+
+def encode_delete_scram_user_response(resp: DeleteScramUserResponse) -> bytes:
+    w = _Writer()
+    w.u16_le(resp.error_code)
+    return w.finish()
+
+
+
+def decode_delete_scram_user_response(payload: bytes) -> DeleteScramUserResponse:
+    r = _Reader(payload)
+    return DeleteScramUserResponse(error_code=r.u16_le())
+
+
+
+def encode_list_scram_users_request() -> bytes:
+    return b""
+
+
+
+def decode_list_scram_users_request(payload: bytes) -> None:
+    return None
+
+
+
+def encode_list_scram_users_response(resp: ListScramUsersResponse) -> bytes:
+    w = _Writer()
+    w.u16_le(resp.error_code)
+    w.u32_le(len(resp.usernames))
+    for name in resp.usernames:
+        _put_string(w, name)
+    return w.finish()
+
+
+
+def decode_list_scram_users_response(payload: bytes) -> ListScramUsersResponse:
+    r = _Reader(payload)
+    error_code = r.u16_le()
+    n = r.u32_le()
+    usernames = [_get_string(r) for _ in range(n)]
+    return ListScramUsersResponse(error_code=error_code, usernames=usernames)
+
+
+
 def encode_delete_offsets_request(req: DeleteOffsetsRequest) -> bytes:
     w = _Writer()
     _put_string(w, req.group_id)
@@ -1738,6 +1873,12 @@ def decode_response(opcode: int, payload: bytes):
         return decode_create_partitions_response(payload)
     if opcode == OP_LIST_OFFSETS_RESPONSE:
         return decode_list_offsets_response(payload)
+    if opcode == OP_CREATE_SCRAM_USER_RESPONSE:
+        return decode_create_scram_user_response(payload)
+    if opcode == OP_DELETE_SCRAM_USER_RESPONSE:
+        return decode_delete_scram_user_response(payload)
+    if opcode == OP_LIST_SCRAM_USERS_RESPONSE:
+        return decode_list_scram_users_response(payload)
     if opcode == OP_DELETE_OFFSETS_RESPONSE:
         return decode_delete_offsets_response(payload)
     if opcode == OP_DESCRIBE_CONFIGS_RESPONSE:

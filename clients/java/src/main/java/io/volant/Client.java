@@ -968,6 +968,52 @@ public final class Client implements AutoCloseable {
         return resp.groups;
     }
 
+    /**
+     * Create or replace a SCRAM user (native opcode 64/65) with broker-default
+     * iterations (0 → 4096). Password is sent in the clear (use TLS).
+     */
+    public void createScramUser(String username, String password) {
+        createScramUser(username, password, 0);
+    }
+
+    /**
+     * Create or replace a SCRAM user (native opcode 64/65). {@code iterations}
+     * 0 means the broker default (4096). This is not the v0.46 handshake
+     * (60–63).
+     */
+    public void createScramUser(String username, String password, int iterations) {
+        byte[] payload = Codec.encodeCreateScramUserRequest(
+                new Codec.CreateScramUserRequest(username, password, iterations));
+        Object decoded = roundTrip(Codec.OP_CREATE_SCRAM_USER, payload);
+        if (!(decoded instanceof Codec.CreateScramUserResponse)) {
+            throw new ProtocolException("unexpected response for create_scram_user: " + typeName(decoded));
+        }
+        Codec.CreateScramUserResponse resp = (Codec.CreateScramUserResponse) decoded;
+        check(resp.errorCode, "create_scram_user");
+    }
+
+    /** Delete a SCRAM user (native opcode 66/67). */
+    public void deleteScramUser(String username) {
+        byte[] payload = Codec.encodeDeleteScramUserRequest(new Codec.DeleteScramUserRequest(username));
+        Object decoded = roundTrip(Codec.OP_DELETE_SCRAM_USER, payload);
+        if (!(decoded instanceof Codec.DeleteScramUserResponse)) {
+            throw new ProtocolException("unexpected response for delete_scram_user: " + typeName(decoded));
+        }
+        Codec.DeleteScramUserResponse resp = (Codec.DeleteScramUserResponse) decoded;
+        check(resp.errorCode, "delete_scram_user");
+    }
+
+    /** List SCRAM usernames (native opcode 68/69). */
+    public List<String> listScramUsers() {
+        Object decoded = roundTrip(Codec.OP_LIST_SCRAM_USERS, Codec.encodeListScramUsersRequest());
+        if (!(decoded instanceof Codec.ListScramUsersResponse)) {
+            throw new ProtocolException("unexpected response for list_scram_users: " + typeName(decoded));
+        }
+        Codec.ListScramUsersResponse resp = (Codec.ListScramUsersResponse) decoded;
+        check(resp.errorCode, "list_scram_users");
+        return resp.usernames;
+    }
+
     /** Leave a consumer group. */
     public void leaveGroup(String group, String memberId) {
         byte[] payload = Codec.encodeLeaveGroupRequest(new Codec.LeaveGroupRequest(group, memberId));
