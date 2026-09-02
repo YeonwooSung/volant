@@ -21,6 +21,11 @@
 //! `poll` can set Fetch `max_messages` / `max_bytes` (default **100 /
 //! 4 MiB**; `0` clamps to those). [`Client::fetch_opts`] exposes
 //! `max_bytes`; [`Client::fetch`] still uses 4 MiB.
+//! v0.79 redirects controller-gated admin (`create_topic` / `delete_topic` /
+//! `create_partitions` / `reassign_partitions` / `create_acls` /
+//! `delete_acls`) on error **14** (`NotController`) using a
+//! `controller_id=N` message hint or the first other advertised broker.
+//! v0.77 adds a Metadata `controller_id` trailer (`0` = unknown).
 //! v0.80 retries [`Client::heartbeat`] on the same transient set as
 //! produce ([`ClientConfig::max_retries`], default 0). Rebalance 9/10/11
 //! is not retried. GroupConsumer poll / background heartbeat inherit.

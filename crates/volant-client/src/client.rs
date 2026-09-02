@@ -179,8 +179,8 @@ impl HeartbeatResult {
 ///
 /// Supports optional shared-token auth, optional SCRAM-SHA-256 (Phase 22),
 /// optional TLS (`tls` feature), automatic reconnect to the partition leader
-/// on `NotLeaderForPartition`, and optional idempotent produce with retries
-/// (Phase 10).
+/// on `NotLeaderForPartition`, controller redirect on `NotController` (v0.79),
+/// and optional idempotent produce with retries (Phase 10).
 #[derive(Debug)]
 pub struct Client {
     stream: Mutex<ClientConn>,
@@ -443,7 +443,7 @@ impl Client {
         configs: Vec<(String, String)>,
     ) -> Result<TopicId> {
         let resp = self
-            .round_trip(Request::CreateTopic {
+            .admin_round_trip(Request::CreateTopic {
                 name: name.to_owned(),
                 partitions,
                 configs,
@@ -571,7 +571,7 @@ impl Client {
     /// Increase topic partition count to `total_count` (Phase 15).
     pub async fn create_partitions(&self, topic: &str, total_count: u32) -> Result<u32> {
         let resp = self
-            .round_trip(Request::CreatePartitions {
+            .admin_round_trip(Request::CreatePartitions {
                 topic: topic.to_owned(),
                 total_count,
             })
@@ -635,7 +635,7 @@ impl Client {
     /// Delete a topic.
     pub async fn delete_topic(&self, name: &str) -> Result<()> {
         let resp = self
-            .round_trip(Request::DeleteTopic {
+            .admin_round_trip(Request::DeleteTopic {
                 name: name.to_owned(),
             })
             .await?;
@@ -1105,6 +1105,97 @@ impl Client {
         self.reconnect(&addr).await
     }
 
+    /// Metadata → reconnect to the controller (v0.79).
+    ///
+    /// If `controller_id` is known (parsed from `controller_id=N` in a 14 Error
+    /// message, or Metadata's v0.77 trailer when non-zero), look that node up
+    /// in Metadata brokers, then [`Self::list_members`] if Metadata has no
+    /// matching id. Otherwise pick the first advertised broker whose host:port
+    /// is not this connection.
+    ///
+    /// Returns `true` when the caller should retry. Returns `false` on no other
+    /// broker / lookup miss / empty host / reconnect fail — caller must surface
+    /// the original error 14.
+    async fn redirect_to_controller(&self, controller_id: Option<u32>) -> bool {
+        let meta = match self.metadata().await {
+            Ok(m) => m,
+            Err(_) => return false,
+        };
+        let current = self.current_addr().await;
+        let controller_id = controller_id.or_else(|| {
+            if meta.controller_id != 0 {
+                Some(meta.controller_id)
+            } else {
+                None
+            }
+        });
+        let (host, port) = if let Some(id) = controller_id {
+            if let Some(b) = meta.brokers.iter().find(|b| b.node_id == id) {
+                (b.host.clone(), b.port)
+            } else {
+                let members = match self.list_members().await {
+                    Ok(m) => m,
+                    Err(_) => return false,
+                };
+                match members.brokers.iter().find(|b| b.id == id) {
+                    Some(b) => (b.host.clone(), b.port),
+                    None => return false,
+                }
+            }
+        } else {
+            match meta
+                .brokers
+                .iter()
+                .find(|b| !b.host.is_empty() && format!("{}:{}", b.host, b.port) != current)
+            {
+                Some(b) => (b.host.clone(), b.port),
+                None => return false,
+            }
+        };
+        if host.is_empty() {
+            return false;
+        }
+        let addr = format!("{host}:{port}");
+        if addr == current {
+            return true;
+        }
+        debug!(from = %current, to = %addr, "redirecting to controller");
+        self.reconnect(&addr).await.is_ok()
+    }
+
+    /// Round-trip a controller-gated admin RPC, redirecting on error 14.
+    async fn admin_round_trip(&self, req: Request) -> Result<Response> {
+        let max_attempts = 1 + self.config.max_redirects;
+        let mut attempt = 0u32;
+        loop {
+            attempt += 1;
+            let resp = self.round_trip(req.clone()).await?;
+            let (is_not_controller, hint) = match &resp {
+                Response::Error { code, message } if *code == ErrorCode::NotController as u16 => {
+                    (true, parse_controller_id(message))
+                }
+                Response::CreateTopic { error_code, .. }
+                | Response::DeleteTopic { error_code, .. }
+                | Response::CreatePartitions { error_code, .. }
+                | Response::ReassignPartitions { error_code, .. }
+                | Response::CreateAcls { error_code }
+                | Response::DeleteAcls { error_code, .. }
+                    if *error_code == ErrorCode::NotController as u16 =>
+                {
+                    (true, None)
+                }
+                _ => (false, None),
+            };
+            if is_not_controller
+                && attempt < max_attempts
+                && self.redirect_to_controller(hint).await
+            {
+                continue;
+            }
+            return Ok(resp);
+        }
+    }
+
     /// Join a consumer group; returns generation, member id, and assignment.
     pub async fn join_group(
         &self,
@@ -1312,7 +1403,9 @@ impl Client {
 
     /// Create ACL bindings (Phase 20). Enables enforcement on the broker.
     pub async fn create_acls(&self, entries: Vec<volant_protocol::AclBinding>) -> Result<()> {
-        let resp = self.round_trip(Request::CreateAcls { entries }).await?;
+        let resp = self
+            .admin_round_trip(Request::CreateAcls { entries })
+            .await?;
         match resp {
             Response::CreateAcls { error_code } => check_ok(error_code, "create_acls"),
             Response::Error { code, message } => Err(error_from_code(code, message)),
@@ -1324,7 +1417,9 @@ impl Client {
 
     /// Delete exact-matching ACL bindings (Phase 20).
     pub async fn delete_acls(&self, entries: Vec<volant_protocol::AclBinding>) -> Result<u32> {
-        let resp = self.round_trip(Request::DeleteAcls { entries }).await?;
+        let resp = self
+            .admin_round_trip(Request::DeleteAcls { entries })
+            .await?;
         match resp {
             Response::DeleteAcls {
                 error_code,
@@ -1431,7 +1526,7 @@ impl Client {
         replicas: &[u32],
     ) -> Result<u32> {
         let resp = self
-            .round_trip(Request::ReassignPartitions {
+            .admin_round_trip(Request::ReassignPartitions {
                 topic: topic.to_owned(),
                 partition: partition.unwrap_or(volant_protocol::REASSIGN_ALL_PARTITIONS),
                 replicas: replicas.to_vec(),
@@ -1562,6 +1657,16 @@ impl Client {
             }
         }
     }
+}
+
+/// Parse `controller_id=N` from a NotController Error message. Ignores junk.
+fn parse_controller_id(message: &str) -> Option<u32> {
+    let rest = message.split("controller_id=").nth(1)?;
+    let digits: String = rest.chars().take_while(|c| c.is_ascii_digit()).collect();
+    if digits.is_empty() {
+        return None;
+    }
+    digits.parse().ok()
 }
 
 fn check_ok(error_code: u16, op: &str) -> Result<()> {
