@@ -486,6 +486,11 @@ pub struct Broker {
     /// Default 24h; override via `VOLANT_TXN_COORDINATOR_TTL_MS`, sparse durable
     /// BROKER config, or [`Broker::set_txn_coordinator_ttl_ms`]. `0` disables GC.
     txn_coordinator_ttl_ms: AtomicU64,
+    /// v0.13: opt-in `__transaction_state` coordinator log (env at construct).
+    ///
+    /// Default **off** (`VOLANT_TRANSACTION_STATE_TOPIC`). Snapshotted so
+    /// Phase 90/114 tests stay unchanged when the env is unset.
+    transaction_state_topic: bool,
     /// Open txns auto-aborted by timeout (lazy + background; Phase 97).
     open_txns_expired_total: AtomicU64,
     /// Prepared txns auto-aborted by timeout (lazy + background; Phase 97).
@@ -738,6 +743,14 @@ mod cluster;
 mod delete_records;
 mod topics;
 mod txn;
+mod txn_state;
+
+pub use txn_state::{
+    transaction_state_topic_enabled_from_env, TransactionStateRecord, ENV_TRANSACTION_STATE_TOPIC,
+    TRANSACTION_STATE_HEADER, TRANSACTION_STATE_RECORD_VERSION, TRANSACTION_STATE_TOPIC,
+    TXN_STATE_COMPLETE_ABORT, TXN_STATE_COMPLETE_COMMIT, TXN_STATE_EMPTY, TXN_STATE_ONGOING,
+    TXN_STATE_PREPARE_ABORT, TXN_STATE_PREPARE_COMMIT,
+};
 
 impl Broker {
     /// Create a single-node broker with the given storage configuration.
@@ -796,6 +809,7 @@ impl Broker {
             transaction_max_timeout_ms: AtomicU64::new(default_transaction_max_timeout_ms()),
             sweep_interval_ms: AtomicU64::new(default_sweep_interval_ms()),
             txn_coordinator_ttl_ms: AtomicU64::new(default_txn_coordinator_ttl_ms()),
+            transaction_state_topic: transaction_state_topic_enabled_from_env(),
             open_txns_expired_total: AtomicU64::new(0),
             prepared_txns_expired_total: AtomicU64::new(0),
             abortable_producers: Mutex::new(HashSet::new()),
@@ -868,6 +882,7 @@ impl Broker {
             .expect("failed to reload single-node topic catalog");
         broker.load_txn_markers();
         broker.load_prepared_txns();
+        broker.replay_transaction_state_topic();
         broker.load_cluster_prepared_index();
         broker.expire_timed_out_txns();
         broker.load_leader_epochs();
@@ -974,6 +989,7 @@ impl Broker {
             transaction_max_timeout_ms: AtomicU64::new(default_transaction_max_timeout_ms()),
             sweep_interval_ms: AtomicU64::new(default_sweep_interval_ms()),
             txn_coordinator_ttl_ms: AtomicU64::new(default_txn_coordinator_ttl_ms()),
+            transaction_state_topic: transaction_state_topic_enabled_from_env(),
             open_txns_expired_total: AtomicU64::new(0),
             prepared_txns_expired_total: AtomicU64::new(0),
             abortable_producers: Mutex::new(HashSet::new()),
@@ -1045,6 +1061,7 @@ impl Broker {
         broker.apply_local_assignment()?;
         broker.load_txn_markers();
         broker.load_prepared_txns();
+        broker.replay_transaction_state_topic();
         broker.load_cluster_prepared_index();
         broker.expire_timed_out_txns();
         broker.load_leader_epochs();

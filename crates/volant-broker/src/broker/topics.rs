@@ -45,7 +45,7 @@ impl Broker {
                     cluster.membership.read().controller_id()
                 )));
             }
-            return self.create_topic_cluster(name, partitions, &topic_cfg);
+            return self.create_topic_cluster(name, partitions, &topic_cfg, None);
         }
 
         // Single-node path.
@@ -79,11 +79,37 @@ impl Broker {
         Ok(id)
     }
 
+    /// Create a topic with an explicit replication factor (v0.13 internal topics).
+    pub(super) fn create_topic_with_replication(
+        &self,
+        name: TopicName,
+        partitions: u32,
+        rf: u32,
+    ) -> Result<TopicId> {
+        if partitions == 0 {
+            return Err(Error::InvalidArgument(
+                "topic must have at least one partition".into(),
+            ));
+        }
+        let topic_cfg = TopicConfig::default();
+        if let Some(cluster) = &self.cluster {
+            if !cluster.membership.read().is_controller() {
+                return Err(Error::InvalidArgument(format!(
+                    "not controller; controller_id={}",
+                    cluster.membership.read().controller_id()
+                )));
+            }
+            return self.create_topic_cluster(name, partitions, &topic_cfg, Some(rf));
+        }
+        self.create_topic_with_configs(name, partitions, &[])
+    }
+
     pub(super) fn create_topic_cluster(
         &self,
         name: TopicName,
         partitions: u32,
         topic_cfg: &TopicConfig,
+        rf_override: Option<u32>,
     ) -> Result<TopicId> {
         let cluster = self.cluster.as_ref().expect("cluster");
         {
@@ -105,8 +131,8 @@ impl Broker {
 
         let cfg = cluster.config.read();
         let broker_ids = cfg.broker_ids();
-        let rf = cfg
-            .default_replication_factor
+        let rf = rf_override
+            .unwrap_or(cfg.default_replication_factor)
             .min(broker_ids.len() as u32)
             .max(1);
         let broker_racks: Vec<(u32, Option<&str>)> = cfg

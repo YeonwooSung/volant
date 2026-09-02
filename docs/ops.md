@@ -490,6 +490,16 @@ curl -s -H "Authorization: Bearer $VOLANT_METRICS_TOKEN" \
 - Wrong/missing token → `401` + `WWW-Authenticate: Bearer`.
 - Does not automatically reuse `--auth-token`; set both if they should match.
 
+## v0.13 `__transaction_state` (opt-in)
+
+Default **off**. Set `VOLANT_TRANSACTION_STATE_TOPIC=1` to create the internal
+`__transaction_state` topic (1 partition, RF `min(3, N)`) on first
+InitProducerId / prepare. Records are **Volant JSON**
+(`volant-txn-state=1`), not Kafka KIP-890 / KRaft schemas. Replay on start
+uses the topic as SoT when the flag is on; `__txn_prepared` still stores
+prepared ranges. `__txn_coordinator` remains the FindCoordinator routing map.
+See [V13_SPEC.md](./V13_SPEC.md).
+
 ## Still deferred
 
 - Multi-language clients
