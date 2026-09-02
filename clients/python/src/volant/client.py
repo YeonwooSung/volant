@@ -1271,8 +1271,8 @@ class Client:
         """Commit one group offset (admin path: empty member, generation 0).
 
         Transient broker/transport errors retry up to ``max_retries``
-        extra times (default 0). Error 2 / 9 / 10 / 11 / 13 / 14 are
-        not retried.
+        extra times (default 0). Error 14 follows ``max_redirects``.
+        Error 2 / 9 / 10 / 11 / 13 are not retried.
         """
         payload = codec.encode_offset_commit_request(
             OffsetCommitRequest(
@@ -1290,11 +1290,20 @@ class Client:
             )
         )
         max_retries = max(0, int(self.max_retries))
+        max_attempts = 1 + self.max_redirects
         retry_attempt = 0
+        redirect_attempt = 0
         while True:
             try:
                 resp = self._round_trip(codec.OP_OFFSET_COMMIT, payload)
             except BrokerError as e:
+                if (
+                    e.code == _NOT_CONTROLLER
+                    and redirect_attempt + 1 < max_attempts
+                    and self._redirect_to_controller(_controller_id_hint(e.message))
+                ):
+                    redirect_attempt += 1
+                    continue
                 if _is_transient_broker(e.code) and retry_attempt < max_retries:
                     retry_attempt += 1
                     self._sleep_produce_retry()
@@ -1310,6 +1319,13 @@ class Client:
                 raise ProtocolError(
                     f"unexpected response for offset_commit: {type(resp)}"
                 )
+            if (
+                resp.error_code == _NOT_CONTROLLER
+                and redirect_attempt + 1 < max_attempts
+                and self._redirect_to_controller(None)
+            ):
+                redirect_attempt += 1
+                continue
             if (
                 _is_transient_broker(resp.error_code)
                 and retry_attempt < max_retries
@@ -1544,17 +1560,27 @@ class Client:
         Returns ``[(partition, offset), ...]``. Empty wire entries mean all
         offsets for the group; this method filters to ``topic`` client-side
         (same as the CLI). Transient broker/transport errors retry up to
-        ``max_retries`` extra times (default 0).
+        ``max_retries`` extra times (default 0). Error 14 follows
+        ``max_redirects``.
         """
         payload = codec.encode_offset_fetch_request(
             OffsetFetchRequest(group_id=group, entries=[])
         )
         max_retries = max(0, int(self.max_retries))
+        max_attempts = 1 + self.max_redirects
         retry_attempt = 0
+        redirect_attempt = 0
         while True:
             try:
                 resp = self._round_trip(codec.OP_OFFSET_FETCH, payload)
             except BrokerError as e:
+                if (
+                    e.code == _NOT_CONTROLLER
+                    and redirect_attempt + 1 < max_attempts
+                    and self._redirect_to_controller(_controller_id_hint(e.message))
+                ):
+                    redirect_attempt += 1
+                    continue
                 if _is_transient_broker(e.code) and retry_attempt < max_retries:
                     retry_attempt += 1
                     self._sleep_produce_retry()
@@ -1570,6 +1596,13 @@ class Client:
                 raise ProtocolError(
                     f"unexpected response for offset_fetch: {type(resp)}"
                 )
+            if (
+                resp.error_code == _NOT_CONTROLLER
+                and redirect_attempt + 1 < max_attempts
+                and self._redirect_to_controller(None)
+            ):
+                redirect_attempt += 1
+                continue
             if (
                 _is_transient_broker(resp.error_code)
                 and retry_attempt < max_retries

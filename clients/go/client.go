@@ -1478,6 +1478,7 @@ func (c *Client) Metadata() (Metadata, error) {
 }
 
 // OffsetCommit commits one group offset (admin path: empty member, generation 0).
+// Error 14 follows maxRedirects. Transient 6 / 7 / 15 / 16 follow maxRetries.
 func (c *Client) OffsetCommit(group, topic string, partition int, offset int64) error {
 	return c.commitOffsets(group, "", 0, []codec.OffsetCommitEntry{
 		{Topic: topic, Partition: uint32(partition), Offset: uint64(offset), Metadata: ""},
@@ -1501,10 +1502,20 @@ func (c *Client) commitOffsets(group, memberID string, generation uint32, entrie
 	if maxRetries < 0 {
 		maxRetries = 0
 	}
+	maxAttempts := 1 + c.maxRedirects
 	retryAttempt := 0
+	redirectAttempt := 0
 	for {
 		decoded, err := c.roundTrip(codec.OpOffsetCommit, payload)
 		if err != nil {
+			ok, rerr := c.maybeRedirectController(err, redirectAttempt+1, maxAttempts)
+			if rerr != nil {
+				return rerr
+			}
+			if ok {
+				redirectAttempt++
+				continue
+			}
 			if isTransientProduceErr(err) && retryAttempt < maxRetries {
 				retryAttempt++
 				c.sleepProduceRetry()
@@ -1515,6 +1526,14 @@ func (c *Client) commitOffsets(group, memberID string, generation uint32, entrie
 		resp, ok := decoded.(codec.OffsetCommitResponse)
 		if !ok {
 			return &frame.ProtocolError{Msg: fmt.Sprintf("unexpected response for offset_commit: %T", decoded)}
+		}
+		ok, rerr := c.maybeRedirectControllerCode(resp.ErrorCode, "", redirectAttempt+1, maxAttempts)
+		if rerr != nil {
+			return rerr
+		}
+		if ok {
+			redirectAttempt++
+			continue
 		}
 		if isTransientBroker(resp.ErrorCode) && retryAttempt < maxRetries {
 			retryAttempt++
@@ -1750,7 +1769,8 @@ func (c *Client) DeleteRecordsWithWaitFlag(topic string, partition uint32, befor
 
 // OffsetFetch returns committed offsets for topic as []Offset.
 // Empty wire entries mean all offsets for the group; this method filters
-// to topic client-side (same as the CLI).
+// to topic client-side (same as the CLI). Error 14 follows maxRedirects.
+// Transient 6 / 7 / 15 / 16 follow maxRetries.
 func (c *Client) OffsetFetch(group, topic string) ([]Offset, error) {
 	entries, err := c.fetchOffsets(group, nil)
 	if err != nil {
@@ -1780,10 +1800,20 @@ func (c *Client) fetchOffsets(group string, entries []codec.OffsetEntry) ([]code
 	if maxRetries < 0 {
 		maxRetries = 0
 	}
+	maxAttempts := 1 + c.maxRedirects
 	retryAttempt := 0
+	redirectAttempt := 0
 	for {
 		decoded, err := c.roundTrip(codec.OpOffsetFetch, payload)
 		if err != nil {
+			ok, rerr := c.maybeRedirectController(err, redirectAttempt+1, maxAttempts)
+			if rerr != nil {
+				return nil, rerr
+			}
+			if ok {
+				redirectAttempt++
+				continue
+			}
 			if isTransientProduceErr(err) && retryAttempt < maxRetries {
 				retryAttempt++
 				c.sleepProduceRetry()
@@ -1794,6 +1824,14 @@ func (c *Client) fetchOffsets(group string, entries []codec.OffsetEntry) ([]code
 		resp, ok := decoded.(codec.OffsetFetchResponse)
 		if !ok {
 			return nil, &frame.ProtocolError{Msg: fmt.Sprintf("unexpected response for offset_fetch: %T", decoded)}
+		}
+		ok, rerr := c.maybeRedirectControllerCode(resp.ErrorCode, "", redirectAttempt+1, maxAttempts)
+		if rerr != nil {
+			return nil, rerr
+		}
+		if ok {
+			redirectAttempt++
+			continue
 		}
 		if isTransientBroker(resp.ErrorCode) && retryAttempt < maxRetries {
 			retryAttempt++

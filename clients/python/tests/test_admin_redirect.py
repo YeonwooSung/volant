@@ -22,6 +22,8 @@ from volant.codec import (
     OP_CREATE_TOPIC,
     OP_DELETE_OFFSETS,
     OP_DELETE_OFFSETS_RESPONSE,
+    OP_OFFSET_COMMIT,
+    OP_OFFSET_FETCH,
     OP_DELETE_SCRAM_USER,
     OP_DELETE_SCRAM_USER_RESPONSE,
     OP_DESCRIBE_CONFIGS,
@@ -53,6 +55,8 @@ from volant.codec import (
     ListMembersResponse,
     ListScramUsersResponse,
     MetadataResponse,
+    OffsetCommitResponse,
+    OffsetFetchResponse,
     ReassignPartitionsResponse,
     RemoveBrokerResponse,
     decode_alter_configs_request,
@@ -73,6 +77,8 @@ from volant.codec import (
     encode_list_members_response,
     encode_list_scram_users_response,
     encode_metadata_response,
+    encode_offset_commit_response,
+    encode_offset_fetch_response,
     encode_reassign_partitions_response,
     encode_remove_broker_response,
 )
@@ -106,6 +112,11 @@ class _AdminServer:
         # DeleteOffsets: (code, message, as_error_opcode). Empty queue → success.
         self.delete_offsets_replies: list[tuple[int, str, bool]] = []
         self.delete_offsets_codes: list[int] = []
+        # OffsetCommit / OffsetFetch: same reply shape as DeleteOffsets.
+        self.offset_commit_replies: list[tuple[int, str, bool]] = []
+        self.offset_commit_codes: list[int] = []
+        self.offset_fetch_replies: list[tuple[int, str, bool]] = []
+        self.offset_fetch_codes: list[int] = []
         self.metadata: Optional[MetadataResponse] = None
         self.opcodes: list[int] = []
         self.create_topic_count = 0
@@ -121,6 +132,8 @@ class _AdminServer:
         self.describe_configs_count = 0
         self.alter_configs_count = 0
         self.delete_offsets_count = 0
+        self.offset_commit_count = 0
+        self.offset_fetch_count = 0
         self.metadata_count = 0
         self.list_members_count = 0
         self.accept_count = 0
@@ -384,6 +397,44 @@ class _AdminServer:
                         )
                     ),
                     OP_DELETE_OFFSETS_RESPONSE,
+                )
+            if opcode == OP_OFFSET_COMMIT:
+                self.offset_commit_count += 1
+                if self.offset_commit_replies:
+                    code, message, as_error = self.offset_commit_replies.pop(0)
+                elif self.offset_commit_codes:
+                    code, message, as_error = self.offset_commit_codes.pop(0), "", False
+                else:
+                    code, message, as_error = 0, "", False
+                if as_error:
+                    return (
+                        encode_error_response(ErrorResponse(code=code, message=message)),
+                        OP_ERROR,
+                    )
+                return (
+                    encode_offset_commit_response(
+                        OffsetCommitResponse(error_code=code)
+                    ),
+                    OP_OFFSET_COMMIT,
+                )
+            if opcode == OP_OFFSET_FETCH:
+                self.offset_fetch_count += 1
+                if self.offset_fetch_replies:
+                    code, message, as_error = self.offset_fetch_replies.pop(0)
+                elif self.offset_fetch_codes:
+                    code, message, as_error = self.offset_fetch_codes.pop(0), "", False
+                else:
+                    code, message, as_error = 0, "", False
+                if as_error:
+                    return (
+                        encode_error_response(ErrorResponse(code=code, message=message)),
+                        OP_ERROR,
+                    )
+                return (
+                    encode_offset_fetch_response(
+                        OffsetFetchResponse(error_code=code, entries=[])
+                    ),
+                    OP_OFFSET_FETCH,
                 )
             if opcode == OP_METADATA:
                 self.metadata_count += 1
@@ -814,6 +865,50 @@ class TestAdminNotControllerRedirect(unittest.TestCase):
                     c.delete_offsets("g")
             self.assertEqual(ctx.exception.code, NOT_CONTROLLER)
         self.assertEqual(follower.delete_offsets_count, 1)
+        self.assertEqual(follower.metadata_count, 0)
+        self.assertEqual(follower.accept_count, 1)
+
+    def test_offset_commit_error_14_redirects_via_controller_id(self) -> None:
+        with _AdminServer() as leader, _AdminServer() as follower:
+            follower.offset_commit_replies = [
+                (NOT_CONTROLLER, "not controller; controller_id=2", True)
+            ]
+            follower.metadata = _controller_meta(2, "127.0.0.1", leader.port)
+            leader.offset_commit_replies = [(0, "", False)]
+            with Client(follower.addr, timeout=5.0) as c:
+                c.offset_commit("g", "t", 0, 5)
+            self.assertEqual(c.addr, leader.addr)
+        self.assertEqual(follower.offset_commit_count, 1)
+        self.assertEqual(follower.metadata_count, 1)
+        self.assertEqual(leader.offset_commit_count, 1)
+        self.assertEqual(follower.list_members_count, 0)
+
+    def test_offset_fetch_typed_14_no_hint_then_ok(self) -> None:
+        with _AdminServer() as leader, _AdminServer() as follower:
+            follower.offset_fetch_codes = [NOT_CONTROLLER]
+            follower.metadata = _other_broker_meta(
+                follower.port, "127.0.0.1", leader.port
+            )
+            leader.offset_fetch_codes = [0]
+            with Client(follower.addr, timeout=5.0) as c:
+                offs = c.offset_fetch("g", "t")
+            self.assertEqual(offs, [])
+            self.assertEqual(c.addr, leader.addr)
+        self.assertEqual(follower.offset_fetch_count, 1)
+        self.assertEqual(follower.metadata_count, 1)
+        self.assertEqual(leader.offset_fetch_count, 1)
+
+    def test_offset_commit_max_redirects_zero_raises_on_first_14(self) -> None:
+        with _AdminServer() as follower:
+            follower.offset_commit_replies = [
+                (NOT_CONTROLLER, "not controller; controller_id=2", True)
+            ]
+            follower.metadata = _controller_meta(2, "127.0.0.1", 9)
+            with Client(follower.addr, timeout=5.0, max_redirects=0) as c:
+                with self.assertRaises(BrokerError) as ctx:
+                    c.offset_commit("g", "t", 0, 5)
+            self.assertEqual(ctx.exception.code, NOT_CONTROLLER)
+        self.assertEqual(follower.offset_commit_count, 1)
         self.assertEqual(follower.metadata_count, 0)
         self.assertEqual(follower.accept_count, 1)
 

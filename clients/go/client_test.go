@@ -2201,6 +2201,10 @@ type adminBroker struct {
 	alterConfigsCodes      []uint16
 	deleteOffsetsReplies   []createTopicReply
 	deleteOffsetsCodes     []uint16
+	offsetCommitReplies    []createTopicReply
+	offsetCommitCodes      []uint16
+	offsetFetchReplies     []createTopicReply
+	offsetFetchCodes       []uint16
 	meta                   codec.MetadataResponse
 	createTopicCount       int
 	createPartitionsCount  int
@@ -2215,6 +2219,8 @@ type adminBroker struct {
 	describeConfigsCount   int
 	alterConfigsCount      int
 	deleteOffsetsCount     int
+	offsetCommitCount      int
+	offsetFetchCount       int
 	metadataCount          int
 	listMembersCount       int
 	acceptCount            int
@@ -2283,6 +2289,18 @@ func (s *adminBroker) deleteOffsetsSnapshot() (n, metas, accepts int) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	return s.deleteOffsetsCount, s.metadataCount, s.acceptCount
+}
+
+func (s *adminBroker) offsetCommitSnapshot() (n, metas, accepts int) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.offsetCommitCount, s.metadataCount, s.acceptCount
+}
+
+func (s *adminBroker) offsetFetchSnapshot() (n, metas, accepts int) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.offsetFetchCount, s.metadataCount, s.acceptCount
 }
 
 func (s *adminBroker) serve(conn net.Conn) {
@@ -2540,6 +2558,38 @@ func (s *adminBroker) handle(f *frame.Frame) ([]byte, error) {
 			ErrorCode: rep.code, DeletedCount: deleted,
 		})
 		replyOp = codec.OpDeleteOffsetsResponse
+	case codec.OpOffsetCommit:
+		s.offsetCommitCount++
+		rep := createTopicReply{}
+		if len(s.offsetCommitReplies) > 0 {
+			rep = s.offsetCommitReplies[0]
+			s.offsetCommitReplies = s.offsetCommitReplies[1:]
+		} else if len(s.offsetCommitCodes) > 0 {
+			rep.code = s.offsetCommitCodes[0]
+			s.offsetCommitCodes = s.offsetCommitCodes[1:]
+		}
+		if rep.asError {
+			payload, err = codec.EncodeErrorResponse(codec.ErrorResponse{Code: rep.code, Message: rep.message})
+			replyOp = codec.OpError
+			break
+		}
+		payload, err = codec.EncodeOffsetCommitResponse(codec.OffsetCommitResponse{ErrorCode: rep.code})
+	case codec.OpOffsetFetch:
+		s.offsetFetchCount++
+		rep := createTopicReply{}
+		if len(s.offsetFetchReplies) > 0 {
+			rep = s.offsetFetchReplies[0]
+			s.offsetFetchReplies = s.offsetFetchReplies[1:]
+		} else if len(s.offsetFetchCodes) > 0 {
+			rep.code = s.offsetFetchCodes[0]
+			s.offsetFetchCodes = s.offsetFetchCodes[1:]
+		}
+		if rep.asError {
+			payload, err = codec.EncodeErrorResponse(codec.ErrorResponse{Code: rep.code, Message: rep.message})
+			replyOp = codec.OpError
+			break
+		}
+		payload, err = codec.EncodeOffsetFetchResponse(codec.OffsetFetchResponse{ErrorCode: rep.code})
 	case codec.OpMetadata:
 		s.metadataCount++
 		payload, err = codec.EncodeMetadataResponse(s.meta)
@@ -3498,6 +3548,98 @@ func TestCreateAclsRetriesTimeoutThenOk(t *testing.T) {
 	_, _, ca, _, metas, _ := srv.snapshot()
 	if ca != 2 || metas != 0 {
 		t.Fatalf("create_acls=%d metadata=%d want 2,0", ca, metas)
+	}
+}
+
+func TestOffsetCommitError14RedirectsViaControllerID(t *testing.T) {
+	leader := &adminBroker{}
+	_, stopL := startAdmin(t, leader)
+	defer stopL()
+	follower := &adminBroker{
+		offsetCommitReplies: []createTopicReply{{
+			code: notController, message: "not controller; controller_id=2", asError: true,
+		}},
+		meta: controllerMeta(2, "127.0.0.1", leader.port()),
+	}
+	fAddr, stopF := startAdmin(t, follower)
+	defer stopF()
+
+	c, err := volant.DialTimeout(fAddr, 5*time.Second)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer c.Close()
+	if err := c.OffsetCommit("g", "t", 0, 5); err != nil {
+		t.Fatal(err)
+	}
+	n, metas, _ := follower.offsetCommitSnapshot()
+	if n != 1 || metas != 1 {
+		t.Fatalf("follower offset_commit=%d metadata=%d want 1,1", n, metas)
+	}
+	ln, _, _ := leader.offsetCommitSnapshot()
+	if ln != 1 {
+		t.Fatalf("leader offset_commit=%d want 1", ln)
+	}
+}
+
+func TestOffsetFetchTyped14NoHintThenOk(t *testing.T) {
+	leader := &adminBroker{}
+	_, stopL := startAdmin(t, leader)
+	defer stopL()
+	follower := &adminBroker{
+		offsetFetchCodes: []uint16{notController},
+	}
+	fAddr, stopF := startAdmin(t, follower)
+	defer stopF()
+	follower.mu.Lock()
+	follower.meta = otherBrokerMeta(follower.port(), "127.0.0.1", leader.port())
+	follower.mu.Unlock()
+
+	c, err := volant.DialTimeout(fAddr, 5*time.Second)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer c.Close()
+	offs, err := c.OffsetFetch("g", "t")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(offs) != 0 {
+		t.Fatalf("offsets %v want empty", offs)
+	}
+	n, metas, _ := follower.offsetFetchSnapshot()
+	if n != 1 || metas != 1 {
+		t.Fatalf("follower offset_fetch=%d metadata=%d want 1,1", n, metas)
+	}
+	ln, _, _ := leader.offsetFetchSnapshot()
+	if ln != 1 {
+		t.Fatalf("leader offset_fetch=%d want 1", ln)
+	}
+}
+
+func TestOffsetCommitMaxRedirectsZeroRaisesOnFirst14(t *testing.T) {
+	follower := &adminBroker{
+		offsetCommitReplies: []createTopicReply{{
+			code: notController, message: "not controller; controller_id=2", asError: true,
+		}},
+		meta: controllerMeta(2, "127.0.0.1", 9),
+	}
+	fAddr, stopF := startAdmin(t, follower)
+	defer stopF()
+
+	c, err := volant.DialTimeout(fAddr, 5*time.Second)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer c.Close()
+	c.SetMaxRedirects(0)
+	err = c.OffsetCommit("g", "t", 0, 5)
+	if brokerCode(err) != notController {
+		t.Fatalf("err=%v want code 14", err)
+	}
+	n, metas, accepts := follower.offsetCommitSnapshot()
+	if n != 1 || metas != 0 || accepts != 1 {
+		t.Fatalf("offset_commit=%d metadata=%d accepts=%d want 1,0,1", n, metas, accepts)
 	}
 }
 
