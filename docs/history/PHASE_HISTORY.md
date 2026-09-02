@@ -264,6 +264,11 @@ docs for day-to-day reading: [ops](../ops.md), [consistency](../consistency.md),
 | v0.63 | ✅ | TransactionalProducer helper on Python/Go/Java | [V63_SPEC.md](../V63_SPEC.md) |
 | v0.64 | ✅ | Go/Java Fetch knobs and Produce acks | [V64_SPEC.md](../V64_SPEC.md) |
 | v0.65 | ✅ | DeleteRecords leader redirect on Python/Go/Java | [V65_SPEC.md](../V65_SPEC.md) |
+| v0.66 | ✅ | Fetch retry on Python/Go/Java | [V66_SPEC.md](../V66_SPEC.md) |
+| v0.67 | ✅ | Rust GroupConsumer auto_offset_reset | [V67_SPEC.md](../V67_SPEC.md) |
+| v0.68 | ✅ | Go/Java ProduceBatch | [V68_SPEC.md](../V68_SPEC.md) |
+| v0.69 | ✅ | Multi-member range via DescribeGroup | [V69_SPEC.md](../V69_SPEC.md) |
+| v0.70 | ✅ | GroupConsumer earliest via ListOffsets | [V70_SPEC.md](../V70_SPEC.md) |
 
 ---
 
