@@ -1592,8 +1592,9 @@ type DescribeConfigsResult struct {
 // DeleteOffsets deletes committed offsets for group (native opcode 38).
 // Nil or empty entries deletes all offsets for the group (wire count 0).
 // Returns the number of offset files removed. Non-zero error_code is
-// BrokerError. Transient broker/transport errors retry up to maxRetries
-// extra times (default 0). This is not Kafka OffsetDelete.
+// BrokerError. Error 14 follows maxRedirects. Transient broker/transport
+// errors retry up to maxRetries extra times (default 0). This is not
+// Kafka OffsetDelete.
 func (c *Client) DeleteOffsets(group string, entries []codec.OffsetEntry) (uint32, error) {
 	if entries == nil {
 		entries = []codec.OffsetEntry{}
@@ -1609,10 +1610,20 @@ func (c *Client) DeleteOffsets(group string, entries []codec.OffsetEntry) (uint3
 	if maxRetries < 0 {
 		maxRetries = 0
 	}
+	maxAttempts := 1 + c.maxRedirects
 	retryAttempt := 0
+	redirectAttempt := 0
 	for {
 		decoded, err := c.roundTrip(codec.OpDeleteOffsets, payload)
 		if err != nil {
+			ok, rerr := c.maybeRedirectController(err, redirectAttempt+1, maxAttempts)
+			if rerr != nil {
+				return 0, rerr
+			}
+			if ok {
+				redirectAttempt++
+				continue
+			}
 			if isTransientProduceErr(err) && retryAttempt < maxRetries {
 				retryAttempt++
 				c.sleepProduceRetry()
@@ -1623,6 +1634,14 @@ func (c *Client) DeleteOffsets(group string, entries []codec.OffsetEntry) (uint3
 		resp, ok := decoded.(codec.DeleteOffsetsResponse)
 		if !ok {
 			return 0, &frame.ProtocolError{Msg: fmt.Sprintf("unexpected response for delete_offsets: %T", decoded)}
+		}
+		ok, rerr := c.maybeRedirectControllerCode(resp.ErrorCode, "", redirectAttempt+1, maxAttempts)
+		if rerr != nil {
+			return 0, rerr
+		}
+		if ok {
+			redirectAttempt++
+			continue
 		}
 		if isTransientBroker(resp.ErrorCode) && retryAttempt < maxRetries {
 			retryAttempt++

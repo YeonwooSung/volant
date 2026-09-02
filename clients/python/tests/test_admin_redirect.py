@@ -20,6 +20,8 @@ from volant.codec import (
     OP_CREATE_SCRAM_USER,
     OP_CREATE_SCRAM_USER_RESPONSE,
     OP_CREATE_TOPIC,
+    OP_DELETE_OFFSETS,
+    OP_DELETE_OFFSETS_RESPONSE,
     OP_DELETE_SCRAM_USER,
     OP_DELETE_SCRAM_USER_RESPONSE,
     OP_DESCRIBE_CONFIGS,
@@ -43,6 +45,7 @@ from volant.codec import (
     CreatePartitionsResponse,
     CreateScramUserResponse,
     CreateTopicResponse,
+    DeleteOffsetsResponse,
     DeleteScramUserResponse,
     DescribeConfigsResponse,
     ErrorResponse,
@@ -62,6 +65,7 @@ from volant.codec import (
     encode_create_partitions_response,
     encode_create_scram_user_response,
     encode_create_topic_response,
+    encode_delete_offsets_response,
     encode_delete_scram_user_response,
     encode_describe_configs_response,
     encode_error_response,
@@ -99,6 +103,9 @@ class _AdminServer:
         # DescribeConfigs: (code, message, as_error_opcode). Empty queue → success.
         self.describe_configs_replies: list[tuple[int, str, bool]] = []
         self.alter_configs_codes: list[int] = []
+        # DeleteOffsets: (code, message, as_error_opcode). Empty queue → success.
+        self.delete_offsets_replies: list[tuple[int, str, bool]] = []
+        self.delete_offsets_codes: list[int] = []
         self.metadata: Optional[MetadataResponse] = None
         self.opcodes: list[int] = []
         self.create_topic_count = 0
@@ -113,6 +120,7 @@ class _AdminServer:
         self.remove_broker_count = 0
         self.describe_configs_count = 0
         self.alter_configs_count = 0
+        self.delete_offsets_count = 0
         self.metadata_count = 0
         self.list_members_count = 0
         self.accept_count = 0
@@ -355,6 +363,27 @@ class _AdminServer:
                         AlterConfigsResponse(error_code=code, topic=req.topic)
                     ),
                     OP_ALTER_CONFIGS_RESPONSE,
+                )
+            if opcode == OP_DELETE_OFFSETS:
+                self.delete_offsets_count += 1
+                if self.delete_offsets_replies:
+                    code, message, as_error = self.delete_offsets_replies.pop(0)
+                elif self.delete_offsets_codes:
+                    code, message, as_error = self.delete_offsets_codes.pop(0), "", False
+                else:
+                    code, message, as_error = 0, "", False
+                if as_error:
+                    return (
+                        encode_error_response(ErrorResponse(code=code, message=message)),
+                        OP_ERROR,
+                    )
+                return (
+                    encode_delete_offsets_response(
+                        DeleteOffsetsResponse(
+                            error_code=code, deleted_count=3 if code == 0 else 0
+                        )
+                    ),
+                    OP_DELETE_OFFSETS_RESPONSE,
                 )
             if opcode == OP_METADATA:
                 self.metadata_count += 1
@@ -740,6 +769,51 @@ class TestAdminNotControllerRedirect(unittest.TestCase):
                     c.describe_configs("events")
             self.assertEqual(ctx.exception.code, NOT_CONTROLLER)
         self.assertEqual(follower.describe_configs_count, 1)
+        self.assertEqual(follower.metadata_count, 0)
+        self.assertEqual(follower.accept_count, 1)
+
+    def test_delete_offsets_error_14_redirects_via_controller_id(self) -> None:
+        with _AdminServer() as leader, _AdminServer() as follower:
+            follower.delete_offsets_replies = [
+                (NOT_CONTROLLER, "not controller; controller_id=2", True)
+            ]
+            follower.metadata = _controller_meta(2, "127.0.0.1", leader.port)
+            leader.delete_offsets_replies = [(0, "", False)]
+            with Client(follower.addr, timeout=5.0) as c:
+                got = c.delete_offsets("g")
+            self.assertEqual(got, 3)
+            self.assertEqual(c.addr, leader.addr)
+        self.assertEqual(follower.delete_offsets_count, 1)
+        self.assertEqual(follower.metadata_count, 1)
+        self.assertEqual(leader.delete_offsets_count, 1)
+        self.assertEqual(follower.list_members_count, 0)
+
+    def test_delete_offsets_typed_14_no_hint_then_ok(self) -> None:
+        with _AdminServer() as leader, _AdminServer() as follower:
+            follower.delete_offsets_codes = [NOT_CONTROLLER]
+            follower.metadata = _other_broker_meta(
+                follower.port, "127.0.0.1", leader.port
+            )
+            leader.delete_offsets_codes = [0]
+            with Client(follower.addr, timeout=5.0) as c:
+                got = c.delete_offsets("g", [("events", 0)])
+            self.assertEqual(got, 3)
+            self.assertEqual(c.addr, leader.addr)
+        self.assertEqual(follower.delete_offsets_count, 1)
+        self.assertEqual(follower.metadata_count, 1)
+        self.assertEqual(leader.delete_offsets_count, 1)
+
+    def test_delete_offsets_max_redirects_zero_raises_on_first_14(self) -> None:
+        with _AdminServer() as follower:
+            follower.delete_offsets_replies = [
+                (NOT_CONTROLLER, "not controller; controller_id=2", True)
+            ]
+            follower.metadata = _controller_meta(2, "127.0.0.1", 9)
+            with Client(follower.addr, timeout=5.0, max_redirects=0) as c:
+                with self.assertRaises(BrokerError) as ctx:
+                    c.delete_offsets("g")
+            self.assertEqual(ctx.exception.code, NOT_CONTROLLER)
+        self.assertEqual(follower.delete_offsets_count, 1)
         self.assertEqual(follower.metadata_count, 0)
         self.assertEqual(follower.accept_count, 1)
 

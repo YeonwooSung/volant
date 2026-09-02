@@ -2070,6 +2070,8 @@ type adminBroker struct {
 	removeBrokerCodes      []uint16
 	describeConfigsReplies []createTopicReply
 	alterConfigsCodes      []uint16
+	deleteOffsetsReplies   []createTopicReply
+	deleteOffsetsCodes     []uint16
 	meta                   codec.MetadataResponse
 	createTopicCount       int
 	createPartitionsCount  int
@@ -2083,6 +2085,7 @@ type adminBroker struct {
 	removeBrokerCount      int
 	describeConfigsCount   int
 	alterConfigsCount      int
+	deleteOffsetsCount     int
 	metadataCount          int
 	listMembersCount       int
 	acceptCount            int
@@ -2145,6 +2148,12 @@ func (s *adminBroker) configsSnapshot() (describe, alter, metas, accepts int) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	return s.describeConfigsCount, s.alterConfigsCount, s.metadataCount, s.acceptCount
+}
+
+func (s *adminBroker) deleteOffsetsSnapshot() (n, metas, accepts int) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.deleteOffsetsCount, s.metadataCount, s.acceptCount
 }
 
 func (s *adminBroker) serve(conn net.Conn) {
@@ -2379,6 +2388,29 @@ func (s *adminBroker) handle(f *frame.Frame) ([]byte, error) {
 			ErrorCode: code, Topic: req.Topic,
 		})
 		replyOp = codec.OpAlterConfigsResponse
+	case codec.OpDeleteOffsets:
+		s.deleteOffsetsCount++
+		rep := createTopicReply{}
+		if len(s.deleteOffsetsReplies) > 0 {
+			rep = s.deleteOffsetsReplies[0]
+			s.deleteOffsetsReplies = s.deleteOffsetsReplies[1:]
+		} else if len(s.deleteOffsetsCodes) > 0 {
+			rep.code = s.deleteOffsetsCodes[0]
+			s.deleteOffsetsCodes = s.deleteOffsetsCodes[1:]
+		}
+		if rep.asError {
+			payload, err = codec.EncodeErrorResponse(codec.ErrorResponse{Code: rep.code, Message: rep.message})
+			replyOp = codec.OpError
+			break
+		}
+		deleted := uint32(0)
+		if rep.code == 0 {
+			deleted = 3
+		}
+		payload, err = codec.EncodeDeleteOffsetsResponse(codec.DeleteOffsetsResponse{
+			ErrorCode: rep.code, DeletedCount: deleted,
+		})
+		replyOp = codec.OpDeleteOffsetsResponse
 	case codec.OpMetadata:
 		s.metadataCount++
 		payload, err = codec.EncodeMetadataResponse(s.meta)
@@ -3090,6 +3122,102 @@ func TestDescribeConfigsMaxRedirectsZeroRaisesOnFirst14(t *testing.T) {
 	dc, _, metas, accepts := follower.configsSnapshot()
 	if dc != 1 || metas != 0 || accepts != 1 {
 		t.Fatalf("describe_configs=%d metadata=%d accepts=%d want 1,0,1", dc, metas, accepts)
+	}
+}
+
+func TestDeleteOffsetsError14RedirectsViaControllerID(t *testing.T) {
+	leader := &adminBroker{}
+	_, stopL := startAdmin(t, leader)
+	defer stopL()
+	follower := &adminBroker{
+		deleteOffsetsReplies: []createTopicReply{{
+			code: notController, message: "not controller; controller_id=2", asError: true,
+		}},
+		meta: controllerMeta(2, "127.0.0.1", leader.port()),
+	}
+	fAddr, stopF := startAdmin(t, follower)
+	defer stopF()
+
+	c, err := volant.DialTimeout(fAddr, 5*time.Second)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer c.Close()
+	got, err := c.DeleteOffsets("g", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got != 3 {
+		t.Fatalf("deleted_count %d want 3", got)
+	}
+	n, metas, _ := follower.deleteOffsetsSnapshot()
+	if n != 1 || metas != 1 {
+		t.Fatalf("follower delete_offsets=%d metadata=%d want 1,1", n, metas)
+	}
+	ln, _, _ := leader.deleteOffsetsSnapshot()
+	if ln != 1 {
+		t.Fatalf("leader delete_offsets=%d want 1", ln)
+	}
+}
+
+func TestDeleteOffsetsTyped14NoHintThenOk(t *testing.T) {
+	leader := &adminBroker{}
+	_, stopL := startAdmin(t, leader)
+	defer stopL()
+	follower := &adminBroker{
+		deleteOffsetsCodes: []uint16{notController},
+	}
+	fAddr, stopF := startAdmin(t, follower)
+	defer stopF()
+	follower.mu.Lock()
+	follower.meta = otherBrokerMeta(follower.port(), "127.0.0.1", leader.port())
+	follower.mu.Unlock()
+
+	c, err := volant.DialTimeout(fAddr, 5*time.Second)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer c.Close()
+	got, err := c.DeleteOffsets("g", []codec.OffsetEntry{{Topic: "events", Partition: 0}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got != 3 {
+		t.Fatalf("deleted_count %d want 3", got)
+	}
+	n, metas, _ := follower.deleteOffsetsSnapshot()
+	if n != 1 || metas != 1 {
+		t.Fatalf("follower delete_offsets=%d metadata=%d want 1,1", n, metas)
+	}
+	ln, _, _ := leader.deleteOffsetsSnapshot()
+	if ln != 1 {
+		t.Fatalf("leader delete_offsets=%d want 1", ln)
+	}
+}
+
+func TestDeleteOffsetsMaxRedirectsZeroRaisesOnFirst14(t *testing.T) {
+	follower := &adminBroker{
+		deleteOffsetsReplies: []createTopicReply{{
+			code: notController, message: "not controller; controller_id=2", asError: true,
+		}},
+		meta: controllerMeta(2, "127.0.0.1", 9),
+	}
+	fAddr, stopF := startAdmin(t, follower)
+	defer stopF()
+
+	c, err := volant.DialTimeout(fAddr, 5*time.Second)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer c.Close()
+	c.SetMaxRedirects(0)
+	_, err = c.DeleteOffsets("g", nil)
+	if brokerCode(err) != notController {
+		t.Fatalf("err=%v want code 14", err)
+	}
+	n, metas, accepts := follower.deleteOffsetsSnapshot()
+	if n != 1 || metas != 0 || accepts != 1 {
+		t.Fatalf("delete_offsets=%d metadata=%d accepts=%d want 1,0,1", n, metas, accepts)
 	}
 }
 

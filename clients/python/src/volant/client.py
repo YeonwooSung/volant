@@ -1263,9 +1263,9 @@ class Client:
 
         ``None`` or ``[]`` deletes all offsets for the group (wire count 0).
         Returns the number of offset files removed. Non-zero ``error_code``
-        raises :class:`BrokerError`. Transient broker/transport errors
-        retry up to ``max_retries`` extra times (default 0). This is not
-        Kafka OffsetDelete.
+        raises :class:`BrokerError`. Error 14 follows ``max_redirects``.
+        Transient broker/transport errors retry up to ``max_retries``
+        extra times (default 0). This is not Kafka OffsetDelete.
         """
         wire = (
             [codec.OffsetEntry(topic=t, partition=int(p)) for t, p in entries]
@@ -1276,11 +1276,20 @@ class Client:
             DeleteOffsetsRequest(group_id=group, entries=wire)
         )
         max_retries = max(0, int(self.max_retries))
+        max_attempts = 1 + self.max_redirects
         retry_attempt = 0
+        redirect_attempt = 0
         while True:
             try:
                 resp = self._round_trip(codec.OP_DELETE_OFFSETS, payload)
             except BrokerError as e:
+                if (
+                    e.code == _NOT_CONTROLLER
+                    and redirect_attempt + 1 < max_attempts
+                    and self._redirect_to_controller(_controller_id_hint(e.message))
+                ):
+                    redirect_attempt += 1
+                    continue
                 if _is_transient_broker(e.code) and retry_attempt < max_retries:
                     retry_attempt += 1
                     self._sleep_produce_retry()
@@ -1296,6 +1305,13 @@ class Client:
                 raise ProtocolError(
                     f"unexpected response for delete_offsets: {type(resp)}"
                 )
+            if (
+                resp.error_code == _NOT_CONTROLLER
+                and redirect_attempt + 1 < max_attempts
+                and self._redirect_to_controller(None)
+            ):
+                redirect_attempt += 1
+                continue
             if (
                 _is_transient_broker(resp.error_code)
                 and retry_attempt < max_retries
