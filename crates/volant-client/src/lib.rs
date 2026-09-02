@@ -44,6 +44,10 @@
 //! `delete_scram_user` / `list_scram_users`) and `list_acls` on error
 //! **14** using the same `redirect_to_controller` / `max_redirects`
 //! budget as v0.79.
+//! v0.92 retries [`Client::describe_group`] / [`Client::list_groups`]
+//! on that same transient set (default 0). Error 2 (no live members),
+//! 9 / 10 / 11, 13 / 14, and protocol are not retried. Range
+//! assignor inherits via `describe_group`.
 
 #![deny(missing_docs)]
 
