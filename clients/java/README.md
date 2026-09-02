@@ -147,7 +147,7 @@ retry once (`setMaxRedirects(1)` is the connect default).
 `setMaxRedirects(0)` raises on the first 13. CreateTopic / DeleteTopic /
 CreatePartitions / ReassignPartitions / CreateAcls / DeleteAcls /
 CreateScramUser / DeleteScramUser / ListScramUsers / ListAcls /
-AddBroker / RemoveBroker follow
+AddBroker / RemoveBroker / DescribeConfigs / AlterConfigs follow
 `NotController` (error 14) the same way (Metadata brokers or a
 `controller_id=N` hint in the Error message; admin 14 prefers
 Metadata.controller_id when the message has no hint; not Kafka

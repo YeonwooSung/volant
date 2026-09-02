@@ -11,6 +11,8 @@ from volant import AclBinding, BrokerError, Client
 from volant.codec import (
     OP_ADD_BROKER,
     OP_ADD_BROKER_RESPONSE,
+    OP_ALTER_CONFIGS,
+    OP_ALTER_CONFIGS_RESPONSE,
     OP_CREATE_ACLS,
     OP_CREATE_ACLS_RESPONSE,
     OP_CREATE_PARTITIONS,
@@ -20,6 +22,8 @@ from volant.codec import (
     OP_CREATE_TOPIC,
     OP_DELETE_SCRAM_USER,
     OP_DELETE_SCRAM_USER_RESPONSE,
+    OP_DESCRIBE_CONFIGS,
+    OP_DESCRIBE_CONFIGS_RESPONSE,
     OP_ERROR,
     OP_LIST_ACLS,
     OP_LIST_ACLS_RESPONSE,
@@ -33,12 +37,14 @@ from volant.codec import (
     OP_REMOVE_BROKER,
     OP_REMOVE_BROKER_RESPONSE,
     AddBrokerResponse,
+    AlterConfigsResponse,
     BrokerInfo,
     CreateAclsResponse,
     CreatePartitionsResponse,
     CreateScramUserResponse,
     CreateTopicResponse,
     DeleteScramUserResponse,
+    DescribeConfigsResponse,
     ErrorResponse,
     ListAclsResponse,
     ListMembersResponse,
@@ -46,14 +52,18 @@ from volant.codec import (
     MetadataResponse,
     ReassignPartitionsResponse,
     RemoveBrokerResponse,
+    decode_alter_configs_request,
     decode_create_partitions_request,
     decode_create_topic_request,
+    decode_describe_configs_request,
     encode_add_broker_response,
+    encode_alter_configs_response,
     encode_create_acls_response,
     encode_create_partitions_response,
     encode_create_scram_user_response,
     encode_create_topic_response,
     encode_delete_scram_user_response,
+    encode_describe_configs_response,
     encode_error_response,
     encode_list_acls_response,
     encode_list_members_response,
@@ -86,6 +96,9 @@ class _AdminServer:
         # AddBroker: (code, message, as_error_opcode). Empty queue → success.
         self.add_broker_replies: list[tuple[int, str, bool]] = []
         self.remove_broker_codes: list[int] = []
+        # DescribeConfigs: (code, message, as_error_opcode). Empty queue → success.
+        self.describe_configs_replies: list[tuple[int, str, bool]] = []
+        self.alter_configs_codes: list[int] = []
         self.metadata: Optional[MetadataResponse] = None
         self.opcodes: list[int] = []
         self.create_topic_count = 0
@@ -98,6 +111,8 @@ class _AdminServer:
         self.list_acls_count = 0
         self.add_broker_count = 0
         self.remove_broker_count = 0
+        self.describe_configs_count = 0
+        self.alter_configs_count = 0
         self.metadata_count = 0
         self.list_members_count = 0
         self.accept_count = 0
@@ -304,6 +319,42 @@ class _AdminServer:
                         )
                     ),
                     OP_REMOVE_BROKER_RESPONSE,
+                )
+            if opcode == OP_DESCRIBE_CONFIGS:
+                self.describe_configs_count += 1
+                req = decode_describe_configs_request(raw)
+                if self.describe_configs_replies:
+                    code, message, as_error = self.describe_configs_replies.pop(0)
+                else:
+                    code, message, as_error = 0, "", False
+                if as_error:
+                    return (
+                        encode_error_response(ErrorResponse(code=code, message=message)),
+                        OP_ERROR,
+                    )
+                return (
+                    encode_describe_configs_response(
+                        DescribeConfigsResponse(
+                            error_code=code,
+                            topic=req.topic,
+                            topic_id=1 if code == 0 else 0,
+                            partition_count=1 if code == 0 else 0,
+                            configs=[("retention.ms", "86400000")] if code == 0 else [],
+                        )
+                    ),
+                    OP_DESCRIBE_CONFIGS_RESPONSE,
+                )
+            if opcode == OP_ALTER_CONFIGS:
+                self.alter_configs_count += 1
+                req = decode_alter_configs_request(raw)
+                code = (
+                    self.alter_configs_codes.pop(0) if self.alter_configs_codes else 0
+                )
+                return (
+                    encode_alter_configs_response(
+                        AlterConfigsResponse(error_code=code, topic=req.topic)
+                    ),
+                    OP_ALTER_CONFIGS_RESPONSE,
                 )
             if opcode == OP_METADATA:
                 self.metadata_count += 1
@@ -642,6 +693,53 @@ class TestAdminNotControllerRedirect(unittest.TestCase):
                     c.add_broker(3, "10.0.0.3", 9092)
             self.assertEqual(ctx.exception.code, NOT_CONTROLLER)
         self.assertEqual(follower.add_broker_count, 1)
+        self.assertEqual(follower.metadata_count, 0)
+        self.assertEqual(follower.accept_count, 1)
+
+    def test_describe_configs_error_14_redirects_via_controller_id(self) -> None:
+        with _AdminServer() as leader, _AdminServer() as follower:
+            follower.describe_configs_replies = [
+                (NOT_CONTROLLER, "not controller; controller_id=2", True)
+            ]
+            follower.metadata = _controller_meta(2, "127.0.0.1", leader.port)
+            leader.describe_configs_replies = [(0, "", False)]
+            with Client(follower.addr, timeout=5.0) as c:
+                got = c.describe_configs("events")
+            self.assertEqual(got.topic, "events")
+            self.assertEqual(got.topic_id, 1)
+            self.assertEqual(got.partition_count, 1)
+            self.assertEqual(got.configs, [("retention.ms", "86400000")])
+            self.assertEqual(c.addr, leader.addr)
+        self.assertEqual(follower.describe_configs_count, 1)
+        self.assertEqual(follower.metadata_count, 1)
+        self.assertEqual(leader.describe_configs_count, 1)
+        self.assertEqual(follower.list_members_count, 0)
+
+    def test_alter_configs_typed_14_no_hint_then_ok(self) -> None:
+        with _AdminServer() as leader, _AdminServer() as follower:
+            follower.alter_configs_codes = [NOT_CONTROLLER]
+            follower.metadata = _other_broker_meta(
+                follower.port, "127.0.0.1", leader.port
+            )
+            leader.alter_configs_codes = [0]
+            with Client(follower.addr, timeout=5.0) as c:
+                c.alter_configs("events", [("retention.ms", "86400000")])
+            self.assertEqual(c.addr, leader.addr)
+        self.assertEqual(follower.alter_configs_count, 1)
+        self.assertEqual(follower.metadata_count, 1)
+        self.assertEqual(leader.alter_configs_count, 1)
+
+    def test_describe_configs_max_redirects_zero_raises_on_first_14(self) -> None:
+        with _AdminServer() as follower:
+            follower.describe_configs_replies = [
+                (NOT_CONTROLLER, "not controller; controller_id=2", True)
+            ]
+            follower.metadata = _controller_meta(2, "127.0.0.1", 9)
+            with Client(follower.addr, timeout=5.0, max_redirects=0) as c:
+                with self.assertRaises(BrokerError) as ctx:
+                    c.describe_configs("events")
+            self.assertEqual(ctx.exception.code, NOT_CONTROLLER)
+        self.assertEqual(follower.describe_configs_count, 1)
         self.assertEqual(follower.metadata_count, 0)
         self.assertEqual(follower.accept_count, 1)
 

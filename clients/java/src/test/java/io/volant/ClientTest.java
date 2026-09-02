@@ -1227,6 +1227,9 @@ class ClientTest {
         final List<int[]> addBrokerReplies = new CopyOnWriteArrayList<>();
         final List<String> addBrokerMessages = new CopyOnWriteArrayList<>();
         final List<Integer> removeBrokerCodes = new CopyOnWriteArrayList<>();
+        final List<int[]> describeConfigsReplies = new CopyOnWriteArrayList<>();
+        final List<String> describeConfigsMessages = new CopyOnWriteArrayList<>();
+        final List<Integer> alterConfigsCodes = new CopyOnWriteArrayList<>();
         volatile Metadata meta = new Metadata(Collections.emptyList(), Collections.emptyList());
         final AtomicInteger createTopicCount = new AtomicInteger();
         final AtomicInteger createPartitionsCount = new AtomicInteger();
@@ -1238,6 +1241,8 @@ class ClientTest {
         final AtomicInteger listAclsCount = new AtomicInteger();
         final AtomicInteger addBrokerCount = new AtomicInteger();
         final AtomicInteger removeBrokerCount = new AtomicInteger();
+        final AtomicInteger describeConfigsCount = new AtomicInteger();
+        final AtomicInteger alterConfigsCount = new AtomicInteger();
         final AtomicInteger metadataCount = new AtomicInteger();
         final AtomicInteger listMembersCount = new AtomicInteger();
         final AtomicInteger acceptCount = new AtomicInteger();
@@ -1300,6 +1305,16 @@ class ClientTest {
         void queueAddBrokerOk() {
             addBrokerReplies.add(new int[] {0, 0});
             addBrokerMessages.add("");
+        }
+
+        void queueDescribeConfigsError(int code, String message) {
+            describeConfigsReplies.add(new int[] {code, 1});
+            describeConfigsMessages.add(message);
+        }
+
+        void queueDescribeConfigsOk() {
+            describeConfigsReplies.add(new int[] {0, 0});
+            describeConfigsMessages.add("");
         }
 
         private void serve(Socket conn) {
@@ -1444,6 +1459,37 @@ class ClientTest {
                 replyOp[0] = Codec.OP_REMOVE_BROKER_RESPONSE;
                 return Codec.encodeRemoveBrokerResponse(
                         new Codec.RemoveBrokerResponse(code, code == 0 ? 12L : 0L));
+            }
+            if (frame.opcode == Codec.OP_DESCRIBE_CONFIGS) {
+                describeConfigsCount.incrementAndGet();
+                Codec.DescribeConfigsRequest req = Codec.decodeDescribeConfigsRequest(frame.payload);
+                int code = 0;
+                boolean asError = false;
+                String message = "";
+                if (!describeConfigsReplies.isEmpty()) {
+                    int[] spec = describeConfigsReplies.remove(0);
+                    code = spec[0];
+                    asError = spec[1] != 0;
+                    message = describeConfigsMessages.isEmpty() ? "" : describeConfigsMessages.remove(0);
+                }
+                if (asError) {
+                    replyOp[0] = Codec.OP_ERROR;
+                    return Codec.encodeErrorResponse(new Codec.ErrorResponse(code, message));
+                }
+                replyOp[0] = Codec.OP_DESCRIBE_CONFIGS_RESPONSE;
+                List<String[]> cfgs = code == 0
+                        ? Collections.singletonList(new String[] {"retention.ms", "86400000"})
+                        : Collections.emptyList();
+                return Codec.encodeDescribeConfigsResponse(
+                        new Codec.DescribeConfigsResponse(
+                                code, req.topic, code == 0 ? 1 : 0, code == 0 ? 1 : 0, cfgs));
+            }
+            if (frame.opcode == Codec.OP_ALTER_CONFIGS) {
+                alterConfigsCount.incrementAndGet();
+                Codec.AlterConfigsRequest req = Codec.decodeAlterConfigsRequest(frame.payload);
+                int code = alterConfigsCodes.isEmpty() ? 0 : alterConfigsCodes.remove(0);
+                replyOp[0] = Codec.OP_ALTER_CONFIGS_RESPONSE;
+                return Codec.encodeAlterConfigsResponse(new Codec.AlterConfigsResponse(code, req.topic));
             }
             if (frame.opcode == Codec.OP_METADATA) {
                 metadataCount.incrementAndGet();
@@ -1777,6 +1823,64 @@ class ClientTest {
                 assertEquals(NOT_CONTROLLER, ex.code);
             }
             assertEquals(1, follower.addBrokerCount.get());
+            assertEquals(0, follower.metadataCount.get());
+            assertEquals(1, follower.acceptCount.get());
+        }
+    }
+
+    @Test
+    void describeConfigsError14RedirectsViaControllerId() throws Exception {
+        try (AdminBroker leader = AdminBroker.start();
+                AdminBroker follower = AdminBroker.start()) {
+            follower.queueDescribeConfigsError(NOT_CONTROLLER, "not controller; controller_id=2");
+            follower.meta = controllerMeta(2, "127.0.0.1", leader.port);
+            leader.queueDescribeConfigsOk();
+            try (Client c = Client.connect("127.0.0.1", follower.port, 5_000)) {
+                DescribeConfigsResult got = c.describeConfigs("events");
+                assertEquals("events", got.topic);
+                assertEquals(1L, got.topicId);
+                assertEquals(1L, got.partitionCount);
+                assertEquals(1, got.configs.size());
+                assertEquals("retention.ms", got.configs.get(0)[0]);
+                assertEquals("86400000", got.configs.get(0)[1]);
+                assertEquals(leader.port, Integer.parseInt(c.addr().substring(c.addr().indexOf(':') + 1)));
+            }
+            assertEquals(1, follower.describeConfigsCount.get());
+            assertEquals(1, follower.metadataCount.get());
+            assertEquals(1, leader.describeConfigsCount.get());
+        }
+    }
+
+    @Test
+    void alterConfigsTyped14NoHintThenOk() throws Exception {
+        try (AdminBroker leader = AdminBroker.start();
+                AdminBroker follower = AdminBroker.start()) {
+            follower.alterConfigsCodes.add(NOT_CONTROLLER);
+            follower.meta = otherBrokerMeta(follower.port, "127.0.0.1", leader.port);
+            try (Client c = Client.connect("127.0.0.1", follower.port, 5_000)) {
+                c.alterConfigs(
+                        "events",
+                        Collections.singletonList(new String[] {"retention.ms", "86400000"}));
+                assertEquals(leader.port, Integer.parseInt(c.addr().substring(c.addr().indexOf(':') + 1)));
+            }
+            assertEquals(1, follower.alterConfigsCount.get());
+            assertEquals(1, follower.metadataCount.get());
+            assertEquals(1, leader.alterConfigsCount.get());
+        }
+    }
+
+    @Test
+    void describeConfigsMaxRedirectsZeroRaisesOnFirst14() throws Exception {
+        try (AdminBroker follower = AdminBroker.start()) {
+            follower.queueDescribeConfigsError(NOT_CONTROLLER, "not controller; controller_id=2");
+            follower.meta = controllerMeta(2, "127.0.0.1", 9);
+            try (Client c = Client.connect("127.0.0.1", follower.port, 5_000)) {
+                c.setMaxRedirects(0);
+                BrokerException ex =
+                        assertThrows(BrokerException.class, () -> c.describeConfigs("events"));
+                assertEquals(NOT_CONTROLLER, ex.code);
+            }
+            assertEquals(1, follower.describeConfigsCount.get());
             assertEquals(0, follower.metadataCount.get());
             assertEquals(1, follower.acceptCount.get());
         }

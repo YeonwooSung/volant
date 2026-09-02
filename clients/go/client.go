@@ -1551,7 +1551,7 @@ type DescribeConfigsResult struct {
 // DescribeConfigs returns topic configuration (native opcode 40/41).
 // Topic configs only (not Kafka DescribeConfigs / BROKER). Empty values
 // mean the key is unset. Non-zero error_code is BrokerError with
-// Op "describe_configs".
+// Op "describe_configs". Error 14 follows maxRedirects.
 
 // DeleteOffsets deletes committed offsets for group (native opcode 38).
 // Nil or empty entries deletes all offsets for the group (wire count 0).
@@ -1605,29 +1605,47 @@ func (c *Client) DescribeConfigs(topic string) (DescribeConfigsResult, error) {
 	if err != nil {
 		return DescribeConfigsResult{}, err
 	}
-	decoded, err := c.roundTrip(codec.OpDescribeConfigs, payload)
-	if err != nil {
-		return DescribeConfigsResult{}, err
+	maxAttempts := 1 + c.maxRedirects
+	for attempt := 1; ; attempt++ {
+		decoded, err := c.roundTrip(codec.OpDescribeConfigs, payload)
+		if err != nil {
+			ok, rerr := c.maybeRedirectController(err, attempt, maxAttempts)
+			if rerr != nil {
+				return DescribeConfigsResult{}, rerr
+			}
+			if ok {
+				continue
+			}
+			return DescribeConfigsResult{}, err
+		}
+		resp, ok := decoded.(codec.DescribeConfigsResponse)
+		if !ok {
+			return DescribeConfigsResult{}, &frame.ProtocolError{Msg: fmt.Sprintf("unexpected response for describe_configs: %T", decoded)}
+		}
+		ok, rerr := c.maybeRedirectControllerCode(resp.ErrorCode, "", attempt, maxAttempts)
+		if rerr != nil {
+			return DescribeConfigsResult{}, rerr
+		}
+		if ok {
+			continue
+		}
+		if err := check(resp.ErrorCode, "describe_configs"); err != nil {
+			return DescribeConfigsResult{}, err
+		}
+		return DescribeConfigsResult{
+			Topic:          resp.Topic,
+			TopicID:        resp.TopicID,
+			PartitionCount: resp.PartitionCount,
+			Configs:        resp.Configs,
+		}, nil
 	}
-	resp, ok := decoded.(codec.DescribeConfigsResponse)
-	if !ok {
-		return DescribeConfigsResult{}, &frame.ProtocolError{Msg: fmt.Sprintf("unexpected response for describe_configs: %T", decoded)}
-	}
-	if err := check(resp.ErrorCode, "describe_configs"); err != nil {
-		return DescribeConfigsResult{}, err
-	}
-	return DescribeConfigsResult{
-		Topic:          resp.Topic,
-		TopicID:        resp.TopicID,
-		PartitionCount: resp.PartitionCount,
-		Configs:        resp.Configs,
-	}, nil
 }
 
 
 // AlterConfigs updates topic configuration (native opcode 42/43).
 // Empty value clears that key (same as Rust). Topic configs only.
 // Non-zero error_code is BrokerError with Op "alter_configs".
+// Error 14 follows maxRedirects.
 func (c *Client) AlterConfigs(topic string, configs [][2]string) error {
 	if configs == nil {
 		configs = [][2]string{}
@@ -1639,15 +1657,32 @@ func (c *Client) AlterConfigs(topic string, configs [][2]string) error {
 	if err != nil {
 		return err
 	}
-	decoded, err := c.roundTrip(codec.OpAlterConfigs, payload)
-	if err != nil {
-		return err
+	maxAttempts := 1 + c.maxRedirects
+	for attempt := 1; ; attempt++ {
+		decoded, err := c.roundTrip(codec.OpAlterConfigs, payload)
+		if err != nil {
+			ok, rerr := c.maybeRedirectController(err, attempt, maxAttempts)
+			if rerr != nil {
+				return rerr
+			}
+			if ok {
+				continue
+			}
+			return err
+		}
+		resp, ok := decoded.(codec.AlterConfigsResponse)
+		if !ok {
+			return &frame.ProtocolError{Msg: fmt.Sprintf("unexpected response for alter_configs: %T", decoded)}
+		}
+		ok, rerr := c.maybeRedirectControllerCode(resp.ErrorCode, "", attempt, maxAttempts)
+		if rerr != nil {
+			return rerr
+		}
+		if ok {
+			continue
+		}
+		return check(resp.ErrorCode, "alter_configs")
 	}
-	resp, ok := decoded.(codec.AlterConfigsResponse)
-	if !ok {
-		return &frame.ProtocolError{Msg: fmt.Sprintf("unexpected response for alter_configs: %T", decoded)}
-	}
-	return check(resp.ErrorCode, "alter_configs")
 }
 
 func (c *Client) DeleteRecords(topic string, partition uint32, beforeOffset uint64) (DeleteRecordsResult, error) {

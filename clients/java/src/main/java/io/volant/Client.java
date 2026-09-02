@@ -715,6 +715,12 @@ public final class Client implements AutoCloseable {
         if (decoded instanceof Codec.RemoveBrokerResponse) {
             return ((Codec.RemoveBrokerResponse) decoded).errorCode;
         }
+        if (decoded instanceof Codec.DescribeConfigsResponse) {
+            return ((Codec.DescribeConfigsResponse) decoded).errorCode;
+        }
+        if (decoded instanceof Codec.AlterConfigsResponse) {
+            return ((Codec.AlterConfigsResponse) decoded).errorCode;
+        }
         return 0;
     }
 
@@ -1366,14 +1372,14 @@ public final class Client implements AutoCloseable {
         }
     }
 
+    /** Topic configs only. Error 14 follows {@code maxRedirects}. */
     public DescribeConfigsResult describeConfigs(String topic) {
         byte[] payload = Codec.encodeDescribeConfigsRequest(new Codec.DescribeConfigsRequest(topic));
-        Object decoded = roundTrip(Codec.OP_DESCRIBE_CONFIGS, payload);
-        if (!(decoded instanceof Codec.DescribeConfigsResponse)) {
-            throw new ProtocolException("unexpected response for describe_configs: " + typeName(decoded));
-        }
-        Codec.DescribeConfigsResponse resp = (Codec.DescribeConfigsResponse) decoded;
-        check(resp.errorCode, "describe_configs");
+        Codec.DescribeConfigsResponse resp = (Codec.DescribeConfigsResponse) adminRoundTrip(
+                Codec.OP_DESCRIBE_CONFIGS,
+                payload,
+                Codec.DescribeConfigsResponse.class,
+                "describe_configs");
         return new DescribeConfigsResult(resp.topic, resp.topicId, resp.partitionCount, resp.configs);
     }
 
@@ -1383,16 +1389,12 @@ public final class Client implements AutoCloseable {
      *
      * <p>Empty value clears that key (same as Rust). Topic configs only.
      * Non-zero {@code error_code} is {@link BrokerException} with
-     * {@code op="alter_configs"}.
+     * {@code op="alter_configs"}. Error 14 follows {@code maxRedirects}.
      */
     public void alterConfigs(String topic, List<String[]> configs) {
         byte[] payload = Codec.encodeAlterConfigsRequest(new Codec.AlterConfigsRequest(topic, configs));
-        Object decoded = roundTrip(Codec.OP_ALTER_CONFIGS, payload);
-        if (!(decoded instanceof Codec.AlterConfigsResponse)) {
-            throw new ProtocolException("unexpected response for alter_configs: " + typeName(decoded));
-        }
-        Codec.AlterConfigsResponse resp = (Codec.AlterConfigsResponse) decoded;
-        check(resp.errorCode, "alter_configs");
+        adminRoundTrip(
+                Codec.OP_ALTER_CONFIGS, payload, Codec.AlterConfigsResponse.class, "alter_configs");
     }
 
     /**
