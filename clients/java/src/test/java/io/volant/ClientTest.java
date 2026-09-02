@@ -23,6 +23,7 @@ class ClientTest {
     private static final int NOT_LEADER = Client.NOT_LEADER_FOR_PARTITION;
     private static final int TIMEOUT = 7;
     private static final int REBALANCE = 9;
+    private static final int UNKNOWN_MEMBER = 10;
     private static final int NOT_FOUND = 2;
 
     @Test
@@ -312,6 +313,7 @@ class ClientTest {
         final List<Integer> produceCodes = new CopyOnWriteArrayList<>();
         final List<Integer> fetchCodes = new CopyOnWriteArrayList<>();
         final List<Integer> heartbeatCodes = new CopyOnWriteArrayList<>();
+        final List<Integer> leaveGroupCodes = new CopyOnWriteArrayList<>();
         final List<Integer> offsetCommitCodes = new CopyOnWriteArrayList<>();
         final List<Integer> offsetFetchCodes = new CopyOnWriteArrayList<>();
         final List<Integer> deleteOffsetsCodes = new CopyOnWriteArrayList<>();
@@ -325,6 +327,7 @@ class ClientTest {
         final AtomicInteger produceCount = new AtomicInteger();
         final AtomicInteger fetchCount = new AtomicInteger();
         final AtomicInteger heartbeatCount = new AtomicInteger();
+        final AtomicInteger leaveGroupCount = new AtomicInteger();
         final AtomicInteger offsetCommitCount = new AtomicInteger();
         final AtomicInteger offsetFetchCount = new AtomicInteger();
         final AtomicInteger deleteOffsetsCount = new AtomicInteger();
@@ -443,6 +446,14 @@ class ClientTest {
                     code = heartbeatCodes.remove(0);
                 }
                 return Codec.encodeHeartbeatResponse(new Codec.HeartbeatResponse(code));
+            }
+            if (frame.opcode == Codec.OP_LEAVE_GROUP) {
+                leaveGroupCount.incrementAndGet();
+                int code = 0;
+                if (!leaveGroupCodes.isEmpty()) {
+                    code = leaveGroupCodes.remove(0);
+                }
+                return Codec.encodeLeaveGroupResponse(new Codec.LeaveGroupResponse(code));
             }
             if (frame.opcode == Codec.OP_OFFSET_COMMIT) {
                 offsetCommitCount.incrementAndGet();
@@ -751,6 +762,75 @@ class ClientTest {
                 assertEquals(TIMEOUT, ex.code);
             }
             assertEquals(3, srv.heartbeatCount.get());
+        }
+    }
+
+    @Test
+    void leaveGroupDefaultMaxRetriesZeroRaisesOnTimeout() throws Exception {
+        try (ScriptedBroker srv = ScriptedBroker.start()) {
+            srv.leaveGroupCodes.add(TIMEOUT);
+            try (Client c = Client.connect("127.0.0.1", srv.port, 5_000)) {
+                assertEquals(0, c.maxRetries());
+                BrokerException ex =
+                        assertThrows(BrokerException.class, () -> c.leaveGroup("g", "m1"));
+                assertEquals(TIMEOUT, ex.code);
+            }
+            assertEquals(1, srv.leaveGroupCount.get());
+        }
+    }
+
+    @Test
+    void leaveGroupRetriesTimeoutThenOk() throws Exception {
+        try (ScriptedBroker srv = ScriptedBroker.start()) {
+            srv.leaveGroupCodes.add(TIMEOUT);
+            srv.leaveGroupCodes.add(0);
+            try (Client c = Client.connect("127.0.0.1", srv.port, 5_000)) {
+                c.setMaxRetries(2);
+                c.setRetryBackoffMs(0);
+                c.leaveGroup("g", "m1");
+            }
+            assertEquals(2, srv.leaveGroupCount.get());
+        }
+    }
+
+    @Test
+    void leaveGroupUnknownMemberIsSuccess() throws Exception {
+        try (ScriptedBroker srv = ScriptedBroker.start()) {
+            srv.leaveGroupCodes.add(UNKNOWN_MEMBER);
+            try (Client c = Client.connect("127.0.0.1", srv.port, 5_000)) {
+                c.leaveGroup("g", "m1");
+            }
+            assertEquals(1, srv.leaveGroupCount.get());
+        }
+    }
+
+    @Test
+    void leaveGroupRetriesTimeoutThenUnknownMember() throws Exception {
+        try (ScriptedBroker srv = ScriptedBroker.start()) {
+            srv.leaveGroupCodes.add(TIMEOUT);
+            srv.leaveGroupCodes.add(UNKNOWN_MEMBER);
+            try (Client c = Client.connect("127.0.0.1", srv.port, 5_000)) {
+                c.setMaxRetries(2);
+                c.setRetryBackoffMs(0);
+                c.leaveGroup("g", "m1");
+            }
+            assertEquals(2, srv.leaveGroupCount.get());
+        }
+    }
+
+    @Test
+    void leaveGroupRebalanceIsNotRetried() throws Exception {
+        try (ScriptedBroker srv = ScriptedBroker.start()) {
+            srv.leaveGroupCodes.add(REBALANCE);
+            srv.leaveGroupCodes.add(0);
+            try (Client c = Client.connect("127.0.0.1", srv.port, 5_000)) {
+                c.setMaxRetries(2);
+                c.setRetryBackoffMs(0);
+                BrokerException ex =
+                        assertThrows(BrokerException.class, () -> c.leaveGroup("g", "m1"));
+                assertEquals(REBALANCE, ex.code);
+            }
+            assertEquals(1, srv.leaveGroupCount.get());
         }
     }
 

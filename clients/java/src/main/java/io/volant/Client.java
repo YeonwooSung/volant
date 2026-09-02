@@ -1678,15 +1678,52 @@ public final class Client implements AutoCloseable {
         return resp.entries;
     }
 
-    /** Leave a consumer group. */
+    /**
+     * Leave a consumer group. Transient broker/transport errors retry up
+     * to {@code maxRetries} extra times (default 0). Error 10
+     * (UnknownMemberId) is success (already left). Rebalance 9 /
+     * IllegalGeneration 11 / 13 / 14 / not-found 2 are not retried.
+     */
     public void leaveGroup(String group, String memberId) {
         byte[] payload = Codec.encodeLeaveGroupRequest(new Codec.LeaveGroupRequest(group, memberId));
-        Object decoded = roundTrip(Codec.OP_LEAVE_GROUP, payload);
-        if (!(decoded instanceof Codec.LeaveGroupResponse)) {
-            throw new ProtocolException("unexpected response for leave_group: " + typeName(decoded));
+        int retryAttempt = 0;
+        while (true) {
+            Object decoded;
+            try {
+                decoded = roundTrip(Codec.OP_LEAVE_GROUP, payload);
+            } catch (BrokerException e) {
+                if (e.code == 10) {
+                    return;
+                }
+                if (isTransientBroker(e.code) && retryAttempt < maxRetries) {
+                    retryAttempt++;
+                    sleepProduceRetry();
+                    continue;
+                }
+                throw e;
+            } catch (RuntimeException e) {
+                if (isTransientTransport(e) && retryAttempt < maxRetries) {
+                    retryAttempt++;
+                    sleepProduceRetry();
+                    continue;
+                }
+                throw e;
+            }
+            if (!(decoded instanceof Codec.LeaveGroupResponse)) {
+                throw new ProtocolException("unexpected response for leave_group: " + typeName(decoded));
+            }
+            Codec.LeaveGroupResponse resp = (Codec.LeaveGroupResponse) decoded;
+            if (resp.errorCode == 10) {
+                return;
+            }
+            if (isTransientBroker(resp.errorCode) && retryAttempt < maxRetries) {
+                retryAttempt++;
+                sleepProduceRetry();
+                continue;
+            }
+            check(resp.errorCode, "leave_group");
+            return;
         }
-        Codec.LeaveGroupResponse resp = (Codec.LeaveGroupResponse) decoded;
-        check(resp.errorCode, "leave_group");
     }
 
     /** Cluster brokers and topics (all topics). */
