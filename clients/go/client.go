@@ -1420,15 +1420,32 @@ func (c *Client) commitOffsets(group, memberID string, generation uint32, entrie
 	if err != nil {
 		return err
 	}
-	decoded, err := c.roundTrip(codec.OpOffsetCommit, payload)
-	if err != nil {
-		return err
+	maxRetries := c.maxRetries
+	if maxRetries < 0 {
+		maxRetries = 0
 	}
-	resp, ok := decoded.(codec.OffsetCommitResponse)
-	if !ok {
-		return &frame.ProtocolError{Msg: fmt.Sprintf("unexpected response for offset_commit: %T", decoded)}
+	retryAttempt := 0
+	for {
+		decoded, err := c.roundTrip(codec.OpOffsetCommit, payload)
+		if err != nil {
+			if isTransientProduceErr(err) && retryAttempt < maxRetries {
+				retryAttempt++
+				c.sleepProduceRetry()
+				continue
+			}
+			return err
+		}
+		resp, ok := decoded.(codec.OffsetCommitResponse)
+		if !ok {
+			return &frame.ProtocolError{Msg: fmt.Sprintf("unexpected response for offset_commit: %T", decoded)}
+		}
+		if isTransientBroker(resp.ErrorCode) && retryAttempt < maxRetries {
+			retryAttempt++
+			c.sleepProduceRetry()
+			continue
+		}
+		return check(resp.ErrorCode, "offset_commit")
 	}
-	return check(resp.ErrorCode, "offset_commit")
 }
 
 // ListOffsets returns earliest/latest offsets for topic (native opcode 48).
@@ -1481,7 +1498,8 @@ type DescribeConfigsResult struct {
 // DeleteOffsets deletes committed offsets for group (native opcode 38).
 // Nil or empty entries deletes all offsets for the group (wire count 0).
 // Returns the number of offset files removed. Non-zero error_code is
-// BrokerError. This is not Kafka OffsetDelete.
+// BrokerError. Transient broker/transport errors retry up to maxRetries
+// extra times (default 0). This is not Kafka OffsetDelete.
 func (c *Client) DeleteOffsets(group string, entries []codec.OffsetEntry) (uint32, error) {
 	if entries == nil {
 		entries = []codec.OffsetEntry{}
@@ -1493,18 +1511,35 @@ func (c *Client) DeleteOffsets(group string, entries []codec.OffsetEntry) (uint3
 	if err != nil {
 		return 0, err
 	}
-	decoded, err := c.roundTrip(codec.OpDeleteOffsets, payload)
-	if err != nil {
-		return 0, err
+	maxRetries := c.maxRetries
+	if maxRetries < 0 {
+		maxRetries = 0
 	}
-	resp, ok := decoded.(codec.DeleteOffsetsResponse)
-	if !ok {
-		return 0, &frame.ProtocolError{Msg: fmt.Sprintf("unexpected response for delete_offsets: %T", decoded)}
+	retryAttempt := 0
+	for {
+		decoded, err := c.roundTrip(codec.OpDeleteOffsets, payload)
+		if err != nil {
+			if isTransientProduceErr(err) && retryAttempt < maxRetries {
+				retryAttempt++
+				c.sleepProduceRetry()
+				continue
+			}
+			return 0, err
+		}
+		resp, ok := decoded.(codec.DeleteOffsetsResponse)
+		if !ok {
+			return 0, &frame.ProtocolError{Msg: fmt.Sprintf("unexpected response for delete_offsets: %T", decoded)}
+		}
+		if isTransientBroker(resp.ErrorCode) && retryAttempt < maxRetries {
+			retryAttempt++
+			c.sleepProduceRetry()
+			continue
+		}
+		if err := check(resp.ErrorCode, "delete_offsets"); err != nil {
+			return 0, err
+		}
+		return resp.DeletedCount, nil
 	}
-	if err := check(resp.ErrorCode, "delete_offsets"); err != nil {
-		return 0, err
-	}
-	return resp.DeletedCount, nil
 }
 
 func (c *Client) DescribeConfigs(topic string) (DescribeConfigsResult, error) {
@@ -1641,18 +1676,35 @@ func (c *Client) fetchOffsets(group string, entries []codec.OffsetEntry) ([]code
 	if err != nil {
 		return nil, err
 	}
-	decoded, err := c.roundTrip(codec.OpOffsetFetch, payload)
-	if err != nil {
-		return nil, err
+	maxRetries := c.maxRetries
+	if maxRetries < 0 {
+		maxRetries = 0
 	}
-	resp, ok := decoded.(codec.OffsetFetchResponse)
-	if !ok {
-		return nil, &frame.ProtocolError{Msg: fmt.Sprintf("unexpected response for offset_fetch: %T", decoded)}
+	retryAttempt := 0
+	for {
+		decoded, err := c.roundTrip(codec.OpOffsetFetch, payload)
+		if err != nil {
+			if isTransientProduceErr(err) && retryAttempt < maxRetries {
+				retryAttempt++
+				c.sleepProduceRetry()
+				continue
+			}
+			return nil, err
+		}
+		resp, ok := decoded.(codec.OffsetFetchResponse)
+		if !ok {
+			return nil, &frame.ProtocolError{Msg: fmt.Sprintf("unexpected response for offset_fetch: %T", decoded)}
+		}
+		if isTransientBroker(resp.ErrorCode) && retryAttempt < maxRetries {
+			retryAttempt++
+			c.sleepProduceRetry()
+			continue
+		}
+		if err := check(resp.ErrorCode, "offset_fetch"); err != nil {
+			return nil, err
+		}
+		return resp.Entries, nil
 	}
-	if err := check(resp.ErrorCode, "offset_fetch"); err != nil {
-		return nil, err
-	}
-	return resp.Entries, nil
 }
 
 // JoinGroup joins a consumer group. First join sends empty member_id

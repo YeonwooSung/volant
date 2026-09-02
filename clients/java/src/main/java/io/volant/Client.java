@@ -1196,12 +1196,38 @@ public final class Client implements AutoCloseable {
     void offsetCommit(String group, String memberId, long generation, List<Codec.OffsetCommitEntry> entries) {
         byte[] payload = Codec.encodeOffsetCommitRequest(
                 new Codec.OffsetCommitRequest(group, memberId, generation, entries));
-        Object decoded = roundTrip(Codec.OP_OFFSET_COMMIT, payload);
-        if (!(decoded instanceof Codec.OffsetCommitResponse)) {
-            throw new ProtocolException("unexpected response for offset_commit: " + typeName(decoded));
+        int retryAttempt = 0;
+        while (true) {
+            Object decoded;
+            try {
+                decoded = roundTrip(Codec.OP_OFFSET_COMMIT, payload);
+            } catch (BrokerException e) {
+                if (isTransientBroker(e.code) && retryAttempt < maxRetries) {
+                    retryAttempt++;
+                    sleepProduceRetry();
+                    continue;
+                }
+                throw e;
+            } catch (RuntimeException e) {
+                if (isTransientTransport(e) && retryAttempt < maxRetries) {
+                    retryAttempt++;
+                    sleepProduceRetry();
+                    continue;
+                }
+                throw e;
+            }
+            if (!(decoded instanceof Codec.OffsetCommitResponse)) {
+                throw new ProtocolException("unexpected response for offset_commit: " + typeName(decoded));
+            }
+            Codec.OffsetCommitResponse resp = (Codec.OffsetCommitResponse) decoded;
+            if (isTransientBroker(resp.errorCode) && retryAttempt < maxRetries) {
+                retryAttempt++;
+                sleepProduceRetry();
+                continue;
+            }
+            check(resp.errorCode, "offset_commit");
+            return;
         }
-        Codec.OffsetCommitResponse resp = (Codec.OffsetCommitResponse) decoded;
-        check(resp.errorCode, "offset_commit");
     }
 
     /**
@@ -1259,18 +1285,44 @@ public final class Client implements AutoCloseable {
      *
      * <p>{@code null} or empty {@code entries} deletes all offsets for the
      * group (wire count 0). Returns the number of offset files removed.
-     * Non-zero {@code error_code} is {@link BrokerException}. This is not
-     * Kafka OffsetDelete.
+     * Non-zero {@code error_code} is {@link BrokerException}. Transient
+     * broker/transport errors retry up to {@code maxRetries} extra times
+     * (default 0). This is not Kafka OffsetDelete.
      */
     public int deleteOffsets(String group, List<Codec.OffsetEntry> entries) {
         byte[] payload = Codec.encodeDeleteOffsetsRequest(new Codec.DeleteOffsetsRequest(group, entries));
-        Object decoded = roundTrip(Codec.OP_DELETE_OFFSETS, payload);
-        if (!(decoded instanceof Codec.DeleteOffsetsResponse)) {
-            throw new ProtocolException("unexpected response for delete_offsets: " + typeName(decoded));
+        int retryAttempt = 0;
+        while (true) {
+            Object decoded;
+            try {
+                decoded = roundTrip(Codec.OP_DELETE_OFFSETS, payload);
+            } catch (BrokerException e) {
+                if (isTransientBroker(e.code) && retryAttempt < maxRetries) {
+                    retryAttempt++;
+                    sleepProduceRetry();
+                    continue;
+                }
+                throw e;
+            } catch (RuntimeException e) {
+                if (isTransientTransport(e) && retryAttempt < maxRetries) {
+                    retryAttempt++;
+                    sleepProduceRetry();
+                    continue;
+                }
+                throw e;
+            }
+            if (!(decoded instanceof Codec.DeleteOffsetsResponse)) {
+                throw new ProtocolException("unexpected response for delete_offsets: " + typeName(decoded));
+            }
+            Codec.DeleteOffsetsResponse resp = (Codec.DeleteOffsetsResponse) decoded;
+            if (isTransientBroker(resp.errorCode) && retryAttempt < maxRetries) {
+                retryAttempt++;
+                sleepProduceRetry();
+                continue;
+            }
+            check(resp.errorCode, "delete_offsets");
+            return resp.deletedCount;
         }
-        Codec.DeleteOffsetsResponse resp = (Codec.DeleteOffsetsResponse) decoded;
-        check(resp.errorCode, "delete_offsets");
-        return resp.deletedCount;
     }
 
     public DescribeConfigsResult describeConfigs(String topic) {
@@ -1370,13 +1422,38 @@ public final class Client implements AutoCloseable {
 
     List<Codec.OffsetFetchEntry> offsetFetchEntries(String group, List<Codec.OffsetEntry> entries) {
         byte[] payload = Codec.encodeOffsetFetchRequest(new Codec.OffsetFetchRequest(group, entries));
-        Object decoded = roundTrip(Codec.OP_OFFSET_FETCH, payload);
-        if (!(decoded instanceof Codec.OffsetFetchResponse)) {
-            throw new ProtocolException("unexpected response for offset_fetch: " + typeName(decoded));
+        int retryAttempt = 0;
+        while (true) {
+            Object decoded;
+            try {
+                decoded = roundTrip(Codec.OP_OFFSET_FETCH, payload);
+            } catch (BrokerException e) {
+                if (isTransientBroker(e.code) && retryAttempt < maxRetries) {
+                    retryAttempt++;
+                    sleepProduceRetry();
+                    continue;
+                }
+                throw e;
+            } catch (RuntimeException e) {
+                if (isTransientTransport(e) && retryAttempt < maxRetries) {
+                    retryAttempt++;
+                    sleepProduceRetry();
+                    continue;
+                }
+                throw e;
+            }
+            if (!(decoded instanceof Codec.OffsetFetchResponse)) {
+                throw new ProtocolException("unexpected response for offset_fetch: " + typeName(decoded));
+            }
+            Codec.OffsetFetchResponse resp = (Codec.OffsetFetchResponse) decoded;
+            if (isTransientBroker(resp.errorCode) && retryAttempt < maxRetries) {
+                retryAttempt++;
+                sleepProduceRetry();
+                continue;
+            }
+            check(resp.errorCode, "offset_fetch");
+            return resp.entries;
         }
-        Codec.OffsetFetchResponse resp = (Codec.OffsetFetchResponse) decoded;
-        check(resp.errorCode, "offset_fetch");
-        return resp.entries;
     }
 
     /**
