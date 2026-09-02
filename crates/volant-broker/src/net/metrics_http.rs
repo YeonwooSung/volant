@@ -342,6 +342,15 @@ fn broker_metrics_text(broker: &Broker) -> String {
         "volant_fetch_session_dual_epoch_converge_total {}\n",
         sessions.dual_epoch_converge_total()
     ));
+    // v0.30: mirror-only (no primary) self-converge (loser overwrote its mirror).
+    text.push_str(
+        "# HELP volant_fetch_session_mirror_converge_total Mirror-only loser overwrites (adopted winner snapshot)\n",
+    );
+    text.push_str("# TYPE volant_fetch_session_mirror_converge_total counter\n");
+    text.push_str(&format!(
+        "volant_fetch_session_mirror_converge_total {}\n",
+        sessions.mirror_converge_total()
+    ));
     // Phase 120/122: multi-broker EndTxn / AddOffsets / TxnOffsetCommit forward.
     text.push_str(
         "# HELP volant_txn_forward_total Successful Kafka txn API forwards to coordinator (EndTxn/AddOffsets/TxnOffsetCommit)\n",

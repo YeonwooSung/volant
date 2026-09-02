@@ -20,6 +20,7 @@
 | | `VOLANT_GROUP_COMMIT_MS` | `0` (off) | Produce group-commit window (ms); shared fsync across concurrent appends |
 | | `VOLANT_GROUP_COMMIT_MAX_RECORDS` | inherit | Optional record threshold (else `flush_every_n` or 64) |
 | | `VOLANT_SESSION_DUAL_EPOCH_CONVERGE` | on (`1`) | Unclaimed dual-primary converge; `0`/`false`/`no`/`off` disables |
+| | `VOLANT_SESSION_MIRROR_CONVERGE` | on (`1`) | Mirror-only (no primary) self-converge; `0`/`false`/`no`/`off` disables |
 
 Logging filter: `RUST_LOG` (e.g. `volant=info,volant_broker=debug`).
 
@@ -51,6 +52,7 @@ Key series (prefix `volant_`):
 - `volant_fetch_session_promote_claim_reject_total` (Phase 143 dual-promote / claim-lose rejects)
 - `volant_fetch_session_serve_from_mirror_total` (Phase 147 owner-miss serve foreign mirror without promote)
 - `volant_fetch_session_dual_epoch_converge_total` (v0.25 unclaimed dual-primary demote; loser became mirror)
+- `volant_fetch_session_mirror_converge_total` (v0.30 mirror-only loser overwrite; adopted winner snapshot)
 - `volant_preferred_replica_redirect_total` (Phase 126 PreferredReadReplica redirects)
 - `volant_preferred_replica_suppressed_total` (Phase 140: READ_COMMITTED suppress when a preferred candidate existed)
 - `volant_preferred_replica_session_suppressed_total` (Phase 144: preferred suppress when client has established fetch session)
@@ -252,7 +254,13 @@ volant-server \
   (higher `mirror_gen`, then higher epoch, then lowest non-zero `promoted_by` /
   owner id; `0` = no claim) and demotes the loser to a mirror (metric
   `volant_fetch_session_dual_epoch_converge_total`). Default **on**;
-  `VOLANT_SESSION_DUAL_EPOCH_CONVERGE=0` disables. Phase 147 single owner-miss
+  `VOLANT_SESSION_DUAL_EPOCH_CONVERGE=0` disables. **v0.30 mirror-only:** when
+  two peers both hold **only** a foreign mirror (owner dead, no primary), serving
+  from that mirror / session-touch / sweep queues a best-effort MirrorPut and
+  `converge_dual_mirror` overwrites the loser with the same winner order (metric
+  `volant_fetch_session_mirror_converge_total`). Default **on**;
+  `VOLANT_SESSION_MIRROR_CONVERGE=0` disables. Does not promote unless Phase 147
+  `promote_on_miss` is already on. Phase 147 single owner-miss
   serve-from-mirror is unchanged. Best-effort only (not Raft); put lag/fail still
   **70**; session_id owner bits are not re-encoded.
   Sticky routing still preferred for latency (one extra RTT on forward when owner is up).
@@ -717,6 +725,25 @@ Metric: `volant_fetch_session_dual_epoch_converge_total`.
 Phase 147 single owner-miss serve-from-mirror is unchanged. Not Raft.
 
 See [V25_SPEC.md](./V25_SPEC.md).
+
+## v0.30 mirror converge
+
+When two peers both hold **only** a foreign fetch-session mirror (no local
+primary; Phase 147 serve-from-mirror after owner death), inbound MirrorPut or
+`converge_dual_mirror` keeps one snapshot: the loser overwrites its mirror
+with the winner.
+
+Winner: same as v0.25 — higher `mirror_gen`, then higher epoch, then lowest
+non-zero `promoted_by` / owner id (`0` = no claim, loses). Tie keeps local.
+Does **not** promote unless `VOLANT_FETCH_SESSION_PROMOTE_ON_MISS=1`.
+
+Trigger: serve-from-mirror (147), incremental session-touch, or the Phase 97
+sweep (best-effort `from_mirror` MirrorPut to live peers).
+
+Default **on**. Escape hatch: `VOLANT_SESSION_MIRROR_CONVERGE=0`.
+Metric: `volant_fetch_session_mirror_converge_total`.
+
+See [V30_SPEC.md](./V30_SPEC.md).
 
 ## Shipped (not gaps)
 
