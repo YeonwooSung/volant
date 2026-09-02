@@ -234,6 +234,11 @@ docs for day-to-day reading: [ops](../ops.md), [consistency](../consistency.md),
 | v0.33 | ✅ | Java offset commit/fetch + GroupConsumer | [V33_SPEC.md](../V33_SPEC.md) |
 | v0.34 | ✅ | Rollback overlay if openraft joint fails | [V34_SPEC.md](../V34_SPEC.md) |
 | v0.35 | ✅ | Store openraft log in redb | [V35_SPEC.md](../V35_SPEC.md) |
+| v0.36 | ✅ | Static group_instance_id on Python/Go/Java GroupConsumers | [V36_SPEC.md](../V36_SPEC.md) |
+| v0.37 | ✅ | GroupConsumer background heartbeat (Python/Go/Java) | [V37_SPEC.md](../V37_SPEC.md) |
+| v0.38 | ✅ | Follower Add/RemoveBroker forward to openraft leader | [V38_SPEC.md](../V38_SPEC.md) |
+| v0.39 | ✅ | Restore assignment if add-broker joint rolls back | [V39_SPEC.md](../V39_SPEC.md) |
+| v0.40 | ✅ | Wait for homemade metadata-raft commit before CreateTopic ok | [V40_SPEC.md](../V40_SPEC.md) |
 
 ---
 
