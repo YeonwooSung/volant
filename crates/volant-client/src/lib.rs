@@ -67,6 +67,11 @@
 //! abort inherit) on that same transient set (default 0). InvalidTxnState
 //! (22), fence / epoch / abortable, 13 / 14 / 9 / 10 / 11 / 2, and
 //! protocol are not retried. [`TransactionalProducer`] inherits.
+//! v0.102 retries InitProducerId (`ensure_producer_id`) on that same
+//! transient set (default 0). Error 13 / 14 / 9 / 10 / 11 / 2,
+//! protocol, and UnknownProducerId (21) on Init itself are not retried.
+//! Produce / BeginTxn / `admin_round_trip` are unchanged. Already
+//! initialized clients skip Init.
 
 #![deny(missing_docs)]
 
