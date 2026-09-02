@@ -630,6 +630,24 @@ fn broker_metrics_text(broker: &Broker) -> String {
         "volant_preferred_replica_session_suppressed_total {}\n",
         broker.preferred_replica_session_suppressed_total()
     ));
+    // v0.7: preferred redirect throttle applied.
+    text.push_str(
+        "# HELP volant_preferred_replica_throttled_total Fetch preferred redirect throttle applied\n",
+    );
+    text.push_str("# TYPE volant_preferred_replica_throttled_total counter\n");
+    text.push_str(&format!(
+        "volant_preferred_replica_throttled_total {}\n",
+        broker.preferred_replica_throttled_total()
+    ));
+    // v0.7: preferred advertised-addr TCP probe failures.
+    text.push_str(
+        "# HELP volant_preferred_replica_probe_fail_total Preferred replica TCP connect probe failures\n",
+    );
+    text.push_str("# TYPE volant_preferred_replica_probe_fail_total counter\n");
+    text.push_str(&format!(
+        "volant_preferred_replica_probe_fail_total {}\n",
+        broker.preferred_replica_probe_fail_total()
+    ));
     // Phase 145: rack-aware replica assignment on create.
     text.push_str(
         "# HELP volant_rack_aware_assignment_total Topic create/create-partitions using rack-diversity placement\n",
