@@ -29,6 +29,9 @@ var ErrGroupClosed = errors.New("group consumer closed")
 const (
 	assignorBroker = "broker"
 	assignorRange  = "range"
+	resetEarliest  = "earliest"
+	resetLatest    = "latest"
+	resetNone      = "none"
 )
 
 // GroupConsumerOption configures [JoinGroupConsumer].
@@ -40,6 +43,7 @@ type groupConsumerOptions struct {
 	assignor            string
 	autoCommit          bool
 	autoCommitInterval  time.Duration
+	autoOffsetReset     string
 }
 
 // WithAutoCommit enables offset auto-commit after a successful Poll that
@@ -74,6 +78,29 @@ func normalizeAssignor(name string) (string, error) {
 		return assignorRange, nil
 	default:
 		return "", fmt.Errorf("unknown assignor %q", name)
+	}
+}
+
+// WithAutoOffsetReset selects the fetch position when OffsetFetch is
+// missing or OFFSET_UNKNOWN: "earliest" (default, position 0, no
+// ListOffsets), "latest" (native ListOffsets LEO), or "none" (error).
+// Empty is "earliest". Unknown values fail Join.
+func WithAutoOffsetReset(name string) GroupConsumerOption {
+	return func(o *groupConsumerOptions) {
+		o.autoOffsetReset = name
+	}
+}
+
+func normalizeAutoOffsetReset(name string) (string, error) {
+	switch name {
+	case "", resetEarliest:
+		return resetEarliest, nil
+	case resetLatest:
+		return resetLatest, nil
+	case resetNone:
+		return resetNone, nil
+	default:
+		return "", fmt.Errorf("unknown auto_offset_reset %q", name)
 	}
 }
 
@@ -152,6 +179,7 @@ type GroupConsumer struct {
 	assignor            string
 	autoCommit          bool
 	autoCommitInterval  time.Duration
+	autoOffsetReset     string
 	lastAutoCommit      time.Time
 	dirty               bool
 
@@ -173,6 +201,9 @@ func JoinGroupConsumer(c *Client, group string, topics []string, sessionTimeoutM
 		}
 	}
 	if _, err := normalizeAssignor(o.assignor); err != nil {
+		return nil, err
+	}
+	if _, err := normalizeAutoOffsetReset(o.autoOffsetReset); err != nil {
 		return nil, err
 	}
 	return joinGroupConsumer(c, group, topics, sessionTimeoutMs, o)
@@ -207,6 +238,10 @@ func joinGroupConsumer(c *Client, group string, topics []string, sessionTimeoutM
 	if err != nil {
 		return nil, err
 	}
+	reset, err := normalizeAutoOffsetReset(o.autoOffsetReset)
+	if err != nil {
+		return nil, err
+	}
 	g := &GroupConsumer{
 		client:              c,
 		groupID:             group,
@@ -218,6 +253,7 @@ func joinGroupConsumer(c *Client, group string, topics []string, sessionTimeoutM
 		assignor:            assignor,
 		autoCommit:          o.autoCommit,
 		autoCommitInterval:  o.autoCommitInterval,
+		autoOffsetReset:     reset,
 		stop:                make(chan struct{}),
 		hbDone:              make(chan struct{}),
 	}
@@ -311,13 +347,14 @@ func (g *GroupConsumer) doJoin() error {
 		}
 	}
 
+	var missing []topicPartition
 	for _, a := range g.assignment {
 		tp := topicPartition{a.Topic, a.Partition}
 		if _, ok := g.positions[tp]; !ok {
-			g.positions[tp] = 0
+			missing = append(missing, tp)
 		}
 	}
-	return nil
+	return g.applyReset(missing)
 }
 
 func (g *GroupConsumer) fetchPositionsFor(partitions []topicPartition) error {
@@ -332,14 +369,61 @@ func (g *GroupConsumer) fetchPositionsFor(partitions []topicPartition) error {
 	if err != nil {
 		return err
 	}
+	found := make(map[topicPartition]uint64, len(fetched))
 	for _, e := range fetched {
-		pos := e.Offset
-		if pos == offsetUnknown {
-			pos = 0
-		}
-		g.positions[topicPartition{e.Topic, e.Partition}] = pos
+		found[topicPartition{e.Topic, e.Partition}] = e.Offset
 	}
-	return nil
+	var unknown []topicPartition
+	for _, p := range partitions {
+		off, ok := found[p]
+		if !ok || off == offsetUnknown {
+			unknown = append(unknown, p)
+			continue
+		}
+		g.positions[p] = off
+	}
+	return g.applyReset(unknown)
+}
+
+func (g *GroupConsumer) applyReset(partitions []topicPartition) error {
+	if len(partitions) == 0 {
+		return nil
+	}
+	switch g.autoOffsetReset {
+	case resetEarliest:
+		for _, p := range partitions {
+			g.positions[p] = 0
+		}
+		return nil
+	case resetNone:
+		p := partitions[0]
+		return fmt.Errorf("no committed offset for %s-%d and auto_offset_reset=%q", p.topic, p.partition, resetNone)
+	case resetLatest:
+		byTopic := make(map[string][]uint32)
+		for _, p := range partitions {
+			byTopic[p.topic] = append(byTopic[p.topic], p.partition)
+		}
+		for topic, parts := range byTopic {
+			listings, err := g.client.ListOffsets(topic, parts)
+			if err != nil {
+				return err
+			}
+			got := make(map[uint32]uint64, len(listings))
+			for _, e := range listings {
+				got[e.Partition] = e.Latest
+			}
+			for _, part := range parts {
+				latest, ok := got[part]
+				if !ok {
+					return fmt.Errorf("list_offsets missing partition %s-%d", topic, part)
+				}
+				g.positions[topicPartition{topic, part}] = latest
+			}
+		}
+		return nil
+	default:
+		return fmt.Errorf("unknown auto_offset_reset %q", g.autoOffsetReset)
+	}
 }
 
 func (g *GroupConsumer) localRangeAssignment() ([]Assignment, error) {
@@ -595,6 +679,14 @@ func (g *GroupConsumer) GroupInstanceID() string {
 		return ""
 	}
 	return g.groupInstanceID
+}
+
+// AutoOffsetReset is the join-time reset policy (earliest / latest / none).
+func (g *GroupConsumer) AutoOffsetReset() string {
+	if g == nil {
+		return ""
+	}
+	return g.autoOffsetReset
 }
 
 // Positions returns next-read offsets for assigned partitions.

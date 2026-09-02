@@ -34,6 +34,9 @@ _HB_INTERVAL_MIN_MS = 100
 _HB_INTERVAL_MAX_MS = 3000
 _ASSIGNOR_BROKER = "broker"
 _ASSIGNOR_RANGE = "range"
+_RESET_EARLIEST = "earliest"
+_RESET_LATEST = "latest"
+_RESET_NONE = "none"
 
 
 def heartbeat_interval_ms(session_timeout_ms: int) -> int:
@@ -52,6 +55,16 @@ def _normalize_assignor(name: Optional[str]) -> str:
     if name == _ASSIGNOR_RANGE:
         return _ASSIGNOR_RANGE
     raise ValueError(f"unknown assignor: {name!r}")
+
+
+def _normalize_auto_offset_reset(name: Optional[str]) -> str:
+    if name is None or name == "" or name == _RESET_EARLIEST:
+        return _RESET_EARLIEST
+    if name == _RESET_LATEST:
+        return _RESET_LATEST
+    if name == _RESET_NONE:
+        return _RESET_NONE
+    raise ValueError(f"unknown auto_offset_reset: {name!r}")
 
 
 @dataclass
@@ -105,6 +118,8 @@ class GroupConsumer:
         g = GroupConsumer.join(
             c, group="g", topics=["t"], auto_commit=True, auto_commit_interval_ms=5000
         )
+        # Opt-in auto_offset_reset (v0.62). Default earliest (position 0).
+        g = GroupConsumer.join(c, group="g", topics=["t"], auto_offset_reset="latest")
     """
 
     def __init__(
@@ -118,6 +133,7 @@ class GroupConsumer:
         assignor: str = _ASSIGNOR_BROKER,
         auto_commit: bool = False,
         auto_commit_interval_ms: int = _DEFAULT_AUTO_COMMIT_INTERVAL_MS,
+        auto_offset_reset: str = _RESET_EARLIEST,
     ) -> None:
         self._client = client
         self._group_id = group_id
@@ -126,6 +142,7 @@ class GroupConsumer:
         self._group_instance_id = group_instance_id
         self._heartbeat_enabled = heartbeat
         self._assignor = _normalize_assignor(assignor)
+        self._auto_offset_reset = _normalize_auto_offset_reset(auto_offset_reset)
         self._auto_commit = auto_commit
         self._auto_commit_interval_ms = max(0, auto_commit_interval_ms)
         self._last_auto_commit: Optional[float] = None
@@ -153,6 +170,7 @@ class GroupConsumer:
         assignor: str = _ASSIGNOR_BROKER,
         auto_commit: bool = False,
         auto_commit_interval_ms: int = _DEFAULT_AUTO_COMMIT_INTERVAL_MS,
+        auto_offset_reset: str = _RESET_EARLIEST,
     ) -> GroupConsumer:
         """Join ``group`` on ``topics``. Empty ``member_id`` on first join.
 
@@ -168,6 +186,11 @@ class GroupConsumer:
         positions (interval 0 = every such poll; else first successful
         poll, then every ``auto_commit_interval_ms``). Not Kafka
         ``enable.auto.commit`` (no background commit thread).
+        ``auto_offset_reset`` is ``"earliest"`` (default: position 0, no
+        ListOffsets), ``"latest"`` (native ListOffsets LEO), or ``"none"``
+        (raise if OffsetFetch is missing / ``OFFSET_UNKNOWN``). Invalid
+        strings raise ``ValueError`` before JoinGroup. Not Kafka
+        ``auto.offset.reset`` (no timestamp).
         """
         timeout = (
             _DEFAULT_SESSION_TIMEOUT_MS
@@ -184,6 +207,7 @@ class GroupConsumer:
             assignor=assignor,
             auto_commit=auto_commit,
             auto_commit_interval_ms=auto_commit_interval_ms,
+            auto_offset_reset=auto_offset_reset,
         )
         this._do_join()
         this._start_heartbeat()
@@ -241,8 +265,9 @@ class GroupConsumer:
             to_fetch = new_assignment if not previous else added
             self._fetch_positions_for(to_fetch)
 
-        for tp in self._assignment:
-            self._positions.setdefault(tp, 0)
+        missing = [tp for tp in self._assignment if tp not in self._positions]
+        if missing:
+            self._apply_reset(missing)
 
     def _fetch_positions_for(self, partitions: list[tuple[str, int]]) -> None:
         if not partitions:
@@ -250,16 +275,44 @@ class GroupConsumer:
         by_topic: dict[str, list[int]] = {}
         for topic, partition in partitions:
             by_topic.setdefault(topic, []).append(partition)
+        unknown: list[tuple[str, int]] = []
         for topic, wanted in by_topic.items():
             fetched = self._client.offset_fetch(self._group_id, topic)
             found = {int(p): int(off) for p, off in fetched}
             for partition in wanted:
-                if partition not in found:
+                off = found.get(partition)
+                if off is None or off == OFFSET_UNKNOWN:
+                    unknown.append((topic, partition))
                     continue
-                off = found[partition]
-                self._positions[(topic, partition)] = (
-                    0 if off == OFFSET_UNKNOWN else off
-                )
+                self._positions[(topic, partition)] = off
+        if unknown:
+            self._apply_reset(unknown)
+
+    def _apply_reset(self, partitions: list[tuple[str, int]]) -> None:
+        if not partitions:
+            return
+        if self._auto_offset_reset == _RESET_EARLIEST:
+            for tp in partitions:
+                self._positions[tp] = 0
+            return
+        if self._auto_offset_reset == _RESET_NONE:
+            topic, partition = partitions[0]
+            raise ValueError(
+                f"no committed offset for {topic}-{partition} "
+                f"and auto_offset_reset={self._auto_offset_reset!r}"
+            )
+        by_topic: dict[str, list[int]] = {}
+        for topic, partition in partitions:
+            by_topic.setdefault(topic, []).append(partition)
+        for topic, wanted in by_topic.items():
+            listings = self._client.list_offsets(topic, wanted)
+            found = {int(e.partition): int(e.latest) for e in listings}
+            for partition in wanted:
+                if partition not in found:
+                    raise ValueError(
+                        f"list_offsets missing partition {topic}-{partition}"
+                    )
+                self._positions[(topic, partition)] = found[partition]
 
     def _heartbeat(self) -> None:
         self._client.heartbeat(self._group_id, self._member_id, self._generation)
@@ -450,3 +503,7 @@ class GroupConsumer:
     @property
     def assignor(self) -> str:
         return self._assignor
+
+    @property
+    def auto_offset_reset(self) -> str:
+        return self._auto_offset_reset

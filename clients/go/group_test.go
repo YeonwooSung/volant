@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"net"
 	"os"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -33,6 +34,8 @@ type fakeGroupBroker struct {
 	fetches       []codec.FetchRequest
 	leaves        []codec.LeaveGroupRequest
 	offsetFetches []codec.OffsetFetchRequest
+	listOffsets   []codec.ListOffsetsRequest
+	bounds        map[tpKey]codec.OffsetListing
 	topics        []codec.TopicInfo
 	metadatas     int
 }
@@ -43,6 +46,7 @@ func newFakeGroupBroker() *fakeGroupBroker {
 		generation: 1,
 		offsets:    make(map[tpKey]uint64),
 		records:    make(map[tpKey][]codec.FetchRecord),
+		bounds:     make(map[tpKey]codec.OffsetListing),
 	}
 }
 
@@ -78,6 +82,12 @@ func (s *fakeGroupBroker) snapshot() (joins []codec.JoinGroupRequest, hbs []code
 		append([]codec.FetchRequest(nil), s.fetches...),
 		append([]codec.LeaveGroupRequest(nil), s.leaves...),
 		append([]codec.OffsetFetchRequest(nil), s.offsetFetches...)
+}
+
+func (s *fakeGroupBroker) listOffsetSnapshot() []codec.ListOffsetsRequest {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return append([]codec.ListOffsetsRequest(nil), s.listOffsets...)
 }
 
 func startFakeGroup(t *testing.T, s *fakeGroupBroker) (addr string, stop func()) {
@@ -143,6 +153,7 @@ func (s *fakeGroupBroker) handle(f *frame.Frame) ([]byte, error) {
 	defer s.mu.Unlock()
 	var payload []byte
 	var err error
+	respOp := f.Opcode
 	switch f.Opcode {
 	case codec.OpJoinGroup:
 		req, e := codec.DecodeJoinGroupRequest(f.Payload)
@@ -229,6 +240,30 @@ func (s *fakeGroupBroker) handle(f *frame.Frame) ([]byte, error) {
 		payload, err = codec.EncodeMetadataResponse(codec.MetadataResponse{
 			Topics: append([]codec.TopicInfo(nil), s.topics...),
 		})
+	case codec.OpListOffsets:
+		req, e := codec.DecodeListOffsetsRequest(f.Payload)
+		if e != nil {
+			return nil, e
+		}
+		s.listOffsets = append(s.listOffsets, req)
+		var entries []codec.OffsetListing
+		if len(req.Partitions) == 0 {
+			for k, e := range s.bounds {
+				if k.topic == req.Topic {
+					entries = append(entries, e)
+				}
+			}
+		} else {
+			for _, p := range req.Partitions {
+				if e, ok := s.bounds[tpKey{req.Topic, p}]; ok {
+					entries = append(entries, e)
+				}
+			}
+		}
+		payload, err = codec.EncodeListOffsetsResponse(codec.ListOffsetsResponse{
+			ErrorCode: 0, Topic: req.Topic, Entries: entries,
+		})
+		respOp = codec.OpListOffsetsResponse
 	case codec.OpFetch:
 		req, e := codec.DecodeFetchRequest(f.Payload)
 		if e != nil {
@@ -259,7 +294,7 @@ func (s *fakeGroupBroker) handle(f *frame.Frame) ([]byte, error) {
 	if err != nil {
 		return nil, err
 	}
-	return frame.Encode(f.Opcode, f.CorrelationID, payload)
+	return frame.Encode(respOp, f.CorrelationID, payload)
 }
 
 func TestJoinGroupConsumerPositionsFromOffsetFetch(t *testing.T) {
@@ -326,6 +361,12 @@ func TestJoinGroupConsumerUnknownOffsetStartsAtZero(t *testing.T) {
 	pos := g.Positions()
 	if len(pos) != 1 || pos[0].Offset != 0 {
 		t.Fatalf("positions %+v want offset 0", pos)
+	}
+	if g.AutoOffsetReset() != "earliest" {
+		t.Fatalf("reset=%q want earliest", g.AutoOffsetReset())
+	}
+	if got := s.listOffsetSnapshot(); len(got) != 0 {
+		t.Fatalf("list_offsets=%+v want none", got)
 	}
 }
 
@@ -558,6 +599,136 @@ func TestCloseLeavesGroup(t *testing.T) {
 	_, _, _, _, leaves, _ := s.snapshot()
 	if len(leaves) != 1 || leaves[0].GroupID != "g" || leaves[0].MemberID != "m-1" {
 		t.Fatalf("leaves %+v", leaves)
+	}
+}
+
+func TestJoinLatestUnknownUsesListOffsets(t *testing.T) {
+	s := newFakeGroupBroker()
+	s.setAssignment([]codec.Assignment{{Topic: "t", Partition: 0}}, nil)
+	s.bounds[tpKey{"t", 0}] = codec.OffsetListing{Partition: 0, Earliest: 0, Latest: 10}
+	addr, stop := startFakeGroup(t, s)
+	defer stop()
+
+	c, err := volant.DialTimeout(addr, 5*time.Second)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer c.Close()
+
+	g, err := volant.JoinGroupConsumer(c, "g", []string{"t"}, 10_000,
+		volant.WithBackgroundHeartbeat(false), volant.WithAutoOffsetReset("latest"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer g.Close()
+
+	pos := g.Positions()
+	if len(pos) != 1 || pos[0].Offset != 10 {
+		t.Fatalf("positions %+v want offset 10", pos)
+	}
+	got := s.listOffsetSnapshot()
+	if len(got) != 1 || got[0].Topic != "t" || len(got[0].Partitions) != 1 || got[0].Partitions[0] != 0 {
+		t.Fatalf("list_offsets %+v", got)
+	}
+	_, _, _, fetches, _, _ := s.snapshot()
+	if len(fetches) != 0 {
+		t.Fatalf("fetches=%d want 0", len(fetches))
+	}
+}
+
+func TestJoinLatestCommittedSkipsListOffsets(t *testing.T) {
+	s := newFakeGroupBroker()
+	s.setAssignment([]codec.Assignment{{Topic: "t", Partition: 0}}, nil)
+	s.offsets[tpKey{"t", 0}] = 5
+	s.bounds[tpKey{"t", 0}] = codec.OffsetListing{Partition: 0, Earliest: 0, Latest: 10}
+	addr, stop := startFakeGroup(t, s)
+	defer stop()
+
+	c, err := volant.DialTimeout(addr, 5*time.Second)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer c.Close()
+
+	g, err := volant.JoinGroupConsumer(c, "g", []string{"t"}, 10_000,
+		volant.WithBackgroundHeartbeat(false), volant.WithAutoOffsetReset("latest"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer g.Close()
+
+	pos := g.Positions()
+	if len(pos) != 1 || pos[0].Offset != 5 {
+		t.Fatalf("positions %+v want offset 5", pos)
+	}
+	if got := s.listOffsetSnapshot(); len(got) != 0 {
+		t.Fatalf("list_offsets=%+v want none", got)
+	}
+}
+
+func TestJoinNoneUnknownRaisesWithoutFetch(t *testing.T) {
+	s := newFakeGroupBroker()
+	s.setAssignment([]codec.Assignment{{Topic: "t", Partition: 0}}, nil)
+	addr, stop := startFakeGroup(t, s)
+	defer stop()
+
+	c, err := volant.DialTimeout(addr, 5*time.Second)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer c.Close()
+
+	_, err = volant.JoinGroupConsumer(c, "g", []string{"t"}, 10_000,
+		volant.WithBackgroundHeartbeat(false), volant.WithAutoOffsetReset("none"))
+	if err == nil {
+		t.Fatal("expected error")
+	}
+	if !strings.Contains(err.Error(), "auto_offset_reset") {
+		t.Fatalf("err=%v want auto_offset_reset", err)
+	}
+	_, _, _, fetches, _, _ := s.snapshot()
+	if len(fetches) != 0 {
+		t.Fatalf("fetches=%d want 0", len(fetches))
+	}
+	if got := s.listOffsetSnapshot(); len(got) != 0 {
+		t.Fatalf("list_offsets=%+v want none", got)
+	}
+}
+
+func TestJoinInvalidAutoOffsetReset(t *testing.T) {
+	_, err := volant.JoinGroupConsumer(nil, "g", []string{"t"}, 10_000, volant.WithAutoOffsetReset("foo"))
+	if err == nil || !strings.Contains(err.Error(), "unknown auto_offset_reset") {
+		t.Fatalf("err=%v want unknown auto_offset_reset", err)
+	}
+}
+
+func TestJoinLatestEmptyAssignmentSkipsListOffsets(t *testing.T) {
+	s := newFakeGroupBroker()
+	addr, stop := startFakeGroup(t, s)
+	defer stop()
+
+	c, err := volant.DialTimeout(addr, 5*time.Second)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer c.Close()
+
+	g, err := volant.JoinGroupConsumer(c, "g", []string{"t"}, 10_000,
+		volant.WithBackgroundHeartbeat(false), volant.WithAutoOffsetReset("latest"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer g.Close()
+
+	if len(g.Positions()) != 0 {
+		t.Fatalf("positions %+v want empty", g.Positions())
+	}
+	if got := s.listOffsetSnapshot(); len(got) != 0 {
+		t.Fatalf("list_offsets=%+v want none", got)
+	}
+	_, _, _, _, _, ofs := s.snapshot()
+	if len(ofs) != 0 {
+		t.Fatalf("offset fetch %+v want none", ofs)
 	}
 }
 
