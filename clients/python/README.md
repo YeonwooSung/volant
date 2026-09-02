@@ -69,6 +69,11 @@ loop (heartbeat on poll, re-join on error 9/10/11, cooperative revoke).
 `commit` sends the joined `member_id` + `generation`. `close` leaves
 the group and does not close the `Client`.
 
+Produce and Fetch follow `NotLeaderForPartition` (error 13) by default:
+Metadata, reconnect to the partition leader, retry once
+(`max_redirects=1`). `max_redirects=0` raises on the first 13. Still
+one TCP connection at a time.
+
 Correlation ids increment per request. Decode verifies magic `V` (0x56),
 protocol version 1, and IEEE CRC32 of the **payload only**.
 
@@ -106,15 +111,17 @@ set or both unset. Handshake failures close the TCP socket.
 ## Honesty
 
 Not implemented: `kafka-python`, client-side assignor, SCRAM /
-shared-token auth, async I/O, idempotent produce, leader redirect,
+shared-token auth, async I/O, idempotent produce,
 background heartbeat thread, auto-commit. Offset commit/fetch is the
 admin path only (empty member, generation 0) unless the caller (or
 `GroupConsumer.commit`) passes a joined `member_id` / `generation`.
 Sync only; one TCP connection; acks=1 by default. TLS does not change
-broker TLS (Phase 8/19) and does not add Kafka API keys.
+broker TLS (Phase 8/19) and does not add Kafka API keys. Leader
+redirect is Produce/Fetch only (default one extra attempt).
 
 See [docs/V14_SPEC.md](../../docs/V14_SPEC.md),
 [docs/V24_SPEC.md](../../docs/V24_SPEC.md),
 [docs/V27_SPEC.md](../../docs/V27_SPEC.md),
-[docs/V28_SPEC.md](../../docs/V28_SPEC.md), and
-[docs/V31_SPEC.md](../../docs/V31_SPEC.md).
+[docs/V28_SPEC.md](../../docs/V28_SPEC.md),
+[docs/V31_SPEC.md](../../docs/V31_SPEC.md), and
+[docs/V43_SPEC.md](../../docs/V43_SPEC.md).

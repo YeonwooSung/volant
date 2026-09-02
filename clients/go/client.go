@@ -11,6 +11,7 @@ import (
 	"io"
 	"net"
 	"os"
+	"strconv"
 	"time"
 
 	"github.com/volant-mq/volant/clients/go/codec"
@@ -21,6 +22,9 @@ import (
 const Version = "0.2.0"
 
 const defaultTimeout = 10 * time.Second
+
+// notLeaderForPartition is native ErrorCode::NotLeaderForPartition.
+const notLeaderForPartition uint16 = 13
 
 // Re-exported wire / error types.
 type (
@@ -53,12 +57,14 @@ type JoinGroupResult struct {
 
 // Client is a sync TCP client for the native Volant protocol (MVP).
 type Client struct {
-	addr     string
-	conn     net.Conn
-	timeout  time.Duration
-	nextCorr uint32
-	buf      []byte
-	tls      bool
+	addr         string
+	conn         net.Conn
+	timeout      time.Duration
+	nextCorr     uint32
+	buf          []byte
+	tls          bool
+	tlsCfg       TLSConfig
+	maxRedirects int
 }
 
 // TLSConfig is optional TLS for [DialTLS]. Zero value uses system roots
@@ -91,10 +97,11 @@ func DialTimeout(addr string, timeout time.Duration) (*Client, error) {
 		return nil, err
 	}
 	return &Client{
-		addr:     addr,
-		conn:     conn,
-		timeout:  timeout,
-		nextCorr: 1,
+		addr:         addr,
+		conn:         conn,
+		timeout:      timeout,
+		nextCorr:     1,
+		maxRedirects: 1,
 	}, nil
 }
 
@@ -126,12 +133,24 @@ func DialTLSTimeout(addr string, cfg TLSConfig, timeout time.Duration) (*Client,
 		_ = tlsConn.SetDeadline(time.Time{})
 	}
 	return &Client{
-		addr:     addr,
-		conn:     tlsConn,
-		timeout:  timeout,
-		nextCorr: 1,
-		tls:      true,
+		addr:         addr,
+		conn:         tlsConn,
+		timeout:      timeout,
+		nextCorr:     1,
+		tls:          true,
+		tlsCfg:       cfg,
+		maxRedirects: 1,
 	}, nil
+}
+
+// SetMaxRedirects sets extra Produce/Fetch attempts after NotLeaderForPartition
+// (error 13). Default is 1 (one initial send + one redirect). 0 disables
+// redirect and raises on the first 13. Negative values are treated as 0.
+func (c *Client) SetMaxRedirects(n int) {
+	if n < 0 {
+		n = 0
+	}
+	c.maxRedirects = n
 }
 
 // TLS reports whether the connection is TLS-wrapped.
@@ -364,18 +383,39 @@ func (c *Client) Produce(topic string, partition int, key, value []byte) (int64,
 	if err != nil {
 		return 0, err
 	}
-	decoded, err := c.roundTrip(codec.OpProduce, payload)
-	if err != nil {
-		return 0, err
+	maxAttempts := 1 + c.maxRedirects
+	for attempt := 1; ; attempt++ {
+		decoded, err := c.roundTrip(codec.OpProduce, payload)
+		if err != nil {
+			if be, ok := err.(*codec.BrokerError); ok && be.Code == notLeaderForPartition && attempt < maxAttempts && partition >= 0 {
+				ok, rerr := c.redirectToLeader(topic, uint32(partition))
+				if rerr != nil {
+					return 0, rerr
+				}
+				if ok {
+					continue
+				}
+			}
+			return 0, err
+		}
+		resp, ok := decoded.(codec.ProduceResponse)
+		if !ok {
+			return 0, &frame.ProtocolError{Msg: fmt.Sprintf("unexpected response for produce: %T", decoded)}
+		}
+		if resp.ErrorCode == notLeaderForPartition && attempt < maxAttempts {
+			ok, rerr := c.redirectToLeader(resp.Topic, resp.Partition)
+			if rerr != nil {
+				return 0, rerr
+			}
+			if ok {
+				continue
+			}
+		}
+		if err := check(resp.ErrorCode, "produce"); err != nil {
+			return 0, err
+		}
+		return int64(resp.BaseOffset), nil
 	}
-	resp, ok := decoded.(codec.ProduceResponse)
-	if !ok {
-		return 0, &frame.ProtocolError{Msg: fmt.Sprintf("unexpected response for produce: %T", decoded)}
-	}
-	if err := check(resp.ErrorCode, "produce"); err != nil {
-		return 0, err
-	}
-	return int64(resp.BaseOffset), nil
 }
 
 // Fetch reads records from topic/partition starting at offset.
@@ -399,18 +439,116 @@ func (c *Client) fetchAt(topic string, partition int, offset int64, maxMessages,
 	if err != nil {
 		return nil, err
 	}
-	decoded, err := c.roundTrip(codec.OpFetch, payload)
+	maxAttempts := 1 + c.maxRedirects
+	for attempt := 1; ; attempt++ {
+		decoded, err := c.roundTrip(codec.OpFetch, payload)
+		if err != nil {
+			if be, ok := err.(*codec.BrokerError); ok && be.Code == notLeaderForPartition && attempt < maxAttempts {
+				ok, rerr := c.redirectToLeader(topic, uint32(partition))
+				if rerr != nil {
+					return nil, rerr
+				}
+				if ok {
+					continue
+				}
+			}
+			return nil, err
+		}
+		resp, ok := decoded.(codec.FetchResponse)
+		if !ok {
+			return nil, &frame.ProtocolError{Msg: fmt.Sprintf("unexpected response for fetch: %T", decoded)}
+		}
+		if resp.ErrorCode == notLeaderForPartition && attempt < maxAttempts {
+			ok, rerr := c.redirectToLeader(resp.Topic, resp.Partition)
+			if rerr != nil {
+				return nil, rerr
+			}
+			if ok {
+				continue
+			}
+		}
+		if err := check(resp.ErrorCode, "fetch"); err != nil {
+			return nil, err
+		}
+		return resp.Records, nil
+	}
+}
+
+// redirectToLeader refreshes Metadata and reconnects to the partition leader.
+// ok is false when Metadata has no leader / unknown broker / empty host
+// (caller should surface the original error 13).
+func (c *Client) redirectToLeader(topic string, partition uint32) (bool, error) {
+	meta, err := c.Metadata()
 	if err != nil {
-		return nil, err
+		return false, err
 	}
-	resp, ok := decoded.(codec.FetchResponse)
-	if !ok {
-		return nil, &frame.ProtocolError{Msg: fmt.Sprintf("unexpected response for fetch: %T", decoded)}
+	var leaderID uint32
+	found := false
+	for _, t := range meta.Topics {
+		if t.Name != topic {
+			continue
+		}
+		for _, p := range t.Partitions {
+			if p.PartitionID == partition {
+				leaderID = p.Leader
+				found = true
+				break
+			}
+		}
+		if found {
+			break
+		}
 	}
-	if err := check(resp.ErrorCode, "fetch"); err != nil {
-		return nil, err
+	if !found {
+		return false, nil
 	}
-	return resp.Records, nil
+	var broker *codec.BrokerInfo
+	for i := range meta.Brokers {
+		if meta.Brokers[i].NodeID == leaderID {
+			broker = &meta.Brokers[i]
+			break
+		}
+	}
+	if broker == nil || broker.Host == "" {
+		return false, nil
+	}
+	addr := net.JoinHostPort(broker.Host, strconv.Itoa(int(broker.Port)))
+	if addr == c.addr {
+		return true, nil
+	}
+	if err := c.reconnect(addr); err != nil {
+		return false, err
+	}
+	return true, nil
+}
+
+func (c *Client) reconnect(addr string) error {
+	if c.conn != nil {
+		_ = c.conn.Close()
+		c.conn = nil
+	}
+	c.buf = nil
+	conn, err := net.DialTimeout("tcp", addr, c.timeout)
+	if err != nil {
+		return err
+	}
+	if c.tls {
+		if c.timeout > 0 {
+			_ = conn.SetDeadline(time.Now().Add(c.timeout))
+		}
+		tlsConn, err := wrapTLS(conn, addr, c.tlsCfg)
+		if err != nil {
+			_ = conn.Close()
+			return err
+		}
+		if c.timeout > 0 {
+			_ = tlsConn.SetDeadline(time.Time{})
+		}
+		conn = tlsConn
+	}
+	c.conn = conn
+	c.addr = addr
+	return nil
 }
 
 // Metadata returns cluster brokers and topics (all topics when the list is empty).

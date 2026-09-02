@@ -42,19 +42,24 @@ public final class Client implements AutoCloseable {
     public static final String VERSION = "0.2.0";
 
     private static final int DEFAULT_TIMEOUT_MS = 10_000;
+    /** Native {@code ErrorCode::NotLeaderForPartition}. */
+    static final int NOT_LEADER_FOR_PARTITION = 13;
 
-    private final String addr;
+    private String addr;
     private Socket socket;
     private final int timeoutMs;
     private final boolean tls;
+    private final TlsOptions tlsOptions;
+    private int maxRedirects = 1;
     private long nextCorr = 1;
     private byte[] buf = new byte[0];
 
-    private Client(String addr, Socket socket, int timeoutMs, boolean tls) {
+    private Client(String addr, Socket socket, int timeoutMs, TlsOptions tlsOptions) {
         this.addr = addr;
         this.socket = socket;
         this.timeoutMs = timeoutMs;
-        this.tls = tls;
+        this.tls = tlsOptions != null;
+        this.tlsOptions = tlsOptions;
     }
 
     /** Connect to a native Volant listener with a 10s timeout. */
@@ -64,20 +69,8 @@ public final class Client implements AutoCloseable {
 
     /** Connect with an explicit dial / RPC timeout in milliseconds. */
     public static Client connect(String host, int port, int timeoutMs) {
-        Socket s = new Socket();
-        try {
-            s.connect(new InetSocketAddress(host, port), timeoutMs);
-            s.setSoTimeout(timeoutMs);
-            s.setTcpNoDelay(true);
-        } catch (IOException e) {
-            try {
-                s.close();
-            } catch (IOException ignored) {
-                // best-effort
-            }
-            throw new ProtocolException("connect failed: " + e.getMessage(), e);
-        }
-        return new Client(host + ":" + port, s, timeoutMs, false);
+        Socket s = openSocket(host, port, timeoutMs, null);
+        return new Client(formatAddr(host, port), s, timeoutMs, null);
     }
 
     /** Connect with TLS after TCP (v0.27). See {@link TlsOptions#ca}. */
@@ -90,30 +83,21 @@ public final class Client implements AutoCloseable {
         if (tls == null) {
             throw new IllegalArgumentException("tls options are required; use connect() for plaintext");
         }
-        Socket s = new Socket();
-        try {
-            s.connect(new InetSocketAddress(host, port), timeoutMs);
-            s.setSoTimeout(timeoutMs);
-            s.setTcpNoDelay(true);
-            Socket wrapped = Tls.wrap(s, host, port, tls);
-            wrapped.setSoTimeout(timeoutMs);
-            try {
-                wrapped.setTcpNoDelay(true);
-            } catch (IOException ignored) {
-                // some SSL sockets reject this
-            }
-            return new Client(host + ":" + port, wrapped, timeoutMs, true);
-        } catch (IOException | RuntimeException e) {
-            try {
-                s.close();
-            } catch (IOException ignored) {
-                // best-effort
-            }
-            if (e instanceof ProtocolException) {
-                throw (ProtocolException) e;
-            }
-            throw new ProtocolException("tls connect failed: " + e.getMessage(), e);
-        }
+        Socket s = openSocket(host, port, timeoutMs, tls);
+        return new Client(formatAddr(host, port), s, timeoutMs, tls);
+    }
+
+    /**
+     * Extra Produce/Fetch attempts after {@code NotLeaderForPartition} (13).
+     * Default is 1 (one initial send + one redirect). {@code 0} disables
+     * redirect and raises on the first 13. Negative values are treated as 0.
+     */
+    public void setMaxRedirects(int n) {
+        this.maxRedirects = Math.max(0, n);
+    }
+
+    public int maxRedirects() {
+        return maxRedirects;
     }
 
     /** Whether this connection is TLS-wrapped. */
@@ -231,6 +215,104 @@ public final class Client implements AutoCloseable {
         }
     }
 
+    private static String formatAddr(String host, int port) {
+        if (host != null && host.indexOf(':') >= 0 && !host.startsWith("[")) {
+            return "[" + host + "]:" + port;
+        }
+        return host + ":" + port;
+    }
+
+    private static Socket openSocket(String host, int port, int timeoutMs, TlsOptions tls) {
+        Socket s = new Socket();
+        try {
+            s.connect(new InetSocketAddress(host, port), timeoutMs);
+            s.setSoTimeout(timeoutMs);
+            s.setTcpNoDelay(true);
+            if (tls != null) {
+                Socket wrapped = Tls.wrap(s, host, port, tls);
+                wrapped.setSoTimeout(timeoutMs);
+                try {
+                    wrapped.setTcpNoDelay(true);
+                } catch (IOException ignored) {
+                    // some SSL sockets reject this
+                }
+                return wrapped;
+            }
+            return s;
+        } catch (IOException | RuntimeException e) {
+            try {
+                s.close();
+            } catch (IOException ignored) {
+                // best-effort
+            }
+            if (e instanceof ProtocolException) {
+                throw (ProtocolException) e;
+            }
+            String prefix = tls != null ? "tls connect failed: " : "connect failed: ";
+            throw new ProtocolException(prefix + e.getMessage(), e);
+        }
+    }
+
+    private void reconnect(String host, int port) {
+        Socket old = socket;
+        socket = null;
+        buf = new byte[0];
+        if (old != null) {
+            try {
+                old.close();
+            } catch (IOException ignored) {
+                // best-effort
+            }
+        }
+        socket = openSocket(host, port, timeoutMs, tlsOptions);
+        addr = formatAddr(host, port);
+    }
+
+    /**
+     * Metadata → reconnect to the partition leader.
+     *
+     * @return true when the caller should retry (redirected or already on
+     *     that host); false when Metadata has no leader / unknown broker /
+     *     empty host (raise the original error 13).
+     */
+    private boolean redirectToLeader(String topic, int partition) {
+        Metadata meta = metadata();
+        Long leaderId = null;
+        for (Metadata.TopicInfo t : meta.topics) {
+            if (!topic.equals(t.name)) {
+                continue;
+            }
+            for (Metadata.PartitionInfo p : t.partitions) {
+                if (p.partitionId == (partition & 0xFFFFFFFFL)) {
+                    leaderId = p.leader;
+                    break;
+                }
+            }
+            if (leaderId != null) {
+                break;
+            }
+        }
+        if (leaderId == null) {
+            return false;
+        }
+        Metadata.BrokerInfo broker = null;
+        for (Metadata.BrokerInfo b : meta.brokers) {
+            if (b.nodeId == leaderId) {
+                broker = b;
+                break;
+            }
+        }
+        if (broker == null || broker.host == null || broker.host.isEmpty()) {
+            return false;
+        }
+        String next = formatAddr(broker.host, broker.port);
+        if (next.equals(addr)) {
+            return true;
+        }
+        reconnect(broker.host, broker.port);
+        return true;
+    }
+
     /** Create a topic. Returns the broker-assigned topic id. */
     public int createTopic(String name, int partitions) {
         byte[] payload = Codec.encodeCreateTopicRequest(
@@ -274,13 +356,34 @@ public final class Client implements AutoCloseable {
                         0L,
                         0,
                         -1));
-        Object decoded = roundTrip(Codec.OP_PRODUCE, payload);
-        if (!(decoded instanceof Codec.ProduceResponse)) {
-            throw new ProtocolException("unexpected response for produce: " + typeName(decoded));
+        int maxAttempts = 1 + maxRedirects;
+        int attempt = 0;
+        while (true) {
+            attempt++;
+            Object decoded;
+            try {
+                decoded = roundTrip(Codec.OP_PRODUCE, payload);
+            } catch (BrokerException e) {
+                if (e.code == NOT_LEADER_FOR_PARTITION
+                        && attempt < maxAttempts
+                        && partition >= 0
+                        && redirectToLeader(topic, partition)) {
+                    continue;
+                }
+                throw e;
+            }
+            if (!(decoded instanceof Codec.ProduceResponse)) {
+                throw new ProtocolException("unexpected response for produce: " + typeName(decoded));
+            }
+            Codec.ProduceResponse resp = (Codec.ProduceResponse) decoded;
+            if (resp.errorCode == NOT_LEADER_FOR_PARTITION
+                    && attempt < maxAttempts
+                    && redirectToLeader(resp.topic, (int) resp.partition)) {
+                continue;
+            }
+            check(resp.errorCode, "produce");
+            return resp.baseOffset;
         }
-        Codec.ProduceResponse resp = (Codec.ProduceResponse) decoded;
-        check(resp.errorCode, "produce");
-        return resp.baseOffset;
     }
 
     /**
@@ -295,13 +398,33 @@ public final class Client implements AutoCloseable {
     List<Record> fetch(String topic, int partition, long offset, int maxMessages, long maxWaitMs) {
         byte[] payload = Codec.encodeFetchRequest(
                 new Codec.FetchRequest(topic, partition, offset, maxMessages, 4L * 1024 * 1024, maxWaitMs));
-        Object decoded = roundTrip(Codec.OP_FETCH, payload);
-        if (!(decoded instanceof Codec.FetchResponse)) {
-            throw new ProtocolException("unexpected response for fetch: " + typeName(decoded));
+        int maxAttempts = 1 + maxRedirects;
+        int attempt = 0;
+        while (true) {
+            attempt++;
+            Object decoded;
+            try {
+                decoded = roundTrip(Codec.OP_FETCH, payload);
+            } catch (BrokerException e) {
+                if (e.code == NOT_LEADER_FOR_PARTITION
+                        && attempt < maxAttempts
+                        && redirectToLeader(topic, partition)) {
+                    continue;
+                }
+                throw e;
+            }
+            if (!(decoded instanceof Codec.FetchResponse)) {
+                throw new ProtocolException("unexpected response for fetch: " + typeName(decoded));
+            }
+            Codec.FetchResponse resp = (Codec.FetchResponse) decoded;
+            if (resp.errorCode == NOT_LEADER_FOR_PARTITION
+                    && attempt < maxAttempts
+                    && redirectToLeader(resp.topic, (int) resp.partition)) {
+                continue;
+            }
+            check(resp.errorCode, "fetch");
+            return resp.records;
         }
-        Codec.FetchResponse resp = (Codec.FetchResponse) decoded;
-        check(resp.errorCode, "fetch");
-        return resp.records;
     }
 
     /**

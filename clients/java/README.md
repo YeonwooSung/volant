@@ -59,6 +59,11 @@ Client.connectTls(
 `GroupConsumer` joins, polls assigned partitions, heartbeats, commits with
 member+generation, and rejoins on heartbeat error 9.
 
+Produce and Fetch follow `NotLeaderForPartition` (error 13) by default:
+Metadata, reconnect to the partition leader, retry once
+(`setMaxRedirects(1)` is the connect default). `setMaxRedirects(0)`
+raises on the first 13. Still one TCP connection at a time.
+
 Correlation ids increment per request. Decode verifies magic `V` (0x56),
 protocol version 1, and IEEE CRC32 of the **payload only**. Broker
 `error_code != 0` is a `BrokerException`.
@@ -98,14 +103,16 @@ socket.
 
 Not implemented: `kafka-clients`, cooperative assignor client logic
 beyond sticky position retain, static membership, SCRAM / shared-token
-auth, async I/O, idempotent produce, leader redirect. Sync only; one
+auth, async I/O, idempotent produce. Sync only; one
 TCP connection; acks=1 by default. Convenience `offsetCommit` is
 admin-only (`generation=0`); `GroupConsumer.commit` sends the joined
 member+generation. TLS does not change broker TLS (Phase 8/19) and
 does not add Kafka API keys. Client private keys other than PKCS#8 /
-RSA PKCS#1 PEM are not loaded.
+RSA PKCS#1 PEM are not loaded. Leader redirect is Produce/Fetch only
+(default one extra attempt).
 
 See [docs/V23_SPEC.md](../../docs/V23_SPEC.md),
 [docs/V27_SPEC.md](../../docs/V27_SPEC.md),
-[docs/V28_SPEC.md](../../docs/V28_SPEC.md), and
-[docs/V33_SPEC.md](../../docs/V33_SPEC.md).
+[docs/V28_SPEC.md](../../docs/V28_SPEC.md),
+[docs/V33_SPEC.md](../../docs/V33_SPEC.md), and
+[docs/V43_SPEC.md](../../docs/V43_SPEC.md).

@@ -75,6 +75,11 @@ positions or 0, poll = heartbeat + fetch assigned, commit with
 member+generation, rejoin on error 9, honor revoked). `Close` leaves
 the group and does not close the `Client`.
 
+Produce and Fetch follow `NotLeaderForPartition` (error 13) by default:
+Metadata, reconnect to the partition leader, retry once
+(`SetMaxRedirects(1)` is the Dial default). `SetMaxRedirects(0)`
+raises on the first 13. Still one TCP connection at a time.
+
 Correlation ids increment per request. Decode verifies magic `V` (0x56),
 protocol version 1, and IEEE CRC32 of the **payload only**. Broker
 `error_code != 0` is a `BrokerError`.
@@ -112,14 +117,16 @@ must be paired. Handshake failures close the TCP socket.
 ## Honesty
 
 Not implemented: `kafka-go`, custom assignor, static membership,
-SCRAM / shared-token auth, async I/O, idempotent produce, leader
-redirect. Thin `OffsetCommit` is still the admin path (empty member,
+SCRAM / shared-token auth, async I/O, idempotent produce.
+Thin `OffsetCommit` is still the admin path (empty member,
 generation 0); `GroupConsumer.Commit` sends member+generation.
 Sync only; one TCP connection; acks=1 by default. TLS
 does not change broker TLS (Phase 8/19) and does not add Kafka API keys.
+Leader redirect is Produce/Fetch only (default one extra attempt).
 
 See [docs/V19_SPEC.md](../../docs/V19_SPEC.md),
 [docs/V24_SPEC.md](../../docs/V24_SPEC.md),
 [docs/V27_SPEC.md](../../docs/V27_SPEC.md),
-[docs/V28_SPEC.md](../../docs/V28_SPEC.md), and
-[docs/V32_SPEC.md](../../docs/V32_SPEC.md).
+[docs/V28_SPEC.md](../../docs/V28_SPEC.md),
+[docs/V32_SPEC.md](../../docs/V32_SPEC.md), and
+[docs/V43_SPEC.md](../../docs/V43_SPEC.md).
