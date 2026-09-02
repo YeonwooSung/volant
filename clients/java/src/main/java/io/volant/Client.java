@@ -593,6 +593,32 @@ public final class Client implements AutoCloseable {
         check(resp.errorCode, "heartbeat");
     }
 
+    /**
+     * Describe a live consumer group (native opcode 34/35).
+     * Error 2 (NotFound, no live members) is a {@link BrokerException}.
+     */
+    public DescribeGroupResult describeGroup(String group) {
+        byte[] payload = Codec.encodeDescribeGroupRequest(new Codec.DescribeGroupRequest(group));
+        Object decoded = roundTrip(Codec.OP_DESCRIBE_GROUP, payload);
+        if (!(decoded instanceof Codec.DescribeGroupResponse)) {
+            throw new ProtocolException("unexpected response for describe_group: " + typeName(decoded));
+        }
+        Codec.DescribeGroupResponse resp = (Codec.DescribeGroupResponse) decoded;
+        check(resp.errorCode, "describe_group");
+        return new DescribeGroupResult(resp.groupId, resp.generation, resp.members);
+    }
+
+    /** List known consumer groups (native opcode 36/37). */
+    public List<Codec.GroupListing> listGroups() {
+        Object decoded = roundTrip(Codec.OP_LIST_GROUPS, Codec.encodeListGroupsRequest());
+        if (!(decoded instanceof Codec.ListGroupsResponse)) {
+            throw new ProtocolException("unexpected response for list_groups: " + typeName(decoded));
+        }
+        Codec.ListGroupsResponse resp = (Codec.ListGroupsResponse) decoded;
+        check(resp.errorCode, "list_groups");
+        return resp.groups;
+    }
+
     /** Leave a consumer group. */
     public void leaveGroup(String group, String memberId) {
         byte[] payload = Codec.encodeLeaveGroupRequest(new Codec.LeaveGroupRequest(group, memberId));

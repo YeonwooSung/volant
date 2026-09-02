@@ -2,7 +2,8 @@
 
 Matches `crates/volant-protocol/src/payload.rs` for the MVP opcodes:
 Produce, Fetch, CreateTopic, Metadata, DeleteTopic, OffsetCommit,
-OffsetFetch, JoinGroup, Heartbeat, LeaveGroup, Auth.
+OffsetFetch, JoinGroup, Heartbeat, LeaveGroup, Auth, DescribeGroup,
+ListGroups.
 
 Header fields are big-endian (see :mod:`volant.frame`); **payload** integers
 and length prefixes are little-endian.
@@ -12,6 +13,7 @@ from __future__ import annotations
 
 import struct
 from dataclasses import dataclass, field
+from enum import IntEnum
 from typing import Optional
 
 from .frame import ProtocolError
@@ -28,6 +30,10 @@ OP_HEARTBEAT = 9
 OP_LEAVE_GROUP = 10
 OP_AUTH = 30
 OP_AUTH_RESPONSE = 31
+OP_DESCRIBE_GROUP = 34
+OP_DESCRIBE_GROUP_RESPONSE = 35
+OP_LIST_GROUPS = 36
+OP_LIST_GROUPS_RESPONSE = 37
 OP_ERROR = 0xFFFF
 
 _NULL_LEN = 0xFFFFFFFF
@@ -421,6 +427,51 @@ class AuthRequest:
 @dataclass
 class AuthResponse:
     error_code: int
+
+
+class GroupState(IntEnum):
+    """ListGroups state byte (Phase 12). Unknown values decode as Empty."""
+
+    EMPTY = 0
+    STABLE = 1
+
+    @classmethod
+    def from_u8(cls, v: int) -> GroupState:
+        return cls.STABLE if v == 1 else cls.EMPTY
+
+
+@dataclass
+class GroupListing:
+    group_id: str
+    state: GroupState
+    member_count: int
+    generation: int
+
+
+@dataclass
+class GroupMemberInfo:
+    member_id: str
+    topics: list[str] = field(default_factory=list)
+    assignment: list[Assignment] = field(default_factory=list)
+
+
+@dataclass
+class DescribeGroupRequest:
+    group_id: str
+
+
+@dataclass
+class DescribeGroupResponse:
+    error_code: int
+    group_id: str
+    generation: int
+    members: list[GroupMemberInfo] = field(default_factory=list)
+
+
+@dataclass
+class ListGroupsResponse:
+    error_code: int
+    groups: list[GroupListing] = field(default_factory=list)
 
 
 # --- produce ---------------------------------------------------------------
@@ -987,6 +1038,98 @@ def decode_auth_response(payload: bytes) -> AuthResponse:
     return AuthResponse(error_code=r.u16_le())
 
 
+# --- describe / list groups ------------------------------------------------
+
+
+def encode_describe_group_request(req: DescribeGroupRequest) -> bytes:
+    w = _Writer()
+    _put_string(w, req.group_id)
+    return w.finish()
+
+
+def decode_describe_group_request(payload: bytes) -> DescribeGroupRequest:
+    return DescribeGroupRequest(group_id=_get_string(_Reader(payload)))
+
+
+def encode_describe_group_response(resp: DescribeGroupResponse) -> bytes:
+    w = _Writer()
+    w.u16_le(resp.error_code)
+    _put_string(w, resp.group_id)
+    w.u32_le(resp.generation)
+    w.u32_le(len(resp.members))
+    for m in resp.members:
+        _put_string(w, m.member_id)
+        w.u32_le(len(m.topics))
+        for t in m.topics:
+            _put_string(w, t)
+        _put_assignments(w, m.assignment)
+    return w.finish()
+
+
+def decode_describe_group_response(payload: bytes) -> DescribeGroupResponse:
+    r = _Reader(payload)
+    error_code = r.u16_le()
+    group_id = _get_string(r)
+    generation = r.u32_le()
+    n = r.u32_le()
+    members: list[GroupMemberInfo] = []
+    for _ in range(n):
+        member_id = _get_string(r)
+        n_topics = r.u32_le()
+        topics = [_get_string(r) for _ in range(n_topics)]
+        assignment = _get_assignments(r)
+        members.append(
+            GroupMemberInfo(member_id=member_id, topics=topics, assignment=assignment)
+        )
+    return DescribeGroupResponse(
+        error_code=error_code,
+        group_id=group_id,
+        generation=generation,
+        members=members,
+    )
+
+
+def encode_list_groups_request() -> bytes:
+    return b""
+
+
+def decode_list_groups_request(payload: bytes) -> None:
+    return None
+
+
+def encode_list_groups_response(resp: ListGroupsResponse) -> bytes:
+    w = _Writer()
+    w.u16_le(resp.error_code)
+    w.u32_le(len(resp.groups))
+    for g in resp.groups:
+        _put_string(w, g.group_id)
+        w.u8(int(g.state))
+        w.u32_le(g.member_count)
+        w.u32_le(g.generation)
+    return w.finish()
+
+
+def decode_list_groups_response(payload: bytes) -> ListGroupsResponse:
+    r = _Reader(payload)
+    error_code = r.u16_le()
+    n = r.u32_le()
+    groups: list[GroupListing] = []
+    for _ in range(n):
+        group_id = _get_string(r)
+        state = GroupState.from_u8(r.u8())
+        member_count = r.u32_le()
+        generation = r.u32_le()
+        groups.append(
+            GroupListing(
+                group_id=group_id,
+                state=state,
+                member_count=member_count,
+                generation=generation,
+            )
+        )
+    return ListGroupsResponse(error_code=error_code, groups=groups)
+
+
 # --- error opcode ----------------------------------------------------------
 
 
@@ -1026,6 +1169,10 @@ def decode_response(opcode: int, payload: bytes):
         return decode_leave_group_response(payload)
     if opcode == OP_AUTH_RESPONSE:
         return decode_auth_response(payload)
+    if opcode == OP_DESCRIBE_GROUP_RESPONSE:
+        return decode_describe_group_response(payload)
+    if opcode == OP_LIST_GROUPS_RESPONSE:
+        return decode_list_groups_response(payload)
     if opcode == OP_ERROR:
         return decode_error_response(payload)
     raise ProtocolError(f"unknown response opcode {opcode}")

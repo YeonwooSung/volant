@@ -10,7 +10,8 @@ import java.util.List;
  *
  * <p>Matches {@code crates/volant-protocol/src/payload.rs} for the MVP opcodes:
  * Produce, Fetch, CreateTopic, Metadata, DeleteTopic, OffsetCommit,
- * OffsetFetch, JoinGroup, Heartbeat, LeaveGroup, Auth.
+ * OffsetFetch, JoinGroup, Heartbeat, LeaveGroup, Auth, DescribeGroup,
+ * ListGroups.
  *
  * <p>Header fields are big-endian (see {@link Frame}); <strong>payload</strong>
  * integers and length prefixes are little-endian.
@@ -28,7 +29,16 @@ public final class Codec {
     public static final int OP_LEAVE_GROUP = 10;
     public static final int OP_AUTH = 30;
     public static final int OP_AUTH_RESPONSE = 31;
+    public static final int OP_DESCRIBE_GROUP = 34;
+    public static final int OP_DESCRIBE_GROUP_RESPONSE = 35;
+    public static final int OP_LIST_GROUPS = 36;
+    public static final int OP_LIST_GROUPS_RESPONSE = 37;
     public static final int OP_ERROR = 0xFFFF;
+
+    /** ListGroups state: offsets only, no live members. */
+    public static final int GROUP_STATE_EMPTY = 0;
+    /** ListGroups state: at least one live member. */
+    public static final int GROUP_STATE_STABLE = 1;
 
     static final long NULL_LEN = 0xFFFFFFFFL;
 
@@ -406,6 +416,73 @@ public final class Codec {
 
         public AuthResponse(int errorCode) {
             this.errorCode = errorCode;
+        }
+    }
+
+    public static final class GroupListing {
+        public final String groupId;
+        public final int state;
+        public final long memberCount;
+        public final long generation;
+
+        public GroupListing(String groupId, int state, long memberCount, long generation) {
+            this.groupId = groupId;
+            this.state = state == 1 ? GROUP_STATE_STABLE : GROUP_STATE_EMPTY;
+            this.memberCount = memberCount;
+            this.generation = generation;
+        }
+    }
+
+    public static final class GroupMemberInfo {
+        public final String memberId;
+        public final List<String> topics;
+        public final List<Assignment> assignment;
+
+        public GroupMemberInfo(String memberId, List<String> topics, List<Assignment> assignment) {
+            this.memberId = memberId;
+            this.topics = topics == null
+                    ? Collections.emptyList()
+                    : Collections.unmodifiableList(new ArrayList<>(topics));
+            this.assignment = assignment == null
+                    ? Collections.emptyList()
+                    : Collections.unmodifiableList(new ArrayList<>(assignment));
+        }
+    }
+
+    public static final class DescribeGroupRequest {
+        public final String groupId;
+
+        public DescribeGroupRequest(String groupId) {
+            this.groupId = groupId == null ? "" : groupId;
+        }
+    }
+
+    public static final class DescribeGroupResponse {
+        public final int errorCode;
+        public final String groupId;
+        public final long generation;
+        public final List<GroupMemberInfo> members;
+
+        public DescribeGroupResponse(
+                int errorCode, String groupId, long generation, List<GroupMemberInfo> members) {
+            this.errorCode = errorCode;
+            this.groupId = groupId == null ? "" : groupId;
+            this.generation = generation;
+            this.members = members == null
+                    ? Collections.emptyList()
+                    : Collections.unmodifiableList(new ArrayList<>(members));
+        }
+    }
+
+    public static final class ListGroupsResponse {
+        public final int errorCode;
+        public final List<GroupListing> groups;
+
+        public ListGroupsResponse(int errorCode, List<GroupListing> groups) {
+            this.errorCode = errorCode;
+            this.groups = groups == null
+                    ? Collections.emptyList()
+                    : Collections.unmodifiableList(new ArrayList<>(groups));
         }
     }
 
@@ -1140,6 +1217,85 @@ public final class Codec {
         return new AuthResponse(new Reader(payload).u16());
     }
 
+    public static byte[] encodeDescribeGroupRequest(DescribeGroupRequest req) {
+        Writer w = new Writer();
+        putString(w, req.groupId);
+        return w.finish();
+    }
+
+    public static DescribeGroupRequest decodeDescribeGroupRequest(byte[] payload) {
+        return new DescribeGroupRequest(getString(new Reader(payload)));
+    }
+
+    public static byte[] encodeDescribeGroupResponse(DescribeGroupResponse resp) {
+        Writer w = new Writer();
+        w.u16(resp.errorCode);
+        putString(w, resp.groupId);
+        w.u32(resp.generation);
+        w.u32(resp.members.size());
+        for (GroupMemberInfo m : resp.members) {
+            putString(w, m.memberId);
+            w.u32(m.topics.size());
+            for (String t : m.topics) {
+                putString(w, t);
+            }
+            putAssignments(w, m.assignment);
+        }
+        return w.finish();
+    }
+
+    public static DescribeGroupResponse decodeDescribeGroupResponse(byte[] payload) {
+        Reader r = new Reader(payload);
+        int errorCode = r.u16();
+        String groupId = getString(r);
+        long generation = r.u32();
+        long n = r.u32();
+        List<GroupMemberInfo> members = new ArrayList<>();
+        for (int i = 0; i < n; i++) {
+            String memberId = getString(r);
+            long nTopics = r.u32();
+            List<String> topics = new ArrayList<>();
+            for (int j = 0; j < nTopics; j++) {
+                topics.add(getString(r));
+            }
+            List<Assignment> assignment = getAssignments(r);
+            members.add(new GroupMemberInfo(memberId, topics, assignment));
+        }
+        return new DescribeGroupResponse(errorCode, groupId, generation, members);
+    }
+
+    public static byte[] encodeListGroupsRequest() {
+        return new byte[0];
+    }
+
+    public static byte[] encodeListGroupsResponse(ListGroupsResponse resp) {
+        Writer w = new Writer();
+        w.u16(resp.errorCode);
+        w.u32(resp.groups.size());
+        for (GroupListing g : resp.groups) {
+            putString(w, g.groupId);
+            w.u8(g.state);
+            w.u32(g.memberCount);
+            w.u32(g.generation);
+        }
+        return w.finish();
+    }
+
+    public static ListGroupsResponse decodeListGroupsResponse(byte[] payload) {
+        Reader r = new Reader(payload);
+        int errorCode = r.u16();
+        long n = r.u32();
+        List<GroupListing> groups = new ArrayList<>();
+        for (int i = 0; i < n; i++) {
+            String groupId = getString(r);
+            int state = r.u8();
+            long memberCount = r.u32();
+            long generation = r.u32();
+            groups.add(new GroupListing(groupId, state, memberCount, generation));
+        }
+        return new ListGroupsResponse(errorCode, groups);
+    }
+
     // --- error opcode ------------------------------------------------------
 
     public static byte[] encodeErrorResponse(ErrorResponse resp) {
@@ -1179,6 +1335,10 @@ public final class Codec {
                 return decodeLeaveGroupResponse(payload);
             case OP_AUTH_RESPONSE:
                 return decodeAuthResponse(payload);
+            case OP_DESCRIBE_GROUP_RESPONSE:
+                return decodeDescribeGroupResponse(payload);
+            case OP_LIST_GROUPS_RESPONSE:
+                return decodeListGroupsResponse(payload);
             case OP_ERROR:
                 return decodeErrorResponse(payload);
             default:

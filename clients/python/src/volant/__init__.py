@@ -1,12 +1,21 @@
 """Volant native protocol client (sync TCP MVP)."""
 
 from .assignor import range_assign, range_assign_multi
-from .client import Client, FetchResult, JoinGroupResult, ProduceResult
+from .client import (
+    Client,
+    DescribeGroupResult,
+    FetchResult,
+    JoinGroupResult,
+    ProduceResult,
+)
 from .codec import (
     Assignment,
     BrokerError,
     BrokerInfo,
     FetchRecord,
+    GroupListing,
+    GroupMemberInfo,
+    GroupState,
     MetadataResponse,
     PartitionInfo,
     ProduceMessage,
@@ -22,10 +31,14 @@ __all__ = [
     "BrokerError",
     "BrokerInfo",
     "Client",
+    "DescribeGroupResult",
     "FetchedRecord",
     "FetchRecord",
     "FetchResult",
     "GroupConsumer",
+    "GroupListing",
+    "GroupMemberInfo",
+    "GroupState",
     "JoinGroupResult",
     "MetadataResponse",
     "PartitionInfo",

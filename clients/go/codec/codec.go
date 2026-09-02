@@ -2,7 +2,7 @@
 //
 // Matches crates/volant-protocol/src/payload.rs for Produce, Fetch,
 // CreateTopic, Metadata, DeleteTopic, OffsetCommit, OffsetFetch,
-// JoinGroup, Heartbeat, LeaveGroup, and Auth.
+// JoinGroup, Heartbeat, LeaveGroup, Auth, DescribeGroup, and ListGroups.
 // Frame headers are big-endian (see package frame); payload integers and
 // length prefixes are little-endian.
 package codec
@@ -15,19 +15,23 @@ import (
 )
 
 const (
-	OpProduce      uint16 = 1
-	OpFetch        uint16 = 2
-	OpCreateTopic  uint16 = 3
-	OpMetadata     uint16 = 4
-	OpDeleteTopic  uint16 = 5
-	OpOffsetCommit uint16 = 6
-	OpOffsetFetch  uint16 = 7
-	OpJoinGroup    uint16 = 8
-	OpHeartbeat    uint16 = 9
-	OpLeaveGroup   uint16 = 10
-	OpAuth         uint16 = 30
-	OpAuthResponse uint16 = 31
-	OpError        uint16 = 0xFFFF
+	OpProduce               uint16 = 1
+	OpFetch                 uint16 = 2
+	OpCreateTopic           uint16 = 3
+	OpMetadata              uint16 = 4
+	OpDeleteTopic           uint16 = 5
+	OpOffsetCommit          uint16 = 6
+	OpOffsetFetch           uint16 = 7
+	OpJoinGroup             uint16 = 8
+	OpHeartbeat             uint16 = 9
+	OpLeaveGroup            uint16 = 10
+	OpAuth                  uint16 = 30
+	OpAuthResponse          uint16 = 31
+	OpDescribeGroup         uint16 = 34
+	OpDescribeGroupResponse uint16 = 35
+	OpListGroups            uint16 = 36
+	OpListGroupsResponse    uint16 = 37
+	OpError                 uint16 = 0xFFFF
 
 	nullLen = 0xFFFFFFFF
 )
@@ -474,6 +478,58 @@ type AuthRequest struct {
 // AuthResponse is the Auth reply (opcode 31).
 type AuthResponse struct {
 	ErrorCode uint16
+}
+
+// GroupState is the ListGroups state byte (Phase 12).
+type GroupState uint8
+
+const (
+	// GroupStateEmpty is offsets on disk only; no live members.
+	GroupStateEmpty GroupState = 0
+	// GroupStateStable is at least one live member.
+	GroupStateStable GroupState = 1
+)
+
+// GroupStateFromU8 maps the wire byte (unknown values decode as Empty).
+func GroupStateFromU8(v uint8) GroupState {
+	if v == 1 {
+		return GroupStateStable
+	}
+	return GroupStateEmpty
+}
+
+// GroupListing is one group in a ListGroups response.
+type GroupListing struct {
+	GroupID     string
+	State       GroupState
+	MemberCount uint32
+	Generation  uint32
+}
+
+// GroupMemberInfo is one member in a DescribeGroup response.
+type GroupMemberInfo struct {
+	MemberID   string
+	Topics     []string
+	Assignment []Assignment
+}
+
+// DescribeGroupRequest is the DescribeGroup opcode (34) body.
+type DescribeGroupRequest struct {
+	GroupID string
+}
+
+// DescribeGroupResponse is the DescribeGroup reply (opcode 35).
+type DescribeGroupResponse struct {
+	ErrorCode  uint16
+	GroupID    string
+	Generation uint32
+	Members    []GroupMemberInfo
+}
+
+// ListGroupsResponse is the ListGroups reply (opcode 37).
+type ListGroupsResponse struct {
+	ErrorCode uint16
+	Groups    []GroupListing
 }
 
 func EncodeProduceRequest(req ProduceRequest) ([]byte, error) {
@@ -1473,6 +1529,158 @@ func DecodeAuthResponse(payload []byte) (AuthResponse, error) {
 	return AuthResponse{ErrorCode: code}, nil
 }
 
+func EncodeDescribeGroupRequest(req DescribeGroupRequest) ([]byte, error) {
+	w := &writer{}
+	if err := putString(w, req.GroupID); err != nil {
+		return nil, err
+	}
+	return w.buf, nil
+}
+
+func DecodeDescribeGroupRequest(payload []byte) (DescribeGroupRequest, error) {
+	groupID, err := getString(&reader{data: payload})
+	if err != nil {
+		return DescribeGroupRequest{}, err
+	}
+	return DescribeGroupRequest{GroupID: groupID}, nil
+}
+
+func EncodeDescribeGroupResponse(resp DescribeGroupResponse) ([]byte, error) {
+	w := &writer{}
+	w.u16(resp.ErrorCode)
+	if err := putString(w, resp.GroupID); err != nil {
+		return nil, err
+	}
+	w.u32(resp.Generation)
+	w.u32(uint32(len(resp.Members)))
+	for _, m := range resp.Members {
+		if err := putString(w, m.MemberID); err != nil {
+			return nil, err
+		}
+		w.u32(uint32(len(m.Topics)))
+		for _, t := range m.Topics {
+			if err := putString(w, t); err != nil {
+				return nil, err
+			}
+		}
+		if err := putAssignments(w, m.Assignment); err != nil {
+			return nil, err
+		}
+	}
+	return w.buf, nil
+}
+
+func DecodeDescribeGroupResponse(payload []byte) (DescribeGroupResponse, error) {
+	r := &reader{data: payload}
+	code, err := r.u16()
+	if err != nil {
+		return DescribeGroupResponse{}, err
+	}
+	groupID, err := getString(r)
+	if err != nil {
+		return DescribeGroupResponse{}, err
+	}
+	generation, err := r.u32()
+	if err != nil {
+		return DescribeGroupResponse{}, err
+	}
+	n, err := r.u32()
+	if err != nil {
+		return DescribeGroupResponse{}, err
+	}
+	members := make([]GroupMemberInfo, 0, n)
+	for i := uint32(0); i < n; i++ {
+		memberID, err := getString(r)
+		if err != nil {
+			return DescribeGroupResponse{}, err
+		}
+		nTopics, err := r.u32()
+		if err != nil {
+			return DescribeGroupResponse{}, err
+		}
+		topics := make([]string, 0, nTopics)
+		for j := uint32(0); j < nTopics; j++ {
+			t, err := getString(r)
+			if err != nil {
+				return DescribeGroupResponse{}, err
+			}
+			topics = append(topics, t)
+		}
+		assignment, err := getAssignments(r)
+		if err != nil {
+			return DescribeGroupResponse{}, err
+		}
+		members = append(members, GroupMemberInfo{
+			MemberID:   memberID,
+			Topics:     topics,
+			Assignment: assignment,
+		})
+	}
+	return DescribeGroupResponse{
+		ErrorCode:  code,
+		GroupID:    groupID,
+		Generation: generation,
+		Members:    members,
+	}, nil
+}
+
+func EncodeListGroupsRequest() []byte {
+	return []byte{}
+}
+
+func EncodeListGroupsResponse(resp ListGroupsResponse) ([]byte, error) {
+	w := &writer{}
+	w.u16(resp.ErrorCode)
+	w.u32(uint32(len(resp.Groups)))
+	for _, g := range resp.Groups {
+		if err := putString(w, g.GroupID); err != nil {
+			return nil, err
+		}
+		w.u8(uint8(g.State))
+		w.u32(g.MemberCount)
+		w.u32(g.Generation)
+	}
+	return w.buf, nil
+}
+
+func DecodeListGroupsResponse(payload []byte) (ListGroupsResponse, error) {
+	r := &reader{data: payload}
+	code, err := r.u16()
+	if err != nil {
+		return ListGroupsResponse{}, err
+	}
+	n, err := r.u32()
+	if err != nil {
+		return ListGroupsResponse{}, err
+	}
+	groups := make([]GroupListing, 0, n)
+	for i := uint32(0); i < n; i++ {
+		groupID, err := getString(r)
+		if err != nil {
+			return ListGroupsResponse{}, err
+		}
+		state, err := r.u8()
+		if err != nil {
+			return ListGroupsResponse{}, err
+		}
+		memberCount, err := r.u32()
+		if err != nil {
+			return ListGroupsResponse{}, err
+		}
+		generation, err := r.u32()
+		if err != nil {
+			return ListGroupsResponse{}, err
+		}
+		groups = append(groups, GroupListing{
+			GroupID:     groupID,
+			State:       GroupStateFromU8(state),
+			MemberCount: memberCount,
+			Generation:  generation,
+		})
+	}
+	return ListGroupsResponse{ErrorCode: code, Groups: groups}, nil
+}
+
 func EncodeErrorResponse(resp ErrorResponse) ([]byte, error) {
 	w := &writer{}
 	w.u16(resp.Code)
@@ -1520,6 +1728,10 @@ func DecodeResponse(opcode uint16, payload []byte) (any, error) {
 		return DecodeLeaveGroupResponse(payload)
 	case OpAuthResponse:
 		return DecodeAuthResponse(payload)
+	case OpDescribeGroupResponse:
+		return DecodeDescribeGroupResponse(payload)
+	case OpListGroupsResponse:
+		return DecodeListGroupsResponse(payload)
 	case OpError:
 		return DecodeErrorResponse(payload)
 	default:

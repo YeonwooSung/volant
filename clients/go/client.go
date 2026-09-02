@@ -39,6 +39,16 @@ type (
 	ProduceMessage   = codec.ProduceMessage
 	MetadataResponse = codec.MetadataResponse
 	Assignment       = codec.Assignment
+	GroupListing     = codec.GroupListing
+	GroupMemberInfo  = codec.GroupMemberInfo
+	GroupState       = codec.GroupState
+)
+
+const (
+	// GroupStateEmpty is offsets on disk only; no live members.
+	GroupStateEmpty = codec.GroupStateEmpty
+	// GroupStateStable is at least one live member.
+	GroupStateStable = codec.GroupStateStable
 )
 
 // Offset is one committed (partition, offset) pair from OffsetFetch.
@@ -53,6 +63,13 @@ type JoinGroupResult struct {
 	Generation uint32
 	Assignment []Assignment
 	Revoked    []Assignment
+}
+
+// DescribeGroupResult is the successful DescribeGroup reply (Phase 11 / v0.49).
+type DescribeGroupResult struct {
+	GroupID    string
+	Generation uint32
+	Members    []GroupMemberInfo
 }
 
 // Client is a sync TCP client for the native Volant protocol (MVP).
@@ -762,6 +779,47 @@ func (c *Client) Heartbeat(group, memberID string, generation uint32) error {
 		return &frame.ProtocolError{Msg: fmt.Sprintf("unexpected response for heartbeat: %T", decoded)}
 	}
 	return check(resp.ErrorCode, "heartbeat")
+}
+
+// DescribeGroup describes a live consumer group (native opcode 34/35).
+// Error 2 (NotFound, no live members) is a BrokerError.
+func (c *Client) DescribeGroup(id string) (DescribeGroupResult, error) {
+	payload, err := codec.EncodeDescribeGroupRequest(codec.DescribeGroupRequest{GroupID: id})
+	if err != nil {
+		return DescribeGroupResult{}, err
+	}
+	decoded, err := c.roundTrip(codec.OpDescribeGroup, payload)
+	if err != nil {
+		return DescribeGroupResult{}, err
+	}
+	resp, ok := decoded.(codec.DescribeGroupResponse)
+	if !ok {
+		return DescribeGroupResult{}, &frame.ProtocolError{Msg: fmt.Sprintf("unexpected response for describe_group: %T", decoded)}
+	}
+	if err := check(resp.ErrorCode, "describe_group"); err != nil {
+		return DescribeGroupResult{}, err
+	}
+	return DescribeGroupResult{
+		GroupID:    resp.GroupID,
+		Generation: resp.Generation,
+		Members:    resp.Members,
+	}, nil
+}
+
+// ListGroups lists known consumer groups (native opcode 36/37).
+func (c *Client) ListGroups() ([]GroupListing, error) {
+	decoded, err := c.roundTrip(codec.OpListGroups, codec.EncodeListGroupsRequest())
+	if err != nil {
+		return nil, err
+	}
+	resp, ok := decoded.(codec.ListGroupsResponse)
+	if !ok {
+		return nil, &frame.ProtocolError{Msg: fmt.Sprintf("unexpected response for list_groups: %T", decoded)}
+	}
+	if err := check(resp.ErrorCode, "list_groups"); err != nil {
+		return nil, err
+	}
+	return resp.Groups, nil
 }
 
 // LeaveGroup leaves a consumer group.
