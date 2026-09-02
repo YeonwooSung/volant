@@ -32,6 +32,11 @@ if err != nil {
 for _, rec := range recs {
     fmt.Println(rec.Offset, rec.Key, rec.Value)
 }
+if err := c.OffsetCommit("g", "t", 0, 5); err != nil {
+    log.Fatal(err)
+}
+offs, err := c.OffsetFetch("g", "t")
+_ = offs
 meta, err := c.Metadata()
 _ = off
 _ = meta
@@ -39,6 +44,8 @@ _ = meta
 
 `Produce(..., nil, value)` sends a null key. `Fetch` returns `[]Record`
 (`Offset`, `Key`, `Value`). `Metadata()` returns brokers + topics.
+`OffsetCommit` is an admin commit (empty member, generation 0).
+`OffsetFetch` returns `[]Offset` (`Partition`, `Offset`) for the topic.
 
 Correlation ids increment per request. Decode verifies magic `V` (0x56),
 protocol version 1, and IEEE CRC32 of the **payload only**. Broker
@@ -70,8 +77,11 @@ Not a required default-CI job.
 
 ## Honesty
 
-Not implemented: Java client, `kafka-go`, consumer groups, TLS / SCRAM /
-shared-token auth, async I/O, idempotent produce, leader redirect. Sync
-only; one TCP connection; acks=1 by default.
+Not implemented: Java client, `kafka-go`, JoinGroup / Heartbeat /
+LeaveGroup, TLS / SCRAM / shared-token auth, async I/O, idempotent
+produce, leader redirect. Offset commit/fetch is the admin path only
+(empty member, generation 0). Sync only; one TCP connection; acks=1 by
+default.
 
-See [docs/V19_SPEC.md](../../docs/V19_SPEC.md).
+See [docs/V19_SPEC.md](../../docs/V19_SPEC.md) and
+[docs/V24_SPEC.md](../../docs/V24_SPEC.md).

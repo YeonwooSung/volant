@@ -1,8 +1,9 @@
 // Package codec encodes and decodes little-endian native payloads.
 //
 // Matches crates/volant-protocol/src/payload.rs for Produce, Fetch,
-// CreateTopic, Metadata, and DeleteTopic. Frame headers are big-endian
-// (see package frame); payload integers and length prefixes are little-endian.
+// CreateTopic, Metadata, DeleteTopic, OffsetCommit, and OffsetFetch.
+// Frame headers are big-endian (see package frame); payload integers and
+// length prefixes are little-endian.
 package codec
 
 import (
@@ -13,12 +14,14 @@ import (
 )
 
 const (
-	OpProduce     uint16 = 1
-	OpFetch       uint16 = 2
-	OpCreateTopic uint16 = 3
-	OpMetadata    uint16 = 4
-	OpDeleteTopic uint16 = 5
-	OpError       uint16 = 0xFFFF
+	OpProduce      uint16 = 1
+	OpFetch        uint16 = 2
+	OpCreateTopic  uint16 = 3
+	OpMetadata     uint16 = 4
+	OpDeleteTopic  uint16 = 5
+	OpOffsetCommit uint16 = 6
+	OpOffsetFetch  uint16 = 7
+	OpError        uint16 = 0xFFFF
 
 	nullLen = 0xFFFFFFFF
 )
@@ -361,6 +364,53 @@ type MetadataResponse struct {
 type ErrorResponse struct {
 	Code    uint16
 	Message string
+}
+
+// OffsetCommitEntry is one topic/partition commit in an OffsetCommit request.
+type OffsetCommitEntry struct {
+	Topic     string
+	Partition uint32
+	Offset    uint64
+	Metadata  string
+}
+
+// OffsetCommitRequest is the OffsetCommit opcode body.
+type OffsetCommitRequest struct {
+	GroupID    string
+	MemberID   string
+	Generation uint32
+	Entries    []OffsetCommitEntry
+}
+
+// OffsetCommitResponse is the OffsetCommit opcode reply.
+type OffsetCommitResponse struct {
+	ErrorCode uint16
+}
+
+// OffsetEntry is one topic/partition selector in an OffsetFetch request.
+type OffsetEntry struct {
+	Topic     string
+	Partition uint32
+}
+
+// OffsetFetchRequest is the OffsetFetch opcode body. Empty Entries means all.
+type OffsetFetchRequest struct {
+	GroupID string
+	Entries []OffsetEntry
+}
+
+// OffsetFetchEntry is one committed offset in an OffsetFetch response.
+type OffsetFetchEntry struct {
+	Topic     string
+	Partition uint32
+	Offset    uint64
+	Metadata  string
+}
+
+// OffsetFetchResponse is the OffsetFetch opcode reply.
+type OffsetFetchResponse struct {
+	ErrorCode uint16
+	Entries   []OffsetFetchEntry
 }
 
 func EncodeProduceRequest(req ProduceRequest) ([]byte, error) {
@@ -917,6 +967,184 @@ func DecodeMetadataResponse(payload []byte) (MetadataResponse, error) {
 	return MetadataResponse{Brokers: brokers, Topics: topics}, nil
 }
 
+func EncodeOffsetCommitRequest(req OffsetCommitRequest) ([]byte, error) {
+	w := &writer{}
+	if err := putString(w, req.GroupID); err != nil {
+		return nil, err
+	}
+	if err := putString(w, req.MemberID); err != nil {
+		return nil, err
+	}
+	w.u32(req.Generation)
+	w.u32(uint32(len(req.Entries)))
+	for _, e := range req.Entries {
+		if err := putString(w, e.Topic); err != nil {
+			return nil, err
+		}
+		w.u32(e.Partition)
+		w.u64(e.Offset)
+		if err := putString(w, e.Metadata); err != nil {
+			return nil, err
+		}
+	}
+	return w.buf, nil
+}
+
+func DecodeOffsetCommitRequest(payload []byte) (OffsetCommitRequest, error) {
+	r := &reader{data: payload}
+	groupID, err := getString(r)
+	if err != nil {
+		return OffsetCommitRequest{}, err
+	}
+	memberID, err := getString(r)
+	if err != nil {
+		return OffsetCommitRequest{}, err
+	}
+	generation, err := r.u32()
+	if err != nil {
+		return OffsetCommitRequest{}, err
+	}
+	n, err := r.u32()
+	if err != nil {
+		return OffsetCommitRequest{}, err
+	}
+	entries := make([]OffsetCommitEntry, 0, n)
+	for i := uint32(0); i < n; i++ {
+		topic, err := getString(r)
+		if err != nil {
+			return OffsetCommitRequest{}, err
+		}
+		part, err := r.u32()
+		if err != nil {
+			return OffsetCommitRequest{}, err
+		}
+		off, err := r.u64()
+		if err != nil {
+			return OffsetCommitRequest{}, err
+		}
+		meta, err := getString(r)
+		if err != nil {
+			return OffsetCommitRequest{}, err
+		}
+		entries = append(entries, OffsetCommitEntry{
+			Topic: topic, Partition: part, Offset: off, Metadata: meta,
+		})
+	}
+	return OffsetCommitRequest{
+		GroupID:    groupID,
+		MemberID:   memberID,
+		Generation: generation,
+		Entries:    entries,
+	}, nil
+}
+
+func EncodeOffsetCommitResponse(resp OffsetCommitResponse) ([]byte, error) {
+	w := &writer{}
+	w.u16(resp.ErrorCode)
+	return w.buf, nil
+}
+
+func DecodeOffsetCommitResponse(payload []byte) (OffsetCommitResponse, error) {
+	r := &reader{data: payload}
+	code, err := r.u16()
+	if err != nil {
+		return OffsetCommitResponse{}, err
+	}
+	return OffsetCommitResponse{ErrorCode: code}, nil
+}
+
+func EncodeOffsetFetchRequest(req OffsetFetchRequest) ([]byte, error) {
+	w := &writer{}
+	if err := putString(w, req.GroupID); err != nil {
+		return nil, err
+	}
+	w.u32(uint32(len(req.Entries)))
+	for _, e := range req.Entries {
+		if err := putString(w, e.Topic); err != nil {
+			return nil, err
+		}
+		w.u32(e.Partition)
+	}
+	return w.buf, nil
+}
+
+func DecodeOffsetFetchRequest(payload []byte) (OffsetFetchRequest, error) {
+	r := &reader{data: payload}
+	groupID, err := getString(r)
+	if err != nil {
+		return OffsetFetchRequest{}, err
+	}
+	n, err := r.u32()
+	if err != nil {
+		return OffsetFetchRequest{}, err
+	}
+	entries := make([]OffsetEntry, 0, n)
+	for i := uint32(0); i < n; i++ {
+		topic, err := getString(r)
+		if err != nil {
+			return OffsetFetchRequest{}, err
+		}
+		part, err := r.u32()
+		if err != nil {
+			return OffsetFetchRequest{}, err
+		}
+		entries = append(entries, OffsetEntry{Topic: topic, Partition: part})
+	}
+	return OffsetFetchRequest{GroupID: groupID, Entries: entries}, nil
+}
+
+func EncodeOffsetFetchResponse(resp OffsetFetchResponse) ([]byte, error) {
+	w := &writer{}
+	w.u16(resp.ErrorCode)
+	w.u32(uint32(len(resp.Entries)))
+	for _, e := range resp.Entries {
+		if err := putString(w, e.Topic); err != nil {
+			return nil, err
+		}
+		w.u32(e.Partition)
+		w.u64(e.Offset)
+		if err := putString(w, e.Metadata); err != nil {
+			return nil, err
+		}
+	}
+	return w.buf, nil
+}
+
+func DecodeOffsetFetchResponse(payload []byte) (OffsetFetchResponse, error) {
+	r := &reader{data: payload}
+	code, err := r.u16()
+	if err != nil {
+		return OffsetFetchResponse{}, err
+	}
+	n, err := r.u32()
+	if err != nil {
+		return OffsetFetchResponse{}, err
+	}
+	entries := make([]OffsetFetchEntry, 0, n)
+	for i := uint32(0); i < n; i++ {
+		topic, err := getString(r)
+		if err != nil {
+			return OffsetFetchResponse{}, err
+		}
+		part, err := r.u32()
+		if err != nil {
+			return OffsetFetchResponse{}, err
+		}
+		off, err := r.u64()
+		if err != nil {
+			return OffsetFetchResponse{}, err
+		}
+		meta, err := getString(r)
+		if err != nil {
+			return OffsetFetchResponse{}, err
+		}
+		entries = append(entries, OffsetFetchEntry{
+			Topic: topic, Partition: part, Offset: off, Metadata: meta,
+		})
+	}
+	return OffsetFetchResponse{ErrorCode: code, Entries: entries}, nil
+}
+
 func EncodeErrorResponse(resp ErrorResponse) ([]byte, error) {
 	w := &writer{}
 	w.u16(resp.Code)
@@ -952,6 +1180,10 @@ func DecodeResponse(opcode uint16, payload []byte) (any, error) {
 		return DecodeMetadataResponse(payload)
 	case OpDeleteTopic:
 		return DecodeDeleteTopicResponse(payload)
+	case OpOffsetCommit:
+		return DecodeOffsetCommitResponse(payload)
+	case OpOffsetFetch:
+		return DecodeOffsetFetchResponse(payload)
 	case OpError:
 		return DecodeErrorResponse(payload)
 	default:

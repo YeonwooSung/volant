@@ -415,3 +415,198 @@ func TestDecodeResponseDispatch(t *testing.T) {
 		t.Fatal("expected unknown opcode")
 	}
 }
+
+func TestOffsetCommitRequestPayloadRS(t *testing.T) {
+	req := OffsetCommitRequest{
+		GroupID:    "g1",
+		MemberID:   "m1",
+		Generation: 2,
+		Entries: []OffsetCommitEntry{
+			{Topic: "events", Partition: 1, Offset: 42, Metadata: "cli"},
+		},
+	}
+	raw, err := EncodeOffsetCommitRequest(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	expected := mustHex(t,
+		"0200"+
+			"6731"+
+			"0200"+
+			"6d31"+
+			"02000000"+
+			"01000000"+
+			"0600"+
+			"6576656e7473"+
+			"01000000"+
+			"2a00000000000000"+
+			"0300"+
+			"636c69",
+	)
+	if !bytes.Equal(raw, expected) {
+		t.Fatalf("encode:\n got %x\nwant %x", raw, expected)
+	}
+	decoded, err := DecodeOffsetCommitRequest(raw)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if decoded.GroupID != req.GroupID || decoded.MemberID != req.MemberID || decoded.Generation != req.Generation {
+		t.Fatalf("decoded header %+v", decoded)
+	}
+	if len(decoded.Entries) != 1 || decoded.Entries[0] != req.Entries[0] {
+		t.Fatalf("entries %+v", decoded.Entries)
+	}
+}
+
+func TestOffsetCommitRequestAdminShape(t *testing.T) {
+	req := OffsetCommitRequest{
+		GroupID:    "g",
+		MemberID:   "",
+		Generation: 0,
+		Entries:    []OffsetCommitEntry{{Topic: "t", Partition: 0, Offset: 5, Metadata: ""}},
+	}
+	raw, err := EncodeOffsetCommitRequest(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	expected := mustHex(t, "010067"+"0000"+"00000000"+"01000000"+"010074"+"00000000"+"0500000000000000"+"0000")
+	if !bytes.Equal(raw, expected) {
+		t.Fatalf("encode:\n got %x\nwant %x", raw, expected)
+	}
+	decoded, err := DecodeOffsetCommitRequest(raw)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if decoded.GroupID != "g" || decoded.MemberID != "" || decoded.Generation != 0 {
+		t.Fatalf("decoded %+v", decoded)
+	}
+	if decoded.Entries[0].Topic != "t" || decoded.Entries[0].Offset != 5 {
+		t.Fatalf("entry %+v", decoded.Entries[0])
+	}
+}
+
+func TestOffsetCommitResponse(t *testing.T) {
+	resp := OffsetCommitResponse{ErrorCode: 0}
+	raw, err := EncodeOffsetCommitResponse(resp)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.Equal(raw, mustHex(t, "0000")) {
+		t.Fatalf("raw %x", raw)
+	}
+	decoded, err := DecodeOffsetCommitResponse(raw)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if decoded != resp {
+		t.Fatalf("decoded %+v", decoded)
+	}
+	got, err := DecodeResponse(OpOffsetCommit, raw)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cr, ok := got.(OffsetCommitResponse); !ok || cr.ErrorCode != 0 {
+		t.Fatalf("dispatch %#v", got)
+	}
+}
+
+func TestOffsetFetchRequestPayloadRS(t *testing.T) {
+	req := OffsetFetchRequest{
+		GroupID: "g1",
+		Entries: []OffsetEntry{{Topic: "events", Partition: 1}},
+	}
+	raw, err := EncodeOffsetFetchRequest(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	expected := mustHex(t, "02006731"+"01000000"+"06006576656e7473"+"01000000")
+	if !bytes.Equal(raw, expected) {
+		t.Fatalf("encode:\n got %x\nwant %x", raw, expected)
+	}
+	decoded, err := DecodeOffsetFetchRequest(raw)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if decoded.GroupID != "g1" || len(decoded.Entries) != 1 || decoded.Entries[0] != req.Entries[0] {
+		t.Fatalf("decoded %+v", decoded)
+	}
+}
+
+func TestOffsetFetchRequestEmptyEntries(t *testing.T) {
+	req := OffsetFetchRequest{GroupID: "g1", Entries: []OffsetEntry{}}
+	raw, err := EncodeOffsetFetchRequest(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	expected := mustHex(t, "02006731"+"00000000")
+	if !bytes.Equal(raw, expected) {
+		t.Fatalf("raw %x", raw)
+	}
+	decoded, err := DecodeOffsetFetchRequest(raw)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if decoded.GroupID != "g1" || len(decoded.Entries) != 0 {
+		t.Fatalf("decoded %+v", decoded)
+	}
+}
+
+func TestOffsetFetchResponseUnknownOffset(t *testing.T) {
+	resp := OffsetFetchResponse{
+		ErrorCode: 0,
+		Entries: []OffsetFetchEntry{
+			{Topic: "events", Partition: 0, Offset: ^uint64(0), Metadata: ""},
+		},
+	}
+	raw, err := EncodeOffsetFetchResponse(resp)
+	if err != nil {
+		t.Fatal(err)
+	}
+	expected := mustHex(t,
+		"0000"+
+			"01000000"+
+			"06006576656e7473"+
+			"00000000"+
+			"ffffffffffffffff"+
+			"0000",
+	)
+	if !bytes.Equal(raw, expected) {
+		t.Fatalf("encode:\n got %x\nwant %x", raw, expected)
+	}
+	decoded, err := DecodeOffsetFetchResponse(raw)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if decoded.ErrorCode != 0 || len(decoded.Entries) != 1 || decoded.Entries[0].Offset != ^uint64(0) {
+		t.Fatalf("decoded %+v", decoded)
+	}
+	got, err := DecodeResponse(OpOffsetFetch, raw)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if fr, ok := got.(OffsetFetchResponse); !ok || fr.Entries[0].Topic != "events" {
+		t.Fatalf("dispatch %#v", got)
+	}
+}
+
+func TestOffsetFetchResponseCommitted(t *testing.T) {
+	resp := OffsetFetchResponse{
+		ErrorCode: 0,
+		Entries:   []OffsetFetchEntry{{Topic: "t", Partition: 0, Offset: 5, Metadata: ""}},
+	}
+	raw, err := EncodeOffsetFetchResponse(resp)
+	if err != nil {
+		t.Fatal(err)
+	}
+	expected := mustHex(t, "0000"+"01000000"+"010074"+"00000000"+"0500000000000000"+"0000")
+	if !bytes.Equal(raw, expected) {
+		t.Fatalf("encode:\n got %x\nwant %x", raw, expected)
+	}
+	decoded, err := DecodeOffsetFetchResponse(raw)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if decoded.Entries[0] != resp.Entries[0] {
+		t.Fatalf("decoded %+v", decoded)
+	}
+}

@@ -17,6 +17,11 @@ from .codec import (
     FetchResponse,
     MetadataRequest,
     MetadataResponse,
+    OffsetCommitEntry,
+    OffsetCommitRequest,
+    OffsetCommitResponse,
+    OffsetFetchRequest,
+    OffsetFetchResponse,
     ProduceMessage,
     ProduceRequest,
     ProduceResponse,
@@ -83,6 +88,8 @@ class Client:
         c.create_topic("t", partitions=1)
         c.produce("t", 0, value=b"hello")
         batch = c.fetch("t", 0, offset=0)
+        c.offset_commit(group="g", topic="t", partition=0, offset=5)
+        offs = c.offset_fetch(group="g", topic="t")
         meta = c.metadata()
         c.close()
     """
@@ -283,6 +290,54 @@ class Client:
         if not isinstance(resp, MetadataResponse):
             raise ProtocolError(f"unexpected response for metadata: {type(resp)}")
         return resp
+
+    def offset_commit(
+        self,
+        group: str,
+        topic: str,
+        partition: int,
+        offset: int,
+        *,
+        member_id: str = "",
+        generation: int = 0,
+        metadata: str = "",
+    ) -> None:
+        """Commit one group offset (admin path: empty member, generation 0)."""
+        payload = codec.encode_offset_commit_request(
+            OffsetCommitRequest(
+                group_id=group,
+                member_id=member_id,
+                generation=generation,
+                entries=[
+                    OffsetCommitEntry(
+                        topic=topic,
+                        partition=partition,
+                        offset=offset,
+                        metadata=metadata,
+                    )
+                ],
+            )
+        )
+        resp = self._round_trip(codec.OP_OFFSET_COMMIT, payload)
+        if not isinstance(resp, OffsetCommitResponse):
+            raise ProtocolError(f"unexpected response for offset_commit: {type(resp)}")
+        self._check(resp.error_code, "offset_commit")
+
+    def offset_fetch(self, group: str, topic: str) -> list[tuple[int, int]]:
+        """Fetch committed offsets for ``topic``.
+
+        Returns ``[(partition, offset), ...]``. Empty wire entries mean all
+        offsets for the group; this method filters to ``topic`` client-side
+        (same as the CLI).
+        """
+        payload = codec.encode_offset_fetch_request(
+            OffsetFetchRequest(group_id=group, entries=[])
+        )
+        resp = self._round_trip(codec.OP_OFFSET_FETCH, payload)
+        if not isinstance(resp, OffsetFetchResponse):
+            raise ProtocolError(f"unexpected response for offset_fetch: {type(resp)}")
+        self._check(resp.error_code, "offset_fetch")
+        return [(e.partition, e.offset) for e in resp.entries if e.topic == topic]
 
 
 # Re-export result types used by callers.

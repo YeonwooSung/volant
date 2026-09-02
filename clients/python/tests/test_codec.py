@@ -15,6 +15,13 @@ from volant.codec import (
     FetchResponse,
     MetadataRequest,
     MetadataResponse,
+    OffsetCommitEntry,
+    OffsetCommitRequest,
+    OffsetCommitResponse,
+    OffsetEntry,
+    OffsetFetchEntry,
+    OffsetFetchRequest,
+    OffsetFetchResponse,
     PartitionInfo,
     ProduceMessage,
     ProduceRequest,
@@ -28,8 +35,13 @@ from volant.codec import (
     decode_fetch_response,
     decode_metadata_request,
     decode_metadata_response,
+    decode_offset_commit_request,
+    decode_offset_commit_response,
+    decode_offset_fetch_request,
+    decode_offset_fetch_response,
     decode_produce_request,
     decode_produce_response,
+    decode_response,
     encode_create_topic_request,
     encode_create_topic_response,
     encode_delete_topic_request,
@@ -38,8 +50,14 @@ from volant.codec import (
     encode_fetch_response,
     encode_metadata_request,
     encode_metadata_response,
+    encode_offset_commit_request,
+    encode_offset_commit_response,
+    encode_offset_fetch_request,
+    encode_offset_fetch_response,
     encode_produce_request,
     encode_produce_response,
+    OP_OFFSET_COMMIT,
+    OP_OFFSET_FETCH,
 )
 
 
@@ -288,6 +306,133 @@ class TestCreateMetadataCodec(unittest.TestCase):
         )
         self.assertEqual(_hx(raw), _hx(expected))
         self.assertEqual(decode_metadata_response(raw), resp)
+
+
+class TestOffsetCodec(unittest.TestCase):
+    def test_offset_commit_request_payload_rs_fixture(self) -> None:
+        # crates/volant-protocol/src/payload.rs group_request_roundtrips
+        req = OffsetCommitRequest(
+            group_id="g1",
+            member_id="m1",
+            generation=2,
+            entries=[
+                OffsetCommitEntry(
+                    topic="events", partition=1, offset=42, metadata="cli"
+                )
+            ],
+        )
+        raw = encode_offset_commit_request(req)
+        expected = bytes.fromhex(
+            "0200"
+            "6731"  # "g1"
+            "0200"
+            "6d31"  # "m1"
+            "02000000"  # generation 2
+            "01000000"  # 1 entry
+            "0600"
+            "6576656e7473"  # "events"
+            "01000000"  # partition 1
+            "2a00000000000000"  # offset 42
+            "0300"
+            "636c69"  # "cli"
+        )
+        self.assertEqual(_hx(raw), _hx(expected))
+        self.assertEqual(decode_offset_commit_request(raw), req)
+
+    def test_offset_commit_request_admin_shape(self) -> None:
+        req = OffsetCommitRequest(
+            group_id="g",
+            member_id="",
+            generation=0,
+            entries=[OffsetCommitEntry(topic="t", partition=0, offset=5, metadata="")],
+        )
+        raw = encode_offset_commit_request(req)
+        expected = bytes.fromhex(
+            "010067"
+            "0000"
+            "00000000"
+            "01000000"
+            "010074"
+            "00000000"
+            "0500000000000000"
+            "0000"
+        )
+        self.assertEqual(_hx(raw), _hx(expected))
+        self.assertEqual(decode_offset_commit_request(raw), req)
+
+    def test_offset_commit_response(self) -> None:
+        resp = OffsetCommitResponse(error_code=0)
+        raw = encode_offset_commit_response(resp)
+        self.assertEqual(raw, bytes.fromhex("0000"))
+        self.assertEqual(decode_offset_commit_response(raw), resp)
+        self.assertEqual(decode_response(OP_OFFSET_COMMIT, raw), resp)
+
+    def test_offset_fetch_request_payload_rs_fixture(self) -> None:
+        req = OffsetFetchRequest(
+            group_id="g1",
+            entries=[OffsetEntry(topic="events", partition=1)],
+        )
+        raw = encode_offset_fetch_request(req)
+        expected = bytes.fromhex(
+            "02006731"
+            "01000000"
+            "06006576656e7473"
+            "01000000"
+        )
+        self.assertEqual(_hx(raw), _hx(expected))
+        self.assertEqual(decode_offset_fetch_request(raw), req)
+
+    def test_offset_fetch_request_empty_entries(self) -> None:
+        req = OffsetFetchRequest(group_id="g1", entries=[])
+        raw = encode_offset_fetch_request(req)
+        expected = bytes.fromhex("02006731" "00000000")
+        self.assertEqual(_hx(raw), _hx(expected))
+        self.assertEqual(decode_offset_fetch_request(raw), req)
+
+    def test_offset_fetch_response_unknown_offset(self) -> None:
+        # payload.rs group_response_roundtrips: offset = u64::MAX
+        resp = OffsetFetchResponse(
+            error_code=0,
+            entries=[
+                OffsetFetchEntry(
+                    topic="events",
+                    partition=0,
+                    offset=(1 << 64) - 1,
+                    metadata="",
+                )
+            ],
+        )
+        raw = encode_offset_fetch_response(resp)
+        expected = bytes.fromhex(
+            "0000"
+            "01000000"
+            "06006576656e7473"
+            "00000000"
+            "ffffffffffffffff"
+            "0000"
+        )
+        self.assertEqual(_hx(raw), _hx(expected))
+        self.assertEqual(decode_offset_fetch_response(raw), resp)
+        self.assertEqual(decode_response(OP_OFFSET_FETCH, raw), resp)
+
+    def test_offset_fetch_response_committed(self) -> None:
+        resp = OffsetFetchResponse(
+            error_code=0,
+            entries=[
+                OffsetFetchEntry(topic="t", partition=0, offset=5, metadata="")
+            ],
+        )
+        raw = encode_offset_fetch_response(resp)
+        expected = bytes.fromhex(
+            "0000"
+            "01000000"
+            "010074"
+            "00000000"
+            "0500000000000000"
+            "0000"
+        )
+        self.assertEqual(_hx(raw), _hx(expected))
+        self.assertEqual(decode_offset_fetch_response(raw), resp)
 
 
 if __name__ == "__main__":
