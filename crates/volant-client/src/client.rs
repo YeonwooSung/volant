@@ -1341,22 +1341,63 @@ impl Client {
     }
 
     /// Leave a consumer group.
+    ///
+    /// Transient broker/transport errors retry up to
+    /// [`ClientConfig::max_retries`] extra times (default 0). Error 10
+    /// (`UnknownMemberId`) is treated as success (already left). Rebalance
+    /// 9 / 11, 13 / 14, NotFound 2, and protocol errors are not retried.
+    /// [`crate::GroupConsumer::leave`] inherits via this method.
     pub async fn leave_group(&self, group_id: &str, member_id: &str) -> Result<()> {
-        let resp = self
-            .round_trip(Request::LeaveGroup {
-                group_id: group_id.to_owned(),
-                member_id: member_id.to_owned(),
-            })
-            .await?;
-        match resp {
-            Response::LeaveGroup { error_code } => {
-                check_ok(error_code, "leave_group")?;
-                Ok(())
+        let max_retries = self.config.max_retries;
+        let mut retry_attempt = 0u32;
+        loop {
+            let resp = match self
+                .round_trip(Request::LeaveGroup {
+                    group_id: group_id.to_owned(),
+                    member_id: member_id.to_owned(),
+                })
+                .await
+            {
+                Ok(r) => r,
+                Err(e) if is_transient_transport(&e) && retry_attempt < max_retries => {
+                    retry_attempt += 1;
+                    tokio::time::sleep(Duration::from_millis(self.config.retry_backoff_ms)).await;
+                    continue;
+                }
+                Err(e) => return Err(e),
+            };
+            match resp {
+                Response::LeaveGroup { error_code } => {
+                    if error_code == ErrorCode::UnknownMemberId as u16 {
+                        return Ok(());
+                    }
+                    if is_transient_error_code(error_code) && retry_attempt < max_retries {
+                        retry_attempt += 1;
+                        tokio::time::sleep(Duration::from_millis(self.config.retry_backoff_ms))
+                            .await;
+                        continue;
+                    }
+                    check_ok(error_code, "leave_group")?;
+                    return Ok(());
+                }
+                Response::Error { code, message } => {
+                    if code == ErrorCode::UnknownMemberId as u16 {
+                        return Ok(());
+                    }
+                    if is_transient_error_code(code) && retry_attempt < max_retries {
+                        retry_attempt += 1;
+                        tokio::time::sleep(Duration::from_millis(self.config.retry_backoff_ms))
+                            .await;
+                        continue;
+                    }
+                    return Err(error_from_code(code, message));
+                }
+                other => {
+                    return Err(Error::Protocol(format!(
+                        "unexpected response for leave_group: {other:?}"
+                    )))
+                }
             }
-            Response::Error { code, message } => Err(error_from_code(code, message)),
-            other => Err(Error::Protocol(format!(
-                "unexpected response for leave_group: {other:?}"
-            ))),
         }
     }
 
