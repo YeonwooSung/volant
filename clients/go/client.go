@@ -26,6 +26,14 @@ const defaultTimeout = 10 * time.Second
 // notLeaderForPartition is native ErrorCode::NotLeaderForPartition.
 const notLeaderForPartition uint16 = 13
 
+// unknownProducerID is native ErrorCode::UnknownProducerId.
+const unknownProducerID uint16 = 21
+
+type seqKey struct {
+	topic     string
+	partition int32
+}
+
 // Re-exported wire / error types.
 type (
 	ProtocolError    = frame.ProtocolError
@@ -75,15 +83,20 @@ type DescribeGroupResult struct {
 
 // Client is a sync TCP client for the native Volant protocol (MVP).
 type Client struct {
-	addr         string
-	conn         net.Conn
-	timeout      time.Duration
-	nextCorr     uint32
-	buf          []byte
-	tls          bool
-	tlsCfg       TLSConfig
-	authToken    string
-	maxRedirects int
+	addr              string
+	conn              net.Conn
+	timeout           time.Duration
+	nextCorr          uint32
+	buf               []byte
+	tls               bool
+	tlsCfg            TLSConfig
+	authToken         string
+	maxRedirects      int
+	enableIdempotence bool
+	producerID        uint64
+	producerEpoch     uint16
+	producerReady     bool
+	nextSeq           map[seqKey]int32
 }
 
 // TLSConfig is optional TLS for [DialTLS]. Zero value uses system roots
@@ -200,6 +213,15 @@ func (c *Client) SetMaxRedirects(n int) {
 		n = 0
 	}
 	c.maxRedirects = n
+}
+
+// EnableIdempotence turns on InitProducerId + per-partition produce sequences.
+// Default is off (trailer (0, 0, -1)). Call before the first Produce.
+func (c *Client) EnableIdempotence() {
+	c.enableIdempotence = true
+	if c.nextSeq == nil {
+		c.nextSeq = make(map[seqKey]int32)
+	}
 }
 
 // TLS reports whether the connection is TLS-wrapped.
@@ -439,32 +461,56 @@ func (c *Client) DeleteTopic(name string) error {
 }
 
 // Produce sends one message (null key when key is nil) with acks=1.
-// Idempotent produce is not implemented; trailer is (0, 0, -1).
-// Returns the broker-assigned base offset.
+// Default trailer is (0, 0, -1). After EnableIdempotence the first produce
+// sends InitProducerId (empty transactional_id) and later produces attach
+// pid/epoch/seq. Returns the broker-assigned base offset.
 func (c *Client) Produce(topic string, partition int, key, value []byte) (int64, error) {
 	if value == nil {
 		value = []byte{}
 	}
-	payload, err := codec.EncodeProduceRequest(codec.ProduceRequest{
-		Topic:     topic,
-		Partition: int32(partition),
-		Acks:      1,
-		Messages: []codec.ProduceMessage{
-			{Key: key, Value: value, TimestampMs: -1},
-		},
-		ProducerID:    0,
-		ProducerEpoch: 0,
-		BaseSequence:  -1,
-	})
-	if err != nil {
-		return 0, err
+	reinitBudget := 0
+	if c.enableIdempotence {
+		reinitBudget = 1
 	}
-	maxAttempts := 1 + c.maxRedirects
-	for attempt := 1; ; attempt++ {
-		decoded, err := c.roundTrip(codec.OpProduce, payload)
+	for {
+		payload, err := c.encodeProduce(topic, partition, key, value)
 		if err != nil {
-			if be, ok := err.(*codec.BrokerError); ok && be.Code == notLeaderForPartition && attempt < maxAttempts && partition >= 0 {
-				ok, rerr := c.redirectToLeader(topic, uint32(partition))
+			return 0, err
+		}
+		maxAttempts := 1 + c.maxRedirects
+		retriedUnknown := false
+		for attempt := 1; ; attempt++ {
+			decoded, err := c.roundTrip(codec.OpProduce, payload)
+			if err != nil {
+				if be, ok := err.(*codec.BrokerError); ok && be.Code == unknownProducerID && reinitBudget > 0 {
+					reinitBudget--
+					c.resetProducerID()
+					retriedUnknown = true
+					break
+				}
+				if be, ok := err.(*codec.BrokerError); ok && be.Code == notLeaderForPartition && attempt < maxAttempts && partition >= 0 {
+					ok, rerr := c.redirectToLeader(topic, uint32(partition))
+					if rerr != nil {
+						return 0, rerr
+					}
+					if ok {
+						continue
+					}
+				}
+				return 0, err
+			}
+			resp, ok := decoded.(codec.ProduceResponse)
+			if !ok {
+				return 0, &frame.ProtocolError{Msg: fmt.Sprintf("unexpected response for produce: %T", decoded)}
+			}
+			if resp.ErrorCode == unknownProducerID && reinitBudget > 0 {
+				reinitBudget--
+				c.resetProducerID()
+				retriedUnknown = true
+				break
+			}
+			if resp.ErrorCode == notLeaderForPartition && attempt < maxAttempts {
+				ok, rerr := c.redirectToLeader(resp.Topic, resp.Partition)
 				if rerr != nil {
 					return 0, rerr
 				}
@@ -472,26 +518,94 @@ func (c *Client) Produce(topic string, partition int, key, value []byte) (int64,
 					continue
 				}
 			}
-			return 0, err
-		}
-		resp, ok := decoded.(codec.ProduceResponse)
-		if !ok {
-			return 0, &frame.ProtocolError{Msg: fmt.Sprintf("unexpected response for produce: %T", decoded)}
-		}
-		if resp.ErrorCode == notLeaderForPartition && attempt < maxAttempts {
-			ok, rerr := c.redirectToLeader(resp.Topic, resp.Partition)
-			if rerr != nil {
-				return 0, rerr
+			if err := check(resp.ErrorCode, "produce"); err != nil {
+				return 0, err
 			}
-			if ok {
-				continue
+			seqPart := int32(partition)
+			if partition < 0 {
+				seqPart = int32(resp.Partition)
 			}
+			c.noteProduceSuccess(topic, seqPart, 1)
+			return int64(resp.BaseOffset), nil
 		}
-		if err := check(resp.ErrorCode, "produce"); err != nil {
-			return 0, err
+		if !retriedUnknown {
+			return 0, &frame.ProtocolError{Msg: "produce loop exited"}
 		}
-		return int64(resp.BaseOffset), nil
 	}
+}
+
+func (c *Client) encodeProduce(topic string, partition int, key, value []byte) ([]byte, error) {
+	pid, epoch, seq, err := c.produceTrailer(topic, int32(partition))
+	if err != nil {
+		return nil, err
+	}
+	return codec.EncodeProduceRequest(codec.ProduceRequest{
+		Topic:     topic,
+		Partition: int32(partition),
+		Acks:      1,
+		Messages: []codec.ProduceMessage{
+			{Key: key, Value: value, TimestampMs: -1},
+		},
+		ProducerID:    pid,
+		ProducerEpoch: epoch,
+		BaseSequence:  seq,
+	})
+}
+
+func (c *Client) produceTrailer(topic string, partition int32) (uint64, uint16, int32, error) {
+	if !c.enableIdempotence {
+		return 0, 0, -1, nil
+	}
+	if err := c.ensureProducerID(); err != nil {
+		return 0, 0, 0, err
+	}
+	if c.nextSeq == nil {
+		c.nextSeq = make(map[seqKey]int32)
+	}
+	return c.producerID, c.producerEpoch, c.nextSeq[seqKey{topic: topic, partition: partition}], nil
+}
+
+func (c *Client) noteProduceSuccess(topic string, partition int32, count int32) {
+	if !c.enableIdempotence {
+		return
+	}
+	if c.nextSeq == nil {
+		c.nextSeq = make(map[seqKey]int32)
+	}
+	key := seqKey{topic: topic, partition: partition}
+	c.nextSeq[key] = c.nextSeq[key] + count
+}
+
+func (c *Client) resetProducerID() {
+	c.producerReady = false
+	c.producerID = 0
+	c.producerEpoch = 0
+	c.nextSeq = make(map[seqKey]int32)
+}
+
+func (c *Client) ensureProducerID() error {
+	if c.producerReady {
+		return nil
+	}
+	payload, err := codec.EncodeInitProducerIdRequest(codec.InitProducerIdRequest{TransactionalID: ""})
+	if err != nil {
+		return err
+	}
+	decoded, err := c.roundTrip(codec.OpInitProducerId, payload)
+	if err != nil {
+		return err
+	}
+	resp, ok := decoded.(codec.InitProducerIdResponse)
+	if !ok {
+		return &frame.ProtocolError{Msg: fmt.Sprintf("unexpected response for init_producer_id: %T", decoded)}
+	}
+	if err := check(resp.ErrorCode, "init_producer_id"); err != nil {
+		return err
+	}
+	c.producerID = resp.ProducerID
+	c.producerEpoch = resp.Epoch
+	c.producerReady = true
+	return nil
 }
 
 // Fetch reads records from topic/partition starting at offset.

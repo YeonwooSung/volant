@@ -7,7 +7,9 @@ import java.net.InetSocketAddress;
 import java.net.Socket;
 import java.util.ArrayList;
 import java.util.Collections;
+import java.util.HashMap;
 import java.util.List;
+import java.util.Map;
 
 /**
  * Sync TCP client for the native Volant protocol (MVP).
@@ -48,6 +50,8 @@ public final class Client implements AutoCloseable {
     private static final int DEFAULT_TIMEOUT_MS = 10_000;
     /** Native {@code ErrorCode::NotLeaderForPartition}. */
     static final int NOT_LEADER_FOR_PARTITION = 13;
+    /** Native {@code ErrorCode::UnknownProducerId}. */
+    static final int UNKNOWN_PRODUCER_ID = 21;
 
     private String addr;
     private Socket socket;
@@ -56,6 +60,11 @@ public final class Client implements AutoCloseable {
     private final TlsOptions tlsOptions;
     private final String authToken;
     private int maxRedirects = 1;
+    private boolean enableIdempotence = false;
+    private long producerId = 0L;
+    private int producerEpoch = 0;
+    private boolean producerReady = false;
+    private final Map<String, Integer> nextSeq = new HashMap<>();
     private long nextCorr = 1;
     private byte[] buf = new byte[0];
 
@@ -132,6 +141,18 @@ public final class Client implements AutoCloseable {
 
     public int maxRedirects() {
         return maxRedirects;
+    }
+
+    /**
+     * Opt-in InitProducerId + per-partition produce sequences. Default is
+     * off (trailer {@code (0, 0, -1)}). Call before the first produce.
+     */
+    public void setEnableIdempotence(boolean enable) {
+        this.enableIdempotence = enable;
+    }
+
+    public boolean enableIdempotence() {
+        return enableIdempotence;
     }
 
     private static Client finishConnect(Client c) {
@@ -401,7 +422,9 @@ public final class Client implements AutoCloseable {
 
     /**
      * Produce one message (null key when {@code key} is null) with acks=1.
-     * Idempotent produce is not implemented; trailer is {@code (0, 0, -1)}.
+     * Default trailer is {@code (0, 0, -1)}. After {@link #setEnableIdempotence}
+     * the first produce sends InitProducerId (empty transactional_id) and later
+     * produces attach pid/epoch/seq.
      *
      * @return the broker-assigned base offset
      */
@@ -409,43 +432,114 @@ public final class Client implements AutoCloseable {
         if (value == null) {
             value = new byte[0];
         }
-        byte[] payload = Codec.encodeProduceRequest(
+        int reinitBudget = enableIdempotence ? 1 : 0;
+        while (true) {
+            byte[] payload = encodeProduce(topic, partition, key, value);
+            int maxAttempts = 1 + maxRedirects;
+            int attempt = 0;
+            boolean retriedUnknown = false;
+            while (true) {
+                attempt++;
+                Object decoded;
+                try {
+                    decoded = roundTrip(Codec.OP_PRODUCE, payload);
+                } catch (BrokerException e) {
+                    if (e.code == UNKNOWN_PRODUCER_ID && reinitBudget > 0) {
+                        reinitBudget--;
+                        resetProducerId();
+                        retriedUnknown = true;
+                        break;
+                    }
+                    if (e.code == NOT_LEADER_FOR_PARTITION
+                            && attempt < maxAttempts
+                            && partition >= 0
+                            && redirectToLeader(topic, partition)) {
+                        continue;
+                    }
+                    throw e;
+                }
+                if (!(decoded instanceof Codec.ProduceResponse)) {
+                    throw new ProtocolException("unexpected response for produce: " + typeName(decoded));
+                }
+                Codec.ProduceResponse resp = (Codec.ProduceResponse) decoded;
+                if (resp.errorCode == UNKNOWN_PRODUCER_ID && reinitBudget > 0) {
+                    reinitBudget--;
+                    resetProducerId();
+                    retriedUnknown = true;
+                    break;
+                }
+                if (resp.errorCode == NOT_LEADER_FOR_PARTITION
+                        && attempt < maxAttempts
+                        && redirectToLeader(resp.topic, (int) resp.partition)) {
+                    continue;
+                }
+                check(resp.errorCode, "produce");
+                int seqPart = partition < 0 ? (int) resp.partition : partition;
+                noteProduceSuccess(topic, seqPart, 1);
+                return resp.baseOffset;
+            }
+            if (!retriedUnknown) {
+                throw new ProtocolException("produce loop exited");
+            }
+        }
+    }
+
+    private byte[] encodeProduce(String topic, int partition, byte[] key, byte[] value) {
+        long[] trailer = produceTrailer(topic, partition);
+        return Codec.encodeProduceRequest(
                 new Codec.ProduceRequest(
                         topic,
                         partition,
                         1,
                         Collections.singletonList(new Codec.ProduceMessage(key, value, -1L, Collections.emptyList())),
-                        0L,
-                        0,
-                        -1));
-        int maxAttempts = 1 + maxRedirects;
-        int attempt = 0;
-        while (true) {
-            attempt++;
-            Object decoded;
-            try {
-                decoded = roundTrip(Codec.OP_PRODUCE, payload);
-            } catch (BrokerException e) {
-                if (e.code == NOT_LEADER_FOR_PARTITION
-                        && attempt < maxAttempts
-                        && partition >= 0
-                        && redirectToLeader(topic, partition)) {
-                    continue;
-                }
-                throw e;
-            }
-            if (!(decoded instanceof Codec.ProduceResponse)) {
-                throw new ProtocolException("unexpected response for produce: " + typeName(decoded));
-            }
-            Codec.ProduceResponse resp = (Codec.ProduceResponse) decoded;
-            if (resp.errorCode == NOT_LEADER_FOR_PARTITION
-                    && attempt < maxAttempts
-                    && redirectToLeader(resp.topic, (int) resp.partition)) {
-                continue;
-            }
-            check(resp.errorCode, "produce");
-            return resp.baseOffset;
+                        trailer[0],
+                        (int) trailer[1],
+                        (int) trailer[2]));
+    }
+
+    private long[] produceTrailer(String topic, int partition) {
+        if (!enableIdempotence) {
+            return new long[] {0L, 0L, -1L};
         }
+        ensureProducerId();
+        Integer seq = nextSeq.get(seqKey(topic, partition));
+        return new long[] {producerId, producerEpoch, seq == null ? 0 : seq};
+    }
+
+    private void noteProduceSuccess(String topic, int partition, int count) {
+        if (!enableIdempotence) {
+            return;
+        }
+        String key = seqKey(topic, partition);
+        Integer cur = nextSeq.get(key);
+        nextSeq.put(key, (cur == null ? 0 : cur) + count);
+    }
+
+    private void resetProducerId() {
+        producerReady = false;
+        producerId = 0L;
+        producerEpoch = 0;
+        nextSeq.clear();
+    }
+
+    private void ensureProducerId() {
+        if (producerReady) {
+            return;
+        }
+        byte[] payload = Codec.encodeInitProducerIdRequest(new Codec.InitProducerIdRequest(""));
+        Object decoded = roundTrip(Codec.OP_INIT_PRODUCER_ID, payload);
+        if (!(decoded instanceof Codec.InitProducerIdResponse)) {
+            throw new ProtocolException("unexpected response for init_producer_id: " + typeName(decoded));
+        }
+        Codec.InitProducerIdResponse resp = (Codec.InitProducerIdResponse) decoded;
+        check(resp.errorCode, "init_producer_id");
+        producerId = resp.producerId;
+        producerEpoch = resp.epoch;
+        producerReady = true;
+    }
+
+    private static String seqKey(String topic, int partition) {
+        return topic + "\0" + partition;
     }
 
     /**

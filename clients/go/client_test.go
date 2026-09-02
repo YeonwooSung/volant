@@ -18,15 +18,27 @@ type scriptedBroker struct {
 	produceCodes  []uint16
 	fetchCodes    []uint16
 	meta          codec.MetadataResponse
+	opcodes       []uint16
+	produceReqs   []codec.ProduceRequest
+	initTxnIDs    []string
+	initCount     int
 	produceCount  int
 	fetchCount    int
 	metadataCount int
 	acceptCount   int
+	initPID       uint64
+	initEpoch     uint16
 	ln            net.Listener
 }
 
 func startScripted(t *testing.T, s *scriptedBroker) (addr string, stop func()) {
 	t.Helper()
+	if s.initPID == 0 {
+		s.initPID = 42
+	}
+	if s.initEpoch == 0 {
+		s.initEpoch = 1
+	}
 	ln, err := net.Listen("tcp", "127.0.0.1:0")
 	if err != nil {
 		t.Fatal(err)
@@ -65,6 +77,36 @@ func (s *scriptedBroker) snapshot() (produces, fetches, metas, accepts int) {
 	return s.produceCount, s.fetchCount, s.metadataCount, s.acceptCount
 }
 
+func (s *scriptedBroker) inits() int {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.initCount
+}
+
+func (s *scriptedBroker) copyProduces() []codec.ProduceRequest {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	out := make([]codec.ProduceRequest, len(s.produceReqs))
+	copy(out, s.produceReqs)
+	return out
+}
+
+func (s *scriptedBroker) copyOpcodes() []uint16 {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	out := make([]uint16, len(s.opcodes))
+	copy(out, s.opcodes)
+	return out
+}
+
+func (s *scriptedBroker) copyInitTxnIDs() []string {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	out := make([]string, len(s.initTxnIDs))
+	copy(out, s.initTxnIDs)
+	return out
+}
+
 func (s *scriptedBroker) serve(conn net.Conn) {
 	defer conn.Close()
 	_ = conn.SetDeadline(time.Now().Add(10 * time.Second))
@@ -100,15 +142,29 @@ func (s *scriptedBroker) serve(conn net.Conn) {
 func (s *scriptedBroker) handle(f *frame.Frame) ([]byte, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	s.opcodes = append(s.opcodes, f.Opcode)
 	var payload []byte
 	var err error
+	replyOp := f.Opcode
 	switch f.Opcode {
+	case codec.OpInitProducerId:
+		s.initCount++
+		req, e := codec.DecodeInitProducerIdRequest(f.Payload)
+		if e != nil {
+			return nil, e
+		}
+		s.initTxnIDs = append(s.initTxnIDs, req.TransactionalID)
+		payload, err = codec.EncodeInitProducerIdResponse(codec.InitProducerIdResponse{
+			ProducerID: s.initPID, Epoch: s.initEpoch, ErrorCode: 0,
+		})
+		replyOp = codec.OpInitProducerIdResponse
 	case codec.OpProduce:
 		s.produceCount++
 		req, e := codec.DecodeProduceRequest(f.Payload)
 		if e != nil {
 			return nil, e
 		}
+		s.produceReqs = append(s.produceReqs, req)
 		code := uint16(0)
 		if len(s.produceCodes) > 0 {
 			code = s.produceCodes[0]
@@ -122,7 +178,7 @@ func (s *scriptedBroker) handle(f *frame.Frame) ([]byte, error) {
 		count := uint32(0)
 		if code == 0 {
 			off = 7
-			count = 1
+			count = uint32(len(req.Messages))
 		}
 		payload, err = codec.EncodeProduceResponse(codec.ProduceResponse{
 			Topic: req.Topic, Partition: part, BaseOffset: off, Count: count, ErrorCode: code,
@@ -150,7 +206,7 @@ func (s *scriptedBroker) handle(f *frame.Frame) ([]byte, error) {
 	if err != nil {
 		return nil, err
 	}
-	return frame.Encode(f.Opcode, f.CorrelationID, payload)
+	return frame.Encode(replyOp, f.CorrelationID, payload)
 }
 
 func leaderMeta(topic string, partition, leaderID uint32, host string, port int) codec.MetadataResponse {
@@ -346,5 +402,119 @@ func TestEmptyHostRaises13(t *testing.T) {
 	fp, _, fm, fa := follower.snapshot()
 	if fp != 1 || fm != 1 || fa != 1 {
 		t.Fatalf("produce/metadata/accepts = %d/%d/%d want 1/1/1", fp, fm, fa)
+	}
+}
+
+func TestIdempotentProduceOnInitsThenSequences(t *testing.T) {
+	srv := &scriptedBroker{}
+	addr, stop := startScripted(t, srv)
+	defer stop()
+
+	c, err := volant.DialTimeout(addr, 5*time.Second)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer c.Close()
+	c.EnableIdempotence()
+
+	if _, err := c.Produce("t", 0, nil, []byte("a")); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := c.Produce("t", 0, nil, []byte("b")); err != nil {
+		t.Fatal(err)
+	}
+	if srv.inits() != 1 {
+		t.Fatalf("init count %d want 1", srv.inits())
+	}
+	txns := srv.copyInitTxnIDs()
+	if len(txns) != 1 || txns[0] != "" {
+		t.Fatalf("init txn ids %#v", txns)
+	}
+	ops := srv.copyOpcodes()
+	if len(ops) != 3 || ops[0] != codec.OpInitProducerId || ops[1] != codec.OpProduce || ops[2] != codec.OpProduce {
+		t.Fatalf("opcodes %#v", ops)
+	}
+	reqs := srv.copyProduces()
+	if len(reqs) != 2 {
+		t.Fatalf("produces %d", len(reqs))
+	}
+	if reqs[0].ProducerID != 42 || reqs[0].ProducerEpoch != 1 || reqs[0].BaseSequence != 0 {
+		t.Fatalf("first trailer %+v", reqs[0])
+	}
+	if reqs[1].ProducerID != 42 || reqs[1].ProducerEpoch != 1 || reqs[1].BaseSequence != 1 {
+		t.Fatalf("second trailer %+v", reqs[1])
+	}
+}
+
+func TestIdempotentProduceOffDefaultTrailer(t *testing.T) {
+	srv := &scriptedBroker{}
+	addr, stop := startScripted(t, srv)
+	defer stop()
+
+	c, err := volant.DialTimeout(addr, 5*time.Second)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer c.Close()
+
+	if _, err := c.Produce("t", 0, nil, []byte("a")); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := c.Produce("t", 0, nil, []byte("b")); err != nil {
+		t.Fatal(err)
+	}
+	if srv.inits() != 0 {
+		t.Fatalf("init count %d want 0", srv.inits())
+	}
+	for i, req := range srv.copyProduces() {
+		if req.ProducerID != 0 || req.ProducerEpoch != 0 || req.BaseSequence != -1 {
+			t.Fatalf("produce %d trailer %+v", i, req)
+		}
+	}
+}
+
+func TestIdempotentProduceRedirectKeepsSequence(t *testing.T) {
+	leader := &scriptedBroker{}
+	_, stopL := startScripted(t, leader)
+	defer stopL()
+
+	follower := &scriptedBroker{
+		produceCodes: []uint16{notLeader},
+		meta:         leaderMeta("t", 0, 2, "127.0.0.1", leader.port()),
+	}
+	addr, stopF := startScripted(t, follower)
+	defer stopF()
+
+	c, err := volant.DialTimeout(addr, 5*time.Second)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer c.Close()
+	c.EnableIdempotence()
+
+	if _, err := c.Produce("t", 0, nil, []byte("hello")); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := c.Produce("t", 0, nil, []byte("again")); err != nil {
+		t.Fatal(err)
+	}
+	if follower.inits() != 1 || leader.inits() != 0 {
+		t.Fatalf("init follower/leader = %d/%d want 1/0", follower.inits(), leader.inits())
+	}
+	fp, _, _, _ := follower.snapshot()
+	lp, _, _, _ := leader.snapshot()
+	if fp != 1 || lp != 2 {
+		t.Fatalf("produce follower/leader = %d/%d want 1/2", fp, lp)
+	}
+	fReqs := follower.copyProduces()
+	if fReqs[0].ProducerID != 42 || fReqs[0].BaseSequence != 0 {
+		t.Fatalf("follower first %+v", fReqs[0])
+	}
+	lReqs := leader.copyProduces()
+	if lReqs[0].BaseSequence != 0 || lReqs[1].BaseSequence != 1 {
+		t.Fatalf("leader seqs %d %d", lReqs[0].BaseSequence, lReqs[1].BaseSequence)
+	}
+	if lReqs[0].ProducerID != 42 {
+		t.Fatalf("leader pid %d", lReqs[0].ProducerID)
 	}
 }
