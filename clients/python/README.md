@@ -142,9 +142,9 @@ joined `member_id` + `generation`. `close` leaves the group and does
 not close the `Client`.
 `volant.range_assign` / `range_assign_multi` match the broker range
 algorithm. `GroupConsumer.join(..., assignor="range")` replaces the
-fetch set with a **solo** local range (this member only — JoinGroup
-does not return the live member list). Default `assignor="broker"`
-keeps the broker assignment as SoT.
+fetch set with a local range over **DescribeGroup** members (still no
+SyncGroup; describe failure falls back to solo). Default
+`assignor="broker"` keeps the broker assignment as SoT.
 
 Produce, Fetch, and DeleteRecords follow `NotLeaderForPartition`
 (error 13) by default: Metadata, reconnect to the partition leader,
@@ -255,11 +255,11 @@ seeing other group members on the wire, SCRAM, async I/O,
 Kafka transactions (API keys 22/24/25/26/28). Native BeginTxn/EndTxn
 (opcodes 50–53) is opt-in via `transactional_id=`. Idempotent produce
 is opt-in (`enable_idempotence=True`); default off. Local
-`assignor="range"` cannot
+`assignor="range"` uses DescribeGroup members (still no SyncGroup).
 seeing other group members on the wire, SCRAM-SHA-512, Kafka SASL,
 async I/O, idempotent
-produce, auto-commit. Local `assignor="range"` cannot
-split across live members. Thin `join_group` still defaults to empty
+produce, auto-commit. Local `assignor="range"` uses DescribeGroup
+members (still no SyncGroup). Thin `join_group` still defaults to empty
 `group_instance_id` unless the caller (or `GroupConsumer.join`) passes
 one. Offset commit/fetch is the
 admin path only (empty member, generation 0) unless the caller (or

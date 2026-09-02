@@ -130,8 +130,8 @@ member+generation, and rejoins on heartbeat error 9.
 resends it on rejoin.
 `RangeAssignor.rangeAssign` / `rangeAssignMulti` match the broker range
 algorithm. `GroupConsumer.join(..., "range")` replaces the fetch set
-with a **solo** local range (this member only — JoinGroup does not
-return the live member list). Default assignor is broker.
+with a local range over **DescribeGroup** members (still no SyncGroup;
+describe failure falls back to solo). Default assignor is broker.
 
 Produce, Fetch, and DeleteRecords follow `NotLeaderForPartition`
 (error 13) by default: Metadata, reconnect to the partition leader,
@@ -247,11 +247,11 @@ seeing other group members on the wire, SCRAM, async I/O, Kafka
 transactions (API keys 22/24/25/26/28). Native BeginTxn/EndTxn
 (opcodes 50–53) is opt-in via `setTransactionalId`. Idempotent produce
 is opt-in (`setEnableIdempotence(true)`); default off. Local
-`assignor="range"` cannot split across
+`assignor="range"` uses DescribeGroup members (still no SyncGroup).
 seeing other group members on the wire, SCRAM-SHA-512, Kafka SASL,
 async I/O, idempotent
-produce. Local `assignor="range"` cannot split across
-live members. Sync only; one TCP connection; acks=1 by default
+produce. Local `assignor="range"` uses DescribeGroup members
+(still no SyncGroup). Sync only; one TCP connection; acks=1 by default
 (`produce(..., acks)` / `acks=255` is acks=all; v0.64). Convenience
 Produce is still one message per RPC (not Kafka Produce; native
 opcode 1). Public 6-arg `fetch` exposes max_messages / max_bytes /

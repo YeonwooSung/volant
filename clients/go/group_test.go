@@ -36,8 +36,11 @@ type fakeGroupBroker struct {
 	offsetFetches []codec.OffsetFetchRequest
 	listOffsets   []codec.ListOffsetsRequest
 	bounds        map[tpKey]codec.OffsetListing
-	topics        []codec.TopicInfo
-	metadatas     int
+	topics          []codec.TopicInfo
+	metadatas       int
+	describeMembers []codec.GroupMemberInfo
+	describeError   uint16
+	describeCount   int
 }
 
 func newFakeGroupBroker() *fakeGroupBroker {
@@ -71,6 +74,13 @@ func (s *fakeGroupBroker) setTopic(name string, n int) {
 		parts[i] = codec.PartitionInfo{PartitionID: uint32(i)}
 	}
 	s.topics = append(s.topics, codec.TopicInfo{Name: name, Partitions: parts})
+}
+
+func (s *fakeGroupBroker) setDescribeMembers(members []codec.GroupMemberInfo, errCode uint16) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.describeMembers = append([]codec.GroupMemberInfo(nil), members...)
+	s.describeError = errCode
 }
 
 func (s *fakeGroupBroker) snapshot() (joins []codec.JoinGroupRequest, hbs []codec.HeartbeatRequest, commits []codec.OffsetCommitRequest, fetches []codec.FetchRequest, leaves []codec.LeaveGroupRequest, ofs []codec.OffsetFetchRequest) {
@@ -240,6 +250,28 @@ func (s *fakeGroupBroker) handle(f *frame.Frame) ([]byte, error) {
 		payload, err = codec.EncodeMetadataResponse(codec.MetadataResponse{
 			Topics: append([]codec.TopicInfo(nil), s.topics...),
 		})
+	case codec.OpDescribeGroup:
+		req, e := codec.DecodeDescribeGroupRequest(f.Payload)
+		if e != nil {
+			return nil, e
+		}
+		s.describeCount++
+		var resp codec.DescribeGroupResponse
+		if s.describeError != 0 {
+			resp = codec.DescribeGroupResponse{
+				ErrorCode: s.describeError,
+				GroupID:   req.GroupID,
+			}
+		} else {
+			resp = codec.DescribeGroupResponse{
+				ErrorCode:  0,
+				GroupID:    req.GroupID,
+				Generation: s.generation,
+				Members:    append([]codec.GroupMemberInfo(nil), s.describeMembers...),
+			}
+		}
+		payload, err = codec.EncodeDescribeGroupResponse(resp)
+		respOp = codec.OpDescribeGroupResponse
 	case codec.OpListOffsets:
 		req, e := codec.DecodeListOffsetsRequest(f.Payload)
 		if e != nil {
