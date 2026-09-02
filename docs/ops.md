@@ -666,6 +666,14 @@ Python / Go MVPs (not Kafka, not `--kafka-listen`). `mvn -q test` or
 `VOLANT_E2E=1` after `cargo build -p volant-server`. See
 [V23_SPEC.md](./V23_SPEC.md).
 
+## v0.24 client offsets
+
+Python and Go native clients now speak **OffsetCommit** (opcode 6) and
+**OffsetFetch** (opcode 7). Admin path: empty member id, generation 0.
+`offset_fetch(group, topic)` / `OffsetFetch(group, topic)` fetch all
+group offsets and filter to the topic. Codec tests need no broker; live
+round-trip is `VOLANT_E2E=1`. See [V24_SPEC.md](./V24_SPEC.md).
+
 ## Shipped (not gaps)
 
 Kafka wire shim **Phases 23–109** (ApiVersions **0–5**, Fetch **0–18**, ACL admin

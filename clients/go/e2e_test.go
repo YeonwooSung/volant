@@ -83,6 +83,42 @@ func TestE2ECreateProduceFetchMetadata(t *testing.T) {
 	}
 }
 
+func TestE2EOffsetCommitFetch(t *testing.T) {
+	if os.Getenv("VOLANT_E2E") != "1" {
+		t.Skip("set VOLANT_E2E=1 to run live broker e2e")
+	}
+	addr, cleanup := startBroker(t)
+	defer cleanup()
+
+	c, err := volant.DialTimeout(addr, 5*time.Second)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer c.Close()
+
+	topic := fmt.Sprintf("go-off-%d-%d", os.Getpid(), time.Now().UnixNano())
+	group := fmt.Sprintf("go-g-%d", os.Getpid())
+	if err := c.CreateTopic(topic, 1); err != nil {
+		t.Fatalf("CreateTopic: %v", err)
+	}
+	if _, err := c.Produce(topic, 0, nil, []byte("hello")); err != nil {
+		t.Fatalf("Produce: %v", err)
+	}
+	if err := c.OffsetCommit(group, topic, 0, 5); err != nil {
+		t.Fatalf("OffsetCommit: %v", err)
+	}
+	offs, err := c.OffsetFetch(group, topic)
+	if err != nil {
+		t.Fatalf("OffsetFetch: %v", err)
+	}
+	if len(offs) != 1 || offs[0].Partition != 0 || offs[0].Offset != 5 {
+		t.Fatalf("offsets %+v want [{0 5}]", offs)
+	}
+	if err := c.DeleteTopic(topic); err != nil {
+		t.Fatalf("DeleteTopic: %v", err)
+	}
+}
+
 func startBroker(t *testing.T) (addr string, cleanup func()) {
 	t.Helper()
 	if existing := os.Getenv("VOLANT_BROKER"); existing != "" {

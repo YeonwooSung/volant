@@ -1,7 +1,8 @@
 """Little-endian native payload encode/decode.
 
 Matches `crates/volant-protocol/src/payload.rs` for the MVP opcodes:
-Produce, Fetch, CreateTopic, Metadata, DeleteTopic.
+Produce, Fetch, CreateTopic, Metadata, DeleteTopic, OffsetCommit,
+OffsetFetch.
 
 Header fields are big-endian (see :mod:`volant.frame`); **payload** integers
 and length prefixes are little-endian.
@@ -20,6 +21,8 @@ OP_FETCH = 2
 OP_CREATE_TOPIC = 3
 OP_METADATA = 4
 OP_DELETE_TOPIC = 5
+OP_OFFSET_COMMIT = 6
+OP_OFFSET_FETCH = 7
 OP_ERROR = 0xFFFF
 
 _NULL_LEN = 0xFFFFFFFF
@@ -309,6 +312,53 @@ class MetadataResponse:
 class ErrorResponse:
     code: int
     message: str
+
+
+@dataclass
+class OffsetCommitEntry:
+    topic: str
+    partition: int
+    offset: int
+    metadata: str = ""
+
+
+@dataclass
+class OffsetCommitRequest:
+    group_id: str
+    member_id: str
+    generation: int
+    entries: list[OffsetCommitEntry]
+
+
+@dataclass
+class OffsetCommitResponse:
+    error_code: int
+
+
+@dataclass
+class OffsetEntry:
+    topic: str
+    partition: int
+
+
+@dataclass
+class OffsetFetchRequest:
+    group_id: str
+    entries: list[OffsetEntry] = field(default_factory=list)
+
+
+@dataclass
+class OffsetFetchEntry:
+    topic: str
+    partition: int
+    offset: int
+    metadata: str = ""
+
+
+@dataclass
+class OffsetFetchResponse:
+    error_code: int
+    entries: list[OffsetFetchEntry]
 
 
 # --- produce ---------------------------------------------------------------
@@ -616,6 +666,111 @@ def decode_metadata_response(payload: bytes) -> MetadataResponse:
     return MetadataResponse(brokers=brokers, topics=topics)
 
 
+# --- offset commit / fetch -------------------------------------------------
+
+
+def encode_offset_commit_request(req: OffsetCommitRequest) -> bytes:
+    w = _Writer()
+    _put_string(w, req.group_id)
+    _put_string(w, req.member_id)
+    w.u32_le(req.generation)
+    w.u32_le(len(req.entries))
+    for e in req.entries:
+        _put_string(w, e.topic)
+        w.u32_le(e.partition)
+        w.u64_le(e.offset)
+        _put_string(w, e.metadata)
+    return w.finish()
+
+
+def decode_offset_commit_request(payload: bytes) -> OffsetCommitRequest:
+    r = _Reader(payload)
+    group_id = _get_string(r)
+    member_id = _get_string(r)
+    generation = r.u32_le()
+    n = r.u32_le()
+    entries: list[OffsetCommitEntry] = []
+    for _ in range(n):
+        topic = _get_string(r)
+        partition = r.u32_le()
+        offset = r.u64_le()
+        metadata = _get_string(r)
+        entries.append(
+            OffsetCommitEntry(
+                topic=topic, partition=partition, offset=offset, metadata=metadata
+            )
+        )
+    return OffsetCommitRequest(
+        group_id=group_id,
+        member_id=member_id,
+        generation=generation,
+        entries=entries,
+    )
+
+
+def encode_offset_commit_response(resp: OffsetCommitResponse) -> bytes:
+    w = _Writer()
+    w.u16_le(resp.error_code)
+    return w.finish()
+
+
+def decode_offset_commit_response(payload: bytes) -> OffsetCommitResponse:
+    r = _Reader(payload)
+    return OffsetCommitResponse(error_code=r.u16_le())
+
+
+def encode_offset_fetch_request(req: OffsetFetchRequest) -> bytes:
+    w = _Writer()
+    _put_string(w, req.group_id)
+    w.u32_le(len(req.entries))
+    for e in req.entries:
+        _put_string(w, e.topic)
+        w.u32_le(e.partition)
+    return w.finish()
+
+
+def decode_offset_fetch_request(payload: bytes) -> OffsetFetchRequest:
+    r = _Reader(payload)
+    group_id = _get_string(r)
+    n = r.u32_le()
+    entries: list[OffsetEntry] = []
+    for _ in range(n):
+        topic = _get_string(r)
+        partition = r.u32_le()
+        entries.append(OffsetEntry(topic=topic, partition=partition))
+    return OffsetFetchRequest(group_id=group_id, entries=entries)
+
+
+def encode_offset_fetch_response(resp: OffsetFetchResponse) -> bytes:
+    w = _Writer()
+    w.u16_le(resp.error_code)
+    w.u32_le(len(resp.entries))
+    for e in resp.entries:
+        _put_string(w, e.topic)
+        w.u32_le(e.partition)
+        w.u64_le(e.offset)
+        _put_string(w, e.metadata)
+    return w.finish()
+
+
+def decode_offset_fetch_response(payload: bytes) -> OffsetFetchResponse:
+    r = _Reader(payload)
+    error_code = r.u16_le()
+    n = r.u32_le()
+    entries: list[OffsetFetchEntry] = []
+    for _ in range(n):
+        topic = _get_string(r)
+        partition = r.u32_le()
+        offset = r.u64_le()
+        metadata = _get_string(r)
+        entries.append(
+            OffsetFetchEntry(
+                topic=topic, partition=partition, offset=offset, metadata=metadata
+            )
+        )
+    return OffsetFetchResponse(error_code=error_code, entries=entries)
+
+
 # --- error opcode ----------------------------------------------------------
 
 
@@ -643,6 +798,10 @@ def decode_response(opcode: int, payload: bytes):
         return decode_metadata_response(payload)
     if opcode == OP_DELETE_TOPIC:
         return decode_delete_topic_response(payload)
+    if opcode == OP_OFFSET_COMMIT:
+        return decode_offset_commit_response(payload)
+    if opcode == OP_OFFSET_FETCH:
+        return decode_offset_fetch_response(payload)
     if opcode == OP_ERROR:
         return decode_error_response(payload)
     raise ProtocolError(f"unknown response opcode {opcode}")

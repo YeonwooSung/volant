@@ -24,6 +24,8 @@ c.produce("t", 0, value=b"hello")
 batch = c.fetch("t", 0, offset=0)
 for offset, key, value in batch.tuples():
     print(offset, key, value)
+c.offset_commit(group="g", topic="t", partition=0, offset=5)
+offs = c.offset_fetch(group="g", topic="t")  # [(partition, offset), ...]
 meta = c.metadata()
 c.close()
 ```
@@ -31,6 +33,9 @@ c.close()
 `Client` is also a context manager. `produce(..., key=b"...")` is supported;
 null key is the default. `fetch` returns a `FetchResult` (iterable of records
 with `offset`, `key`, `value`). `metadata()` returns brokers + topics.
+`offset_commit` is an admin commit (`member_id=""`, `generation=0` unless
+overridden). `offset_fetch` returns committed `(partition, offset)` pairs
+for the given topic.
 
 Correlation ids increment per request. Decode verifies magic `V` (0x56),
 protocol version 1, and IEEE CRC32 of the **payload only**.
@@ -62,8 +67,11 @@ Repo helper: `scripts/python_client_smoke.sh` (skips if `python3` is missing).
 
 ## Honesty
 
-Not implemented: Java / Go clients, `kafka-python`, consumer groups,
-TLS / SCRAM / shared-token auth, async I/O, idempotent produce, leader
-redirect. Sync only; one TCP connection; acks=1 by default.
+Not implemented: Java client, `kafka-python`, JoinGroup / Heartbeat /
+LeaveGroup, TLS / SCRAM / shared-token auth, async I/O, idempotent
+produce, leader redirect. Offset commit/fetch is the admin path only
+(empty member, generation 0). Sync only; one TCP connection; acks=1 by
+default.
 
-See [docs/V14_SPEC.md](../../docs/V14_SPEC.md).
+See [docs/V14_SPEC.md](../../docs/V14_SPEC.md) and
+[docs/V24_SPEC.md](../../docs/V24_SPEC.md).

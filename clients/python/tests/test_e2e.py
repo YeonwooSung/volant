@@ -174,6 +174,18 @@ class TestE2E(unittest.TestCase):
             meta2 = c.metadata()
             self.assertNotIn(topic, [t.name for t in meta2.topics])
 
+    def test_offset_commit_fetch(self) -> None:
+        topic = f"py-off-{os.getpid()}-{int(time.time())}"
+        group = f"py-g-{os.getpid()}"
+        with Client(self.addr, timeout=5.0) as c:
+            c.create_topic(topic, partitions=1)
+            produced = c.produce(topic, 0, value=b"hello")
+            self.assertEqual(produced.base_offset, 0)
+            c.offset_commit(group=group, topic=topic, partition=0, offset=5)
+            offs = c.offset_fetch(group=group, topic=topic)
+            self.assertEqual(offs, [(0, 5)])
+            c.delete_topic(topic)
+
 
 if __name__ == "__main__":
     unittest.main()

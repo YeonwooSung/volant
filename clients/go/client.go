@@ -33,6 +33,12 @@ type (
 	MetadataResponse = codec.MetadataResponse
 )
 
+// Offset is one committed (partition, offset) pair from OffsetFetch.
+type Offset struct {
+	Partition uint32
+	Offset    uint64
+}
+
 // Client is a sync TCP client for the native Volant protocol (MVP).
 type Client struct {
 	addr     string
@@ -297,4 +303,59 @@ func (c *Client) Metadata() (Metadata, error) {
 		return Metadata{}, &frame.ProtocolError{Msg: fmt.Sprintf("unexpected response for metadata: %T", decoded)}
 	}
 	return resp, nil
+}
+
+// OffsetCommit commits one group offset (admin path: empty member, generation 0).
+func (c *Client) OffsetCommit(group, topic string, partition int, offset int64) error {
+	payload, err := codec.EncodeOffsetCommitRequest(codec.OffsetCommitRequest{
+		GroupID:    group,
+		MemberID:   "",
+		Generation: 0,
+		Entries: []codec.OffsetCommitEntry{
+			{Topic: topic, Partition: uint32(partition), Offset: uint64(offset), Metadata: ""},
+		},
+	})
+	if err != nil {
+		return err
+	}
+	decoded, err := c.roundTrip(codec.OpOffsetCommit, payload)
+	if err != nil {
+		return err
+	}
+	resp, ok := decoded.(codec.OffsetCommitResponse)
+	if !ok {
+		return &frame.ProtocolError{Msg: fmt.Sprintf("unexpected response for offset_commit: %T", decoded)}
+	}
+	return check(resp.ErrorCode, "offset_commit")
+}
+
+// OffsetFetch returns committed offsets for topic as []Offset.
+// Empty wire entries mean all offsets for the group; this method filters
+// to topic client-side (same as the CLI).
+func (c *Client) OffsetFetch(group, topic string) ([]Offset, error) {
+	payload, err := codec.EncodeOffsetFetchRequest(codec.OffsetFetchRequest{
+		GroupID: group,
+		Entries: []codec.OffsetEntry{},
+	})
+	if err != nil {
+		return nil, err
+	}
+	decoded, err := c.roundTrip(codec.OpOffsetFetch, payload)
+	if err != nil {
+		return nil, err
+	}
+	resp, ok := decoded.(codec.OffsetFetchResponse)
+	if !ok {
+		return nil, &frame.ProtocolError{Msg: fmt.Sprintf("unexpected response for offset_fetch: %T", decoded)}
+	}
+	if err := check(resp.ErrorCode, "offset_fetch"); err != nil {
+		return nil, err
+	}
+	out := make([]Offset, 0, len(resp.Entries))
+	for _, e := range resp.Entries {
+		if e.Topic == topic {
+			out = append(out, Offset{Partition: e.Partition, Offset: e.Offset})
+		}
+	}
+	return out, nil
 }
