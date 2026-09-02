@@ -239,6 +239,7 @@ fn authorize_request(broker: &Broker, req: &Request, principal: Option<&str>) ->
         | Request::MembershipPut { .. }
         | Request::OpenraftAppend { .. }
         | Request::OpenraftVote { .. }
+        | Request::OpenraftInstallSnapshot { .. }
         | Request::Auth { .. }
         | Request::ScramFirst { .. }
         | Request::ScramFinal { .. } => return None,
@@ -348,6 +349,7 @@ fn authorize_request(broker: &Broker, req: &Request, principal: Option<&str>) ->
         | Request::MembershipPut { .. }
         | Request::OpenraftAppend { .. }
         | Request::OpenraftVote { .. }
+        | Request::OpenraftInstallSnapshot { .. }
         | Request::Auth { .. }
         | Request::ScramFirst { .. }
         | Request::ScramFinal { .. } => true,
@@ -449,7 +451,9 @@ fn record_response_metrics(broker: &Broker, resp: &Response) {
                 m.record_error(ErrorCode::Unknown as u16);
             }
         }
-        Response::OpenraftAppend { .. } | Response::OpenraftVote { .. } => {}
+        Response::OpenraftAppend { .. }
+        | Response::OpenraftVote { .. }
+        | Response::OpenraftInstallSnapshot { .. } => {}
         Response::Metadata { .. } => {}
     }
 }
@@ -1342,6 +1346,10 @@ async fn handle_request(broker: &Arc<Broker>, req: Request) -> Result<Response> 
         Request::OpenraftVote { payload } => {
             let out = broker.handle_openraft_vote(&payload).await?;
             Ok(Response::OpenraftVote { payload: out })
+        }
+        Request::OpenraftInstallSnapshot { payload } => {
+            let out = broker.handle_openraft_install_snapshot(&payload).await?;
+            Ok(Response::OpenraftInstallSnapshot { payload: out })
         }
         Request::ListMembers => {
             let snap = broker.list_membership();

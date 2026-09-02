@@ -760,7 +760,9 @@ pub fn encode_request(req: &Request) -> Result<Bytes> {
             dst.put_u32_le(*id);
         }
         Request::ListMembers => {}
-        Request::OpenraftAppend { payload } | Request::OpenraftVote { payload } => {
+        Request::OpenraftAppend { payload }
+        | Request::OpenraftVote { payload }
+        | Request::OpenraftInstallSnapshot { payload } => {
             put_bytes(&mut dst, payload);
         }
     }
@@ -1534,6 +1536,9 @@ pub fn decode_request(opcode: u16, payload: &[u8]) -> Result<Request> {
         RequestOpcode::OpenraftVote => Ok(Request::OpenraftVote {
             payload: get_bytes(&mut src)?,
         }),
+        RequestOpcode::OpenraftInstallSnapshot => Ok(Request::OpenraftInstallSnapshot {
+            payload: get_bytes(&mut src)?,
+        }),
     }
 }
 
@@ -1998,7 +2003,9 @@ pub fn encode_response(resp: &Response) -> Result<Bytes> {
                 dst.put_u32_le(*id);
             }
         }
-        Response::OpenraftAppend { payload } | Response::OpenraftVote { payload } => {
+        Response::OpenraftAppend { payload }
+        | Response::OpenraftVote { payload }
+        | Response::OpenraftInstallSnapshot { payload } => {
             put_bytes(&mut dst, payload);
         }
         Response::Error { code, message } => {
@@ -2904,6 +2911,9 @@ pub fn decode_response(opcode: u16, payload: &[u8]) -> Result<Response> {
             payload: get_bytes(&mut src)?,
         }),
         ResponseOpcode::OpenraftVote => Ok(Response::OpenraftVote {
+            payload: get_bytes(&mut src)?,
+        }),
+        ResponseOpcode::OpenraftInstallSnapshot => Ok(Response::OpenraftInstallSnapshot {
             payload: get_bytes(&mut src)?,
         }),
         ResponseOpcode::Error => {
@@ -5001,5 +5011,26 @@ mod tests {
         );
         assert!(decode_request(RequestOpcode::OpenraftAppend as u16, &[]).is_err());
         assert!(decode_response(ResponseOpcode::OpenraftVote as u16, &[]).is_err());
+
+        let snap = Request::OpenraftInstallSnapshot {
+            payload: Bytes::from_static(b"{\"done\":true}"),
+        };
+        let sb = encode_request(&snap).unwrap();
+        assert_eq!(snap.opcode(), RequestOpcode::OpenraftInstallSnapshot as u16);
+        assert_eq!(
+            decode_request(RequestOpcode::OpenraftInstallSnapshot as u16, &sb).unwrap(),
+            snap
+        );
+        let sr = Response::OpenraftInstallSnapshot {
+            payload: Bytes::from_static(b"{\"vote\":{}}"),
+        };
+        let srb = encode_response(&sr).unwrap();
+        assert_eq!(sr.opcode(), ResponseOpcode::OpenraftInstallSnapshot as u16);
+        assert_eq!(
+            decode_response(ResponseOpcode::OpenraftInstallSnapshot as u16, &srb).unwrap(),
+            sr
+        );
+        assert!(decode_request(RequestOpcode::OpenraftInstallSnapshot as u16, &[]).is_err());
+        assert!(decode_response(ResponseOpcode::OpenraftInstallSnapshot as u16, &[]).is_err());
     }
 }

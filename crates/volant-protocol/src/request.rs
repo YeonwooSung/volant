@@ -116,6 +116,8 @@ pub enum RequestOpcode {
     OpenraftAppend = 108,
     /// Inter-broker openraft RequestVote (v0.11).
     OpenraftVote = 110,
+    /// Inter-broker openraft InstallSnapshot (v0.17).
+    OpenraftInstallSnapshot = 112,
 }
 
 impl RequestOpcode {
@@ -176,6 +178,7 @@ impl RequestOpcode {
             106 => Self::ListMembers,
             108 => Self::OpenraftAppend,
             110 => Self::OpenraftVote,
+            112 => Self::OpenraftInstallSnapshot,
             _ => return None,
         })
     }
@@ -712,6 +715,11 @@ pub enum Request {
         /// `serde_json` of openraft `VoteRequest`.
         payload: Bytes,
     },
+    /// Inter-broker openraft InstallSnapshot (v0.17). JSON body of the raft RPC.
+    OpenraftInstallSnapshot {
+        /// `serde_json` of openraft `InstallSnapshotRequest`.
+        payload: Bytes,
+    },
 }
 
 /// One broker endpoint on the membership overlay wire (v0.10).
@@ -808,6 +816,7 @@ impl Request {
             Self::ListMembers => RequestOpcode::ListMembers as u16,
             Self::OpenraftAppend { .. } => RequestOpcode::OpenraftAppend as u16,
             Self::OpenraftVote { .. } => RequestOpcode::OpenraftVote as u16,
+            Self::OpenraftInstallSnapshot { .. } => RequestOpcode::OpenraftInstallSnapshot as u16,
         }
     }
 }

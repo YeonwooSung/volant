@@ -114,6 +114,8 @@ pub enum ResponseOpcode {
     OpenraftAppend = 109,
     /// Inter-broker openraft RequestVote result (v0.11).
     OpenraftVote = 111,
+    /// Inter-broker openraft InstallSnapshot result (v0.17).
+    OpenraftInstallSnapshot = 113,
     /// Error response.
     Error = 0xFFFF,
 }
@@ -176,6 +178,7 @@ impl ResponseOpcode {
             107 => Self::ListMembers,
             109 => Self::OpenraftAppend,
             111 => Self::OpenraftVote,
+            113 => Self::OpenraftInstallSnapshot,
             0xFFFF => Self::Error,
             _ => return None,
         })
@@ -840,6 +843,11 @@ pub enum Response {
         /// `serde_json` of openraft `VoteResponse`.
         payload: Bytes,
     },
+    /// Inter-broker openraft InstallSnapshot result (v0.17).
+    OpenraftInstallSnapshot {
+        /// `serde_json` of openraft `InstallSnapshotResponse`.
+        payload: Bytes,
+    },
     /// Error response.
     Error {
         /// Error code.
@@ -933,6 +941,7 @@ impl Response {
             Self::ListMembers { .. } => ResponseOpcode::ListMembers as u16,
             Self::OpenraftAppend { .. } => ResponseOpcode::OpenraftAppend as u16,
             Self::OpenraftVote { .. } => ResponseOpcode::OpenraftVote as u16,
+            Self::OpenraftInstallSnapshot { .. } => ResponseOpcode::OpenraftInstallSnapshot as u16,
             Self::Error { .. } => ResponseOpcode::Error as u16,
         }
     }
