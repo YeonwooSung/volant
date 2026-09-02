@@ -36,7 +36,7 @@ pub use openraft_meta::{
     default_openraft_joint_rollback_enabled, default_openraft_metadata_enabled,
     openraft_snapshot_logs_since_last, MetaRequest, MetaResponse, OpenraftGuard,
     OpenraftMetaHandle, OpenraftMetricsCache, DEFAULT_OPENRAFT_SNAPSHOT_LOGS, OPENRAFT_DIR,
-    OPENRAFT_HARD_STATE_FILE, OPENRAFT_LOG_FILE, OPENRAFT_SNAPSHOT_FILE,
+    OPENRAFT_HARD_STATE_FILE, OPENRAFT_LOG_FILE, OPENRAFT_REDB_FILE, OPENRAFT_SNAPSHOT_FILE,
 };
 pub use overlay::{
     load_membership_overlay, membership_overlay_path, save_membership_overlay,
