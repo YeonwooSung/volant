@@ -306,7 +306,8 @@ fn authorize_request(broker: &Broker, req: &Request, principal: Option<&str>) ->
         Request::CreateAcls { .. }
         | Request::DeleteAcls { .. }
         | Request::AddBroker { .. }
-        | Request::RemoveBroker { .. } => {
+        | Request::RemoveBroker { .. }
+        | Request::ReassignPartitions { .. } => {
             check(ResourceType::Cluster, CLUSTER_RESOURCE, AclOperation::Alter)
         }
         Request::ListAcls { .. } | Request::ListMembers => check(
@@ -439,7 +440,8 @@ fn record_response_metrics(broker: &Broker, resp: &Response) {
         | Response::MembershipPut { error_code, .. }
         | Response::AddBroker { error_code, .. }
         | Response::RemoveBroker { error_code, .. }
-        | Response::ListMembers { error_code, .. } => {
+        | Response::ListMembers { error_code, .. }
+        | Response::ReassignPartitions { error_code, .. } => {
             if *error_code != 0 {
                 m.record_error(*error_code);
             }
@@ -1360,6 +1362,48 @@ async fn handle_request(broker: &Arc<Broker>, req: Request) -> Result<Response> 
                     .collect(),
                 live: snap.live,
             })
+        }
+        Request::ReassignPartitions {
+            topic,
+            partition,
+            replicas,
+        } => {
+            if broker.cluster_config().is_some() && !broker.is_controller() {
+                return Ok(Response::ReassignPartitions {
+                    error_code: ErrorCode::NotController as u16,
+                    generation: 0,
+                });
+            }
+            let prev = snapshot_if_must_wait(broker);
+            match broker.reassign_partitions(&topic, partition, &replicas) {
+                Ok(generation) => {
+                    if !complete_assignment_mutation(broker, prev).await? {
+                        return Ok(Response::ReassignPartitions {
+                            error_code: ErrorCode::NotEnoughReplicas as u16,
+                            generation: 0,
+                        });
+                    }
+                    Ok(Response::ReassignPartitions {
+                        error_code: 0,
+                        generation,
+                    })
+                }
+                Err(Error::NotFound(_)) => Ok(Response::ReassignPartitions {
+                    error_code: ErrorCode::NotFound as u16,
+                    generation: 0,
+                }),
+                Err(Error::InvalidArgument(m)) if m.starts_with("not controller") => {
+                    Ok(Response::ReassignPartitions {
+                        error_code: ErrorCode::NotController as u16,
+                        generation: 0,
+                    })
+                }
+                Err(Error::InvalidArgument(_)) => Ok(Response::ReassignPartitions {
+                    error_code: ErrorCode::InvalidArg as u16,
+                    generation: 0,
+                }),
+                Err(e) => Err(e),
+            }
         }
         Request::KafkaTxnForward {
             api_key,

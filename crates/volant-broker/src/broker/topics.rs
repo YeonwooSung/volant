@@ -5,7 +5,7 @@ use std::fs;
 use std::sync::atomic::Ordering;
 
 use volant_core::{Error, Offset, PartitionId, Result, TopicId, TopicName};
-use volant_protocol::ErrorCode;
+use volant_protocol::{ErrorCode, REASSIGN_ALL_PARTITIONS};
 
 use crate::cluster::{assign_replicas, save_assignment, PartitionAssignment, TopicAssignment};
 use crate::leader_epoch::ensure_entry;
@@ -417,6 +417,184 @@ impl Broker {
         Ok(total_count)
     }
 
+    /// Reassign replicas for a topic (or one partition) (v0.18).
+    ///
+    /// `partition == REASSIGN_ALL_PARTITIONS` updates every partition.
+    /// Empty `replicas` recomputes placement with the current effective
+    /// broker list (`assign_replicas`, same as CreateTopic). New replicas
+    /// start empty (LEO=0); there is no live segment copy.
+    ///
+    /// Returns the new assignment generation.
+    pub fn reassign_partitions(
+        &self,
+        topic: &str,
+        partition: u32,
+        replicas: &[u32],
+    ) -> Result<u32> {
+        let cluster = self
+            .cluster
+            .as_ref()
+            .ok_or_else(|| Error::InvalidArgument("reassign requires cluster mode".into()))?;
+        if !cluster.membership.read().is_controller() {
+            return Err(Error::InvalidArgument(format!(
+                "not controller; controller_id={}",
+                cluster.membership.read().controller_id()
+            )));
+        }
+        {
+            let asg = cluster.assignment.read();
+            if !asg.topics.contains_key(topic) {
+                return Err(Error::NotFound(format!("topic {topic}")));
+            }
+        }
+
+        let cfg = cluster.config.read();
+        let member_ids = cfg.broker_ids();
+        let broker_racks: Vec<(u32, Option<&str>)> = cfg
+            .brokers
+            .iter()
+            .map(|b| (b.id, b.rack.as_deref()))
+            .collect();
+        let rf = cfg
+            .default_replication_factor
+            .min(member_ids.len() as u32)
+            .max(1);
+
+        let explicit = normalize_replica_list(replicas)?;
+        if let Some(ref ids) = explicit {
+            validate_replicas_in_membership(ids, &member_ids)?;
+        }
+
+        let n_parts = {
+            let asg = cluster.assignment.read();
+            asg.topics
+                .get(topic)
+                .map(|t| t.partitions.len() as u32)
+                .unwrap_or(0)
+        };
+        if n_parts == 0 {
+            return Err(Error::NotFound(format!("topic {topic}")));
+        }
+        if partition != REASSIGN_ALL_PARTITIONS && partition >= n_parts {
+            return Err(Error::InvalidArgument(format!(
+                "partition {partition} out of range (topic {topic} has {n_parts})"
+            )));
+        }
+
+        let auto_sets = if explicit.is_none() {
+            let (sets, rack_aware) =
+                assign_replicas(topic, n_parts, broker_racks.iter().copied(), rf);
+            if rack_aware {
+                self.rack_aware_assignment_total
+                    .fetch_add(1, Ordering::Relaxed);
+            }
+            Some(sets)
+        } else {
+            None
+        };
+        drop(cfg);
+
+        let mut epoch_bumps: Vec<(u32, u32, u64)> = Vec::new();
+        let generation = {
+            let mut asg = cluster.assignment.write();
+            let ta = asg
+                .topics
+                .get_mut(topic)
+                .ok_or_else(|| Error::NotFound(format!("topic {topic}")))?;
+            let pids: Vec<u32> = if partition == REASSIGN_ALL_PARTITIONS {
+                let mut ids: Vec<u32> = ta.partitions.keys().copied().collect();
+                ids.sort_unstable();
+                ids
+            } else {
+                vec![partition]
+            };
+            for pid in pids {
+                let new_replicas = if let Some(ref ids) = explicit {
+                    ids.clone()
+                } else {
+                    auto_sets
+                        .as_ref()
+                        .and_then(|sets| sets.get(pid as usize).cloned())
+                        .ok_or_else(|| {
+                            Error::InvalidArgument(format!(
+                                "auto-reassign missing placement for {topic}/{pid}"
+                            ))
+                        })?
+                };
+                let pa = ta
+                    .partitions
+                    .get_mut(&pid)
+                    .ok_or_else(|| Error::NotFound(format!("partition {topic}/{pid}")))?;
+                if let Some(bump) = apply_replica_set(pa, new_replicas) {
+                    let start = self
+                        .topics
+                        .read()
+                        .get(&TopicName::new(topic))
+                        .and_then(|t| t.partitions.get(&PartitionId(pid)))
+                        .map(|p| p.leo())
+                        .unwrap_or(0);
+                    epoch_bumps.push((pid, bump, start));
+                }
+            }
+            asg.generation = asg.generation.saturating_add(1);
+            save_assignment(&cluster.data_dir, &asg)?;
+            asg.generation
+        };
+        for (pid, new_epoch, start) in epoch_bumps {
+            self.record_epoch_start(topic, pid, new_epoch, start);
+        }
+        self.apply_local_assignment()?;
+        self.maybe_append_cluster_metadata();
+        Ok(generation)
+    }
+
+    /// Expand under-replicated topics onto `new_id` after AddBroker (v0.18).
+    ///
+    /// For each partition, if `new_id` is not already a replica and
+    /// `replicas.len() < min(default_rf, N)`, append `new_id`. Leader and ISR
+    /// stay put (the new replica starts empty, not in ISR). Best-effort: no
+    /// generation bump when nothing changes.
+    pub(super) fn auto_reassign_after_add(&self, new_id: u32) -> Result<Option<u32>> {
+        let Some(cluster) = &self.cluster else {
+            return Ok(None);
+        };
+        let cfg = cluster.config.read();
+        if cfg.broker(new_id).is_none() {
+            return Ok(None);
+        }
+        let n = cfg.brokers.len() as u32;
+        let rf = cfg.default_replication_factor.max(1);
+        let cap = rf.min(n);
+        drop(cfg);
+
+        let mut changed = false;
+        let generation = {
+            let mut asg = cluster.assignment.write();
+            for ta in asg.topics.values_mut() {
+                for pa in ta.partitions.values_mut() {
+                    if pa.replicas.contains(&new_id) {
+                        continue;
+                    }
+                    let unique = unique_replica_count(&pa.replicas);
+                    if unique >= cap {
+                        continue;
+                    }
+                    pa.replicas.push(new_id);
+                    changed = true;
+                }
+            }
+            if !changed {
+                return Ok(None);
+            }
+            asg.generation = asg.generation.saturating_add(1);
+            save_assignment(&cluster.data_dir, &asg)?;
+            asg.generation
+        };
+        self.apply_local_assignment()?;
+        self.maybe_append_cluster_metadata();
+        Ok(Some(generation))
+    }
+
     /// List earliest/latest offsets for topic partitions (Phase 15).
     ///
     /// Empty `partitions` means all known partitions. Returns
@@ -735,4 +913,76 @@ impl Broker {
         };
         Ok(PartitionId(idx))
     }
+}
+
+/// Dedup preserving order. `None` means auto (input was empty).
+fn normalize_replica_list(replicas: &[u32]) -> Result<Option<Vec<u32>>> {
+    if replicas.is_empty() {
+        return Ok(None);
+    }
+    let mut out = Vec::with_capacity(replicas.len());
+    for &id in replicas {
+        if !out.contains(&id) {
+            out.push(id);
+        }
+    }
+    if out.is_empty() {
+        return Err(Error::InvalidArgument(
+            "replica set must not be empty".into(),
+        ));
+    }
+    Ok(Some(out))
+}
+
+fn validate_replicas_in_membership(replicas: &[u32], member_ids: &[u32]) -> Result<()> {
+    for &id in replicas {
+        if !member_ids.contains(&id) {
+            return Err(Error::InvalidArgument(format!(
+                "replica id {id} is not in membership"
+            )));
+        }
+    }
+    Ok(())
+}
+
+fn unique_replica_count(replicas: &[u32]) -> u32 {
+    let mut seen = Vec::with_capacity(replicas.len());
+    for &id in replicas {
+        if !seen.contains(&id) {
+            seen.push(id);
+        }
+    }
+    seen.len() as u32
+}
+
+/// Apply a new replica set. Leader stays if still in the set; otherwise first
+/// replica. ISR is the intersection of the old ISR with the new set (leader
+/// always first). New replicas are **not** added to ISR (they start empty).
+///
+/// Returns `Some(new_epoch)` when the leader changed.
+fn apply_replica_set(pa: &mut PartitionAssignment, new_replicas: Vec<u32>) -> Option<u32> {
+    let old_leader = pa.leader;
+    let new_leader = if new_replicas.contains(&old_leader) {
+        old_leader
+    } else {
+        new_replicas[0]
+    };
+    let mut new_isr = Vec::with_capacity(pa.isr.len().max(1));
+    new_isr.push(new_leader);
+    for &id in &pa.isr {
+        if id != new_leader && new_replicas.contains(&id) && !new_isr.contains(&id) {
+            new_isr.push(id);
+        }
+    }
+    let epoch = if new_leader != old_leader {
+        let e = pa.leader_epoch.saturating_add(1);
+        pa.leader_epoch = e;
+        Some(e)
+    } else {
+        None
+    };
+    pa.replicas = new_replicas;
+    pa.leader = new_leader;
+    pa.isr = new_isr;
+    epoch
 }

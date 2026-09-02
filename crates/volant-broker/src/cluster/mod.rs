@@ -12,8 +12,9 @@ pub mod state;
 
 pub use assignment::{
     assign_replicas, assign_replicas_round_robin, compute_hwm, distinct_configured_racks,
-    elect_leader, expand_isr, isr_rejoin_eligible, rack_aware_assignment_enabled, reconcile_isr,
-    shrink_isr, shrink_isr_by_time, topic_hash, will_use_rack_aware_assignment,
+    elect_leader, expand_isr, isr_rejoin_eligible, rack_aware_assignment_enabled,
+    reassign_on_add_enabled, reconcile_isr, shrink_isr, shrink_isr_by_time, topic_hash,
+    will_use_rack_aware_assignment, ENV_REASSIGN_ON_ADD,
 };
 pub use assignment_consensus::{
     AssignmentConsensus, AssignmentConsensusFile, ASSIGNMENT_COMMITTED_SNAPSHOT_FILE,

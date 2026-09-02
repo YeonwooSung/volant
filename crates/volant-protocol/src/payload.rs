@@ -763,6 +763,18 @@ pub fn encode_request(req: &Request) -> Result<Bytes> {
         Request::OpenraftAppend { payload } | Request::OpenraftVote { payload } => {
             put_bytes(&mut dst, payload);
         }
+        Request::ReassignPartitions {
+            topic,
+            partition,
+            replicas,
+        } => {
+            put_string(&mut dst, topic)?;
+            dst.put_u32_le(*partition);
+            dst.put_u32_le(replicas.len() as u32);
+            for id in replicas {
+                dst.put_u32_le(*id);
+            }
+        }
     }
     finish_payload(dst)
 }
@@ -1534,6 +1546,30 @@ pub fn decode_request(opcode: u16, payload: &[u8]) -> Result<Request> {
         RequestOpcode::OpenraftVote => Ok(Request::OpenraftVote {
             payload: get_bytes(&mut src)?,
         }),
+        RequestOpcode::ReassignPartitions => {
+            let topic = get_string(&mut src)?;
+            if src.remaining() < 4 + 4 {
+                return Err(Error::Protocol(
+                    "truncated reassign partitions header".into(),
+                ));
+            }
+            let partition = src.get_u32_le();
+            let count = src.get_u32_le() as usize;
+            if src.remaining() < count.saturating_mul(4) {
+                return Err(Error::Protocol(
+                    "truncated reassign partitions replicas".into(),
+                ));
+            }
+            let mut replicas = Vec::with_capacity(count);
+            for _ in 0..count {
+                replicas.push(src.get_u32_le());
+            }
+            Ok(Request::ReassignPartitions {
+                topic,
+                partition,
+                replicas,
+            })
+        }
     }
 }
 
@@ -2000,6 +2036,13 @@ pub fn encode_response(resp: &Response) -> Result<Bytes> {
         }
         Response::OpenraftAppend { payload } | Response::OpenraftVote { payload } => {
             put_bytes(&mut dst, payload);
+        }
+        Response::ReassignPartitions {
+            error_code,
+            generation,
+        } => {
+            dst.put_u16_le(*error_code);
+            dst.put_u32_le(*generation);
         }
         Response::Error { code, message } => {
             dst.put_u16_le(*code);
@@ -2906,6 +2949,17 @@ pub fn decode_response(opcode: u16, payload: &[u8]) -> Result<Response> {
         ResponseOpcode::OpenraftVote => Ok(Response::OpenraftVote {
             payload: get_bytes(&mut src)?,
         }),
+        ResponseOpcode::ReassignPartitions => {
+            if src.remaining() < 2 + 4 {
+                return Err(Error::Protocol(
+                    "truncated reassign partitions response".into(),
+                ));
+            }
+            Ok(Response::ReassignPartitions {
+                error_code: src.get_u16_le(),
+                generation: src.get_u32_le(),
+            })
+        }
         ResponseOpcode::Error => {
             if src.remaining() < 2 {
                 return Err(Error::Protocol("truncated error code".into()));
@@ -4961,6 +5015,43 @@ mod tests {
         assert!(decode_response(ResponseOpcode::AddBroker as u16, &[]).is_err());
         assert!(decode_response(ResponseOpcode::RemoveBroker as u16, &[]).is_err());
         assert!(decode_response(ResponseOpcode::ListMembers as u16, &[]).is_err());
+    }
+
+    #[test]
+    fn v18_reassign_opcodes_roundtrip() {
+        let req = Request::ReassignPartitions {
+            topic: "events".into(),
+            partition: u32::MAX,
+            replicas: vec![1, 2, 3],
+        };
+        let b = encode_request(&req).unwrap();
+        assert_eq!(req.opcode(), RequestOpcode::ReassignPartitions as u16);
+        assert_eq!(
+            decode_request(RequestOpcode::ReassignPartitions as u16, &b).unwrap(),
+            req
+        );
+        let auto = Request::ReassignPartitions {
+            topic: "events".into(),
+            partition: 0,
+            replicas: vec![],
+        };
+        let ab = encode_request(&auto).unwrap();
+        assert_eq!(
+            decode_request(RequestOpcode::ReassignPartitions as u16, &ab).unwrap(),
+            auto
+        );
+        let resp = Response::ReassignPartitions {
+            error_code: 0,
+            generation: 7,
+        };
+        let rb = encode_response(&resp).unwrap();
+        assert_eq!(resp.opcode(), ResponseOpcode::ReassignPartitions as u16);
+        assert_eq!(
+            decode_response(ResponseOpcode::ReassignPartitions as u16, &rb).unwrap(),
+            resp
+        );
+        assert!(decode_request(RequestOpcode::ReassignPartitions as u16, &[]).is_err());
+        assert!(decode_response(ResponseOpcode::ReassignPartitions as u16, &[]).is_err());
     }
 
     #[test]

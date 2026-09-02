@@ -71,12 +71,13 @@ pub use broker_config::{
 pub use cluster::{
     assignment_path, cluster_metadata_replicas, cluster_metadata_topic_env_enabled,
     load_assignment_from_cluster_metadata, load_membership_overlay, membership_overlay_path,
-    save_membership_overlay, AssignmentConsensus, AssignmentConsensusFile, BrokerEndpoint,
-    ClusterConfig, MembershipOverlay, MetadataCommand, MetadataLogEntry, MetadataRaftHardState,
-    MetadataRaftState, ASSIGNMENT_COMMITTED_SNAPSHOT_FILE, ASSIGNMENT_CONSENSUS_DIR,
-    ASSIGNMENT_CONSENSUS_FILE, ASSIGNMENT_CONSENSUS_FILE_VERSION, CLUSTER_METADATA_HEADER,
-    CLUSTER_METADATA_HEADER_VALUE, CLUSTER_METADATA_TOPIC, METADATA_RAFT_DIR,
-    METADATA_RAFT_FILE_VERSION, METADATA_RAFT_HARD_STATE_FILE, METADATA_RAFT_LOG_FILE,
+    reassign_on_add_enabled, save_membership_overlay, AssignmentConsensus, AssignmentConsensusFile,
+    BrokerEndpoint, ClusterConfig, MembershipOverlay, MetadataCommand, MetadataLogEntry,
+    MetadataRaftHardState, MetadataRaftState, ASSIGNMENT_COMMITTED_SNAPSHOT_FILE,
+    ASSIGNMENT_CONSENSUS_DIR, ASSIGNMENT_CONSENSUS_FILE, ASSIGNMENT_CONSENSUS_FILE_VERSION,
+    CLUSTER_METADATA_HEADER, CLUSTER_METADATA_HEADER_VALUE, CLUSTER_METADATA_TOPIC,
+    ENV_REASSIGN_ON_ADD, METADATA_RAFT_DIR, METADATA_RAFT_FILE_VERSION,
+    METADATA_RAFT_HARD_STATE_FILE, METADATA_RAFT_LOG_FILE,
 };
 pub use cluster_admin::{
     ClusterAdminFile, ClusterAdminStore, CLUSTER_ADMIN_DIR, CLUSTER_ADMIN_FILE,
