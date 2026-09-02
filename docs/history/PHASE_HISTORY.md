@@ -284,6 +284,11 @@ docs for day-to-day reading: [ops](../ops.md), [consistency](../consistency.md),
 | v0.83 | ✅ | Rust OffsetCommit/Fetch/DeleteOffsets retry | [V83_SPEC.md](../V83_SPEC.md) |
 | v0.84 | ✅ | Rust ListOffsets retry | [V84_SPEC.md](../V84_SPEC.md) |
 | v0.85 | ✅ | SCRAM-admin/ListAcls NotController redirect on Python/Go/Java | [V85_SPEC.md](../V85_SPEC.md) |
+| v0.86 | ✅ | LeaveGroup retry on Python/Go/Java | [V86_SPEC.md](../V86_SPEC.md) |
+| v0.87 | ✅ | Rust LeaveGroup retry | [V87_SPEC.md](../V87_SPEC.md) |
+| v0.88 | ✅ | Rust SCRAM-admin/ListAcls NotController redirect | [V88_SPEC.md](../V88_SPEC.md) |
+| v0.89 | ✅ | AddBroker/RemoveBroker NotController redirect on Python/Go/Java | [V89_SPEC.md](../V89_SPEC.md) |
+| v0.90 | ✅ | DescribeGroup/ListGroups retry on Python/Go/Java | [V90_SPEC.md](../V90_SPEC.md) |
 
 ---
 
