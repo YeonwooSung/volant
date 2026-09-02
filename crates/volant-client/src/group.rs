@@ -6,6 +6,12 @@
 //! [`GroupConsumer::join_with_heartbeat`] / [`GroupConsumer::join_static_with_heartbeat`].
 //! [`GroupConsumer::poll`] still heartbeats once at the start of the call.
 //!
+//! Offset commit is explicit by default. Opt in with
+//! [`GroupConsumer::join_with_auto_commit`]: after a successful `poll` that
+//! returned records, commit immediately (interval zero) or on the first such
+//! poll and then every `auto_commit_interval`. This is **not** Kafka
+//! `enable.auto.commit` — there is no background commit timer.
+//!
 //! The join lock serializes the heartbeat task against `poll` / `commit` /
 //! `leave`. This is **not** a fully concurrent consumer — do not call `poll`
 //! from two tasks. [`GroupConsumer::leave`] stops the task and sends
@@ -15,7 +21,7 @@
 use std::collections::{HashMap, HashSet};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use tokio::sync::{watch, Mutex as AsyncMutex};
 use tokio::task::JoinHandle;
@@ -49,6 +55,10 @@ struct JoinState {
     assignment: Vec<(String, u32)>,
     last_revoked: Vec<(String, u32)>,
     positions: HashMap<(String, u32), u64>,
+    /// Last successful auto or explicit commit (None = never).
+    last_auto_commit: Option<Instant>,
+    /// Positions advanced since the last successful commit.
+    dirty: bool,
 }
 
 #[derive(Debug)]
@@ -68,6 +78,10 @@ pub struct GroupConsumer {
     session_timeout_ms: u32,
     /// Static membership instance id (Phase 12); empty = dynamic.
     group_instance_id: String,
+    /// Opt-in auto-commit after a successful poll that returned records.
+    auto_commit: bool,
+    /// Zero = after every such poll; otherwise first poll then this interval.
+    auto_commit_interval: Duration,
     shared: Arc<Shared>,
     hb_stop: Option<watch::Sender<bool>>,
     hb_task: Option<JoinHandle<()>>,
@@ -136,6 +150,47 @@ impl GroupConsumer {
         group_instance_id: impl Into<String>,
         heartbeat: bool,
     ) -> Result<Self> {
+        Self::join_with_auto_commit(
+            client,
+            group_id,
+            topics,
+            session_timeout_ms,
+            group_instance_id,
+            heartbeat,
+            false,
+            Duration::ZERO,
+        )
+        .await
+    }
+
+    /// Join with opt-in auto-commit after a successful `poll` that returned
+    /// records (v0.60).
+    ///
+    /// Existing [`join`](Self::join) / [`join_static`](Self::join_static) /
+    /// [`join_with_heartbeat`](Self::join_with_heartbeat) /
+    /// [`join_static_with_heartbeat`](Self::join_static_with_heartbeat)
+    /// stay explicit-only. `auto_commit = false` is that same default.
+    ///
+    /// When `auto_commit` is on:
+    /// - interval **zero**: commit after every successful poll that returned
+    ///   records;
+    /// - interval **> 0**: first such poll always commits, then when at least
+    ///   `auto_commit_interval` has elapsed since the last auto or explicit
+    ///   [`commit`](Self::commit).
+    ///
+    /// Empty polls never auto-commit. `leave` best-effort commits leftover
+    /// dirty positions, then LeaveGroup. Not Kafka `enable.auto.commit`
+    /// (no background commit timer independent of `poll`).
+    pub async fn join_with_auto_commit(
+        client: Arc<Client>,
+        group_id: impl Into<String>,
+        topics: Vec<String>,
+        session_timeout_ms: u32,
+        group_instance_id: impl Into<String>,
+        heartbeat: bool,
+        auto_commit: bool,
+        auto_commit_interval: Duration,
+    ) -> Result<Self> {
         let group_id = group_id.into();
         let group_instance_id = group_instance_id.into();
         let timeout = if session_timeout_ms == 0 {
@@ -149,6 +204,8 @@ impl GroupConsumer {
             topics,
             session_timeout_ms: timeout,
             group_instance_id,
+            auto_commit,
+            auto_commit_interval,
             shared: Arc::new(Shared {
                 gate: AsyncMutex::new(()),
                 state: Mutex::new(JoinState {
@@ -157,6 +214,8 @@ impl GroupConsumer {
                     assignment: Vec::new(),
                     last_revoked: Vec::new(),
                     positions: HashMap::new(),
+                    last_auto_commit: None,
+                    dirty: false,
                 }),
                 heartbeat_count: AtomicU64::new(0),
             }),
@@ -268,12 +327,22 @@ impl GroupConsumer {
                 });
             }
         }
+        if !out.is_empty() {
+            lock_state(&self.shared).dirty = true;
+            self.maybe_auto_commit().await?;
+        }
         Ok(out)
     }
 
     /// Commit last+1 positions for all assigned partitions.
+    ///
+    /// Resets the auto-commit interval clock on success.
     pub async fn commit(&self) -> Result<()> {
         let _gate = self.shared.gate.lock().await;
+        self.commit_unlocked().await
+    }
+
+    async fn commit_unlocked(&self) -> Result<()> {
         let (member_id, generation, entries) = {
             let state = lock_state(&self.shared);
             if state.positions.is_empty() {
@@ -293,15 +362,39 @@ impl GroupConsumer {
         };
         self.client
             .commit_offsets(&self.group_id, &member_id, generation, entries)
-            .await
+            .await?;
+        let mut state = lock_state(&self.shared);
+        state.last_auto_commit = Some(Instant::now());
+        state.dirty = false;
+        Ok(())
+    }
+
+    async fn maybe_auto_commit(&self) -> Result<()> {
+        let last = lock_state(&self.shared).last_auto_commit;
+        if !due_for_auto_commit(
+            self.auto_commit,
+            self.auto_commit_interval,
+            last,
+            Instant::now(),
+        ) {
+            return Ok(());
+        }
+        self.commit_unlocked().await
     }
 
     /// Stop the heartbeat task (if any) and leave the group (consumes self).
     ///
     /// Idempotent with `Drop`: after this returns the task is gone. Required
     /// for a clean LeaveGroup — `Drop` only aborts the task.
+    ///
+    /// Auto-commit on + dirty positions: best-effort commit once (error
+    /// swallowed), then LeaveGroup.
     pub async fn leave(mut self) -> Result<()> {
         self.shutdown_heartbeat().await;
+        let _gate = self.shared.gate.lock().await;
+        if self.auto_commit && lock_state(&self.shared).dirty {
+            let _ = self.commit_unlocked().await;
+        }
         let member_id = lock_state(&self.shared).member_id.clone();
         self.client.leave_group(&self.group_id, &member_id).await
     }
@@ -350,6 +443,23 @@ impl Drop for GroupConsumer {
         if let Some(task) = self.hb_task.take() {
             task.abort();
         }
+    }
+}
+
+/// Whether an auto-commit should run after a successful poll that returned records.
+fn due_for_auto_commit(
+    auto_commit: bool,
+    interval: Duration,
+    last: Option<Instant>,
+    now: Instant,
+) -> bool {
+    if !auto_commit {
+        return false;
+    }
+    match last {
+        None => true,
+        Some(_) if interval.is_zero() => true,
+        Some(t) => now.saturating_duration_since(t) >= interval,
     }
 }
 
@@ -518,5 +628,38 @@ mod tests {
         assert_eq!(heartbeat_interval(150), Duration::from_millis(100));
         assert_eq!(heartbeat_interval(900), Duration::from_millis(300));
         assert_eq!(heartbeat_interval(10_000), Duration::from_millis(3000));
+    }
+
+    #[test]
+    fn auto_commit_due_default_off() {
+        let now = Instant::now();
+        assert!(!due_for_auto_commit(false, Duration::ZERO, None, now));
+        assert!(!due_for_auto_commit(
+            false,
+            Duration::from_secs(10),
+            None,
+            now
+        ));
+    }
+
+    #[test]
+    fn auto_commit_due_interval_zero_always() {
+        let now = Instant::now();
+        assert!(due_for_auto_commit(true, Duration::ZERO, None, now));
+        assert!(due_for_auto_commit(true, Duration::ZERO, Some(now), now));
+    }
+
+    #[test]
+    fn auto_commit_due_first_poll_then_interval() {
+        let t0 = Instant::now();
+        let interval = Duration::from_secs(10);
+        assert!(due_for_auto_commit(true, interval, None, t0));
+        assert!(!due_for_auto_commit(
+            true,
+            interval,
+            Some(t0),
+            t0 + Duration::from_millis(5)
+        ));
+        assert!(due_for_auto_commit(true, interval, Some(t0), t0 + interval));
     }
 }

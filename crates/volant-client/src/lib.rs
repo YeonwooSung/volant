@@ -6,6 +6,9 @@
 //! v0.44 adds a background heartbeat task on [`GroupConsumer`] so a silent
 //! consumer does not expire (`heartbeat_interval`; opt out with
 //! [`GroupConsumer::join_with_heartbeat`]).
+//! v0.60 adds opt-in auto-commit after a successful [`GroupConsumer::poll`]
+//! that returned records ([`GroupConsumer::join_with_auto_commit`]; default
+//! off). Not Kafka `enable.auto.commit`.
 
 #![deny(missing_docs)]
 
