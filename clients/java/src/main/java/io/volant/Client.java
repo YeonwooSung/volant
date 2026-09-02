@@ -75,6 +75,8 @@ public final class Client implements AutoCloseable {
     private long retryBackoffMs = 50;
     /** Test-only: next N fetch RPCs throw a transient transport error. */
     int injectFetchTransportFails;
+    /** Test-only: next N heartbeat RPCs throw a transient transport error. */
+    int injectHeartbeatTransportFails;
     private boolean enableIdempotence = false;
     private String transactionalId = null;
     private long producerId = 0L;
@@ -212,9 +214,10 @@ public final class Client implements AutoCloseable {
     }
 
     /**
-     * Extra Produce/Fetch attempts after the first on transient
+     * Extra Produce/Fetch/Heartbeat attempts after the first on transient
      * broker/transport errors. Default is 0. Error 13 stays on
      * {@link #setMaxRedirects}; error 21 stays on the one re-Init.
+     * Heartbeat rebalance codes 9 / 10 / 11 are not retried.
      */
     public void setMaxRetries(int n) {
         this.maxRetries = Math.max(0, n);
@@ -1276,15 +1279,49 @@ public final class Client implements AutoCloseable {
         return new JoinGroupResult(resp.memberId, resp.generation, resp.assignment, resp.revoked);
     }
 
-    /** Heartbeat for group membership. Non-zero error_code is BrokerException. */
+    /**
+     * Heartbeat for group membership. Non-zero error_code is BrokerException.
+     * Transient broker/transport errors retry up to {@code maxRetries} extra
+     * times (default 0). Rebalance codes 9 / 10 / 11 are not retried.
+     */
     public void heartbeat(String group, String memberId, long generation) {
         byte[] payload = Codec.encodeHeartbeatRequest(new Codec.HeartbeatRequest(group, memberId, generation));
-        Object decoded = roundTrip(Codec.OP_HEARTBEAT, payload);
-        if (!(decoded instanceof Codec.HeartbeatResponse)) {
-            throw new ProtocolException("unexpected response for heartbeat: " + typeName(decoded));
+        int retryAttempt = 0;
+        while (true) {
+            Object decoded;
+            try {
+                if (injectHeartbeatTransportFails > 0) {
+                    injectHeartbeatTransportFails--;
+                    throw new RuntimeException(new java.io.IOException("injected transport"));
+                }
+                decoded = roundTrip(Codec.OP_HEARTBEAT, payload);
+            } catch (BrokerException e) {
+                if (isTransientBroker(e.code) && retryAttempt < maxRetries) {
+                    retryAttempt++;
+                    sleepProduceRetry();
+                    continue;
+                }
+                throw e;
+            } catch (RuntimeException e) {
+                if (isTransientTransport(e) && retryAttempt < maxRetries) {
+                    retryAttempt++;
+                    sleepProduceRetry();
+                    continue;
+                }
+                throw e;
+            }
+            if (!(decoded instanceof Codec.HeartbeatResponse)) {
+                throw new ProtocolException("unexpected response for heartbeat: " + typeName(decoded));
+            }
+            Codec.HeartbeatResponse resp = (Codec.HeartbeatResponse) decoded;
+            if (isTransientBroker(resp.errorCode) && retryAttempt < maxRetries) {
+                retryAttempt++;
+                sleepProduceRetry();
+                continue;
+            }
+            check(resp.errorCode, "heartbeat");
+            return;
         }
-        Codec.HeartbeatResponse resp = (Codec.HeartbeatResponse) decoded;
-        check(resp.errorCode, "heartbeat");
     }
 
     /**

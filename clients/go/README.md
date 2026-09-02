@@ -174,7 +174,9 @@ Produce and Fetch retry transient broker codes 6 / 7 / 15 / 16 and TCP
 I/O errors up to `SetMaxRetries` extra attempts (default 0). Sleep
 `SetRetryBackoff` (default 50ms) between attempts; 0 is allowed in
 tests. Error 13 stays on the redirect budget; error 21 stays on the
-one re-Init. This is not Kafka `retries`.
+one re-Init. Heartbeat shares produce/fetch `SetMaxRetries` (default
+0); rebalance codes 9 / 10 / 11 are not retried. This is not Kafka
+`retries`.
 
 Correlation ids increment per request. Decode verifies magic `V` (0x56),
 protocol version 1, and IEEE CRC32 of the **payload only**. Broker

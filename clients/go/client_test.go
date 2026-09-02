@@ -15,22 +15,24 @@ const notLeader = 13
 const timeoutCode uint16 = 7
 
 type scriptedBroker struct {
-	mu            sync.Mutex
-	produceCodes  []uint16
-	fetchCodes    []uint16
-	meta          codec.MetadataResponse
-	opcodes       []uint16
-	produceReqs   []codec.ProduceRequest
-	fetchReqs     []codec.FetchRequest
-	initTxnIDs    []string
-	initCount     int
-	produceCount  int
-	fetchCount    int
-	metadataCount int
-	acceptCount   int
-	initPID       uint64
-	initEpoch     uint16
-	ln            net.Listener
+	mu             sync.Mutex
+	produceCodes   []uint16
+	fetchCodes     []uint16
+	heartbeatCodes []uint16
+	meta           codec.MetadataResponse
+	opcodes        []uint16
+	produceReqs    []codec.ProduceRequest
+	fetchReqs      []codec.FetchRequest
+	initTxnIDs     []string
+	initCount      int
+	produceCount   int
+	fetchCount     int
+	heartbeatCount int
+	metadataCount  int
+	acceptCount    int
+	initPID        uint64
+	initEpoch      uint16
+	ln             net.Listener
 }
 
 func startScripted(t *testing.T, s *scriptedBroker) (addr string, stop func()) {
@@ -77,6 +79,12 @@ func (s *scriptedBroker) snapshot() (produces, fetches, metas, accepts int) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	return s.produceCount, s.fetchCount, s.metadataCount, s.acceptCount
+}
+
+func (s *scriptedBroker) heartbeats() int {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.heartbeatCount
 }
 
 func (s *scriptedBroker) inits() int {
@@ -208,6 +216,14 @@ func (s *scriptedBroker) handle(f *frame.Frame) ([]byte, error) {
 		payload, err = codec.EncodeFetchResponse(codec.FetchResponse{
 			Topic: req.Topic, Partition: req.Partition, HighWatermark: 0, ErrorCode: code, Records: nil,
 		})
+	case codec.OpHeartbeat:
+		s.heartbeatCount++
+		code := uint16(0)
+		if len(s.heartbeatCodes) > 0 {
+			code = s.heartbeatCodes[0]
+			s.heartbeatCodes = s.heartbeatCodes[1:]
+		}
+		payload, err = codec.EncodeHeartbeatResponse(codec.HeartbeatResponse{ErrorCode: code})
 	case codec.OpMetadata:
 		s.metadataCount++
 		payload, err = codec.EncodeMetadataResponse(s.meta)
@@ -967,6 +983,105 @@ func TestFetchExhaustedRetriesRaises(t *testing.T) {
 	_, ff, _, _ := srv.snapshot()
 	if ff != 3 {
 		t.Fatalf("fetch count %d want 3", ff)
+	}
+}
+
+const rebalanceCode uint16 = 9
+
+func TestHeartbeatDefaultMaxRetriesZeroRaisesOnTimeout(t *testing.T) {
+	srv := &scriptedBroker{heartbeatCodes: []uint16{timeoutCode}}
+	addr, stop := startScripted(t, srv)
+	defer stop()
+
+	c, err := volant.DialTimeout(addr, 5*time.Second)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer c.Close()
+
+	err = c.Heartbeat("g", "m1", 1)
+	if err == nil {
+		t.Fatal("expected BrokerError 7")
+	}
+	be, ok := err.(*volant.BrokerError)
+	if !ok || be.Code != timeoutCode {
+		t.Fatalf("got %v want BrokerError code=7", err)
+	}
+	if n := srv.heartbeats(); n != 1 {
+		t.Fatalf("heartbeat count %d want 1", n)
+	}
+}
+
+func TestHeartbeatRetriesTimeoutThenOk(t *testing.T) {
+	srv := &scriptedBroker{heartbeatCodes: []uint16{timeoutCode, 0}}
+	addr, stop := startScripted(t, srv)
+	defer stop()
+
+	c, err := volant.DialTimeout(addr, 5*time.Second)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer c.Close()
+	c.SetMaxRetries(2)
+	c.SetRetryBackoff(0)
+
+	if err := c.Heartbeat("g", "m1", 1); err != nil {
+		t.Fatal(err)
+	}
+	if n := srv.heartbeats(); n != 2 {
+		t.Fatalf("heartbeat count %d want 2", n)
+	}
+}
+
+func TestHeartbeatRebalanceIsNotRetried(t *testing.T) {
+	srv := &scriptedBroker{heartbeatCodes: []uint16{rebalanceCode, 0}}
+	addr, stop := startScripted(t, srv)
+	defer stop()
+
+	c, err := volant.DialTimeout(addr, 5*time.Second)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer c.Close()
+	c.SetMaxRetries(2)
+	c.SetRetryBackoff(0)
+
+	err = c.Heartbeat("g", "m1", 1)
+	if err == nil {
+		t.Fatal("expected BrokerError 9")
+	}
+	be, ok := err.(*volant.BrokerError)
+	if !ok || be.Code != rebalanceCode {
+		t.Fatalf("got %v want BrokerError code=9", err)
+	}
+	if n := srv.heartbeats(); n != 1 {
+		t.Fatalf("heartbeat count %d want 1", n)
+	}
+}
+
+func TestHeartbeatExhaustedRetriesRaises(t *testing.T) {
+	srv := &scriptedBroker{heartbeatCodes: []uint16{timeoutCode, timeoutCode, timeoutCode}}
+	addr, stop := startScripted(t, srv)
+	defer stop()
+
+	c, err := volant.DialTimeout(addr, 5*time.Second)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer c.Close()
+	c.SetMaxRetries(2)
+	c.SetRetryBackoff(0)
+
+	err = c.Heartbeat("g", "m1", 1)
+	if err == nil {
+		t.Fatal("expected BrokerError 7")
+	}
+	be, ok := err.(*volant.BrokerError)
+	if !ok || be.Code != timeoutCode {
+		t.Fatalf("got %v want BrokerError code=7", err)
+	}
+	if n := srv.heartbeats(); n != 3 {
+		t.Fatalf("heartbeat count %d want 3", n)
 	}
 }
 

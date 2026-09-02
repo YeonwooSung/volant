@@ -22,6 +22,7 @@ import org.junit.jupiter.api.Test;
 class ClientTest {
     private static final int NOT_LEADER = Client.NOT_LEADER_FOR_PARTITION;
     private static final int TIMEOUT = 7;
+    private static final int REBALANCE = 9;
 
     @Test
     void produceRedirectsToLeader() throws Exception {
@@ -309,6 +310,7 @@ class ClientTest {
         final int port;
         final List<Integer> produceCodes = new CopyOnWriteArrayList<>();
         final List<Integer> fetchCodes = new CopyOnWriteArrayList<>();
+        final List<Integer> heartbeatCodes = new CopyOnWriteArrayList<>();
         volatile Metadata meta = new Metadata(Collections.emptyList(), Collections.emptyList());
         final List<Integer> opcodes = new CopyOnWriteArrayList<>();
         final List<Codec.ProduceRequest> produceReqs = new CopyOnWriteArrayList<>();
@@ -317,6 +319,7 @@ class ClientTest {
         final AtomicInteger initCount = new AtomicInteger();
         final AtomicInteger produceCount = new AtomicInteger();
         final AtomicInteger fetchCount = new AtomicInteger();
+        final AtomicInteger heartbeatCount = new AtomicInteger();
         final AtomicInteger metadataCount = new AtomicInteger();
         final AtomicInteger acceptCount = new AtomicInteger();
         volatile long initPid = 42L;
@@ -423,6 +426,14 @@ class ClientTest {
                 }
                 return Codec.encodeFetchResponse(
                         new Codec.FetchResponse(req.topic, req.partition, 0, code, Collections.emptyList()));
+            }
+            if (frame.opcode == Codec.OP_HEARTBEAT) {
+                heartbeatCount.incrementAndGet();
+                int code = 0;
+                if (!heartbeatCodes.isEmpty()) {
+                    code = heartbeatCodes.remove(0);
+                }
+                return Codec.encodeHeartbeatResponse(new Codec.HeartbeatResponse(code));
             }
             if (frame.opcode == Codec.OP_METADATA) {
                 metadataCount.incrementAndGet();
@@ -621,6 +632,80 @@ class ClientTest {
                 assertEquals(TIMEOUT, ex.code);
             }
             assertEquals(3, srv.fetchCount.get());
+        }
+    }
+
+    @Test
+    void heartbeatDefaultMaxRetriesZeroRaisesOnTimeout() throws Exception {
+        try (ScriptedBroker srv = ScriptedBroker.start()) {
+            srv.heartbeatCodes.add(TIMEOUT);
+            try (Client c = Client.connect("127.0.0.1", srv.port, 5_000)) {
+                assertEquals(0, c.maxRetries());
+                BrokerException ex =
+                        assertThrows(BrokerException.class, () -> c.heartbeat("g", "m1", 1));
+                assertEquals(TIMEOUT, ex.code);
+            }
+            assertEquals(1, srv.heartbeatCount.get());
+        }
+    }
+
+    @Test
+    void heartbeatRetriesTimeoutThenOk() throws Exception {
+        try (ScriptedBroker srv = ScriptedBroker.start()) {
+            srv.heartbeatCodes.add(TIMEOUT);
+            srv.heartbeatCodes.add(0);
+            try (Client c = Client.connect("127.0.0.1", srv.port, 5_000)) {
+                c.setMaxRetries(2);
+                c.setRetryBackoffMs(0);
+                c.heartbeat("g", "m1", 1);
+            }
+            assertEquals(2, srv.heartbeatCount.get());
+        }
+    }
+
+    @Test
+    void heartbeatRebalanceIsNotRetried() throws Exception {
+        try (ScriptedBroker srv = ScriptedBroker.start()) {
+            srv.heartbeatCodes.add(REBALANCE);
+            srv.heartbeatCodes.add(0);
+            try (Client c = Client.connect("127.0.0.1", srv.port, 5_000)) {
+                c.setMaxRetries(2);
+                c.setRetryBackoffMs(0);
+                BrokerException ex =
+                        assertThrows(BrokerException.class, () -> c.heartbeat("g", "m1", 1));
+                assertEquals(REBALANCE, ex.code);
+            }
+            assertEquals(1, srv.heartbeatCount.get());
+        }
+    }
+
+    @Test
+    void heartbeatTransportFailThenOk() throws Exception {
+        try (ScriptedBroker srv = ScriptedBroker.start()) {
+            try (Client c = Client.connect("127.0.0.1", srv.port, 5_000)) {
+                c.setMaxRetries(1);
+                c.setRetryBackoffMs(0);
+                c.injectHeartbeatTransportFails = 1;
+                c.heartbeat("g", "m1", 1);
+            }
+            assertEquals(1, srv.heartbeatCount.get());
+        }
+    }
+
+    @Test
+    void heartbeatExhaustedRetriesRaises() throws Exception {
+        try (ScriptedBroker srv = ScriptedBroker.start()) {
+            srv.heartbeatCodes.add(TIMEOUT);
+            srv.heartbeatCodes.add(TIMEOUT);
+            srv.heartbeatCodes.add(TIMEOUT);
+            try (Client c = Client.connect("127.0.0.1", srv.port, 5_000)) {
+                c.setMaxRetries(2);
+                c.setRetryBackoffMs(0);
+                BrokerException ex =
+                        assertThrows(BrokerException.class, () -> c.heartbeat("g", "m1", 1));
+                assertEquals(TIMEOUT, ex.code);
+            }
+            assertEquals(3, srv.heartbeatCount.get());
         }
     }
 
