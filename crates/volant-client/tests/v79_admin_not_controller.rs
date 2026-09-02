@@ -286,6 +286,7 @@ async fn serve_stub(
                             Response::Metadata {
                                 brokers: brokers.lock().expect("brokers").clone(),
                                 topics: vec![],
+                                controller_id: 0,
                             }
                         }
                         Request::ListMembers => {
