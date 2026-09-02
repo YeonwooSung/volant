@@ -1249,6 +1249,32 @@ pub fn skip_tag_buffer(src: &mut impl Buf) -> Result<()> {
     Ok(())
 }
 
+/// Volant DeleteRecords **v2** request-level tag **0**: `wait_majority` `u8`
+/// (`0` = broker knob, `1` = force on, `2` = force off).
+///
+/// Not a Kafka standard field. Absent tag / empty buffer / unknown tags → `0`.
+/// Unknown tag bodies are skipped.
+pub fn read_delete_records_wait_tag(src: &mut impl Buf) -> Result<u8> {
+    let n = read_unsigned_varint(src)?;
+    let mut flag = 0u8;
+    for _ in 0..n {
+        let tag = read_unsigned_varint(src)?;
+        let len = read_unsigned_varint(src)? as usize;
+        if src.remaining() < len {
+            return Err(Error::Protocol("truncated tagged field body".into()));
+        }
+        if tag == 0 && len >= 1 {
+            flag = src.get_u8();
+            if len > 1 {
+                src.advance(len - 1);
+            }
+        } else {
+            src.advance(len);
+        }
+    }
+    Ok(flag)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1354,6 +1380,42 @@ mod tests {
         put_uuid(&mut buf, &u);
         let mut src = buf.freeze();
         assert_eq!(get_uuid(&mut src).unwrap(), u);
+    }
+
+    #[test]
+    fn delete_records_wait_tag_parse() {
+        let mut buf = BytesMut::new();
+        put_empty_tag_buffer(&mut buf);
+        let mut src = buf.freeze();
+        assert_eq!(read_delete_records_wait_tag(&mut src).unwrap(), 0);
+        assert_eq!(src.remaining(), 0);
+
+        let mut buf = BytesMut::new();
+        put_unsigned_varint(&mut buf, 1);
+        put_unsigned_varint(&mut buf, 0);
+        put_unsigned_varint(&mut buf, 1);
+        buf.put_u8(1);
+        let mut src = buf.freeze();
+        assert_eq!(read_delete_records_wait_tag(&mut src).unwrap(), 1);
+
+        let mut buf = BytesMut::new();
+        put_unsigned_varint(&mut buf, 1);
+        put_unsigned_varint(&mut buf, 7);
+        put_unsigned_varint(&mut buf, 3);
+        buf.extend_from_slice(&[1, 2, 3]);
+        let mut src = buf.freeze();
+        assert_eq!(read_delete_records_wait_tag(&mut src).unwrap(), 0);
+
+        let mut buf = BytesMut::new();
+        put_unsigned_varint(&mut buf, 2);
+        put_unsigned_varint(&mut buf, 0);
+        put_unsigned_varint(&mut buf, 1);
+        buf.put_u8(2);
+        put_unsigned_varint(&mut buf, 9);
+        put_unsigned_varint(&mut buf, 1);
+        buf.put_u8(0xff);
+        let mut src = buf.freeze();
+        assert_eq!(read_delete_records_wait_tag(&mut src).unwrap(), 2);
     }
 
     #[test]

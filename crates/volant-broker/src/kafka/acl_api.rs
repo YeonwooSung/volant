@@ -11,7 +11,8 @@ use crate::broker::Broker;
 use super::codec::{
     get_compact_array_len,
     get_compact_nullable_string, get_compact_string, get_nullable_string, get_string, put_compact_array_len, put_compact_nullable_string,
-    put_compact_string, put_empty_tag_buffer, put_nullable_string, put_string, skip_tag_buffer,
+    put_compact_string, put_empty_tag_buffer, put_nullable_string, put_string,
+    read_delete_records_wait_tag, skip_tag_buffer,
 };
 use super::KafkaErrorCode;
 
@@ -44,6 +45,44 @@ const KAFKA_PATTERN_LITERAL: i8 = 3;
 /// Kafka cluster resource name advertised on the wire.
 const KAFKA_CLUSTER_NAME: &str = "kafka-cluster";
 
+/// Peek DeleteRecords v2 request-level tag 0 (`wait_majority` u8).
+///
+/// Walks a clone of the flexible body through `timeout_ms`. Absent / unknown
+/// tags / parse errors → `0` (broker knob).
+pub(crate) fn peek_delete_records_wait_flag(mut src: impl Buf) -> u8 {
+    let topic_count = match get_compact_array_len(&mut src) {
+        Ok(Some(n)) => n,
+        _ => return 0,
+    };
+    for _ in 0..topic_count {
+        if get_compact_string(&mut src).is_err() {
+            return 0;
+        }
+        let pc = match get_compact_array_len(&mut src) {
+            Ok(Some(n)) => n,
+            Ok(None) => 0,
+            Err(_) => return 0,
+        };
+        for _ in 0..pc {
+            if src.remaining() < 12 {
+                return 0;
+            }
+            src.advance(12);
+            if skip_tag_buffer(&mut src).is_err() {
+                return 0;
+            }
+        }
+        if skip_tag_buffer(&mut src).is_err() {
+            return 0;
+        }
+    }
+    if src.remaining() < 4 {
+        return 0;
+    }
+    let _timeout = src.get_i32();
+    read_delete_records_wait_tag(&mut src).unwrap_or(0)
+}
+
 /// Encode Kafka DeleteRecords response.
 ///
 /// Returns successful leader truncates as
@@ -56,6 +95,9 @@ const KAFKA_CLUSTER_NAME: &str = "kafka-cluster";
 /// `NOT_ENOUGH_REPLICAS` (**19**) and **unchanged** low watermark (no local
 /// truncate). Majority ok → local truncate then replica fan-out. Returned
 /// fanouts vec is empty in wait mode (work already completed).
+///
+/// Flexible v2 request-level tag **0** (`wait_majority` u8) is parsed here so
+/// the body is consumed; the caller resolves the effective wait flag.
 pub(crate) async fn encode_delete_records(
     broker: &Broker,
     src: &mut impl Buf,
@@ -126,7 +168,8 @@ pub(crate) async fn encode_delete_records(
         if src.remaining() >= 4 {
             let _timeout = src.get_i32();
         }
-        let _ = skip_tag_buffer(src);
+        // Tag 0 = wait_majority u8 (Volant extension; not a Kafka standard field).
+        let _ = read_delete_records_wait_tag(src);
     } else {
         if src.remaining() < 4 {
             empty(out);
