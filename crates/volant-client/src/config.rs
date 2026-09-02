@@ -35,11 +35,11 @@ pub struct ClientConfig {
     /// prior owners of the same id. Use with [`crate::TransactionalProducer`].
     pub transactional_id: Option<String>,
     /// Extra produce / heartbeat / offset-admin / ListOffsets /
-    /// LeaveGroup attempts after the first on transient
-    /// broker/transport errors.
+    /// LeaveGroup / DescribeGroup / ListGroups attempts after the
+    /// first on transient broker/transport errors.
     pub max_retries: u32,
     /// Sleep between produce / heartbeat / offset-admin / ListOffsets /
-    /// LeaveGroup retries (milliseconds).
+    /// LeaveGroup / DescribeGroup / ListGroups retries (milliseconds).
     pub retry_backoff_ms: u64,
 }
 

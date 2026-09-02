@@ -48,6 +48,10 @@
 //! on error **14** via the same `admin_round_trip` /
 //! `redirect_to_controller` / `max_redirects` budget. Overlay is still
 //! SoT; this is not Kafka broker catalog.
+//! v0.92 retries [`Client::describe_group`] / [`Client::list_groups`]
+//! on that same transient set (default 0). Error 2 (no live members),
+//! 9 / 10 / 11, 13 / 14, and protocol are not retried. Range
+//! assignor inherits via `describe_group`.
 
 #![deny(missing_docs)]
 

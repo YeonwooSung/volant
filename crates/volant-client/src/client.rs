@@ -1408,9 +1408,14 @@ impl Client {
     }
 
     /// Describe a live consumer group (Phase 11).
+    ///
+    /// Transient broker/transport errors retry up to
+    /// [`ClientConfig::max_retries`] extra times (default 0). Error 2
+    /// (no live members), 9 / 10 / 11, 13 / 14, and protocol errors
+    /// are not retried. Range assignor inherits via this method.
     pub async fn describe_group(&self, group_id: &str) -> Result<DescribeGroupResult> {
         let resp = self
-            .round_trip(Request::DescribeGroup {
+            .describe_list_groups_round_trip(Request::DescribeGroup {
                 group_id: group_id.to_owned(),
             })
             .await?;
@@ -1436,8 +1441,14 @@ impl Client {
     }
 
     /// List known consumer groups (Phase 12).
+    ///
+    /// Transient broker/transport errors retry up to
+    /// [`ClientConfig::max_retries`] extra times (default 0). Error 2,
+    /// 9 / 10 / 11, 13 / 14, and protocol errors are not retried.
     pub async fn list_groups(&self) -> Result<Vec<GroupListing>> {
-        let resp = self.round_trip(Request::ListGroups).await?;
+        let resp = self
+            .describe_list_groups_round_trip(Request::ListGroups)
+            .await?;
         match resp {
             Response::ListGroups { error_code, groups } => {
                 check_ok(error_code, "list_groups")?;
@@ -1447,6 +1458,40 @@ impl Client {
             other => Err(Error::Protocol(format!(
                 "unexpected response for list_groups: {other:?}"
             ))),
+        }
+    }
+
+    /// DescribeGroup / ListGroups share produce/heartbeat
+    /// [`ClientConfig::max_retries`]. Transient 6 / 7 / 15 / 16 and
+    /// [`Error::Io`] are retried; 13 / 14 / 9 / 10 / 11 / 2 and protocol
+    /// errors are not.
+    async fn describe_list_groups_round_trip(&self, req: Request) -> Result<Response> {
+        let max_retries = self.config.max_retries;
+        let mut retry_attempt = 0u32;
+        loop {
+            let resp = match self.round_trip(req.clone()).await {
+                Ok(r) => r,
+                Err(e) if is_transient_transport(&e) && retry_attempt < max_retries => {
+                    retry_attempt += 1;
+                    tokio::time::sleep(Duration::from_millis(self.config.retry_backoff_ms)).await;
+                    continue;
+                }
+                Err(e) => return Err(e),
+            };
+            let code = match &resp {
+                Response::DescribeGroup { error_code, .. }
+                | Response::ListGroups { error_code, .. }
+                | Response::Error {
+                    code: error_code, ..
+                } => *error_code,
+                _ => return Ok(resp),
+            };
+            if is_transient_error_code(code) && retry_attempt < max_retries {
+                retry_attempt += 1;
+                tokio::time::sleep(Duration::from_millis(self.config.retry_backoff_ms)).await;
+                continue;
+            }
+            return Ok(resp);
         }
     }
 
