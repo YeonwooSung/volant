@@ -13,6 +13,7 @@ import (
 	"io"
 	"net"
 	"os"
+	"regexp"
 	"strconv"
 	"time"
 
@@ -27,6 +28,24 @@ const defaultTimeout = 10 * time.Second
 
 // notLeaderForPartition is native ErrorCode::NotLeaderForPartition.
 const notLeaderForPartition uint16 = 13
+
+// notController is native ErrorCode::NotController (controller-gated admin).
+const notController uint16 = 14
+
+var controllerIDRe = regexp.MustCompile(`controller_id=(\d+)`)
+
+func parseControllerID(msg string) *uint32 {
+	m := controllerIDRe.FindStringSubmatch(msg)
+	if m == nil {
+		return nil
+	}
+	n, err := strconv.ParseUint(m[1], 10, 32)
+	if err != nil {
+		return nil
+	}
+	id := uint32(n)
+	return &id
+}
 
 // unknownProducerID is native ErrorCode::UnknownProducerId.
 const unknownProducerID uint16 = 21
@@ -567,6 +586,7 @@ func (c *Client) authenticateScram(username, password string) error {
 }
 
 // CreateTopic creates a topic with the given partition count.
+// Error 14 (NotController) follows maxRedirects (same budget as Produce/Fetch 13).
 func (c *Client) CreateTopic(name string, partitions int) error {
 	payload, err := codec.EncodeCreateTopicRequest(codec.CreateTopicRequest{
 		Name:       name,
@@ -576,37 +596,73 @@ func (c *Client) CreateTopic(name string, partitions int) error {
 	if err != nil {
 		return err
 	}
-	decoded, err := c.roundTrip(codec.OpCreateTopic, payload)
-	if err != nil {
-		return err
+	maxAttempts := 1 + c.maxRedirects
+	for attempt := 1; ; attempt++ {
+		decoded, err := c.roundTrip(codec.OpCreateTopic, payload)
+		if err != nil {
+			ok, rerr := c.maybeRedirectController(err, attempt, maxAttempts)
+			if rerr != nil {
+				return rerr
+			}
+			if ok {
+				continue
+			}
+			return err
+		}
+		resp, ok := decoded.(codec.CreateTopicResponse)
+		if !ok {
+			return &frame.ProtocolError{Msg: fmt.Sprintf("unexpected response for create_topic: %T", decoded)}
+		}
+		ok, rerr := c.maybeRedirectControllerCode(resp.ErrorCode, "", attempt, maxAttempts)
+		if rerr != nil {
+			return rerr
+		}
+		if ok {
+			continue
+		}
+		return check(resp.ErrorCode, "create_topic")
 	}
-	resp, ok := decoded.(codec.CreateTopicResponse)
-	if !ok {
-		return &frame.ProtocolError{Msg: fmt.Sprintf("unexpected response for create_topic: %T", decoded)}
-	}
-	return check(resp.ErrorCode, "create_topic")
 }
 
 // DeleteTopic deletes a topic by name.
+// Error 14 follows maxRedirects.
 func (c *Client) DeleteTopic(name string) error {
 	payload, err := codec.EncodeDeleteTopicRequest(codec.DeleteTopicRequest{Name: name})
 	if err != nil {
 		return err
 	}
-	decoded, err := c.roundTrip(codec.OpDeleteTopic, payload)
-	if err != nil {
-		return err
+	maxAttempts := 1 + c.maxRedirects
+	for attempt := 1; ; attempt++ {
+		decoded, err := c.roundTrip(codec.OpDeleteTopic, payload)
+		if err != nil {
+			ok, rerr := c.maybeRedirectController(err, attempt, maxAttempts)
+			if rerr != nil {
+				return rerr
+			}
+			if ok {
+				continue
+			}
+			return err
+		}
+		resp, ok := decoded.(codec.DeleteTopicResponse)
+		if !ok {
+			return &frame.ProtocolError{Msg: fmt.Sprintf("unexpected response for delete_topic: %T", decoded)}
+		}
+		ok, rerr := c.maybeRedirectControllerCode(resp.ErrorCode, "", attempt, maxAttempts)
+		if rerr != nil {
+			return rerr
+		}
+		if ok {
+			continue
+		}
+		return check(resp.ErrorCode, "delete_topic")
 	}
-	resp, ok := decoded.(codec.DeleteTopicResponse)
-	if !ok {
-		return &frame.ProtocolError{Msg: fmt.Sprintf("unexpected response for delete_topic: %T", decoded)}
-	}
-	return check(resp.ErrorCode, "delete_topic")
 }
 
 // CreatePartitions grows topic to totalCount partitions (native opcode 46).
 // totalCount must exceed the current count. Returns the new total. Non-zero
-// error_code is BrokerError. This is not Kafka CreatePartitions (API key 37).
+// error_code is BrokerError. Error 14 follows maxRedirects. This is not Kafka
+// CreatePartitions (API key 37).
 func (c *Client) CreatePartitions(topic string, totalCount uint32) (uint32, error) {
 	payload, err := codec.EncodeCreatePartitionsRequest(codec.CreatePartitionsRequest{
 		Topic:      topic,
@@ -615,18 +671,35 @@ func (c *Client) CreatePartitions(topic string, totalCount uint32) (uint32, erro
 	if err != nil {
 		return 0, err
 	}
-	decoded, err := c.roundTrip(codec.OpCreatePartitions, payload)
-	if err != nil {
-		return 0, err
+	maxAttempts := 1 + c.maxRedirects
+	for attempt := 1; ; attempt++ {
+		decoded, err := c.roundTrip(codec.OpCreatePartitions, payload)
+		if err != nil {
+			ok, rerr := c.maybeRedirectController(err, attempt, maxAttempts)
+			if rerr != nil {
+				return 0, rerr
+			}
+			if ok {
+				continue
+			}
+			return 0, err
+		}
+		resp, ok := decoded.(codec.CreatePartitionsResponse)
+		if !ok {
+			return 0, &frame.ProtocolError{Msg: fmt.Sprintf("unexpected response for create_partitions: %T", decoded)}
+		}
+		ok, rerr := c.maybeRedirectControllerCode(resp.ErrorCode, "", attempt, maxAttempts)
+		if rerr != nil {
+			return 0, rerr
+		}
+		if ok {
+			continue
+		}
+		if err := check(resp.ErrorCode, "create_partitions"); err != nil {
+			return 0, err
+		}
+		return resp.Partitions, nil
 	}
-	resp, ok := decoded.(codec.CreatePartitionsResponse)
-	if !ok {
-		return 0, &frame.ProtocolError{Msg: fmt.Sprintf("unexpected response for create_partitions: %T", decoded)}
-	}
-	if err := check(resp.ErrorCode, "create_partitions"); err != nil {
-		return 0, err
-	}
-	return resp.Partitions, nil
 }
 
 // ReassignPartitions reassigns replicas for topic (native opcode 114).
@@ -816,18 +889,35 @@ func (c *Client) ReassignPartitions(topic string, replicas []uint32, partition *
 	if err != nil {
 		return 0, err
 	}
-	decoded, err := c.roundTrip(codec.OpReassignPartitions, payload)
-	if err != nil {
-		return 0, err
+	maxAttempts := 1 + c.maxRedirects
+	for attempt := 1; ; attempt++ {
+		decoded, err := c.roundTrip(codec.OpReassignPartitions, payload)
+		if err != nil {
+			ok, rerr := c.maybeRedirectController(err, attempt, maxAttempts)
+			if rerr != nil {
+				return 0, rerr
+			}
+			if ok {
+				continue
+			}
+			return 0, err
+		}
+		resp, ok := decoded.(codec.ReassignPartitionsResponse)
+		if !ok {
+			return 0, &frame.ProtocolError{Msg: fmt.Sprintf("unexpected response for reassign_partitions: %T", decoded)}
+		}
+		ok, rerr := c.maybeRedirectControllerCode(resp.ErrorCode, "", attempt, maxAttempts)
+		if rerr != nil {
+			return 0, rerr
+		}
+		if ok {
+			continue
+		}
+		if err := check(resp.ErrorCode, "reassign_partitions"); err != nil {
+			return 0, err
+		}
+		return resp.Generation, nil
 	}
-	resp, ok := decoded.(codec.ReassignPartitionsResponse)
-	if !ok {
-		return 0, &frame.ProtocolError{Msg: fmt.Sprintf("unexpected response for reassign_partitions: %T", decoded)}
-	}
-	if err := check(resp.ErrorCode, "reassign_partitions"); err != nil {
-		return 0, err
-	}
-	return resp.Generation, nil
 }
 
 // Produce sends one message (null key when key is nil) with acks=1.
@@ -1175,6 +1265,90 @@ func (c *Client) redirectToLeader(topic string, partition uint32) (bool, error) 
 	}
 	if err := c.reconnect(addr); err != nil {
 		return false, err
+	}
+	return true, nil
+}
+
+func (c *Client) maybeRedirectController(err error, attempt, maxAttempts int) (bool, error) {
+	be, ok := err.(*codec.BrokerError)
+	if !ok {
+		return false, nil
+	}
+	return c.maybeRedirectControllerCode(be.Code, be.Message, attempt, maxAttempts)
+}
+
+func (c *Client) maybeRedirectControllerCode(code uint16, msg string, attempt, maxAttempts int) (bool, error) {
+	if code != notController || attempt >= maxAttempts {
+		return false, nil
+	}
+	return c.redirectToController(parseControllerID(msg))
+}
+
+// redirectToController refreshes Metadata and reconnects to the controller.
+// If controllerID is set (parsed from controller_id=N in a 14 Error message),
+// look that node up in Metadata brokers, then ListMembers if Metadata has no
+// matching id. Otherwise pick the first advertised broker whose host:port is
+// not this connection. Native Metadata has no controller_id field.
+// ok is false on no other broker / lookup miss / empty host / reconnect fail
+// (caller should surface the original error 14).
+func (c *Client) redirectToController(controllerID *uint32) (bool, error) {
+	meta, err := c.Metadata()
+	if err != nil {
+		return false, err
+	}
+	var host string
+	var port uint16
+	if controllerID != nil {
+		found := false
+		for i := range meta.Brokers {
+			if meta.Brokers[i].NodeID == *controllerID {
+				host = meta.Brokers[i].Host
+				port = meta.Brokers[i].Port
+				found = true
+				break
+			}
+		}
+		if !found {
+			members, lerr := c.ListMembers()
+			if lerr != nil {
+				return false, nil
+			}
+			for i := range members.Brokers {
+				if members.Brokers[i].ID == *controllerID {
+					host = members.Brokers[i].Host
+					port = members.Brokers[i].Port
+					found = true
+					break
+				}
+			}
+		}
+		if !found || host == "" {
+			return false, nil
+		}
+	} else {
+		picked := false
+		for i := range meta.Brokers {
+			if meta.Brokers[i].Host == "" {
+				continue
+			}
+			addr := net.JoinHostPort(meta.Brokers[i].Host, strconv.Itoa(int(meta.Brokers[i].Port)))
+			if addr != c.addr {
+				host = meta.Brokers[i].Host
+				port = meta.Brokers[i].Port
+				picked = true
+				break
+			}
+		}
+		if !picked {
+			return false, nil
+		}
+	}
+	addr := net.JoinHostPort(host, strconv.Itoa(int(port)))
+	if addr == c.addr {
+		return true, nil
+	}
+	if err := c.reconnect(addr); err != nil {
+		return false, nil
 	}
 	return true, nil
 }
@@ -1643,42 +1817,77 @@ func (c *Client) ListScramUsers() ([]string, error) {
 }
 
 // CreateAcls creates ACL bindings (native opcode 54/55).
-// This is not Kafka CreateAcls (API key 30).
+// This is not Kafka CreateAcls (API key 30). Error 14 follows maxRedirects.
 func (c *Client) CreateAcls(entries []codec.AclBinding) error {
 	payload, err := codec.EncodeCreateAclsRequest(codec.CreateAclsRequest{Entries: entries})
 	if err != nil {
 		return err
 	}
-	decoded, err := c.roundTrip(codec.OpCreateAcls, payload)
-	if err != nil {
-		return err
+	maxAttempts := 1 + c.maxRedirects
+	for attempt := 1; ; attempt++ {
+		decoded, err := c.roundTrip(codec.OpCreateAcls, payload)
+		if err != nil {
+			ok, rerr := c.maybeRedirectController(err, attempt, maxAttempts)
+			if rerr != nil {
+				return rerr
+			}
+			if ok {
+				continue
+			}
+			return err
+		}
+		resp, ok := decoded.(codec.CreateAclsResponse)
+		if !ok {
+			return &frame.ProtocolError{Msg: fmt.Sprintf("unexpected response for create_acls: %T", decoded)}
+		}
+		ok, rerr := c.maybeRedirectControllerCode(resp.ErrorCode, "", attempt, maxAttempts)
+		if rerr != nil {
+			return rerr
+		}
+		if ok {
+			continue
+		}
+		return check(resp.ErrorCode, "create_acls")
 	}
-	resp, ok := decoded.(codec.CreateAclsResponse)
-	if !ok {
-		return &frame.ProtocolError{Msg: fmt.Sprintf("unexpected response for create_acls: %T", decoded)}
-	}
-	return check(resp.ErrorCode, "create_acls")
 }
 
 // DeleteAcls deletes exact-matching ACL bindings (native opcode 56/57).
-// Returns the number of entries removed. No filter-delete.
+// Returns the number of entries removed. No filter-delete. Error 14 follows
+// maxRedirects.
 func (c *Client) DeleteAcls(entries []codec.AclBinding) (uint32, error) {
 	payload, err := codec.EncodeDeleteAclsRequest(codec.DeleteAclsRequest{Entries: entries})
 	if err != nil {
 		return 0, err
 	}
-	decoded, err := c.roundTrip(codec.OpDeleteAcls, payload)
-	if err != nil {
-		return 0, err
+	maxAttempts := 1 + c.maxRedirects
+	for attempt := 1; ; attempt++ {
+		decoded, err := c.roundTrip(codec.OpDeleteAcls, payload)
+		if err != nil {
+			ok, rerr := c.maybeRedirectController(err, attempt, maxAttempts)
+			if rerr != nil {
+				return 0, rerr
+			}
+			if ok {
+				continue
+			}
+			return 0, err
+		}
+		resp, ok := decoded.(codec.DeleteAclsResponse)
+		if !ok {
+			return 0, &frame.ProtocolError{Msg: fmt.Sprintf("unexpected response for delete_acls: %T", decoded)}
+		}
+		ok, rerr := c.maybeRedirectControllerCode(resp.ErrorCode, "", attempt, maxAttempts)
+		if rerr != nil {
+			return 0, rerr
+		}
+		if ok {
+			continue
+		}
+		if err := check(resp.ErrorCode, "delete_acls"); err != nil {
+			return 0, err
+		}
+		return resp.Removed, nil
 	}
-	resp, ok := decoded.(codec.DeleteAclsResponse)
-	if !ok {
-		return 0, &frame.ProtocolError{Msg: fmt.Sprintf("unexpected response for delete_acls: %T", decoded)}
-	}
-	if err := check(resp.ErrorCode, "delete_acls"); err != nil {
-		return 0, err
-	}
-	return resp.Removed, nil
 }
 
 // ListAcls lists ACL bindings with optional filters (native opcode 58/59).
