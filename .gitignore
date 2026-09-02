@@ -14,3 +14,9 @@ data/
 examples/tls/*.key
 examples/tls/*.crt
 examples/tls/*.pem
+
+# Python client (v0.14)
+**/__pycache__/
+*.py[cod]
+*.egg-info/
+.pytest_cache/
