@@ -21,7 +21,7 @@ import time
 import unittest
 from pathlib import Path
 
-from volant import Client
+from volant import Client, GroupConsumer
 
 
 def _e2e_enabled() -> bool:
@@ -200,6 +200,74 @@ class TestE2E(unittest.TestCase):
             self.assertEqual(c.heartbeat(group, member_id, generation), 0)
             c.leave_group(group, member_id)
             c.delete_topic(topic)
+
+    def test_group_consumer_poll_commit_resume(self) -> None:
+        topic = f"py-gc-{os.getpid()}-{int(time.time())}"
+        group = f"py-gcg-{os.getpid()}"
+        with Client(self.addr, timeout=5.0) as c:
+            c.create_topic(topic, partitions=1)
+            c.produce(topic, 0, value=b"a")
+            c.produce(topic, 0, value=b"b")
+            g = GroupConsumer.join(
+                c, group=group, topics=[topic], session_timeout_ms=10_000
+            )
+            recs: list = []
+            for _ in range(8):
+                recs.extend(g.poll(max_wait_ms=200))
+                if len(recs) >= 2:
+                    break
+            self.assertEqual([r.value for r in recs], [b"a", b"b"])
+            g.commit()
+            g.close()
+            offs = c.offset_fetch(group=group, topic=topic)
+            self.assertEqual(offs, [(0, 2)])
+
+            c.produce(topic, 0, value=b"c")
+            g2 = GroupConsumer.join(
+                c, group=group, topics=[topic], session_timeout_ms=10_000
+            )
+            recs2: list = []
+            for _ in range(8):
+                recs2.extend(g2.poll(max_wait_ms=200))
+                if recs2:
+                    break
+            self.assertEqual([r.value for r in recs2], [b"c"])
+            g2.close()
+            c.delete_topic(topic)
+
+    def test_group_consumer_two_members_split(self) -> None:
+        topic = f"py-gc2-{os.getpid()}-{int(time.time())}"
+        group = f"py-gc2g-{os.getpid()}"
+        c1 = Client(self.addr, timeout=5.0)
+        c2 = Client(self.addr, timeout=5.0)
+        try:
+            c1.create_topic(topic, partitions=2)
+            c1.produce(topic, 0, value=b"p0")
+            c1.produce(topic, 1, value=b"p1")
+            g1 = GroupConsumer.join(
+                c1, group=group, topics=[topic], session_timeout_ms=10_000
+            )
+            g2 = GroupConsumer.join(
+                c2, group=group, topics=[topic], session_timeout_ms=10_000
+            )
+            seen: set[int] = set()
+            for _ in range(8):
+                for g in (g1, g2):
+                    for r in g.poll(max_wait_ms=100):
+                        seen.add(r.partition)
+            a1 = set(g1.assignment)
+            a2 = set(g2.assignment)
+            self.assertTrue(
+                a1.isdisjoint(a2), f"assignments overlap: {a1!r} vs {a2!r}"
+            )
+            self.assertEqual(a1 | a2, {(topic, 0), (topic, 1)})
+            self.assertEqual(seen, {0, 1})
+            g1.close()
+            g2.close()
+            c1.delete_topic(topic)
+        finally:
+            c1.close()
+            c2.close()
 
 
 if __name__ == "__main__":
