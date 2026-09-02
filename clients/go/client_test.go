@@ -1763,6 +1763,151 @@ func TestCreatePartitionsError14NoHintPicksOtherBroker(t *testing.T) {
 	}
 }
 
+func TestCreatePartitionsPrefersMetadataControllerID(t *testing.T) {
+	controller := &adminBroker{}
+	_, stopC := startAdmin(t, controller)
+	defer stopC()
+	decoy := &adminBroker{}
+	_, stopD := startAdmin(t, decoy)
+	defer stopD()
+	follower := &adminBroker{
+		createPartitionsCodes: []uint16{notController},
+	}
+	fAddr, stopF := startAdmin(t, follower)
+	defer stopF()
+	follower.mu.Lock()
+	follower.meta = codec.MetadataResponse{
+		Brokers: []codec.BrokerInfo{
+			{NodeID: 1, Host: "127.0.0.1", Port: uint16(follower.port())},
+			{NodeID: 3, Host: "127.0.0.1", Port: uint16(decoy.port())},
+			{NodeID: 2, Host: "127.0.0.1", Port: uint16(controller.port())},
+		},
+		ControllerID: 2,
+	}
+	follower.mu.Unlock()
+
+	c, err := volant.DialTimeout(fAddr, 5*time.Second)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer c.Close()
+	n, err := c.CreatePartitions("events", 4)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if n != 4 {
+		t.Fatalf("partitions %d want 4", n)
+	}
+	_, cp, _, _, metas, _ := follower.snapshot()
+	if cp != 1 || metas != 1 {
+		t.Fatalf("follower create_partitions=%d metadata=%d want 1,1", cp, metas)
+	}
+	_, ccp, _, _, _, _ := controller.snapshot()
+	if ccp != 1 {
+		t.Fatalf("controller create_partitions=%d want 1", ccp)
+	}
+	_, dcp, _, _, _, _ := decoy.snapshot()
+	if dcp != 0 {
+		t.Fatalf("decoy create_partitions=%d want 0", dcp)
+	}
+}
+
+func TestCreatePartitionsMetadataControllerIDZeroPicksOther(t *testing.T) {
+	later := &adminBroker{}
+	_, stopL := startAdmin(t, later)
+	defer stopL()
+	firstOther := &adminBroker{}
+	_, stopO := startAdmin(t, firstOther)
+	defer stopO()
+	follower := &adminBroker{
+		createPartitionsCodes: []uint16{notController},
+	}
+	fAddr, stopF := startAdmin(t, follower)
+	defer stopF()
+	follower.mu.Lock()
+	follower.meta = codec.MetadataResponse{
+		Brokers: []codec.BrokerInfo{
+			{NodeID: 1, Host: "127.0.0.1", Port: uint16(follower.port())},
+			{NodeID: 3, Host: "127.0.0.1", Port: uint16(firstOther.port())},
+			{NodeID: 2, Host: "127.0.0.1", Port: uint16(later.port())},
+		},
+		ControllerID: 0,
+	}
+	follower.mu.Unlock()
+
+	c, err := volant.DialTimeout(fAddr, 5*time.Second)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer c.Close()
+	n, err := c.CreatePartitions("events", 4)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if n != 4 {
+		t.Fatalf("partitions %d want 4", n)
+	}
+	_, cp, _, _, metas, _ := follower.snapshot()
+	if cp != 1 || metas != 1 {
+		t.Fatalf("follower create_partitions=%d metadata=%d want 1,1", cp, metas)
+	}
+	_, ocp, _, _, _, _ := firstOther.snapshot()
+	if ocp != 1 {
+		t.Fatalf("first-other create_partitions=%d want 1", ocp)
+	}
+	_, lcp, _, _, _, _ := later.snapshot()
+	if lcp != 0 {
+		t.Fatalf("later create_partitions=%d want 0", lcp)
+	}
+}
+
+func TestCreateTopicMessageControllerIDWinsOverMetadata(t *testing.T) {
+	hinted := &adminBroker{}
+	_, stopH := startAdmin(t, hinted)
+	defer stopH()
+	metaCtrl := &adminBroker{}
+	_, stopM := startAdmin(t, metaCtrl)
+	defer stopM()
+	follower := &adminBroker{
+		createTopicReplies: []createTopicReply{{
+			code: notController, message: "not controller; controller_id=3", asError: true,
+		}},
+	}
+	fAddr, stopF := startAdmin(t, follower)
+	defer stopF()
+	follower.mu.Lock()
+	follower.meta = codec.MetadataResponse{
+		Brokers: []codec.BrokerInfo{
+			{NodeID: 1, Host: "127.0.0.1", Port: uint16(follower.port())},
+			{NodeID: 2, Host: "127.0.0.1", Port: uint16(metaCtrl.port())},
+			{NodeID: 3, Host: "127.0.0.1", Port: uint16(hinted.port())},
+		},
+		ControllerID: 2,
+	}
+	follower.mu.Unlock()
+
+	c, err := volant.DialTimeout(fAddr, 5*time.Second)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer c.Close()
+	if err := c.CreateTopic("events", 1); err != nil {
+		t.Fatal(err)
+	}
+	ct, _, _, _, metas, _ := follower.snapshot()
+	if ct != 1 || metas != 1 {
+		t.Fatalf("follower create_topic=%d metadata=%d want 1,1", ct, metas)
+	}
+	hct, _, _, _, _, _ := hinted.snapshot()
+	if hct != 1 {
+		t.Fatalf("hinted create_topic=%d want 1", hct)
+	}
+	mct, _, _, _, _, _ := metaCtrl.snapshot()
+	if mct != 0 {
+		t.Fatalf("metadata-controller create_topic=%d want 0", mct)
+	}
+}
+
 func TestMaxRedirectsZeroRaisesOnFirst14(t *testing.T) {
 	follower := &adminBroker{
 		createTopicReplies: []createTopicReply{{

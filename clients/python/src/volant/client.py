@@ -440,16 +440,18 @@ class Client:
         """Metadata → reconnect to the controller.
 
         If ``controller_id`` is known (parsed from ``controller_id=N`` in
-        a 14 Error message), look that node up in Metadata brokers, then
-        ``list_members()`` if Metadata has no matching id. Otherwise pick
-        the first advertised broker whose host:port is not this
-        connection. Native Metadata has no controller_id field.
+        a 14 Error message, or Metadata's v0.77 trailer when non-zero),
+        look that node up in Metadata brokers, then ``list_members()``
+        if Metadata has no matching id. Otherwise pick the first
+        advertised broker whose host:port is not this connection.
 
         Returns True when the caller should retry. Returns False on no
         other broker / lookup miss / empty host / reconnect fail — caller
         must raise the original error 14.
         """
         meta = self.metadata()
+        if controller_id is None and meta.controller_id != 0:
+            controller_id = meta.controller_id
         host: Optional[str] = None
         port = 0
         if controller_id is not None:

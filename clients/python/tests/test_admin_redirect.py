@@ -265,6 +265,83 @@ class TestAdminNotControllerRedirect(unittest.TestCase):
         self.assertEqual(follower.metadata_count, 1)
         self.assertEqual(leader.create_partitions_count, 1)
 
+    def test_create_partitions_prefers_metadata_controller_id(self) -> None:
+        with (
+            _AdminServer() as controller,
+            _AdminServer() as decoy,
+            _AdminServer() as follower,
+        ):
+            follower.create_partitions_codes = [NOT_CONTROLLER]
+            follower.metadata = MetadataResponse(
+                brokers=[
+                    BrokerInfo(node_id=1, host="127.0.0.1", port=follower.port),
+                    BrokerInfo(node_id=3, host="127.0.0.1", port=decoy.port),
+                    BrokerInfo(node_id=2, host="127.0.0.1", port=controller.port),
+                ],
+                topics=[],
+                controller_id=2,
+            )
+            with Client(follower.addr, timeout=5.0) as c:
+                got = c.create_partitions("events", 4)
+            self.assertEqual(got, 4)
+            self.assertEqual(c.addr, controller.addr)
+        self.assertEqual(follower.create_partitions_count, 1)
+        self.assertEqual(follower.metadata_count, 1)
+        self.assertEqual(controller.create_partitions_count, 1)
+        self.assertEqual(decoy.create_partitions_count, 0)
+
+    def test_create_partitions_metadata_controller_id_zero_picks_other(self) -> None:
+        with (
+            _AdminServer() as later,
+            _AdminServer() as first_other,
+            _AdminServer() as follower,
+        ):
+            follower.create_partitions_codes = [NOT_CONTROLLER]
+            follower.metadata = MetadataResponse(
+                brokers=[
+                    BrokerInfo(node_id=1, host="127.0.0.1", port=follower.port),
+                    BrokerInfo(node_id=3, host="127.0.0.1", port=first_other.port),
+                    BrokerInfo(node_id=2, host="127.0.0.1", port=later.port),
+                ],
+                topics=[],
+                controller_id=0,
+            )
+            with Client(follower.addr, timeout=5.0) as c:
+                got = c.create_partitions("events", 4)
+            self.assertEqual(got, 4)
+            self.assertEqual(c.addr, first_other.addr)
+        self.assertEqual(follower.create_partitions_count, 1)
+        self.assertEqual(follower.metadata_count, 1)
+        self.assertEqual(first_other.create_partitions_count, 1)
+        self.assertEqual(later.create_partitions_count, 0)
+
+    def test_create_topic_message_controller_id_wins_over_metadata(self) -> None:
+        with (
+            _AdminServer() as hinted,
+            _AdminServer() as meta_ctrl,
+            _AdminServer() as follower,
+        ):
+            follower.create_topic_replies = [
+                (NOT_CONTROLLER, "not controller; controller_id=3", True)
+            ]
+            follower.metadata = MetadataResponse(
+                brokers=[
+                    BrokerInfo(node_id=1, host="127.0.0.1", port=follower.port),
+                    BrokerInfo(node_id=2, host="127.0.0.1", port=meta_ctrl.port),
+                    BrokerInfo(node_id=3, host="127.0.0.1", port=hinted.port),
+                ],
+                topics=[],
+                controller_id=2,
+            )
+            with Client(follower.addr, timeout=5.0) as c:
+                topic_id = c.create_topic("events", partitions=1)
+            self.assertEqual(topic_id, 1)
+            self.assertEqual(c.addr, hinted.addr)
+        self.assertEqual(follower.create_topic_count, 1)
+        self.assertEqual(follower.metadata_count, 1)
+        self.assertEqual(hinted.create_topic_count, 1)
+        self.assertEqual(meta_ctrl.create_topic_count, 0)
+
     def test_max_redirects_zero_raises_on_first_14(self) -> None:
         with _AdminServer() as follower:
             follower.create_topic_replies = [

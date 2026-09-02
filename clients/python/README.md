@@ -153,9 +153,9 @@ Produce, Fetch, and DeleteRecords follow `NotLeaderForPartition`
 retry once (`max_redirects=1`). `max_redirects=0` raises on the first
 13. CreateTopic / DeleteTopic / CreatePartitions / ReassignPartitions /
 CreateAcls / DeleteAcls follow `NotController` (error 14) the same way
-(Metadata brokers or a `controller_id=N` hint in the Error message; not
-Kafka FindCoordinator; native Metadata has no controller_id). Still one
-TCP connection at a time.
+(Metadata brokers or a `controller_id=N` hint in the Error message;
+admin 14 prefers Metadata.controller_id when the message has no hint;
+not Kafka FindCoordinator). Still one TCP connection at a time.
 Produce and Fetch follow `NotLeaderForPartition` (error 13) by default:
 Metadata, reconnect to the partition leader, retry once
 (`max_redirects=1`). `max_redirects=0` raises on the first 13. Still
