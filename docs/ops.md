@@ -386,7 +386,8 @@ specs. Ops-critical notes only:
 | Env | v0.2 default | Role |
 |-----|--------------|------|
 | `VOLANT_METADATA_RAFT` | **off** | `1`/`true`/`yes` prefers 154 AppendEntries 98/99; unset/`0` uses Phase 150 notes |
-| `VOLANT_OPENRAFT_METADATA` | **off** | `1`/`true`/`yes`/`on` → `controller_id()` is the openraft leader (opcodes 108–111). Unset keeps lowest-id. |
+| `VOLANT_OPENRAFT_METADATA` | **off** | `1`/`true`/`yes`/`on` → `controller_id()` is the openraft leader (opcodes 108–111, snapshot 112/113). Unset keeps lowest-id. |
+| `VOLANT_OPENRAFT_SNAPSHOT_LOGS` | **1000** | openraft snapshot every N applied logs. `0`/`never`/`off` disables automatic snapshots. Tests use `1`. |
 | `VOLANT_ASSIGNMENT_METADATA_COMMITTED_ONLY` | **off** | `1` serves majority-committed Metadata snapshot + wait-like admin; unset/`0` is live assignment |
 | `VOLANT_ASSIGNMENT_CONSENSUS` | **on** | Best-effort 96/97 push. Must **not** gate Metadata or fail CreateTopic |
 | `VOLANT_ASSIGNMENT_CONSENSUS_WAIT` | **off** | `1` → native **15** on majority miss; **rolls back** live `assignment.json` (must_wait path only) |
@@ -416,7 +417,7 @@ group over native opcodes **108/109** (AppendEntries) and **110/111**
 (RequestVote). `controller_id()` / Metadata controller is that leader.
 Gauges: `volant_openraft_leader_id`, `volant_openraft_term`. v0.11 did **not**
 replicate `assignment.json` through openraft (election only). v0.16 does
-when the same flag is on (see below). InstallSnapshot is still unimplemented.
+when the same flag is on (see below). InstallSnapshot is v0.17.
 Homemade 154 log is unchanged. See [V11_SPEC.md](./V11_SPEC.md) and
 [V16_SPEC.md](./V16_SPEC.md).
 
@@ -433,7 +434,19 @@ openraft apply (skip 154 fan-out for that mutation). Wait
 (`VOLANT_ASSIGNMENT_CONSENSUS_WAIT` / committed-only) still uses native
 **15** / Kafka **19** + live rollback; wait **off** is best-effort (local
 write is SoT if `client_write` fails). Log store stays in-memory; not full
-KRaft; no InstallSnapshot (v0.17). See [V16_SPEC.md](./V16_SPEC.md).
+KRaft. See [V16_SPEC.md](./V16_SPEC.md).
+
+## v0.17 openraft snapshot
+
+When `VOLANT_OPENRAFT_METADATA=1`, openraft builds in-memory snapshots
+(JSON `last_applied` + `membership` + optional live `assignment`) and
+replicates them over native opcodes **112/113** (`OpenraftInstallSnapshot`).
+Default policy is every **1000** applied logs (`VOLANT_OPENRAFT_SNAPSHOT_LOGS`).
+Set the env to `1` or `5` in tests so snapshots actually fire; `0`/`never`
+disables automatic snapshots. After a snapshot, openraft purges the
+in-memory log prefix. A node that was down can catch up via InstallSnapshot
+and then vote / append. This is **not** homemade 154 snapshot/compaction.
+See [V17_SPEC.md](./V17_SPEC.md).
 
 **Cluster sharp edges:** Truncate-journal majority (Phase 130), assignment
 majority (Phase 150/154), and Phase 135/137/148 wait mode use **configured N**

@@ -648,6 +648,8 @@ pub struct Broker {
     pub(crate) openraft_meta: Mutex<Option<OpenraftMetaHandle>>,
     /// Cached openraft leader / term for metrics.
     pub(crate) openraft_metrics: OpenraftMetricsCache,
+    /// v0.17: inbound InstallSnapshot (opcode 112) count.
+    pub(crate) openraft_install_snapshot_rx: AtomicU64,
     /// v0.12: append assignment snapshots to `__cluster_metadata`. Default **off**
     /// (`VOLANT_CLUSTER_METADATA_TOPIC`).
     cluster_metadata_topic_enabled: AtomicBool,
@@ -902,6 +904,7 @@ impl Broker {
             openraft_metadata_enabled: AtomicBool::new(default_openraft_metadata_enabled()),
             openraft_meta: Mutex::new(None),
             openraft_metrics: OpenraftMetricsCache::default(),
+            openraft_install_snapshot_rx: AtomicU64::new(0),
             cluster_metadata_topic_enabled: AtomicBool::new(cluster_metadata_topic_env_enabled()),
             partition_raft_new_topics: AtomicBool::new(partition_raft_env_enabled()),
             partition_rafts: Mutex::new(HashMap::new()),
@@ -1101,6 +1104,7 @@ impl Broker {
             openraft_metadata_enabled: AtomicBool::new(default_openraft_metadata_enabled()),
             openraft_meta: Mutex::new(None),
             openraft_metrics: OpenraftMetricsCache::default(),
+            openraft_install_snapshot_rx: AtomicU64::new(0),
             cluster_metadata_topic_enabled: AtomicBool::new(cluster_metadata_topic_env_enabled()),
             partition_raft_new_topics: AtomicBool::new(partition_raft_env_enabled()),
             partition_rafts: Mutex::new(HashMap::new()),

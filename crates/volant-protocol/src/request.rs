@@ -116,7 +116,8 @@ pub enum RequestOpcode {
     OpenraftAppend = 108,
     /// Inter-broker openraft RequestVote (v0.11).
     OpenraftVote = 110,
-    // 112/113 reserved for openraft snapshot sibling.
+    /// Inter-broker openraft InstallSnapshot (v0.17).
+    OpenraftInstallSnapshot = 112,
     /// Admin: reassign topic partition replicas (v0.18).
     ReassignPartitions = 114,
 }
@@ -179,6 +180,7 @@ impl RequestOpcode {
             106 => Self::ListMembers,
             108 => Self::OpenraftAppend,
             110 => Self::OpenraftVote,
+            112 => Self::OpenraftInstallSnapshot,
             114 => Self::ReassignPartitions,
             _ => return None,
         })
@@ -716,6 +718,11 @@ pub enum Request {
         /// `serde_json` of openraft `VoteRequest`.
         payload: Bytes,
     },
+    /// Inter-broker openraft InstallSnapshot (v0.17). JSON body of the raft RPC.
+    OpenraftInstallSnapshot {
+        /// `serde_json` of openraft `InstallSnapshotRequest`.
+        payload: Bytes,
+    },
     /// Admin: reassign replicas for a topic (or one partition) (v0.18).
     ///
     /// Empty `replicas` means auto-place with the current effective broker list
@@ -829,6 +836,7 @@ impl Request {
             Self::ListMembers => RequestOpcode::ListMembers as u16,
             Self::OpenraftAppend { .. } => RequestOpcode::OpenraftAppend as u16,
             Self::OpenraftVote { .. } => RequestOpcode::OpenraftVote as u16,
+            Self::OpenraftInstallSnapshot { .. } => RequestOpcode::OpenraftInstallSnapshot as u16,
             Self::ReassignPartitions { .. } => RequestOpcode::ReassignPartitions as u16,
         }
     }

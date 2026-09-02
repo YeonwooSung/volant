@@ -1,10 +1,10 @@
-//! Opt-in openraft metadata election (v0.11) + assignment apply (v0.16).
+//! Opt-in openraft metadata election (v0.11) + assignment apply (v0.16)
+//! + InstallSnapshot (v0.17).
 //!
-//! When `VOLANT_OPENRAFT_METADATA=1`, the leader replicates [`MetaRequest::SetAssignment`]
-//! via existing opcodes 108/109. Apply writes `assignment.json` and installs
-//! cluster state so followers learn topics. Homemade 154 / 150 paths stay.
-//! InstallSnapshot is not implemented (snapshot policy never fires).
-//! Hard state / log remain in-memory.
+//! When `VOLANT_OPENRAFT_METADATA=1`, the leader replicates
+//! [`MetaRequest::SetAssignment`] via opcodes 108/109. Apply writes
+//! `assignment.json` and installs cluster state. Snapshots use opcodes
+//! 112/113. Homemade 154 is unchanged. Hard state / log remain in-memory.
 
 use std::collections::BTreeMap;
 use std::fmt;
@@ -15,7 +15,7 @@ use std::sync::{Arc, Weak};
 use std::time::Duration;
 
 use bytes::Bytes;
-use openraft::error::{RPCError, RaftError, Unreachable};
+use openraft::error::{InstallSnapshotError, RPCError, RaftError, Unreachable};
 use openraft::network::RPCOption;
 use openraft::raft::{
     AppendEntriesRequest, AppendEntriesResponse, InstallSnapshotRequest, InstallSnapshotResponse,
@@ -24,8 +24,8 @@ use openraft::raft::{
 use openraft::storage::{LogFlushed, RaftLogStorage, RaftStateMachine, Snapshot};
 use openraft::{
     BasicNode, Config, Entry, EntryPayload, LogId, LogState, Raft, RaftLogId, RaftLogReader,
-    RaftNetwork, RaftNetworkFactory, RaftSnapshotBuilder, SnapshotMeta, StorageError,
-    StoredMembership, Vote,
+    RaftNetwork, RaftNetworkFactory, RaftSnapshotBuilder, SnapshotMeta, SnapshotPolicy,
+    StorageError, StoredMembership, Vote,
 };
 use parking_lot::Mutex;
 use serde::{Deserialize, Serialize};
@@ -34,6 +34,7 @@ use volant_core::{Error, Result};
 use volant_protocol::{ClusterTopicState, Request, Response};
 
 use crate::broker::Broker;
+use crate::cluster::state::AssignmentSnapshot;
 use crate::net::inter_broker_rpc;
 
 /// How long the mutating leader waits for `client_write` (commit + local apply).
@@ -208,11 +209,19 @@ impl RaftLogStorage<TypeConfig> for LogStore {
     }
 }
 
-#[derive(Clone)]
+/// JSON bytes stored in an openraft snapshot (v0.17).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct MetaSnapshotPayload {
+    last_applied: Option<LogId<u32>>,
+    membership: StoredMembership<u32, BasicNode>,
+    assignment: AssignmentSnapshot,
+}
+
+#[derive(Clone, Default)]
 struct StateMachine {
     inner: Arc<Mutex<SmInner>>,
     /// Weak so apply can install assignment without a Broker↔Raft cycle.
-    broker: Weak<Broker>,
+    broker: Option<Weak<Broker>>,
 }
 
 #[derive(Default)]
@@ -220,21 +229,50 @@ struct SmInner {
     last_applied: Option<LogId<u32>>,
     last_membership: StoredMembership<u32, BasicNode>,
     snapshot: Option<(SnapshotMeta<u32, BasicNode>, Vec<u8>)>,
+    snapshot_seq: u64,
+}
+
+impl StateMachine {
+    fn with_broker(broker: &Arc<Broker>) -> Self {
+        Self {
+            inner: Arc::new(Mutex::new(SmInner::default())),
+            broker: Some(Arc::downgrade(broker)),
+        }
+    }
+
+    fn live_assignment(&self) -> AssignmentSnapshot {
+        self.broker
+            .as_ref()
+            .and_then(|w| w.upgrade())
+            .and_then(|b| b.clone_live_assignment())
+            .unwrap_or_default()
+    }
 }
 
 impl RaftSnapshotBuilder<TypeConfig> for StateMachine {
     async fn build_snapshot(
         &mut self,
     ) -> std::result::Result<Snapshot<TypeConfig>, StorageError<u32>> {
-        let inner = self.inner.lock();
+        let assignment = self.live_assignment();
+        let mut inner = self.inner.lock();
+        let payload = MetaSnapshotPayload {
+            last_applied: inner.last_applied,
+            membership: inner.last_membership.clone(),
+            assignment,
+        };
+        let bytes = serde_json::to_vec(&payload).unwrap_or_else(|_| b"{}".to_vec());
+        let seq = inner.snapshot_seq;
+        inner.snapshot_seq = seq.saturating_add(1);
+        let index = inner.last_applied.map(|id| id.index).unwrap_or(0);
         let meta = SnapshotMeta {
             last_log_id: inner.last_applied,
             last_membership: inner.last_membership.clone(),
-            snapshot_id: "v16-empty".into(),
+            snapshot_id: format!("v17-{index}-{seq}"),
         };
+        inner.snapshot = Some((meta.clone(), bytes.clone()));
         Ok(Snapshot {
             meta,
-            snapshot: Box::new(Cursor::new(Vec::new())),
+            snapshot: Box::new(Cursor::new(bytes)),
         })
     }
 }
@@ -261,7 +299,7 @@ impl RaftStateMachine<TypeConfig> for StateMachine {
         I::IntoIter: Send,
     {
         let mut out = Vec::new();
-        let broker = self.broker.upgrade();
+        let broker = self.broker.as_ref().and_then(|w| w.upgrade());
         for e in entries {
             {
                 let mut inner = self.inner.lock();
@@ -314,10 +352,17 @@ impl RaftStateMachine<TypeConfig> for StateMachine {
         meta: &SnapshotMeta<u32, BasicNode>,
         snapshot: Box<Cursor<Vec<u8>>>,
     ) -> std::result::Result<(), StorageError<u32>> {
+        let bytes = snapshot.into_inner();
+        if let Ok(payload) = serde_json::from_slice::<MetaSnapshotPayload>(&bytes) {
+            // last_applied / membership come from SnapshotMeta (source of
+            // truth). Payload assignment is stored only; live assignment.json
+            // apply stays on the Phase 6 / 154 path.
+            let _ = payload;
+        }
         let mut inner = self.inner.lock();
         inner.last_applied = meta.last_log_id;
         inner.last_membership = meta.last_membership.clone();
-        inner.snapshot = Some((meta.clone(), snapshot.into_inner()));
+        inner.snapshot = Some((meta.clone(), bytes));
         Ok(())
     }
 
@@ -363,18 +408,29 @@ impl RaftNetwork<TypeConfig> for MetaNetwork {
 
     async fn install_snapshot(
         &mut self,
-        _rpc: InstallSnapshotRequest<TypeConfig>,
+        rpc: InstallSnapshotRequest<TypeConfig>,
         _option: RPCOption,
     ) -> std::result::Result<
         InstallSnapshotResponse<u32>,
-        RPCError<u32, BasicNode, RaftError<u32, openraft::error::InstallSnapshotError>>,
+        RPCError<u32, BasicNode, RaftError<u32, InstallSnapshotError>>,
     > {
-        Err(RPCError::Unreachable(Unreachable::new(
-            &std::io::Error::new(
-                std::io::ErrorKind::Other,
-                "InstallSnapshot is not implemented in v0.11",
-            ),
-        )))
+        let payload = serde_json::to_vec(&rpc).map_err(|e| unreachable_install_err(&e))?;
+        let resp = rpc_peer_install(
+            &self.broker,
+            self.target,
+            Request::OpenraftInstallSnapshot {
+                payload: Bytes::from(payload),
+            },
+        )
+        .await?;
+        match resp {
+            Response::OpenraftInstallSnapshot { payload } => {
+                serde_json::from_slice(&payload).map_err(|e| unreachable_install_err(&e))
+            }
+            other => Err(unreachable_install_err(&format!(
+                "unexpected install-snapshot ack {other:?}"
+            ))),
+        }
     }
 
     async fn vote(
@@ -422,6 +478,15 @@ fn unreachable_err(err: &dyn fmt::Display) -> RPCError<u32, BasicNode, RaftError
     )))
 }
 
+fn unreachable_install_err(
+    err: &dyn fmt::Display,
+) -> RPCError<u32, BasicNode, RaftError<u32, InstallSnapshotError>> {
+    RPCError::Unreachable(Unreachable::new(&std::io::Error::new(
+        std::io::ErrorKind::Other,
+        err.to_string(),
+    )))
+}
+
 async fn rpc_peer(
     broker: &Broker,
     target: u32,
@@ -433,6 +498,20 @@ async fn rpc_peer(
     inter_broker_rpc(broker, &addr, &req)
         .await
         .map_err(|e| unreachable_err(&e))
+}
+
+async fn rpc_peer_install(
+    broker: &Broker,
+    target: u32,
+    req: Request,
+) -> std::result::Result<Response, RPCError<u32, BasicNode, RaftError<u32, InstallSnapshotError>>>
+{
+    let addr = broker
+        .broker_addr(target)
+        .ok_or_else(|| unreachable_install_err(&format!("no addr for broker {target}")))?;
+    inter_broker_rpc(broker, &addr, &req)
+        .await
+        .map_err(|e| unreachable_install_err(&e))
 }
 
 fn membership_nodes(broker: &Broker) -> BTreeMap<u32, BasicNode> {
@@ -450,7 +529,46 @@ fn membership_nodes(broker: &Broker) -> BTreeMap<u32, BasicNode> {
     nodes
 }
 
+/// Snapshot interval from `VOLANT_OPENRAFT_SNAPSHOT_LOGS`.
+///
+/// * unset → every **1000** applied logs (conservative production default)
+/// * `0` / `never` / `off` → never (manual `trigger().snapshot()` only)
+/// * `N` ≥ 1 → every N logs (tests use `1` or `5`)
+pub fn openraft_snapshot_logs_since_last() -> Option<u64> {
+    match std::env::var("VOLANT_OPENRAFT_SNAPSHOT_LOGS") {
+        Ok(s) => {
+            let t = s.trim();
+            if t.is_empty() {
+                return Some(DEFAULT_OPENRAFT_SNAPSHOT_LOGS);
+            }
+            if t == "0"
+                || t.eq_ignore_ascii_case("never")
+                || t.eq_ignore_ascii_case("off")
+                || t.eq_ignore_ascii_case("false")
+            {
+                return None;
+            }
+            Some(
+                t.parse::<u64>()
+                    .unwrap_or(DEFAULT_OPENRAFT_SNAPSHOT_LOGS)
+                    .max(1),
+            )
+        }
+        Err(_) => Some(DEFAULT_OPENRAFT_SNAPSHOT_LOGS),
+    }
+}
+
+/// Default production snapshot interval (applied logs since last snapshot).
+pub const DEFAULT_OPENRAFT_SNAPSHOT_LOGS: u64 = 1000;
+
 fn raft_config() -> Config {
+    let env_set = std::env::var("VOLANT_OPENRAFT_SNAPSHOT_LOGS").is_ok();
+    let (snapshot_policy, max_in_snapshot_log_to_keep, replication_lag_threshold) =
+        match openraft_snapshot_logs_since_last() {
+            None => (SnapshotPolicy::Never, 1000, 5000),
+            Some(n) if env_set => (SnapshotPolicy::LogsSinceLast(n), 0, n.max(1)),
+            Some(n) => (SnapshotPolicy::LogsSinceLast(n), 1000, 5000),
+        };
     Config {
         cluster_name: "volant-openraft-meta".into(),
         election_timeout_min: 200,
@@ -458,7 +576,10 @@ fn raft_config() -> Config {
         heartbeat_interval: 50,
         install_snapshot_timeout: 400,
         max_payload_entries: 64,
-        snapshot_policy: openraft::SnapshotPolicy::LogsSinceLast(u64::MAX),
+        snapshot_policy,
+        max_in_snapshot_log_to_keep,
+        replication_lag_threshold,
+        purge_batch_size: 1,
         enable_tick: true,
         enable_heartbeat: true,
         enable_elect: true,
@@ -525,10 +646,7 @@ impl Broker {
             broker: Arc::clone(self),
         };
         let log_store = LogStore::default();
-        let state_machine = StateMachine {
-            inner: Arc::new(Mutex::new(SmInner::default())),
-            broker: Arc::downgrade(self),
-        };
+        let state_machine = StateMachine::with_broker(self);
         let raft = Raft::new(self.node_id(), config, network, log_store, state_machine)
             .await
             .map_err(|e| Error::InvalidArgument(format!("openraft new: {e}")))?;
@@ -671,6 +789,135 @@ impl Broker {
         let bytes = serde_json::to_vec(&resp)
             .map_err(|e| Error::Protocol(format!("openraft vote encode: {e}")))?;
         Ok(Bytes::from(bytes))
+    }
+
+    /// Handle inbound InstallSnapshot (opcode 112).
+    pub async fn handle_openraft_install_snapshot(&self, payload: &[u8]) -> Result<Bytes> {
+        self.openraft_install_snapshot_rx
+            .fetch_add(1, Ordering::Relaxed);
+        let req: InstallSnapshotRequest<TypeConfig> = serde_json::from_slice(payload)
+            .map_err(|e| Error::Protocol(format!("openraft install snapshot decode: {e}")))?;
+        let raft = {
+            let g = self.openraft_meta.lock();
+            g.as_ref()
+                .map(|h| h.raft.clone())
+                .ok_or_else(|| Error::Protocol("openraft not started".into()))?
+        };
+        let resp = raft
+            .install_snapshot(req)
+            .await
+            .map_err(|e| Error::Protocol(format!("openraft install snapshot: {e}")))?;
+        let bytes = serde_json::to_vec(&resp)
+            .map_err(|e| Error::Protocol(format!("openraft install snapshot encode: {e}")))?;
+        Ok(Bytes::from(bytes))
+    }
+
+    /// Inbound InstallSnapshot (opcode 112) count (test hook).
+    pub fn test_openraft_install_snapshot_rx(&self) -> u64 {
+        self.openraft_install_snapshot_rx.load(Ordering::Relaxed)
+    }
+
+    /// Last purged log index (`None` if the prefix has not been truncated).
+    pub fn test_openraft_last_purged_index(&self) -> Option<u64> {
+        let g = self.openraft_meta.lock();
+        g.as_ref()?
+            .raft
+            .metrics()
+            .borrow()
+            .purged
+            .map(|id| id.index)
+    }
+
+    /// Last applied log index (`None` if nothing has been applied).
+    pub fn test_openraft_last_applied_index(&self) -> Option<u64> {
+        let g = self.openraft_meta.lock();
+        g.as_ref()?
+            .raft
+            .metrics()
+            .borrow()
+            .last_applied
+            .map(|id| id.index)
+    }
+
+    /// Current in-memory snapshot (`snapshot_id`, last log index, JSON bytes).
+    pub async fn test_openraft_current_snapshot(&self) -> Option<(String, Option<u64>, Vec<u8>)> {
+        let raft = {
+            let g = self.openraft_meta.lock();
+            g.as_ref()?.raft.clone()
+        };
+        let snap = raft.get_snapshot().await.ok()??;
+        let bytes = snap.snapshot.get_ref().clone();
+        Some((
+            snap.meta.snapshot_id,
+            snap.meta.last_log_id.map(|id| id.index),
+            bytes,
+        ))
+    }
+
+    /// Submit a `Noop` client write (must run on the leader).
+    pub async fn test_openraft_client_write_noop(&self) -> Result<()> {
+        let raft = {
+            let g = self.openraft_meta.lock();
+            g.as_ref()
+                .map(|h| h.raft.clone())
+                .ok_or_else(|| Error::Protocol("openraft not started".into()))?
+        };
+        raft.client_write(MetaRequest::Noop)
+            .await
+            .map_err(|e| Error::Protocol(format!("openraft client write: {e}")))?;
+        Ok(())
+    }
+
+    /// Ask openraft to build a snapshot now (returns immediately).
+    pub async fn test_openraft_trigger_snapshot(&self) -> Result<()> {
+        let raft = {
+            let g = self.openraft_meta.lock();
+            g.as_ref()
+                .map(|h| h.raft.clone())
+                .ok_or_else(|| Error::Protocol("openraft not started".into()))?
+        };
+        raft.trigger()
+            .snapshot()
+            .await
+            .map_err(|e| Error::Protocol(format!("openraft trigger snapshot: {e}")))?;
+        Ok(())
+    }
+
+    /// Ask openraft to purge logs up through last-applied (returns immediately).
+    pub async fn test_openraft_trigger_purge(&self) -> Result<()> {
+        let raft = {
+            let g = self.openraft_meta.lock();
+            g.as_ref()
+                .map(|h| h.raft.clone())
+                .ok_or_else(|| Error::Protocol("openraft not started".into()))?
+        };
+        let upto = raft
+            .metrics()
+            .borrow()
+            .last_applied
+            .map(|id| id.index)
+            .unwrap_or(0);
+        raft.trigger()
+            .purge_log(upto)
+            .await
+            .map_err(|e| Error::Protocol(format!("openraft trigger purge: {e}")))?;
+        Ok(())
+    }
+
+    /// JSON body of a dummy InstallSnapshotRequest (vote term 0) for opcode tests.
+    pub fn test_openraft_probe_install_snapshot_payload() -> Bytes {
+        let rpc = InstallSnapshotRequest::<TypeConfig> {
+            vote: Vote::new(0, 1),
+            meta: SnapshotMeta {
+                last_log_id: None,
+                last_membership: StoredMembership::default(),
+                snapshot_id: "v17-probe".into(),
+            },
+            offset: 0,
+            data: b"{}".to_vec(),
+            done: true,
+        };
+        Bytes::from(serde_json::to_vec(&rpc).unwrap_or_else(|_| b"{}".to_vec()))
     }
 }
 
