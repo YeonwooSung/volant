@@ -54,6 +54,10 @@
 //! assignor inherits via `describe_group`.
 //! v0.94 redirects topic `describe_configs` / `alter_configs` on that
 //! same error **14** budget. Topic-only (not Kafka BROKER configs).
+//! v0.100 retries [`Client::begin_transaction`] / EndTxn (commit /
+//! abort inherit) on that same transient set (default 0). InvalidTxnState
+//! (22), fence / epoch / abortable, 13 / 14 / 9 / 10 / 11 / 2, and
+//! protocol are not retried. [`TransactionalProducer`] inherits.
 
 #![deny(missing_docs)]
 
