@@ -29,9 +29,12 @@ from .codec import (
     LeaveGroupRequest,
     LeaveGroupResponse,
     ListGroupsResponse,
+    ListOffsetsRequest,
+    ListOffsetsResponse,
     MetadataRequest,
     MetadataResponse,
     OffsetCommitEntry,
+    OffsetListing,
     OffsetCommitRequest,
     OffsetCommitResponse,
     OffsetFetchRequest,
@@ -176,6 +179,7 @@ class Client:
         batch = c.fetch("t", 0, offset=0)
         c.offset_commit(group="g", topic="t", partition=0, offset=5)
         offs = c.offset_fetch(group="g", topic="t")
+        bounds = c.list_offsets("t")  # all partitions; or list_offsets("t", [0])
         member_id, generation, assignment = c.join_group(
             "g", topics=["t"], session_timeout_ms=10000
         )
@@ -569,6 +573,27 @@ class Client:
             raise ProtocolError(f"unexpected response for offset_commit: {type(resp)}")
         self._check(resp.error_code, "offset_commit")
 
+    def list_offsets(
+        self, topic: str, partitions: Optional[Iterable[int]] = None
+    ) -> list[OffsetListing]:
+        """List earliest/latest offsets for ``topic`` (native opcode 48).
+
+        ``None`` or ``[]`` means all partitions (wire count 0). Returns
+        :class:`OffsetListing` rows. Non-zero ``error_code`` raises
+        :class:`BrokerError`. This is not Kafka ListOffsets (no timestamp
+        or isolation); both ends of each log are returned.
+        """
+        payload = codec.encode_list_offsets_request(
+            ListOffsetsRequest(
+                topic=topic, partitions=list(partitions) if partitions else []
+            )
+        )
+        resp = self._round_trip(codec.OP_LIST_OFFSETS, payload)
+        if not isinstance(resp, ListOffsetsResponse):
+            raise ProtocolError(f"unexpected response for list_offsets: {type(resp)}")
+        self._check(resp.error_code, "list_offsets")
+        return list(resp.entries)
+
     def offset_fetch(self, group: str, topic: str) -> list[tuple[int, int]]:
         """Fetch committed offsets for ``topic``.
 
@@ -684,6 +709,7 @@ __all__ = [
     "GroupState",
     "JoinGroupResult",
     "MetadataResponse",
+    "OffsetListing",
     "ProduceMessage",
     "ProduceResult",
     "ProtocolError",

@@ -2,7 +2,7 @@
 //
 // Matches crates/volant-protocol/src/payload.rs for Produce, Fetch,
 // CreateTopic, Metadata, DeleteTopic, OffsetCommit, OffsetFetch,
-// JoinGroup, Heartbeat, LeaveGroup, Auth, DescribeGroup, and ListGroups.
+// JoinGroup, Heartbeat, LeaveGroup, Auth, DescribeGroup, ListGroups, and ListOffsets.
 // Frame headers are big-endian (see package frame); payload integers and
 // length prefixes are little-endian.
 package codec
@@ -31,6 +31,8 @@ const (
 	OpDescribeGroupResponse uint16 = 35
 	OpListGroups            uint16 = 36
 	OpListGroupsResponse    uint16 = 37
+	OpListOffsets           uint16 = 48
+	OpListOffsetsResponse   uint16 = 49
 	OpError                 uint16 = 0xFFFF
 
 	nullLen = 0xFFFFFFFF
@@ -531,6 +533,29 @@ type ListGroupsResponse struct {
 	ErrorCode uint16
 	Groups    []GroupListing
 }
+
+// OffsetListing is one partition earliest/latest pair from ListOffsets
+// (Phase 15 / v0.50).
+type OffsetListing struct {
+	Partition uint32
+	Earliest  uint64
+	Latest    uint64
+}
+
+// ListOffsetsRequest is the ListOffsets opcode (48) body.
+// Empty Partitions means all partitions of the topic.
+type ListOffsetsRequest struct {
+	Topic      string
+	Partitions []uint32
+}
+
+// ListOffsetsResponse is the ListOffsets reply (opcode 49).
+type ListOffsetsResponse struct {
+	ErrorCode uint16
+	Topic     string
+	Entries   []OffsetListing
+}
+
 
 func EncodeProduceRequest(req ProduceRequest) ([]byte, error) {
 	w := &writer{}
@@ -1681,6 +1706,93 @@ func DecodeListGroupsResponse(payload []byte) (ListGroupsResponse, error) {
 	return ListGroupsResponse{ErrorCode: code, Groups: groups}, nil
 }
 
+func EncodeListOffsetsRequest(req ListOffsetsRequest) ([]byte, error) {
+	w := &writer{}
+	if err := putString(w, req.Topic); err != nil {
+		return nil, err
+	}
+	parts := req.Partitions
+	if parts == nil {
+		parts = []uint32{}
+	}
+	w.u32(uint32(len(parts)))
+	for _, p := range parts {
+		w.u32(p)
+	}
+	return w.buf, nil
+}
+
+func DecodeListOffsetsRequest(payload []byte) (ListOffsetsRequest, error) {
+	r := &reader{data: payload}
+	topic, err := getString(r)
+	if err != nil {
+		return ListOffsetsRequest{}, err
+	}
+	n, err := r.u32()
+	if err != nil {
+		return ListOffsetsRequest{}, err
+	}
+	parts := make([]uint32, 0, n)
+	for i := uint32(0); i < n; i++ {
+		p, err := r.u32()
+		if err != nil {
+			return ListOffsetsRequest{}, err
+		}
+		parts = append(parts, p)
+	}
+	return ListOffsetsRequest{Topic: topic, Partitions: parts}, nil
+}
+
+func EncodeListOffsetsResponse(resp ListOffsetsResponse) ([]byte, error) {
+	w := &writer{}
+	w.u16(resp.ErrorCode)
+	if err := putString(w, resp.Topic); err != nil {
+		return nil, err
+	}
+	w.u32(uint32(len(resp.Entries)))
+	for _, e := range resp.Entries {
+		w.u32(e.Partition)
+		w.u64(e.Earliest)
+		w.u64(e.Latest)
+	}
+	return w.buf, nil
+}
+
+func DecodeListOffsetsResponse(payload []byte) (ListOffsetsResponse, error) {
+	r := &reader{data: payload}
+	code, err := r.u16()
+	if err != nil {
+		return ListOffsetsResponse{}, err
+	}
+	topic, err := getString(r)
+	if err != nil {
+		return ListOffsetsResponse{}, err
+	}
+	n, err := r.u32()
+	if err != nil {
+		return ListOffsetsResponse{}, err
+	}
+	entries := make([]OffsetListing, 0, n)
+	for i := uint32(0); i < n; i++ {
+		part, err := r.u32()
+		if err != nil {
+			return ListOffsetsResponse{}, err
+		}
+		earliest, err := r.u64()
+		if err != nil {
+			return ListOffsetsResponse{}, err
+		}
+		latest, err := r.u64()
+		if err != nil {
+			return ListOffsetsResponse{}, err
+		}
+		entries = append(entries, OffsetListing{
+			Partition: part, Earliest: earliest, Latest: latest,
+		})
+	}
+	return ListOffsetsResponse{ErrorCode: code, Topic: topic, Entries: entries}, nil
+}
+
 func EncodeErrorResponse(resp ErrorResponse) ([]byte, error) {
 	w := &writer{}
 	w.u16(resp.Code)
@@ -1732,6 +1844,8 @@ func DecodeResponse(opcode uint16, payload []byte) (any, error) {
 		return DecodeDescribeGroupResponse(payload)
 	case OpListGroupsResponse:
 		return DecodeListGroupsResponse(payload)
+	case OpListOffsetsResponse:
+		return DecodeListOffsetsResponse(payload)
 	case OpError:
 		return DecodeErrorResponse(payload)
 	default:

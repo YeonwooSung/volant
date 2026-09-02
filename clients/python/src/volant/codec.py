@@ -3,7 +3,7 @@
 Matches `crates/volant-protocol/src/payload.rs` for the MVP opcodes:
 Produce, Fetch, CreateTopic, Metadata, DeleteTopic, OffsetCommit,
 OffsetFetch, JoinGroup, Heartbeat, LeaveGroup, Auth, DescribeGroup,
-ListGroups.
+ListGroups, ListOffsets.
 
 Header fields are big-endian (see :mod:`volant.frame`); **payload** integers
 and length prefixes are little-endian.
@@ -34,6 +34,8 @@ OP_DESCRIBE_GROUP = 34
 OP_DESCRIBE_GROUP_RESPONSE = 35
 OP_LIST_GROUPS = 36
 OP_LIST_GROUPS_RESPONSE = 37
+OP_LIST_OFFSETS = 48
+OP_LIST_OFFSETS_RESPONSE = 49
 OP_ERROR = 0xFFFF
 
 _NULL_LEN = 0xFFFFFFFF
@@ -472,6 +474,28 @@ class DescribeGroupResponse:
 class ListGroupsResponse:
     error_code: int
     groups: list[GroupListing] = field(default_factory=list)
+
+
+@dataclass
+class OffsetListing:
+    """One partition earliest/latest pair from ListOffsets (Phase 15 / v0.50)."""
+
+    partition: int
+    earliest: int
+    latest: int
+
+
+@dataclass
+class ListOffsetsRequest:
+    topic: str
+    partitions: list[int] = field(default_factory=list)
+
+
+@dataclass
+class ListOffsetsResponse:
+    error_code: int
+    topic: str
+    entries: list[OffsetListing]
 
 
 # --- produce ---------------------------------------------------------------
@@ -1130,6 +1154,51 @@ def decode_list_groups_response(payload: bytes) -> ListGroupsResponse:
     return ListGroupsResponse(error_code=error_code, groups=groups)
 
 
+# --- list offsets ----------------------------------------------------------
+
+
+def encode_list_offsets_request(req: ListOffsetsRequest) -> bytes:
+    w = _Writer()
+    _put_string(w, req.topic)
+    parts = req.partitions or []
+    w.u32_le(len(parts))
+    for p in parts:
+        w.u32_le(p)
+    return w.finish()
+
+
+def decode_list_offsets_request(payload: bytes) -> ListOffsetsRequest:
+    r = _Reader(payload)
+    topic = _get_string(r)
+    n = r.u32_le()
+    partitions = [r.u32_le() for _ in range(n)]
+    return ListOffsetsRequest(topic=topic, partitions=partitions)
+
+
+def encode_list_offsets_response(resp: ListOffsetsResponse) -> bytes:
+    w = _Writer()
+    w.u16_le(resp.error_code)
+    _put_string(w, resp.topic)
+    w.u32_le(len(resp.entries))
+    for e in resp.entries:
+        w.u32_le(e.partition)
+        w.u64_le(e.earliest)
+        w.u64_le(e.latest)
+    return w.finish()
+
+
+def decode_list_offsets_response(payload: bytes) -> ListOffsetsResponse:
+    r = _Reader(payload)
+    error_code = r.u16_le()
+    topic = _get_string(r)
+    n = r.u32_le()
+    entries = [
+        OffsetListing(partition=r.u32_le(), earliest=r.u64_le(), latest=r.u64_le())
+        for _ in range(n)
+    ]
+    return ListOffsetsResponse(error_code=error_code, topic=topic, entries=entries)
+
+
 # --- error opcode ----------------------------------------------------------
 
 
@@ -1173,6 +1242,8 @@ def decode_response(opcode: int, payload: bytes):
         return decode_describe_group_response(payload)
     if opcode == OP_LIST_GROUPS_RESPONSE:
         return decode_list_groups_response(payload)
+    if opcode == OP_LIST_OFFSETS_RESPONSE:
+        return decode_list_offsets_response(payload)
     if opcode == OP_ERROR:
         return decode_error_response(payload)
     raise ProtocolError(f"unknown response opcode {opcode}")

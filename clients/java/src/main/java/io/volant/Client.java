@@ -22,6 +22,7 @@ import java.util.List;
  *   List&lt;Record&gt; recs = c.fetch("t", 0, 0);
  *   c.offsetCommit("g", "t", 0, 5);
  *   List&lt;Offset&gt; offs = c.offsetFetch("g", "t");
+ *   List&lt;OffsetListing&gt; bounds = c.listOffsets("t");
  *   JoinGroupResult j = c.joinGroup("g", java.util.List.of("t"), 10000);
  *   c.heartbeat("g", j.memberId, j.generation);
  *   c.leaveGroup("g", j.memberId);
@@ -518,6 +519,39 @@ public final class Client implements AutoCloseable {
         }
         Codec.OffsetCommitResponse resp = (Codec.OffsetCommitResponse) decoded;
         check(resp.errorCode, "offset_commit");
+    }
+
+    /**
+     * List earliest/latest offsets for every partition of {@code topic}
+     * (native opcode 48; empty partition list on the wire).
+     */
+    public List<OffsetListing> listOffsets(String topic) {
+        return listOffsets(topic, new int[0]);
+    }
+
+    /**
+     * List earliest/latest offsets for {@code topic} (native opcode 48).
+     *
+     * <p>An empty {@code partitions} array means all partitions (wire count 0).
+     * Non-zero {@code error_code} is {@link BrokerException}. This is not Kafka
+     * ListOffsets (no timestamp or isolation); both ends of each log are
+     * returned.
+     */
+    public List<OffsetListing> listOffsets(String topic, int... partitions) {
+        List<Integer> parts = new ArrayList<>();
+        if (partitions != null) {
+            for (int p : partitions) {
+                parts.add(p);
+            }
+        }
+        byte[] payload = Codec.encodeListOffsetsRequest(new Codec.ListOffsetsRequest(topic, parts));
+        Object decoded = roundTrip(Codec.OP_LIST_OFFSETS, payload);
+        if (!(decoded instanceof Codec.ListOffsetsResponse)) {
+            throw new ProtocolException("unexpected response for list_offsets: " + typeName(decoded));
+        }
+        Codec.ListOffsetsResponse resp = (Codec.ListOffsetsResponse) decoded;
+        check(resp.errorCode, "list_offsets");
+        return resp.entries;
     }
 
     /**

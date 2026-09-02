@@ -16,6 +16,7 @@ import io.volant.Client;
 import io.volant.GroupConsumer;
 import io.volant.Metadata;
 import io.volant.Offset;
+import io.volant.OffsetListing;
 import io.volant.Record;
 import java.util.List;
 
@@ -28,6 +29,7 @@ try (Client c = Client.connect("127.0.0.1", 9092)) {
   }
   c.offsetCommit("g", "t", 0, 5);
   List<Offset> offs = c.offsetFetch("g", "t");
+  List<OffsetListing> bounds = c.listOffsets("t"); // all; or listOffsets("t", 0)
   JoinGroupResult j = c.joinGroup("g", List.of("t"), 10000);
   c.heartbeat("g", j.memberId, j.generation);
   c.leaveGroup("g", j.memberId);
@@ -62,6 +64,9 @@ Client.connectTls("127.0.0.1", 9092, TlsOptions.ca("ca.pem"), "s3cret");
 (`offset`, `key`, `value`). `metadata()` returns brokers + topics.
 `offsetCommit` is an admin commit (empty member, generation 0).
 `offsetFetch` returns `List<Offset>` (`partition`, `offset`) for the topic.
+`listOffsets` returns `List<OffsetListing>` (`partition`, `earliest`,
+`latest`); no / empty partitions means all (native opcode 48, not
+Kafka timestamp ListOffsets).
 `joinGroup` sends empty `memberId` on first join.
 `GroupConsumer` joins, polls assigned partitions, heartbeats, commits with
 member+generation, and rejoins on heartbeat error 9.
@@ -156,4 +161,6 @@ See [docs/V23_SPEC.md](../../docs/V23_SPEC.md),
 [docs/V41_SPEC.md](../../docs/V41_SPEC.md),
 [docs/V42_SPEC.md](../../docs/V42_SPEC.md),
 [docs/V43_SPEC.md](../../docs/V43_SPEC.md), and
-[docs/V48_SPEC.md](../../docs/V48_SPEC.md).
+[docs/V48_SPEC.md](../../docs/V48_SPEC.md),
+[docs/V49_SPEC.md](../../docs/V49_SPEC.md), and
+[docs/V50_SPEC.md](../../docs/V50_SPEC.md).
