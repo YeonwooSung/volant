@@ -20,6 +20,7 @@ from volant import Client
 
 c = Client("127.0.0.1:9092")
 c.create_topic("t", partitions=1)
+c.create_partitions("t", 2)
 c.produce("t", 0, value=b"hello")
 batch = c.fetch("t", 0, offset=0)
 for offset, key, value in batch.tuples():
@@ -77,7 +78,10 @@ null key is the default. `fetch` returns a `FetchResult` (iterable of records
 with `offset`, `key`, `value`). `metadata()` returns brokers + topics.
 `offset_commit` is an admin commit (`member_id=""`, `generation=0` unless
 overridden). `offset_fetch` returns committed `(partition, offset)` pairs
-for the given topic. `list_offsets(topic, partitions=None)` returns
+for the given topic. `create_partitions(topic, total_count)` grows the topic to
+`total_count` partitions and returns the new total (native opcode 46,
+not Kafka CreatePartitions).
+`list_offsets(topic, partitions=None)` returns
 earliest/latest (`OffsetListing`) for the topic (`None` / `[]` = all
 partitions; native opcode 48, not Kafka timestamp ListOffsets).
 `join_group` sends empty `member_id` on first join
@@ -194,5 +198,6 @@ See [docs/V14_SPEC.md](../../docs/V14_SPEC.md),
 [docs/V47_SPEC.md](../../docs/V47_SPEC.md),
 [docs/V48_SPEC.md](../../docs/V48_SPEC.md),
 [docs/V49_SPEC.md](../../docs/V49_SPEC.md),
-[docs/V50_SPEC.md](../../docs/V50_SPEC.md).,
+[docs/V50_SPEC.md](../../docs/V50_SPEC.md),
+[docs/V51_SPEC.md](../../docs/V51_SPEC.md),
 [docs/V46_SPEC.md](../../docs/V46_SPEC.md).

@@ -557,6 +557,31 @@ func (c *Client) DeleteTopic(name string) error {
 	return check(resp.ErrorCode, "delete_topic")
 }
 
+// CreatePartitions grows topic to totalCount partitions (native opcode 46).
+// totalCount must exceed the current count. Returns the new total. Non-zero
+// error_code is BrokerError. This is not Kafka CreatePartitions (API key 37).
+func (c *Client) CreatePartitions(topic string, totalCount uint32) (uint32, error) {
+	payload, err := codec.EncodeCreatePartitionsRequest(codec.CreatePartitionsRequest{
+		Topic:      topic,
+		TotalCount: totalCount,
+	})
+	if err != nil {
+		return 0, err
+	}
+	decoded, err := c.roundTrip(codec.OpCreatePartitions, payload)
+	if err != nil {
+		return 0, err
+	}
+	resp, ok := decoded.(codec.CreatePartitionsResponse)
+	if !ok {
+		return 0, &frame.ProtocolError{Msg: fmt.Sprintf("unexpected response for create_partitions: %T", decoded)}
+	}
+	if err := check(resp.ErrorCode, "create_partitions"); err != nil {
+		return 0, err
+	}
+	return resp.Partitions, nil
+}
+
 // Produce sends one message (null key when key is nil) with acks=1.
 // Default trailer is (0, 0, -1). After EnableIdempotence the first produce
 // sends InitProducerId (empty transactional_id) and later produces attach

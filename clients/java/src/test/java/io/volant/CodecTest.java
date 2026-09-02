@@ -685,4 +685,33 @@ class CodecTest {
         assertEquals(2, dispatched.groups.size());
         assertEquals(Codec.GROUP_STATE_EMPTY, new Codec.GroupListing("x", 99, 0, 0).state);
     }
+
+    @Test
+    void createPartitionsRequestPayloadRs() {
+        // crates/volant-protocol/src/payload.rs
+        // phase15_create_partitions_list_offsets_roundtrip (count 4)
+        Codec.CreatePartitionsRequest req = new Codec.CreatePartitionsRequest("events", 4);
+        byte[] raw = Codec.encodeCreatePartitionsRequest(req);
+        byte[] expected = hx("0600" + "6576656e7473" + "04000000");
+        assertArrayEquals(expected, raw);
+        Codec.CreatePartitionsRequest decoded = Codec.decodeCreatePartitionsRequest(raw);
+        assertEquals("events", decoded.topic);
+        assertEquals(4, decoded.totalCount);
+    }
+
+    @Test
+    void createPartitionsResponsePayloadRs() {
+        Codec.CreatePartitionsResponse resp = new Codec.CreatePartitionsResponse(0, "events", 4);
+        byte[] raw = Codec.encodeCreatePartitionsResponse(resp);
+        byte[] expected = hx("0000" + "06006576656e7473" + "04000000");
+        assertArrayEquals(expected, raw);
+        Codec.CreatePartitionsResponse decoded = Codec.decodeCreatePartitionsResponse(raw);
+        assertEquals(0, decoded.errorCode);
+        assertEquals("events", decoded.topic);
+        assertEquals(4, decoded.partitions);
+        Codec.CreatePartitionsResponse dispatched = assertInstanceOf(
+                Codec.CreatePartitionsResponse.class,
+                Codec.decodeResponse(Codec.OP_CREATE_PARTITIONS_RESPONSE, raw));
+        assertEquals(4, dispatched.partitions);
+    }
 }

@@ -28,6 +28,8 @@ from volant.codec import (
     LeaveGroupRequest,
     LeaveGroupResponse,
     ListGroupsResponse,
+    CreatePartitionsRequest,
+    CreatePartitionsResponse,
     ListOffsetsRequest,
     ListOffsetsResponse,
     MetadataRequest,
@@ -63,6 +65,8 @@ from volant.codec import (
     decode_leave_group_response,
     decode_list_groups_request,
     decode_list_groups_response,
+    decode_create_partitions_request,
+    decode_create_partitions_response,
     decode_list_offsets_request,
     decode_list_offsets_response,
     decode_metadata_request,
@@ -92,6 +96,8 @@ from volant.codec import (
     encode_leave_group_response,
     encode_list_groups_request,
     encode_list_groups_response,
+    encode_create_partitions_request,
+    encode_create_partitions_response,
     encode_list_offsets_request,
     encode_list_offsets_response,
     encode_metadata_request,
@@ -107,6 +113,7 @@ from volant.codec import (
     OP_HEARTBEAT,
     OP_JOIN_GROUP,
     OP_LEAVE_GROUP,
+    OP_CREATE_PARTITIONS_RESPONSE,
     OP_LIST_GROUPS_RESPONSE,
     OP_LIST_OFFSETS_RESPONSE,
     OP_OFFSET_COMMIT,
@@ -784,6 +791,33 @@ class TestListOffsetsCodec(unittest.TestCase):
         self.assertEqual(_hx(raw), _hx(expected))
         self.assertEqual(decode_list_offsets_response(raw), resp)
         self.assertEqual(decode_response(OP_LIST_OFFSETS_RESPONSE, raw), resp)
+
+
+class TestCreatePartitionsCodec(unittest.TestCase):
+    def test_create_partitions_request_payload_rs_fixture(self) -> None:
+        # crates/volant-protocol/src/payload.rs
+        # phase15_create_partitions_list_offsets_roundtrip (count 4)
+        req = CreatePartitionsRequest(topic="events", total_count=4)
+        raw = encode_create_partitions_request(req)
+        expected = bytes.fromhex(
+            "0600"
+            "6576656e7473"  # "events"
+            "04000000"  # total_count 4
+        )
+        self.assertEqual(_hx(raw), _hx(expected))
+        self.assertEqual(decode_create_partitions_request(raw), req)
+
+    def test_create_partitions_response_payload_rs_fixture(self) -> None:
+        resp = CreatePartitionsResponse(error_code=0, topic="events", partitions=4)
+        raw = encode_create_partitions_response(resp)
+        expected = bytes.fromhex(
+            "0000"  # error_code
+            "06006576656e7473"
+            "04000000"  # partitions 4
+        )
+        self.assertEqual(_hx(raw), _hx(expected))
+        self.assertEqual(decode_create_partitions_response(raw), resp)
+        self.assertEqual(decode_response(OP_CREATE_PARTITIONS_RESPONSE, raw), resp)
 
 
 if __name__ == "__main__":

@@ -21,6 +21,8 @@ defer c.Close()
 if err := c.CreateTopic("t", 1); err != nil {
     log.Fatal(err)
 }
+n, err := c.CreatePartitions("t", 2)
+_ = n
 off, err := c.Produce("t", 0, nil, []byte("hello"))
 if err != nil {
     log.Fatal(err)
@@ -82,6 +84,8 @@ c, err = volant.DialTLSScram("127.0.0.1:9092", volant.TLSConfig{CAFile: "ca.pem"
 (`Offset`, `Key`, `Value`). `Metadata()` returns brokers + topics.
 `OffsetCommit` is an admin commit (empty member, generation 0).
 `OffsetFetch` returns `[]Offset` (`Partition`, `Offset`) for the topic.
+`CreatePartitions` grows the topic to `totalCount` partitions and
+returns the new total (native opcode 46, not Kafka CreatePartitions).
 `ListOffsets` returns `[]OffsetListing` (`Partition`, `Earliest`,
 `Latest`); nil / empty partitions means all (native opcode 48, not
 Kafka timestamp ListOffsets).
@@ -197,5 +201,6 @@ See [docs/V19_SPEC.md](../../docs/V19_SPEC.md),
 [docs/V47_SPEC.md](../../docs/V47_SPEC.md),
 [docs/V48_SPEC.md](../../docs/V48_SPEC.md),
 [docs/V49_SPEC.md](../../docs/V49_SPEC.md),
-[docs/V50_SPEC.md](../../docs/V50_SPEC.md).,
+[docs/V50_SPEC.md](../../docs/V50_SPEC.md),
+[docs/V51_SPEC.md](../../docs/V51_SPEC.md),
 [docs/V46_SPEC.md](../../docs/V46_SPEC.md).
