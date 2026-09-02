@@ -526,6 +526,20 @@ local generation is unchanged. Escape
 restores follower-local v0.10 write. Flag **off** is unchanged v0.10.
 See [V38_SPEC.md](./V38_SPEC.md).
 
+## v0.39 reassign rollback
+
+When `VOLANT_REASSIGN_ON_ADD=1` and the v0.34 overlay rollback runs
+(openraft **leader**, joint fail), the controller also restores
+`{data_dir}/cluster/assignment.json` and the live replica sets to the
+pre-add snapshot so a rolled-back broker id is not left in replica
+lists. Client still **`NotEnoughReplicas` (15)**.
+
+Default **on** whenever both features are on. Escape
+`VOLANT_REASSIGN_ON_ADD_ROLLBACK=0` (or `false` / `no` / `off`) keeps the
+v0.18 assignment write even if overlay rolls back. Reassign-off is
+unchanged (no extra work). In-process `add_broker` still does not rewind
+assignment (same as v0.34 overlay). See [V39_SPEC.md](./V39_SPEC.md).
+
 ## v0.35 openraft redb
 
 When `VOLANT_OPENRAFT_METADATA=1`, the openraft **log** (vote, committed,
@@ -643,6 +657,9 @@ volant topic reassign --topic events --partition 0 --broker 127.0.0.1:9092
   (v0.10). Set `VOLANT_REASSIGN_ON_ADD=1` on the controller to append
   the new id onto under-replicated partitions
   (`unique(replicas) < min(default_rf, N)`).
+- **v0.39:** if that add later rolls back the overlay (v0.34 joint fail
+  on the openraft leader), assignment is restored too unless
+  `VOLANT_REASSIGN_ON_ADD_ROLLBACK=0`.
 
 See [V18_SPEC.md](./V18_SPEC.md).
 

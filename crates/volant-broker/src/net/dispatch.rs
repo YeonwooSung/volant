@@ -12,7 +12,9 @@ use volant_protocol::{
 };
 
 use crate::broker::{Broker, MembershipOverlaySnapshot, Txn2pcFanout};
-use crate::cluster::MetadataLogEntry;
+use crate::cluster::{
+    reassign_on_add_enabled, reassign_on_add_rollback_enabled, AssignmentSnapshot, MetadataLogEntry,
+};
 
 use super::fanout::{
     complete_assignment_mutation, fanout_assignment_consensus, fanout_cluster_acl_snapshot,
@@ -1334,10 +1336,12 @@ async fn handle_request(broker: &Arc<Broker>, req: Request) -> Result<Response> 
                 .await);
             }
             let prev = broker.snapshot_membership_overlay();
+            // v0.39: snapshot assignment before add_broker may expand replicas.
+            let prev_assignment = snapshot_assignment_for_add_rollback(broker);
             match broker.add_broker(id, host, port, rack) {
                 Ok(generation) => {
                     let (error_code, generation) =
-                        after_overlay_mutation(broker, &prev, generation).await;
+                        after_overlay_mutation(broker, &prev, generation, prev_assignment).await;
                     Ok(Response::AddBroker {
                         error_code,
                         generation,
@@ -1359,7 +1363,7 @@ async fn handle_request(broker: &Arc<Broker>, req: Request) -> Result<Response> 
             match broker.remove_broker(id) {
                 Ok(generation) => {
                     let (error_code, generation) =
-                        after_overlay_mutation(broker, &prev, generation).await;
+                        after_overlay_mutation(broker, &prev, generation, None).await;
                     Ok(Response::RemoveBroker {
                         error_code,
                         generation,
@@ -1996,14 +2000,30 @@ async fn forward_membership_to_leader(broker: &Broker, req: Request) -> Response
     }
 }
 
+/// Snapshot live assignment before `add_broker` may expand replicas (v0.39).
+///
+/// No-op when reassign-on-add is off or the rollback escape is set.
+fn snapshot_assignment_for_add_rollback(broker: &Broker) -> Option<AssignmentSnapshot> {
+    if reassign_on_add_enabled() && reassign_on_add_rollback_enabled() {
+        broker.clone_live_assignment()
+    } else {
+        None
+    }
+}
+
 /// After overlay add/remove: leader joint-sync (rollback on fail) or v0.26
 /// best-effort. Followers with openraft + forward on never reach here
 /// (v0.38). Flag-off and `VOLANT_OPENRAFT_FORWARD_MEMBERSHIP=0` keep
 /// persist + MembershipPut.
+///
+/// `prev_assignment` is the pre-add snapshot (AddBroker + reassign-on-add).
+/// On overlay rollback it is restored to `assignment.json` + live state so a
+/// dropped broker id is not left in replica sets (v0.39).
 async fn after_overlay_mutation(
     broker: &Broker,
     prev: &MembershipOverlaySnapshot,
     generation: u64,
+    prev_assignment: Option<AssignmentSnapshot>,
 ) -> (u16, u64) {
     if broker.openraft_joint_rollback_armed() {
         if broker.change_openraft_membership().await {
@@ -2015,6 +2035,15 @@ async fn after_overlay_mutation(
                     error = %e,
                     "openraft joint rollback failed to restore overlay"
                 );
+            }
+            if let Some(ref snap) = prev_assignment {
+                let expected_gen = broker.generation();
+                if let Err(e) = broker.restore_live_assignment(snap, expected_gen) {
+                    warn!(
+                        error = %e,
+                        "openraft joint rollback failed to restore assignment"
+                    );
+                }
             }
             (
                 ErrorCode::NotEnoughReplicas as u16,

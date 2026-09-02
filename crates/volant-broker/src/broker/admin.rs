@@ -151,6 +151,9 @@ impl Broker {
         drop(cfg);
         // Endpoint is configured immediately; live only after heartbeat.
         // v0.18: opt-in expand of under-replicated topics onto the new id.
+        // v0.39: dispatch restores assignment.json when joint overlay rolls back
+        // (`VOLANT_REASSIGN_ON_ADD_ROLLBACK` default on). In-process callers
+        // stay v0.18 (no assignment rewind).
         if crate::cluster::reassign_on_add_enabled() && self.is_controller() {
             if let Err(e) = self.auto_reassign_after_add(id) {
                 warn!(
