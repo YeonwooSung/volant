@@ -114,6 +114,9 @@ pub enum ResponseOpcode {
     OpenraftAppend = 109,
     /// Inter-broker openraft RequestVote result (v0.11).
     OpenraftVote = 111,
+    // 112/113 reserved for openraft snapshot sibling.
+    /// Reassign partitions result (v0.18).
+    ReassignPartitions = 115,
     /// Error response.
     Error = 0xFFFF,
 }
@@ -176,6 +179,7 @@ impl ResponseOpcode {
             107 => Self::ListMembers,
             109 => Self::OpenraftAppend,
             111 => Self::OpenraftVote,
+            115 => Self::ReassignPartitions,
             0xFFFF => Self::Error,
             _ => return None,
         })
@@ -840,6 +844,13 @@ pub enum Response {
         /// `serde_json` of openraft `VoteResponse`.
         payload: Bytes,
     },
+    /// Reassign partitions result (v0.18).
+    ReassignPartitions {
+        /// 0 = ok.
+        error_code: u16,
+        /// Assignment generation after apply (`0` on error).
+        generation: u32,
+    },
     /// Error response.
     Error {
         /// Error code.
@@ -933,6 +944,7 @@ impl Response {
             Self::ListMembers { .. } => ResponseOpcode::ListMembers as u16,
             Self::OpenraftAppend { .. } => ResponseOpcode::OpenraftAppend as u16,
             Self::OpenraftVote { .. } => ResponseOpcode::OpenraftVote as u16,
+            Self::ReassignPartitions { .. } => ResponseOpcode::ReassignPartitions as u16,
             Self::Error { .. } => ResponseOpcode::Error as u16,
         }
     }

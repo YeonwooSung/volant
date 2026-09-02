@@ -494,9 +494,34 @@ volant cluster members --broker 127.0.0.1:9092
 
 - New brokers are **configured immediately**, **live on heartbeat**.
 - Majority N follows the overlay (add increases N; remove decreases N).
-- Existing topic replicas are **not** moved onto a new broker.
+- Existing topic replicas are **not** moved onto a new broker unless you
+  reassign (v0.18) or set `VOLANT_REASSIGN_ON_ADD=1`.
 - Push is **best-effort** (`MembershipPut` 100/101); no majority wait.
 - Not Raft joint consensus. Isolated nodes can both accept add.
+
+## v0.18 reassign
+
+Move (or expand) topic replicas after membership changes. Native admin
+opcodes **114/115** — not a Kafka API key.
+
+```bash
+# Explicit replica set (all partitions of the topic)
+volant topic reassign --topic events --replicas 1,2,3 --broker 127.0.0.1:9092
+
+# One partition; omit --replicas to auto-place with current membership
+volant topic reassign --topic events --partition 0 --broker 127.0.0.1:9092
+```
+
+- Controller-only. Unknown topic / replica id not in membership / empty
+  computed set are rejected.
+- New replicas start **empty** (LEO=0) and catch up via ReplicaFetch.
+  There is no live segment copy in this MVP.
+- Default AddBroker still does **not** rewrite existing replica sets
+  (v0.10). Set `VOLANT_REASSIGN_ON_ADD=1` on the controller to append
+  the new id onto under-replicated partitions
+  (`unique(replicas) < min(default_rf, N)`).
+
+See [V18_SPEC.md](./V18_SPEC.md).
 
 ## v0.12 cluster metadata topic
 

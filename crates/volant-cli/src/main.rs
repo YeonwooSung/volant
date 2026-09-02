@@ -199,6 +199,21 @@ enum TopicCmd {
         #[arg(long, default_value = "127.0.0.1:9092")]
         broker: String,
     },
+    /// Reassign partition replicas (v0.18). Empty `--replicas` auto-places.
+    Reassign {
+        /// Topic name.
+        #[arg(long)]
+        topic: String,
+        /// Optional partition (omit = all partitions).
+        #[arg(long)]
+        partition: Option<u32>,
+        /// Comma-separated replica broker ids (e.g. `1,2,3`). Omit to auto-place.
+        #[arg(long)]
+        replicas: Option<String>,
+        /// Broker address.
+        #[arg(long, default_value = "127.0.0.1:9092")]
+        broker: String,
+    },
 }
 
 #[derive(Debug, Subcommand)]
@@ -636,6 +651,35 @@ async fn main() -> Result<()> {
                         "{}\tp{}\tearliest={}\tlatest={}",
                         res.topic, e.partition, e.earliest, e.latest
                     );
+                }
+            }
+            TopicCmd::Reassign {
+                topic,
+                partition,
+                replicas,
+                broker,
+            } => {
+                let client = connect(&broker, auth).await?;
+                let ids = parse_replica_list(replicas.as_deref())?;
+                let gen = client
+                    .reassign_partitions(&topic, partition, &ids)
+                    .await
+                    .with_context(|| format!("reassign topic '{topic}'"))?;
+                match (partition, ids.as_slice()) {
+                    (Some(p), []) => {
+                        println!("reassigned {topic}/p{p} auto generation={gen}")
+                    }
+                    (Some(p), ids) => {
+                        println!("reassigned {topic}/p{p} replicas={ids:?} generation={gen}")
+                    }
+                    (None, []) => {
+                        println!("reassigned {topic} (all partitions) auto generation={gen}")
+                    }
+                    (None, ids) => {
+                        println!(
+                            "reassigned {topic} (all partitions) replicas={ids:?} generation={gen}"
+                        )
+                    }
                 }
             }
         },
@@ -1153,6 +1197,27 @@ async fn main() -> Result<()> {
         }
     }
     Ok(())
+}
+
+/// Parse `--replicas 1,2,3`. Empty / omitted → auto-place (`[]`).
+fn parse_replica_list(raw: Option<&str>) -> Result<Vec<u32>> {
+    let Some(s) = raw.map(str::trim).filter(|s| !s.is_empty()) else {
+        return Ok(Vec::new());
+    };
+    let mut out = Vec::new();
+    for part in s.split(',') {
+        let t = part.trim();
+        if t.is_empty() {
+            continue;
+        }
+        let id = t
+            .parse::<u32>()
+            .with_context(|| format!("invalid replica id '{t}'"))?;
+        if !out.contains(&id) {
+            out.push(id);
+        }
+    }
+    Ok(out)
 }
 
 fn parse_resource_type_u8(s: &str) -> Result<u8> {

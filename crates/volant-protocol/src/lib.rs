@@ -18,7 +18,7 @@ pub use payload::{
 };
 pub use request::{
     metadata_raft_cmd, AclBinding, MembershipBroker, MetadataRaftLogEntry, OffsetCommitEntry,
-    OffsetEntry, ProduceMessage, Request, RequestOpcode, TxnOffsetCommit,
+    OffsetEntry, ProduceMessage, Request, RequestOpcode, TxnOffsetCommit, REASSIGN_ALL_PARTITIONS,
 };
 pub use response::{
     Assignment, BrokerInfo, ClusterPartitionState, ClusterTopicState, ErrorCode, FetchRecord,

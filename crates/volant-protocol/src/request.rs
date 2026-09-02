@@ -116,6 +116,9 @@ pub enum RequestOpcode {
     OpenraftAppend = 108,
     /// Inter-broker openraft RequestVote (v0.11).
     OpenraftVote = 110,
+    // 112/113 reserved for openraft snapshot sibling.
+    /// Admin: reassign topic partition replicas (v0.18).
+    ReassignPartitions = 114,
 }
 
 impl RequestOpcode {
@@ -176,6 +179,7 @@ impl RequestOpcode {
             106 => Self::ListMembers,
             108 => Self::OpenraftAppend,
             110 => Self::OpenraftVote,
+            114 => Self::ReassignPartitions,
             _ => return None,
         })
     }
@@ -712,7 +716,24 @@ pub enum Request {
         /// `serde_json` of openraft `VoteRequest`.
         payload: Bytes,
     },
+    /// Admin: reassign replicas for a topic (or one partition) (v0.18).
+    ///
+    /// Empty `replicas` means auto-place with the current effective broker list
+    /// (same placement as CreateTopic). `partition ==`
+    /// [`REASSIGN_ALL_PARTITIONS`] applies to every partition of the topic.
+    ReassignPartitions {
+        /// Topic name.
+        topic: String,
+        /// Partition id, or [`REASSIGN_ALL_PARTITIONS`] for every partition.
+        partition: u32,
+        /// Explicit replica broker ids (order = preferred leader first).
+        /// Empty → auto-recompute.
+        replicas: Vec<u32>,
+    },
 }
+
+/// `ReassignPartitions.partition` sentinel: apply to every partition of the topic.
+pub const REASSIGN_ALL_PARTITIONS: u32 = u32::MAX;
 
 /// One broker endpoint on the membership overlay wire (v0.10).
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -808,6 +829,7 @@ impl Request {
             Self::ListMembers => RequestOpcode::ListMembers as u16,
             Self::OpenraftAppend { .. } => RequestOpcode::OpenraftAppend as u16,
             Self::OpenraftVote { .. } => RequestOpcode::OpenraftVote as u16,
+            Self::ReassignPartitions { .. } => RequestOpcode::ReassignPartitions as u16,
         }
     }
 }

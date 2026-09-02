@@ -15,6 +15,26 @@ pub fn topic_hash(name: &str) -> u32 {
     h
 }
 
+/// Env flag: auto-expand under-replicated topics after `AddBroker` (v0.18).
+pub const ENV_REASSIGN_ON_ADD: &str = "VOLANT_REASSIGN_ON_ADD";
+
+/// Whether the controller should expand replica sets after a successful add.
+///
+/// Default **off**. Set `VOLANT_REASSIGN_ON_ADD=1` (or `true`/`yes`/`on`) to
+/// opt in. New replicas start empty (no live segment copy).
+pub fn reassign_on_add_enabled() -> bool {
+    match std::env::var(ENV_REASSIGN_ON_ADD) {
+        Ok(s) => {
+            let t = s.trim();
+            t == "1"
+                || t.eq_ignore_ascii_case("true")
+                || t.eq_ignore_ascii_case("yes")
+                || t.eq_ignore_ascii_case("on")
+        }
+        Err(_) => false,
+    }
+}
+
 /// Whether rack-aware diversity is enabled (Phase 145).
 ///
 /// Default **on**. Set `VOLANT_RACK_AWARE_ASSIGNMENT=0` (or `false`/`no`/`off`)

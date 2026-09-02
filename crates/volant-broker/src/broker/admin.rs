@@ -94,7 +94,18 @@ impl Broker {
         cluster
             .membership_generation
             .store(generation, Ordering::Relaxed);
+        drop(cfg);
         // Endpoint is configured immediately; live only after heartbeat.
+        // v0.18: opt-in expand of under-replicated topics onto the new id.
+        if crate::cluster::reassign_on_add_enabled() && self.is_controller() {
+            if let Err(e) = self.auto_reassign_after_add(id) {
+                warn!(
+                    new_id = id,
+                    error = %e,
+                    "auto reassign after add-broker failed"
+                );
+            }
+        }
         Ok(generation)
     }
 

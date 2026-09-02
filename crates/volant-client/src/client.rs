@@ -1345,6 +1345,38 @@ impl Client {
         }
     }
 
+    /// Reassign replicas for a topic (or one partition) (v0.18).
+    ///
+    /// `partition = None` updates every partition. Empty `replicas` asks the
+    /// controller to auto-place with the current membership.
+    pub async fn reassign_partitions(
+        &self,
+        topic: &str,
+        partition: Option<u32>,
+        replicas: &[u32],
+    ) -> Result<u32> {
+        let resp = self
+            .round_trip(Request::ReassignPartitions {
+                topic: topic.to_owned(),
+                partition: partition.unwrap_or(volant_protocol::REASSIGN_ALL_PARTITIONS),
+                replicas: replicas.to_vec(),
+            })
+            .await?;
+        match resp {
+            Response::ReassignPartitions {
+                error_code,
+                generation,
+            } => {
+                check_ok(error_code, "reassign_partitions")?;
+                Ok(generation)
+            }
+            Response::Error { code, message } => Err(error_from_code(code, message)),
+            other => Err(Error::Protocol(format!(
+                "unexpected response for reassign_partitions: {other:?}"
+            ))),
+        }
+    }
+
     /// List configured + live membership (v0.10).
     pub async fn list_members(&self) -> Result<MembershipList> {
         let resp = self.round_trip(Request::ListMembers).await?;
