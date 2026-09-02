@@ -229,6 +229,11 @@ docs for day-to-day reading: [ops](../ops.md), [consistency](../consistency.md),
 | v0.28 | ✅ | JoinGroup/Heartbeat/LeaveGroup on native clients | [V28_SPEC.md](../V28_SPEC.md) |
 | v0.29 | ✅ | Cluster DeleteRecords wait-off safety | [V29_SPEC.md](../V29_SPEC.md) |
 | v0.30 | ✅ | Fetch-session mirror-only self-converge | [V30_SPEC.md](../V30_SPEC.md) |
+| v0.31 | ✅ | Python GroupConsumer (join/poll/commit) | [V31_SPEC.md](../V31_SPEC.md) |
+| v0.32 | ✅ | Go GroupConsumer (join/poll/commit) | [V32_SPEC.md](../V32_SPEC.md) |
+| v0.33 | ✅ | Java offset commit/fetch + GroupConsumer | [V33_SPEC.md](../V33_SPEC.md) |
+| v0.34 | ✅ | Rollback overlay if openraft joint fails | [V34_SPEC.md](../V34_SPEC.md) |
+| v0.35 | ✅ | Store openraft log in redb | [V35_SPEC.md](../V35_SPEC.md) |
 
 ---
 

@@ -1,6 +1,6 @@
 # Volant residual TODO (review loop)
 
-**Baseline:** HEAD product = **Phases 0–154** + residuals **v0.3–v0.30**.  
+**Baseline:** HEAD product = **Phases 0–154** + residuals **v0.3–v0.35**.  
 **Last review:** 2026-09-02  
 
 Living roadmap: [ROADMAP.md](./ROADMAP.md).  
@@ -61,14 +61,14 @@ Phase index: [docs/history/PHASE_HISTORY.md](./docs/history/PHASE_HISTORY.md).
 | **P3** | Preferred **throttling / TCP probe** | **closed (v0.7)** — opt-in `throttle_time_ms` + TCP connect probe |
 | **P3** | Kafka DeleteRecords **per-request** wait | **closed (v0.6)** — flex v2 tag 0; v0–1 env-only |
 | **P3** | Cross-app EOS fencing | **closed (v0.8)** — optional `application_id` fence id |
-| **Later** | Full **openraft** crate integration | **v0.11–v0.17 + durable log (v0.21) + snapshot apply (v0.22)** — JSON files, not Rocks/KRaft |
+| **Later** | Full **openraft** crate integration | **v0.11–v0.26 + redb log (v0.35) + joint rollback (v0.34)** — not RocksDB/KRaft |
 | **Later** | **Dynamic membership** reconfiguration | **overlay v0.10 + openraft joint v0.26** — overlay still SoT; change_membership best-effort |
 | **Later** | Full **KIP-890 / `__transaction_state`** | **log MVP closed (v0.13)** — opt-in JSON topic; not Kafka schemas |
-| **Later** | **Multi-language clients** | **Python/Go/Java** + offsets **v0.24** + TLS **v0.27** + JoinGroup **v0.28**; no high-level consumer |
+| **Later** | **Multi-language clients** | **Python/Go/Java GroupConsumer v0.31–v0.33**; not kafka-python / assignor |
 | **Later** | **Long fuzz + chaos-mesh** | **MVP closed (v0.15)** — extended corpus + Chaos Mesh YAML + A→B isolate |
 | **Later** | **Perf campaign** vs aspirational targets | **closed (v0.2 PR2)** — measured table published; group-commit **v0.20** (opt-in, no new bench) |
 
-**Default next slice:** openraft Rocks store, or high-level GroupConsumer. Homemade Raft election / InstallSnapshot-on-154 / Phase 155 is **not** the next product bet. Do not open Phase 155.
+**Default next slice:** high-level assignor / static membership on clients, or openraft RocksDB if redb is not enough. Homemade Raft election / InstallSnapshot-on-154 / Phase 155 is **not** the next product bet. Do not open Phase 155.
 
 ---
 
@@ -116,6 +116,11 @@ Phase index: [docs/history/PHASE_HISTORY.md](./docs/history/PHASE_HISTORY.md).
 - [x] JoinGroup/Heartbeat/LeaveGroup on native clients → **v0.28**
 - [x] Cluster DeleteRecords wait-off safety → **v0.29**
 - [x] Fetch-session mirror-only self-converge → **v0.30**
+- [x] Python GroupConsumer → **v0.31**
+- [x] Go GroupConsumer → **v0.32**
+- [x] Java offsets + GroupConsumer → **v0.33**
+- [x] Rollback overlay if openraft joint fails → **v0.34**
+- [x] openraft log in redb → **v0.35**
 
 ---
 
@@ -124,7 +129,7 @@ Phase index: [docs/history/PHASE_HISTORY.md](./docs/history/PHASE_HISTORY.md).
 ### Metadata / consensus
 - [x] True **openraft** leader election + term contests (v0.11 opt-in; default still lowest-id)
 - [x] **InstallSnapshot** / log truncation on **openraft** (v0.17; homemade 154 still frozen)
-- [x] **Dynamic membership** overlay add/remove (v0.10) + openraft joint (v0.26; overlay still SoT)
+- [x] **Dynamic membership** overlay (v0.10) + joint (v0.26) + rollback on raft fail (v0.34; leader path)
 - [x] Rollback **local** assignment file when wait/committed-only majority misses (v0.3 residual; `!must_wait` still retains local)
 - [x] Kafka CreateTopics / DeleteTopics / CreatePartitions honor the same wait/rollback (v0.4; majority miss → Kafka **19**)
 - [x] v0.5 ops confidence (unwritable dir / isolate leader / in-flight acks=all)
@@ -139,7 +144,7 @@ Phase index: [docs/history/PHASE_HISTORY.md](./docs/history/PHASE_HISTORY.md).
 - [x] `__transaction_state` log MVP (v0.13; Volant JSON; not Kafka KIP-890/939 schemas)
 - [x] Kafka DeleteRecords **per-request** wait flag (v0.6 flex v2 tag 0; v0–1 env-only)
 - [x] Preferred selector **throttling** / TCP probe (v0.7; opt-in, not Kafka quota)
-- [x] Multi-language clients — Python/Go/Java + offsets v0.24 + TLS v0.27 + JoinGroup v0.28; not kafka-python / high-level consumer
+- [x] Multi-language clients — Python/Go/Java GroupConsumer (v0.31–v0.33); not kafka-python / custom assignor
 - [x] Long fuzz campaigns + chaos-mesh MVP (v0.15; corpus + YAML + A→B isolate; not multi-hour CI)
 - [x] Published perf numbers vs aspirational table; group-commit **v0.20** (opt-in)
 
@@ -166,5 +171,6 @@ Phase index: [docs/history/PHASE_HISTORY.md](./docs/history/PHASE_HISTORY.md).
 | v0.16–v0.20 | **Shipped** — openraft apply + snapshot; reassign; Go client; group-commit |
 | v0.21–v0.25 | **Shipped** — durable openraft; snapshot apply; Java client; client offsets; dual-epoch |
 | v0.26–v0.30 | **Shipped** — openraft joint; client TLS; JoinGroup; wait-off safety; mirror converge |
+| v0.31–v0.35 | **Shipped** — Python/Go/Java GroupConsumer; joint rollback; openraft redb |
 
 **How to use this file:** mark new work by phase number in ROADMAP + PHASE*_SPEC; fold completed rows into “Closed checklist”; keep “Still open” as the only honesty surface for operators and contributors.
