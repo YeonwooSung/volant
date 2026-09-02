@@ -1,6 +1,6 @@
 # Volant residual TODO (review loop)
 
-**Baseline:** HEAD product = **Phases 0–154** + residuals **v0.3–v0.55**.  
+**Baseline:** HEAD product = **Phases 0–154** + residuals **v0.3–v0.60**.  
 **Last review:** 2026-09-02  
 
 Living roadmap: [ROADMAP.md](./ROADMAP.md).  
@@ -64,11 +64,11 @@ Phase index: [docs/history/PHASE_HISTORY.md](./docs/history/PHASE_HISTORY.md).
 | **Later** | Full **openraft** crate integration | **v0.11–v0.26 + redb log (v0.35) + joint rollback (v0.34) + follower forward (v0.38)** — not RocksDB/KRaft |
 | **Later** | **Dynamic membership** reconfiguration | **overlay v0.10 + joint v0.26 + rollback v0.34 + follower forward v0.38 + reassign rollback v0.39** — overlay still SoT |
 | **Later** | Full **KIP-890 / `__transaction_state`** | **log MVP closed (v0.13)** — opt-in JSON topic; not Kafka schemas |
-| **Later** | **Multi-language clients** | **Python/Go/Java through v0.55** (GroupConsumer + SCRAM handshake + idempotent produce + auto-commit + List/DescribeGroup + ListOffsets + CreatePartitions + DeleteRecords + Describe/AlterConfigs + DeleteOffsets + SCRAM admin); not kafka-python / SyncGroup / txn produce |
+| **Later** | **Multi-language clients** | **Python/Go/Java through v0.59** + Rust auto-commit **v0.60** (admin ACLs / txn / membership / reassign included); not kafka-python / SyncGroup |
 | **Later** | **Long fuzz + chaos-mesh** | **MVP closed (v0.15)** — extended corpus + Chaos Mesh YAML + A→B isolate |
 | **Later** | **Perf campaign** vs aspirational targets | **closed (v0.2 PR2)** — measured table published; group-commit **v0.20** (opt-in, no new bench) |
 
-**Default next slice:** language-client ACLs / BeginTxn-EndTxn / AddBroker-ListMembers / ReassignPartitions, or openraft RocksDB if redb is not enough. Homemade Raft election / InstallSnapshot-on-154 / Phase 155 is **not** the next product bet. Do not open Phase 155.
+**Default next slice:** openraft RocksDB if redb is not enough, language-client produce retry, or SyncGroup (needs a member list — no new Kafka keys). Homemade Raft election / InstallSnapshot-on-154 / Phase 155 is **not** the next product bet. Do not open Phase 155.
 
 ---
 
@@ -141,6 +141,11 @@ Phase index: [docs/history/PHASE_HISTORY.md](./docs/history/PHASE_HISTORY.md).
 - [x] DescribeConfigs and AlterConfigs on Python/Go/Java → **v0.53**
 - [x] DeleteOffsets on Python/Go/Java clients → **v0.54**
 - [x] Create/Delete/ListScramUsers on Python/Go/Java → **v0.55**
+- [x] Create/Delete/ListAcls on Python/Go/Java → **v0.56**
+- [x] BeginTxn/EndTxn on Python/Go/Java → **v0.57**
+- [x] AddBroker/RemoveBroker/ListMembers on Python/Go/Java → **v0.58**
+- [x] ReassignPartitions on Python/Go/Java → **v0.59**
+- [x] Rust GroupConsumer auto-commit → **v0.60**
 
 ---
 
@@ -164,7 +169,7 @@ Phase index: [docs/history/PHASE_HISTORY.md](./docs/history/PHASE_HISTORY.md).
 - [x] `__transaction_state` log MVP (v0.13; Volant JSON; not Kafka KIP-890/939 schemas)
 - [x] Kafka DeleteRecords **per-request** wait flag (v0.6 flex v2 tag 0; v0–1 env-only)
 - [x] Preferred selector **throttling** / TCP probe (v0.7; opt-in, not Kafka quota)
-- [x] Multi-language clients — Python/Go/Java through v0.55 (GroupConsumer + SCRAM handshake + idempotent produce + auto-commit + List/DescribeGroup + ListOffsets + CreatePartitions + DeleteRecords + Describe/AlterConfigs + DeleteOffsets + SCRAM admin); not kafka-python / SyncGroup / txn produce
+- [x] Multi-language clients — Python/Go/Java through v0.59 (incl. ACLs, BeginTxn/EndTxn, membership, reassign) + Rust auto-commit **v0.60**; not kafka-python / SyncGroup
 - [x] Long fuzz campaigns + chaos-mesh MVP (v0.15; corpus + YAML + A→B isolate; not multi-hour CI)
 - [x] Published perf numbers vs aspirational table; group-commit **v0.20** (opt-in)
 
@@ -174,10 +179,11 @@ Phase index: [docs/history/PHASE_HISTORY.md](./docs/history/PHASE_HISTORY.md).
 - Metadata raft wait-commit default **on** (v0.40): CreateTopic waits for `commit_index` else rollback + **15**; escape `VOLANT_METADATA_RAFT_WAIT_COMMIT=0` (Phase 154 tests)
 - Local `assignor="range"` is solo-member only (JoinGroup has no member list / no SyncGroup)
 - Language-client SCRAM handshake is **SHA-256** only (v0.46); admin Create/Delete/ListScramUsers are native **64–69** (v0.55); password is sent in the clear on create (use TLS); not Kafka SASL / AlterUserScramCredentials
-- Idempotent produce is native **32/33** with empty `transactional_id` (v0.47); no BeginTxn / EndTxn
-- Auto-commit is poll-tied and default **off** (v0.48); not Kafka `enable.auto.commit`; Rust GroupConsumer is still explicit-only
+- Idempotent produce is native **32/33** (v0.47); BeginTxn/EndTxn are native **50–53** (v0.57) and need `transactional_id`. Not Kafka txn API keys
+- Auto-commit is poll-tied and default **off** (language **v0.48**, Rust **v0.60**); not Kafka `enable.auto.commit`
 - ListOffsets is native **48/49** (v0.50); `latest` is LEO; no isolation / timestamp
-- CreatePartitions **46/47** (v0.51) cannot shrink; DeleteRecords **44/45** (v0.52) does not auto-redirect error 13; Describe/AlterConfigs **40–43** (v0.53) are topic-only; DeleteOffsets **38/39** (v0.54) has no DeleteGroups opcode. ACLs / BeginTxn / AddBroker stay Rust/CLI
+- CreatePartitions **46/47** (v0.51) cannot shrink; DeleteRecords **44/45** (v0.52) does not auto-redirect error 13; Describe/AlterConfigs **40–43** (v0.53) are topic-only; DeleteOffsets **38/39** (v0.54) has no DeleteGroups opcode
+- ACLs are native **54–59** (v0.56), exact-match delete only. Membership **102–107** (v0.58) and Reassign **114/115** (v0.59) do not change overlay-as-SoT
 
 ---
 
@@ -202,5 +208,6 @@ Phase index: [docs/history/PHASE_HISTORY.md](./docs/history/PHASE_HISTORY.md).
 | v0.41–v0.45 | **Shipped** — client range assignor; shared-token Auth; leader redirect; Rust heartbeat; wait-off ACK |
 | v0.46–v0.50 | **Shipped** — client SCRAM-SHA-256; idempotent produce; auto-commit; List/DescribeGroup; ListOffsets |
 | v0.51–v0.55 | **Shipped** — CreatePartitions; DeleteRecords; Describe/AlterConfigs; DeleteOffsets; SCRAM admin |
+| v0.56–v0.60 | **Shipped** — client ACLs; BeginTxn/EndTxn; membership admin; ReassignPartitions; Rust auto-commit |
 
 **How to use this file:** mark new work by phase number in ROADMAP + PHASE*_SPEC; fold completed rows into “Closed checklist”; keep “Still open” as the only honesty surface for operators and contributors.

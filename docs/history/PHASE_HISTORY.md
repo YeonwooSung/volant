@@ -254,6 +254,11 @@ docs for day-to-day reading: [ops](../ops.md), [consistency](../consistency.md),
 | v0.53 | ✅ | DescribeConfigs and AlterConfigs on Python/Go/Java | [V53_SPEC.md](../V53_SPEC.md) |
 | v0.54 | ✅ | DeleteOffsets on Python/Go/Java clients | [V54_SPEC.md](../V54_SPEC.md) |
 | v0.55 | ✅ | Create/Delete/ListScramUsers on Python/Go/Java | [V55_SPEC.md](../V55_SPEC.md) |
+| v0.56 | ✅ | Create/Delete/ListAcls on Python/Go/Java | [V56_SPEC.md](../V56_SPEC.md) |
+| v0.57 | ✅ | BeginTxn/EndTxn on Python/Go/Java | [V57_SPEC.md](../V57_SPEC.md) |
+| v0.58 | ✅ | AddBroker/RemoveBroker/ListMembers on Python/Go/Java | [V58_SPEC.md](../V58_SPEC.md) |
+| v0.59 | ✅ | ReassignPartitions on Python/Go/Java | [V59_SPEC.md](../V59_SPEC.md) |
+| v0.60 | ✅ | Rust GroupConsumer auto-commit | [V60_SPEC.md](../V60_SPEC.md) |
 
 ---
 
