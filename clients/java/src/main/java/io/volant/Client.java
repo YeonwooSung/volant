@@ -799,16 +799,44 @@ public final class Client implements AutoCloseable {
 
     /**
      * List configured + live membership (native opcode 106/107). Overlay is
-     * still SoT.
+     * still SoT. Transient broker/transport errors retry up to {@code
+     * maxRetries} extra times (default 0). Error 2 / 9 / 10 / 11 / 13 / 14
+     * are not retried.
      */
     public MembershipList listMembers() {
-        Object decoded = roundTrip(Codec.OP_LIST_MEMBERS, Codec.encodeListMembersRequest());
-        if (!(decoded instanceof Codec.ListMembersResponse)) {
-            throw new ProtocolException("unexpected response for list_members: " + typeName(decoded));
+        byte[] payload = Codec.encodeListMembersRequest();
+        int retryAttempt = 0;
+        while (true) {
+            Object decoded;
+            try {
+                decoded = roundTrip(Codec.OP_LIST_MEMBERS, payload);
+            } catch (BrokerException e) {
+                if (isTransientBroker(e.code) && retryAttempt < maxRetries) {
+                    retryAttempt++;
+                    sleepProduceRetry();
+                    continue;
+                }
+                throw e;
+            } catch (RuntimeException e) {
+                if (isTransientTransport(e) && retryAttempt < maxRetries) {
+                    retryAttempt++;
+                    sleepProduceRetry();
+                    continue;
+                }
+                throw e;
+            }
+            if (!(decoded instanceof Codec.ListMembersResponse)) {
+                throw new ProtocolException("unexpected response for list_members: " + typeName(decoded));
+            }
+            Codec.ListMembersResponse resp = (Codec.ListMembersResponse) decoded;
+            if (isTransientBroker(resp.errorCode) && retryAttempt < maxRetries) {
+                retryAttempt++;
+                sleepProduceRetry();
+                continue;
+            }
+            check(resp.errorCode, "list_members");
+            return new MembershipList(resp.generation, resp.brokers, resp.live);
         }
-        Codec.ListMembersResponse resp = (Codec.ListMembersResponse) decoded;
-        check(resp.errorCode, "list_members");
-        return new MembershipList(resp.generation, resp.brokers, resp.live);
     }
 
     public int reassignPartitions(String topic, int... replicas) {
@@ -1784,14 +1812,39 @@ public final class Client implements AutoCloseable {
         }
     }
 
-    /** Cluster brokers and topics (all topics). */
+    /**
+     * Cluster brokers and topics (all topics). Transient broker/transport
+     * errors retry up to {@code maxRetries} extra times (default 0). Native
+     * Metadata has no top-level {@code error_code}; failures arrive as Error
+     * opcode / transport. Error 2 / 9 / 10 / 11 / 13 / 14 are not retried.
+     */
     public Metadata metadata() {
         byte[] payload = Codec.encodeMetadataRequest(new Codec.MetadataRequest(Collections.emptyList()));
-        Object decoded = roundTrip(Codec.OP_METADATA, payload);
-        if (!(decoded instanceof Metadata)) {
-            throw new ProtocolException("unexpected response for metadata: " + typeName(decoded));
+        int retryAttempt = 0;
+        while (true) {
+            Object decoded;
+            try {
+                decoded = roundTrip(Codec.OP_METADATA, payload);
+            } catch (BrokerException e) {
+                if (isTransientBroker(e.code) && retryAttempt < maxRetries) {
+                    retryAttempt++;
+                    sleepProduceRetry();
+                    continue;
+                }
+                throw e;
+            } catch (RuntimeException e) {
+                if (isTransientTransport(e) && retryAttempt < maxRetries) {
+                    retryAttempt++;
+                    sleepProduceRetry();
+                    continue;
+                }
+                throw e;
+            }
+            if (!(decoded instanceof Metadata)) {
+                throw new ProtocolException("unexpected response for metadata: " + typeName(decoded));
+            }
+            return (Metadata) decoded;
         }
-        return (Metadata) decoded;
     }
 
     private static String typeName(Object o) {

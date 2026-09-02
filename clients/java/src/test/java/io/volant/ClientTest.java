@@ -320,6 +320,8 @@ class ClientTest {
         final List<Integer> listOffsetsCodes = new CopyOnWriteArrayList<>();
         final List<Integer> describeGroupCodes = new CopyOnWriteArrayList<>();
         final List<Integer> listGroupsCodes = new CopyOnWriteArrayList<>();
+        final List<Integer> metadataCodes = new CopyOnWriteArrayList<>();
+        final List<Integer> listMembersCodes = new CopyOnWriteArrayList<>();
         volatile Metadata meta = new Metadata(Collections.emptyList(), Collections.emptyList());
         final List<Integer> opcodes = new CopyOnWriteArrayList<>();
         final List<Codec.ProduceRequest> produceReqs = new CopyOnWriteArrayList<>();
@@ -336,6 +338,7 @@ class ClientTest {
         final AtomicInteger listOffsetsCount = new AtomicInteger();
         final AtomicInteger describeGroupCount = new AtomicInteger();
         final AtomicInteger listGroupsCount = new AtomicInteger();
+        final AtomicInteger listMembersCount = new AtomicInteger();
         final AtomicInteger metadataCount = new AtomicInteger();
         final AtomicInteger acceptCount = new AtomicInteger();
         volatile long initPid = 42L;
@@ -515,8 +518,27 @@ class ClientTest {
                 return Codec.encodeListGroupsResponse(
                         new Codec.ListGroupsResponse(code, Collections.emptyList()));
             }
+            if (frame.opcode == Codec.OP_LIST_MEMBERS) {
+                listMembersCount.incrementAndGet();
+                int code = 0;
+                if (!listMembersCodes.isEmpty()) {
+                    code = listMembersCodes.remove(0);
+                }
+                replyOp[0] = Codec.OP_LIST_MEMBERS_RESPONSE;
+                return Codec.encodeListMembersResponse(
+                        new Codec.ListMembersResponse(
+                                code, 0, Collections.emptyList(), Collections.emptyList()));
+            }
             if (frame.opcode == Codec.OP_METADATA) {
                 metadataCount.incrementAndGet();
+                int code = 0;
+                if (!metadataCodes.isEmpty()) {
+                    code = metadataCodes.remove(0);
+                }
+                if (code != 0) {
+                    replyOp[0] = Codec.OP_ERROR;
+                    return Codec.encodeErrorResponse(new Codec.ErrorResponse(code, ""));
+                }
                 return Codec.encodeMetadataResponse(meta);
             }
             throw new ProtocolException("unexpected opcode " + frame.opcode);
@@ -1085,6 +1107,86 @@ class ClientTest {
                 assertEquals(TIMEOUT, ex.code);
             }
             assertEquals(3, srv.describeGroupCount.get());
+        }
+    }
+
+    @Test
+    void metadataDefaultMaxRetriesZeroRaisesOnTimeout() throws Exception {
+        try (ScriptedBroker srv = ScriptedBroker.start()) {
+            srv.metadataCodes.add(TIMEOUT);
+            try (Client c = Client.connect("127.0.0.1", srv.port, 5_000)) {
+                assertEquals(0, c.maxRetries());
+                BrokerException ex =
+                        assertThrows(BrokerException.class, () -> c.metadata());
+                assertEquals(TIMEOUT, ex.code);
+            }
+            assertEquals(1, srv.metadataCount.get());
+        }
+    }
+
+    @Test
+    void metadataRetriesTimeoutThenOk() throws Exception {
+        try (ScriptedBroker srv = ScriptedBroker.start()) {
+            srv.metadataCodes.add(TIMEOUT);
+            srv.metadataCodes.add(0);
+            try (Client c = Client.connect("127.0.0.1", srv.port, 5_000)) {
+                c.setMaxRetries(2);
+                c.setRetryBackoffMs(0);
+                Metadata got = c.metadata();
+                assertTrue(got.brokers.isEmpty());
+                assertTrue(got.topics.isEmpty());
+            }
+            assertEquals(2, srv.metadataCount.get());
+        }
+    }
+
+    @Test
+    void metadataNotFoundIsNotRetried() throws Exception {
+        try (ScriptedBroker srv = ScriptedBroker.start()) {
+            srv.metadataCodes.add(NOT_FOUND);
+            srv.metadataCodes.add(0);
+            try (Client c = Client.connect("127.0.0.1", srv.port, 5_000)) {
+                c.setMaxRetries(2);
+                c.setRetryBackoffMs(0);
+                BrokerException ex =
+                        assertThrows(BrokerException.class, () -> c.metadata());
+                assertEquals(NOT_FOUND, ex.code);
+            }
+            assertEquals(1, srv.metadataCount.get());
+        }
+    }
+
+    @Test
+    void listMembersRetriesTimeoutThenOk() throws Exception {
+        try (ScriptedBroker srv = ScriptedBroker.start()) {
+            srv.listMembersCodes.add(TIMEOUT);
+            srv.listMembersCodes.add(0);
+            try (Client c = Client.connect("127.0.0.1", srv.port, 5_000)) {
+                c.setMaxRetries(2);
+                c.setRetryBackoffMs(0);
+                MembershipList got = c.listMembers();
+                assertEquals(0, got.generation);
+                assertTrue(got.brokers.isEmpty());
+                assertTrue(got.live.isEmpty());
+            }
+            assertEquals(2, srv.listMembersCount.get());
+        }
+    }
+
+    @Test
+    void metadataExhaustedRetriesRaises() throws Exception {
+        try (ScriptedBroker srv = ScriptedBroker.start()) {
+            srv.metadataCodes.add(TIMEOUT);
+            srv.metadataCodes.add(TIMEOUT);
+            srv.metadataCodes.add(TIMEOUT);
+            try (Client c = Client.connect("127.0.0.1", srv.port, 5_000)) {
+                c.setMaxRetries(2);
+                c.setRetryBackoffMs(0);
+                BrokerException ex =
+                        assertThrows(BrokerException.class, () -> c.metadata());
+                assertEquals(TIMEOUT, ex.code);
+            }
+            assertEquals(3, srv.metadataCount.get());
         }
     }
 

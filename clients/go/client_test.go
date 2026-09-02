@@ -26,6 +26,8 @@ type scriptedBroker struct {
 	listOffsetsCodes    []uint16
 	describeGroupCodes  []uint16
 	listGroupsCodes     []uint16
+	metadataCodes       []uint16
+	listMembersCodes    []uint16
 	meta                codec.MetadataResponse
 	opcodes             []uint16
 	produceReqs         []codec.ProduceRequest
@@ -42,6 +44,7 @@ type scriptedBroker struct {
 	listOffsetsCount    int
 	describeGroupCount  int
 	listGroupsCount     int
+	listMembersCount    int
 	metadataCount      int
 	acceptCount        int
 	initPID            uint64
@@ -141,6 +144,18 @@ func (s *scriptedBroker) listGroups() int {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	return s.listGroupsCount
+}
+
+func (s *scriptedBroker) metadatas() int {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.metadataCount
+}
+
+func (s *scriptedBroker) listMembers() int {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.listMembersCount
 }
 
 func (s *scriptedBroker) inits() int {
@@ -340,8 +355,27 @@ func (s *scriptedBroker) handle(f *frame.Frame) ([]byte, error) {
 		}
 		payload, err = codec.EncodeListGroupsResponse(codec.ListGroupsResponse{ErrorCode: code})
 		replyOp = codec.OpListGroupsResponse
+	case codec.OpListMembers:
+		s.listMembersCount++
+		code := uint16(0)
+		if len(s.listMembersCodes) > 0 {
+			code = s.listMembersCodes[0]
+			s.listMembersCodes = s.listMembersCodes[1:]
+		}
+		payload, err = codec.EncodeListMembersResponse(codec.ListMembersResponse{ErrorCode: code})
+		replyOp = codec.OpListMembersResponse
 	case codec.OpMetadata:
 		s.metadataCount++
+		code := uint16(0)
+		if len(s.metadataCodes) > 0 {
+			code = s.metadataCodes[0]
+			s.metadataCodes = s.metadataCodes[1:]
+		}
+		if code != 0 {
+			payload, err = codec.EncodeErrorResponse(codec.ErrorResponse{Code: code})
+			replyOp = codec.OpError
+			break
+		}
 		payload, err = codec.EncodeMetadataResponse(s.meta)
 	default:
 		return nil, &frame.ProtocolError{Msg: "unexpected opcode"}
@@ -1687,6 +1721,132 @@ func TestDescribeGroupExhaustedRetriesRaises(t *testing.T) {
 	}
 	if n := srv.describeGroups(); n != 3 {
 		t.Fatalf("describe group count %d want 3", n)
+	}
+}
+
+func TestMetadataDefaultMaxRetriesZeroRaisesOnTimeout(t *testing.T) {
+	srv := &scriptedBroker{metadataCodes: []uint16{timeoutCode}}
+	addr, stop := startScripted(t, srv)
+	defer stop()
+
+	c, err := volant.DialTimeout(addr, 5*time.Second)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer c.Close()
+
+	_, err = c.Metadata()
+	if err == nil {
+		t.Fatal("expected BrokerError 7")
+	}
+	be, ok := err.(*volant.BrokerError)
+	if !ok || be.Code != timeoutCode {
+		t.Fatalf("got %v want BrokerError code=7", err)
+	}
+	if n := srv.metadatas(); n != 1 {
+		t.Fatalf("metadata count %d want 1", n)
+	}
+}
+
+func TestMetadataRetriesTimeoutThenOk(t *testing.T) {
+	srv := &scriptedBroker{metadataCodes: []uint16{timeoutCode, 0}}
+	addr, stop := startScripted(t, srv)
+	defer stop()
+
+	c, err := volant.DialTimeout(addr, 5*time.Second)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer c.Close()
+	c.SetMaxRetries(2)
+	c.SetRetryBackoff(0)
+
+	got, err := c.Metadata()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(got.Brokers) != 0 || len(got.Topics) != 0 {
+		t.Fatalf("metadata %v want empty", got)
+	}
+	if n := srv.metadatas(); n != 2 {
+		t.Fatalf("metadata count %d want 2", n)
+	}
+}
+
+func TestMetadataNotFoundIsNotRetried(t *testing.T) {
+	srv := &scriptedBroker{metadataCodes: []uint16{notFoundCode, 0}}
+	addr, stop := startScripted(t, srv)
+	defer stop()
+
+	c, err := volant.DialTimeout(addr, 5*time.Second)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer c.Close()
+	c.SetMaxRetries(2)
+	c.SetRetryBackoff(0)
+
+	_, err = c.Metadata()
+	if err == nil {
+		t.Fatal("expected BrokerError 2")
+	}
+	be, ok := err.(*volant.BrokerError)
+	if !ok || be.Code != notFoundCode {
+		t.Fatalf("got %v want BrokerError code=2", err)
+	}
+	if n := srv.metadatas(); n != 1 {
+		t.Fatalf("metadata count %d want 1", n)
+	}
+}
+
+func TestListMembersRetriesTimeoutThenOk(t *testing.T) {
+	srv := &scriptedBroker{listMembersCodes: []uint16{timeoutCode, 0}}
+	addr, stop := startScripted(t, srv)
+	defer stop()
+
+	c, err := volant.DialTimeout(addr, 5*time.Second)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer c.Close()
+	c.SetMaxRetries(2)
+	c.SetRetryBackoff(0)
+
+	got, err := c.ListMembers()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.Generation != 0 || len(got.Brokers) != 0 || len(got.Live) != 0 {
+		t.Fatalf("list members %v want empty", got)
+	}
+	if n := srv.listMembers(); n != 2 {
+		t.Fatalf("list members count %d want 2", n)
+	}
+}
+
+func TestMetadataExhaustedRetriesRaises(t *testing.T) {
+	srv := &scriptedBroker{metadataCodes: []uint16{timeoutCode, timeoutCode, timeoutCode}}
+	addr, stop := startScripted(t, srv)
+	defer stop()
+
+	c, err := volant.DialTimeout(addr, 5*time.Second)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer c.Close()
+	c.SetMaxRetries(2)
+	c.SetRetryBackoff(0)
+
+	_, err = c.Metadata()
+	if err == nil {
+		t.Fatal("expected BrokerError 7")
+	}
+	be, ok := err.(*volant.BrokerError)
+	if !ok || be.Code != timeoutCode {
+		t.Fatalf("got %v want BrokerError code=7", err)
+	}
+	if n := srv.metadatas(); n != 3 {
+		t.Fatalf("metadata count %d want 3", n)
 	}
 }
 

@@ -768,21 +768,46 @@ class Client:
 
         Returns :class:`MembershipList` (generation, brokers, live).
         Non-zero ``error_code`` raises :class:`BrokerError` with
-        ``op="list_members"``. Overlay is still SoT.
+        ``op="list_members"``. Overlay is still SoT. Transient
+        broker/transport errors retry up to ``max_retries`` extra
+        times (default 0). Error 2 / 9 / 10 / 11 / 13 / 14 are not
+        retried.
         """
-        resp = self._round_trip(
-            codec.OP_LIST_MEMBERS, codec.encode_list_members_request()
-        )
-        if not isinstance(resp, ListMembersResponse):
-            raise ProtocolError(
-                f"unexpected response for list_members: {type(resp)}"
+        payload = codec.encode_list_members_request()
+        max_retries = max(0, int(self.max_retries))
+        retry_attempt = 0
+        while True:
+            try:
+                resp = self._round_trip(codec.OP_LIST_MEMBERS, payload)
+            except BrokerError as e:
+                if _is_transient_broker(e.code) and retry_attempt < max_retries:
+                    retry_attempt += 1
+                    self._sleep_produce_retry()
+                    continue
+                raise
+            except OSError:
+                if retry_attempt < max_retries:
+                    retry_attempt += 1
+                    self._sleep_produce_retry()
+                    continue
+                raise
+            if not isinstance(resp, ListMembersResponse):
+                raise ProtocolError(
+                    f"unexpected response for list_members: {type(resp)}"
+                )
+            if (
+                _is_transient_broker(resp.error_code)
+                and retry_attempt < max_retries
+            ):
+                retry_attempt += 1
+                self._sleep_produce_retry()
+                continue
+            self._check(resp.error_code, "list_members")
+            return MembershipList(
+                generation=resp.generation,
+                brokers=list(resp.brokers),
+                live=list(resp.live),
             )
-        self._check(resp.error_code, "list_members")
-        return MembershipList(
-            generation=resp.generation,
-            brokers=list(resp.brokers),
-            live=list(resp.live),
-        )
 
     def reassign_partitions(
         self,
@@ -1083,13 +1108,38 @@ class Client:
                 )
 
     def metadata(self, topics: Optional[list[str]] = None) -> MetadataResponse:
+        """Cluster brokers and topics (all topics when ``topics`` is empty).
+
+        Native Metadata has no top-level ``error_code``; failures arrive
+        as Error opcode / transport. Transient broker/transport errors
+        retry up to ``max_retries`` extra times (default 0). Error 2 /
+        9 / 10 / 11 / 13 / 14 are not retried.
+        """
         payload = codec.encode_metadata_request(
             MetadataRequest(topics=list(topics) if topics else [])
         )
-        resp = self._round_trip(codec.OP_METADATA, payload)
-        if not isinstance(resp, MetadataResponse):
-            raise ProtocolError(f"unexpected response for metadata: {type(resp)}")
-        return resp
+        max_retries = max(0, int(self.max_retries))
+        retry_attempt = 0
+        while True:
+            try:
+                resp = self._round_trip(codec.OP_METADATA, payload)
+            except BrokerError as e:
+                if _is_transient_broker(e.code) and retry_attempt < max_retries:
+                    retry_attempt += 1
+                    self._sleep_produce_retry()
+                    continue
+                raise
+            except OSError:
+                if retry_attempt < max_retries:
+                    retry_attempt += 1
+                    self._sleep_produce_retry()
+                    continue
+                raise
+            if not isinstance(resp, MetadataResponse):
+                raise ProtocolError(
+                    f"unexpected response for metadata: {type(resp)}"
+                )
+            return resp
 
     def offset_commit(
         self,

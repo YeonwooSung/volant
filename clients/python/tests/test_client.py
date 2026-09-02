@@ -12,6 +12,7 @@ from volant.codec import (
     OP_DELETE_OFFSETS_RESPONSE,
     OP_DESCRIBE_GROUP,
     OP_DESCRIBE_GROUP_RESPONSE,
+    OP_ERROR,
     OP_FETCH,
     OP_HEARTBEAT,
     OP_INIT_PRODUCER_ID,
@@ -19,6 +20,8 @@ from volant.codec import (
     OP_INIT_PRODUCER_ID_RESPONSE,
     OP_LIST_GROUPS,
     OP_LIST_GROUPS_RESPONSE,
+    OP_LIST_MEMBERS,
+    OP_LIST_MEMBERS_RESPONSE,
     OP_LIST_OFFSETS,
     OP_LIST_OFFSETS_RESPONSE,
     OP_METADATA,
@@ -28,11 +31,13 @@ from volant.codec import (
     BrokerInfo,
     DeleteOffsetsResponse,
     DescribeGroupResponse,
+    ErrorResponse,
     FetchResponse,
     HeartbeatResponse,
     InitProducerIdResponse,
     LeaveGroupResponse,
     ListGroupsResponse,
+    ListMembersResponse,
     ListOffsetsResponse,
     MetadataResponse,
     OffsetCommitResponse,
@@ -46,11 +51,13 @@ from volant.codec import (
     decode_produce_request,
     encode_delete_offsets_response,
     encode_describe_group_response,
+    encode_error_response,
     encode_fetch_response,
     encode_heartbeat_response,
     encode_init_producer_id_response,
     encode_leave_group_response,
     encode_list_groups_response,
+    encode_list_members_response,
     encode_list_offsets_response,
     encode_metadata_response,
     encode_offset_commit_response,
@@ -68,9 +75,12 @@ class ScriptedBroker:
     ``produce_codes`` / ``fetch_codes`` / ``heartbeat_codes`` /
     ``leave_group_codes`` / ``offset_commit_codes`` / ``offset_fetch_codes`` /
     ``delete_offsets_codes`` / ``list_offsets_codes`` /
-    ``describe_group_codes`` / ``list_groups_codes`` are queues of
+    ``describe_group_codes`` / ``list_groups_codes`` /
+    ``metadata_codes`` / ``list_members_codes`` are queues of
     error_code values consumed across connections. Metadata is a fixed
-    response (or a callable of ``() -> MetadataResponse``).
+    response (or a callable of ``() -> MetadataResponse``). Non-zero
+    ``metadata_codes`` reply as Error opcode (native Metadata has no
+    top-level error_code).
     """
 
     def __init__(self) -> None:
@@ -84,6 +94,8 @@ class ScriptedBroker:
         self.list_offsets_codes: list[int] = []
         self.describe_group_codes: list[int] = []
         self.list_groups_codes: list[int] = []
+        self.metadata_codes: list[int] = []
+        self.list_members_codes: list[int] = []
         self.metadata: MetadataResponse | None = None
         self.opcodes: list[int] = []
         self.produce_reqs: list[ProduceRequest] = []
@@ -99,6 +111,7 @@ class ScriptedBroker:
         self.list_offsets_count = 0
         self.describe_group_count = 0
         self.list_groups_count = 0
+        self.list_members_count = 0
         self.metadata_count = 0
         self.accept_count = 0
         self.init_pid = 42
@@ -291,8 +304,25 @@ class ScriptedBroker:
                 ),
                 OP_LIST_GROUPS_RESPONSE,
             )
+        if opcode == OP_LIST_MEMBERS:
+            self.list_members_count += 1
+            code = self.list_members_codes.pop(0) if self.list_members_codes else 0
+            return (
+                encode_list_members_response(
+                    ListMembersResponse(
+                        error_code=code, generation=0, brokers=[], live=[]
+                    )
+                ),
+                OP_LIST_MEMBERS_RESPONSE,
+            )
         if opcode == OP_METADATA:
             self.metadata_count += 1
+            code = self.metadata_codes.pop(0) if self.metadata_codes else 0
+            if code != 0:
+                return (
+                    encode_error_response(ErrorResponse(code=code, message="")),
+                    OP_ERROR,
+                )
             meta = self.metadata
             if callable(meta):
                 meta = meta()
@@ -883,6 +913,55 @@ class TestDescribeListGroupsRetry(unittest.TestCase):
                     c.describe_group("g")
             self.assertEqual(ctx.exception.code, TIMEOUT)
             self.assertEqual(srv.describe_group_count, 3)
+
+
+class TestMetadataListMembersRetry(unittest.TestCase):
+    def test_default_max_retries_zero_raises_on_timeout(self) -> None:
+        with ScriptedBroker() as srv:
+            srv.metadata_codes = [TIMEOUT]
+            with Client(srv.addr, timeout=5.0) as c:
+                self.assertEqual(c.max_retries, 0)
+                with self.assertRaises(BrokerError) as ctx:
+                    c.metadata()
+            self.assertEqual(ctx.exception.code, TIMEOUT)
+            self.assertEqual(srv.metadata_count, 1)
+
+    def test_retries_timeout_then_ok(self) -> None:
+        with ScriptedBroker() as srv:
+            srv.metadata_codes = [TIMEOUT, 0]
+            with Client(srv.addr, timeout=5.0, max_retries=2, retry_backoff_ms=0) as c:
+                got = c.metadata()
+            self.assertEqual(got.brokers, [])
+            self.assertEqual(got.topics, [])
+            self.assertEqual(srv.metadata_count, 2)
+
+    def test_not_found_is_not_retried(self) -> None:
+        with ScriptedBroker() as srv:
+            srv.metadata_codes = [NOT_FOUND, 0]
+            with Client(srv.addr, timeout=5.0, max_retries=2, retry_backoff_ms=0) as c:
+                with self.assertRaises(BrokerError) as ctx:
+                    c.metadata()
+            self.assertEqual(ctx.exception.code, NOT_FOUND)
+            self.assertEqual(srv.metadata_count, 1)
+
+    def test_list_members_retries_timeout_then_ok(self) -> None:
+        with ScriptedBroker() as srv:
+            srv.list_members_codes = [TIMEOUT, 0]
+            with Client(srv.addr, timeout=5.0, max_retries=2, retry_backoff_ms=0) as c:
+                got = c.list_members()
+            self.assertEqual(got.generation, 0)
+            self.assertEqual(got.brokers, [])
+            self.assertEqual(got.live, [])
+            self.assertEqual(srv.list_members_count, 2)
+
+    def test_exhausted_retries_raises(self) -> None:
+        with ScriptedBroker() as srv:
+            srv.metadata_codes = [TIMEOUT, TIMEOUT, TIMEOUT]
+            with Client(srv.addr, timeout=5.0, max_retries=2, retry_backoff_ms=0) as c:
+                with self.assertRaises(BrokerError) as ctx:
+                    c.metadata()
+            self.assertEqual(ctx.exception.code, TIMEOUT)
+            self.assertEqual(srv.metadata_count, 3)
 
 
 if __name__ == "__main__":
