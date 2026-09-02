@@ -374,6 +374,15 @@ impl StateMachine {
         }
     }
 
+    /// Memory-only SM bound to `broker` (v0.22 install tests; no `__openraft/` write).
+    fn with_broker(broker: &Arc<Broker>) -> Self {
+        Self {
+            inner: Arc::new(Mutex::new(SmInner::default())),
+            broker: Some(Arc::downgrade(broker)),
+            dir: None,
+        }
+    }
+
     fn live_assignment(&self) -> AssignmentSnapshot {
         self.broker
             .as_ref()

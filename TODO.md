@@ -1,6 +1,6 @@
 # Volant residual TODO (review loop)
 
-**Baseline:** HEAD product = **Phases 0–154** + residuals **v0.3–v0.20**.  
+**Baseline:** HEAD product = **Phases 0–154** + residuals **v0.3–v0.25**.  
 **Last review:** 2026-09-02  
 
 Living roadmap: [ROADMAP.md](./ROADMAP.md).  
@@ -61,14 +61,14 @@ Phase index: [docs/history/PHASE_HISTORY.md](./docs/history/PHASE_HISTORY.md).
 | **P3** | Preferred **throttling / TCP probe** | **closed (v0.7)** — opt-in `throttle_time_ms` + TCP connect probe |
 | **P3** | Kafka DeleteRecords **per-request** wait | **closed (v0.6)** — flex v2 tag 0; v0–1 env-only |
 | **P3** | Cross-app EOS fencing | **closed (v0.8)** — optional `application_id` fence id |
-| **Later** | Full **openraft** crate integration | **election (v0.11) + apply (v0.16) + snapshot (v0.17)** — log still in-memory; not full KRaft |
+| **Later** | Full **openraft** crate integration | **v0.11–v0.17 + durable log (v0.21) + snapshot apply (v0.22)** — JSON files, not Rocks/KRaft |
 | **Later** | **Dynamic membership** reconfiguration | **MVP closed (v0.10)** — overlay add/remove; not Raft joint consensus |
 | **Later** | Full **KIP-890 / `__transaction_state`** | **log MVP closed (v0.13)** — opt-in JSON topic; not Kafka schemas |
-| **Later** | **Multi-language clients** | **Python (v0.14) + Go (v0.19)** — no Java; no groups/TLS |
+| **Later** | **Multi-language clients** | **Python (v0.14) + Go (v0.19) + Java (v0.23)**; offsets **v0.24**; no TLS/JoinGroup |
 | **Later** | **Long fuzz + chaos-mesh** | **MVP closed (v0.15)** — extended corpus + Chaos Mesh YAML + A→B isolate |
 | **Later** | **Perf campaign** vs aspirational targets | **closed (v0.2 PR2)** — measured table published; group-commit **v0.20** (opt-in, no new bench) |
 
-**Default next slice:** durable openraft log + apply assignment from snapshot (v0.16/v0.17 still in-memory). Homemade Raft election / InstallSnapshot-on-154 / Phase 155 is **not** the next product bet. Do not open Phase 155.
+**Default next slice:** openraft joint consensus / Rocks store, or client TLS + JoinGroup. Homemade Raft election / InstallSnapshot-on-154 / Phase 155 is **not** the next product bet. Do not open Phase 155.
 
 ---
 
@@ -106,6 +106,11 @@ Phase index: [docs/history/PHASE_HISTORY.md](./docs/history/PHASE_HISTORY.md).
 - [x] Partition reassignment after add-broker → **v0.18**
 - [x] Go native client (produce/fetch/metadata) → **v0.19**
 - [x] Produce group-commit (coalesced fsync) → **v0.20**
+- [x] Durable openraft log + hard state → **v0.21**
+- [x] Apply assignment from openraft snapshot → **v0.22**
+- [x] Java native client (produce/fetch/metadata) → **v0.23**
+- [x] Python and Go offset commit/fetch → **v0.24**
+- [x] Fetch-session dual-epoch converge → **v0.25**
 
 ---
 
@@ -129,13 +134,13 @@ Phase index: [docs/history/PHASE_HISTORY.md](./docs/history/PHASE_HISTORY.md).
 - [x] `__transaction_state` log MVP (v0.13; Volant JSON; not Kafka KIP-890/939 schemas)
 - [x] Kafka DeleteRecords **per-request** wait flag (v0.6 flex v2 tag 0; v0–1 env-only)
 - [x] Preferred selector **throttling** / TCP probe (v0.7; opt-in, not Kafka quota)
-- [x] Multi-language clients — Python (v0.14) + Go (v0.19); not Java/kafka-python
+- [x] Multi-language clients — Python (v0.14) + Go (v0.19) + Java (v0.23); offsets v0.24; not kafka-python/TLS
 - [x] Long fuzz campaigns + chaos-mesh MVP (v0.15; corpus + YAML + A→B isolate; not multi-hour CI)
 - [x] Published perf numbers vs aspirational table; group-commit **v0.20** (opt-in)
 
 ### Wait-off / best-effort paths (by design)
 - DeleteRecords **wait off**: still local-first (irreversible truncate)
-- Session mirror: dual-epoch if two peers serve without promote (147)
+- Session mirror: dual unclaimed primary converges on MirrorPut (v0.25); mirror-only pairs still do not self-converge
 - Metadata raft **uncommitted** local mutate may lead commit until majority (Metadata committed-only hides when on)
 
 ---
@@ -154,5 +159,6 @@ Phase index: [docs/history/PHASE_HISTORY.md](./docs/history/PHASE_HISTORY.md).
 | v0.6–v0.10 | **Shipped** — Kafka DR wait tag; preferred throttle/probe; app fence; changelog EOS; membership overlay |
 | v0.11–v0.15 | **Shipped** — openraft election; cluster-metadata + partition raft; txn-state topic; Python client; fuzz/chaos |
 | v0.16–v0.20 | **Shipped** — openraft apply + snapshot; reassign; Go client; group-commit |
+| v0.21–v0.25 | **Shipped** — durable openraft; snapshot apply; Java client; client offsets; dual-epoch |
 
 **How to use this file:** mark new work by phase number in ROADMAP + PHASE*_SPEC; fold completed rows into “Closed checklist”; keep “Still open” as the only honesty surface for operators and contributors.

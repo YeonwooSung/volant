@@ -219,6 +219,11 @@ docs for day-to-day reading: [ops](../ops.md), [consistency](../consistency.md),
 | v0.18 | ✅ | Partition reassignment after add-broker | [V18_SPEC.md](../V18_SPEC.md) |
 | v0.19 | ✅ | Go native client (produce/fetch/metadata) | [V19_SPEC.md](../V19_SPEC.md) |
 | v0.20 | ✅ | Produce group-commit (coalesced fsync) | [V20_SPEC.md](../V20_SPEC.md) |
+| v0.21 | ✅ | Durable openraft log + hard state | [V21_SPEC.md](../V21_SPEC.md) |
+| v0.22 | ✅ | Apply assignment from openraft snapshot | [V22_SPEC.md](../V22_SPEC.md) |
+| v0.23 | ✅ | Java native client (produce/fetch/metadata) | [V23_SPEC.md](../V23_SPEC.md) |
+| v0.24 | ✅ | Python and Go offset commit/fetch | [V24_SPEC.md](../V24_SPEC.md) |
+| v0.25 | ✅ | Fetch-session dual-epoch converge | [V25_SPEC.md](../V25_SPEC.md) |
 
 ---
 
