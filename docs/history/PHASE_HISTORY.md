@@ -224,6 +224,11 @@ docs for day-to-day reading: [ops](../ops.md), [consistency](../consistency.md),
 | v0.23 | ✅ | Java native client (produce/fetch/metadata) | [V23_SPEC.md](../V23_SPEC.md) |
 | v0.24 | ✅ | Python and Go offset commit/fetch | [V24_SPEC.md](../V24_SPEC.md) |
 | v0.25 | ✅ | Fetch-session dual-epoch converge | [V25_SPEC.md](../V25_SPEC.md) |
+| v0.26 | ✅ | openraft joint membership on add/remove | [V26_SPEC.md](../V26_SPEC.md) |
+| v0.27 | ✅ | TLS for Python/Go/Java native clients | [V27_SPEC.md](../V27_SPEC.md) |
+| v0.28 | ✅ | JoinGroup/Heartbeat/LeaveGroup on native clients | [V28_SPEC.md](../V28_SPEC.md) |
+| v0.29 | ✅ | Cluster DeleteRecords wait-off safety | [V29_SPEC.md](../V29_SPEC.md) |
+| v0.30 | ✅ | Fetch-session mirror-only self-converge | [V30_SPEC.md](../V30_SPEC.md) |
 
 ---
 
