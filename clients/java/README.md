@@ -13,7 +13,9 @@ Crate / client version **0.2.0**.
 import static java.nio.charset.StandardCharsets.UTF_8;
 
 import io.volant.Client;
+import io.volant.GroupConsumer;
 import io.volant.Metadata;
+import io.volant.Offset;
 import io.volant.Record;
 import java.util.List;
 
@@ -24,9 +26,15 @@ try (Client c = Client.connect("127.0.0.1", 9092)) {
   for (Record rec : recs) {
     System.out.println(rec.offset + " " + rec.key + " " + new String(rec.value, UTF_8));
   }
+  c.offsetCommit("g", "t", 0, 5);
+  List<Offset> offs = c.offsetFetch("g", "t");
   JoinGroupResult j = c.joinGroup("g", List.of("t"), 10000);
   c.heartbeat("g", j.memberId, j.generation);
   c.leaveGroup("g", j.memberId);
+  GroupConsumer g = GroupConsumer.join(c, "g", List.of("t"), 10_000);
+  List<Record> polled = g.poll(500);
+  g.commit();
+  g.close();
   Metadata meta = c.metadata();
 }
 
@@ -45,7 +53,11 @@ Client.connectTls(
 
 `produce(..., null, value)` sends a null key. `fetch` returns `List<Record>`
 (`offset`, `key`, `value`). `metadata()` returns brokers + topics.
+`offsetCommit` is an admin commit (empty member, generation 0).
+`offsetFetch` returns `List<Offset>` (`partition`, `offset`) for the topic.
 `joinGroup` sends empty `memberId` on first join.
+`GroupConsumer` joins, polls assigned partitions, heartbeats, commits with
+member+generation, and rejoins on heartbeat error 9.
 
 Correlation ids increment per request. Decode verifies magic `V` (0x56),
 protocol version 1, and IEEE CRC32 of the **payload only**. Broker
@@ -84,13 +96,16 @@ socket.
 
 ## Honesty
 
-Not implemented: `kafka-clients`, high-level GroupConsumer / assignor
-loop, offset commit/fetch, SCRAM / shared-token auth, async I/O,
-idempotent produce, leader redirect. Sync only; one TCP connection;
-acks=1 by default. TLS does not change broker TLS (Phase 8/19) and
+Not implemented: `kafka-clients`, cooperative assignor client logic
+beyond sticky position retain, static membership, SCRAM / shared-token
+auth, async I/O, idempotent produce, leader redirect. Sync only; one
+TCP connection; acks=1 by default. Convenience `offsetCommit` is
+admin-only (`generation=0`); `GroupConsumer.commit` sends the joined
+member+generation. TLS does not change broker TLS (Phase 8/19) and
 does not add Kafka API keys. Client private keys other than PKCS#8 /
 RSA PKCS#1 PEM are not loaded.
 
 See [docs/V23_SPEC.md](../../docs/V23_SPEC.md),
-[docs/V27_SPEC.md](../../docs/V27_SPEC.md), and
-[docs/V28_SPEC.md](../../docs/V28_SPEC.md).
+[docs/V27_SPEC.md](../../docs/V27_SPEC.md),
+[docs/V28_SPEC.md](../../docs/V28_SPEC.md), and
+[docs/V33_SPEC.md](../../docs/V33_SPEC.md).

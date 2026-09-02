@@ -309,6 +309,129 @@ class CodecTest {
     }
 
     @Test
+    void offsetCommitRequestPayloadRsFixture() {
+        Codec.OffsetCommitRequest req = new Codec.OffsetCommitRequest(
+                "g1",
+                "m1",
+                2,
+                Collections.singletonList(new Codec.OffsetCommitEntry("events", 1, 42, "cli")));
+        byte[] raw = Codec.encodeOffsetCommitRequest(req);
+        byte[] expected = hx(
+                "0200"
+                        + "6731"
+                        + "0200"
+                        + "6d31"
+                        + "02000000"
+                        + "01000000"
+                        + "0600"
+                        + "6576656e7473"
+                        + "01000000"
+                        + "2a00000000000000"
+                        + "0300"
+                        + "636c69");
+        assertArrayEquals(expected, raw);
+        Codec.OffsetCommitRequest decoded = Codec.decodeOffsetCommitRequest(raw);
+        assertEquals("g1", decoded.groupId);
+        assertEquals("m1", decoded.memberId);
+        assertEquals(2, decoded.generation);
+        assertEquals(1, decoded.entries.size());
+        assertEquals("events", decoded.entries.get(0).topic);
+        assertEquals(1, decoded.entries.get(0).partition);
+        assertEquals(42, decoded.entries.get(0).offset);
+        assertEquals("cli", decoded.entries.get(0).metadata);
+    }
+
+    @Test
+    void offsetCommitRequestAdminShape() {
+        Codec.OffsetCommitRequest req = new Codec.OffsetCommitRequest(
+                "g",
+                "",
+                0,
+                Collections.singletonList(new Codec.OffsetCommitEntry("t", 0, 5, "")));
+        byte[] raw = Codec.encodeOffsetCommitRequest(req);
+        assertArrayEquals(
+                hx("010067" + "0000" + "00000000" + "01000000" + "010074" + "00000000" + "0500000000000000" + "0000"),
+                raw);
+        Codec.OffsetCommitRequest decoded = Codec.decodeOffsetCommitRequest(raw);
+        assertEquals("g", decoded.groupId);
+        assertEquals("", decoded.memberId);
+        assertEquals(0, decoded.generation);
+        assertEquals("t", decoded.entries.get(0).topic);
+        assertEquals(5, decoded.entries.get(0).offset);
+    }
+
+    @Test
+    void offsetCommitResponse() {
+        byte[] raw = Codec.encodeOffsetCommitResponse(new Codec.OffsetCommitResponse(0));
+        assertArrayEquals(hx("0000"), raw);
+        assertEquals(0, Codec.decodeOffsetCommitResponse(raw).errorCode);
+        Object got = Codec.decodeResponse(Codec.OP_OFFSET_COMMIT, raw);
+        Codec.OffsetCommitResponse cr = assertInstanceOf(Codec.OffsetCommitResponse.class, got);
+        assertEquals(0, cr.errorCode);
+    }
+
+    @Test
+    void offsetFetchRequestPayloadRsFixture() {
+        Codec.OffsetFetchRequest req =
+                new Codec.OffsetFetchRequest("g1", Collections.singletonList(new Codec.OffsetEntry("events", 1)));
+        byte[] raw = Codec.encodeOffsetFetchRequest(req);
+        assertArrayEquals(hx("02006731" + "01000000" + "06006576656e7473" + "01000000"), raw);
+        Codec.OffsetFetchRequest decoded = Codec.decodeOffsetFetchRequest(raw);
+        assertEquals("g1", decoded.groupId);
+        assertEquals(1, decoded.entries.size());
+        assertEquals("events", decoded.entries.get(0).topic);
+        assertEquals(1, decoded.entries.get(0).partition);
+    }
+
+    @Test
+    void offsetFetchRequestEmptyEntries() {
+        Codec.OffsetFetchRequest req = new Codec.OffsetFetchRequest("g1", Collections.emptyList());
+        byte[] raw = Codec.encodeOffsetFetchRequest(req);
+        assertArrayEquals(hx("02006731" + "00000000"), raw);
+        Codec.OffsetFetchRequest decoded = Codec.decodeOffsetFetchRequest(raw);
+        assertEquals("g1", decoded.groupId);
+        assertTrue(decoded.entries.isEmpty());
+    }
+
+    @Test
+    void offsetFetchResponseUnknownOffset() {
+        Codec.OffsetFetchResponse resp = new Codec.OffsetFetchResponse(
+                0,
+                Collections.singletonList(
+                        new Codec.OffsetFetchEntry("events", 0, 0xFFFFFFFFFFFFFFFFL, "")));
+        byte[] raw = Codec.encodeOffsetFetchResponse(resp);
+        byte[] expected = hx(
+                "0000"
+                        + "01000000"
+                        + "06006576656e7473"
+                        + "00000000"
+                        + "ffffffffffffffff"
+                        + "0000");
+        assertArrayEquals(expected, raw);
+        Codec.OffsetFetchResponse decoded = Codec.decodeOffsetFetchResponse(raw);
+        assertEquals(0, decoded.errorCode);
+        assertEquals(1, decoded.entries.size());
+        assertEquals(0xFFFFFFFFFFFFFFFFL, decoded.entries.get(0).offset);
+        Object got = Codec.decodeResponse(Codec.OP_OFFSET_FETCH, raw);
+        Codec.OffsetFetchResponse dispatched = assertInstanceOf(Codec.OffsetFetchResponse.class, got);
+        assertEquals("events", dispatched.entries.get(0).topic);
+    }
+
+    @Test
+    void offsetFetchResponseCommitted() {
+        Codec.OffsetFetchResponse resp = new Codec.OffsetFetchResponse(
+                0, Collections.singletonList(new Codec.OffsetFetchEntry("t", 0, 5, "")));
+        byte[] raw = Codec.encodeOffsetFetchResponse(resp);
+        assertArrayEquals(
+                hx("0000" + "01000000" + "010074" + "00000000" + "0500000000000000" + "0000"), raw);
+        Codec.OffsetFetchResponse decoded = Codec.decodeOffsetFetchResponse(raw);
+        assertEquals("t", decoded.entries.get(0).topic);
+        assertEquals(0, decoded.entries.get(0).partition);
+        assertEquals(5, decoded.entries.get(0).offset);
+        assertEquals("", decoded.entries.get(0).metadata);
+    }
+
+    @Test
     void joinGroupRequestPayloadRsFixture() {
         Codec.JoinGroupRequest req = new Codec.JoinGroupRequest(
                 "g1", "", 10_000, Arrays.asList("events", "logs"), "");

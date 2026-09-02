@@ -829,6 +829,16 @@ Two members need two `Client` connections. Unit tests need no broker;
 live poll+commit / two-member split is `VOLANT_E2E=1`. See
 [V31_SPEC.md](./V31_SPEC.md).
 
+## v0.33 Java GroupConsumer
+
+Java native client now speaks **OffsetCommit** (opcode 6) and
+**OffsetFetch** (opcode 7), matching the Python/Go v0.24 admin path
+(empty member, generation 0). `GroupConsumer.join` / `poll` / `commit`
+/ `close` matches the Rust client: fetch assigned, heartbeat, commit
+with member+generation, rejoin on error 9. Codec and mock unit tests
+need no broker; live commit/fetch + resume is `VOLANT_E2E=1`. See
+[V33_SPEC.md](./V33_SPEC.md).
+
 ## Shipped (not gaps)
 
 Kafka wire shim **Phases 23–109** (ApiVersions **0–5**, Fetch **0–18**, ACL admin
