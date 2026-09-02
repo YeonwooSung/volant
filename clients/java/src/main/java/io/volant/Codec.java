@@ -11,7 +11,7 @@ import java.util.List;
  * <p>Matches {@code crates/volant-protocol/src/payload.rs} for the MVP opcodes:
  * Produce, Fetch, CreateTopic, Metadata, DeleteTopic, OffsetCommit,
  * OffsetFetch, JoinGroup, Heartbeat, LeaveGroup, Auth, DescribeGroup,
- * ListGroups, ListOffsets, InitProducerId, Scram.
+ * ListGroups, CreatePartitions, ListOffsets, InitProducerId, Scram.
  *
  * <p>Header fields are big-endian (see {@link Frame}); <strong>payload</strong>
  * integers and length prefixes are little-endian.
@@ -39,6 +39,8 @@ public final class Codec {
     public static final int OP_DESCRIBE_GROUP_RESPONSE = 35;
     public static final int OP_LIST_GROUPS = 36;
     public static final int OP_LIST_GROUPS_RESPONSE = 37;
+    public static final int OP_CREATE_PARTITIONS = 46;
+    public static final int OP_CREATE_PARTITIONS_RESPONSE = 47;
     public static final int OP_LIST_OFFSETS = 48;
     public static final int OP_LIST_OFFSETS_RESPONSE = 49;
     public static final int OP_ERROR = 0xFFFF;
@@ -585,6 +587,28 @@ public final class Codec {
             this.entries = entries == null
                     ? Collections.emptyList()
                     : Collections.unmodifiableList(new ArrayList<>(entries));
+        }
+    }
+
+    public static final class CreatePartitionsRequest {
+        public final String topic;
+        public final long totalCount;
+
+        public CreatePartitionsRequest(String topic, long totalCount) {
+            this.topic = topic;
+            this.totalCount = totalCount;
+        }
+    }
+
+    public static final class CreatePartitionsResponse {
+        public final int errorCode;
+        public final String topic;
+        public final long partitions;
+
+        public CreatePartitionsResponse(int errorCode, String topic, long partitions) {
+            this.errorCode = errorCode;
+            this.topic = topic;
+            this.partitions = partitions;
         }
     }
 
@@ -1444,6 +1468,36 @@ public final class Codec {
         return new ListOffsetsResponse(errorCode, topic, entries);
     }
 
+    public static byte[] encodeCreatePartitionsRequest(CreatePartitionsRequest req) {
+        Writer w = new Writer();
+        putString(w, req.topic);
+        w.u32(req.totalCount);
+        return w.finish();
+    }
+
+    public static CreatePartitionsRequest decodeCreatePartitionsRequest(byte[] payload) {
+        Reader r = new Reader(payload);
+        String topic = getString(r);
+        long totalCount = r.u32();
+        return new CreatePartitionsRequest(topic, totalCount);
+    }
+
+    public static byte[] encodeCreatePartitionsResponse(CreatePartitionsResponse resp) {
+        Writer w = new Writer();
+        w.u16(resp.errorCode);
+        putString(w, resp.topic);
+        w.u32(resp.partitions);
+        return w.finish();
+    }
+
+    public static CreatePartitionsResponse decodeCreatePartitionsResponse(byte[] payload) {
+        Reader r = new Reader(payload);
+        int errorCode = r.u16();
+        String topic = getString(r);
+        long partitions = r.u32();
+        return new CreatePartitionsResponse(errorCode, topic, partitions);
+    }
+
     // --- error opcode ------------------------------------------------------
 
     public static byte[] encodeErrorResponse(ErrorResponse resp) {
@@ -1575,6 +1629,8 @@ public final class Codec {
                 return decodeDescribeGroupResponse(payload);
             case OP_LIST_GROUPS_RESPONSE:
                 return decodeListGroupsResponse(payload);
+            case OP_CREATE_PARTITIONS_RESPONSE:
+                return decodeCreatePartitionsResponse(payload);
             case OP_LIST_OFFSETS_RESPONSE:
                 return decodeListOffsetsResponse(payload);
             case OP_ERROR:

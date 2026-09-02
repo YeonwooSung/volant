@@ -12,6 +12,7 @@ from .codec import (
     Assignment,
     BrokerError,
     BrokerInfo,
+    CreatePartitionsRequest,
     CreateTopicRequest,
     DeleteTopicRequest,
     DescribeGroupRequest,
@@ -177,6 +178,7 @@ class Client:
         from volant import Client
         c = Client("127.0.0.1:9092")
         c.create_topic("t", partitions=1)
+        c.create_partitions("t", 2)
         c.produce("t", 0, value=b"hello")
         batch = c.fetch("t", 0, offset=0)
         c.offset_commit(group="g", topic="t", partition=0, offset=5)
@@ -504,6 +506,24 @@ class Client:
         if not isinstance(resp, codec.DeleteTopicResponse):
             raise ProtocolError(f"unexpected response for delete_topic: {type(resp)}")
         self._check(resp.error_code, "delete_topic")
+
+    def create_partitions(self, topic: str, total_count: int) -> int:
+        """Grow ``topic`` to ``total_count`` partitions (native opcode 46).
+
+        ``total_count`` must exceed the current count. Returns the new total.
+        Non-zero ``error_code`` raises :class:`BrokerError`. This is not Kafka
+        CreatePartitions (API key 37).
+        """
+        payload = codec.encode_create_partitions_request(
+            CreatePartitionsRequest(topic=topic, total_count=total_count)
+        )
+        resp = self._round_trip(codec.OP_CREATE_PARTITIONS, payload)
+        if not isinstance(resp, codec.CreatePartitionsResponse):
+            raise ProtocolError(
+                f"unexpected response for create_partitions: {type(resp)}"
+            )
+        self._check(resp.error_code, "create_partitions")
+        return resp.partitions
 
     def produce(
         self,

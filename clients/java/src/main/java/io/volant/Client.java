@@ -20,6 +20,7 @@ import java.util.Map;
  * <pre>
  * try (Client c = Client.connect("127.0.0.1", 9092)) {
  *   c.createTopic("t", 1);
+ *   int parts = c.createPartitions("t", 2);
  *   long off = c.produce("t", 0, null, "hello".getBytes(UTF_8));
  *   List&lt;Record&gt; recs = c.fetch("t", 0, 0);
  *   c.offsetCommit("g", "t", 0, 5);
@@ -523,6 +524,26 @@ public final class Client implements AutoCloseable {
         }
         Codec.DeleteTopicResponse resp = (Codec.DeleteTopicResponse) decoded;
         check(resp.errorCode, "delete_topic");
+    }
+
+    /**
+     * Grow {@code topic} to {@code totalCount} partitions (native opcode 46).
+     *
+     * <p>{@code totalCount} must exceed the current count. Returns the new
+     * total. Non-zero {@code error_code} is {@link BrokerException}. This is
+     * not Kafka CreatePartitions (API key 37).
+     */
+    public int createPartitions(String topic, int totalCount) {
+        byte[] payload = Codec.encodeCreatePartitionsRequest(
+                new Codec.CreatePartitionsRequest(topic, totalCount));
+        Object decoded = roundTrip(Codec.OP_CREATE_PARTITIONS, payload);
+        if (!(decoded instanceof Codec.CreatePartitionsResponse)) {
+            throw new ProtocolException(
+                    "unexpected response for create_partitions: " + typeName(decoded));
+        }
+        Codec.CreatePartitionsResponse resp = (Codec.CreatePartitionsResponse) decoded;
+        check(resp.errorCode, "create_partitions");
+        return (int) resp.partitions;
     }
 
     /**

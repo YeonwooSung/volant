@@ -22,6 +22,7 @@ import java.util.List;
 
 try (Client c = Client.connect("127.0.0.1", 9092)) {
   c.createTopic("t", 1);
+  int parts = c.createPartitions("t", 2);
   long off = c.produce("t", 0, null, "hello".getBytes(UTF_8));
   List<Record> recs = c.fetch("t", 0, 0);
   for (Record rec : recs) {
@@ -71,6 +72,8 @@ Client.connectTlsScram("127.0.0.1", 9092, TlsOptions.ca("ca.pem"), "alice", "s3c
 (`offset`, `key`, `value`). `metadata()` returns brokers + topics.
 `offsetCommit` is an admin commit (empty member, generation 0).
 `offsetFetch` returns `List<Offset>` (`partition`, `offset`) for the topic.
+`createPartitions` grows the topic to `totalCount` partitions
+and returns the new total (native opcode 46, not Kafka CreatePartitions).
 `listOffsets` returns `List<OffsetListing>` (`partition`, `earliest`,
 `latest`); no / empty partitions means all (native opcode 48, not
 Kafka timestamp ListOffsets).
@@ -188,5 +191,6 @@ See [docs/V23_SPEC.md](../../docs/V23_SPEC.md),
 [docs/V47_SPEC.md](../../docs/V47_SPEC.md),
 [docs/V48_SPEC.md](../../docs/V48_SPEC.md),
 [docs/V49_SPEC.md](../../docs/V49_SPEC.md),
-[docs/V50_SPEC.md](../../docs/V50_SPEC.md).,
+[docs/V50_SPEC.md](../../docs/V50_SPEC.md),
+[docs/V51_SPEC.md](../../docs/V51_SPEC.md),
 [docs/V46_SPEC.md](../../docs/V46_SPEC.md).

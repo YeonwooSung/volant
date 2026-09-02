@@ -2,7 +2,7 @@
 //
 // Matches crates/volant-protocol/src/payload.rs for Produce, Fetch,
 // CreateTopic, Metadata, DeleteTopic, OffsetCommit, OffsetFetch,
-// JoinGroup, Heartbeat, LeaveGroup, Auth, DescribeGroup, ListGroups, ListOffsets, InitProducerId, and Scram.
+// JoinGroup, Heartbeat, LeaveGroup, Auth, DescribeGroup, ListGroups, CreatePartitions, ListOffsets, InitProducerId, and Scram.
 // Frame headers are big-endian (see package frame); payload integers and
 // length prefixes are little-endian.
 package codec
@@ -35,10 +35,12 @@ const (
 	OpScramFinalResponse    uint16 = 63
 	OpDescribeGroup         uint16 = 34
 	OpDescribeGroupResponse uint16 = 35
-	OpListGroups            uint16 = 36
-	OpListGroupsResponse    uint16 = 37
-	OpListOffsets           uint16 = 48
-	OpListOffsetsResponse   uint16 = 49
+	OpListGroups                 uint16 = 36
+	OpListGroupsResponse         uint16 = 37
+	OpCreatePartitions           uint16 = 46
+	OpCreatePartitionsResponse   uint16 = 47
+	OpListOffsets                uint16 = 48
+	OpListOffsetsResponse        uint16 = 49
 	OpError                 uint16 = 0xFFFF
 
 	nullLen = 0xFFFFFFFF
@@ -593,6 +595,21 @@ type ListOffsetsResponse struct {
 	ErrorCode uint16
 	Topic     string
 	Entries   []OffsetListing
+}
+
+// CreatePartitionsRequest is the CreatePartitions opcode (46) body.
+// TotalCount is the desired total partition count (must exceed current).
+type CreatePartitionsRequest struct {
+	Topic      string
+	TotalCount uint32
+}
+
+// CreatePartitionsResponse is the CreatePartitions reply (opcode 47).
+// Partitions is the new total (0 on error).
+type CreatePartitionsResponse struct {
+	ErrorCode  uint16
+	Topic      string
+	Partitions uint32
 }
 
 
@@ -1832,6 +1849,55 @@ func DecodeListOffsetsResponse(payload []byte) (ListOffsetsResponse, error) {
 	return ListOffsetsResponse{ErrorCode: code, Topic: topic, Entries: entries}, nil
 }
 
+func EncodeCreatePartitionsRequest(req CreatePartitionsRequest) ([]byte, error) {
+	w := &writer{}
+	if err := putString(w, req.Topic); err != nil {
+		return nil, err
+	}
+	w.u32(req.TotalCount)
+	return w.buf, nil
+}
+
+func DecodeCreatePartitionsRequest(payload []byte) (CreatePartitionsRequest, error) {
+	r := &reader{data: payload}
+	topic, err := getString(r)
+	if err != nil {
+		return CreatePartitionsRequest{}, err
+	}
+	n, err := r.u32()
+	if err != nil {
+		return CreatePartitionsRequest{}, err
+	}
+	return CreatePartitionsRequest{Topic: topic, TotalCount: n}, nil
+}
+
+func EncodeCreatePartitionsResponse(resp CreatePartitionsResponse) ([]byte, error) {
+	w := &writer{}
+	w.u16(resp.ErrorCode)
+	if err := putString(w, resp.Topic); err != nil {
+		return nil, err
+	}
+	w.u32(resp.Partitions)
+	return w.buf, nil
+}
+
+func DecodeCreatePartitionsResponse(payload []byte) (CreatePartitionsResponse, error) {
+	r := &reader{data: payload}
+	code, err := r.u16()
+	if err != nil {
+		return CreatePartitionsResponse{}, err
+	}
+	topic, err := getString(r)
+	if err != nil {
+		return CreatePartitionsResponse{}, err
+	}
+	n, err := r.u32()
+	if err != nil {
+		return CreatePartitionsResponse{}, err
+	}
+	return CreatePartitionsResponse{ErrorCode: code, Topic: topic, Partitions: n}, nil
+}
+
 func EncodeInitProducerIdRequest(req InitProducerIdRequest) ([]byte, error) {
 	w := &writer{}
 	// Always write the string; empty transactional_id = non-transactional PID.
@@ -2049,6 +2115,8 @@ func DecodeResponse(opcode uint16, payload []byte) (any, error) {
 		return DecodeDescribeGroupResponse(payload)
 	case OpListGroupsResponse:
 		return DecodeListGroupsResponse(payload)
+	case OpCreatePartitionsResponse:
+		return DecodeCreatePartitionsResponse(payload)
 	case OpListOffsetsResponse:
 		return DecodeListOffsetsResponse(payload)
 	case OpError:

@@ -1143,3 +1143,50 @@ func TestListOffsetsResponsePayloadRS(t *testing.T) {
 		t.Fatalf("dispatch %#v", got)
 	}
 }
+
+func TestCreatePartitionsRequestPayloadRS(t *testing.T) {
+	// crates/volant-protocol/src/payload.rs
+	// phase15_create_partitions_list_offsets_roundtrip (count 4)
+	req := CreatePartitionsRequest{Topic: "events", TotalCount: 4}
+	raw, err := EncodeCreatePartitionsRequest(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	expected := mustHex(t, "0600"+"6576656e7473"+"04000000")
+	if !bytes.Equal(raw, expected) {
+		t.Fatalf("encode:\n got %x\nwant %x", raw, expected)
+	}
+	decoded, err := DecodeCreatePartitionsRequest(raw)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if decoded.Topic != "events" || decoded.TotalCount != 4 {
+		t.Fatalf("decoded %+v", decoded)
+	}
+}
+
+func TestCreatePartitionsResponsePayloadRS(t *testing.T) {
+	resp := CreatePartitionsResponse{ErrorCode: 0, Topic: "events", Partitions: 4}
+	raw, err := EncodeCreatePartitionsResponse(resp)
+	if err != nil {
+		t.Fatal(err)
+	}
+	expected := mustHex(t, "0000"+"06006576656e7473"+"04000000")
+	if !bytes.Equal(raw, expected) {
+		t.Fatalf("encode:\n got %x\nwant %x", raw, expected)
+	}
+	decoded, err := DecodeCreatePartitionsResponse(raw)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if decoded.ErrorCode != 0 || decoded.Topic != "events" || decoded.Partitions != 4 {
+		t.Fatalf("decoded %+v", decoded)
+	}
+	got, err := DecodeResponse(OpCreatePartitionsResponse, raw)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cr, ok := got.(CreatePartitionsResponse); !ok || cr.Partitions != 4 {
+		t.Fatalf("dispatch %#v", got)
+	}
+}

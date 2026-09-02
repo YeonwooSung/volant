@@ -3,7 +3,7 @@
 Matches `crates/volant-protocol/src/payload.rs` for the MVP opcodes:
 Produce, Fetch, CreateTopic, Metadata, DeleteTopic, OffsetCommit,
 OffsetFetch, JoinGroup, Heartbeat, LeaveGroup, Auth, DescribeGroup,
-ListGroups, ListOffsets, InitProducerId, Scram.
+ListGroups, CreatePartitions, ListOffsets, InitProducerId, Scram.
 
 Header fields are big-endian (see :mod:`volant.frame`); **payload** integers
 and length prefixes are little-endian.
@@ -40,6 +40,8 @@ OP_DESCRIBE_GROUP = 34
 OP_DESCRIBE_GROUP_RESPONSE = 35
 OP_LIST_GROUPS = 36
 OP_LIST_GROUPS_RESPONSE = 37
+OP_CREATE_PARTITIONS = 46
+OP_CREATE_PARTITIONS_RESPONSE = 47
 OP_LIST_OFFSETS = 48
 OP_LIST_OFFSETS_RESPONSE = 49
 OP_ERROR = 0xFFFF
@@ -543,6 +545,23 @@ class ListOffsetsResponse:
     error_code: int
     topic: str
     entries: list[OffsetListing]
+
+
+@dataclass
+class CreatePartitionsRequest:
+    """CreatePartitions opcode 46 body. ``total_count`` is the desired total."""
+
+    topic: str
+    total_count: int
+
+
+@dataclass
+class CreatePartitionsResponse:
+    """CreatePartitions reply (opcode 47). ``partitions`` is 0 on error."""
+
+    error_code: int
+    topic: str
+    partitions: int
 
 
 # --- produce ---------------------------------------------------------------
@@ -1246,6 +1265,39 @@ def decode_list_offsets_response(payload: bytes) -> ListOffsetsResponse:
     return ListOffsetsResponse(error_code=error_code, topic=topic, entries=entries)
 
 
+# --- create partitions -----------------------------------------------------
+
+
+def encode_create_partitions_request(req: CreatePartitionsRequest) -> bytes:
+    w = _Writer()
+    _put_string(w, req.topic)
+    w.u32_le(req.total_count)
+    return w.finish()
+
+
+def decode_create_partitions_request(payload: bytes) -> CreatePartitionsRequest:
+    r = _Reader(payload)
+    topic = _get_string(r)
+    return CreatePartitionsRequest(topic=topic, total_count=r.u32_le())
+
+
+def encode_create_partitions_response(resp: CreatePartitionsResponse) -> bytes:
+    w = _Writer()
+    w.u16_le(resp.error_code)
+    _put_string(w, resp.topic)
+    w.u32_le(resp.partitions)
+    return w.finish()
+
+
+def decode_create_partitions_response(payload: bytes) -> CreatePartitionsResponse:
+    r = _Reader(payload)
+    return CreatePartitionsResponse(
+        error_code=r.u16_le(),
+        topic=_get_string(r),
+        partitions=r.u32_le(),
+    )
+
+
 # --- error opcode ----------------------------------------------------------
 
 
@@ -1388,6 +1440,8 @@ def decode_response(opcode: int, payload: bytes):
         return decode_describe_group_response(payload)
     if opcode == OP_LIST_GROUPS_RESPONSE:
         return decode_list_groups_response(payload)
+    if opcode == OP_CREATE_PARTITIONS_RESPONSE:
+        return decode_create_partitions_response(payload)
     if opcode == OP_LIST_OFFSETS_RESPONSE:
         return decode_list_offsets_response(payload)
     if opcode == OP_ERROR:
