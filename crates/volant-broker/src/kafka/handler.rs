@@ -398,10 +398,13 @@ async fn dispatch_kafka(
                     debug!(error = %e, "delete records flexible header tag buffer");
                 }
             }
-            // Phase 135: wait mode awaits journal majority per successful
-            // partition before response encoding. Default off: encode then
-            // fire-and-forget fan-out (Phase 113).
-            let wait = broker.delete_records_wait_majority();
+            // v2 request-level tag 0 = wait_majority u8; v0–1 stay flag 0.
+            let flag = if hdr.api_version >= 2 {
+                acl_api::peek_delete_records_wait_flag(src.clone())
+            } else {
+                0
+            };
+            let wait = broker.effective_delete_records_wait_majority(flag);
             let fanouts = acl_api::encode_delete_records(
                 broker.as_ref(),
                 &mut src,

@@ -40,7 +40,7 @@ From `SUPPORTED_APIS` in `crates/volant-broker/src/kafka/mod.rs`:
 | 18 | ApiVersions | 0–5 | Flex v3–5; header always v0; empty feature tags; v5 ClusterId/NodeId ignored |
 | 19 | CreateTopics | 0–7 | Flex v5+; TopicId response v7; assignment wait/rollback same as native (majority miss → **19**) |
 | 20 | DeleteTopics | 0–6 | Flex v4+; ErrorMessage v5; TopicId v6; assignment wait/rollback same as native (majority miss → **19**) |
-| 21 | DeleteRecords | 0–2 | Flex v2; GC/clip aborted soft markers vs log start (Phase 104/111); best-effort replica fan-out (Phase 113) + durable leader outbox retry for offline peers (Phase 116) + new-leader outbox reconcile on leadership change (Phase 123); optional journal majority wait via broker env `VOLANT_DELETE_RECORDS_WAIT_MAJORITY` only (Phase 135 — fail → Kafka **19**); **no** per-request wait field (Phase 137 native trailer is native-only) |
+| 21 | DeleteRecords | 0–2 | Flex v2; GC/clip aborted soft markers vs log start (Phase 104/111); best-effort replica fan-out (Phase 113) + durable leader outbox retry for offline peers (Phase 116) + new-leader outbox reconcile on leadership change (Phase 123); optional journal majority wait via broker env `VOLANT_DELETE_RECORDS_WAIT_MAJORITY` (Phase 135 — fail → Kafka **19**); Volant **v2 request-level tag 0** = `wait_majority` u8 (0/1/2; **not** a Kafka standard field — librdkafka will not send it); v0–1 stay env/broker only |
 | 22 | InitProducerId | 0–6 | Flex v2+; v6 Enable2Pc/KeepPreparedTxn (Phase 90 prepared MVP); OngoingTxn* when prepared |
 | 23 | OffsetForLeaderEpoch | 0–4 | Flex v4; durable epoch history MVP (Phase 87); prior epochs → transition end |
 | 24 | AddPartitionsToTxn | 0–5 | Flex v3; batch v4–5; 123 after timeout (Phase 94) |
