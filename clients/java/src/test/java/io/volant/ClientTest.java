@@ -1752,6 +1752,55 @@ class ClientTest {
     }
 
     @Test
+    void produceHeadersUsesSetAcks() throws Exception {
+        try (ScriptedBroker srv = ScriptedBroker.start()) {
+            try (Client c = Client.connect("127.0.0.1", srv.port, 5_000)) {
+                c.setAcks(255);
+                c.produce(
+                        "t",
+                        0,
+                        null,
+                        "hello".getBytes(StandardCharsets.UTF_8),
+                        Collections.singletonList(
+                                new Record.Header("h", "hv".getBytes(StandardCharsets.UTF_8))));
+            }
+            assertEquals(1, srv.produceReqs.size());
+            Codec.ProduceRequest req = srv.produceReqs.get(0);
+            assertEquals(255, req.acks);
+            assertEquals(1, req.messages.get(0).headers.size());
+            assertEquals("h", req.messages.get(0).headers.get(0).name);
+            assertArrayEquals(
+                    "hv".getBytes(StandardCharsets.UTF_8), req.messages.get(0).headers.get(0).value);
+        }
+    }
+
+    @Test
+    void produceHeadersAcksEncodes() throws Exception {
+        try (ScriptedBroker srv = ScriptedBroker.start()) {
+            try (Client c = Client.connect("127.0.0.1", srv.port, 5_000)) {
+                long off =
+                        c.produceHeadersAcks(
+                                "t",
+                                0,
+                                null,
+                                "hello".getBytes(StandardCharsets.UTF_8),
+                                Collections.singletonList(
+                                        new Record.Header("h", "hv".getBytes(StandardCharsets.UTF_8))),
+                                255);
+                assertEquals(7L, off);
+            }
+            assertEquals(1, srv.produceReqs.size());
+            Codec.ProduceRequest req = srv.produceReqs.get(0);
+            assertEquals(255, req.acks);
+            assertEquals(1, req.messages.size());
+            assertEquals(1, req.messages.get(0).headers.size());
+            assertEquals("h", req.messages.get(0).headers.get(0).name);
+            assertArrayEquals(
+                    "hv".getBytes(StandardCharsets.UTF_8), req.messages.get(0).headers.get(0).value);
+        }
+    }
+
+    @Test
     void produceBatchRetriesTimeoutThenOk() throws Exception {
         try (ScriptedBroker srv = ScriptedBroker.start()) {
             srv.produceCodes.add(TIMEOUT);
