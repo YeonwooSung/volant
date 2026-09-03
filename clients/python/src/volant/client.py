@@ -265,14 +265,17 @@ class Client:
 
         c = Client("127.0.0.1:9092", enable_idempotence=True)
 
-    Optional produce/fetch/heartbeat/BeginTxn/EndTxn/admin retry (v0.61 /
-    v0.66 / v0.74 / v0.99 / v0.103) retries transient broker codes 6, 7,
-    15, 16 and TCP I/O errors. Default ``max_retries=0`` (no extra
-    attempts). ``retry_backoff_ms`` defaults to 50; tests may set 0.
-    Error 13 stays on the redirect budget; error 21 stays on the one
-    re-Init. Controller-gated admin shares this budget; error 14 stays
-    on ``max_redirects``. Heartbeat rebalance codes 9 / 10 / 11 are not
-    retried. InvalidTxnState (22) is not retried::
+    Optional produce/fetch/heartbeat/BeginTxn/EndTxn/admin/SCRAM retry
+    (v0.61 / v0.66 / v0.74 / v0.99 / v0.103 / v0.108) retries transient
+    broker codes 6, 7, 15, 16 and TCP I/O errors. Default
+    ``max_retries=0`` (no extra attempts). ``retry_backoff_ms`` defaults
+    to 50; tests may set 0. Error 13 stays on the redirect budget;
+    error 21 stays on the one re-Init. Controller-gated admin shares
+    this budget; error 14 stays on ``max_redirects``. Heartbeat
+    rebalance codes 9 / 10 / 11 are not retried. InvalidTxnState (22)
+    is not retried. SCRAM 17 / 18 and server-signature mismatch are
+    not retried; a transient first or final restarts the handshake
+    with a new client nonce::
 
         c = Client("127.0.0.1:9092", max_retries=3, retry_backoff_ms=50)
         c.max_retries = 3
@@ -701,37 +704,79 @@ class Client:
             time.sleep(ms / 1000.0)
 
     def _authenticate_scram(self, username: str, password: str) -> None:
+        """SCRAM-SHA-256 first+final as one unit (v0.108).
+
+        Transient 6 / 7 / 15 / 16 and TCP/IO restart from first with a
+        new client nonce (``max_retries`` extra times, default 0). 17 /
+        18, other broker codes, and protocol errors (including server
+        signature mismatch) are not retried. Token Auth is not wrapped.
+        """
         from .scram import client_proof_and_server_sig, generate_client_nonce
 
-        client_nonce = generate_client_nonce()
-        payload = codec.encode_scram_first_request(
-            codec.ScramFirstRequest(username=username, client_nonce=client_nonce)
-        )
-        first = self._round_trip(codec.OP_SCRAM_FIRST, payload)
-        if not isinstance(first, codec.ScramFirstResponse):
-            raise ProtocolError(f"unexpected response for scram first: {type(first)}")
-        self._check(first.error_code, "scram first")
-        proof, expected_sig = client_proof_and_server_sig(
-            username,
-            password,
-            client_nonce,
-            first.combined_nonce,
-            first.salt,
-            first.iterations,
-        )
-        payload = codec.encode_scram_final_request(
-            codec.ScramFinalRequest(
-                username=username,
-                combined_nonce=first.combined_nonce,
-                client_proof=proof,
-            )
-        )
-        final = self._round_trip(codec.OP_SCRAM_FINAL, payload)
-        if not isinstance(final, codec.ScramFinalResponse):
-            raise ProtocolError(f"unexpected response for scram final: {type(final)}")
-        self._check(final.error_code, "scram final")
-        if final.server_signature != expected_sig:
-            raise ProtocolError("scram server signature mismatch")
+        max_retries = max(0, int(self.max_retries))
+        retry_attempt = 0
+        while True:
+            try:
+                client_nonce = generate_client_nonce()
+                payload = codec.encode_scram_first_request(
+                    codec.ScramFirstRequest(username=username, client_nonce=client_nonce)
+                )
+                first = self._round_trip(codec.OP_SCRAM_FIRST, payload)
+                if not isinstance(first, codec.ScramFirstResponse):
+                    raise ProtocolError(
+                        f"unexpected response for scram first: {type(first)}"
+                    )
+                if (
+                    _is_transient_broker(first.error_code)
+                    and retry_attempt < max_retries
+                ):
+                    retry_attempt += 1
+                    self._sleep_produce_retry()
+                    continue
+                self._check(first.error_code, "scram first")
+                proof, expected_sig = client_proof_and_server_sig(
+                    username,
+                    password,
+                    client_nonce,
+                    first.combined_nonce,
+                    first.salt,
+                    first.iterations,
+                )
+                payload = codec.encode_scram_final_request(
+                    codec.ScramFinalRequest(
+                        username=username,
+                        combined_nonce=first.combined_nonce,
+                        client_proof=proof,
+                    )
+                )
+                final = self._round_trip(codec.OP_SCRAM_FINAL, payload)
+                if not isinstance(final, codec.ScramFinalResponse):
+                    raise ProtocolError(
+                        f"unexpected response for scram final: {type(final)}"
+                    )
+                if (
+                    _is_transient_broker(final.error_code)
+                    and retry_attempt < max_retries
+                ):
+                    retry_attempt += 1
+                    self._sleep_produce_retry()
+                    continue
+                self._check(final.error_code, "scram final")
+                if final.server_signature != expected_sig:
+                    raise ProtocolError("scram server signature mismatch")
+                return
+            except BrokerError as e:
+                if _is_transient_broker(e.code) and retry_attempt < max_retries:
+                    retry_attempt += 1
+                    self._sleep_produce_retry()
+                    continue
+                raise
+            except OSError:
+                if retry_attempt < max_retries:
+                    retry_attempt += 1
+                    self._sleep_produce_retry()
+                    continue
+                raise
 
     def create_topic(
         self,

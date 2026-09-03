@@ -113,6 +113,59 @@ class ScramTest {
         assertThrows(IllegalArgumentException.class, () -> Client.connectScram("127.0.0.1", 1, null, PASS));
     }
 
+    @Test
+    void defaultMaxRetriesZeroRaisesOnFirstTimeout() throws Exception {
+        try (ScramServer srv = ScramServer.scripted(Collections.singletonList(7), Collections.emptyList())) {
+            BrokerException ex = assertThrows(
+                    BrokerException.class, () -> Client.connectScram("127.0.0.1", srv.port, 5_000, USER, PASS));
+            assertEquals(7, ex.code);
+            assertEquals("scram first", ex.op);
+            assertEquals(1, srv.firstUsers.size());
+            assertEquals(0, srv.finalUsers.size());
+        }
+    }
+
+    @Test
+    void retriesFirstTimeoutThenOk() throws Exception {
+        try (ScramServer srv = ScramServer.scripted(Collections.singletonList(7), Collections.emptyList())) {
+            try (Client c = Client.connectScram("127.0.0.1", srv.port, 5_000, USER, PASS, 2, 0)) {
+                assertEquals(1, c.metadata().brokers.size());
+            }
+            srv.assertOk();
+            assertEquals(2, srv.firstUsers.size());
+            assertEquals(1, srv.finalUsers.size());
+            assertEquals(2, srv.firstNonces.size());
+            assertTrue(!srv.firstNonces.get(0).equals(srv.firstNonces.get(1)));
+        }
+    }
+
+    @Test
+    void retriesFinalTimeoutRestartsHandshake() throws Exception {
+        try (ScramServer srv = ScramServer.scripted(Collections.emptyList(), Collections.singletonList(7))) {
+            try (Client c = Client.connectScram("127.0.0.1", srv.port, 5_000, USER, PASS, 2, 0)) {
+                assertEquals(1, c.metadata().brokers.size());
+            }
+            srv.assertOk();
+            assertTrue(srv.firstUsers.size() >= 2);
+            assertEquals(2, srv.finalUsers.size());
+            assertTrue(srv.firstNonces.size() >= 2);
+            assertTrue(!srv.firstNonces.get(0).equals(srv.firstNonces.get(1)));
+        }
+    }
+
+    @Test
+    void authFailedOnFirstIsNotRetried() throws Exception {
+        try (ScramServer srv = ScramServer.scripted(Collections.singletonList(17), Collections.emptyList())) {
+            BrokerException ex = assertThrows(
+                    BrokerException.class,
+                    () -> Client.connectScram("127.0.0.1", srv.port, 5_000, USER, PASS, 2, 0));
+            assertEquals(17, ex.code);
+            assertEquals("scram first", ex.op);
+            assertEquals(1, srv.firstUsers.size());
+            assertEquals(0, srv.finalUsers.size());
+        }
+    }
+
     private static String hex(byte[] b) {
         StringBuilder sb = new StringBuilder(b.length * 2);
         for (byte v : b) {
@@ -124,25 +177,37 @@ class ScramTest {
     private static final class ScramServer implements AutoCloseable {
         final int port;
         final List<Integer> opcodes = Collections.synchronizedList(new ArrayList<>());
+        final List<String> firstUsers = Collections.synchronizedList(new ArrayList<>());
+        final List<String> finalUsers = Collections.synchronizedList(new ArrayList<>());
+        final List<String> firstNonces = Collections.synchronizedList(new ArrayList<>());
         volatile String firstUser;
         volatile String finalUser;
         volatile String token;
         private final boolean badSignature;
+        private final List<Integer> firstErrors;
+        private final List<Integer> finalErrors;
         private final ServerSocket listen;
         private final Thread thread;
         private final AtomicReference<Exception> error = new AtomicReference<>();
         private final CountDownLatch done = new CountDownLatch(1);
 
         static ScramServer ok() throws Exception {
-            return new ScramServer(false);
+            return new ScramServer(false, Collections.emptyList(), Collections.emptyList());
         }
 
         static ScramServer badSignature() throws Exception {
-            return new ScramServer(true);
+            return new ScramServer(true, Collections.emptyList(), Collections.emptyList());
         }
 
-        private ScramServer(boolean badSignature) throws IOException {
+        static ScramServer scripted(List<Integer> firstErrors, List<Integer> finalErrors) throws Exception {
+            return new ScramServer(false, firstErrors, finalErrors);
+        }
+
+        private ScramServer(boolean badSignature, List<Integer> firstErrors, List<Integer> finalErrors)
+                throws IOException {
             this.badSignature = badSignature;
+            this.firstErrors = new ArrayList<>(firstErrors);
+            this.finalErrors = new ArrayList<>(finalErrors);
             ServerSocket ss = new ServerSocket();
             ss.setReuseAddress(true);
             ss.bind(new InetSocketAddress("127.0.0.1", 0));
@@ -219,8 +284,11 @@ class ScramTest {
                 if (d.frame.opcode == Codec.OP_SCRAM_FIRST) {
                     Codec.ScramFirstRequest req = Codec.decodeScramFirstRequest(d.frame.payload);
                     firstUser = req.username;
+                    firstUsers.add(req.username);
+                    firstNonces.add(req.clientNonce);
+                    int firstCode = firstErrors.isEmpty() ? 0 : firstErrors.remove(0);
                     byte[] payload = Codec.encodeScramFirstResponse(
-                            new Codec.ScramFirstResponse(0, req.clientNonce + "s", SALT, ITERS));
+                            new Codec.ScramFirstResponse(firstCode, req.clientNonce + "s", SALT, ITERS));
                     out.write(Frame.encode(Codec.OP_SCRAM_FIRST_RESPONSE, d.frame.correlationId, payload));
                     out.flush();
                     continue;
@@ -228,6 +296,7 @@ class ScramTest {
                 if (d.frame.opcode == Codec.OP_SCRAM_FINAL) {
                     Codec.ScramFinalRequest req = Codec.decodeScramFinalRequest(d.frame.payload);
                     finalUser = req.username;
+                    finalUsers.add(req.username);
                     String clientNonce = req.combinedNonce.endsWith("s")
                             ? req.combinedNonce.substring(0, req.combinedNonce.length() - 1)
                             : "";
@@ -235,7 +304,9 @@ class ScramTest {
                             req.username, PASS, clientNonce, req.combinedNonce, SALT, ITERS);
                     int code = 0;
                     byte[] sig = expected.serverSignature;
-                    if (!Arrays.equals(req.clientProof, expected.clientProof)) {
+                    if (!finalErrors.isEmpty()) {
+                        code = finalErrors.remove(0);
+                    } else if (!Arrays.equals(req.clientProof, expected.clientProof)) {
                         code = 17;
                     } else if (badSignature) {
                         sig = new byte[32];
@@ -243,6 +314,11 @@ class ScramTest {
                     byte[] payload = Codec.encodeScramFinalResponse(new Codec.ScramFinalResponse(code, sig));
                     out.write(Frame.encode(Codec.OP_SCRAM_FINAL_RESPONSE, d.frame.correlationId, payload));
                     out.flush();
+                    // Keep the connection open after a transient reply so the
+                    // client can restart the handshake on the same socket.
+                    if (code == 6 || code == 7 || code == 15 || code == 16) {
+                        continue;
+                    }
                     if (code != 0 || badSignature) {
                         return;
                     }
