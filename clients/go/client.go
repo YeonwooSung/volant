@@ -732,6 +732,14 @@ func (c *Client) CreateTopic(name string, partitions int) error {
 	return err
 }
 
+// CreateTopicID is CreateTopic but returns the broker-assigned topic id
+// (same as CreateTopicWithConfigs / Python create_topic / Java createTopic).
+// CreateTopic stays error-only. Error 14 and transient retry inherit
+// adminRoundTrip.
+func (c *Client) CreateTopicID(name string, partitions int) (uint32, error) {
+	return c.CreateTopicWithConfigs(name, partitions, nil)
+}
+
 // CreateTopicWithConfigs is CreateTopic plus native CreateTopic config pairs
 // (Phase 13 trailer; same as Python configs= / Rust create_topic_with_configs).
 // Empty value is allowed. Returns the broker-assigned topic id. This is not
