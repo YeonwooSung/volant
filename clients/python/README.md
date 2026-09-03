@@ -34,6 +34,7 @@ c.offset_commit(group="g", topic="t", partition=0, offset=5)
 c.commit_offsets("g", [("t", 0, 5), ("t", 1, 9)])  # v0.119 batch
 offs = c.offset_fetch(group="g", topic="t")  # [(partition, offset), ...]
 all_offs = c.offset_fetch_all("g")  # v0.118; [(topic, partition, offset), ...]
+rows = c.fetch_offsets("g", [("t", 0)])  # v0.122; empty/None = all
 bounds = c.list_offsets("t")  # [OffsetListing(partition, earliest, latest), ...]
 cfg = c.describe_configs("t")
 c.alter_configs("t", [("retention.ms", "86400000")])

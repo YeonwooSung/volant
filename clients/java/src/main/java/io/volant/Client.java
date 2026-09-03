@@ -1781,9 +1781,9 @@ public final class Client implements AutoCloseable {
      * {@code maxRetries}.
      */
     public List<Offset> offsetFetch(String group, String topic) {
-        List<Codec.OffsetFetchEntry> entries = offsetFetchEntries(group, Collections.emptyList());
+        List<OffsetFetchEntry> entries = fetchOffsets(group, Collections.emptyList());
         List<Offset> out = new ArrayList<>();
-        for (Codec.OffsetFetchEntry e : entries) {
+        for (OffsetFetchEntry e : entries) {
             if (topic.equals(e.topic)) {
                 out.add(new Offset(e.partition, e.offset));
             }
@@ -1800,9 +1800,24 @@ public final class Client implements AutoCloseable {
      * 6 / 7 / 15 / 16 follow {@code maxRetries}.
      */
     public List<OffsetFetchEntry> offsetFetchAll(String group) {
-        List<Codec.OffsetFetchEntry> entries = offsetFetchEntries(group, Collections.emptyList());
+        return fetchOffsets(group, Collections.emptyList());
+    }
+
+    /**
+     * Fetch committed offsets (Rust {@code fetch_offsets} parity).
+     *
+     * <p>{@code null} / empty {@code entries} send empty wire entries (all
+     * group offsets). Non-empty entries are encoded on the wire. Error 14
+     * follows {@code maxRedirects}. Transient 6 / 7 / 15 / 16 follow
+     * {@code maxRetries}.
+     */
+    public List<OffsetFetchEntry> fetchOffsets(String group, List<Codec.OffsetEntry> entries) {
+        if (entries == null) {
+            entries = Collections.emptyList();
+        }
+        List<Codec.OffsetFetchEntry> raw = offsetFetchEntries(group, entries);
         List<OffsetFetchEntry> out = new ArrayList<>();
-        for (Codec.OffsetFetchEntry e : entries) {
+        for (Codec.OffsetFetchEntry e : raw) {
             out.add(new OffsetFetchEntry(e.topic, e.partition, e.offset));
         }
         return out;

@@ -21,34 +21,35 @@ type scriptedBroker struct {
 	fetchCodes         []uint16
 	heartbeatCodes     []uint16
 	leaveGroupCodes    []uint16
-	offsetCommitCodes   []uint16
-	offsetFetchCodes    []uint16
-	offsetFetchEntries  []codec.OffsetFetchEntry
-	deleteOffsetsCodes  []uint16
-	listOffsetsCodes    []uint16
-	describeGroupCodes  []uint16
-	listGroupsCodes     []uint16
-	metadataCodes       []uint16
-	listMembersCodes    []uint16
-	listMembersReplies  []createTopicReply
-	meta                codec.MetadataResponse
-	opcodes             []uint16
-	produceReqs         []codec.ProduceRequest
-	fetchReqs           []codec.FetchRequest
-	offsetCommitReqs    []codec.OffsetCommitRequest
-	initTxnIDs          []string
-	initCount           int
-	produceCount        int
-	fetchCount          int
-	heartbeatCount      int
-	leaveGroupCount     int
-	offsetCommitCount   int
-	offsetFetchCount    int
-	deleteOffsetsCount  int
-	listOffsetsCount    int
-	describeGroupCount  int
-	listGroupsCount     int
-	listMembersCount    int
+	offsetCommitCodes  []uint16
+	offsetFetchCodes   []uint16
+	offsetFetchEntries []codec.OffsetFetchEntry
+	deleteOffsetsCodes []uint16
+	listOffsetsCodes   []uint16
+	describeGroupCodes []uint16
+	listGroupsCodes    []uint16
+	metadataCodes      []uint16
+	listMembersCodes   []uint16
+	listMembersReplies []createTopicReply
+	meta               codec.MetadataResponse
+	opcodes            []uint16
+	produceReqs        []codec.ProduceRequest
+	fetchReqs          []codec.FetchRequest
+	offsetCommitReqs   []codec.OffsetCommitRequest
+	offsetFetchReqs    []codec.OffsetFetchRequest
+	initTxnIDs         []string
+	initCount          int
+	produceCount       int
+	fetchCount         int
+	heartbeatCount     int
+	leaveGroupCount    int
+	offsetCommitCount  int
+	offsetFetchCount   int
+	deleteOffsetsCount int
+	listOffsetsCount   int
+	describeGroupCount int
+	listGroupsCount    int
+	listMembersCount   int
 	metadataCount      int
 	acceptCount        int
 	initPID            uint64
@@ -189,6 +190,14 @@ func (s *scriptedBroker) copyOffsetCommits() []codec.OffsetCommitRequest {
 	defer s.mu.Unlock()
 	out := make([]codec.OffsetCommitRequest, len(s.offsetCommitReqs))
 	copy(out, s.offsetCommitReqs)
+	return out
+}
+
+func (s *scriptedBroker) copyOffsetFetches() []codec.OffsetFetchRequest {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	out := make([]codec.OffsetFetchRequest, len(s.offsetFetchReqs))
+	copy(out, s.offsetFetchReqs)
 	return out
 }
 
@@ -335,6 +344,11 @@ func (s *scriptedBroker) handle(f *frame.Frame) ([]byte, error) {
 		payload, err = codec.EncodeOffsetCommitResponse(codec.OffsetCommitResponse{ErrorCode: code})
 	case codec.OpOffsetFetch:
 		s.offsetFetchCount++
+		req, e := codec.DecodeOffsetFetchRequest(f.Payload)
+		if e != nil {
+			return nil, e
+		}
+		s.offsetFetchReqs = append(s.offsetFetchReqs, req)
 		code := uint16(0)
 		if len(s.offsetFetchCodes) > 0 {
 			code = s.offsetFetchCodes[0]
@@ -1632,6 +1646,133 @@ func TestOffsetFetchStillFiltersTopic(t *testing.T) {
 	}
 }
 
+func TestFetchOffsetsEncodesSpecificEntries(t *testing.T) {
+	srv := &scriptedBroker{offsetFetchEntries: []codec.OffsetFetchEntry{
+		{Topic: "t", Partition: 0, Offset: 5},
+	}}
+	addr, stop := startScripted(t, srv)
+	defer stop()
+
+	c, err := volant.DialTimeout(addr, 5*time.Second)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer c.Close()
+
+	offs, err := c.FetchOffsets("g", []codec.OffsetEntry{{Topic: "t", Partition: 0}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(offs) != 1 || offs[0] != (codec.OffsetFetchEntry{Topic: "t", Partition: 0, Offset: 5}) {
+		t.Fatalf("offsets %v want [{t 0 5}]", offs)
+	}
+	reqs := srv.copyOffsetFetches()
+	if len(reqs) != 1 {
+		t.Fatalf("offset fetch reqs %d want 1", len(reqs))
+	}
+	if reqs[0].GroupID != "g" {
+		t.Fatalf("group %q want g", reqs[0].GroupID)
+	}
+	if len(reqs[0].Entries) != 1 || reqs[0].Entries[0] != (codec.OffsetEntry{Topic: "t", Partition: 0}) {
+		t.Fatalf("entries %v want [{t 0}]", reqs[0].Entries)
+	}
+}
+
+func TestFetchOffsetsNilOrEmptySendsAll(t *testing.T) {
+	srv := &scriptedBroker{offsetFetchEntries: []codec.OffsetFetchEntry{
+		{Topic: "t", Partition: 0, Offset: 5},
+		{Topic: "u", Partition: 1, Offset: 9},
+	}}
+	addr, stop := startScripted(t, srv)
+	defer stop()
+
+	c, err := volant.DialTimeout(addr, 5*time.Second)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer c.Close()
+
+	noneOffs, err := c.FetchOffsets("g", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	emptyOffs, err := c.FetchOffsets("g", []codec.OffsetEntry{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(noneOffs) != 2 || noneOffs[0].Topic != "t" || noneOffs[1].Topic != "u" {
+		t.Fatalf("nil entries offsets %v", noneOffs)
+	}
+	if len(emptyOffs) != 2 {
+		t.Fatalf("empty entries offsets %v", emptyOffs)
+	}
+	reqs := srv.copyOffsetFetches()
+	if len(reqs) != 2 {
+		t.Fatalf("offset fetch reqs %d want 2", len(reqs))
+	}
+	if len(reqs[0].Entries) != 0 || len(reqs[1].Entries) != 0 {
+		t.Fatalf("wire entries %v / %v want empty", reqs[0].Entries, reqs[1].Entries)
+	}
+}
+
+func TestOffsetFetchStillFiltersTopicRecordsEmptyWire(t *testing.T) {
+	srv := &scriptedBroker{offsetFetchEntries: []codec.OffsetFetchEntry{
+		{Topic: "t", Partition: 0, Offset: 5},
+		{Topic: "u", Partition: 1, Offset: 9},
+	}}
+	addr, stop := startScripted(t, srv)
+	defer stop()
+
+	c, err := volant.DialTimeout(addr, 5*time.Second)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer c.Close()
+
+	offs, err := c.OffsetFetch("g", "t")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(offs) != 1 || offs[0] != (volant.Offset{Partition: 0, Offset: 5}) {
+		t.Fatalf("offsets %v want [{0 5}]", offs)
+	}
+	reqs := srv.copyOffsetFetches()
+	if len(reqs) != 1 || len(reqs[0].Entries) != 0 {
+		t.Fatalf("wire entries %v want empty", reqs)
+	}
+}
+
+func TestOffsetFetchAllStillWorksRecordsEmptyWire(t *testing.T) {
+	srv := &scriptedBroker{offsetFetchEntries: []codec.OffsetFetchEntry{
+		{Topic: "t", Partition: 0, Offset: 5},
+		{Topic: "u", Partition: 1, Offset: 9},
+	}}
+	addr, stop := startScripted(t, srv)
+	defer stop()
+
+	c, err := volant.DialTimeout(addr, 5*time.Second)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer c.Close()
+
+	offs, err := c.OffsetFetchAll("g")
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := []volant.OffsetFetchEntry{
+		{Topic: "t", Partition: 0, Offset: 5},
+		{Topic: "u", Partition: 1, Offset: 9},
+	}
+	if len(offs) != len(want) || offs[0] != want[0] || offs[1] != want[1] {
+		t.Fatalf("offsets %v want %v", offs, want)
+	}
+	reqs := srv.copyOffsetFetches()
+	if len(reqs) != 1 || len(reqs[0].Entries) != 0 {
+		t.Fatalf("wire entries %v want empty", reqs)
+	}
+}
+
 func TestDeleteOffsetsRetriesTimeoutThenOk(t *testing.T) {
 	srv := &scriptedBroker{deleteOffsetsCodes: []uint16{timeoutCode, 0}}
 	addr, stop := startScripted(t, srv)
@@ -2270,7 +2411,6 @@ func TestMetadataExhaustedRetriesRaises(t *testing.T) {
 	}
 }
 
-
 func batchMsgs(values ...string) []codec.ProduceMessage {
 	out := make([]codec.ProduceMessage, len(values))
 	for i, v := range values {
@@ -2478,15 +2618,15 @@ type createTopicReply struct {
 }
 
 type adminBroker struct {
-	mu                    sync.Mutex
-	createTopicReplies    []createTopicReply
-	createPartitionsCodes []uint16
-	createAclsCodes       []uint16
-	reassignCodes         []uint16
-	createScramReplies    []createTopicReply
-	deleteScramCodes      []uint16
-	listScramCodes        []uint16
-	listAclsCodes         []uint16
+	mu                     sync.Mutex
+	createTopicReplies     []createTopicReply
+	createPartitionsCodes  []uint16
+	createAclsCodes        []uint16
+	reassignCodes          []uint16
+	createScramReplies     []createTopicReply
+	deleteScramCodes       []uint16
+	listScramCodes         []uint16
+	listAclsCodes          []uint16
 	addBrokerReplies       []createTopicReply
 	removeBrokerCodes      []uint16
 	describeConfigsReplies []createTopicReply
@@ -4032,4 +4172,3 @@ func TestOffsetCommitMaxRedirectsZeroRaisesOnFirst14(t *testing.T) {
 		t.Fatalf("offset_commit=%d metadata=%d accepts=%d want 1,0,1", n, metas, accepts)
 	}
 }
-
