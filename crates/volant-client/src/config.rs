@@ -1,4 +1,7 @@
 //! Client configuration.
+//!
+//! v0.144 adds Fetch knobs (`fetch_max_messages` / `fetch_max_bytes` /
+//! `fetch_max_wait_ms`) used by [`crate::Client::fetch_default`].
 
 use std::path::PathBuf;
 
@@ -11,6 +14,17 @@ pub struct ClientConfig {
     pub client_id: String,
     /// Default produce acks (`1` = leader only; `255` = all ISR).
     pub acks: u8,
+    /// Default Fetch `max_messages` for [`crate::Client::fetch_default`] (128).
+    /// [`crate::Client::fetch`] still takes an explicit `max_messages`.
+    /// GroupConsumer poll stays historical 100 (v0.76).
+    pub fetch_max_messages: u32,
+    /// Default Fetch `max_bytes` for [`crate::Client::fetch_default`] (4 MiB).
+    /// [`crate::Client::fetch`] still hardcodes 4 MiB; use
+    /// [`crate::Client::fetch_opts`] for an explicit size.
+    pub fetch_max_bytes: u32,
+    /// Default Fetch `max_wait_ms` for [`crate::Client::fetch_default`] (0).
+    /// [`crate::Client::fetch`] still takes an explicit `max_wait_ms`.
+    pub fetch_max_wait_ms: u32,
     /// Shared auth token. When set, the client sends Auth on connect.
     pub auth_token: Option<String>,
     /// SCRAM-SHA-256 username (Phase 22). Requires [`Self::scram_password`].
@@ -61,6 +75,9 @@ impl Default for ClientConfig {
             brokers: vec!["127.0.0.1:9092".into()],
             client_id: "volant-client".into(),
             acks: 1,
+            fetch_max_messages: 128,
+            fetch_max_bytes: 4 * 1024 * 1024,
+            fetch_max_wait_ms: 0,
             auth_token: None,
             scram_username: None,
             scram_password: None,
