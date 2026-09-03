@@ -324,6 +324,11 @@ docs for day-to-day reading: [ops](../ops.md), [consistency](../consistency.md),
 | v0.123 | ✅ | Python GroupConsumer batch OffsetCommit | [V123_SPEC.md](../V123_SPEC.md) |
 | v0.124 | ✅ | DescribeGroup/ListGroups NotController redirect on Python/Go/Java | [V124_SPEC.md](../V124_SPEC.md) |
 | v0.125 | ✅ | Rust DescribeGroup/ListGroups NotController redirect | [V125_SPEC.md](../V125_SPEC.md) |
+| v0.126 | ✅ | Go CreateTopicID returns topic id | [V126_SPEC.md](../V126_SPEC.md) |
+| v0.127 | ✅ | Go/Java JoinGroup with instance id | [V127_SPEC.md](../V127_SPEC.md) |
+| v0.128 | ✅ | Go/Java OffsetCommit metadata | [V128_SPEC.md](../V128_SPEC.md) |
+| v0.129 | ✅ | language produce default acks | [V129_SPEC.md](../V129_SPEC.md) |
+| v0.130 | ✅ | Go/Java Produce headers | [V130_SPEC.md](../V130_SPEC.md) |
 
 ---
 
