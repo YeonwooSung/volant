@@ -87,6 +87,12 @@
 //! nonce. Error 17 / 18 / 13 / 14 / 9 / 10 / 11 / 2 / 21 / 22,
 //! protocol (including server signature mismatch), and InvalidArgument
 //! are not retried.
+//! v0.111 retries [`Client::delete_records`] /
+//! `delete_records_with_wait_flag` on that same transient set
+//! (default 0). Error **13** stays on `max_redirects` via
+//! `redirect_to_leader` (independent counter). 14 / 9 / 10 / 11 / 2 /
+//! 17 / 18 / 21 / 22 and protocol are not retried. `wait_majority`
+//! trailer is unchanged.
 
 #![deny(missing_docs)]
 

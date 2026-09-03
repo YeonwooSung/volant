@@ -37,14 +37,16 @@ pub struct ClientConfig {
     /// Extra produce / heartbeat / offset-admin / ListOffsets /
     /// LeaveGroup / DescribeGroup / ListGroups / Metadata /
     /// ListMembers / BeginTxn / EndTxn / InitProducerId /
-    /// controller-gated admin / Auth / SCRAM handshake attempts after
-    /// the first on transient broker/transport errors.
+    /// controller-gated admin / Auth / SCRAM handshake /
+    /// DeleteRecords attempts after the first on transient
+    /// broker/transport errors. DeleteRecords error 13 stays on
+    /// [`Self::max_redirects`].
     pub max_retries: u32,
     /// Sleep between produce / heartbeat / offset-admin / ListOffsets /
     /// LeaveGroup / DescribeGroup / ListGroups / Metadata /
     /// ListMembers / BeginTxn / EndTxn / InitProducerId /
-    /// controller-gated admin / Auth / SCRAM handshake retries
-    /// (milliseconds).
+    /// controller-gated admin / Auth / SCRAM handshake /
+    /// DeleteRecords retries (milliseconds).
     pub retry_backoff_ms: u64,
 }
 
