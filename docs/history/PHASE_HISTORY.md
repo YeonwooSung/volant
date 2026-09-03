@@ -314,6 +314,11 @@ docs for day-to-day reading: [ops](../ops.md), [consistency](../consistency.md),
 | v0.113 | ✅ | Rust ListOffsets NotLeader redirect | [V113_SPEC.md](../V113_SPEC.md) |
 | v0.114 | ✅ | Rust metadata topic filter | [V114_SPEC.md](../V114_SPEC.md) |
 | v0.115 | ✅ | public reconnect on Python/Go/Java | [V115_SPEC.md](../V115_SPEC.md) |
+| v0.116 | ✅ | Go/Java metadata topic filter | [V116_SPEC.md](../V116_SPEC.md) |
+| v0.117 | ✅ | Go/Java CreateTopic configs | [V117_SPEC.md](../V117_SPEC.md) |
+| v0.118 | ✅ | OffsetFetch all-group on Python/Go/Java | [V118_SPEC.md](../V118_SPEC.md) |
+| v0.119 | ✅ | public CommitOffsets batch on Python/Go/Java | [V119_SPEC.md](../V119_SPEC.md) |
+| v0.120 | ✅ | Rust ListMembers NotController redirect | [V120_SPEC.md](../V120_SPEC.md) |
 
 ---
 
