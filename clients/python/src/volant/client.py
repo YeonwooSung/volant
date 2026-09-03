@@ -50,6 +50,7 @@ from .codec import (
     OffsetListing,
     OffsetCommitRequest,
     OffsetCommitResponse,
+    OffsetFetchEntry,
     OffsetFetchRequest,
     OffsetFetchResponse,
     ProduceMessage,
@@ -1678,6 +1679,26 @@ class Client:
         ``max_retries`` extra times (default 0). Error 14 follows
         ``max_redirects``.
         """
+        return [
+            (e.partition, e.offset)
+            for e in self._fetch_offsets(group)
+            if e.topic == topic
+        ]
+
+    def offset_fetch_all(self, group: str) -> list[tuple[str, int, int]]:
+        """Fetch all committed offsets for ``group``.
+
+        Returns ``[(topic, partition, offset), ...]``. Empty wire entries
+        mean all offsets (same as :meth:`offset_fetch`); this method does
+        not filter by topic. Transient broker/transport errors retry up
+        to ``max_retries`` extra times (default 0). Error 14 follows
+        ``max_redirects``.
+        """
+        return [
+            (e.topic, e.partition, e.offset) for e in self._fetch_offsets(group)
+        ]
+
+    def _fetch_offsets(self, group: str) -> list[OffsetFetchEntry]:
         payload = codec.encode_offset_fetch_request(
             OffsetFetchRequest(group_id=group, entries=[])
         )
@@ -1726,7 +1747,7 @@ class Client:
                 self._sleep_produce_retry()
                 continue
             self._check(resp.error_code, "offset_fetch")
-            return [(e.partition, e.offset) for e in resp.entries if e.topic == topic]
+            return list(resp.entries)
 
     def join_group(
         self,

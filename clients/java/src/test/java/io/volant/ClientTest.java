@@ -390,6 +390,7 @@ class ClientTest {
         final List<Integer> leaveGroupCodes = new CopyOnWriteArrayList<>();
         final List<Integer> offsetCommitCodes = new CopyOnWriteArrayList<>();
         final List<Integer> offsetFetchCodes = new CopyOnWriteArrayList<>();
+        final List<Codec.OffsetFetchEntry> offsetFetchEntries = new CopyOnWriteArrayList<>();
         final List<Integer> deleteOffsetsCodes = new CopyOnWriteArrayList<>();
         final List<Integer> listOffsetsCodes = new CopyOnWriteArrayList<>();
         final List<Integer> describeGroupCodes = new CopyOnWriteArrayList<>();
@@ -555,7 +556,7 @@ class ClientTest {
                     code = offsetFetchCodes.remove(0);
                 }
                 return Codec.encodeOffsetFetchResponse(
-                        new Codec.OffsetFetchResponse(code, Collections.emptyList()));
+                        new Codec.OffsetFetchResponse(code, new ArrayList<>(offsetFetchEntries)));
             }
             if (frame.opcode == Codec.OP_DELETE_OFFSETS) {
                 deleteOffsetsCount.incrementAndGet();
@@ -998,6 +999,34 @@ class ClientTest {
                 assertTrue(offs.isEmpty());
             }
             assertEquals(2, srv.offsetFetchCount.get());
+        }
+    }
+
+    @Test
+    void offsetFetchAllTwoTopics() throws Exception {
+        try (ScriptedBroker srv = ScriptedBroker.start()) {
+            srv.offsetFetchEntries.add(new Codec.OffsetFetchEntry("t", 0, 5, ""));
+            srv.offsetFetchEntries.add(new Codec.OffsetFetchEntry("u", 1, 9, ""));
+            try (Client c = Client.connect("127.0.0.1", srv.port, 5_000)) {
+                List<OffsetFetchEntry> offs = c.offsetFetchAll("g");
+                assertEquals(
+                        List.of(new OffsetFetchEntry("t", 0, 5), new OffsetFetchEntry("u", 1, 9)),
+                        offs);
+            }
+            assertEquals(1, srv.offsetFetchCount.get());
+        }
+    }
+
+    @Test
+    void offsetFetchStillFiltersTopic() throws Exception {
+        try (ScriptedBroker srv = ScriptedBroker.start()) {
+            srv.offsetFetchEntries.add(new Codec.OffsetFetchEntry("t", 0, 5, ""));
+            srv.offsetFetchEntries.add(new Codec.OffsetFetchEntry("u", 1, 9, ""));
+            try (Client c = Client.connect("127.0.0.1", srv.port, 5_000)) {
+                List<Offset> offs = c.offsetFetch("g", "t");
+                assertEquals(List.of(new Offset(0, 5)), offs);
+            }
+            assertEquals(1, srv.offsetFetchCount.get());
         }
     }
 

@@ -23,6 +23,7 @@ type scriptedBroker struct {
 	leaveGroupCodes    []uint16
 	offsetCommitCodes   []uint16
 	offsetFetchCodes    []uint16
+	offsetFetchEntries  []codec.OffsetFetchEntry
 	deleteOffsetsCodes  []uint16
 	listOffsetsCodes    []uint16
 	describeGroupCodes  []uint16
@@ -324,7 +325,10 @@ func (s *scriptedBroker) handle(f *frame.Frame) ([]byte, error) {
 			code = s.offsetFetchCodes[0]
 			s.offsetFetchCodes = s.offsetFetchCodes[1:]
 		}
-		payload, err = codec.EncodeOffsetFetchResponse(codec.OffsetFetchResponse{ErrorCode: code})
+		payload, err = codec.EncodeOffsetFetchResponse(codec.OffsetFetchResponse{
+			ErrorCode: code,
+			Entries:   s.offsetFetchEntries,
+		})
 	case codec.OpDeleteOffsets:
 		s.deleteOffsetsCount++
 		code := uint16(0)
@@ -1546,6 +1550,62 @@ func TestOffsetFetchRetriesTimeoutThenOk(t *testing.T) {
 	}
 	if n := srv.offsetFetches(); n != 2 {
 		t.Fatalf("offset fetch count %d want 2", n)
+	}
+}
+
+func TestOffsetFetchAllTwoTopics(t *testing.T) {
+	srv := &scriptedBroker{offsetFetchEntries: []codec.OffsetFetchEntry{
+		{Topic: "t", Partition: 0, Offset: 5},
+		{Topic: "u", Partition: 1, Offset: 9},
+	}}
+	addr, stop := startScripted(t, srv)
+	defer stop()
+
+	c, err := volant.DialTimeout(addr, 5*time.Second)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer c.Close()
+
+	offs, err := c.OffsetFetchAll("g")
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := []volant.OffsetFetchEntry{
+		{Topic: "t", Partition: 0, Offset: 5},
+		{Topic: "u", Partition: 1, Offset: 9},
+	}
+	if len(offs) != len(want) || offs[0] != want[0] || offs[1] != want[1] {
+		t.Fatalf("offsets %v want %v", offs, want)
+	}
+	if n := srv.offsetFetches(); n != 1 {
+		t.Fatalf("offset fetch count %d want 1", n)
+	}
+}
+
+func TestOffsetFetchStillFiltersTopic(t *testing.T) {
+	srv := &scriptedBroker{offsetFetchEntries: []codec.OffsetFetchEntry{
+		{Topic: "t", Partition: 0, Offset: 5},
+		{Topic: "u", Partition: 1, Offset: 9},
+	}}
+	addr, stop := startScripted(t, srv)
+	defer stop()
+
+	c, err := volant.DialTimeout(addr, 5*time.Second)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer c.Close()
+
+	offs, err := c.OffsetFetch("g", "t")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(offs) != 1 || offs[0] != (volant.Offset{Partition: 0, Offset: 5}) {
+		t.Fatalf("offsets %v want [{0 5}]", offs)
+	}
+	if n := srv.offsetFetches(); n != 1 {
+		t.Fatalf("offset fetch count %d want 1", n)
 	}
 }
 

@@ -41,6 +41,7 @@ from volant.codec import (
     ListOffsetsResponse,
     MetadataResponse,
     OffsetCommitResponse,
+    OffsetFetchEntry,
     OffsetFetchResponse,
     PartitionInfo,
     ProduceRequest,
@@ -91,6 +92,7 @@ class ScriptedBroker:
         self.leave_group_codes: list[int] = []
         self.offset_commit_codes: list[int] = []
         self.offset_fetch_codes: list[int] = []
+        self.offset_fetch_entries: list[OffsetFetchEntry] = []
         self.delete_offsets_codes: list[int] = []
         self.list_offsets_codes: list[int] = []
         self.describe_group_codes: list[int] = []
@@ -264,7 +266,9 @@ class ScriptedBroker:
             code = self.offset_fetch_codes.pop(0) if self.offset_fetch_codes else 0
             return (
                 encode_offset_fetch_response(
-                    OffsetFetchResponse(error_code=code, entries=[])
+                    OffsetFetchResponse(
+                        error_code=code, entries=list(self.offset_fetch_entries)
+                    )
                 ),
                 OP_OFFSET_FETCH,
             )
@@ -868,6 +872,28 @@ class TestOffsetAdminRetry(unittest.TestCase):
                 offs = c.offset_fetch("g", "t")
             self.assertEqual(offs, [])
             self.assertEqual(srv.offset_fetch_count, 2)
+
+    def test_offset_fetch_all_two_topics(self) -> None:
+        with ScriptedBroker() as srv:
+            srv.offset_fetch_entries = [
+                OffsetFetchEntry(topic="t", partition=0, offset=5),
+                OffsetFetchEntry(topic="u", partition=1, offset=9),
+            ]
+            with Client(srv.addr, timeout=5.0) as c:
+                offs = c.offset_fetch_all("g")
+            self.assertEqual(offs, [("t", 0, 5), ("u", 1, 9)])
+            self.assertEqual(srv.offset_fetch_count, 1)
+
+    def test_offset_fetch_still_filters_topic(self) -> None:
+        with ScriptedBroker() as srv:
+            srv.offset_fetch_entries = [
+                OffsetFetchEntry(topic="t", partition=0, offset=5),
+                OffsetFetchEntry(topic="u", partition=1, offset=9),
+            ]
+            with Client(srv.addr, timeout=5.0) as c:
+                offs = c.offset_fetch("g", "t")
+            self.assertEqual(offs, [(0, 5)])
+            self.assertEqual(srv.offset_fetch_count, 1)
 
     def test_delete_offsets_retries_timeout_then_ok(self) -> None:
         with ScriptedBroker() as srv:

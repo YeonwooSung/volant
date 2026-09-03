@@ -1748,6 +1748,23 @@ public final class Client implements AutoCloseable {
         return out;
     }
 
+    /**
+     * Fetch all committed offsets for {@code group}.
+     *
+     * <p>Sends empty OffsetFetch entries (all group offsets) and returns
+     * every row, including topic. {@link #offsetFetch(String, String)} still
+     * filters to one topic. Error 14 follows {@code maxRedirects}. Transient
+     * 6 / 7 / 15 / 16 follow {@code maxRetries}.
+     */
+    public List<OffsetFetchEntry> offsetFetchAll(String group) {
+        List<Codec.OffsetFetchEntry> entries = offsetFetchEntries(group, Collections.emptyList());
+        List<OffsetFetchEntry> out = new ArrayList<>();
+        for (Codec.OffsetFetchEntry e : entries) {
+            out.add(new OffsetFetchEntry(e.topic, e.partition, e.offset));
+        }
+        return out;
+    }
+
     List<Codec.OffsetFetchEntry> offsetFetchEntries(String group, List<Codec.OffsetEntry> entries) {
         byte[] payload = Codec.encodeOffsetFetchRequest(new Codec.OffsetFetchRequest(group, entries));
         int retryAttempt = 0;

@@ -32,6 +32,7 @@ for offset, key, value in batch.tuples():
     print(offset, key, value)
 c.offset_commit(group="g", topic="t", partition=0, offset=5)
 offs = c.offset_fetch(group="g", topic="t")  # [(partition, offset), ...]
+all_offs = c.offset_fetch_all("g")  # v0.118; [(topic, partition, offset), ...]
 bounds = c.list_offsets("t")  # [OffsetListing(partition, earliest, latest), ...]
 cfg = c.describe_configs("t")
 c.alter_configs("t", [("retention.ms", "86400000")])
