@@ -77,6 +77,7 @@ allOffs, err := c.OffsetFetchAll("g") // v0.118 / v0.140; []OffsetFetchEntry{Top
 topicOffs, err := c.OffsetFetchEntries("g", "t") // v0.148; same topic filter, keep Metadata
 rows, err := c.FetchOffsets("g", []codec.OffsetEntry{{Topic: "t", Partition: 0}}) // v0.122; nil/empty = all; codec Metadata already on each row
 deleted, err := c.DeleteOffsets("g", []codec.OffsetEntry{{Topic: "t", Partition: 0}})
+deleted, err = c.DeleteOffset("g", "t", 0) // v0.164; one OffsetEntry
 deleted, err = c.DeleteOffsetsAll("g") // v0.158; same as DeleteOffsets(group, nil)
 _ = offs
 _ = allOffs
@@ -187,6 +188,8 @@ caller member + generation (v0.139; Java 6/7-arg parity).
 including metadata.
 `DeleteOffsetsAll(group)` deletes every committed offset for the group
 (empty wire entries); same as `DeleteOffsets(group, nil)`.
+`DeleteOffset(group, topic, partition)` deletes one committed offset
+(one OffsetEntry); same as `DeleteOffsets` with a one-element list.
 `CreatePartitions` grows the topic to `totalCount` partitions and
 returns the new total (native opcode 46, not Kafka CreatePartitions).
 `ReassignPartitions` reassigns replicas and returns the assignment

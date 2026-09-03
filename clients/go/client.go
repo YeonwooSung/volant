@@ -2099,6 +2099,13 @@ func (c *Client) DeleteOffsetsAll(group string) (uint32, error) {
 	return c.DeleteOffsets(group, nil)
 }
 
+// DeleteOffset deletes one committed offset (one OffsetEntry).
+// Same as DeleteOffsets with a one-element list. Error 14 and
+// transient retry inherit from DeleteOffsets.
+func (c *Client) DeleteOffset(group, topic string, partition uint32) (uint32, error) {
+	return c.DeleteOffsets(group, []codec.OffsetEntry{{Topic: topic, Partition: partition}})
+}
+
 func (c *Client) DescribeConfigs(topic string) (DescribeConfigsResult, error) {
 	payload, err := codec.EncodeDescribeConfigsRequest(codec.DescribeConfigsRequest{Topic: topic})
 	if err != nil {

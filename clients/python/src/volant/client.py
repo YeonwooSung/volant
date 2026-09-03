@@ -1695,6 +1695,14 @@ class Client:
             self._check(resp.error_code, "delete_offsets")
             return resp.deleted_count
 
+    def delete_offset(self, group: str, topic: str, partition: int) -> int:
+        """Delete one committed offset (one OffsetEntry).
+
+        Same as ``delete_offsets(group, [(topic, partition)])``.
+        Error 14 / transient retry inherit from ``delete_offsets``.
+        """
+        return self.delete_offsets(group, [(topic, partition)])
+
 
     def describe_configs(self, topic: str) -> DescribeConfigsResult:
         """Describe topic configuration (native opcode 40/41).

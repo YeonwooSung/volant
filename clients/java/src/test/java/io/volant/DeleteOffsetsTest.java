@@ -46,6 +46,20 @@ class DeleteOffsetsTest {
     }
 
     @Test
+    void deleteOffsetEncodesOneEntry() throws Exception {
+        try (DeleteOffsetsServer srv = DeleteOffsetsServer.ok(1)) {
+            try (Client c = Client.connect("127.0.0.1", srv.port, 5_000)) {
+                int got = c.deleteOffset("g", "events", 0);
+                assertEquals(1, got);
+            }
+            assertEquals("g", srv.group.get());
+            assertEquals(1, srv.entries.size());
+            assertEquals("events", srv.entries.get(0).topic);
+            assertEquals(0, srv.entries.get(0).partition);
+        }
+    }
+
+    @Test
     void nonzeroErrorCodeRaises() throws Exception {
         try (DeleteOffsetsServer srv = DeleteOffsetsServer.error(2)) {
             try (Client c = Client.connect("127.0.0.1", srv.port, 5_000)) {

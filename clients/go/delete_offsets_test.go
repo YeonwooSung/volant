@@ -162,6 +162,29 @@ func TestDeleteOffsetsExplicitEntry(t *testing.T) {
 	}
 }
 
+func TestDeleteOffsetEncodesOneEntry(t *testing.T) {
+	addr, got, stop := serveDeleteOffsets(t, 0, 1)
+	defer stop()
+	c, err := volant.DialTimeout(addr, 5*time.Second)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer c.Close()
+	out, err := c.DeleteOffset("g", "events", 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.err != nil {
+		t.Fatal(got.err)
+	}
+	if got.group != "g" || len(got.entries) != 1 || got.entries[0].Topic != "events" || got.entries[0].Partition != 0 {
+		t.Fatalf("entries %v", got.entries)
+	}
+	if out != 1 {
+		t.Fatalf("deleted_count %d", out)
+	}
+}
+
 func TestDeleteOffsetsNonzeroErrorRaises(t *testing.T) {
 	addr, _, stop := serveDeleteOffsets(t, 2, 0)
 	defer stop()
