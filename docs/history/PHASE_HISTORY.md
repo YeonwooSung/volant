@@ -329,6 +329,11 @@ docs for day-to-day reading: [ops](../ops.md), [consistency](../consistency.md),
 | v0.128 | ✅ | Go/Java OffsetCommit metadata | [V128_SPEC.md](../V128_SPEC.md) |
 | v0.129 | ✅ | language produce default acks | [V129_SPEC.md](../V129_SPEC.md) |
 | v0.130 | ✅ | Go/Java Produce headers | [V130_SPEC.md](../V130_SPEC.md) |
+| v0.131 | ✅ | Go/Java JoinGroup rejoin member_id | [V131_SPEC.md](../V131_SPEC.md) |
+| v0.132 | ✅ | Go/Java Produce timestamp | [V132_SPEC.md](../V132_SPEC.md) |
+| v0.133 | ✅ | Go/Java Produce headers + acks | [V133_SPEC.md](../V133_SPEC.md) |
+| v0.134 | ✅ | Heartbeat NotController redirect on Python/Go/Java | [V134_SPEC.md](../V134_SPEC.md) |
+| v0.135 | ✅ | Rust Heartbeat NotController redirect | [V135_SPEC.md](../V135_SPEC.md) |
 
 ---
 
