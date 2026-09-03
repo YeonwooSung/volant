@@ -2188,6 +2188,82 @@ impl Client {
         }
     }
 
+    /// Admin path: empty member, generation 0, empty metadata.
+    pub async fn commit_offset(
+        &self,
+        group_id: &str,
+        topic: &str,
+        partition: u32,
+        offset: u64,
+    ) -> Result<()> {
+        self.commit_offset_meta(group_id, topic, partition, offset, "")
+            .await
+    }
+
+    /// Admin path with per-entry metadata.
+    pub async fn commit_offset_meta(
+        &self,
+        group_id: &str,
+        topic: &str,
+        partition: u32,
+        offset: u64,
+        metadata: &str,
+    ) -> Result<()> {
+        self.commit_offsets(
+            group_id,
+            "",
+            0,
+            vec![OffsetCommitEntry {
+                topic: topic.to_owned(),
+                partition,
+                offset,
+                metadata: metadata.to_owned(),
+            }],
+        )
+        .await
+    }
+
+    /// One entry with caller member_id + generation (empty metadata).
+    pub async fn commit_offset_member(
+        &self,
+        group_id: &str,
+        topic: &str,
+        partition: u32,
+        offset: u64,
+        member_id: &str,
+        generation: u32,
+    ) -> Result<()> {
+        self.commit_offset_member_meta(
+            group_id, topic, partition, offset, member_id, generation, "",
+        )
+        .await
+    }
+
+    /// One entry with member + generation + metadata.
+    pub async fn commit_offset_member_meta(
+        &self,
+        group_id: &str,
+        topic: &str,
+        partition: u32,
+        offset: u64,
+        member_id: &str,
+        generation: u32,
+        metadata: &str,
+    ) -> Result<()> {
+        self.commit_offsets(
+            group_id,
+            member_id,
+            generation,
+            vec![OffsetCommitEntry {
+                topic: topic.to_owned(),
+                partition,
+                offset,
+                metadata: metadata.to_owned(),
+            }],
+        )
+        .await
+    }
+
     /// Fetch committed offsets. Empty `entries` returns all offsets for the group.
     ///
     /// Transient broker/transport errors retry up to
