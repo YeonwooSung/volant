@@ -1173,6 +1173,18 @@ impl Client {
         Ok((state.producer_id, state.epoch))
     }
 
+    /// Stored producer id (0 until [`Self::init_producer_id`] or implicit init).
+    /// Does not call Init.
+    pub async fn producer_id(&self) -> u64 {
+        self.idempotent.lock().await.producer_id
+    }
+
+    /// Stored producer epoch (0 until [`Self::init_producer_id`] or implicit init).
+    /// Does not call Init.
+    pub async fn producer_epoch(&self) -> u16 {
+        self.idempotent.lock().await.epoch
+    }
+
     /// Begin a transaction (Phase 18). Requires `transactional_id` in config.
     ///
     /// Transient broker/transport errors retry up to

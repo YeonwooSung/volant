@@ -809,6 +809,58 @@ func TestInitProducerIDSecondCallIsNoop(t *testing.T) {
 	}
 }
 
+func TestProducerIDGettersBeforeInitAreZero(t *testing.T) {
+	srv := &scriptedBroker{}
+	addr, stop := startScripted(t, srv)
+	defer stop()
+
+	c, err := volant.DialTimeout(addr, 5*time.Second)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer c.Close()
+
+	if pid := c.ProducerID(); pid != 0 {
+		t.Fatalf("ProducerID = %d want 0", pid)
+	}
+	if epoch := c.ProducerEpoch(); epoch != 0 {
+		t.Fatalf("ProducerEpoch = %d want 0", epoch)
+	}
+	if srv.inits() != 0 {
+		t.Fatalf("init count %d want 0", srv.inits())
+	}
+	ops := srv.copyOpcodes()
+	if len(ops) != 0 {
+		t.Fatalf("opcodes %#v want none", ops)
+	}
+}
+
+func TestProducerIDGettersAfterInitMatchStored(t *testing.T) {
+	srv := &scriptedBroker{}
+	addr, stop := startScripted(t, srv)
+	defer stop()
+
+	c, err := volant.DialTimeout(addr, 5*time.Second)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer c.Close()
+
+	pid, epoch, err := c.InitProducerID()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if pid != 42 || epoch != 1 {
+		t.Fatalf("pid/epoch = %d/%d want 42/1", pid, epoch)
+	}
+	if c.ProducerID() != pid || c.ProducerEpoch() != epoch {
+		t.Fatalf("getters %d/%d want %d/%d", c.ProducerID(), c.ProducerEpoch(), pid, epoch)
+	}
+	if srv.inits() != 1 {
+		t.Fatalf("init count %d want 1", srv.inits())
+	}
+}
+
 func TestIdempotentProduceStillInitsOnce(t *testing.T) {
 	srv := &scriptedBroker{}
 	addr, stop := startScripted(t, srv)

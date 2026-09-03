@@ -733,6 +733,16 @@ class Client:
         self._ensure_producer_id()
         return (self._producer_id, self._producer_epoch)
 
+    @property
+    def producer_id(self) -> int:
+        """Stored producer id (0 until init_producer_id or implicit init)."""
+        return self._producer_id
+
+    @property
+    def producer_epoch(self) -> int:
+        """Stored producer epoch (0 until init_producer_id or implicit init)."""
+        return self._producer_epoch
+
     def _produce_trailer(self, topic: str, partition: int) -> tuple[int, int, int]:
         if not self._uses_pid():
             return 0, 0, -1
