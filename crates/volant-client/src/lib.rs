@@ -168,6 +168,9 @@
 //! v0.162 adds [`Client::list_acls_all`] as a named helper for
 //! unfiltered ListAcls. Same as `list_acls("", 255, "")`.
 //! [`Client::list_acls`] is unchanged.
+//! v0.165 adds [`Client::delete_offsets_all`] / [`Client::delete_offset`]
+//! wrapping [`Client::delete_offsets`]. Empty entries still delete all.
+//! [`Client::delete_offsets`] is unchanged.
 
 #![deny(missing_docs)]
 
