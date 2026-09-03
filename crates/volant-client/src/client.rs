@@ -853,6 +853,12 @@ impl Client {
         }
     }
 
+    /// List earliest/latest offsets for every partition of `topic`
+    /// (empty wire partitions). Same as `list_offsets(topic, vec![])`.
+    pub async fn list_offsets_all(&self, topic: &str) -> Result<ListOffsetsResult> {
+        self.list_offsets(topic, Vec::new()).await
+    }
+
     /// Delete a topic.
     pub async fn delete_topic(&self, name: &str) -> Result<()> {
         let resp = self
