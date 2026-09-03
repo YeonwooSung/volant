@@ -32,6 +32,7 @@ pub struct ClientConfig {
     /// ListMembers (v0.120) uses this for error 14 (`NotController`).
     /// DescribeGroup / ListGroups (v0.125) use this for error 14.
     /// Heartbeat (v0.135) uses this for error 14.
+    /// LeaveGroup (v0.137) uses this for error 14.
     pub max_redirects: u32,
     /// Enable idempotent produce (InitProducerId + per-partition sequences). Phase 10.
     pub enable_idempotence: bool,

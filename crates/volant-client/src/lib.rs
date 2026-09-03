@@ -122,6 +122,13 @@
 //! 9 / 10 / 11 / 17 / 18 / 21 / 22 and protocol are not redirected.
 //! Rebalance 9/10/11 is still not retried. Typed non-zero codes
 //! still return [`HeartbeatResult`]. [`GroupConsumer`] inherits.
+//! v0.137 redirects [`Client::leave_group`] on error **14**
+//! (`NotController`) via `redirect_to_controller` /
+//! `max_redirects`. Transient 6/7/15/16 stay on `max_retries`
+//! (v0.87). `max_redirects=0` does not redirect. Error 10
+//! (`UnknownMemberId`) stays success. 13 / 2 / 9 / 11 / 17 / 18 /
+//! 21 / 22 and protocol are not redirected. Rebalance 9/11 is
+//! still not retried. [`GroupConsumer::leave`] inherits.
 
 #![deny(missing_docs)]
 
