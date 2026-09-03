@@ -966,9 +966,34 @@ func (c *Client) RemoveBroker(id uint32) (uint64, error) {
 
 // ListMembers lists configured + live membership (native opcode 106/107).
 // Overlay is still SoT. Transient broker/transport errors retry up to
-// maxRetries extra times (default 0). Error 2 / 9 / 10 / 11 / 13 / 14
-// are not retried.
+// maxRetries extra times (default 0). Error 14 (NotController) uses
+// maxRedirects via redirectToController (independent of retry).
+// maxRedirects=0 does not redirect. Error 2 / 9 / 10 / 11 / 13 / 17 /
+// 18 / 21 / 22 and protocol are not retried or redirected.
 func (c *Client) ListMembers() (MembershipList, error) {
+	maxAttempts := 1 + c.maxRedirects
+	redirectAttempt := 0
+	for {
+		got, err := c.listMembersRpc()
+		if err != nil {
+			ok, rerr := c.maybeRedirectController(err, redirectAttempt+1, maxAttempts)
+			if rerr != nil {
+				return MembershipList{}, rerr
+			}
+			if ok {
+				redirectAttempt++
+				continue
+			}
+			return MembershipList{}, err
+		}
+		return got, nil
+	}
+}
+
+// listMembersRpc is ListMembers without the v0.121 error-14 wrap.
+// Used by redirectToController so hunt and ListMembers are not
+// mutually recursive. Transient retry is still v0.95.
+func (c *Client) listMembersRpc() (MembershipList, error) {
 	payload := codec.EncodeListMembersRequest()
 	maxRetries := c.maxRetries
 	if maxRetries < 0 {
@@ -1409,7 +1434,7 @@ func (c *Client) maybeRedirectControllerCode(code uint16, msg string, attempt, m
 // redirectToController refreshes Metadata and reconnects to the controller.
 // If controllerID is set (parsed from controller_id=N in a 14 Error message,
 // or Metadata's v0.77 trailer when non-zero), look that node up in Metadata
-// brokers, then ListMembers if Metadata has no matching id. Otherwise pick
+// brokers, then listMembersRpc if Metadata has no matching id. Otherwise pick
 // the first advertised broker whose host:port is not this connection.
 // ok is false on no other broker / lookup miss / empty host / reconnect fail
 // (caller should surface the original error 14).
@@ -1435,7 +1460,7 @@ func (c *Client) redirectToController(controllerID *uint32) (bool, error) {
 			}
 		}
 		if !found {
-			members, lerr := c.ListMembers()
+			members, lerr := c.listMembersRpc()
 			if lerr != nil {
 				return false, nil
 			}

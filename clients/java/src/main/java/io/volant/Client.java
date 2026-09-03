@@ -663,7 +663,7 @@ public final class Client implements AutoCloseable {
      *
      * <p>If {@code controllerId} is known (parsed from {@code controller_id=N}
      * in a 14 Error message, or Metadata's v0.77 trailer when non-zero), look
-     * that node up in Metadata brokers, then {@link #listMembers()} if
+     * that node up in Metadata brokers, then {@link #listMembersRpc()} if
      * Metadata has no matching id. Otherwise pick the first advertised broker
      * whose host:port is not this connection.
      *
@@ -687,7 +687,7 @@ public final class Client implements AutoCloseable {
             }
             if (host == null) {
                 try {
-                    MembershipList members = listMembers();
+                    MembershipList members = listMembersRpc();
                     for (MembershipBroker b : members.brokers) {
                         if ((b.id & 0xFFFFFFFFL) == controllerId) {
                             host = b.host;
@@ -926,10 +926,33 @@ public final class Client implements AutoCloseable {
     /**
      * List configured + live membership (native opcode 106/107). Overlay is
      * still SoT. Transient broker/transport errors retry up to {@code
-     * maxRetries} extra times (default 0). Error 2 / 9 / 10 / 11 / 13 / 14
-     * are not retried.
+     * maxRetries} extra times (default 0). Error 14 ({@code NotController})
+     * uses {@code maxRedirects} via {@link #redirectToController} (independent
+     * of retry). {@code maxRedirects=0} does not redirect. Error 2 / 9 / 10 /
+     * 11 / 13 / 17 / 18 / 21 / 22 and protocol are not retried or redirected.
      */
     public MembershipList listMembers() {
+        int redirectAttempt = 0;
+        int maxAttempts = 1 + maxRedirects;
+        while (true) {
+            try {
+                return listMembersRpc();
+            } catch (BrokerException e) {
+                if (maybeRedirectController(e.code, e.message, redirectAttempt + 1, maxAttempts)) {
+                    redirectAttempt++;
+                    continue;
+                }
+                throw e;
+            }
+        }
+    }
+
+    /**
+     * ListMembers without the v0.121 error-14 wrap. Used by
+     * {@link #redirectToController} so hunt and {@link #listMembers()} are
+     * not mutually recursive. Transient retry is still v0.95.
+     */
+    private MembershipList listMembersRpc() {
         byte[] payload = Codec.encodeListMembersRequest();
         int retryAttempt = 0;
         while (true) {

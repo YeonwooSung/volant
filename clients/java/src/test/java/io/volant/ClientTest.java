@@ -397,6 +397,8 @@ class ClientTest {
         final List<Integer> listGroupsCodes = new CopyOnWriteArrayList<>();
         final List<Integer> metadataCodes = new CopyOnWriteArrayList<>();
         final List<Integer> listMembersCodes = new CopyOnWriteArrayList<>();
+        final List<int[]> listMembersReplies = new CopyOnWriteArrayList<>();
+        final List<String> listMembersMessages = new CopyOnWriteArrayList<>();
         volatile Metadata meta = new Metadata(Collections.emptyList(), Collections.emptyList());
         final List<Integer> opcodes = new CopyOnWriteArrayList<>();
         final List<Codec.ProduceRequest> produceReqs = new CopyOnWriteArrayList<>();
@@ -602,8 +604,19 @@ class ClientTest {
             if (frame.opcode == Codec.OP_LIST_MEMBERS) {
                 listMembersCount.incrementAndGet();
                 int code = 0;
-                if (!listMembersCodes.isEmpty()) {
+                String message = "";
+                boolean asError = false;
+                if (!listMembersReplies.isEmpty()) {
+                    int[] spec = listMembersReplies.remove(0);
+                    code = spec[0];
+                    asError = spec[1] != 0;
+                    message = listMembersMessages.isEmpty() ? "" : listMembersMessages.remove(0);
+                } else if (!listMembersCodes.isEmpty()) {
                     code = listMembersCodes.remove(0);
+                }
+                if (asError) {
+                    replyOp[0] = Codec.OP_ERROR;
+                    return Codec.encodeErrorResponse(new Codec.ErrorResponse(code, message));
                 }
                 replyOp[0] = Codec.OP_LIST_MEMBERS_RESPONSE;
                 return Codec.encodeListMembersResponse(
@@ -1349,6 +1362,61 @@ class ClientTest {
                 assertTrue(got.live.isEmpty());
             }
             assertEquals(2, srv.listMembersCount.get());
+            assertEquals(0, srv.metadataCount.get());
+        }
+    }
+
+    @Test
+    void listMembersError14RedirectsViaControllerId() throws Exception {
+        try (ScriptedBroker leader = ScriptedBroker.start();
+                ScriptedBroker follower = ScriptedBroker.start()) {
+            follower.listMembersReplies.add(new int[] {NOT_CONTROLLER, 1});
+            follower.listMembersMessages.add("not controller; controller_id=2");
+            follower.meta = controllerMeta(2, "127.0.0.1", leader.port);
+            try (Client c = Client.connect("127.0.0.1", follower.port, 5_000)) {
+                MembershipList got = c.listMembers();
+                assertEquals(0, got.generation);
+                assertTrue(got.brokers.isEmpty());
+                assertTrue(got.live.isEmpty());
+                assertEquals(leader.port, Integer.parseInt(c.addr().substring(c.addr().indexOf(':') + 1)));
+            }
+            assertEquals(1, follower.listMembersCount.get());
+            assertEquals(1, follower.metadataCount.get());
+            assertEquals(1, leader.listMembersCount.get());
+            assertEquals(0, leader.metadataCount.get());
+        }
+    }
+
+    @Test
+    void listMembersTyped14NoHintThenOk() throws Exception {
+        try (ScriptedBroker leader = ScriptedBroker.start();
+                ScriptedBroker follower = ScriptedBroker.start()) {
+            follower.listMembersCodes.add(NOT_CONTROLLER);
+            follower.meta = otherBrokerMeta(follower.port, "127.0.0.1", leader.port);
+            try (Client c = Client.connect("127.0.0.1", follower.port, 5_000)) {
+                MembershipList got = c.listMembers();
+                assertEquals(0, got.generation);
+                assertEquals(leader.port, Integer.parseInt(c.addr().substring(c.addr().indexOf(':') + 1)));
+            }
+            assertEquals(1, follower.listMembersCount.get());
+            assertEquals(1, follower.metadataCount.get());
+            assertEquals(1, leader.listMembersCount.get());
+        }
+    }
+
+    @Test
+    void listMembersMaxRedirectsZeroRaisesOnFirst14() throws Exception {
+        try (ScriptedBroker follower = ScriptedBroker.start()) {
+            follower.listMembersReplies.add(new int[] {NOT_CONTROLLER, 1});
+            follower.listMembersMessages.add("not controller; controller_id=2");
+            follower.meta = controllerMeta(2, "127.0.0.1", 9);
+            try (Client c = Client.connect("127.0.0.1", follower.port, 5_000)) {
+                c.setMaxRedirects(0);
+                BrokerException ex = assertThrows(BrokerException.class, c::listMembers);
+                assertEquals(NOT_CONTROLLER, ex.code);
+            }
+            assertEquals(1, follower.listMembersCount.get());
+            assertEquals(0, follower.metadataCount.get());
         }
     }
 

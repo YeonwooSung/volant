@@ -453,9 +453,10 @@ class Client:
 
         If ``controller_id`` is known (parsed from ``controller_id=N`` in
         a 14 Error message, or Metadata's v0.77 trailer when non-zero),
-        look that node up in Metadata brokers, then ``list_members()``
-        if Metadata has no matching id. Otherwise pick the first
-        advertised broker whose host:port is not this connection.
+        look that node up in Metadata brokers, then
+        ``_list_members_rpc()`` if Metadata has no matching id.
+        Otherwise pick the first advertised broker whose host:port is
+        not this connection.
 
         Returns True when the caller should retry. Returns False on no
         other broker / lookup miss / empty host / reconnect fail — caller
@@ -473,7 +474,7 @@ class Client:
                     break
             if host is None:
                 try:
-                    members = self.list_members()
+                    members = self._list_members_rpc()
                 except Exception:
                     return False
                 for b in members.brokers:
@@ -900,8 +901,33 @@ class Client:
         Non-zero ``error_code`` raises :class:`BrokerError` with
         ``op="list_members"``. Overlay is still SoT. Transient
         broker/transport errors retry up to ``max_retries`` extra
-        times (default 0). Error 2 / 9 / 10 / 11 / 13 / 14 are not
-        retried.
+        times (default 0). Error **14** (`NotController`) uses
+        ``max_redirects`` via ``_redirect_to_controller``
+        (independent of retry). ``max_redirects=0`` does not
+        redirect. Error 2 / 9 / 10 / 11 / 13 / 17 / 18 / 21 / 22
+        and protocol are not retried or redirected.
+        """
+        max_redirects = max(0, int(self.max_redirects))
+        redirect_attempt = 0
+        while True:
+            try:
+                return self._list_members_rpc()
+            except BrokerError as e:
+                if (
+                    e.code == _NOT_CONTROLLER
+                    and redirect_attempt + 1 < 1 + max_redirects
+                    and self._redirect_to_controller(_controller_id_hint(e.message))
+                ):
+                    redirect_attempt += 1
+                    continue
+                raise
+
+    def _list_members_rpc(self) -> MembershipList:
+        """ListMembers without the v0.121 error-14 wrap.
+
+        Used by :meth:`_redirect_to_controller` so hunt and
+        ``list_members`` are not mutually recursive. Transient retry
+        is still v0.95.
         """
         payload = codec.encode_list_members_request()
         max_retries = max(0, int(self.max_retries))

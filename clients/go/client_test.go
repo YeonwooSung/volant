@@ -30,6 +30,7 @@ type scriptedBroker struct {
 	listGroupsCodes     []uint16
 	metadataCodes       []uint16
 	listMembersCodes    []uint16
+	listMembersReplies  []createTopicReply
 	meta                codec.MetadataResponse
 	opcodes             []uint16
 	produceReqs         []codec.ProduceRequest
@@ -381,12 +382,20 @@ func (s *scriptedBroker) handle(f *frame.Frame) ([]byte, error) {
 		replyOp = codec.OpListGroupsResponse
 	case codec.OpListMembers:
 		s.listMembersCount++
-		code := uint16(0)
-		if len(s.listMembersCodes) > 0 {
-			code = s.listMembersCodes[0]
+		rep := createTopicReply{}
+		if len(s.listMembersReplies) > 0 {
+			rep = s.listMembersReplies[0]
+			s.listMembersReplies = s.listMembersReplies[1:]
+		} else if len(s.listMembersCodes) > 0 {
+			rep.code = s.listMembersCodes[0]
 			s.listMembersCodes = s.listMembersCodes[1:]
 		}
-		payload, err = codec.EncodeListMembersResponse(codec.ListMembersResponse{ErrorCode: code})
+		if rep.asError {
+			payload, err = codec.EncodeErrorResponse(codec.ErrorResponse{Code: rep.code, Message: rep.message})
+			replyOp = codec.OpError
+			break
+		}
+		payload, err = codec.EncodeListMembersResponse(codec.ListMembersResponse{ErrorCode: rep.code})
 		replyOp = codec.OpListMembersResponse
 	case codec.OpMetadata:
 		s.metadataCount++
@@ -2126,6 +2135,112 @@ func TestListMembersRetriesTimeoutThenOk(t *testing.T) {
 	}
 	if n := srv.listMembers(); n != 2 {
 		t.Fatalf("list members count %d want 2", n)
+	}
+	if n := srv.metadatas(); n != 0 {
+		t.Fatalf("metadata count %d want 0", n)
+	}
+}
+
+func TestListMembersError14RedirectsViaControllerID(t *testing.T) {
+	leader := &scriptedBroker{}
+	_, stopL := startScripted(t, leader)
+	defer stopL()
+	follower := &scriptedBroker{
+		listMembersReplies: []createTopicReply{{
+			code: notController, message: "not controller; controller_id=2", asError: true,
+		}},
+		meta: controllerMeta(2, "127.0.0.1", leader.port()),
+	}
+	fAddr, stopF := startScripted(t, follower)
+	defer stopF()
+
+	c, err := volant.DialTimeout(fAddr, 5*time.Second)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer c.Close()
+	got, err := c.ListMembers()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.Generation != 0 || len(got.Brokers) != 0 || len(got.Live) != 0 {
+		t.Fatalf("list members %v want empty", got)
+	}
+	if n := follower.listMembers(); n != 1 {
+		t.Fatalf("follower list members %d want 1", n)
+	}
+	if n := follower.metadatas(); n != 1 {
+		t.Fatalf("follower metadata %d want 1", n)
+	}
+	if n := leader.listMembers(); n != 1 {
+		t.Fatalf("leader list members %d want 1", n)
+	}
+	if n := leader.metadatas(); n != 0 {
+		t.Fatalf("leader metadata %d want 0", n)
+	}
+}
+
+func TestListMembersTyped14NoHintThenOk(t *testing.T) {
+	leader := &scriptedBroker{}
+	_, stopL := startScripted(t, leader)
+	defer stopL()
+	follower := &scriptedBroker{
+		listMembersCodes: []uint16{notController},
+	}
+	fAddr, stopF := startScripted(t, follower)
+	defer stopF()
+	follower.mu.Lock()
+	follower.meta = otherBrokerMeta(follower.port(), "127.0.0.1", leader.port())
+	follower.mu.Unlock()
+
+	c, err := volant.DialTimeout(fAddr, 5*time.Second)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer c.Close()
+	got, err := c.ListMembers()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.Generation != 0 {
+		t.Fatalf("generation %d want 0", got.Generation)
+	}
+	if n := follower.listMembers(); n != 1 {
+		t.Fatalf("follower list members %d want 1", n)
+	}
+	if n := follower.metadatas(); n != 1 {
+		t.Fatalf("follower metadata %d want 1", n)
+	}
+	if n := leader.listMembers(); n != 1 {
+		t.Fatalf("leader list members %d want 1", n)
+	}
+}
+
+func TestListMembersMaxRedirectsZeroRaisesOnFirst14(t *testing.T) {
+	follower := &scriptedBroker{
+		listMembersReplies: []createTopicReply{{
+			code: notController, message: "not controller; controller_id=2", asError: true,
+		}},
+		meta: controllerMeta(2, "127.0.0.1", 9),
+	}
+	fAddr, stopF := startScripted(t, follower)
+	defer stopF()
+
+	c, err := volant.DialTimeout(fAddr, 5*time.Second)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer c.Close()
+	c.SetMaxRedirects(0)
+	_, err = c.ListMembers()
+	if brokerCode(err) != notController {
+		t.Fatalf("err=%v want code 14", err)
+	}
+	if n := follower.listMembers(); n != 1 {
+		t.Fatalf("list members %d want 1", n)
+	}
+	if n := follower.metadatas(); n != 0 {
+		t.Fatalf("metadata %d want 0", n)
 	}
 }
 

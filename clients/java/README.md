@@ -155,7 +155,7 @@ retry once (`setMaxRedirects(1)` is the connect default).
 CreatePartitions / ReassignPartitions / CreateAcls / DeleteAcls /
 CreateScramUser / DeleteScramUser / ListScramUsers / ListAcls /
 AddBroker / RemoveBroker / DescribeConfigs / AlterConfigs / DeleteOffsets /
-OffsetCommit / OffsetFetch follow
+OffsetCommit / OffsetFetch / ListMembers follow
 `NotController` (error 14) the same way (Metadata brokers or a
 `controller_id=N` hint in the Error message; admin 14 prefers
 Metadata.controller_id when the message has no hint; not Kafka

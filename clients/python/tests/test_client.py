@@ -101,6 +101,8 @@ class ScriptedBroker:
         self.list_groups_codes: list[int] = []
         self.metadata_codes: list[int] = []
         self.list_members_codes: list[int] = []
+        # (code, message, as_error_opcode). Takes precedence over codes.
+        self.list_members_replies: list[tuple[int, str, bool]] = []
         self.metadata: MetadataResponse | None = None
         self.opcodes: list[int] = []
         self.produce_reqs: list[ProduceRequest] = []
@@ -316,7 +318,16 @@ class ScriptedBroker:
             )
         if opcode == OP_LIST_MEMBERS:
             self.list_members_count += 1
-            code = self.list_members_codes.pop(0) if self.list_members_codes else 0
+            if self.list_members_replies:
+                code, message, as_error = self.list_members_replies.pop(0)
+            else:
+                code = self.list_members_codes.pop(0) if self.list_members_codes else 0
+                message, as_error = "", False
+            if as_error:
+                return (
+                    encode_error_response(ErrorResponse(code=code, message=message)),
+                    OP_ERROR,
+                )
             return (
                 encode_list_members_response(
                     ListMembersResponse(
@@ -1105,6 +1116,7 @@ class TestMetadataListMembersRetry(unittest.TestCase):
             self.assertEqual(got.brokers, [])
             self.assertEqual(got.live, [])
             self.assertEqual(srv.list_members_count, 2)
+            self.assertEqual(srv.metadata_count, 0)
 
     def test_exhausted_retries_raises(self) -> None:
         with ScriptedBroker() as srv:
@@ -1114,6 +1126,75 @@ class TestMetadataListMembersRetry(unittest.TestCase):
                     c.metadata()
             self.assertEqual(ctx.exception.code, TIMEOUT)
             self.assertEqual(srv.metadata_count, 3)
+
+
+NOT_CONTROLLER = 14
+
+
+def _controller_meta(node_id: int, host: str, port: int) -> MetadataResponse:
+    return MetadataResponse(
+        brokers=[
+            BrokerInfo(node_id=1, host="127.0.0.1", port=1),
+            BrokerInfo(node_id=node_id, host=host, port=port),
+        ],
+        topics=[],
+    )
+
+
+def _other_broker_meta(current_port: int, host: str, port: int) -> MetadataResponse:
+    return MetadataResponse(
+        brokers=[
+            BrokerInfo(node_id=1, host="127.0.0.1", port=current_port),
+            BrokerInfo(node_id=2, host=host, port=port),
+        ],
+        topics=[],
+    )
+
+
+class TestListMembersNotControllerRedirect(unittest.TestCase):
+    def test_list_members_error_14_redirects_via_controller_id(self) -> None:
+        with ScriptedBroker() as leader, ScriptedBroker() as follower:
+            follower.list_members_replies = [
+                (NOT_CONTROLLER, "not controller; controller_id=2", True)
+            ]
+            follower.metadata = _controller_meta(2, "127.0.0.1", leader.port)
+            with Client(follower.addr, timeout=5.0) as c:
+                got = c.list_members()
+            self.assertEqual(got.generation, 0)
+            self.assertEqual(got.brokers, [])
+            self.assertEqual(got.live, [])
+            self.assertEqual(c.addr, leader.addr)
+            self.assertEqual(follower.list_members_count, 1)
+            self.assertEqual(follower.metadata_count, 1)
+            self.assertEqual(leader.list_members_count, 1)
+            self.assertEqual(leader.metadata_count, 0)
+
+    def test_list_members_typed_14_no_hint_then_ok(self) -> None:
+        with ScriptedBroker() as leader, ScriptedBroker() as follower:
+            follower.list_members_codes = [NOT_CONTROLLER]
+            follower.metadata = _other_broker_meta(
+                follower.port, "127.0.0.1", leader.port
+            )
+            with Client(follower.addr, timeout=5.0) as c:
+                got = c.list_members()
+            self.assertEqual(got.generation, 0)
+            self.assertEqual(c.addr, leader.addr)
+            self.assertEqual(follower.list_members_count, 1)
+            self.assertEqual(follower.metadata_count, 1)
+            self.assertEqual(leader.list_members_count, 1)
+
+    def test_list_members_max_redirects_zero_raises_on_first_14(self) -> None:
+        with ScriptedBroker() as follower:
+            follower.list_members_replies = [
+                (NOT_CONTROLLER, "not controller; controller_id=2", True)
+            ]
+            follower.metadata = _controller_meta(2, "127.0.0.1", 9)
+            with Client(follower.addr, timeout=5.0, max_redirects=0) as c:
+                with self.assertRaises(BrokerError) as ctx:
+                    c.list_members()
+            self.assertEqual(ctx.exception.code, NOT_CONTROLLER)
+            self.assertEqual(follower.list_members_count, 1)
+            self.assertEqual(follower.metadata_count, 0)
 
 
 if __name__ == "__main__":
