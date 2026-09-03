@@ -1802,6 +1802,16 @@ class Client:
             (e.topic, e.partition, e.offset) for e in self.fetch_offsets(group)
         ]
 
+    def offset_fetch_entries(self, group: str, topic: str) -> list[OffsetFetchEntry]:
+        """Fetch committed offsets for ``topic`` as :class:`OffsetFetchEntry`.
+
+        Filters :meth:`fetch_offsets` to ``topic`` and keeps metadata.
+        :meth:`offset_fetch` still returns ``[(partition, offset), ...]``.
+        Transient broker/transport errors retry up to ``max_retries`` extra
+        times (default 0). Error 14 follows ``max_redirects``.
+        """
+        return [e for e in self.fetch_offsets(group) if e.topic == topic]
+
     def fetch_offsets(
         self,
         group: str,

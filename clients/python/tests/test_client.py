@@ -1254,6 +1254,31 @@ class TestFetchOffsetsEntries(unittest.TestCase):
             self.assertEqual(srv.offset_fetch_count, 1)
             self.assertEqual(srv.offset_fetch_reqs[0].entries, [])
 
+    def test_offset_fetch_entries_filters_topic_keeps_metadata(self) -> None:
+        with ScriptedBroker() as srv:
+            srv.offset_fetch_entries = [
+                OffsetFetchEntry(
+                    topic="t", partition=0, offset=5, metadata="consumer-1"
+                ),
+                OffsetFetchEntry(topic="u", partition=1, offset=9),
+            ]
+            with Client(srv.addr, timeout=5.0) as c:
+                entries = c.offset_fetch_entries("g", "t")
+                offs = c.offset_fetch("g", "t")
+            self.assertEqual(
+                entries,
+                [
+                    OffsetFetchEntry(
+                        topic="t",
+                        partition=0,
+                        offset=5,
+                        metadata="consumer-1",
+                    )
+                ],
+            )
+            self.assertEqual(offs, [(0, 5)])
+            self.assertEqual(srv.offset_fetch_count, 2)
+
 
 class TestCommitOffsetsBatch(unittest.TestCase):
     def test_batch_of_two_entries_on_the_wire(self) -> None:

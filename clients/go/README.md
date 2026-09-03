@@ -72,6 +72,7 @@ _ = c.OffsetCommitMember("g", "t", 0, 5, "m1", 3)    // v0.139 member + generati
 _ = c.CommitOffsets("g", "", 0, []codec.OffsetCommitEntry{{Topic: "t", Partition: 0, Offset: 5}, {Topic: "t", Partition: 1, Offset: 9}}) // v0.119 batch
 offs, err := c.OffsetFetch("g", "t")
 allOffs, err := c.OffsetFetchAll("g") // v0.118 / v0.140; []OffsetFetchEntry{Topic, Partition, Offset, Metadata}
+topicOffs, err := c.OffsetFetchEntries("g", "t") // v0.148; same topic filter, keep Metadata
 rows, err := c.FetchOffsets("g", []codec.OffsetEntry{{Topic: "t", Partition: 0}}) // v0.122; nil/empty = all; codec Metadata already on each row
 _ = offs
 _ = allOffs
@@ -167,6 +168,8 @@ return the same records plus the already-decoded high watermark.
 `OffsetCommitMember` / `OffsetCommitMemberMeta` send one entry with
 caller member + generation (v0.139; Java 6/7-arg parity).
 `OffsetFetch` returns `[]Offset` (`Partition`, `Offset`) for the topic.
+`OffsetFetchEntries` returns `[]OffsetFetchEntry` for the same topic
+including metadata.
 `CreatePartitions` grows the topic to `totalCount` partitions and
 returns the new total (native opcode 46, not Kafka CreatePartitions).
 `ReassignPartitions` reassigns replicas and returns the assignment

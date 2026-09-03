@@ -117,7 +117,7 @@ type Offset struct {
 }
 
 // OffsetFetchEntry is one committed (topic, partition, offset, metadata)
-// from OffsetFetchAll.
+// from OffsetFetchAll / OffsetFetchEntries.
 type OffsetFetchEntry struct {
 	Topic     string
 	Partition uint32
@@ -2167,6 +2167,29 @@ func (c *Client) OffsetFetchAll(group string) ([]OffsetFetchEntry, error) {
 			Offset:    e.Offset,
 			Metadata:  e.Metadata,
 		})
+	}
+	return out, nil
+}
+
+// OffsetFetchEntries returns committed offsets for topic as []OffsetFetchEntry,
+// including metadata. Calls FetchOffsets(group, nil) and keeps rows whose
+// Topic == topic. OffsetFetch still returns []Offset (partition+offset only).
+// Error 14 follows maxRedirects. Transient 6 / 7 / 15 / 16 follow maxRetries.
+func (c *Client) OffsetFetchEntries(group, topic string) ([]OffsetFetchEntry, error) {
+	entries, err := c.FetchOffsets(group, nil)
+	if err != nil {
+		return nil, err
+	}
+	out := make([]OffsetFetchEntry, 0, len(entries))
+	for _, e := range entries {
+		if e.Topic == topic {
+			out = append(out, OffsetFetchEntry{
+				Topic:     e.Topic,
+				Partition: e.Partition,
+				Offset:    e.Offset,
+				Metadata:  e.Metadata,
+			})
+		}
 	}
 	return out, nil
 }
