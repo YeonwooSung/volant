@@ -359,6 +359,11 @@ docs for day-to-day reading: [ops](../ops.md), [consistency](../consistency.md),
 | v0.158 | ✅ | Go DeleteOffsetsAll | [V158_SPEC.md](../V158_SPEC.md) |
 | v0.159 | ✅ | Rust fetch_offsets_all | [V159_SPEC.md](../V159_SPEC.md) |
 | v0.160 | ✅ | Go/Python/Rust producer id getters | [V160_SPEC.md](../V160_SPEC.md) |
+| v0.161 | ✅ | Go ListAclsAll | [V161_SPEC.md](../V161_SPEC.md) |
+| v0.162 | ✅ | Rust list_acls_all | [V162_SPEC.md](../V162_SPEC.md) |
+| v0.163 | ✅ | Go ListOffsetsAll | [V163_SPEC.md](../V163_SPEC.md) |
+| v0.164 | ✅ | language single-entry DeleteOffset | [V164_SPEC.md](../V164_SPEC.md) |
+| v0.165 | ✅ | Rust delete_offsets_all + delete_offset | [V165_SPEC.md](../V165_SPEC.md) |
 
 ---
 
