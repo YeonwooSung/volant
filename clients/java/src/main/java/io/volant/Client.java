@@ -82,6 +82,8 @@ public final class Client implements AutoCloseable {
     private long retryBackoffMs = 50;
     /** Default produce acks (1 = leader only; 255 = acks=all). */
     private int acks = 1;
+    /** Default DeleteRecords wait_majority (0 = broker default; 1 = force wait; 2 = force no-wait). */
+    private int deleteRecordsWait = 0;
     /** Default Fetch max_messages used by 3-arg {@link #fetch(String, int, long)}. */
     private int fetchMaxMessages = 128;
     /** Default Fetch max_bytes used by 3-arg {@link #fetch(String, int, long)}. */
@@ -272,6 +274,20 @@ public final class Client implements AutoCloseable {
 
     public int acks() {
         return acks;
+    }
+
+    /**
+     * Default DeleteRecords {@code wait_majority} used by 3-arg
+     * {@link #deleteRecords(String, int, long)}. {@code 0} = broker
+     * default; {@code 1} = force wait; {@code 2} = force no-wait.
+     * Default is 0. The 4-arg overload stays explicit.
+     */
+    public void setDeleteRecordsWait(int n) {
+        this.deleteRecordsWait = n;
+    }
+
+    public int deleteRecordsWait() {
+        return deleteRecordsWait;
     }
 
     /**
@@ -1966,12 +1982,14 @@ public final class Client implements AutoCloseable {
 
     /**
      * Delete records before {@code beforeOffset} (native opcode 44).
-     * Sends {@code wait_majority=0} (broker default). Error 13 follows
-     * Produce/Fetch redirect. Transient 6 / 7 / 15 / 16 follow
-     * {@code maxRetries}. This is not Kafka DeleteRecords.
+     * Uses the client default {@code wait_majority} (0 unless
+     * {@link #setDeleteRecordsWait}). The 4-arg overload stays
+     * explicit. Error 13 follows Produce/Fetch redirect. Transient
+     * 6 / 7 / 15 / 16 follow {@code maxRetries}. This is not Kafka
+     * DeleteRecords.
      */
     public DeleteRecordsResult deleteRecords(String topic, int partition, long beforeOffset) {
-        return deleteRecords(topic, partition, beforeOffset, 0);
+        return deleteRecords(topic, partition, beforeOffset, this.deleteRecordsWait);
     }
 
     /**

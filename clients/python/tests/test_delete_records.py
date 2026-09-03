@@ -197,6 +197,41 @@ class TestDeleteRecordsClient(unittest.TestCase):
         self.assertEqual(srv.got_wait_majority, 1)
         self.assertEqual(srv.opcodes, [OP_DELETE_RECORDS, OP_DELETE_RECORDS])
 
+    def test_default_wait_majority_zero(self) -> None:
+        with _DeleteRecordsServer(low_watermark=96) as srv:
+            with Client(srv.addr, timeout=5.0) as c:
+                self.assertEqual(c.delete_records_wait, 0)
+                c.delete_records("events", 2, 100)
+        if srv.error is not None:
+            raise srv.error
+        self.assertEqual(srv.got_wait_majority, 0)
+
+    def test_client_default_wait_majority(self) -> None:
+        with _DeleteRecordsServer(low_watermark=96) as srv:
+            with Client(srv.addr, timeout=5.0) as c:
+                c.delete_records_wait = 1
+                c.delete_records("events", 2, 100)
+        if srv.error is not None:
+            raise srv.error
+        self.assertEqual(srv.got_wait_majority, 1)
+
+    def test_constructor_delete_records_wait(self) -> None:
+        with _DeleteRecordsServer(low_watermark=96) as srv:
+            with Client(srv.addr, timeout=5.0, delete_records_wait=1) as c:
+                self.assertEqual(c.delete_records_wait, 1)
+                c.delete_records("events", 2, 100)
+        if srv.error is not None:
+            raise srv.error
+        self.assertEqual(srv.got_wait_majority, 1)
+
+    def test_explicit_wait_majority_wins(self) -> None:
+        with _DeleteRecordsServer(low_watermark=96) as srv:
+            with Client(srv.addr, timeout=5.0, delete_records_wait=1) as c:
+                c.delete_records("events", 2, 100, wait_majority=2)
+        if srv.error is not None:
+            raise srv.error
+        self.assertEqual(srv.got_wait_majority, 2)
+
     def test_error_13_max_redirects_zero_raises(self) -> None:
         with _DeleteRecordsServer(error_code=13) as srv:
             with Client(srv.addr, timeout=5.0, max_redirects=0) as c:

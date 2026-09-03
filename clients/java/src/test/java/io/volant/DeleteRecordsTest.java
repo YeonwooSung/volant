@@ -40,6 +40,40 @@ class DeleteRecordsTest {
     }
 
     @Test
+    void defaultWaitMajorityZero() throws Exception {
+        try (DeleteRecordsServer srv = DeleteRecordsServer.ok(96)) {
+            try (Client c = Client.connect("127.0.0.1", srv.port, 5_000)) {
+                assertEquals(0, c.deleteRecordsWait());
+                c.deleteRecords("events", 2, 100);
+            }
+            assertEquals(0, srv.waitMajority.get());
+        }
+    }
+
+    @Test
+    void setDeleteRecordsWait() throws Exception {
+        try (DeleteRecordsServer srv = DeleteRecordsServer.ok(96)) {
+            try (Client c = Client.connect("127.0.0.1", srv.port, 5_000)) {
+                c.setDeleteRecordsWait(1);
+                assertEquals(1, c.deleteRecordsWait());
+                c.deleteRecords("events", 2, 100);
+            }
+            assertEquals(1, srv.waitMajority.get());
+        }
+    }
+
+    @Test
+    void explicitWaitFlagWins() throws Exception {
+        try (DeleteRecordsServer srv = DeleteRecordsServer.ok(96)) {
+            try (Client c = Client.connect("127.0.0.1", srv.port, 5_000)) {
+                c.setDeleteRecordsWait(1);
+                c.deleteRecords("events", 2, 100, 2);
+            }
+            assertEquals(2, srv.waitMajority.get());
+        }
+    }
+
+    @Test
     void error13MaxRedirectsZeroRaises() throws Exception {
         try (DeleteRecordsServer srv = DeleteRecordsServer.error(13)) {
             try (Client c = Client.connect("127.0.0.1", srv.port, 5_000)) {

@@ -42,6 +42,7 @@ bounds = c.list_offsets("t")  # [OffsetListing(partition, earliest, latest), ...
 cfg = c.describe_configs("t")
 c.alter_configs("t", [("retention.ms", "86400000")])
 cut = c.delete_records("t", 0, 100)  # DeleteRecordsResult; wait_majority=0
+# Client default wait (v0.152): Client(..., delete_records_wait=1) or c.delete_records_wait = 1; wait_majority= still wins.
 # cut = c.delete_records("t", 0, 100, wait_majority=1)  # force majority wait
 member_id, generation, assignment = c.join_group(
     "g", topics=["t"], session_timeout_ms=10000
@@ -138,10 +139,12 @@ partitions (`u32::MAX`); `replicas=[]` is auto-place.
 `list_offsets(topic, partitions=None)` returns
 earliest/latest (`OffsetListing`) for the topic (`None` / `[]` = all
 partitions; native opcode 48, not Kafka timestamp ListOffsets).
-`delete_records(topic, partition, before_offset, wait_majority=0)`
+`delete_records(topic, partition, before_offset, wait_majority=None)`
 returns `DeleteRecordsResult` (`topic`, `partition`, `low_watermark`);
 native opcode 44, not Kafka DeleteRecords (API key 21). `wait_majority`
-0 = broker default, 1 = force wait, 2 = force no-wait. Error 13 follows
+0 = broker default, 1 = force wait, 2 = force no-wait. Omitted
+`wait_majority` uses `self.delete_records_wait` (constructor default
+0; v0.152). An explicit `wait_majority=` wins. Error 13 follows
 Produce/Fetch redirect. Transient 6 / 7 / 15 / 16 follow ``max_retries``.
 `join_group` sends empty `member_id` on first join
 (broker assigns one) and unpacks as
