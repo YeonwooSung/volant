@@ -2047,6 +2047,27 @@ public final class Client implements AutoCloseable {
     }
 
     /**
+     * Fetch committed offsets for {@code topic} as {@link OffsetFetchEntry},
+     * including metadata.
+     *
+     * <p>Calls {@link #fetchOffsets(String, List)} with empty entries (all
+     * group offsets) and keeps rows whose topic matches. {@link
+     * #offsetFetch(String, String)} still returns partition+offset only.
+     * Error 14 follows {@code maxRedirects}. Transient 6 / 7 / 15 / 16
+     * follow {@code maxRetries}.
+     */
+    public List<OffsetFetchEntry> offsetFetchEntries(String group, String topic) {
+        List<OffsetFetchEntry> entries = fetchOffsets(group, Collections.emptyList());
+        List<OffsetFetchEntry> out = new ArrayList<>();
+        for (OffsetFetchEntry e : entries) {
+            if (topic.equals(e.topic)) {
+                out.add(e);
+            }
+        }
+        return out;
+    }
+
+    /**
      * Fetch committed offsets (Rust {@code fetch_offsets} parity).
      *
      * <p>{@code null} / empty {@code entries} send empty wire entries (all

@@ -2,7 +2,7 @@ package io.volant;
 
 import java.util.Objects;
 
-/** One committed (topic, partition, offset, metadata) from OffsetFetchAll. */
+/** One committed (topic, partition, offset, metadata) from OffsetFetchAll / offsetFetchEntries. */
 public final class OffsetFetchEntry {
     public final String topic;
     public final int partition;

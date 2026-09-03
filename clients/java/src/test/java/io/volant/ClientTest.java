@@ -1382,6 +1382,20 @@ class ClientTest {
     }
 
     @Test
+    void offsetFetchEntriesFiltersTopicKeepsMetadata() throws Exception {
+        try (ScriptedBroker srv = ScriptedBroker.start()) {
+            srv.offsetFetchEntries.add(new Codec.OffsetFetchEntry("t", 0, 5, "consumer-1"));
+            srv.offsetFetchEntries.add(new Codec.OffsetFetchEntry("u", 1, 9, ""));
+            try (Client c = Client.connect("127.0.0.1", srv.port, 5_000)) {
+                List<OffsetFetchEntry> entries = c.offsetFetchEntries("g", "t");
+                assertEquals(List.of(new OffsetFetchEntry("t", 0, 5, "consumer-1")), entries);
+                List<Offset> offs = c.offsetFetch("g", "t");
+                assertEquals(List.of(new Offset(0, 5)), offs);
+            }
+        }
+    }
+
+    @Test
     void offsetFetchEntryThreeArgMetadataEmpty() {
         OffsetFetchEntry e = new OffsetFetchEntry("t", 0, 5);
         assertEquals("t", e.topic);

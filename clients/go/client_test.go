@@ -2191,6 +2191,38 @@ func TestOffsetFetchAllSurfacesMetadata(t *testing.T) {
 	}
 }
 
+func TestOffsetFetchEntriesFiltersTopicKeepsMetadata(t *testing.T) {
+	srv := &scriptedBroker{offsetFetchEntries: []codec.OffsetFetchEntry{
+		{Topic: "t", Partition: 0, Offset: 5, Metadata: "consumer-1"},
+		{Topic: "u", Partition: 1, Offset: 9},
+	}}
+	addr, stop := startScripted(t, srv)
+	defer stop()
+
+	c, err := volant.DialTimeout(addr, 5*time.Second)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer c.Close()
+
+	entries, err := c.OffsetFetchEntries("g", "t")
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := volant.OffsetFetchEntry{Topic: "t", Partition: 0, Offset: 5, Metadata: "consumer-1"}
+	if len(entries) != 1 || entries[0] != want {
+		t.Fatalf("entries %v want [%v]", entries, want)
+	}
+
+	offs, err := c.OffsetFetch("g", "t")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(offs) != 1 || offs[0] != (volant.Offset{Partition: 0, Offset: 5}) {
+		t.Fatalf("offsets %v want [{0 5}]", offs)
+	}
+}
+
 func TestDeleteOffsetsRetriesTimeoutThenOk(t *testing.T) {
 	srv := &scriptedBroker{deleteOffsetsCodes: []uint16{timeoutCode, 0}}
 	addr, stop := startScripted(t, srv)
