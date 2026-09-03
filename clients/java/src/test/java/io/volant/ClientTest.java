@@ -1440,6 +1440,7 @@ class ClientTest {
         final AtomicInteger metadataCount = new AtomicInteger();
         final AtomicInteger listMembersCount = new AtomicInteger();
         final AtomicInteger acceptCount = new AtomicInteger();
+        final List<String[]> lastCreateTopicConfigs = new CopyOnWriteArrayList<>();
 
         private final ServerSocket listen;
         private final Thread acceptThread;
@@ -1477,7 +1478,11 @@ class ClientTest {
         }
 
         void queueCreateTopicOk() {
-            createTopicReplies.add(new int[] {0, 0});
+            queueCreateTopicOk(1);
+        }
+
+        void queueCreateTopicOk(int topicId) {
+            createTopicReplies.add(new int[] {0, 0, topicId});
             createTopicMessages.add("");
         }
 
@@ -1583,21 +1588,30 @@ class ClientTest {
             if (frame.opcode == Codec.OP_CREATE_TOPIC) {
                 createTopicCount.incrementAndGet();
                 Codec.CreateTopicRequest req = Codec.decodeCreateTopicRequest(frame.payload);
+                lastCreateTopicConfigs.clear();
+                if (req.configs != null) {
+                    lastCreateTopicConfigs.addAll(req.configs);
+                }
                 int code = 0;
                 boolean asError = false;
                 String message = "";
+                int topicId = 1;
                 if (!createTopicReplies.isEmpty()) {
                     int[] spec = createTopicReplies.remove(0);
                     code = spec[0];
                     asError = spec[1] != 0;
                     message = createTopicMessages.isEmpty() ? "" : createTopicMessages.remove(0);
+                    if (spec.length > 2) {
+                        topicId = spec[2];
+                    }
                 }
                 if (asError) {
                     replyOp[0] = Codec.OP_ERROR;
                     return Codec.encodeErrorResponse(new Codec.ErrorResponse(code, message));
                 }
                 return Codec.encodeCreateTopicResponse(
-                        new Codec.CreateTopicResponse(code == 0 ? 1 : 0, req.name, code == 0 ? req.partitions : 0, code));
+                        new Codec.CreateTopicResponse(
+                                code == 0 ? topicId : 0, req.name, code == 0 ? req.partitions : 0, code));
             }
             if (frame.opcode == Codec.OP_CREATE_PARTITIONS) {
                 createPartitionsCount.incrementAndGet();
@@ -2290,6 +2304,56 @@ class ClientTest {
             }
             assertEquals(1, srv.createTopicCount.get());
             assertEquals(0, srv.metadataCount.get());
+        }
+    }
+
+    @Test
+    void createTopicSendsEmptyConfigs() throws Exception {
+        try (AdminBroker srv = AdminBroker.start()) {
+            srv.queueCreateTopicOk();
+            try (Client c = Client.connect("127.0.0.1", srv.port, 5_000)) {
+                assertEquals(1, c.createTopic("events", 1));
+            }
+            assertEquals(1, srv.createTopicCount.get());
+            assertTrue(srv.lastCreateTopicConfigs.isEmpty());
+        }
+    }
+
+    @Test
+    void createTopicWithConfigsSendsPairsAndReturnsTopicId() throws Exception {
+        try (AdminBroker srv = AdminBroker.start()) {
+            srv.queueCreateTopicOk(42);
+            try (Client c = Client.connect("127.0.0.1", srv.port, 5_000)) {
+                int id = c.createTopic(
+                        "events", 1, Collections.singletonList(new String[] {"retention.ms", "1000"}));
+                assertEquals(42, id);
+            }
+            assertEquals(1, srv.createTopicCount.get());
+            assertEquals(1, srv.lastCreateTopicConfigs.size());
+            assertEquals("retention.ms", srv.lastCreateTopicConfigs.get(0)[0]);
+            assertEquals("1000", srv.lastCreateTopicConfigs.get(0)[1]);
+        }
+    }
+
+    @Test
+    void createTopicWithConfigsError14Redirects() throws Exception {
+        try (AdminBroker leader = AdminBroker.start();
+                AdminBroker follower = AdminBroker.start()) {
+            follower.queueCreateTopicError(NOT_CONTROLLER, "not controller; controller_id=2");
+            follower.meta = controllerMeta(2, "127.0.0.1", leader.port);
+            leader.queueCreateTopicOk(7);
+            try (Client c = Client.connect("127.0.0.1", follower.port, 5_000)) {
+                int id = c.createTopic(
+                        "events", 1, Collections.singletonList(new String[] {"retention.ms", "1000"}));
+                assertEquals(7, id);
+                assertEquals(leader.port, Integer.parseInt(c.addr().substring(c.addr().indexOf(':') + 1)));
+            }
+            assertEquals(1, follower.createTopicCount.get());
+            assertEquals(1, follower.metadataCount.get());
+            assertEquals(1, leader.createTopicCount.get());
+            assertEquals(1, leader.lastCreateTopicConfigs.size());
+            assertEquals("retention.ms", leader.lastCreateTopicConfigs.get(0)[0]);
+            assertEquals("1000", leader.lastCreateTopicConfigs.get(0)[1]);
         }
     }
 

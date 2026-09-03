@@ -721,16 +721,32 @@ func typedAdminErrorCode(decoded any) (uint16, bool) {
 // Error 14 (NotController) follows maxRedirects (same budget as Produce/Fetch 13).
 // Transient 6 / 7 / 15 / 16 and TCP/IO follow maxRetries (default 0); 14 is not a retry.
 func (c *Client) CreateTopic(name string, partitions int) error {
+	_, err := c.CreateTopicWithConfigs(name, partitions, nil)
+	return err
+}
+
+// CreateTopicWithConfigs is CreateTopic plus native CreateTopic config pairs
+// (Phase 13 trailer; same as Python configs= / Rust create_topic_with_configs).
+// Empty value is allowed. Returns the broker-assigned topic id. This is not
+// Kafka CreateTopics configs / IncrementalAlterConfigs. Error 14 and
+// transient retry inherit adminRoundTrip.
+func (c *Client) CreateTopicWithConfigs(name string, partitions int, configs [][2]string) (uint32, error) {
+	if configs == nil {
+		configs = [][2]string{}
+	}
 	payload, err := codec.EncodeCreateTopicRequest(codec.CreateTopicRequest{
 		Name:       name,
 		Partitions: uint32(partitions),
-		Configs:    [][2]string{},
+		Configs:    configs,
 	})
 	if err != nil {
-		return err
+		return 0, err
 	}
-	_, err = c.adminRoundTrip(codec.OpCreateTopic, payload, "create_topic")
-	return err
+	decoded, err := c.adminRoundTrip(codec.OpCreateTopic, payload, "create_topic")
+	if err != nil {
+		return 0, err
+	}
+	return decoded.(codec.CreateTopicResponse).TopicID, nil
 }
 
 // DeleteTopic deletes a topic by name.

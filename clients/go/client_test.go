@@ -2189,6 +2189,7 @@ type createTopicReply struct {
 	code    uint16
 	message string
 	asError bool
+	topicID uint32
 }
 
 type adminBroker struct {
@@ -2230,6 +2231,7 @@ type adminBroker struct {
 	metadataCount          int
 	listMembersCount       int
 	acceptCount            int
+	lastCreateTopicConfigs [][2]string
 	ln                     net.Listener
 }
 
@@ -2271,6 +2273,14 @@ func (s *adminBroker) snapshot() (createTopic, createParts, createAcls, reassign
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	return s.createTopicCount, s.createPartitionsCount, s.createAclsCount, s.reassignCount, s.metadataCount, s.acceptCount
+}
+
+func (s *adminBroker) lastCreateConfigs() [][2]string {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	out := make([][2]string, len(s.lastCreateTopicConfigs))
+	copy(out, s.lastCreateTopicConfigs)
+	return out
 }
 
 func (s *adminBroker) scramAclSnapshot() (createScram, deleteScram, listScram, listAcls, metas, accepts int) {
@@ -2354,6 +2364,7 @@ func (s *adminBroker) handle(f *frame.Frame) ([]byte, error) {
 		if e != nil {
 			return nil, e
 		}
+		s.lastCreateTopicConfigs = append([][2]string(nil), req.Configs...)
 		rep := createTopicReply{}
 		if len(s.createTopicReplies) > 0 {
 			rep = s.createTopicReplies[0]
@@ -2367,7 +2378,10 @@ func (s *adminBroker) handle(f *frame.Frame) ([]byte, error) {
 		id := uint32(0)
 		parts := uint32(0)
 		if rep.code == 0 {
-			id = 1
+			id = rep.topicID
+			if id == 0 {
+				id = 1
+			}
 			parts = req.Partitions
 		}
 		payload, err = codec.EncodeCreateTopicResponse(codec.CreateTopicResponse{
@@ -3503,6 +3517,91 @@ func TestCreateTopicNotFoundNotRetried(t *testing.T) {
 	ct, _, _, _, metas, _ := srv.snapshot()
 	if ct != 1 || metas != 0 {
 		t.Fatalf("create_topic=%d metadata=%d want 1,0", ct, metas)
+	}
+}
+
+func TestCreateTopicSendsEmptyConfigs(t *testing.T) {
+	srv := &adminBroker{}
+	addr, stop := startAdmin(t, srv)
+	defer stop()
+
+	c, err := volant.DialTimeout(addr, 5*time.Second)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer c.Close()
+	if err := c.CreateTopic("events", 1); err != nil {
+		t.Fatal(err)
+	}
+	got := srv.lastCreateConfigs()
+	if len(got) != 0 {
+		t.Fatalf("configs=%v want empty", got)
+	}
+}
+
+func TestCreateTopicWithConfigsSendsPairsAndReturnsTopicID(t *testing.T) {
+	srv := &adminBroker{
+		createTopicReplies: []createTopicReply{{code: 0, topicID: 42}},
+	}
+	addr, stop := startAdmin(t, srv)
+	defer stop()
+
+	c, err := volant.DialTimeout(addr, 5*time.Second)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer c.Close()
+	id, err := c.CreateTopicWithConfigs("events", 1, [][2]string{{"retention.ms", "1000"}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if id != 42 {
+		t.Fatalf("topic id %d want 42", id)
+	}
+	got := srv.lastCreateConfigs()
+	if len(got) != 1 || got[0] != [2]string{"retention.ms", "1000"} {
+		t.Fatalf("configs=%v want [(retention.ms 1000)]", got)
+	}
+}
+
+func TestCreateTopicWithConfigsError14Redirects(t *testing.T) {
+	leader := &adminBroker{
+		createTopicReplies: []createTopicReply{{code: 0, topicID: 7}},
+	}
+	_, stopL := startAdmin(t, leader)
+	defer stopL()
+	follower := &adminBroker{
+		createTopicReplies: []createTopicReply{{
+			code: notController, message: "not controller; controller_id=2", asError: true,
+		}},
+		meta: controllerMeta(2, "127.0.0.1", leader.port()),
+	}
+	fAddr, stopF := startAdmin(t, follower)
+	defer stopF()
+
+	c, err := volant.DialTimeout(fAddr, 5*time.Second)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer c.Close()
+	id, err := c.CreateTopicWithConfigs("events", 1, [][2]string{{"retention.ms", "1000"}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if id != 7 {
+		t.Fatalf("topic id %d want 7", id)
+	}
+	ct, _, _, _, metas, _ := follower.snapshot()
+	if ct != 1 || metas != 1 {
+		t.Fatalf("follower create_topic=%d metadata=%d want 1,1", ct, metas)
+	}
+	lct, _, _, _, _, _ := leader.snapshot()
+	if lct != 1 {
+		t.Fatalf("leader create_topic=%d want 1", lct)
+	}
+	got := leader.lastCreateConfigs()
+	if len(got) != 1 || got[0] != [2]string{"retention.ms", "1000"} {
+		t.Fatalf("leader configs=%v want [(retention.ms 1000)]", got)
 	}
 }
 
