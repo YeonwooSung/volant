@@ -334,6 +334,11 @@ docs for day-to-day reading: [ops](../ops.md), [consistency](../consistency.md),
 | v0.133 | ✅ | Go/Java Produce headers + acks | [V133_SPEC.md](../V133_SPEC.md) |
 | v0.134 | ✅ | Heartbeat NotController redirect on Python/Go/Java | [V134_SPEC.md](../V134_SPEC.md) |
 | v0.135 | ✅ | Rust Heartbeat NotController redirect | [V135_SPEC.md](../V135_SPEC.md) |
+| v0.136 | ✅ | LeaveGroup NotController redirect on Python/Go/Java | [V136_SPEC.md](../V136_SPEC.md) |
+| v0.137 | ✅ | Rust LeaveGroup NotController redirect | [V137_SPEC.md](../V137_SPEC.md) |
+| v0.138 | ✅ | Go/Java Produce timestamp + headers | [V138_SPEC.md](../V138_SPEC.md) |
+| v0.139 | ✅ | Go OffsetCommit member + generation | [V139_SPEC.md](../V139_SPEC.md) |
+| v0.140 | ✅ | Go/Java OffsetFetch entry metadata | [V140_SPEC.md](../V140_SPEC.md) |
 
 ---
 
