@@ -1,6 +1,6 @@
 # Volant residual TODO (review loop)
 
-**Baseline:** HEAD product = **Phases 0–154** + residuals **v0.3–v0.105**.  
+**Baseline:** HEAD product = **Phases 0–154** + residuals **v0.3–v0.110**.  
 **Last review:** 2026-09-02  
 
 Living roadmap: [ROADMAP.md](./ROADMAP.md).  
@@ -64,11 +64,11 @@ Phase index: [docs/history/PHASE_HISTORY.md](./docs/history/PHASE_HISTORY.md).
 | **Later** | Full **openraft** crate integration | **v0.11–v0.26 + redb log (v0.35) + joint rollback (v0.34) + follower forward (v0.38)** — not RocksDB/KRaft |
 | **Later** | **Dynamic membership** reconfiguration | **overlay v0.10 + joint v0.26 + rollback v0.34 + follower forward v0.38 + reassign rollback v0.39** — overlay still SoT |
 | **Later** | Full **KIP-890 / `__transaction_state`** | **log MVP closed (v0.13)** — opt-in JSON topic; not Kafka schemas |
-| **Later** | **Multi-language clients** | **Python/Go/Java through v0.105** + Rust InitProducerId retry / admin_round_trip retry **v0.102/v0.104**; not kafka-python / SyncGroup |
+| **Later** | **Multi-language clients** | **Python/Go/Java through v0.110** + Rust Auth / SCRAM handshake retry **v0.107/v0.109**; not kafka-python / SyncGroup |
 | **Later** | **Long fuzz + chaos-mesh** | **MVP closed (v0.15)** — extended corpus + Chaos Mesh YAML + A→B isolate |
 | **Later** | **Perf campaign** vs aspirational targets | **closed (v0.2 PR2)** — measured table published; group-commit **v0.20** (opt-in, no new bench) |
 
-**Default next slice:** JoinGroup is still not retried (not idempotent). Language Auth retry, or openraft RocksDB if redb is not enough. SyncGroup still has no opcode. Homemade Raft election / InstallSnapshot-on-154 / Phase 155 is **not** the next product bet. Do not open Phase 155.
+**Default next slice:** JoinGroup is still not retried (not idempotent). Rust DeleteRecords retry, or openraft RocksDB if redb is not enough. SyncGroup still has no opcode. Homemade Raft election / InstallSnapshot-on-154 / Phase 155 is **not** the next product bet. Do not open Phase 155.
 
 ---
 
@@ -191,6 +191,11 @@ Phase index: [docs/history/PHASE_HISTORY.md](./docs/history/PHASE_HISTORY.md).
 - [x] admin_round_trip transient retry on Python/Go/Java → **v0.103**
 - [x] Rust admin_round_trip transient retry → **v0.104**
 - [x] OffsetCommit/Fetch NotController redirect on Python/Go/Java → **v0.105**
+- [x] Auth retry on Python/Go/Java → **v0.106**
+- [x] Rust Auth retry → **v0.107**
+- [x] SCRAM handshake retry on Python/Go/Java → **v0.108**
+- [x] Rust SCRAM handshake retry → **v0.109**
+- [x] DeleteRecords transient retry on Python/Go/Java → **v0.110**
 
 ---
 
@@ -214,7 +219,7 @@ Phase index: [docs/history/PHASE_HISTORY.md](./docs/history/PHASE_HISTORY.md).
 - [x] `__transaction_state` log MVP (v0.13; Volant JSON; not Kafka KIP-890/939 schemas)
 - [x] Kafka DeleteRecords **per-request** wait flag (v0.6 flex v2 tag 0; v0–1 env-only)
 - [x] Preferred selector **throttling** / TCP probe (v0.7; opt-in, not Kafka quota)
-- [x] Multi-language clients — Python/Go/Java through v0.105 (incl. InitProducerId retry, admin_round_trip retry, OffsetCommit/Fetch 14) + Rust InitProducerId retry / admin_round_trip retry **v0.102/v0.104**; not kafka-python / SyncGroup
+- [x] Multi-language clients — Python/Go/Java through v0.110 (incl. Auth retry, SCRAM handshake retry, DeleteRecords retry) + Rust Auth / SCRAM handshake retry **v0.107/v0.109**; not kafka-python / SyncGroup
 - [x] Long fuzz campaigns + chaos-mesh MVP (v0.15; corpus + YAML + A→B isolate; not multi-hour CI)
 - [x] Published perf numbers vs aspirational table; group-commit **v0.20** (opt-in)
 
@@ -225,7 +230,7 @@ Phase index: [docs/history/PHASE_HISTORY.md](./docs/history/PHASE_HISTORY.md).
 - Local `assignor="range"` uses DescribeGroup members (language **v0.69**, Rust **v0.73**); describe failure falls back. JoinGroup still has no member list / no SyncGroup
 - Language-client SCRAM handshake is **SHA-256** only (v0.46); admin Create/Delete/ListScramUsers are native **64–69** (v0.55); password is sent in the clear on create (use TLS); not Kafka SASL / AlterUserScramCredentials
 - Idempotent produce is native **32/33** (v0.47); BeginTxn/EndTxn are native **50–53** (v0.57); `TransactionalProducer` is a thin helper (v0.63). Not Kafka txn API keys
-- Produce/fetch/heartbeat/offset-admin/ListOffsets/LeaveGroup/DescribeGroup/ListGroups/Metadata/ListMembers/BeginTxn/EndTxn/InitProducerId/admin_round_trip retry (v0.61 / v0.66 / v0.74 / v0.78 / v0.82 / v0.86 / v0.90 / v0.95 / v0.99 / v0.101 / v0.103 / Rust **v0.80/v0.83/v0.84/v0.87/v0.92/v0.96/v0.100/v0.102/v0.104**) is default **0**; transient codes 6/7/15/16 + TCP I/O only. LeaveGroup error **10** is success (already left). InvalidTxnState (22) is not retried. Error 21 on Init itself is not retried. Error 13 stays on `max_redirects`. Error **14** stays on `max_redirects` (independent of retry). JoinGroup and Auth are not retried
+- Produce/fetch/heartbeat/offset-admin/ListOffsets/LeaveGroup/DescribeGroup/ListGroups/Metadata/ListMembers/BeginTxn/EndTxn/InitProducerId/admin_round_trip/Auth/SCRAM handshake/DeleteRecords retry (v0.61 / v0.66 / v0.74 / v0.78 / v0.82 / v0.86 / v0.90 / v0.95 / v0.99 / v0.101 / v0.103 / v0.106 / v0.108 / v0.110 / Rust **v0.80/v0.83/v0.84/v0.87/v0.92/v0.96/v0.100/v0.102/v0.104/v0.107/v0.109**) is default **0**; transient codes 6/7/15/16 + TCP I/O only. LeaveGroup error **10** is success (already left). InvalidTxnState (22) is not retried. Error 21 on Init itself is not retried. Auth / SCRAM **17 / 18** are not retried. SCRAM first+final is one unit (new nonce on restart). Error 13 stays on `max_redirects`. Error **14** stays on `max_redirects` (independent of retry). JoinGroup is not retried. Rust DeleteRecords is still single-shot
 - Auto-commit is poll-tied and default **off** (language **v0.48**, Rust **v0.60**); not Kafka `enable.auto.commit`
 - GroupConsumer `auto_offset_reset`: `earliest` is ListOffsets earliest (language **v0.70**, Rust **v0.71**); `latest` is LEO. Not Kafka timestamp reset
 - Go/Java convenience Produce is still one message; `ProduceBatch` / `produce(..., messages, acks)` sends N in one RPC (v0.68)
@@ -268,5 +273,6 @@ Phase index: [docs/history/PHASE_HISTORY.md](./docs/history/PHASE_HISTORY.md).
 | v0.91–v0.95 | **Shipped** — Rust Add/RemoveBroker 14; Rust Describe/ListGroups retry; configs 14; Rust configs 14; Metadata/ListMembers retry |
 | v0.96–v0.100 | **Shipped** — Rust Metadata retry; DeleteOffsets 14; Rust DeleteOffsets 14; BeginTxn/EndTxn retry; Rust BeginTxn/EndTxn retry |
 | v0.101–v0.105 | **Shipped** — InitProducerId retry; Rust InitProducerId retry; admin_round_trip retry; Rust admin_round_trip retry; OffsetCommit/Fetch 14 |
+| v0.106–v0.110 | **Shipped** — Auth retry; Rust Auth retry; SCRAM handshake retry; Rust SCRAM handshake retry; DeleteRecords retry |
 
 **How to use this file:** mark new work by phase number in ROADMAP + PHASE*_SPEC; fold completed rows into “Closed checklist”; keep “Still open” as the only honesty surface for operators and contributors.

@@ -304,6 +304,11 @@ docs for day-to-day reading: [ops](../ops.md), [consistency](../consistency.md),
 | v0.103 | ✅ | admin_round_trip transient retry on Python/Go/Java | [V103_SPEC.md](../V103_SPEC.md) |
 | v0.104 | ✅ | Rust admin_round_trip transient retry | [V104_SPEC.md](../V104_SPEC.md) |
 | v0.105 | ✅ | OffsetCommit/Fetch NotController redirect on Python/Go/Java | [V105_SPEC.md](../V105_SPEC.md) |
+| v0.106 | ✅ | Auth retry on Python/Go/Java | [V106_SPEC.md](../V106_SPEC.md) |
+| v0.107 | ✅ | Rust Auth retry | [V107_SPEC.md](../V107_SPEC.md) |
+| v0.108 | ✅ | SCRAM handshake retry on Python/Go/Java | [V108_SPEC.md](../V108_SPEC.md) |
+| v0.109 | ✅ | Rust SCRAM handshake retry | [V109_SPEC.md](../V109_SPEC.md) |
+| v0.110 | ✅ | DeleteRecords transient retry on Python/Go/Java | [V110_SPEC.md](../V110_SPEC.md) |
 
 ---
 
