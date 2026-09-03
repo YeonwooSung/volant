@@ -1493,8 +1493,10 @@ public final class Client implements AutoCloseable {
      * <p>An empty {@code partitions} array means all partitions (wire count 0).
      * Non-zero {@code error_code} is {@link BrokerException}. Transient
      * broker/transport errors retry up to {@code maxRetries} extra times
-     * (default 0). This is not Kafka ListOffsets (no timestamp or isolation);
-     * both ends of each log are returned.
+     * (default 0). Error 13 follows Produce/Fetch redirect
+     * ({@code maxRedirects}); 13 is not a transient retry. This is not Kafka
+     * ListOffsets (no timestamp or isolation); both ends of each log are
+     * returned.
      */
     public List<OffsetListing> listOffsets(String topic, int... partitions) {
         List<Integer> parts = new ArrayList<>();
@@ -1504,12 +1506,21 @@ public final class Client implements AutoCloseable {
             }
         }
         byte[] payload = Codec.encodeListOffsetsRequest(new Codec.ListOffsetsRequest(topic, parts));
+        int redirectPartition = parts.isEmpty() ? 0 : parts.get(0);
+        int maxAttempts = 1 + maxRedirects;
         int retryAttempt = 0;
+        int redirectAttempt = 0;
         while (true) {
             Object decoded;
             try {
                 decoded = roundTrip(Codec.OP_LIST_OFFSETS, payload);
             } catch (BrokerException e) {
+                if (e.code == NOT_LEADER_FOR_PARTITION
+                        && redirectAttempt + 1 < maxAttempts
+                        && redirectToLeader(topic, redirectPartition)) {
+                    redirectAttempt++;
+                    continue;
+                }
                 if (isTransientBroker(e.code) && retryAttempt < maxRetries) {
                     retryAttempt++;
                     sleepProduceRetry();
@@ -1528,6 +1539,13 @@ public final class Client implements AutoCloseable {
                 throw new ProtocolException("unexpected response for list_offsets: " + typeName(decoded));
             }
             Codec.ListOffsetsResponse resp = (Codec.ListOffsetsResponse) decoded;
+            String leadTopic = (resp.topic != null && !resp.topic.isEmpty()) ? resp.topic : topic;
+            if (resp.errorCode == NOT_LEADER_FOR_PARTITION
+                    && redirectAttempt + 1 < maxAttempts
+                    && redirectToLeader(leadTopic, redirectPartition)) {
+                redirectAttempt++;
+                continue;
+            }
             if (isTransientBroker(resp.errorCode) && retryAttempt < maxRetries) {
                 retryAttempt++;
                 sleepProduceRetry();

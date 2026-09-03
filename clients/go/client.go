@@ -1588,8 +1588,10 @@ func (c *Client) commitOffsets(group, memberID string, generation uint32, entrie
 // ListOffsets returns earliest/latest offsets for topic (native opcode 48).
 // Nil or empty partitions means all partitions (wire count 0). Non-zero
 // error_code is BrokerError. Transient broker/transport errors retry up
-// to maxRetries extra times (default 0). This is not Kafka ListOffsets
-// (no timestamp or isolation); both ends of each log are returned.
+// to maxRetries extra times (default 0). Error 13 follows Produce/Fetch
+// redirect (maxRedirects); 13 is not a transient retry. This is not
+// Kafka ListOffsets (no timestamp or isolation); both ends of each log
+// are returned.
 func (c *Client) ListOffsets(topic string, partitions []uint32) ([]OffsetListing, error) {
 	if partitions == nil {
 		partitions = []uint32{}
@@ -1601,14 +1603,30 @@ func (c *Client) ListOffsets(topic string, partitions []uint32) ([]OffsetListing
 	if err != nil {
 		return nil, err
 	}
+	redirectPart := uint32(0)
+	if len(partitions) > 0 {
+		redirectPart = partitions[0]
+	}
 	maxRetries := c.maxRetries
 	if maxRetries < 0 {
 		maxRetries = 0
 	}
+	maxAttempts := 1 + c.maxRedirects
 	retryAttempt := 0
+	redirectAttempt := 0
 	for {
 		decoded, err := c.roundTrip(codec.OpListOffsets, payload)
 		if err != nil {
+			if be, ok := err.(*codec.BrokerError); ok && be.Code == notLeaderForPartition && redirectAttempt+1 < maxAttempts {
+				ok, rerr := c.redirectToLeader(topic, redirectPart)
+				if rerr != nil {
+					return nil, rerr
+				}
+				if ok {
+					redirectAttempt++
+					continue
+				}
+			}
 			if isTransientProduceErr(err) && retryAttempt < maxRetries {
 				retryAttempt++
 				c.sleepProduceRetry()
@@ -1619,6 +1637,20 @@ func (c *Client) ListOffsets(topic string, partitions []uint32) ([]OffsetListing
 		resp, ok := decoded.(codec.ListOffsetsResponse)
 		if !ok {
 			return nil, &frame.ProtocolError{Msg: fmt.Sprintf("unexpected response for list_offsets: %T", decoded)}
+		}
+		if resp.ErrorCode == notLeaderForPartition && redirectAttempt+1 < maxAttempts {
+			leadTopic := resp.Topic
+			if leadTopic == "" {
+				leadTopic = topic
+			}
+			ok, rerr := c.redirectToLeader(leadTopic, redirectPart)
+			if rerr != nil {
+				return nil, rerr
+			}
+			if ok {
+				redirectAttempt++
+				continue
+			}
 		}
 		if isTransientBroker(resp.ErrorCode) && retryAttempt < maxRetries {
 			retryAttempt++

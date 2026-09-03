@@ -1673,6 +1673,9 @@ func TestListOffsetsRetriesTimeoutThenOk(t *testing.T) {
 	if n := srv.listOffsets(); n != 2 {
 		t.Fatalf("list offsets count %d want 2", n)
 	}
+	if n := srv.metadatas(); n != 0 {
+		t.Fatalf("metadata count %d want 0", n)
+	}
 }
 
 func TestListOffsetsNotFoundIsNotRetried(t *testing.T) {
@@ -1698,6 +1701,9 @@ func TestListOffsetsNotFoundIsNotRetried(t *testing.T) {
 	}
 	if n := srv.listOffsets(); n != 1 {
 		t.Fatalf("list offsets count %d want 1", n)
+	}
+	if n := srv.metadatas(); n != 0 {
+		t.Fatalf("metadata count %d want 0", n)
 	}
 }
 
