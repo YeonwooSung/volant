@@ -46,6 +46,8 @@ try (Client c = Client.connect("127.0.0.1", 9092)) {
   off = c.produceTimestampHeaders("t", 0, null, "hello".getBytes(UTF_8), 1700000000000L, List.of(new Record.Header("h", "hv".getBytes(UTF_8))));
   // produceTimestampAcks: timestamp + explicit acks (v0.141). produceTimestamp stays default acks; acks produce stays -1.
   off = c.produceTimestampAcks("t", 0, null, "hello".getBytes(UTF_8), 1700000000000L, 255);
+  // produceTimestampHeadersAcks: timestamp + headers + explicit acks (v0.142). produceTimestampHeaders stays client default acks; produceHeadersAcks stays -1.
+  off = c.produceTimestampHeadersAcks("t", 0, null, "hello".getBytes(UTF_8), 1700000000000L, List.of(new Record.Header("h", "hv".getBytes(UTF_8))), 255);
   List<Record> recs = c.fetch("t", 0, 0);
   // fetch 6-arg: max_messages / max_bytes / max_wait_ms (v0.64). fetch 3-arg stays 128 / 4MiB / 0.
   recs = c.fetch("t", 0, 0, 10, 4096L, 100);
@@ -329,6 +331,8 @@ and headers using the client default acks (v0.138).
 `produceTimestampAcks` sends one message with caller timestamp and
 explicit acks (v0.141); `produceTimestamp` still uses the client
 default acks and acks `produce` still sends timestamp -1.
+`produceTimestampHeadersAcks` sends timestamp, headers, and explicit
+acks on one message (v0.142).
 Public 6-arg `fetch` exposes max_messages / max_bytes /
 max_wait_ms (not Kafka Fetch; native opcode 2). Thin
 `joinGroup` still sends empty `group_instance_id`;

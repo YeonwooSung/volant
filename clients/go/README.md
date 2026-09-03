@@ -49,6 +49,8 @@ off, err = c.ProduceHeadersAcks("t", 0, nil, []byte("hello"), []codec.Header{{Na
 off, err = c.ProduceTimestampHeaders("t", 0, nil, []byte("hello"), 1700000000000, []codec.Header{{Name: "h", Value: []byte("hv")}})
 // ProduceTimestampAcks: timestamp + explicit acks (v0.141). ProduceTimestamp stays default acks; ProduceAcks stays -1.
 off, err = c.ProduceTimestampAcks("t", 0, nil, []byte("hello"), 1700000000000, 255)
+// ProduceTimestampHeadersAcks: timestamp + headers + explicit acks (v0.142). ProduceTimestampHeaders stays client default acks; ProduceHeadersAcks stays -1.
+off, err = c.ProduceTimestampHeadersAcks("t", 0, nil, []byte("hello"), 1700000000000, []codec.Header{{Name: "h", Value: []byte("hv")}}, 255)
 recs, err := c.Fetch("t", 0, 0)
 if err != nil {
     log.Fatal(err)
@@ -353,6 +355,8 @@ caller timestamp and headers using the client default acks (v0.138).
 `ProduceTimestampAcks` sends one message with caller timestamp and
 explicit acks (v0.141); `ProduceTimestamp` still uses the client
 default acks and `ProduceAcks` still sends timestamp -1.
+`ProduceTimestampHeadersAcks` sends timestamp, headers, and explicit
+acks on one message (v0.142).
 `FetchOpts`
 exposes max_messages / max_bytes / max_wait_ms (not Kafka Fetch;
 native opcode 2). TLS
