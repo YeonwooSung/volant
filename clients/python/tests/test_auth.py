@@ -24,12 +24,24 @@ from volant.frame import encode_frame, try_decode_frame
 
 
 class _OneShotServer:
-    """Accept one connection, record the first frame, optionally reply."""
+    """Accept one connection, record the first frame, optionally reply.
 
-    def __init__(self, *, auth_error: Optional[int] = None) -> None:
+    ``auth_error`` is the single-shot path (close after a non-zero Auth).
+    ``auth_codes`` is a same-socket queue: after each Auth reply the
+    connection stays open so the client can send Auth again.
+    """
+
+    def __init__(
+        self,
+        *,
+        auth_error: Optional[int] = None,
+        auth_codes: Optional[list[int]] = None,
+    ) -> None:
         self.host = "127.0.0.1"
         self.port = 0
         self.auth_error = auth_error
+        self.auth_codes = list(auth_codes) if auth_codes is not None else None
+        self.auth_count = 0
         self.first_opcode: Optional[int] = None
         self.got_token: Optional[str] = None
         self.error: Optional[BaseException] = None
@@ -85,8 +97,15 @@ class _OneShotServer:
                 if self.first_opcode is None:
                     self.first_opcode = frame.opcode
                 if frame.opcode == OP_AUTH:
+                    self.auth_count += 1
                     self.got_token = decode_auth_request(frame.payload).token
-                    code = 0 if self.auth_error is None else self.auth_error
+                    if self.auth_codes is not None:
+                        if self.auth_codes:
+                            code = self.auth_codes.pop(0)
+                        else:
+                            code = 0
+                    else:
+                        code = 0 if self.auth_error is None else self.auth_error
                     conn.sendall(
                         encode_frame(
                             OP_AUTH_RESPONSE,
@@ -94,7 +113,7 @@ class _OneShotServer:
                             encode_auth_response(AuthResponse(error_code=code)),
                         )
                     )
-                    if code != 0:
+                    if code != 0 and self.auth_codes is None:
                         return
                     continue
                 if frame.opcode == OP_METADATA:
@@ -153,6 +172,65 @@ class TestAuthClient(unittest.TestCase):
                 self.assertIsNone(c.auth_token)
                 c.metadata()
         self.assertEqual(srv.first_opcode, OP_METADATA)
+
+
+TIMEOUT = 7
+AUTH_FAILED = 17
+
+
+class TestAuthRetry(unittest.TestCase):
+    def test_default_max_retries_zero_raises_on_auth_timeout(self) -> None:
+        with _OneShotServer(auth_codes=[TIMEOUT]) as srv:
+            with self.assertRaises(BrokerError) as cm:
+                Client(srv.addr, timeout=5.0, auth_token="s3cret")
+        self.assertEqual(cm.exception.code, TIMEOUT)
+        self.assertEqual(cm.exception.op, "auth")
+        self.assertEqual(srv.auth_count, 1)
+
+    def test_retries_auth_timeout_then_ok(self) -> None:
+        with _OneShotServer(auth_codes=[TIMEOUT, 0]) as srv:
+            with Client(
+                srv.addr,
+                timeout=5.0,
+                auth_token="s3cret",
+                max_retries=2,
+                retry_backoff_ms=0,
+            ) as c:
+                self.assertEqual(c.max_retries, 2)
+                meta = c.metadata()
+                self.assertEqual(len(meta.brokers), 1)
+        self.assertEqual(srv.auth_count, 2)
+        self.assertEqual(srv.got_token, "s3cret")
+        if srv.error is not None:
+            raise srv.error
+
+    def test_auth_failed_not_retried(self) -> None:
+        with _OneShotServer(auth_codes=[AUTH_FAILED]) as srv:
+            with self.assertRaises(BrokerError) as cm:
+                Client(
+                    srv.addr,
+                    timeout=5.0,
+                    auth_token="nope",
+                    max_retries=2,
+                    retry_backoff_ms=0,
+                )
+        self.assertEqual(cm.exception.code, AUTH_FAILED)
+        self.assertEqual(cm.exception.op, "auth")
+        self.assertEqual(srv.auth_count, 1)
+
+    def test_auth_exhausted_retries_raises(self) -> None:
+        with _OneShotServer(auth_codes=[TIMEOUT, TIMEOUT, TIMEOUT]) as srv:
+            with self.assertRaises(BrokerError) as cm:
+                Client(
+                    srv.addr,
+                    timeout=5.0,
+                    auth_token="s3cret",
+                    max_retries=2,
+                    retry_backoff_ms=0,
+                )
+        self.assertEqual(cm.exception.code, TIMEOUT)
+        self.assertEqual(cm.exception.op, "auth")
+        self.assertEqual(srv.auth_count, 3)
 
 
 if __name__ == "__main__":

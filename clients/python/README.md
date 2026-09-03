@@ -172,9 +172,11 @@ rebalance codes 9 / 10 / 11 are not retried. LeaveGroup shares
 ``max_retries``; error 10 is success (already left). JoinGroup is not
 retried. OffsetCommit / OffsetFetch / DeleteOffsets / ListOffsets /
 DescribeGroup / ListGroups / Metadata / ListMembers / BeginTxn /
-EndTxn / InitProducerId share the same ``max_retries`` (default 0).
+EndTxn / InitProducerId / Auth share the same ``max_retries`` (default 0).
 InvalidTxnState (22) is not retried. Error 21 on InitProducerId
 itself is not retried (distinct from produce's one re-Init).
+Auth retries transient 6 / 7 / 15 / 16 and TCP/IO; 17 / 18 and SCRAM
+first/final are not retried.
 This is not Kafka ``retries``.
 
 Correlation ids increment per request. Decode verifies magic `V` (0x56),

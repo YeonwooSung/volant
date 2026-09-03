@@ -282,6 +282,16 @@ public final class Client implements AutoCloseable {
         }
     }
 
+    /** Test helper: apply retry knobs before shared-token Auth. */
+    static Client connectWithRetries(
+            String host, int port, int timeoutMs, String authToken, int maxRetries, long retryBackoffMs) {
+        Socket s = openSocket(host, port, timeoutMs, null);
+        Client c = new Client(formatAddr(host, port), s, timeoutMs, null, authToken);
+        c.maxRetries = Math.max(0, maxRetries);
+        c.retryBackoffMs = Math.max(0, retryBackoffMs);
+        return finishConnect(c);
+    }
+
     /** Whether this connection is TLS-wrapped. */
     public boolean isTls() {
         return tls;
@@ -420,12 +430,38 @@ public final class Client implements AutoCloseable {
 
     private void authenticate(String token) {
         byte[] payload = Codec.encodeAuthRequest(new Codec.AuthRequest(token));
-        Object decoded = roundTrip(Codec.OP_AUTH, payload);
-        if (!(decoded instanceof Codec.AuthResponse)) {
-            throw new ProtocolException("unexpected response for auth: " + typeName(decoded));
+        int retryAttempt = 0;
+        while (true) {
+            Object decoded;
+            try {
+                decoded = roundTrip(Codec.OP_AUTH, payload);
+            } catch (BrokerException e) {
+                if (isTransientBroker(e.code) && retryAttempt < maxRetries) {
+                    retryAttempt++;
+                    sleepProduceRetry();
+                    continue;
+                }
+                throw e;
+            } catch (RuntimeException e) {
+                if (isTransientTransport(e) && retryAttempt < maxRetries) {
+                    retryAttempt++;
+                    sleepProduceRetry();
+                    continue;
+                }
+                throw e;
+            }
+            if (!(decoded instanceof Codec.AuthResponse)) {
+                throw new ProtocolException("unexpected response for auth: " + typeName(decoded));
+            }
+            Codec.AuthResponse resp = (Codec.AuthResponse) decoded;
+            if (isTransientBroker(resp.errorCode) && retryAttempt < maxRetries) {
+                retryAttempt++;
+                sleepProduceRetry();
+                continue;
+            }
+            check(resp.errorCode, "auth");
+            return;
         }
-        Codec.AuthResponse resp = (Codec.AuthResponse) decoded;
-        check(resp.errorCode, "auth");
     }
 
     private void authenticateScram(String username, String password) {

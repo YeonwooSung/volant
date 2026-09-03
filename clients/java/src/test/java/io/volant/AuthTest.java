@@ -66,26 +66,86 @@ class AuthTest {
         }
     }
 
+    @Test
+    void defaultMaxRetriesZeroRaisesOnAuthTimeout() throws Exception {
+        try (OneShotAuthServer srv = OneShotAuthServer.codes(7)) {
+            BrokerException ex = assertThrows(
+                    BrokerException.class, () -> Client.connect("127.0.0.1", srv.port, 5_000, "s3cret"));
+            assertEquals(7, ex.code);
+            assertEquals("auth", ex.op);
+            assertEquals(1, srv.authCount.get());
+        }
+    }
+
+    @Test
+    void retriesAuthTimeoutThenOk() throws Exception {
+        try (OneShotAuthServer srv = OneShotAuthServer.codes(7, 0)) {
+            try (Client c = Client.connectWithRetries("127.0.0.1", srv.port, 5_000, "s3cret", 2, 0)) {
+                assertEquals(2, c.maxRetries());
+                assertEquals(1, c.metadata().brokers.size());
+            }
+            srv.assertOk();
+            assertEquals(2, srv.authCount.get());
+            assertEquals("s3cret", srv.token.get());
+        }
+    }
+
+    @Test
+    void authFailedNotRetried() throws Exception {
+        try (OneShotAuthServer srv = OneShotAuthServer.codes(17)) {
+            BrokerException ex = assertThrows(
+                    BrokerException.class,
+                    () -> Client.connectWithRetries("127.0.0.1", srv.port, 5_000, "nope", 2, 0));
+            assertEquals(17, ex.code);
+            assertEquals("auth", ex.op);
+            assertEquals(1, srv.authCount.get());
+        }
+    }
+
+    @Test
+    void authExhaustedRetriesRaises() throws Exception {
+        try (OneShotAuthServer srv = OneShotAuthServer.codes(7, 7, 7)) {
+            BrokerException ex = assertThrows(
+                    BrokerException.class,
+                    () -> Client.connectWithRetries("127.0.0.1", srv.port, 5_000, "s3cret", 2, 0));
+            assertEquals(7, ex.code);
+            assertEquals("auth", ex.op);
+            assertEquals(3, srv.authCount.get());
+        }
+    }
+
     private static final class OneShotAuthServer implements AutoCloseable {
         final int port;
         final AtomicInteger firstOpcode = new AtomicInteger(-1);
+        final AtomicInteger authCount = new AtomicInteger();
         final AtomicReference<String> token = new AtomicReference<>();
         private final int authError;
+        private final int[] authCodes;
+        private int authCodeIndex;
         private final ServerSocket listen;
         private final Thread thread;
         private final AtomicReference<Exception> error = new AtomicReference<>();
         private final CountDownLatch done = new CountDownLatch(1);
 
         static OneShotAuthServer ok() throws Exception {
-            return new OneShotAuthServer(0);
+            return new OneShotAuthServer(0, null);
         }
 
         static OneShotAuthServer reject(int code) throws Exception {
-            return new OneShotAuthServer(code);
+            return new OneShotAuthServer(code, null);
+        }
+
+        static OneShotAuthServer codes(int... codes) throws Exception {
+            return new OneShotAuthServer(0, codes);
         }
 
         private OneShotAuthServer(int authError) throws IOException {
+            this(authError, null);
+        }
+
+        private OneShotAuthServer(int authError, int[] authCodes) throws IOException {
             this.authError = authError;
+            this.authCodes = authCodes;
             ServerSocket ss = new ServerSocket();
             ss.setReuseAddress(true);
             ss.bind(new InetSocketAddress("127.0.0.1", 0));
@@ -155,11 +215,21 @@ class AuthTest {
                     firstOpcode.set(d.frame.opcode);
                 }
                 if (d.frame.opcode == Codec.OP_AUTH) {
+                    authCount.incrementAndGet();
                     token.set(Codec.decodeAuthRequest(d.frame.payload).token);
-                    byte[] payload = Codec.encodeAuthResponse(new Codec.AuthResponse(authError));
+                    int code;
+                    if (authCodes != null) {
+                        code = authCodeIndex < authCodes.length ? authCodes[authCodeIndex++] : 0;
+                    } else {
+                        code = authError;
+                    }
+                    byte[] payload = Codec.encodeAuthResponse(new Codec.AuthResponse(code));
                     out.write(Frame.encode(Codec.OP_AUTH_RESPONSE, d.frame.correlationId, payload));
                     out.flush();
-                    if (authError != 0) {
+                    if (authCodes != null && authCodes.length > 1) {
+                        continue;
+                    }
+                    if (code != 0) {
                         return;
                     }
                     continue;
