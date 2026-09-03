@@ -3059,6 +3059,49 @@ func TestProduceHeadersAcksEncodes(t *testing.T) {
 	}
 }
 
+func TestProduceTimestampHeadersEncodes(t *testing.T) {
+	srv := &scriptedBroker{}
+	addr, stop := startScripted(t, srv)
+	defer stop()
+
+	c, err := volant.DialTimeout(addr, 5*time.Second)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer c.Close()
+
+	const wantTs int64 = 1_700_000_000_000
+	off, err := c.ProduceTimestampHeaders("t", 0, nil, []byte("hello"), wantTs, []codec.Header{
+		{Name: "h", Value: []byte("hv")},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if off != 7 {
+		t.Fatalf("base offset: got %d want 7", off)
+	}
+	reqs := srv.copyProduces()
+	if len(reqs) != 1 {
+		t.Fatalf("produces %d want 1", len(reqs))
+	}
+	if reqs[0].Acks != 1 {
+		t.Fatalf("acks %d want 1", reqs[0].Acks)
+	}
+	if n := len(reqs[0].Messages); n != 1 {
+		t.Fatalf("messages %d want 1", n)
+	}
+	if ts := reqs[0].Messages[0].TimestampMs; ts != wantTs {
+		t.Fatalf("timestamp %d want %d", ts, wantTs)
+	}
+	hs := reqs[0].Messages[0].Headers
+	if len(hs) != 1 {
+		t.Fatalf("headers %d want 1", len(hs))
+	}
+	if hs[0].Name != "h" || string(hs[0].Value) != "hv" {
+		t.Fatalf("header %+v want h=hv", hs[0])
+	}
+}
+
 func TestProduceBatchRetriesTimeoutThenOk(t *testing.T) {
 	srv := &scriptedBroker{produceCodes: []uint16{timeoutCode, 0}}
 	addr, stop := startScripted(t, srv)
