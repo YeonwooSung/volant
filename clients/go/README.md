@@ -70,6 +70,7 @@ cut, err := c.DeleteRecords("t", 0, 100) // wait_majority=0
 _ = cut
 j, err := c.JoinGroup("g", []string{"t"}, 10000)
 j, err = c.JoinGroupWithInstance("g", []string{"t"}, 10000, "inst-1") // v0.127; empty = dynamic
+j, err = c.JoinGroupMember("g", "m-1", []string{"t"}, 10000)          // v0.131; empty member_id = first join
 if err != nil {
     log.Fatal(err)
 }
@@ -164,6 +165,7 @@ Produce/Fetch redirect. Transient 6 / 7 / 15 / 16 follow `SetMaxRetries`.
 `JoinGroup` sends empty `member_id` on first join; the result has
 `MemberID`, `Generation`, and `Assignment`. `JoinGroupWithInstance`
 sends Phase 12 `group_instance_id` (empty = dynamic; v0.127).
+`JoinGroupMember` encodes `member_id` for rejoin (empty = first join; v0.131).
 `JoinGroupConsumer` is the high-level loop (join, OffsetFetch
 positions or 0, poll = heartbeat + fetch assigned, commit with
 member+generation, rejoin on error 9, honor revoked).

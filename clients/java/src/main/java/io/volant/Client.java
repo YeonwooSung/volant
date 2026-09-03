@@ -1949,6 +1949,16 @@ public final class Client implements AutoCloseable {
         return joinGroup(group, "", topics, sessionTimeoutMs, groupInstanceId);
     }
 
+    /**
+     * Join (or rejoin) with an explicit {@code memberId}. Empty id is a first
+     * join (same as {@link #joinGroup}). Named so it does not collide with
+     * instanceId / assignor overloads.
+     */
+    public JoinGroupResult joinGroupMember(
+            String group, String memberId, List<String> topics, int sessionTimeoutMs) {
+        return joinGroup(group, memberId, topics, sessionTimeoutMs, "");
+    }
+
     JoinGroupResult joinGroup(String group, String memberId, List<String> topics, int sessionTimeoutMs) {
         return joinGroup(group, memberId, topics, sessionTimeoutMs, "");
     }
