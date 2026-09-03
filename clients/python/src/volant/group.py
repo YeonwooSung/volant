@@ -18,7 +18,7 @@ from typing import Optional
 
 from .assignor import range_assign_multi
 from .client import Client, FetchResult, JoinGroupResult
-from .codec import BrokerError, FetchRecord
+from .codec import BrokerError, FetchRecord, OffsetCommitEntry
 
 # Wire sentinel: unknown / not-committed offset (docs/PHASE3_SPEC.md).
 OFFSET_UNKNOWN = (1 << 64) - 1
@@ -428,7 +428,7 @@ class GroupConsumer:
             return recs
 
     def commit(self) -> None:
-        """Commit current positions with the joined member_id + generation."""
+        """Commit assigned positions in one OffsetCommit (member_id + generation)."""
         with self._lock:
             self._ensure_open()
             self._commit_unlocked()
@@ -436,14 +436,20 @@ class GroupConsumer:
     def _commit_unlocked(self) -> None:
         if self._positions:
             assigned = set(self._assignment)
-            for (topic, partition), offset in self._positions.items():
-                if assigned and (topic, partition) not in assigned:
-                    continue
-                self._client.offset_commit(
+            entries = [
+                OffsetCommitEntry(
+                    topic=topic,
+                    partition=partition,
+                    offset=offset,
+                    metadata="",
+                )
+                for (topic, partition), offset in self._positions.items()
+                if not assigned or (topic, partition) in assigned
+            ]
+            if entries:
+                self._client.commit_offsets(
                     self._group_id,
-                    topic,
-                    partition,
-                    offset,
+                    entries,
                     member_id=self._member_id,
                     generation=self._generation,
                 )

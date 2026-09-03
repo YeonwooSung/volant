@@ -143,7 +143,8 @@ Produce/Fetch redirect. Transient 6 / 7 / 15 / 16 follow ``max_retries``.
 loop (heartbeat on poll, re-join on error 9/10/11, cooperative revoke).
 Optional `group_instance_id=` is Phase 12 static membership (empty =
 dynamic); re-join resends the same instance id. `commit` sends the
-joined `member_id` + `generation`. `close` leaves the group and does
+joined `member_id` + `generation` in one OffsetCommit for all assigned
+positions (v0.123). `close` leaves the group and does
 not close the `Client`.
 `volant.range_assign` / `range_assign_multi` match the broker range
 algorithm. `GroupConsumer.join(..., assignor="range")` replaces the
