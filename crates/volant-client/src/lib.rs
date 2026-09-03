@@ -148,6 +148,9 @@
 //! can filter group OffsetFetch to one topic and keep per-entry
 //! metadata. [`Client::fetch_offsets`] is unchanged (empty entries
 //! = all). Retry / error 14 inherit via `fetch_offsets`.
+//! v0.155 adds [`ClientConfig::delete_records_wait`] (default **0**)
+//! used by [`Client::delete_records`].
+//! [`Client::delete_records_with_wait_flag`] stays fully explicit.
 
 #![deny(missing_docs)]
 

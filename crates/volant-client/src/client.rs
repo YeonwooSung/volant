@@ -1,4 +1,7 @@
 //! Networked async client for Volant brokers.
+//!
+//! v0.155: [`Client::delete_records`] uses
+//! [`crate::ClientConfig::delete_records_wait`] (default 0).
 
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicU32, Ordering};
@@ -617,7 +620,9 @@ impl Client {
     /// Delete records before `before_offset` on a partition (Phase 14).
     ///
     /// Returns the new log start offset (low watermark).
-    /// Sends `wait_majority: 0` (broker default; Phase 137).
+    /// Sends `wait_majority` from [`ClientConfig::delete_records_wait`]
+    /// (default 0 = broker default; Phase 137). Use
+    /// [`Self::delete_records_with_wait_flag`] for an explicit flag.
     /// Inherits error-13 redirect and transient retry from
     /// [`Self::delete_records_with_wait_flag`].
     pub async fn delete_records(
@@ -626,8 +631,13 @@ impl Client {
         partition: u32,
         before_offset: u64,
     ) -> Result<DeleteRecordsResult> {
-        self.delete_records_with_wait_flag(topic, partition, before_offset, 0)
-            .await
+        self.delete_records_with_wait_flag(
+            topic,
+            partition,
+            before_offset,
+            self.config.delete_records_wait,
+        )
+        .await
     }
 
     /// Delete records with Phase 137 majority-wait trailer.
