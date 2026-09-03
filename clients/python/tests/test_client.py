@@ -6,7 +6,7 @@ import socket
 import threading
 import unittest
 
-from volant import BrokerError, Client, OffsetCommitEntry
+from volant import BrokerError, Client, OffsetCommitEntry, OffsetEntry, OffsetFetchEntry
 from volant.codec import (
     OP_DELETE_OFFSETS,
     OP_DELETE_OFFSETS_RESPONSE,
@@ -42,7 +42,7 @@ from volant.codec import (
     MetadataResponse,
     OffsetCommitRequest,
     OffsetCommitResponse,
-    OffsetFetchEntry,
+    OffsetFetchRequest,
     OffsetFetchResponse,
     PartitionInfo,
     ProduceRequest,
@@ -51,6 +51,7 @@ from volant.codec import (
     decode_fetch_request,
     decode_init_producer_id_request,
     decode_offset_commit_request,
+    decode_offset_fetch_request,
     decode_produce_request,
     encode_delete_offsets_response,
     encode_describe_group_response,
@@ -105,6 +106,7 @@ class ScriptedBroker:
         self.opcodes: list[int] = []
         self.produce_reqs: list[ProduceRequest] = []
         self.offset_commit_reqs: list[OffsetCommitRequest] = []
+        self.offset_fetch_reqs: list[OffsetFetchRequest] = []
         self.init_txn_ids: list[str] = []
         self.init_count = 0
         self.produce_count = 0
@@ -267,6 +269,7 @@ class ScriptedBroker:
             )
         if opcode == OP_OFFSET_FETCH:
             self.offset_fetch_count += 1
+            self.offset_fetch_reqs.append(decode_offset_fetch_request(raw))
             code = self.offset_fetch_codes.pop(0) if self.offset_fetch_codes else 0
             return (
                 encode_offset_fetch_response(
@@ -924,6 +927,68 @@ class TestOffsetAdminRetry(unittest.TestCase):
                     c.offset_commit("g", "t", 0, 5)
             self.assertEqual(ctx.exception.code, TIMEOUT)
             self.assertEqual(srv.offset_commit_count, 3)
+
+
+class TestFetchOffsetsEntries(unittest.TestCase):
+    def test_fetch_offsets_encodes_specific_entries(self) -> None:
+        with ScriptedBroker() as srv:
+            srv.offset_fetch_entries = [
+                OffsetFetchEntry(topic="t", partition=0, offset=5),
+            ]
+            with Client(srv.addr, timeout=5.0) as c:
+                offs = c.fetch_offsets("g", [("t", 0)])
+            self.assertEqual(
+                offs, [OffsetFetchEntry(topic="t", partition=0, offset=5)]
+            )
+            self.assertEqual(srv.offset_fetch_count, 1)
+            req = srv.offset_fetch_reqs[0]
+            self.assertEqual(req.group_id, "g")
+            self.assertEqual(req.entries, [OffsetEntry(topic="t", partition=0)])
+
+    def test_fetch_offsets_none_or_empty_sends_all(self) -> None:
+        with ScriptedBroker() as srv:
+            srv.offset_fetch_entries = [
+                OffsetFetchEntry(topic="t", partition=0, offset=5),
+                OffsetFetchEntry(topic="u", partition=1, offset=9),
+            ]
+            with Client(srv.addr, timeout=5.0) as c:
+                none_offs = c.fetch_offsets("g")
+                empty_offs = c.fetch_offsets("g", [])
+            self.assertEqual(
+                none_offs,
+                [
+                    OffsetFetchEntry(topic="t", partition=0, offset=5),
+                    OffsetFetchEntry(topic="u", partition=1, offset=9),
+                ],
+            )
+            self.assertEqual(empty_offs, none_offs)
+            self.assertEqual(srv.offset_fetch_count, 2)
+            self.assertEqual(srv.offset_fetch_reqs[0].entries, [])
+            self.assertEqual(srv.offset_fetch_reqs[1].entries, [])
+
+    def test_offset_fetch_still_filters_topic(self) -> None:
+        with ScriptedBroker() as srv:
+            srv.offset_fetch_entries = [
+                OffsetFetchEntry(topic="t", partition=0, offset=5),
+                OffsetFetchEntry(topic="u", partition=1, offset=9),
+            ]
+            with Client(srv.addr, timeout=5.0) as c:
+                offs = c.offset_fetch("g", "t")
+            self.assertEqual(offs, [(0, 5)])
+            self.assertEqual(srv.offset_fetch_count, 1)
+            self.assertEqual(srv.offset_fetch_reqs[0].entries, [])
+
+    def test_offset_fetch_all_still_works(self) -> None:
+        with ScriptedBroker() as srv:
+            srv.offset_fetch_entries = [
+                OffsetFetchEntry(topic="t", partition=0, offset=5),
+                OffsetFetchEntry(topic="u", partition=1, offset=9),
+            ]
+            with Client(srv.addr, timeout=5.0) as c:
+                offs = c.offset_fetch_all("g")
+            self.assertEqual(offs, [("t", 0, 5), ("u", 1, 9)])
+            self.assertEqual(srv.offset_fetch_count, 1)
+            self.assertEqual(srv.offset_fetch_reqs[0].entries, [])
 
 
 class TestCommitOffsetsBatch(unittest.TestCase):

@@ -52,6 +52,7 @@ if err := c.OffsetCommit("g", "t", 0, 5); err != nil {
 _ = c.CommitOffsets("g", "", 0, []codec.OffsetCommitEntry{{Topic: "t", Partition: 0, Offset: 5}, {Topic: "t", Partition: 1, Offset: 9}}) // v0.119 batch
 offs, err := c.OffsetFetch("g", "t")
 allOffs, err := c.OffsetFetchAll("g") // v0.118; []OffsetFetchEntry{Topic, Partition, Offset}
+rows, err := c.FetchOffsets("g", []codec.OffsetEntry{{Topic: "t", Partition: 0}}) // v0.122; nil/empty = all
 _ = offs
 _ = allOffs
 bounds, err := c.ListOffsets("t", nil) // all partitions; or []uint32{0}

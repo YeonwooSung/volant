@@ -47,6 +47,7 @@ from .codec import (
     MetadataRequest,
     MetadataResponse,
     OffsetCommitEntry,
+    OffsetEntry,
     OffsetListing,
     OffsetCommitRequest,
     OffsetCommitResponse,
@@ -1732,7 +1733,7 @@ class Client:
         """
         return [
             (e.partition, e.offset)
-            for e in self._fetch_offsets(group)
+            for e in self.fetch_offsets(group)
             if e.topic == topic
         ]
 
@@ -1746,12 +1747,33 @@ class Client:
         ``max_redirects``.
         """
         return [
-            (e.topic, e.partition, e.offset) for e in self._fetch_offsets(group)
+            (e.topic, e.partition, e.offset) for e in self.fetch_offsets(group)
         ]
 
-    def _fetch_offsets(self, group: str) -> list[OffsetFetchEntry]:
+    def fetch_offsets(
+        self,
+        group: str,
+        entries: Optional[list] = None,
+    ) -> list[OffsetFetchEntry]:
+        """Fetch committed offsets (Rust ``fetch_offsets`` parity).
+
+        ``entries`` are :class:`OffsetEntry` or ``(topic, partition)``
+        tuples. ``None`` / empty sends empty wire entries (all group
+        offsets). Non-empty entries are encoded on the wire. Transient
+        broker/transport errors retry up to ``max_retries`` extra times
+        (default 0). Error 14 follows ``max_redirects``.
+        """
+        parsed: list[OffsetEntry] = []
+        for e in entries or ():
+            if isinstance(e, OffsetEntry):
+                parsed.append(e)
+            elif isinstance(e, tuple) and len(e) == 2:
+                topic, partition = e
+                parsed.append(OffsetEntry(topic=topic, partition=partition))
+            else:
+                raise TypeError(f"unsupported offset fetch entry: {type(e)}")
         payload = codec.encode_offset_fetch_request(
-            OffsetFetchRequest(group_id=group, entries=[])
+            OffsetFetchRequest(group_id=group, entries=parsed)
         )
         max_retries = max(0, int(self.max_retries))
         max_attempts = 1 + self.max_redirects

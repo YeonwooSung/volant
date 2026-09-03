@@ -414,7 +414,7 @@ func (g *GroupConsumer) fetchPositionsFor(partitions []topicPartition) error {
 	for _, p := range partitions {
 		entries = append(entries, codec.OffsetEntry{Topic: p.topic, Partition: p.partition})
 	}
-	fetched, err := g.client.fetchOffsets(g.groupID, entries)
+	fetched, err := g.client.FetchOffsets(g.groupID, entries)
 	if err != nil {
 		return err
 	}

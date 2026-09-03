@@ -1909,7 +1909,7 @@ func (c *Client) DeleteRecordsWithWaitFlag(topic string, partition uint32, befor
 // to topic client-side (same as the CLI). Error 14 follows maxRedirects.
 // Transient 6 / 7 / 15 / 16 follow maxRetries.
 func (c *Client) OffsetFetch(group, topic string) ([]Offset, error) {
-	entries, err := c.fetchOffsets(group, nil)
+	entries, err := c.FetchOffsets(group, nil)
 	if err != nil {
 		return nil, err
 	}
@@ -1927,7 +1927,7 @@ func (c *Client) OffsetFetch(group, topic string) ([]Offset, error) {
 // not filter by topic. Error 14 follows maxRedirects. Transient 6 / 7 / 15 / 16
 // follow maxRetries.
 func (c *Client) OffsetFetchAll(group string) ([]OffsetFetchEntry, error) {
-	entries, err := c.fetchOffsets(group, nil)
+	entries, err := c.FetchOffsets(group, nil)
 	if err != nil {
 		return nil, err
 	}
@@ -1938,7 +1938,11 @@ func (c *Client) OffsetFetchAll(group string) ([]OffsetFetchEntry, error) {
 	return out, nil
 }
 
-func (c *Client) fetchOffsets(group string, entries []codec.OffsetEntry) ([]codec.OffsetFetchEntry, error) {
+// FetchOffsets returns committed offsets for group. Nil or empty entries
+// request all group offsets (same as OffsetFetch / OffsetFetchAll).
+// Non-empty entries are sent on the wire (Rust fetch_offsets parity).
+// Error 14 follows maxRedirects. Transient 6 / 7 / 15 / 16 follow maxRetries.
+func (c *Client) FetchOffsets(group string, entries []codec.OffsetEntry) ([]codec.OffsetFetchEntry, error) {
 	if entries == nil {
 		entries = []codec.OffsetEntry{}
 	}

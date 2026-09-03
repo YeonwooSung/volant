@@ -402,6 +402,7 @@ class ClientTest {
         final List<Codec.ProduceRequest> produceReqs = new CopyOnWriteArrayList<>();
         final List<Codec.FetchRequest> fetchReqs = new CopyOnWriteArrayList<>();
         final List<Codec.OffsetCommitRequest> offsetCommitReqs = new CopyOnWriteArrayList<>();
+        final List<Codec.OffsetFetchRequest> offsetFetchReqs = new CopyOnWriteArrayList<>();
         final List<String> initTxnIds = new CopyOnWriteArrayList<>();
         final AtomicInteger initCount = new AtomicInteger();
         final AtomicInteger produceCount = new AtomicInteger();
@@ -553,6 +554,7 @@ class ClientTest {
             }
             if (frame.opcode == Codec.OP_OFFSET_FETCH) {
                 offsetFetchCount.incrementAndGet();
+                offsetFetchReqs.add(Codec.decodeOffsetFetchRequest(frame.payload));
                 int code = 0;
                 if (!offsetFetchCodes.isEmpty()) {
                     code = offsetFetchCodes.remove(0);
@@ -1029,6 +1031,75 @@ class ClientTest {
                 assertEquals(List.of(new Offset(0, 5)), offs);
             }
             assertEquals(1, srv.offsetFetchCount.get());
+        }
+    }
+
+    @Test
+    void fetchOffsetsEncodesSpecificEntries() throws Exception {
+        try (ScriptedBroker srv = ScriptedBroker.start()) {
+            srv.offsetFetchEntries.add(new Codec.OffsetFetchEntry("t", 0, 5, ""));
+            try (Client c = Client.connect("127.0.0.1", srv.port, 5_000)) {
+                List<OffsetFetchEntry> offs =
+                        c.fetchOffsets("g", List.of(new Codec.OffsetEntry("t", 0)));
+                assertEquals(List.of(new OffsetFetchEntry("t", 0, 5)), offs);
+            }
+            assertEquals(1, srv.offsetFetchCount.get());
+            assertEquals(1, srv.offsetFetchReqs.size());
+            Codec.OffsetFetchRequest req = srv.offsetFetchReqs.get(0);
+            assertEquals("g", req.groupId);
+            assertEquals(1, req.entries.size());
+            assertEquals("t", req.entries.get(0).topic);
+            assertEquals(0, req.entries.get(0).partition);
+        }
+    }
+
+    @Test
+    void fetchOffsetsNullOrEmptySendsAll() throws Exception {
+        try (ScriptedBroker srv = ScriptedBroker.start()) {
+            srv.offsetFetchEntries.add(new Codec.OffsetFetchEntry("t", 0, 5, ""));
+            srv.offsetFetchEntries.add(new Codec.OffsetFetchEntry("u", 1, 9, ""));
+            try (Client c = Client.connect("127.0.0.1", srv.port, 5_000)) {
+                List<OffsetFetchEntry> none = c.fetchOffsets("g", null);
+                List<OffsetFetchEntry> empty = c.fetchOffsets("g", Collections.emptyList());
+                assertEquals(
+                        List.of(new OffsetFetchEntry("t", 0, 5), new OffsetFetchEntry("u", 1, 9)),
+                        none);
+                assertEquals(none, empty);
+            }
+            assertEquals(2, srv.offsetFetchCount.get());
+            assertEquals(2, srv.offsetFetchReqs.size());
+            assertTrue(srv.offsetFetchReqs.get(0).entries.isEmpty());
+            assertTrue(srv.offsetFetchReqs.get(1).entries.isEmpty());
+        }
+    }
+
+    @Test
+    void offsetFetchStillFiltersTopicRecordsEmptyWire() throws Exception {
+        try (ScriptedBroker srv = ScriptedBroker.start()) {
+            srv.offsetFetchEntries.add(new Codec.OffsetFetchEntry("t", 0, 5, ""));
+            srv.offsetFetchEntries.add(new Codec.OffsetFetchEntry("u", 1, 9, ""));
+            try (Client c = Client.connect("127.0.0.1", srv.port, 5_000)) {
+                List<Offset> offs = c.offsetFetch("g", "t");
+                assertEquals(List.of(new Offset(0, 5)), offs);
+            }
+            assertEquals(1, srv.offsetFetchCount.get());
+            assertTrue(srv.offsetFetchReqs.get(0).entries.isEmpty());
+        }
+    }
+
+    @Test
+    void offsetFetchAllStillWorksRecordsEmptyWire() throws Exception {
+        try (ScriptedBroker srv = ScriptedBroker.start()) {
+            srv.offsetFetchEntries.add(new Codec.OffsetFetchEntry("t", 0, 5, ""));
+            srv.offsetFetchEntries.add(new Codec.OffsetFetchEntry("u", 1, 9, ""));
+            try (Client c = Client.connect("127.0.0.1", srv.port, 5_000)) {
+                List<OffsetFetchEntry> offs = c.offsetFetchAll("g");
+                assertEquals(
+                        List.of(new OffsetFetchEntry("t", 0, 5), new OffsetFetchEntry("u", 1, 9)),
+                        offs);
+            }
+            assertEquals(1, srv.offsetFetchCount.get());
+            assertTrue(srv.offsetFetchReqs.get(0).entries.isEmpty());
         }
     }
 
