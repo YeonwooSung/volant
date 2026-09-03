@@ -170,7 +170,7 @@ CreateAcls / DeleteAcls / CreateScramUser / DeleteScramUser /
 ListScramUsers / ListAcls / AddBroker / RemoveBroker /
 DescribeConfigs / AlterConfigs / DeleteOffsets / OffsetCommit /
 OffsetFetch / ListMembers / DescribeGroup / ListGroups / Heartbeat /
-LeaveGroup follow
+LeaveGroup / Metadata follow
 `NotController` (error 14) the same way (Metadata `controller_id`
 trailer when the message has no hint, else `controller_id=N` or the
 first other advertised broker; not Kafka FindCoordinator). AddBroker /

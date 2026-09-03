@@ -513,6 +513,8 @@ class ClientTest {
         final List<int[]> listGroupsReplies = new CopyOnWriteArrayList<>();
         final List<String> listGroupsMessages = new CopyOnWriteArrayList<>();
         final List<Integer> metadataCodes = new CopyOnWriteArrayList<>();
+        final List<int[]> metadataReplies = new CopyOnWriteArrayList<>();
+        final List<String> metadataMessages = new CopyOnWriteArrayList<>();
         final List<Integer> listMembersCodes = new CopyOnWriteArrayList<>();
         final List<int[]> listMembersReplies = new CopyOnWriteArrayList<>();
         final List<String> listMembersMessages = new CopyOnWriteArrayList<>();
@@ -550,6 +552,11 @@ class ClientTest {
         void queueHeartbeatError(int code, String message) {
             heartbeatReplies.add(new int[] {code, 1});
             heartbeatMessages.add(message);
+        }
+
+        void queueMetadataError(int code, String message) {
+            metadataReplies.add(new int[] {code, 1});
+            metadataMessages.add(message);
         }
 
         void queueDescribeGroupError(int code, String message) {
@@ -800,12 +807,19 @@ class ClientTest {
             if (frame.opcode == Codec.OP_METADATA) {
                 metadataCount.incrementAndGet();
                 int code = 0;
-                if (!metadataCodes.isEmpty()) {
+                String message = "";
+                boolean asError = false;
+                if (!metadataReplies.isEmpty()) {
+                    int[] spec = metadataReplies.remove(0);
+                    code = spec[0];
+                    asError = spec[1] != 0;
+                    message = metadataMessages.isEmpty() ? "" : metadataMessages.remove(0);
+                } else if (!metadataCodes.isEmpty()) {
                     code = metadataCodes.remove(0);
                 }
-                if (code != 0) {
+                if (asError || code != 0) {
                     replyOp[0] = Codec.OP_ERROR;
-                    return Codec.encodeErrorResponse(new Codec.ErrorResponse(code, ""));
+                    return Codec.encodeErrorResponse(new Codec.ErrorResponse(code, message));
                 }
                 return Codec.encodeMetadataResponse(meta);
             }
@@ -1942,6 +1956,39 @@ class ClientTest {
                 assertEquals(TIMEOUT, ex.code);
             }
             assertEquals(3, srv.metadataCount.get());
+        }
+    }
+
+    @Test
+    void metadataError14RedirectsViaControllerId() throws Exception {
+        try (ScriptedBroker leader = ScriptedBroker.start();
+                ScriptedBroker follower = ScriptedBroker.start()) {
+            follower.queueMetadataError(NOT_CONTROLLER, "not controller; controller_id=2");
+            follower.meta = controllerMeta(2, "127.0.0.1", leader.port);
+            try (Client c = Client.connect("127.0.0.1", follower.port, 5_000)) {
+                Metadata got = c.metadata();
+                assertTrue(got.brokers.isEmpty());
+                assertTrue(got.topics.isEmpty());
+                assertEquals(leader.port, Integer.parseInt(c.addr().substring(c.addr().indexOf(':') + 1)));
+            }
+            assertEquals(2, follower.metadataCount.get());
+            assertEquals(1, leader.metadataCount.get());
+        }
+    }
+
+    @Test
+    void metadataMaxRedirectsZeroRaisesOnFirst14() throws Exception {
+        try (ScriptedBroker follower = ScriptedBroker.start()) {
+            follower.queueMetadataError(NOT_CONTROLLER, "not controller; controller_id=2");
+            follower.meta = controllerMeta(2, "127.0.0.1", 9);
+            try (Client c = Client.connect("127.0.0.1", follower.port, 5_000)) {
+                c.setMaxRedirects(0);
+                BrokerException ex =
+                        assertThrows(BrokerException.class, () -> c.metadata());
+                assertEquals(NOT_CONTROLLER, ex.code);
+            }
+            assertEquals(1, follower.metadataCount.get());
+            assertEquals(1, follower.acceptCount.get());
         }
     }
 

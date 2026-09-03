@@ -476,7 +476,7 @@ class Client:
         other broker / lookup miss / empty host / reconnect fail — caller
         must raise the original error 14.
         """
-        meta = self.metadata()
+        meta = self._metadata_rpc(None)
         if controller_id is None and meta.controller_id != 0:
             controller_id = meta.controller_id
         host: Optional[str] = None
@@ -1360,8 +1360,33 @@ class Client:
 
         Native Metadata has no top-level ``error_code``; failures arrive
         as Error opcode / transport. Transient broker/transport errors
-        retry up to ``max_retries`` extra times (default 0). Error 2 /
-        9 / 10 / 11 / 13 / 14 are not retried.
+        retry up to ``max_retries`` extra times (default 0). Error 14
+        follows ``max_redirects``. Error 2 / 9 / 10 / 11 / 13 are not
+        retried.
+        """
+        max_attempts = 1 + self.max_redirects
+        redirect_attempt = 0
+        while True:
+            try:
+                return self._metadata_rpc(topics)
+            except BrokerError as e:
+                if (
+                    e.code == _NOT_CONTROLLER
+                    and redirect_attempt + 1 < max_attempts
+                    and self._redirect_to_controller(_controller_id_hint(e.message))
+                ):
+                    redirect_attempt += 1
+                    continue
+                raise
+
+    def _metadata_rpc(
+        self, topics: Optional[list[str]] = None
+    ) -> MetadataResponse:
+        """Metadata without the v0.156 error-14 wrap.
+
+        Used by :meth:`_redirect_to_controller` so hunt and
+        ``metadata`` are not mutually recursive. Transient retry
+        is still v0.95.
         """
         payload = codec.encode_metadata_request(
             MetadataRequest(topics=list(topics) if topics else [])
