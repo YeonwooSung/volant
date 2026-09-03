@@ -2642,6 +2642,13 @@ func (c *Client) CreateAcls(entries []codec.AclBinding) error {
 	return err
 }
 
+// CreateAcl creates one ACL binding.
+// Same as CreateAcls with a one-element list. Error 14 and
+// transient retry inherit from CreateAcls.
+func (c *Client) CreateAcl(entry codec.AclBinding) error {
+	return c.CreateAcls([]codec.AclBinding{entry})
+}
+
 // DeleteAcls deletes exact-matching ACL bindings (native opcode 56/57).
 // Returns the number of entries removed. No filter-delete. Error 14 follows
 // maxRedirects.
@@ -2655,6 +2662,13 @@ func (c *Client) DeleteAcls(entries []codec.AclBinding) (uint32, error) {
 		return 0, err
 	}
 	return decoded.(codec.DeleteAclsResponse).Removed, nil
+}
+
+// DeleteAcl deletes one exact-matching ACL binding.
+// Same as DeleteAcls with a one-element list. Error 14 and
+// transient retry inherit from DeleteAcls.
+func (c *Client) DeleteAcl(entry codec.AclBinding) (uint32, error) {
+	return c.DeleteAcls([]codec.AclBinding{entry})
 }
 
 // ListAcls lists ACL bindings with optional filters (native opcode 58/59).

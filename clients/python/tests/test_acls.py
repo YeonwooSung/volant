@@ -172,11 +172,32 @@ class TestAclsClient(unittest.TestCase):
         self.assertEqual(srv.got_create, [entry])
         self.assertEqual(srv.opcodes, [OP_CREATE_ACLS])
 
+    def test_create_acl_encodes_one_entry(self) -> None:
+        entry = _sample()
+        with _AclServer() as srv:
+            with Client(srv.addr, timeout=5.0) as c:
+                c.create_acl(entry)
+        if srv.error is not None:
+            raise srv.error
+        self.assertEqual(srv.got_create, [entry])
+        self.assertEqual(srv.opcodes, [OP_CREATE_ACLS])
+
     def test_delete_returns_removed(self) -> None:
         entry = _sample()
         with _AclServer(removed=1) as srv:
             with Client(srv.addr, timeout=5.0) as c:
                 n = c.delete_acls([entry])
+        if srv.error is not None:
+            raise srv.error
+        self.assertEqual(n, 1)
+        self.assertEqual(srv.got_delete, [entry])
+        self.assertEqual(srv.opcodes, [OP_DELETE_ACLS])
+
+    def test_delete_acl_encodes_one_entry(self) -> None:
+        entry = _sample()
+        with _AclServer(removed=1) as srv:
+            with Client(srv.addr, timeout=5.0) as c:
+                n = c.delete_acl(entry)
         if srv.error is not None:
             raise srv.error
         self.assertEqual(n, 1)

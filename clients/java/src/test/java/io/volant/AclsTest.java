@@ -34,11 +34,35 @@ class AclsTest {
     }
 
     @Test
+    void createAclEncodesOneEntry() throws Exception {
+        AclBinding entry = sample();
+        try (AclServer srv = new AclServer(0, 0, 0, 1, Collections.singletonList(entry))) {
+            try (Client c = Client.connect("127.0.0.1", srv.port, 5_000)) {
+                c.createAcl(entry);
+            }
+            assertEquals(Collections.singletonList(entry), srv.create.get());
+            assertEquals(Collections.singletonList(Codec.OP_CREATE_ACLS), srv.opcodes);
+        }
+    }
+
+    @Test
     void deleteReturnsRemoved() throws Exception {
         AclBinding entry = sample();
         try (AclServer srv = new AclServer(0, 0, 0, 1, Collections.emptyList())) {
             try (Client c = Client.connect("127.0.0.1", srv.port, 5_000)) {
                 int n = c.deleteAcls(Collections.singletonList(entry));
+                assertEquals(1, n);
+            }
+            assertEquals(Collections.singletonList(entry), srv.delete.get());
+        }
+    }
+
+    @Test
+    void deleteAclEncodesOneEntry() throws Exception {
+        AclBinding entry = sample();
+        try (AclServer srv = new AclServer(0, 0, 0, 1, Collections.emptyList())) {
+            try (Client c = Client.connect("127.0.0.1", srv.port, 5_000)) {
+                int n = c.deleteAcl(entry);
                 assertEquals(1, n);
             }
             assertEquals(Collections.singletonList(entry), srv.delete.get());

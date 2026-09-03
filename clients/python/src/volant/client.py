@@ -2275,6 +2275,14 @@ class Client:
             codec.OP_CREATE_ACLS, payload, codec.CreateAclsResponse, "create_acls"
         )
 
+    def create_acl(self, entry: codec.AclBinding) -> None:
+        """Create one ACL binding.
+
+        Same as ``create_acls([entry])``. Error 14 / transient retry
+        inherit from ``create_acls``.
+        """
+        return self.create_acls([entry])
+
     def delete_acls(self, entries: list[codec.AclBinding]) -> int:
         """Delete exact-matching ACL bindings (native opcode 56/57).
 
@@ -2290,6 +2298,14 @@ class Client:
             codec.OP_DELETE_ACLS, payload, codec.DeleteAclsResponse, "delete_acls"
         )
         return resp.removed
+
+    def delete_acl(self, entry: codec.AclBinding) -> int:
+        """Delete one exact-matching ACL binding.
+
+        Same as ``delete_acls([entry])``. Error 14 / transient retry
+        inherit from ``delete_acls``.
+        """
+        return self.delete_acls([entry])
 
     def list_acls(
         self,

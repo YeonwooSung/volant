@@ -161,6 +161,29 @@ func TestCreateAclsOk(t *testing.T) {
 	}
 }
 
+func TestCreateAclEncodesOneEntry(t *testing.T) {
+	entry := sampleAcl()
+	addr, got, stop := serveAcls(t, 0, 0, 0, 1, nil)
+	defer stop()
+	c, err := volant.DialTimeout(addr, 5*time.Second)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer c.Close()
+	if err := c.CreateAcl(entry); err != nil {
+		t.Fatal(err)
+	}
+	if got.err != nil {
+		t.Fatal(got.err)
+	}
+	if len(got.create) != 1 || got.create[0] != entry {
+		t.Fatalf("create %#v", got.create)
+	}
+	if len(got.opcodes) != 1 || got.opcodes[0] != codec.OpCreateAcls {
+		t.Fatalf("opcodes %#v", got.opcodes)
+	}
+}
+
 func TestDeleteAclsReturnsRemoved(t *testing.T) {
 	entry := sampleAcl()
 	addr, got, stop := serveAcls(t, 0, 0, 0, 1, nil)
@@ -171,6 +194,30 @@ func TestDeleteAclsReturnsRemoved(t *testing.T) {
 	}
 	defer c.Close()
 	n, err := c.DeleteAcls([]codec.AclBinding{entry})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.err != nil {
+		t.Fatal(got.err)
+	}
+	if n != 1 {
+		t.Fatalf("removed %d", n)
+	}
+	if len(got.delete) != 1 || got.delete[0] != entry {
+		t.Fatalf("delete %#v", got.delete)
+	}
+}
+
+func TestDeleteAclEncodesOneEntry(t *testing.T) {
+	entry := sampleAcl()
+	addr, got, stop := serveAcls(t, 0, 0, 0, 1, nil)
+	defer stop()
+	c, err := volant.DialTimeout(addr, 5*time.Second)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer c.Close()
+	n, err := c.DeleteAcl(entry)
 	if err != nil {
 		t.Fatal(err)
 	}

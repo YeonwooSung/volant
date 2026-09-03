@@ -169,10 +169,12 @@ err = c.DeleteScramUser("alice")
 _ = names
 // ACL admin (v0.56). Opcodes 54–59; exact-match delete. Not Kafka CreateAcls.
 e := codec.AclBinding{Principal: "User:alice", ResourceType: 0, Resource: "events", Operation: 3, Permission: 1}
+err = c.CreateAcl(e) // v0.169; one binding
 err = c.CreateAcls([]codec.AclBinding{e})
 listed, err := c.ListAcls("", 255, "")
 listed, err = c.ListAclsAll() // v0.161; same as ListAcls("", 255, "")
-removed, err := c.DeleteAcls([]codec.AclBinding{e})
+removed, err := c.DeleteAcl(e) // v0.169; one binding
+removed, err = c.DeleteAcls([]codec.AclBinding{e})
 _ = listed
 _ = removed
 ```
@@ -337,7 +339,9 @@ Create/Delete/ListAcls (v0.56) are admin RPCs (opcodes 54–59).
 removed) / `ListAcls(principal, resourceType, resource)`. Empty
 principal/resource and `resourceType=255` list any.
 `ListAclsAll()` lists every ACL binding (empty filters); same as
-`ListAcls("", 255, "")`. Delete is
+`ListAcls("", 255, "")`.
+`CreateAcl(entry)` / `DeleteAcl(entry)` create or delete one binding
+(same as a one-element list). Delete is
 exact-match only. Not Kafka CreateAcls / DeleteAcls / DescribeAcls
 (API keys 30/31/29).
 
