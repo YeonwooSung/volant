@@ -50,7 +50,9 @@ if err := c.OffsetCommit("g", "t", 0, 5); err != nil {
     log.Fatal(err)
 }
 offs, err := c.OffsetFetch("g", "t")
+allOffs, err := c.OffsetFetchAll("g") // v0.118; []OffsetFetchEntry{Topic, Partition, Offset}
 _ = offs
+_ = allOffs
 bounds, err := c.ListOffsets("t", nil) // all partitions; or []uint32{0}
 _ = bounds
 cfg, err := c.DescribeConfigs("t")

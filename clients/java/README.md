@@ -17,6 +17,7 @@ import io.volant.Codec;
 import io.volant.GroupConsumer;
 import io.volant.Metadata;
 import io.volant.Offset;
+import io.volant.OffsetFetchEntry;
 import io.volant.DeleteRecordsResult;
 import io.volant.OffsetListing;
 import io.volant.Record;
@@ -42,6 +43,7 @@ try (Client c = Client.connect("127.0.0.1", 9092)) {
   }
   c.offsetCommit("g", "t", 0, 5);
   List<Offset> offs = c.offsetFetch("g", "t");
+  List<OffsetFetchEntry> allOffs = c.offsetFetchAll("g"); // v0.118; topic+partition+offset
   List<OffsetListing> bounds = c.listOffsets("t"); // all; or listOffsets("t", 0)
   DeleteRecordsResult cut = c.deleteRecords("t", 0, 100); // wait_majority=0
   // cut = c.deleteRecords("t", 0, 100, 1); // force majority wait

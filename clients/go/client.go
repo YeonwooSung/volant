@@ -108,6 +108,13 @@ type Offset struct {
 	Offset    uint64
 }
 
+// OffsetFetchEntry is one committed (topic, partition, offset) from OffsetFetchAll.
+type OffsetFetchEntry struct {
+	Topic     string
+	Partition uint32
+	Offset    uint64
+}
+
 // JoinGroupResult is the successful JoinGroup reply (Rust client field names).
 type JoinGroupResult struct {
 	MemberID   string
@@ -1908,6 +1915,22 @@ func (c *Client) OffsetFetch(group, topic string) ([]Offset, error) {
 		if e.Topic == topic {
 			out = append(out, Offset{Partition: e.Partition, Offset: e.Offset})
 		}
+	}
+	return out, nil
+}
+
+// OffsetFetchAll returns all committed offsets for group as []OffsetFetchEntry.
+// Empty wire entries mean all offsets (same as OffsetFetch); this method does
+// not filter by topic. Error 14 follows maxRedirects. Transient 6 / 7 / 15 / 16
+// follow maxRetries.
+func (c *Client) OffsetFetchAll(group string) ([]OffsetFetchEntry, error) {
+	entries, err := c.fetchOffsets(group, nil)
+	if err != nil {
+		return nil, err
+	}
+	out := make([]OffsetFetchEntry, 0, len(entries))
+	for _, e := range entries {
+		out = append(out, OffsetFetchEntry{Topic: e.Topic, Partition: e.Partition, Offset: e.Offset})
 	}
 	return out, nil
 }
