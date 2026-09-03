@@ -333,73 +333,132 @@ impl Client {
         }
     }
 
+    /// Run SCRAM-SHA-256 first+final as one handshake.
+    ///
+    /// Transient broker/transport errors on either step retry the whole
+    /// handshake from ScramFirst with a new client nonce, up to
+    /// [`ClientConfig::max_retries`] extra times (default 0). Error 17 / 18 /
+    /// 13 / 14 / 9 / 10 / 11 / 2 / 21 / 22, protocol (including server
+    /// signature mismatch), and InvalidArgument are not retried.
     async fn authenticate_scram(&self, username: &str, password: &str) -> Result<()> {
-        let client_nonce = crate::scram::generate_client_nonce();
-        let first = self
-            .round_trip(Request::ScramFirst {
-                username: username.to_owned(),
-                client_nonce: client_nonce.clone(),
-            })
-            .await?;
-        let (combined_nonce, salt, iterations) = match first {
-            Response::ScramFirst {
-                error_code,
-                combined_nonce,
-                salt,
+        let max_retries = self.config.max_retries;
+        let mut retry_attempt = 0u32;
+        loop {
+            let client_nonce = crate::scram::generate_client_nonce();
+            let first = match self
+                .round_trip(Request::ScramFirst {
+                    username: username.to_owned(),
+                    client_nonce: client_nonce.clone(),
+                })
+                .await
+            {
+                Ok(r) => r,
+                Err(e) if is_transient_transport(&e) && retry_attempt < max_retries => {
+                    retry_attempt += 1;
+                    tokio::time::sleep(Duration::from_millis(self.config.retry_backoff_ms)).await;
+                    continue;
+                }
+                Err(e) => return Err(e),
+            };
+            let (combined_nonce, salt, iterations) = match first {
+                Response::ScramFirst {
+                    error_code,
+                    combined_nonce,
+                    salt,
+                    iterations,
+                } => {
+                    if error_code != 0 {
+                        if is_transient_error_code(error_code) && retry_attempt < max_retries {
+                            retry_attempt += 1;
+                            tokio::time::sleep(Duration::from_millis(self.config.retry_backoff_ms))
+                                .await;
+                            continue;
+                        }
+                        return Err(error_from_code(
+                            error_code,
+                            format!("scram first failed error_code={error_code}"),
+                        ));
+                    }
+                    (combined_nonce, salt, iterations)
+                }
+                Response::Error { code, message } => {
+                    if is_transient_error_code(code) && retry_attempt < max_retries {
+                        retry_attempt += 1;
+                        tokio::time::sleep(Duration::from_millis(self.config.retry_backoff_ms))
+                            .await;
+                        continue;
+                    }
+                    return Err(error_from_code(code, message));
+                }
+                other => {
+                    return Err(Error::Protocol(format!(
+                        "unexpected response for scram first: {other:?}"
+                    )))
+                }
+            };
+
+            let (proof, expected_sig) = crate::scram::client_proof_and_server_sig(
+                username,
+                password,
+                &client_nonce,
+                &combined_nonce,
+                &salt,
                 iterations,
-            } => {
-                if error_code != 0 {
-                    return Err(error_from_code(
-                        error_code,
-                        format!("scram first failed error_code={error_code}"),
-                    ));
-                }
-                (combined_nonce, salt, iterations)
-            }
-            Response::Error { code, message } => return Err(error_from_code(code, message)),
-            other => {
-                return Err(Error::Protocol(format!(
-                    "unexpected response for scram first: {other:?}"
-                )))
-            }
-        };
+            )?;
 
-        let (proof, expected_sig) = crate::scram::client_proof_and_server_sig(
-            username,
-            password,
-            &client_nonce,
-            &combined_nonce,
-            &salt,
-            iterations,
-        )?;
-
-        let final_resp = self
-            .round_trip(Request::ScramFinal {
-                username: username.to_owned(),
-                combined_nonce,
-                client_proof: bytes::Bytes::from(proof),
-            })
-            .await?;
-        match final_resp {
-            Response::ScramFinal {
-                error_code,
-                server_signature,
-            } => {
-                if error_code != 0 {
-                    return Err(error_from_code(
-                        error_code,
-                        format!("scram final failed error_code={error_code}"),
-                    ));
+            let final_resp = match self
+                .round_trip(Request::ScramFinal {
+                    username: username.to_owned(),
+                    combined_nonce,
+                    client_proof: bytes::Bytes::from(proof),
+                })
+                .await
+            {
+                Ok(r) => r,
+                Err(e) if is_transient_transport(&e) && retry_attempt < max_retries => {
+                    retry_attempt += 1;
+                    tokio::time::sleep(Duration::from_millis(self.config.retry_backoff_ms)).await;
+                    continue;
                 }
-                if server_signature.as_ref() != expected_sig.as_slice() {
-                    return Err(Error::Protocol("scram server signature mismatch".into()));
+                Err(e) => return Err(e),
+            };
+            match final_resp {
+                Response::ScramFinal {
+                    error_code,
+                    server_signature,
+                } => {
+                    if error_code != 0 {
+                        if is_transient_error_code(error_code) && retry_attempt < max_retries {
+                            retry_attempt += 1;
+                            tokio::time::sleep(Duration::from_millis(self.config.retry_backoff_ms))
+                                .await;
+                            continue;
+                        }
+                        return Err(error_from_code(
+                            error_code,
+                            format!("scram final failed error_code={error_code}"),
+                        ));
+                    }
+                    if server_signature.as_ref() != expected_sig.as_slice() {
+                        return Err(Error::Protocol("scram server signature mismatch".into()));
+                    }
+                    return Ok(());
                 }
-                Ok(())
+                Response::Error { code, message } => {
+                    if is_transient_error_code(code) && retry_attempt < max_retries {
+                        retry_attempt += 1;
+                        tokio::time::sleep(Duration::from_millis(self.config.retry_backoff_ms))
+                            .await;
+                        continue;
+                    }
+                    return Err(error_from_code(code, message));
+                }
+                other => {
+                    return Err(Error::Protocol(format!(
+                        "unexpected response for scram final: {other:?}"
+                    )))
+                }
             }
-            Response::Error { code, message } => Err(error_from_code(code, message)),
-            other => Err(Error::Protocol(format!(
-                "unexpected response for scram final: {other:?}"
-            ))),
         }
     }
 

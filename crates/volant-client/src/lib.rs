@@ -79,9 +79,14 @@
 //! v0.107 retries shared-token Auth (`authenticate`) on that same
 //! transient set (default 0). Error 17 / 18 (auth failed / required)
 //! is not retried. 13 / 14 / 9 / 10 / 11 / 2 / 21 / 22, Protocol, and
-//! InvalidArgument are not retried. SCRAM (`authenticate_scram`) is a
-//! sibling residual (v0.109). Already-connected clients skip Auth.
-//! Each `connect` / `reconnect` has its own retry budget.
+//! InvalidArgument are not retried. Already-connected clients skip
+//! Auth. Each `connect` / `reconnect` has its own retry budget.
+//! v0.109 retries the SCRAM-SHA-256 handshake (`authenticate_scram`)
+//! on that same transient set (default 0). First+final is one unit;
+//! a transient on either step restarts from ScramFirst with a new
+//! nonce. Error 17 / 18 / 13 / 14 / 9 / 10 / 11 / 2 / 21 / 22,
+//! protocol (including server signature mismatch), and InvalidArgument
+//! are not retried.
 
 #![deny(missing_docs)]
 
