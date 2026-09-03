@@ -309,6 +309,11 @@ docs for day-to-day reading: [ops](../ops.md), [consistency](../consistency.md),
 | v0.108 | ✅ | SCRAM handshake retry on Python/Go/Java | [V108_SPEC.md](../V108_SPEC.md) |
 | v0.109 | ✅ | Rust SCRAM handshake retry | [V109_SPEC.md](../V109_SPEC.md) |
 | v0.110 | ✅ | DeleteRecords transient retry on Python/Go/Java | [V110_SPEC.md](../V110_SPEC.md) |
+| v0.111 | ✅ | Rust DeleteRecords 13 redirect + transient retry | [V111_SPEC.md](../V111_SPEC.md) |
+| v0.112 | ✅ | ListOffsets NotLeader redirect on Python/Go/Java | [V112_SPEC.md](../V112_SPEC.md) |
+| v0.113 | ✅ | Rust ListOffsets NotLeader redirect | [V113_SPEC.md](../V113_SPEC.md) |
+| v0.114 | ✅ | Rust metadata topic filter | [V114_SPEC.md](../V114_SPEC.md) |
+| v0.115 | ✅ | public reconnect on Python/Go/Java | [V115_SPEC.md](../V115_SPEC.md) |
 
 ---
 
