@@ -95,6 +95,14 @@ type DeleteRecordsResult struct {
 	LowWatermark uint64
 }
 
+// FetchResult is a successful Fetch reply (records plus high watermark).
+type FetchResult struct {
+	Topic         string
+	Partition     uint32
+	HighWatermark uint64
+	Records       []Record
+}
+
 const (
 	// GroupStateEmpty is offsets on disk only; no live members.
 	GroupStateEmpty = codec.GroupStateEmpty
@@ -1392,13 +1400,31 @@ func (c *Client) ensureProducerID() error {
 // Fetch reads records from topic/partition starting at offset.
 // Defaults match the Python client: max_messages=128, max_bytes=4MiB, max_wait_ms=0.
 func (c *Client) Fetch(topic string, partition int, offset int64) ([]Record, error) {
-	return c.FetchOpts(topic, partition, offset, 128, 4*1024*1024, 0)
+	res, err := c.FetchResult(topic, partition, offset)
+	if err != nil {
+		return nil, err
+	}
+	return res.Records, nil
+}
+
+// FetchResult is Fetch plus the already-decoded high watermark.
+func (c *Client) FetchResult(topic string, partition int, offset int64) (FetchResult, error) {
+	return c.FetchOptsResult(topic, partition, offset, 128, 4*1024*1024, 0)
 }
 
 // FetchOpts is Fetch with explicit max_messages, max_bytes, and max_wait_ms.
 // Transient broker/transport errors retry up to maxRetries extra times
 // (default 0). Error 13 uses maxRedirects only.
 func (c *Client) FetchOpts(topic string, partition int, offset int64, maxMessages, maxBytes, maxWaitMs uint32) ([]Record, error) {
+	res, err := c.FetchOptsResult(topic, partition, offset, maxMessages, maxBytes, maxWaitMs)
+	if err != nil {
+		return nil, err
+	}
+	return res.Records, nil
+}
+
+// FetchOptsResult is FetchOpts plus the already-decoded high watermark.
+func (c *Client) FetchOptsResult(topic string, partition int, offset int64, maxMessages, maxBytes, maxWaitMs uint32) (FetchResult, error) {
 	payload, err := codec.EncodeFetchRequest(codec.FetchRequest{
 		Topic:       topic,
 		Partition:   uint32(partition),
@@ -1408,7 +1434,7 @@ func (c *Client) FetchOpts(topic string, partition int, offset int64, maxMessage
 		MaxWaitMs:   maxWaitMs,
 	})
 	if err != nil {
-		return nil, err
+		return FetchResult{}, err
 	}
 	maxRetries := c.maxRetries
 	if maxRetries < 0 {
@@ -1424,7 +1450,7 @@ func (c *Client) FetchOpts(topic string, partition int, offset int64, maxMessage
 				if be, ok := err.(*codec.BrokerError); ok && be.Code == notLeaderForPartition && attempt < maxAttempts {
 					ok, rerr := c.redirectToLeader(topic, uint32(partition))
 					if rerr != nil {
-						return nil, rerr
+						return FetchResult{}, rerr
 					}
 					if ok {
 						continue
@@ -1436,16 +1462,16 @@ func (c *Client) FetchOpts(topic string, partition int, offset int64, maxMessage
 					retried = true
 					break
 				}
-				return nil, err
+				return FetchResult{}, err
 			}
 			resp, ok := decoded.(codec.FetchResponse)
 			if !ok {
-				return nil, &frame.ProtocolError{Msg: fmt.Sprintf("unexpected response for fetch: %T", decoded)}
+				return FetchResult{}, &frame.ProtocolError{Msg: fmt.Sprintf("unexpected response for fetch: %T", decoded)}
 			}
 			if resp.ErrorCode == notLeaderForPartition && attempt < maxAttempts {
 				ok, rerr := c.redirectToLeader(resp.Topic, resp.Partition)
 				if rerr != nil {
-					return nil, rerr
+					return FetchResult{}, rerr
 				}
 				if ok {
 					continue
@@ -1458,12 +1484,17 @@ func (c *Client) FetchOpts(topic string, partition int, offset int64, maxMessage
 				break
 			}
 			if err := check(resp.ErrorCode, "fetch"); err != nil {
-				return nil, err
+				return FetchResult{}, err
 			}
-			return resp.Records, nil
+			return FetchResult{
+				Topic:         resp.Topic,
+				Partition:     resp.Partition,
+				HighWatermark: resp.HighWatermark,
+				Records:       resp.Records,
+			}, nil
 		}
 		if !retried {
-			return nil, &frame.ProtocolError{Msg: "fetch loop exited"}
+			return FetchResult{}, &frame.ProtocolError{Msg: "fetch loop exited"}
 		}
 	}
 }

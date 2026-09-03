@@ -21,6 +21,7 @@ import io.volant.OffsetFetchEntry;
 import io.volant.DeleteRecordsResult;
 import io.volant.OffsetListing;
 import io.volant.Record;
+import io.volant.FetchResult;
 import java.util.List;
 
 try (Client c = Client.connect("127.0.0.1", 9092)) {
@@ -51,6 +52,9 @@ try (Client c = Client.connect("127.0.0.1", 9092)) {
   List<Record> recs = c.fetch("t", 0, 0);
   // fetch 6-arg: max_messages / max_bytes / max_wait_ms (v0.64). fetch 3-arg stays 128 / 4MiB / 0.
   recs = c.fetch("t", 0, 0, 10, 4096L, 100);
+  // fetchResult: records + high watermark (v0.145). fetch stays records only.
+  FetchResult batch = c.fetchResult("t", 0, 0);
+  long hwm = batch.highWatermark;
   for (Record rec : recs) {
     System.out.println(rec.offset + " " + rec.key + " " + new String(rec.value, UTF_8));
   }
@@ -137,7 +141,8 @@ int removed = c.deleteAcls(List.of(e));
 ```
 
 `produce(..., null, value)` sends a null key. `fetch` returns `List<Record>`
-(`offset`, `key`, `value`). `metadata()` returns brokers + topics.
+(`offset`, `key`, `value`). `fetchResult` returns the same records plus the
+already-decoded high watermark. `metadata()` returns brokers + topics.
 `offsetCommit` is an admin commit (empty member, generation 0).
 `offsetFetch` returns `List<Offset>` (`partition`, `offset`) for the topic.
 `createPartitions` grows the topic to `totalCount` partitions

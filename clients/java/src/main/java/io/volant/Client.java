@@ -1516,7 +1516,7 @@ public final class Client implements AutoCloseable {
      * max_wait_ms=0.
      */
     public List<Record> fetch(String topic, int partition, long offset) {
-        return fetch(topic, partition, offset, 128, 4L * 1024 * 1024, 0);
+        return fetchResult(topic, partition, offset).records;
     }
 
     /**
@@ -1525,15 +1525,22 @@ public final class Client implements AutoCloseable {
      */
     public List<Record> fetch(
             String topic, int partition, long offset, int maxMessages, long maxBytes, long maxWaitMs) {
-        return fetchAt(topic, partition, offset, maxMessages, maxBytes, maxWaitMs);
+        return fetchResult(topic, partition, offset, maxMessages, maxBytes, (int) maxWaitMs).records;
     }
 
-    List<Record> fetch(String topic, int partition, long offset, int maxMessages, long maxWaitMs) {
-        return fetch(topic, partition, offset, maxMessages, 4L * 1024 * 1024, maxWaitMs);
+    /**
+     * Fetch records plus the already-decoded high watermark.
+     * Defaults match {@link #fetch(String, int, long)}.
+     */
+    public FetchResult fetchResult(String topic, int partition, long offset) {
+        return fetchResult(topic, partition, offset, 128, 4L * 1024 * 1024, 0);
     }
 
-    private List<Record> fetchAt(
-            String topic, int partition, long offset, int maxMessages, long maxBytes, long maxWaitMs) {
+    /**
+     * Fetch with explicit knobs, returning records and high watermark.
+     */
+    public FetchResult fetchResult(
+            String topic, int partition, long offset, int maxMessages, long maxBytes, int maxWaitMs) {
         byte[] payload = Codec.encodeFetchRequest(
                 new Codec.FetchRequest(topic, partition, offset, maxMessages, maxBytes, maxWaitMs));
         int retryAttempt = 0;
@@ -1588,12 +1595,17 @@ public final class Client implements AutoCloseable {
                     break;
                 }
                 check(resp.errorCode, "fetch");
-                return resp.records;
+                return new FetchResult(resp.topic, (int) resp.partition, resp.highWatermark, resp.records);
             }
             if (!retried) {
                 throw new ProtocolException("fetch loop exited");
             }
         }
+    }
+
+    List<Record> fetch(String topic, int partition, long offset, int maxMessages, long maxWaitMs) {
+        return fetchResult(topic, partition, offset, maxMessages, 4L * 1024 * 1024, (int) maxWaitMs)
+                .records;
     }
 
     /**
