@@ -344,7 +344,7 @@ Binding: **[docs/PHASE7_SPEC.md](./docs/PHASE7_SPEC.md)**. Ops runbook: **[docs/
 - [x] Docker image + docker-compose + systemd unit (`deploy/`)
 - [x] Protocol chaos tests (random/truncated decode must not panic)
 - [x] Auth required / wrong token / metrics smoke integration tests
-- [ ] Multi-language clients (Rust first; Go / Python FFI or REST gateway) — **deferred** (Python/Go/Java through v0.155; Rust **v0.151–v0.155**)
+- [ ] Multi-language clients (Rust first; Go / Python FFI or REST gateway) — **deferred** (Python/Go/Java through v0.160; Rust Metadata 14 **v0.157**)
 - [ ] Kafka protocol compatibility shim — **deferred**
 - [ ] Full chaos mesh (partition loss, disk full, slow disk) — **deferred** (protocol chaos only)
 - [ ] SCRAM / full SASL — **deferred** (mTLS identity mapping: **Phase 19**)
@@ -3915,7 +3915,7 @@ no/single rack; `VOLANT_RACK_AWARE_ASSIGNMENT=0` off);
 **N=2 majority health gauges** Phase 141 (`volant_cluster_*` configured/live/quorum/impossible);
 **Metadata ISR overlay + leader→controller IsrUpdate** Phase 142;
 **txn coordinator registry TTL GC** Phase 127 + **BROKER config surface** Phase 128; **truncate journal** Phase 129 + **majority multi-controller consensus** Phase 130 + **journal rejoin catch-up** Phase 131 + **catch-up hardening** Phase 132 + **p2p heartbeat mesh** Phase 134 + **optional DeleteRecords majority wait** Phase 135 + **non-blocking admin catch-up** Phase 136 + **native DeleteRecords request wait trailer + journal topic GC** Phase 137).
-Still deferred: multi-language clients (Python/Go/Java through v0.155; Rust **v0.151–v0.155**), full chaos-mesh suites / long fuzz
+Still deferred: multi-language clients (Python/Go/Java through v0.160; Rust Metadata 14 **v0.157**), full chaos-mesh suites / long fuzz
 campaigns, Kafka client-quota preferred throttling (v0.7 closed opt-in
 redirect throttle + TCP probe), full
 KIP-890/939, rollback local truncate on majority fail (wait-off still

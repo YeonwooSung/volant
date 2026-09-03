@@ -354,6 +354,11 @@ docs for day-to-day reading: [ops](../ops.md), [consistency](../consistency.md),
 | v0.153 | ✅ | Rust single-entry OffsetCommit | [V153_SPEC.md](../V153_SPEC.md) |
 | v0.154 | ✅ | Rust OffsetFetch topic + metadata | [V154_SPEC.md](../V154_SPEC.md) |
 | v0.155 | ✅ | Rust DeleteRecords default wait flag (not Phase 155) | [V155_SPEC.md](../V155_SPEC.md) |
+| v0.156 | ✅ | Metadata NotController redirect on Python/Go/Java | [V156_SPEC.md](../V156_SPEC.md) |
+| v0.157 | ✅ | Rust Metadata NotController redirect | [V157_SPEC.md](../V157_SPEC.md) |
+| v0.158 | ✅ | Go DeleteOffsetsAll | [V158_SPEC.md](../V158_SPEC.md) |
+| v0.159 | ✅ | Rust fetch_offsets_all | [V159_SPEC.md](../V159_SPEC.md) |
+| v0.160 | ✅ | Go/Python/Rust producer id getters | [V160_SPEC.md](../V160_SPEC.md) |
 
 ---
 
