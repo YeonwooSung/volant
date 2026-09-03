@@ -26,8 +26,10 @@ type scriptedBroker struct {
 	offsetFetchEntries  []codec.OffsetFetchEntry
 	deleteOffsetsCodes  []uint16
 	listOffsetsCodes    []uint16
-	describeGroupCodes  []uint16
-	listGroupsCodes     []uint16
+	describeGroupCodes   []uint16
+	describeGroupReplies []createTopicReply
+	listGroupsCodes      []uint16
+	listGroupsReplies    []createTopicReply
 	metadataCodes       []uint16
 	listMembersCodes    []uint16
 	meta                codec.MetadataResponse
@@ -363,21 +365,37 @@ func (s *scriptedBroker) handle(f *frame.Frame) ([]byte, error) {
 		replyOp = codec.OpListOffsetsResponse
 	case codec.OpDescribeGroup:
 		s.describeGroupCount++
-		code := uint16(0)
-		if len(s.describeGroupCodes) > 0 {
-			code = s.describeGroupCodes[0]
+		rep := createTopicReply{}
+		if len(s.describeGroupReplies) > 0 {
+			rep = s.describeGroupReplies[0]
+			s.describeGroupReplies = s.describeGroupReplies[1:]
+		} else if len(s.describeGroupCodes) > 0 {
+			rep.code = s.describeGroupCodes[0]
 			s.describeGroupCodes = s.describeGroupCodes[1:]
 		}
-		payload, err = codec.EncodeDescribeGroupResponse(codec.DescribeGroupResponse{ErrorCode: code})
+		if rep.asError {
+			payload, err = codec.EncodeErrorResponse(codec.ErrorResponse{Code: rep.code, Message: rep.message})
+			replyOp = codec.OpError
+			break
+		}
+		payload, err = codec.EncodeDescribeGroupResponse(codec.DescribeGroupResponse{ErrorCode: rep.code})
 		replyOp = codec.OpDescribeGroupResponse
 	case codec.OpListGroups:
 		s.listGroupsCount++
-		code := uint16(0)
-		if len(s.listGroupsCodes) > 0 {
-			code = s.listGroupsCodes[0]
+		rep := createTopicReply{}
+		if len(s.listGroupsReplies) > 0 {
+			rep = s.listGroupsReplies[0]
+			s.listGroupsReplies = s.listGroupsReplies[1:]
+		} else if len(s.listGroupsCodes) > 0 {
+			rep.code = s.listGroupsCodes[0]
 			s.listGroupsCodes = s.listGroupsCodes[1:]
 		}
-		payload, err = codec.EncodeListGroupsResponse(codec.ListGroupsResponse{ErrorCode: code})
+		if rep.asError {
+			payload, err = codec.EncodeErrorResponse(codec.ErrorResponse{Code: rep.code, Message: rep.message})
+			replyOp = codec.OpError
+			break
+		}
+		payload, err = codec.EncodeListGroupsResponse(codec.ListGroupsResponse{ErrorCode: rep.code})
 		replyOp = codec.OpListGroupsResponse
 	case codec.OpListMembers:
 		s.listMembersCount++
@@ -1950,6 +1968,9 @@ func TestDescribeGroupRetriesTimeoutThenOk(t *testing.T) {
 	if n := srv.describeGroups(); n != 2 {
 		t.Fatalf("describe group count %d want 2", n)
 	}
+	if n := srv.metadatas(); n != 0 {
+		t.Fatalf("metadata count %d want 0", n)
+	}
 }
 
 func TestDescribeGroupNotFoundIsNotRetried(t *testing.T) {
@@ -1975,6 +1996,9 @@ func TestDescribeGroupNotFoundIsNotRetried(t *testing.T) {
 	}
 	if n := srv.describeGroups(); n != 1 {
 		t.Fatalf("describe group count %d want 1", n)
+	}
+	if n := srv.metadatas(); n != 0 {
+		t.Fatalf("metadata count %d want 0", n)
 	}
 }
 
@@ -2026,6 +2050,112 @@ func TestDescribeGroupExhaustedRetriesRaises(t *testing.T) {
 	}
 	if n := srv.describeGroups(); n != 3 {
 		t.Fatalf("describe group count %d want 3", n)
+	}
+}
+
+func TestDescribeGroupError14RedirectsViaControllerID(t *testing.T) {
+	leader := &scriptedBroker{}
+	_, stopL := startScripted(t, leader)
+	defer stopL()
+	follower := &scriptedBroker{
+		describeGroupReplies: []createTopicReply{{
+			code: notController, message: "not controller; controller_id=2", asError: true,
+		}},
+		meta: controllerMeta(2, "127.0.0.1", leader.port()),
+	}
+	fAddr, stopF := startScripted(t, follower)
+	defer stopF()
+
+	c, err := volant.DialTimeout(fAddr, 5*time.Second)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer c.Close()
+	got, err := c.DescribeGroup("g")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.GroupID != "" || len(got.Members) != 0 {
+		t.Fatalf("describe %v want empty", got)
+	}
+	if n := follower.describeGroups(); n != 1 {
+		t.Fatalf("follower describe_group=%d want 1", n)
+	}
+	if n := follower.metadatas(); n != 1 {
+		t.Fatalf("follower metadata=%d want 1", n)
+	}
+	if n := leader.describeGroups(); n != 1 {
+		t.Fatalf("leader describe_group=%d want 1", n)
+	}
+}
+
+func TestListGroupsTyped14NoHintThenOk(t *testing.T) {
+	leader := &scriptedBroker{}
+	_, stopL := startScripted(t, leader)
+	defer stopL()
+	follower := &scriptedBroker{
+		listGroupsCodes: []uint16{notController},
+	}
+	fAddr, stopF := startScripted(t, follower)
+	defer stopF()
+	follower.mu.Lock()
+	follower.meta = otherBrokerMeta(follower.port(), "127.0.0.1", leader.port())
+	follower.mu.Unlock()
+
+	c, err := volant.DialTimeout(fAddr, 5*time.Second)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer c.Close()
+	out, err := c.ListGroups()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(out) != 0 {
+		t.Fatalf("listings %v want empty", out)
+	}
+	if n := follower.listGroups(); n != 1 {
+		t.Fatalf("follower list_groups=%d want 1", n)
+	}
+	if n := follower.metadatas(); n != 1 {
+		t.Fatalf("follower metadata=%d want 1", n)
+	}
+	if n := leader.listGroups(); n != 1 {
+		t.Fatalf("leader list_groups=%d want 1", n)
+	}
+}
+
+func TestDescribeGroupMaxRedirectsZeroRaisesOnFirst14(t *testing.T) {
+	follower := &scriptedBroker{
+		describeGroupReplies: []createTopicReply{{
+			code: notController, message: "not controller; controller_id=2", asError: true,
+		}},
+		meta: controllerMeta(2, "127.0.0.1", 9),
+	}
+	fAddr, stopF := startScripted(t, follower)
+	defer stopF()
+
+	c, err := volant.DialTimeout(fAddr, 5*time.Second)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer c.Close()
+	c.SetMaxRedirects(0)
+	_, err = c.DescribeGroup("g")
+	if brokerCode(err) != notController {
+		t.Fatalf("err=%v want code 14", err)
+	}
+	if n := follower.describeGroups(); n != 1 {
+		t.Fatalf("describe_group=%d want 1", n)
+	}
+	if n := follower.metadatas(); n != 0 {
+		t.Fatalf("metadata=%d want 0", n)
+	}
+	follower.mu.Lock()
+	accepts := follower.acceptCount
+	follower.mu.Unlock()
+	if accepts != 1 {
+		t.Fatalf("accepts=%d want 1", accepts)
 	}
 }
 

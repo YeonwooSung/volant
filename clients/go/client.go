@@ -2085,7 +2085,8 @@ func (c *Client) Heartbeat(group, memberID string, generation uint32) error {
 // DescribeGroup describes a live consumer group (native opcode 34/35).
 // Error 2 (NotFound, no live members) is a BrokerError. Transient
 // broker/transport errors retry up to maxRetries extra times (default
-// 0). Error 2 / 9 / 10 / 11 / 13 / 14 are not retried.
+// 0). Error 14 follows maxRedirects. Error 2 / 9 / 10 / 11 / 13 are
+// not retried.
 func (c *Client) DescribeGroup(id string) (DescribeGroupResult, error) {
 	payload, err := codec.EncodeDescribeGroupRequest(codec.DescribeGroupRequest{GroupID: id})
 	if err != nil {
@@ -2095,10 +2096,20 @@ func (c *Client) DescribeGroup(id string) (DescribeGroupResult, error) {
 	if maxRetries < 0 {
 		maxRetries = 0
 	}
+	maxAttempts := 1 + c.maxRedirects
 	retryAttempt := 0
+	redirectAttempt := 0
 	for {
 		decoded, err := c.roundTrip(codec.OpDescribeGroup, payload)
 		if err != nil {
+			ok, rerr := c.maybeRedirectController(err, redirectAttempt+1, maxAttempts)
+			if rerr != nil {
+				return DescribeGroupResult{}, rerr
+			}
+			if ok {
+				redirectAttempt++
+				continue
+			}
 			if isTransientProduceErr(err) && retryAttempt < maxRetries {
 				retryAttempt++
 				c.sleepProduceRetry()
@@ -2109,6 +2120,14 @@ func (c *Client) DescribeGroup(id string) (DescribeGroupResult, error) {
 		resp, ok := decoded.(codec.DescribeGroupResponse)
 		if !ok {
 			return DescribeGroupResult{}, &frame.ProtocolError{Msg: fmt.Sprintf("unexpected response for describe_group: %T", decoded)}
+		}
+		ok, rerr := c.maybeRedirectControllerCode(resp.ErrorCode, "", redirectAttempt+1, maxAttempts)
+		if rerr != nil {
+			return DescribeGroupResult{}, rerr
+		}
+		if ok {
+			redirectAttempt++
+			continue
 		}
 		if isTransientBroker(resp.ErrorCode) && retryAttempt < maxRetries {
 			retryAttempt++
@@ -2128,17 +2147,28 @@ func (c *Client) DescribeGroup(id string) (DescribeGroupResult, error) {
 
 // ListGroups lists known consumer groups (native opcode 36/37).
 // Transient broker/transport errors retry up to maxRetries extra times
-// (default 0). Error 2 / 9 / 10 / 11 / 13 / 14 are not retried.
+// (default 0). Error 14 follows maxRedirects. Error 2 / 9 / 10 / 11 /
+// 13 are not retried.
 func (c *Client) ListGroups() ([]GroupListing, error) {
 	payload := codec.EncodeListGroupsRequest()
 	maxRetries := c.maxRetries
 	if maxRetries < 0 {
 		maxRetries = 0
 	}
+	maxAttempts := 1 + c.maxRedirects
 	retryAttempt := 0
+	redirectAttempt := 0
 	for {
 		decoded, err := c.roundTrip(codec.OpListGroups, payload)
 		if err != nil {
+			ok, rerr := c.maybeRedirectController(err, redirectAttempt+1, maxAttempts)
+			if rerr != nil {
+				return nil, rerr
+			}
+			if ok {
+				redirectAttempt++
+				continue
+			}
 			if isTransientProduceErr(err) && retryAttempt < maxRetries {
 				retryAttempt++
 				c.sleepProduceRetry()
@@ -2149,6 +2179,14 @@ func (c *Client) ListGroups() ([]GroupListing, error) {
 		resp, ok := decoded.(codec.ListGroupsResponse)
 		if !ok {
 			return nil, &frame.ProtocolError{Msg: fmt.Sprintf("unexpected response for list_groups: %T", decoded)}
+		}
+		ok, rerr := c.maybeRedirectControllerCode(resp.ErrorCode, "", redirectAttempt+1, maxAttempts)
+		if rerr != nil {
+			return nil, rerr
+		}
+		if ok {
+			redirectAttempt++
+			continue
 		}
 		if isTransientBroker(resp.ErrorCode) && retryAttempt < maxRetries {
 			retryAttempt++
