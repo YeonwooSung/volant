@@ -1662,6 +1662,21 @@ func (c *Client) OffsetCommitMeta(group, topic string, partition int, offset int
 	})
 }
 
+// OffsetCommitMember is OffsetCommit with caller member_id + generation
+// (Java 6-arg parity). Empty memberID + generation 0 is the admin path.
+// Error 14 / transient retry inherit from CommitOffsets.
+func (c *Client) OffsetCommitMember(group, topic string, partition int, offset int64, memberID string, generation uint32) error {
+	return c.OffsetCommitMemberMeta(group, topic, partition, offset, memberID, generation, "")
+}
+
+// OffsetCommitMemberMeta is OffsetCommitMember with per-entry metadata
+// (Java 7-arg parity). Empty metadata matches OffsetCommitMember.
+func (c *Client) OffsetCommitMemberMeta(group, topic string, partition int, offset int64, memberID string, generation uint32, metadata string) error {
+	return c.CommitOffsets(group, memberID, generation, []codec.OffsetCommitEntry{
+		{Topic: topic, Partition: uint32(partition), Offset: uint64(offset), Metadata: metadata},
+	})
+}
+
 // CommitOffsets sends one OffsetCommit RPC with N entries (native opcode 6).
 // generation 0 skips the broker generation check. Error 14 follows
 // maxRedirects. Transient 6 / 7 / 15 / 16 follow maxRetries.
