@@ -414,6 +414,8 @@ class ClientTest {
         final List<Integer> initCodes = new CopyOnWriteArrayList<>();
         final List<Integer> fetchCodes = new CopyOnWriteArrayList<>();
         final List<Integer> heartbeatCodes = new CopyOnWriteArrayList<>();
+        final List<int[]> heartbeatReplies = new CopyOnWriteArrayList<>();
+        final List<String> heartbeatMessages = new CopyOnWriteArrayList<>();
         final List<Integer> leaveGroupCodes = new CopyOnWriteArrayList<>();
         final List<Integer> offsetCommitCodes = new CopyOnWriteArrayList<>();
         final List<Integer> offsetFetchCodes = new CopyOnWriteArrayList<>();
@@ -459,6 +461,11 @@ class ClientTest {
 
         static ScriptedBroker start() throws IOException {
             return new ScriptedBroker();
+        }
+
+        void queueHeartbeatError(int code, String message) {
+            heartbeatReplies.add(new int[] {code, 1});
+            heartbeatMessages.add(message);
         }
 
         void queueDescribeGroupError(int code, String message) {
@@ -567,6 +574,15 @@ class ClientTest {
             }
             if (frame.opcode == Codec.OP_HEARTBEAT) {
                 heartbeatCount.incrementAndGet();
+                if (!heartbeatReplies.isEmpty()) {
+                    int[] rep = heartbeatReplies.remove(0);
+                    String msg = heartbeatMessages.isEmpty() ? "" : heartbeatMessages.remove(0);
+                    if (rep.length > 1 && rep[1] == 1) {
+                        replyOp[0] = Codec.OP_ERROR;
+                        return Codec.encodeErrorResponse(new Codec.ErrorResponse(rep[0], msg));
+                    }
+                    return Codec.encodeHeartbeatResponse(new Codec.HeartbeatResponse(rep[0]));
+                }
                 int code = 0;
                 if (!heartbeatCodes.isEmpty()) {
                     code = heartbeatCodes.remove(0);
@@ -916,6 +932,7 @@ class ClientTest {
                 c.heartbeat("g", "m1", 1);
             }
             assertEquals(2, srv.heartbeatCount.get());
+            assertEquals(0, srv.metadataCount.get());
         }
     }
 
@@ -962,6 +979,55 @@ class ClientTest {
                 assertEquals(TIMEOUT, ex.code);
             }
             assertEquals(3, srv.heartbeatCount.get());
+        }
+    }
+
+    @Test
+    void heartbeatError14RedirectsViaControllerId() throws Exception {
+        try (ScriptedBroker leader = ScriptedBroker.start();
+                ScriptedBroker follower = ScriptedBroker.start()) {
+            follower.queueHeartbeatError(NOT_CONTROLLER, "not controller; controller_id=2");
+            follower.meta = controllerMeta(2, "127.0.0.1", leader.port);
+            try (Client c = Client.connect("127.0.0.1", follower.port, 5_000)) {
+                c.heartbeat("g", "m1", 1);
+                assertEquals(leader.port, Integer.parseInt(c.addr().substring(c.addr().indexOf(':') + 1)));
+            }
+            assertEquals(1, follower.heartbeatCount.get());
+            assertEquals(1, follower.metadataCount.get());
+            assertEquals(1, leader.heartbeatCount.get());
+        }
+    }
+
+    @Test
+    void heartbeatTyped14NoHintThenOk() throws Exception {
+        try (ScriptedBroker leader = ScriptedBroker.start();
+                ScriptedBroker follower = ScriptedBroker.start()) {
+            follower.heartbeatCodes.add(NOT_CONTROLLER);
+            follower.meta = otherBrokerMeta(follower.port, "127.0.0.1", leader.port);
+            try (Client c = Client.connect("127.0.0.1", follower.port, 5_000)) {
+                c.heartbeat("g", "m1", 1);
+                assertEquals(leader.port, Integer.parseInt(c.addr().substring(c.addr().indexOf(':') + 1)));
+            }
+            assertEquals(1, follower.heartbeatCount.get());
+            assertEquals(1, follower.metadataCount.get());
+            assertEquals(1, leader.heartbeatCount.get());
+        }
+    }
+
+    @Test
+    void heartbeatMaxRedirectsZeroRaisesOnFirst14() throws Exception {
+        try (ScriptedBroker follower = ScriptedBroker.start()) {
+            follower.queueHeartbeatError(NOT_CONTROLLER, "not controller; controller_id=2");
+            follower.meta = controllerMeta(2, "127.0.0.1", 9);
+            try (Client c = Client.connect("127.0.0.1", follower.port, 5_000)) {
+                c.setMaxRedirects(0);
+                BrokerException ex =
+                        assertThrows(BrokerException.class, () -> c.heartbeat("g", "m1", 1));
+                assertEquals(NOT_CONTROLLER, ex.code);
+            }
+            assertEquals(1, follower.heartbeatCount.get());
+            assertEquals(0, follower.metadataCount.get());
+            assertEquals(1, follower.acceptCount.get());
         }
     }
 

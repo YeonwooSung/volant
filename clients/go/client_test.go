@@ -20,6 +20,7 @@ type scriptedBroker struct {
 	initCodes          []uint16
 	fetchCodes         []uint16
 	heartbeatCodes     []uint16
+	heartbeatReplies   []createTopicReply
 	leaveGroupCodes    []uint16
 	offsetCommitCodes    []uint16
 	offsetFetchCodes     []uint16
@@ -317,12 +318,20 @@ func (s *scriptedBroker) handle(f *frame.Frame) ([]byte, error) {
 		})
 	case codec.OpHeartbeat:
 		s.heartbeatCount++
-		code := uint16(0)
-		if len(s.heartbeatCodes) > 0 {
-			code = s.heartbeatCodes[0]
+		rep := createTopicReply{}
+		if len(s.heartbeatReplies) > 0 {
+			rep = s.heartbeatReplies[0]
+			s.heartbeatReplies = s.heartbeatReplies[1:]
+		} else if len(s.heartbeatCodes) > 0 {
+			rep.code = s.heartbeatCodes[0]
 			s.heartbeatCodes = s.heartbeatCodes[1:]
 		}
-		payload, err = codec.EncodeHeartbeatResponse(codec.HeartbeatResponse{ErrorCode: code})
+		if rep.asError {
+			payload, err = codec.EncodeErrorResponse(codec.ErrorResponse{Code: rep.code, Message: rep.message})
+			replyOp = codec.OpError
+			break
+		}
+		payload, err = codec.EncodeHeartbeatResponse(codec.HeartbeatResponse{ErrorCode: rep.code})
 	case codec.OpLeaveGroup:
 		s.leaveGroupCount++
 		code := uint16(0)
@@ -1423,6 +1432,9 @@ func TestHeartbeatRetriesTimeoutThenOk(t *testing.T) {
 	if n := srv.heartbeats(); n != 2 {
 		t.Fatalf("heartbeat count %d want 2", n)
 	}
+	if n := srv.metadatas(); n != 0 {
+		t.Fatalf("metadata count %d want 0", n)
+	}
 }
 
 func TestHeartbeatRebalanceIsNotRetried(t *testing.T) {
@@ -1474,6 +1486,104 @@ func TestHeartbeatExhaustedRetriesRaises(t *testing.T) {
 	}
 	if n := srv.heartbeats(); n != 3 {
 		t.Fatalf("heartbeat count %d want 3", n)
+	}
+}
+
+func TestHeartbeatError14RedirectsViaControllerID(t *testing.T) {
+	leader := &scriptedBroker{}
+	_, stopL := startScripted(t, leader)
+	defer stopL()
+	follower := &scriptedBroker{
+		heartbeatReplies: []createTopicReply{{
+			code: notController, message: "not controller; controller_id=2", asError: true,
+		}},
+		meta: controllerMeta(2, "127.0.0.1", leader.port()),
+	}
+	fAddr, stopF := startScripted(t, follower)
+	defer stopF()
+
+	c, err := volant.DialTimeout(fAddr, 5*time.Second)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer c.Close()
+	if err := c.Heartbeat("g", "m1", 1); err != nil {
+		t.Fatal(err)
+	}
+	if n := follower.heartbeats(); n != 1 {
+		t.Fatalf("follower heartbeat=%d want 1", n)
+	}
+	if n := follower.metadatas(); n != 1 {
+		t.Fatalf("follower metadata=%d want 1", n)
+	}
+	if n := leader.heartbeats(); n != 1 {
+		t.Fatalf("leader heartbeat=%d want 1", n)
+	}
+}
+
+func TestHeartbeatTyped14NoHintThenOk(t *testing.T) {
+	leader := &scriptedBroker{}
+	_, stopL := startScripted(t, leader)
+	defer stopL()
+	follower := &scriptedBroker{
+		heartbeatCodes: []uint16{notController},
+	}
+	fAddr, stopF := startScripted(t, follower)
+	defer stopF()
+	follower.mu.Lock()
+	follower.meta = otherBrokerMeta(follower.port(), "127.0.0.1", leader.port())
+	follower.mu.Unlock()
+
+	c, err := volant.DialTimeout(fAddr, 5*time.Second)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer c.Close()
+	if err := c.Heartbeat("g", "m1", 1); err != nil {
+		t.Fatal(err)
+	}
+	if n := follower.heartbeats(); n != 1 {
+		t.Fatalf("follower heartbeat=%d want 1", n)
+	}
+	if n := follower.metadatas(); n != 1 {
+		t.Fatalf("follower metadata=%d want 1", n)
+	}
+	if n := leader.heartbeats(); n != 1 {
+		t.Fatalf("leader heartbeat=%d want 1", n)
+	}
+}
+
+func TestHeartbeatMaxRedirectsZeroRaisesOnFirst14(t *testing.T) {
+	follower := &scriptedBroker{
+		heartbeatReplies: []createTopicReply{{
+			code: notController, message: "not controller; controller_id=2", asError: true,
+		}},
+		meta: controllerMeta(2, "127.0.0.1", 9),
+	}
+	fAddr, stopF := startScripted(t, follower)
+	defer stopF()
+
+	c, err := volant.DialTimeout(fAddr, 5*time.Second)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer c.Close()
+	c.SetMaxRedirects(0)
+	err = c.Heartbeat("g", "m1", 1)
+	if brokerCode(err) != notController {
+		t.Fatalf("err=%v want code 14", err)
+	}
+	if n := follower.heartbeats(); n != 1 {
+		t.Fatalf("heartbeat=%d want 1", n)
+	}
+	if n := follower.metadatas(); n != 0 {
+		t.Fatalf("metadata=%d want 0", n)
+	}
+	follower.mu.Lock()
+	accepts := follower.acceptCount
+	follower.mu.Unlock()
+	if accepts != 1 {
+		t.Fatalf("accepts=%d want 1", accepts)
 	}
 }
 

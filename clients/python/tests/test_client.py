@@ -82,12 +82,12 @@ class ScriptedBroker:
     ``delete_offsets_codes`` / ``list_offsets_codes`` /
     ``describe_group_codes`` / ``list_groups_codes`` /
     ``metadata_codes`` / ``list_members_codes`` / ``init_codes`` are queues of
-    error_code values consumed across connections. ``describe_group_replies``
-    / ``list_groups_replies`` are ``(code, message, as_error_opcode)``
-    (Error opcode when the flag is set). Metadata is a fixed
-    response (or a callable of ``() -> MetadataResponse``). Non-zero
-    ``metadata_codes`` reply as Error opcode (native Metadata has no
-    top-level error_code).
+    error_code values consumed across connections. ``heartbeat_replies`` /
+    ``describe_group_replies`` / ``list_groups_replies`` are
+    ``(code, message, as_error_opcode)`` (Error opcode when the flag is
+    set). Metadata is a fixed response (or a callable of
+    ``() -> MetadataResponse``). Non-zero ``metadata_codes`` reply as
+    Error opcode (native Metadata has no top-level error_code).
     """
 
     def __init__(self) -> None:
@@ -95,6 +95,7 @@ class ScriptedBroker:
         self.init_codes: list[int] = []
         self.fetch_codes: list[int] = []
         self.heartbeat_codes: list[int] = []
+        self.heartbeat_replies: list[tuple[int, str, bool]] = []
         self.leave_group_codes: list[int] = []
         self.offset_commit_codes: list[int] = []
         self.offset_fetch_codes: list[int] = []
@@ -254,7 +255,17 @@ class ScriptedBroker:
             )
         if opcode == OP_HEARTBEAT:
             self.heartbeat_count += 1
-            code = self.heartbeat_codes.pop(0) if self.heartbeat_codes else 0
+            if self.heartbeat_replies:
+                code, message, as_error = self.heartbeat_replies.pop(0)
+                if as_error:
+                    return (
+                        encode_error_response(
+                            ErrorResponse(code=code, message=message)
+                        ),
+                        OP_ERROR,
+                    )
+            else:
+                code = self.heartbeat_codes.pop(0) if self.heartbeat_codes else 0
             return (
                 encode_heartbeat_response(HeartbeatResponse(error_code=code)),
                 OP_HEARTBEAT,
@@ -853,6 +864,7 @@ class TestHeartbeatRetry(unittest.TestCase):
                 code = c.heartbeat("g", "m1", 1)
             self.assertEqual(code, 0)
             self.assertEqual(srv.heartbeat_count, 2)
+            self.assertEqual(srv.metadata_count, 0)
 
     def test_rebalance_is_not_retried(self) -> None:
         with ScriptedBroker() as srv:
@@ -893,6 +905,50 @@ class TestHeartbeatRetry(unittest.TestCase):
                     c.heartbeat("g", "m1", 1)
             self.assertEqual(ctx.exception.code, TIMEOUT)
             self.assertEqual(srv.heartbeat_count, 3)
+
+    def test_heartbeat_error_14_redirects_via_controller_id(self) -> None:
+        with ScriptedBroker() as leader, ScriptedBroker() as follower:
+            follower.heartbeat_replies = [
+                (NOT_CONTROLLER, "not controller; controller_id=2", True)
+            ]
+            follower.metadata = _controller_meta(2, "127.0.0.1", leader.port)
+            leader.heartbeat_codes = [0]
+            with Client(follower.addr, timeout=5.0) as c:
+                code = c.heartbeat("g", "m1", 1)
+            self.assertEqual(code, 0)
+            self.assertEqual(c.addr, leader.addr)
+        self.assertEqual(follower.heartbeat_count, 1)
+        self.assertEqual(follower.metadata_count, 1)
+        self.assertEqual(leader.heartbeat_count, 1)
+
+    def test_heartbeat_typed_14_no_hint_then_ok(self) -> None:
+        with ScriptedBroker() as leader, ScriptedBroker() as follower:
+            follower.heartbeat_codes = [NOT_CONTROLLER]
+            follower.metadata = _other_broker_meta(
+                follower.port, "127.0.0.1", leader.port
+            )
+            leader.heartbeat_codes = [0]
+            with Client(follower.addr, timeout=5.0) as c:
+                code = c.heartbeat("g", "m1", 1)
+            self.assertEqual(code, 0)
+            self.assertEqual(c.addr, leader.addr)
+        self.assertEqual(follower.heartbeat_count, 1)
+        self.assertEqual(follower.metadata_count, 1)
+        self.assertEqual(leader.heartbeat_count, 1)
+
+    def test_heartbeat_max_redirects_zero_raises_on_first_14(self) -> None:
+        with ScriptedBroker() as follower:
+            follower.heartbeat_replies = [
+                (NOT_CONTROLLER, "not controller; controller_id=2", True)
+            ]
+            follower.metadata = _controller_meta(2, "127.0.0.1", 9)
+            with Client(follower.addr, timeout=5.0, max_redirects=0) as c:
+                with self.assertRaises(BrokerError) as ctx:
+                    c.heartbeat("g", "m1", 1)
+            self.assertEqual(ctx.exception.code, NOT_CONTROLLER)
+        self.assertEqual(follower.heartbeat_count, 1)
+        self.assertEqual(follower.metadata_count, 0)
+        self.assertEqual(follower.accept_count, 1)
 
 
 UNKNOWN_MEMBER = 10

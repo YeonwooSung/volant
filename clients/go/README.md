@@ -182,7 +182,7 @@ retry once (`SetMaxRedirects(1)` is the Dial default).
 CreatePartitions / ReassignPartitions / CreateAcls / DeleteAcls /
 CreateScramUser / DeleteScramUser / ListScramUsers / ListAcls /
 AddBroker / RemoveBroker / DescribeConfigs / AlterConfigs / DeleteOffsets /
-OffsetCommit / OffsetFetch / ListMembers / DescribeGroup / ListGroups follow
+OffsetCommit / OffsetFetch / ListMembers / DescribeGroup / ListGroups / Heartbeat follow
 `NotController` (error 14) the same way (Metadata brokers or a
 `controller_id=N` hint in the Error message; admin 14 prefers
 Metadata.controller_id when the message has no hint; not Kafka
