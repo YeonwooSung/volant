@@ -1162,6 +1162,12 @@ func (c *Client) ReassignPartitions(topic string, replicas []uint32, partition *
 	return decoded.(codec.ReassignPartitionsResponse).Generation, nil
 }
 
+// ReassignAllPartitions reassigns every partition of topic.
+// Same as ReassignPartitions(topic, replicas, nil).
+func (c *Client) ReassignAllPartitions(topic string, replicas []uint32) (uint32, error) {
+	return c.ReassignPartitions(topic, replicas, nil)
+}
+
 // Produce sends one message (null key when key is nil) with the client
 // default acks (1 unless SetAcks). Default trailer is (0, 0, -1). After
 // EnableIdempotence the first produce sends InitProducerId (empty
