@@ -98,6 +98,11 @@
 //! `max_redirects`. Transient 6/7/15/16 stay on `max_retries`.
 //! `max_redirects=0` does not redirect. 14 / 2 / 9 / 10 / 11 / 17 /
 //! 18 / 21 / 22 and protocol are not redirected.
+//! v0.114 adds [`Client::metadata_topics`] so a Rust caller can send
+//! a native Metadata topic filter. [`Client::metadata`] stays
+//! empty-list (all topics). Retry (v0.96) is inherited via
+//! `metadata_list_members_round_trip`. Empty remains “all”. Not
+//! Kafka `allow_auto_topic_creation` / topic ids.
 
 #![deny(missing_docs)]
 
