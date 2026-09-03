@@ -336,6 +336,7 @@ class Client:
         fetch_max_messages: int = 128,
         fetch_max_bytes: int = 4 * 1024 * 1024,
         fetch_max_wait_ms: int = 0,
+        delete_records_wait: int = 0,
         transactional_id: Optional[str] = None,
         scram_username: Optional[str] = None,
         scram_password: Optional[str] = None,
@@ -367,6 +368,8 @@ class Client:
         self.fetch_max_messages = int(fetch_max_messages)
         self.fetch_max_bytes = int(fetch_max_bytes)
         self.fetch_max_wait_ms = int(fetch_max_wait_ms)
+        # Default DeleteRecords wait_majority (0 = broker default). delete_records(..., wait_majority=) wins.
+        self.delete_records_wait = int(delete_records_wait)
         self.transactional_id = transactional_id or None
         self._producer_id = 0
         self._producer_epoch = 0
@@ -1707,19 +1710,23 @@ class Client:
         topic: str,
         partition: int,
         before_offset: int,
-        wait_majority: int = 0,
+        wait_majority: Optional[int] = None,
     ) -> DeleteRecordsResult:
         """Delete records before ``before_offset`` (native opcode 44).
 
         Returns :class:`DeleteRecordsResult` with the new log start
         (``low_watermark``). ``wait_majority`` is the Phase 137 trailer:
         0 = broker default, 1 = force wait, 2 = force no-wait. Always
-        written on the wire. Non-zero ``error_code`` raises
-        :class:`BrokerError`. Error 13 follows Produce/Fetch redirect
-        (``max_redirects``); 13 is not a transient retry. Transient
-        6 / 7 / 15 / 16 and TCP/IO follow ``max_retries`` (default 0).
-        This is not Kafka DeleteRecords (API key 21).
+        written on the wire. Defaults to ``self.delete_records_wait``
+        (constructor default 0). An explicit ``wait_majority=`` wins.
+        Non-zero ``error_code`` raises :class:`BrokerError`. Error 13
+        follows Produce/Fetch redirect (``max_redirects``); 13 is not
+        a transient retry. Transient 6 / 7 / 15 / 16 and TCP/IO follow
+        ``max_retries`` (default 0). This is not Kafka DeleteRecords
+        (API key 21).
         """
+        if wait_majority is None:
+            wait_majority = self.delete_records_wait
         payload = codec.encode_delete_records_request(
             DeleteRecordsRequest(
                 topic=topic,

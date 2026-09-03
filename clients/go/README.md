@@ -84,6 +84,7 @@ cfg, err := c.DescribeConfigs("t")
 _ = cfg
 err = c.AlterConfigs("t", [][2]string{{"retention.ms", "86400000"}})
 cut, err := c.DeleteRecords("t", 0, 100) // wait_majority=0
+// SetDeleteRecordsWait(1) changes DeleteRecords default (v0.152). DeleteRecordsWithWaitFlag stays explicit.
 // cut, err = c.DeleteRecordsWithWaitFlag("t", 0, 100, 1) // force majority wait
 _ = cut
 j, err := c.JoinGroup("g", []string{"t"}, 10000)
@@ -188,7 +189,9 @@ Kafka timestamp ListOffsets).
 `DeleteRecords` / `DeleteRecordsWithWaitFlag` return
 `DeleteRecordsResult` (`Topic`, `Partition`, `LowWatermark`); native
 opcode 44, not Kafka DeleteRecords (API key 21). `waitMajority` 0 =
-broker default, 1 = force wait, 2 = force no-wait. Error 13 follows
+broker default, 1 = force wait, 2 = force no-wait. `DeleteRecords`
+uses `DeleteRecordsWait()` (default 0; v0.152).
+`DeleteRecordsWithWaitFlag` stays explicit. Error 13 follows
 Produce/Fetch redirect. Transient 6 / 7 / 15 / 16 follow `SetMaxRetries`.
 `JoinGroup` sends empty `member_id` on first join; the result has
 `MemberID`, `Generation`, and `Assignment`. `JoinGroupWithInstance`

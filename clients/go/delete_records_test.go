@@ -202,6 +202,65 @@ func TestDeleteRecordsSuccessReturnsLowWatermark(t *testing.T) {
 	}
 }
 
+func TestDeleteRecordsDefaultWaitMajorityZero(t *testing.T) {
+	srv, addr, stop := startDeleteRecords(t, 0, 96)
+	defer stop()
+	c, err := volant.DialTimeout(addr, 5*time.Second)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer c.Close()
+	if c.DeleteRecordsWait() != 0 {
+		t.Fatalf("DeleteRecordsWait() %d want 0", c.DeleteRecordsWait())
+	}
+	if _, err := c.DeleteRecords("events", 2, 100); err != nil {
+		t.Fatal(err)
+	}
+	_, _, _, _, wait, _ := srv.snapshot()
+	if wait != 0 {
+		t.Fatalf("wait flag %d want 0", wait)
+	}
+}
+
+func TestDeleteRecordsSetDeleteRecordsWait(t *testing.T) {
+	srv, addr, stop := startDeleteRecords(t, 0, 96)
+	defer stop()
+	c, err := volant.DialTimeout(addr, 5*time.Second)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer c.Close()
+	c.SetDeleteRecordsWait(1)
+	if c.DeleteRecordsWait() != 1 {
+		t.Fatalf("DeleteRecordsWait() %d want 1", c.DeleteRecordsWait())
+	}
+	if _, err := c.DeleteRecords("events", 2, 100); err != nil {
+		t.Fatal(err)
+	}
+	_, _, _, _, wait, _ := srv.snapshot()
+	if wait != 1 {
+		t.Fatalf("wait flag %d want 1", wait)
+	}
+}
+
+func TestDeleteRecordsWithWaitFlagExplicitWins(t *testing.T) {
+	srv, addr, stop := startDeleteRecords(t, 0, 96)
+	defer stop()
+	c, err := volant.DialTimeout(addr, 5*time.Second)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer c.Close()
+	c.SetDeleteRecordsWait(1)
+	if _, err := c.DeleteRecordsWithWaitFlag("events", 2, 100, 2); err != nil {
+		t.Fatal(err)
+	}
+	_, _, _, _, wait, _ := srv.snapshot()
+	if wait != 2 {
+		t.Fatalf("wait flag %d want 2", wait)
+	}
+}
+
 func TestDeleteRecordsError13MaxRedirectsZeroRaises(t *testing.T) {
 	srv, addr, stop := startDeleteRecords(t, 13, 0)
 	defer stop()

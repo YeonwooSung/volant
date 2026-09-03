@@ -156,6 +156,7 @@ type Client struct {
 	maxRetries        int
 	retryBackoff      time.Duration
 	acks              uint8
+	deleteRecordsWait uint8
 	fetchMaxMessages  uint32
 	fetchMaxBytes     uint32
 	fetchMaxWaitMs    uint32
@@ -227,10 +228,11 @@ func dialPlain(addr string, timeout time.Duration, token, scramUser, scramPass s
 		scramPass:    scramPass,
 		maxRedirects:     1,
 		retryBackoff:     50 * time.Millisecond,
-		acks:             1,
-		fetchMaxMessages: 128,
-		fetchMaxBytes:    4 * 1024 * 1024,
-		fetchMaxWaitMs:   0,
+		acks:              1,
+		deleteRecordsWait: 0,
+		fetchMaxMessages:  128,
+		fetchMaxBytes:     4 * 1024 * 1024,
+		fetchMaxWaitMs:    0,
 	}
 	if err := c.maybeAuthenticate(); err != nil {
 		return nil, err
@@ -296,10 +298,11 @@ func dialTLS(addr string, cfg TLSConfig, timeout time.Duration, token, scramUser
 		scramPass:    scramPass,
 		maxRedirects:     1,
 		retryBackoff:     50 * time.Millisecond,
-		acks:             1,
-		fetchMaxMessages: 128,
-		fetchMaxBytes:    4 * 1024 * 1024,
-		fetchMaxWaitMs:   0,
+		acks:              1,
+		deleteRecordsWait: 0,
+		fetchMaxMessages:  128,
+		fetchMaxBytes:     4 * 1024 * 1024,
+		fetchMaxWaitMs:    0,
 	}
 	if err := c.maybeAuthenticate(); err != nil {
 		return nil, err
@@ -350,6 +353,18 @@ func (c *Client) SetAcks(acks uint8) {
 // Acks returns the default produce acks (1 = leader, 255 = all).
 func (c *Client) Acks() uint8 {
 	return c.acks
+}
+
+// SetDeleteRecordsWait sets the default DeleteRecords wait_majority
+// used by DeleteRecords. 0 = broker default, 1 = force wait, 2 = force
+// no-wait. Default is 0. DeleteRecordsWithWaitFlag stays explicit.
+func (c *Client) SetDeleteRecordsWait(n uint8) {
+	c.deleteRecordsWait = n
+}
+
+// DeleteRecordsWait returns the default DeleteRecords wait_majority.
+func (c *Client) DeleteRecordsWait() uint8 {
+	return c.deleteRecordsWait
 }
 
 // SetFetchMaxMessages sets the default Fetch max_messages (default 128).
@@ -2073,8 +2088,12 @@ func (c *Client) AlterConfigs(topic string, configs [][2]string) error {
 	return err
 }
 
+// DeleteRecords truncates records before beforeOffset (native opcode 44).
+// Uses the client default wait_majority (0 unless SetDeleteRecordsWait).
+// DeleteRecordsWithWaitFlag stays explicit. Error 13 follows
+// Produce/Fetch redirect. This is not Kafka DeleteRecords.
 func (c *Client) DeleteRecords(topic string, partition uint32, beforeOffset uint64) (DeleteRecordsResult, error) {
-	return c.DeleteRecordsWithWaitFlag(topic, partition, beforeOffset, 0)
+	return c.DeleteRecordsWithWaitFlag(topic, partition, beforeOffset, c.deleteRecordsWait)
 }
 
 // DeleteRecordsWithWaitFlag is DeleteRecords plus the Phase 137 trailer.

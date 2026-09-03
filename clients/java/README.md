@@ -72,6 +72,7 @@ try (Client c = Client.connect("127.0.0.1", 9092)) {
   List<OffsetFetchEntry> rows = c.fetchOffsets("g", List.of(new Codec.OffsetEntry("t", 0))); // v0.122; null/empty = all
   List<OffsetListing> bounds = c.listOffsets("t"); // all; or listOffsets("t", 0)
   DeleteRecordsResult cut = c.deleteRecords("t", 0, 100); // wait_majority=0
+  // setDeleteRecordsWait(1) changes 3-arg deleteRecords default (v0.152). 4-arg stays explicit.
   // cut = c.deleteRecords("t", 0, 100, 1); // force majority wait
   JoinGroupResult j = c.joinGroup("g", List.of("t"), 10000);
   j = c.joinGroupWithInstance("g", List.of("t"), 10000, "inst-1"); // v0.127; empty = dynamic
@@ -170,8 +171,9 @@ Kafka timestamp ListOffsets).
 `deleteRecords` returns `DeleteRecordsResult` (`topic`, `partition`,
 `lowWatermark`); native opcode 44, not Kafka DeleteRecords (API key
 21). `waitMajority` 0 = broker default, 1 = force wait, 2 = force
-no-wait. Error 13 follows Produce/Fetch redirect. Transient 6 / 7 /
-15 / 16 follow `setMaxRetries`.
+no-wait. 3-arg `deleteRecords` uses `deleteRecordsWait()` (default 0;
+v0.152). The 4-arg overload stays explicit. Error 13 follows
+Produce/Fetch redirect. Transient 6 / 7 / 15 / 16 follow `setMaxRetries`.
 `joinGroup` sends empty `memberId` on first join.
 `joinGroupWithInstance` sends Phase 12 `group_instance_id` (empty =
 dynamic; v0.127). Named so it does not collide with memberId /
