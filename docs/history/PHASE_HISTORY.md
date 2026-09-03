@@ -339,6 +339,11 @@ docs for day-to-day reading: [ops](../ops.md), [consistency](../consistency.md),
 | v0.138 | ✅ | Go/Java Produce timestamp + headers | [V138_SPEC.md](../V138_SPEC.md) |
 | v0.139 | ✅ | Go OffsetCommit member + generation | [V139_SPEC.md](../V139_SPEC.md) |
 | v0.140 | ✅ | Go/Java OffsetFetch entry metadata | [V140_SPEC.md](../V140_SPEC.md) |
+| v0.141 | ✅ | Go/Java Produce timestamp + acks | [V141_SPEC.md](../V141_SPEC.md) |
+| v0.142 | ✅ | Go/Java Produce timestamp + headers + acks | [V142_SPEC.md](../V142_SPEC.md) |
+| v0.143 | ✅ | language Fetch client-level default knobs | [V143_SPEC.md](../V143_SPEC.md) |
+| v0.144 | ✅ | Rust ClientConfig Fetch knobs | [V144_SPEC.md](../V144_SPEC.md) |
+| v0.145 | ✅ | Go/Java Fetch high watermark | [V145_SPEC.md](../V145_SPEC.md) |
 
 ---
 
