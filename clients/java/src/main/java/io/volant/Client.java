@@ -1457,7 +1457,15 @@ public final class Client implements AutoCloseable {
      * {@code maxRetries}.
      */
     public void offsetCommit(String group, String topic, int partition, long offset) {
-        offsetCommit(group, topic, partition, offset, "", 0);
+        offsetCommit(group, topic, partition, offset, "");
+    }
+
+    /**
+     * Admin OffsetCommit with per-entry metadata (empty {@code memberId},
+     * {@code generation = 0}). Empty metadata matches the 4-arg overload.
+     */
+    public void offsetCommit(String group, String topic, int partition, long offset, String metadata) {
+        offsetCommit(group, topic, partition, offset, "", 0, metadata);
     }
 
     /**
@@ -1471,6 +1479,25 @@ public final class Client implements AutoCloseable {
                 memberId,
                 generation,
                 Collections.singletonList(new Codec.OffsetCommitEntry(topic, partition, offset, "")));
+    }
+
+    /**
+     * OffsetCommit with member + generation and per-entry metadata.
+     * {@code generation = 0} skips the broker generation check.
+     */
+    public void offsetCommit(
+            String group,
+            String topic,
+            int partition,
+            long offset,
+            String memberId,
+            long generation,
+            String metadata) {
+        offsetCommit(
+                group,
+                memberId,
+                generation,
+                Collections.singletonList(new Codec.OffsetCommitEntry(topic, partition, offset, metadata)));
     }
 
     /**
