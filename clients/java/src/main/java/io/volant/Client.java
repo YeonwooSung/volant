@@ -80,6 +80,8 @@ public final class Client implements AutoCloseable {
     private int maxRedirects = 1;
     private int maxRetries = 0;
     private long retryBackoffMs = 50;
+    /** Default produce acks (1 = leader only; 255 = acks=all). */
+    private int acks = 1;
     /** Test-only: next N fetch RPCs throw a transient transport error. */
     int injectFetchTransportFails;
     /** Test-only: next N heartbeat RPCs throw a transient transport error. */
@@ -250,6 +252,19 @@ public final class Client implements AutoCloseable {
 
     public long retryBackoffMs() {
         return retryBackoffMs;
+    }
+
+    /**
+     * Default produce acks used by {@link #produce(String, int, byte[], byte[])}.
+     * {@code 1} = leader only; {@code 255} = acks=all (ISR). Default is 1.
+     * Overloads with an explicit acks argument are unchanged.
+     */
+    public void setAcks(int acks) {
+        this.acks = acks;
+    }
+
+    public int acks() {
+        return acks;
     }
 
     /**
@@ -1023,15 +1038,16 @@ public final class Client implements AutoCloseable {
     }
 
     /**
-     * Produce one message (null key when {@code key} is null) with acks=1.
-     * Default trailer is {@code (0, 0, -1)}. After {@link #setEnableIdempotence}
-     * the first produce sends InitProducerId (empty transactional_id) and later
+     * Produce one message (null key when {@code key} is null) with the
+     * client default acks (1 unless {@link #setAcks}). Default trailer is
+     * {@code (0, 0, -1)}. After {@link #setEnableIdempotence} the first
+     * produce sends InitProducerId (empty transactional_id) and later
      * produces attach pid/epoch/seq.
      *
      * @return the broker-assigned base offset
      */
     public long produce(String topic, int partition, byte[] key, byte[] value) {
-        return produce(topic, partition, key, value, 1);
+        return produce(topic, partition, key, value, this.acks);
     }
 
     /**

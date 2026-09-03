@@ -669,6 +669,39 @@ class TestInitProducerIdRetry(unittest.TestCase):
             self.assertEqual(srv.produce_count, 0)
 
 
+class TestProduceDefaultAcks(unittest.TestCase):
+    def test_produce_default_acks(self) -> None:
+        with ScriptedBroker() as srv:
+            with Client(srv.addr, timeout=5.0) as c:
+                self.assertEqual(c.acks, 1)
+                c.produce("t", 0, value=b"hello")
+            self.assertEqual(len(srv.produce_reqs), 1)
+            self.assertEqual(srv.produce_reqs[0].acks, 1)
+
+    def test_produce_set_acks_all(self) -> None:
+        with ScriptedBroker() as srv:
+            with Client(srv.addr, timeout=5.0) as c:
+                c.acks = 255
+                c.produce("t", 0, value=b"hello")
+            self.assertEqual(len(srv.produce_reqs), 1)
+            self.assertEqual(srv.produce_reqs[0].acks, 255)
+
+    def test_produce_constructor_acks(self) -> None:
+        with ScriptedBroker() as srv:
+            with Client(srv.addr, timeout=5.0, acks=255) as c:
+                self.assertEqual(c.acks, 255)
+                c.produce("t", 0, value=b"hello")
+            self.assertEqual(len(srv.produce_reqs), 1)
+            self.assertEqual(srv.produce_reqs[0].acks, 255)
+
+    def test_produce_explicit_acks_wins(self) -> None:
+        with ScriptedBroker() as srv:
+            with Client(srv.addr, timeout=5.0, acks=255) as c:
+                c.produce("t", 0, value=b"hello", acks=1)
+            self.assertEqual(len(srv.produce_reqs), 1)
+            self.assertEqual(srv.produce_reqs[0].acks, 1)
+
+
 class TestProduceRetry(unittest.TestCase):
     def test_default_max_retries_zero_raises_on_timeout(self) -> None:
         with ScriptedBroker() as srv:

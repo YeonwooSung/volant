@@ -46,7 +46,7 @@ class TransactionalProducer:
         *,
         key: Optional[bytes] = None,
         messages: Optional[Iterable[Union[bytes, ProduceMessage]]] = None,
-        acks: int = 1,
+        acks: Optional[int] = None,
         timestamp_ms: int = -1,
         headers: Optional[list[tuple[str, bytes]]] = None,
     ) -> ProduceResult:
