@@ -3,6 +3,7 @@
 //! v0.144 adds Fetch knobs (`fetch_max_messages` / `fetch_max_bytes` /
 //! `fetch_max_wait_ms`) used by [`crate::Client::fetch_default`].
 //! v0.149: [`crate::Client::fetch`] also uses `fetch_max_bytes`.
+//! v0.155: [`crate::Client::delete_records`] uses `delete_records_wait`.
 
 use std::path::PathBuf;
 
@@ -26,6 +27,8 @@ pub struct ClientConfig {
     /// Default Fetch `max_wait_ms` for [`crate::Client::fetch_default`] (0).
     /// [`crate::Client::fetch`] still takes an explicit `max_wait_ms`.
     pub fetch_max_wait_ms: u32,
+    /// Default DeleteRecords wait_majority (0 = broker default, 1 = force wait, 2 = force no-wait).
+    pub delete_records_wait: u8,
     /// Shared auth token. When set, the client sends Auth on connect.
     pub auth_token: Option<String>,
     /// SCRAM-SHA-256 username (Phase 22). Requires [`Self::scram_password`].
@@ -79,6 +82,7 @@ impl Default for ClientConfig {
             fetch_max_messages: 128,
             fetch_max_bytes: crate::client::Client::DEFAULT_FETCH_MAX_BYTES,
             fetch_max_wait_ms: 0,
+            delete_records_wait: 0,
             auth_token: None,
             scram_username: None,
             scram_password: None,

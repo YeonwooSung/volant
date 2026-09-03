@@ -136,6 +136,9 @@
 //! `max_messages` / `max_wait_ms` and uses
 //! [`ClientConfig::fetch_max_bytes`] (v0.149).
 //! GroupConsumer poll knobs stay historical (v0.76; 100 / 4 MiB).
+//! v0.155 adds [`ClientConfig::delete_records_wait`] (default **0**)
+//! used by [`Client::delete_records`].
+//! [`Client::delete_records_with_wait_flag`] stays fully explicit.
 
 #![deny(missing_docs)]
 
