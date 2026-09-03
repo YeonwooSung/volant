@@ -168,6 +168,7 @@ _ = names
 e := codec.AclBinding{Principal: "User:alice", ResourceType: 0, Resource: "events", Operation: 3, Permission: 1}
 err = c.CreateAcls([]codec.AclBinding{e})
 listed, err := c.ListAcls("", 255, "")
+listed, err = c.ListAclsAll() // v0.161; same as ListAcls("", 255, "")
 removed, err := c.DeleteAcls([]codec.AclBinding{e})
 _ = listed
 _ = removed
@@ -325,7 +326,9 @@ not the handshake. `CreateScramUser` sends the password in the clear
 Create/Delete/ListAcls (v0.56) are admin RPCs (opcodes 54–59).
 `CreateAcls([]codec.AclBinding)` / `DeleteAcls(...)` (returns
 removed) / `ListAcls(principal, resourceType, resource)`. Empty
-principal/resource and `resourceType=255` list any. Delete is
+principal/resource and `resourceType=255` list any.
+`ListAclsAll()` lists every ACL binding (empty filters); same as
+`ListAcls("", 255, "")`. Delete is
 exact-match only. Not Kafka CreateAcls / DeleteAcls / DescribeAcls
 (API keys 30/31/29).
 

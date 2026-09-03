@@ -2657,6 +2657,12 @@ func (c *Client) ListAcls(principal string, resourceType uint8, resource string)
 	return decoded.(codec.ListAclsResponse).Entries, nil
 }
 
+// ListAclsAll lists every ACL binding (empty filters).
+// Same as ListAcls("", 255, "").
+func (c *Client) ListAclsAll() ([]codec.AclBinding, error) {
+	return c.ListAcls("", 255, "")
+}
+
 // LeaveGroup leaves a consumer group. Transient broker/transport errors
 // retry up to maxRetries extra times (default 0). Error 10
 // (UnknownMemberId) is success (already left). Error 14 follows

@@ -209,6 +209,30 @@ func TestListAclsReturnsBindings(t *testing.T) {
 	}
 }
 
+func TestListAclsAllEncodesEmptyFilters(t *testing.T) {
+	entry := sampleAcl()
+	addr, got, stop := serveAcls(t, 0, 0, 0, 0, []codec.AclBinding{entry})
+	defer stop()
+	c, err := volant.DialTimeout(addr, 5*time.Second)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer c.Close()
+	listed, err := c.ListAclsAll()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.err != nil {
+		t.Fatal(got.err)
+	}
+	if len(listed) != 1 || listed[0] != entry {
+		t.Fatalf("listed %#v", listed)
+	}
+	if got.listReq.Principal != "" || got.listReq.ResourceType != 255 || got.listReq.Resource != "" {
+		t.Fatalf("list req %+v", got.listReq)
+	}
+}
+
 func TestCreateAclsUnauthorizedRaises(t *testing.T) {
 	addr, _, stop := serveAcls(t, 23, 0, 0, 0, nil)
 	defer stop()
