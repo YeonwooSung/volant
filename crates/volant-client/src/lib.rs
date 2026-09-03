@@ -109,6 +109,12 @@
 //! (v0.96 helper). `max_redirects=0` does not redirect. 13 / 2 /
 //! 9 / 10 / 11 / 17 / 18 / 21 / 22 and protocol are not redirected.
 //! [`Client::metadata`] is unchanged (not controller-gated).
+//! v0.125 redirects [`Client::describe_group`] / [`Client::list_groups`]
+//! on error **14** (`NotController`) via `redirect_to_controller` /
+//! `max_redirects`. Transient 6/7/15/16 stay on `max_retries`
+//! (v0.92 helper). `max_redirects=0` does not redirect. 13 / 2 /
+//! 9 / 10 / 11 / 17 / 18 / 21 / 22 and protocol are not redirected.
+//! Range assignor inherits via `describe_group`.
 
 #![deny(missing_docs)]
 
