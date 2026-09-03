@@ -93,6 +93,29 @@ func serveDeleteOffsets(t *testing.T, errorCode uint16, deletedCount uint32) (ad
 	}
 }
 
+func TestDeleteOffsetsAllEncodesEmptyEntries(t *testing.T) {
+	addr, got, stop := serveDeleteOffsets(t, 0, 3)
+	defer stop()
+	c, err := volant.DialTimeout(addr, 5*time.Second)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer c.Close()
+	out, err := c.DeleteOffsetsAll("g")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.err != nil {
+		t.Fatal(got.err)
+	}
+	if got.group != "g" || len(got.entries) != 0 {
+		t.Fatalf("wire request group=%q entries=%v", got.group, got.entries)
+	}
+	if out != 3 {
+		t.Fatalf("deleted_count %d", out)
+	}
+}
+
 func TestDeleteOffsetsEmptyEntriesEncodedAsCountZero(t *testing.T) {
 	addr, got, stop := serveDeleteOffsets(t, 0, 3)
 	defer stop()
