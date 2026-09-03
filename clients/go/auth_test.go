@@ -14,15 +14,22 @@ import (
 type authServerResult struct {
 	firstOpcode uint16
 	token       string
+	authCount   int
 	err         error
 }
 
 func serveAuth(t *testing.T, replyCode uint16, alsoMeta bool) (addr string, got *authServerResult, stop func()) {
 	t.Helper()
+	return serveAuthQueue(t, []uint16{replyCode}, alsoMeta)
+}
+
+func serveAuthQueue(t *testing.T, codes []uint16, alsoMeta bool) (addr string, got *authServerResult, stop func()) {
+	t.Helper()
 	ln, err := net.Listen("tcp", "127.0.0.1:0")
 	if err != nil {
 		t.Fatal(err)
 	}
+	queued := append([]uint16(nil), codes...)
 	res := &authServerResult{}
 	done := make(chan struct{})
 	go func() {
@@ -65,7 +72,13 @@ func serveAuth(t *testing.T, replyCode uint16, alsoMeta bool) (addr string, got 
 					return
 				}
 				res.token = req.Token
-				payload, err := codec.EncodeAuthResponse(codec.AuthResponse{ErrorCode: replyCode})
+				res.authCount++
+				code := uint16(0)
+				if len(queued) > 0 {
+					code = queued[0]
+					queued = queued[1:]
+				}
+				payload, err := codec.EncodeAuthResponse(codec.AuthResponse{ErrorCode: code})
 				if err != nil {
 					res.err = err
 					return
@@ -79,7 +92,11 @@ func serveAuth(t *testing.T, replyCode uint16, alsoMeta bool) (addr string, got 
 					res.err = err
 					return
 				}
-				if replyCode != 0 || !alsoMeta {
+				// Multi-code queue stays on the same socket so Auth can retry.
+				if len(codes) > 1 {
+					continue
+				}
+				if code != 0 || !alsoMeta {
 					return
 				}
 			case codec.OpMetadata:
@@ -178,5 +195,77 @@ func TestDialAuthEmptyTokenSkipsAuth(t *testing.T) {
 	}
 	if got.firstOpcode != codec.OpMetadata {
 		t.Fatalf("first opcode %d want metadata", got.firstOpcode)
+	}
+}
+
+const (
+	authTimeout    uint16 = 7
+	authFailed     uint16 = 17
+)
+
+func TestDialAuthDefaultMaxRetriesZeroRaisesOnTimeout(t *testing.T) {
+	addr, got, stop := serveAuthQueue(t, []uint16{authTimeout}, false)
+	defer stop()
+	_, err := volant.DialAuth(addr, "s3cret")
+	if err == nil {
+		t.Fatal("expected auth timeout")
+	}
+	var be *codec.BrokerError
+	if !errors.As(err, &be) || be.Code != authTimeout || be.Op != "auth" {
+		t.Fatalf("err=%v", err)
+	}
+	if got.authCount != 1 {
+		t.Fatalf("auth count %d want 1", got.authCount)
+	}
+}
+
+func TestDialAuthRetriesTimeoutThenOk(t *testing.T) {
+	addr, got, stop := serveAuthQueue(t, []uint16{authTimeout, 0}, true)
+	defer stop()
+	c, err := volant.DialAuthRetries(addr, "s3cret", 2, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer c.Close()
+	if _, err := c.Metadata(); err != nil {
+		t.Fatal(err)
+	}
+	if got.authCount != 2 {
+		t.Fatalf("auth count %d want 2", got.authCount)
+	}
+	if got.token != "s3cret" {
+		t.Fatalf("token %q", got.token)
+	}
+}
+
+func TestDialAuthFailedNotRetried(t *testing.T) {
+	addr, got, stop := serveAuthQueue(t, []uint16{authFailed}, false)
+	defer stop()
+	_, err := volant.DialAuthRetries(addr, "nope", 2, 0)
+	if err == nil {
+		t.Fatal("expected auth failed")
+	}
+	var be *codec.BrokerError
+	if !errors.As(err, &be) || be.Code != authFailed || be.Op != "auth" {
+		t.Fatalf("err=%v", err)
+	}
+	if got.authCount != 1 {
+		t.Fatalf("auth count %d want 1", got.authCount)
+	}
+}
+
+func TestDialAuthExhaustedRetriesRaises(t *testing.T) {
+	addr, got, stop := serveAuthQueue(t, []uint16{authTimeout, authTimeout, authTimeout}, false)
+	defer stop()
+	_, err := volant.DialAuthRetries(addr, "s3cret", 2, 0)
+	if err == nil {
+		t.Fatal("expected auth timeout")
+	}
+	var be *codec.BrokerError
+	if !errors.As(err, &be) || be.Code != authTimeout || be.Op != "auth" {
+		t.Fatalf("err=%v", err)
+	}
+	if got.authCount != 3 {
+		t.Fatalf("auth count %d want 3", got.authCount)
 	}
 }

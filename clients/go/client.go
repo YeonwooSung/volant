@@ -524,15 +524,32 @@ func (c *Client) authenticate(token string) error {
 	if err != nil {
 		return err
 	}
-	decoded, err := c.roundTrip(codec.OpAuth, payload)
-	if err != nil {
-		return err
+	maxRetries := c.maxRetries
+	if maxRetries < 0 {
+		maxRetries = 0
 	}
-	resp, ok := decoded.(codec.AuthResponse)
-	if !ok {
-		return &frame.ProtocolError{Msg: fmt.Sprintf("unexpected response for auth: %T", decoded)}
+	retryAttempt := 0
+	for {
+		decoded, err := c.roundTrip(codec.OpAuth, payload)
+		if err != nil {
+			if isTransientProduceErr(err) && retryAttempt < maxRetries {
+				retryAttempt++
+				c.sleepProduceRetry()
+				continue
+			}
+			return err
+		}
+		resp, ok := decoded.(codec.AuthResponse)
+		if !ok {
+			return &frame.ProtocolError{Msg: fmt.Sprintf("unexpected response for auth: %T", decoded)}
+		}
+		if isTransientBroker(resp.ErrorCode) && retryAttempt < maxRetries {
+			retryAttempt++
+			c.sleepProduceRetry()
+			continue
+		}
+		return check(resp.ErrorCode, "auth")
 	}
-	return check(resp.ErrorCode, "auth")
 }
 
 func (c *Client) authenticateScram(username, password string) error {

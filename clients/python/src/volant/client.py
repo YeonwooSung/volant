@@ -265,10 +265,11 @@ class Client:
 
         c = Client("127.0.0.1:9092", enable_idempotence=True)
 
-    Optional produce/fetch/heartbeat/BeginTxn/EndTxn/admin retry (v0.61 /
-    v0.66 / v0.74 / v0.99 / v0.103) retries transient broker codes 6, 7,
-    15, 16 and TCP I/O errors. Default ``max_retries=0`` (no extra
-    attempts). ``retry_backoff_ms`` defaults to 50; tests may set 0.
+    Optional produce/fetch/heartbeat/BeginTxn/EndTxn/admin/Auth retry
+    (v0.61 / v0.66 / v0.74 / v0.99 / v0.103 / v0.106) retries transient
+    broker codes 6, 7, 15, 16 and TCP I/O errors. Default
+    ``max_retries=0`` (no extra attempts). ``retry_backoff_ms`` defaults
+    to 50; tests may set 0.
     Error 13 stays on the redirect budget; error 21 stays on the one
     re-Init. Controller-gated admin shares this budget; error 14 stays
     on ``max_redirects``. Heartbeat rebalance codes 9 / 10 / 11 are not
@@ -622,10 +623,34 @@ class Client:
 
     def _authenticate(self, token: str) -> None:
         payload = codec.encode_auth_request(codec.AuthRequest(token=token))
-        resp = self._round_trip(codec.OP_AUTH, payload)
-        if not isinstance(resp, codec.AuthResponse):
-            raise ProtocolError(f"unexpected response for auth: {type(resp)}")
-        self._check(resp.error_code, "auth")
+        max_retries = max(0, int(self.max_retries))
+        retry_attempt = 0
+        while True:
+            try:
+                resp = self._round_trip(codec.OP_AUTH, payload)
+            except BrokerError as e:
+                if _is_transient_broker(e.code) and retry_attempt < max_retries:
+                    retry_attempt += 1
+                    self._sleep_produce_retry()
+                    continue
+                raise
+            except OSError:
+                if retry_attempt < max_retries:
+                    retry_attempt += 1
+                    self._sleep_produce_retry()
+                    continue
+                raise
+            if not isinstance(resp, codec.AuthResponse):
+                raise ProtocolError(f"unexpected response for auth: {type(resp)}")
+            if (
+                _is_transient_broker(resp.error_code)
+                and retry_attempt < max_retries
+            ):
+                retry_attempt += 1
+                self._sleep_produce_retry()
+                continue
+            self._check(resp.error_code, "auth")
+            return
 
     def _uses_pid(self) -> bool:
         return bool(self.enable_idempotence or self.transactional_id)
