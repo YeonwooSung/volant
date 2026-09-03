@@ -991,6 +991,63 @@ func TestFetchDefaultKnobs(t *testing.T) {
 	}
 }
 
+func TestFetchSetClientDefaults(t *testing.T) {
+	srv := &scriptedBroker{}
+	addr, stop := startScripted(t, srv)
+	defer stop()
+
+	c, err := volant.DialTimeout(addr, 5*time.Second)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer c.Close()
+
+	c.SetFetchMaxMessages(10)
+	c.SetFetchMaxBytes(4096)
+	c.SetFetchMaxWaitMs(100)
+	if c.FetchMaxMessages() != 10 || c.FetchMaxBytes() != 4096 || c.FetchMaxWaitMs() != 100 {
+		t.Fatalf("getters %d/%d/%d want 10/4096/100", c.FetchMaxMessages(), c.FetchMaxBytes(), c.FetchMaxWaitMs())
+	}
+	if _, err := c.Fetch("t", 0, 0); err != nil {
+		t.Fatal(err)
+	}
+	reqs := srv.copyFetches()
+	if len(reqs) != 1 {
+		t.Fatalf("fetches %d want 1", len(reqs))
+	}
+	req := reqs[0]
+	if req.MaxMessages != 10 || req.MaxBytes != 4096 || req.MaxWaitMs != 100 {
+		t.Fatalf("client defaults %+v want max_messages=10 max_bytes=4096 max_wait_ms=100", req)
+	}
+}
+
+func TestFetchOptsIgnoresClientDefaults(t *testing.T) {
+	srv := &scriptedBroker{}
+	addr, stop := startScripted(t, srv)
+	defer stop()
+
+	c, err := volant.DialTimeout(addr, 5*time.Second)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer c.Close()
+
+	c.SetFetchMaxMessages(10)
+	c.SetFetchMaxBytes(4096)
+	c.SetFetchMaxWaitMs(100)
+	if _, err := c.FetchOpts("t", 0, 0, 20, 8192, 50); err != nil {
+		t.Fatal(err)
+	}
+	reqs := srv.copyFetches()
+	if len(reqs) != 1 {
+		t.Fatalf("fetches %d want 1", len(reqs))
+	}
+	req := reqs[0]
+	if req.MaxMessages != 20 || req.MaxBytes != 8192 || req.MaxWaitMs != 50 {
+		t.Fatalf("explicit knobs %+v want max_messages=20 max_bytes=8192 max_wait_ms=50", req)
+	}
+}
+
 func TestProduceAcksAll(t *testing.T) {
 	srv := &scriptedBroker{}
 	addr, stop := startScripted(t, srv)

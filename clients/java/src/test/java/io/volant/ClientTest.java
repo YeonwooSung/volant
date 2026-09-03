@@ -299,6 +299,43 @@ class ClientTest {
     }
 
     @Test
+    void fetchSetClientDefaults() throws Exception {
+        try (ScriptedBroker srv = ScriptedBroker.start()) {
+            try (Client c = Client.connect("127.0.0.1", srv.port, 5_000)) {
+                c.setFetchMaxMessages(10);
+                c.setFetchMaxBytes(4096L);
+                c.setFetchMaxWaitMs(100);
+                assertEquals(10, c.fetchMaxMessages());
+                assertEquals(4096L, c.fetchMaxBytes());
+                assertEquals(100, c.fetchMaxWaitMs());
+                c.fetch("t", 0, 0);
+            }
+            assertEquals(1, srv.fetchReqs.size());
+            Codec.FetchRequest req = srv.fetchReqs.get(0);
+            assertEquals(10, req.maxMessages);
+            assertEquals(4096, req.maxBytes);
+            assertEquals(100, req.maxWaitMs);
+        }
+    }
+
+    @Test
+    void fetchSixArgIgnoresClientDefaults() throws Exception {
+        try (ScriptedBroker srv = ScriptedBroker.start()) {
+            try (Client c = Client.connect("127.0.0.1", srv.port, 5_000)) {
+                c.setFetchMaxMessages(10);
+                c.setFetchMaxBytes(4096L);
+                c.setFetchMaxWaitMs(100);
+                c.fetch("t", 0, 0, 20, 8192L, 50);
+            }
+            assertEquals(1, srv.fetchReqs.size());
+            Codec.FetchRequest req = srv.fetchReqs.get(0);
+            assertEquals(20, req.maxMessages);
+            assertEquals(8192, req.maxBytes);
+            assertEquals(50, req.maxWaitMs);
+        }
+    }
+
+    @Test
     void produceAcksAll() throws Exception {
         try (ScriptedBroker srv = ScriptedBroker.start()) {
             try (Client c = Client.connect("127.0.0.1", srv.port, 5_000)) {

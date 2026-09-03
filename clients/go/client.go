@@ -156,6 +156,9 @@ type Client struct {
 	maxRetries        int
 	retryBackoff      time.Duration
 	acks              uint8
+	fetchMaxMessages  uint32
+	fetchMaxBytes     uint32
+	fetchMaxWaitMs    uint32
 	enableIdempotence bool
 	transactionalID   string
 	producerID        uint64
@@ -222,9 +225,12 @@ func dialPlain(addr string, timeout time.Duration, token, scramUser, scramPass s
 		authToken:    token,
 		scramUser:    scramUser,
 		scramPass:    scramPass,
-		maxRedirects: 1,
-		retryBackoff: 50 * time.Millisecond,
-		acks:         1,
+		maxRedirects:     1,
+		retryBackoff:     50 * time.Millisecond,
+		acks:             1,
+		fetchMaxMessages: 128,
+		fetchMaxBytes:    4 * 1024 * 1024,
+		fetchMaxWaitMs:   0,
 	}
 	if err := c.maybeAuthenticate(); err != nil {
 		return nil, err
@@ -288,9 +294,12 @@ func dialTLS(addr string, cfg TLSConfig, timeout time.Duration, token, scramUser
 		authToken:    token,
 		scramUser:    scramUser,
 		scramPass:    scramPass,
-		maxRedirects: 1,
-		retryBackoff: 50 * time.Millisecond,
-		acks:         1,
+		maxRedirects:     1,
+		retryBackoff:     50 * time.Millisecond,
+		acks:             1,
+		fetchMaxMessages: 128,
+		fetchMaxBytes:    4 * 1024 * 1024,
+		fetchMaxWaitMs:   0,
 	}
 	if err := c.maybeAuthenticate(); err != nil {
 		return nil, err
@@ -341,6 +350,39 @@ func (c *Client) SetAcks(acks uint8) {
 // Acks returns the default produce acks (1 = leader, 255 = all).
 func (c *Client) Acks() uint8 {
 	return c.acks
+}
+
+// SetFetchMaxMessages sets the default Fetch max_messages (default 128).
+// 0 is kept as-is (wire-legal; no clamp) so tests can send 0.
+func (c *Client) SetFetchMaxMessages(n uint32) {
+	c.fetchMaxMessages = n
+}
+
+// FetchMaxMessages returns the default Fetch max_messages.
+func (c *Client) FetchMaxMessages() uint32 {
+	return c.fetchMaxMessages
+}
+
+// SetFetchMaxBytes sets the default Fetch max_bytes (default 4MiB).
+// 0 is kept as-is (wire-legal; no clamp).
+func (c *Client) SetFetchMaxBytes(n uint32) {
+	c.fetchMaxBytes = n
+}
+
+// FetchMaxBytes returns the default Fetch max_bytes.
+func (c *Client) FetchMaxBytes() uint32 {
+	return c.fetchMaxBytes
+}
+
+// SetFetchMaxWaitMs sets the default Fetch max_wait_ms (default 0).
+// 0 is kept as-is (wire-legal; no clamp).
+func (c *Client) SetFetchMaxWaitMs(n uint32) {
+	c.fetchMaxWaitMs = n
+}
+
+// FetchMaxWaitMs returns the default Fetch max_wait_ms.
+func (c *Client) FetchMaxWaitMs() uint32 {
+	return c.fetchMaxWaitMs
 }
 
 // EnableIdempotence turns on InitProducerId + per-partition produce sequences.
@@ -1398,7 +1440,8 @@ func (c *Client) ensureProducerID() error {
 }
 
 // Fetch reads records from topic/partition starting at offset.
-// Defaults match the Python client: max_messages=128, max_bytes=4MiB, max_wait_ms=0.
+// Uses the client default knobs (128 / 4MiB / 0 unless SetFetchMax*).
+// FetchOpts still takes explicit knobs.
 func (c *Client) Fetch(topic string, partition int, offset int64) ([]Record, error) {
 	res, err := c.FetchResult(topic, partition, offset)
 	if err != nil {
@@ -1409,7 +1452,7 @@ func (c *Client) Fetch(topic string, partition int, offset int64) ([]Record, err
 
 // FetchResult is Fetch plus the already-decoded high watermark.
 func (c *Client) FetchResult(topic string, partition int, offset int64) (FetchResult, error) {
-	return c.FetchOptsResult(topic, partition, offset, 128, 4*1024*1024, 0)
+	return c.FetchOptsResult(topic, partition, offset, c.fetchMaxMessages, c.fetchMaxBytes, c.fetchMaxWaitMs)
 }
 
 // FetchOpts is Fetch with explicit max_messages, max_bytes, and max_wait_ms.

@@ -82,6 +82,12 @@ public final class Client implements AutoCloseable {
     private long retryBackoffMs = 50;
     /** Default produce acks (1 = leader only; 255 = acks=all). */
     private int acks = 1;
+    /** Default Fetch max_messages used by 3-arg {@link #fetch(String, int, long)}. */
+    private int fetchMaxMessages = 128;
+    /** Default Fetch max_bytes used by 3-arg {@link #fetch(String, int, long)}. */
+    private long fetchMaxBytes = 4L * 1024 * 1024;
+    /** Default Fetch max_wait_ms used by 3-arg {@link #fetch(String, int, long)}. */
+    private long fetchMaxWaitMs = 0;
     /** Test-only: next N fetch RPCs throw a transient transport error. */
     int injectFetchTransportFails;
     /** Test-only: next N heartbeat RPCs throw a transient transport error. */
@@ -265,6 +271,43 @@ public final class Client implements AutoCloseable {
 
     public int acks() {
         return acks;
+    }
+
+    /**
+     * Default Fetch {@code max_messages} used by 3-arg {@link #fetch(String, int, long)}.
+     * Default is 128. {@code 0} is kept as-is (wire-legal; no clamp).
+     * The 6-arg {@code fetch} overload stays explicit.
+     */
+    public void setFetchMaxMessages(int n) {
+        this.fetchMaxMessages = n;
+    }
+
+    public int fetchMaxMessages() {
+        return fetchMaxMessages;
+    }
+
+    /**
+     * Default Fetch {@code max_bytes} used by 3-arg {@link #fetch(String, int, long)}.
+     * Default is 4MiB. {@code 0} is kept as-is (wire-legal; no clamp).
+     */
+    public void setFetchMaxBytes(long n) {
+        this.fetchMaxBytes = n;
+    }
+
+    public long fetchMaxBytes() {
+        return fetchMaxBytes;
+    }
+
+    /**
+     * Default Fetch {@code max_wait_ms} used by 3-arg {@link #fetch(String, int, long)}.
+     * Default is 0. {@code 0} is kept as-is (wire-legal; no clamp).
+     */
+    public void setFetchMaxWaitMs(long n) {
+        this.fetchMaxWaitMs = n;
+    }
+
+    public long fetchMaxWaitMs() {
+        return fetchMaxWaitMs;
     }
 
     /**
@@ -1512,8 +1555,9 @@ public final class Client implements AutoCloseable {
 
     /**
      * Fetch records from topic/partition starting at {@code offset}.
-     * Defaults match the Python/Go clients: max_messages=128, max_bytes=4MiB,
-     * max_wait_ms=0.
+     * Uses the client default knobs (128 / 4MiB / 0 unless {@link
+     * #setFetchMaxMessages} / {@link #setFetchMaxBytes} / {@link
+     * #setFetchMaxWaitMs}). The 6-arg overload stays explicit.
      */
     public List<Record> fetch(String topic, int partition, long offset) {
         return fetchResult(topic, partition, offset).records;
@@ -1533,7 +1577,8 @@ public final class Client implements AutoCloseable {
      * Defaults match {@link #fetch(String, int, long)}.
      */
     public FetchResult fetchResult(String topic, int partition, long offset) {
-        return fetchResult(topic, partition, offset, 128, 4L * 1024 * 1024, 0);
+        return fetchResult(
+                topic, partition, offset, fetchMaxMessages, fetchMaxBytes, (int) fetchMaxWaitMs);
     }
 
     /**
