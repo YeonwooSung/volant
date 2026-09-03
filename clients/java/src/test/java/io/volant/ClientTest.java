@@ -2000,6 +2000,24 @@ class ClientTest {
     }
 
     @Test
+    void produceTimestampAcksEncodes() throws Exception {
+        try (ScriptedBroker srv = ScriptedBroker.start()) {
+            try (Client c = Client.connect("127.0.0.1", srv.port, 5_000)) {
+                long off =
+                        c.produceTimestampAcks(
+                                "t", 0, null, "hello".getBytes(StandardCharsets.UTF_8), 1_700_000_000_000L, 255);
+                assertEquals(7L, off);
+            }
+            assertEquals(1, srv.produceReqs.size());
+            Codec.ProduceRequest req = srv.produceReqs.get(0);
+            assertEquals(255, req.acks);
+            assertEquals(1, req.messages.size());
+            assertEquals(1_700_000_000_000L, req.messages.get(0).timestampMs);
+            assertTrue(req.messages.get(0).headers.isEmpty());
+        }
+    }
+
+    @Test
     void produceBatchRetriesTimeoutThenOk() throws Exception {
         try (ScriptedBroker srv = ScriptedBroker.start()) {
             srv.produceCodes.add(TIMEOUT);

@@ -3209,6 +3209,43 @@ func TestProduceTimestampHeadersEncodes(t *testing.T) {
 	}
 }
 
+func TestProduceTimestampAcksEncodes(t *testing.T) {
+	srv := &scriptedBroker{}
+	addr, stop := startScripted(t, srv)
+	defer stop()
+
+	c, err := volant.DialTimeout(addr, 5*time.Second)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer c.Close()
+
+	const wantTs int64 = 1_700_000_000_000
+	off, err := c.ProduceTimestampAcks("t", 0, nil, []byte("hello"), wantTs, 255)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if off != 7 {
+		t.Fatalf("base offset: got %d want 7", off)
+	}
+	reqs := srv.copyProduces()
+	if len(reqs) != 1 {
+		t.Fatalf("produces %d want 1", len(reqs))
+	}
+	if reqs[0].Acks != 255 {
+		t.Fatalf("acks %d want 255", reqs[0].Acks)
+	}
+	if n := len(reqs[0].Messages); n != 1 {
+		t.Fatalf("messages %d want 1", n)
+	}
+	if ts := reqs[0].Messages[0].TimestampMs; ts != wantTs {
+		t.Fatalf("timestamp %d want %d", ts, wantTs)
+	}
+	if n := len(reqs[0].Messages[0].Headers); n != 0 {
+		t.Fatalf("headers %d want 0", n)
+	}
+}
+
 func TestProduceBatchRetriesTimeoutThenOk(t *testing.T) {
 	srv := &scriptedBroker{produceCodes: []uint16{timeoutCode, 0}}
 	addr, stop := startScripted(t, srv)
