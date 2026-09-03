@@ -783,6 +783,9 @@ impl Client {
 
     /// Fetch cluster metadata (all topics).
     ///
+    /// Sends an empty native Metadata `topics` list (all topics).
+    /// Same as [`Self::metadata_topics`] with `Vec::new()`.
+    ///
     /// Transient broker/transport errors retry up to
     /// [`ClientConfig::max_retries`] extra times (default 0). Native
     /// Metadata has no top-level error_code; failures arrive as
@@ -790,8 +793,18 @@ impl Client {
     /// 14 and protocol errors are not retried. Admin-14 and leader-13
     /// redirect inherit via this method.
     pub async fn metadata(&self) -> Result<Metadata> {
+        self.metadata_topics(Vec::new()).await
+    }
+
+    /// Fetch cluster metadata for the named topics.
+    ///
+    /// Empty `topics` means all topics (same as [`Self::metadata`]).
+    /// Same decode, retry, and error handling as [`Self::metadata`].
+    /// This is the native Metadata `topics` list, not Kafka
+    /// `allow_auto_topic_creation` / topic ids.
+    pub async fn metadata_topics(&self, topics: Vec<String>) -> Result<Metadata> {
         let resp = self
-            .metadata_list_members_round_trip(Request::Metadata { topics: vec![] })
+            .metadata_list_members_round_trip(Request::Metadata { topics })
             .await?;
         match resp {
             Response::Metadata {

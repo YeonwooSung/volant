@@ -87,6 +87,11 @@
 //! nonce. Error 17 / 18 / 13 / 14 / 9 / 10 / 11 / 2 / 21 / 22,
 //! protocol (including server signature mismatch), and InvalidArgument
 //! are not retried.
+//! v0.114 adds [`Client::metadata_topics`] so a Rust caller can send
+//! a native Metadata topic filter. [`Client::metadata`] stays
+//! empty-list (all topics). Retry (v0.96) is inherited via
+//! `metadata_list_members_round_trip`. Empty remains “all”. Not
+//! Kafka `allow_auto_topic_creation` / topic ids.
 
 #![deny(missing_docs)]
 
