@@ -253,6 +253,7 @@ SCRAM-SHA-256 (v0.46): `DialScram` / `DialTLSScram` send opcodes 60
 then 62 after connect. Empty user or password is an error before
 dial. A rejected proof or server-signature mismatch fails Dial.
 Leader redirect re-runs the same auth path.
+Transient 6 / 7 / 15 / 16 and TCP/IO retry the whole handshake from first with a new nonce (v0.108; default `max_retries=0`).
 Create/Delete/ListScramUsers (v0.55) are admin RPCs (opcodes 64–69),
 not the handshake. `CreateScramUser` sends the password in the clear
 (use TLS). Not Kafka AlterUserScramCredentials.

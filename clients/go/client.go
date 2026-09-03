@@ -289,11 +289,12 @@ func (c *Client) SetMaxRedirects(n int) {
 	c.maxRedirects = n
 }
 
-// SetMaxRetries sets extra Produce/Fetch/Heartbeat attempts after the
-// first on transient broker/transport errors. Default is 0 (no extra
+// SetMaxRetries sets extra Produce/Fetch/Heartbeat/SCRAM attempts after
+// the first on transient broker/transport errors. Default is 0 (no extra
 // attempts). Negative values are treated as 0. Error 13 stays on the
 // redirect budget; error 21 stays on the one re-Init. Heartbeat
-// rebalance codes 9 / 10 / 11 are not retried.
+// rebalance codes 9 / 10 / 11 are not retried. SCRAM 17 / 18 and
+// server-signature mismatch are not retried.
 func (c *Client) SetMaxRetries(n int) {
 	if n < 0 {
 		n = 0
@@ -553,6 +554,29 @@ func (c *Client) authenticate(token string) error {
 }
 
 func (c *Client) authenticateScram(username, password string) error {
+	// First+final is one unit (v0.108): a transient first or final
+	// restarts from first with a new client nonce. 17 / 18 and
+	// protocol errors (including signature mismatch) are not retried.
+	maxRetries := c.maxRetries
+	if maxRetries < 0 {
+		maxRetries = 0
+	}
+	retryAttempt := 0
+	for {
+		err := c.scramHandshake(username, password)
+		if err == nil {
+			return nil
+		}
+		if isTransientProduceErr(err) && retryAttempt < maxRetries {
+			retryAttempt++
+			c.sleepProduceRetry()
+			continue
+		}
+		return err
+	}
+}
+
+func (c *Client) scramHandshake(username, password string) error {
 	clientNonce, err := generateClientNonce()
 	if err != nil {
 		return err

@@ -23,11 +23,19 @@ type scramServerResult struct {
 	opcodes        []uint16
 	firstUsernames []string
 	finalUsernames []string
+	firstNonces    []string
 	token          string
 	err            error
 }
 
 func serveScram(t *testing.T, password string, badSig bool, conns int) (addr string, got *scramServerResult, stop func()) {
+	t.Helper()
+	return serveScramScript(t, password, badSig, conns, nil, nil)
+}
+
+func serveScramScript(
+	t *testing.T, password string, badSig bool, conns int, firstErrors, finalErrors []uint16,
+) (addr string, got *scramServerResult, stop func()) {
 	t.Helper()
 	if conns < 1 {
 		conns = 1
@@ -37,6 +45,8 @@ func serveScram(t *testing.T, password string, badSig bool, conns int) (addr str
 		t.Fatal(err)
 	}
 	res := &scramServerResult{}
+	fe := append([]uint16(nil), firstErrors...)
+	ff := append([]uint16(nil), finalErrors...)
 	done := make(chan struct{})
 	go func() {
 		defer close(done)
@@ -46,7 +56,7 @@ func serveScram(t *testing.T, password string, badSig bool, conns int) (addr str
 				res.err = err
 				return
 			}
-			if err := handleScramConn(conn, password, badSig, res); err != nil {
+			if err := handleScramConn(conn, password, badSig, res, &fe, &ff); err != nil {
 				res.err = err
 				_ = conn.Close()
 				return
@@ -63,7 +73,16 @@ func serveScram(t *testing.T, password string, badSig bool, conns int) (addr str
 	}
 }
 
-func handleScramConn(conn net.Conn, password string, badSig bool, res *scramServerResult) error {
+func popScramCode(q *[]uint16) (uint16, bool) {
+	if q == nil || len(*q) == 0 {
+		return 0, false
+	}
+	c := (*q)[0]
+	*q = (*q)[1:]
+	return c, true
+}
+
+func handleScramConn(conn net.Conn, password string, badSig bool, res *scramServerResult, firstErrors, finalErrors *[]uint16) error {
 	_ = conn.SetDeadline(time.Now().Add(5 * time.Second))
 	buf := make([]byte, 0, 4096)
 	tmp := make([]byte, 4096)
@@ -108,9 +127,11 @@ func handleScramConn(conn net.Conn, password string, badSig bool, res *scramServ
 				return err
 			}
 			res.firstUsernames = append(res.firstUsernames, req.Username)
+			res.firstNonces = append(res.firstNonces, req.ClientNonce)
+			firstCode, _ := popScramCode(firstErrors)
 			combined := req.ClientNonce + "s"
 			payload, err := codec.EncodeScramFirstResponse(codec.ScramFirstResponse{
-				ErrorCode:     0,
+				ErrorCode:     firstCode,
 				CombinedNonce: combined,
 				Salt:          []byte(scramSaltStr),
 				Iterations:    scramIters,
@@ -143,7 +164,9 @@ func handleScramConn(conn net.Conn, password string, badSig bool, res *scramServ
 			}
 			code := uint16(0)
 			outSig := sig
-			if !bytes.Equal(req.ClientProof, proof) {
+			if queued, ok := popScramCode(finalErrors); ok {
+				code = queued
+			} else if !bytes.Equal(req.ClientProof, proof) {
 				code = 17
 			} else if badSig {
 				outSig = make([]byte, 32)
@@ -161,6 +184,11 @@ func handleScramConn(conn net.Conn, password string, badSig bool, res *scramServ
 			}
 			if _, err := conn.Write(raw); err != nil {
 				return err
+			}
+			// Keep the connection open after a transient reply so the
+			// client can restart the handshake on the same socket.
+			if code == 6 || code == 7 || code == 15 || code == 16 {
+				continue
 			}
 			if code != 0 || badSig {
 				return nil
@@ -278,5 +306,75 @@ func TestDialScramIncompleteCreds(t *testing.T) {
 	}
 	if _, err := volant.DialScram("127.0.0.1:1", "", "s3cret"); err == nil {
 		t.Fatal("expected error")
+	}
+}
+
+func TestDialScramDefaultMaxRetriesZeroRaisesOnFirstTimeout(t *testing.T) {
+	addr, got, stop := serveScramScript(t, scramPass, false, 1, []uint16{7}, nil)
+	defer stop()
+	_, err := volant.DialScram(addr, scramUser, scramPass)
+	if err == nil {
+		t.Fatal("expected error")
+	}
+	var be *codec.BrokerError
+	if !errors.As(err, &be) || be.Code != 7 || be.Op != "scram first" {
+		t.Fatalf("err=%v", err)
+	}
+	if len(got.firstUsernames) != 1 || len(got.finalUsernames) != 0 {
+		t.Fatalf("first=%d final=%d opcodes=%v", len(got.firstUsernames), len(got.finalUsernames), got.opcodes)
+	}
+}
+
+func TestDialScramRetriesFirstTimeoutThenOk(t *testing.T) {
+	addr, got, stop := serveScramScript(t, scramPass, false, 1, []uint16{7}, nil)
+	defer stop()
+	c, err := volant.DialScramRetry(addr, scramUser, scramPass, 2, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer c.Close()
+	if _, err := c.Metadata(); err != nil {
+		t.Fatal(err)
+	}
+	if len(got.firstUsernames) != 2 || len(got.finalUsernames) != 1 {
+		t.Fatalf("first=%d final=%d opcodes=%v", len(got.firstUsernames), len(got.finalUsernames), got.opcodes)
+	}
+	if len(got.firstNonces) != 2 || got.firstNonces[0] == got.firstNonces[1] {
+		t.Fatalf("nonces %v", got.firstNonces)
+	}
+}
+
+func TestDialScramRetriesFinalTimeoutRestartsHandshake(t *testing.T) {
+	addr, got, stop := serveScramScript(t, scramPass, false, 1, nil, []uint16{7})
+	defer stop()
+	c, err := volant.DialScramRetry(addr, scramUser, scramPass, 2, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer c.Close()
+	if _, err := c.Metadata(); err != nil {
+		t.Fatal(err)
+	}
+	if len(got.firstUsernames) < 2 || len(got.finalUsernames) != 2 {
+		t.Fatalf("first=%d final=%d opcodes=%v", len(got.firstUsernames), len(got.finalUsernames), got.opcodes)
+	}
+	if len(got.firstNonces) < 2 || got.firstNonces[0] == got.firstNonces[1] {
+		t.Fatalf("nonces %v", got.firstNonces)
+	}
+}
+
+func TestDialScramAuthFailedOnFirstIsNotRetried(t *testing.T) {
+	addr, got, stop := serveScramScript(t, scramPass, false, 1, []uint16{17}, nil)
+	defer stop()
+	_, err := volant.DialScramRetry(addr, scramUser, scramPass, 2, 0)
+	if err == nil {
+		t.Fatal("expected error")
+	}
+	var be *codec.BrokerError
+	if !errors.As(err, &be) || be.Code != 17 || be.Op != "scram first" {
+		t.Fatalf("err=%v", err)
+	}
+	if len(got.firstUsernames) != 1 || len(got.finalUsernames) != 0 {
+		t.Fatalf("first=%d final=%d opcodes=%v", len(got.firstUsernames), len(got.finalUsernames), got.opcodes)
 	}
 }

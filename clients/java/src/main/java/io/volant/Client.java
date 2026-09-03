@@ -180,9 +180,17 @@ public final class Client implements AutoCloseable {
 
     /** Connect with timeout and SCRAM-SHA-256. */
     public static Client connectScram(String host, int port, int timeoutMs, String user, String pass) {
+        return connectScram(host, port, timeoutMs, user, pass, 0, 50);
+    }
+
+    /** Test helper: SCRAM connect with {@code maxRetries} already applied. */
+    static Client connectScram(
+            String host, int port, int timeoutMs, String user, String pass, int maxRetries, long retryBackoffMs) {
         requireScramPair(user, pass);
         Socket s = openSocket(host, port, timeoutMs, null);
         Client c = new Client(formatAddr(host, port), s, timeoutMs, null, null, user, pass);
+        c.maxRetries = Math.max(0, maxRetries);
+        c.retryBackoffMs = Math.max(0, retryBackoffMs);
         return finishConnect(c);
     }
 
@@ -221,10 +229,11 @@ public final class Client implements AutoCloseable {
     }
 
     /**
-     * Extra Produce/Fetch/Heartbeat attempts after the first on transient
-     * broker/transport errors. Default is 0. Error 13 stays on
+     * Extra Produce/Fetch/Heartbeat/SCRAM attempts after the first on
+     * transient broker/transport errors. Default is 0. Error 13 stays on
      * {@link #setMaxRedirects}; error 21 stays on the one re-Init.
-     * Heartbeat rebalance codes 9 / 10 / 11 are not retried.
+     * Heartbeat rebalance codes 9 / 10 / 11 are not retried. SCRAM 17 /
+     * 18 and server-signature mismatch are not retried.
      */
     public void setMaxRetries(int n) {
         this.maxRetries = Math.max(0, n);
@@ -465,6 +474,33 @@ public final class Client implements AutoCloseable {
     }
 
     private void authenticateScram(String username, String password) {
+        // First+final is one unit (v0.108): a transient first or final
+        // restarts from first with a new client nonce. 17 / 18 and
+        // protocol errors (including signature mismatch) are not retried.
+        int retryAttempt = 0;
+        while (true) {
+            try {
+                scramHandshake(username, password);
+                return;
+            } catch (BrokerException e) {
+                if (isTransientBroker(e.code) && retryAttempt < maxRetries) {
+                    retryAttempt++;
+                    sleepProduceRetry();
+                    continue;
+                }
+                throw e;
+            } catch (RuntimeException e) {
+                if (isTransientTransport(e) && retryAttempt < maxRetries) {
+                    retryAttempt++;
+                    sleepProduceRetry();
+                    continue;
+                }
+                throw e;
+            }
+        }
+    }
+
+    private void scramHandshake(String username, String password) {
         String clientNonce = Scram.generateClientNonce();
         byte[] payload =
                 Codec.encodeScramFirstRequest(new Codec.ScramFirstRequest(username, clientNonce));

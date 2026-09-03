@@ -65,6 +65,8 @@ class _ScramServer:
         final_error: Optional[int] = None,
         bad_signature: bool = False,
         connections: int = 1,
+        first_errors: Optional[list[int]] = None,
+        final_errors: Optional[list[int]] = None,
     ) -> None:
         self.host = "127.0.0.1"
         self.port = 0
@@ -74,9 +76,12 @@ class _ScramServer:
         self.final_error = final_error
         self.bad_signature = bad_signature
         self.connections = connections
+        self._first_errors = list(first_errors or [])
+        self._final_errors = list(final_errors or [])
         self.opcodes: list[int] = []
         self.first_usernames: list[str] = []
         self.final_usernames: list[str] = []
+        self.first_nonces: list[str] = []
         self.got_token: Optional[str] = None
         self.error: Optional[BaseException] = None
         self._lsock: Optional[socket.socket] = None
@@ -150,14 +155,16 @@ class _ScramServer:
             if frame.opcode == OP_SCRAM_FIRST:
                 req = decode_scram_first_request(frame.payload)
                 self.first_usernames.append(req.username)
+                self.first_nonces.append(req.client_nonce)
                 combined = req.client_nonce + "s"
+                first_code = self._first_errors.pop(0) if self._first_errors else 0
                 conn.sendall(
                     encode_frame(
                         OP_SCRAM_FIRST_RESPONSE,
                         frame.correlation_id,
                         encode_scram_first_response(
                             ScramFirstResponse(
-                                error_code=0,
+                                error_code=first_code,
                                 combined_nonce=combined,
                                 salt=self.salt,
                                 iterations=self.iterations,
@@ -178,7 +185,10 @@ class _ScramServer:
                     self.salt,
                     self.iterations,
                 )
-                if self.final_error is not None:
+                if self._final_errors:
+                    code = self._final_errors.pop(0)
+                    sig = expected_sig
+                elif self.final_error is not None:
                     code = self.final_error
                     sig = expected_sig
                 elif req.client_proof != expected_proof:
@@ -196,6 +206,10 @@ class _ScramServer:
                         ),
                     )
                 )
+                # Keep the connection open after a transient reply so the
+                # client can restart the handshake on the same socket.
+                if code in (6, 7, 15, 16):
+                    continue
                 if code != 0 or self.bad_signature:
                     return
                 continue
@@ -279,6 +293,67 @@ class TestScramClient(unittest.TestCase):
         self.assertEqual(srv.final_usernames, [_USER, _USER])
         if srv.error is not None:
             raise srv.error
+
+    def test_default_max_retries_zero_raises_on_first_timeout(self) -> None:
+        with _ScramServer(first_errors=[7]) as srv:
+            with self.assertRaises(BrokerError) as cm:
+                Client(srv.addr, timeout=5.0, scram_username=_USER, scram_password=_PASS)
+        self.assertEqual(cm.exception.code, 7)
+        self.assertEqual(cm.exception.op, "scram first")
+        self.assertEqual(len(srv.first_usernames), 1)
+        self.assertEqual(len(srv.final_usernames), 0)
+
+    def test_retries_first_timeout_then_ok(self) -> None:
+        with _ScramServer(first_errors=[7]) as srv:
+            with Client(
+                srv.addr,
+                timeout=5.0,
+                scram_username=_USER,
+                scram_password=_PASS,
+                max_retries=2,
+                retry_backoff_ms=0,
+            ) as c:
+                c.metadata()
+        self.assertEqual(len(srv.first_usernames), 2)
+        self.assertEqual(len(srv.final_usernames), 1)
+        self.assertEqual(len(srv.first_nonces), 2)
+        self.assertNotEqual(srv.first_nonces[0], srv.first_nonces[1])
+        if srv.error is not None:
+            raise srv.error
+
+    def test_retries_final_timeout_restarts_handshake(self) -> None:
+        with _ScramServer(final_errors=[7]) as srv:
+            with Client(
+                srv.addr,
+                timeout=5.0,
+                scram_username=_USER,
+                scram_password=_PASS,
+                max_retries=2,
+                retry_backoff_ms=0,
+            ) as c:
+                c.metadata()
+        self.assertGreaterEqual(len(srv.first_usernames), 2)
+        self.assertEqual(len(srv.final_usernames), 2)
+        self.assertEqual(len(srv.first_nonces), len(srv.first_usernames))
+        self.assertNotEqual(srv.first_nonces[0], srv.first_nonces[1])
+        if srv.error is not None:
+            raise srv.error
+
+    def test_auth_failed_on_first_is_not_retried(self) -> None:
+        with _ScramServer(first_errors=[17]) as srv:
+            with self.assertRaises(BrokerError) as cm:
+                Client(
+                    srv.addr,
+                    timeout=5.0,
+                    scram_username=_USER,
+                    scram_password=_PASS,
+                    max_retries=2,
+                    retry_backoff_ms=0,
+                )
+        self.assertEqual(cm.exception.code, 17)
+        self.assertEqual(cm.exception.op, "scram first")
+        self.assertEqual(len(srv.first_usernames), 1)
+        self.assertEqual(len(srv.final_usernames), 0)
 
 
 if __name__ == "__main__":
