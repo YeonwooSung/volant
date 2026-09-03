@@ -148,9 +148,11 @@ List<String> names = c.listScramUsers();
 c.deleteScramUser("alice");
 // ACL admin (v0.56). Opcodes 54–59; exact-match delete. Not Kafka CreateAcls.
 AclBinding e = new AclBinding("User:alice", 0, "events", 3, 1);
+c.createAcl(e); // v0.169; one binding
 c.createAcls(List.of(e));
 List<AclBinding> listed = c.listAcls(); // any/any/any
-int removed = c.deleteAcls(List.of(e));
+int removed = c.deleteAcl(e); // v0.169; one binding
+removed = c.deleteAcls(List.of(e));
 ```
 
 `produce(..., null, value)` sends a null key. `fetch` returns `List<Record>`
@@ -303,7 +305,9 @@ not the handshake. `createScramUser` sends the password in the clear
 Create/Delete/ListAcls (v0.56) are admin RPCs (opcodes 54–59).
 `createAcls(List<AclBinding>)` / `deleteAcls(...)` (returns removed)
 / `listAcls()` or `listAcls(principal, resourceType, resource)`.
-Empty principal/resource and `resourceType=255` list any. Delete is
+Empty principal/resource and `resourceType=255` list any.
+`createAcl(entry)` / `deleteAcl(entry)` create or delete one binding
+(same as a singleton list). Delete is
 exact-match only. Not Kafka CreateAcls / DeleteAcls / DescribeAcls
 (API keys 30/31/29).
 

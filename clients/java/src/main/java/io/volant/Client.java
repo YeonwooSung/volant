@@ -2458,6 +2458,15 @@ public final class Client implements AutoCloseable {
     }
 
     /**
+     * Create one ACL binding. Same as {@link #createAcls(List)} with a
+     * singleton list. Error 14 / transient retry inherit from
+     * {@code createAcls}.
+     */
+    public void createAcl(AclBinding entry) {
+        createAcls(Collections.singletonList(entry));
+    }
+
+    /**
      * Delete exact-matching ACL bindings (native opcode 56/57). Returns the
      * number of entries removed. No filter-delete. Error 14 follows
      * {@code maxRedirects}.
@@ -2467,6 +2476,15 @@ public final class Client implements AutoCloseable {
         Codec.DeleteAclsResponse resp = (Codec.DeleteAclsResponse) adminRoundTrip(
                 Codec.OP_DELETE_ACLS, payload, Codec.DeleteAclsResponse.class, "delete_acls");
         return resp.removed;
+    }
+
+    /**
+     * Delete one exact-matching ACL binding. Same as
+     * {@link #deleteAcls(List)} with a singleton list. Error 14 /
+     * transient retry inherit from {@code deleteAcls}.
+     */
+    public int deleteAcl(AclBinding entry) {
+        return deleteAcls(Collections.singletonList(entry));
     }
 
     /** List all ACL bindings (empty filters: any principal / type / resource). */
