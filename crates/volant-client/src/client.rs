@@ -2160,6 +2160,14 @@ impl Client {
         }
     }
 
+    /// Reassign replicas for every partition of `topic`.
+    ///
+    /// Same as `reassign_partitions(topic, None, replicas)`. Empty
+    /// `replicas` still asks the controller to auto-place.
+    pub async fn reassign_partitions_all(&self, topic: &str, replicas: &[u32]) -> Result<u32> {
+        self.reassign_partitions(topic, None, replicas).await
+    }
+
     /// List configured + live membership (v0.10).
     ///
     /// Transient broker/transport errors retry up to

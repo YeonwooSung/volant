@@ -171,6 +171,9 @@
 //! v0.165 adds [`Client::delete_offsets_all`] / [`Client::delete_offset`]
 //! wrapping [`Client::delete_offsets`]. Empty entries still delete all.
 //! [`Client::delete_offsets`] is unchanged.
+//! v0.168 adds [`Client::reassign_partitions_all`] as a named helper for
+//! all-partition reassign. Same as `reassign_partitions(topic, None, replicas)`.
+//! [`Client::reassign_partitions`] is unchanged.
 
 #![deny(missing_docs)]
 
