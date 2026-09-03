@@ -648,7 +648,7 @@ func (g *GroupConsumer) commitLocked() error {
 		}
 		return entries[i].Partition < entries[j].Partition
 	})
-	if err := g.client.commitOffsets(g.groupID, g.memberID, g.generation, entries); err != nil {
+	if err := g.client.CommitOffsets(g.groupID, g.memberID, g.generation, entries); err != nil {
 		return err
 	}
 	g.lastAutoCommit = time.Now()

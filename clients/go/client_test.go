@@ -34,6 +34,7 @@ type scriptedBroker struct {
 	opcodes             []uint16
 	produceReqs         []codec.ProduceRequest
 	fetchReqs           []codec.FetchRequest
+	offsetCommitReqs    []codec.OffsetCommitRequest
 	initTxnIDs          []string
 	initCount           int
 	produceCount        int
@@ -182,6 +183,14 @@ func (s *scriptedBroker) copyFetches() []codec.FetchRequest {
 	return out
 }
 
+func (s *scriptedBroker) copyOffsetCommits() []codec.OffsetCommitRequest {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	out := make([]codec.OffsetCommitRequest, len(s.offsetCommitReqs))
+	copy(out, s.offsetCommitReqs)
+	return out
+}
+
 func (s *scriptedBroker) copyOpcodes() []uint16 {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -312,6 +321,11 @@ func (s *scriptedBroker) handle(f *frame.Frame) ([]byte, error) {
 		payload, err = codec.EncodeLeaveGroupResponse(codec.LeaveGroupResponse{ErrorCode: code})
 	case codec.OpOffsetCommit:
 		s.offsetCommitCount++
+		req, e := codec.DecodeOffsetCommitRequest(f.Payload)
+		if e != nil {
+			return nil, e
+		}
+		s.offsetCommitReqs = append(s.offsetCommitReqs, req)
 		code := uint16(0)
 		if len(s.offsetCommitCodes) > 0 {
 			code = s.offsetCommitCodes[0]
@@ -1683,6 +1697,102 @@ func TestOffsetCommitExhaustedRetriesRaises(t *testing.T) {
 	}
 	if n := srv.offsetCommits(); n != 3 {
 		t.Fatalf("offset commit count %d want 3", n)
+	}
+}
+
+func TestCommitOffsetsBatchOfTwoOnTheWire(t *testing.T) {
+	srv := &scriptedBroker{}
+	addr, stop := startScripted(t, srv)
+	defer stop()
+
+	c, err := volant.DialTimeout(addr, 5*time.Second)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer c.Close()
+
+	err = c.CommitOffsets("g", "", 0, []codec.OffsetCommitEntry{
+		{Topic: "t", Partition: 0, Offset: 5, Metadata: "m0"},
+		{Topic: "u", Partition: 1, Offset: 9, Metadata: "m1"},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if n := srv.offsetCommits(); n != 1 {
+		t.Fatalf("offset commit count %d want 1", n)
+	}
+	reqs := srv.copyOffsetCommits()
+	if len(reqs) != 1 {
+		t.Fatalf("decoded %d requests want 1", len(reqs))
+	}
+	req := reqs[0]
+	if req.GroupID != "g" || req.MemberID != "" || req.Generation != 0 {
+		t.Fatalf("header %+v", req)
+	}
+	if len(req.Entries) != 2 {
+		t.Fatalf("entries %v want 2", req.Entries)
+	}
+	if req.Entries[0] != (codec.OffsetCommitEntry{Topic: "t", Partition: 0, Offset: 5, Metadata: "m0"}) {
+		t.Fatalf("entry0 %+v", req.Entries[0])
+	}
+	if req.Entries[1] != (codec.OffsetCommitEntry{Topic: "u", Partition: 1, Offset: 9, Metadata: "m1"}) {
+		t.Fatalf("entry1 %+v", req.Entries[1])
+	}
+}
+
+func TestOffsetCommitOneEntryStillWorks(t *testing.T) {
+	srv := &scriptedBroker{}
+	addr, stop := startScripted(t, srv)
+	defer stop()
+
+	c, err := volant.DialTimeout(addr, 5*time.Second)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer c.Close()
+
+	if err := c.OffsetCommit("g", "t", 0, 5); err != nil {
+		t.Fatal(err)
+	}
+	reqs := srv.copyOffsetCommits()
+	if len(reqs) != 1 {
+		t.Fatalf("decoded %d requests want 1", len(reqs))
+	}
+	req := reqs[0]
+	if req.GroupID != "g" || req.MemberID != "" || req.Generation != 0 {
+		t.Fatalf("header %+v", req)
+	}
+	if len(req.Entries) != 1 || req.Entries[0] != (codec.OffsetCommitEntry{Topic: "t", Partition: 0, Offset: 5, Metadata: ""}) {
+		t.Fatalf("entries %+v", req.Entries)
+	}
+}
+
+func TestCommitOffsetsSendsMemberIDAndGeneration(t *testing.T) {
+	srv := &scriptedBroker{}
+	addr, stop := startScripted(t, srv)
+	defer stop()
+
+	c, err := volant.DialTimeout(addr, 5*time.Second)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer c.Close()
+
+	if err := c.CommitOffsets("g", "m1", 3, []codec.OffsetCommitEntry{
+		{Topic: "t", Partition: 0, Offset: 5},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	reqs := srv.copyOffsetCommits()
+	if len(reqs) != 1 {
+		t.Fatalf("decoded %d requests want 1", len(reqs))
+	}
+	req := reqs[0]
+	if req.MemberID != "m1" || req.Generation != 3 {
+		t.Fatalf("member/gen %+v", req)
+	}
+	if len(req.Entries) != 1 || req.Entries[0].Topic != "t" || req.Entries[0].Offset != 5 {
+		t.Fatalf("entries %+v", req.Entries)
 	}
 }
 

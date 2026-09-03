@@ -1450,7 +1450,13 @@ public final class Client implements AutoCloseable {
                 Collections.singletonList(new Codec.OffsetCommitEntry(topic, partition, offset, "")));
     }
 
-    void offsetCommit(String group, String memberId, long generation, List<Codec.OffsetCommitEntry> entries) {
+    /**
+     * OffsetCommit with N entries in one RPC (native opcode 6).
+     * {@code generation = 0} skips the broker generation check. Error 14
+     * follows {@code maxRedirects}. Transient 6 / 7 / 15 / 16 follow
+     * {@code maxRetries}.
+     */
+    public void offsetCommit(String group, String memberId, long generation, List<Codec.OffsetCommitEntry> entries) {
         byte[] payload = Codec.encodeOffsetCommitRequest(
                 new Codec.OffsetCommitRequest(group, memberId, generation, entries));
         int retryAttempt = 0;

@@ -401,6 +401,7 @@ class ClientTest {
         final List<Integer> opcodes = new CopyOnWriteArrayList<>();
         final List<Codec.ProduceRequest> produceReqs = new CopyOnWriteArrayList<>();
         final List<Codec.FetchRequest> fetchReqs = new CopyOnWriteArrayList<>();
+        final List<Codec.OffsetCommitRequest> offsetCommitReqs = new CopyOnWriteArrayList<>();
         final List<String> initTxnIds = new CopyOnWriteArrayList<>();
         final AtomicInteger initCount = new AtomicInteger();
         final AtomicInteger produceCount = new AtomicInteger();
@@ -543,6 +544,7 @@ class ClientTest {
             }
             if (frame.opcode == Codec.OP_OFFSET_COMMIT) {
                 offsetCommitCount.incrementAndGet();
+                offsetCommitReqs.add(Codec.decodeOffsetCommitRequest(frame.payload));
                 int code = 0;
                 if (!offsetCommitCodes.isEmpty()) {
                     code = offsetCommitCodes.remove(0);
@@ -1074,6 +1076,74 @@ class ClientTest {
                 assertEquals(TIMEOUT, ex.code);
             }
             assertEquals(3, srv.offsetCommitCount.get());
+        }
+    }
+
+    @Test
+    void commitOffsetsBatchOfTwoOnTheWire() throws Exception {
+        try (ScriptedBroker srv = ScriptedBroker.start()) {
+            try (Client c = Client.connect("127.0.0.1", srv.port, 5_000)) {
+                c.offsetCommit(
+                        "g",
+                        "",
+                        0,
+                        List.of(
+                                new Codec.OffsetCommitEntry("t", 0, 5L, "m0"),
+                                new Codec.OffsetCommitEntry("u", 1, 9L, "m1")));
+            }
+            assertEquals(1, srv.offsetCommitCount.get());
+            assertEquals(1, srv.offsetCommitReqs.size());
+            Codec.OffsetCommitRequest req = srv.offsetCommitReqs.get(0);
+            assertEquals("g", req.groupId);
+            assertEquals("", req.memberId);
+            assertEquals(0L, req.generation);
+            assertEquals(2, req.entries.size());
+            assertEquals("t", req.entries.get(0).topic);
+            assertEquals(0, req.entries.get(0).partition);
+            assertEquals(5L, req.entries.get(0).offset);
+            assertEquals("m0", req.entries.get(0).metadata);
+            assertEquals("u", req.entries.get(1).topic);
+            assertEquals(1, req.entries.get(1).partition);
+            assertEquals(9L, req.entries.get(1).offset);
+            assertEquals("m1", req.entries.get(1).metadata);
+        }
+    }
+
+    @Test
+    void offsetCommitOneEntryStillWorks() throws Exception {
+        try (ScriptedBroker srv = ScriptedBroker.start()) {
+            try (Client c = Client.connect("127.0.0.1", srv.port, 5_000)) {
+                c.offsetCommit("g", "t", 0, 5);
+            }
+            assertEquals(1, srv.offsetCommitCount.get());
+            Codec.OffsetCommitRequest req = srv.offsetCommitReqs.get(0);
+            assertEquals("g", req.groupId);
+            assertEquals("", req.memberId);
+            assertEquals(0L, req.generation);
+            assertEquals(1, req.entries.size());
+            assertEquals("t", req.entries.get(0).topic);
+            assertEquals(0, req.entries.get(0).partition);
+            assertEquals(5L, req.entries.get(0).offset);
+            assertEquals("", req.entries.get(0).metadata);
+        }
+    }
+
+    @Test
+    void commitOffsetsSendsMemberIdAndGeneration() throws Exception {
+        try (ScriptedBroker srv = ScriptedBroker.start()) {
+            try (Client c = Client.connect("127.0.0.1", srv.port, 5_000)) {
+                c.offsetCommit(
+                        "g",
+                        "m1",
+                        3,
+                        List.of(new Codec.OffsetCommitEntry("t", 0, 5L, "")));
+            }
+            Codec.OffsetCommitRequest req = srv.offsetCommitReqs.get(0);
+            assertEquals("m1", req.memberId);
+            assertEquals(3L, req.generation);
+            assertEquals(1, req.entries.size());
+            assertEquals("t", req.entries.get(0).topic);
+            assertEquals(5L, req.entries.get(0).offset);
         }
     }
 
