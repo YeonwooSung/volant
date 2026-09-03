@@ -364,6 +364,11 @@ docs for day-to-day reading: [ops](../ops.md), [consistency](../consistency.md),
 | v0.163 | ✅ | Go ListOffsetsAll | [V163_SPEC.md](../V163_SPEC.md) |
 | v0.164 | ✅ | language single-entry DeleteOffset | [V164_SPEC.md](../V164_SPEC.md) |
 | v0.165 | ✅ | Rust delete_offsets_all + delete_offset | [V165_SPEC.md](../V165_SPEC.md) |
+| v0.166 | ✅ | Rust list_offsets_all | [V166_SPEC.md](../V166_SPEC.md) |
+| v0.167 | ✅ | Go ReassignAllPartitions | [V167_SPEC.md](../V167_SPEC.md) |
+| v0.168 | ✅ | Rust reassign_partitions_all | [V168_SPEC.md](../V168_SPEC.md) |
+| v0.169 | ✅ | language single-entry CreateAcl / DeleteAcl | [V169_SPEC.md](../V169_SPEC.md) |
+| v0.170 | ✅ | Rust create_acl / delete_acl | [V170_SPEC.md](../V170_SPEC.md) |
 
 ---
 
