@@ -618,6 +618,8 @@ impl Client {
     ///
     /// Returns the new log start offset (low watermark).
     /// Sends `wait_majority: 0` (broker default; Phase 137).
+    /// Inherits error-13 redirect and transient retry from
+    /// [`Self::delete_records_with_wait_flag`].
     pub async fn delete_records(
         &self,
         topic: &str,
@@ -631,6 +633,13 @@ impl Client {
     /// Delete records with Phase 137 majority-wait trailer.
     ///
     /// `wait_majority`: 0 = broker default, 1 = force wait, 2 = force no-wait.
+    /// Error **13** (`NotLeaderForPartition`) uses
+    /// [`ClientConfig::max_redirects`] via [`Self::redirect_to_leader`]
+    /// (independent of retry; default 1 extra; `0` does not redirect).
+    /// Transient 6 / 7 / 15 / 16 and [`Error::Io`] retry up to
+    /// [`ClientConfig::max_retries`] extra times (default 0). 14 / 9 /
+    /// 10 / 11 / 2 / 17 / 18 / 21 / 22 and protocol are not retried.
+    /// [`Self::delete_records`] inherits.
     pub async fn delete_records_with_wait_flag(
         &self,
         topic: &str,
@@ -638,32 +647,82 @@ impl Client {
         before_offset: u64,
         wait_majority: u8,
     ) -> Result<DeleteRecordsResult> {
-        let resp = self
-            .round_trip(Request::DeleteRecords {
-                topic: topic.to_owned(),
-                partition,
-                before_offset,
-                wait_majority,
-            })
-            .await?;
-        match resp {
-            Response::DeleteRecords {
-                error_code,
-                topic,
-                partition,
-                low_watermark,
-            } => {
-                check_ok(error_code, "delete_records")?;
-                Ok(DeleteRecordsResult {
-                    topic,
-                    partition,
+        let max_retries = self.config.max_retries;
+        let max_redirects = self.config.max_redirects;
+        let mut retry_attempt = 0u32;
+        let mut redirects = 0u32;
+        let req = Request::DeleteRecords {
+            topic: topic.to_owned(),
+            partition,
+            before_offset,
+            wait_majority,
+        };
+        loop {
+            let resp = match self.round_trip(req.clone()).await {
+                Ok(r) => r,
+                Err(e) if is_transient_transport(&e) && retry_attempt < max_retries => {
+                    retry_attempt += 1;
+                    tokio::time::sleep(Duration::from_millis(self.config.retry_backoff_ms)).await;
+                    continue;
+                }
+                Err(e) => return Err(e),
+            };
+            match resp {
+                Response::DeleteRecords {
+                    error_code,
+                    topic: t,
+                    partition: p,
                     low_watermark,
-                })
+                } => {
+                    if error_code == ErrorCode::NotLeaderForPartition as u16
+                        && redirects < max_redirects
+                    {
+                        let before = self.current_addr().await;
+                        if self.redirect_to_leader(&t, p).await.is_ok()
+                            && self.current_addr().await != before
+                        {
+                            redirects += 1;
+                            continue;
+                        }
+                    }
+                    if is_transient_error_code(error_code) && retry_attempt < max_retries {
+                        retry_attempt += 1;
+                        tokio::time::sleep(Duration::from_millis(self.config.retry_backoff_ms))
+                            .await;
+                        continue;
+                    }
+                    check_ok(error_code, "delete_records")?;
+                    return Ok(DeleteRecordsResult {
+                        topic: t,
+                        partition: p,
+                        low_watermark,
+                    });
+                }
+                Response::Error { code, message } => {
+                    if code == ErrorCode::NotLeaderForPartition as u16 && redirects < max_redirects
+                    {
+                        let before = self.current_addr().await;
+                        if self.redirect_to_leader(topic, partition).await.is_ok()
+                            && self.current_addr().await != before
+                        {
+                            redirects += 1;
+                            continue;
+                        }
+                    }
+                    if is_transient_error_code(code) && retry_attempt < max_retries {
+                        retry_attempt += 1;
+                        tokio::time::sleep(Duration::from_millis(self.config.retry_backoff_ms))
+                            .await;
+                        continue;
+                    }
+                    return Err(error_from_code(code, message));
+                }
+                other => {
+                    return Err(Error::Protocol(format!(
+                        "unexpected response for delete_records: {other:?}"
+                    )))
+                }
             }
-            Response::Error { code, message } => Err(error_from_code(code, message)),
-            other => Err(Error::Protocol(format!(
-                "unexpected response for delete_records: {other:?}"
-            ))),
         }
     }
 
