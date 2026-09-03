@@ -158,6 +158,49 @@ class ClientTest {
     }
 
     @Test
+    void initProducerIdSendsOpcodeAndReturnsPid() throws Exception {
+        try (ScriptedBroker srv = ScriptedBroker.start()) {
+            try (Client c = Client.connect("127.0.0.1", srv.port, 5_000)) {
+                long pid = c.initProducerId();
+                assertEquals(42L, pid);
+                assertEquals(42L, c.producerId());
+                assertEquals(1, c.producerEpoch());
+            }
+            assertEquals(1, srv.initCount.get());
+            assertEquals(List.of(Codec.OP_INIT_PRODUCER_ID), srv.opcodes);
+        }
+    }
+
+    @Test
+    void initProducerIdSecondCallIsNoop() throws Exception {
+        try (ScriptedBroker srv = ScriptedBroker.start()) {
+            try (Client c = Client.connect("127.0.0.1", srv.port, 5_000)) {
+                long first = c.initProducerId();
+                long second = c.initProducerId();
+                assertEquals(42L, first);
+                assertEquals(42L, second);
+                assertEquals(1, c.producerEpoch());
+            }
+            assertEquals(1, srv.initCount.get());
+            assertEquals(List.of(Codec.OP_INIT_PRODUCER_ID), srv.opcodes);
+        }
+    }
+
+    @Test
+    void idempotentProduceStillInitsOnce() throws Exception {
+        try (ScriptedBroker srv = ScriptedBroker.start()) {
+            try (Client c = Client.connect("127.0.0.1", srv.port, 5_000)) {
+                c.setEnableIdempotence(true);
+                c.produce("t", 0, null, "a".getBytes(StandardCharsets.UTF_8));
+                c.produce("t", 0, null, "b".getBytes(StandardCharsets.UTF_8));
+            }
+            assertEquals(1, srv.initCount.get());
+            assertEquals(
+                    List.of(Codec.OP_INIT_PRODUCER_ID, Codec.OP_PRODUCE, Codec.OP_PRODUCE), srv.opcodes);
+        }
+    }
+
+    @Test
     void idempotentOffDefaultTrailer() throws Exception {
         try (ScriptedBroker srv = ScriptedBroker.start()) {
             try (Client c = Client.connect("127.0.0.1", srv.port, 5_000)) {
