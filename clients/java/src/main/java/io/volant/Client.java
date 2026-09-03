@@ -2128,6 +2128,21 @@ public final class Client implements AutoCloseable {
         return joinGroup(group, memberId, topics, sessionTimeoutMs, "");
     }
 
+    /**
+     * Join (or rejoin) with both {@code memberId} and Phase 12
+     * {@code groupInstanceId}. Empty memberId is a first join; empty
+     * groupInstanceId is dynamic membership. Named so it does not collide
+     * with {@code joinGroup(..., String)} overloads.
+     */
+    public JoinGroupResult joinGroupMemberWithInstance(
+            String group,
+            String memberId,
+            List<String> topics,
+            int sessionTimeoutMs,
+            String groupInstanceId) {
+        return joinGroup(group, memberId, topics, sessionTimeoutMs, groupInstanceId);
+    }
+
     JoinGroupResult joinGroup(String group, String memberId, List<String> topics, int sessionTimeoutMs) {
         return joinGroup(group, memberId, topics, sessionTimeoutMs, "");
     }

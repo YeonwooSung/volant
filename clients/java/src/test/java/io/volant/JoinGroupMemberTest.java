@@ -56,10 +56,36 @@ class JoinGroupMemberTest {
         }
     }
 
+    @Test
+    void joinGroupMemberWithInstanceEncodesMemberAndInstance() throws Exception {
+        try (JoinGroupStub srv = new JoinGroupStub()) {
+            try (Client c = Client.connect("127.0.0.1", srv.port, 5_000)) {
+                JoinGroupResult j = c.joinGroupMemberWithInstance("g", "m-1", List.of("t"), 10_000, "inst-1");
+                assertEquals("m-1", j.memberId);
+            }
+            srv.assertOk();
+            assertEquals("m-1", srv.memberId.get());
+            assertEquals("inst-1", srv.instanceId.get());
+        }
+    }
+
+    @Test
+    void joinGroupMemberWithInstanceEmptyInstanceMatchesJoinGroupMember() throws Exception {
+        try (JoinGroupStub srv = new JoinGroupStub()) {
+            try (Client c = Client.connect("127.0.0.1", srv.port, 5_000)) {
+                c.joinGroupMemberWithInstance("g", "m-1", List.of("t"), 10_000, "");
+            }
+            srv.assertOk();
+            assertEquals("m-1", srv.memberId.get());
+            assertEquals("", srv.instanceId.get());
+        }
+    }
+
     private static final class JoinGroupStub implements AutoCloseable {
         final int port;
         final List<Integer> opcodes = new CopyOnWriteArrayList<>();
         final AtomicReference<String> memberId = new AtomicReference<>();
+        final AtomicReference<String> instanceId = new AtomicReference<>();
         final AtomicReference<String> group = new AtomicReference<>();
         private final ServerSocket listen;
         private final Thread thread;
@@ -139,6 +165,7 @@ class JoinGroupMemberTest {
                 Codec.JoinGroupRequest req = Codec.decodeJoinGroupRequest(d.frame.payload);
                 group.set(req.groupId);
                 memberId.set(req.memberId);
+                instanceId.set(req.groupInstanceId);
                 byte[] payload = Codec.encodeJoinGroupResponse(
                         new Codec.JoinGroupResponse(
                                 0, 1L, "m-1", Collections.emptyList(), Collections.emptyList()));

@@ -71,6 +71,7 @@ try (Client c = Client.connect("127.0.0.1", 9092)) {
   JoinGroupResult j = c.joinGroup("g", List.of("t"), 10000);
   j = c.joinGroupWithInstance("g", List.of("t"), 10000, "inst-1"); // v0.127; empty = dynamic
   j = c.joinGroupMember("g", "m-1", List.of("t"), 10000); // v0.131; empty memberId = first join
+  j = c.joinGroupMemberWithInstance("g", "m-1", List.of("t"), 10000, "inst-1"); // v0.146; empty instance = dynamic
   c.heartbeat("g", j.memberId, j.generation);
   c.leaveGroup("g", j.memberId);
   GroupConsumer g = GroupConsumer.join(c, "g", List.of("t"), 10_000);
@@ -166,6 +167,7 @@ no-wait. Error 13 follows Produce/Fetch redirect. Transient 6 / 7 /
 dynamic; v0.127). Named so it does not collide with memberId /
 assignor overloads.
 `joinGroupMember` encodes `memberId` for rejoin (empty = first join; v0.131).
+`joinGroupMemberWithInstance` encodes both `memberId` and Phase 12 `group_instance_id` (empty member = first join; empty instance = dynamic; v0.146).
 `GroupConsumer` joins, polls assigned partitions, heartbeats, commits with
 member+generation, and rejoins on heartbeat error 9.
 `joinStatic` sends Phase 12 `group_instance_id` (empty = dynamic) and
