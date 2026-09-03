@@ -2083,6 +2083,18 @@ func (c *Client) JoinGroupWithInstance(group string, topics []string, sessionTim
 	return c.joinGroup(group, "", topics, sessionTimeoutMs, instanceID)
 }
 
+// JoinGroupMember joins (or rejoins) with an explicit member_id.
+// Empty memberID is a first join (same as JoinGroup).
+func (c *Client) JoinGroupMember(group, memberID string, topics []string, sessionTimeoutMs int) (JoinGroupResult, error) {
+	return c.joinGroup(group, memberID, topics, sessionTimeoutMs, "")
+}
+
+// JoinGroupMemberInstance joins with member_id and Phase 12 instance id.
+// Empty memberID is a first join; empty instanceID is dynamic membership.
+func (c *Client) JoinGroupMemberInstance(group, memberID string, topics []string, sessionTimeoutMs int, instanceID string) (JoinGroupResult, error) {
+	return c.joinGroup(group, memberID, topics, sessionTimeoutMs, instanceID)
+}
+
 func (c *Client) joinGroup(group, memberID string, topics []string, sessionTimeoutMs int, instanceID string) (JoinGroupResult, error) {
 	timeout := uint32(sessionTimeoutMs)
 	if timeout == 0 {
