@@ -273,23 +273,63 @@ impl Client {
         }
     }
 
+    /// Shared-token Auth on connect / reconnect.
+    ///
+    /// Transient broker/transport errors retry up to
+    /// [`ClientConfig::max_retries`] extra times (default 0). Error 17 /
+    /// 18 (auth failed / required), 13 / 14 / 9 / 10 / 11 / 2 / 21 / 22,
+    /// Protocol, and InvalidArgument are not retried. SCRAM
+    /// (`authenticate_scram`) is unchanged. Each call has its own retry
+    /// budget.
     async fn authenticate(&self, token: String) -> Result<()> {
-        let resp = self.round_trip(Request::Auth { token }).await?;
-        match resp {
-            Response::Auth { error_code } => {
-                if error_code == 0 {
-                    Ok(())
-                } else {
-                    Err(error_from_code(
+        let max_retries = self.config.max_retries;
+        let mut retry_attempt = 0u32;
+        loop {
+            let resp = match self
+                .round_trip(Request::Auth {
+                    token: token.clone(),
+                })
+                .await
+            {
+                Ok(r) => r,
+                Err(e) if is_transient_transport(&e) && retry_attempt < max_retries => {
+                    retry_attempt += 1;
+                    tokio::time::sleep(Duration::from_millis(self.config.retry_backoff_ms)).await;
+                    continue;
+                }
+                Err(e) => return Err(e),
+            };
+            match resp {
+                Response::Auth { error_code } => {
+                    if is_transient_error_code(error_code) && retry_attempt < max_retries {
+                        retry_attempt += 1;
+                        tokio::time::sleep(Duration::from_millis(self.config.retry_backoff_ms))
+                            .await;
+                        continue;
+                    }
+                    if error_code == 0 {
+                        return Ok(());
+                    }
+                    return Err(error_from_code(
                         error_code,
                         format!("auth failed with error_code={error_code}"),
-                    ))
+                    ));
+                }
+                Response::Error { code, message } => {
+                    if is_transient_error_code(code) && retry_attempt < max_retries {
+                        retry_attempt += 1;
+                        tokio::time::sleep(Duration::from_millis(self.config.retry_backoff_ms))
+                            .await;
+                        continue;
+                    }
+                    return Err(error_from_code(code, message));
+                }
+                other => {
+                    return Err(Error::Protocol(format!(
+                        "unexpected response for auth: {other:?}"
+                    )))
                 }
             }
-            Response::Error { code, message } => Err(error_from_code(code, message)),
-            other => Err(Error::Protocol(format!(
-                "unexpected response for auth: {other:?}"
-            ))),
         }
     }
 

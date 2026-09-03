@@ -76,6 +76,12 @@
 //! `admin_round_trip`) on that same transient set (default 0). Error
 //! **14** stays on `max_redirects` (independent counter). 13 / 9 / 10 /
 //! 11 / 2 / 21 / InvalidTxnState (22) and protocol are not retried.
+//! v0.107 retries shared-token Auth (`authenticate`) on that same
+//! transient set (default 0). Error 17 / 18 (auth failed / required)
+//! is not retried. 13 / 14 / 9 / 10 / 11 / 2 / 21 / 22, Protocol, and
+//! InvalidArgument are not retried. SCRAM (`authenticate_scram`) is a
+//! sibling residual (v0.109). Already-connected clients skip Auth.
+//! Each `connect` / `reconnect` has its own retry budget.
 
 #![deny(missing_docs)]
 
