@@ -52,7 +52,7 @@ try (Client c = Client.connect("127.0.0.1", 9092)) {
   c.offsetCommit("g", "t", 0, 5, "consumer-1"); // v0.128 per-entry metadata
   c.offsetCommit("g", "", 0L, List.of(new Codec.OffsetCommitEntry("t", 0, 5L, ""), new Codec.OffsetCommitEntry("t", 1, 9L, ""))); // v0.119 batch
   List<Offset> offs = c.offsetFetch("g", "t");
-  List<OffsetFetchEntry> allOffs = c.offsetFetchAll("g"); // v0.118; topic+partition+offset
+  List<OffsetFetchEntry> allOffs = c.offsetFetchAll("g"); // v0.118 / v0.140; topic+partition+offset+metadata
   List<OffsetFetchEntry> rows = c.fetchOffsets("g", List.of(new Codec.OffsetEntry("t", 0))); // v0.122; null/empty = all
   List<OffsetListing> bounds = c.listOffsets("t"); // all; or listOffsets("t", 0)
   DeleteRecordsResult cut = c.deleteRecords("t", 0, 100); // wait_majority=0

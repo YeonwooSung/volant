@@ -1241,6 +1241,28 @@ class ClientTest {
     }
 
     @Test
+    void offsetFetchAllSurfacesMetadata() throws Exception {
+        try (ScriptedBroker srv = ScriptedBroker.start()) {
+            srv.offsetFetchEntries.add(new Codec.OffsetFetchEntry("t", 0, 5, "consumer-1"));
+            try (Client c = Client.connect("127.0.0.1", srv.port, 5_000)) {
+                List<OffsetFetchEntry> offs = c.offsetFetchAll("g");
+                assertEquals(List.of(new OffsetFetchEntry("t", 0, 5, "consumer-1")), offs);
+                List<OffsetFetchEntry> rows = c.fetchOffsets("g", Collections.emptyList());
+                assertEquals("consumer-1", rows.get(0).metadata);
+            }
+        }
+    }
+
+    @Test
+    void offsetFetchEntryThreeArgMetadataEmpty() {
+        OffsetFetchEntry e = new OffsetFetchEntry("t", 0, 5);
+        assertEquals("t", e.topic);
+        assertEquals(0, e.partition);
+        assertEquals(5, e.offset);
+        assertEquals("", e.metadata);
+    }
+
+    @Test
     void deleteOffsetsRetriesTimeoutThenOk() throws Exception {
         try (ScriptedBroker srv = ScriptedBroker.start()) {
             srv.deleteOffsetsCodes.add(TIMEOUT);
