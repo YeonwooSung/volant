@@ -24,6 +24,7 @@ defer c.Close()
 if err := c.CreateTopic("t", 1); err != nil {
     log.Fatal(err)
 }
+// CreateTopicWithConfigs sends native pairs (e.g. {{"retention.ms","1000"}}) and returns topic id.
 n, err := c.CreatePartitions("t", 2)
 _ = n
 gen, err := c.ReassignPartitions("t", []uint32{1, 2}, nil) // all partitions

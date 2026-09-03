@@ -24,6 +24,7 @@ import java.util.List;
 
 try (Client c = Client.connect("127.0.0.1", 9092)) {
   c.createTopic("t", 1);
+  // createTopic(name, n, configs) sends native pairs (v0.117); same List<String[]> as alterConfigs.
   int parts = c.createPartitions("t", 2);
   int gen = c.reassignPartitions("t", new int[] {1, 2}); // all partitions
   long off = c.produce("t", 0, null, "hello".getBytes(UTF_8));

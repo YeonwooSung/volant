@@ -833,8 +833,22 @@ public final class Client implements AutoCloseable {
      * Transient 6 / 7 / 15 / 16 and TCP/IO follow {@code maxRetries}
      * (default 0); 14 is not a retry. */
     public int createTopic(String name, int partitions) {
+        return createTopic(name, partitions, Collections.emptyList());
+    }
+
+    /**
+     * Create a topic with native CreateTopic config pairs (Phase 13 trailer;
+     * same as Python {@code configs=} / Rust {@code create_topic_with_configs}).
+     * Empty value is allowed. Returns the broker-assigned topic id. This is
+     * not Kafka CreateTopics configs / IncrementalAlterConfigs. Error 14 and
+     * transient retry inherit {@code adminRoundTrip}.
+     */
+    public int createTopic(String name, int partitions, List<String[]> configs) {
+        if (configs == null) {
+            configs = Collections.emptyList();
+        }
         byte[] payload = Codec.encodeCreateTopicRequest(
-                new Codec.CreateTopicRequest(name, partitions, Collections.emptyList()));
+                new Codec.CreateTopicRequest(name, partitions, configs));
         Codec.CreateTopicResponse resp = (Codec.CreateTopicResponse) adminRoundTrip(
                 Codec.OP_CREATE_TOPIC, payload, Codec.CreateTopicResponse.class, "create_topic");
         return (int) resp.topicId;
