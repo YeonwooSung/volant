@@ -1,6 +1,6 @@
 # Volant residual TODO (review loop)
 
-**Baseline:** HEAD product = **Phases 0–154** + residuals **v0.3–v0.145**.  
+**Baseline:** HEAD product = **Phases 0–154** + residuals **v0.3–v0.150**.  
 **Last review:** 2026-09-03  
 
 Living roadmap: [ROADMAP.md](./ROADMAP.md).  
@@ -64,7 +64,7 @@ Phase index: [docs/history/PHASE_HISTORY.md](./docs/history/PHASE_HISTORY.md).
 | **Later** | Full **openraft** crate integration | **v0.11–v0.26 + redb log (v0.35) + joint rollback (v0.34) + follower forward (v0.38)** — not RocksDB/KRaft |
 | **Later** | **Dynamic membership** reconfiguration | **overlay v0.10 + joint v0.26 + rollback v0.34 + follower forward v0.38 + reassign rollback v0.39** — overlay still SoT |
 | **Later** | Full **KIP-890 / `__transaction_state`** | **log MVP closed (v0.13)** — opt-in JSON topic; not Kafka schemas |
-| **Later** | **Multi-language clients** | **Python/Go/Java through v0.145** + Rust Fetch config knobs **v0.144**; not kafka-python / SyncGroup |
+| **Later** | **Multi-language clients** | **Python/Go/Java through v0.150** + Rust fetch max_bytes **v0.149**; not kafka-python / SyncGroup |
 | **Later** | **Long fuzz + chaos-mesh** | **MVP closed (v0.15)** — extended corpus + Chaos Mesh YAML + A→B isolate |
 | **Later** | **Perf campaign** vs aspirational targets | **closed (v0.2 PR2)** — measured table published; group-commit **v0.20** (opt-in, no new bench) |
 
@@ -231,6 +231,11 @@ Phase index: [docs/history/PHASE_HISTORY.md](./docs/history/PHASE_HISTORY.md).
 - [x] language Fetch client-level default knobs → **v0.143**
 - [x] Rust ClientConfig Fetch knobs → **v0.144**
 - [x] Go/Java Fetch high watermark → **v0.145**
+- [x] Java JoinGroup member + instance → **v0.146**
+- [x] Go/Java ProduceBatch default acks → **v0.147**
+- [x] language OffsetFetch topic + metadata → **v0.148**
+- [x] Rust fetch uses ClientConfig fetch_max_bytes → **v0.149**
+- [x] language public InitProducerId → **v0.150**
 
 ---
 
@@ -254,7 +259,7 @@ Phase index: [docs/history/PHASE_HISTORY.md](./docs/history/PHASE_HISTORY.md).
 - [x] `__transaction_state` log MVP (v0.13; Volant JSON; not Kafka KIP-890/939 schemas)
 - [x] Kafka DeleteRecords **per-request** wait flag (v0.6 flex v2 tag 0; v0–1 env-only)
 - [x] Preferred selector **throttling** / TCP probe (v0.7; opt-in, not Kafka quota)
-- [x] Multi-language clients — Python/Go/Java through v0.145 (incl. Produce timestamp+acks / timestamp+headers+acks, Fetch client knobs, Fetch high watermark) + Rust Fetch config **v0.144**; not kafka-python / SyncGroup
+- [x] Multi-language clients — Python/Go/Java through v0.150 (incl. JoinGroup member+instance, ProduceBatch default acks, OffsetFetch topic metadata, public InitProducerId) + Rust fetch max_bytes **v0.149**; not kafka-python / SyncGroup
 - [x] Long fuzz campaigns + chaos-mesh MVP (v0.15; corpus + YAML + A→B isolate; not multi-hour CI)
 - [x] Published perf numbers vs aspirational table; group-commit **v0.20** (opt-in)
 
@@ -265,7 +270,7 @@ Phase index: [docs/history/PHASE_HISTORY.md](./docs/history/PHASE_HISTORY.md).
 - Local `assignor="range"` uses DescribeGroup members (language **v0.69**, Rust **v0.73**); describe failure falls back. JoinGroup still has no member list / no SyncGroup
 - Language-client SCRAM handshake is **SHA-256** only (v0.46); admin Create/Delete/ListScramUsers are native **64–69** (v0.55); password is sent in the clear on create (use TLS); not Kafka SASL / AlterUserScramCredentials
 - Idempotent produce is native **32/33** (v0.47); BeginTxn/EndTxn are native **50–53** (v0.57); `TransactionalProducer` is a thin helper (v0.63). Not Kafka txn API keys
-- Produce/fetch/heartbeat/offset-admin/ListOffsets/LeaveGroup/DescribeGroup/ListGroups/Metadata/ListMembers/BeginTxn/EndTxn/InitProducerId/admin_round_trip/Auth/SCRAM handshake/DeleteRecords retry (v0.61 / v0.66 / v0.74 / v0.78 / v0.82 / v0.86 / v0.90 / v0.95 / v0.99 / v0.101 / v0.103 / v0.106 / v0.108 / v0.110 / v0.111 / Rust **v0.80/v0.83/v0.84/v0.87/v0.92/v0.96/v0.100/v0.102/v0.104/v0.107/v0.109/v0.111**) is default **0**; transient codes 6/7/15/16 + TCP I/O only. LeaveGroup error **10** is success (already left). InvalidTxnState (22) is not retried. Error 21 on Init itself is not retried. Auth / SCRAM **17 / 18** are not retried. SCRAM first+final is one unit (new nonce on restart). Error 13 stays on `max_redirects` (Produce/Fetch/DeleteRecords/ListOffsets; language **v0.112**, Rust **v0.113**). Error **14** stays on `max_redirects` (independent of retry). ListMembers follows 14 (language **v0.121**, Rust **v0.120**; hunt uses a no-14 helper). DescribeGroup / ListGroups follow 14 (language **v0.124**, Rust **v0.125**; broker may still not return 14). JoinGroup is not retried. Language `reconnect` is public (**v0.115**). Go/Java Metadata can filter topics (**v0.116**). Go/Java CreateTopic can send configs (**v0.117**); Go `CreateTopicID` returns the topic id (**v0.126**; `CreateTopic` still discards it). OffsetFetchAll returns the whole group (**v0.118**); `fetch_offsets` can send wire entries (**v0.122**). CommitOffsets batch is public (**v0.119**); Python GroupConsumer commit is one RPC (**v0.123**). Go/Java JoinGroup can send instance id (**v0.127**). Go/Java OffsetCommit can send entry metadata (**v0.128**). Language produce default acks is 1 (**v0.129**; Rust `ClientConfig.acks`). Go/Java convenience Produce can send headers (**v0.130**), timestamp (**v0.132**), headers+acks (**v0.133**), timestamp+headers (**v0.138**), timestamp+acks (**v0.141**), and timestamp+headers+acks (**v0.142**). Language 3-arg Fetch uses client fetch knobs (**v0.143**; default 128 / 4MiB / 0). Rust `fetch_default` uses `ClientConfig` fetch knobs (**v0.144**). Go/Java `FetchResult` / `fetchResult` expose high watermark (**v0.145**; `Fetch` / `fetch` still return records only). Go/Java JoinGroup can rejoin with member_id (**v0.131**). Heartbeat follows 14 (language **v0.134**, Rust **v0.135**; broker may still not return 14). LeaveGroup follows 14 (language **v0.136**, Rust **v0.137**; error **10** stays success). Go `OffsetCommitMember` sends member+generation (**v0.139**; `OffsetCommit` stays admin-only). Go/Java public OffsetFetchEntry carries metadata (**v0.140**).
+- Produce/fetch/heartbeat/offset-admin/ListOffsets/LeaveGroup/DescribeGroup/ListGroups/Metadata/ListMembers/BeginTxn/EndTxn/InitProducerId/admin_round_trip/Auth/SCRAM handshake/DeleteRecords retry (v0.61 / v0.66 / v0.74 / v0.78 / v0.82 / v0.86 / v0.90 / v0.95 / v0.99 / v0.101 / v0.103 / v0.106 / v0.108 / v0.110 / v0.111 / Rust **v0.80/v0.83/v0.84/v0.87/v0.92/v0.96/v0.100/v0.102/v0.104/v0.107/v0.109/v0.111**) is default **0**; transient codes 6/7/15/16 + TCP I/O only. LeaveGroup error **10** is success (already left). InvalidTxnState (22) is not retried. Error 21 on Init itself is not retried. Auth / SCRAM **17 / 18** are not retried. SCRAM first+final is one unit (new nonce on restart). Error 13 stays on `max_redirects` (Produce/Fetch/DeleteRecords/ListOffsets; language **v0.112**, Rust **v0.113**). Error **14** stays on `max_redirects` (independent of retry). ListMembers follows 14 (language **v0.121**, Rust **v0.120**; hunt uses a no-14 helper). DescribeGroup / ListGroups follow 14 (language **v0.124**, Rust **v0.125**; broker may still not return 14). JoinGroup is not retried. Language `reconnect` is public (**v0.115**). Go/Java Metadata can filter topics (**v0.116**). Go/Java CreateTopic can send configs (**v0.117**); Go `CreateTopicID` returns the topic id (**v0.126**; `CreateTopic` still discards it). OffsetFetchAll returns the whole group (**v0.118**); `fetch_offsets` can send wire entries (**v0.122**). CommitOffsets batch is public (**v0.119**); Python GroupConsumer commit is one RPC (**v0.123**). Go/Java JoinGroup can send instance id (**v0.127**). Go/Java OffsetCommit can send entry metadata (**v0.128**). Language produce default acks is 1 (**v0.129**; Rust `ClientConfig.acks`). Go/Java convenience Produce can send headers (**v0.130**), timestamp (**v0.132**), headers+acks (**v0.133**), timestamp+headers (**v0.138**), timestamp+acks (**v0.141**), and timestamp+headers+acks (**v0.142**). Language 3-arg Fetch uses client fetch knobs (**v0.143**; default 128 / 4MiB / 0). Rust `fetch_default` uses `ClientConfig` fetch knobs (**v0.144**). Go/Java `FetchResult` / `fetchResult` expose high watermark (**v0.145**; `Fetch` / `fetch` still return records only). Java `joinGroupMemberWithInstance` sends member+instance (**v0.146**). Go `ProduceBatchDefault` / Java list `produce` without acks use the client default (**v0.147**). Language `OffsetFetchEntries` keeps topic-filtered metadata (**v0.148**; `OffsetFetch` still partition+offset). Rust `fetch` uses `ClientConfig.fetch_max_bytes` (**v0.149**). Language public InitProducerId pre-allocates a pid (**v0.150**; produce / BeginTxn still init implicitly). Go/Java JoinGroup can rejoin with member_id (**v0.131**). Heartbeat follows 14 (language **v0.134**, Rust **v0.135**; broker may still not return 14). LeaveGroup follows 14 (language **v0.136**, Rust **v0.137**; error **10** stays success). Go `OffsetCommitMember` sends member+generation (**v0.139**; `OffsetCommit` stays admin-only). Go/Java public OffsetFetchEntry carries metadata (**v0.140**).
 - Auto-commit is poll-tied and default **off** (language **v0.48**, Rust **v0.60**); not Kafka `enable.auto.commit`
 - GroupConsumer `auto_offset_reset`: `earliest` is ListOffsets earliest (language **v0.70**, Rust **v0.71**); `latest` is LEO. Not Kafka timestamp reset
 - Go/Java convenience Produce is still one message; `ProduceBatch` / `produce(..., messages, acks)` sends N in one RPC (v0.68)
@@ -316,5 +321,6 @@ Phase index: [docs/history/PHASE_HISTORY.md](./docs/history/PHASE_HISTORY.md).
 | v0.131–v0.135 | **Shipped** — JoinGroup rejoin; Produce timestamp; Produce headers+acks; language Heartbeat 14; Rust Heartbeat 14 |
 | v0.136–v0.140 | **Shipped** — language LeaveGroup 14; Rust LeaveGroup 14; Produce timestamp+headers; Go OffsetCommit member; OffsetFetch metadata |
 | v0.141–v0.145 | **Shipped** — Produce timestamp+acks; Produce timestamp+headers+acks; language Fetch knobs; Rust Fetch config; Fetch high watermark |
+| v0.146–v0.150 | **Shipped** — Java JoinGroup member+instance; ProduceBatch default acks; OffsetFetch topic metadata; Rust fetch max_bytes; public InitProducerId |
 
 **How to use this file:** mark new work by phase number in ROADMAP + PHASE*_SPEC; fold completed rows into “Closed checklist”; keep “Still open” as the only honesty surface for operators and contributors.

@@ -344,6 +344,11 @@ docs for day-to-day reading: [ops](../ops.md), [consistency](../consistency.md),
 | v0.143 | ✅ | language Fetch client-level default knobs | [V143_SPEC.md](../V143_SPEC.md) |
 | v0.144 | ✅ | Rust ClientConfig Fetch knobs | [V144_SPEC.md](../V144_SPEC.md) |
 | v0.145 | ✅ | Go/Java Fetch high watermark | [V145_SPEC.md](../V145_SPEC.md) |
+| v0.146 | ✅ | Java JoinGroup member + instance | [V146_SPEC.md](../V146_SPEC.md) |
+| v0.147 | ✅ | Go/Java ProduceBatch default acks | [V147_SPEC.md](../V147_SPEC.md) |
+| v0.148 | ✅ | language OffsetFetch topic + metadata | [V148_SPEC.md](../V148_SPEC.md) |
+| v0.149 | ✅ | Rust fetch uses ClientConfig fetch_max_bytes | [V149_SPEC.md](../V149_SPEC.md) |
+| v0.150 | ✅ | language public InitProducerId | [V150_SPEC.md](../V150_SPEC.md) |
 
 ---
 
