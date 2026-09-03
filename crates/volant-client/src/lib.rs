@@ -177,6 +177,9 @@
 //! v0.168 adds [`Client::reassign_partitions_all`] as a named helper for
 //! all-partition reassign. Same as `reassign_partitions(topic, None, replicas)`.
 //! [`Client::reassign_partitions`] is unchanged.
+//! v0.170 adds [`Client::create_acl`] / [`Client::delete_acl`] wrapping
+//! [`Client::create_acls`] / [`Client::delete_acls`]. Single-binding
+//! convenience. Batch APIs unchanged.
 
 #![deny(missing_docs)]
 

@@ -2028,6 +2028,11 @@ impl Client {
         }
     }
 
+    /// Create one ACL binding. Same as `create_acls(vec![entry])`.
+    pub async fn create_acl(&self, entry: volant_protocol::AclBinding) -> Result<()> {
+        self.create_acls(vec![entry]).await
+    }
+
     /// Delete exact-matching ACL bindings (Phase 20).
     pub async fn delete_acls(&self, entries: Vec<volant_protocol::AclBinding>) -> Result<u32> {
         let resp = self
@@ -2046,6 +2051,11 @@ impl Client {
                 "unexpected response for delete_acls: {other:?}"
             ))),
         }
+    }
+
+    /// Delete one exact-matching ACL binding. Same as `delete_acls(vec![entry])`.
+    pub async fn delete_acl(&self, entry: volant_protocol::AclBinding) -> Result<u32> {
+        self.delete_acls(vec![entry]).await
     }
 
     /// List ACL bindings with optional filters (Phase 20).
