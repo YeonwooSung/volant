@@ -3087,6 +3087,68 @@ func TestProduceBatchEmpty(t *testing.T) {
 	}
 }
 
+func TestProduceBatchDefaultUsesSetAcks(t *testing.T) {
+	srv := &scriptedBroker{}
+	addr, stop := startScripted(t, srv)
+	defer stop()
+
+	c, err := volant.DialTimeout(addr, 5*time.Second)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer c.Close()
+
+	c.SetAcks(255)
+	off, err := c.ProduceBatchDefault("t", 0, batchMsgs("a", "b", "c"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if off != 7 {
+		t.Fatalf("base offset: got %d want 7", off)
+	}
+	reqs := srv.copyProduces()
+	if len(reqs) != 1 {
+		t.Fatalf("produces %d want 1", len(reqs))
+	}
+	if n := len(reqs[0].Messages); n != 3 {
+		t.Fatalf("messages %d want 3", n)
+	}
+	if reqs[0].Acks != 255 {
+		t.Fatalf("acks %d want 255", reqs[0].Acks)
+	}
+	got := string(reqs[0].Messages[0].Value) + string(reqs[0].Messages[1].Value) + string(reqs[0].Messages[2].Value)
+	if got != "abc" {
+		t.Fatalf("values %q want abc", got)
+	}
+}
+
+func TestProduceBatchExplicitAcksWins(t *testing.T) {
+	srv := &scriptedBroker{}
+	addr, stop := startScripted(t, srv)
+	defer stop()
+
+	c, err := volant.DialTimeout(addr, 5*time.Second)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer c.Close()
+
+	c.SetAcks(255)
+	if _, err := c.ProduceBatch("t", 0, batchMsgs("a", "b", "c"), 1); err != nil {
+		t.Fatal(err)
+	}
+	reqs := srv.copyProduces()
+	if len(reqs) != 1 {
+		t.Fatalf("produces %d want 1", len(reqs))
+	}
+	if n := len(reqs[0].Messages); n != 3 {
+		t.Fatalf("messages %d want 3", n)
+	}
+	if reqs[0].Acks != 1 {
+		t.Fatalf("acks %d want 1", reqs[0].Acks)
+	}
+}
+
 func TestProduceStillOneMessage(t *testing.T) {
 	srv := &scriptedBroker{}
 	addr, stop := startScripted(t, srv)

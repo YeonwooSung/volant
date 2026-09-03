@@ -340,9 +340,9 @@ func (c *Client) SetRetryBackoff(d time.Duration) {
 	c.retryBackoff = d
 }
 
-// SetAcks sets the default produce acks used by Produce. 1 = leader
-// only; 255 = acks=all (ISR). Default is 1. ProduceAcks / ProduceBatch
-// stay explicit.
+// SetAcks sets the default produce acks used by Produce and
+// ProduceBatchDefault. 1 = leader only; 255 = acks=all (ISR).
+// Default is 1. ProduceAcks / ProduceBatch stay explicit.
 func (c *Client) SetAcks(acks uint8) {
 	c.acks = acks
 }
@@ -1224,6 +1224,12 @@ func (c *Client) ProduceTimestampHeadersAcks(topic string, partition int, key, v
 	return c.ProduceBatch(topic, partition, []codec.ProduceMessage{
 		{Key: key, Value: value, TimestampMs: timestampMs, Headers: headers},
 	}, acks)
+}
+
+// ProduceBatchDefault is ProduceBatch using the client default acks
+// (1 unless SetAcks). ProduceBatch still requires explicit acks.
+func (c *Client) ProduceBatchDefault(topic string, partition int, msgs []codec.ProduceMessage) (int64, error) {
+	return c.ProduceBatch(topic, partition, msgs, c.acks)
 }
 
 // ProduceBatch sends msgs in one Produce RPC. acks: 1 = leader, 255 = all.
