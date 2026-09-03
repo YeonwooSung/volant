@@ -6,7 +6,7 @@ import socket
 import threading
 import unittest
 
-from volant import BrokerError, Client
+from volant import BrokerError, Client, OffsetCommitEntry
 from volant.codec import (
     OP_DELETE_OFFSETS,
     OP_DELETE_OFFSETS_RESPONSE,
@@ -40,6 +40,7 @@ from volant.codec import (
     ListMembersResponse,
     ListOffsetsResponse,
     MetadataResponse,
+    OffsetCommitRequest,
     OffsetCommitResponse,
     OffsetFetchResponse,
     PartitionInfo,
@@ -48,6 +49,7 @@ from volant.codec import (
     TopicInfo,
     decode_fetch_request,
     decode_init_producer_id_request,
+    decode_offset_commit_request,
     decode_produce_request,
     encode_delete_offsets_response,
     encode_describe_group_response,
@@ -100,6 +102,7 @@ class ScriptedBroker:
         self.metadata: MetadataResponse | None = None
         self.opcodes: list[int] = []
         self.produce_reqs: list[ProduceRequest] = []
+        self.offset_commit_reqs: list[OffsetCommitRequest] = []
         self.init_txn_ids: list[str] = []
         self.init_count = 0
         self.produce_count = 0
@@ -254,6 +257,7 @@ class ScriptedBroker:
             )
         if opcode == OP_OFFSET_COMMIT:
             self.offset_commit_count += 1
+            self.offset_commit_reqs.append(decode_offset_commit_request(raw))
             code = self.offset_commit_codes.pop(0) if self.offset_commit_codes else 0
             return (
                 encode_offset_commit_response(OffsetCommitResponse(error_code=code)),
@@ -894,6 +898,60 @@ class TestOffsetAdminRetry(unittest.TestCase):
                     c.offset_commit("g", "t", 0, 5)
             self.assertEqual(ctx.exception.code, TIMEOUT)
             self.assertEqual(srv.offset_commit_count, 3)
+
+
+class TestCommitOffsetsBatch(unittest.TestCase):
+    def test_batch_of_two_entries_on_the_wire(self) -> None:
+        with ScriptedBroker() as srv:
+            with Client(srv.addr, timeout=5.0) as c:
+                c.commit_offsets(
+                    "g",
+                    [
+                        OffsetCommitEntry("t", 0, 5, "m0"),
+                        ("u", 1, 9, "m1"),
+                    ],
+                )
+            self.assertEqual(srv.offset_commit_count, 1)
+            req = srv.offset_commit_reqs[0]
+            self.assertEqual(req.group_id, "g")
+            self.assertEqual(req.member_id, "")
+            self.assertEqual(req.generation, 0)
+            self.assertEqual(
+                req.entries,
+                [
+                    OffsetCommitEntry("t", 0, 5, "m0"),
+                    OffsetCommitEntry("u", 1, 9, "m1"),
+                ],
+            )
+
+    def test_one_entry_offset_commit_still_works(self) -> None:
+        with ScriptedBroker() as srv:
+            with Client(srv.addr, timeout=5.0) as c:
+                c.offset_commit("g", "t", 0, 5)
+            self.assertEqual(srv.offset_commit_count, 1)
+            req = srv.offset_commit_reqs[0]
+            self.assertEqual(req.group_id, "g")
+            self.assertEqual(req.member_id, "")
+            self.assertEqual(req.generation, 0)
+            self.assertEqual(
+                req.entries, [OffsetCommitEntry("t", 0, 5, "")]
+            )
+
+    def test_member_id_and_generation_are_sent(self) -> None:
+        with ScriptedBroker() as srv:
+            with Client(srv.addr, timeout=5.0) as c:
+                c.commit_offsets(
+                    "g",
+                    [("t", 0, 5)],
+                    member_id="m1",
+                    generation=3,
+                )
+            req = srv.offset_commit_reqs[0]
+            self.assertEqual(req.member_id, "m1")
+            self.assertEqual(req.generation, 3)
+            self.assertEqual(
+                req.entries, [OffsetCommitEntry("t", 0, 5, "")]
+            )
 
 
 class TestListOffsetsRetry(unittest.TestCase):

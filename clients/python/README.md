@@ -31,6 +31,7 @@ batch = c.fetch("t", 0, offset=0, max_messages=10, max_bytes=4096, max_wait_ms=1
 for offset, key, value in batch.tuples():
     print(offset, key, value)
 c.offset_commit(group="g", topic="t", partition=0, offset=5)
+c.commit_offsets("g", [("t", 0, 5), ("t", 1, 9)])  # v0.119 batch
 offs = c.offset_fetch(group="g", topic="t")  # [(partition, offset), ...]
 bounds = c.list_offsets("t")  # [OffsetListing(partition, earliest, latest), ...]
 cfg = c.describe_configs("t")

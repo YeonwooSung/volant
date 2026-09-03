@@ -1528,12 +1528,15 @@ func (c *Client) Metadata() (Metadata, error) {
 // OffsetCommit commits one group offset (admin path: empty member, generation 0).
 // Error 14 follows maxRedirects. Transient 6 / 7 / 15 / 16 follow maxRetries.
 func (c *Client) OffsetCommit(group, topic string, partition int, offset int64) error {
-	return c.commitOffsets(group, "", 0, []codec.OffsetCommitEntry{
+	return c.CommitOffsets(group, "", 0, []codec.OffsetCommitEntry{
 		{Topic: topic, Partition: uint32(partition), Offset: uint64(offset), Metadata: ""},
 	})
 }
 
-func (c *Client) commitOffsets(group, memberID string, generation uint32, entries []codec.OffsetCommitEntry) error {
+// CommitOffsets sends one OffsetCommit RPC with N entries (native opcode 6).
+// generation 0 skips the broker generation check. Error 14 follows
+// maxRedirects. Transient 6 / 7 / 15 / 16 follow maxRetries.
+func (c *Client) CommitOffsets(group, memberID string, generation uint32, entries []codec.OffsetCommitEntry) error {
 	if entries == nil {
 		entries = []codec.OffsetCommitEntry{}
 	}

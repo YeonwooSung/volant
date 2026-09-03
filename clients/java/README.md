@@ -40,6 +40,7 @@ try (Client c = Client.connect("127.0.0.1", 9092)) {
     System.out.println(rec.offset + " " + rec.key + " " + new String(rec.value, UTF_8));
   }
   c.offsetCommit("g", "t", 0, 5);
+  c.offsetCommit("g", "", 0L, List.of(new Codec.OffsetCommitEntry("t", 0, 5L, ""), new Codec.OffsetCommitEntry("t", 1, 9L, ""))); // v0.119 batch
   List<Offset> offs = c.offsetFetch("g", "t");
   List<OffsetListing> bounds = c.listOffsets("t"); // all; or listOffsets("t", 0)
   DeleteRecordsResult cut = c.deleteRecords("t", 0, 100); // wait_majority=0

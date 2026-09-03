@@ -1347,19 +1347,70 @@ class Client:
         extra times (default 0). Error 14 follows ``max_redirects``.
         Error 2 / 9 / 10 / 11 / 13 are not retried.
         """
-        payload = codec.encode_offset_commit_request(
-            OffsetCommitRequest(
-                group_id=group,
-                member_id=member_id,
-                generation=generation,
-                entries=[
+        self.commit_offsets(
+            group,
+            [
+                OffsetCommitEntry(
+                    topic=topic,
+                    partition=partition,
+                    offset=offset,
+                    metadata=metadata,
+                )
+            ],
+            member_id=member_id,
+            generation=generation,
+        )
+
+    def commit_offsets(
+        self,
+        group: str,
+        entries: Iterable[Union[OffsetCommitEntry, tuple]],
+        *,
+        member_id: str = "",
+        generation: int = 0,
+    ) -> None:
+        """Commit N group offsets in one OffsetCommit RPC (native opcode 6).
+
+        ``entries`` are :class:`OffsetCommitEntry` or
+        ``(topic, partition, offset)`` /
+        ``(topic, partition, offset, metadata)`` tuples.
+        ``generation = 0`` skips the broker generation check.
+        Transient broker/transport errors retry up to ``max_retries``
+        extra times (default 0). Error 14 follows ``max_redirects``.
+        Error 2 / 9 / 10 / 11 / 13 are not retried.
+        """
+        parsed: list[OffsetCommitEntry] = []
+        for e in entries or ():
+            if isinstance(e, OffsetCommitEntry):
+                parsed.append(e)
+            elif isinstance(e, tuple) and len(e) == 3:
+                topic, partition, offset = e
+                parsed.append(
+                    OffsetCommitEntry(
+                        topic=topic,
+                        partition=partition,
+                        offset=offset,
+                        metadata="",
+                    )
+                )
+            elif isinstance(e, tuple) and len(e) == 4:
+                topic, partition, offset, metadata = e
+                parsed.append(
                     OffsetCommitEntry(
                         topic=topic,
                         partition=partition,
                         offset=offset,
                         metadata=metadata,
                     )
-                ],
+                )
+            else:
+                raise TypeError(f"unsupported offset commit entry: {type(e)}")
+        payload = codec.encode_offset_commit_request(
+            OffsetCommitRequest(
+                group_id=group,
+                member_id=member_id,
+                generation=generation,
+                entries=parsed,
             )
         )
         max_retries = max(0, int(self.max_retries))

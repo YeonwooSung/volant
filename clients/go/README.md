@@ -48,6 +48,7 @@ for _, rec := range recs {
 if err := c.OffsetCommit("g", "t", 0, 5); err != nil {
     log.Fatal(err)
 }
+_ = c.CommitOffsets("g", "", 0, []codec.OffsetCommitEntry{{Topic: "t", Partition: 0, Offset: 5}, {Topic: "t", Partition: 1, Offset: 9}}) // v0.119 batch
 offs, err := c.OffsetFetch("g", "t")
 _ = offs
 bounds, err := c.ListOffsets("t", nil) // all partitions; or []uint32{0}
