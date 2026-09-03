@@ -413,6 +413,8 @@ class ClientTest {
         final List<Integer> produceCodes = new CopyOnWriteArrayList<>();
         final List<Integer> initCodes = new CopyOnWriteArrayList<>();
         final List<Integer> fetchCodes = new CopyOnWriteArrayList<>();
+        volatile long fetchHighWatermark = 0;
+        volatile List<Record> fetchRecords = Collections.emptyList();
         final List<Integer> heartbeatCodes = new CopyOnWriteArrayList<>();
         final List<int[]> heartbeatReplies = new CopyOnWriteArrayList<>();
         final List<String> heartbeatMessages = new CopyOnWriteArrayList<>();
@@ -577,7 +579,7 @@ class ClientTest {
                     code = fetchCodes.remove(0);
                 }
                 return Codec.encodeFetchResponse(
-                        new Codec.FetchResponse(req.topic, req.partition, 0, code, Collections.emptyList()));
+                        new Codec.FetchResponse(req.topic, req.partition, fetchHighWatermark, code, fetchRecords));
             }
             if (frame.opcode == Codec.OP_HEARTBEAT) {
                 heartbeatCount.incrementAndGet();
@@ -903,6 +905,30 @@ class ClientTest {
                 assertTrue(recs.isEmpty());
             }
             assertEquals(1, srv.fetchCount.get());
+        }
+    }
+
+    @Test
+    void fetchResultReturnsHighWatermark() throws Exception {
+        try (ScriptedBroker srv = ScriptedBroker.start()) {
+            srv.fetchHighWatermark = 42L;
+            srv.fetchRecords = List.of(
+                    new Record(7L, -1L, null, "hello".getBytes(StandardCharsets.UTF_8), List.of()));
+            try (Client c = Client.connect("127.0.0.1", srv.port, 5_000)) {
+                FetchResult got = c.fetchResult("t", 0, 0);
+                assertEquals("t", got.topic);
+                assertEquals(0, got.partition);
+                assertEquals(42L, got.highWatermark);
+                assertEquals(1, got.records.size());
+                assertEquals(7L, got.records.get(0).offset);
+                assertArrayEquals("hello".getBytes(StandardCharsets.UTF_8), got.records.get(0).value);
+
+                List<Record> recs = c.fetch("t", 0, 0);
+                assertEquals(1, recs.size());
+                assertEquals(7L, recs.get(0).offset);
+                assertArrayEquals("hello".getBytes(StandardCharsets.UTF_8), recs.get(0).value);
+            }
+            assertEquals(2, srv.fetchCount.get());
         }
     }
 

@@ -53,6 +53,9 @@ if err != nil {
 }
 // FetchOpts: max_messages / max_bytes / max_wait_ms (v0.64). Fetch stays 128 / 4MiB / 0.
 recs, err = c.FetchOpts("t", 0, 0, 10, 4096, 100)
+// FetchResult: records + high watermark (v0.145). Fetch / FetchOpts stay records only.
+batch, err := c.FetchResult("t", 0, 0)
+_ = batch.HighWatermark
 for _, rec := range recs {
     fmt.Println(rec.Offset, rec.Key, rec.Value)
 }
@@ -151,8 +154,10 @@ _ = listed
 _ = removed
 ```
 
-`Produce(..., nil, value)` sends a null key. `Fetch` returns `[]Record`
-(`Offset`, `Key`, `Value`). `Metadata()` returns brokers + topics.
+`Produce(..., nil, value)` sends a null key. `Fetch` / `FetchOpts` return
+`[]Record` (`Offset`, `Key`, `Value`). `FetchResult` / `FetchOptsResult`
+return the same records plus the already-decoded high watermark.
+`Metadata()` returns brokers + topics.
 `OffsetCommit` is an admin commit (empty member, generation 0).
 `OffsetCommitMember` / `OffsetCommitMemberMeta` send one entry with
 caller member + generation (v0.139; Java 6/7-arg parity).

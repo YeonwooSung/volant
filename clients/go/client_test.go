@@ -19,6 +19,8 @@ type scriptedBroker struct {
 	produceCodes       []uint16
 	initCodes          []uint16
 	fetchCodes         []uint16
+	fetchHwm           uint64
+	fetchRecords       []codec.FetchRecord
 	heartbeatCodes     []uint16
 	heartbeatReplies   []createTopicReply
 	leaveGroupCodes    []uint16
@@ -315,7 +317,7 @@ func (s *scriptedBroker) handle(f *frame.Frame) ([]byte, error) {
 			s.fetchCodes = s.fetchCodes[1:]
 		}
 		payload, err = codec.EncodeFetchResponse(codec.FetchResponse{
-			Topic: req.Topic, Partition: req.Partition, HighWatermark: 0, ErrorCode: code, Records: nil,
+			Topic: req.Topic, Partition: req.Partition, HighWatermark: s.fetchHwm, ErrorCode: code, Records: s.fetchRecords,
 		})
 	case codec.OpHeartbeat:
 		s.heartbeatCount++
@@ -589,6 +591,45 @@ func TestFetchRedirectsOnce(t *testing.T) {
 	}
 	if lf != 1 {
 		t.Fatalf("leader fetch = %d want 1", lf)
+	}
+}
+
+func TestFetchResultReturnsHighWatermark(t *testing.T) {
+	recs := []codec.FetchRecord{{
+		Offset:      7,
+		TimestampMs: -1,
+		Value:       []byte("hello"),
+	}}
+	srv := &scriptedBroker{fetchHwm: 42, fetchRecords: recs}
+	addr, stop := startScripted(t, srv)
+	defer stop()
+
+	c, err := volant.DialTimeout(addr, 5*time.Second)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer c.Close()
+
+	got, err := c.FetchResult("t", 0, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.Topic != "t" || got.Partition != 0 || got.HighWatermark != 42 {
+		t.Fatalf("result %+v want topic=t partition=0 hwm=42", got)
+	}
+	if len(got.Records) != 1 || got.Records[0].Offset != 7 || string(got.Records[0].Value) != "hello" {
+		t.Fatalf("records %+v want [{offset=7 value=hello}]", got.Records)
+	}
+
+	only, err := c.Fetch("t", 0, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(only) != 1 || only[0].Offset != 7 || string(only[0].Value) != "hello" {
+		t.Fatalf("Fetch records %+v want [{offset=7 value=hello}]", only)
+	}
+	if _, n, _, _ := srv.snapshot(); n != 2 {
+		t.Fatalf("fetch count %d want 2", n)
 	}
 }
 
