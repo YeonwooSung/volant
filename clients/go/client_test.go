@@ -1935,6 +1935,33 @@ func TestOffsetCommitOneEntryStillWorks(t *testing.T) {
 	}
 }
 
+func TestOffsetCommitMetaEncodesMetadata(t *testing.T) {
+	srv := &scriptedBroker{}
+	addr, stop := startScripted(t, srv)
+	defer stop()
+
+	c, err := volant.DialTimeout(addr, 5*time.Second)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer c.Close()
+
+	if err := c.OffsetCommitMeta("g", "t", 0, 5, "consumer-1"); err != nil {
+		t.Fatal(err)
+	}
+	reqs := srv.copyOffsetCommits()
+	if len(reqs) != 1 {
+		t.Fatalf("decoded %d requests want 1", len(reqs))
+	}
+	req := reqs[0]
+	if req.GroupID != "g" || req.MemberID != "" || req.Generation != 0 {
+		t.Fatalf("header %+v", req)
+	}
+	if len(req.Entries) != 1 || req.Entries[0] != (codec.OffsetCommitEntry{Topic: "t", Partition: 0, Offset: 5, Metadata: "consumer-1"}) {
+		t.Fatalf("entries %+v", req.Entries)
+	}
+}
+
 func TestCommitOffsetsSendsMemberIDAndGeneration(t *testing.T) {
 	srv := &scriptedBroker{}
 	addr, stop := startScripted(t, srv)

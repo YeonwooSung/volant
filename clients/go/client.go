@@ -1588,8 +1588,15 @@ func (c *Client) MetadataTopics(topics []string) (Metadata, error) {
 // OffsetCommit commits one group offset (admin path: empty member, generation 0).
 // Error 14 follows maxRedirects. Transient 6 / 7 / 15 / 16 follow maxRetries.
 func (c *Client) OffsetCommit(group, topic string, partition int, offset int64) error {
+	return c.OffsetCommitMeta(group, topic, partition, offset, "")
+}
+
+// OffsetCommitMeta is OffsetCommit with per-entry metadata (admin path).
+// Empty metadata matches OffsetCommit. Error 14 follows maxRedirects.
+// Transient 6 / 7 / 15 / 16 follow maxRetries.
+func (c *Client) OffsetCommitMeta(group, topic string, partition int, offset int64, metadata string) error {
 	return c.CommitOffsets(group, "", 0, []codec.OffsetCommitEntry{
-		{Topic: topic, Partition: uint32(partition), Offset: uint64(offset), Metadata: ""},
+		{Topic: topic, Partition: uint32(partition), Offset: uint64(offset), Metadata: metadata},
 	})
 }
 

@@ -1244,6 +1244,57 @@ class ClientTest {
     }
 
     @Test
+    void offsetCommitFiveArgEncodesMetadata() throws Exception {
+        try (ScriptedBroker srv = ScriptedBroker.start()) {
+            try (Client c = Client.connect("127.0.0.1", srv.port, 5_000)) {
+                c.offsetCommit("g", "t", 0, 5, "consumer-1");
+            }
+            assertEquals(1, srv.offsetCommitCount.get());
+            Codec.OffsetCommitRequest req = srv.offsetCommitReqs.get(0);
+            assertEquals("g", req.groupId);
+            assertEquals("", req.memberId);
+            assertEquals(0L, req.generation);
+            assertEquals(1, req.entries.size());
+            assertEquals("t", req.entries.get(0).topic);
+            assertEquals(0, req.entries.get(0).partition);
+            assertEquals(5L, req.entries.get(0).offset);
+            assertEquals("consumer-1", req.entries.get(0).metadata);
+        }
+    }
+
+    @Test
+    void offsetCommitSixArgStillSendsEmptyMetadata() throws Exception {
+        try (ScriptedBroker srv = ScriptedBroker.start()) {
+            try (Client c = Client.connect("127.0.0.1", srv.port, 5_000)) {
+                c.offsetCommit("g", "t", 0, 5, "m1", 3);
+            }
+            Codec.OffsetCommitRequest req = srv.offsetCommitReqs.get(0);
+            assertEquals("m1", req.memberId);
+            assertEquals(3L, req.generation);
+            assertEquals(1, req.entries.size());
+            assertEquals("t", req.entries.get(0).topic);
+            assertEquals(5L, req.entries.get(0).offset);
+            assertEquals("", req.entries.get(0).metadata);
+        }
+    }
+
+    @Test
+    void offsetCommitSevenArgEncodesMemberGenerationAndMetadata() throws Exception {
+        try (ScriptedBroker srv = ScriptedBroker.start()) {
+            try (Client c = Client.connect("127.0.0.1", srv.port, 5_000)) {
+                c.offsetCommit("g", "t", 0, 5, "m1", 3, "consumer-1");
+            }
+            Codec.OffsetCommitRequest req = srv.offsetCommitReqs.get(0);
+            assertEquals("m1", req.memberId);
+            assertEquals(3L, req.generation);
+            assertEquals(1, req.entries.size());
+            assertEquals("t", req.entries.get(0).topic);
+            assertEquals(5L, req.entries.get(0).offset);
+            assertEquals("consumer-1", req.entries.get(0).metadata);
+        }
+    }
+
+    @Test
     void commitOffsetsSendsMemberIdAndGeneration() throws Exception {
         try (ScriptedBroker srv = ScriptedBroker.start()) {
             try (Client c = Client.connect("127.0.0.1", srv.port, 5_000)) {
@@ -1259,6 +1310,7 @@ class ClientTest {
             assertEquals(1, req.entries.size());
             assertEquals("t", req.entries.get(0).topic);
             assertEquals(5L, req.entries.get(0).offset);
+            assertEquals("", req.entries.get(0).metadata);
         }
     }
 

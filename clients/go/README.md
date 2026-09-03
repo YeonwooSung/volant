@@ -49,6 +49,7 @@ for _, rec := range recs {
 if err := c.OffsetCommit("g", "t", 0, 5); err != nil {
     log.Fatal(err)
 }
+_ = c.OffsetCommitMeta("g", "t", 0, 5, "consumer-1") // v0.128 per-entry metadata
 _ = c.CommitOffsets("g", "", 0, []codec.OffsetCommitEntry{{Topic: "t", Partition: 0, Offset: 5}, {Topic: "t", Partition: 1, Offset: 9}}) // v0.119 batch
 offs, err := c.OffsetFetch("g", "t")
 allOffs, err := c.OffsetFetchAll("g") // v0.118; []OffsetFetchEntry{Topic, Partition, Offset}

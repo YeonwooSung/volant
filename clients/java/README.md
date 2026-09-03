@@ -42,6 +42,7 @@ try (Client c = Client.connect("127.0.0.1", 9092)) {
     System.out.println(rec.offset + " " + rec.key + " " + new String(rec.value, UTF_8));
   }
   c.offsetCommit("g", "t", 0, 5);
+  c.offsetCommit("g", "t", 0, 5, "consumer-1"); // v0.128 per-entry metadata
   c.offsetCommit("g", "", 0L, List.of(new Codec.OffsetCommitEntry("t", 0, 5L, ""), new Codec.OffsetCommitEntry("t", 1, 9L, ""))); // v0.119 batch
   List<Offset> offs = c.offsetFetch("g", "t");
   List<OffsetFetchEntry> allOffs = c.offsetFetchAll("g"); // v0.118; topic+partition+offset
