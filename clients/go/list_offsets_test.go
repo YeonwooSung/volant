@@ -189,6 +189,36 @@ func (s *listOffsetsServer) handle(f *frame.Frame) ([]byte, error) {
 	return frame.Encode(replyOp, f.CorrelationID, payload)
 }
 
+func TestListOffsetsAllEncodesEmptyPartitions(t *testing.T) {
+	entries := []codec.OffsetListing{
+		{Partition: 0, Earliest: 0, Latest: 10},
+		{Partition: 1, Earliest: 2, Latest: 5},
+	}
+	addr, got, stop := serveListOffsets(t, 0, entries)
+	defer stop()
+	c, err := volant.DialTimeout(addr, 5*time.Second)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer c.Close()
+	out, err := c.ListOffsetsAll("events")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.err != nil {
+		t.Fatal(got.err)
+	}
+	if got.topic != "events" || len(got.partitions) != 0 {
+		t.Fatalf("wire request topic=%q partitions=%v", got.topic, got.partitions)
+	}
+	if len(out) != 2 || out[0] != (volant.OffsetListing{Partition: 0, Earliest: 0, Latest: 10}) {
+		t.Fatalf("parsed %+v", out)
+	}
+	if out[1] != (volant.OffsetListing{Partition: 1, Earliest: 2, Latest: 5}) {
+		t.Fatalf("parsed entry1 %+v", out[1])
+	}
+}
+
 func TestListOffsetsEmptyPartitionsEncodedAsCountZero(t *testing.T) {
 	entries := []codec.OffsetListing{
 		{Partition: 0, Earliest: 0, Latest: 10},
