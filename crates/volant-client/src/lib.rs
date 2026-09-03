@@ -151,6 +151,14 @@
 //! v0.155 adds [`ClientConfig::delete_records_wait`] (default **0**)
 //! used by [`Client::delete_records`].
 //! [`Client::delete_records_with_wait_flag`] stays fully explicit.
+//! v0.157 redirects [`Client::metadata`] / [`Client::metadata_topics`]
+//! on error **14** (`NotController`) via `redirect_to_controller` /
+//! `max_redirects`. Transient 6/7/15/16 stay on `max_retries`
+//! (v0.96 helper). `max_redirects=0` does not redirect. Hunt uses a
+//! no-14 `metadata_rpc` so redirect and metadata are not recursive.
+//! Native Metadata has no top-level error_code; 14 arrives as
+//! [`volant_protocol::Response::Error`]. 13 / 2 / 9 / 10 / 11 / 17 /
+//! 18 / 21 / 22 and protocol are not redirected.
 //! v0.159 adds [`Client::fetch_offsets_all`] as a named helper for
 //! all-group OffsetFetch. Same as `fetch_offsets(group_id, vec![])`.
 //! [`Client::fetch_offsets`] is unchanged.

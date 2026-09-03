@@ -880,9 +880,12 @@ impl Client {
     /// Transient broker/transport errors retry up to
     /// [`ClientConfig::max_retries`] extra times (default 0). Native
     /// Metadata has no top-level error_code; failures arrive as
-    /// [`Response::Error`] or transport. Error 2 / 9 / 10 / 11 / 13 /
-    /// 14 and protocol errors are not retried. Admin-14 and leader-13
-    /// redirect inherit via this method.
+    /// [`Response::Error`] or transport. Error **14** (`NotController`)
+    /// uses [`ClientConfig::max_redirects`] via
+    /// [`Self::redirect_to_controller`] (independent of retry) and
+    /// does not increment `retry_attempt`. `max_redirects=0` does not
+    /// redirect. Error 2 / 9 / 10 / 11 / 13 / 17 / 18 / 21 / 22 and
+    /// protocol errors are not retried or redirected.
     pub async fn metadata(&self) -> Result<Metadata> {
         self.metadata_topics(Vec::new()).await
     }
@@ -890,28 +893,43 @@ impl Client {
     /// Fetch cluster metadata for the named topics.
     ///
     /// Empty `topics` means all topics (same as [`Self::metadata`]).
-    /// Same decode, retry, and error handling as [`Self::metadata`].
-    /// This is the native Metadata `topics` list, not Kafka
-    /// `allow_auto_topic_creation` / topic ids.
+    /// Same decode, retry, redirect, and error handling as
+    /// [`Self::metadata`]. This is the native Metadata `topics` list,
+    /// not Kafka `allow_auto_topic_creation` / topic ids.
     pub async fn metadata_topics(&self, topics: Vec<String>) -> Result<Metadata> {
+        let max_redirects = self.config.max_redirects;
+        let mut redirects = 0u32;
+        loop {
+            let resp = self
+                .metadata_list_members_round_trip(Request::Metadata {
+                    topics: topics.clone(),
+                })
+                .await?;
+            match &resp {
+                Response::Error { code, message }
+                    if *code == ErrorCode::NotController as u16
+                        && redirects < max_redirects
+                        && self
+                            .redirect_to_controller(parse_controller_id(message))
+                            .await =>
+                {
+                    redirects += 1;
+                    continue;
+                }
+                _ => return metadata_from_response(resp),
+            }
+        }
+    }
+
+    /// Metadata without the v0.157 error-14 wrap. Used by
+    /// [`Self::redirect_to_controller`] so hunt and `metadata` /
+    /// `metadata_topics` are not mutually recursive. Transient retry
+    /// is still v0.96.
+    async fn metadata_rpc(&self, topics: Vec<String>) -> Result<Metadata> {
         let resp = self
             .metadata_list_members_round_trip(Request::Metadata { topics })
             .await?;
-        match resp {
-            Response::Metadata {
-                brokers,
-                topics,
-                controller_id,
-            } => Ok(Metadata {
-                brokers,
-                topics,
-                controller_id,
-            }),
-            Response::Error { code, message } => Err(error_from_code(code, message)),
-            other => Err(Error::Protocol(format!(
-                "unexpected response for metadata: {other:?}"
-            ))),
-        }
+        metadata_from_response(resp)
     }
 
     /// Produce messages to a topic (default acks from config, usually `1`).
@@ -1490,11 +1508,15 @@ impl Client {
     /// matching id. Otherwise pick the first advertised broker whose host:port
     /// is not this connection.
     ///
+    /// Hunt uses [`Self::metadata_rpc`] (no 14 wrap) so this helper and
+    /// `metadata` / `metadata_topics` are not mutually recursive. Id miss
+    /// still uses [`Self::list_members_rpc`].
+    ///
     /// Returns `true` when the caller should retry. Returns `false` on no other
     /// broker / lookup miss / empty host / reconnect fail — caller must surface
     /// the original error 14.
     async fn redirect_to_controller(&self, controller_id: Option<u32>) -> bool {
-        let meta = match self.metadata().await {
+        let meta = match self.metadata_rpc(Vec::new()).await {
             Ok(m) => m,
             Err(_) => return false,
         };
@@ -2404,6 +2426,24 @@ impl Client {
                 )));
             }
         }
+    }
+}
+
+fn metadata_from_response(resp: Response) -> Result<Metadata> {
+    match resp {
+        Response::Metadata {
+            brokers,
+            topics,
+            controller_id,
+        } => Ok(Metadata {
+            brokers,
+            topics,
+            controller_id,
+        }),
+        Response::Error { code, message } => Err(error_from_code(code, message)),
+        other => Err(Error::Protocol(format!(
+            "unexpected response for metadata: {other:?}"
+        ))),
     }
 }
 
