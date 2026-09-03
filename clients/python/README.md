@@ -92,6 +92,9 @@ c = Client("127.0.0.1:9092", tls=True, tls_ca="ca.pem", auth_token="s3cret")
 c = Client("127.0.0.1:9092", enable_idempotence=True)
 # Pre-allocate pid (v0.150). Second call is a no-op. Produce / BeginTxn still init implicitly.
 pid, epoch = c.init_producer_id()
+# Stored pid/epoch without Init (v0.160). Uninitialized is 0.
+_ = c.producer_id
+_ = c.producer_epoch
 # Optional produce/fetch retry (v0.61 / v0.66). Default 0 extra attempts.
 c = Client("127.0.0.1:9092", max_retries=3, retry_backoff_ms=50)
 c.max_retries = 3
@@ -245,6 +248,8 @@ broker returns UnknownProducerId (21), the client re-Inits once and
 resets sequences. Not Kafka idempotent produce v2.
 `init_producer_id()` (v0.150) pre-allocates the pid; a second call
 is a no-op. Produce / BeginTxn still init implicitly.
+`producer_id` / `producer_epoch` (v0.160) read the stored values
+without Init. Uninitialized is 0.
 Native transactions (v0.57) are opt-in via `transactional_id=`.
 `begin_transaction` / `commit_transaction` / `abort_transaction` send
 opcodes 50–53. Init uses that id. Abort rewinds sequences. Not Kafka

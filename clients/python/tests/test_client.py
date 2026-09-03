@@ -714,6 +714,23 @@ class TestPublicInitProducerId(unittest.TestCase):
             self.assertEqual(srv.init_count, 1)
             self.assertEqual(srv.opcodes, [OP_INIT_PRODUCER_ID])
 
+    def test_producer_id_getters_before_init_are_zero(self) -> None:
+        with ScriptedBroker() as srv:
+            with Client(srv.addr, timeout=5.0) as c:
+                self.assertEqual(c.producer_id, 0)
+                self.assertEqual(c.producer_epoch, 0)
+            self.assertEqual(srv.init_count, 0)
+            self.assertEqual(srv.opcodes, [])
+
+    def test_producer_id_getters_after_init_match_stored(self) -> None:
+        with ScriptedBroker() as srv:
+            with Client(srv.addr, timeout=5.0) as c:
+                pid, epoch = c.init_producer_id()
+                self.assertEqual((c.producer_id, c.producer_epoch), (pid, epoch))
+                self.assertEqual((c.producer_id, c.producer_epoch), (42, 1))
+            self.assertEqual(srv.init_count, 1)
+            self.assertEqual(srv.opcodes, [OP_INIT_PRODUCER_ID])
+
     def test_idempotent_produce_still_inits_once(self) -> None:
         with ScriptedBroker() as srv:
             with Client(srv.addr, timeout=5.0, enable_idempotence=True) as c:

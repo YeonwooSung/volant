@@ -140,6 +140,9 @@
 //! `ensure_producer_id`. Returns stored pid/epoch. A second
 //! call is a no-op (already initialized). Produce / BeginTxn
 //! still init implicitly.
+//! v0.160 adds [`Client::producer_id`] / [`Client::producer_epoch`]
+//! getters that read stored pid/epoch without calling Init.
+//! Uninitialized is 0.
 //! v0.153 adds one-entry [`Client::commit_offset`] /
 //! [`Client::commit_offset_meta`] / [`Client::commit_offset_member`] /
 //! [`Client::commit_offset_member_meta`] wrapping [`Client::commit_offsets`].

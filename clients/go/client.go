@@ -419,6 +419,18 @@ func (c *Client) InitProducerID() (producerID uint64, epoch uint16, err error) {
 	return c.producerID, c.producerEpoch, nil
 }
 
+// ProducerID returns the stored producer id (0 until Init or implicit init).
+// Does not call Init.
+func (c *Client) ProducerID() uint64 {
+	return c.producerID
+}
+
+// ProducerEpoch returns the stored producer epoch (0 until Init or implicit init).
+// Does not call Init.
+func (c *Client) ProducerEpoch() uint16 {
+	return c.producerEpoch
+}
+
 // TLS reports whether the connection is TLS-wrapped.
 func (c *Client) TLS() bool {
 	return c != nil && c.tls
