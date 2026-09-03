@@ -115,6 +115,13 @@
 //! (v0.92 helper). `max_redirects=0` does not redirect. 13 / 2 /
 //! 9 / 10 / 11 / 17 / 18 / 21 / 22 and protocol are not redirected.
 //! Range assignor inherits via `describe_group`.
+//! v0.135 redirects [`Client::heartbeat`] on error **14**
+//! (`NotController`) via `redirect_to_controller` /
+//! `max_redirects`. Transient 6/7/15/16 stay on `max_retries`
+//! (v0.80). `max_redirects=0` does not redirect. 13 / 2 /
+//! 9 / 10 / 11 / 17 / 18 / 21 / 22 and protocol are not redirected.
+//! Rebalance 9/10/11 is still not retried. Typed non-zero codes
+//! still return [`HeartbeatResult`]. [`GroupConsumer`] inherits.
 
 #![deny(missing_docs)]
 
