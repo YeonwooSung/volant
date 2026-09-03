@@ -35,10 +35,13 @@ class _DeleteRecordsServer:
         *,
         error_code: int = 0,
         low_watermark: int = 96,
+        error_codes: Optional[list[int]] = None,
     ) -> None:
         self.host = "127.0.0.1"
         self.port = 0
-        self.error_codes: list[int] = [error_code]
+        self.error_codes: list[int] = (
+            list(error_codes) if error_codes is not None else [error_code]
+        )
         self.low_watermark = low_watermark
         self.metadata: Optional[MetadataResponse] = None
         self.got_topic: Optional[str] = None
@@ -238,6 +241,72 @@ class TestDeleteRecordsClient(unittest.TestCase):
         self.assertEqual(srv.delete_count, 1)
         self.assertEqual(srv.metadata_count, 1)
         self.assertEqual(srv.accept_count, 1)
+
+    def test_default_max_retries_zero_raises_on_timeout(self) -> None:
+        with _DeleteRecordsServer(error_code=7) as srv:
+            with Client(srv.addr, timeout=5.0) as c:
+                self.assertEqual(c.max_retries, 0)
+                with self.assertRaises(BrokerError) as ctx:
+                    c.delete_records("events", 0, 10)
+            self.assertEqual(ctx.exception.code, 7)
+            self.assertEqual(ctx.exception.op, "delete_records")
+        self.assertEqual(srv.delete_count, 1)
+        self.assertEqual(srv.metadata_count, 0)
+        self.assertEqual(srv.opcodes, [OP_DELETE_RECORDS])
+
+    def test_retries_timeout_then_ok(self) -> None:
+        with _DeleteRecordsServer(error_codes=[7, 0], low_watermark=96) as srv:
+            with Client(srv.addr, timeout=5.0, max_retries=2, retry_backoff_ms=0) as c:
+                got = c.delete_records("events", 2, 100)
+            self.assertEqual(
+                got,
+                DeleteRecordsResult(topic="events", partition=2, low_watermark=96),
+            )
+        self.assertEqual(srv.delete_count, 2)
+        self.assertEqual(srv.metadata_count, 0)
+        self.assertEqual(srv.opcodes, [OP_DELETE_RECORDS, OP_DELETE_RECORDS])
+
+    def test_error_13_redirect_not_counted_as_retry(self) -> None:
+        with _DeleteRecordsServer(low_watermark=96) as leader, _DeleteRecordsServer(
+            error_code=13
+        ) as follower:
+            follower.metadata = _leader_meta("events", 2, 2, "127.0.0.1", leader.port)
+            with Client(follower.addr, timeout=5.0) as c:
+                self.assertEqual(c.max_retries, 0)
+                got = c.delete_records("events", 2, 100, wait_majority=1)
+            self.assertEqual(
+                got,
+                DeleteRecordsResult(topic="events", partition=2, low_watermark=96),
+            )
+            self.assertEqual(c.addr, leader.addr)
+        self.assertEqual(follower.delete_count, 1)
+        self.assertEqual(follower.metadata_count, 1)
+        self.assertEqual(leader.delete_count, 1)
+        self.assertEqual(leader.got_wait_majority, 1)
+
+    def test_not_found_not_retried(self) -> None:
+        with _DeleteRecordsServer(error_code=2) as srv:
+            with Client(srv.addr, timeout=5.0, max_retries=2, retry_backoff_ms=0) as c:
+                with self.assertRaises(BrokerError) as ctx:
+                    c.delete_records("events", 0, 10)
+            self.assertEqual(ctx.exception.code, 2)
+            self.assertEqual(ctx.exception.op, "delete_records")
+        self.assertEqual(srv.delete_count, 1)
+        self.assertEqual(srv.metadata_count, 0)
+        self.assertEqual(srv.opcodes, [OP_DELETE_RECORDS])
+
+    def test_exhausted_retries_raises(self) -> None:
+        with _DeleteRecordsServer(error_codes=[7, 7, 7]) as srv:
+            with Client(srv.addr, timeout=5.0, max_retries=2, retry_backoff_ms=0) as c:
+                with self.assertRaises(BrokerError) as ctx:
+                    c.delete_records("events", 0, 10)
+            self.assertEqual(ctx.exception.code, 7)
+            self.assertEqual(ctx.exception.op, "delete_records")
+        self.assertEqual(srv.delete_count, 3)
+        self.assertEqual(srv.metadata_count, 0)
+        self.assertEqual(
+            srv.opcodes, [OP_DELETE_RECORDS, OP_DELETE_RECORDS, OP_DELETE_RECORDS]
+        )
 
 
 if __name__ == "__main__":

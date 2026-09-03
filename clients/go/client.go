@@ -1717,7 +1717,8 @@ func (c *Client) DeleteRecords(topic string, partition uint32, beforeOffset uint
 
 // DeleteRecordsWithWaitFlag is DeleteRecords plus the Phase 137 trailer.
 // waitMajority: 0 = broker default, 1 = force wait, 2 = force no-wait.
-// Error 13 follows Produce/Fetch redirect (maxRedirects).
+// Error 13 follows Produce/Fetch redirect (maxRedirects); 13 is not a
+// transient retry. Transient 6 / 7 / 15 / 16 follow maxRetries (default 0).
 func (c *Client) DeleteRecordsWithWaitFlag(topic string, partition uint32, beforeOffset uint64, waitMajority uint8) (DeleteRecordsResult, error) {
 	payload, err := codec.EncodeDeleteRecordsRequest(codec.DeleteRecordsRequest{
 		Topic:        topic,
@@ -1728,18 +1729,30 @@ func (c *Client) DeleteRecordsWithWaitFlag(topic string, partition uint32, befor
 	if err != nil {
 		return DeleteRecordsResult{}, err
 	}
+	maxRetries := c.maxRetries
+	if maxRetries < 0 {
+		maxRetries = 0
+	}
 	maxAttempts := 1 + c.maxRedirects
-	for attempt := 1; ; attempt++ {
+	retryAttempt := 0
+	redirectAttempt := 0
+	for {
 		decoded, err := c.roundTrip(codec.OpDeleteRecords, payload)
 		if err != nil {
-			if be, ok := err.(*codec.BrokerError); ok && be.Code == notLeaderForPartition && attempt < maxAttempts {
+			if be, ok := err.(*codec.BrokerError); ok && be.Code == notLeaderForPartition && redirectAttempt+1 < maxAttempts {
 				ok, rerr := c.redirectToLeader(topic, partition)
 				if rerr != nil {
 					return DeleteRecordsResult{}, rerr
 				}
 				if ok {
+					redirectAttempt++
 					continue
 				}
+			}
+			if isTransientProduceErr(err) && retryAttempt < maxRetries {
+				retryAttempt++
+				c.sleepProduceRetry()
+				continue
 			}
 			return DeleteRecordsResult{}, err
 		}
@@ -1747,14 +1760,20 @@ func (c *Client) DeleteRecordsWithWaitFlag(topic string, partition uint32, befor
 		if !ok {
 			return DeleteRecordsResult{}, &frame.ProtocolError{Msg: fmt.Sprintf("unexpected response for delete_records: %T", decoded)}
 		}
-		if resp.ErrorCode == notLeaderForPartition && attempt < maxAttempts {
+		if resp.ErrorCode == notLeaderForPartition && redirectAttempt+1 < maxAttempts {
 			ok, rerr := c.redirectToLeader(resp.Topic, resp.Partition)
 			if rerr != nil {
 				return DeleteRecordsResult{}, rerr
 			}
 			if ok {
+				redirectAttempt++
 				continue
 			}
+		}
+		if isTransientBroker(resp.ErrorCode) && retryAttempt < maxRetries {
+			retryAttempt++
+			c.sleepProduceRetry()
+			continue
 		}
 		if err := check(resp.ErrorCode, "delete_records"); err != nil {
 			return DeleteRecordsResult{}, err

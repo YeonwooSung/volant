@@ -132,7 +132,7 @@ partitions; native opcode 48, not Kafka timestamp ListOffsets).
 returns `DeleteRecordsResult` (`topic`, `partition`, `low_watermark`);
 native opcode 44, not Kafka DeleteRecords (API key 21). `wait_majority`
 0 = broker default, 1 = force wait, 2 = force no-wait. Error 13 follows
-Produce/Fetch redirect.
+Produce/Fetch redirect. Transient 6 / 7 / 15 / 16 follow ``max_retries``.
 `join_group` sends empty `member_id` on first join
 (broker assigns one) and unpacks as
 `(member_id, generation, assignment)`.
@@ -171,8 +171,9 @@ re-Init. Heartbeat shares produce/fetch ``max_retries`` (default 0);
 rebalance codes 9 / 10 / 11 are not retried. LeaveGroup shares
 ``max_retries``; error 10 is success (already left). JoinGroup is not
 retried. OffsetCommit / OffsetFetch / DeleteOffsets / ListOffsets /
-DescribeGroup / ListGroups / Metadata / ListMembers / BeginTxn /
-EndTxn / InitProducerId share the same ``max_retries`` (default 0).
+DeleteRecords / DescribeGroup / ListGroups / Metadata / ListMembers /
+BeginTxn / EndTxn / InitProducerId share the same ``max_retries``
+(default 0).
 InvalidTxnState (22) is not retried. Error 21 on InitProducerId
 itself is not retried (distinct from produce's one re-Init).
 This is not Kafka ``retries``.

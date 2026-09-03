@@ -92,6 +92,91 @@ class DeleteRecordsTest {
         }
     }
 
+    @Test
+    void defaultMaxRetriesZeroRaisesOnTimeout() throws Exception {
+        try (DeleteRecordsServer srv = DeleteRecordsServer.error(7)) {
+            try (Client c = Client.connect("127.0.0.1", srv.port, 5_000)) {
+                assertEquals(0, c.maxRetries());
+                BrokerException ex =
+                        assertThrows(BrokerException.class, () -> c.deleteRecords("events", 0, 10));
+                assertEquals(7, ex.code);
+                assertEquals("delete_records", ex.op);
+            }
+            assertEquals(List.of(Codec.OP_DELETE_RECORDS), srv.opcodes);
+            assertEquals(1, srv.deleteCount.get());
+            assertEquals(0, srv.metadataCount.get());
+        }
+    }
+
+    @Test
+    void retriesTimeoutThenOk() throws Exception {
+        try (DeleteRecordsServer srv = DeleteRecordsServer.codes(96, 7, 0)) {
+            try (Client c = Client.connect("127.0.0.1", srv.port, 5_000)) {
+                c.setMaxRetries(2);
+                c.setRetryBackoffMs(0);
+                DeleteRecordsResult got = c.deleteRecords("events", 2, 100);
+                assertEquals(new DeleteRecordsResult("events", 2, 96), got);
+            }
+            assertEquals(List.of(Codec.OP_DELETE_RECORDS, Codec.OP_DELETE_RECORDS), srv.opcodes);
+            assertEquals(2, srv.deleteCount.get());
+            assertEquals(0, srv.metadataCount.get());
+        }
+    }
+
+    @Test
+    void error13RedirectNotCountedAsRetry() throws Exception {
+        try (DeleteRecordsServer leader = DeleteRecordsServer.ok(96);
+                DeleteRecordsServer follower = DeleteRecordsServer.error(13)) {
+            follower.meta = leaderMeta("events", 2, 2, "127.0.0.1", leader.port);
+            try (Client c = Client.connect("127.0.0.1", follower.port, 5_000)) {
+                assertEquals(0, c.maxRetries());
+                DeleteRecordsResult got = c.deleteRecords("events", 2, 100, 1);
+                assertEquals(new DeleteRecordsResult("events", 2, 96), got);
+                assertEquals("127.0.0.1:" + leader.port, c.addr());
+            }
+            assertEquals(1, follower.deleteCount.get());
+            assertEquals(1, follower.metadataCount.get());
+            assertEquals(1, leader.deleteCount.get());
+            assertEquals(1, leader.waitMajority.get());
+        }
+    }
+
+    @Test
+    void notFoundNotRetried() throws Exception {
+        try (DeleteRecordsServer srv = DeleteRecordsServer.error(2)) {
+            try (Client c = Client.connect("127.0.0.1", srv.port, 5_000)) {
+                c.setMaxRetries(2);
+                c.setRetryBackoffMs(0);
+                BrokerException ex =
+                        assertThrows(BrokerException.class, () -> c.deleteRecords("events", 0, 10));
+                assertEquals(2, ex.code);
+                assertEquals("delete_records", ex.op);
+            }
+            assertEquals(List.of(Codec.OP_DELETE_RECORDS), srv.opcodes);
+            assertEquals(1, srv.deleteCount.get());
+            assertEquals(0, srv.metadataCount.get());
+        }
+    }
+
+    @Test
+    void exhaustedRetriesRaises() throws Exception {
+        try (DeleteRecordsServer srv = DeleteRecordsServer.codes(0, 7, 7, 7)) {
+            try (Client c = Client.connect("127.0.0.1", srv.port, 5_000)) {
+                c.setMaxRetries(2);
+                c.setRetryBackoffMs(0);
+                BrokerException ex =
+                        assertThrows(BrokerException.class, () -> c.deleteRecords("events", 0, 10));
+                assertEquals(7, ex.code);
+                assertEquals("delete_records", ex.op);
+            }
+            assertEquals(
+                    List.of(Codec.OP_DELETE_RECORDS, Codec.OP_DELETE_RECORDS, Codec.OP_DELETE_RECORDS),
+                    srv.opcodes);
+            assertEquals(3, srv.deleteCount.get());
+            assertEquals(0, srv.metadataCount.get());
+        }
+    }
+
     private static Metadata leaderMeta(String topic, int partition, int leaderId, String host, int port) {
         List<Metadata.BrokerInfo> brokers = new ArrayList<>();
         brokers.add(new Metadata.BrokerInfo(1, "127.0.0.1", 1));
@@ -128,16 +213,26 @@ class DeleteRecordsTest {
         private final Thread acceptThread;
 
         static DeleteRecordsServer ok(long lowWatermark) throws IOException {
-            return new DeleteRecordsServer(0, lowWatermark);
+            return new DeleteRecordsServer(lowWatermark, 0);
         }
 
         static DeleteRecordsServer error(int code) throws IOException {
-            return new DeleteRecordsServer(code, 0);
+            return new DeleteRecordsServer(0, code);
         }
 
-        private DeleteRecordsServer(int errorCode, long lowWatermark) throws IOException {
+        static DeleteRecordsServer codes(long lowWatermark, int... codes) throws IOException {
+            return new DeleteRecordsServer(lowWatermark, codes);
+        }
+
+        private DeleteRecordsServer(long lowWatermark, int... codes) throws IOException {
             this.lowWatermark = lowWatermark;
-            this.errorCodes.add(errorCode);
+            if (codes.length == 0) {
+                this.errorCodes.add(0);
+            } else {
+                for (int code : codes) {
+                    this.errorCodes.add(code);
+                }
+            }
             listen = new ServerSocket(0, 8, InetAddress.getByName("127.0.0.1"));
             listen.setSoTimeout(8_000);
             port = listen.getLocalPort();
