@@ -129,6 +129,12 @@
 //! (`UnknownMemberId`) stays success. 13 / 2 / 9 / 11 / 17 / 18 /
 //! 21 / 22 and protocol are not redirected. Rebalance 9/11 is
 //! still not retried. [`GroupConsumer::leave`] inherits.
+//! v0.144 adds [`ClientConfig::fetch_max_messages`] /
+//! [`ClientConfig::fetch_max_bytes`] /
+//! [`ClientConfig::fetch_max_wait_ms`] (defaults **128 / 4 MiB / 0**)
+//! and [`Client::fetch_default`]. [`Client::fetch`] still requires
+//! `max_messages` / `max_wait_ms` and hardcodes 4 MiB.
+//! GroupConsumer poll knobs stay historical (v0.76; 100 / 4 MiB).
 
 #![deny(missing_docs)]
 

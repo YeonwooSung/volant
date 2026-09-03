@@ -1322,6 +1322,7 @@ impl Client {
     ///
     /// On `NotLeaderForPartition`, reconnects to the leader and retries.
     /// `max_bytes` is the default 4 MiB; use [`Self::fetch_opts`] to set it.
+    /// For [`ClientConfig`] fetch knobs, use [`Self::fetch_default`].
     pub async fn fetch(
         &self,
         topic: &str,
@@ -1337,6 +1338,29 @@ impl Client {
             max_messages,
             max_wait_ms,
             Self::DEFAULT_FETCH_MAX_BYTES,
+        )
+        .await
+    }
+
+    /// Fetch using [`ClientConfig`] `fetch_max_messages` / `fetch_max_wait_ms` /
+    /// `fetch_max_bytes` (defaults 128 / 0 / 4 MiB).
+    ///
+    /// [`Self::fetch`] still requires explicit `max_messages` / `max_wait_ms`
+    /// and hardcodes 4 MiB. GroupConsumer poll knobs stay historical
+    /// (v0.76; 100 / 4 MiB).
+    pub async fn fetch_default(
+        &self,
+        topic: &str,
+        partition: u32,
+        from: Offset,
+    ) -> Result<FetchResult> {
+        self.fetch_opts(
+            topic,
+            partition,
+            from,
+            self.config.fetch_max_messages,
+            self.config.fetch_max_wait_ms,
+            self.config.fetch_max_bytes,
         )
         .await
     }
