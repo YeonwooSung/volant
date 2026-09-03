@@ -1441,7 +1441,7 @@ impl Client {
     ///
     /// If `controller_id` is known (parsed from `controller_id=N` in a 14 Error
     /// message, or Metadata's v0.77 trailer when non-zero), look that node up
-    /// in Metadata brokers, then [`Self::list_members`] if Metadata has no
+    /// in Metadata brokers, then [`Self::list_members_rpc`] if Metadata has no
     /// matching id. Otherwise pick the first advertised broker whose host:port
     /// is not this connection.
     ///
@@ -1465,7 +1465,9 @@ impl Client {
             if let Some(b) = meta.brokers.iter().find(|b| b.node_id == id) {
                 (b.host.clone(), b.port)
             } else {
-                let members = match self.list_members().await {
+                // Hunt uses the no-14 path so this helper and
+                // `list_members` are not mutually recursive async fns.
+                let members = match self.list_members_rpc().await {
                     Ok(m) => m,
                     Err(_) => return false,
                 };
@@ -1996,31 +1998,43 @@ impl Client {
     ///
     /// Transient broker/transport errors retry up to
     /// [`ClientConfig::max_retries`] extra times (default 0). Typed
-    /// error_code 2 / 9 / 10 / 11 / 13 / 14 and protocol errors are
-    /// not retried. Admin-14 redirect inherits via this method.
+    /// error_code 2 / 9 / 10 / 11 / 13 and protocol errors are
+    /// not retried. Error **14** (`NotController`) uses
+    /// [`ClientConfig::max_redirects`] via [`Self::redirect_to_controller`]
+    /// (independent of retry). `max_redirects=0` does not redirect.
+    /// 13 / 2 / 9 / 10 / 11 / 17 / 18 / 21 / 22 and protocol are not
+    /// redirected. [`Self::metadata`] is not wrapped here.
     pub async fn list_members(&self) -> Result<MembershipList> {
+        let max_redirects = self.config.max_redirects;
+        let mut redirect_attempt = 0u32;
+        loop {
+            let resp = self
+                .metadata_list_members_round_trip(Request::ListMembers)
+                .await?;
+            let (code, hint) = match &resp {
+                Response::Error { code, message } => (*code, parse_controller_id(message)),
+                Response::ListMembers { error_code, .. } => (*error_code, None),
+                _ => return membership_list_from_response(resp),
+            };
+            if code == ErrorCode::NotController as u16
+                && redirect_attempt + 1 < 1 + max_redirects
+                && self.redirect_to_controller(hint).await
+            {
+                redirect_attempt += 1;
+                continue;
+            }
+            return membership_list_from_response(resp);
+        }
+    }
+
+    /// ListMembers without the v0.120 error-14 wrap. Used by
+    /// [`Self::redirect_to_controller`] so hunt and `list_members` are
+    /// not mutually recursive. Transient retry is still v0.96.
+    async fn list_members_rpc(&self) -> Result<MembershipList> {
         let resp = self
             .metadata_list_members_round_trip(Request::ListMembers)
             .await?;
-        match resp {
-            Response::ListMembers {
-                error_code,
-                generation,
-                brokers,
-                live,
-            } => {
-                check_ok(error_code, "list_members")?;
-                Ok(MembershipList {
-                    generation,
-                    brokers,
-                    live,
-                })
-            }
-            Response::Error { code, message } => Err(error_from_code(code, message)),
-            other => Err(Error::Protocol(format!(
-                "unexpected response for list_members: {other:?}"
-            ))),
-        }
+        membership_list_from_response(resp)
     }
 
     /// Metadata / ListMembers share produce/heartbeat
@@ -2192,6 +2206,28 @@ impl Client {
                 )));
             }
         }
+    }
+}
+
+fn membership_list_from_response(resp: Response) -> Result<MembershipList> {
+    match resp {
+        Response::ListMembers {
+            error_code,
+            generation,
+            brokers,
+            live,
+        } => {
+            check_ok(error_code, "list_members")?;
+            Ok(MembershipList {
+                generation,
+                brokers,
+                live,
+            })
+        }
+        Response::Error { code, message } => Err(error_from_code(code, message)),
+        other => Err(Error::Protocol(format!(
+            "unexpected response for list_members: {other:?}"
+        ))),
     }
 }
 

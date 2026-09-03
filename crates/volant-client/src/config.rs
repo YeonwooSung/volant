@@ -29,6 +29,7 @@ pub struct ClientConfig {
     pub tls_key: Option<PathBuf>,
     /// Max leader-redirect retries after `NotLeaderForPartition` (default 1 extra attempt).
     /// Produce / Fetch / ListOffsets (v0.113) use this for error 13.
+    /// ListMembers (v0.120) uses this for error 14 (`NotController`).
     pub max_redirects: u32,
     /// Enable idempotent produce (InitProducerId + per-partition sequences). Phase 10.
     pub enable_idempotence: bool,

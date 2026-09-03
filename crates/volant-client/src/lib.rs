@@ -58,7 +58,7 @@
 //! that same transient set (default 0). Native Metadata has no
 //! top-level error_code; failures arrive as [`volant_protocol::Response::Error`]
 //! or transport. Error 2 / 9 / 10 / 11 / 13 / 14 and protocol are
-//! not retried. Admin-14 and leader-13 redirect inherit.
+//! not retried. Admin-14 and leader-13 redirect inherit this retry.
 //! v0.98 redirects [`Client::delete_offsets`] (and OffsetCommit /
 //! OffsetFetch, which share `offset_admin_round_trip`) on error **14**
 //! via `redirect_to_controller` / `max_redirects`. Transient 6/7/15/16
@@ -103,6 +103,12 @@
 //! empty-list (all topics). Retry (v0.96) is inherited via
 //! `metadata_list_members_round_trip`. Empty remains “all”. Not
 //! Kafka `allow_auto_topic_creation` / topic ids.
+//! v0.120 redirects [`Client::list_members`] on error **14**
+//! (`NotController`) via `redirect_to_controller` /
+//! `max_redirects`. Transient 6/7/15/16 stay on `max_retries`
+//! (v0.96 helper). `max_redirects=0` does not redirect. 13 / 2 /
+//! 9 / 10 / 11 / 17 / 18 / 21 / 22 and protocol are not redirected.
+//! [`Client::metadata`] is unchanged (not controller-gated).
 
 #![deny(missing_docs)]
 
