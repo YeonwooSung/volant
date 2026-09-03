@@ -1047,12 +1047,30 @@ public final class Client implements AutoCloseable {
      * @return the broker-assigned base offset
      */
     public long produce(String topic, int partition, byte[] key, byte[] value) {
-        return produce(topic, partition, key, value, this.acks);
+        return produce(topic, partition, key, value, Collections.emptyList());
+    }
+
+    /**
+     * Produce one message with native record headers and the client
+     * default acks. Four-arg {@link #produce(String, int, byte[], byte[])}
+     * still sends empty headers. Reuses the batch retry / error 13 /
+     * error 21 path. Not Kafka RecordBatch header versions.
+     */
+    public long produce(String topic, int partition, byte[] key, byte[] value, List<Record.Header> headers) {
+        if (value == null) {
+            value = new byte[0];
+        }
+        return produce(
+                topic,
+                partition,
+                Collections.singletonList(new Codec.ProduceMessage(key, value, -1L, headers)),
+                this.acks);
     }
 
     /**
      * Produce with an explicit acks byte. {@code 1} = leader only;
      * {@code 255} = acks=all (ISR). Same as the Rust client / Python {@code acks=}.
+     * One message; empty headers (use the headers overload or the batch path).
      */
     public long produce(String topic, int partition, byte[] key, byte[] value, int acks) {
         if (value == null) {

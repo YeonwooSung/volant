@@ -39,6 +39,8 @@ if err != nil {
 off, err = c.ProduceAcks("t", 0, nil, []byte("hello"), 255)
 // ProduceBatch: N messages in one Produce RPC (v0.68). Produce stays one message.
 off, err = c.ProduceBatch("t", 0, []codec.ProduceMessage{{Value: []byte("a")}, {Value: []byte("b")}}, 1)
+// ProduceHeaders: one-message Produce with native headers (v0.130). Produce stays empty headers.
+off, err = c.ProduceHeaders("t", 0, nil, []byte("hello"), []codec.Header{{Name: "h", Value: []byte("hv")}})
 recs, err := c.Fetch("t", 0, 0)
 if err != nil {
     log.Fatal(err)
@@ -326,7 +328,9 @@ generation 0); `GroupConsumer.Commit` sends member+generation.
 Sync only; one TCP connection; acks=1 by default (`ProduceAcks` /
 `acks=255` is acks=all; v0.64). `Produce` stays one message;
 `ProduceBatch` sends N in one RPC (v0.68; not Kafka Produce; native
-opcode 1). `FetchOpts`
+opcode 1). `ProduceHeaders` attaches native record headers on one
+message (v0.130); `Produce` / `ProduceAcks` still send empty headers.
+`FetchOpts`
 exposes max_messages / max_bytes / max_wait_ms (not Kafka Fetch;
 native opcode 2). TLS
 does not change broker TLS (Phase 8/19) and does not add Kafka API keys.

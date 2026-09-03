@@ -1,5 +1,6 @@
 package io.volant;
 
+import static org.junit.jupiter.api.Assertions.assertArrayEquals;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
@@ -1721,6 +1722,32 @@ class ClientTest {
             assertEquals(
                     "hello",
                     new String(srv.produceReqs.get(0).messages.get(0).value, StandardCharsets.UTF_8));
+            assertTrue(srv.produceReqs.get(0).messages.get(0).headers.isEmpty());
+        }
+    }
+
+    @Test
+    void produceHeadersEncodes() throws Exception {
+        try (ScriptedBroker srv = ScriptedBroker.start()) {
+            try (Client c = Client.connect("127.0.0.1", srv.port, 5_000)) {
+                long off =
+                        c.produce(
+                                "t",
+                                0,
+                                null,
+                                "hello".getBytes(StandardCharsets.UTF_8),
+                                Collections.singletonList(
+                                        new Record.Header("h", "hv".getBytes(StandardCharsets.UTF_8))));
+                assertEquals(7L, off);
+            }
+            assertEquals(1, srv.produceReqs.size());
+            Codec.ProduceRequest req = srv.produceReqs.get(0);
+            assertEquals(1, req.acks);
+            assertEquals(1, req.messages.size());
+            assertEquals(1, req.messages.get(0).headers.size());
+            assertEquals("h", req.messages.get(0).headers.get(0).name);
+            assertArrayEquals(
+                    "hv".getBytes(StandardCharsets.UTF_8), req.messages.get(0).headers.get(0).value);
         }
     }
 
