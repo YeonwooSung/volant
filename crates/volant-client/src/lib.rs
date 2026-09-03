@@ -76,6 +76,13 @@
 //! `admin_round_trip`) on that same transient set (default 0). Error
 //! **14** stays on `max_redirects` (independent counter). 13 / 9 / 10 /
 //! 11 / 2 / 21 / InvalidTxnState (22) and protocol are not retried.
+//! v0.109 retries the SCRAM-SHA-256 handshake (`authenticate_scram`)
+//! on that same transient set (default 0). First+final is one unit;
+//! a transient on either step restarts from ScramFirst with a new
+//! nonce. Error 17 / 18 / 13 / 14 / 9 / 10 / 11 / 2 / 21 / 22,
+//! protocol (including server signature mismatch), and InvalidArgument
+//! are not retried. Token Auth (`authenticate`) is unchanged (sibling
+//! v0.107).
 
 #![deny(missing_docs)]
 
