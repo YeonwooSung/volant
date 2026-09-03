@@ -4094,6 +4094,31 @@ func TestCreateTopicSendsEmptyConfigs(t *testing.T) {
 	}
 }
 
+func TestCreateTopicIDReturnsTopicID(t *testing.T) {
+	srv := &adminBroker{
+		createTopicReplies: []createTopicReply{{code: 0, topicID: 42}},
+	}
+	addr, stop := startAdmin(t, srv)
+	defer stop()
+
+	c, err := volant.DialTimeout(addr, 5*time.Second)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer c.Close()
+	id, err := c.CreateTopicID("events", 1)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if id != 42 {
+		t.Fatalf("topic id %d want 42", id)
+	}
+	got := srv.lastCreateConfigs()
+	if len(got) != 0 {
+		t.Fatalf("configs=%v want empty", got)
+	}
+}
+
 func TestCreateTopicWithConfigsSendsPairsAndReturnsTopicID(t *testing.T) {
 	srv := &adminBroker{
 		createTopicReplies: []createTopicReply{{code: 0, topicID: 42}},
