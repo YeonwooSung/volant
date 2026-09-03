@@ -1147,6 +1147,20 @@ func (c *Client) ProduceTimestampHeaders(topic string, partition int, key, value
 	}, c.acks)
 }
 
+// ProduceTimestampAcks is Produce with a caller-supplied native timestamp
+// on the single message, empty headers, and an explicit acks byte.
+// 1 = leader only; 255 = acks=all (ISR). ProduceTimestamp still uses
+// the client default acks. ProduceAcks still sends TimestampMs: -1.
+// Reuses ProduceBatch retry / error 13 / error 21.
+func (c *Client) ProduceTimestampAcks(topic string, partition int, key, value []byte, timestampMs int64, acks uint8) (int64, error) {
+	if value == nil {
+		value = []byte{}
+	}
+	return c.ProduceBatch(topic, partition, []codec.ProduceMessage{
+		{Key: key, Value: value, TimestampMs: timestampMs},
+	}, acks)
+}
+
 // ProduceBatch sends msgs in one Produce RPC. acks: 1 = leader, 255 = all.
 func (c *Client) ProduceBatch(topic string, partition int, msgs []codec.ProduceMessage, acks uint8) (int64, error) {
 	if len(msgs) == 0 {
