@@ -1692,13 +1692,19 @@ impl Client {
     /// Leave a consumer group.
     ///
     /// Transient broker/transport errors retry up to
-    /// [`ClientConfig::max_retries`] extra times (default 0). Error 10
-    /// (`UnknownMemberId`) is treated as success (already left). Rebalance
-    /// 9 / 11, 13 / 14, NotFound 2, and protocol errors are not retried.
-    /// [`crate::GroupConsumer::leave`] inherits via this method.
+    /// [`ClientConfig::max_retries`] extra times (default 0). Error **14**
+    /// (`NotController`) redirects via [`ClientConfig::max_redirects`]
+    /// (default 1; `0` does not redirect) and does not increment
+    /// `retry_attempt`. Error 10 (`UnknownMemberId`) is treated as
+    /// success (already left) before 14 / transient handling. Rebalance
+    /// 9 / 11, 13, NotFound 2, 17 / 18, 21, 22, and protocol errors are
+    /// not retried or redirected. [`crate::GroupConsumer::leave`] inherits
+    /// via this method.
     pub async fn leave_group(&self, group_id: &str, member_id: &str) -> Result<()> {
         let max_retries = self.config.max_retries;
+        let max_redirects = self.config.max_redirects;
         let mut retry_attempt = 0u32;
+        let mut redirects = 0u32;
         loop {
             let resp = match self
                 .round_trip(Request::LeaveGroup {
@@ -1720,6 +1726,13 @@ impl Client {
                     if error_code == ErrorCode::UnknownMemberId as u16 {
                         return Ok(());
                     }
+                    if error_code == ErrorCode::NotController as u16
+                        && redirects < max_redirects
+                        && self.redirect_to_controller(None).await
+                    {
+                        redirects += 1;
+                        continue;
+                    }
                     if is_transient_error_code(error_code) && retry_attempt < max_retries {
                         retry_attempt += 1;
                         tokio::time::sleep(Duration::from_millis(self.config.retry_backoff_ms))
@@ -1732,6 +1745,15 @@ impl Client {
                 Response::Error { code, message } => {
                     if code == ErrorCode::UnknownMemberId as u16 {
                         return Ok(());
+                    }
+                    if code == ErrorCode::NotController as u16
+                        && redirects < max_redirects
+                        && self
+                            .redirect_to_controller(parse_controller_id(&message))
+                            .await
+                    {
+                        redirects += 1;
+                        continue;
                     }
                     if is_transient_error_code(code) && retry_attempt < max_retries {
                         retry_attempt += 1;
