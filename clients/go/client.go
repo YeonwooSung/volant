@@ -2051,6 +2051,12 @@ func (c *Client) DeleteOffsets(group string, entries []codec.OffsetEntry) (uint3
 	}
 }
 
+// DeleteOffsetsAll deletes every committed offset for group
+// (empty wire entries). Same as DeleteOffsets(group, nil).
+func (c *Client) DeleteOffsetsAll(group string) (uint32, error) {
+	return c.DeleteOffsets(group, nil)
+}
+
 func (c *Client) DescribeConfigs(topic string) (DescribeConfigsResult, error) {
 	payload, err := codec.EncodeDescribeConfigsRequest(codec.DescribeConfigsRequest{Topic: topic})
 	if err != nil {
