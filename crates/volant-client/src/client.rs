@@ -2218,6 +2218,18 @@ impl Client {
         }
     }
 
+    /// Fetch committed offsets for `topic`, including per-entry metadata.
+    /// Calls `fetch_offsets(group_id, vec![])` (all group offsets) and
+    /// keeps rows whose topic matches.
+    pub async fn fetch_offsets_for_topic(
+        &self,
+        group_id: &str,
+        topic: &str,
+    ) -> Result<Vec<OffsetFetchEntry>> {
+        let entries = self.fetch_offsets(group_id, vec![]).await?;
+        Ok(entries.into_iter().filter(|e| e.topic == topic).collect())
+    }
+
     /// OffsetCommit / OffsetFetch / DeleteOffsets share produce/heartbeat
     /// [`ClientConfig::max_retries`]. Transient 6 / 7 / 15 / 16 and
     /// [`Error::Io`] are retried; 13 / 9 / 10 / 11 / 2 and protocol

@@ -136,6 +136,10 @@
 //! `max_messages` / `max_wait_ms` and uses
 //! [`ClientConfig::fetch_max_bytes`] (v0.149).
 //! GroupConsumer poll knobs stay historical (v0.76; 100 / 4 MiB).
+//! v0.154 adds [`Client::fetch_offsets_for_topic`] so a Rust caller
+//! can filter group OffsetFetch to one topic and keep per-entry
+//! metadata. [`Client::fetch_offsets`] is unchanged (empty entries
+//! = all). Retry / error 14 inherit via `fetch_offsets`.
 
 #![deny(missing_docs)]
 
