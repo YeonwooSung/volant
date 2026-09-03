@@ -136,6 +136,16 @@ class TestDeleteOffsetsClient(unittest.TestCase):
         self.assertEqual(srv.got_entries, [("events", 0)])
         self.assertEqual(got, 1)
 
+    def test_delete_offset_encodes_one_entry(self) -> None:
+        with _DeleteOffsetsServer(deleted_count=1) as srv:
+            with Client(srv.addr, timeout=5.0) as c:
+                got = c.delete_offset("g", "events", 0)
+        if srv.error is not None:
+            raise srv.error
+        self.assertEqual(srv.got_group, "g")
+        self.assertEqual(srv.got_entries, [("events", 0)])
+        self.assertEqual(got, 1)
+
     def test_nonzero_error_code_raises(self) -> None:
         with _DeleteOffsetsServer(error_code=2) as srv:
             with Client(srv.addr, timeout=5.0) as c:

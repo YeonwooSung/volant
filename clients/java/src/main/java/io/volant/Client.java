@@ -1955,6 +1955,15 @@ public final class Client implements AutoCloseable {
         }
     }
 
+    /**
+     * Delete one committed offset (one OffsetEntry). Same as
+     * {@link #deleteOffsets(String, List)} with a singleton list.
+     * Error 14 / transient retry inherit from {@code deleteOffsets}.
+     */
+    public int deleteOffset(String group, String topic, int partition) {
+        return deleteOffsets(group, Collections.singletonList(new Codec.OffsetEntry(topic, partition)));
+    }
+
     /** Topic configs only. Error 14 follows {@code maxRedirects}. */
     public DescribeConfigsResult describeConfigs(String topic) {
         byte[] payload = Codec.encodeDescribeConfigsRequest(new Codec.DescribeConfigsRequest(topic));

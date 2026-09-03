@@ -38,6 +38,8 @@ offs = c.offset_fetch(group="g", topic="t")  # [(partition, offset), ...]
 all_offs = c.offset_fetch_all("g")  # v0.118; [(topic, partition, offset), ...]
 topic_offs = c.offset_fetch_entries("g", "t")  # v0.148; [OffsetFetchEntry, ...] with metadata
 rows = c.fetch_offsets("g", [("t", 0)])  # v0.122; empty/None = all
+deleted = c.delete_offsets("g", [("t", 0)])
+deleted = c.delete_offset("g", "t", 0)  # v0.164; one OffsetEntry
 bounds = c.list_offsets("t")  # [OffsetListing(partition, earliest, latest), ...]
 cfg = c.describe_configs("t")
 c.alter_configs("t", [("retention.ms", "86400000")])
@@ -132,7 +134,10 @@ with `offset`, `key`, `value`). `metadata()` returns brokers + topics.
 `offset_commit` is an admin commit (`member_id=""`, `generation=0` unless
 overridden). `offset_fetch` returns committed `(partition, offset)` pairs
 for the given topic. `offset_fetch_entries` returns the same topic
-filter as `OffsetFetchEntry` rows including metadata. `create_partitions(topic, total_count)` grows the topic to
+filter as `OffsetFetchEntry` rows including metadata.
+`delete_offset(group, topic, partition)` deletes one committed offset
+(one OffsetEntry); same as `delete_offsets(group, [(topic, partition)])`.
+`create_partitions(topic, total_count)` grows the topic to
 `total_count` partitions and returns the new total (native opcode 46,
 not Kafka CreatePartitions).
 `reassign_partitions(topic, replicas, partition=None)` reassigns

@@ -70,6 +70,8 @@ try (Client c = Client.connect("127.0.0.1", 9092)) {
   List<OffsetFetchEntry> allOffs = c.offsetFetchAll("g"); // v0.118 / v0.140; topic+partition+offset+metadata
   List<OffsetFetchEntry> topicOffs = c.offsetFetchEntries("g", "t"); // v0.148; same topic filter, keep metadata
   List<OffsetFetchEntry> rows = c.fetchOffsets("g", List.of(new Codec.OffsetEntry("t", 0))); // v0.122; null/empty = all
+  int deleted = c.deleteOffsets("g", List.of(new Codec.OffsetEntry("t", 0)));
+  deleted = c.deleteOffset("g", "t", 0); // v0.164; one OffsetEntry
   List<OffsetListing> bounds = c.listOffsets("t"); // all; or listOffsets("t", 0)
   DeleteRecordsResult cut = c.deleteRecords("t", 0, 100); // wait_majority=0
   // setDeleteRecordsWait(1) changes 3-arg deleteRecords default (v0.152). 4-arg stays explicit.
@@ -158,6 +160,8 @@ already-decoded high watermark. `metadata()` returns brokers + topics.
 `offsetFetch` returns `List<Offset>` (`partition`, `offset`) for the topic.
 `offsetFetchEntries` returns `List<OffsetFetchEntry>` for the same topic
 including metadata.
+`deleteOffset(group, topic, partition)` deletes one committed offset
+(one OffsetEntry); same as `deleteOffsets` with a singleton list.
 `createPartitions` grows the topic to `totalCount` partitions
 and returns the new total (native opcode 46, not Kafka CreatePartitions).
 `reassignPartitions` reassigns replicas and returns the assignment
