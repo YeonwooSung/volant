@@ -37,13 +37,13 @@ pub struct ClientConfig {
     /// Extra produce / heartbeat / offset-admin / ListOffsets /
     /// LeaveGroup / DescribeGroup / ListGroups / Metadata /
     /// ListMembers / BeginTxn / EndTxn / InitProducerId /
-    /// controller-gated admin attempts after the first on transient
-    /// broker/transport errors.
+    /// controller-gated admin / Auth attempts after the first on
+    /// transient broker/transport errors.
     pub max_retries: u32,
     /// Sleep between produce / heartbeat / offset-admin / ListOffsets /
     /// LeaveGroup / DescribeGroup / ListGroups / Metadata /
     /// ListMembers / BeginTxn / EndTxn / InitProducerId /
-    /// controller-gated admin retries (milliseconds).
+    /// controller-gated admin / Auth retries (milliseconds).
     pub retry_backoff_ms: u64,
 }
 
