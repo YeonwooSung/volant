@@ -174,6 +174,9 @@
 //! v0.166 adds [`Client::list_offsets_all`] as a named helper for
 //! all-partition ListOffsets. Same as `list_offsets(topic, vec![])`.
 //! [`Client::list_offsets`] is unchanged.
+//! v0.168 adds [`Client::reassign_partitions_all`] as a named helper for
+//! all-partition reassign. Same as `reassign_partitions(topic, None, replicas)`.
+//! [`Client::reassign_partitions`] is unchanged.
 
 #![deny(missing_docs)]
 
