@@ -31,12 +31,19 @@ type deleteRecordsServer struct {
 
 func startDeleteRecords(t *testing.T, errorCode uint16, lowWatermark uint64) (*deleteRecordsServer, string, func()) {
 	t.Helper()
+	return startDeleteRecordsCodes(t, []uint16{errorCode}, lowWatermark)
+}
+
+func startDeleteRecordsCodes(t *testing.T, errorCodes []uint16, lowWatermark uint64) (*deleteRecordsServer, string, func()) {
+	t.Helper()
 	ln, err := net.Listen("tcp", "127.0.0.1:0")
 	if err != nil {
 		t.Fatal(err)
 	}
+	codes := make([]uint16, len(errorCodes))
+	copy(codes, errorCodes)
 	s := &deleteRecordsServer{
-		errorCodes:   []uint16{errorCode},
+		errorCodes:   codes,
 		lowWatermark: lowWatermark,
 		ln:           ln,
 	}
@@ -281,5 +288,138 @@ func TestDeleteRecordsError13UnknownTopicRaises(t *testing.T) {
 	deletes, metas, accepts, _, _, _ := srv.snapshot()
 	if deletes != 1 || metas != 1 || accepts != 1 {
 		t.Fatalf("delete/metadata/accepts = %d/%d/%d want 1/1/1", deletes, metas, accepts)
+	}
+}
+
+func TestDeleteRecordsDefaultMaxRetriesZeroRaisesOnTimeout(t *testing.T) {
+	srv, addr, stop := startDeleteRecords(t, 7, 0)
+	defer stop()
+	c, err := volant.DialTimeout(addr, 5*time.Second)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer c.Close()
+	_, err = c.DeleteRecords("events", 0, 10)
+	if err == nil {
+		t.Fatal("expected error")
+	}
+	var be *volant.BrokerError
+	if !errors.As(err, &be) {
+		t.Fatalf("got %T %v", err, err)
+	}
+	if be.Code != 7 || be.Op != "delete_records" {
+		t.Fatalf("broker error %+v", be)
+	}
+	deletes, metas, _, ops, _, _ := srv.snapshot()
+	if deletes != 1 || metas != 0 || len(ops) != 1 || ops[0] != codec.OpDeleteRecords {
+		t.Fatalf("opcodes %v deletes=%d metas=%d", ops, deletes, metas)
+	}
+}
+
+func TestDeleteRecordsRetriesTimeoutThenOk(t *testing.T) {
+	srv, addr, stop := startDeleteRecordsCodes(t, []uint16{7, 0}, 96)
+	defer stop()
+	c, err := volant.DialTimeout(addr, 5*time.Second)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer c.Close()
+	c.SetMaxRetries(2)
+	c.SetRetryBackoff(0)
+	out, err := c.DeleteRecords("events", 2, 100)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if out != (volant.DeleteRecordsResult{Topic: "events", Partition: 2, LowWatermark: 96}) {
+		t.Fatalf("parsed %+v", out)
+	}
+	deletes, metas, _, ops, _, _ := srv.snapshot()
+	if deletes != 2 || metas != 0 || len(ops) != 2 || ops[0] != codec.OpDeleteRecords || ops[1] != codec.OpDeleteRecords {
+		t.Fatalf("opcodes %v deletes=%d metas=%d", ops, deletes, metas)
+	}
+}
+
+func TestDeleteRecordsError13RedirectNotCountedAsRetry(t *testing.T) {
+	leader, _, stopL := startDeleteRecords(t, 0, 96)
+	defer stopL()
+	follower, faddr, stopF := startDeleteRecords(t, 13, 0)
+	defer stopF()
+	follower.mu.Lock()
+	follower.meta = leaderMeta("events", 2, 2, "127.0.0.1", leader.port())
+	follower.mu.Unlock()
+
+	c, err := volant.DialTimeout(faddr, 5*time.Second)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer c.Close()
+	out, err := c.DeleteRecordsWithWaitFlag("events", 2, 100, 1)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if out != (volant.DeleteRecordsResult{Topic: "events", Partition: 2, LowWatermark: 96}) {
+		t.Fatalf("parsed %+v", out)
+	}
+	fd, fm, _, _, _, _ := follower.snapshot()
+	ld, _, _, _, wait, before := leader.snapshot()
+	if fd != 1 || fm != 1 {
+		t.Fatalf("follower delete/metadata = %d/%d want 1/1", fd, fm)
+	}
+	if ld != 1 || wait != 1 || before != 100 {
+		t.Fatalf("leader delete=%d wait=%d before=%d", ld, wait, before)
+	}
+}
+
+func TestDeleteRecordsNotFoundNotRetried(t *testing.T) {
+	srv, addr, stop := startDeleteRecords(t, 2, 0)
+	defer stop()
+	c, err := volant.DialTimeout(addr, 5*time.Second)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer c.Close()
+	c.SetMaxRetries(2)
+	c.SetRetryBackoff(0)
+	_, err = c.DeleteRecords("events", 0, 10)
+	if err == nil {
+		t.Fatal("expected error")
+	}
+	var be *volant.BrokerError
+	if !errors.As(err, &be) {
+		t.Fatalf("got %T %v", err, err)
+	}
+	if be.Code != 2 || be.Op != "delete_records" {
+		t.Fatalf("broker error %+v", be)
+	}
+	deletes, metas, _, ops, _, _ := srv.snapshot()
+	if deletes != 1 || metas != 0 || len(ops) != 1 || ops[0] != codec.OpDeleteRecords {
+		t.Fatalf("opcodes %v deletes=%d metas=%d", ops, deletes, metas)
+	}
+}
+
+func TestDeleteRecordsExhaustedRetriesRaises(t *testing.T) {
+	srv, addr, stop := startDeleteRecordsCodes(t, []uint16{7, 7, 7}, 0)
+	defer stop()
+	c, err := volant.DialTimeout(addr, 5*time.Second)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer c.Close()
+	c.SetMaxRetries(2)
+	c.SetRetryBackoff(0)
+	_, err = c.DeleteRecords("events", 0, 10)
+	if err == nil {
+		t.Fatal("expected error")
+	}
+	var be *volant.BrokerError
+	if !errors.As(err, &be) {
+		t.Fatalf("got %T %v", err, err)
+	}
+	if be.Code != 7 || be.Op != "delete_records" {
+		t.Fatalf("broker error %+v", be)
+	}
+	deletes, metas, _, ops, _, _ := srv.snapshot()
+	if deletes != 3 || metas != 0 || len(ops) != 3 {
+		t.Fatalf("opcodes %v deletes=%d metas=%d", ops, deletes, metas)
 	}
 }

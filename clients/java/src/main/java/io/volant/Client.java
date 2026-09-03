@@ -1639,7 +1639,8 @@ public final class Client implements AutoCloseable {
     /**
      * Delete records before {@code beforeOffset} (native opcode 44).
      * Sends {@code wait_majority=0} (broker default). Error 13 follows
-     * Produce/Fetch redirect. This is not Kafka DeleteRecords.
+     * Produce/Fetch redirect. Transient 6 / 7 / 15 / 16 follow
+     * {@code maxRetries}. This is not Kafka DeleteRecords.
      */
     public DeleteRecordsResult deleteRecords(String topic, int partition, long beforeOffset) {
         return deleteRecords(topic, partition, beforeOffset, 0);
@@ -1651,22 +1652,37 @@ public final class Client implements AutoCloseable {
      * <p>{@code waitMajority}: 0 = broker default, 1 = force wait, 2 = force
      * no-wait. Always written on the wire. Non-zero {@code error_code} is
      * {@link BrokerException} with {@code op="delete_records"}. Error 13
-     * follows Produce/Fetch redirect ({@code maxRedirects}).
+     * follows Produce/Fetch redirect ({@code maxRedirects}); 13 is not a
+     * transient retry. Transient 6 / 7 / 15 / 16 and TCP/IO follow
+     * {@code maxRetries} (default 0).
      */
     public DeleteRecordsResult deleteRecords(String topic, int partition, long beforeOffset, int waitMajority) {
         byte[] payload = Codec.encodeDeleteRecordsRequest(
                 new Codec.DeleteRecordsRequest(topic, partition & 0xFFFFFFFFL, beforeOffset, waitMajority));
         int maxAttempts = 1 + maxRedirects;
-        int attempt = 0;
+        int retryAttempt = 0;
+        int redirectAttempt = 0;
         while (true) {
-            attempt++;
             Object decoded;
             try {
                 decoded = roundTrip(Codec.OP_DELETE_RECORDS, payload);
             } catch (BrokerException e) {
                 if (e.code == NOT_LEADER_FOR_PARTITION
-                        && attempt < maxAttempts
+                        && redirectAttempt + 1 < maxAttempts
                         && redirectToLeader(topic, partition)) {
+                    redirectAttempt++;
+                    continue;
+                }
+                if (isTransientBroker(e.code) && retryAttempt < maxRetries) {
+                    retryAttempt++;
+                    sleepProduceRetry();
+                    continue;
+                }
+                throw e;
+            } catch (RuntimeException e) {
+                if (isTransientTransport(e) && retryAttempt < maxRetries) {
+                    retryAttempt++;
+                    sleepProduceRetry();
                     continue;
                 }
                 throw e;
@@ -1676,8 +1692,14 @@ public final class Client implements AutoCloseable {
             }
             Codec.DeleteRecordsResponse resp = (Codec.DeleteRecordsResponse) decoded;
             if (resp.errorCode == NOT_LEADER_FOR_PARTITION
-                    && attempt < maxAttempts
+                    && redirectAttempt + 1 < maxAttempts
                     && redirectToLeader(resp.topic, (int) resp.partition)) {
+                redirectAttempt++;
+                continue;
+            }
+            if (isTransientBroker(resp.errorCode) && retryAttempt < maxRetries) {
+                retryAttempt++;
+                sleepProduceRetry();
                 continue;
             }
             check(resp.errorCode, "delete_records");

@@ -1582,7 +1582,9 @@ class Client:
         0 = broker default, 1 = force wait, 2 = force no-wait. Always
         written on the wire. Non-zero ``error_code`` raises
         :class:`BrokerError`. Error 13 follows Produce/Fetch redirect
-        (``max_redirects``). This is not Kafka DeleteRecords (API key 21).
+        (``max_redirects``); 13 is not a transient retry. Transient
+        6 / 7 / 15 / 16 and TCP/IO follow ``max_retries`` (default 0).
+        This is not Kafka DeleteRecords (API key 21).
         """
         payload = codec.encode_delete_records_request(
             DeleteRecordsRequest(
@@ -1592,18 +1594,30 @@ class Client:
                 wait_majority=wait_majority,
             )
         )
+        max_retries = max(0, int(self.max_retries))
         max_attempts = 1 + self.max_redirects
-        attempt = 0
+        retry_attempt = 0
+        redirect_attempt = 0
         while True:
-            attempt += 1
             try:
                 resp = self._round_trip(codec.OP_DELETE_RECORDS, payload)
             except BrokerError as e:
                 if (
                     e.code == _NOT_LEADER
-                    and attempt < max_attempts
+                    and redirect_attempt + 1 < max_attempts
                     and self._redirect_to_leader(topic, partition)
                 ):
+                    redirect_attempt += 1
+                    continue
+                if _is_transient_broker(e.code) and retry_attempt < max_retries:
+                    retry_attempt += 1
+                    self._sleep_produce_retry()
+                    continue
+                raise
+            except OSError:
+                if retry_attempt < max_retries:
+                    retry_attempt += 1
+                    self._sleep_produce_retry()
                     continue
                 raise
             if not isinstance(resp, DeleteRecordsResponse):
@@ -1612,9 +1626,17 @@ class Client:
                 )
             if (
                 resp.error_code == _NOT_LEADER
-                and attempt < max_attempts
+                and redirect_attempt + 1 < max_attempts
                 and self._redirect_to_leader(resp.topic or topic, resp.partition)
             ):
+                redirect_attempt += 1
+                continue
+            if (
+                _is_transient_broker(resp.error_code)
+                and retry_attempt < max_retries
+            ):
+                retry_attempt += 1
+                self._sleep_produce_retry()
                 continue
             self._check(resp.error_code, "delete_records")
             return DeleteRecordsResult(

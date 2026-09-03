@@ -130,7 +130,8 @@ Kafka timestamp ListOffsets).
 `deleteRecords` returns `DeleteRecordsResult` (`topic`, `partition`,
 `lowWatermark`); native opcode 44, not Kafka DeleteRecords (API key
 21). `waitMajority` 0 = broker default, 1 = force wait, 2 = force
-no-wait. Error 13 follows Produce/Fetch redirect.
+no-wait. Error 13 follows Produce/Fetch redirect. Transient 6 / 7 /
+15 / 16 follow `setMaxRetries`.
 `joinGroup` sends empty `memberId` on first join.
 `GroupConsumer` joins, polls assigned partitions, heartbeats, commits with
 member+generation, and rejoins on heartbeat error 9.
@@ -169,11 +170,14 @@ one re-Init. Heartbeat shares produce/fetch `setMaxRetries` (default
 `setMaxRetries`; error 10 is success (already left). JoinGroup is not
 retried. OffsetCommit / OffsetFetch / DeleteOffsets / ListOffsets /
 DescribeGroup / ListGroups / Metadata / ListMembers / BeginTxn /
-EndTxn / InitProducerId / Auth share the same `setMaxRetries` (default 0).
+EndTxn / InitProducerId / Auth / SCRAM handshake / DeleteRecords
+share the same `setMaxRetries` (default 0).
 InvalidTxnState (22) is not retried. Error 21 on InitProducerId
 itself is not retried (distinct from produce's one re-Init).
-Auth retries transient 6 / 7 / 15 / 16 and TCP/IO; 17 / 18 and SCRAM
-first/final are not retried.
+Auth retries transient 6 / 7 / 15 / 16 and TCP/IO; 17 / 18 is not
+retried. SCRAM first+final is one unit (new nonce on restart);
+17 / 18 and server-signature mismatch are not retried. DeleteRecords
+error 13 stays on `max_redirects`.
 This is not Kafka `retries`.
 
 Correlation ids increment per request. Decode verifies magic `V` (0x56),
