@@ -82,6 +82,7 @@ _ = offs
 _ = allOffs
 _ = deleted
 bounds, err := c.ListOffsets("t", nil) // all partitions; or []uint32{0}
+bounds, err = c.ListOffsetsAll("t")    // v0.163; same as ListOffsets(topic, nil)
 _ = bounds
 cfg, err := c.DescribeConfigs("t")
 _ = cfg
@@ -194,6 +195,8 @@ is auto-place.
 `ListOffsets` returns `[]OffsetListing` (`Partition`, `Earliest`,
 `Latest`); nil / empty partitions means all (native opcode 48, not
 Kafka timestamp ListOffsets).
+`ListOffsetsAll(topic)` lists earliest/latest for every partition
+(empty wire partitions); same as `ListOffsets(topic, nil)`.
 `DeleteRecords` / `DeleteRecordsWithWaitFlag` return
 `DeleteRecordsResult` (`Topic`, `Partition`, `LowWatermark`); native
 opcode 44, not Kafka DeleteRecords (API key 21). `waitMajority` 0 =

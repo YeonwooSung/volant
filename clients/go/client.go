@@ -2004,6 +2004,12 @@ func (c *Client) ListOffsets(topic string, partitions []uint32) ([]OffsetListing
 	}
 }
 
+// ListOffsetsAll lists earliest/latest for every partition of topic
+// (empty wire partitions). Same as ListOffsets(topic, nil).
+func (c *Client) ListOffsetsAll(topic string) ([]OffsetListing, error) {
+	return c.ListOffsets(topic, nil)
+}
+
 // DeleteRecords truncates records before beforeOffset (native opcode 44).
 // Sends wait_majority 0 (broker default; Phase 137). Error 13 is not
 // redirected (Produce/Fetch only). This is not Kafka DeleteRecords.
