@@ -417,6 +417,8 @@ class ClientTest {
         final List<int[]> heartbeatReplies = new CopyOnWriteArrayList<>();
         final List<String> heartbeatMessages = new CopyOnWriteArrayList<>();
         final List<Integer> leaveGroupCodes = new CopyOnWriteArrayList<>();
+        final List<int[]> leaveGroupReplies = new CopyOnWriteArrayList<>();
+        final List<String> leaveGroupMessages = new CopyOnWriteArrayList<>();
         final List<Integer> offsetCommitCodes = new CopyOnWriteArrayList<>();
         final List<Integer> offsetFetchCodes = new CopyOnWriteArrayList<>();
         final List<Codec.OffsetFetchEntry> offsetFetchEntries = new CopyOnWriteArrayList<>();
@@ -471,6 +473,11 @@ class ClientTest {
         void queueDescribeGroupError(int code, String message) {
             describeGroupReplies.add(new int[] {code, 1});
             describeGroupMessages.add(message);
+        }
+
+        void queueLeaveGroupError(int code, String message) {
+            leaveGroupReplies.add(new int[] {code, 1});
+            leaveGroupMessages.add(message);
         }
 
         private ScriptedBroker() throws IOException {
@@ -591,6 +598,15 @@ class ClientTest {
             }
             if (frame.opcode == Codec.OP_LEAVE_GROUP) {
                 leaveGroupCount.incrementAndGet();
+                if (!leaveGroupReplies.isEmpty()) {
+                    int[] rep = leaveGroupReplies.remove(0);
+                    String msg = leaveGroupMessages.isEmpty() ? "" : leaveGroupMessages.remove(0);
+                    if (rep.length > 1 && rep[1] == 1) {
+                        replyOp[0] = Codec.OP_ERROR;
+                        return Codec.encodeErrorResponse(new Codec.ErrorResponse(rep[0], msg));
+                    }
+                    return Codec.encodeLeaveGroupResponse(new Codec.LeaveGroupResponse(rep[0]));
+                }
                 int code = 0;
                 if (!leaveGroupCodes.isEmpty()) {
                     code = leaveGroupCodes.remove(0);
@@ -1097,6 +1113,55 @@ class ClientTest {
                 assertEquals(REBALANCE, ex.code);
             }
             assertEquals(1, srv.leaveGroupCount.get());
+        }
+    }
+
+    @Test
+    void leaveGroupError14RedirectsViaControllerId() throws Exception {
+        try (ScriptedBroker leader = ScriptedBroker.start();
+                ScriptedBroker follower = ScriptedBroker.start()) {
+            follower.queueLeaveGroupError(NOT_CONTROLLER, "not controller; controller_id=2");
+            follower.meta = controllerMeta(2, "127.0.0.1", leader.port);
+            try (Client c = Client.connect("127.0.0.1", follower.port, 5_000)) {
+                c.leaveGroup("g", "m1");
+                assertEquals(leader.port, Integer.parseInt(c.addr().substring(c.addr().indexOf(':') + 1)));
+            }
+            assertEquals(1, follower.leaveGroupCount.get());
+            assertEquals(1, follower.metadataCount.get());
+            assertEquals(1, leader.leaveGroupCount.get());
+        }
+    }
+
+    @Test
+    void leaveGroupTyped14NoHintThenOk() throws Exception {
+        try (ScriptedBroker leader = ScriptedBroker.start();
+                ScriptedBroker follower = ScriptedBroker.start()) {
+            follower.leaveGroupCodes.add(NOT_CONTROLLER);
+            follower.meta = otherBrokerMeta(follower.port, "127.0.0.1", leader.port);
+            try (Client c = Client.connect("127.0.0.1", follower.port, 5_000)) {
+                c.leaveGroup("g", "m1");
+                assertEquals(leader.port, Integer.parseInt(c.addr().substring(c.addr().indexOf(':') + 1)));
+            }
+            assertEquals(1, follower.leaveGroupCount.get());
+            assertEquals(1, follower.metadataCount.get());
+            assertEquals(1, leader.leaveGroupCount.get());
+        }
+    }
+
+    @Test
+    void leaveGroupMaxRedirectsZeroRaisesOnFirst14() throws Exception {
+        try (ScriptedBroker follower = ScriptedBroker.start()) {
+            follower.queueLeaveGroupError(NOT_CONTROLLER, "not controller; controller_id=2");
+            follower.meta = controllerMeta(2, "127.0.0.1", 9);
+            try (Client c = Client.connect("127.0.0.1", follower.port, 5_000)) {
+                c.setMaxRedirects(0);
+                BrokerException ex =
+                        assertThrows(BrokerException.class, () -> c.leaveGroup("g", "m1"));
+                assertEquals(NOT_CONTROLLER, ex.code);
+            }
+            assertEquals(1, follower.leaveGroupCount.get());
+            assertEquals(0, follower.metadataCount.get());
+            assertEquals(1, follower.acceptCount.get());
         }
     }
 

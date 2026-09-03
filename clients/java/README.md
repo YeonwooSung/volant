@@ -170,7 +170,8 @@ retry once (`setMaxRedirects(1)` is the connect default).
 CreatePartitions / ReassignPartitions / CreateAcls / DeleteAcls /
 CreateScramUser / DeleteScramUser / ListScramUsers / ListAcls /
 AddBroker / RemoveBroker / DescribeConfigs / AlterConfigs / DeleteOffsets /
-OffsetCommit / OffsetFetch / ListMembers / DescribeGroup / ListGroups / Heartbeat follow
+OffsetCommit / OffsetFetch / ListMembers / DescribeGroup / ListGroups / Heartbeat /
+LeaveGroup follow
 `NotController` (error 14) the same way (Metadata brokers or a
 `controller_id=N` hint in the Error message; admin 14 prefers
 Metadata.controller_id when the message has no hint; not Kafka
@@ -188,7 +189,8 @@ I/O errors up to `setMaxRetries` extra attempts (default 0). Sleep
 tests. Error 13 stays on the redirect budget; error 21 stays on the
 one re-Init. Heartbeat shares produce/fetch `setMaxRetries` (default
 0); rebalance codes 9 / 10 / 11 are not retried. LeaveGroup shares
-`setMaxRetries`; error 10 is success (already left). JoinGroup is not
+`setMaxRetries`; error 10 is success (already left); error 14 follows
+`setMaxRedirects`. JoinGroup is not
 retried. OffsetCommit / OffsetFetch / DeleteOffsets / ListOffsets /
 DescribeGroup / ListGroups / Metadata / ListMembers / BeginTxn /
 EndTxn / InitProducerId / Auth / SCRAM handshake / DeleteRecords

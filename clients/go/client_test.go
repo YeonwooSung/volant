@@ -22,6 +22,7 @@ type scriptedBroker struct {
 	heartbeatCodes     []uint16
 	heartbeatReplies   []createTopicReply
 	leaveGroupCodes    []uint16
+	leaveGroupReplies  []createTopicReply
 	offsetCommitCodes    []uint16
 	offsetFetchCodes     []uint16
 	offsetFetchEntries   []codec.OffsetFetchEntry
@@ -334,12 +335,20 @@ func (s *scriptedBroker) handle(f *frame.Frame) ([]byte, error) {
 		payload, err = codec.EncodeHeartbeatResponse(codec.HeartbeatResponse{ErrorCode: rep.code})
 	case codec.OpLeaveGroup:
 		s.leaveGroupCount++
-		code := uint16(0)
-		if len(s.leaveGroupCodes) > 0 {
-			code = s.leaveGroupCodes[0]
+		rep := createTopicReply{}
+		if len(s.leaveGroupReplies) > 0 {
+			rep = s.leaveGroupReplies[0]
+			s.leaveGroupReplies = s.leaveGroupReplies[1:]
+		} else if len(s.leaveGroupCodes) > 0 {
+			rep.code = s.leaveGroupCodes[0]
 			s.leaveGroupCodes = s.leaveGroupCodes[1:]
 		}
-		payload, err = codec.EncodeLeaveGroupResponse(codec.LeaveGroupResponse{ErrorCode: code})
+		if rep.asError {
+			payload, err = codec.EncodeErrorResponse(codec.ErrorResponse{Code: rep.code, Message: rep.message})
+			replyOp = codec.OpError
+			break
+		}
+		payload, err = codec.EncodeLeaveGroupResponse(codec.LeaveGroupResponse{ErrorCode: rep.code})
 	case codec.OpOffsetCommit:
 		s.offsetCommitCount++
 		req, e := codec.DecodeOffsetCommitRequest(f.Payload)
@@ -1697,6 +1706,104 @@ func TestLeaveGroupRebalanceIsNotRetried(t *testing.T) {
 	}
 	if n := srv.leaveGroups(); n != 1 {
 		t.Fatalf("leave group count %d want 1", n)
+	}
+}
+
+func TestLeaveGroupError14RedirectsViaControllerID(t *testing.T) {
+	leader := &scriptedBroker{}
+	_, stopL := startScripted(t, leader)
+	defer stopL()
+	follower := &scriptedBroker{
+		leaveGroupReplies: []createTopicReply{{
+			code: notController, message: "not controller; controller_id=2", asError: true,
+		}},
+		meta: controllerMeta(2, "127.0.0.1", leader.port()),
+	}
+	fAddr, stopF := startScripted(t, follower)
+	defer stopF()
+
+	c, err := volant.DialTimeout(fAddr, 5*time.Second)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer c.Close()
+	if err := c.LeaveGroup("g", "m1"); err != nil {
+		t.Fatal(err)
+	}
+	if n := follower.leaveGroups(); n != 1 {
+		t.Fatalf("follower leave group=%d want 1", n)
+	}
+	if n := follower.metadatas(); n != 1 {
+		t.Fatalf("follower metadata=%d want 1", n)
+	}
+	if n := leader.leaveGroups(); n != 1 {
+		t.Fatalf("leader leave group=%d want 1", n)
+	}
+}
+
+func TestLeaveGroupTyped14NoHintThenOk(t *testing.T) {
+	leader := &scriptedBroker{}
+	_, stopL := startScripted(t, leader)
+	defer stopL()
+	follower := &scriptedBroker{
+		leaveGroupCodes: []uint16{notController},
+	}
+	fAddr, stopF := startScripted(t, follower)
+	defer stopF()
+	follower.mu.Lock()
+	follower.meta = otherBrokerMeta(follower.port(), "127.0.0.1", leader.port())
+	follower.mu.Unlock()
+
+	c, err := volant.DialTimeout(fAddr, 5*time.Second)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer c.Close()
+	if err := c.LeaveGroup("g", "m1"); err != nil {
+		t.Fatal(err)
+	}
+	if n := follower.leaveGroups(); n != 1 {
+		t.Fatalf("follower leave group=%d want 1", n)
+	}
+	if n := follower.metadatas(); n != 1 {
+		t.Fatalf("follower metadata=%d want 1", n)
+	}
+	if n := leader.leaveGroups(); n != 1 {
+		t.Fatalf("leader leave group=%d want 1", n)
+	}
+}
+
+func TestLeaveGroupMaxRedirectsZeroRaisesOnFirst14(t *testing.T) {
+	follower := &scriptedBroker{
+		leaveGroupReplies: []createTopicReply{{
+			code: notController, message: "not controller; controller_id=2", asError: true,
+		}},
+		meta: controllerMeta(2, "127.0.0.1", 9),
+	}
+	fAddr, stopF := startScripted(t, follower)
+	defer stopF()
+
+	c, err := volant.DialTimeout(fAddr, 5*time.Second)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer c.Close()
+	c.SetMaxRedirects(0)
+	err = c.LeaveGroup("g", "m1")
+	if brokerCode(err) != notController {
+		t.Fatalf("err=%v want code 14", err)
+	}
+	if n := follower.leaveGroups(); n != 1 {
+		t.Fatalf("leave group=%d want 1", n)
+	}
+	if n := follower.metadatas(); n != 0 {
+		t.Fatalf("metadata=%d want 0", n)
+	}
+	follower.mu.Lock()
+	accepts := follower.acceptCount
+	follower.mu.Unlock()
+	if accepts != 1 {
+		t.Fatalf("accepts=%d want 1", accepts)
 	}
 }
 

@@ -2420,8 +2420,9 @@ func (c *Client) ListAcls(principal string, resourceType uint8, resource string)
 
 // LeaveGroup leaves a consumer group. Transient broker/transport errors
 // retry up to maxRetries extra times (default 0). Error 10
-// (UnknownMemberId) is success (already left). Rebalance 9 /
-// IllegalGeneration 11 / 13 / 14 / not-found 2 are not retried.
+// (UnknownMemberId) is success (already left). Error 14 follows
+// maxRedirects. Rebalance 9 / IllegalGeneration 11 / 13 / not-found 2
+// are not retried.
 func (c *Client) LeaveGroup(group, memberID string) error {
 	payload, err := codec.EncodeLeaveGroupRequest(codec.LeaveGroupRequest{
 		GroupID:  group,
@@ -2434,12 +2435,22 @@ func (c *Client) LeaveGroup(group, memberID string) error {
 	if maxRetries < 0 {
 		maxRetries = 0
 	}
+	maxAttempts := 1 + c.maxRedirects
 	retryAttempt := 0
+	redirectAttempt := 0
 	for {
 		decoded, err := c.roundTrip(codec.OpLeaveGroup, payload)
 		if err != nil {
 			if be, ok := err.(*codec.BrokerError); ok && be.Code == 10 {
 				return nil
+			}
+			ok, rerr := c.maybeRedirectController(err, redirectAttempt+1, maxAttempts)
+			if rerr != nil {
+				return rerr
+			}
+			if ok {
+				redirectAttempt++
+				continue
 			}
 			if isTransientProduceErr(err) && retryAttempt < maxRetries {
 				retryAttempt++
@@ -2454,6 +2465,14 @@ func (c *Client) LeaveGroup(group, memberID string) error {
 		}
 		if resp.ErrorCode == 10 {
 			return nil
+		}
+		ok, rerr := c.maybeRedirectControllerCode(resp.ErrorCode, "", redirectAttempt+1, maxAttempts)
+		if rerr != nil {
+			return rerr
+		}
+		if ok {
+			redirectAttempt++
+			continue
 		}
 		if isTransientBroker(resp.ErrorCode) && retryAttempt < maxRetries {
 			retryAttempt++
