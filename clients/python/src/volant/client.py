@@ -1376,8 +1376,11 @@ class Client:
         generation: int = 0,
         metadata: str = "",
     ) -> None:
-        """Commit one group offset (admin path: empty member, generation 0).
+        """Commit one group offset.
 
+        Default is the admin path (empty ``member_id``, ``generation=0``).
+        Pass a joined ``member_id`` / ``generation`` for the group-consumer
+        path. ``generation=0`` skips the broker generation check.
         Transient broker/transport errors retry up to ``max_retries``
         extra times (default 0). Error 14 follows ``max_redirects``.
         Error 2 / 9 / 10 / 11 / 13 are not retried.
