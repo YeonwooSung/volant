@@ -1069,6 +1069,18 @@ func (c *Client) ProduceAcks(topic string, partition int, key, value []byte, ack
 	}, acks)
 }
 
+// ProduceHeaders is Produce (acks=1) with native record headers on the
+// single message. Produce / ProduceAcks still send empty headers.
+// Reuses ProduceBatch retry / error 13 / error 21. Not Kafka RecordBatch.
+func (c *Client) ProduceHeaders(topic string, partition int, key, value []byte, headers []codec.Header) (int64, error) {
+	if value == nil {
+		value = []byte{}
+	}
+	return c.ProduceBatch(topic, partition, []codec.ProduceMessage{
+		{Key: key, Value: value, TimestampMs: -1, Headers: headers},
+	}, 1)
+}
+
 // ProduceBatch sends msgs in one Produce RPC. acks: 1 = leader, 255 = all.
 func (c *Client) ProduceBatch(topic string, partition int, msgs []codec.ProduceMessage, acks uint8) (int64, error) {
 	if len(msgs) == 0 {

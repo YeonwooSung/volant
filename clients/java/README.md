@@ -35,6 +35,8 @@ try (Client c = Client.connect("127.0.0.1", 9092)) {
   off = c.produce("t", 0, List.of(
       new Codec.ProduceMessage(null, "a".getBytes(UTF_8)),
       new Codec.ProduceMessage(null, "b".getBytes(UTF_8))), 1);
+  // produce(..., headers): one-message Produce with native headers (v0.130). 4-arg stays empty headers.
+  off = c.produce("t", 0, null, "hello".getBytes(UTF_8), List.of(new Record.Header("h", "hv".getBytes(UTF_8))));
   List<Record> recs = c.fetch("t", 0, 0);
   // fetch 6-arg: max_messages / max_bytes / max_wait_ms (v0.64). fetch 3-arg stays 128 / 4MiB / 0.
   recs = c.fetch("t", 0, 0, 10, 4096L, 100);
@@ -299,6 +301,8 @@ Sync only; one TCP connection; acks=1 by default
 (`produce(..., acks)` / `acks=255` is acks=all; v0.64). 4-arg
 `produce` stays one message; `produce(topic, partition, messages, acks)`
 sends N in one RPC (v0.68; not Kafka Produce; native opcode 1).
+`produce(..., headers)` attaches native record headers on one message
+(v0.130); 4-arg `produce` still sends empty headers.
 Public 6-arg `fetch` exposes max_messages / max_bytes /
 max_wait_ms (not Kafka Fetch; native opcode 2). Thin
 `joinGroup` still sends empty `group_instance_id`; use
