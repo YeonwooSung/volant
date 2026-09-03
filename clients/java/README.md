@@ -114,6 +114,9 @@ Client.connectTls("127.0.0.1", 9092, TlsOptions.ca("ca.pem"), "s3cret");
 // Optional idempotent produce (v0.47). Default off (trailer (0, 0, -1)).
 try (Client c = Client.connect("127.0.0.1", 9092)) {
   c.setEnableIdempotence(true);
+  // Pre-allocate pid (v0.150). Second call is a no-op. Produce / BeginTxn still init implicitly.
+  long pid = c.initProducerId();
+  int epoch = c.producerEpoch();
   // Optional produce/fetch retry (v0.61 / v0.66). Default 0 extra attempts.
   c.setMaxRetries(3);
   c.setRetryBackoffMs(50);
@@ -271,6 +274,9 @@ empty transactional_id; later produces attach pid/epoch/seq. Default
 off keeps trailer `(0, 0, -1)`. Redirect keeps the same pid. If the
 broker returns UnknownProducerId (21), the client re-Inits once and
 resets sequences. Not Kafka idempotent produce v2.
+`initProducerId()` (v0.150) pre-allocates the pid; a second call is
+a no-op. `producerId()` / `producerEpoch()` read the stored values.
+Produce / BeginTxn still init implicitly.
 Native transactions (v0.57) are opt-in via `setTransactionalId`.
 `beginTransaction` / `commitTransaction` / `abortTransaction` send
 opcodes 50–53. Init uses that id. Abort rewinds sequences. Not Kafka

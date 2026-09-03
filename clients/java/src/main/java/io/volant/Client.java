@@ -324,6 +324,26 @@ public final class Client implements AutoCloseable {
     }
 
     /**
+     * Ensure InitProducerId has run (native opcode 32). Returns the stored
+     * producer id. A second call is a no-op (already ready). Produce /
+     * {@link #beginTransaction} still init implicitly.
+     */
+    public long initProducerId() {
+        ensureProducerId();
+        return producerId;
+    }
+
+    /** Stored producer id (0 until {@link #initProducerId} or implicit init). */
+    public long producerId() {
+        return producerId;
+    }
+
+    /** Stored producer epoch (0 until {@link #initProducerId} or implicit init). */
+    public int producerEpoch() {
+        return producerEpoch;
+    }
+
+    /**
      * Native transactional_id used on InitProducerId (opcode 32) and
      * required by {@link #beginTransaction}. Null or empty means
      * non-transactional (v0.47 empty-id idempotence still works).

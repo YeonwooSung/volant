@@ -725,6 +725,11 @@ class Client:
             self._next_seq.clear()
             return
 
+    def init_producer_id(self) -> tuple[int, int]:
+        """Ensure InitProducerId has run. Returns (producer_id, epoch)."""
+        self._ensure_producer_id()
+        return (self._producer_id, self._producer_epoch)
+
     def _produce_trailer(self, topic: str, partition: int) -> tuple[int, int, int]:
         if not self._uses_pid():
             return 0, 0, -1

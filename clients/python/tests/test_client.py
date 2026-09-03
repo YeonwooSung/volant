@@ -695,6 +695,34 @@ class TestInitProducerIdRetry(unittest.TestCase):
             self.assertEqual(srv.produce_count, 0)
 
 
+class TestPublicInitProducerId(unittest.TestCase):
+    def test_init_producer_id_sends_opcode_and_returns_pid(self) -> None:
+        with ScriptedBroker() as srv:
+            with Client(srv.addr, timeout=5.0) as c:
+                pid, epoch = c.init_producer_id()
+            self.assertEqual((pid, epoch), (42, 1))
+            self.assertEqual(srv.init_count, 1)
+            self.assertEqual(srv.opcodes, [OP_INIT_PRODUCER_ID])
+
+    def test_init_producer_id_second_call_is_noop(self) -> None:
+        with ScriptedBroker() as srv:
+            with Client(srv.addr, timeout=5.0) as c:
+                first = c.init_producer_id()
+                second = c.init_producer_id()
+            self.assertEqual(first, (42, 1))
+            self.assertEqual(second, (42, 1))
+            self.assertEqual(srv.init_count, 1)
+            self.assertEqual(srv.opcodes, [OP_INIT_PRODUCER_ID])
+
+    def test_idempotent_produce_still_inits_once(self) -> None:
+        with ScriptedBroker() as srv:
+            with Client(srv.addr, timeout=5.0, enable_idempotence=True) as c:
+                c.produce("t", 0, value=b"a")
+                c.produce("t", 0, value=b"b")
+            self.assertEqual(srv.init_count, 1)
+            self.assertEqual(srv.opcodes, [OP_INIT_PRODUCER_ID, OP_PRODUCE, OP_PRODUCE])
+
+
 class TestProduceDefaultAcks(unittest.TestCase):
     def test_produce_default_acks(self) -> None:
         with ScriptedBroker() as srv:

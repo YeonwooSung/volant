@@ -394,6 +394,16 @@ func (c *Client) EnableIdempotence() {
 	}
 }
 
+// InitProducerID ensures InitProducerId has run (native opcode 32).
+// Returns the stored producer id and epoch. A second call is a no-op
+// (already ready). Produce / BeginTxn still init implicitly.
+func (c *Client) InitProducerID() (producerID uint64, epoch uint16, err error) {
+	if err := c.ensureProducerID(); err != nil {
+		return 0, 0, err
+	}
+	return c.producerID, c.producerEpoch, nil
+}
+
 // TLS reports whether the connection is TLS-wrapped.
 func (c *Client) TLS() bool {
 	return c != nil && c.tls

@@ -128,6 +128,10 @@ c, err = volant.DialAuth("127.0.0.1:9092", "s3cret")
 c, err = volant.DialTLSAuth("127.0.0.1:9092", volant.TLSConfig{CAFile: "ca.pem"}, "s3cret")
 // Optional idempotent produce (v0.47). Default off (trailer (0, 0, -1)).
 c.EnableIdempotence()
+// Pre-allocate pid (v0.150). Second call is a no-op. Produce / BeginTxn still init implicitly.
+pid, epoch, err := c.InitProducerID()
+_ = pid
+_ = epoch
 // Optional produce/fetch retry (v0.61 / v0.66). Default 0 extra attempts.
 c.SetMaxRetries(3)
 c.SetRetryBackoff(50 * time.Millisecond)
@@ -287,6 +291,8 @@ transactional_id; later produces attach pid/epoch/seq. Default off
 keeps trailer `(0, 0, -1)`. Redirect keeps the same pid. UnknownProducerId
 (21) re-Inits once and resets sequences. Not Kafka idempotent produce
 v2.
+`InitProducerID()` (v0.150) pre-allocates the pid; a second call is
+a no-op. Produce / BeginTxn still init implicitly.
 Native transactions (v0.57) are opt-in via `SetTransactionalID`.
 `BeginTransaction` / `CommitTransaction` / `AbortTransaction` send
 opcodes 50–53. Init uses that id. Abort rewinds sequences. Not Kafka

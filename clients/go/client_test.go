@@ -747,6 +747,91 @@ func TestIdempotentProduceOnInitsThenSequences(t *testing.T) {
 	}
 }
 
+func TestInitProducerIDSendsOpcodeAndReturnsPid(t *testing.T) {
+	srv := &scriptedBroker{}
+	addr, stop := startScripted(t, srv)
+	defer stop()
+
+	c, err := volant.DialTimeout(addr, 5*time.Second)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer c.Close()
+
+	pid, epoch, err := c.InitProducerID()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if pid != 42 || epoch != 1 {
+		t.Fatalf("pid/epoch = %d/%d want 42/1", pid, epoch)
+	}
+	if srv.inits() != 1 {
+		t.Fatalf("init count %d want 1", srv.inits())
+	}
+	ops := srv.copyOpcodes()
+	if len(ops) != 1 || ops[0] != codec.OpInitProducerId {
+		t.Fatalf("opcodes %#v want [32]", ops)
+	}
+}
+
+func TestInitProducerIDSecondCallIsNoop(t *testing.T) {
+	srv := &scriptedBroker{}
+	addr, stop := startScripted(t, srv)
+	defer stop()
+
+	c, err := volant.DialTimeout(addr, 5*time.Second)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer c.Close()
+
+	pid1, epoch1, err := c.InitProducerID()
+	if err != nil {
+		t.Fatal(err)
+	}
+	pid2, epoch2, err := c.InitProducerID()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if pid1 != 42 || epoch1 != 1 || pid2 != 42 || epoch2 != 1 {
+		t.Fatalf("pid/epoch first=%d/%d second=%d/%d want 42/1", pid1, epoch1, pid2, epoch2)
+	}
+	if srv.inits() != 1 {
+		t.Fatalf("init count %d want 1", srv.inits())
+	}
+	ops := srv.copyOpcodes()
+	if len(ops) != 1 || ops[0] != codec.OpInitProducerId {
+		t.Fatalf("opcodes %#v want [32]", ops)
+	}
+}
+
+func TestIdempotentProduceStillInitsOnce(t *testing.T) {
+	srv := &scriptedBroker{}
+	addr, stop := startScripted(t, srv)
+	defer stop()
+
+	c, err := volant.DialTimeout(addr, 5*time.Second)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer c.Close()
+	c.EnableIdempotence()
+
+	if _, err := c.Produce("t", 0, nil, []byte("a")); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := c.Produce("t", 0, nil, []byte("b")); err != nil {
+		t.Fatal(err)
+	}
+	if srv.inits() != 1 {
+		t.Fatalf("init count %d want 1", srv.inits())
+	}
+	ops := srv.copyOpcodes()
+	if len(ops) != 3 || ops[0] != codec.OpInitProducerId || ops[1] != codec.OpProduce || ops[2] != codec.OpProduce {
+		t.Fatalf("opcodes %#v", ops)
+	}
+}
+
 func TestIdempotentProduceOffDefaultTrailer(t *testing.T) {
 	srv := &scriptedBroker{}
 	addr, stop := startScripted(t, srv)
