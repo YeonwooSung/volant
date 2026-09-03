@@ -1872,9 +1872,20 @@ public final class Client implements AutoCloseable {
     /**
      * Join a consumer group. First join sends empty {@code memberId}
      * (broker assigns one). {@code sessionTimeoutMs} 0 defaults to 10000.
+     * Sends empty {@code groupInstanceId} (dynamic membership).
      */
     public JoinGroupResult joinGroup(String group, List<String> topics, int sessionTimeoutMs) {
         return joinGroup(group, "", topics, sessionTimeoutMs, "");
+    }
+
+    /**
+     * Join with Phase 12 static membership ({@code groupInstanceId}).
+     * Empty id is dynamic membership (same as {@link #joinGroup}). Named so
+     * it does not collide with memberId / assignor overloads.
+     */
+    public JoinGroupResult joinGroupWithInstance(
+            String group, List<String> topics, int sessionTimeoutMs, String groupInstanceId) {
+        return joinGroup(group, "", topics, sessionTimeoutMs, groupInstanceId);
     }
 
     JoinGroupResult joinGroup(String group, String memberId, List<String> topics, int sessionTimeoutMs) {

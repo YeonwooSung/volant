@@ -50,6 +50,7 @@ try (Client c = Client.connect("127.0.0.1", 9092)) {
   DeleteRecordsResult cut = c.deleteRecords("t", 0, 100); // wait_majority=0
   // cut = c.deleteRecords("t", 0, 100, 1); // force majority wait
   JoinGroupResult j = c.joinGroup("g", List.of("t"), 10000);
+  j = c.joinGroupWithInstance("g", List.of("t"), 10000, "inst-1"); // v0.127; empty = dynamic
   c.heartbeat("g", j.memberId, j.generation);
   c.leaveGroup("g", j.memberId);
   GroupConsumer g = GroupConsumer.join(c, "g", List.of("t"), 10_000);
@@ -140,6 +141,9 @@ Kafka timestamp ListOffsets).
 no-wait. Error 13 follows Produce/Fetch redirect. Transient 6 / 7 /
 15 / 16 follow `setMaxRetries`.
 `joinGroup` sends empty `memberId` on first join.
+`joinGroupWithInstance` sends Phase 12 `group_instance_id` (empty =
+dynamic; v0.127). Named so it does not collide with memberId /
+assignor overloads.
 `GroupConsumer` joins, polls assigned partitions, heartbeats, commits with
 member+generation, and rejoins on heartbeat error 9.
 `joinStatic` sends Phase 12 `group_instance_id` (empty = dynamic) and
@@ -301,8 +305,9 @@ Sync only; one TCP connection; acks=1 by default
 sends N in one RPC (v0.68; not Kafka Produce; native opcode 1).
 Public 6-arg `fetch` exposes max_messages / max_bytes /
 max_wait_ms (not Kafka Fetch; native opcode 2). Thin
-`joinGroup` still sends empty `group_instance_id`; use
-`GroupConsumer.joinStatic` for static membership. Convenience
+`joinGroup` still sends empty `group_instance_id`;
+`joinGroupWithInstance` encodes the id (v0.127; empty = dynamic).
+Use `GroupConsumer.joinStatic` for the high-level loop. Convenience
 `offsetCommit` is
 admin-only (`generation=0`); `GroupConsumer.commit` sends the joined
 member+generation. TLS does not change broker TLS (Phase 8/19) and

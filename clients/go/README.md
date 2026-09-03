@@ -64,6 +64,7 @@ cut, err := c.DeleteRecords("t", 0, 100) // wait_majority=0
 // cut, err = c.DeleteRecordsWithWaitFlag("t", 0, 100, 1) // force majority wait
 _ = cut
 j, err := c.JoinGroup("g", []string{"t"}, 10000)
+j, err = c.JoinGroupWithInstance("g", []string{"t"}, 10000, "inst-1") // v0.127; empty = dynamic
 if err != nil {
     log.Fatal(err)
 }
@@ -156,7 +157,8 @@ opcode 44, not Kafka DeleteRecords (API key 21). `waitMajority` 0 =
 broker default, 1 = force wait, 2 = force no-wait. Error 13 follows
 Produce/Fetch redirect. Transient 6 / 7 / 15 / 16 follow `SetMaxRetries`.
 `JoinGroup` sends empty `member_id` on first join; the result has
-`MemberID`, `Generation`, and `Assignment`.
+`MemberID`, `Generation`, and `Assignment`. `JoinGroupWithInstance`
+sends Phase 12 `group_instance_id` (empty = dynamic; v0.127).
 `JoinGroupConsumer` is the high-level loop (join, OffsetFetch
 positions or 0, poll = heartbeat + fetch assigned, commit with
 member+generation, rejoin on error 9, honor revoked).
@@ -314,8 +316,9 @@ seeing other group members on the wire, SCRAM-SHA-512, Kafka SASL,
 async I/O, idempotent
 produce. Local `WithAssignor("range")` uses DescribeGroup members
 (still no SyncGroup). Thin `Client.JoinGroup` still sends empty
-`group_instance_id`; use `JoinGroupConsumerStatic` for static
-membership. Thin `OffsetCommit` is still the admin path (empty member,
+`group_instance_id`; `JoinGroupWithInstance` encodes the id (v0.127;
+empty = dynamic). Use `JoinGroupConsumerStatic` for the high-level
+loop. Thin `OffsetCommit` is still the admin path (empty member,
 generation 0); `GroupConsumer.Commit` sends member+generation.
 Sync only; one TCP connection; acks=1 by default (`ProduceAcks` /
 `acks=255` is acks=all; v0.64). `Produce` stays one message;

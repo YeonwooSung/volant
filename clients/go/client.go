@@ -2029,8 +2029,15 @@ func (c *Client) FetchOffsets(group string, entries []codec.OffsetEntry) ([]code
 
 // JoinGroup joins a consumer group. First join sends empty member_id
 // (broker assigns one). sessionTimeoutMs 0 defaults to 10000.
+// Sends empty group_instance_id (dynamic membership).
 func (c *Client) JoinGroup(group string, topics []string, sessionTimeoutMs int) (JoinGroupResult, error) {
 	return c.joinGroup(group, "", topics, sessionTimeoutMs, "")
+}
+
+// JoinGroupWithInstance joins with Phase 12 static membership.
+// Empty instanceID is dynamic membership (same as JoinGroup).
+func (c *Client) JoinGroupWithInstance(group string, topics []string, sessionTimeoutMs int, instanceID string) (JoinGroupResult, error) {
+	return c.joinGroup(group, "", topics, sessionTimeoutMs, instanceID)
 }
 
 func (c *Client) joinGroup(group, memberID string, topics []string, sessionTimeoutMs int, instanceID string) (JoinGroupResult, error) {
