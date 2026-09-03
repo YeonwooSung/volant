@@ -29,6 +29,7 @@ if err := c.CreateTopic("t", 1); err != nil {
 n, err := c.CreatePartitions("t", 2)
 _ = n
 gen, err := c.ReassignPartitions("t", []uint32{1, 2}, nil) // all partitions
+gen, err = c.ReassignAllPartitions("t", []uint32{1, 2})    // v0.167; same as ReassignPartitions(topic, replicas, nil)
 _ = gen
 off, err := c.Produce("t", 0, nil, []byte("hello"))
 if err != nil {
@@ -196,6 +197,8 @@ returns the new total (native opcode 46, not Kafka CreatePartitions).
 generation (native opcode 114, not Kafka AlterPartitionReassignments).
 Nil `partition` is all partitions (`u32::MAX`); nil / empty `replicas`
 is auto-place.
+`ReassignAllPartitions(topic, replicas)` reassigns every partition
+(wire `u32::MAX`); same as `ReassignPartitions(topic, replicas, nil)`.
 `ListOffsets` returns `[]OffsetListing` (`Partition`, `Earliest`,
 `Latest`); nil / empty partitions means all (native opcode 48, not
 Kafka timestamp ListOffsets).

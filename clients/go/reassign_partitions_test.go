@@ -146,6 +146,29 @@ func TestReassignPartitionsNilPartitionEncodesAll(t *testing.T) {
 	}
 }
 
+func TestReassignAllPartitionsEncodesAll(t *testing.T) {
+	addr, got, stop := serveReassignPartitions(t, 0, 3)
+	defer stop()
+	c, err := volant.DialTimeout(addr, 5*time.Second)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer c.Close()
+	out, err := c.ReassignAllPartitions("events", []uint32{1, 2})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.err != nil {
+		t.Fatal(got.err)
+	}
+	if got.topic != "events" || got.partition != codec.ReassignAllPartitions || len(got.replicas) != 2 || got.replicas[0] != 1 || got.replicas[1] != 2 {
+		t.Fatalf("wire request topic=%q partition=%d replicas=%v", got.topic, got.partition, got.replicas)
+	}
+	if out != 3 {
+		t.Fatalf("parsed %d", out)
+	}
+}
+
 func TestReassignPartitionsNonzeroErrorRaises(t *testing.T) {
 	addr, _, stop := serveReassignPartitions(t, 2, 0)
 	defer stop()
