@@ -1986,6 +1986,28 @@ impl Client {
         }
     }
 
+    /// Delete every committed offset for `group_id` (empty wire entries).
+    pub async fn delete_offsets_all(&self, group_id: &str) -> Result<DeleteOffsetsResult> {
+        self.delete_offsets(group_id, Vec::new()).await
+    }
+
+    /// Delete one committed offset.
+    pub async fn delete_offset(
+        &self,
+        group_id: &str,
+        topic: &str,
+        partition: u32,
+    ) -> Result<DeleteOffsetsResult> {
+        self.delete_offsets(
+            group_id,
+            vec![OffsetEntry {
+                topic: topic.to_owned(),
+                partition,
+            }],
+        )
+        .await
+    }
+
     /// Create ACL bindings (Phase 20). Enables enforcement on the broker.
     pub async fn create_acls(&self, entries: Vec<volant_protocol::AclBinding>) -> Result<()> {
         let resp = self
