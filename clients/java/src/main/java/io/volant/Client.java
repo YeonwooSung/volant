@@ -766,7 +766,7 @@ public final class Client implements AutoCloseable {
      *     lookup miss / empty host / reconnect fail (raise the original 14).
      */
     private boolean redirectToController(Long controllerId) {
-        Metadata meta = metadata();
+        Metadata meta = metadataRpc(Collections.emptyList());
         if (controllerId == null && meta.controllerId != 0) {
             controllerId = meta.controllerId;
         }
@@ -2543,7 +2543,8 @@ public final class Client implements AutoCloseable {
      * broker/transport errors retry up to {@code maxRetries} extra
      * times (default 0). Native Metadata has no top-level
      * {@code error_code}; failures arrive as Error opcode /
-     * transport. Error 2 / 9 / 10 / 11 / 13 / 14 are not retried.
+     * transport. Error 14 follows {@code maxRedirects}. Error 2 / 9 /
+     * 10 / 11 / 13 are not retried.
      */
     public Metadata metadata() {
         return metadata(Collections.emptyList());
@@ -2557,6 +2558,27 @@ public final class Client implements AutoCloseable {
      * {@code allow_auto_topic_creation} / topic ids.
      */
     public Metadata metadata(List<String> topics) {
+        int redirectAttempt = 0;
+        int maxAttempts = 1 + maxRedirects;
+        while (true) {
+            try {
+                return metadataRpc(topics);
+            } catch (BrokerException e) {
+                if (maybeRedirectController(e.code, e.message, redirectAttempt + 1, maxAttempts)) {
+                    redirectAttempt++;
+                    continue;
+                }
+                throw e;
+            }
+        }
+    }
+
+    /**
+     * Metadata without the v0.156 error-14 wrap. Used by
+     * {@link #redirectToController} so hunt and {@link #metadata()} are
+     * not mutually recursive. Transient retry is still v0.95.
+     */
+    private Metadata metadataRpc(List<String> topics) {
         byte[] payload = Codec.encodeMetadataRequest(new Codec.MetadataRequest(topics));
         int retryAttempt = 0;
         while (true) {

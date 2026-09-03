@@ -1651,7 +1651,7 @@ func (c *Client) maybeRedirectControllerCode(code uint16, msg string, attempt, m
 // ok is false on no other broker / lookup miss / empty host / reconnect fail
 // (caller should surface the original error 14).
 func (c *Client) redirectToController(controllerID *uint32) (bool, error) {
-	meta, err := c.Metadata()
+	meta, err := c.metadataRpc(nil)
 	if err != nil {
 		return false, err
 	}
@@ -1756,7 +1756,8 @@ func (c *Client) reconnect(addr string) error {
 // Same as MetadataTopics(nil). Transient broker/transport errors
 // retry up to maxRetries extra times (default 0). Native Metadata
 // has no top-level error_code; failures arrive as Error opcode /
-// transport. Error 2 / 9 / 10 / 11 / 13 / 14 are not retried.
+// transport. Error 14 follows maxRedirects. Error 2 / 9 / 10 / 11 /
+// 13 are not retried.
 func (c *Client) Metadata() (Metadata, error) {
 	return c.MetadataTopics(nil)
 }
@@ -1767,6 +1768,29 @@ func (c *Client) Metadata() (Metadata, error) {
 // native Metadata topics list, not Kafka allow_auto_topic_creation
 // / topic ids.
 func (c *Client) MetadataTopics(topics []string) (Metadata, error) {
+	maxAttempts := 1 + c.maxRedirects
+	redirectAttempt := 0
+	for {
+		got, err := c.metadataRpc(topics)
+		if err != nil {
+			ok, rerr := c.maybeRedirectController(err, redirectAttempt+1, maxAttempts)
+			if rerr != nil {
+				return Metadata{}, rerr
+			}
+			if ok {
+				redirectAttempt++
+				continue
+			}
+			return Metadata{}, err
+		}
+		return got, nil
+	}
+}
+
+// metadataRpc is Metadata without the v0.156 error-14 wrap.
+// Used by redirectToController so hunt and Metadata are not
+// mutually recursive. Transient retry is still v0.95.
+func (c *Client) metadataRpc(topics []string) (Metadata, error) {
 	if topics == nil {
 		topics = []string{}
 	}

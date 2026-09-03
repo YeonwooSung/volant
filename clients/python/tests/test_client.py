@@ -85,11 +85,11 @@ class ScriptedBroker:
     ``metadata_codes`` / ``list_members_codes`` / ``init_codes`` are queues of
     error_code values consumed across connections. ``heartbeat_replies`` /
     ``leave_group_replies`` / ``describe_group_replies`` /
-    ``list_groups_replies`` are
+    ``list_groups_replies`` / ``metadata_replies`` are
     ``(code, message, as_error_opcode)`` (Error opcode when the flag is
     set). Metadata is a fixed response (or a callable of
-    ``() -> MetadataResponse``). Non-zero ``metadata_codes`` reply as
-    Error opcode (native Metadata has no top-level error_code).
+    ``() -> MetadataResponse``). Non-zero ``metadata_codes`` / replies
+    reply as Error opcode (native Metadata has no top-level error_code).
     """
 
     def __init__(self) -> None:
@@ -110,6 +110,7 @@ class ScriptedBroker:
         self.list_groups_codes: list[int] = []
         self.list_groups_replies: list[tuple[int, str, bool]] = []
         self.metadata_codes: list[int] = []
+        self.metadata_replies: list[tuple[int, str, bool]] = []
         self.list_members_codes: list[int] = []
         # (code, message, as_error_opcode). Takes precedence over codes.
         self.list_members_replies: list[tuple[int, str, bool]] = []
@@ -392,12 +393,22 @@ class ScriptedBroker:
             )
         if opcode == OP_METADATA:
             self.metadata_count += 1
-            code = self.metadata_codes.pop(0) if self.metadata_codes else 0
-            if code != 0:
-                return (
-                    encode_error_response(ErrorResponse(code=code, message="")),
-                    OP_ERROR,
-                )
+            if self.metadata_replies:
+                code, message, as_error = self.metadata_replies.pop(0)
+                if as_error or code != 0:
+                    return (
+                        encode_error_response(
+                            ErrorResponse(code=code, message=message)
+                        ),
+                        OP_ERROR,
+                    )
+            else:
+                code = self.metadata_codes.pop(0) if self.metadata_codes else 0
+                if code != 0:
+                    return (
+                        encode_error_response(ErrorResponse(code=code, message="")),
+                        OP_ERROR,
+                    )
             meta = self.metadata
             if callable(meta):
                 meta = meta()
@@ -1543,6 +1554,35 @@ class TestMetadataListMembersRetry(unittest.TestCase):
                     c.metadata()
             self.assertEqual(ctx.exception.code, TIMEOUT)
             self.assertEqual(srv.metadata_count, 3)
+
+
+class TestMetadataNotControllerRedirect(unittest.TestCase):
+    def test_metadata_error_14_redirects_via_controller_id(self) -> None:
+        with ScriptedBroker() as leader, ScriptedBroker() as follower:
+            follower.metadata_replies = [
+                (NOT_CONTROLLER, "not controller; controller_id=2", True)
+            ]
+            follower.metadata = _controller_meta(2, "127.0.0.1", leader.port)
+            with Client(follower.addr, timeout=5.0) as c:
+                got = c.metadata()
+            self.assertEqual(got.brokers, [])
+            self.assertEqual(got.topics, [])
+            self.assertEqual(c.addr, leader.addr)
+        self.assertEqual(follower.metadata_count, 2)
+        self.assertEqual(leader.metadata_count, 1)
+
+    def test_metadata_max_redirects_zero_raises_on_first_14(self) -> None:
+        with ScriptedBroker() as follower:
+            follower.metadata_replies = [
+                (NOT_CONTROLLER, "not controller; controller_id=2", True)
+            ]
+            follower.metadata = _controller_meta(2, "127.0.0.1", 9)
+            with Client(follower.addr, timeout=5.0, max_redirects=0) as c:
+                with self.assertRaises(BrokerError) as ctx:
+                    c.metadata()
+            self.assertEqual(ctx.exception.code, NOT_CONTROLLER)
+        self.assertEqual(follower.metadata_count, 1)
+        self.assertEqual(follower.accept_count, 1)
 
 
 NOT_CONTROLLER = 14

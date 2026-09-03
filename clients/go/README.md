@@ -216,8 +216,8 @@ CreatePartitions / ReassignPartitions / CreateAcls / DeleteAcls /
 CreateScramUser / DeleteScramUser / ListScramUsers / ListAcls /
 AddBroker / RemoveBroker / DescribeConfigs / AlterConfigs / DeleteOffsets /
 OffsetCommit / OffsetFetch / ListMembers / DescribeGroup / ListGroups / Heartbeat /
-LeaveGroup follow
-`NotController` (error 14) the same way (Metadata brokers or a
+LeaveGroup / Metadata follow
+`NotController` (error 14) the same way (Metadata brokers or a)
 `controller_id=N` hint in the Error message; admin 14 prefers
 Metadata.controller_id when the message has no hint; not Kafka
 FindCoordinator). AddBroker / RemoveBroker follow error 14 when the

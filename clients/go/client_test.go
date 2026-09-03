@@ -35,6 +35,7 @@ type scriptedBroker struct {
 	listGroupsCodes      []uint16
 	listGroupsReplies    []createTopicReply
 	metadataCodes        []uint16
+	metadataReplies      []createTopicReply
 	listMembersCodes     []uint16
 	listMembersReplies   []createTopicReply
 	meta                 codec.MetadataResponse
@@ -451,13 +452,16 @@ func (s *scriptedBroker) handle(f *frame.Frame) ([]byte, error) {
 		replyOp = codec.OpListMembersResponse
 	case codec.OpMetadata:
 		s.metadataCount++
-		code := uint16(0)
-		if len(s.metadataCodes) > 0 {
-			code = s.metadataCodes[0]
+		rep := createTopicReply{}
+		if len(s.metadataReplies) > 0 {
+			rep = s.metadataReplies[0]
+			s.metadataReplies = s.metadataReplies[1:]
+		} else if len(s.metadataCodes) > 0 {
+			rep.code = s.metadataCodes[0]
 			s.metadataCodes = s.metadataCodes[1:]
 		}
-		if code != 0 {
-			payload, err = codec.EncodeErrorResponse(codec.ErrorResponse{Code: code})
+		if rep.asError || rep.code != 0 {
+			payload, err = codec.EncodeErrorResponse(codec.ErrorResponse{Code: rep.code, Message: rep.message})
 			replyOp = codec.OpError
 			break
 		}
@@ -3136,6 +3140,70 @@ func TestMetadataExhaustedRetriesRaises(t *testing.T) {
 	}
 	if n := srv.metadatas(); n != 3 {
 		t.Fatalf("metadata count %d want 3", n)
+	}
+}
+
+func TestMetadataError14RedirectsViaControllerID(t *testing.T) {
+	leader := &scriptedBroker{}
+	_, stopL := startScripted(t, leader)
+	defer stopL()
+	follower := &scriptedBroker{
+		metadataReplies: []createTopicReply{{
+			code: notController, message: "not controller; controller_id=2", asError: true,
+		}},
+		meta: controllerMeta(2, "127.0.0.1", leader.port()),
+	}
+	fAddr, stopF := startScripted(t, follower)
+	defer stopF()
+
+	c, err := volant.DialTimeout(fAddr, 5*time.Second)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer c.Close()
+	got, err := c.Metadata()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(got.Brokers) != 0 || len(got.Topics) != 0 {
+		t.Fatalf("metadata %v want empty", got)
+	}
+	if n := follower.metadatas(); n != 2 {
+		t.Fatalf("follower metadata %d want 2", n)
+	}
+	if n := leader.metadatas(); n != 1 {
+		t.Fatalf("leader metadata %d want 1", n)
+	}
+}
+
+func TestMetadataMaxRedirectsZeroRaisesOnFirst14(t *testing.T) {
+	follower := &scriptedBroker{
+		metadataReplies: []createTopicReply{{
+			code: notController, message: "not controller; controller_id=2", asError: true,
+		}},
+		meta: controllerMeta(2, "127.0.0.1", 9),
+	}
+	fAddr, stopF := startScripted(t, follower)
+	defer stopF()
+
+	c, err := volant.DialTimeout(fAddr, 5*time.Second)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer c.Close()
+	c.SetMaxRedirects(0)
+	_, err = c.Metadata()
+	if brokerCode(err) != notController {
+		t.Fatalf("err=%v want code 14", err)
+	}
+	if n := follower.metadatas(); n != 1 {
+		t.Fatalf("metadata %d want 1", n)
+	}
+	follower.mu.Lock()
+	accepts := follower.acceptCount
+	follower.mu.Unlock()
+	if accepts != 1 {
+		t.Fatalf("accepts=%d want 1", accepts)
 	}
 }
 
