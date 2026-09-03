@@ -2051,6 +2051,12 @@ impl Client {
         }
     }
 
+    /// List every ACL binding (empty filters: any principal / type / resource).
+    /// Same as `list_acls("", 255, "")`.
+    pub async fn list_acls_all(&self) -> Result<Vec<volant_protocol::AclBinding>> {
+        self.list_acls("", 255, "").await
+    }
+
     /// Add a broker endpoint to the membership overlay (v0.10).
     pub async fn add_broker(
         &self,

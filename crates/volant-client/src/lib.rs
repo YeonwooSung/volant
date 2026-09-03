@@ -165,6 +165,9 @@
 //! v0.159 adds [`Client::fetch_offsets_all`] as a named helper for
 //! all-group OffsetFetch. Same as `fetch_offsets(group_id, vec![])`.
 //! [`Client::fetch_offsets`] is unchanged.
+//! v0.162 adds [`Client::list_acls_all`] as a named helper for
+//! unfiltered ListAcls. Same as `list_acls("", 255, "")`.
+//! [`Client::list_acls`] is unchanged.
 
 #![deny(missing_docs)]
 
