@@ -319,6 +319,11 @@ docs for day-to-day reading: [ops](../ops.md), [consistency](../consistency.md),
 | v0.118 | ✅ | OffsetFetch all-group on Python/Go/Java | [V118_SPEC.md](../V118_SPEC.md) |
 | v0.119 | ✅ | public CommitOffsets batch on Python/Go/Java | [V119_SPEC.md](../V119_SPEC.md) |
 | v0.120 | ✅ | Rust ListMembers NotController redirect | [V120_SPEC.md](../V120_SPEC.md) |
+| v0.121 | ✅ | ListMembers NotController redirect on Python/Go/Java | [V121_SPEC.md](../V121_SPEC.md) |
+| v0.122 | ✅ | OffsetFetch entries on Python/Go/Java | [V122_SPEC.md](../V122_SPEC.md) |
+| v0.123 | ✅ | Python GroupConsumer batch OffsetCommit | [V123_SPEC.md](../V123_SPEC.md) |
+| v0.124 | ✅ | DescribeGroup/ListGroups NotController redirect on Python/Go/Java | [V124_SPEC.md](../V124_SPEC.md) |
+| v0.125 | ✅ | Rust DescribeGroup/ListGroups NotController redirect | [V125_SPEC.md](../V125_SPEC.md) |
 
 ---
 
