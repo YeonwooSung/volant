@@ -1954,20 +1954,29 @@ class Client:
 
         Transient broker/transport errors retry up to ``max_retries``
         extra times (default 0). Error 10 (UnknownMemberId) is success
-        (already left). Rebalance 9 / IllegalGeneration 11 / 13 / 14 /
-        not-found 2 are not retried.
+        (already left). Error 14 follows ``max_redirects``. Rebalance 9 /
+        IllegalGeneration 11 / 13 / not-found 2 are not retried.
         """
         payload = codec.encode_leave_group_request(
             LeaveGroupRequest(group_id=group, member_id=member_id)
         )
         max_retries = max(0, int(self.max_retries))
+        max_attempts = 1 + self.max_redirects
         retry_attempt = 0
+        redirect_attempt = 0
         while True:
             try:
                 resp = self._round_trip(codec.OP_LEAVE_GROUP, payload)
             except BrokerError as e:
                 if e.code == 10:
                     return
+                if (
+                    e.code == _NOT_CONTROLLER
+                    and redirect_attempt + 1 < max_attempts
+                    and self._redirect_to_controller(_controller_id_hint(e.message))
+                ):
+                    redirect_attempt += 1
+                    continue
                 if _is_transient_broker(e.code) and retry_attempt < max_retries:
                     retry_attempt += 1
                     self._sleep_produce_retry()
@@ -1985,6 +1994,13 @@ class Client:
                 )
             if resp.error_code == 10:
                 return
+            if (
+                resp.error_code == _NOT_CONTROLLER
+                and redirect_attempt + 1 < max_attempts
+                and self._redirect_to_controller(None)
+            ):
+                redirect_attempt += 1
+                continue
             if (
                 _is_transient_broker(resp.error_code)
                 and retry_attempt < max_retries

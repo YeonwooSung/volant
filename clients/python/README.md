@@ -161,7 +161,8 @@ retry once (`max_redirects=1`). `max_redirects=0` raises on the first
 CreateAcls / DeleteAcls / CreateScramUser / DeleteScramUser /
 ListScramUsers / ListAcls / AddBroker / RemoveBroker /
 DescribeConfigs / AlterConfigs / DeleteOffsets / OffsetCommit /
-OffsetFetch / ListMembers / DescribeGroup / ListGroups / Heartbeat follow
+OffsetFetch / ListMembers / DescribeGroup / ListGroups / Heartbeat /
+LeaveGroup follow
 `NotController` (error 14) the same way (Metadata `controller_id`
 trailer when the message has no hint, else `controller_id=N` or the
 first other advertised broker; not Kafka FindCoordinator). AddBroker /
@@ -175,7 +176,8 @@ I/O errors up to ``max_retries`` extra attempts (default 0). Sleep
 Error 13 stays on the redirect budget; error 21 stays on the one
 re-Init. Heartbeat shares produce/fetch ``max_retries`` (default 0);
 rebalance codes 9 / 10 / 11 are not retried. LeaveGroup shares
-``max_retries``; error 10 is success (already left). JoinGroup is not
+``max_retries``; error 10 is success (already left); error 14 follows
+``max_redirects``. JoinGroup is not
 retried. OffsetCommit / OffsetFetch / DeleteOffsets / ListOffsets /
 DescribeGroup / ListGroups / Metadata / ListMembers / BeginTxn /
 EndTxn / InitProducerId / Auth / SCRAM handshake / DeleteRecords

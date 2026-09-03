@@ -2288,12 +2288,15 @@ public final class Client implements AutoCloseable {
     /**
      * Leave a consumer group. Transient broker/transport errors retry up
      * to {@code maxRetries} extra times (default 0). Error 10
-     * (UnknownMemberId) is success (already left). Rebalance 9 /
-     * IllegalGeneration 11 / 13 / 14 / not-found 2 are not retried.
+     * (UnknownMemberId) is success (already left). Error 14 follows
+     * {@code maxRedirects}. Rebalance 9 / IllegalGeneration 11 / 13 /
+     * not-found 2 are not retried.
      */
     public void leaveGroup(String group, String memberId) {
         byte[] payload = Codec.encodeLeaveGroupRequest(new Codec.LeaveGroupRequest(group, memberId));
         int retryAttempt = 0;
+        int redirectAttempt = 0;
+        int maxAttempts = 1 + maxRedirects;
         while (true) {
             Object decoded;
             try {
@@ -2301,6 +2304,10 @@ public final class Client implements AutoCloseable {
             } catch (BrokerException e) {
                 if (e.code == 10) {
                     return;
+                }
+                if (maybeRedirectController(e.code, e.message, redirectAttempt + 1, maxAttempts)) {
+                    redirectAttempt++;
+                    continue;
                 }
                 if (isTransientBroker(e.code) && retryAttempt < maxRetries) {
                     retryAttempt++;
@@ -2322,6 +2329,10 @@ public final class Client implements AutoCloseable {
             Codec.LeaveGroupResponse resp = (Codec.LeaveGroupResponse) decoded;
             if (resp.errorCode == 10) {
                 return;
+            }
+            if (maybeRedirectController(resp.errorCode, null, redirectAttempt + 1, maxAttempts)) {
+                redirectAttempt++;
+                continue;
             }
             if (isTransientBroker(resp.errorCode) && retryAttempt < maxRetries) {
                 retryAttempt++;
