@@ -93,6 +93,11 @@
 //! `redirect_to_leader` (independent counter). 14 / 9 / 10 / 11 / 2 /
 //! 17 / 18 / 21 / 22 and protocol are not retried. `wait_majority`
 //! trailer is unchanged.
+//! v0.113 redirects [`Client::list_offsets`] on error **13**
+//! (`NotLeaderForPartition`) via `redirect_to_leader` /
+//! `max_redirects`. Transient 6/7/15/16 stay on `max_retries`.
+//! `max_redirects=0` does not redirect. 14 / 2 / 9 / 10 / 11 / 17 /
+//! 18 / 21 / 22 and protocol are not redirected.
 
 #![deny(missing_docs)]
 
