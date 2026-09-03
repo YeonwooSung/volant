@@ -696,13 +696,21 @@ impl Client {
     /// Empty `partitions` means all partitions.
     /// Transient broker/transport errors retry up to
     /// [`ClientConfig::max_retries`] extra times (default 0).
+    /// Error **13** (`NotLeaderForPartition`) uses
+    /// [`ClientConfig::max_redirects`] via [`Self::redirect_to_leader`]
+    /// (independent of retry). `max_redirects=0` does not redirect.
+    /// 14 / 2 / 9 / 10 / 11 / 17 / 18 / 21 / 22 and protocol are not
+    /// redirected.
     pub async fn list_offsets(
         &self,
         topic: &str,
         partitions: Vec<u32>,
     ) -> Result<ListOffsetsResult> {
         let max_retries = self.config.max_retries;
+        let max_redirects = self.config.max_redirects;
         let mut retry_attempt = 0u32;
+        let mut redirect_attempt = 0u32;
+        let redirect_part = partitions.first().copied().unwrap_or(0);
         loop {
             let resp = match self
                 .round_trip(Request::ListOffsets {
@@ -722,9 +730,16 @@ impl Client {
             match resp {
                 Response::ListOffsets {
                     error_code,
-                    topic,
+                    topic: resp_topic,
                     entries,
                 } => {
+                    if error_code == ErrorCode::NotLeaderForPartition as u16
+                        && redirect_attempt + 1 < 1 + max_redirects
+                        && self.redirect_to_leader(topic, redirect_part).await.is_ok()
+                    {
+                        redirect_attempt += 1;
+                        continue;
+                    }
                     if is_transient_error_code(error_code) && retry_attempt < max_retries {
                         retry_attempt += 1;
                         tokio::time::sleep(Duration::from_millis(self.config.retry_backoff_ms))
@@ -733,7 +748,7 @@ impl Client {
                     }
                     check_ok(error_code, "list_offsets")?;
                     return Ok(ListOffsetsResult {
-                        topic,
+                        topic: resp_topic,
                         entries: entries
                             .into_iter()
                             .map(|e| PartitionOffsets {
@@ -745,6 +760,13 @@ impl Client {
                     });
                 }
                 Response::Error { code, message } => {
+                    if code == ErrorCode::NotLeaderForPartition as u16
+                        && redirect_attempt + 1 < 1 + max_redirects
+                        && self.redirect_to_leader(topic, redirect_part).await.is_ok()
+                    {
+                        redirect_attempt += 1;
+                        continue;
+                    }
                     if is_transient_error_code(code) && retry_attempt < max_retries {
                         retry_attempt += 1;
                         tokio::time::sleep(Duration::from_millis(self.config.retry_backoff_ms))
