@@ -71,6 +71,7 @@ from volant.codec import (
 from volant.frame import encode_frame, try_decode_frame
 
 NOT_LEADER = 13
+NOT_CONTROLLER = 14
 
 
 class ScriptedBroker:
@@ -81,7 +82,9 @@ class ScriptedBroker:
     ``delete_offsets_codes`` / ``list_offsets_codes`` /
     ``describe_group_codes`` / ``list_groups_codes`` /
     ``metadata_codes`` / ``list_members_codes`` / ``init_codes`` are queues of
-    error_code values consumed across connections. Metadata is a fixed
+    error_code values consumed across connections. ``describe_group_replies``
+    / ``list_groups_replies`` are ``(code, message, as_error_opcode)``
+    (Error opcode when the flag is set). Metadata is a fixed
     response (or a callable of ``() -> MetadataResponse``). Non-zero
     ``metadata_codes`` reply as Error opcode (native Metadata has no
     top-level error_code).
@@ -99,7 +102,9 @@ class ScriptedBroker:
         self.delete_offsets_codes: list[int] = []
         self.list_offsets_codes: list[int] = []
         self.describe_group_codes: list[int] = []
+        self.describe_group_replies: list[tuple[int, str, bool]] = []
         self.list_groups_codes: list[int] = []
+        self.list_groups_replies: list[tuple[int, str, bool]] = []
         self.metadata_codes: list[int] = []
         self.list_members_codes: list[int] = []
         # (code, message, as_error_opcode). Takes precedence over codes.
@@ -301,7 +306,17 @@ class ScriptedBroker:
             )
         if opcode == OP_DESCRIBE_GROUP:
             self.describe_group_count += 1
-            code = self.describe_group_codes.pop(0) if self.describe_group_codes else 0
+            if self.describe_group_replies:
+                code, message, as_error = self.describe_group_replies.pop(0)
+                if as_error:
+                    return (
+                        encode_error_response(
+                            ErrorResponse(code=code, message=message)
+                        ),
+                        OP_ERROR,
+                    )
+            else:
+                code = self.describe_group_codes.pop(0) if self.describe_group_codes else 0
             return (
                 encode_describe_group_response(
                     DescribeGroupResponse(
@@ -312,7 +327,17 @@ class ScriptedBroker:
             )
         if opcode == OP_LIST_GROUPS:
             self.list_groups_count += 1
-            code = self.list_groups_codes.pop(0) if self.list_groups_codes else 0
+            if self.list_groups_replies:
+                code, message, as_error = self.list_groups_replies.pop(0)
+                if as_error:
+                    return (
+                        encode_error_response(
+                            ErrorResponse(code=code, message=message)
+                        ),
+                        OP_ERROR,
+                    )
+            else:
+                code = self.list_groups_codes.pop(0) if self.list_groups_codes else 0
             return (
                 encode_list_groups_response(
                     ListGroupsResponse(error_code=code, groups=[])
@@ -358,6 +383,26 @@ class ScriptedBroker:
 
 class ProtocolErrorForTest(Exception):
     pass
+
+
+def _controller_meta(node_id: int, host: str, port: int) -> MetadataResponse:
+    return MetadataResponse(
+        brokers=[
+            BrokerInfo(node_id=1, host="127.0.0.1", port=1),
+            BrokerInfo(node_id=node_id, host=host, port=port),
+        ],
+        topics=[],
+    )
+
+
+def _other_broker_meta(current_port: int, host: str, port: int) -> MetadataResponse:
+    return MetadataResponse(
+        brokers=[
+            BrokerInfo(node_id=1, host="127.0.0.1", port=current_port),
+            BrokerInfo(node_id=2, host=host, port=port),
+        ],
+        topics=[],
+    )
 
 
 def _leader_meta(topic: str, partition: int, leader_id: int, host: str, port: int) -> MetadataResponse:
@@ -1115,6 +1160,7 @@ class TestDescribeListGroupsRetry(unittest.TestCase):
             self.assertEqual(got.group_id, "")
             self.assertEqual(got.members, [])
             self.assertEqual(srv.describe_group_count, 2)
+            self.assertEqual(srv.metadata_count, 0)
 
     def test_not_found_is_not_retried(self) -> None:
         with ScriptedBroker() as srv:
@@ -1124,6 +1170,7 @@ class TestDescribeListGroupsRetry(unittest.TestCase):
                     c.describe_group("missing")
             self.assertEqual(ctx.exception.code, NOT_FOUND)
             self.assertEqual(srv.describe_group_count, 1)
+            self.assertEqual(srv.metadata_count, 0)
 
     def test_list_groups_retries_timeout_then_ok(self) -> None:
         with ScriptedBroker() as srv:
@@ -1141,6 +1188,50 @@ class TestDescribeListGroupsRetry(unittest.TestCase):
                     c.describe_group("g")
             self.assertEqual(ctx.exception.code, TIMEOUT)
             self.assertEqual(srv.describe_group_count, 3)
+
+    def test_describe_group_error_14_redirects_via_controller_id(self) -> None:
+        with ScriptedBroker() as leader, ScriptedBroker() as follower:
+            follower.describe_group_replies = [
+                (NOT_CONTROLLER, "not controller; controller_id=2", True)
+            ]
+            follower.metadata = _controller_meta(2, "127.0.0.1", leader.port)
+            leader.describe_group_codes = [0]
+            with Client(follower.addr, timeout=5.0) as c:
+                got = c.describe_group("g")
+            self.assertEqual(got.group_id, "")
+            self.assertEqual(c.addr, leader.addr)
+        self.assertEqual(follower.describe_group_count, 1)
+        self.assertEqual(follower.metadata_count, 1)
+        self.assertEqual(leader.describe_group_count, 1)
+
+    def test_list_groups_typed_14_no_hint_then_ok(self) -> None:
+        with ScriptedBroker() as leader, ScriptedBroker() as follower:
+            follower.list_groups_codes = [NOT_CONTROLLER]
+            follower.metadata = _other_broker_meta(
+                follower.port, "127.0.0.1", leader.port
+            )
+            leader.list_groups_codes = [0]
+            with Client(follower.addr, timeout=5.0) as c:
+                got = c.list_groups()
+            self.assertEqual(got, [])
+            self.assertEqual(c.addr, leader.addr)
+        self.assertEqual(follower.list_groups_count, 1)
+        self.assertEqual(follower.metadata_count, 1)
+        self.assertEqual(leader.list_groups_count, 1)
+
+    def test_describe_group_max_redirects_zero_raises_on_first_14(self) -> None:
+        with ScriptedBroker() as follower:
+            follower.describe_group_replies = [
+                (NOT_CONTROLLER, "not controller; controller_id=2", True)
+            ]
+            follower.metadata = _controller_meta(2, "127.0.0.1", 9)
+            with Client(follower.addr, timeout=5.0, max_redirects=0) as c:
+                with self.assertRaises(BrokerError) as ctx:
+                    c.describe_group("g")
+            self.assertEqual(ctx.exception.code, NOT_CONTROLLER)
+        self.assertEqual(follower.describe_group_count, 1)
+        self.assertEqual(follower.metadata_count, 0)
+        self.assertEqual(follower.accept_count, 1)
 
 
 class TestMetadataListMembersRetry(unittest.TestCase):

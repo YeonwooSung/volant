@@ -394,7 +394,11 @@ class ClientTest {
         final List<Integer> deleteOffsetsCodes = new CopyOnWriteArrayList<>();
         final List<Integer> listOffsetsCodes = new CopyOnWriteArrayList<>();
         final List<Integer> describeGroupCodes = new CopyOnWriteArrayList<>();
+        final List<int[]> describeGroupReplies = new CopyOnWriteArrayList<>();
+        final List<String> describeGroupMessages = new CopyOnWriteArrayList<>();
         final List<Integer> listGroupsCodes = new CopyOnWriteArrayList<>();
+        final List<int[]> listGroupsReplies = new CopyOnWriteArrayList<>();
+        final List<String> listGroupsMessages = new CopyOnWriteArrayList<>();
         final List<Integer> metadataCodes = new CopyOnWriteArrayList<>();
         final List<Integer> listMembersCodes = new CopyOnWriteArrayList<>();
         final List<int[]> listMembersReplies = new CopyOnWriteArrayList<>();
@@ -428,6 +432,11 @@ class ClientTest {
 
         static ScriptedBroker start() throws IOException {
             return new ScriptedBroker();
+        }
+
+        void queueDescribeGroupError(int code, String message) {
+            describeGroupReplies.add(new int[] {code, 1});
+            describeGroupMessages.add(message);
         }
 
         private ScriptedBroker() throws IOException {
@@ -585,6 +594,17 @@ class ClientTest {
             }
             if (frame.opcode == Codec.OP_DESCRIBE_GROUP) {
                 describeGroupCount.incrementAndGet();
+                if (!describeGroupReplies.isEmpty()) {
+                    int[] rep = describeGroupReplies.remove(0);
+                    String msg = describeGroupMessages.isEmpty() ? "" : describeGroupMessages.remove(0);
+                    if (rep.length > 1 && rep[1] == 1) {
+                        replyOp[0] = Codec.OP_ERROR;
+                        return Codec.encodeErrorResponse(new Codec.ErrorResponse(rep[0], msg));
+                    }
+                    replyOp[0] = Codec.OP_DESCRIBE_GROUP_RESPONSE;
+                    return Codec.encodeDescribeGroupResponse(
+                            new Codec.DescribeGroupResponse(rep[0], "", 0, Collections.emptyList()));
+                }
                 int code = 0;
                 if (!describeGroupCodes.isEmpty()) {
                     code = describeGroupCodes.remove(0);
@@ -595,6 +615,17 @@ class ClientTest {
             }
             if (frame.opcode == Codec.OP_LIST_GROUPS) {
                 listGroupsCount.incrementAndGet();
+                if (!listGroupsReplies.isEmpty()) {
+                    int[] rep = listGroupsReplies.remove(0);
+                    String msg = listGroupsMessages.isEmpty() ? "" : listGroupsMessages.remove(0);
+                    if (rep.length > 1 && rep[1] == 1) {
+                        replyOp[0] = Codec.OP_ERROR;
+                        return Codec.encodeErrorResponse(new Codec.ErrorResponse(rep[0], msg));
+                    }
+                    replyOp[0] = Codec.OP_LIST_GROUPS_RESPONSE;
+                    return Codec.encodeListGroupsResponse(
+                            new Codec.ListGroupsResponse(rep[0], Collections.emptyList()));
+                }
                 int code = 0;
                 if (!listGroupsCodes.isEmpty()) {
                     code = listGroupsCodes.remove(0);
@@ -1322,6 +1353,7 @@ class ClientTest {
                 assertTrue(got.members.isEmpty());
             }
             assertEquals(2, srv.describeGroupCount.get());
+            assertEquals(0, srv.metadataCount.get());
         }
     }
 
@@ -1338,6 +1370,7 @@ class ClientTest {
                 assertEquals(NOT_FOUND, ex.code);
             }
             assertEquals(1, srv.describeGroupCount.get());
+            assertEquals(0, srv.metadataCount.get());
         }
     }
 
@@ -1370,6 +1403,58 @@ class ClientTest {
                 assertEquals(TIMEOUT, ex.code);
             }
             assertEquals(3, srv.describeGroupCount.get());
+        }
+    }
+
+    @Test
+    void describeGroupError14RedirectsViaControllerId() throws Exception {
+        try (ScriptedBroker leader = ScriptedBroker.start();
+                ScriptedBroker follower = ScriptedBroker.start()) {
+            follower.queueDescribeGroupError(NOT_CONTROLLER, "not controller; controller_id=2");
+            follower.meta = controllerMeta(2, "127.0.0.1", leader.port);
+            try (Client c = Client.connect("127.0.0.1", follower.port, 5_000)) {
+                DescribeGroupResult got = c.describeGroup("g");
+                assertEquals("", got.groupId);
+                assertTrue(got.members.isEmpty());
+                assertEquals(leader.port, Integer.parseInt(c.addr().substring(c.addr().indexOf(':') + 1)));
+            }
+            assertEquals(1, follower.describeGroupCount.get());
+            assertEquals(1, follower.metadataCount.get());
+            assertEquals(1, leader.describeGroupCount.get());
+        }
+    }
+
+    @Test
+    void listGroupsTyped14NoHintThenOk() throws Exception {
+        try (ScriptedBroker leader = ScriptedBroker.start();
+                ScriptedBroker follower = ScriptedBroker.start()) {
+            follower.listGroupsCodes.add(NOT_CONTROLLER);
+            follower.meta = otherBrokerMeta(follower.port, "127.0.0.1", leader.port);
+            try (Client c = Client.connect("127.0.0.1", follower.port, 5_000)) {
+                List<Codec.GroupListing> got = c.listGroups();
+                assertTrue(got.isEmpty());
+                assertEquals(leader.port, Integer.parseInt(c.addr().substring(c.addr().indexOf(':') + 1)));
+            }
+            assertEquals(1, follower.listGroupsCount.get());
+            assertEquals(1, follower.metadataCount.get());
+            assertEquals(1, leader.listGroupsCount.get());
+        }
+    }
+
+    @Test
+    void describeGroupMaxRedirectsZeroRaisesOnFirst14() throws Exception {
+        try (ScriptedBroker follower = ScriptedBroker.start()) {
+            follower.queueDescribeGroupError(NOT_CONTROLLER, "not controller; controller_id=2");
+            follower.meta = controllerMeta(2, "127.0.0.1", 9);
+            try (Client c = Client.connect("127.0.0.1", follower.port, 5_000)) {
+                c.setMaxRedirects(0);
+                BrokerException ex =
+                        assertThrows(BrokerException.class, () -> c.describeGroup("g"));
+                assertEquals(NOT_CONTROLLER, ex.code);
+            }
+            assertEquals(1, follower.describeGroupCount.get());
+            assertEquals(0, follower.metadataCount.get());
+            assertEquals(1, follower.acceptCount.get());
         }
     }
 

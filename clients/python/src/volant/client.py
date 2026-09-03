@@ -1977,18 +1977,27 @@ class Client:
 
         Error 2 (NotFound, no live members) raises :class:`BrokerError`.
         Transient broker/transport errors retry up to ``max_retries``
-        extra times (default 0). Error 2 / 9 / 10 / 11 / 13 / 14 are
-        not retried.
+        extra times (default 0). Error 14 follows ``max_redirects``.
+        Error 2 / 9 / 10 / 11 / 13 are not retried.
         """
         payload = codec.encode_describe_group_request(
             DescribeGroupRequest(group_id=group)
         )
         max_retries = max(0, int(self.max_retries))
+        max_attempts = 1 + self.max_redirects
         retry_attempt = 0
+        redirect_attempt = 0
         while True:
             try:
                 resp = self._round_trip(codec.OP_DESCRIBE_GROUP, payload)
             except BrokerError as e:
+                if (
+                    e.code == _NOT_CONTROLLER
+                    and redirect_attempt + 1 < max_attempts
+                    and self._redirect_to_controller(_controller_id_hint(e.message))
+                ):
+                    redirect_attempt += 1
+                    continue
                 if _is_transient_broker(e.code) and retry_attempt < max_retries:
                     retry_attempt += 1
                     self._sleep_produce_retry()
@@ -2004,6 +2013,13 @@ class Client:
                 raise ProtocolError(
                     f"unexpected response for describe_group: {type(resp)}"
                 )
+            if (
+                resp.error_code == _NOT_CONTROLLER
+                and redirect_attempt + 1 < max_attempts
+                and self._redirect_to_controller(None)
+            ):
+                redirect_attempt += 1
+                continue
             if (
                 _is_transient_broker(resp.error_code)
                 and retry_attempt < max_retries
@@ -2022,16 +2038,25 @@ class Client:
         """List known consumer groups (native opcode 36/37).
 
         Transient broker/transport errors retry up to ``max_retries``
-        extra times (default 0). Error 2 / 9 / 10 / 11 / 13 / 14 are
-        not retried.
+        extra times (default 0). Error 14 follows ``max_redirects``.
+        Error 2 / 9 / 10 / 11 / 13 are not retried.
         """
         payload = codec.encode_list_groups_request()
         max_retries = max(0, int(self.max_retries))
+        max_attempts = 1 + self.max_redirects
         retry_attempt = 0
+        redirect_attempt = 0
         while True:
             try:
                 resp = self._round_trip(codec.OP_LIST_GROUPS, payload)
             except BrokerError as e:
+                if (
+                    e.code == _NOT_CONTROLLER
+                    and redirect_attempt + 1 < max_attempts
+                    and self._redirect_to_controller(_controller_id_hint(e.message))
+                ):
+                    redirect_attempt += 1
+                    continue
                 if _is_transient_broker(e.code) and retry_attempt < max_retries:
                     retry_attempt += 1
                     self._sleep_produce_retry()
@@ -2047,6 +2072,13 @@ class Client:
                 raise ProtocolError(
                     f"unexpected response for list_groups: {type(resp)}"
                 )
+            if (
+                resp.error_code == _NOT_CONTROLLER
+                and redirect_attempt + 1 < max_attempts
+                and self._redirect_to_controller(None)
+            ):
+                redirect_attempt += 1
+                continue
             if (
                 _is_transient_broker(resp.error_code)
                 and retry_attempt < max_retries

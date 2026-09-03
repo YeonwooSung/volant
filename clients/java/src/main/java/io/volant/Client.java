@@ -1952,17 +1952,23 @@ public final class Client implements AutoCloseable {
      * Describe a live consumer group (native opcode 34/35).
      * Error 2 (NotFound, no live members) is a {@link BrokerException}.
      * Transient broker/transport errors retry up to {@code maxRetries}
-     * extra times (default 0). Error 2 / 9 / 10 / 11 / 13 / 14 are not
-     * retried.
+     * extra times (default 0). Error 14 follows {@code maxRedirects}.
+     * Error 2 / 9 / 10 / 11 / 13 are not retried.
      */
     public DescribeGroupResult describeGroup(String group) {
         byte[] payload = Codec.encodeDescribeGroupRequest(new Codec.DescribeGroupRequest(group));
         int retryAttempt = 0;
+        int redirectAttempt = 0;
+        int maxAttempts = 1 + maxRedirects;
         while (true) {
             Object decoded;
             try {
                 decoded = roundTrip(Codec.OP_DESCRIBE_GROUP, payload);
             } catch (BrokerException e) {
+                if (maybeRedirectController(e.code, e.message, redirectAttempt + 1, maxAttempts)) {
+                    redirectAttempt++;
+                    continue;
+                }
                 if (isTransientBroker(e.code) && retryAttempt < maxRetries) {
                     retryAttempt++;
                     sleepProduceRetry();
@@ -1981,6 +1987,10 @@ public final class Client implements AutoCloseable {
                 throw new ProtocolException("unexpected response for describe_group: " + typeName(decoded));
             }
             Codec.DescribeGroupResponse resp = (Codec.DescribeGroupResponse) decoded;
+            if (maybeRedirectController(resp.errorCode, null, redirectAttempt + 1, maxAttempts)) {
+                redirectAttempt++;
+                continue;
+            }
             if (isTransientBroker(resp.errorCode) && retryAttempt < maxRetries) {
                 retryAttempt++;
                 sleepProduceRetry();
@@ -1994,16 +2004,23 @@ public final class Client implements AutoCloseable {
     /**
      * List known consumer groups (native opcode 36/37). Transient
      * broker/transport errors retry up to {@code maxRetries} extra times
-     * (default 0). Error 2 / 9 / 10 / 11 / 13 / 14 are not retried.
+     * (default 0). Error 14 follows {@code maxRedirects}. Error 2 / 9 /
+     * 10 / 11 / 13 are not retried.
      */
     public List<Codec.GroupListing> listGroups() {
         byte[] payload = Codec.encodeListGroupsRequest();
         int retryAttempt = 0;
+        int redirectAttempt = 0;
+        int maxAttempts = 1 + maxRedirects;
         while (true) {
             Object decoded;
             try {
                 decoded = roundTrip(Codec.OP_LIST_GROUPS, payload);
             } catch (BrokerException e) {
+                if (maybeRedirectController(e.code, e.message, redirectAttempt + 1, maxAttempts)) {
+                    redirectAttempt++;
+                    continue;
+                }
                 if (isTransientBroker(e.code) && retryAttempt < maxRetries) {
                     retryAttempt++;
                     sleepProduceRetry();
@@ -2022,6 +2039,10 @@ public final class Client implements AutoCloseable {
                 throw new ProtocolException("unexpected response for list_groups: " + typeName(decoded));
             }
             Codec.ListGroupsResponse resp = (Codec.ListGroupsResponse) decoded;
+            if (maybeRedirectController(resp.errorCode, null, redirectAttempt + 1, maxAttempts)) {
+                redirectAttempt++;
+                continue;
+            }
             if (isTransientBroker(resp.errorCode) && retryAttempt < maxRetries) {
                 retryAttempt++;
                 sleepProduceRetry();
