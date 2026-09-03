@@ -151,6 +151,9 @@
 //! v0.155 adds [`ClientConfig::delete_records_wait`] (default **0**)
 //! used by [`Client::delete_records`].
 //! [`Client::delete_records_with_wait_flag`] stays fully explicit.
+//! v0.159 adds [`Client::fetch_offsets_all`] as a named helper for
+//! all-group OffsetFetch. Same as `fetch_offsets(group_id, vec![])`.
+//! [`Client::fetch_offsets`] is unchanged.
 
 #![deny(missing_docs)]
 
