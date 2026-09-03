@@ -332,6 +332,7 @@ class Client:
         enable_idempotence: bool = False,
         max_retries: int = 0,
         retry_backoff_ms: int = 50,
+        acks: int = 1,
         transactional_id: Optional[str] = None,
         scram_username: Optional[str] = None,
         scram_password: Optional[str] = None,
@@ -357,6 +358,8 @@ class Client:
         # Extra produce/fetch attempts on transient broker/transport errors.
         self.max_retries = max(0, int(max_retries))
         self.retry_backoff_ms = max(0, int(retry_backoff_ms))
+        # Default produce acks (1 = leader only; 255 = all ISR). produce(..., acks=) wins.
+        self.acks = int(acks)
         self.transactional_id = transactional_id or None
         self._producer_id = 0
         self._producer_epoch = 0
@@ -1007,13 +1010,15 @@ class Client:
         *,
         key: Optional[bytes] = None,
         messages: Optional[Iterable[Union[bytes, ProduceMessage]]] = None,
-        acks: int = 1,
+        acks: Optional[int] = None,
         timestamp_ms: int = -1,
         headers: Optional[list[tuple[str, bytes]]] = None,
     ) -> ProduceResult:
         """Produce one value-only (or keyed) message, or an explicit batch.
 
         ``partition`` is sent as ``i32`` (use ``-1`` to let the broker assign).
+        ``acks`` defaults to ``self.acks`` (constructor default 1 = leader
+        only; 255 = all ISR). An explicit ``acks=`` wins.
         With ``enable_idempotence=False`` (default) the trailer is
         ``(0, 0, -1)``. When on, the first produce sends InitProducerId
         (empty transactional_id) and later produces attach pid/epoch/seq.
@@ -1022,6 +1027,8 @@ class Client:
         error 21 uses the one re-Init only. Failed produce does not
         increment the idempotent sequence.
         """
+        if acks is None:
+            acks = self.acks
         batch: list[ProduceMessage]
         if messages is not None:
             batch = []

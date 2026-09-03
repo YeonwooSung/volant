@@ -312,7 +312,33 @@ class ClientTest {
     void produceDefaultAcks() throws Exception {
         try (ScriptedBroker srv = ScriptedBroker.start()) {
             try (Client c = Client.connect("127.0.0.1", srv.port, 5_000)) {
+                assertEquals(1, c.acks());
                 c.produce("t", 0, null, "hello".getBytes(StandardCharsets.UTF_8));
+            }
+            assertEquals(1, srv.produceReqs.size());
+            assertEquals(1, srv.produceReqs.get(0).acks);
+        }
+    }
+
+    @Test
+    void produceSetAcksAll() throws Exception {
+        try (ScriptedBroker srv = ScriptedBroker.start()) {
+            try (Client c = Client.connect("127.0.0.1", srv.port, 5_000)) {
+                c.setAcks(255);
+                assertEquals(255, c.acks());
+                c.produce("t", 0, null, "hello".getBytes(StandardCharsets.UTF_8));
+            }
+            assertEquals(1, srv.produceReqs.size());
+            assertEquals(255, srv.produceReqs.get(0).acks);
+        }
+    }
+
+    @Test
+    void produceAcksExplicitWins() throws Exception {
+        try (ScriptedBroker srv = ScriptedBroker.start()) {
+            try (Client c = Client.connect("127.0.0.1", srv.port, 5_000)) {
+                c.setAcks(255);
+                c.produce("t", 0, null, "hello".getBytes(StandardCharsets.UTF_8), 1);
             }
             assertEquals(1, srv.produceReqs.size());
             assertEquals(1, srv.produceReqs.get(0).acks);

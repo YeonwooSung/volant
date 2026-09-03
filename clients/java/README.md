@@ -30,6 +30,7 @@ try (Client c = Client.connect("127.0.0.1", 9092)) {
   int gen = c.reassignPartitions("t", new int[] {1, 2}); // all partitions
   long off = c.produce("t", 0, null, "hello".getBytes(UTF_8));
   // produce(..., acks): 1 = leader, 255 = acks=all (v0.64). produce 4-arg stays acks=1.
+  // setAcks(255) changes 4-arg produce default (v0.129). Explicit acks overload unchanged.
   off = c.produce("t", 0, null, "hello".getBytes(UTF_8), 255);
   // produce(topic, partition, messages, acks): N messages in one RPC (v0.68).
   off = c.produce("t", 0, List.of(

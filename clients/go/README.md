@@ -35,6 +35,7 @@ if err != nil {
     log.Fatal(err)
 }
 // ProduceAcks: 1 = leader, 255 = acks=all (v0.64). Produce stays acks=1.
+// SetAcks(255) changes Produce default (v0.129). ProduceAcks / ProduceBatch stay explicit.
 off, err = c.ProduceAcks("t", 0, nil, []byte("hello"), 255)
 // ProduceBatch: N messages in one Produce RPC (v0.68). Produce stays one message.
 off, err = c.ProduceBatch("t", 0, []codec.ProduceMessage{{Value: []byte("a")}, {Value: []byte("b")}}, 1)

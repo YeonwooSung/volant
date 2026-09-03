@@ -145,6 +145,7 @@ type Client struct {
 	maxRedirects      int
 	maxRetries        int
 	retryBackoff      time.Duration
+	acks              uint8
 	enableIdempotence bool
 	transactionalID   string
 	producerID        uint64
@@ -213,6 +214,7 @@ func dialPlain(addr string, timeout time.Duration, token, scramUser, scramPass s
 		scramPass:    scramPass,
 		maxRedirects: 1,
 		retryBackoff: 50 * time.Millisecond,
+		acks:         1,
 	}
 	if err := c.maybeAuthenticate(); err != nil {
 		return nil, err
@@ -278,6 +280,7 @@ func dialTLS(addr string, cfg TLSConfig, timeout time.Duration, token, scramUser
 		scramPass:    scramPass,
 		maxRedirects: 1,
 		retryBackoff: 50 * time.Millisecond,
+		acks:         1,
 	}
 	if err := c.maybeAuthenticate(); err != nil {
 		return nil, err
@@ -316,6 +319,18 @@ func (c *Client) SetRetryBackoff(d time.Duration) {
 		d = 0
 	}
 	c.retryBackoff = d
+}
+
+// SetAcks sets the default produce acks used by Produce. 1 = leader
+// only; 255 = acks=all (ISR). Default is 1. ProduceAcks / ProduceBatch
+// stay explicit.
+func (c *Client) SetAcks(acks uint8) {
+	c.acks = acks
+}
+
+// Acks returns the default produce acks (1 = leader, 255 = all).
+func (c *Client) Acks() uint8 {
+	return c.acks
 }
 
 // EnableIdempotence turns on InitProducerId + per-partition produce sequences.
@@ -1058,12 +1073,13 @@ func (c *Client) ReassignPartitions(topic string, replicas []uint32, partition *
 	return decoded.(codec.ReassignPartitionsResponse).Generation, nil
 }
 
-// Produce sends one message (null key when key is nil) with acks=1.
-// Default trailer is (0, 0, -1). After EnableIdempotence the first produce
-// sends InitProducerId (empty transactional_id) and later produces attach
-// pid/epoch/seq. Returns the broker-assigned base offset.
+// Produce sends one message (null key when key is nil) with the client
+// default acks (1 unless SetAcks). Default trailer is (0, 0, -1). After
+// EnableIdempotence the first produce sends InitProducerId (empty
+// transactional_id) and later produces attach pid/epoch/seq. Returns
+// the broker-assigned base offset.
 func (c *Client) Produce(topic string, partition int, key, value []byte) (int64, error) {
-	return c.ProduceAcks(topic, partition, key, value, 1)
+	return c.ProduceAcks(topic, partition, key, value, c.acks)
 }
 
 // ProduceAcks is Produce with an explicit acks byte. 1 = leader only;

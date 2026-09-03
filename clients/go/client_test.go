@@ -966,7 +966,61 @@ func TestProduceDefaultAcks(t *testing.T) {
 	}
 	defer c.Close()
 
+	if c.Acks() != 1 {
+		t.Fatalf("Acks() %d want 1", c.Acks())
+	}
 	if _, err := c.Produce("t", 0, nil, []byte("hello")); err != nil {
+		t.Fatal(err)
+	}
+	reqs := srv.copyProduces()
+	if len(reqs) != 1 {
+		t.Fatalf("produces %d want 1", len(reqs))
+	}
+	if reqs[0].Acks != 1 {
+		t.Fatalf("acks %d want 1", reqs[0].Acks)
+	}
+}
+
+func TestProduceSetAcksAll(t *testing.T) {
+	srv := &scriptedBroker{}
+	addr, stop := startScripted(t, srv)
+	defer stop()
+
+	c, err := volant.DialTimeout(addr, 5*time.Second)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer c.Close()
+
+	c.SetAcks(255)
+	if c.Acks() != 255 {
+		t.Fatalf("Acks() %d want 255", c.Acks())
+	}
+	if _, err := c.Produce("t", 0, nil, []byte("hello")); err != nil {
+		t.Fatal(err)
+	}
+	reqs := srv.copyProduces()
+	if len(reqs) != 1 {
+		t.Fatalf("produces %d want 1", len(reqs))
+	}
+	if reqs[0].Acks != 255 {
+		t.Fatalf("acks %d want 255", reqs[0].Acks)
+	}
+}
+
+func TestProduceAcksExplicitWins(t *testing.T) {
+	srv := &scriptedBroker{}
+	addr, stop := startScripted(t, srv)
+	defer stop()
+
+	c, err := volant.DialTimeout(addr, 5*time.Second)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer c.Close()
+
+	c.SetAcks(255)
+	if _, err := c.ProduceAcks("t", 0, nil, []byte("hello"), 1); err != nil {
 		t.Fatal(err)
 	}
 	reqs := srv.copyProduces()

@@ -24,6 +24,7 @@ c.create_partitions("t", 2)
 c.reassign_partitions("t", [1, 2])  # all partitions; or partition=0
 c.produce("t", 0, value=b"hello")
 # acks=1 by default; acks=255 is acks=all (already shipped).
+# Client default acks (v0.129): Client(..., acks=255) or c.acks = 255; produce(..., acks=) still wins.
 c.produce("t", 0, value=b"hello", acks=255)
 batch = c.fetch("t", 0, offset=0)
 # max_messages=128, max_bytes=4MiB, max_wait_ms=0 by default (already shipped).
