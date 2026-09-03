@@ -1,4 +1,4 @@
-//! v0.144: Rust ClientConfig Fetch knobs + fetch_default.
+//! v0.149: Client::fetch uses ClientConfig.fetch_max_bytes.
 
 use std::sync::{Arc, Mutex};
 
@@ -9,9 +9,7 @@ use volant_core::Offset;
 use volant_protocol::codec::{decode_frame, encode_frame};
 use volant_protocol::{decode_request, pack_response, Request, Response};
 
-const DEFAULT_FETCH_MAX_MESSAGES: u32 = 128;
 const DEFAULT_FETCH_MAX_BYTES: u32 = 4 * 1024 * 1024;
-const DEFAULT_FETCH_MAX_WAIT_MS: u32 = 0;
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 struct FetchSnap {
@@ -157,63 +155,32 @@ async fn connect_cfg(stub: &FetchStub, cfg: ClientConfig) -> Client {
 }
 
 #[tokio::test]
-async fn fetch_default_uses_client_config_defaults() {
+async fn default_fetch_sends_config_default_max_bytes() {
     let stub = FetchStub::boot().await;
     let client = connect(&stub).await;
     client
-        .fetch_default("t", 0, Offset::ZERO)
+        .fetch("t", 0, Offset::ZERO, 7, 0)
         .await
-        .expect("fetch_default");
+        .expect("fetch");
     assert_eq!(
         stub.fetches(),
         vec![FetchSnap {
             topic: "t".into(),
             partition: 0,
-            max_messages: DEFAULT_FETCH_MAX_MESSAGES,
+            max_messages: 7,
             max_bytes: DEFAULT_FETCH_MAX_BYTES,
-            max_wait_ms: DEFAULT_FETCH_MAX_WAIT_MS,
+            max_wait_ms: 0,
         }]
     );
 }
 
 #[tokio::test]
-async fn fetch_default_uses_configured_knobs() {
+async fn fetch_uses_configured_fetch_max_bytes() {
     let stub = FetchStub::boot().await;
     let client = connect_cfg(
         &stub,
         ClientConfig {
-            fetch_max_messages: 10,
             fetch_max_bytes: 4096,
-            fetch_max_wait_ms: 100,
-            ..ClientConfig::default()
-        },
-    )
-    .await;
-    client
-        .fetch_default("t", 0, Offset::ZERO)
-        .await
-        .expect("fetch_default");
-    assert_eq!(
-        stub.fetches(),
-        vec![FetchSnap {
-            topic: "t".into(),
-            partition: 0,
-            max_messages: 10,
-            max_bytes: 4096,
-            max_wait_ms: 100,
-        }]
-    );
-}
-
-#[tokio::test]
-async fn existing_fetch_uses_config_fetch_max_bytes() {
-    let stub = FetchStub::boot().await;
-    let client = connect_cfg(
-        &stub,
-        ClientConfig {
-            fetch_max_messages: 10,
-            fetch_max_bytes: 4096,
-            fetch_max_wait_ms: 100,
             ..ClientConfig::default()
         },
     )
@@ -229,6 +196,33 @@ async fn existing_fetch_uses_config_fetch_max_bytes() {
             partition: 0,
             max_messages: 7,
             max_bytes: 4096,
+            max_wait_ms: 0,
+        }]
+    );
+}
+
+#[tokio::test]
+async fn fetch_opts_ignores_config_fetch_max_bytes() {
+    let stub = FetchStub::boot().await;
+    let client = connect_cfg(
+        &stub,
+        ClientConfig {
+            fetch_max_bytes: 4096,
+            ..ClientConfig::default()
+        },
+    )
+    .await;
+    client
+        .fetch_opts("t", 0, Offset::ZERO, 7, 0, 8192)
+        .await
+        .expect("fetch_opts");
+    assert_eq!(
+        stub.fetches(),
+        vec![FetchSnap {
+            topic: "t".into(),
+            partition: 0,
+            max_messages: 7,
+            max_bytes: 8192,
             max_wait_ms: 0,
         }]
     );

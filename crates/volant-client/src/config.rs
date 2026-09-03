@@ -2,6 +2,7 @@
 //!
 //! v0.144 adds Fetch knobs (`fetch_max_messages` / `fetch_max_bytes` /
 //! `fetch_max_wait_ms`) used by [`crate::Client::fetch_default`].
+//! v0.149: [`crate::Client::fetch`] also uses `fetch_max_bytes`.
 
 use std::path::PathBuf;
 
@@ -18,9 +19,9 @@ pub struct ClientConfig {
     /// [`crate::Client::fetch`] still takes an explicit `max_messages`.
     /// GroupConsumer poll stays historical 100 (v0.76).
     pub fetch_max_messages: u32,
-    /// Default Fetch `max_bytes` for [`crate::Client::fetch_default`] (4 MiB).
-    /// [`crate::Client::fetch`] still hardcodes 4 MiB; use
-    /// [`crate::Client::fetch_opts`] for an explicit size.
+    /// Default Fetch `max_bytes` for [`crate::Client::fetch`] and
+    /// [`crate::Client::fetch_default`] (4 MiB). Use
+    /// [`crate::Client::fetch_opts`] for an explicit per-call size.
     pub fetch_max_bytes: u32,
     /// Default Fetch `max_wait_ms` for [`crate::Client::fetch_default`] (0).
     /// [`crate::Client::fetch`] still takes an explicit `max_wait_ms`.
@@ -76,7 +77,7 @@ impl Default for ClientConfig {
             client_id: "volant-client".into(),
             acks: 1,
             fetch_max_messages: 128,
-            fetch_max_bytes: 4 * 1024 * 1024,
+            fetch_max_bytes: crate::client::Client::DEFAULT_FETCH_MAX_BYTES,
             fetch_max_wait_ms: 0,
             auth_token: None,
             scram_username: None,
