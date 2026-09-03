@@ -171,6 +171,9 @@
 //! v0.165 adds [`Client::delete_offsets_all`] / [`Client::delete_offset`]
 //! wrapping [`Client::delete_offsets`]. Empty entries still delete all.
 //! [`Client::delete_offsets`] is unchanged.
+//! v0.170 adds [`Client::create_acl`] / [`Client::delete_acl`] wrapping
+//! [`Client::create_acls`] / [`Client::delete_acls`]. Single-binding
+//! convenience. Batch APIs unchanged.
 
 #![deny(missing_docs)]
 
