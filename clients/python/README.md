@@ -28,6 +28,7 @@ c.produce("t", 0, value=b"hello")
 c.produce("t", 0, value=b"hello", acks=255)
 batch = c.fetch("t", 0, offset=0)
 # max_messages=128, max_bytes=4MiB, max_wait_ms=0 by default (already shipped).
+# Client default knobs (v0.143): Client(..., fetch_max_messages=10) or c.fetch_max_messages = 10; explicit kwargs still win. 0 stays 0.
 batch = c.fetch("t", 0, offset=0, max_messages=10, max_bytes=4096, max_wait_ms=100)
 for offset, key, value in batch.tuples():
     print(offset, key, value)
@@ -302,7 +303,9 @@ admin path only (empty member, generation 0) unless the caller (or
 `GroupConsumer.commit`) passes a joined `member_id` / `generation`.
 Sync only; one TCP connection; acks=1 by default (`acks=255` is
 acks=all). `fetch` already takes `max_messages` / `max_bytes` /
-`max_wait_ms`. Convenience batch is `messages=` (Go `ProduceBatch` /
+`max_wait_ms`. Omitted knobs use `self.fetch_max_*` (constructor
+defaults 128 / 4MiB / 0; v0.143). Explicit kwargs still win.
+GroupConsumer poll knobs stay 100 / 4MiB (v0.75). Convenience batch is `messages=` (Go `ProduceBatch` /
 Java list `produce` now match; not Kafka Produce; native opcode 1).
 TLS does not change
 broker TLS (Phase 8/19) and does not add Kafka API keys. Leader

@@ -333,6 +333,9 @@ class Client:
         max_retries: int = 0,
         retry_backoff_ms: int = 50,
         acks: int = 1,
+        fetch_max_messages: int = 128,
+        fetch_max_bytes: int = 4 * 1024 * 1024,
+        fetch_max_wait_ms: int = 0,
         transactional_id: Optional[str] = None,
         scram_username: Optional[str] = None,
         scram_password: Optional[str] = None,
@@ -360,6 +363,10 @@ class Client:
         self.retry_backoff_ms = max(0, int(retry_backoff_ms))
         # Default produce acks (1 = leader only; 255 = all ISR). produce(..., acks=) wins.
         self.acks = int(acks)
+        # Default Fetch knobs (128 / 4MiB / 0). fetch(..., max_*=) wins. 0 stays 0.
+        self.fetch_max_messages = int(fetch_max_messages)
+        self.fetch_max_bytes = int(fetch_max_bytes)
+        self.fetch_max_wait_ms = int(fetch_max_wait_ms)
         self.transactional_id = transactional_id or None
         self._producer_id = 0
         self._producer_epoch = 0
@@ -1257,15 +1264,24 @@ class Client:
         partition: int,
         offset: int = 0,
         *,
-        max_messages: int = 128,
-        max_bytes: int = 4 * 1024 * 1024,
-        max_wait_ms: int = 0,
+        max_messages: Optional[int] = None,
+        max_bytes: Optional[int] = None,
+        max_wait_ms: Optional[int] = None,
     ) -> FetchResult:
         """Fetch records from topic/partition starting at ``offset``.
 
+        ``max_messages`` / ``max_bytes`` / ``max_wait_ms`` default to
+        ``self.fetch_max_*`` (constructor defaults 128 / 4MiB / 0).
+        Explicit kwargs still win. 0 is kept as-is (wire-legal; no clamp).
         Transient broker/transport errors retry up to ``max_retries``
         extra times (default 0). Error 13 uses ``max_redirects`` only.
         """
+        if max_messages is None:
+            max_messages = self.fetch_max_messages
+        if max_bytes is None:
+            max_bytes = self.fetch_max_bytes
+        if max_wait_ms is None:
+            max_wait_ms = self.fetch_max_wait_ms
         payload = codec.encode_fetch_request(
             FetchRequest(
                 topic=topic,

@@ -24,10 +24,13 @@ func DialAuthRetries(addr, token string, maxRetries int, backoff time.Duration) 
 		timeout:      timeout,
 		nextCorr:     1,
 		authToken:    token,
-		maxRedirects: 1,
-		maxRetries:   maxRetries,
-		retryBackoff: backoff,
-		acks:         1,
+		maxRedirects:     1,
+		maxRetries:       maxRetries,
+		retryBackoff:     backoff,
+		acks:             1,
+		fetchMaxMessages: 128,
+		fetchMaxBytes:    4 * 1024 * 1024,
+		fetchMaxWaitMs:   0,
 	}
 	if err := c.maybeAuthenticate(); err != nil {
 		return nil, err
@@ -58,10 +61,13 @@ func DialScramRetry(addr, user, pass string, maxRetries int, backoff time.Durati
 		nextCorr:     1,
 		scramUser:    user,
 		scramPass:    pass,
-		maxRedirects: 1,
-		maxRetries:   maxRetries,
-		retryBackoff: backoff,
-		acks:         1,
+		maxRedirects:     1,
+		maxRetries:       maxRetries,
+		retryBackoff:     backoff,
+		acks:             1,
+		fetchMaxMessages: 128,
+		fetchMaxBytes:    4 * 1024 * 1024,
+		fetchMaxWaitMs:   0,
 	}
 	if err := c.maybeAuthenticate(); err != nil {
 		return nil, err

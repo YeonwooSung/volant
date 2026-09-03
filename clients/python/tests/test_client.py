@@ -32,6 +32,7 @@ from volant.codec import (
     DeleteOffsetsResponse,
     DescribeGroupResponse,
     ErrorResponse,
+    FetchRequest,
     FetchResponse,
     HeartbeatResponse,
     InitProducerIdResponse,
@@ -115,6 +116,7 @@ class ScriptedBroker:
         self.metadata: MetadataResponse | None = None
         self.opcodes: list[int] = []
         self.produce_reqs: list[ProduceRequest] = []
+        self.fetch_reqs: list[FetchRequest] = []
         self.offset_commit_reqs: list[OffsetCommitRequest] = []
         self.offset_fetch_reqs: list[OffsetFetchRequest] = []
         self.init_txn_ids: list[str] = []
@@ -242,6 +244,7 @@ class ScriptedBroker:
         if opcode == OP_FETCH:
             self.fetch_count += 1
             req = decode_fetch_request(raw)
+            self.fetch_reqs.append(req)
             code = self.fetch_codes.pop(0) if self.fetch_codes else 0
             return (
                 encode_fetch_response(
@@ -723,6 +726,67 @@ class TestProduceDefaultAcks(unittest.TestCase):
                 c.produce("t", 0, value=b"hello", acks=1)
             self.assertEqual(len(srv.produce_reqs), 1)
             self.assertEqual(srv.produce_reqs[0].acks, 1)
+
+
+class TestFetchDefaultKnobs(unittest.TestCase):
+    def test_fetch_default_knobs(self) -> None:
+        with ScriptedBroker() as srv:
+            with Client(srv.addr, timeout=5.0) as c:
+                self.assertEqual(c.fetch_max_messages, 128)
+                self.assertEqual(c.fetch_max_bytes, 4 * 1024 * 1024)
+                self.assertEqual(c.fetch_max_wait_ms, 0)
+                c.fetch("t", 0, offset=0)
+            self.assertEqual(len(srv.fetch_reqs), 1)
+            req = srv.fetch_reqs[0]
+            self.assertEqual(req.max_messages, 128)
+            self.assertEqual(req.max_bytes, 4 * 1024 * 1024)
+            self.assertEqual(req.max_wait_ms, 0)
+
+    def test_fetch_set_client_defaults(self) -> None:
+        with ScriptedBroker() as srv:
+            with Client(srv.addr, timeout=5.0) as c:
+                c.fetch_max_messages = 10
+                c.fetch_max_bytes = 4096
+                c.fetch_max_wait_ms = 100
+                c.fetch("t", 0, offset=0)
+            self.assertEqual(len(srv.fetch_reqs), 1)
+            req = srv.fetch_reqs[0]
+            self.assertEqual(req.max_messages, 10)
+            self.assertEqual(req.max_bytes, 4096)
+            self.assertEqual(req.max_wait_ms, 100)
+
+    def test_fetch_constructor_defaults(self) -> None:
+        with ScriptedBroker() as srv:
+            with Client(
+                srv.addr,
+                timeout=5.0,
+                fetch_max_messages=10,
+                fetch_max_bytes=4096,
+                fetch_max_wait_ms=100,
+            ) as c:
+                self.assertEqual(c.fetch_max_messages, 10)
+                c.fetch("t", 0, offset=0)
+            self.assertEqual(len(srv.fetch_reqs), 1)
+            req = srv.fetch_reqs[0]
+            self.assertEqual(req.max_messages, 10)
+            self.assertEqual(req.max_bytes, 4096)
+            self.assertEqual(req.max_wait_ms, 100)
+
+    def test_fetch_explicit_kwargs_win(self) -> None:
+        with ScriptedBroker() as srv:
+            with Client(
+                srv.addr,
+                timeout=5.0,
+                fetch_max_messages=10,
+                fetch_max_bytes=4096,
+                fetch_max_wait_ms=100,
+            ) as c:
+                c.fetch("t", 0, offset=0, max_messages=20, max_bytes=8192, max_wait_ms=50)
+            self.assertEqual(len(srv.fetch_reqs), 1)
+            req = srv.fetch_reqs[0]
+            self.assertEqual(req.max_messages, 20)
+            self.assertEqual(req.max_bytes, 8192)
+            self.assertEqual(req.max_wait_ms, 50)
 
 
 class TestProduceRetry(unittest.TestCase):

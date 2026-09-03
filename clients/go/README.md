@@ -51,7 +51,8 @@ recs, err := c.Fetch("t", 0, 0)
 if err != nil {
     log.Fatal(err)
 }
-// FetchOpts: max_messages / max_bytes / max_wait_ms (v0.64). Fetch stays 128 / 4MiB / 0.
+// FetchOpts: max_messages / max_bytes / max_wait_ms (v0.64). Fetch uses client defaults (128 / 4MiB / 0).
+// SetFetchMaxMessages / SetFetchMaxBytes / SetFetchMaxWaitMs change Fetch (v0.143). 0 stays 0 (no clamp). FetchOpts stays explicit.
 recs, err = c.FetchOpts("t", 0, 0, 10, 4096, 100)
 for _, rec := range recs {
     fmt.Println(rec.Offset, rec.Key, rec.Value)
@@ -350,7 +351,9 @@ message (v0.130); `ProduceHeadersAcks` sets headers and explicit acks
 caller timestamp and headers using the client default acks (v0.138).
 `FetchOpts`
 exposes max_messages / max_bytes / max_wait_ms (not Kafka Fetch;
-native opcode 2). TLS
+native opcode 2). 3-arg `Fetch` uses client defaults (128 / 4MiB / 0
+unless `SetFetchMax*`; v0.143). `FetchOpts` stays explicit.
+GroupConsumer poll knobs stay 100 / 4MiB (v0.75). TLS
 does not change broker TLS (Phase 8/19) and does not add Kafka API keys.
 Leader redirect is Produce/Fetch/DeleteRecords (error 13) and the six
 controller-gated admin RPCs (error 14; default one extra attempt).

@@ -45,7 +45,8 @@ try (Client c = Client.connect("127.0.0.1", 9092)) {
   // produceTimestampHeaders: timestamp + headers (v0.138). produceTimestamp stays empty headers; headers produce stays -1.
   off = c.produceTimestampHeaders("t", 0, null, "hello".getBytes(UTF_8), 1700000000000L, List.of(new Record.Header("h", "hv".getBytes(UTF_8))));
   List<Record> recs = c.fetch("t", 0, 0);
-  // fetch 6-arg: max_messages / max_bytes / max_wait_ms (v0.64). fetch 3-arg stays 128 / 4MiB / 0.
+  // fetch 6-arg: max_messages / max_bytes / max_wait_ms (v0.64). 3-arg uses client defaults (128 / 4MiB / 0).
+  // setFetchMaxMessages / setFetchMaxBytes / setFetchMaxWaitMs change 3-arg fetch (v0.143). 0 stays 0 (no clamp). 6-arg stays explicit.
   recs = c.fetch("t", 0, 0, 10, 4096L, 100);
   for (Record rec : recs) {
     System.out.println(rec.offset + " " + rec.key + " " + new String(rec.value, UTF_8));
@@ -325,7 +326,10 @@ sends N in one RPC (v0.68; not Kafka Produce; native opcode 1).
 `produceTimestampHeaders` sends one message with both caller timestamp
 and headers using the client default acks (v0.138).
 Public 6-arg `fetch` exposes max_messages / max_bytes /
-max_wait_ms (not Kafka Fetch; native opcode 2). Thin
+max_wait_ms (not Kafka Fetch; native opcode 2). 3-arg `fetch` uses
+client defaults (128 / 4MiB / 0 unless `setFetchMax*`; v0.143).
+6-arg stays explicit. GroupConsumer poll knobs stay 100 / 4MiB
+(v0.75). Thin
 `joinGroup` still sends empty `group_instance_id`;
 `joinGroupWithInstance` encodes the id (v0.127; empty = dynamic).
 Use `GroupConsumer.joinStatic` for the high-level loop. Convenience
