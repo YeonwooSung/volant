@@ -1723,6 +1723,7 @@ class ClientTest {
                     "hello",
                     new String(srv.produceReqs.get(0).messages.get(0).value, StandardCharsets.UTF_8));
             assertTrue(srv.produceReqs.get(0).messages.get(0).headers.isEmpty());
+            assertEquals(-1L, srv.produceReqs.get(0).messages.get(0).timestampMs);
         }
     }
 
@@ -1748,6 +1749,24 @@ class ClientTest {
             assertEquals("h", req.messages.get(0).headers.get(0).name);
             assertArrayEquals(
                     "hv".getBytes(StandardCharsets.UTF_8), req.messages.get(0).headers.get(0).value);
+        }
+    }
+
+    @Test
+    void produceTimestampEncodes() throws Exception {
+        try (ScriptedBroker srv = ScriptedBroker.start()) {
+            try (Client c = Client.connect("127.0.0.1", srv.port, 5_000)) {
+                long off =
+                        c.produceTimestamp(
+                                "t", 0, null, "hello".getBytes(StandardCharsets.UTF_8), 1_700_000_000_000L);
+                assertEquals(7L, off);
+            }
+            assertEquals(1, srv.produceReqs.size());
+            Codec.ProduceRequest req = srv.produceReqs.get(0);
+            assertEquals(1, req.acks);
+            assertEquals(1, req.messages.size());
+            assertEquals(1_700_000_000_000L, req.messages.get(0).timestampMs);
+            assertTrue(req.messages.get(0).headers.isEmpty());
         }
     }
 

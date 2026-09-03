@@ -1068,6 +1068,27 @@ public final class Client implements AutoCloseable {
     }
 
     /**
+     * Produce one message with a caller-supplied native timestamp, the
+     * client default acks, and empty headers. Named so it does not
+     * collide with {@link #produce(String, int, byte[], byte[], int)}
+     * or {@link #produce(String, int, byte[], byte[], List)}. Four-arg
+     * {@link #produce(String, int, byte[], byte[])} still sends
+     * {@code timestampMs = -1} (broker now). Reuses the batch retry /
+     * error 13 / error 21 path.
+     */
+    public long produceTimestamp(String topic, int partition, byte[] key, byte[] value, long timestampMs) {
+        if (value == null) {
+            value = new byte[0];
+        }
+        return produce(
+                topic,
+                partition,
+                Collections.singletonList(
+                        new Codec.ProduceMessage(key, value, timestampMs, Collections.emptyList())),
+                this.acks);
+    }
+
+    /**
      * Produce with an explicit acks byte. {@code 1} = leader only;
      * {@code 255} = acks=all (ISR). Same as the Rust client / Python {@code acks=}.
      * One message; empty headers (use the headers overload or the batch path).
