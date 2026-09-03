@@ -261,7 +261,8 @@ public final class Client implements AutoCloseable {
     }
 
     /**
-     * Default produce acks used by {@link #produce(String, int, byte[], byte[])}.
+     * Default produce acks used by {@link #produce(String, int, byte[], byte[])}
+     * and 3-arg list {@link #produce(String, int, List)}.
      * {@code 1} = leader only; {@code 255} = acks=all (ISR). Default is 1.
      * Overloads with an explicit acks argument are unchanged.
      */
@@ -1236,6 +1237,18 @@ public final class Client implements AutoCloseable {
                 partition,
                 Collections.singletonList(new Codec.ProduceMessage(key, value, -1L, Collections.emptyList())),
                 acks);
+    }
+
+    /**
+     * Produce {@code messages} in one Produce RPC using the client
+     * default acks (1 unless {@link #setAcks}). The 4-arg list
+     * {@link #produce(String, int, List, int)} still requires explicit
+     * acks. Empty / null batch is an error (no opcode 1).
+     *
+     * @return the broker-assigned base offset of the batch
+     */
+    public long produce(String topic, int partition, List<Codec.ProduceMessage> messages) {
+        return produce(topic, partition, messages, this.acks);
     }
 
     /**

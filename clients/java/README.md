@@ -37,6 +37,10 @@ try (Client c = Client.connect("127.0.0.1", 9092)) {
   off = c.produce("t", 0, List.of(
       new Codec.ProduceMessage(null, "a".getBytes(UTF_8)),
       new Codec.ProduceMessage(null, "b".getBytes(UTF_8))), 1);
+  // produce(topic, partition, messages): N messages using client default acks (v0.147). 4-arg list stays explicit.
+  off = c.produce("t", 0, List.of(
+      new Codec.ProduceMessage(null, "a".getBytes(UTF_8)),
+      new Codec.ProduceMessage(null, "b".getBytes(UTF_8))));
   // produce(..., headers): one-message Produce with native headers (v0.130). 4-arg stays empty headers.
   off = c.produce("t", 0, null, "hello".getBytes(UTF_8), List.of(new Record.Header("h", "hv".getBytes(UTF_8))));
   // produceTimestamp: one-message Produce with caller timestamp (v0.132). 4-arg stays -1 (broker now).
@@ -327,6 +331,8 @@ Sync only; one TCP connection; acks=1 by default
 (`produce(..., acks)` / `acks=255` is acks=all; v0.64). 4-arg
 `produce` stays one message; `produce(topic, partition, messages, acks)`
 sends N in one RPC (v0.68; not Kafka Produce; native opcode 1).
+3-arg list `produce(topic, partition, messages)` uses the client default
+acks (v0.147); the 4-arg list still requires explicit acks.
 `produce(..., headers)` attaches native record headers on one message
 (v0.130); `produceHeadersAcks` sets headers and explicit acks (v0.133).
 4-arg `produce` still sends empty headers.

@@ -1928,6 +1928,39 @@ class ClientTest {
     }
 
     @Test
+    void produceBatchDefaultUsesSetAcks() throws Exception {
+        try (ScriptedBroker srv = ScriptedBroker.start()) {
+            try (Client c = Client.connect("127.0.0.1", srv.port, 5_000)) {
+                c.setAcks(255);
+                long off = c.produce("t", 0, batchMsgs("a", "b", "c"));
+                assertEquals(7L, off);
+            }
+            assertEquals(1, srv.produceReqs.size());
+            Codec.ProduceRequest req = srv.produceReqs.get(0);
+            assertEquals(3, req.messages.size());
+            assertEquals(255, req.acks);
+            assertEquals("a", new String(req.messages.get(0).value, StandardCharsets.UTF_8));
+            assertEquals("b", new String(req.messages.get(1).value, StandardCharsets.UTF_8));
+            assertEquals("c", new String(req.messages.get(2).value, StandardCharsets.UTF_8));
+        }
+    }
+
+    @Test
+    void produceBatchExplicitAcksWins() throws Exception {
+        try (ScriptedBroker srv = ScriptedBroker.start()) {
+            try (Client c = Client.connect("127.0.0.1", srv.port, 5_000)) {
+                c.setAcks(255);
+                long off = c.produce("t", 0, batchMsgs("a", "b", "c"), 1);
+                assertEquals(7L, off);
+            }
+            assertEquals(1, srv.produceReqs.size());
+            Codec.ProduceRequest req = srv.produceReqs.get(0);
+            assertEquals(3, req.messages.size());
+            assertEquals(1, req.acks);
+        }
+    }
+
+    @Test
     void produceStillOneMessage() throws Exception {
         try (ScriptedBroker srv = ScriptedBroker.start()) {
             try (Client c = Client.connect("127.0.0.1", srv.port, 5_000)) {
