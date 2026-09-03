@@ -61,6 +61,7 @@ try (Client c = Client.connect("127.0.0.1", 9092)) {
   g.setFetchMaxMessages(10);
   g.setFetchMaxBytes(4096);
   Metadata meta = c.metadata();
+  c.reconnect("127.0.0.1", 9093); // v0.115; re-Auth / re-SCRAM
 }
 
 // Optional TLS (v0.27). connect() stays plaintext.

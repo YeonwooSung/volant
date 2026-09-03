@@ -166,6 +166,26 @@ class ScramTest {
         }
     }
 
+    @Test
+    void reconnectRerunsScram() throws Exception {
+        try (ScramServer first = ScramServer.ok();
+                ScramServer second = ScramServer.ok()) {
+            try (Client c = Client.connectScram("127.0.0.1", first.port, 5_000, USER, PASS)) {
+                assertEquals(1, c.metadata().brokers.size());
+                c.reconnect("127.0.0.1", second.port);
+                assertEquals(1, c.metadata().brokers.size());
+            }
+            first.assertOk();
+            second.assertOk();
+            assertEquals(USER, first.firstUser);
+            assertEquals(USER, first.finalUser);
+            assertEquals(USER, second.firstUser);
+            assertEquals(USER, second.finalUser);
+            assertEquals(1, first.firstUsers.size());
+            assertEquals(1, second.firstUsers.size());
+        }
+    }
+
     private static String hex(byte[] b) {
         StringBuilder sb = new StringBuilder(b.length * 2);
         for (byte v : b) {

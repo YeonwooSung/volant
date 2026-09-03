@@ -571,7 +571,11 @@ public final class Client implements AutoCloseable {
         }
     }
 
-    private void reconnect(String host, int port) {
+    /**
+     * Reconnect to {@code host:port}, re-authenticating when a token or
+     * SCRAM is configured. Producer id / txn / sequences are not reset.
+     */
+    public void reconnect(String host, int port) {
         Socket old = socket;
         socket = null;
         buf = new byte[0];

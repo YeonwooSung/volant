@@ -287,7 +287,7 @@ class TestScramClient(unittest.TestCase):
         with _ScramServer(connections=2) as srv:
             with Client(srv.addr, timeout=5.0, scram_username=_USER, scram_password=_PASS) as c:
                 c.metadata()
-                c._reconnect(srv.addr)
+                c.reconnect(srv.addr)
                 c.metadata()
         self.assertEqual(srv.first_usernames, [_USER, _USER])
         self.assertEqual(srv.final_usernames, [_USER, _USER])

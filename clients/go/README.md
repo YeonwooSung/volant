@@ -78,6 +78,7 @@ g, err = volant.JoinGroupConsumer(c, "g", []string{"t"}, 10_000, volant.WithAuto
 g, err = volant.JoinGroupConsumer(c, "g", []string{"t"}, 10_000, volant.WithFetchMaxMessages(10), volant.WithFetchMaxBytes(4096))
 _ = batch
 meta, err := c.Metadata()
+_ = c.Reconnect("127.0.0.1:9093") // v0.115; re-Auth / re-SCRAM
 _ = off
 _ = meta
 
