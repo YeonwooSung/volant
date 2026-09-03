@@ -1456,6 +1456,13 @@ func (c *Client) redirectToController(controllerID *uint32) (bool, error) {
 	return true, nil
 }
 
+// Reconnect closes the current socket, dials addr, and re-runs Auth
+// (token wins) or SCRAM when configured. Producer id / txn / sequences
+// are not reset.
+func (c *Client) Reconnect(addr string) error {
+	return c.reconnect(addr)
+}
+
 func (c *Client) reconnect(addr string) error {
 	if c.conn != nil {
 		_ = c.conn.Close()

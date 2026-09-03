@@ -114,6 +114,42 @@ class AuthTest {
         }
     }
 
+    @Test
+    void reconnectSecondListenerMetadata() throws Exception {
+        try (OneShotAuthServer first = OneShotAuthServer.ok();
+                OneShotAuthServer second = OneShotAuthServer.ok()) {
+            try (Client c = Client.connect("127.0.0.1", first.port, 5_000)) {
+                assertEquals(1, c.metadata().brokers.size());
+                c.reconnect("127.0.0.1", second.port);
+                assertEquals(1, c.metadata().brokers.size());
+            }
+            first.assertOk();
+            second.assertOk();
+            assertEquals(Codec.OP_METADATA, first.firstOpcode.get());
+            assertEquals(Codec.OP_METADATA, second.firstOpcode.get());
+        }
+    }
+
+    @Test
+    void reconnectResendsAuth() throws Exception {
+        try (OneShotAuthServer first = OneShotAuthServer.ok();
+                OneShotAuthServer second = OneShotAuthServer.ok()) {
+            try (Client c = Client.connect("127.0.0.1", first.port, 5_000, "s3cret")) {
+                assertEquals(1, c.metadata().brokers.size());
+                c.reconnect("127.0.0.1", second.port);
+                assertEquals(1, c.metadata().brokers.size());
+            }
+            first.assertOk();
+            second.assertOk();
+            assertEquals(1, first.authCount.get());
+            assertEquals("s3cret", first.token.get());
+            assertEquals(Codec.OP_AUTH, first.firstOpcode.get());
+            assertEquals(1, second.authCount.get());
+            assertEquals("s3cret", second.token.get());
+            assertEquals(Codec.OP_AUTH, second.firstOpcode.get());
+        }
+    }
+
     private static final class OneShotAuthServer implements AutoCloseable {
         final int port;
         final AtomicInteger firstOpcode = new AtomicInteger(-1);

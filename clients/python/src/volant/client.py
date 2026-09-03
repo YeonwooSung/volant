@@ -398,6 +398,10 @@ class Client:
             self._sock = raw
         self._sock.settimeout(self._timeout)
 
+    def reconnect(self, addr: str) -> None:
+        """Reconnect to ``addr``, re-authenticating when a token or SCRAM is configured."""
+        self._reconnect(addr)
+
     def _reconnect(self, addr: str) -> None:
         old = getattr(self, "_sock", None)
         self._sock = None  # type: ignore[assignment]
