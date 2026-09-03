@@ -349,6 +349,11 @@ docs for day-to-day reading: [ops](../ops.md), [consistency](../consistency.md),
 | v0.148 | ✅ | language OffsetFetch topic + metadata | [V148_SPEC.md](../V148_SPEC.md) |
 | v0.149 | ✅ | Rust fetch uses ClientConfig fetch_max_bytes | [V149_SPEC.md](../V149_SPEC.md) |
 | v0.150 | ✅ | language public InitProducerId | [V150_SPEC.md](../V150_SPEC.md) |
+| v0.151 | ✅ | Rust public InitProducerId | [V151_SPEC.md](../V151_SPEC.md) |
+| v0.152 | ✅ | language DeleteRecords default wait flag | [V152_SPEC.md](../V152_SPEC.md) |
+| v0.153 | ✅ | Rust single-entry OffsetCommit | [V153_SPEC.md](../V153_SPEC.md) |
+| v0.154 | ✅ | Rust OffsetFetch topic + metadata | [V154_SPEC.md](../V154_SPEC.md) |
+| v0.155 | ✅ | Rust DeleteRecords default wait flag (not Phase 155) | [V155_SPEC.md](../V155_SPEC.md) |
 
 ---
 
