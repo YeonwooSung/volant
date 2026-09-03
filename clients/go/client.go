@@ -108,11 +108,13 @@ type Offset struct {
 	Offset    uint64
 }
 
-// OffsetFetchEntry is one committed (topic, partition, offset) from OffsetFetchAll.
+// OffsetFetchEntry is one committed (topic, partition, offset, metadata)
+// from OffsetFetchAll.
 type OffsetFetchEntry struct {
 	Topic     string
 	Partition uint32
 	Offset    uint64
+	Metadata  string
 }
 
 // JoinGroupResult is the successful JoinGroup reply (Rust client field names).
@@ -2042,7 +2044,12 @@ func (c *Client) OffsetFetchAll(group string) ([]OffsetFetchEntry, error) {
 	}
 	out := make([]OffsetFetchEntry, 0, len(entries))
 	for _, e := range entries {
-		out = append(out, OffsetFetchEntry{Topic: e.Topic, Partition: e.Partition, Offset: e.Offset})
+		out = append(out, OffsetFetchEntry{
+			Topic:     e.Topic,
+			Partition: e.Partition,
+			Offset:    e.Offset,
+			Metadata:  e.Metadata,
+		})
 	}
 	return out, nil
 }

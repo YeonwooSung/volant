@@ -1955,6 +1955,37 @@ func TestOffsetFetchAllStillWorksRecordsEmptyWire(t *testing.T) {
 	}
 }
 
+func TestOffsetFetchAllSurfacesMetadata(t *testing.T) {
+	srv := &scriptedBroker{offsetFetchEntries: []codec.OffsetFetchEntry{
+		{Topic: "t", Partition: 0, Offset: 5, Metadata: "consumer-1"},
+	}}
+	addr, stop := startScripted(t, srv)
+	defer stop()
+
+	c, err := volant.DialTimeout(addr, 5*time.Second)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer c.Close()
+
+	offs, err := c.OffsetFetchAll("g")
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := volant.OffsetFetchEntry{Topic: "t", Partition: 0, Offset: 5, Metadata: "consumer-1"}
+	if len(offs) != 1 || offs[0] != want {
+		t.Fatalf("offsets %v want [%v]", offs, want)
+	}
+
+	rows, err := c.FetchOffsets("g", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(rows) != 1 || rows[0].Metadata != "consumer-1" {
+		t.Fatalf("fetch offsets %v want metadata consumer-1", rows)
+	}
+}
+
 func TestDeleteOffsetsRetriesTimeoutThenOk(t *testing.T) {
 	srv := &scriptedBroker{deleteOffsetsCodes: []uint16{timeoutCode, 0}}
 	addr, stop := startScripted(t, srv)

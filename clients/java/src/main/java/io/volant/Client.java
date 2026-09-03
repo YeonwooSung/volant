@@ -1920,7 +1920,7 @@ public final class Client implements AutoCloseable {
         List<Codec.OffsetFetchEntry> raw = offsetFetchEntries(group, entries);
         List<OffsetFetchEntry> out = new ArrayList<>();
         for (Codec.OffsetFetchEntry e : raw) {
-            out.add(new OffsetFetchEntry(e.topic, e.partition, e.offset));
+            out.add(new OffsetFetchEntry(e.topic, e.partition, e.offset, e.metadata));
         }
         return out;
     }

@@ -61,8 +61,8 @@ _ = c.OffsetCommitMeta("g", "t", 0, 5, "consumer-1") // v0.128 per-entry metadat
 _ = c.OffsetCommitMember("g", "t", 0, 5, "m1", 3)    // v0.139 member + generation
 _ = c.CommitOffsets("g", "", 0, []codec.OffsetCommitEntry{{Topic: "t", Partition: 0, Offset: 5}, {Topic: "t", Partition: 1, Offset: 9}}) // v0.119 batch
 offs, err := c.OffsetFetch("g", "t")
-allOffs, err := c.OffsetFetchAll("g") // v0.118; []OffsetFetchEntry{Topic, Partition, Offset}
-rows, err := c.FetchOffsets("g", []codec.OffsetEntry{{Topic: "t", Partition: 0}}) // v0.122; nil/empty = all
+allOffs, err := c.OffsetFetchAll("g") // v0.118 / v0.140; []OffsetFetchEntry{Topic, Partition, Offset, Metadata}
+rows, err := c.FetchOffsets("g", []codec.OffsetEntry{{Topic: "t", Partition: 0}}) // v0.122; nil/empty = all; codec Metadata already on each row
 _ = offs
 _ = allOffs
 bounds, err := c.ListOffsets("t", nil) // all partitions; or []uint32{0}
