@@ -2325,6 +2325,12 @@ impl Client {
         Ok(entries.into_iter().filter(|e| e.topic == topic).collect())
     }
 
+    /// Fetch every committed offset for `group` (empty wire entries).
+    /// Same as `fetch_offsets(group_id, vec![])`.
+    pub async fn fetch_offsets_all(&self, group_id: &str) -> Result<Vec<OffsetFetchEntry>> {
+        self.fetch_offsets(group_id, Vec::new()).await
+    }
+
     /// OffsetCommit / OffsetFetch / DeleteOffsets share produce/heartbeat
     /// [`ClientConfig::max_retries`]. Transient 6 / 7 / 15 / 16 and
     /// [`Error::Io`] are retried; 13 / 9 / 10 / 11 / 2 and protocol
