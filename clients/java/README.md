@@ -40,6 +40,8 @@ try (Client c = Client.connect("127.0.0.1", 9092)) {
   off = c.produce("t", 0, null, "hello".getBytes(UTF_8), List.of(new Record.Header("h", "hv".getBytes(UTF_8))));
   // produceTimestamp: one-message Produce with caller timestamp (v0.132). 4-arg stays -1 (broker now).
   off = c.produceTimestamp("t", 0, null, "hello".getBytes(UTF_8), 1700000000000L);
+  // produceHeadersAcks: headers + explicit acks (v0.133). headers produce stays client default acks.
+  off = c.produceHeadersAcks("t", 0, null, "hello".getBytes(UTF_8), List.of(new Record.Header("h", "hv".getBytes(UTF_8))), 255);
   List<Record> recs = c.fetch("t", 0, 0);
   // fetch 6-arg: max_messages / max_bytes / max_wait_ms (v0.64). fetch 3-arg stays 128 / 4MiB / 0.
   recs = c.fetch("t", 0, 0, 10, 4096L, 100);
@@ -312,7 +314,8 @@ Sync only; one TCP connection; acks=1 by default
 `produce` stays one message; `produce(topic, partition, messages, acks)`
 sends N in one RPC (v0.68; not Kafka Produce; native opcode 1).
 `produce(..., headers)` attaches native record headers on one message
-(v0.130); 4-arg `produce` still sends empty headers.
+(v0.130); `produceHeadersAcks` sets headers and explicit acks (v0.133).
+4-arg `produce` still sends empty headers.
 `produceTimestamp` sets native record timestamp on one message
 (v0.132); 4-arg / headers / acks `produce` still send -1 (broker now).
 Public 6-arg `fetch` exposes max_messages / max_bytes /

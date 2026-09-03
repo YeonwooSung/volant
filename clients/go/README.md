@@ -43,6 +43,8 @@ off, err = c.ProduceBatch("t", 0, []codec.ProduceMessage{{Value: []byte("a")}, {
 off, err = c.ProduceHeaders("t", 0, nil, []byte("hello"), []codec.Header{{Name: "h", Value: []byte("hv")}})
 // ProduceTimestamp: one-message Produce with caller timestamp (v0.132). Produce stays -1 (broker now).
 off, err = c.ProduceTimestamp("t", 0, nil, []byte("hello"), 1700000000000)
+// ProduceHeadersAcks: headers + explicit acks (v0.133). ProduceHeaders stays client default acks.
+off, err = c.ProduceHeadersAcks("t", 0, nil, []byte("hello"), []codec.Header{{Name: "h", Value: []byte("hv")}}, 255)
 recs, err := c.Fetch("t", 0, 0)
 if err != nil {
     log.Fatal(err)
@@ -333,7 +335,8 @@ Sync only; one TCP connection; acks=1 by default (`ProduceAcks` /
 `acks=255` is acks=all; v0.64). `Produce` stays one message;
 `ProduceBatch` sends N in one RPC (v0.68; not Kafka Produce; native
 opcode 1). `ProduceHeaders` attaches native record headers on one
-message (v0.130); `Produce` / `ProduceAcks` still send empty headers.
+message (v0.130); `ProduceHeadersAcks` sets headers and explicit acks
+(v0.133). `Produce` / `ProduceAcks` still send empty headers.
 `ProduceTimestamp` sets native record timestamp on one message
 (v0.132); `Produce` / `ProduceAcks` / `ProduceHeaders` still send -1
 (broker now).

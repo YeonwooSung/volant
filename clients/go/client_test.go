@@ -2795,6 +2795,75 @@ func TestProduceTimestampEncodes(t *testing.T) {
 	}
 }
 
+func TestProduceHeadersUsesSetAcks(t *testing.T) {
+	srv := &scriptedBroker{}
+	addr, stop := startScripted(t, srv)
+	defer stop()
+
+	c, err := volant.DialTimeout(addr, 5*time.Second)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer c.Close()
+
+	c.SetAcks(255)
+	if _, err := c.ProduceHeaders("t", 0, nil, []byte("hello"), []codec.Header{
+		{Name: "h", Value: []byte("hv")},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	reqs := srv.copyProduces()
+	if len(reqs) != 1 {
+		t.Fatalf("produces %d want 1", len(reqs))
+	}
+	if reqs[0].Acks != 255 {
+		t.Fatalf("acks %d want 255", reqs[0].Acks)
+	}
+	hs := reqs[0].Messages[0].Headers
+	if len(hs) != 1 || hs[0].Name != "h" || string(hs[0].Value) != "hv" {
+		t.Fatalf("header %+v want h=hv", hs)
+	}
+}
+
+func TestProduceHeadersAcksEncodes(t *testing.T) {
+	srv := &scriptedBroker{}
+	addr, stop := startScripted(t, srv)
+	defer stop()
+
+	c, err := volant.DialTimeout(addr, 5*time.Second)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer c.Close()
+
+	off, err := c.ProduceHeadersAcks("t", 0, nil, []byte("hello"), []codec.Header{
+		{Name: "h", Value: []byte("hv")},
+	}, 255)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if off != 7 {
+		t.Fatalf("base offset: got %d want 7", off)
+	}
+	reqs := srv.copyProduces()
+	if len(reqs) != 1 {
+		t.Fatalf("produces %d want 1", len(reqs))
+	}
+	if reqs[0].Acks != 255 {
+		t.Fatalf("acks %d want 255", reqs[0].Acks)
+	}
+	if n := len(reqs[0].Messages); n != 1 {
+		t.Fatalf("messages %d want 1", n)
+	}
+	hs := reqs[0].Messages[0].Headers
+	if len(hs) != 1 {
+		t.Fatalf("headers %d want 1", len(hs))
+	}
+	if hs[0].Name != "h" || string(hs[0].Value) != "hv" {
+		t.Fatalf("header %+v want h=hv", hs[0])
+	}
+}
+
 func TestProduceBatchRetriesTimeoutThenOk(t *testing.T) {
 	srv := &scriptedBroker{produceCodes: []uint16{timeoutCode, 0}}
 	addr, stop := startScripted(t, srv)

@@ -1089,6 +1089,26 @@ public final class Client implements AutoCloseable {
     }
 
     /**
+     * Produce one message with native record headers and an explicit
+     * acks byte. {@code 1} = leader only; {@code 255} = acks=all (ISR).
+     * Named to avoid colliding with {@link #produce(String, int, byte[], byte[], int)}
+     * and the headers overload. The headers {@code produce} still uses
+     * {@link #acks()}. Reuses the batch retry / error 13 / error 21 path.
+     * Not Kafka RecordBatch header versions.
+     */
+    public long produceHeadersAcks(
+            String topic, int partition, byte[] key, byte[] value, List<Record.Header> headers, int acks) {
+        if (value == null) {
+            value = new byte[0];
+        }
+        return produce(
+                topic,
+                partition,
+                Collections.singletonList(new Codec.ProduceMessage(key, value, -1L, headers)),
+                acks);
+    }
+
+    /**
      * Produce with an explicit acks byte. {@code 1} = leader only;
      * {@code 255} = acks=all (ISR). Same as the Rust client / Python {@code acks=}.
      * One message; empty headers (use the headers overload or the batch path).
