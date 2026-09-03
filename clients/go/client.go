@@ -1492,13 +1492,25 @@ func (c *Client) reconnect(addr string) error {
 	return c.maybeAuthenticate()
 }
 
-// Metadata returns cluster brokers and topics (all topics when the list is empty).
-// Transient broker/transport errors retry up to maxRetries extra times
-// (default 0). Native Metadata has no top-level error_code; failures
-// arrive as Error opcode / transport. Error 2 / 9 / 10 / 11 / 13 / 14
-// are not retried.
+// Metadata returns cluster brokers and topics (all topics).
+// Same as MetadataTopics(nil). Transient broker/transport errors
+// retry up to maxRetries extra times (default 0). Native Metadata
+// has no top-level error_code; failures arrive as Error opcode /
+// transport. Error 2 / 9 / 10 / 11 / 13 / 14 are not retried.
 func (c *Client) Metadata() (Metadata, error) {
-	payload, err := codec.EncodeMetadataRequest(codec.MetadataRequest{Topics: []string{}})
+	return c.MetadataTopics(nil)
+}
+
+// MetadataTopics returns cluster brokers and the named topics.
+// Nil or empty topics means all topics (same as Metadata).
+// Same decode, retry, and error handling as Metadata. This is the
+// native Metadata topics list, not Kafka allow_auto_topic_creation
+// / topic ids.
+func (c *Client) MetadataTopics(topics []string) (Metadata, error) {
+	if topics == nil {
+		topics = []string{}
+	}
+	payload, err := codec.EncodeMetadataRequest(codec.MetadataRequest{Topics: topics})
 	if err != nil {
 		return Metadata{}, err
 	}

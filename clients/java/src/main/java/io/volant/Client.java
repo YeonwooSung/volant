@@ -2082,13 +2082,26 @@ public final class Client implements AutoCloseable {
     }
 
     /**
-     * Cluster brokers and topics (all topics). Transient broker/transport
-     * errors retry up to {@code maxRetries} extra times (default 0). Native
-     * Metadata has no top-level {@code error_code}; failures arrive as Error
-     * opcode / transport. Error 2 / 9 / 10 / 11 / 13 / 14 are not retried.
+     * Cluster brokers and topics (all topics). Same as
+     * {@link #metadata(List)} with an empty list. Transient
+     * broker/transport errors retry up to {@code maxRetries} extra
+     * times (default 0). Native Metadata has no top-level
+     * {@code error_code}; failures arrive as Error opcode /
+     * transport. Error 2 / 9 / 10 / 11 / 13 / 14 are not retried.
      */
     public Metadata metadata() {
-        byte[] payload = Codec.encodeMetadataRequest(new Codec.MetadataRequest(Collections.emptyList()));
+        return metadata(Collections.emptyList());
+    }
+
+    /**
+     * Cluster brokers and the named topics. Null or empty
+     * {@code topics} means all topics (same as {@link #metadata()}).
+     * Same decode, retry, and error handling as {@link #metadata()}.
+     * This is the native Metadata topics list, not Kafka
+     * {@code allow_auto_topic_creation} / topic ids.
+     */
+    public Metadata metadata(List<String> topics) {
+        byte[] payload = Codec.encodeMetadataRequest(new Codec.MetadataRequest(topics));
         int retryAttempt = 0;
         while (true) {
             Object decoded;

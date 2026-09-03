@@ -61,6 +61,7 @@ try (Client c = Client.connect("127.0.0.1", 9092)) {
   g.setFetchMaxMessages(10);
   g.setFetchMaxBytes(4096);
   Metadata meta = c.metadata();
+  meta = c.metadata(List.of("events")); // v0.116; empty = all
   c.reconnect("127.0.0.1", 9093); // v0.115; re-Auth / re-SCRAM
 }
 
