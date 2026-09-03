@@ -1074,6 +1074,7 @@ class ClientTest {
                 assertTrue(got.isEmpty());
             }
             assertEquals(2, srv.listOffsetsCount.get());
+            assertEquals(0, srv.metadataCount.get());
         }
     }
 
@@ -1090,6 +1091,7 @@ class ClientTest {
                 assertEquals(NOT_FOUND, ex.code);
             }
             assertEquals(1, srv.listOffsetsCount.get());
+            assertEquals(0, srv.metadataCount.get());
         }
     }
 

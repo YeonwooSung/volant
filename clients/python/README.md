@@ -179,7 +179,8 @@ itself is not retried (distinct from produce's one re-Init).
 Auth retries transient 6 / 7 / 15 / 16 and TCP/IO; 17 / 18 is not
 retried. SCRAM first+final is one unit (new nonce on restart);
 17 / 18 and server-signature mismatch are not retried. DeleteRecords
-error 13 stays on ``max_redirects``.
+error 13 stays on ``max_redirects``. ListOffsets error 13 follows
+Produce/Fetch redirect (``max_redirects``).
 This is not Kafka ``retries``.
 
 Correlation ids increment per request. Decode verifies magic `V` (0x56),

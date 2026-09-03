@@ -1413,21 +1413,32 @@ class Client:
         ``None`` or ``[]`` means all partitions (wire count 0). Returns
         :class:`OffsetListing` rows. Non-zero ``error_code`` raises
         :class:`BrokerError`. Transient broker/transport errors retry
-        up to ``max_retries`` extra times (default 0). Error 2 / 9 / 10
-        / 11 / 13 / 14 are not retried. This is not Kafka ListOffsets
-        (no timestamp or isolation); both ends of each log are returned.
+        up to ``max_retries`` extra times (default 0). Error 13 follows
+        Produce/Fetch redirect (``max_redirects``); 13 is not a
+        transient retry. Error 2 / 9 / 10 / 11 / 14 are not retried.
+        This is not Kafka ListOffsets (no timestamp or isolation);
+        both ends of each log are returned.
         """
+        parts = list(partitions) if partitions else []
         payload = codec.encode_list_offsets_request(
-            ListOffsetsRequest(
-                topic=topic, partitions=list(partitions) if partitions else []
-            )
+            ListOffsetsRequest(topic=topic, partitions=parts)
         )
+        redirect_partition = int(parts[0]) if parts else 0
         max_retries = max(0, int(self.max_retries))
+        max_attempts = 1 + self.max_redirects
         retry_attempt = 0
+        redirect_attempt = 0
         while True:
             try:
                 resp = self._round_trip(codec.OP_LIST_OFFSETS, payload)
             except BrokerError as e:
+                if (
+                    e.code == _NOT_LEADER
+                    and redirect_attempt + 1 < max_attempts
+                    and self._redirect_to_leader(topic, redirect_partition)
+                ):
+                    redirect_attempt += 1
+                    continue
                 if _is_transient_broker(e.code) and retry_attempt < max_retries:
                     retry_attempt += 1
                     self._sleep_produce_retry()
@@ -1443,6 +1454,15 @@ class Client:
                 raise ProtocolError(
                     f"unexpected response for list_offsets: {type(resp)}"
                 )
+            if (
+                resp.error_code == _NOT_LEADER
+                and redirect_attempt + 1 < max_attempts
+                and self._redirect_to_leader(
+                    resp.topic or topic, redirect_partition
+                )
+            ):
+                redirect_attempt += 1
+                continue
             if (
                 _is_transient_broker(resp.error_code)
                 and retry_attempt < max_retries

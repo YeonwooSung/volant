@@ -914,6 +914,7 @@ class TestListOffsetsRetry(unittest.TestCase):
                 got = c.list_offsets("t")
             self.assertEqual(got, [])
             self.assertEqual(srv.list_offsets_count, 2)
+            self.assertEqual(srv.metadata_count, 0)
 
     def test_not_found_is_not_retried(self) -> None:
         with ScriptedBroker() as srv:
@@ -923,6 +924,7 @@ class TestListOffsetsRetry(unittest.TestCase):
                     c.list_offsets("missing")
             self.assertEqual(ctx.exception.code, NOT_FOUND)
             self.assertEqual(srv.list_offsets_count, 1)
+            self.assertEqual(srv.metadata_count, 0)
 
     def test_exhausted_retries_raises(self) -> None:
         with ScriptedBroker() as srv:
