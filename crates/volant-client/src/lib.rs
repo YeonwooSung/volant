@@ -136,6 +136,10 @@
 //! `max_messages` / `max_wait_ms` and uses
 //! [`ClientConfig::fetch_max_bytes`] (v0.149).
 //! GroupConsumer poll knobs stay historical (v0.76; 100 / 4 MiB).
+//! v0.153 adds one-entry [`Client::commit_offset`] /
+//! [`Client::commit_offset_meta`] / [`Client::commit_offset_member`] /
+//! [`Client::commit_offset_member_meta`] wrapping [`Client::commit_offsets`].
+//! Admin path is empty member, generation 0. Error 14 / transient retry inherit.
 
 #![deny(missing_docs)]
 
