@@ -1136,6 +1136,15 @@ impl Client {
         }
     }
 
+    /// Ensure InitProducerId has run (native opcode 32).
+    /// Returns the stored producer id and epoch. A second call is a no-op
+    /// (already initialized). Produce / BeginTxn still init implicitly.
+    pub async fn init_producer_id(&self) -> Result<(u64, u16)> {
+        self.ensure_producer_id().await?;
+        let state = self.idempotent.lock().await;
+        Ok((state.producer_id, state.epoch))
+    }
+
     /// Begin a transaction (Phase 18). Requires `transactional_id` in config.
     ///
     /// Transient broker/transport errors retry up to
