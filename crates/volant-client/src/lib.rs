@@ -136,6 +136,10 @@
 //! `max_messages` / `max_wait_ms` and uses
 //! [`ClientConfig::fetch_max_bytes`] (v0.149).
 //! GroupConsumer poll knobs stay historical (v0.76; 100 / 4 MiB).
+//! v0.151 adds public [`Client::init_producer_id`] wrapping
+//! `ensure_producer_id`. Returns stored pid/epoch. A second
+//! call is a no-op (already initialized). Produce / BeginTxn
+//! still init implicitly.
 
 #![deny(missing_docs)]
 
