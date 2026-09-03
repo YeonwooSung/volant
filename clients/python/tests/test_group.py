@@ -6,7 +6,7 @@ import threading
 import time
 import unittest
 
-from volant import FetchedRecord, GroupConsumer, OffsetListing
+from volant import FetchedRecord, GroupConsumer, OffsetCommitEntry, OffsetListing
 from volant.client import FetchResult, JoinGroupResult
 from volant.codec import Assignment, BrokerError, FetchRecord
 from volant.group import OFFSET_UNKNOWN, heartbeat_interval_ms
@@ -22,6 +22,7 @@ class FakeClient:
         self.leaves: list[tuple[str, str]] = []
         self.fetches: list[tuple[str, int, int, int, int, int]] = []
         self.commits: list[dict] = []
+        self.commit_offset_calls: list[dict] = []
         self.offset_fetches: list[tuple[str, str]] = []
         self.list_offsets_calls: list[tuple[str, list[int]]] = []
         self.list_offset_entries: dict[tuple[str, int], tuple[int, int]] = {}
@@ -104,6 +105,47 @@ class FakeClient:
             topic=topic, partition=partition, high_watermark=hwm, records=recs
         )
 
+    def commit_offsets(
+        self,
+        group: str,
+        entries,
+        *,
+        member_id: str = "",
+        generation: int = 0,
+    ) -> None:
+        parsed = list(entries)
+        self.commit_offset_calls.append(
+            {
+                "group": group,
+                "member_id": member_id,
+                "generation": generation,
+                "entries": parsed,
+            }
+        )
+        for e in parsed:
+            if isinstance(e, OffsetCommitEntry):
+                topic, partition, offset, metadata = (
+                    e.topic,
+                    e.partition,
+                    e.offset,
+                    e.metadata,
+                )
+            else:
+                topic, partition, offset = e[0], e[1], e[2]
+                metadata = e[3] if len(e) > 3 else ""
+            self.commits.append(
+                {
+                    "group": group,
+                    "topic": topic,
+                    "partition": partition,
+                    "offset": offset,
+                    "member_id": member_id,
+                    "generation": generation,
+                    "metadata": metadata,
+                }
+            )
+            self.committed[(topic, partition)] = offset
+
     def offset_commit(
         self,
         group: str,
@@ -115,18 +157,19 @@ class FakeClient:
         generation: int = 0,
         metadata: str = "",
     ) -> None:
-        self.commits.append(
-            {
-                "group": group,
-                "topic": topic,
-                "partition": partition,
-                "offset": offset,
-                "member_id": member_id,
-                "generation": generation,
-                "metadata": metadata,
-            }
+        self.commit_offsets(
+            group,
+            [
+                OffsetCommitEntry(
+                    topic=topic,
+                    partition=partition,
+                    offset=offset,
+                    metadata=metadata,
+                )
+            ],
+            member_id=member_id,
+            generation=generation,
         )
-        self.committed[(topic, partition)] = offset
 
     def offset_fetch(self, group: str, topic: str) -> list[tuple[int, int]]:
         self.offset_fetches.append((group, topic))
@@ -260,6 +303,7 @@ class TestGroupConsumer(unittest.TestCase):
         g = _gc(c, "g", ["t"])
         g.poll()
         g.commit()
+        self.assertEqual(len(c.commit_offset_calls), 1)
         self.assertEqual(len(c.commits), 1)
         commit = c.commits[0]
         self.assertEqual(commit["group"], "g")
@@ -269,6 +313,52 @@ class TestGroupConsumer(unittest.TestCase):
         self.assertEqual(commit["member_id"], "m1")
         self.assertEqual(commit["generation"], 1)
         self.assertNotEqual(commit["member_id"], "")
+
+    def test_commit_batches_two_assigned_positions(self) -> None:
+        c = FakeClient()
+        c.join_queue.append(_join([("t", 0), ("t", 1)]))
+        c.log[("t", 0)] = [_rec(0, b"a")]
+        c.log[("t", 1)] = [_rec(0, b"b")]
+        g = _gc(c, "g", ["t"])
+        g.poll()
+        g.commit()
+        self.assertEqual(len(c.commit_offset_calls), 1)
+        call = c.commit_offset_calls[0]
+        self.assertEqual(call["group"], "g")
+        self.assertEqual(call["member_id"], "m1")
+        self.assertEqual(call["generation"], 1)
+        self.assertNotEqual(call["member_id"], "")
+        entries = {
+            (e.topic, e.partition, e.offset, e.metadata) for e in call["entries"]
+        }
+        self.assertEqual(entries, {("t", 0, 1, ""), ("t", 1, 1, "")})
+        self.assertEqual(len(c.commits), 2)
+
+    def test_commit_empty_positions_skips_rpc(self) -> None:
+        c = FakeClient()
+        c.join_queue.append(_join([]))
+        g = _gc(c, "g", ["t"])
+        self.assertEqual(g.positions, {})
+        g.commit()
+        self.assertEqual(c.commit_offset_calls, [])
+        self.assertEqual(c.commits, [])
+
+    def test_commit_skips_unassigned_position(self) -> None:
+        c = FakeClient()
+        c.join_queue.append(_join([("t", 0)]))
+        c.log[("t", 0)] = [_rec(0, b"a")]
+        g = _gc(c, "g", ["t"])
+        g.poll()
+        with g._lock:
+            g._positions[("t", 1)] = 99
+        g.commit()
+        self.assertEqual(len(c.commit_offset_calls), 1)
+        call = c.commit_offset_calls[0]
+        self.assertEqual(call["member_id"], "m1")
+        self.assertEqual(call["generation"], 1)
+        entries = [(e.topic, e.partition, e.offset) for e in call["entries"]]
+        self.assertEqual(entries, [("t", 0, 1)])
+        self.assertNotIn(("t", 1), {(e.topic, e.partition) for e in call["entries"]})
 
     def test_close_leaves_group(self) -> None:
         c = FakeClient()
