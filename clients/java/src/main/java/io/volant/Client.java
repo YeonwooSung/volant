@@ -2029,11 +2029,14 @@ public final class Client implements AutoCloseable {
     /**
      * Heartbeat for group membership. Non-zero error_code is BrokerException.
      * Transient broker/transport errors retry up to {@code maxRetries} extra
-     * times (default 0). Rebalance codes 9 / 10 / 11 are not retried.
+     * times (default 0). Error 14 follows {@code maxRedirects}.
+     * Rebalance codes 9 / 10 / 11 are not retried.
      */
     public void heartbeat(String group, String memberId, long generation) {
         byte[] payload = Codec.encodeHeartbeatRequest(new Codec.HeartbeatRequest(group, memberId, generation));
         int retryAttempt = 0;
+        int redirectAttempt = 0;
+        int maxAttempts = 1 + maxRedirects;
         while (true) {
             Object decoded;
             try {
@@ -2043,6 +2046,10 @@ public final class Client implements AutoCloseable {
                 }
                 decoded = roundTrip(Codec.OP_HEARTBEAT, payload);
             } catch (BrokerException e) {
+                if (maybeRedirectController(e.code, e.message, redirectAttempt + 1, maxAttempts)) {
+                    redirectAttempt++;
+                    continue;
+                }
                 if (isTransientBroker(e.code) && retryAttempt < maxRetries) {
                     retryAttempt++;
                     sleepProduceRetry();
@@ -2061,6 +2068,10 @@ public final class Client implements AutoCloseable {
                 throw new ProtocolException("unexpected response for heartbeat: " + typeName(decoded));
             }
             Codec.HeartbeatResponse resp = (Codec.HeartbeatResponse) decoded;
+            if (maybeRedirectController(resp.errorCode, null, redirectAttempt + 1, maxAttempts)) {
+                redirectAttempt++;
+                continue;
+            }
             if (isTransientBroker(resp.errorCode) && retryAttempt < maxRetries) {
                 retryAttempt++;
                 sleepProduceRetry();

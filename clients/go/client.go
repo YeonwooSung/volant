@@ -2160,8 +2160,8 @@ func (c *Client) joinGroup(group, memberID string, topics []string, sessionTimeo
 
 // Heartbeat keeps a group member alive. Non-zero error_code is BrokerError
 // (9 = rebalance in progress). Transient broker/transport errors retry
-// up to maxRetries extra times (default 0). Rebalance codes 9 / 10 / 11
-// are not retried.
+// up to maxRetries extra times (default 0). Error 14 follows
+// maxRedirects. Rebalance codes 9 / 10 / 11 are not retried.
 func (c *Client) Heartbeat(group, memberID string, generation uint32) error {
 	payload, err := codec.EncodeHeartbeatRequest(codec.HeartbeatRequest{
 		GroupID:    group,
@@ -2175,10 +2175,20 @@ func (c *Client) Heartbeat(group, memberID string, generation uint32) error {
 	if maxRetries < 0 {
 		maxRetries = 0
 	}
+	maxAttempts := 1 + c.maxRedirects
 	retryAttempt := 0
+	redirectAttempt := 0
 	for {
 		decoded, err := c.roundTrip(codec.OpHeartbeat, payload)
 		if err != nil {
+			ok, rerr := c.maybeRedirectController(err, redirectAttempt+1, maxAttempts)
+			if rerr != nil {
+				return rerr
+			}
+			if ok {
+				redirectAttempt++
+				continue
+			}
 			if isTransientProduceErr(err) && retryAttempt < maxRetries {
 				retryAttempt++
 				c.sleepProduceRetry()
@@ -2189,6 +2199,14 @@ func (c *Client) Heartbeat(group, memberID string, generation uint32) error {
 		resp, ok := decoded.(codec.HeartbeatResponse)
 		if !ok {
 			return &frame.ProtocolError{Msg: fmt.Sprintf("unexpected response for heartbeat: %T", decoded)}
+		}
+		ok, rerr := c.maybeRedirectControllerCode(resp.ErrorCode, "", redirectAttempt+1, maxAttempts)
+		if rerr != nil {
+			return rerr
+		}
+		if ok {
+			redirectAttempt++
+			continue
 		}
 		if isTransientBroker(resp.ErrorCode) && retryAttempt < maxRetries {
 			retryAttempt++
