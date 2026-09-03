@@ -133,7 +133,8 @@
 //! [`ClientConfig::fetch_max_bytes`] /
 //! [`ClientConfig::fetch_max_wait_ms`] (defaults **128 / 4 MiB / 0**)
 //! and [`Client::fetch_default`]. [`Client::fetch`] still requires
-//! `max_messages` / `max_wait_ms` and hardcodes 4 MiB.
+//! `max_messages` / `max_wait_ms` and uses
+//! [`ClientConfig::fetch_max_bytes`] (v0.149).
 //! GroupConsumer poll knobs stay historical (v0.76; 100 / 4 MiB).
 
 #![deny(missing_docs)]

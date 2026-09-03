@@ -1315,14 +1315,16 @@ impl Client {
         Ok(p)
     }
 
-    /// Default Fetch `max_bytes` (4 MiB).
-    const DEFAULT_FETCH_MAX_BYTES: u32 = 4 * 1024 * 1024;
+    /// Default Fetch `max_bytes` (4 MiB). Default for
+    /// [`ClientConfig::fetch_max_bytes`].
+    pub(crate) const DEFAULT_FETCH_MAX_BYTES: u32 = 4 * 1024 * 1024;
 
     /// Fetch records from a partition.
     ///
     /// On `NotLeaderForPartition`, reconnects to the leader and retries.
-    /// `max_bytes` is the default 4 MiB; use [`Self::fetch_opts`] to set it.
-    /// For [`ClientConfig`] fetch knobs, use [`Self::fetch_default`].
+    /// `max_bytes` comes from [`ClientConfig::fetch_max_bytes`] (default 4 MiB);
+    /// use [`Self::fetch_opts`] to set it per call.
+    /// For all [`ClientConfig`] fetch knobs, use [`Self::fetch_default`].
     pub async fn fetch(
         &self,
         topic: &str,
@@ -1337,7 +1339,7 @@ impl Client {
             from,
             max_messages,
             max_wait_ms,
-            Self::DEFAULT_FETCH_MAX_BYTES,
+            self.config.fetch_max_bytes,
         )
         .await
     }
@@ -1346,8 +1348,8 @@ impl Client {
     /// `fetch_max_bytes` (defaults 128 / 0 / 4 MiB).
     ///
     /// [`Self::fetch`] still requires explicit `max_messages` / `max_wait_ms`
-    /// and hardcodes 4 MiB. GroupConsumer poll knobs stay historical
-    /// (v0.76; 100 / 4 MiB).
+    /// and uses [`ClientConfig::fetch_max_bytes`]. GroupConsumer poll knobs
+    /// stay historical (v0.76; 100 / 4 MiB).
     pub async fn fetch_default(
         &self,
         topic: &str,
