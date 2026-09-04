@@ -334,6 +334,15 @@ func (c *Client) SetMaxRetries(n int) {
 	c.maxRetries = n
 }
 
+// MaxRetries returns extra Produce/Fetch/Heartbeat/SCRAM attempts
+// after the first (default 0).
+func (c *Client) MaxRetries() int {
+	if c == nil {
+		return 0
+	}
+	return c.maxRetries
+}
+
 // SetRetryBackoff sets the sleep between produce/fetch retries. Default
 // is 50ms. Zero is allowed (tests). Negative values are treated as 0.
 func (c *Client) SetRetryBackoff(d time.Duration) {
