@@ -9,7 +9,7 @@ use std::sync::{Mutex, OnceLock};
 use bytes::Bytes;
 use volant_broker::{
     Broker, TRANSACTION_STATE_HEADER, TRANSACTION_STATE_TOPIC, TXN_STATE_COMPLETE_ABORT,
-    TXN_STATE_COMPLETE_COMMIT, TXN_STATE_PREPARE_COMMIT,
+    TXN_STATE_COMPLETE_COMMIT, TXN_STATE_ONGOING, TXN_STATE_PREPARE_COMMIT,
 };
 use volant_core::{Message, PartitionId, TopicName};
 use volant_storage::StorageConfig;
@@ -261,6 +261,144 @@ fn fence_abort_writes_complete_abort() {
         "fence abort must write complete_abort, got {log:?}"
     );
     drop(env);
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+fn assert_open_aborted(broker: &Broker, tid: &str) {
+    assert_eq!(
+        last_state(broker, tid).as_deref(),
+        Some(TXN_STATE_COMPLETE_ABORT),
+        "topic last-write must be complete_abort, got {:?}",
+        broker.read_transaction_state_log()
+    );
+    assert_eq!(
+        broker.describe_transaction(tid).unwrap().0,
+        "Empty",
+        "Describe after open≡abort must be Empty"
+    );
+    assert!(
+        !broker
+            .list_open_transactions()
+            .iter()
+            .any(|(k, _, st)| k == tid && st == "Ongoing"),
+        "List must not report Ongoing after open≡abort: {:?}",
+        broker.list_open_transactions()
+    );
+}
+
+/// v0.226: crash≡abort of an open write-through txn appends complete_abort
+/// so Replay/Describe/List match markers (open ≡ abort).
+#[test]
+fn crash_open_writes_complete_abort() {
+    let _g = env_lock().lock().unwrap();
+    let (env, dir, broker) = broker_on("crash-open");
+    broker.create_topic("events", 1).unwrap();
+    let r = broker.init_producer_id_with_opts("txn-crash", false, false, 60_000);
+    assert_eq!(r.error_code, 0);
+    let pid = r.producer_id;
+    let epoch = r.epoch;
+    assert_eq!(broker.begin_txn(pid, epoch), 0);
+    match broker.buffer_txn_produce(
+        pid,
+        epoch,
+        "events",
+        0,
+        0,
+        vec![Message::from_value(Bytes::from_static(b"unstable"))],
+    ) {
+        volant_broker::IdempotentCheck::Accept { .. } => {}
+        other => panic!("produce rejected: {other:?}"),
+    }
+    assert_eq!(
+        last_state(&broker, "txn-crash").as_deref(),
+        Some(TXN_STATE_ONGOING)
+    );
+    assert_eq!(
+        broker.describe_transaction("txn-crash").unwrap().0,
+        "Ongoing"
+    );
+    drop(broker);
+
+    let broker2 = reopen(&dir);
+    assert_open_aborted(&broker2, "txn-crash");
+    drop(env);
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// v0.226: begin-only open (no markers) still last-write-wins complete_abort
+/// on restart — replay must not restore Ongoing.
+#[test]
+fn crash_begin_only_writes_complete_abort() {
+    let _g = env_lock().lock().unwrap();
+    let (env, dir, broker) = broker_on("crash-begin");
+    broker.create_topic("events", 1).unwrap();
+    let r = broker.init_producer_id_with_opts("txn-begin", false, false, 60_000);
+    assert_eq!(r.error_code, 0);
+    assert_eq!(broker.begin_txn(r.producer_id, r.epoch), 0);
+    assert_eq!(
+        last_state(&broker, "txn-begin").as_deref(),
+        Some(TXN_STATE_ONGOING)
+    );
+    drop(broker);
+
+    let broker2 = reopen(&dir);
+    assert_open_aborted(&broker2, "txn-begin");
+    drop(env);
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// v0.226: open-txn timeout sweeper writes complete_abort (not only prepared).
+#[test]
+fn open_timeout_writes_complete_abort() {
+    let _g = env_lock().lock().unwrap();
+    let (env, dir, broker) = broker_on("open-timeout");
+    broker.create_topic("events", 1).unwrap();
+    let r = broker.init_producer_id_with_opts("txn-to", false, false, 1_000);
+    assert_eq!(r.error_code, 0);
+    let pid = r.producer_id;
+    assert_eq!(broker.begin_txn(pid, r.epoch), 0);
+    assert!(broker.backdate_open_txn(pid, 5_000));
+    assert_eq!(broker.expire_timed_out_open_txns(), 1);
+    assert_open_aborted(&broker, "txn-to");
+    drop(env);
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// Flag off: crash≡abort still applies via markers, but the topic is not created.
+#[test]
+fn flag_off_crash_does_not_create_topic() {
+    let _g = env_lock().lock().unwrap();
+    let (dir, broker) = broker_off("crash-off");
+    broker.create_topic("events", 1).unwrap();
+    let r = broker.init_producer_id_with_opts("txn-off-crash", false, false, 60_000);
+    assert_eq!(r.error_code, 0);
+    assert_eq!(broker.begin_txn(r.producer_id, r.epoch), 0);
+    match broker.buffer_txn_produce(
+        r.producer_id,
+        r.epoch,
+        "events",
+        0,
+        0,
+        vec![Message::from_value(Bytes::from_static(b"x"))],
+    ) {
+        volant_broker::IdempotentCheck::Accept { .. } => {}
+        other => panic!("produce rejected: {other:?}"),
+    }
+    drop(broker);
+    let broker2 = reopen(&dir);
+    assert!(!broker2.transaction_state_topic_enabled());
+    assert!(
+        !broker2
+            .list_topics()
+            .iter()
+            .any(|t| t.as_str() == TRANSACTION_STATE_TOPIC),
+        "__transaction_state must not auto-create on crash when flag is off"
+    );
+    // Memory-only open map is gone; identity remains so Describe is Empty.
+    assert_eq!(
+        broker2.describe_transaction("txn-off-crash").unwrap().0,
+        "Empty"
+    );
     let _ = std::fs::remove_dir_all(&dir);
 }
 
