@@ -384,6 +384,11 @@ docs for day-to-day reading: [ops](../ops.md), [consistency](../consistency.md),
 | v0.183 | ✅ | Go Addr getter | [V183_SPEC.md](../V183_SPEC.md) |
 | v0.184 | ✅ | Go/Java GroupConsumer assignor getter | [V184_SPEC.md](../V184_SPEC.md) |
 | v0.185 | ✅ | Go SetEnableIdempotence / Idempotence | [V185_SPEC.md](../V185_SPEC.md) |
+| v0.186 | ✅ | Go GroupConsumer HeartbeatCount | [V186_SPEC.md](../V186_SPEC.md) |
+| v0.187 | ✅ | Java GroupConsumer heartbeatCount | [V187_SPEC.md](../V187_SPEC.md) |
+| v0.188 | ✅ | Python GroupConsumer heartbeat_count | [V188_SPEC.md](../V188_SPEC.md) |
+| v0.189 | ✅ | Go/Java GroupConsumer sessionTimeoutMs getter | [V189_SPEC.md](../V189_SPEC.md) |
+| v0.190 | ✅ | Go/Java GroupConsumer Leave alias | [V190_SPEC.md](../V190_SPEC.md) |
 
 ---
 
