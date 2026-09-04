@@ -476,6 +476,11 @@ docs for day-to-day reading: [ops](../ops.md), [consistency](../consistency.md),
 | v0.277 | ✅ | Kafka ShareFetch key 78 reject | [V277_SPEC.md](../V277_SPEC.md) |
 | v0.278 | ✅ | Kafka ShareAcknowledge key 79 reject | [V278_SPEC.md](../V278_SPEC.md) |
 | v0.279 | ✅ | Kafka InitializeShareGroupState key 83 reject | [V279_SPEC.md](../V279_SPEC.md) |
+| v0.280 | ✅ | Kafka ReadShareGroupState key 84 reject | [V280_SPEC.md](../V280_SPEC.md) |
+| v0.281 | ✅ | Kafka WriteShareGroupState key 85 reject | [V281_SPEC.md](../V281_SPEC.md) |
+| v0.282 | ✅ | Kafka DeleteShareGroupState key 86 reject | [V282_SPEC.md](../V282_SPEC.md) |
+| v0.283 | ✅ | Kafka ReadShareGroupStateSummary key 87 reject | [V283_SPEC.md](../V283_SPEC.md) |
+| v0.284 | ✅ | Kafka DescribeShareGroupOffsets key 90 reject | [V284_SPEC.md](../V284_SPEC.md) |
 
 ---
 
