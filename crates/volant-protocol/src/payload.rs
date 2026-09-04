@@ -3630,6 +3630,12 @@ mod tests {
                     member_count: 1,
                     generation: 1,
                 },
+                GroupListing {
+                    group_id: "g4".into(),
+                    state: GroupState::PreparingRebalance,
+                    member_count: 1,
+                    generation: 1,
+                },
             ],
         };
         let b = encode_response(&list_resp).unwrap();
@@ -3640,7 +3646,9 @@ mod tests {
         assert_eq!(GroupState::from_u8(0), GroupState::Empty);
         assert_eq!(GroupState::from_u8(1), GroupState::Stable);
         assert_eq!(GroupState::from_u8(2), GroupState::CompletingRebalance);
+        assert_eq!(GroupState::from_u8(3), GroupState::PreparingRebalance);
         assert_eq!(GroupState::from_u8(99), GroupState::Empty);
+        assert_eq!(GroupState::PreparingRebalance.as_str(), "PreparingRebalance");
 
         let del = Request::DeleteOffsets {
             group_id: "g1".into(),

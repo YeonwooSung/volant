@@ -93,7 +93,7 @@ pub struct GroupDescription {
     pub generation: u32,
     /// Members (sorted by member id).
     pub members: Vec<GroupMemberDescription>,
-    /// Empty / Stable / CompletingRebalance (v0.218 SyncGroup fence label).
+    /// Empty / Stable / CompletingRebalance / PreparingRebalance (v0.230).
     pub state: GroupState,
 }
 
@@ -102,7 +102,7 @@ pub struct GroupDescription {
 pub struct GroupListEntry {
     /// Group id.
     pub group_id: String,
-    /// Empty / Stable / CompletingRebalance (live && !all_synced).
+    /// Empty / Stable / CompletingRebalance / PreparingRebalance (v0.230).
     pub state: GroupState,
     /// Live member count.
     pub member_count: u32,
@@ -145,6 +145,8 @@ pub struct GroupCoordinator {
     groups: Mutex<HashMap<String, Group>>,
     /// Waiters for the v0.215 SyncGroup fence (released during the wait).
     join_park: Condvar,
+    /// Per-group parked Join count (v0.230 List/Describe label). Not members.
+    join_waiters: Mutex<HashMap<String, u32>>,
     offsets: OffsetStore,
 }
 
@@ -154,6 +156,7 @@ impl GroupCoordinator {
         Ok(Self {
             groups: Mutex::new(HashMap::new()),
             join_park: Condvar::new(),
+            join_waiters: Mutex::new(HashMap::new()),
             offsets: OffsetStore::new(data_dir)?,
         })
     }
@@ -217,7 +220,13 @@ impl GroupCoordinator {
                 .and_then(|g| g.members.get(&resolved_id))
                 .is_some_and(|m| m.topics != topics);
             if topics_changed
-                && !park_until_all_synced(&self.join_park, &mut groups, group_id, timeout)
+                && !park_until_all_synced(
+                    &self.join_park,
+                    &self.join_waiters,
+                    &mut groups,
+                    group_id,
+                    timeout,
+                )
             {
                 return Ok(fenced_join_lookup(&groups, group_id, resolved_id));
             }
@@ -263,7 +272,13 @@ impl GroupCoordinator {
 
         // New member: park unless every live member confirmed this generation.
         // Empty group (first Join) is always all_synced.
-        if !park_until_all_synced(&self.join_park, &mut groups, group_id, timeout) {
+        if !park_until_all_synced(
+            &self.join_park,
+            &self.join_waiters,
+            &mut groups,
+            group_id,
+            timeout,
+        ) {
             return Ok(fenced_join_lookup(&groups, group_id, resolved_id));
         }
 
@@ -464,11 +479,12 @@ impl GroupCoordinator {
             })
             .collect();
         members.sort_by(|a, b| a.member_id.cmp(&b.member_id));
+        let parked = parked_count(&self.join_waiters, group_id);
         Some(GroupDescription {
             group_id: group_id.to_owned(),
             generation: group.generation,
             members,
-            state: listed_state(group),
+            state: listed_state(group, parked),
         })
     }
 
@@ -500,20 +516,26 @@ impl GroupCoordinator {
                 set.insert(gid, ());
             }
         }
+        let waiters = self.join_waiters.lock();
         let mut out: Vec<GroupListEntry> = set
             .into_keys()
             .map(|group_id| {
+                let parked = waiters.get(&group_id).copied().unwrap_or(0);
                 if let Some(g) = groups.get(&group_id) {
                     GroupListEntry {
                         group_id,
-                        state: listed_state(g),
+                        state: listed_state(g, parked),
                         member_count: g.members.len() as u32,
                         generation: g.generation,
                     }
                 } else {
                     GroupListEntry {
                         group_id,
-                        state: GroupState::Empty,
+                        state: if parked > 0 {
+                            GroupState::PreparingRebalance
+                        } else {
+                            GroupState::Empty
+                        },
                         member_count: 0,
                         generation: 0,
                     }
@@ -670,33 +692,63 @@ fn all_synced(group: &Group) -> bool {
 
 /// Park until `all_synced` or `timeout_ms`. Releases `groups` while waiting.
 /// Missing / empty group is treated as synced (first Join).
+/// Increments the per-group parked waiter count while waiting (v0.230).
 fn park_until_all_synced(
     park: &Condvar,
+    waiters: &Mutex<HashMap<String, u32>>,
     groups: &mut parking_lot::MutexGuard<'_, HashMap<String, Group>>,
     group_id: &str,
     timeout_ms: u32,
 ) -> bool {
+    if groups.get(group_id).map(all_synced).unwrap_or(true) {
+        return true;
+    }
+    inc_join_waiters(waiters, group_id);
     let deadline = Instant::now() + Duration::from_millis(u64::from(timeout_ms));
-    loop {
+    let synced = loop {
         if groups.get(group_id).map(all_synced).unwrap_or(true) {
-            return true;
+            break true;
         }
         let now = Instant::now();
         if now >= deadline {
-            return false;
+            break false;
         }
         if park
             .wait_for(groups, deadline.saturating_duration_since(now))
             .timed_out()
         {
-            return groups.get(group_id).map(all_synced).unwrap_or(true);
+            break groups.get(group_id).map(all_synced).unwrap_or(true);
         }
+    };
+    dec_join_waiters(waiters, group_id);
+    synced
+}
+
+fn inc_join_waiters(waiters: &Mutex<HashMap<String, u32>>, group_id: &str) {
+    let mut map = waiters.lock();
+    *map.entry(group_id.to_owned()).or_insert(0) += 1;
+}
+
+fn dec_join_waiters(waiters: &Mutex<HashMap<String, u32>>, group_id: &str) {
+    let mut map = waiters.lock();
+    match map.get_mut(group_id) {
+        Some(n) if *n > 1 => *n -= 1,
+        Some(_) => {
+            map.remove(group_id);
+        }
+        None => {}
     }
 }
 
-/// List/describe label: CompletingRebalance while the v0.215 fence is open.
-fn listed_state(group: &Group) -> GroupState {
-    if group.members.is_empty() {
+fn parked_count(waiters: &Mutex<HashMap<String, u32>>, group_id: &str) -> u32 {
+    waiters.lock().get(group_id).copied().unwrap_or(0)
+}
+
+/// List/describe label: PreparingRebalance while Join waiters exist.
+fn listed_state(group: &Group, parked: u32) -> GroupState {
+    if parked > 0 {
+        GroupState::PreparingRebalance
+    } else if group.members.is_empty() {
         GroupState::Empty
     } else if all_synced(group) {
         GroupState::Stable
@@ -1222,6 +1274,85 @@ mod tests {
             .all(|e| e.state == GroupState::Empty
                 || e.member_count > 0 && e.state != GroupState::Empty));
         assert_eq!(crate::kafka::SUPPORTED_APIS.len(), 40);
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    fn listed(coord: &GroupCoordinator, group: &str) -> GroupListEntry {
+        coord
+            .list_groups()
+            .into_iter()
+            .find(|e| e.group_id == group)
+            .unwrap_or_else(|| panic!("missing listed group {group}"))
+    }
+
+    #[test]
+    fn first_join_without_second_is_completing_rebalance() {
+        let dir = temp_dir();
+        let coord = GroupCoordinator::new(&dir).unwrap();
+        let j1 = coord
+            .join("g", "", 10_000, vec!["t".into()], "", counts)
+            .unwrap();
+        assert_eq!(j1.error_code, 0);
+        let live = listed(&coord, "g");
+        assert_eq!(live.state, GroupState::CompletingRebalance);
+        assert_eq!(live.member_count, 1);
+        assert_eq!(
+            coord.describe_group("g").unwrap().state,
+            GroupState::CompletingRebalance
+        );
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn list_describe_preparing_while_join_parked() {
+        let dir = temp_dir();
+        let coord = Arc::new(GroupCoordinator::new(&dir).unwrap());
+        let a = coord
+            .join("g", "", 10_000, vec!["t".into()], "", counts)
+            .unwrap();
+        assert_eq!(a.error_code, 0);
+        assert_eq!(listed(&coord, "g").state, GroupState::CompletingRebalance);
+
+        let coord_b = Arc::clone(&coord);
+        let handle =
+            thread::spawn(move || coord_b.join("g", "", 150, vec!["t".into()], "", counts));
+
+        let deadline = Instant::now() + Duration::from_millis(100);
+        loop {
+            let live = listed(&coord, "g");
+            if live.state == GroupState::PreparingRebalance {
+                assert_eq!(live.member_count, 1);
+                assert_eq!(
+                    coord.describe_group("g").unwrap().state,
+                    GroupState::PreparingRebalance
+                );
+                assert_eq!(member_count(&coord, "g"), 1);
+                break;
+            }
+            assert!(
+                Instant::now() < deadline,
+                "expected PreparingRebalance while B is parked, got {:?}",
+                live.state
+            );
+            thread::sleep(Duration::from_millis(5));
+        }
+
+        sync_ok(&coord, "g", &a.member_id, a.generation);
+        let b = handle.join().expect("join thread").unwrap();
+        assert_eq!(b.error_code, 0);
+        assert_eq!(member_count(&coord, "g"), 2);
+        let after_b = listed(&coord, "g");
+        assert_eq!(after_b.state, GroupState::CompletingRebalance);
+        assert_eq!(after_b.member_count, 2);
+        assert_eq!(
+            coord.describe_group("g").unwrap().state,
+            GroupState::CompletingRebalance
+        );
+
+        sync_ok(&coord, "g", &a.member_id, b.generation);
+        sync_ok(&coord, "g", &b.member_id, b.generation);
+        assert_eq!(listed(&coord, "g").state, GroupState::Stable);
+        assert_eq!(coord.describe_group("g").unwrap().state, GroupState::Stable);
         let _ = fs::remove_dir_all(&dir);
     }
 

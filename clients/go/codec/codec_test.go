@@ -1161,6 +1161,9 @@ func TestListGroupsRoundTrip(t *testing.T) {
 	if GroupStateFromU8(2) != GroupStateCompletingRebalance {
 		t.Fatalf("2 should decode as completing rebalance")
 	}
+	if GroupStateFromU8(3) != GroupStatePreparingRebalance {
+		t.Fatalf("3 should decode as preparing rebalance")
+	}
 	if GroupStateFromU8(99) != GroupStateEmpty {
 		t.Fatalf("unknown state should decode as empty")
 	}

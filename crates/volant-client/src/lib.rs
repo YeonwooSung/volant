@@ -222,7 +222,8 @@
 //! v0.211 prefers JoinGroup `members` trailer for range assignor and
 //! falls back to DescribeGroup when that list is empty.
 //! v0.218 decodes ListGroups state byte **2** as CompletingRebalance
-//! (live members, SyncGroup fence still open).
+//! (live members, SyncGroup fence still open). v0.230 decodes **3**
+//! as PreparingRebalance (a Join is parked; label only).
 //! v0.221 retries [`GroupConsumer`] Join on error **9** up to
 //! [`ClientConfig::max_retries`] (default 0) so overlapping joins can
 //! wait for a peer SyncGroup.

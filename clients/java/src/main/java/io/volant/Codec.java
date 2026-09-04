@@ -89,6 +89,8 @@ public final class Codec {
     public static final int GROUP_STATE_STABLE = 1;
     /** ListGroups state: live members with the v0.215 SyncGroup fence open. */
     public static final int GROUP_STATE_COMPLETING_REBALANCE = 2;
+    /** ListGroups state: a Join is parked on the v0.227 Condvar (label only). */
+    public static final int GROUP_STATE_PREPARING_REBALANCE = 3;
 
     static final long NULL_LEN = 0xFFFFFFFFL;
 
@@ -503,6 +505,9 @@ public final class Codec {
             }
             if (v == GROUP_STATE_COMPLETING_REBALANCE) {
                 return GROUP_STATE_COMPLETING_REBALANCE;
+            }
+            if (v == GROUP_STATE_PREPARING_REBALANCE) {
+                return GROUP_STATE_PREPARING_REBALANCE;
             }
             return GROUP_STATE_EMPTY;
         }

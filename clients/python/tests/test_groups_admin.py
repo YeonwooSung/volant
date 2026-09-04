@@ -163,6 +163,7 @@ class TestGroupAdminClient(unittest.TestCase):
         self.assertEqual(GroupState.from_u8(0), GroupState.EMPTY)
         self.assertEqual(GroupState.from_u8(1), GroupState.STABLE)
         self.assertEqual(GroupState.from_u8(2), GroupState.COMPLETING_REBALANCE)
+        self.assertEqual(GroupState.from_u8(3), GroupState.PREPARING_REBALANCE)
         self.assertEqual(GroupState.from_u8(99), GroupState.EMPTY)
 
     def test_list_groups_empty_and_stable(self) -> None:

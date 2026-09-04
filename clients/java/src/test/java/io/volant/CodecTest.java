@@ -769,10 +769,15 @@ class CodecTest {
         assertEquals(Codec.GROUP_STATE_STABLE, Codec.GroupListing.groupStateFromU8(1));
         assertEquals(
                 Codec.GROUP_STATE_COMPLETING_REBALANCE, Codec.GroupListing.groupStateFromU8(2));
+        assertEquals(
+                Codec.GROUP_STATE_PREPARING_REBALANCE, Codec.GroupListing.groupStateFromU8(3));
         assertEquals(Codec.GROUP_STATE_EMPTY, Codec.GroupListing.groupStateFromU8(99));
         assertEquals(
                 Codec.GROUP_STATE_COMPLETING_REBALANCE,
                 new Codec.GroupListing("c", Codec.GROUP_STATE_COMPLETING_REBALANCE, 1, 1).state);
+        assertEquals(
+                Codec.GROUP_STATE_PREPARING_REBALANCE,
+                new Codec.GroupListing("p", Codec.GROUP_STATE_PREPARING_REBALANCE, 1, 1).state);
     }
 
     @Test
