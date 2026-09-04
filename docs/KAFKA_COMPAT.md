@@ -54,6 +54,7 @@ From `SUPPORTED_APIS` in `crates/volant-broker/src/kafka/mod.rs`:
 | 37 | CreatePartitions | 0–3 | Flex v2+; v3 = v2 wire (no KIP-599 quota); assignment wait/rollback same as native (majority miss → **19**) |
 | 42 | DeleteGroups | 0–3 | Flex v2; ErrorMessage v3 |
 | 44 | IncrementalAlterConfigs | 0–1 | SET/DELETE only; TOPIC + BROKER (Phase 99–103 name check + sparse durable; BROKER cluster Alter controller-only Phase 113) |
+| 45 | AlterPartitionReassignments | 0 | Always flex; wraps native opcode 114 + assignment wait; TimeoutMs ignored; null replicas → **83** (no pending cancel log); not live copy; not key **46** |
 | 47 | OffsetDelete | 0 | Classic only |
 | 60 | DescribeCluster | 0–2 | Always flex; IsFenced always false |
 | 61 | DescribeProducers | 0 | Always flex |
@@ -125,7 +126,8 @@ These are **current** product facts, not temporary docs lag:
 | DeleteRecords (cluster) | Leader-only client path; best-effort inter-broker truncate of other replicas (Phase 113); fan-out failure does not fail the client by default; failed peers recorded in leader-local durable outbox and retried when live (Phase 116); **Phase 123** new leader rebuilds pending targets from local `log_start` after leadership change; truncate journal SoT + majority (Phase 129/130) with optional client wait (Phase 135 env; Phase 137 **native** per-request trailer only — Kafka still broker knob); local low not rolled back on wait fail; **Phase 137** assignment prune + known-topic push filter (journal GC / anti-resurrection) — still not a full Raft truncate log |
 | KIP-951 | CurrentLeader on leader errors; Produce NodeEndpoints v10+; Fetch NodeEndpoints v16+; empty tags on success |
 | ApiVersions features | Empty SupportedFeatures / FinalizedFeatures / ZkMigrationReady tags; no REBOOTSTRAP_REQUIRED |
-| Missing APIs | Large Kafka surface still unsupported (GSSAPI, OAUTH, broker configs, …) |
+| AlterPartitionReassignments | **v0 wrap** (v0.225): key **45** advertised; apply is native opcode 114 (instant; new replicas start empty); TimeoutMs ignored; `replicas=null` → **83** (no cancel log / no pending state); not live Kafka reassignment; **ListPartitionReassignments (46)** not advertised |
+| Missing APIs | Large Kafka surface still unsupported (GSSAPI, OAUTH, ListPartitionReassignments **46**, broker configs, …) |
 
 ## Related
 
