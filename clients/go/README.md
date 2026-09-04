@@ -152,6 +152,7 @@ c.SetTransactionalID("txn-1")
 _ = c.BeginTransaction()
 _ = c.Produce("t", 0, nil, []byte("hello"))
 _, _ = c.CommitTransaction(nil) // or []codec.TxnOffsetCommit
+_, _ = c.CommitTransactionEmpty() // v0.176; same as CommitTransaction(nil)
 _ = c.AbortTransaction()
 // Optional TransactionalProducer helper (v0.63). Queues offsets until Commit.
 p, err := volant.NewTransactionalProducer(c) // c must have transactional_id
@@ -327,6 +328,8 @@ Native transactions (v0.57) are opt-in via `SetTransactionalID`.
 `BeginTransaction` / `CommitTransaction` / `AbortTransaction` send
 opcodes 50–53. Init uses that id. Abort rewinds sequences. Not Kafka
 transactions (API keys 22/24/25/26/28).
+`CommitTransactionEmpty()` commits with no deferred offsets; same as
+`CommitTransaction(nil)`.
 `TransactionalProducer` (v0.63) is a thin helper: `Begin` / `Produce` /
 `AddOffsets` (local queue) / `Commit` / `Abort`. Produce is
 write-through; LSO/commit is broker-side. `NewTransactionalProducer`
