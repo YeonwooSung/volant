@@ -570,10 +570,17 @@ public final class Codec {
     public static final class ScramFirstRequest {
         public final String username;
         public final String clientNonce;
+        /** v0.238 trailer: 0/1 = SHA-256, 2 = SHA-512. */
+        public final int hash;
 
         public ScramFirstRequest(String username, String clientNonce) {
+            this(username, clientNonce, 0);
+        }
+
+        public ScramFirstRequest(String username, String clientNonce, int hash) {
             this.username = username == null ? "" : username;
             this.clientNonce = clientNonce == null ? "" : clientNonce;
+            this.hash = hash & 0xff;
         }
     }
 
@@ -2624,12 +2631,16 @@ public final class Codec {
         Writer w = new Writer();
         putString(w, req.username);
         putString(w, req.clientNonce);
+        w.u8(req.hash);
         return w.finish();
     }
 
     public static ScramFirstRequest decodeScramFirstRequest(byte[] payload) {
         Reader r = new Reader(payload);
-        return new ScramFirstRequest(getString(r), getString(r));
+        String user = getString(r);
+        String nonce = getString(r);
+        int hash = r.remaining() >= 1 ? r.u8() : 0;
+        return new ScramFirstRequest(user, nonce, hash);
     }
 
     public static byte[] encodeScramFirstResponse(ScramFirstResponse resp) {

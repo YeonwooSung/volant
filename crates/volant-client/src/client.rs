@@ -201,7 +201,8 @@ impl Client {
     ///
     /// When [`ClientConfig::auth_token`] is set, sends Auth. When
     /// [`ClientConfig::scram_username`] / [`ClientConfig::scram_password`] are
-    /// set, runs SCRAM-SHA-256. Token is preferred when both are set.
+    /// set, runs SCRAM (SHA-256 unless [`ClientConfig::scram_hash`] is 2).
+    /// Token is preferred when both are set.
     pub async fn connect(config: ClientConfig) -> Result<Self> {
         let addr = config
             .brokers
@@ -237,6 +238,22 @@ impl Client {
         Self::connect(ClientConfig {
             brokers: vec![addr.as_ref().to_owned()],
             auth_token: Some(auth_token.into()),
+            ..ClientConfig::default()
+        })
+        .await
+    }
+
+    /// Connect with SCRAM-SHA-512 (v0.238 native trailer 2).
+    pub async fn connect_scram_sha512(
+        addr: impl AsRef<str>,
+        username: impl Into<String>,
+        password: impl Into<String>,
+    ) -> Result<Self> {
+        Self::connect(ClientConfig {
+            brokers: vec![addr.as_ref().to_owned()],
+            scram_username: Some(username.into()),
+            scram_password: Some(password.into()),
+            scram_hash: volant_protocol::SCRAM_HASH_SHA512,
             ..ClientConfig::default()
         })
         .await
@@ -344,7 +361,7 @@ impl Client {
         }
     }
 
-    /// Run SCRAM-SHA-256 first+final as one handshake.
+    /// Run SCRAM first+final as one handshake (SHA-256 unless `scram_hash` is 2).
     ///
     /// Transient broker/transport errors on either step retry the whole
     /// handshake from ScramFirst with a new client nonce, up to
@@ -356,10 +373,12 @@ impl Client {
         let mut retry_attempt = 0u32;
         loop {
             let client_nonce = crate::scram::generate_client_nonce();
+            let hash = self.config.scram_hash;
             let first = match self
                 .round_trip(Request::ScramFirst {
                     username: username.to_owned(),
                     client_nonce: client_nonce.clone(),
+                    hash,
                 })
                 .await
             {
@@ -408,14 +427,25 @@ impl Client {
                 }
             };
 
-            let (proof, expected_sig) = crate::scram::client_proof_and_server_sig(
-                username,
-                password,
-                &client_nonce,
-                &combined_nonce,
-                &salt,
-                iterations,
-            )?;
+            let (proof, expected_sig) = if hash == volant_protocol::SCRAM_HASH_SHA512 {
+                crate::scram::client_proof_and_server_sig_sha512(
+                    username,
+                    password,
+                    &client_nonce,
+                    &combined_nonce,
+                    &salt,
+                    iterations,
+                )?
+            } else {
+                crate::scram::client_proof_and_server_sig(
+                    username,
+                    password,
+                    &client_nonce,
+                    &combined_nonce,
+                    &salt,
+                    iterations,
+                )?
+            };
 
             let final_resp = match self
                 .round_trip(Request::ScramFinal {

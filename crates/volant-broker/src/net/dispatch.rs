@@ -112,26 +112,45 @@ fn handle_scram(
         Request::ScramFirst {
             username,
             client_nonce,
-        } => match broker.scram().begin(&username, &client_nonce) {
-            Ok((chal, salt, iterations, combined_nonce)) => {
-                *scram_challenge = Some(chal);
-                Response::ScramFirst {
-                    error_code: 0,
-                    combined_nonce,
-                    salt: bytes::Bytes::from(salt),
-                    iterations,
+            hash,
+        } => {
+            let alg = match hash {
+                0 | 1 => crate::scram::ScramHash::Sha256,
+                2 => crate::scram::ScramHash::Sha512,
+                _ => {
+                    *scram_challenge = None;
+                    return Response::ScramFirst {
+                        error_code: ErrorCode::InvalidArg as u16,
+                        combined_nonce: String::new(),
+                        salt: bytes::Bytes::new(),
+                        iterations: 0,
+                    };
+                }
+            };
+            match broker
+                .scram()
+                .begin_with_hash(&username, &client_nonce, alg)
+            {
+                Ok((chal, salt, iterations, combined_nonce)) => {
+                    *scram_challenge = Some(chal);
+                    Response::ScramFirst {
+                        error_code: 0,
+                        combined_nonce,
+                        salt: bytes::Bytes::from(salt),
+                        iterations,
+                    }
+                }
+                Err(_) => {
+                    *scram_challenge = None;
+                    Response::ScramFirst {
+                        error_code: ErrorCode::InvalidArg as u16,
+                        combined_nonce: String::new(),
+                        salt: bytes::Bytes::new(),
+                        iterations: 0,
+                    }
                 }
             }
-            Err(_) => {
-                *scram_challenge = None;
-                Response::ScramFirst {
-                    error_code: ErrorCode::InvalidArg as u16,
-                    combined_nonce: String::new(),
-                    salt: bytes::Bytes::new(),
-                    iterations: 0,
-                }
-            }
-        },
+        }
         Request::ScramFinal {
             username,
             combined_nonce,

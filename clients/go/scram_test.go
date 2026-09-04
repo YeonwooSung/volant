@@ -32,6 +32,37 @@ func TestScramPinnedVector(t *testing.T) {
 	}
 }
 
+func TestScramSHA512ProofLen(t *testing.T) {
+	proof, sig, err := ClientProofAndServerSigSHA512(
+		"alice",
+		"s3cret",
+		"rOprNGfwEbeRWgbNEkqO",
+		"rOprNGfwEbeRWgbNEkqOserver",
+		[]byte("saltSALTsaltSALT"),
+		4096,
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(proof) != 64 || len(sig) != 64 {
+		t.Fatalf("sha512 proof/sig len %d/%d want 64/64", len(proof), len(sig))
+	}
+	p256, _, err := ClientProofAndServerSig(
+		"alice",
+		"s3cret",
+		"rOprNGfwEbeRWgbNEkqO",
+		"rOprNGfwEbeRWgbNEkqOserver",
+		[]byte("saltSALTsaltSALT"),
+		4096,
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if hex.EncodeToString(proof[:32]) == hex.EncodeToString(p256) {
+		t.Fatal("sha512 proof prefix must differ from sha256")
+	}
+}
+
 func TestDialPlainTokenWinsOverScram(t *testing.T) {
 	ln, err := net.Listen("tcp", "127.0.0.1:0")
 	if err != nil {

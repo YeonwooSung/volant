@@ -80,6 +80,8 @@ public final class Client implements AutoCloseable {
     private final String authToken;
     private final String scramUsername;
     private final String scramPassword;
+    /** Native ScramFirst hash trailer (v0.238). 0/1 = SHA-256, 2 = SHA-512. */
+    private final int scramHash;
     private int maxRedirects = 1;
     private int maxRetries = 0;
     private long retryBackoffMs = 50;
@@ -109,7 +111,7 @@ public final class Client implements AutoCloseable {
     private byte[] buf = new byte[0];
 
     private Client(String addr, Socket socket, int timeoutMs, TlsOptions tlsOptions, String authToken) {
-        this(addr, socket, timeoutMs, tlsOptions, authToken, null, null);
+        this(addr, socket, timeoutMs, tlsOptions, authToken, null, null, 0);
     }
 
     private Client(
@@ -120,6 +122,18 @@ public final class Client implements AutoCloseable {
             String authToken,
             String scramUsername,
             String scramPassword) {
+        this(addr, socket, timeoutMs, tlsOptions, authToken, scramUsername, scramPassword, 0);
+    }
+
+    private Client(
+            String addr,
+            Socket socket,
+            int timeoutMs,
+            TlsOptions tlsOptions,
+            String authToken,
+            String scramUsername,
+            String scramPassword,
+            int scramHash) {
         this.addr = addr;
         this.socket = socket;
         this.timeoutMs = timeoutMs;
@@ -128,6 +142,7 @@ public final class Client implements AutoCloseable {
         this.authToken = authToken;
         this.scramUsername = scramUsername;
         this.scramPassword = scramPassword;
+        this.scramHash = scramHash & 0xff;
     }
 
     /** Connect to a native Volant listener with a 10s timeout. */
@@ -199,9 +214,34 @@ public final class Client implements AutoCloseable {
     /** Test helper: SCRAM connect with {@code maxRetries} already applied. */
     static Client connectScram(
             String host, int port, int timeoutMs, String user, String pass, int maxRetries, long retryBackoffMs) {
+        return connectScram(host, port, timeoutMs, user, pass, maxRetries, retryBackoffMs, 0);
+    }
+
+    /**
+     * Connect and run SCRAM-SHA-512 (v0.238 native trailer 2) after TCP.
+     * Username and password must both be non-empty.
+     */
+    public static Client connectScramSha512(String host, int port, String user, String pass) {
+        return connectScramSha512(host, port, DEFAULT_TIMEOUT_MS, user, pass);
+    }
+
+    /** Connect with timeout and SCRAM-SHA-512. */
+    public static Client connectScramSha512(String host, int port, int timeoutMs, String user, String pass) {
+        return connectScram(host, port, timeoutMs, user, pass, 0, 50, 2);
+    }
+
+    static Client connectScram(
+            String host,
+            int port,
+            int timeoutMs,
+            String user,
+            String pass,
+            int maxRetries,
+            long retryBackoffMs,
+            int scramHash) {
         requireScramPair(user, pass);
         Socket s = openSocket(host, port, timeoutMs, null);
-        Client c = new Client(formatAddr(host, port), s, timeoutMs, null, null, user, pass);
+        Client c = new Client(formatAddr(host, port), s, timeoutMs, null, null, user, pass, scramHash);
         c.maxRetries = Math.max(0, maxRetries);
         c.retryBackoffMs = Math.max(0, retryBackoffMs);
         return finishConnect(c);
@@ -615,8 +655,8 @@ public final class Client implements AutoCloseable {
 
     private void scramHandshake(String username, String password) {
         String clientNonce = Scram.generateClientNonce();
-        byte[] payload =
-                Codec.encodeScramFirstRequest(new Codec.ScramFirstRequest(username, clientNonce));
+        byte[] payload = Codec.encodeScramFirstRequest(
+                new Codec.ScramFirstRequest(username, clientNonce, scramHash));
         Object decoded = roundTrip(Codec.OP_SCRAM_FIRST, payload);
         if (!(decoded instanceof Codec.ScramFirstResponse)) {
             throw new ProtocolException("unexpected response for scram first: " + typeName(decoded));
@@ -626,13 +666,22 @@ public final class Client implements AutoCloseable {
         if (first.iterations <= 0 || first.iterations > Integer.MAX_VALUE) {
             throw new ProtocolException("scram iterations out of range: " + first.iterations);
         }
-        Scram.Proof proof = Scram.clientProofAndServerSig(
-                username,
-                password,
-                clientNonce,
-                first.combinedNonce,
-                first.salt,
-                (int) first.iterations);
+        Scram.Proof proof =
+                scramHash == 2
+                        ? Scram.clientProofAndServerSigSha512(
+                                username,
+                                password,
+                                clientNonce,
+                                first.combinedNonce,
+                                first.salt,
+                                (int) first.iterations)
+                        : Scram.clientProofAndServerSig(
+                                username,
+                                password,
+                                clientNonce,
+                                first.combinedNonce,
+                                first.salt,
+                                (int) first.iterations);
         payload = Codec.encodeScramFinalRequest(
                 new Codec.ScramFinalRequest(username, first.combinedNonce, proof.clientProof));
         decoded = roundTrip(Codec.OP_SCRAM_FINAL, payload);

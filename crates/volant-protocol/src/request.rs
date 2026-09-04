@@ -64,9 +64,9 @@ pub enum RequestOpcode {
     DeleteAcls = 56,
     /// List ACL entries (Phase 20).
     ListAcls = 58,
-    /// SCRAM-SHA-256 first message (Phase 22).
+    /// SCRAM client-first (Phase 22; v0.238 hash trailer).
     ScramFirst = 60,
-    /// SCRAM-SHA-256 final message (Phase 22).
+    /// SCRAM client-final (Phase 22; proof is 32 or 64 bytes).
     ScramFinal = 62,
     /// Create/upsert SCRAM user (Phase 22).
     CreateScramUser = 64,
@@ -502,20 +502,22 @@ pub enum Request {
         /// Resource name filter; empty = any.
         resource: String,
     },
-    /// SCRAM-SHA-256 client-first (Phase 22).
+    /// SCRAM client-first (Phase 22; v0.238 optional hash trailer).
     ScramFirst {
         /// Claimed username.
         username: String,
         /// Client nonce (printable ASCII, no commas).
         client_nonce: String,
+        /// Hash trailer: missing / 0 / 1 = SHA-256, 2 = SHA-512 (v0.238).
+        hash: u8,
     },
-    /// SCRAM-SHA-256 client-final (Phase 22).
+    /// SCRAM client-final (Phase 22).
     ScramFinal {
         /// Username (must match ScramFirst).
         username: String,
         /// Combined nonce from ScramFirst response.
         combined_nonce: String,
-        /// Client proof (32 bytes for SHA-256).
+        /// Client proof (32 bytes SHA-256, 64 bytes SHA-512).
         client_proof: Bytes,
     },
     /// Create or replace a SCRAM user (Phase 22).
@@ -761,6 +763,11 @@ pub enum Request {
 
 /// `ReassignPartitions.partition` sentinel: apply to every partition of the topic.
 pub const REASSIGN_ALL_PARTITIONS: u32 = u32::MAX;
+
+/// Native ScramFirst `hash` trailer: SHA-256 (v0.238). Missing / 0 also SHA-256.
+pub const SCRAM_HASH_SHA256: u8 = 1;
+/// Native ScramFirst `hash` trailer: SHA-512 (v0.238).
+pub const SCRAM_HASH_SHA512: u8 = 2;
 
 /// One broker endpoint on the membership overlay wire (v0.10).
 #[derive(Debug, Clone, PartialEq, Eq)]
