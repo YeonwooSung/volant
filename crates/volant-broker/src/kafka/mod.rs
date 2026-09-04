@@ -41,8 +41,9 @@
 //! RenewDelegationToken v0 (always flexible; no token store; reject 42),
 //! ExpireDelegationToken v0 (always flexible; no token store; reject 42),
 //! DescribeDelegationToken v0 (always flexible residual; no token store; empty tokens),
-//! ConsumerGroupDescribe v0 (always flexible; classic snapshot wrap; not KIP-848).
-//! ConsumerGroupHeartbeat v0 (always flexible; reject 42; not KIP-848).
+//! ConsumerGroupDescribe v0 (always flexible; classic snapshot wrap; not KIP-848),
+//! ConsumerGroupHeartbeat v0 (always flexible; reject 42; not KIP-848),
+//! Envelope v0 (key 58 reject; forwarding not supported; not KIP-590).
 //! See `docs/PHASE23_SPEC.md` … `docs/PHASE91_SPEC.md`, `docs/V225_SPEC.md`,
 //! `docs/V228_SPEC.md`, `docs/V233_SPEC.md`, `docs/V235_SPEC.md`,
 //! `docs/V236_SPEC.md`, `docs/V237_SPEC.md`, `docs/V241_SPEC.md`,
@@ -52,7 +53,7 @@
 //! `docs/V255_SPEC.md`, `docs/V257_SPEC.md`, `docs/V258_SPEC.md`,
 //! `docs/V259_SPEC.md`, `docs/V260_SPEC.md`, `docs/V261_SPEC.md`,
 //! `docs/V263_SPEC.md`, `docs/V264_SPEC.md`, `docs/V265_SPEC.md`,
-//! and `docs/V269_SPEC.md`.
+//! `docs/V266_SPEC.md`, and `docs/V269_SPEC.md`.
 
 mod acl_api;
 mod admin_api;
@@ -352,6 +353,10 @@ pub enum ApiKey {
     AlterPartition = 56,
     /// UpdateFeatures (always flexible; v0–1). Rejects every feature.
     UpdateFeatures = 57,
+    /// Envelope (always flexible; v0 only). Honest reject: Volant has
+    /// no request forwarding (not KIP-590). Embedded RequestData is
+    /// discarded; nothing is unwrapped or executed.
+    Envelope = 58,
     /// DescribeCluster (always flexible).
     DescribeCluster = 60,
     /// DescribeProducers (always flexible).
@@ -451,6 +456,7 @@ impl ApiKey {
             55 => Some(Self::DescribeQuorum),
             56 => Some(Self::AlterPartition),
             57 => Some(Self::UpdateFeatures),
+            58 => Some(Self::Envelope),
             60 => Some(Self::DescribeCluster),
             61 => Some(Self::DescribeProducers),
             62 => Some(Self::BrokerRegistration),
@@ -524,6 +530,7 @@ pub const SUPPORTED_APIS: &[(ApiKey, i16, i16)] = &[
     (ApiKey::DescribeQuorum, 0, 1),
     (ApiKey::AlterPartition, 0, 0),
     (ApiKey::UpdateFeatures, 0, 1),
+    (ApiKey::Envelope, 0, 0),
     (ApiKey::DescribeCluster, 0, 2),
     (ApiKey::DescribeProducers, 0, 0),
     (ApiKey::BrokerRegistration, 0, 0),
@@ -807,5 +814,16 @@ mod tests {
             *k == ApiKey::ExpireDelegationToken && *min == 0 && *max == 0
         }));
         assert_eq!(ApiKey::from_i16(40), Some(ApiKey::ExpireDelegationToken));
+    }
+
+    #[test]
+    fn supported_apis_includes_envelope_58() {
+        assert!(SUPPORTED_APIS.len() >= 65);
+        assert!(SUPPORTED_APIS
+            .iter()
+            .any(|(k, min, max)| *k == ApiKey::Envelope && *min == 0 && *max == 0));
+        assert_eq!(ApiKey::from_i16(58), Some(ApiKey::Envelope));
+        assert_eq!(ApiKey::from_i16(57), Some(ApiKey::UpdateFeatures));
+        assert_eq!(ApiKey::from_i16(60), Some(ApiKey::DescribeCluster));
     }
 }
