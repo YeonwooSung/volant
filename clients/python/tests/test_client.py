@@ -16,6 +16,7 @@ from volant.codec import (
     OP_FETCH,
     OP_HEARTBEAT,
     OP_INIT_PRODUCER_ID,
+    OP_JOIN_GROUP,
     OP_LEAVE_GROUP,
     OP_INIT_PRODUCER_ID_RESPONSE,
     OP_LIST_GROUPS,
@@ -36,6 +37,7 @@ from volant.codec import (
     FetchResponse,
     HeartbeatResponse,
     InitProducerIdResponse,
+    JoinGroupResponse,
     LeaveGroupResponse,
     ListGroupsResponse,
     ListMembersResponse,
@@ -60,6 +62,7 @@ from volant.codec import (
     encode_fetch_response,
     encode_heartbeat_response,
     encode_init_producer_id_response,
+    encode_join_group_response,
     encode_leave_group_response,
     encode_list_groups_response,
     encode_list_members_response,
@@ -79,7 +82,8 @@ class ScriptedBroker:
     """Accepts connections and replies to Produce / Fetch / Metadata.
 
     ``produce_codes`` / ``fetch_codes`` / ``heartbeat_codes`` /
-    ``leave_group_codes`` / ``offset_commit_codes`` / ``offset_fetch_codes`` /
+    ``join_group_codes`` / ``leave_group_codes`` / ``offset_commit_codes`` /
+    ``offset_fetch_codes`` /
     ``delete_offsets_codes`` / ``list_offsets_codes`` /
     ``describe_group_codes`` / ``list_groups_codes`` /
     ``metadata_codes`` / ``list_members_codes`` / ``init_codes`` are queues of
@@ -98,6 +102,7 @@ class ScriptedBroker:
         self.fetch_codes: list[int] = []
         self.heartbeat_codes: list[int] = []
         self.heartbeat_replies: list[tuple[int, str, bool]] = []
+        self.join_group_codes: list[int] = []
         self.leave_group_codes: list[int] = []
         self.leave_group_replies: list[tuple[int, str, bool]] = []
         self.offset_commit_codes: list[int] = []
@@ -125,6 +130,7 @@ class ScriptedBroker:
         self.produce_count = 0
         self.fetch_count = 0
         self.heartbeat_count = 0
+        self.join_group_count = 0
         self.leave_group_count = 0
         self.offset_commit_count = 0
         self.offset_fetch_count = 0
@@ -275,6 +281,19 @@ class ScriptedBroker:
             return (
                 encode_heartbeat_response(HeartbeatResponse(error_code=code)),
                 OP_HEARTBEAT,
+            )
+        if opcode == OP_JOIN_GROUP:
+            self.join_group_count += 1
+            code = self.join_group_codes.pop(0) if self.join_group_codes else 0
+            return (
+                encode_join_group_response(
+                    JoinGroupResponse(
+                        error_code=code,
+                        generation=1,
+                        member_id="m-1",
+                    )
+                ),
+                OP_JOIN_GROUP,
             )
         if opcode == OP_LEAVE_GROUP:
             self.leave_group_count += 1
@@ -1084,6 +1103,39 @@ class TestHeartbeatRetry(unittest.TestCase):
 
 
 UNKNOWN_MEMBER = 10
+
+
+class TestJoinGroupRetry(unittest.TestCase):
+    def test_empty_member_and_instance_is_one_shot(self) -> None:
+        with ScriptedBroker() as srv:
+            srv.join_group_codes = [TIMEOUT, 0]
+            with Client(srv.addr, timeout=5.0, max_retries=2, retry_backoff_ms=0) as c:
+                with self.assertRaises(BrokerError) as ctx:
+                    c.join_group("g", topics=["t"])
+            self.assertEqual(ctx.exception.code, TIMEOUT)
+            self.assertEqual(srv.join_group_count, 1)
+            self.assertEqual(srv.heartbeat_count, 0)
+
+    def test_stored_member_id_retries_timeout_then_ok(self) -> None:
+        with ScriptedBroker() as srv:
+            srv.join_group_codes = [TIMEOUT, 0]
+            with Client(srv.addr, timeout=5.0, max_retries=2, retry_backoff_ms=0) as c:
+                result = c.join_group("g", topics=["t"], member_id="m-rejoin")
+            self.assertEqual(result.member_id, "m-1")
+            self.assertEqual(result.generation, 1)
+            self.assertEqual(srv.join_group_count, 2)
+            self.assertEqual(srv.heartbeat_count, 0)
+
+    def test_static_instance_retries_timeout_then_ok(self) -> None:
+        with ScriptedBroker() as srv:
+            srv.join_group_codes = [TIMEOUT, 0]
+            with Client(srv.addr, timeout=5.0, max_retries=2, retry_backoff_ms=0) as c:
+                result = c.join_group(
+                    "g", topics=["t"], group_instance_id="inst-1"
+                )
+            self.assertEqual(result.member_id, "m-1")
+            self.assertEqual(srv.join_group_count, 2)
+            self.assertEqual(srv.heartbeat_count, 0)
 
 
 class TestLeaveGroupRetry(unittest.TestCase):

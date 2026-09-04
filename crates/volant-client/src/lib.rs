@@ -202,6 +202,9 @@
 //! CreateTopic with 1 partition. Same as `create_topic(name, 1)`.
 //! [`Client::create_topic`] / [`Client::create_topic_with_configs`]
 //! are unchanged.
+//! v0.205 retries [`Client::join_group`] / [`Client::join_group_with_instance`]
+//! on the same transient set as Heartbeat (default 0) when `member_id`
+//! or `group_instance_id` is set; empty first join is one shot.
 
 #![deny(missing_docs)]
 

@@ -498,6 +498,7 @@ class ClientTest {
         final List<Integer> heartbeatCodes = new CopyOnWriteArrayList<>();
         final List<int[]> heartbeatReplies = new CopyOnWriteArrayList<>();
         final List<String> heartbeatMessages = new CopyOnWriteArrayList<>();
+        final List<Integer> joinGroupCodes = new CopyOnWriteArrayList<>();
         final List<Integer> leaveGroupCodes = new CopyOnWriteArrayList<>();
         final List<int[]> leaveGroupReplies = new CopyOnWriteArrayList<>();
         final List<String> leaveGroupMessages = new CopyOnWriteArrayList<>();
@@ -529,6 +530,7 @@ class ClientTest {
         final AtomicInteger produceCount = new AtomicInteger();
         final AtomicInteger fetchCount = new AtomicInteger();
         final AtomicInteger heartbeatCount = new AtomicInteger();
+        final AtomicInteger joinGroupCount = new AtomicInteger();
         final AtomicInteger leaveGroupCount = new AtomicInteger();
         final AtomicInteger offsetCommitCount = new AtomicInteger();
         final AtomicInteger offsetFetchCount = new AtomicInteger();
@@ -684,6 +686,16 @@ class ClientTest {
                     code = heartbeatCodes.remove(0);
                 }
                 return Codec.encodeHeartbeatResponse(new Codec.HeartbeatResponse(code));
+            }
+            if (frame.opcode == Codec.OP_JOIN_GROUP) {
+                joinGroupCount.incrementAndGet();
+                int code = 0;
+                if (!joinGroupCodes.isEmpty()) {
+                    code = joinGroupCodes.remove(0);
+                }
+                return Codec.encodeJoinGroupResponse(
+                        new Codec.JoinGroupResponse(
+                                code, 1L, "m-1", Collections.emptyList(), Collections.emptyList()));
             }
             if (frame.opcode == Codec.OP_LEAVE_GROUP) {
                 leaveGroupCount.incrementAndGet();
@@ -1115,6 +1127,57 @@ class ClientTest {
                 assertEquals(TIMEOUT, ex.code);
             }
             assertEquals(3, srv.heartbeatCount.get());
+        }
+    }
+
+    @Test
+    void joinGroupEmptyMemberAndInstanceIsOneShot() throws Exception {
+        try (ScriptedBroker srv = ScriptedBroker.start()) {
+            srv.joinGroupCodes.add(TIMEOUT);
+            srv.joinGroupCodes.add(0);
+            try (Client c = Client.connect("127.0.0.1", srv.port, 5_000)) {
+                c.setMaxRetries(2);
+                c.setRetryBackoffMs(0);
+                BrokerException ex =
+                        assertThrows(
+                                BrokerException.class, () -> c.joinGroup("g", List.of("t"), 10_000));
+                assertEquals(TIMEOUT, ex.code);
+            }
+            assertEquals(1, srv.joinGroupCount.get());
+            assertEquals(0, srv.heartbeatCount.get());
+        }
+    }
+
+    @Test
+    void joinGroupStoredMemberIdRetriesTimeoutThenOk() throws Exception {
+        try (ScriptedBroker srv = ScriptedBroker.start()) {
+            srv.joinGroupCodes.add(TIMEOUT);
+            srv.joinGroupCodes.add(0);
+            try (Client c = Client.connect("127.0.0.1", srv.port, 5_000)) {
+                c.setMaxRetries(2);
+                c.setRetryBackoffMs(0);
+                JoinGroupResult j = c.joinGroupMember("g", "m-rejoin", List.of("t"), 10_000);
+                assertEquals("m-1", j.memberId);
+                assertEquals(1L, j.generation);
+            }
+            assertEquals(2, srv.joinGroupCount.get());
+            assertEquals(0, srv.heartbeatCount.get());
+        }
+    }
+
+    @Test
+    void joinGroupStaticInstanceRetriesTimeoutThenOk() throws Exception {
+        try (ScriptedBroker srv = ScriptedBroker.start()) {
+            srv.joinGroupCodes.add(TIMEOUT);
+            srv.joinGroupCodes.add(0);
+            try (Client c = Client.connect("127.0.0.1", srv.port, 5_000)) {
+                c.setMaxRetries(2);
+                c.setRetryBackoffMs(0);
+                JoinGroupResult j = c.joinGroupWithInstance("g", List.of("t"), 10_000, "inst-1");
+                assertEquals("m-1", j.memberId);
+            }
+            assertEquals(2, srv.joinGroupCount.get());
+            assertEquals(0, srv.heartbeatCount.get());
         }
     }
 

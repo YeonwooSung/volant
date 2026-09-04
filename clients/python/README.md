@@ -214,8 +214,10 @@ Error 13 stays on the redirect budget; error 21 stays on the one
 re-Init. Heartbeat shares produce/fetch ``max_retries`` (default 0);
 rebalance codes 9 / 10 / 11 are not retried. LeaveGroup shares
 ``max_retries``; error 10 is success (already left); error 14 follows
-``max_redirects``. JoinGroup is not
-retried. OffsetCommit / OffsetFetch / DeleteOffsets / ListOffsets /
+``max_redirects``. JoinGroup shares
+``max_retries`` when ``member_id`` or ``group_instance_id`` is
+non-empty (rejoin / static membership); empty first join is one shot.
+OffsetCommit / OffsetFetch / DeleteOffsets / ListOffsets /
 DescribeGroup / ListGroups / Metadata / ListMembers / BeginTxn /
 EndTxn / InitProducerId / Auth / SCRAM handshake / DeleteRecords
 share the same ``max_retries`` (default 0).
