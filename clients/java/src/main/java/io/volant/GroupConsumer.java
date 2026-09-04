@@ -788,6 +788,11 @@ public final class GroupConsumer implements AutoCloseable {
         return autoOffsetReset;
     }
 
+    /** Join-time assignor ({@code broker} or {@code range}). */
+    public String assignor() {
+        return assignor;
+    }
+
     /**
      * Bound each assigned {@code fetch} inside {@link #poll} ({@code max_messages}).
      * Default 100. Values {@code <= 0} clamp to 100. Not Kafka

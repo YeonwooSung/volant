@@ -91,6 +91,7 @@ class RangeAssignorTest {
         fake.records.put(tp("t", 2), recs(0, "p2"));
 
         GroupConsumer g = GroupConsumer.joinWithAssignor(fake, "g", List.of("t"), 10_000, "range");
+        assertEquals("range", g.assignor());
         assertEquals(3, g.assignment().size());
         assertEquals(0, g.assignment().get(0).partition);
         assertEquals(1, g.assignment().get(1).partition);
@@ -111,6 +112,7 @@ class RangeAssignorTest {
         fake.nextJoin = joinResult("m1", 1, assign("t", 0));
         fake.metadata = topicMeta("t", 3);
         GroupConsumer g = GroupConsumer.join(fake, "g", List.of("t"), 10_000);
+        assertEquals("broker", g.assignor());
         assertEquals(1, g.assignment().size());
         assertEquals(0, g.assignment().get(0).partition);
         assertEquals(0, fake.metadataCount);

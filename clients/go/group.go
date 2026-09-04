@@ -792,6 +792,14 @@ func (g *GroupConsumer) AutoOffsetReset() string {
 	return g.autoOffsetReset
 }
 
+// Assignor is the join-time assignor ("broker" or "range").
+func (g *GroupConsumer) Assignor() string {
+	if g == nil {
+		return ""
+	}
+	return g.assignor
+}
+
 // FetchMaxMessages is the Poll fetch max_messages (default 100).
 func (g *GroupConsumer) FetchMaxMessages() uint32 {
 	if g == nil {

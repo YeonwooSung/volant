@@ -94,6 +94,10 @@ func TestJoinGroupConsumerRangeFetchesEveryPartition(t *testing.T) {
 	}
 	defer g.Close()
 
+	if g.Assignor() != "range" {
+		t.Fatalf("assignor=%q want range", g.Assignor())
+	}
+
 	asgn := g.Assignment()
 	if len(asgn) != 3 {
 		t.Fatalf("assignment %+v want 3 partitions", asgn)
@@ -149,6 +153,10 @@ func TestJoinGroupConsumerBrokerDoesNotCallMetadata(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer g.Close()
+
+	if g.Assignor() != "broker" {
+		t.Fatalf("assignor=%q want broker", g.Assignor())
+	}
 
 	asgn := g.Assignment()
 	if len(asgn) != 1 || asgn[0].Partition != 0 {
