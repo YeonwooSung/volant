@@ -287,6 +287,7 @@ async fn dispatch_kafka(
                 | Some(ApiKey::DescribeDelegationToken)
                 | Some(ApiKey::ConsumerGroupHeartbeat)
                 | Some(ApiKey::ConsumerGroupDescribe)
+                | Some(ApiKey::ShareAcknowledge)
                 | Some(ApiKey::ControllerRegistration)
                 | Some(ApiKey::AddRaftVoter)
                 | Some(ApiKey::RemoveRaftVoter)
@@ -742,6 +743,12 @@ async fn dispatch_kafka(
                 debug!(error = %e, "consumer group describe flexible header tag buffer");
             }
             group_api::encode_consumer_group_describe(broker, &mut src, &mut out, principal);
+        }
+        Some(ApiKey::ShareAcknowledge) if hdr.api_version == 1 => {
+            if let Err(e) = skip_tag_buffer(&mut src) {
+                debug!(error = %e, "share acknowledge flexible header tag buffer");
+            }
+            group_api::encode_share_acknowledge(broker, &mut src, &mut out, principal);
         }
         Some(ApiKey::ListGroups) if (0..=5).contains(&hdr.api_version) => {
             if hdr.api_version >= 3 {
