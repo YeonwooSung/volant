@@ -1,7 +1,8 @@
 //! Kafka wire handlers: Create/Delete topics, CreatePartitions,
 //! AlterPartitionReassignments, ListPartitionReassignments,
 //! ElectLeaders, Describe/AlterUserScramCredentials,
-//! Describe/AlterClientQuotas, AlterReplicaLogDirs, DescribeLogDirs,
+//! Describe/AlterClientQuotas, ListClientMetricsResources,
+//! AlterReplicaLogDirs, DescribeLogDirs,
 //! DescribeTopicPartitions, UnregisterBroker, UpdateFeatures,
 //! DescribeQuorum, AllocateProducerIds, configs.
 
@@ -3457,6 +3458,39 @@ pub(crate) fn encode_alter_client_quotas(
         }
         put_empty_tag_buffer(out);
     }
+    put_empty_tag_buffer(out);
+}
+
+/// ListClientMetricsResources v0 (always flexible). Volant has no
+/// client-metrics resource store (KIP-714).
+///
+/// Request is a tagged buffer only. Response: throttle=0, error=0,
+/// empty resources (official body has no errorMessage). ACL: Cluster
+/// DESCRIBE (disabled ACLs allow). Denied → **31**, empty resources.
+pub(crate) fn encode_list_client_metrics_resources(
+    broker: &Broker,
+    src: &mut impl Buf,
+    out: &mut BytesMut,
+    principal: &str,
+) {
+    let _ = skip_tag_buffer(src);
+
+    let error = if broker.acls().is_enabled()
+        && !broker.acls().authorize(
+            Some(principal),
+            ResourceType::Cluster,
+            CLUSTER_RESOURCE,
+            AclOperation::Describe,
+        )
+    {
+        KafkaErrorCode::ClusterAuthorizationFailed
+    } else {
+        KafkaErrorCode::None
+    };
+
+    out.put_i32(0);
+    out.put_i16(error.as_i16());
+    put_compact_array_len(out, 0);
     put_empty_tag_buffer(out);
 }
 

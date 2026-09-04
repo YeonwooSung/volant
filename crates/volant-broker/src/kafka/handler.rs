@@ -261,6 +261,7 @@ async fn dispatch_kafka(
                 | Some(ApiKey::AlterUserScramCredentials)
                 | Some(ApiKey::DescribeClientQuotas)
                 | Some(ApiKey::AlterClientQuotas)
+                | Some(ApiKey::ListClientMetricsResources)
                 | Some(ApiKey::DescribeTopicPartitions)
                 | Some(ApiKey::UnregisterBroker)
                 | Some(ApiKey::UpdateFeatures)
@@ -784,6 +785,14 @@ async fn dispatch_kafka(
                 debug!(error = %e, "alter client quotas flexible header tag buffer");
             }
             admin_api::encode_alter_client_quotas(broker, &mut src, &mut out, principal);
+        }
+        Some(ApiKey::ListClientMetricsResources) if hdr.api_version == 0 => {
+            if let Err(e) = skip_tag_buffer(&mut src) {
+                debug!(error = %e, "list client metrics resources flexible header tag buffer");
+            }
+            admin_api::encode_list_client_metrics_resources(
+                broker, &mut src, &mut out, principal,
+            );
         }
         Some(ApiKey::UpdateFeatures) if (0..=1).contains(&hdr.api_version) => {
             if let Err(e) = skip_tag_buffer(&mut src) {
