@@ -1990,6 +1990,15 @@ public final class Client implements AutoCloseable {
     }
 
     /**
+     * Alter one topic config key. Same as {@link #alterConfigs(String, List)}
+     * with a singleton list. Error 14 / transient retry inherit from
+     * {@code alterConfigs}. Empty value still clears that key.
+     */
+    public void alterConfig(String topic, String key, String value) {
+        alterConfigs(topic, Collections.singletonList(new String[] {key, value}));
+    }
+
+    /**
      * Delete records before {@code beforeOffset} (native opcode 44).
      * Uses the client default {@code wait_majority} (0 unless
      * {@link #setDeleteRecordsWait}). The 4-arg overload stays

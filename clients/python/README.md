@@ -43,6 +43,7 @@ deleted = c.delete_offset("g", "t", 0)  # v0.164; one OffsetEntry
 bounds = c.list_offsets("t")  # [OffsetListing(partition, earliest, latest), ...]
 cfg = c.describe_configs("t")
 c.alter_configs("t", [("retention.ms", "86400000")])
+c.alter_config("t", "retention.ms", "86400000")  # v0.177; one key
 cut = c.delete_records("t", 0, 100)  # DeleteRecordsResult; wait_majority=0
 # Client default wait (v0.152): Client(..., delete_records_wait=1) or c.delete_records_wait = 1; wait_majority= still wins.
 # cut = c.delete_records("t", 0, 100, wait_majority=1)  # force majority wait
@@ -139,6 +140,8 @@ for the given topic. `offset_fetch_entries` returns the same topic
 filter as `OffsetFetchEntry` rows including metadata.
 `delete_offset(group, topic, partition)` deletes one committed offset
 (one OffsetEntry); same as `delete_offsets(group, [(topic, partition)])`.
+`alter_config(topic, key, value)` alters one topic config key; same as
+`alter_configs(topic, [(key, value)])`.
 `create_partitions(topic, total_count)` grows the topic to
 `total_count` partitions and returns the new total (native opcode 46,
 not Kafka CreatePartitions).

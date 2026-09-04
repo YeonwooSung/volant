@@ -170,6 +170,25 @@ func TestAlterConfigsOkEmptyValueClear(t *testing.T) {
 	}
 }
 
+func TestAlterConfigEncodesOnePair(t *testing.T) {
+	addr, got, stop := serveConfigs(t, 0, nil)
+	defer stop()
+	c, err := volant.DialTimeout(addr, 5*time.Second)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer c.Close()
+	if err := c.AlterConfig("events", "retention.ms", "1"); err != nil {
+		t.Fatal(err)
+	}
+	if got.err != nil {
+		t.Fatal(got.err)
+	}
+	if got.topic != "events" || len(got.alter) != 1 || got.alter[0] != [2]string{"retention.ms", "1"} {
+		t.Fatalf("wire alter topic=%q configs=%v", got.topic, got.alter)
+	}
+}
+
 func TestDescribeConfigsNonzeroErrorRaises(t *testing.T) {
 	addr, _, stop := serveConfigs(t, 2, nil)
 	defer stop()

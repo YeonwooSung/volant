@@ -1747,6 +1747,15 @@ class Client:
             "alter_configs",
         )
 
+    def alter_config(self, topic: str, key: str, value: str) -> None:
+        """Alter one topic config key.
+
+        Same as ``alter_configs(topic, [(key, value)])``. Error 14 /
+        transient retry inherit from ``alter_configs``. Empty value
+        still clears that key.
+        """
+        return self.alter_configs(topic, [(key, value)])
+
 
     def delete_records(
         self,

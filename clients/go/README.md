@@ -91,6 +91,7 @@ _ = bounds
 cfg, err := c.DescribeConfigs("t")
 _ = cfg
 err = c.AlterConfigs("t", [][2]string{{"retention.ms", "86400000"}})
+err = c.AlterConfig("t", "retention.ms", "86400000") // v0.177; one key
 cut, err := c.DeleteRecords("t", 0, 100) // wait_majority=0
 // SetDeleteRecordsWait(1) changes DeleteRecords default (v0.152). DeleteRecordsWithWaitFlag stays explicit.
 // cut, err = c.DeleteRecordsWithWaitFlag("t", 0, 100, 1) // force majority wait
@@ -197,6 +198,8 @@ including metadata.
 (empty wire entries); same as `DeleteOffsets(group, nil)`.
 `DeleteOffset(group, topic, partition)` deletes one committed offset
 (one OffsetEntry); same as `DeleteOffsets` with a one-element list.
+`AlterConfig(topic, key, value)` alters one topic config key; same as
+`AlterConfigs` with a one-element list.
 `CreatePartitions` grows the topic to `totalCount` partitions and
 returns the new total (native opcode 46, not Kafka CreatePartitions).
 `ReassignPartitions` reassigns replicas and returns the assignment
