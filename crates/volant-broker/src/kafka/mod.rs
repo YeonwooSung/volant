@@ -45,7 +45,8 @@
 //! ConsumerGroupDescribe v0 (always flexible; classic snapshot wrap; not KIP-848),
 //! ConsumerGroupHeartbeat v0 (always flexible; reject 42; not KIP-848),
 //! Envelope v0 (key 58 reject; forwarding not supported; not KIP-590),
-//! ControllerRegistration v0 (key 70 reject; not KRaft / not AddBroker).
+//! ControllerRegistration v0 (key 70 reject; not KRaft / not AddBroker),
+//! RemoveRaftVoter v0 (key 81 reject; not KRaft / not remove_broker).
 //! See `docs/PHASE23_SPEC.md` … `docs/PHASE91_SPEC.md`, `docs/V225_SPEC.md`,
 //! `docs/V228_SPEC.md`, `docs/V233_SPEC.md`, `docs/V235_SPEC.md`,
 //! `docs/V236_SPEC.md`, `docs/V237_SPEC.md`, `docs/V241_SPEC.md`,
@@ -56,7 +57,7 @@
 //! `docs/V259_SPEC.md`, `docs/V260_SPEC.md`, `docs/V261_SPEC.md`,
 //! `docs/V263_SPEC.md`, `docs/V264_SPEC.md`, `docs/V265_SPEC.md`,
 //! `docs/V266_SPEC.md`, `docs/V267_SPEC.md`, `docs/V268_SPEC.md`,
-//! and `docs/V269_SPEC.md`.
+//! `docs/V269_SPEC.md`, and `docs/V272_SPEC.md`.
 
 mod acl_api;
 mod admin_api;
@@ -412,6 +413,10 @@ pub enum ApiKey {
     ListClientMetricsResources = 74,
     /// DescribeTopicPartitions (always flexible; v0 only).
     DescribeTopicPartitions = 75,
+    /// RemoveRaftVoter (always flexible; v0 only). Honest reject:
+    /// not KRaft (no voter set / DirectoryId). Does not wrap native
+    /// `remove_broker`. Overlay membership is unchanged.
+    RemoveRaftVoter = 81,
 }
 
 impl ApiKey {
@@ -486,6 +491,7 @@ impl ApiKey {
             73 => Some(Self::AssignReplicasToDirs),
             74 => Some(Self::ListClientMetricsResources),
             75 => Some(Self::DescribeTopicPartitions),
+            81 => Some(Self::RemoveRaftVoter),
             _ => None,
         }
     }
@@ -562,6 +568,7 @@ pub const SUPPORTED_APIS: &[(ApiKey, i16, i16)] = &[
     (ApiKey::AssignReplicasToDirs, 0, 0),
     (ApiKey::ListClientMetricsResources, 0, 0),
     (ApiKey::DescribeTopicPartitions, 0, 0),
+    (ApiKey::RemoveRaftVoter, 0, 0),
 ];
 
 #[cfg(test)]
@@ -860,5 +867,14 @@ mod tests {
             *k == ApiKey::ControllerRegistration && *min == 0 && *max == 0
         }));
         assert_eq!(ApiKey::from_i16(70), Some(ApiKey::ControllerRegistration));
+    }
+
+    #[test]
+    fn supported_apis_includes_remove_raft_voter_81() {
+        assert!(SUPPORTED_APIS.len() >= 70);
+        assert!(SUPPORTED_APIS
+            .iter()
+            .any(|(k, min, max)| { *k == ApiKey::RemoveRaftVoter && *min == 0 && *max == 0 }));
+        assert_eq!(ApiKey::from_i16(81), Some(ApiKey::RemoveRaftVoter));
     }
 }
