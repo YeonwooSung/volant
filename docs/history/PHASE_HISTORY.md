@@ -389,6 +389,11 @@ docs for day-to-day reading: [ops](../ops.md), [consistency](../consistency.md),
 | v0.188 | ✅ | Python GroupConsumer heartbeat_count | [V188_SPEC.md](../V188_SPEC.md) |
 | v0.189 | ✅ | Go/Java GroupConsumer sessionTimeoutMs getter | [V189_SPEC.md](../V189_SPEC.md) |
 | v0.190 | ✅ | Go/Java GroupConsumer Leave alias | [V190_SPEC.md](../V190_SPEC.md) |
+| v0.191 | ✅ | Go MaxRedirects getter | [V191_SPEC.md](../V191_SPEC.md) |
+| v0.192 | ✅ | Go MaxRetries getter | [V192_SPEC.md](../V192_SPEC.md) |
+| v0.193 | ✅ | Go RetryBackoff getter | [V193_SPEC.md](../V193_SPEC.md) |
+| v0.194 | ✅ | Go TransactionalID getter | [V194_SPEC.md](../V194_SPEC.md) |
+| v0.195 | ✅ | language Client timeout getter | [V195_SPEC.md](../V195_SPEC.md) |
 
 ---
 
