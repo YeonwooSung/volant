@@ -183,6 +183,9 @@ retry is safe (no ghost member) and unpacks as
 loop (heartbeat on poll, re-join on error 9/10/11, cooperative revoke).
 After a successful join, GroupConsumer confirms the assignment via
 SyncGroup peek (v0.207; empty or error keeps JoinGroup assignment).
+GroupConsumer retries Join on generation-fence error 9 with ``max_retries`` /
+``retry_backoff_ms`` (default 0 extra attempts; concurrent joins need
+``max_retries > 0``).
 Optional `group_instance_id=` is Phase 12 static membership (empty =
 dynamic); re-join resends the same instance id. `commit` sends the
 joined `member_id` + `generation` in one OffsetCommit for all assigned

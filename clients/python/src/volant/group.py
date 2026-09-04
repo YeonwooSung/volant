@@ -309,13 +309,31 @@ class GroupConsumer:
 
     def _do_join(self) -> None:
         previous = list(self._assignment)
-        result: JoinGroupResult = self._client.join_group(
-            self._group_id,
-            topics=self._topics,
-            session_timeout_ms=self._session_timeout_ms,
-            member_id=self._member_id,
-            group_instance_id=self._group_instance_id,
-        )
+        # v0.220: retry Join on generation-fence 9 only. Default
+        # max_retries=0 (first 9 surfaces). 10/11 stay on the existing
+        # heartbeat/poll rejoin path. Do not bump heartbeat_count.
+        max_retries = max(0, int(getattr(self._client, "max_retries", 0) or 0))
+        retry_attempt = 0
+        while True:
+            try:
+                result: JoinGroupResult = self._client.join_group(
+                    self._group_id,
+                    topics=self._topics,
+                    session_timeout_ms=self._session_timeout_ms,
+                    member_id=self._member_id,
+                    group_instance_id=self._group_instance_id,
+                )
+                break
+            except BrokerError as exc:
+                if exc.code == 9 and retry_attempt < max_retries:
+                    retry_attempt += 1
+                    ms = max(
+                        0, int(getattr(self._client, "retry_backoff_ms", 0) or 0)
+                    )
+                    if ms:
+                        time.sleep(ms / 1000.0)
+                    continue
+                raise
         self._member_id = result.member_id
         self._generation = result.generation
         new_assignment = [(a.topic, int(a.partition)) for a in result.assignment]

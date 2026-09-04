@@ -36,6 +36,37 @@ class GroupConsumerTest {
     }
 
     @Test
+    void joinRetriesError9ThenOk() {
+        FakeBackend fake = new FakeBackend();
+        fake.maxRetries = 1;
+        fake.joinErrors.add(9);
+        fake.nextJoin = joinResult("m1", 1, assign("t", 0));
+        fake.committed.put(tp("t", 0), 5L);
+
+        GroupConsumer g = GroupConsumer.join(fake, "g", List.of("t"), 10_000, false);
+        assertEquals(2, fake.joinCount);
+        assertEquals(1, fake.syncCount);
+        assertEquals("m1", g.memberId());
+        assertEquals(0, g.assignment().get(0).partition);
+        assertEquals(5L, g.positions().values().iterator().next());
+        assertEquals(0, g.heartbeatCount());
+        g.close();
+    }
+
+    @Test
+    void joinError9SurfacesWhenMaxRetriesZero() {
+        FakeBackend fake = new FakeBackend();
+        fake.joinErrors.add(9);
+        fake.nextJoin = joinResult("m1", 1, assign("t", 0));
+
+        BrokerException ex = assertThrows(
+                BrokerException.class, () -> GroupConsumer.join(fake, "g", List.of("t"), 10_000, false));
+        assertEquals(9, ex.code);
+        assertEquals(1, fake.joinCount);
+        assertEquals(0, fake.syncCount);
+    }
+
+    @Test
     void joinIssuesSyncGroup() {
         FakeBackend fake = new FakeBackend();
         fake.nextJoin = joinResult("m1", 1, assign("t", 0));
@@ -592,6 +623,9 @@ class GroupConsumerTest {
         List<Codec.Assignment> nextSync;
         RuntimeException syncError;
         int heartbeatCode;
+        int maxRetries;
+        long retryBackoffMs;
+        final List<Integer> joinErrors = new ArrayList<>();
         int joinCount;
         int syncCount;
         String lastSyncGroup = "";
@@ -632,6 +666,16 @@ class GroupConsumerTest {
         }
 
         @Override
+        public int maxRetries() {
+            return maxRetries;
+        }
+
+        @Override
+        public long retryBackoffMs() {
+            return retryBackoffMs;
+        }
+
+        @Override
         public JoinGroupResult joinGroup(
                 String group, String memberId, List<String> topics, int sessionTimeoutMs, String groupInstanceId) {
             synchronized (lock) {
@@ -640,6 +684,12 @@ class GroupConsumerTest {
                 lastGroupInstanceId = groupInstanceId == null ? "" : groupInstanceId;
                 lastJoinMemberId = memberId == null ? "" : memberId;
                 joinInstanceIds.add(lastGroupInstanceId);
+                if (!joinErrors.isEmpty()) {
+                    int code = joinErrors.remove(0);
+                    if (code != 0) {
+                        throw new BrokerException(code, "", "join_group");
+                    }
+                }
                 return nextJoin;
             }
         }

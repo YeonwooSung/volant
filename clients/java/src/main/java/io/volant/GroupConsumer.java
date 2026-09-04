@@ -386,7 +386,7 @@ public final class GroupConsumer implements AutoCloseable {
 
     private void doJoin() {
         List<Codec.Assignment> previous = new ArrayList<>(assignment);
-        JoinGroupResult result = backend.joinGroup(groupId, memberId, topics, sessionTimeoutMs, groupInstanceId);
+        JoinGroupResult result = joinGroupWithFenceRetry();
         memberId = result.memberId;
         generation = result.generation;
         List<Codec.Assignment> newAssignment = new ArrayList<>(result.assignment);
@@ -903,6 +903,35 @@ public final class GroupConsumer implements AutoCloseable {
         }
     }
 
+    /**
+     * v0.220: retry Join on generation-fence 9 only. Default
+     * {@code maxRetries=0} (first 9 surfaces). 10/11 stay on the
+     * existing heartbeat/poll rejoin path. Do not bump heartbeatCount.
+     */
+    private JoinGroupResult joinGroupWithFenceRetry() {
+        int maxRetries = Math.max(0, backend.maxRetries());
+        long backoffMs = Math.max(0L, backend.retryBackoffMs());
+        int retryAttempt = 0;
+        while (true) {
+            try {
+                return backend.joinGroup(groupId, memberId, topics, sessionTimeoutMs, groupInstanceId);
+            } catch (BrokerException e) {
+                if (e.code == ERR_REBALANCE && retryAttempt < maxRetries) {
+                    retryAttempt++;
+                    if (backoffMs > 0) {
+                        try {
+                            Thread.sleep(backoffMs);
+                        } catch (InterruptedException ie) {
+                            Thread.currentThread().interrupt();
+                        }
+                    }
+                    continue;
+                }
+                throw e;
+            }
+        }
+    }
+
     private void ensureOpen() {
         if (closed) {
             throw new ProtocolException("consumer closed");
@@ -1007,6 +1036,16 @@ public final class GroupConsumer implements AutoCloseable {
         Metadata metadata();
 
         DescribeGroupResult describeGroup(String group);
+
+        /** Extra Join attempts after the first on generation-fence 9 (default 0). */
+        default int maxRetries() {
+            return 0;
+        }
+
+        /** Sleep between fence-9 Join retries, milliseconds (default 0). */
+        default long retryBackoffMs() {
+            return 0;
+        }
     }
 
     static final class ClientBackend implements Backend {
@@ -1014,6 +1053,16 @@ public final class GroupConsumer implements AutoCloseable {
 
         ClientBackend(Client client) {
             this.client = client;
+        }
+
+        @Override
+        public int maxRetries() {
+            return client.maxRetries();
+        }
+
+        @Override
+        public long retryBackoffMs() {
+            return client.retryBackoffMs();
         }
 
         @Override

@@ -1,6 +1,7 @@
 package volant_test
 
 import (
+	"errors"
 	"fmt"
 	"net"
 	"os"
@@ -47,6 +48,7 @@ type fakeGroupBroker struct {
 	syncAssignment  []codec.Assignment
 	syncOverride    bool
 	syncError       uint16
+	joinCodes       []uint16
 }
 
 func newFakeGroupBroker() *fakeGroupBroker {
@@ -190,6 +192,14 @@ func (s *fakeGroupBroker) handle(f *frame.Frame) ([]byte, error) {
 			return nil, e
 		}
 		s.joins = append(s.joins, req)
+		if len(s.joinCodes) > 0 {
+			code := s.joinCodes[0]
+			s.joinCodes = s.joinCodes[1:]
+			if code != 0 {
+				payload, err = codec.EncodeJoinGroupResponse(codec.JoinGroupResponse{ErrorCode: code})
+				break
+			}
+		}
 		member := s.memberID
 		if member == "" {
 			member = req.MemberID
@@ -410,6 +420,74 @@ func TestJoinGroupConsumerPositionsFromOffsetFetch(t *testing.T) {
 	_, _, _, _, _, ofs := s.snapshot()
 	if len(ofs) != 1 || len(ofs[0].Entries) != 1 || ofs[0].Entries[0].Partition != 0 {
 		t.Fatalf("offset fetch %+v", ofs)
+	}
+}
+
+func TestJoinGroupConsumerRetriesJoinOnError9(t *testing.T) {
+	s := newFakeGroupBroker()
+	s.setAssignment([]codec.Assignment{{Topic: "t", Partition: 0}}, nil)
+	s.offsets[tpKey{"t", 0}] = 5
+	s.joinCodes = []uint16{9}
+	addr, stop := startFakeGroup(t, s)
+	defer stop()
+
+	c, err := volant.DialTimeout(addr, 5*time.Second)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer c.Close()
+	c.SetMaxRetries(1)
+	c.SetRetryBackoff(0)
+
+	g, err := volant.JoinGroupConsumer(c, "g", []string{"t"}, 10_000, volant.WithBackgroundHeartbeat(false))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer g.Close()
+
+	joins, _, _, _, _, _ := s.snapshot()
+	if len(joins) != 2 {
+		t.Fatalf("joins=%d want 2", len(joins))
+	}
+	syncs := s.syncSnapshot()
+	if len(syncs) != 1 {
+		t.Fatalf("syncs=%d want 1", len(syncs))
+	}
+	if g.HeartbeatCount() != 0 {
+		t.Fatalf("heartbeat_count=%d want 0", g.HeartbeatCount())
+	}
+	asgn := g.Assignment()
+	if len(asgn) != 1 || asgn[0].Topic != "t" || asgn[0].Partition != 0 {
+		t.Fatalf("assignment %+v", asgn)
+	}
+}
+
+func TestJoinGroupConsumerJoinError9SurfacesWhenMaxRetriesZero(t *testing.T) {
+	s := newFakeGroupBroker()
+	s.joinCodes = []uint16{9}
+	addr, stop := startFakeGroup(t, s)
+	defer stop()
+
+	c, err := volant.DialTimeout(addr, 5*time.Second)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer c.Close()
+
+	_, err = volant.JoinGroupConsumer(c, "g", []string{"t"}, 10_000, volant.WithBackgroundHeartbeat(false))
+	if err == nil {
+		t.Fatal("expected error 9")
+	}
+	var be *codec.BrokerError
+	if !errors.As(err, &be) || be.Code != 9 {
+		t.Fatalf("err=%v want code 9", err)
+	}
+	joins, _, _, _, _, _ := s.snapshot()
+	if len(joins) != 1 {
+		t.Fatalf("joins=%d want 1", len(joins))
+	}
+	if len(s.syncSnapshot()) != 0 {
+		t.Fatalf("syncs=%d want 0", len(s.syncSnapshot()))
 	}
 }
 
