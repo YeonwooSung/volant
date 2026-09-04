@@ -268,6 +268,7 @@ async fn dispatch_kafka(
                 | Some(ApiKey::AlterClientQuotas)
                 | Some(ApiKey::ListClientMetricsResources)
                 | Some(ApiKey::DescribeTopicPartitions)
+                | Some(ApiKey::BrokerRegistration)
                 | Some(ApiKey::UnregisterBroker)
                 | Some(ApiKey::UpdateFeatures)
                 | Some(ApiKey::DescribeQuorum)
@@ -778,6 +779,12 @@ async fn dispatch_kafka(
                 debug!(error = %e, "list partition reassignments flexible header tag buffer");
             }
             admin_api::encode_list_partition_reassignments(broker, &mut src, &mut out, principal);
+        }
+        Some(ApiKey::BrokerRegistration) if hdr.api_version == 0 => {
+            if let Err(e) = skip_tag_buffer(&mut src) {
+                debug!(error = %e, "broker registration flexible header tag buffer");
+            }
+            admin_api::encode_broker_registration(broker, &mut src, &mut out, principal);
         }
         Some(ApiKey::UnregisterBroker) if hdr.api_version == 0 => {
             if let Err(e) = skip_tag_buffer(&mut src) {
