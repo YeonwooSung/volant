@@ -418,18 +418,23 @@ docs for day-to-day reading: [ops](../ops.md), [consistency](../consistency.md),
 | v0.219 | ✅ | OffsetCommit 9 until SyncGroup confirms | [V219_SPEC.md](../V219_SPEC.md) |
 | v0.220 | ✅ | language GroupConsumer Join 9 retry | [V220_SPEC.md](../V220_SPEC.md) |
 | v0.221 | ✅ | Rust GroupConsumer Join 9 retry | [V221_SPEC.md](../V221_SPEC.md) |
+| v0.222 | ✅ | delete homemade 154 hatch; keep 98/99 decode | [V222_SPEC.md](../V222_SPEC.md) |
+| v0.223 | ✅ | language Client.join_group retries error 9 | [V223_SPEC.md](../V223_SPEC.md) |
+| v0.224 | ✅ | Rust Client.join_group retries error 9 | [V224_SPEC.md](../V224_SPEC.md) |
+| v0.225 | ✅ | Kafka AlterPartitionReassignments key 45 v0 | [V225_SPEC.md](../V225_SPEC.md) |
+| v0.226 | ✅ | opt-in txn-state topic records open≡abort | [V226_SPEC.md](../V226_SPEC.md) |
 
 ---
 
 ## Still deferred (post–v0.10)
 
-- Full openraft / KRaft (assignment gen majority MVP → **closed by Phase 150**; Metadata lead residual → **closed by Phase 152**; membership overlay → **v0.10**; homemade election still frozen)
+- Full openraft / KRaft (assignment gen majority MVP → **closed by Phase 150**; Metadata lead residual → **closed by Phase 152**; membership overlay → **v0.10**; homemade 154 hatch **deleted v0.222**)
 
 ---
 
 ## Still deferred (post–Phase 154)
 
-- Full openraft election + InstallSnapshot (metadata log MVP → **closed by Phase 154**; membership overlay → **v0.10**; residual: lowest-id controller, no snapshot install, not Raft joint consensus)
+- Full openraft election + InstallSnapshot (metadata log MVP → **closed by Phase 154**; hatch **deleted v0.222**; membership overlay → **v0.10**; leftover `__metadata_raft/` unread)
 - Full Kafka Streams EOS / multi-worker 2PC (stream EOS MVP → **closed by Phase 151**; checkpoint → **153**; app fence → **v0.8**; changelog in txn → **v0.9**; residual: one-process topology)
 - ~~Metadata gated exclusively on `committed_generation` (150 residual)~~ → **closed by Phase 152**
 - ~~EOS + durable state single atomic boundary (151 residual)~~ → **closed by Phase 153** (process-local staging; changelog opt-in **v0.9**)

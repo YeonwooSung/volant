@@ -1,6 +1,6 @@
 # Phase 155 — openraft metadata SoT + native SyncGroup + Join retry
 
-**Status:** Open — PR1–PR5 landed on main (crate **0.2.0**). Overlay membership still SoT; homemade 154 not deleted.  
+**Status:** Open — PR1–PR5 landed on main (crate **0.2.0**). Overlay membership still SoT; homemade 154 hatch **deleted** (v0.222).  
 **Theme:** Change the v0.2 product bets that leftover residuals could not
 touch: replace homemade 150/152/154 as the cluster metadata story with
 **openraft** (already in-tree, opt-in through v0.40), add native
@@ -20,12 +20,14 @@ is unrelated.
    the client-visible SoT.
 2. **Single-node unchanged.** No cluster config → do not start
    openraft. `controller_id()` is the local `node_id`.
-3. **Do not grow homemade 154.** No RequestVote, no InstallSnapshot,
-   no compaction on `__metadata_raft`. `VOLANT_METADATA_RAFT` stays
-   default **off**. Code remains for tests / escape hatch.
+3. **Do not grow homemade 154.** Hatch **deleted** (v0.222). No
+   RequestVote, no InstallSnapshot, no `{data_dir}/__metadata_raft/`
+   creation. Inbound 98 always `metadata raft not enabled`.
+   `VOLANT_METADATA_RAFT` / `VOLANT_METADATA_RAFT_WAIT_COMMIT` warn
+   once and ignore. Protocol 98/99 encode/decode stays.
 4. **Native SyncGroup 116/117** is a peek/confirm (same honesty as
-   the Kafka shim key **14**, which already exists in the 38-key
-   table). Not Kafka CompletingRebalance.
+   the Kafka shim key **14**, which already exists). Not Kafka
+   CompletingRebalance. `SUPPORTED_APIS` is **39** (key **45** v0).
 5. **JoinGroup retry** only when `member_id` or `group_instance_id`
    is non-empty. Empty first join is still one shot.
 6. **Go `CreateTopic` / `CreateTopicDefault` return `(uint32, error)`.**
@@ -40,7 +42,7 @@ is unrelated.
 | Kafka two-phase join/sync states | Coordinator rewrite; shim SyncGroup already ignores leader payload |
 | JoinGroup native member list | Frozen; range still uses DescribeGroup |
 | Retry empty-`member_id` first Join | Ghost member + generation++ |
-| New Kafka API key / version ratchet | SyncGroup **14** is already in `SUPPORTED_APIS` (38 keys) |
+| New Kafka API key / version ratchet | `SUPPORTED_APIS` is **39** (key **45** v0, v0.225). Key **46** stays out |
 | librdkafka / kafka-python / kcat claims | Still not claimed |
 | Distributed EOS / windows / KIP-890 | Unchanged |
 | Crate 0.3.0 | After 155 ships, not during |
@@ -95,12 +97,12 @@ func (c *Client) CreateTopicID(name string, partitions int) (uint32, error) // a
 ## Honesty leftovers after 155
 
 - Overlay is persist-after-joint on the openraft-on leader (v0.212) and apply artifact on followers (v0.216). In-process add/remove also persist after joint when raft is started (v0.217). Flag off stays v0.10.
-- Homemade 154 is gated (v0.213/v0.214), not deleted. No RequestVote/InstallSnapshot on 154.
-- SyncGroup is a generation confirm fence (v0.215). List/Describe report CompletingRebalance while the fence is open (v0.218). Member OffsetCommit is 9 until sync (v0.219). GroupConsumer retries Join 9 when `max_retries>0` (v0.220/v0.221). Still not parked Join.
+- Homemade 154 hatch is **deleted** (v0.222). 98/99 still decode. Leftover `__metadata_raft/` files are unread.
+- SyncGroup is a generation confirm fence (v0.215). List/Describe report CompletingRebalance while the fence is open (v0.218). Member OffsetCommit is 9 until sync (v0.219). GroupConsumer retries Join 9 when `max_retries>0` (v0.220/v0.221). Thin Client retries Join 9 on the same budget (v0.223/v0.224). Still not parked Join.
 - Range uses JoinGroup members trailer when present (v0.211); empty trailer still DescribeGroup.
 - Empty first Join now sends a client-generated member_id (v0.209/v0.210) so retry is safe.
-- Kafka stays 38 keys. No client-compat claim.
-- Process-local EOS / windows / KIP-890 unchanged.
+- Kafka `SUPPORTED_APIS` is **39** (AlterPartitionReassignments key **45** v0, v0.225). Key **46** stays out. No client-compat claim.
+- Opt-in `__transaction_state` records open≡abort (v0.226). Flag still default off. Not Kafka/KIP-890 schemas. Process-local EOS / windows unchanged.
 
 ## Related
 
