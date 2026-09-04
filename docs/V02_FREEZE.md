@@ -24,7 +24,7 @@ apply artifact. Homemade 154 hatch is **deleted** (v0.222): no
 `metadata_raft.rs`, inbound 98 always disabled, leftover
 `__metadata_raft/` unread. Protocol 98/99 still decode.
 
-The Kafka shim is HEAD `SUPPORTED_APIS` (**52 keys**, v0.249). SyncGroup
+The Kafka shim is HEAD `SUPPORTED_APIS` (**56 keys**, v0.254). SyncGroup
 API key **14** was already in the 38-key table; Phase 155 added
 **native** opcodes 116/117, not a Kafka key. Residuals added
 AlterPartitionReassignments **45** v0 (v0.225) and
@@ -40,7 +40,7 @@ ListPartitionReassignments **46** v0 (v0.228).
 | In-process streams | ALO + process-local EOS (149/151/153); optional [`TumblingWindow::durable`](../crates/volant-stream/src/window.rs) buckets |
 | Security MVP | Token, TLS/mTLS, SCRAM, ACLs |
 | One-binary ops | Metrics, TLS, Helm (`deploy/`) |
-| Kafka shim | Optional `--kafka-listen`; 52 keys at HEAD |
+| Kafka shim | Optional `--kafka-listen`; 56 keys at HEAD |
 
 ## 3. Frozen
 
@@ -50,7 +50,7 @@ ListPartitionReassignments **46** v0 (v0.228).
 | InstallSnapshot / compaction | Homemade 154 module gone. Openraft InstallSnapshot is v0.17. Leftover `__metadata_raft/` unread. |
 | Metadata SoT (v0.2 / single-node) | Phase 6 `assignment.json` + live assignment — not the 152 committed snapshot. |
 | Metadata SoT (Phase 155 cluster) | Openraft committed `SetAssignment`. See [PHASE155_SPEC.md](./PHASE155_SPEC.md). |
-| Kafka `SUPPORTED_APIS` | 52 keys (`kafka/mod.rs`), including SyncGroup **14**, AlterReplicaLogDirs **34** (reject), DescribeLogDirs **35**, ElectLeaders **43**, quotas **48**/**49** (empty/reject), Alter/ListPartitionReassignments **45**/**46**, Describe/AlterUserScramCredentials **50**/**51**, DescribeQuorum **55**, UpdateFeatures **57** (reject), UnregisterBroker **64**, AllocateProducerIds **67**, DescribeTopicPartitions **75**. Native 116/117 is not a Kafka key. |
+| Kafka `SUPPORTED_APIS` | 56 keys (`kafka/mod.rs`), including SyncGroup **14**, WriteTxnMarkers **27**, AlterReplicaLogDirs **34** (reject), DescribeLogDirs **35**, ElectLeaders **43**, quotas **48**/**49** (empty/reject), Alter/ListPartitionReassignments **45**/**46**, Describe/AlterUserScramCredentials **50**/**51**, DescribeQuorum **55**, UpdateFeatures **57** (reject), UnregisterBroker **64**, AllocateProducerIds **67**, GetTelemetrySubscriptions **71**, AssignReplicasToDirs **73** (reject), ListClientMetricsResources **74**, DescribeTopicPartitions **75**. Native 116/117 is not a Kafka key. |
 | Distributed EOS | 153 is process-local staging. Not broker-held 2PC. |
 | Durable-window *promise* | In-process buckets landed (`TumblingWindow::durable`). Do not claim cluster / distributed window durability. |
 | Dynamic membership / full KIP-890/939 / preferred TCP probe / published SLAs | Overlay `membership.json` stays membership SoT. Txn-state Kafka TransactionLog v0 is opt-in (v0.229). |
@@ -75,7 +75,7 @@ Post-v0.2 the **only** allowed quorum bet is **replace** 150/152/154 with **open
 
 | Band | Content |
 |------|---------|
-| IN | HEAD `SUPPORTED_APIS` (52 keys): Produce 0–13, Fetch 0–18, Metadata 0–13, groups **including SyncGroup 14 v0–5**, SASL, txn MVP, ACL admin, configs, DescribeCluster / DescribeProducers / Describe+ListTransactions, **AlterReplicaLogDirs 34** (reject), **DescribeLogDirs 35**, **ElectLeaders 43**, **quotas 48/49** (empty/reject), **Alter/ListPartitionReassignments 45/46**, **SCRAM 50/51**, **DescribeQuorum 55**, **UpdateFeatures 57** (reject), **UnregisterBroker 64**, **AllocateProducerIds 67**, **DescribeTopicPartitions 75**. |
+| IN | HEAD `SUPPORTED_APIS` (56 keys): Produce 0–13, Fetch 0–18, Metadata 0–13, groups **including SyncGroup 14 v0–5**, SASL, txn MVP, ACL admin, configs, DescribeCluster / DescribeProducers / Describe+ListTransactions, **WriteTxnMarkers 27**, **AlterReplicaLogDirs 34** (reject), **DescribeLogDirs 35**, **ElectLeaders 43**, **quotas 48/49** (empty/reject), **Alter/ListPartitionReassignments 45/46**, **SCRAM 50/51**, **DescribeQuorum 55**, **UpdateFeatures 57** (reject), **UnregisterBroker 64**, **AllocateProducerIds 67**, **GetTelemetrySubscriptions 71**, **AssignReplicasToDirs 73** (reject), **ListClientMetricsResources 74**, **DescribeTopicPartitions 75**. |
 | FROZEN | No further keys. No max-version ratchets. No session / txn / preferred depth unless a real client is proven broken. |
 | Do not claim | librdkafka, kafka-python, kcat, or Java client compatibility. CI is `cargo test --workspace` + protocol fuzz corpus (`.github/workflows/ci.yml`). Shim tests use `boot_kafka` + codec (`phase23_kafka_shim.rs`), not those clients. |
 
@@ -100,7 +100,7 @@ PreparingRebalance · live reassignment progress · distributed streams ·
 preferred TCP probe · session Raft registry.
 
 Leftover TODO/ROADMAP lists are **not** a license to grow homemade
-154 or invent Kafka keys beyond the approved 52.
+154 or invent Kafka keys beyond the approved 56.
 
 ## Key Decisions
 
@@ -108,7 +108,7 @@ Leftover TODO/ROADMAP lists are **not** a license to grow homemade
 - **Phase 155 cluster SoT is openraft.** Unset env → on when `--cluster-config` is set. CreateTopic waits on `client_write`. Homemade 154 hatch is deleted (v0.222).
 - **Stop extending homemade Raft.** Module gone. Finishing RequestVote + snapshot stays rejected.
 - **`VOLANT_ASSIGNMENT_CONSENSUS` stays on as push** when openraft is off. Openraft-on cluster uses `client_write` as the gate.
-- **Kafka surface is 52 keys** (… + v0.249 **34**; v0.245 **55**; v0.246 **67**). SyncGroup **14** was already listed. Native 116/117 is not a Kafka key.
+- **Kafka surface is 56 keys** (… + v0.250 **27**; v0.253 **71**; v0.251 **73**; v0.252 **74**). SyncGroup **14** was already listed. Native 116/117 is not a Kafka key.
 - **Distributed EOS is not a v0.2 or 155 claim.** 153 is process-local staging.
 
 ## Alternatives Considered

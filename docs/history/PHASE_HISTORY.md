@@ -446,6 +446,11 @@ docs for day-to-day reading: [ops](../ops.md), [consistency](../consistency.md),
 | v0.247 | ✅ | ACL TransactionalId on txn APIs | [V247_SPEC.md](../V247_SPEC.md) |
 | v0.248 | ✅ | apply SyncGroup assignment when it decodes | [V248_SPEC.md](../V248_SPEC.md) |
 | v0.249 | ✅ | Kafka AlterReplicaLogDirs key 34 reject | [V249_SPEC.md](../V249_SPEC.md) |
+| v0.250 | ✅ | Kafka WriteTxnMarkers key 27 | [V250_SPEC.md](../V250_SPEC.md) |
+| v0.251 | ✅ | Kafka AssignReplicasToDirs key 73 reject | [V251_SPEC.md](../V251_SPEC.md) |
+| v0.252 | ✅ | Kafka ListClientMetricsResources key 74 empty | [V252_SPEC.md](../V252_SPEC.md) |
+| v0.253 | ✅ | Kafka GetTelemetrySubscriptions key 71 empty | [V253_SPEC.md](../V253_SPEC.md) |
+| v0.254 | ✅ | TxnOffsetCommit v3+ generation/member fence | [V254_SPEC.md](../V254_SPEC.md) |
 
 ---
 

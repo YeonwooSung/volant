@@ -27,7 +27,7 @@ is unrelated.
    once and ignore. Protocol 98/99 encode/decode stays.
 4. **Native SyncGroup 116/117** applies assignment bytes when they
    decode (v0.248); empty/garbage still peeks Join (same as Kafka
-   key **14**). Not Kafka CompletingRebalance. `SUPPORTED_APIS` is **52**.
+   key **14**). Not Kafka CompletingRebalance. `SUPPORTED_APIS` is **56**.
 5. **JoinGroup retry** only when `member_id` or `group_instance_id`
    is non-empty. Empty first join is still one shot.
 6. **Go `CreateTopic` / `CreateTopicDefault` return `(uint32, error)`.**
@@ -42,7 +42,7 @@ is unrelated.
 | Kafka two-phase join/sync states | Join parks (v0.227); still not PreparingRebalance / join-set wait |
 | JoinGroup native member list | Frozen; range still uses DescribeGroup |
 | Retry empty-`member_id` first Join | Ghost member + generation++ |
-| New Kafka API key / version ratchet | `SUPPORTED_APIS` is **52**. No further keys |
+| New Kafka API key / version ratchet | `SUPPORTED_APIS` is **56**. No further keys |
 | librdkafka / kafka-python / kcat claims | Still not claimed |
 | Distributed EOS / windows / full KIP-890 | Opt-in TransactionLog v0 (v0.229); not TV2 / default-on |
 | Crate 0.3.0 | After 155 ships, not during |
@@ -103,7 +103,8 @@ func (c *Client) CreateTopicID(name string, partitions int) (uint32, error) // a
 - SyncGroup is a generation confirm fence (v0.215). List/Describe report CompletingRebalance while the fence is open (v0.218) and **PreparingRebalance** while a Join is parked (v0.230). Member OffsetCommit is 9 until sync (v0.219). GroupConsumer retries Join 9 when `max_retries>0` (v0.220/v0.221). Thin Client retries Join 9 on the same budget (v0.223/v0.224). New-member Join **parks** until SyncGroup or **rebalance** timeout (v0.227/v0.231; default 1000ms; mutex released). Still not join-set wait.
 - Range uses JoinGroup members trailer when present (v0.211); empty trailer still DescribeGroup.
 - Empty first Join now sends a client-generated member_id (v0.209/v0.210) so retry is safe.
-- Kafka `SUPPORTED_APIS` is **52** (… + DescribeQuorum **55**, AllocateProducerIds **67**, AlterReplicaLogDirs **34**). No stored quotas / KIP-584 features / KRaft unregister / unclean election / live reassignment. No client-compat claim.
+- Kafka `SUPPORTED_APIS` is **56** (… + WriteTxnMarkers **27**, GetTelemetrySubscriptions **71**, AssignReplicasToDirs **73**, ListClientMetricsResources **74**). No stored quotas / KIP-584 features / PushTelemetry / KRaft unregister / unclean election / live reassignment. No client-compat claim.
+- TxnOffsetCommit v3+ honors generation/member with the OffsetCommit fence (v0.254). Empty member or gen `< 0` still skips.
 - SyncGroup applies decoded assignment bytes (v0.248). Empty/garbage still peeks Join. Still not join-set wait.
 - ACL TransactionalId (native **4** / Kafka **5**) is Write-checked on txn APIs when the id is non-empty (v0.247).
 - Opt-in `__transaction_state` records open≡abort (v0.226) and writes Kafka TransactionLogKey/Value v0 (v0.229) including open/prepared partitions (v0.232). JSON v1 still replays. Flag still default off. Not TV2 writes / not full KIP-890/939. Process-local EOS / windows unchanged.
