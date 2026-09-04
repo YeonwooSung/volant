@@ -286,7 +286,8 @@ async fn dispatch_kafka(
                 | Some(ApiKey::DescribeDelegationToken)
                 | Some(ApiKey::ConsumerGroupHeartbeat)
                 | Some(ApiKey::ConsumerGroupDescribe)
-                | Some(ApiKey::ControllerRegistration),
+                | Some(ApiKey::ControllerRegistration)
+                | Some(ApiKey::UnregisterController),
             _
         )
     ) || matches!(
@@ -829,6 +830,12 @@ async fn dispatch_kafka(
                 debug!(error = %e, "controller registration flexible header tag buffer");
             }
             admin_api::encode_controller_registration(broker, &mut src, &mut out, principal);
+        }
+        Some(ApiKey::UnregisterController) if hdr.api_version == 0 => {
+            if let Err(e) = skip_tag_buffer(&mut src) {
+                debug!(error = %e, "unregister controller flexible header tag buffer");
+            }
+            admin_api::encode_unregister_controller(broker, &mut src, &mut out, principal);
         }
         Some(ApiKey::UnregisterBroker) if hdr.api_version == 0 => {
             if let Err(e) = skip_tag_buffer(&mut src) {

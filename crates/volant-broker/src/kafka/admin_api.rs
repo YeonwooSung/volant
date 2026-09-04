@@ -5,7 +5,7 @@
 //! ListClientMetricsResources, AlterReplicaLogDirs, AssignReplicasToDirs,
 //! DescribeLogDirs, DescribeTopicPartitions, BrokerRegistration,
 //! BrokerHeartbeat, UnregisterBroker, Envelope, FetchSnapshot,
-//! ControllerRegistration,
+//! ControllerRegistration, UnregisterController,
 //! UpdateFeatures, DescribeQuorum, AllocateProducerIds,
 //! GetTelemetrySubscriptions, PushTelemetry, AlterPartition,
 //! CreateDelegationToken, RenewDelegationToken, ExpireDelegationToken, configs.
@@ -1528,6 +1528,61 @@ fn parse_controller_registration_request(src: &mut impl Buf) {
 
 fn write_controller_registration(out: &mut BytesMut, error: KafkaErrorCode, msg: Option<&str>) {
     // Official ControllerRegistrationResponse.json (v0):
+    // throttleTimeMs, errorCode, errorMessage compact nullable, tagged.
+    out.put_i32(0); // throttleTimeMs
+    out.put_i16(error.as_i16());
+    put_compact_nullable_string(out, msg);
+    put_empty_tag_buffer(out);
+}
+
+/// UnregisterController v0 (always flexible). Volant is **not** a
+/// KRaft controller quorum.
+///
+/// Parses official Kafka `UnregisterControllerRequest.json` v0
+/// (`controllerId` i32 + tagged) and discards it. Does **not** persist.
+/// Does **not** call `remove_broker`. Returns throttle **0**, error
+/// **42** `INVALID_REQUEST`, errorMessage
+/// `"not KRaft controller unregister"`. Controller is not required.
+/// ACL: Cluster **ALTER** (disabled ACLs allow). Denied → **31**,
+/// errorMessage null.
+pub(crate) fn encode_unregister_controller(
+    broker: &Broker,
+    src: &mut impl Buf,
+    out: &mut BytesMut,
+    principal: &str,
+) {
+    parse_unregister_controller_request(src);
+
+    let denied = broker.acls().is_enabled()
+        && !broker.acls().authorize(
+            Some(principal),
+            ResourceType::Cluster,
+            CLUSTER_RESOURCE,
+            AclOperation::Alter,
+        );
+    let (error, msg) = if denied {
+        (KafkaErrorCode::ClusterAuthorizationFailed, None)
+    } else {
+        (
+            KafkaErrorCode::InvalidRequest,
+            Some("not KRaft controller unregister"),
+        )
+    };
+
+    write_unregister_controller(out, error, msg);
+}
+
+fn parse_unregister_controller_request(src: &mut impl Buf) {
+    // Official v0 (flex, `UnregisterControllerRequest.json`):
+    // ControllerId i32, tagged.
+    if src.remaining() >= 4 {
+        let _controller_id = src.get_i32();
+    }
+    let _ = skip_tag_buffer(src);
+}
+
+fn write_unregister_controller(out: &mut BytesMut, error: KafkaErrorCode, msg: Option<&str>) {
+    // Official UnregisterControllerResponse.json (v0):
     // throttleTimeMs, errorCode, errorMessage compact nullable, tagged.
     out.put_i32(0); // throttleTimeMs
     out.put_i16(error.as_i16());
@@ -6681,6 +6736,116 @@ mod tests {
         assert_eq!(throttle, 0);
         assert_eq!(error, KafkaErrorCode::InvalidRequest.as_i16());
         assert_eq!(msg.as_deref(), Some("not KRaft controller registration"));
+        assert_eq!(overlay_ids(&broker), before);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    fn unregister_controller_body(controller_id: i32) -> BytesMut {
+        let mut body = BytesMut::new();
+        body.put_i32(controller_id);
+        put_empty_tag_buffer(&mut body);
+        body
+    }
+
+    fn read_unregister_controller(src: &mut impl Buf) -> (i32, i16, Option<String>) {
+        let throttle = src.get_i32();
+        let error = src.get_i16();
+        let msg = get_compact_nullable_string(src).unwrap();
+        skip_tag_buffer(src).unwrap();
+        assert_eq!(src.remaining(), 0);
+        (throttle, error, msg)
+    }
+
+    #[test]
+    fn kafka_unregister_controller_rejects_and_does_not_persist() {
+        let dir = temp_dir("unregc-ok");
+        let broker = Broker::new(StorageConfig {
+            data_dir: dir.clone(),
+            ..StorageConfig::default()
+        });
+        let before_ids = overlay_ids(&broker);
+        assert!(!membership_file(&dir).exists());
+
+        let mut src = unregister_controller_body(1);
+        let mut out = BytesMut::new();
+        encode_unregister_controller(&broker, &mut src, &mut out, "kafka-anonymous");
+        let mut resp = out.freeze();
+        let (throttle, error, msg) = read_unregister_controller(&mut resp);
+        assert_eq!(throttle, 0);
+        assert_eq!(error, KafkaErrorCode::InvalidRequest.as_i16());
+        assert_eq!(msg.as_deref(), Some("not KRaft controller unregister"));
+
+        assert_eq!(overlay_ids(&broker), before_ids);
+        assert!(
+            !membership_file(&dir).exists(),
+            "UnregisterController must not create membership.json"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn kafka_unregister_controller_existing_brokers_unchanged() {
+        let dir = temp_dir("unregc-exist");
+        let broker = cluster_n2(dir.clone(), 1);
+        broker
+            .add_broker(3, "127.0.0.1".into(), 19403, None)
+            .unwrap();
+        let before = overlay_ids(&broker);
+        assert!(before.contains(&3));
+
+        let mut src = unregister_controller_body(3);
+        let mut out = BytesMut::new();
+        encode_unregister_controller(&broker, &mut src, &mut out, "kafka-anonymous");
+        let mut resp = out.freeze();
+        let (throttle, error, msg) = read_unregister_controller(&mut resp);
+        assert_eq!(throttle, 0);
+        assert_eq!(error, KafkaErrorCode::InvalidRequest.as_i16());
+        assert_eq!(msg.as_deref(), Some("not KRaft controller unregister"));
+
+        let after = overlay_ids(&broker);
+        assert_eq!(after, before);
+        assert!(after.contains(&3));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn kafka_unregister_controller_acl_deny_is_31() {
+        let dir = temp_dir("unregc-acl");
+        let broker = Broker::new(StorageConfig {
+            data_dir: dir.clone(),
+            ..StorageConfig::default()
+        });
+        broker
+            .configure_acls(true, None, vec![], "token".into())
+            .unwrap();
+
+        let mut src = unregister_controller_body(2);
+        let mut out = BytesMut::new();
+        encode_unregister_controller(&broker, &mut src, &mut out, "kafka-anonymous");
+        let mut resp = out.freeze();
+        let (throttle, error, msg) = read_unregister_controller(&mut resp);
+        assert_eq!(throttle, 0);
+        assert_eq!(error, KafkaErrorCode::ClusterAuthorizationFailed.as_i16());
+        assert_eq!(msg, None);
+        assert!(!membership_file(&dir).exists());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn kafka_unregister_controller_not_controller_still_42() {
+        let dir = temp_dir("unregc-nc");
+        let broker = cluster_n2(dir.clone(), 2);
+        assert!(!broker.is_controller());
+        let before = overlay_ids(&broker);
+
+        let mut src = unregister_controller_body(1);
+        let mut out = BytesMut::new();
+        encode_unregister_controller(&broker, &mut src, &mut out, "kafka-anonymous");
+        let mut resp = out.freeze();
+        let (throttle, error, msg) = read_unregister_controller(&mut resp);
+        assert_eq!(throttle, 0);
+        assert_eq!(error, KafkaErrorCode::InvalidRequest.as_i16());
+        assert_eq!(msg.as_deref(), Some("not KRaft controller unregister"));
         assert_eq!(overlay_ids(&broker), before);
         let _ = std::fs::remove_dir_all(&dir);
     }
