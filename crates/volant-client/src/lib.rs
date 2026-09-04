@@ -211,6 +211,9 @@
 //! `max_redirects`. Rebalance 9/10/11 is not retried. Not Kafka
 //! CompletingRebalance. [`GroupConsumer`] still uses JoinGroup
 //! assignment.
+//! v0.210 generates a UUID `member_id` when both JoinGroup
+//! `member_id` and `group_instance_id` are empty, before the first
+//! send, so the v0.205 retry guard sees a non-empty id.
 
 #![deny(missing_docs)]
 
