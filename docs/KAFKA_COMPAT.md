@@ -50,6 +50,7 @@ From `SUPPORTED_APIS` in `crates/volant-broker/src/kafka/mod.rs`:
 | 29–31 | ACL admin | 0–3 | Flex v2+; User resource v3; LITERAL only; cluster Create/Delete **controller-only** + snapshot fan-out (Phase 113; **41** NotController) |
 | 32 | DescribeConfigs | 0–4 | Flex v4; TOPIC + BROKER (Phase 99–103; name empty or local `node_id`; sparse durable; cluster effective values after Phase 113 push) |
 | 33 | AlterConfigs | 0–2 | Flex v2; TOPIC + BROKER SET (empty = product default; name check Phase 103; sparse durable Phase 100/102; BROKER cluster Alter **controller-only** Phase 113 → **41**) |
+| 35 | DescribeLogDirs | 0–1 | Flex v1; local logs only; size = `Log::total_size`; offsetLag = LEO−HWM (0 if unknown); isFuture false; not multi-log.dirs |
 | 36 | SaslAuthenticate | 0–2 | Flex v2 |
 | 37 | CreatePartitions | 0–3 | Flex v2+; v3 = v2 wire (no KIP-599 quota); assignment wait/rollback same as native (majority miss → **19**) |
 | 42 | DeleteGroups | 0–3 | Flex v2; ErrorMessage v3 |

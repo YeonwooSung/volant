@@ -800,6 +800,8 @@ mod topics;
 mod txn;
 mod txn_state;
 
+pub(crate) use topics::{LocalLogDirFilter, LocalLogDirTopic};
+
 pub use txn_state::{
     decode_transaction_log_key, decode_transaction_log_value, encode_transaction_log_key,
     encode_transaction_log_value, parse_transaction_state_record,

@@ -1,12 +1,12 @@
 //! Kafka wire handlers: Create/Delete topics, CreatePartitions,
 //! AlterPartitionReassignments, ListPartitionReassignments,
-//! Describe/AlterUserScramCredentials, configs.
+//! Describe/AlterUserScramCredentials, DescribeLogDirs, configs.
 
 use bytes::{Buf, BufMut, BytesMut};
 use volant_core::{Error, TopicName};
 
 use crate::acl::{AclOperation, ResourceType, CLUSTER_RESOURCE};
-use crate::broker::Broker;
+use crate::broker::{Broker, LocalLogDirFilter, LocalLogDirTopic};
 use crate::net::{complete_assignment_mutation, snapshot_if_must_wait};
 
 use crate::scram::ScramHash;
@@ -2403,6 +2403,183 @@ fn apply_alter_user_scram(
         }
     }
     (KafkaErrorCode::None, None)
+}
+
+/// DescribeLogDirs v0 classic / v1 flexible. Local open partitions only.
+///
+/// `topics = null` → every local partition. Named topic with empty
+/// `partitions` → all local partitions of that topic. Unknown topic is
+/// omitted (empty). ACL: Cluster DESCRIBE, or Topic DESCRIBE per named
+/// topic. Disabled ACLs allow.
+pub(crate) fn encode_describe_log_dirs(
+    broker: &Broker,
+    src: &mut impl Buf,
+    out: &mut BytesMut,
+    version: i16,
+    principal: &str,
+) {
+    let flexible = version >= 1;
+    let filter = parse_describe_log_dirs_topics(src, flexible);
+    if flexible {
+        let _ = skip_tag_buffer(src);
+    }
+
+    let cluster_ok = !broker.acls().is_enabled()
+        || broker.acls().authorize(
+            Some(principal),
+            ResourceType::Cluster,
+            CLUSTER_RESOURCE,
+            AclOperation::Describe,
+        );
+
+    let (dir_error, rows) = match &filter {
+        LocalLogDirFilter::All => {
+            if broker.acls().is_enabled() && !cluster_ok {
+                (
+                    KafkaErrorCode::ClusterAuthorizationFailed.as_i16(),
+                    Vec::new(),
+                )
+            } else {
+                (0, broker.local_log_dir_rows(&filter))
+            }
+        }
+        LocalLogDirFilter::Topics(topics) => {
+            if !broker.acls().is_enabled() || cluster_ok {
+                (0, broker.local_log_dir_rows(&filter))
+            } else {
+                let allowed: Vec<(String, Vec<i32>)> = topics
+                    .iter()
+                    .filter(|(name, _)| {
+                        broker.acls().authorize(
+                            Some(principal),
+                            ResourceType::Topic,
+                            name,
+                            AclOperation::Describe,
+                        )
+                    })
+                    .cloned()
+                    .collect();
+                (
+                    0,
+                    broker.local_log_dir_rows(&LocalLogDirFilter::Topics(allowed)),
+                )
+            }
+        }
+    };
+
+    write_describe_log_dirs(
+        out,
+        flexible,
+        dir_error,
+        &broker.local_log_dir_path(),
+        &rows,
+    );
+}
+
+fn parse_describe_log_dirs_topics(src: &mut impl Buf, flexible: bool) -> LocalLogDirFilter {
+    if flexible {
+        match get_compact_array_len(src) {
+            Ok(None) => LocalLogDirFilter::All,
+            Ok(Some(n)) => {
+                let mut topics = Vec::with_capacity(n);
+                for _ in 0..n {
+                    let name = match get_compact_string(src) {
+                        Ok(s) => s,
+                        Err(_) => break,
+                    };
+                    let mut partitions = Vec::new();
+                    match get_compact_array_len(src) {
+                        Ok(Some(pc)) => {
+                            for _ in 0..pc {
+                                if src.remaining() < 4 {
+                                    break;
+                                }
+                                partitions.push(src.get_i32());
+                            }
+                        }
+                        Ok(None) | Err(_) => {}
+                    }
+                    let _ = skip_tag_buffer(src);
+                    topics.push((name, partitions));
+                }
+                LocalLogDirFilter::Topics(topics)
+            }
+            Err(_) => LocalLogDirFilter::Topics(Vec::new()),
+        }
+    } else {
+        if src.remaining() < 4 {
+            return LocalLogDirFilter::All;
+        }
+        let n = src.get_i32();
+        if n < 0 {
+            return LocalLogDirFilter::All;
+        }
+        let mut topics = Vec::with_capacity(n as usize);
+        for _ in 0..n {
+            let name = match get_string(src) {
+                Ok(s) => s,
+                Err(_) => break,
+            };
+            if src.remaining() < 4 {
+                break;
+            }
+            let pc = src.get_i32();
+            let mut partitions = Vec::new();
+            for _ in 0..pc.max(0) {
+                if src.remaining() < 4 {
+                    break;
+                }
+                partitions.push(src.get_i32());
+            }
+            topics.push((name, partitions));
+        }
+        LocalLogDirFilter::Topics(topics)
+    }
+}
+
+fn write_describe_log_dirs(
+    out: &mut BytesMut,
+    flexible: bool,
+    dir_error: i16,
+    path: &str,
+    topics: &[LocalLogDirTopic],
+) {
+    out.put_i32(0); // throttle
+    if flexible {
+        put_compact_array_len(out, 1);
+        out.put_i16(dir_error);
+        put_compact_string(out, path);
+        put_compact_array_len(out, topics.len());
+        for t in topics {
+            put_compact_string(out, &t.name);
+            put_compact_array_len(out, t.partitions.len());
+            for p in &t.partitions {
+                out.put_i32(p.partition);
+                out.put_i64(p.size);
+                out.put_i64(p.offset_lag);
+                out.put_u8(u8::from(p.is_future));
+                put_empty_tag_buffer(out);
+            }
+            put_empty_tag_buffer(out);
+        }
+        put_empty_tag_buffer(out); // dir tags
+        put_empty_tag_buffer(out); // top tags
+    } else {
+        out.put_i32(1);
+        out.put_i16(dir_error);
+        put_string(out, path);
+        out.put_i32(topics.len() as i32);
+        for t in topics {
+            put_string(out, &t.name);
+            out.put_i32(t.partitions.len() as i32);
+            for p in &t.partitions {
+                out.put_i32(p.partition);
+                out.put_i64(p.size);
+                out.put_i64(p.offset_lag);
+                out.put_u8(u8::from(p.is_future));
+            }
+        }
+    }
 }
 
 // ---------------------------------------------------------------------------
