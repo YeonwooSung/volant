@@ -1,7 +1,7 @@
 //! Kafka wire handlers: Create/Delete topics, CreatePartitions,
 //! AlterPartitionReassignments, ListPartitionReassignments,
 //! ElectLeaders, Describe/AlterUserScramCredentials,
-//! Describe/AlterClientQuotas, DescribeLogDirs,
+//! Describe/AlterClientQuotas, AlterReplicaLogDirs, DescribeLogDirs,
 //! DescribeTopicPartitions, UnregisterBroker, UpdateFeatures, configs.
 
 use bytes::{Buf, BufMut, BytesMut};
@@ -2855,6 +2855,179 @@ pub(crate) fn encode_update_features(
     put_empty_tag_buffer(out);
 }
 
+/// One topic's partitions from an AlterReplicaLogDirs request.
+struct AlterReplicaLogDirTopic {
+    name: String,
+    partitions: Vec<i32>,
+}
+
+/// AlterReplicaLogDirs v0 classic / v1 flexible. Single `data_dir`.
+///
+/// Parses the request and rejects every directory move with **42**
+/// `INVALID_REQUEST`. Does not move files. Not multi-log.dirs.
+/// Controller is not required (local dirs). Official Kafka first
+/// flexible version is **2**; Volant treats v1 as first flexible.
+/// ACL: Cluster ALTER, or Topic ALTER per named topic. Disabled ACLs
+/// allow.
+pub(crate) fn encode_alter_replica_log_dirs(
+    broker: &Broker,
+    src: &mut impl Buf,
+    out: &mut BytesMut,
+    version: i16,
+    principal: &str,
+) {
+    let flexible = version >= 1;
+    let topics = parse_alter_replica_log_dirs(src, flexible);
+    if flexible {
+        let _ = skip_tag_buffer(src);
+    }
+
+    let cluster_ok = !broker.acls().is_enabled()
+        || broker.acls().authorize(
+            Some(principal),
+            ResourceType::Cluster,
+            CLUSTER_RESOURCE,
+            AclOperation::Alter,
+        );
+
+    out.put_i32(0); // throttle
+    if flexible {
+        put_compact_array_len(out, topics.len());
+        for t in &topics {
+            put_compact_string(out, &t.name);
+            put_compact_array_len(out, t.partitions.len());
+            let code = alter_replica_log_dir_error(broker, principal, cluster_ok, &t.name);
+            for &p in &t.partitions {
+                out.put_i32(p);
+                out.put_i16(code);
+                put_empty_tag_buffer(out);
+            }
+            put_empty_tag_buffer(out);
+        }
+        put_empty_tag_buffer(out);
+    } else {
+        out.put_i32(topics.len() as i32);
+        for t in &topics {
+            put_string(out, &t.name);
+            out.put_i32(t.partitions.len() as i32);
+            let code = alter_replica_log_dir_error(broker, principal, cluster_ok, &t.name);
+            for &p in &t.partitions {
+                out.put_i32(p);
+                out.put_i16(code);
+            }
+        }
+    }
+}
+
+fn alter_replica_log_dir_error(
+    broker: &Broker,
+    principal: &str,
+    cluster_ok: bool,
+    topic: &str,
+) -> i16 {
+    if cluster_ok
+        || broker.acls().authorize(
+            Some(principal),
+            ResourceType::Topic,
+            topic,
+            AclOperation::Alter,
+        )
+    {
+        KafkaErrorCode::InvalidRequest.as_i16()
+    } else {
+        KafkaErrorCode::TopicAuthorizationFailed.as_i16()
+    }
+}
+
+fn parse_alter_replica_log_dirs(src: &mut impl Buf, flexible: bool) -> Vec<AlterReplicaLogDirTopic> {
+    let mut topics: Vec<AlterReplicaLogDirTopic> = Vec::new();
+    let mut push = |name: String, partitions: Vec<i32>| {
+        if let Some(existing) = topics.iter_mut().find(|t| t.name == name) {
+            existing.partitions.extend(partitions);
+        } else {
+            topics.push(AlterReplicaLogDirTopic { name, partitions });
+        }
+    };
+
+    if flexible {
+        match get_compact_array_len(src) {
+            Ok(Some(n)) => {
+                for _ in 0..n {
+                    if get_compact_string(src).is_err() {
+                        break;
+                    }
+                    match get_compact_array_len(src) {
+                        Ok(Some(tn)) => {
+                            for _ in 0..tn {
+                                let name = match get_compact_string(src) {
+                                    Ok(s) => s,
+                                    Err(_) => break,
+                                };
+                                let mut partitions = Vec::new();
+                                match get_compact_array_len(src) {
+                                    Ok(Some(pc)) => {
+                                        for _ in 0..pc {
+                                            if src.remaining() < 4 {
+                                                break;
+                                            }
+                                            partitions.push(src.get_i32());
+                                        }
+                                    }
+                                    Ok(None) | Err(_) => {}
+                                }
+                                let _ = skip_tag_buffer(src);
+                                push(name, partitions);
+                            }
+                        }
+                        Ok(None) | Err(_) => {}
+                    }
+                    let _ = skip_tag_buffer(src);
+                }
+            }
+            Ok(None) | Err(_) => {}
+        }
+    } else {
+        if src.remaining() < 4 {
+            return topics;
+        }
+        let n = src.get_i32();
+        if n < 0 {
+            return topics;
+        }
+        for _ in 0..n {
+            if get_string(src).is_err() {
+                break;
+            }
+            if src.remaining() < 4 {
+                break;
+            }
+            let tn = src.get_i32();
+            if tn < 0 {
+                continue;
+            }
+            for _ in 0..tn {
+                let name = match get_string(src) {
+                    Ok(s) => s,
+                    Err(_) => break,
+                };
+                if src.remaining() < 4 {
+                    break;
+                }
+                let pc = src.get_i32();
+                let mut partitions = Vec::new();
+                for _ in 0..pc.max(0) {
+                    if src.remaining() < 4 {
+                        break;
+                    }
+                    partitions.push(src.get_i32());
+                }
+                push(name, partitions);
+            }
+        }
+    }
+    topics
+}
+
 /// DescribeLogDirs v0 classic / v1 flexible. Local open partitions only.
 ///
 /// `topics = null` → every local partition. Named topic with empty
@@ -3747,6 +3920,72 @@ mod tests {
             .filter_map(|e| e.ok().map(|e| e.file_name()))
             .collect();
         assert_eq!(after, before, "UpdateFeatures must not persist features");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    fn alter_replica_log_dirs_v0(path: &str, topic: &str, partitions: &[i32]) -> BytesMut {
+        let mut body = BytesMut::new();
+        body.put_i32(1);
+        put_string(&mut body, path);
+        body.put_i32(1);
+        put_string(&mut body, topic);
+        body.put_i32(partitions.len() as i32);
+        for &p in partitions {
+            body.put_i32(p);
+        }
+        body
+    }
+
+    fn snapshot_dir(root: &std::path::Path) -> Vec<(std::path::PathBuf, u64)> {
+        let mut out = Vec::new();
+        let mut stack = vec![root.to_path_buf()];
+        while let Some(dir) = stack.pop() {
+            let Ok(entries) = std::fs::read_dir(&dir) else {
+                continue;
+            };
+            for e in entries.flatten() {
+                let p = e.path();
+                if p.is_dir() {
+                    stack.push(p);
+                } else if let Ok(meta) = e.metadata() {
+                    let rel = p.strip_prefix(root).unwrap_or(&p).to_path_buf();
+                    out.push((rel, meta.len()));
+                }
+            }
+        }
+        out.sort();
+        out
+    }
+
+    #[test]
+    fn kafka_alter_replica_log_dirs_rejects_and_does_not_move() {
+        let dir = temp_dir("arld");
+        let broker = Broker::new(StorageConfig {
+            data_dir: dir.clone(),
+            ..StorageConfig::default()
+        });
+        broker.create_topic("events", 1).unwrap();
+        let dest = dir.parent().unwrap().join("volant-arld-dest");
+        let before = snapshot_dir(&dir);
+        assert!(!dest.exists());
+
+        let mut src = alter_replica_log_dirs_v0(dest.to_str().unwrap(), "events", &[0]);
+        let mut out = BytesMut::new();
+        encode_alter_replica_log_dirs(&broker, &mut src, &mut out, 0, "kafka-anonymous");
+        let mut resp = out.freeze();
+        assert_eq!(resp.get_i32(), 0); // throttle
+        assert_eq!(resp.get_i32(), 1); // one topic
+        assert_eq!(get_string(&mut resp).unwrap(), "events");
+        assert_eq!(resp.get_i32(), 1);
+        assert_eq!(resp.get_i32(), 0);
+        let code = resp.get_i16();
+        assert!(
+            code == KafkaErrorCode::InvalidRequest.as_i16() || code == 57,
+            "per-partition 42 INVALID_REQUEST or 57 LOG_DIR_NOT_FOUND, got {code}"
+        );
+
+        assert_eq!(snapshot_dir(&dir), before, "must not move replica files");
+        assert!(!dest.exists(), "must not create a destination log dir");
         let _ = std::fs::remove_dir_all(&dir);
     }
 }

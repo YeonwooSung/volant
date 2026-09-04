@@ -50,6 +50,7 @@ From `SUPPORTED_APIS` in `crates/volant-broker/src/kafka/mod.rs`:
 | 29–31 | ACL admin | 0–3 | Flex v2+; User resource v3; LITERAL only; cluster Create/Delete **controller-only** + snapshot fan-out (Phase 113; **41** NotController) |
 | 32 | DescribeConfigs | 0–4 | Flex v4; TOPIC + BROKER (Phase 99–103; name empty or local `node_id`; sparse durable; cluster effective values after Phase 113 push) |
 | 33 | AlterConfigs | 0–2 | Flex v2; TOPIC + BROKER SET (empty = product default; name check Phase 103; sparse durable Phase 100/102; BROKER cluster Alter **controller-only** Phase 113 → **41**) |
+| 34 | AlterReplicaLogDirs | 0–1 | Flex v1 (official Kafka flex is v2); parse and reject every move (**42**); single `data_dir`; files unmoved; Cluster ALTER or Topic ALTER; controller not required (v0.249) |
 | 35 | DescribeLogDirs | 0–1 | Flex v1; local logs only; size = `Log::total_size`; offsetLag = LEO−HWM (0 if unknown); isFuture false; not multi-log.dirs |
 | 36 | SaslAuthenticate | 0–2 | Flex v2 |
 | 37 | CreatePartitions | 0–3 | Flex v2+; v3 = v2 wire (no KIP-599 quota); assignment wait/rollback same as native (majority miss → **19**) |
@@ -144,6 +145,7 @@ These are **current** product facts, not temporary docs lag:
 | DescribeTopicPartitions | **v0 wrap** (v0.237): key **75** advertised; wraps `Broker::metadata`. Same leaders / ISR / epochs / deterministic TopicId as Metadata. Unknown topic → **3**. ACL Topic DESCRIBE. Empty topics = all. `responsePartitionLimit <= 0` unlimited; simple truncate + `next_cursor` when cut. Cursor honored only when its topic is in the result set (else ignored). No ELR fields (Metadata partition body reused). Not Metadata v13+ |
 | UnregisterBroker | **v0 wrap** (v0.242): key **64** advertised; wraps native `remove_broker` (same invert as AddBroker / v0.217). Not KRaft UnregisterBroker (no incarnation / DirectoryId). Controller only (**41**); no cluster → **42** “unregister requires cluster”; self / last broker map native InvalidArgument → **42**. TimeoutMs parsed if present before tags, ignored. ACL Cluster ALTER |
 | UpdateFeatures | **v0–1 reject** (v0.244): key **57** advertised (always flex). Parse request; every feature → **92** `FEATURE_UPDATE_FAILED` (`empty / not supported`). Does **not** persist. ApiVersions SupportedFeatures / FinalizedFeatures stay empty. Not KIP-584. Cluster ALTER. Cluster non-controller → **41**. v2+ → **35**. Describe is already empty via ApiVersions |
+| AlterReplicaLogDirs | **v0–1 reject** (v0.249): key **34** advertised. Single `data_dir`. Parse request; every partition **42** `INVALID_REQUEST` (`single data_dir; replica move not supported`). Does **not** move files. Not multi-log.dirs. Controller not required. Official Kafka first flexible is **2**; Volant v1 is flexible. DescribeLogDirs (35) unchanged. ACL Cluster ALTER or Topic ALTER. v2+ → **35** |
 | Missing APIs | Large Kafka surface still unsupported (GSSAPI, OAUTH, …) |
 
 ## Related
