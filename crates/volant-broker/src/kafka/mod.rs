@@ -26,12 +26,13 @@
 //! UnregisterBroker v0 (wraps native remove_broker; key 64; not KRaft incarnation),
 //! UpdateFeatures v0–1 (always flexible; reject every feature; empty ApiVersions features),
 //! DescribeQuorum v0–1 (always flexible; wraps openraft leader/term/voters; not KRaft),
-//! AllocateProducerIds v0 (always flexible; block from next_producer_id; not KRaft).
+//! AllocateProducerIds v0 (always flexible; block from next_producer_id; not KRaft),
+//! GetTelemetrySubscriptions v0 (always flexible; no client telemetry; empty subscription).
 //! See `docs/PHASE23_SPEC.md` … `docs/PHASE91_SPEC.md`, `docs/V225_SPEC.md`,
 //! `docs/V228_SPEC.md`, `docs/V233_SPEC.md`, `docs/V235_SPEC.md`,
 //! `docs/V236_SPEC.md`, `docs/V237_SPEC.md`, `docs/V241_SPEC.md`,
 //! `docs/V242_SPEC.md`, `docs/V244_SPEC.md`, `docs/V245_SPEC.md`,
-//! `docs/V246_SPEC.md`, and `docs/V249_SPEC.md`.
+//! `docs/V246_SPEC.md`, `docs/V249_SPEC.md`, and `docs/V253_SPEC.md`.
 
 mod acl_api;
 mod admin_api;
@@ -320,6 +321,9 @@ pub enum ApiKey {
     /// AllocateProducerIds (always flexible; v0 only). Block from
     /// `next_producer_id`. BrokerEpoch parsed and ignored. Not KRaft.
     AllocateProducerIds = 67,
+    /// GetTelemetrySubscriptions (always flexible; v0 only). No client
+    /// telemetry (not KIP-714). Empty subscription; do not push.
+    GetTelemetrySubscriptions = 71,
     /// DescribeTopicPartitions (always flexible; v0 only).
     DescribeTopicPartitions = 75,
 }
@@ -378,6 +382,7 @@ impl ApiKey {
             65 => Some(Self::DescribeTransactions),
             66 => Some(Self::ListTransactions),
             67 => Some(Self::AllocateProducerIds),
+            71 => Some(Self::GetTelemetrySubscriptions),
             75 => Some(Self::DescribeTopicPartitions),
             _ => None,
         }
@@ -437,6 +442,7 @@ pub const SUPPORTED_APIS: &[(ApiKey, i16, i16)] = &[
     (ApiKey::DescribeTransactions, 0, 0),
     (ApiKey::ListTransactions, 0, 2),
     (ApiKey::AllocateProducerIds, 0, 0),
+    (ApiKey::GetTelemetrySubscriptions, 0, 0),
     (ApiKey::DescribeTopicPartitions, 0, 0),
 ];
 
@@ -447,9 +453,9 @@ mod tests {
     #[test]
     fn supported_apis_includes_alter_replica_log_dirs_34() {
         assert!(SUPPORTED_APIS.len() >= 50);
-        assert!(SUPPORTED_APIS.iter().any(|(k, min, max)| {
-            *k == ApiKey::AlterReplicaLogDirs && *min == 0 && *max == 1
-        }));
+        assert!(SUPPORTED_APIS
+            .iter()
+            .any(|(k, min, max)| { *k == ApiKey::AlterReplicaLogDirs && *min == 0 && *max == 1 }));
         assert_eq!(ApiKey::from_i16(34), Some(ApiKey::AlterReplicaLogDirs));
     }
 
@@ -559,9 +565,21 @@ mod tests {
     #[test]
     fn supported_apis_includes_allocate_producer_ids_67() {
         assert!(SUPPORTED_APIS.len() >= 50);
-        assert!(SUPPORTED_APIS.iter().any(|(k, min, max)| {
-            *k == ApiKey::AllocateProducerIds && *min == 0 && *max == 0
-        }));
+        assert!(SUPPORTED_APIS
+            .iter()
+            .any(|(k, min, max)| { *k == ApiKey::AllocateProducerIds && *min == 0 && *max == 0 }));
         assert_eq!(ApiKey::from_i16(67), Some(ApiKey::AllocateProducerIds));
+    }
+
+    #[test]
+    fn supported_apis_includes_get_telemetry_subscriptions_71() {
+        assert!(SUPPORTED_APIS.len() >= 53);
+        assert!(SUPPORTED_APIS.iter().any(|(k, min, max)| {
+            *k == ApiKey::GetTelemetrySubscriptions && *min == 0 && *max == 0
+        }));
+        assert_eq!(
+            ApiKey::from_i16(71),
+            Some(ApiKey::GetTelemetrySubscriptions)
+        );
     }
 }

@@ -265,7 +265,8 @@ async fn dispatch_kafka(
                 | Some(ApiKey::UnregisterBroker)
                 | Some(ApiKey::UpdateFeatures)
                 | Some(ApiKey::DescribeQuorum)
-                | Some(ApiKey::AllocateProducerIds),
+                | Some(ApiKey::AllocateProducerIds)
+                | Some(ApiKey::GetTelemetrySubscriptions),
             _
         )
     ) || matches!(
@@ -814,6 +815,12 @@ async fn dispatch_kafka(
                 debug!(error = %e, "allocate producer ids flexible header tag buffer");
             }
             admin_api::encode_allocate_producer_ids(broker, &mut src, &mut out, principal);
+        }
+        Some(ApiKey::GetTelemetrySubscriptions) if hdr.api_version == 0 => {
+            if let Err(e) = skip_tag_buffer(&mut src) {
+                debug!(error = %e, "get telemetry subscriptions flexible header tag buffer");
+            }
+            admin_api::encode_get_telemetry_subscriptions(broker, &mut src, &mut out, principal);
         }
         Some(ApiKey::AlterReplicaLogDirs) if (0..=1).contains(&hdr.api_version) => {
             if hdr.api_version >= 1 {

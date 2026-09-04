@@ -3,7 +3,8 @@
 //! ElectLeaders, Describe/AlterUserScramCredentials,
 //! Describe/AlterClientQuotas, AlterReplicaLogDirs, DescribeLogDirs,
 //! DescribeTopicPartitions, UnregisterBroker, UpdateFeatures,
-//! DescribeQuorum, AllocateProducerIds, configs.
+//! DescribeQuorum, AllocateProducerIds, GetTelemetrySubscriptions,
+//! configs.
 
 use bytes::{Buf, BufMut, BytesMut};
 use volant_core::{Error, PartitionId, TopicName};
@@ -18,7 +19,7 @@ use super::codec::{
     get_compact_array_len, get_compact_bytes, get_compact_nullable_string, get_compact_string,
     get_nullable_string, get_string, get_uuid, put_compact_array_len, put_compact_nullable_string,
     put_compact_string, put_empty_tag_buffer, put_nullable_string, put_string, put_unsigned_varint,
-    skip_tag_buffer, KAFKA_UUID_ZERO,
+    put_uuid, skip_tag_buffer, KAFKA_UUID_ZERO,
 };
 use super::topic_id;
 use super::KafkaErrorCode;
@@ -3129,7 +3130,10 @@ fn alter_replica_log_dir_error(
     }
 }
 
-fn parse_alter_replica_log_dirs(src: &mut impl Buf, flexible: bool) -> Vec<AlterReplicaLogDirTopic> {
+fn parse_alter_replica_log_dirs(
+    src: &mut impl Buf,
+    flexible: bool,
+) -> Vec<AlterReplicaLogDirTopic> {
     let mut topics: Vec<AlterReplicaLogDirTopic> = Vec::new();
     let mut push = |name: String, partitions: Vec<i32>| {
         if let Some(existing) = topics.iter_mut().find(|t| t.name == name) {
@@ -3457,6 +3461,63 @@ pub(crate) fn encode_alter_client_quotas(
         }
         put_empty_tag_buffer(out);
     }
+    put_empty_tag_buffer(out);
+}
+
+/// GetTelemetrySubscriptions v0 (always flexible). Volant has no client
+/// telemetry (not KIP-714).
+///
+/// Parses `clientInstanceId` and leftover `subscriptionId` if present.
+/// Returns error **0**, echoed id, `subscriptionId = 0`, empty
+/// `requestedMetrics`, `pushIntervalMs = -1` (do not push),
+/// `telemetryMaxBytes = 0`, `deltaTemporality = false`, empty accepted
+/// compression. Nothing persisted. Controller is not required.
+/// ACL: Cluster **DESCRIBE** (disabled ACLs allow). Denied → **31**;
+/// still echo `clientInstanceId`; empty metrics.
+pub(crate) fn encode_get_telemetry_subscriptions(
+    broker: &Broker,
+    src: &mut impl Buf,
+    out: &mut BytesMut,
+    principal: &str,
+) {
+    let client_instance_id = get_uuid(src).unwrap_or(KAFKA_UUID_ZERO);
+    // Official Kafka request is ClientInstanceId + tagged. Residual also
+    // listed subscriptionId; consume it when present before tags.
+    if src.remaining() >= 4 {
+        let _subscription_id = src.get_i32();
+    }
+    let _ = skip_tag_buffer(src);
+
+    let denied = broker.acls().is_enabled()
+        && !broker.acls().authorize(
+            Some(principal),
+            ResourceType::Cluster,
+            CLUSTER_RESOURCE,
+            AclOperation::Describe,
+        );
+    let error = if denied {
+        KafkaErrorCode::ClusterAuthorizationFailed
+    } else {
+        KafkaErrorCode::None
+    };
+
+    write_get_telemetry_subscriptions(out, error, &client_instance_id);
+}
+
+fn write_get_telemetry_subscriptions(
+    out: &mut BytesMut,
+    error: KafkaErrorCode,
+    client_instance_id: &[u8; 16],
+) {
+    out.put_i32(0); // throttleTimeMs
+    out.put_i16(error.as_i16());
+    put_uuid(out, client_instance_id);
+    out.put_i32(0); // subscriptionId — no subscription
+    put_compact_array_len(out, 0); // acceptedCompressionTypes
+    out.put_i32(-1); // pushIntervalMs — do not push
+    out.put_i32(0); // telemetryMaxBytes
+    out.put_u8(0); // deltaTemporality = false
+    put_compact_array_len(out, 0); // requestedMetrics
     put_empty_tag_buffer(out);
 }
 
@@ -4268,6 +4329,127 @@ mod tests {
 
         assert_eq!(snapshot_dir(&dir), before, "must not move replica files");
         assert!(!dest.exists(), "must not create a destination log dir");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    fn get_telemetry_body(client_instance_id: &[u8; 16], subscription_id: i32) -> BytesMut {
+        let mut body = BytesMut::new();
+        put_uuid(&mut body, client_instance_id);
+        body.put_i32(subscription_id);
+        put_empty_tag_buffer(&mut body);
+        body
+    }
+
+    fn read_get_telemetry(src: &mut impl Buf) -> (i16, [u8; 16], i32, i32, usize) {
+        assert_eq!(src.get_i32(), 0); // throttle
+        let error = src.get_i16();
+        let id = get_uuid(src).unwrap();
+        let subscription_id = src.get_i32();
+        let compression_n = get_compact_array_len(src).unwrap().unwrap_or(0);
+        let push_interval = src.get_i32();
+        assert_eq!(src.get_i32(), 0); // telemetryMaxBytes
+        assert_eq!(src.get_u8(), 0); // deltaTemporality
+        let metrics_n = get_compact_array_len(src).unwrap().unwrap_or(0);
+        skip_tag_buffer(src).unwrap();
+        assert_eq!(compression_n, 0);
+        (error, id, subscription_id, push_interval, metrics_n)
+    }
+
+    fn dir_has_telemetry(root: &std::path::Path) -> bool {
+        let mut stack = vec![root.to_path_buf()];
+        while let Some(dir) = stack.pop() {
+            let Ok(entries) = std::fs::read_dir(&dir) else {
+                continue;
+            };
+            for e in entries.flatten() {
+                let name = e.file_name();
+                let lower = name.to_string_lossy().to_ascii_lowercase();
+                if lower.contains("telemetry") {
+                    return true;
+                }
+                if e.file_type().map(|t| t.is_dir()).unwrap_or(false) {
+                    stack.push(e.path());
+                }
+            }
+        }
+        false
+    }
+
+    #[test]
+    fn kafka_get_telemetry_subscriptions_empty_and_does_not_persist() {
+        let dir = temp_dir("gts-ok");
+        let broker = Broker::new(StorageConfig {
+            data_dir: dir.clone(),
+            ..StorageConfig::default()
+        });
+        let before = snapshot_dir(&dir);
+        let mut id = [0u8; 16];
+        id[0] = 0x11;
+        id[15] = 0x22;
+
+        let mut src = get_telemetry_body(&id, 7);
+        let mut out = BytesMut::new();
+        encode_get_telemetry_subscriptions(&broker, &mut src, &mut out, "kafka-anonymous");
+        let mut resp = out.freeze();
+        let (error, echoed, subscription_id, push_interval, metrics_n) =
+            read_get_telemetry(&mut resp);
+        assert_eq!(error, 0);
+        assert_eq!(echoed, id);
+        assert_eq!(subscription_id, 0);
+        assert_eq!(push_interval, -1);
+        assert_eq!(metrics_n, 0);
+
+        assert_eq!(snapshot_dir(&dir), before, "must not persist telemetry");
+        assert!(!dir_has_telemetry(&dir), "must not create telemetry files");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn kafka_get_telemetry_subscriptions_acl_deny_is_31() {
+        let dir = temp_dir("gts-acl");
+        let broker = Broker::new(StorageConfig {
+            data_dir: dir.clone(),
+            ..StorageConfig::default()
+        });
+        broker
+            .configure_acls(true, None, vec![], "token".into())
+            .unwrap();
+        let mut id = [0u8; 16];
+        id[3] = 0xab;
+
+        let mut src = get_telemetry_body(&id, 0);
+        let mut out = BytesMut::new();
+        encode_get_telemetry_subscriptions(&broker, &mut src, &mut out, "kafka-anonymous");
+        let mut resp = out.freeze();
+        let (error, echoed, subscription_id, push_interval, metrics_n) =
+            read_get_telemetry(&mut resp);
+        assert_eq!(error, KafkaErrorCode::ClusterAuthorizationFailed.as_i16());
+        assert_eq!(echoed, id);
+        assert_eq!(subscription_id, 0);
+        assert_eq!(push_interval, -1);
+        assert_eq!(metrics_n, 0);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn kafka_get_telemetry_subscriptions_not_controller_still_ok() {
+        let dir = temp_dir("gts-nc");
+        let broker = cluster_n2(dir.clone(), 2);
+        assert!(!broker.is_controller());
+        let mut id = [0u8; 16];
+        id[7] = 0x42;
+
+        let mut src = get_telemetry_body(&id, 1);
+        let mut out = BytesMut::new();
+        encode_get_telemetry_subscriptions(&broker, &mut src, &mut out, "kafka-anonymous");
+        let mut resp = out.freeze();
+        let (error, echoed, subscription_id, push_interval, metrics_n) =
+            read_get_telemetry(&mut resp);
+        assert_eq!(error, 0);
+        assert_eq!(echoed, id);
+        assert_eq!(subscription_id, 0);
+        assert_eq!(push_interval, -1);
+        assert_eq!(metrics_n, 0);
         let _ = std::fs::remove_dir_all(&dir);
     }
 }
