@@ -41,6 +41,7 @@
 //! ExpireDelegationToken v0 (always flexible; no token store; reject 42),
 //! DescribeDelegationToken v0 (always flexible residual; no token store; empty tokens),
 //! ConsumerGroupDescribe v0 (always flexible; classic snapshot wrap; not KIP-848).
+//! ConsumerGroupHeartbeat v0 (always flexible; reject 42; not KIP-848).
 //! See `docs/PHASE23_SPEC.md` … `docs/PHASE91_SPEC.md`, `docs/V225_SPEC.md`,
 //! `docs/V228_SPEC.md`, `docs/V233_SPEC.md`, `docs/V235_SPEC.md`,
 //! `docs/V236_SPEC.md`, `docs/V237_SPEC.md`, `docs/V241_SPEC.md`,
@@ -49,7 +50,7 @@
 //! `docs/V251_SPEC.md`, `docs/V252_SPEC.md`, `docs/V253_SPEC.md`,
 //! `docs/V255_SPEC.md`, `docs/V257_SPEC.md`, `docs/V258_SPEC.md`,
 //! `docs/V259_SPEC.md`, `docs/V260_SPEC.md`, `docs/V261_SPEC.md`,
-//! `docs/V263_SPEC.md`, and `docs/V264_SPEC.md`.
+//! `docs/V263_SPEC.md`, `docs/V264_SPEC.md`, and `docs/V269_SPEC.md`.
 
 mod acl_api;
 mod admin_api;
@@ -367,6 +368,9 @@ pub enum ApiKey {
     /// AllocateProducerIds (always flexible; v0 only). Block from
     /// `next_producer_id`. BrokerEpoch parsed and ignored. Not KRaft.
     AllocateProducerIds = 67,
+    /// ConsumerGroupHeartbeat (always flexible; v0 only). Honest reject:
+    /// not KIP-848 consumer protocol. Does not wrap classic Heartbeat 12.
+    ConsumerGroupHeartbeat = 68,
     /// ConsumerGroupDescribe (always flexible; v0 only). Wraps
     /// `GroupCoordinator::describe_group` (same snapshot as DescribeGroups).
     /// Not KIP-848: memberEpoch = -1, classic groups only.
@@ -448,6 +452,7 @@ impl ApiKey {
             65 => Some(Self::DescribeTransactions),
             66 => Some(Self::ListTransactions),
             67 => Some(Self::AllocateProducerIds),
+            68 => Some(Self::ConsumerGroupHeartbeat),
             69 => Some(Self::ConsumerGroupDescribe),
             71 => Some(Self::GetTelemetrySubscriptions),
             72 => Some(Self::PushTelemetry),
@@ -519,6 +524,7 @@ pub const SUPPORTED_APIS: &[(ApiKey, i16, i16)] = &[
     (ApiKey::DescribeTransactions, 0, 0),
     (ApiKey::ListTransactions, 0, 2),
     (ApiKey::AllocateProducerIds, 0, 0),
+    (ApiKey::ConsumerGroupHeartbeat, 0, 0),
     (ApiKey::ConsumerGroupDescribe, 0, 0),
     (ApiKey::GetTelemetrySubscriptions, 0, 0),
     (ApiKey::PushTelemetry, 0, 0),
@@ -753,6 +759,17 @@ mod tests {
         }));
         assert_eq!(ApiKey::from_i16(69), Some(ApiKey::ConsumerGroupDescribe));
         assert_eq!(KafkaErrorCode::GroupIdNotFound.as_i16(), 69);
+    }
+
+    #[test]
+    fn supported_apis_includes_consumer_group_heartbeat_68() {
+        assert!(SUPPORTED_APIS.len() >= 65);
+        assert!(SUPPORTED_APIS.iter().any(|(k, min, max)| {
+            *k == ApiKey::ConsumerGroupHeartbeat && *min == 0 && *max == 0
+        }));
+        assert_eq!(ApiKey::from_i16(68), Some(ApiKey::ConsumerGroupHeartbeat));
+        assert_eq!(ApiKey::from_i16(67), Some(ApiKey::AllocateProducerIds));
+        assert_eq!(ApiKey::from_i16(69), Some(ApiKey::ConsumerGroupDescribe));
     }
 
     #[test]

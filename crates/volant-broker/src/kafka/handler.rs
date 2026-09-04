@@ -281,6 +281,7 @@ async fn dispatch_kafka(
                 | Some(ApiKey::RenewDelegationToken)
                 | Some(ApiKey::ExpireDelegationToken)
                 | Some(ApiKey::DescribeDelegationToken)
+                | Some(ApiKey::ConsumerGroupHeartbeat)
                 | Some(ApiKey::ConsumerGroupDescribe),
             _
         )
@@ -720,6 +721,12 @@ async fn dispatch_kafka(
                 hdr.api_version,
                 principal,
             );
+        }
+        Some(ApiKey::ConsumerGroupHeartbeat) if hdr.api_version == 0 => {
+            if let Err(e) = skip_tag_buffer(&mut src) {
+                debug!(error = %e, "consumer group heartbeat flexible header tag buffer");
+            }
+            group_api::encode_consumer_group_heartbeat(broker, &mut src, &mut out, principal);
         }
         Some(ApiKey::ConsumerGroupDescribe) if hdr.api_version == 0 => {
             if let Err(e) = skip_tag_buffer(&mut src) {
