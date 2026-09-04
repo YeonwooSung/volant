@@ -156,8 +156,10 @@ class FakeClient:
         max_messages: int = 128,
         max_bytes: int = 4 * 1024 * 1024,
         max_wait_ms: int = 0,
+        group_id: str = "",
+        member_id: str = "",
     ) -> FetchResult:
-        del max_bytes
+        del max_bytes, group_id, member_id
         self.fetches.append((topic, partition, offset, max_wait_ms))
         recs = [
             r for r in self.log.get((topic, partition), []) if r.offset >= offset

@@ -442,6 +442,8 @@ class GroupConsumer:
                 max_messages=_clamp_fetch_max_messages(self._fetch_max_messages),
                 max_bytes=_clamp_fetch_max_bytes(self._fetch_max_bytes),
                 max_wait_ms=max_wait_ms,
+                group_id=self._group_id,
+                member_id=self._member_id,
             )
             for rec in batch.records:
                 nxt = rec.offset + 1 if rec.offset < OFFSET_UNKNOWN else rec.offset

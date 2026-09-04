@@ -308,6 +308,8 @@ class FetchRequest:
     max_messages: int
     max_bytes: int
     max_wait_ms: int
+    group_id: str = ""
+    member_id: str = ""
 
 
 @dataclass
@@ -1067,18 +1069,34 @@ def encode_fetch_request(req: FetchRequest) -> bytes:
     w.u32_le(req.max_messages)
     w.u32_le(req.max_bytes)
     w.u32_le(req.max_wait_ms)
+    if req.group_id or req.member_id:
+        _put_string(w, req.group_id)
+        _put_string(w, req.member_id)
     return w.finish()
 
 
 def decode_fetch_request(payload: bytes) -> FetchRequest:
     r = _Reader(payload)
+    topic = _get_string(r)
+    partition = r.u32_le()
+    from_offset = r.u64_le()
+    max_messages = r.u32_le()
+    max_bytes = r.u32_le()
+    max_wait_ms = r.u32_le()
+    group_id = ""
+    member_id = ""
+    if r.remaining() > 0:
+        group_id = _get_string(r)
+        member_id = _get_string(r)
     return FetchRequest(
-        topic=_get_string(r),
-        partition=r.u32_le(),
-        from_offset=r.u64_le(),
-        max_messages=r.u32_le(),
-        max_bytes=r.u32_le(),
-        max_wait_ms=r.u32_le(),
+        topic=topic,
+        partition=partition,
+        from_offset=from_offset,
+        max_messages=max_messages,
+        max_bytes=max_bytes,
+        max_wait_ms=max_wait_ms,
+        group_id=group_id,
+        member_id=member_id,
     )
 
 

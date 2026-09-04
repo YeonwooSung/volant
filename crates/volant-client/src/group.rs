@@ -559,6 +559,7 @@ impl GroupConsumer {
             .await?;
         }
 
+        let (member_id, _) = membership(&self.shared);
         let assignment = lock_state(&self.shared).assignment.clone();
         let mut out = Vec::new();
         for (topic, partition) in assignment {
@@ -571,7 +572,9 @@ impl GroupConsumer {
             let max_bytes = clamp_fetch_max_bytes(self.shared.fetch_max_bytes);
             let result = self
                 .client
-                .fetch_opts(
+                .fetch_opts_for(
+                    &self.group_id,
+                    &member_id,
                     &topic,
                     partition,
                     Offset::new(from),

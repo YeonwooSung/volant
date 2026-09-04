@@ -96,7 +96,7 @@ pub use delete_records_outbox::{
 };
 pub use group::{
     static_member_id, GroupCoordinator, GroupDescription, GroupListEntry, GroupMemberDescription,
-    STATIC_MEMBER_PREFIX,
+    Owns, STATIC_MEMBER_PREFIX,
 };
 pub use kafka::{serve_kafka_listener, serve_kafka_listener_until};
 pub use leader_epoch::{EpochStart, LeaderEpochStore, LeaderEpochsFile};

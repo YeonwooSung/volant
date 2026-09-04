@@ -105,7 +105,10 @@ class FakeClient:
         max_messages: int = 128,
         max_bytes: int = 4 * 1024 * 1024,
         max_wait_ms: int = 0,
+        group_id: str = "",
+        member_id: str = "",
     ) -> FetchResult:
+        del group_id, member_id
         self.fetches.append((topic, partition, offset, max_wait_ms, max_messages, max_bytes))
         if self.fetch_error is not None:
             raise self.fetch_error

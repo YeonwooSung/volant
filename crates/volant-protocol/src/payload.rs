@@ -308,6 +308,8 @@ pub fn encode_request(req: &Request) -> Result<Bytes> {
             max_messages,
             max_bytes,
             max_wait_ms,
+            group_id,
+            member_id,
         } => {
             put_string(&mut dst, topic)?;
             dst.put_u32_le(*partition);
@@ -315,6 +317,8 @@ pub fn encode_request(req: &Request) -> Result<Bytes> {
             dst.put_u32_le(*max_messages);
             dst.put_u32_le(*max_bytes);
             dst.put_u32_le(*max_wait_ms);
+            put_string(&mut dst, group_id)?;
+            put_string(&mut dst, member_id)?;
         }
         Request::CreateTopic {
             name,
@@ -852,13 +856,26 @@ pub fn decode_request(opcode: u16, payload: &[u8]) -> Result<Request> {
             if src.remaining() < 4 + 8 + 4 + 4 + 4 {
                 return Err(Error::Protocol("truncated fetch request".into()));
             }
+            let partition = src.get_u32_le();
+            let from_offset = src.get_u64_le();
+            let max_messages = src.get_u32_le();
+            let max_bytes = src.get_u32_le();
+            let max_wait_ms = src.get_u32_le();
+            // v0.234 group+member trailer; legacy Fetch omits it.
+            let (group_id, member_id) = if src.has_remaining() {
+                (get_string(&mut src)?, get_string(&mut src)?)
+            } else {
+                (String::new(), String::new())
+            };
             Ok(Request::Fetch {
                 topic,
-                partition: src.get_u32_le(),
-                from_offset: src.get_u64_le(),
-                max_messages: src.get_u32_le(),
-                max_bytes: src.get_u32_le(),
-                max_wait_ms: src.get_u32_le(),
+                partition,
+                from_offset,
+                max_messages,
+                max_bytes,
+                max_wait_ms,
+                group_id,
+                member_id,
             })
         }
         RequestOpcode::CreateTopic => {
@@ -3753,11 +3770,49 @@ mod tests {
             max_messages: 5,
             max_bytes: 1024,
             max_wait_ms: 0,
+            group_id: String::new(),
+            member_id: String::new(),
         };
         let b = encode_request(&fetch).unwrap();
         assert_eq!(
             decode_request(RequestOpcode::Fetch as u16, &b).unwrap(),
             fetch
+        );
+
+        // Legacy Fetch (no group+member trailer) stays unfiltered.
+        let mut legacy = BytesMut::new();
+        put_string(&mut legacy, "t").unwrap();
+        legacy.put_u32_le(2);
+        legacy.put_u64_le(10);
+        legacy.put_u32_le(5);
+        legacy.put_u32_le(1024);
+        legacy.put_u32_le(0);
+        match decode_request(RequestOpcode::Fetch as u16, &legacy).unwrap() {
+            Request::Fetch {
+                group_id,
+                member_id,
+                ..
+            } => {
+                assert!(group_id.is_empty());
+                assert!(member_id.is_empty());
+            }
+            other => panic!("unexpected {other:?}"),
+        }
+
+        let grouped = Request::Fetch {
+            topic: "t".into(),
+            partition: 0,
+            from_offset: 0,
+            max_messages: 1,
+            max_bytes: 64,
+            max_wait_ms: 0,
+            group_id: "g".into(),
+            member_id: "m1".into(),
+        };
+        let b = encode_request(&grouped).unwrap();
+        assert_eq!(
+            decode_request(RequestOpcode::Fetch as u16, &b).unwrap(),
+            grouped
         );
 
         let create = Request::CreateTopic {

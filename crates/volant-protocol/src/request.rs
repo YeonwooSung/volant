@@ -289,6 +289,10 @@ pub enum Request {
         max_bytes: u32,
         /// Long-poll wait; 0 = non-blocking.
         max_wait_ms: u32,
+        /// Consumer group id (v0.234). Empty = unfiltered (admin / CLI / old clients).
+        group_id: String,
+        /// Group member id (v0.234). Empty = unfiltered.
+        member_id: String,
     },
     /// Create a topic.
     CreateTopic {

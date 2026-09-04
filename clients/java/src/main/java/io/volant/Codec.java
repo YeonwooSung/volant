@@ -170,6 +170,10 @@ public final class Codec {
         public final long maxMessages;
         public final long maxBytes;
         public final long maxWaitMs;
+        /** Optional v0.234 assignment trailer. Empty = unfiltered. */
+        public final String groupId;
+        /** Optional v0.234 assignment trailer. Empty = unfiltered. */
+        public final String memberId;
 
         public FetchRequest(
                 String topic,
@@ -178,12 +182,26 @@ public final class Codec {
                 long maxMessages,
                 long maxBytes,
                 long maxWaitMs) {
+            this(topic, partition, fromOffset, maxMessages, maxBytes, maxWaitMs, "", "");
+        }
+
+        public FetchRequest(
+                String topic,
+                long partition,
+                long fromOffset,
+                long maxMessages,
+                long maxBytes,
+                long maxWaitMs,
+                String groupId,
+                String memberId) {
             this.topic = topic;
             this.partition = partition;
             this.fromOffset = fromOffset;
             this.maxMessages = maxMessages;
             this.maxBytes = maxBytes;
             this.maxWaitMs = maxWaitMs;
+            this.groupId = groupId == null ? "" : groupId;
+            this.memberId = memberId == null ? "" : memberId;
         }
     }
 
@@ -1339,12 +1357,30 @@ public final class Codec {
         w.u32(req.maxMessages);
         w.u32(req.maxBytes);
         w.u32(req.maxWaitMs);
+        String groupId = req.groupId == null ? "" : req.groupId;
+        String memberId = req.memberId == null ? "" : req.memberId;
+        if (!groupId.isEmpty() || !memberId.isEmpty()) {
+            putString(w, groupId);
+            putString(w, memberId);
+        }
         return w.finish();
     }
 
     public static FetchRequest decodeFetchRequest(byte[] payload) {
         Reader r = new Reader(payload);
-        return new FetchRequest(getString(r), r.u32(), r.u64(), r.u32(), r.u32(), r.u32());
+        String topic = getString(r);
+        long partition = r.u32();
+        long fromOffset = r.u64();
+        long maxMessages = r.u32();
+        long maxBytes = r.u32();
+        long maxWaitMs = r.u32();
+        String groupId = "";
+        String memberId = "";
+        if (r.remaining() > 0) {
+            groupId = getString(r);
+            memberId = getString(r);
+        }
+        return new FetchRequest(topic, partition, fromOffset, maxMessages, maxBytes, maxWaitMs, groupId, memberId);
     }
 
     public static byte[] encodeFetchResponse(FetchResponse resp) {

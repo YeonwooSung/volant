@@ -15,6 +15,7 @@ use crate::broker::{Broker, MembershipOverlaySnapshot, Txn2pcFanout};
 use crate::cluster::{
     reassign_on_add_enabled, reassign_on_add_rollback_enabled, AssignmentSnapshot,
 };
+use crate::group::Owns;
 
 use super::fanout::{
     complete_assignment_mutation, fanout_cluster_acl_snapshot, fanout_delete_records,
@@ -787,9 +788,38 @@ async fn handle_request(broker: &Arc<Broker>, req: Request) -> Result<Response> 
             max_messages,
             max_bytes: _,
             max_wait_ms,
+            group_id,
+            member_id,
         } => {
             let span = info_span!("fetch", topic = %topic, partition, from_offset);
             async {
+                if !group_id.is_empty() && !member_id.is_empty() {
+                    match broker
+                        .groups()
+                        .member_owns(&group_id, &member_id, &topic, partition)
+                    {
+                        Owns::UnknownMember => {
+                            return Ok(Response::Fetch {
+                                topic,
+                                partition,
+                                high_watermark: 0,
+                                error_code: ErrorCode::UnknownMemberId as u16,
+                                records: Vec::new(),
+                            });
+                        }
+                        Owns::NotAssigned => {
+                            return Ok(Response::Fetch {
+                                topic,
+                                partition,
+                                high_watermark: 0,
+                                error_code: ErrorCode::RebalanceInProgress as u16,
+                                records: Vec::new(),
+                            });
+                        }
+                        Owns::Allow => {}
+                    }
+                }
+
                 let topic_name = TopicName::new(topic.clone());
                 let pid = PartitionId(partition);
                 let from = Offset::new(from_offset);

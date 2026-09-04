@@ -1467,9 +1467,39 @@ impl Client {
 
     /// Fetch records from a partition with an explicit `max_bytes`.
     ///
-    /// Same leader-redirect behaviour as [`Self::fetch`].
+    /// Same leader-redirect behaviour as [`Self::fetch`]. Empty group
+    /// trailer (admin / CLI / old clients) — unfiltered.
     pub async fn fetch_opts(
         &self,
+        topic: &str,
+        partition: u32,
+        from: Offset,
+        max_messages: u32,
+        max_wait_ms: u32,
+        max_bytes: u32,
+    ) -> Result<FetchResult> {
+        self.fetch_opts_for(
+            "",
+            "",
+            topic,
+            partition,
+            from,
+            max_messages,
+            max_wait_ms,
+            max_bytes,
+        )
+        .await
+    }
+
+    /// Fetch with a native group+member trailer (v0.234).
+    ///
+    /// Empty `group_id` or `member_id` is unfiltered (same as
+    /// [`Self::fetch_opts`]). Both set: broker allows only if that
+    /// member currently owns the partition.
+    pub async fn fetch_opts_for(
+        &self,
+        group_id: &str,
+        member_id: &str,
         topic: &str,
         partition: u32,
         from: Offset,
@@ -1489,6 +1519,8 @@ impl Client {
                     max_messages,
                     max_bytes,
                     max_wait_ms,
+                    group_id: group_id.to_owned(),
+                    member_id: member_id.to_owned(),
                 })
                 .await?;
 
