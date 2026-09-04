@@ -1,11 +1,11 @@
 //! Kafka wire handlers: Create/Delete topics, CreatePartitions,
 //! AlterPartitionReassignments, ListPartitionReassignments,
 //! ElectLeaders, Describe/AlterUserScramCredentials,
-//! Describe/AlterClientQuotas, ListClientMetricsResources,
-//! AlterReplicaLogDirs, AssignReplicasToDirs, DescribeLogDirs,
-//! DescribeTopicPartitions, UnregisterBroker, UpdateFeatures,
-//! DescribeQuorum, AllocateProducerIds, GetTelemetrySubscriptions,
-//! configs.
+//! Describe/AlterClientQuotas, DescribeDelegationToken,
+//! ListClientMetricsResources, AlterReplicaLogDirs, AssignReplicasToDirs,
+//! DescribeLogDirs, DescribeTopicPartitions, UnregisterBroker,
+//! UpdateFeatures, DescribeQuorum, AllocateProducerIds,
+//! GetTelemetrySubscriptions, configs.
 
 use bytes::{Buf, BufMut, BytesMut};
 use volant_core::{Error, PartitionId, TopicName};
@@ -3593,6 +3593,62 @@ pub(crate) fn encode_alter_client_quotas(
         put_empty_tag_buffer(out);
     }
     put_empty_tag_buffer(out);
+}
+
+/// DescribeDelegationToken v0 (always flexible residual). Volant has
+/// no delegation-token store.
+///
+/// Official Kafka first flexible version is **2**; Volant treats v0 as
+/// flex (compact owners + tagged). Parses the owners filter (null = all)
+/// and ignores it. Response matches official field order: errorCode,
+/// tokens[], throttleTimeMs, tagged (no errorMessage). Always empty
+/// tokens. Nothing persisted. Controller is not required.
+/// ACL: Cluster DESCRIBE (disabled ACLs allow). Denied → **31**, empty
+/// tokens.
+pub(crate) fn encode_describe_delegation_token(
+    broker: &Broker,
+    src: &mut impl Buf,
+    out: &mut BytesMut,
+    principal: &str,
+) {
+    parse_describe_delegation_token_request(src);
+
+    let error = if broker.acls().is_enabled()
+        && !broker.acls().authorize(
+            Some(principal),
+            ResourceType::Cluster,
+            CLUSTER_RESOURCE,
+            AclOperation::Describe,
+        ) {
+        KafkaErrorCode::ClusterAuthorizationFailed
+    } else {
+        KafkaErrorCode::None
+    };
+
+    // Official DescribeDelegationTokenResponse.json: ErrorCode, Tokens,
+    // ThrottleTimeMs. No errorMessage. Flex tagged trailer (residual v0).
+    out.put_i16(error.as_i16());
+    put_compact_array_len(out, 0);
+    out.put_i32(0);
+    put_empty_tag_buffer(out);
+}
+
+fn parse_describe_delegation_token_request(src: &mut impl Buf) {
+    match get_compact_array_len(src) {
+        Ok(Some(n)) => {
+            for _ in 0..n {
+                if get_compact_string(src).is_err() {
+                    break;
+                }
+                if get_compact_string(src).is_err() {
+                    break;
+                }
+                let _ = skip_tag_buffer(src);
+            }
+        }
+        Ok(None) | Err(_) => {}
+    }
+    let _ = skip_tag_buffer(src);
 }
 
 /// ListClientMetricsResources v0 (always flexible). Volant has no

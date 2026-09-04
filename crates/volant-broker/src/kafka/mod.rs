@@ -20,6 +20,7 @@
 //! ElectLeaders v0–1 (preferred = elect_leader(ISR∩live); unclean refused),
 //! DescribeUserScramCredentials / AlterUserScramCredentials v0 (wraps ScramStore),
 //! DescribeClientQuotas / AlterClientQuotas v0 (no quota store; describe empty, alter 42),
+//! DescribeDelegationToken v0 (no token store; empty tokens; treat v0 as flex),
 //! ListClientMetricsResources v0 (no client-metrics store; empty resources),
 //! AlterReplicaLogDirs 0–1 (reject every move; single data_dir; v1 flexible),
 //! AssignReplicasToDirs v0 (always flexible; reject every assignment; single data_dir),
@@ -31,13 +32,15 @@
 //! AllocateProducerIds v0 (always flexible; block from next_producer_id; not KRaft),
 //! WriteTxnMarkers 0–1 (classic v0 / flex v1; replica-local COMMIT/ABORT control
 //! batches + soft `__txn_markers`; not EndTxn / not a coordinator),
-//! GetTelemetrySubscriptions v0 (always flexible; no client telemetry; empty subscription).
+//! GetTelemetrySubscriptions v0 (always flexible; no client telemetry; empty subscription),
+//! DescribeDelegationToken v0 (always flexible residual; no token store; empty tokens).
 //! See `docs/PHASE23_SPEC.md` … `docs/PHASE91_SPEC.md`, `docs/V225_SPEC.md`,
 //! `docs/V228_SPEC.md`, `docs/V233_SPEC.md`, `docs/V235_SPEC.md`,
 //! `docs/V236_SPEC.md`, `docs/V237_SPEC.md`, `docs/V241_SPEC.md`,
 //! `docs/V242_SPEC.md`, `docs/V244_SPEC.md`, `docs/V245_SPEC.md`,
 //! `docs/V246_SPEC.md`, `docs/V249_SPEC.md`, `docs/V250_SPEC.md`,
-//! `docs/V251_SPEC.md`, `docs/V252_SPEC.md`, and `docs/V253_SPEC.md`.
+//! `docs/V251_SPEC.md`, `docs/V252_SPEC.md`, `docs/V253_SPEC.md`,
+//! and `docs/V259_SPEC.md`.
 
 mod acl_api;
 mod admin_api;
@@ -290,6 +293,9 @@ pub enum ApiKey {
     SaslAuthenticate = 36,
     /// CreatePartitions.
     CreatePartitions = 37,
+    /// DescribeDelegationToken (always flexible residual; v0 only).
+    /// Official Kafka first flexible version is 2. No token store.
+    DescribeDelegationToken = 41,
     /// DeleteGroups.
     DeleteGroups = 42,
     /// ElectLeaders (classic v0; flexible v1).
@@ -379,6 +385,7 @@ impl ApiKey {
             35 => Some(Self::DescribeLogDirs),
             36 => Some(Self::SaslAuthenticate),
             37 => Some(Self::CreatePartitions),
+            41 => Some(Self::DescribeDelegationToken),
             42 => Some(Self::DeleteGroups),
             43 => Some(Self::ElectLeaders),
             44 => Some(Self::IncrementalAlterConfigs),
@@ -442,6 +449,7 @@ pub const SUPPORTED_APIS: &[(ApiKey, i16, i16)] = &[
     (ApiKey::DescribeLogDirs, 0, 1),
     (ApiKey::SaslAuthenticate, 0, 2),
     (ApiKey::CreatePartitions, 0, 3),
+    (ApiKey::DescribeDelegationToken, 0, 0),
     (ApiKey::DeleteGroups, 0, 3),
     (ApiKey::ElectLeaders, 0, 1),
     (ApiKey::IncrementalAlterConfigs, 0, 1),
@@ -631,5 +639,14 @@ mod tests {
             ApiKey::from_i16(74),
             Some(ApiKey::ListClientMetricsResources)
         );
+    }
+
+    #[test]
+    fn supported_apis_includes_describe_delegation_token_41() {
+        assert!(SUPPORTED_APIS.len() >= 57);
+        assert!(SUPPORTED_APIS.iter().any(|(k, min, max)| {
+            *k == ApiKey::DescribeDelegationToken && *min == 0 && *max == 0
+        }));
+        assert_eq!(ApiKey::from_i16(41), Some(ApiKey::DescribeDelegationToken));
     }
 }
