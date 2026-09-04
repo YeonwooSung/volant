@@ -12,9 +12,9 @@ use crate::broker::Broker;
 
 use super::codec::{
     decode_request_header, encode_response_frame, get_bytes, get_compact_bytes, get_string,
-    put_bytes, put_compact_bytes, put_compact_nullable_string,
-    put_empty_tag_buffer, put_nullable_string, put_response_header, put_response_header_v1,
-    put_string, skip_tag_buffer, try_decode_request,
+    put_bytes, put_compact_bytes, put_compact_nullable_string, put_empty_tag_buffer,
+    put_nullable_string, put_response_header, put_response_header_v1, put_string, skip_tag_buffer,
+    try_decode_request,
 };
 use super::sasl::{self, SaslMechanism, SaslState, MECHANISMS};
 use super::txn;
@@ -263,7 +263,8 @@ async fn dispatch_kafka(
                 | Some(ApiKey::AlterClientQuotas)
                 | Some(ApiKey::DescribeTopicPartitions)
                 | Some(ApiKey::UnregisterBroker)
-                | Some(ApiKey::UpdateFeatures),
+                | Some(ApiKey::UpdateFeatures)
+                | Some(ApiKey::DescribeQuorum),
             _
         )
     ) || matches!(
@@ -322,7 +323,13 @@ async fn dispatch_kafka(
             if let Err(e) = skip_tag_buffer(&mut src) {
                 debug!(error = %e, "describe cluster flexible header tag buffer");
             }
-            meta_api::encode_describe_cluster(broker, &mut src, &mut out, hdr.api_version, principal);
+            meta_api::encode_describe_cluster(
+                broker,
+                &mut src,
+                &mut out,
+                hdr.api_version,
+                principal,
+            );
         }
         Some(ApiKey::DescribeProducers) if hdr.api_version == 0 => {
             if let Err(e) = skip_tag_buffer(&mut src) {
@@ -340,7 +347,13 @@ async fn dispatch_kafka(
             if let Err(e) = skip_tag_buffer(&mut src) {
                 debug!(error = %e, "list transactions flexible header tag buffer");
             }
-            meta_api::encode_list_transactions(broker, &mut src, &mut out, hdr.api_version, principal);
+            meta_api::encode_list_transactions(
+                broker,
+                &mut src,
+                &mut out,
+                hdr.api_version,
+                principal,
+            );
         }
         Some(ApiKey::Metadata) if (0..=13).contains(&hdr.api_version) => {
             if hdr.api_version >= 9 {
@@ -393,7 +406,13 @@ async fn dispatch_kafka(
                     debug!(error = %e, "list offsets flexible header tag buffer");
                 }
             }
-            produce_fetch::encode_list_offsets(broker, &mut src, &mut out, hdr.api_version, principal);
+            produce_fetch::encode_list_offsets(
+                broker,
+                &mut src,
+                &mut out,
+                hdr.api_version,
+                principal,
+            );
         }
         Some(ApiKey::CreateTopics) if (0..=7).contains(&hdr.api_version) => {
             if hdr.api_version >= 5 {
@@ -439,13 +458,9 @@ async fn dispatch_kafka(
                 for (topic, partition, before_offset) in fanouts {
                     let b = Arc::clone(broker);
                     tokio::spawn(async move {
-                        let _ = crate::net::fanout_delete_records(
-                            &b,
-                            &topic,
-                            partition,
-                            before_offset,
-                        )
-                        .await;
+                        let _ =
+                            crate::net::fanout_delete_records(&b, &topic, partition, before_offset)
+                                .await;
                     });
                 }
             }
@@ -464,13 +479,9 @@ async fn dispatch_kafka(
                     debug!(error = %e, "create acls flexible header tag buffer");
                 }
             }
-            if let Some(gen) = acl_api::encode_create_acls(
-                broker,
-                &mut src,
-                &mut out,
-                hdr.api_version,
-                principal,
-            ) {
+            if let Some(gen) =
+                acl_api::encode_create_acls(broker, &mut src, &mut out, hdr.api_version, principal)
+            {
                 let b = Arc::clone(broker);
                 tokio::spawn(async move {
                     crate::net::fanout_cluster_acl_snapshot(&b, gen).await;
@@ -483,13 +494,9 @@ async fn dispatch_kafka(
                     debug!(error = %e, "delete acls flexible header tag buffer");
                 }
             }
-            if let Some(gen) = acl_api::encode_delete_acls(
-                broker,
-                &mut src,
-                &mut out,
-                hdr.api_version,
-                principal,
-            ) {
+            if let Some(gen) =
+                acl_api::encode_delete_acls(broker, &mut src, &mut out, hdr.api_version, principal)
+            {
                 let b = Arc::clone(broker);
                 tokio::spawn(async move {
                     crate::net::fanout_cluster_acl_snapshot(&b, gen).await;
@@ -681,7 +688,13 @@ async fn dispatch_kafka(
                     debug!(error = %e, "describe groups flexible header tag buffer");
                 }
             }
-            group_api::encode_describe_groups(broker, &mut src, &mut out, hdr.api_version, principal);
+            group_api::encode_describe_groups(
+                broker,
+                &mut src,
+                &mut out,
+                hdr.api_version,
+                principal,
+            );
         }
         Some(ApiKey::ListGroups) if (0..=5).contains(&hdr.api_version) => {
             if hdr.api_version >= 3 {
@@ -708,8 +721,14 @@ async fn dispatch_kafka(
                     debug!(error = %e, "create partitions flexible header tag buffer");
                 }
             }
-            admin_api::encode_create_partitions(broker, &mut src, &mut out, hdr.api_version, principal)
-                .await;
+            admin_api::encode_create_partitions(
+                broker,
+                &mut src,
+                &mut out,
+                hdr.api_version,
+                principal,
+            )
+            .await;
         }
         Some(ApiKey::ElectLeaders) if (0..=1).contains(&hdr.api_version) => {
             if hdr.api_version >= 1 {
@@ -777,6 +796,18 @@ async fn dispatch_kafka(
                 principal,
             );
         }
+        Some(ApiKey::DescribeQuorum) if (0..=1).contains(&hdr.api_version) => {
+            if let Err(e) = skip_tag_buffer(&mut src) {
+                debug!(error = %e, "describe quorum flexible header tag buffer");
+            }
+            admin_api::encode_describe_quorum(
+                broker,
+                &mut src,
+                &mut out,
+                hdr.api_version,
+                principal,
+            );
+        }
         Some(ApiKey::DescribeLogDirs) if (0..=1).contains(&hdr.api_version) => {
             if hdr.api_version >= 1 {
                 if let Err(e) = skip_tag_buffer(&mut src) {
@@ -797,7 +828,13 @@ async fn dispatch_kafka(
                     debug!(error = %e, "describe configs flexible header tag buffer");
                 }
             }
-            admin_api::encode_describe_configs(broker, &mut src, &mut out, hdr.api_version, principal);
+            admin_api::encode_describe_configs(
+                broker,
+                &mut src,
+                &mut out,
+                hdr.api_version,
+                principal,
+            );
         }
         Some(ApiKey::AlterConfigs) if (0..=2).contains(&hdr.api_version) => {
             if hdr.api_version >= 2 {
@@ -859,7 +896,13 @@ async fn dispatch_kafka(
                     debug!(error = %e, "offset for leader epoch flexible header tag buffer");
                 }
             }
-            produce_fetch::encode_offset_for_leader_epoch(broker, &mut src, &mut out, hdr.api_version, principal);
+            produce_fetch::encode_offset_for_leader_epoch(
+                broker,
+                &mut src,
+                &mut out,
+                hdr.api_version,
+                principal,
+            );
         }
         Some(_) => {
             // Supported API but wrong version — use a generic error body when possible.
@@ -989,4 +1032,3 @@ fn encode_sasl_authenticate(
         put_empty_tag_buffer(out);
     }
 }
-

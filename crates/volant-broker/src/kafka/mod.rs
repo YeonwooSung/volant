@@ -23,11 +23,12 @@
 //! DescribeLogDirs 0–1 (local logs only; v1 flexible),
 //! DescribeTopicPartitions v0 (wraps Metadata; key 75),
 //! UnregisterBroker v0 (wraps native remove_broker; key 64; not KRaft incarnation),
-//! UpdateFeatures v0–1 (always flexible; reject every feature; empty ApiVersions features).
+//! UpdateFeatures v0–1 (always flexible; reject every feature; empty ApiVersions features),
+//! DescribeQuorum v0–1 (always flexible; wraps openraft leader/term/voters; not KRaft).
 //! See `docs/PHASE23_SPEC.md` … `docs/PHASE91_SPEC.md`, `docs/V225_SPEC.md`,
 //! `docs/V228_SPEC.md`, `docs/V233_SPEC.md`, `docs/V235_SPEC.md`,
 //! `docs/V236_SPEC.md`, `docs/V237_SPEC.md`, `docs/V241_SPEC.md`,
-//! `docs/V242_SPEC.md`, and `docs/V244_SPEC.md`.
+//! `docs/V242_SPEC.md`, `docs/V244_SPEC.md`, and `docs/V245_SPEC.md`.
 
 mod acl_api;
 mod admin_api;
@@ -294,6 +295,9 @@ pub enum ApiKey {
     DescribeUserScramCredentials = 50,
     /// AlterUserScramCredentials (always flexible; v0 only).
     AlterUserScramCredentials = 51,
+    /// DescribeQuorum (always flexible; v0–1). Wraps openraft
+    /// leader/term/voters. Not KRaft `__cluster_metadata`.
+    DescribeQuorum = 55,
     /// UpdateFeatures (always flexible; v0–1). Rejects every feature.
     UpdateFeatures = 57,
     /// DescribeCluster (always flexible).
@@ -356,6 +360,7 @@ impl ApiKey {
             49 => Some(Self::AlterClientQuotas),
             50 => Some(Self::DescribeUserScramCredentials),
             51 => Some(Self::AlterUserScramCredentials),
+            55 => Some(Self::DescribeQuorum),
             57 => Some(Self::UpdateFeatures),
             60 => Some(Self::DescribeCluster),
             61 => Some(Self::DescribeProducers),
@@ -412,6 +417,7 @@ pub const SUPPORTED_APIS: &[(ApiKey, i16, i16)] = &[
     (ApiKey::AlterClientQuotas, 0, 0),
     (ApiKey::DescribeUserScramCredentials, 0, 0),
     (ApiKey::AlterUserScramCredentials, 0, 0),
+    (ApiKey::DescribeQuorum, 0, 1),
     (ApiKey::UpdateFeatures, 0, 1),
     (ApiKey::DescribeCluster, 0, 2),
     (ApiKey::DescribeProducers, 0, 0),
@@ -517,5 +523,14 @@ mod tests {
             .iter()
             .any(|(k, min, max)| { *k == ApiKey::UnregisterBroker && *min == 0 && *max == 0 }));
         assert_eq!(ApiKey::from_i16(64), Some(ApiKey::UnregisterBroker));
+    }
+
+    #[test]
+    fn supported_apis_includes_describe_quorum_55() {
+        assert!(SUPPORTED_APIS.len() >= 50);
+        assert!(SUPPORTED_APIS
+            .iter()
+            .any(|(k, min, max)| *k == ApiKey::DescribeQuorum && *min == 0 && *max == 1));
+        assert_eq!(ApiKey::from_i16(55), Some(ApiKey::DescribeQuorum));
     }
 }
