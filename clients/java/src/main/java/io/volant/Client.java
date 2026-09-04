@@ -2190,6 +2190,15 @@ public final class Client implements AutoCloseable {
     }
 
     /**
+     * Fetch one committed offset (one OffsetEntry). Same as
+     * {@link #fetchOffsets(String, List)} with a singleton list.
+     * Error 14 / transient retry inherit from {@code fetchOffsets}.
+     */
+    public List<OffsetFetchEntry> fetchOffset(String group, String topic, int partition) {
+        return fetchOffsets(group, Collections.singletonList(new Codec.OffsetEntry(topic, partition)));
+    }
+
+    /**
      * Join a consumer group. First join sends empty {@code memberId}
      * (broker assigns one). {@code sessionTimeoutMs} 0 defaults to 10000.
      * Sends empty {@code groupInstanceId} (dynamic membership).

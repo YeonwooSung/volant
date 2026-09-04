@@ -2374,6 +2374,13 @@ func (c *Client) FetchOffsets(group string, entries []codec.OffsetEntry) ([]code
 	}
 }
 
+// FetchOffset fetches one committed offset (one OffsetEntry).
+// Same as FetchOffsets with a one-element list. Error 14 and
+// transient retry inherit from FetchOffsets.
+func (c *Client) FetchOffset(group, topic string, partition uint32) ([]codec.OffsetFetchEntry, error) {
+	return c.FetchOffsets(group, []codec.OffsetEntry{{Topic: topic, Partition: partition}})
+}
+
 // JoinGroup joins a consumer group. First join sends empty member_id
 // (broker assigns one). sessionTimeoutMs 0 defaults to 10000.
 // Sends empty group_instance_id (dynamic membership).

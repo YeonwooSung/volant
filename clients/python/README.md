@@ -38,6 +38,7 @@ offs = c.offset_fetch(group="g", topic="t")  # [(partition, offset), ...]
 all_offs = c.offset_fetch_all("g")  # v0.118; [(topic, partition, offset), ...]
 topic_offs = c.offset_fetch_entries("g", "t")  # v0.148; [OffsetFetchEntry, ...] with metadata
 rows = c.fetch_offsets("g", [("t", 0)])  # v0.122; empty/None = all
+rows = c.fetch_offset("g", "t", 0)  # v0.179; one OffsetEntry
 deleted = c.delete_offsets("g", [("t", 0)])
 deleted = c.delete_offset("g", "t", 0)  # v0.164; one OffsetEntry
 bounds = c.list_offsets("t")  # [OffsetListing(partition, earliest, latest), ...]
@@ -138,6 +139,8 @@ with `offset`, `key`, `value`). `metadata()` returns brokers + topics.
 overridden). `offset_fetch` returns committed `(partition, offset)` pairs
 for the given topic. `offset_fetch_entries` returns the same topic
 filter as `OffsetFetchEntry` rows including metadata.
+`fetch_offset(group, topic, partition)` fetches one committed offset
+(one OffsetEntry); same as `fetch_offsets(group, [(topic, partition)])`.
 `delete_offset(group, topic, partition)` deletes one committed offset
 (one OffsetEntry); same as `delete_offsets(group, [(topic, partition)])`.
 `alter_config(topic, key, value)` alters one topic config key; same as
