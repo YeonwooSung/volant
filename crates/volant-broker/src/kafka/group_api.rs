@@ -2539,6 +2539,110 @@ fn write_initialize_share_group_state(
     put_empty_tag_buffer(out);
 }
 
+/// ReadShareGroupState v0 (key 84). Always flexible.
+///
+/// Official `ReadShareGroupStateRequest.json` / `Response.json`.
+/// Not KIP-932: parse and reject per-partition **42** `INVALID_REQUEST`
+/// (`not KIP-932 share state`). Does not persist share state and does
+/// not wrap OffsetFetch / OffsetCommit / InitializeShareGroupState.
+/// Official response has no throttle and no top-level error — echo
+/// TopicId + Partition with the per-partition code, StateEpoch **0**,
+/// StartOffset **-1**, empty `StateBatches[]`. Unparseable body →
+/// empty `Results[]`.
+pub(crate) fn encode_read_share_group_state(
+    broker: &Broker,
+    src: &mut impl Buf,
+    out: &mut BytesMut,
+    principal: &str,
+) {
+    let (group_id, topics) = parse_read_share_group_state_request(src);
+
+    let denied = broker.acls().is_enabled()
+        && !broker.acls().authorize(
+            Some(principal),
+            ResourceType::Group,
+            &group_id,
+            AclOperation::Read,
+        );
+
+    write_read_share_group_state(out, &topics, denied);
+}
+
+fn parse_read_share_group_state_request(
+    src: &mut impl Buf,
+) -> (String, Vec<([u8; 16], Vec<i32>)>) {
+    // Official v0 (flex, `ReadShareGroupStateRequest.json`):
+    // GroupId compact string, Topics[] { TopicId uuid, Partitions[] {
+    // Partition i32, LeaderEpoch i32, tagged }, tagged }, tagged.
+    // Echo TopicId + Partition; discard LeaderEpoch.
+    let group_id = get_compact_string(src).unwrap_or_default();
+    let mut topics = Vec::new();
+    match get_compact_array_len(src) {
+        Ok(Some(n)) => {
+            for _ in 0..n {
+                let Ok(topic_id) = get_uuid(src) else {
+                    break;
+                };
+                let mut parts = Vec::new();
+                match get_compact_array_len(src) {
+                    Ok(Some(pn)) => {
+                        for _ in 0..pn {
+                            if src.remaining() < 4 {
+                                break;
+                            }
+                            let partition = src.get_i32();
+                            if src.remaining() >= 4 {
+                                let _leader_epoch = src.get_i32();
+                            }
+                            let _ = skip_tag_buffer(src);
+                            parts.push(partition);
+                        }
+                    }
+                    Ok(None) | Err(_) => {}
+                }
+                let _ = skip_tag_buffer(src);
+                topics.push((topic_id, parts));
+            }
+        }
+        Ok(None) | Err(_) => {}
+    }
+    let _ = skip_tag_buffer(src);
+    (group_id, topics)
+}
+
+fn write_read_share_group_state(
+    out: &mut BytesMut,
+    topics: &[([u8; 16], Vec<i32>)],
+    denied: bool,
+) {
+    // Official ReadShareGroupStateResponse.json v0:
+    // Results[] { TopicId uuid, Partitions[] { Partition i32,
+    // ErrorCode i16, ErrorMessage compact nullable string,
+    // StateEpoch i32, StartOffset i64, StateBatches[] empty, tagged },
+    // tagged }, tagged. No throttleTimeMs. No top-level error.
+    put_compact_array_len(out, topics.len());
+    for (topic_id, parts) in topics {
+        put_uuid(out, topic_id);
+        put_compact_array_len(out, parts.len());
+        for partition in parts {
+            out.put_i32(*partition);
+            if denied {
+                out.put_i16(KafkaErrorCode::GroupAuthorizationFailed.as_i16());
+                put_compact_nullable_string(out, None);
+            } else {
+                out.put_i16(KafkaErrorCode::InvalidRequest.as_i16());
+                put_compact_nullable_string(out, Some("not KIP-932 share state"));
+            }
+            out.put_i32(0); // StateEpoch
+            out.put_i64(-1); // StartOffset (not initialized)
+            put_compact_array_len(out, 0); // StateBatches[]
+            put_empty_tag_buffer(out);
+        }
+        put_empty_tag_buffer(out);
+    }
+    put_empty_tag_buffer(out);
+}
+
 /// ConsumerGroupDescribe v0 (key 69). Always flexible.
 ///
 /// Official `ConsumerGroupDescribeRequest.json` / `Response.json`. Wraps the
@@ -3780,6 +3884,143 @@ mod tests {
         assert!(broker
             .groups()
             .fetch_offsets("sg-v279", &[])
+            .unwrap()
+            .entries
+            .is_empty());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    fn rsgs_v0_body(group: &str, topic_id: &[u8; 16], partition: i32) -> BytesMut {
+        let mut body = BytesMut::new();
+        put_compact_string(&mut body, group);
+        put_compact_array_len(&mut body, 1);
+        put_uuid(&mut body, topic_id);
+        put_compact_array_len(&mut body, 1);
+        body.put_i32(partition);
+        body.put_i32(3); // LeaderEpoch discarded
+        put_empty_tag_buffer(&mut body);
+        put_empty_tag_buffer(&mut body);
+        put_empty_tag_buffer(&mut body);
+        body
+    }
+
+    fn read_rsgs(
+        src: &mut impl Buf,
+    ) -> Vec<([u8; 16], Vec<(i32, i16, Option<String>, i32, i64, usize)>)> {
+        let n = get_compact_array_len(src).unwrap().unwrap_or(0);
+        let mut results = Vec::new();
+        for _ in 0..n {
+            let topic_id = get_uuid(src).unwrap();
+            let pn = get_compact_array_len(src).unwrap().unwrap_or(0);
+            let mut parts = Vec::new();
+            for _ in 0..pn {
+                let partition = src.get_i32();
+                let error = src.get_i16();
+                let err_msg = get_compact_nullable_string(src).unwrap();
+                let state_epoch = src.get_i32();
+                let start_offset = src.get_i64();
+                let batches = get_compact_array_len(src).unwrap().unwrap_or(0);
+                skip_tag_buffer(src).unwrap();
+                parts.push((
+                    partition,
+                    error,
+                    err_msg,
+                    state_epoch,
+                    start_offset,
+                    batches,
+                ));
+            }
+            skip_tag_buffer(src).unwrap();
+            results.push((topic_id, parts));
+        }
+        skip_tag_buffer(src).unwrap();
+        assert_eq!(src.remaining(), 0);
+        results
+    }
+
+    #[test]
+    fn kafka_read_share_group_state_rejects_42() {
+        let dir = temp_dir("rsgs-ok");
+        let broker = Broker::new(StorageConfig {
+            data_dir: dir.clone(),
+            ..StorageConfig::default()
+        });
+        let topic_id = [0x44u8; 16];
+        let mut src = rsgs_v0_body("sg-v280", &topic_id, 7);
+        let mut out = BytesMut::new();
+        encode_read_share_group_state(&broker, &mut src, &mut out, "kafka-anonymous");
+        let mut resp = out.freeze();
+        let results = read_rsgs(&mut resp);
+        assert_eq!(results.len(), 1);
+        assert_eq!(results[0].0, topic_id);
+        assert_eq!(results[0].1.len(), 1);
+        assert_eq!(results[0].1[0].0, 7);
+        assert_eq!(results[0].1[0].1, KafkaErrorCode::InvalidRequest.as_i16());
+        assert_eq!(
+            results[0].1[0].2.as_deref(),
+            Some("not KIP-932 share state")
+        );
+        assert_eq!(results[0].1[0].3, 0);
+        assert_eq!(results[0].1[0].4, -1);
+        assert_eq!(results[0].1[0].5, 0);
+        assert!(broker.groups().describe_group("sg-v280").is_none());
+        assert!(broker
+            .groups()
+            .fetch_offsets("sg-v280", &[])
+            .unwrap()
+            .entries
+            .is_empty());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn kafka_read_share_group_state_truncated_is_empty_results() {
+        let dir = temp_dir("rsgs-trunc");
+        let broker = Broker::new(StorageConfig {
+            data_dir: dir.clone(),
+            ..StorageConfig::default()
+        });
+        let mut src = BytesMut::new();
+        let mut out = BytesMut::new();
+        encode_read_share_group_state(&broker, &mut src, &mut out, "kafka-anonymous");
+        let mut resp = out.freeze();
+        let results = read_rsgs(&mut resp);
+        assert!(results.is_empty());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn kafka_read_share_group_state_acl_deny_is_30() {
+        let dir = temp_dir("rsgs-acl");
+        let broker = Broker::new(StorageConfig {
+            data_dir: dir.clone(),
+            ..StorageConfig::default()
+        });
+        broker
+            .configure_acls(true, None, vec![], "token".into())
+            .unwrap();
+
+        let topic_id = [0x55u8; 16];
+        let mut src = rsgs_v0_body("sg-v280", &topic_id, 1);
+        let mut out = BytesMut::new();
+        encode_read_share_group_state(&broker, &mut src, &mut out, "kafka-anonymous");
+        let mut resp = out.freeze();
+        let results = read_rsgs(&mut resp);
+        assert_eq!(results.len(), 1);
+        assert_eq!(results[0].0, topic_id);
+        assert_eq!(results[0].1.len(), 1);
+        assert_eq!(results[0].1[0].0, 1);
+        assert_eq!(
+            results[0].1[0].1,
+            KafkaErrorCode::GroupAuthorizationFailed.as_i16()
+        );
+        assert_eq!(results[0].1[0].2, None);
+        assert_eq!(results[0].1[0].3, 0);
+        assert_eq!(results[0].1[0].4, -1);
+        assert_eq!(results[0].1[0].5, 0);
+        assert!(broker
+            .groups()
+            .fetch_offsets("sg-v280", &[])
             .unwrap()
             .entries
             .is_empty());
