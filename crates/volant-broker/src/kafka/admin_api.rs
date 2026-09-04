@@ -2,14 +2,14 @@
 //! AlterPartitionReassignments, ListPartitionReassignments,
 //! ElectLeaders, Describe/AlterUserScramCredentials,
 //! Describe/AlterClientQuotas, DescribeLogDirs,
-//! DescribeTopicPartitions, configs.
+//! DescribeTopicPartitions, UnregisterBroker, configs.
 
 use bytes::{Buf, BufMut, BytesMut};
 use volant_core::{Error, TopicName};
 
 use crate::acl::{AclOperation, ResourceType, CLUSTER_RESOURCE};
 use crate::broker::{Broker, LocalLogDirFilter, LocalLogDirTopic};
-use crate::net::{complete_assignment_mutation, snapshot_if_must_wait};
+use crate::net::{complete_assignment_mutation, fanout_membership_put, snapshot_if_must_wait};
 
 use crate::scram::ScramHash;
 
@@ -1106,6 +1106,102 @@ fn topic_assignment_partitions(
 ) -> Option<Vec<crate::broker::PartitionMetadata>> {
     let snap = broker.metadata(Some(&[TopicName::new(name)]));
     snap.topics.into_iter().next().map(|t| t.partitions)
+}
+
+/// UnregisterBroker v0 (always flexible). Wraps native `remove_broker`
+/// (same invert as AddBroker / v0.217). Not Kafka KRaft incarnation.
+/// TimeoutMs is parsed when present before tags and ignored.
+pub(crate) async fn encode_unregister_broker(
+    broker: &Broker,
+    src: &mut impl Buf,
+    out: &mut BytesMut,
+    principal: &str,
+) {
+    let write = |out: &mut BytesMut, code: KafkaErrorCode, msg: Option<&str>| {
+        out.put_i32(0); // throttle
+        out.put_i16(code.as_i16());
+        put_compact_nullable_string(out, msg);
+        put_empty_tag_buffer(out);
+    };
+
+    if src.remaining() < 4 {
+        write(
+            out,
+            KafkaErrorCode::InvalidRequest,
+            Some("truncated BrokerId"),
+        );
+        return;
+    }
+    let broker_id = src.get_i32();
+    // Official v0 is BrokerId + tags. Some versions send TimeoutMs before tags.
+    if src.remaining() >= 5 {
+        let _timeout_ms = src.get_i32();
+    }
+    let _ = skip_tag_buffer(src);
+
+    if broker.acls().is_enabled()
+        && !broker.acls().authorize(
+            Some(principal),
+            ResourceType::Cluster,
+            CLUSTER_RESOURCE,
+            AclOperation::Alter,
+        )
+    {
+        write(
+            out,
+            KafkaErrorCode::ClusterAuthorizationFailed,
+            Some("cluster authorization failed"),
+        );
+        return;
+    }
+
+    if broker.cluster_config().is_none() {
+        write(
+            out,
+            KafkaErrorCode::InvalidRequest,
+            Some("unregister requires cluster"),
+        );
+        return;
+    }
+
+    if !broker.is_controller() {
+        let msg = format!("not controller; controller_id={}", broker.controller_id());
+        write(out, KafkaErrorCode::NotController, Some(&msg));
+        return;
+    }
+
+    if broker_id < 0 {
+        write(
+            out,
+            KafkaErrorCode::InvalidRequest,
+            Some("invalid broker id"),
+        );
+        return;
+    }
+
+    match broker.remove_broker(broker_id as u32) {
+        Ok(_) => {
+            fanout_membership_put(broker).await;
+            write(out, KafkaErrorCode::None, None);
+        }
+        Err(Error::InvalidArgument(msg)) if msg.contains("requires cluster") => {
+            write(
+                out,
+                KafkaErrorCode::InvalidRequest,
+                Some("unregister requires cluster"),
+            );
+        }
+        Err(Error::InvalidArgument(msg)) if msg.starts_with("not controller") => {
+            write(out, KafkaErrorCode::NotController, Some(&msg));
+        }
+        Err(Error::InvalidArgument(msg)) => {
+            write(out, KafkaErrorCode::InvalidRequest, Some(&msg));
+        }
+        Err(Error::Protocol(msg)) if msg.contains("not enough replicas") => {
+            write(out, KafkaErrorCode::NotEnoughReplicas, Some(&msg));
+        }
+        Err(e) => write(out, KafkaErrorCode::Unknown, Some(&e.to_string())),
+    }
 }
 
 fn list_partition_indexes(
@@ -3413,6 +3509,110 @@ mod tests {
         let asg = broker.clone_live_assignment().unwrap();
         assert_eq!(asg.generation, before.generation);
         assert_eq!(asg.topics["events"].partitions[&0].leader, leader_before);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    fn cluster_n2(dir: PathBuf, self_id: u32) -> Broker {
+        pin_openraft_off();
+        let cfg = ClusterConfig {
+            default_replication_factor: 2,
+            min_insync_replicas: 1,
+            session_timeout_ms: 2000,
+            replica_fetch_max_wait_ms: 50,
+            replica_fetch_max_bytes: 1_048_576,
+            replica_lag_max_messages: 10_000,
+            replica_lag_max_ms: 30_000,
+            brokers: vec![
+                BrokerEndpoint {
+                    id: 1,
+                    host: "127.0.0.1".into(),
+                    port: 19401,
+                    rack: None,
+                },
+                BrokerEndpoint {
+                    id: 2,
+                    host: "127.0.0.1".into(),
+                    port: 19402,
+                    rack: None,
+                },
+            ],
+        };
+        Broker::with_cluster(
+            StorageConfig {
+                data_dir: dir,
+                ..StorageConfig::default()
+            },
+            self_id,
+            cfg,
+        )
+        .unwrap()
+    }
+
+    fn unregister_body(broker_id: i32) -> BytesMut {
+        let mut body = BytesMut::new();
+        body.put_i32(broker_id);
+        put_empty_tag_buffer(&mut body);
+        body
+    }
+
+    fn overlay_ids(b: &Broker) -> Vec<u32> {
+        b.list_membership().brokers.iter().map(|x| x.id).collect()
+    }
+
+    #[tokio::test]
+    async fn kafka_unregister_broker_extra_id() {
+        let dir = temp_dir("unreg-ok");
+        let broker = cluster_n2(dir.clone(), 1);
+        broker
+            .add_broker(3, "127.0.0.1".into(), 19403, None)
+            .unwrap();
+        assert!(overlay_ids(&broker).contains(&3));
+
+        let mut src = unregister_body(3);
+        let mut out = BytesMut::new();
+        encode_unregister_broker(&broker, &mut src, &mut out, "kafka-anonymous").await;
+        let mut resp = out.freeze();
+        assert_eq!(resp.get_i32(), 0);
+        assert_eq!(resp.get_i16(), 0);
+        assert_eq!(get_compact_nullable_string(&mut resp).unwrap(), None);
+
+        assert!(!overlay_ids(&broker).contains(&3));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[tokio::test]
+    async fn kafka_unregister_broker_not_controller_is_41() {
+        let dir = temp_dir("unreg-nc");
+        let broker = cluster_n2(dir.clone(), 2);
+        assert!(!broker.is_controller());
+
+        let mut src = unregister_body(1);
+        let mut out = BytesMut::new();
+        encode_unregister_broker(&broker, &mut src, &mut out, "kafka-anonymous").await;
+        let mut resp = out.freeze();
+        assert_eq!(resp.get_i32(), 0);
+        assert_eq!(resp.get_i16(), KafkaErrorCode::NotController.as_i16());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[tokio::test]
+    async fn kafka_unregister_broker_no_cluster_is_42() {
+        let dir = temp_dir("unreg-single");
+        let broker = Broker::new(StorageConfig {
+            data_dir: dir.clone(),
+            ..StorageConfig::default()
+        });
+
+        let mut src = unregister_body(2);
+        let mut out = BytesMut::new();
+        encode_unregister_broker(&broker, &mut src, &mut out, "kafka-anonymous").await;
+        let mut resp = out.freeze();
+        assert_eq!(resp.get_i32(), 0);
+        assert_eq!(resp.get_i16(), KafkaErrorCode::InvalidRequest.as_i16());
+        assert_eq!(
+            get_compact_nullable_string(&mut resp).unwrap().as_deref(),
+            Some("unregister requires cluster")
+        );
         let _ = std::fs::remove_dir_all(&dir);
     }
 }

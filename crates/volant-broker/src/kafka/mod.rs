@@ -21,10 +21,12 @@
 //! DescribeUserScramCredentials / AlterUserScramCredentials v0 (wraps ScramStore),
 //! DescribeClientQuotas / AlterClientQuotas v0 (no quota store; describe empty, alter 42),
 //! DescribeLogDirs 0–1 (local logs only; v1 flexible),
-//! DescribeTopicPartitions v0 (wraps Metadata; key 75).
+//! DescribeTopicPartitions v0 (wraps Metadata; key 75),
+//! UnregisterBroker v0 (wraps native remove_broker; key 64; not KRaft incarnation).
 //! See `docs/PHASE23_SPEC.md` … `docs/PHASE91_SPEC.md`, `docs/V225_SPEC.md`,
 //! `docs/V228_SPEC.md`, `docs/V233_SPEC.md`, `docs/V235_SPEC.md`,
-//! `docs/V236_SPEC.md`, `docs/V237_SPEC.md`, and `docs/V241_SPEC.md`.
+//! `docs/V236_SPEC.md`, `docs/V237_SPEC.md`, `docs/V241_SPEC.md`,
+//! and `docs/V242_SPEC.md`.
 
 mod acl_api;
 mod admin_api;
@@ -289,6 +291,9 @@ pub enum ApiKey {
     DescribeCluster = 60,
     /// DescribeProducers (always flexible).
     DescribeProducers = 61,
+    /// UnregisterBroker (always flexible; v0 only). Wraps native
+    /// `remove_broker`. Not Kafka KRaft incarnation / DirectoryId.
+    UnregisterBroker = 64,
     /// DescribeTransactions (always flexible).
     DescribeTransactions = 65,
     /// ListTransactions (always flexible).
@@ -344,6 +349,7 @@ impl ApiKey {
             51 => Some(Self::AlterUserScramCredentials),
             60 => Some(Self::DescribeCluster),
             61 => Some(Self::DescribeProducers),
+            64 => Some(Self::UnregisterBroker),
             65 => Some(Self::DescribeTransactions),
             66 => Some(Self::ListTransactions),
             75 => Some(Self::DescribeTopicPartitions),
@@ -398,6 +404,7 @@ pub const SUPPORTED_APIS: &[(ApiKey, i16, i16)] = &[
     (ApiKey::AlterUserScramCredentials, 0, 0),
     (ApiKey::DescribeCluster, 0, 2),
     (ApiKey::DescribeProducers, 0, 0),
+    (ApiKey::UnregisterBroker, 0, 0),
     (ApiKey::DescribeTransactions, 0, 0),
     (ApiKey::ListTransactions, 0, 2),
     (ApiKey::DescribeTopicPartitions, 0, 0),
@@ -479,5 +486,14 @@ mod tests {
         }));
         assert_eq!(ApiKey::from_i16(48), Some(ApiKey::DescribeClientQuotas));
         assert_eq!(ApiKey::from_i16(49), Some(ApiKey::AlterClientQuotas));
+    }
+
+    #[test]
+    fn supported_apis_includes_unregister_broker_64() {
+        assert!(SUPPORTED_APIS.len() >= 46);
+        assert!(SUPPORTED_APIS.iter().any(|(k, min, max)| {
+            *k == ApiKey::UnregisterBroker && *min == 0 && *max == 0
+        }));
+        assert_eq!(ApiKey::from_i16(64), Some(ApiKey::UnregisterBroker));
     }
 }
