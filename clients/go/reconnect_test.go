@@ -37,6 +37,32 @@ func TestAddrNilClient(t *testing.T) {
 	}
 }
 
+func TestMaxRedirectsGetter(t *testing.T) {
+	addr, _, stop := serveAuth(t, 0, true)
+	defer stop()
+
+	c, err := volant.DialTimeout(addr, 5*time.Second)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer c.Close()
+	if got := c.MaxRedirects(); got != 1 {
+		t.Fatalf("MaxRedirects() after DialTimeout = %d want 1", got)
+	}
+	c.SetMaxRedirects(0)
+	if got := c.MaxRedirects(); got != 0 {
+		t.Fatalf("MaxRedirects() after SetMaxRedirects(0) = %d want 0", got)
+	}
+	c.SetMaxRedirects(3)
+	if got := c.MaxRedirects(); got != 3 {
+		t.Fatalf("MaxRedirects() after SetMaxRedirects(3) = %d want 3", got)
+	}
+	c.SetMaxRedirects(-1)
+	if got := c.MaxRedirects(); got != 0 {
+		t.Fatalf("MaxRedirects() after SetMaxRedirects(-1) = %d want 0", got)
+	}
+}
+
 func TestReconnectSecondListenerMetadata(t *testing.T) {
 	addr1, got1, stop1 := serveAuth(t, 0, true)
 	defer stop1()

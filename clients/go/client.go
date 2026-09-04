@@ -321,6 +321,15 @@ func (c *Client) SetMaxRedirects(n int) {
 	c.maxRedirects = n
 }
 
+// MaxRedirects returns the NotLeader/NotController redirect budget
+// (default 1; 0 = no redirect).
+func (c *Client) MaxRedirects() int {
+	if c == nil {
+		return 0
+	}
+	return c.maxRedirects
+}
+
 // SetMaxRetries sets extra Produce/Fetch/Heartbeat/SCRAM attempts after
 // the first on transient broker/transport errors. Default is 0 (no extra
 // attempts). Negative values are treated as 0. Error 13 stays on the
