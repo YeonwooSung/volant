@@ -2,10 +2,11 @@
 //! AlterPartitionReassignments, ListPartitionReassignments,
 //! ElectLeaders, Describe/AlterUserScramCredentials,
 //! Describe/AlterClientQuotas, DescribeLogDirs,
-//! DescribeTopicPartitions, UnregisterBroker, UpdateFeatures, configs.
+//! DescribeTopicPartitions, UnregisterBroker, UpdateFeatures,
+//! DescribeQuorum, configs.
 
 use bytes::{Buf, BufMut, BytesMut};
-use volant_core::{Error, TopicName};
+use volant_core::{Error, PartitionId, TopicName};
 
 use crate::acl::{AclOperation, ResourceType, CLUSTER_RESOURCE};
 use crate::broker::{Broker, LocalLogDirFilter, LocalLogDirTopic};
@@ -2855,6 +2856,142 @@ pub(crate) fn encode_update_features(
     put_empty_tag_buffer(out);
 }
 
+/// DescribeQuorum v0–1 (always flexible). Wraps openraft leader/term/voters.
+///
+/// Not KRaft `__cluster_metadata` (no invented metadata topic). Per-replica
+/// `lastFetch` / `lastCaughtUp` are **-1**. ReplicaDirectoryId is v2-only
+/// and is not advertised.
+///
+/// Empty request `topics` → one synthetic cluster partition **0** (empty
+/// name) using `openraft_voter_ids()` when raft is started. Flag off /
+/// raft not started: top-level **0**, empty topics. Cluster + not
+/// controller: **41**. ACL: Cluster **DESCRIBE**.
+pub(crate) fn encode_describe_quorum(
+    broker: &Broker,
+    src: &mut impl Buf,
+    out: &mut BytesMut,
+    version: i16,
+    principal: &str,
+) {
+    struct TopicReq {
+        name: String,
+        partitions: Vec<i32>,
+    }
+
+    let mut topics = Vec::new();
+    match get_compact_array_len(src) {
+        Ok(Some(n)) => {
+            for _ in 0..n {
+                let name = match get_compact_string(src) {
+                    Ok(s) => s,
+                    Err(_) => break,
+                };
+                let mut partitions = Vec::new();
+                match get_compact_array_len(src) {
+                    Ok(Some(pc)) => {
+                        for _ in 0..pc {
+                            if src.remaining() < 4 {
+                                break;
+                            }
+                            partitions.push(src.get_i32());
+                            let _ = skip_tag_buffer(src);
+                        }
+                    }
+                    Ok(None) | Err(_) => {}
+                }
+                let _ = skip_tag_buffer(src);
+                topics.push(TopicReq { name, partitions });
+            }
+        }
+        Ok(None) | Err(_) => {}
+    }
+    let _ = skip_tag_buffer(src);
+
+    let write_empty = |out: &mut BytesMut, code: KafkaErrorCode| {
+        out.put_i16(code.as_i16());
+        put_compact_array_len(out, 0);
+        put_empty_tag_buffer(out);
+    };
+
+    if broker.cluster_config().is_some() && !broker.is_controller() {
+        write_empty(out, KafkaErrorCode::NotController);
+        return;
+    }
+
+    if broker.acls().is_enabled()
+        && !broker.acls().authorize(
+            Some(principal),
+            ResourceType::Cluster,
+            CLUSTER_RESOURCE,
+            AclOperation::Describe,
+        )
+    {
+        write_empty(out, KafkaErrorCode::ClusterAuthorizationFailed);
+        return;
+    }
+
+    // Single-node / overlay-only / raft not started: honest empty + 0.
+    if !broker.openraft_started() {
+        write_empty(out, KafkaErrorCode::None);
+        return;
+    }
+
+    let leader = broker
+        .openraft_leader_id()
+        .map(|id| id as i32)
+        .unwrap_or(-1);
+    let epoch = i32::try_from(broker.openraft_term()).unwrap_or(i32::MAX);
+    let voters = broker.openraft_voter_ids();
+    let local_id = broker.node_id();
+
+    let report: Vec<(String, Vec<i32>)> = if topics.is_empty() {
+        vec![(String::new(), vec![0])]
+    } else {
+        topics.into_iter().map(|t| (t.name, t.partitions)).collect()
+    };
+
+    out.put_i16(KafkaErrorCode::None.as_i16());
+    put_compact_array_len(out, report.len());
+    for (name, parts) in &report {
+        put_compact_string(out, name);
+        put_compact_array_len(out, parts.len());
+        for &p in parts {
+            let (hwm, local_leo) = local_quorum_offsets(broker, name, p);
+            out.put_i32(p);
+            out.put_i16(0); // partition error
+            out.put_i32(leader);
+            out.put_i32(epoch);
+            out.put_i64(hwm);
+            put_compact_array_len(out, voters.len());
+            for &vid in &voters {
+                out.put_i32(vid as i32);
+                let leo = if vid == local_id { local_leo } else { 0 };
+                out.put_i64(leo);
+                if version >= 1 {
+                    out.put_i64(-1); // lastFetchTimestamp
+                    out.put_i64(-1); // lastCaughtUpTimestamp
+                }
+                put_empty_tag_buffer(out);
+            }
+            put_compact_array_len(out, 0); // observers
+            put_empty_tag_buffer(out);
+        }
+        put_empty_tag_buffer(out);
+    }
+    put_empty_tag_buffer(out);
+}
+
+fn local_quorum_offsets(broker: &Broker, name: &str, partition: i32) -> (i64, i64) {
+    if name.is_empty() || partition < 0 {
+        return (0, 0);
+    }
+    let topic = TopicName::new(name);
+    let pid = PartitionId(partition as u32);
+    let hwm = broker.high_watermark(&topic, pid).unwrap_or(0) as i64;
+    let leo = broker.log_end_offset(&topic, pid).unwrap_or(0) as i64;
+    (hwm, leo)
+}
+
 /// DescribeLogDirs v0 classic / v1 flexible. Local open partitions only.
 ///
 /// `topics = null` → every local partition. Named topic with empty
@@ -3747,6 +3884,43 @@ mod tests {
             .filter_map(|e| e.ok().map(|e| e.file_name()))
             .collect();
         assert_eq!(after, before, "UpdateFeatures must not persist features");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    fn describe_quorum_empty_v0() -> BytesMut {
+        let mut body = BytesMut::new();
+        put_compact_array_len(&mut body, 0);
+        put_empty_tag_buffer(&mut body);
+        body
+    }
+
+    #[test]
+    fn kafka_describe_quorum_single_node_raft_off_is_empty_0() {
+        let dir = temp_dir("dq-single");
+        let broker = Broker::new(StorageConfig {
+            data_dir: dir.clone(),
+            ..StorageConfig::default()
+        });
+        let mut src = describe_quorum_empty_v0();
+        let mut out = BytesMut::new();
+        encode_describe_quorum(&broker, &mut src, &mut out, 0, "kafka-anonymous");
+        let mut resp = out.freeze();
+        assert_eq!(resp.get_i16(), 0);
+        assert_eq!(get_compact_array_len(&mut resp).unwrap(), Some(0));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn kafka_describe_quorum_not_controller_is_41() {
+        let dir = temp_dir("dq-nc");
+        let broker = cluster_n2(dir.clone(), 2);
+        assert!(!broker.is_controller());
+        let mut src = describe_quorum_empty_v0();
+        let mut out = BytesMut::new();
+        encode_describe_quorum(&broker, &mut src, &mut out, 0, "kafka-anonymous");
+        let mut resp = out.freeze();
+        assert_eq!(resp.get_i16(), KafkaErrorCode::NotController.as_i16());
+        assert_eq!(get_compact_array_len(&mut resp).unwrap(), Some(0));
         let _ = std::fs::remove_dir_all(&dir);
     }
 }
