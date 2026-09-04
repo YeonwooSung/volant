@@ -27,6 +27,7 @@
 //! DescribeLogDirs 0–1 (local logs only; v1 flexible),
 //! DescribeTopicPartitions v0 (wraps Metadata; key 75),
 //! BrokerRegistration v0 (key 62 reject; not KRaft / not AddBroker),
+//! BrokerHeartbeat v0 (key 63 reject; not KRaft / not native Heartbeat 12),
 //! UnregisterBroker v0 (wraps native remove_broker; key 64; not KRaft incarnation),
 //! UpdateFeatures v0–1 (always flexible; reject every feature; empty ApiVersions features),
 //! DescribeQuorum v0–1 (always flexible; wraps openraft leader/term/voters; not KRaft),
@@ -50,7 +51,8 @@
 //! `docs/V251_SPEC.md`, `docs/V252_SPEC.md`, `docs/V253_SPEC.md`,
 //! `docs/V255_SPEC.md`, `docs/V257_SPEC.md`, `docs/V258_SPEC.md`,
 //! `docs/V259_SPEC.md`, `docs/V260_SPEC.md`, `docs/V261_SPEC.md`,
-//! `docs/V263_SPEC.md`, `docs/V264_SPEC.md`, and `docs/V269_SPEC.md`.
+//! `docs/V263_SPEC.md`, `docs/V264_SPEC.md`, `docs/V265_SPEC.md`,
+//! and `docs/V269_SPEC.md`.
 
 mod acl_api;
 mod admin_api;
@@ -358,6 +360,10 @@ pub enum ApiKey {
     /// not KRaft (no incarnation / DirectoryId / features). Does not
     /// wrap native AddBroker. Overlay membership is unchanged.
     BrokerRegistration = 62,
+    /// BrokerHeartbeat (always flexible; v0 only). Honest reject:
+    /// not KRaft (no fencing / metadata offset / assigned epoch). Does
+    /// not wrap native Heartbeat (key 12). Overlay membership is unchanged.
+    BrokerHeartbeat = 63,
     /// UnregisterBroker (always flexible; v0 only). Wraps native
     /// `remove_broker`. Not Kafka KRaft incarnation / DirectoryId.
     UnregisterBroker = 64,
@@ -448,6 +454,7 @@ impl ApiKey {
             60 => Some(Self::DescribeCluster),
             61 => Some(Self::DescribeProducers),
             62 => Some(Self::BrokerRegistration),
+            63 => Some(Self::BrokerHeartbeat),
             64 => Some(Self::UnregisterBroker),
             65 => Some(Self::DescribeTransactions),
             66 => Some(Self::ListTransactions),
@@ -520,6 +527,7 @@ pub const SUPPORTED_APIS: &[(ApiKey, i16, i16)] = &[
     (ApiKey::DescribeCluster, 0, 2),
     (ApiKey::DescribeProducers, 0, 0),
     (ApiKey::BrokerRegistration, 0, 0),
+    (ApiKey::BrokerHeartbeat, 0, 0),
     (ApiKey::UnregisterBroker, 0, 0),
     (ApiKey::DescribeTransactions, 0, 0),
     (ApiKey::ListTransactions, 0, 2),
@@ -637,6 +645,17 @@ mod tests {
         assert!(SUPPORTED_APIS
             .iter()
             .any(|(k, min, max)| { *k == ApiKey::BrokerRegistration && *min == 0 && *max == 0 }));
+        assert_eq!(ApiKey::from_i16(62), Some(ApiKey::BrokerRegistration));
+        assert_eq!(ApiKey::from_i16(64), Some(ApiKey::UnregisterBroker));
+    }
+
+    #[test]
+    fn supported_apis_includes_broker_heartbeat_63() {
+        assert!(SUPPORTED_APIS.len() >= 65);
+        assert!(SUPPORTED_APIS
+            .iter()
+            .any(|(k, min, max)| { *k == ApiKey::BrokerHeartbeat && *min == 0 && *max == 0 }));
+        assert_eq!(ApiKey::from_i16(63), Some(ApiKey::BrokerHeartbeat));
         assert_eq!(ApiKey::from_i16(62), Some(ApiKey::BrokerRegistration));
         assert_eq!(ApiKey::from_i16(64), Some(ApiKey::UnregisterBroker));
     }

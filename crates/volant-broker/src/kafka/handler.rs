@@ -269,6 +269,7 @@ async fn dispatch_kafka(
                 | Some(ApiKey::ListClientMetricsResources)
                 | Some(ApiKey::DescribeTopicPartitions)
                 | Some(ApiKey::BrokerRegistration)
+                | Some(ApiKey::BrokerHeartbeat)
                 | Some(ApiKey::UnregisterBroker)
                 | Some(ApiKey::UpdateFeatures)
                 | Some(ApiKey::DescribeQuorum)
@@ -813,6 +814,12 @@ async fn dispatch_kafka(
                 debug!(error = %e, "broker registration flexible header tag buffer");
             }
             admin_api::encode_broker_registration(broker, &mut src, &mut out, principal);
+        }
+        Some(ApiKey::BrokerHeartbeat) if hdr.api_version == 0 => {
+            if let Err(e) = skip_tag_buffer(&mut src) {
+                debug!(error = %e, "broker heartbeat flexible header tag buffer");
+            }
+            admin_api::encode_broker_heartbeat(broker, &mut src, &mut out, principal);
         }
         Some(ApiKey::UnregisterBroker) if hdr.api_version == 0 => {
             if let Err(e) = skip_tag_buffer(&mut src) {

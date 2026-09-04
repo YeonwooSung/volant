@@ -4,7 +4,7 @@
 //! Describe/AlterClientQuotas, DescribeDelegationToken,
 //! ListClientMetricsResources, AlterReplicaLogDirs, AssignReplicasToDirs,
 //! DescribeLogDirs, DescribeTopicPartitions, BrokerRegistration,
-//! UnregisterBroker,
+//! BrokerHeartbeat, UnregisterBroker,
 //! UpdateFeatures, DescribeQuorum, AllocateProducerIds,
 //! GetTelemetrySubscriptions, PushTelemetry, AlterPartition,
 //! CreateDelegationToken, RenewDelegationToken, ExpireDelegationToken, configs.
@@ -1208,6 +1208,78 @@ fn write_broker_registration(out: &mut BytesMut, error: KafkaErrorCode) {
     out.put_i32(0); // throttleTimeMs
     out.put_i16(error.as_i16());
     out.put_i64(-1); // brokerEpoch — none assigned
+    put_empty_tag_buffer(out);
+}
+
+/// BrokerHeartbeat v0 (always flexible). Volant is **not** a KRaft
+/// controller (no fencing, no metadata offset catch-up, no assigned
+/// epoch). Does **not** wrap native Heartbeat (key 12) or
+/// `GroupCoordinator::heartbeat`.
+///
+/// Parses official Kafka `BrokerHeartbeatRequest.json` v0 fields
+/// (`brokerId`, `brokerEpoch`, `currentMetadataOffset`, `wantFence`,
+/// `wantShutDown`) and discards them. Returns throttle **0**, error
+/// **42** `INVALID_REQUEST`, `isCaughtUp` false, `isFenced` true,
+/// `shouldShutDown` false. Official `BrokerHeartbeatResponse.json`
+/// has no `errorMessage`. Controller is not required. ACL: Cluster
+/// **ALTER** (disabled ACLs allow). Denied → **31**.
+pub(crate) fn encode_broker_heartbeat(
+    broker: &Broker,
+    src: &mut impl Buf,
+    out: &mut BytesMut,
+    principal: &str,
+) {
+    parse_broker_heartbeat_request(src);
+
+    let denied = broker.acls().is_enabled()
+        && !broker.acls().authorize(
+            Some(principal),
+            ResourceType::Cluster,
+            CLUSTER_RESOURCE,
+            AclOperation::Alter,
+        );
+    let error = if denied {
+        KafkaErrorCode::ClusterAuthorizationFailed
+    } else {
+        KafkaErrorCode::InvalidRequest
+    };
+
+    write_broker_heartbeat(out, error);
+}
+
+fn parse_broker_heartbeat_request(src: &mut impl Buf) {
+    // Official v0 (flex, `BrokerHeartbeatRequest.json`):
+    // BrokerId i32, BrokerEpoch i64, CurrentMetadataOffset i64,
+    // WantFence bool, WantShutDown bool, tagged.
+    // OfflineLogDirs is v1+ tagged; CordonedLogDirs is v2+ tagged.
+    if src.remaining() >= 4 {
+        let _broker_id = src.get_i32();
+    }
+    if src.remaining() >= 8 {
+        let _broker_epoch = src.get_i64();
+    }
+    if src.remaining() >= 8 {
+        let _current_metadata_offset = src.get_i64();
+    }
+    if src.remaining() >= 1 {
+        let _want_fence = src.get_i8();
+    }
+    if src.remaining() >= 1 {
+        let _want_shut_down = src.get_i8();
+    }
+    let _ = skip_tag_buffer(src);
+}
+
+fn write_broker_heartbeat(out: &mut BytesMut, error: KafkaErrorCode) {
+    // Official BrokerHeartbeatResponse.json (v0+):
+    // throttleTimeMs, errorCode, isCaughtUp, isFenced, shouldShutDown, tagged.
+    // Official defaults: isCaughtUp=false, isFenced=true, shouldShutDown=false.
+    // No errorMessage.
+    out.put_i32(0); // throttleTimeMs
+    out.put_i16(error.as_i16());
+    out.put_i8(0); // isCaughtUp = false
+    out.put_i8(1); // isFenced = true
+    out.put_i8(0); // shouldShutDown = false
     put_empty_tag_buffer(out);
 }
 
@@ -5837,6 +5909,136 @@ mod tests {
         assert_eq!(throttle, 0);
         assert_eq!(error, KafkaErrorCode::InvalidRequest.as_i16());
         assert_eq!(epoch, -1);
+        assert_eq!(overlay_ids(&broker), before);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    fn broker_heartbeat_body(
+        broker_id: i32,
+        broker_epoch: i64,
+        current_metadata_offset: i64,
+        want_fence: bool,
+        want_shut_down: bool,
+    ) -> BytesMut {
+        let mut body = BytesMut::new();
+        body.put_i32(broker_id);
+        body.put_i64(broker_epoch);
+        body.put_i64(current_metadata_offset);
+        body.put_i8(i8::from(want_fence));
+        body.put_i8(i8::from(want_shut_down));
+        put_empty_tag_buffer(&mut body);
+        body
+    }
+
+    fn read_broker_heartbeat(src: &mut impl Buf) -> (i32, i16, bool, bool, bool) {
+        let throttle = src.get_i32();
+        let error = src.get_i16();
+        let is_caught_up = src.get_i8() != 0;
+        let is_fenced = src.get_i8() != 0;
+        let should_shut_down = src.get_i8() != 0;
+        skip_tag_buffer(src).unwrap();
+        assert_eq!(src.remaining(), 0);
+        (throttle, error, is_caught_up, is_fenced, should_shut_down)
+    }
+
+    #[test]
+    fn kafka_broker_heartbeat_rejects_and_does_not_persist() {
+        let dir = temp_dir("bhb-ok");
+        let broker = Broker::new(StorageConfig {
+            data_dir: dir.clone(),
+            ..StorageConfig::default()
+        });
+        let before_ids = overlay_ids(&broker);
+        assert!(!membership_file(&dir).exists());
+
+        let mut src = broker_heartbeat_body(4, 7, 99, true, false);
+        let mut out = BytesMut::new();
+        encode_broker_heartbeat(&broker, &mut src, &mut out, "kafka-anonymous");
+        let mut resp = out.freeze();
+        let (throttle, error, caught_up, fenced, shut_down) = read_broker_heartbeat(&mut resp);
+        assert_eq!(throttle, 0);
+        assert_eq!(error, KafkaErrorCode::InvalidRequest.as_i16());
+        assert!(!caught_up);
+        assert!(fenced);
+        assert!(!shut_down);
+
+        assert_eq!(overlay_ids(&broker), before_ids);
+        assert!(
+            !membership_file(&dir).exists(),
+            "BrokerHeartbeat must not create membership.json"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn kafka_broker_heartbeat_existing_brokers_unchanged() {
+        let dir = temp_dir("bhb-exist");
+        let broker = cluster_n2(dir.clone(), 1);
+        broker
+            .add_broker(3, "127.0.0.1".into(), 19403, None)
+            .unwrap();
+        let before = overlay_ids(&broker);
+        assert!(before.contains(&3));
+
+        let mut src = broker_heartbeat_body(4, 1, 0, false, true);
+        let mut out = BytesMut::new();
+        encode_broker_heartbeat(&broker, &mut src, &mut out, "kafka-anonymous");
+        let mut resp = out.freeze();
+        let (throttle, error, caught_up, fenced, shut_down) = read_broker_heartbeat(&mut resp);
+        assert_eq!(throttle, 0);
+        assert_eq!(error, KafkaErrorCode::InvalidRequest.as_i16());
+        assert!(!caught_up);
+        assert!(fenced);
+        assert!(!shut_down);
+
+        let after = overlay_ids(&broker);
+        assert_eq!(after, before);
+        assert!(!after.contains(&4));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn kafka_broker_heartbeat_acl_deny_is_31() {
+        let dir = temp_dir("bhb-acl");
+        let broker = Broker::new(StorageConfig {
+            data_dir: dir.clone(),
+            ..StorageConfig::default()
+        });
+        broker
+            .configure_acls(true, None, vec![], "token".into())
+            .unwrap();
+
+        let mut src = broker_heartbeat_body(2, -1, 0, false, false);
+        let mut out = BytesMut::new();
+        encode_broker_heartbeat(&broker, &mut src, &mut out, "kafka-anonymous");
+        let mut resp = out.freeze();
+        let (throttle, error, caught_up, fenced, shut_down) = read_broker_heartbeat(&mut resp);
+        assert_eq!(throttle, 0);
+        assert_eq!(error, KafkaErrorCode::ClusterAuthorizationFailed.as_i16());
+        assert!(!caught_up);
+        assert!(fenced);
+        assert!(!shut_down);
+        assert!(!membership_file(&dir).exists());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn kafka_broker_heartbeat_not_controller_still_42() {
+        let dir = temp_dir("bhb-nc");
+        let broker = cluster_n2(dir.clone(), 2);
+        assert!(!broker.is_controller());
+        let before = overlay_ids(&broker);
+
+        let mut src = broker_heartbeat_body(9, 3, 12, true, true);
+        let mut out = BytesMut::new();
+        encode_broker_heartbeat(&broker, &mut src, &mut out, "kafka-anonymous");
+        let mut resp = out.freeze();
+        let (throttle, error, caught_up, fenced, shut_down) = read_broker_heartbeat(&mut resp);
+        assert_eq!(throttle, 0);
+        assert_eq!(error, KafkaErrorCode::InvalidRequest.as_i16());
+        assert!(!caught_up);
+        assert!(fenced);
+        assert!(!shut_down);
         assert_eq!(overlay_ids(&broker), before);
         let _ = std::fs::remove_dir_all(&dir);
     }
