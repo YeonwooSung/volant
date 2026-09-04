@@ -271,6 +271,7 @@ async fn dispatch_kafka(
                 | Some(ApiKey::BrokerRegistration)
                 | Some(ApiKey::UnregisterBroker)
                 | Some(ApiKey::UpdateFeatures)
+                | Some(ApiKey::FetchSnapshot)
                 | Some(ApiKey::DescribeQuorum)
                 | Some(ApiKey::AllocateProducerIds)
                 | Some(ApiKey::AssignReplicasToDirs)
@@ -856,6 +857,12 @@ async fn dispatch_kafka(
                 hdr.api_version,
                 principal,
             );
+        }
+        Some(ApiKey::FetchSnapshot) if hdr.api_version == 0 => {
+            if let Err(e) = skip_tag_buffer(&mut src) {
+                debug!(error = %e, "fetch snapshot flexible header tag buffer");
+            }
+            admin_api::encode_fetch_snapshot(broker, &mut src, &mut out, principal);
         }
         Some(ApiKey::DescribeQuorum) if (0..=1).contains(&hdr.api_version) => {
             if let Err(e) = skip_tag_buffer(&mut src) {
