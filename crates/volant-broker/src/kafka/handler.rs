@@ -247,7 +247,12 @@ async fn dispatch_kafka(
         (Some(ApiKey::SaslAuthenticate), v) if v >= 2
     ) || matches!(
         (api, hdr.api_version),
-        (Some(ApiKey::DescribeLogDirs) | Some(ApiKey::AlterReplicaLogDirs), v) if v >= 1
+        (
+            Some(ApiKey::DescribeLogDirs)
+                | Some(ApiKey::AlterReplicaLogDirs)
+                | Some(ApiKey::WriteTxnMarkers),
+            v
+        ) if v >= 1
     ) || matches!(
         (api, hdr.api_version),
         (
@@ -607,6 +612,14 @@ async fn dispatch_kafka(
                     }
                 }
             }
+        }
+        Some(ApiKey::WriteTxnMarkers) if (0..=1).contains(&hdr.api_version) => {
+            if hdr.api_version >= 1 {
+                if let Err(e) = skip_tag_buffer(&mut src) {
+                    debug!(error = %e, "write txn markers flexible header tag buffer");
+                }
+            }
+            txn::encode_write_txn_markers(broker, &mut src, &mut out, hdr.api_version, principal);
         }
         Some(ApiKey::TxnOffsetCommit) if (0..=6).contains(&hdr.api_version) => {
             if hdr.api_version >= 3 {

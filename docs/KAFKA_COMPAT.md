@@ -46,6 +46,7 @@ From `SUPPORTED_APIS` in `crates/volant-broker/src/kafka/mod.rs`:
 | 24 | AddPartitionsToTxn | 0–5 | Flex v3; batch v4–5; 123 after timeout (Phase 94) |
 | 25 | AddOffsetsToTxn | 0–4 | Flex v3+; v4 = v3 wire; may emit TRANSACTION_ABORTABLE (123) after timeout (Phase 94); multi-broker transparent forward to Init owner (Phase 122) |
 | 26 | EndTxn | 0–5 | Flex v3+; v5 pid/epoch echo; 123 after timeout auto-abort (Phase 94); multi-broker transparent forward (Phase 120) |
+| 27 | WriteTxnMarkers | 0–1 | Flex v1; replica-local COMMIT/ABORT control batches + soft `__txn_markers`; CoordinatorEpoch ignored; not EndTxn / not coordinator; Topic WRITE or Cluster ALTER (v0.250) |
 | 28 | TxnOffsetCommit | 0–6 | Flex v3+; TopicId v6; 123 after timeout when no open (Phase 94); multi-broker transparent forward (Phase 122) |
 | 29–31 | ACL admin | 0–3 | Flex v2+; User resource v3; LITERAL only; cluster Create/Delete **controller-only** + snapshot fan-out (Phase 113; **41** NotController) |
 | 32 | DescribeConfigs | 0–4 | Flex v4; TOPIC + BROKER (Phase 99–103; name empty or local `node_id`; sparse durable; cluster effective values after Phase 113 push) |
@@ -150,6 +151,7 @@ These are **current** product facts, not temporary docs lag:
 | DescribeQuorum | **v0–1 wrap** (v0.245): key **55** advertised (always flex). Wraps `openraft_leader_id` / `openraft_term` / `openraft_voter_ids`. Not KRaft `__cluster_metadata` (no invented metadata topic). Empty request topics → one synthetic cluster partition **0** (empty name) when raft is started. Raft off / not started → top-level **0**, empty topics. Cluster non-controller → **41**. `logEndOffset` / `highWatermark` = local LEO/HWM if the requested topic exists locally else **0**. `lastFetch` / `lastCaughtUp` = **-1**. No v2 Nodes / DirectoryId. Cluster DESCRIBE. v2+ → **35** |
 | AllocateProducerIds | **v0 wrap** (v0.246): key **67** advertised (always flex). Block of **1000** from `next_producer_id` (`fetch_add` + persist `__producer_state` like InitProducerId). BrokerEpoch parsed and **ignored**. Not KRaft fencing. Controller only in cluster (**41**); single-node allowed. ACL Cluster ALTER. v1+ → **35** |
 | AlterReplicaLogDirs | **v0–1 reject** (v0.249): key **34** advertised. Single `data_dir`. Parse request; every partition **42** `INVALID_REQUEST` (`single data_dir; replica move not supported`). Does **not** move files. Not multi-log.dirs. Controller not required. Official Kafka first flexible is **2**; Volant v1 is flexible. DescribeLogDirs (35) unchanged. ACL Cluster ALTER or Topic ALTER. v2+ → **35** |
+| WriteTxnMarkers | **v0–1 wrap** (v0.250): key **27** advertised. Replica-local apply: one COMMIT/ABORT control batch per listed partition (`txn_control_message` / `produce_one` / `flush`) + matching soft `__txn_markers`. CoordinatorEpoch parsed and **ignored**. Does **not** call EndTxn (no coordinator finalize / prepared 2PC). Controller not required. Unknown topic → **3**. ACL Topic WRITE or Cluster ALTER; denied → **29**. v2+ → **35**. Not a transaction coordinator |
 | Missing APIs | Large Kafka surface still unsupported (GSSAPI, OAUTH, …) |
 
 ## Related

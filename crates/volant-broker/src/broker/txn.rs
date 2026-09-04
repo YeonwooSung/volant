@@ -1941,6 +1941,108 @@ impl Broker {
         }
     }
 
+    /// Replica-local WriteTxnMarkers apply (Kafka key 27).
+    ///
+    /// Writes one COMMIT/ABORT control batch per listed partition via
+    /// [`txn_control_message`] / [`Self::produce_one`] / [`Self::flush`].
+    /// Abort persists a matching soft marker from any open written ranges
+    /// (or just rewrites `__txn_markers` on commit). Does **not** call
+    /// [`Self::end_txn`] — no coordinator finalize / prepared-state change.
+    pub fn write_txn_markers(
+        &self,
+        producer_id: u64,
+        producer_epoch: u16,
+        commit: bool,
+        topics: &[(String, Vec<i32>)],
+    ) -> Vec<(String, Vec<(i32, i16)>)> {
+        let marker_type = if commit {
+            ControlMarkerType::Commit
+        } else {
+            ControlMarkerType::Abort
+        };
+        let abort_ranges = if commit {
+            HashMap::new()
+        } else {
+            self.open_abort_ranges(producer_id)
+        };
+
+        let mut results = Vec::with_capacity(topics.len());
+        let mut wrote = false;
+        for (name, parts) in topics {
+            let mut part_results = Vec::with_capacity(parts.len());
+            for &partition in parts {
+                let err = self.write_one_txn_marker(
+                    producer_id,
+                    producer_epoch,
+                    marker_type,
+                    name,
+                    partition,
+                    &abort_ranges,
+                );
+                if err == 0 {
+                    wrote = true;
+                }
+                part_results.push((partition, err));
+            }
+            results.push((name.clone(), part_results));
+        }
+        if wrote {
+            self.persist_txn_markers();
+        }
+        results
+    }
+
+    fn open_abort_ranges(&self, producer_id: u64) -> HashMap<(String, u32), (u64, u64)> {
+        let open = self.open_txns.lock();
+        let Some(txn) = open.get(&producer_id) else {
+            return HashMap::new();
+        };
+        let mut per_part: HashMap<(String, u32), (u64, u64)> = HashMap::new();
+        for r in &txn.written {
+            let e = per_part
+                .entry((r.topic.clone(), r.partition))
+                .or_insert((r.first_offset, r.end_offset));
+            e.0 = e.0.min(r.first_offset);
+            e.1 = e.1.max(r.end_offset);
+        }
+        per_part
+    }
+
+    fn write_one_txn_marker(
+        &self,
+        producer_id: u64,
+        producer_epoch: u16,
+        marker_type: ControlMarkerType,
+        topic: &str,
+        partition: i32,
+        abort_ranges: &HashMap<(String, u32), (u64, u64)>,
+    ) -> i16 {
+        if partition < 0 || !self.partition_exists(topic, partition as u32) {
+            return 3; // UNKNOWN_TOPIC_OR_PARTITION
+        }
+        let msg = txn_control_message(marker_type, producer_id, producer_epoch);
+        let tname = TopicName::new(topic);
+        let pid = PartitionId(partition as u32);
+        if self.produce_one(&tname, pid, msg).is_err() {
+            return 3;
+        }
+        let _ = self.flush(&tname, pid);
+        if marker_type == ControlMarkerType::Abort {
+            if let Some(&(first, end)) = abort_ranges.get(&(topic.to_owned(), partition as u32)) {
+                self.push_aborted_marker(
+                    topic,
+                    partition as u32,
+                    AbortedTxnMarker {
+                        producer_id,
+                        first_offset: first,
+                        end_offset: end,
+                    },
+                );
+            }
+        }
+        0
+    }
+
     pub(super) fn push_aborted_marker(
         &self,
         topic: &str,

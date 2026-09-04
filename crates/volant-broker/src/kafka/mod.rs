@@ -26,12 +26,14 @@
 //! UnregisterBroker v0 (wraps native remove_broker; key 64; not KRaft incarnation),
 //! UpdateFeatures v0–1 (always flexible; reject every feature; empty ApiVersions features),
 //! DescribeQuorum v0–1 (always flexible; wraps openraft leader/term/voters; not KRaft),
-//! AllocateProducerIds v0 (always flexible; block from next_producer_id; not KRaft).
+//! AllocateProducerIds v0 (always flexible; block from next_producer_id; not KRaft),
+//! WriteTxnMarkers 0–1 (classic v0 / flex v1; replica-local COMMIT/ABORT control
+//! batches + soft `__txn_markers`; not EndTxn / not a coordinator).
 //! See `docs/PHASE23_SPEC.md` … `docs/PHASE91_SPEC.md`, `docs/V225_SPEC.md`,
 //! `docs/V228_SPEC.md`, `docs/V233_SPEC.md`, `docs/V235_SPEC.md`,
 //! `docs/V236_SPEC.md`, `docs/V237_SPEC.md`, `docs/V241_SPEC.md`,
 //! `docs/V242_SPEC.md`, `docs/V244_SPEC.md`, `docs/V245_SPEC.md`,
-//! `docs/V246_SPEC.md`, and `docs/V249_SPEC.md`.
+//! `docs/V246_SPEC.md`, `docs/V249_SPEC.md`, and `docs/V250_SPEC.md`.
 
 mod acl_api;
 mod admin_api;
@@ -50,7 +52,7 @@ pub(crate) mod produce_fetch;
 pub mod sasl;
 /// Shared TopicId / topic-name wire identity helpers.
 mod topic_id;
-/// Transaction API handlers (Init / Add* / End / TxnOffsetCommit).
+/// Transaction API handlers (Init / Add* / End / WriteTxnMarkers / TxnOffsetCommit).
 pub(crate) mod txn;
 /// Shared classic/flexible wire read helpers.
 pub(crate) mod wire;
@@ -260,6 +262,9 @@ pub enum ApiKey {
     AddOffsetsToTxn = 25,
     /// EndTxn.
     EndTxn = 26,
+    /// WriteTxnMarkers (classic v0; flexible v1). Replica-local COMMIT/ABORT
+    /// control batches + soft `__txn_markers`. Not EndTxn / not a coordinator.
+    WriteTxnMarkers = 27,
     /// TxnOffsetCommit.
     TxnOffsetCommit = 28,
     /// DescribeAcls.
@@ -350,6 +355,7 @@ impl ApiKey {
             24 => Some(Self::AddPartitionsToTxn),
             25 => Some(Self::AddOffsetsToTxn),
             26 => Some(Self::EndTxn),
+            27 => Some(Self::WriteTxnMarkers),
             28 => Some(Self::TxnOffsetCommit),
             29 => Some(Self::DescribeAcls),
             30 => Some(Self::CreateAcls),
@@ -409,6 +415,7 @@ pub const SUPPORTED_APIS: &[(ApiKey, i16, i16)] = &[
     (ApiKey::AddPartitionsToTxn, 0, 5),
     (ApiKey::AddOffsetsToTxn, 0, 4),
     (ApiKey::EndTxn, 0, 5),
+    (ApiKey::WriteTxnMarkers, 0, 1),
     (ApiKey::TxnOffsetCommit, 0, 6),
     (ApiKey::DescribeAcls, 0, 3),
     (ApiKey::CreateAcls, 0, 3),
@@ -447,9 +454,9 @@ mod tests {
     #[test]
     fn supported_apis_includes_alter_replica_log_dirs_34() {
         assert!(SUPPORTED_APIS.len() >= 50);
-        assert!(SUPPORTED_APIS.iter().any(|(k, min, max)| {
-            *k == ApiKey::AlterReplicaLogDirs && *min == 0 && *max == 1
-        }));
+        assert!(SUPPORTED_APIS
+            .iter()
+            .any(|(k, min, max)| { *k == ApiKey::AlterReplicaLogDirs && *min == 0 && *max == 1 }));
         assert_eq!(ApiKey::from_i16(34), Some(ApiKey::AlterReplicaLogDirs));
     }
 
@@ -559,9 +566,18 @@ mod tests {
     #[test]
     fn supported_apis_includes_allocate_producer_ids_67() {
         assert!(SUPPORTED_APIS.len() >= 50);
-        assert!(SUPPORTED_APIS.iter().any(|(k, min, max)| {
-            *k == ApiKey::AllocateProducerIds && *min == 0 && *max == 0
-        }));
+        assert!(SUPPORTED_APIS
+            .iter()
+            .any(|(k, min, max)| { *k == ApiKey::AllocateProducerIds && *min == 0 && *max == 0 }));
         assert_eq!(ApiKey::from_i16(67), Some(ApiKey::AllocateProducerIds));
+    }
+
+    #[test]
+    fn supported_apis_includes_write_txn_markers_27() {
+        assert!(SUPPORTED_APIS.len() >= 53);
+        assert!(SUPPORTED_APIS
+            .iter()
+            .any(|(k, min, max)| { *k == ApiKey::WriteTxnMarkers && *min == 0 && *max == 1 }));
+        assert_eq!(ApiKey::from_i16(27), Some(ApiKey::WriteTxnMarkers));
     }
 }
