@@ -47,6 +47,36 @@ class ScramTest {
     }
 
     @Test
+    void sha512ProofIs64Bytes() {
+        Scram.Proof p = Scram.clientProofAndServerSigSha512(
+                USER, PASS, "rOprNGfwEbeRWgbNEkqO", "rOprNGfwEbeRWgbNEkqOserver", SALT, ITERS);
+        assertEquals(64, p.clientProof.length);
+        assertEquals(64, p.serverSignature.length);
+        Scram.Proof p256 = Scram.clientProofAndServerSig(
+                USER, PASS, "rOprNGfwEbeRWgbNEkqO", "rOprNGfwEbeRWgbNEkqOserver", SALT, ITERS);
+        assertTrue(p.clientProof.length != p256.clientProof.length
+                || !Arrays.equals(Arrays.copyOf(p.clientProof, 32), p256.clientProof));
+    }
+
+    @Test
+    void scramFirstHashTrailerRoundtrip() {
+        byte[] encoded = Codec.encodeScramFirstRequest(new Codec.ScramFirstRequest(USER, "n1", 2));
+        Codec.ScramFirstRequest decoded = Codec.decodeScramFirstRequest(encoded);
+        assertEquals(2, decoded.hash);
+        byte[] user = USER.getBytes(StandardCharsets.US_ASCII);
+        byte[] nonce = "n1".getBytes(StandardCharsets.US_ASCII);
+        byte[] legacy = new byte[2 + user.length + 2 + nonce.length];
+        legacy[0] = (byte) user.length;
+        legacy[1] = 0;
+        System.arraycopy(user, 0, legacy, 2, user.length);
+        int o = 2 + user.length;
+        legacy[o] = (byte) nonce.length;
+        legacy[o + 1] = 0;
+        System.arraycopy(nonce, 0, legacy, o + 2, nonce.length);
+        assertEquals(0, Codec.decodeScramFirstRequest(legacy).hash);
+    }
+
+    @Test
     void connectScramSendsFirstAndFinal() throws Exception {
         try (ScramServer srv = ScramServer.ok()) {
             try (Client c = Client.connectScram("127.0.0.1", srv.port, 5_000, USER, PASS)) {

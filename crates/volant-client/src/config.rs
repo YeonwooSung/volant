@@ -31,10 +31,12 @@ pub struct ClientConfig {
     pub delete_records_wait: u8,
     /// Shared auth token. When set, the client sends Auth on connect.
     pub auth_token: Option<String>,
-    /// SCRAM-SHA-256 username (Phase 22). Requires [`Self::scram_password`].
+    /// SCRAM username (Phase 22). Requires [`Self::scram_password`].
     pub scram_username: Option<String>,
-    /// SCRAM-SHA-256 password (Phase 22). Requires [`Self::scram_username`].
+    /// SCRAM password (Phase 22). Requires [`Self::scram_username`].
     pub scram_password: Option<String>,
+    /// Native ScramFirst hash trailer (v0.238). `0`/`1` = SHA-256, `2` = SHA-512.
+    pub scram_hash: u8,
     /// Enable TLS for broker connections (requires the `tls` feature).
     pub tls: bool,
     /// When TLS is enabled, skip certificate verification (dev/test only).
@@ -87,6 +89,7 @@ impl Default for ClientConfig {
             auth_token: None,
             scram_username: None,
             scram_password: None,
+            scram_hash: 0,
             tls: false,
             tls_insecure: false,
             tls_ca: None,

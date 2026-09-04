@@ -112,6 +112,7 @@ async fn serve_stub(
                         Request::ScramFirst {
                             username,
                             client_nonce,
+                            hash: _,
                         } => {
                             firsts.fetch_add(1, Ordering::Relaxed);
                             let error_code = first_codes

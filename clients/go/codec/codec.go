@@ -594,6 +594,8 @@ type GroupState uint8
 type ScramFirstRequest struct {
 	Username    string
 	ClientNonce string
+	// Hash is the v0.238 trailer: 0/1 = SHA-256, 2 = SHA-512.
+	Hash uint8
 }
 
 type ScramFirstResponse struct {
@@ -3440,6 +3442,7 @@ func EncodeScramFirstRequest(req ScramFirstRequest) ([]byte, error) {
 	if err := putString(w, req.ClientNonce); err != nil {
 		return nil, err
 	}
+	w.u8(req.Hash)
 	return w.buf, nil
 }
 
@@ -3453,7 +3456,14 @@ func DecodeScramFirstRequest(payload []byte) (ScramFirstRequest, error) {
 	if err != nil {
 		return ScramFirstRequest{}, err
 	}
-	return ScramFirstRequest{Username: user, ClientNonce: nonce}, nil
+	var hash uint8
+	if r.remaining() >= 1 {
+		hash, err = r.u8()
+		if err != nil {
+			return ScramFirstRequest{}, err
+		}
+	}
+	return ScramFirstRequest{Username: user, ClientNonce: nonce, Hash: hash}, nil
 }
 
 func EncodeScramFirstResponse(resp ScramFirstResponse) ([]byte, error) {

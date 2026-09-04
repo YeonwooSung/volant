@@ -159,6 +159,7 @@ type Client struct {
 	authToken         string
 	scramUser         string
 	scramPass         string
+	scramHash         uint8
 	maxRedirects      int
 	maxRetries        int
 	retryBackoff      time.Duration
@@ -220,7 +221,19 @@ func DialScram(addr, user, pass string) (*Client, error) {
 	return dialPlain(addr, defaultTimeout, "", user, pass)
 }
 
+// DialScramSHA512 is [DialScram] with native ScramFirst hash trailer 2 (v0.238).
+func DialScramSHA512(addr, user, pass string) (*Client, error) {
+	if err := checkScramPair(user, pass); err != nil {
+		return nil, err
+	}
+	return dialPlainHash(addr, defaultTimeout, "", user, pass, 2)
+}
+
 func dialPlain(addr string, timeout time.Duration, token, scramUser, scramPass string) (*Client, error) {
+	return dialPlainHash(addr, timeout, token, scramUser, scramPass, 0)
+}
+
+func dialPlainHash(addr string, timeout time.Duration, token, scramUser, scramPass string, scramHash uint8) (*Client, error) {
 	conn, err := net.DialTimeout("tcp", addr, timeout)
 	if err != nil {
 		return nil, err
@@ -233,6 +246,7 @@ func dialPlain(addr string, timeout time.Duration, token, scramUser, scramPass s
 		authToken:    token,
 		scramUser:    scramUser,
 		scramPass:    scramPass,
+		scramHash:    scramHash,
 		maxRedirects:     1,
 		retryBackoff:     50 * time.Millisecond,
 		acks:              1,
@@ -774,6 +788,7 @@ func (c *Client) scramHandshake(username, password string) error {
 	payload, err := codec.EncodeScramFirstRequest(codec.ScramFirstRequest{
 		Username:    username,
 		ClientNonce: clientNonce,
+		Hash:        c.scramHash,
 	})
 	if err != nil {
 		return err
@@ -789,9 +804,16 @@ func (c *Client) scramHandshake(username, password string) error {
 	if err := check(first.ErrorCode, "scram first"); err != nil {
 		return err
 	}
-	proof, expectedSig, err := ClientProofAndServerSig(
-		username, password, clientNonce, first.CombinedNonce, first.Salt, first.Iterations,
-	)
+	var proof, expectedSig []byte
+	if c.scramHash == 2 {
+		proof, expectedSig, err = ClientProofAndServerSigSHA512(
+			username, password, clientNonce, first.CombinedNonce, first.Salt, first.Iterations,
+		)
+	} else {
+		proof, expectedSig, err = ClientProofAndServerSig(
+			username, password, clientNonce, first.CombinedNonce, first.Salt, first.Iterations,
+		)
+	}
 	if err != nil {
 		return err
 	}

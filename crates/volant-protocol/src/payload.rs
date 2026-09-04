@@ -539,9 +539,11 @@ pub fn encode_request(req: &Request) -> Result<Bytes> {
         Request::ScramFirst {
             username,
             client_nonce,
+            hash,
         } => {
             put_string(&mut dst, username)?;
             put_string(&mut dst, client_nonce)?;
+            dst.put_u8(*hash);
         }
         Request::ScramFinal {
             username,
@@ -1242,9 +1244,16 @@ pub fn decode_request(opcode: u16, payload: &[u8]) -> Result<Request> {
         RequestOpcode::ScramFirst => {
             let username = get_string(&mut src)?;
             let client_nonce = get_string(&mut src)?;
+            // v0.238 optional hash trailer (absent / 0 / 1 → SHA-256).
+            let hash = if src.remaining() >= 1 {
+                src.get_u8()
+            } else {
+                0
+            };
             Ok(Request::ScramFirst {
                 username,
                 client_nonce,
+                hash,
             })
         }
         RequestOpcode::ScramFinal => {
@@ -3540,11 +3549,34 @@ mod tests {
         let first = Request::ScramFirst {
             username: "alice".into(),
             client_nonce: "n1".into(),
+            hash: 0,
         };
         let b = encode_request(&first).unwrap();
         assert_eq!(
             decode_request(RequestOpcode::ScramFirst as u16, &b).unwrap(),
             first
+        );
+        let first512 = Request::ScramFirst {
+            username: "alice".into(),
+            client_nonce: "n1".into(),
+            hash: crate::request::SCRAM_HASH_SHA512,
+        };
+        let b = encode_request(&first512).unwrap();
+        assert_eq!(
+            decode_request(RequestOpcode::ScramFirst as u16, &b).unwrap(),
+            first512
+        );
+        // Legacy body: username + client_nonce (no hash trailer) = SHA-256.
+        let mut legacy = bytes::BytesMut::new();
+        put_string(&mut legacy, "alice").unwrap();
+        put_string(&mut legacy, "n1").unwrap();
+        assert_eq!(
+            decode_request(RequestOpcode::ScramFirst as u16, &legacy).unwrap(),
+            Request::ScramFirst {
+                username: "alice".into(),
+                client_nonce: "n1".into(),
+                hash: 0,
+            }
         );
         let first_resp = Response::ScramFirst {
             error_code: 0,
@@ -3627,6 +3659,46 @@ mod tests {
         );
     }
 
+    /// v0.238: ScramFirst hash trailer 2 = SHA-512; omitted = SHA-256.
+    #[test]
+    fn v238_scram_first_hash_trailer() {
+        let req = Request::ScramFirst {
+            username: "alice".into(),
+            client_nonce: "n1".into(),
+            hash: crate::request::SCRAM_HASH_SHA512,
+        };
+        let b = encode_request(&req).unwrap();
+        assert_eq!(
+            decode_request(RequestOpcode::ScramFirst as u16, &b).unwrap(),
+            req
+        );
+
+        let mut legacy = bytes::BytesMut::new();
+        put_string(&mut legacy, "alice").unwrap();
+        put_string(&mut legacy, "n1").unwrap();
+        assert_eq!(
+            decode_request(RequestOpcode::ScramFirst as u16, &legacy).unwrap(),
+            Request::ScramFirst {
+                username: "alice".into(),
+                client_nonce: "n1".into(),
+                hash: 0,
+            }
+        );
+
+        for hash in [0u8, 1u8] {
+            let req = Request::ScramFirst {
+                username: "bob".into(),
+                client_nonce: "n2".into(),
+                hash,
+            };
+            let b = encode_request(&req).unwrap();
+            assert_eq!(
+                decode_request(RequestOpcode::ScramFirst as u16, &b).unwrap(),
+                req
+            );
+        }
+    }
+
     #[test]
     fn phase12_list_delete_static_roundtrip() {
         let list_req = Request::ListGroups;
@@ -3675,7 +3747,10 @@ mod tests {
         assert_eq!(GroupState::from_u8(2), GroupState::CompletingRebalance);
         assert_eq!(GroupState::from_u8(3), GroupState::PreparingRebalance);
         assert_eq!(GroupState::from_u8(99), GroupState::Empty);
-        assert_eq!(GroupState::PreparingRebalance.as_str(), "PreparingRebalance");
+        assert_eq!(
+            GroupState::PreparingRebalance.as_str(),
+            "PreparingRebalance"
+        );
 
         let del = Request::DeleteOffsets {
             group_id: "g1".into(),

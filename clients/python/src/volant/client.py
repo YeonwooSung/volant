@@ -304,12 +304,19 @@ class Client:
         c.produce("t", 0, value=b"hello")
         c.commit_transaction()
 
-    Optional SCRAM-SHA-256 (v0.46) runs after connect when both
-    ``scram_username`` and ``scram_password`` are set and ``auth_token``
-    is unset. Token wins if both are provided. Username without
-    password (or vice versa) is a constructor error::
+    Optional SCRAM (v0.46 SHA-256; v0.238 ``scram_hash=2`` SHA-512)
+    runs after connect when both ``scram_username`` and
+    ``scram_password`` are set and ``auth_token`` is unset. Token wins
+    if both are provided. Username without password (or vice versa) is
+    a constructor error::
 
         c = Client("127.0.0.1:9092", scram_username="alice", scram_password="s3cret")
+        c = Client(
+            "127.0.0.1:9092",
+            scram_username="alice",
+            scram_password="s3cret",
+            scram_hash=2,
+        )
 
     Create/Delete/ListScramUsers (v0.55) are admin RPCs (opcodes 64–69),
     not the handshake. Password is sent in the clear on create (use TLS)::
@@ -352,6 +359,7 @@ class Client:
         transactional_id: Optional[str] = None,
         scram_username: Optional[str] = None,
         scram_password: Optional[str] = None,
+        scram_hash: int = 0,
     ) -> None:
         if tls and (tls_cert is None) != (tls_key is None):
             raise ValueError("tls_cert and tls_key must both be set or both unset")
@@ -368,6 +376,7 @@ class Client:
         self.auth_token = auth_token or None
         self.scram_username = user
         self.scram_password = password
+        self.scram_hash = int(scram_hash) & 0xFF
         # 0 = never redirect (raise on the first NotLeaderForPartition).
         self.max_redirects = max(0, int(max_redirects))
         self.enable_idempotence = bool(enable_idempotence)
@@ -780,22 +789,29 @@ class Client:
             time.sleep(ms / 1000.0)
 
     def _authenticate_scram(self, username: str, password: str) -> None:
-        """SCRAM-SHA-256 first+final as one unit (v0.108).
+        """SCRAM first+final as one unit (v0.108; v0.238 SHA-512 trailer).
 
         Transient 6 / 7 / 15 / 16 and TCP/IO restart from first with a
         new client nonce (``max_retries`` extra times, default 0). 17 /
         18, other broker codes, and protocol errors (including server
         signature mismatch) are not retried. Token Auth is not wrapped.
         """
-        from .scram import client_proof_and_server_sig, generate_client_nonce
+        from .scram import (
+            client_proof_and_server_sig,
+            client_proof_and_server_sig_sha512,
+            generate_client_nonce,
+        )
 
         max_retries = max(0, int(self.max_retries))
         retry_attempt = 0
+        hash_ = int(self.scram_hash) & 0xFF
         while True:
             try:
                 client_nonce = generate_client_nonce()
                 payload = codec.encode_scram_first_request(
-                    codec.ScramFirstRequest(username=username, client_nonce=client_nonce)
+                    codec.ScramFirstRequest(
+                        username=username, client_nonce=client_nonce, hash=hash_
+                    )
                 )
                 first = self._round_trip(codec.OP_SCRAM_FIRST, payload)
                 if not isinstance(first, codec.ScramFirstResponse):
@@ -810,7 +826,12 @@ class Client:
                     self._sleep_produce_retry()
                     continue
                 self._check(first.error_code, "scram first")
-                proof, expected_sig = client_proof_and_server_sig(
+                proof_fn = (
+                    client_proof_and_server_sig_sha512
+                    if hash_ == 2
+                    else client_proof_and_server_sig
+                )
+                proof, expected_sig = proof_fn(
                     username,
                     password,
                     client_nonce,

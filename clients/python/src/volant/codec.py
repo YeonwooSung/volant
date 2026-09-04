@@ -521,6 +521,7 @@ class InitProducerIdResponse:
 class ScramFirstRequest:
     username: str
     client_nonce: str
+    hash: int = 0
 
 
 @dataclass
@@ -2506,12 +2507,16 @@ def encode_scram_first_request(req: ScramFirstRequest) -> bytes:
     w = _Writer()
     _put_string(w, req.username)
     _put_string(w, req.client_nonce)
+    w.u8(req.hash)
     return w.finish()
 
 
 def decode_scram_first_request(payload: bytes) -> ScramFirstRequest:
     r = _Reader(payload)
-    return ScramFirstRequest(username=_get_string(r), client_nonce=_get_string(r))
+    username = _get_string(r)
+    client_nonce = _get_string(r)
+    hash_ = r.u8() if r.remaining() >= 1 else 0
+    return ScramFirstRequest(username=username, client_nonce=client_nonce, hash=hash_)
 
 
 def encode_scram_first_response(resp: ScramFirstResponse) -> bytes:

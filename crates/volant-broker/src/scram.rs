@@ -956,4 +956,162 @@ mod tests {
         assert!(!store.delete_mechanism("carol", ScramHash::Sha256).unwrap());
         let _ = fs::remove_dir_all(&dir);
     }
+
+    #[tokio::test]
+    async fn native_scram_first_hash2_sha512_handshake() {
+        use crate::net::dispatch_with_auth;
+        use crate::Broker;
+        use std::sync::Arc;
+        use volant_protocol::{pack_request, Request, Response, SCRAM_HASH_SHA512};
+        use volant_storage::StorageConfig;
+
+        let dir = std::env::temp_dir().join(format!(
+            "volant-scram-native512-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        let _ = fs::remove_dir_all(&dir);
+        fs::create_dir_all(&dir).unwrap();
+        let broker = Arc::new(Broker::new(StorageConfig {
+            data_dir: dir.clone(),
+            ..StorageConfig::default()
+        }));
+        broker.upsert_scram_user("alice", "s3cret").unwrap();
+
+        let client_nonce = generate_client_nonce();
+        let first = pack_request(
+            1,
+            &Request::ScramFirst {
+                username: "alice".into(),
+                client_nonce: client_nonce.clone(),
+                hash: SCRAM_HASH_SHA512,
+            },
+        )
+        .unwrap();
+        let mut authenticated = false;
+        let mut principal = None;
+        let mut chal = None;
+        let resp = dispatch_with_auth(
+            &broker,
+            first,
+            &mut authenticated,
+            &mut principal,
+            &mut chal,
+        )
+        .await;
+        let (combined, salt, iter) = match resp {
+            Response::ScramFirst {
+                error_code,
+                combined_nonce,
+                salt,
+                iterations,
+            } => {
+                assert_eq!(error_code, 0);
+                (combined_nonce, salt, iterations)
+            }
+            other => panic!("unexpected first: {other:?}"),
+        };
+        assert!(chal.as_ref().is_some_and(|c| c.hash == ScramHash::Sha512));
+
+        let (proof, expected_sig) = client_proof_and_server_sig_for(
+            ScramHash::Sha512,
+            "alice",
+            "s3cret",
+            &client_nonce,
+            &combined,
+            &salt,
+            iter,
+        )
+        .unwrap();
+        assert_eq!(proof.len(), 64);
+
+        let final_frame = pack_request(
+            2,
+            &Request::ScramFinal {
+                username: "alice".into(),
+                combined_nonce: combined,
+                client_proof: bytes::Bytes::from(proof),
+            },
+        )
+        .unwrap();
+        let resp = dispatch_with_auth(
+            &broker,
+            final_frame,
+            &mut authenticated,
+            &mut principal,
+            &mut chal,
+        )
+        .await;
+        match resp {
+            Response::ScramFinal {
+                error_code,
+                server_signature,
+            } => {
+                assert_eq!(error_code, 0);
+                assert_eq!(server_signature.as_ref(), expected_sig.as_slice());
+            }
+            other => panic!("unexpected final: {other:?}"),
+        }
+        assert!(authenticated);
+        assert_eq!(principal.as_deref(), Some("alice"));
+
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[tokio::test]
+    async fn native_scram_first_unknown_hash_is_invalid_arg() {
+        use crate::net::dispatch_with_auth;
+        use crate::Broker;
+        use std::sync::Arc;
+        use volant_protocol::{pack_request, Request, Response};
+        use volant_storage::StorageConfig;
+
+        let dir = std::env::temp_dir().join(format!(
+            "volant-scram-badhash-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        let _ = fs::remove_dir_all(&dir);
+        fs::create_dir_all(&dir).unwrap();
+        let broker = Arc::new(Broker::new(StorageConfig {
+            data_dir: dir.clone(),
+            ..StorageConfig::default()
+        }));
+        broker.upsert_scram_user("alice", "s3cret").unwrap();
+
+        let first = pack_request(
+            1,
+            &Request::ScramFirst {
+                username: "alice".into(),
+                client_nonce: generate_client_nonce(),
+                hash: 3,
+            },
+        )
+        .unwrap();
+        let mut authenticated = false;
+        let mut principal = None;
+        let mut chal = None;
+        let resp = dispatch_with_auth(
+            &broker,
+            first,
+            &mut authenticated,
+            &mut principal,
+            &mut chal,
+        )
+        .await;
+        match resp {
+            Response::ScramFirst { error_code, .. } => {
+                assert_eq!(error_code, volant_protocol::ErrorCode::InvalidArg as u16);
+            }
+            other => panic!("unexpected: {other:?}"),
+        }
+        assert!(chal.is_none());
+        let _ = fs::remove_dir_all(&dir);
+    }
 }

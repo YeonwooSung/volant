@@ -28,10 +28,12 @@ from volant.codec import (
     encode_auth_response,
     encode_metadata_response,
     encode_scram_final_response,
+    encode_scram_first_request,
     encode_scram_first_response,
+    ScramFirstRequest,
 )
 from volant.frame import ProtocolError, encode_frame, try_decode_frame
-from volant.scram import client_proof_and_server_sig
+from volant.scram import client_proof_and_server_sig, client_proof_and_server_sig_sha512
 
 # Pinned vector matching crates/volant-client/src/scram.rs.
 _USER = "alice"
@@ -51,6 +53,29 @@ class TestScramCrypto(unittest.TestCase):
         )
         self.assertEqual(proof.hex(), _PROOF_HEX)
         self.assertEqual(sig.hex(), _SIG_HEX)
+
+    def test_sha512_proof_is_64_bytes(self) -> None:
+        proof, sig = client_proof_and_server_sig_sha512(
+            _USER, _PASS, _CLIENT_NONCE, _COMBINED, _SALT, _ITERS
+        )
+        self.assertEqual(len(proof), 64)
+        self.assertEqual(len(sig), 64)
+        p256, _ = client_proof_and_server_sig(
+            _USER, _PASS, _CLIENT_NONCE, _COMBINED, _SALT, _ITERS
+        )
+        self.assertNotEqual(proof[:32], p256)
+
+    def test_scram_first_hash_trailer(self) -> None:
+        req = ScramFirstRequest(username=_USER, client_nonce=_CLIENT_NONCE, hash=2)
+        decoded = decode_scram_first_request(encode_scram_first_request(req))
+        self.assertEqual(decoded.hash, 2)
+        # Legacy body: username + nonce only.
+        import struct
+
+        user = _USER.encode("utf-8")
+        nonce = _CLIENT_NONCE.encode("utf-8")
+        legacy = struct.pack("<H", len(user)) + user + struct.pack("<H", len(nonce)) + nonce
+        self.assertEqual(decode_scram_first_request(legacy).hash, 0)
 
 
 class _ScramServer:
