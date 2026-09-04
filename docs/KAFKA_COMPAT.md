@@ -91,6 +91,7 @@ From `SUPPORTED_APIS` in `crates/volant-broker/src/kafka/mod.rs`:
 | 73 | AssignReplicasToDirs | 0 | Always flex; parse and reject every assignment (**42**); single `data_dir`; files unmoved; no DirectoryId storage; not KRaft; Cluster ALTER; controller not required (v0.251) |
 | 74 | ListClientMetricsResources | 0 | Always flex; no client-metrics store; empty resources; Cluster DESCRIBE (v0.252) |
 | 75 | DescribeTopicPartitions | 0 | Always flex; wraps Metadata (same leaders/ISR/epochs/TopicId); no ELR; simple `responsePartitionLimit` truncate; cursor start if topic is in the set else ignored (v0.237) |
+| 76 | ShareGroupHeartbeat | 1 | Always flex; parse and reject (**42** `not KIP-932 share group`); does not wrap Heartbeat **12** or ConsumerGroupHeartbeat **68**; official v0 removed in Kafka 4.1; Group READ; controller not required (v0.275) |
 | 80 | AddRaftVoter | 0 | Always flex; not a KRaft raft voter (membership is overlay + native AddBroker); parse and reject (**42**); does not wrap AddBroker; overlay unchanged; Cluster ALTER; controller not required (v0.271) |
 | 81 | RemoveRaftVoter | 0 | Always flex; not a KRaft raft voter (no voter set/DirectoryId); parse and reject (**42**); does not wrap remove_broker; overlay unchanged; Cluster ALTER; controller not required (v0.272) |
 | 82 | UpdateRaftVoter | 0 | Always flex; not a KRaft voter set (no listener / KRaftVersionFeature store); parse and reject (**42**); overlay unchanged; Cluster ALTER; controller not required (v0.273) |

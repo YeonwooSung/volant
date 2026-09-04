@@ -2037,6 +2037,76 @@ fn write_consumer_group_heartbeat(out: &mut BytesMut, denied: bool) {
     put_empty_tag_buffer(out);
 }
 
+/// ShareGroupHeartbeat v1 (key 76). Always flexible.
+///
+/// Official `ShareGroupHeartbeatRequest.json` / `Response.json`.
+/// Not KIP-932: parse and reject **42** `INVALID_REQUEST`
+/// (`not KIP-932 share group`). Does not call
+/// `GroupCoordinator::heartbeat` and does not wrap classic Heartbeat 12
+/// or ConsumerGroupHeartbeat 68. Official v0 was removed in Kafka 4.1.
+pub(crate) fn encode_share_group_heartbeat(
+    broker: &Broker,
+    src: &mut impl Buf,
+    out: &mut BytesMut,
+    principal: &str,
+) {
+    let group_id = parse_share_group_heartbeat_request(src);
+
+    let denied = broker.acls().is_enabled()
+        && !broker.acls().authorize(
+            Some(principal),
+            ResourceType::Group,
+            &group_id,
+            AclOperation::Read,
+        );
+
+    write_share_group_heartbeat(out, denied);
+}
+
+fn parse_share_group_heartbeat_request(src: &mut impl Buf) -> String {
+    // Official v1 (flex, `ShareGroupHeartbeatRequest.json`):
+    // GroupId compact string, MemberId compact string, MemberEpoch i32,
+    // RackId compact nullable string, SubscribedTopicNames compact
+    // nullable array of compact string, tagged.
+    let group_id = get_compact_string(src).unwrap_or_default();
+    let _ = get_compact_string(src);
+    if src.remaining() >= 4 {
+        let _member_epoch = src.get_i32();
+    }
+    let _ = get_compact_nullable_string(src);
+    match get_compact_array_len(src) {
+        Ok(Some(n)) => {
+            for _ in 0..n {
+                if get_compact_string(src).is_err() {
+                    break;
+                }
+            }
+        }
+        Ok(None) | Err(_) => {}
+    }
+    let _ = skip_tag_buffer(src);
+    group_id
+}
+
+fn write_share_group_heartbeat(out: &mut BytesMut, denied: bool) {
+    // Official ShareGroupHeartbeatResponse.json v1:
+    // throttleTimeMs, errorCode, errorMessage, memberId, memberEpoch,
+    // heartbeatIntervalMs, assignment (nullable struct; 0 = null), tagged.
+    out.put_i32(0); // throttleTimeMs
+    if denied {
+        out.put_i16(KafkaErrorCode::GroupAuthorizationFailed.as_i16());
+        put_compact_nullable_string(out, None);
+    } else {
+        out.put_i16(KafkaErrorCode::InvalidRequest.as_i16());
+        put_compact_nullable_string(out, Some("not KIP-932 share group"));
+    }
+    put_compact_nullable_string(out, None); // memberId
+    out.put_i32(-1); // memberEpoch
+    out.put_i32(0); // heartbeatIntervalMs
+    put_unsigned_varint(out, 0); // assignment null
+    put_empty_tag_buffer(out);
+}
+
 /// ConsumerGroupDescribe v0 (key 69). Always flexible.
 ///
 /// Official `ConsumerGroupDescribeRequest.json` / `Response.json`. Wraps the
@@ -2607,6 +2677,129 @@ mod tests {
         assert_eq!(error, KafkaErrorCode::InvalidRequest.as_i16());
 
         let after = broker.groups().describe_group("cg-v269").unwrap();
+        assert_eq!(after.generation, before.generation);
+        assert_eq!(after.members.len(), before.members.len());
+        assert_eq!(after.members[0].member_id, before.members[0].member_id);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    fn share_heartbeat_v1_body(group: &str, member: &str, epoch: i32) -> BytesMut {
+        let mut body = BytesMut::new();
+        put_compact_string(&mut body, group);
+        put_compact_string(&mut body, member);
+        body.put_i32(epoch);
+        put_compact_nullable_string(&mut body, Some("rack-a"));
+        put_compact_array_len(&mut body, 1);
+        put_compact_string(&mut body, "events");
+        put_empty_tag_buffer(&mut body);
+        body
+    }
+
+    #[test]
+    fn kafka_share_group_heartbeat_rejects_42() {
+        let dir = temp_dir("sgh-ok");
+        let broker = Broker::new(StorageConfig {
+            data_dir: dir.clone(),
+            ..StorageConfig::default()
+        });
+        let mut src = share_heartbeat_v1_body("sg-v275", "m1", 1);
+        let mut out = BytesMut::new();
+        encode_share_group_heartbeat(&broker, &mut src, &mut out, "kafka-anonymous");
+        let mut resp = out.freeze();
+        let (throttle, error, err_msg, member, epoch, interval, assignment) =
+            read_heartbeat(&mut resp);
+        assert_eq!(throttle, 0);
+        assert_eq!(error, KafkaErrorCode::InvalidRequest.as_i16());
+        assert_eq!(err_msg.as_deref(), Some("not KIP-932 share group"));
+        assert_eq!(member, None);
+        assert_eq!(epoch, -1);
+        assert_eq!(interval, 0);
+        assert_eq!(assignment, 0);
+        assert!(broker.groups().describe_group("sg-v275").is_none());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn kafka_share_group_heartbeat_truncated_still_42() {
+        let dir = temp_dir("sgh-trunc");
+        let broker = Broker::new(StorageConfig {
+            data_dir: dir.clone(),
+            ..StorageConfig::default()
+        });
+        let mut src = BytesMut::new();
+        let mut out = BytesMut::new();
+        encode_share_group_heartbeat(&broker, &mut src, &mut out, "kafka-anonymous");
+        let mut resp = out.freeze();
+        let (throttle, error, err_msg, member, epoch, interval, assignment) =
+            read_heartbeat(&mut resp);
+        assert_eq!(throttle, 0);
+        assert_eq!(error, KafkaErrorCode::InvalidRequest.as_i16());
+        assert_eq!(err_msg.as_deref(), Some("not KIP-932 share group"));
+        assert_eq!(member, None);
+        assert_eq!(epoch, -1);
+        assert_eq!(interval, 0);
+        assert_eq!(assignment, 0);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn kafka_share_group_heartbeat_acl_deny_is_30() {
+        let dir = temp_dir("sgh-acl");
+        let broker = Broker::new(StorageConfig {
+            data_dir: dir.clone(),
+            ..StorageConfig::default()
+        });
+        broker
+            .configure_acls(true, None, vec![], "token".into())
+            .unwrap();
+
+        let mut src = share_heartbeat_v1_body("sg-v275", "m1", 0);
+        let mut out = BytesMut::new();
+        encode_share_group_heartbeat(&broker, &mut src, &mut out, "kafka-anonymous");
+        let mut resp = out.freeze();
+        let (throttle, error, err_msg, member, epoch, interval, assignment) =
+            read_heartbeat(&mut resp);
+        assert_eq!(throttle, 0);
+        assert_eq!(error, KafkaErrorCode::GroupAuthorizationFailed.as_i16());
+        assert_eq!(err_msg, None);
+        assert_eq!(member, None);
+        assert_eq!(epoch, -1);
+        assert_eq!(interval, 0);
+        assert_eq!(assignment, 0);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn kafka_share_group_heartbeat_does_not_mutate_group() {
+        let dir = temp_dir("sgh-keep");
+        let broker = Broker::new(StorageConfig {
+            data_dir: dir.clone(),
+            ..StorageConfig::default()
+        });
+        let joined = broker
+            .groups()
+            .join(
+                "sg-v275",
+                "",
+                10_000,
+                150,
+                vec!["events".into()],
+                "",
+                |_| Some(1),
+            )
+            .unwrap();
+        assert_eq!(joined.error_code, 0);
+        let before = broker.groups().describe_group("sg-v275").unwrap();
+
+        let mut src =
+            share_heartbeat_v1_body("sg-v275", &joined.member_id, joined.generation as i32);
+        let mut out = BytesMut::new();
+        encode_share_group_heartbeat(&broker, &mut src, &mut out, "kafka-anonymous");
+        let mut resp = out.freeze();
+        let (_, error, _, _, _, _, _) = read_heartbeat(&mut resp);
+        assert_eq!(error, KafkaErrorCode::InvalidRequest.as_i16());
+
+        let after = broker.groups().describe_group("sg-v275").unwrap();
         assert_eq!(after.generation, before.generation);
         assert_eq!(after.members.len(), before.members.len());
         assert_eq!(after.members[0].member_id, before.members[0].member_id);
