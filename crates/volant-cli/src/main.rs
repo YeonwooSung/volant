@@ -838,10 +838,7 @@ async fn main() -> Result<()> {
                 } else {
                     println!("group\tstate\tmembers\tgeneration");
                     for g in groups {
-                        let state = match g.state {
-                            volant_protocol::GroupState::Stable => "Stable",
-                            volant_protocol::GroupState::Empty => "Empty",
-                        };
+                        let state = g.state.as_str();
                         println!(
                             "{}\t{}\t{}\t{}",
                             g.group_id, state, g.member_count, g.generation

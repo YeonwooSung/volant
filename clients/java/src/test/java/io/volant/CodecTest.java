@@ -765,6 +765,14 @@ class CodecTest {
                 Codec.ListGroupsResponse.class, Codec.decodeResponse(Codec.OP_LIST_GROUPS_RESPONSE, raw));
         assertEquals(2, dispatched.groups.size());
         assertEquals(Codec.GROUP_STATE_EMPTY, new Codec.GroupListing("x", 99, 0, 0).state);
+        assertEquals(Codec.GROUP_STATE_EMPTY, Codec.GroupListing.groupStateFromU8(0));
+        assertEquals(Codec.GROUP_STATE_STABLE, Codec.GroupListing.groupStateFromU8(1));
+        assertEquals(
+                Codec.GROUP_STATE_COMPLETING_REBALANCE, Codec.GroupListing.groupStateFromU8(2));
+        assertEquals(Codec.GROUP_STATE_EMPTY, Codec.GroupListing.groupStateFromU8(99));
+        assertEquals(
+                Codec.GROUP_STATE_COMPLETING_REBALANCE,
+                new Codec.GroupListing("c", Codec.GROUP_STATE_COMPLETING_REBALANCE, 1, 1).state);
     }
 
     @Test

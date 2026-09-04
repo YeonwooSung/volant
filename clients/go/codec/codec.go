@@ -612,16 +612,22 @@ type ScramFinalResponse struct {
 const (
 	// GroupStateEmpty is offsets on disk only; no live members.
 	GroupStateEmpty GroupState = 0
-	// GroupStateStable is at least one live member.
+	// GroupStateStable is live members that have confirmed via SyncGroup.
 	GroupStateStable GroupState = 1
+	// GroupStateCompletingRebalance is live members with the v0.215 fence open.
+	GroupStateCompletingRebalance GroupState = 2
 )
 
 // GroupStateFromU8 maps the wire byte (unknown values decode as Empty).
 func GroupStateFromU8(v uint8) GroupState {
-	if v == 1 {
+	switch v {
+	case 1:
 		return GroupStateStable
+	case 2:
+		return GroupStateCompletingRebalance
+	default:
+		return GroupStateEmpty
 	}
-	return GroupStateEmpty
 }
 
 // GroupListing is one group in a ListGroups response.

@@ -108,8 +108,10 @@ type FetchResult struct {
 const (
 	// GroupStateEmpty is offsets on disk only; no live members.
 	GroupStateEmpty = codec.GroupStateEmpty
-	// GroupStateStable is at least one live member.
+	// GroupStateStable is live members that have confirmed via SyncGroup.
 	GroupStateStable = codec.GroupStateStable
+	// GroupStateCompletingRebalance is live members with the v0.215 fence open.
+	GroupStateCompletingRebalance = codec.GroupStateCompletingRebalance
 )
 
 // Offset is one committed (partition, offset) pair from OffsetFetch.

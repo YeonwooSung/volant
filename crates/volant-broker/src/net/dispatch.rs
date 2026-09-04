@@ -1614,11 +1614,7 @@ async fn handle_request(broker: &Arc<Broker>, req: Request) -> Result<Response> 
                 .into_iter()
                 .map(|g| volant_protocol::GroupListing {
                     group_id: g.group_id,
-                    state: if g.stable {
-                        volant_protocol::GroupState::Stable
-                    } else {
-                        volant_protocol::GroupState::Empty
-                    },
+                    state: g.state,
                     member_count: g.member_count,
                     generation: g.generation,
                 })

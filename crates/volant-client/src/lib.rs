@@ -221,6 +221,8 @@
 //! send, so the v0.205 retry guard sees a non-empty id.
 //! v0.211 prefers JoinGroup `members` trailer for range assignor and
 //! falls back to DescribeGroup when that list is empty.
+//! v0.218 decodes ListGroups state byte **2** as CompletingRebalance
+//! (live members, SyncGroup fence still open).
 
 #![deny(missing_docs)]
 

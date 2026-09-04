@@ -73,7 +73,7 @@ async fn list_groups_live_and_empty() {
     assert_eq!(empty.member_count, 0);
 
     let live = list.iter().find(|g| g.group_id == "g-live").unwrap();
-    assert_eq!(live.state, GroupState::Stable);
+    assert_eq!(live.state, GroupState::CompletingRebalance);
     assert_eq!(live.member_count, 1);
     assert!(live.generation >= 1);
 

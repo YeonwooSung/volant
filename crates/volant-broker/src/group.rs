@@ -7,7 +7,7 @@ use std::time::{Duration, Instant};
 use parking_lot::Mutex;
 use uuid::Uuid;
 use volant_core::Result;
-use volant_protocol::ErrorCode;
+use volant_protocol::{ErrorCode, GroupState};
 
 use crate::assignor::sticky_assign_multi;
 use crate::offset_store::{OffsetStore, StoredOffset, OFFSET_UNKNOWN};
@@ -84,7 +84,7 @@ pub struct GroupMemberDescription {
     pub assignment: Vec<(String, u32)>,
 }
 
-/// Live group membership snapshot (Phase 11).
+/// Live group membership snapshot (Phase 11 / v0.218).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct GroupDescription {
     /// Group id.
@@ -93,15 +93,17 @@ pub struct GroupDescription {
     pub generation: u32,
     /// Members (sorted by member id).
     pub members: Vec<GroupMemberDescription>,
+    /// Empty / Stable / CompletingRebalance (v0.218 SyncGroup fence label).
+    pub state: GroupState,
 }
 
-/// One group listing entry (Phase 12).
+/// One group listing entry (Phase 12 / v0.218).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct GroupListEntry {
     /// Group id.
     pub group_id: String,
-    /// True when at least one live member.
-    pub stable: bool,
+    /// Empty / Stable / CompletingRebalance (live && !all_synced).
+    pub state: GroupState,
     /// Live member count.
     pub member_count: u32,
     /// Current generation (`0` if empty).
@@ -448,6 +450,7 @@ impl GroupCoordinator {
             group_id: group_id.to_owned(),
             generation: group.generation,
             members,
+            state: listed_state(group),
         })
     }
 
@@ -485,14 +488,14 @@ impl GroupCoordinator {
                 if let Some(g) = groups.get(&group_id) {
                     GroupListEntry {
                         group_id,
-                        stable: !g.members.is_empty(),
+                        state: listed_state(g),
                         member_count: g.members.len() as u32,
                         generation: g.generation,
                     }
                 } else {
                     GroupListEntry {
                         group_id,
-                        stable: false,
+                        state: GroupState::Empty,
                         member_count: 0,
                         generation: 0,
                     }
@@ -632,6 +635,17 @@ fn all_synced(group: &Group) -> bool {
             .members
             .values()
             .all(|m| m.synced_generation == group.generation)
+}
+
+/// List/describe label: CompletingRebalance while the v0.215 fence is open.
+fn listed_state(group: &Group) -> GroupState {
+    if group.members.is_empty() {
+        GroupState::Empty
+    } else if all_synced(group) {
+        GroupState::Stable
+    } else {
+        GroupState::CompletingRebalance
+    }
 }
 
 fn fenced_join(group: &Group, member_id: String) -> JoinResult {
@@ -1085,24 +1099,51 @@ mod tests {
     }
 
     #[test]
-    fn list_groups_empty_or_stable_supported_apis_stays_38() {
+    fn list_groups_completing_then_stable_empty_supported_apis_stays_38() {
         let dir = temp_dir();
         let coord = GroupCoordinator::new(&dir).unwrap();
         assert!(coord.list_groups().is_empty());
+
+        coord
+            .commit_offsets("g-empty", "", 0, &[("t".into(), 0, 1, String::new())])
+            .unwrap();
+        let empty = coord
+            .list_groups()
+            .into_iter()
+            .find(|e| e.group_id == "g-empty")
+            .unwrap();
+        assert_eq!(empty.state, GroupState::Empty);
+        assert_eq!(empty.member_count, 0);
+
         let j1 = coord
             .join("g", "", 10_000, vec!["t".into()], "", counts)
             .unwrap();
         let listed = coord.list_groups();
-        assert_eq!(listed.len(), 1);
-        assert_eq!(listed[0].group_id, "g");
-        assert!(listed[0].stable);
-        assert_eq!(listed[0].member_count, 1);
-        assert_eq!(listed[0].generation, j1.generation);
+        let live = listed.iter().find(|e| e.group_id == "g").unwrap();
+        assert_eq!(live.state, GroupState::CompletingRebalance);
+        assert_eq!(live.member_count, 1);
+        assert_eq!(live.generation, j1.generation);
+        assert_eq!(
+            coord.describe_group("g").unwrap().state,
+            GroupState::CompletingRebalance
+        );
+
+        sync_ok(&coord, "g", &j1.member_id, j1.generation);
+        let after_sync = coord
+            .list_groups()
+            .into_iter()
+            .find(|e| e.group_id == "g")
+            .unwrap();
+        assert_eq!(after_sync.state, GroupState::Stable);
+        assert_eq!(coord.describe_group("g").unwrap().state, GroupState::Stable);
+
         let leave = coord.leave("g", &j1.member_id, counts);
         assert_eq!(leave.error_code, 0);
-        // Empty group is removed from membership; ListGroups stays Empty/Stable.
         let after = coord.list_groups();
-        assert!(after.iter().all(|e| !e.stable || e.member_count > 0));
+        assert!(after
+            .iter()
+            .all(|e| e.state == GroupState::Empty
+                || e.member_count > 0 && e.state != GroupState::Empty));
         assert_eq!(crate::kafka::SUPPORTED_APIS.len(), 38);
         let _ = fs::remove_dir_all(&dir);
     }
