@@ -48,6 +48,7 @@
 //! ConsumerGroupHeartbeat v0 (always flexible; reject 42; not KIP-848),
 //! ShareGroupHeartbeat v1 (always flexible; reject 42; not KIP-932),
 //! ShareGroupDescribe v1 (key 77 reject; not KIP-932; official v0 removed),
+//! ShareAcknowledge v1 (always flexible; reject 42; not KIP-932),
 //! Envelope v0 (key 58 reject; forwarding not supported; not KIP-590),
 //! ControllerRegistration v0 (key 70 reject; not KRaft / not AddBroker),
 //! Vote v0 (key 52 reject; not KRaft vote / not openraft RequestVote),
@@ -68,7 +69,8 @@
 //! `docs/V266_SPEC.md`, `docs/V267_SPEC.md`, `docs/V268_SPEC.md`,
 //! `docs/V269_SPEC.md`, `docs/V270_SPEC.md`, `docs/V271_SPEC.md`,
 //! `docs/V272_SPEC.md`, `docs/V273_SPEC.md`, `docs/V274_SPEC.md`,
-//! `docs/V275_SPEC.md`, `docs/V276_SPEC.md`, and `docs/V277_SPEC.md`.
+//! `docs/V275_SPEC.md`, `docs/V276_SPEC.md`, `docs/V277_SPEC.md`,
+//! and `docs/V278_SPEC.md`.
 
 mod acl_api;
 mod admin_api;
@@ -443,6 +445,10 @@ pub enum ApiKey {
     /// Volant advertises 1 only (v2 ShareAcquireMode / Renew is out
     /// of range).
     ShareFetch = 78,
+    /// ShareAcknowledge (always flexible; v1 only). Honest reject:
+    /// not KIP-932 share acknowledge. Does not wrap OffsetCommit / Fetch.
+    /// Offsets and record state are unchanged.
+    ShareAcknowledge = 79,
     /// AddRaftVoter (always flexible; v0 only). Honest reject: not a
     /// KRaft raft voter (membership is overlay + native AddBroker).
     /// Does not wrap native AddBroker. Overlay membership is unchanged.
@@ -536,6 +542,7 @@ impl ApiKey {
             76 => Some(Self::ShareGroupHeartbeat),
             77 => Some(Self::ShareGroupDescribe),
             78 => Some(Self::ShareFetch),
+            79 => Some(Self::ShareAcknowledge),
             80 => Some(Self::AddRaftVoter),
             81 => Some(Self::RemoveRaftVoter),
             82 => Some(Self::UpdateRaftVoter),
@@ -620,6 +627,7 @@ pub const SUPPORTED_APIS: &[(ApiKey, i16, i16)] = &[
     (ApiKey::ShareGroupHeartbeat, 1, 1),
     (ApiKey::ShareGroupDescribe, 1, 1),
     (ApiKey::ShareFetch, 1, 1),
+    (ApiKey::ShareAcknowledge, 1, 1),
     (ApiKey::AddRaftVoter, 0, 0),
     (ApiKey::RemoveRaftVoter, 0, 0),
     (ApiKey::UpdateRaftVoter, 0, 0),
@@ -889,9 +897,9 @@ mod tests {
     #[test]
     fn supported_apis_includes_renew_delegation_token_39() {
         assert!(SUPPORTED_APIS.len() >= 61);
-        assert!(SUPPORTED_APIS.iter().any(|(k, min, max)| {
-            *k == ApiKey::RenewDelegationToken && *min == 0 && *max == 0
-        }));
+        assert!(SUPPORTED_APIS
+            .iter()
+            .any(|(k, min, max)| { *k == ApiKey::RenewDelegationToken && *min == 0 && *max == 0 }));
         assert_eq!(ApiKey::from_i16(39), Some(ApiKey::RenewDelegationToken));
     }
 
@@ -957,6 +965,17 @@ mod tests {
     }
 
     #[test]
+    fn supported_apis_includes_share_acknowledge_79() {
+        assert!(SUPPORTED_APIS.len() >= 75);
+        assert!(SUPPORTED_APIS
+            .iter()
+            .any(|(k, min, max)| { *k == ApiKey::ShareAcknowledge && *min == 1 && *max == 1 }));
+        assert_eq!(ApiKey::from_i16(79), Some(ApiKey::ShareAcknowledge));
+        assert_eq!(ApiKey::from_i16(75), Some(ApiKey::DescribeTopicPartitions));
+        assert_eq!(ApiKey::from_i16(80), Some(ApiKey::AddRaftVoter));
+    }
+
+    #[test]
     fn supported_apis_includes_add_raft_voter_80() {
         assert!(SUPPORTED_APIS.len() >= 70);
         assert!(SUPPORTED_APIS
@@ -987,9 +1006,9 @@ mod tests {
     #[test]
     fn supported_apis_includes_unregister_controller_94() {
         assert!(SUPPORTED_APIS.len() >= 70);
-        assert!(SUPPORTED_APIS.iter().any(|(k, min, max)| {
-            *k == ApiKey::UnregisterController && *min == 0 && *max == 0
-        }));
+        assert!(SUPPORTED_APIS
+            .iter()
+            .any(|(k, min, max)| { *k == ApiKey::UnregisterController && *min == 0 && *max == 0 }));
         assert_eq!(ApiKey::from_i16(94), Some(ApiKey::UnregisterController));
         assert_eq!(ApiKey::from_i16(64), Some(ApiKey::UnregisterBroker));
         assert_eq!(ApiKey::from_i16(70), Some(ApiKey::ControllerRegistration));

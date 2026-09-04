@@ -2328,6 +2328,116 @@ fn write_share_fetch(out: &mut BytesMut, denied: bool) {
     put_empty_tag_buffer(out);
 }
 
+/// ShareAcknowledge v1 (key 79). Always flexible.
+///
+/// Official `ShareAcknowledgeRequest.json` / `Response.json`.
+/// Not KIP-932: parse and reject **42** `INVALID_REQUEST`
+/// (`not KIP-932 share acknowledge`). Does not wrap OffsetCommit /
+/// Fetch and does not mutate offsets or record state.
+pub(crate) fn encode_share_acknowledge(
+    broker: &Broker,
+    src: &mut impl Buf,
+    out: &mut BytesMut,
+    principal: &str,
+) {
+    let group_id = parse_share_acknowledge_request(src);
+
+    let denied = broker.acls().is_enabled()
+        && !broker.acls().authorize(
+            Some(principal),
+            ResourceType::Group,
+            &group_id,
+            AclOperation::Read,
+        );
+
+    write_share_acknowledge(out, denied);
+}
+
+fn parse_share_acknowledge_request(src: &mut impl Buf) -> String {
+    // Official v1 (flex, `ShareAcknowledgeRequest.json`):
+    // GroupId compact nullable string, MemberId compact nullable string,
+    // ShareSessionEpoch i32, Topics[] { TopicId uuid, Partitions[] {
+    // PartitionIndex i32, AcknowledgementBatches[] { FirstOffset i64,
+    // LastOffset i64, AcknowledgeTypes[] i8, tagged }, tagged }, tagged },
+    // tagged.
+    // IsRenewAck is v2+ — out of advertised range.
+    let group_id = get_compact_nullable_string(src)
+        .ok()
+        .flatten()
+        .unwrap_or_default();
+    let _ = get_compact_nullable_string(src);
+    if src.remaining() >= 4 {
+        let _share_session_epoch = src.get_i32();
+    }
+    match get_compact_array_len(src) {
+        Ok(Some(n)) => {
+            for _ in 0..n {
+                if get_uuid(src).is_err() {
+                    break;
+                }
+                match get_compact_array_len(src) {
+                    Ok(Some(pn)) => {
+                        for _ in 0..pn {
+                            if src.remaining() < 4 {
+                                break;
+                            }
+                            let _ = src.get_i32();
+                            match get_compact_array_len(src) {
+                                Ok(Some(bn)) => {
+                                    for _ in 0..bn {
+                                        if src.remaining() < 16 {
+                                            break;
+                                        }
+                                        let _ = src.get_i64();
+                                        let _ = src.get_i64();
+                                        match get_compact_array_len(src) {
+                                            Ok(Some(tn)) => {
+                                                for _ in 0..tn {
+                                                    if src.remaining() < 1 {
+                                                        break;
+                                                    }
+                                                    let _ = src.get_i8();
+                                                }
+                                            }
+                                            Ok(None) | Err(_) => {}
+                                        }
+                                        let _ = skip_tag_buffer(src);
+                                    }
+                                }
+                                Ok(None) | Err(_) => {}
+                            }
+                            let _ = skip_tag_buffer(src);
+                        }
+                    }
+                    Ok(None) | Err(_) => {}
+                }
+                let _ = skip_tag_buffer(src);
+            }
+        }
+        Ok(None) | Err(_) => {}
+    }
+    let _ = skip_tag_buffer(src);
+    group_id
+}
+
+fn write_share_acknowledge(out: &mut BytesMut, denied: bool) {
+    // Official ShareAcknowledgeResponse.json v1:
+    // throttleTimeMs, errorCode, errorMessage, Responses[] empty,
+    // NodeEndpoints[] empty, tagged.
+    // AcquisitionLockTimeoutMs is v2+ — do not write.
+    out.put_i32(0); // throttleTimeMs
+    if denied {
+        out.put_i16(KafkaErrorCode::GroupAuthorizationFailed.as_i16());
+        put_compact_nullable_string(out, None);
+    } else {
+        out.put_i16(KafkaErrorCode::InvalidRequest.as_i16());
+        put_compact_nullable_string(out, Some("not KIP-932 share acknowledge"));
+    }
+    put_compact_array_len(out, 0); // Responses[]
+    put_compact_array_len(out, 0); // NodeEndpoints[]
+    put_empty_tag_buffer(out);
+}
+
 /// ConsumerGroupDescribe v0 (key 69). Always flexible.
 ///
 /// Official `ConsumerGroupDescribeRequest.json` / `Response.json`. Wraps the
@@ -3316,6 +3426,142 @@ mod tests {
             broker.log_end_offset(&topic, PartitionId(0)).unwrap(),
             before
         );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    fn share_ack_v1_body(group: &str, member: &str, epoch: i32) -> BytesMut {
+        let mut body = BytesMut::new();
+        put_compact_nullable_string(&mut body, Some(group));
+        put_compact_nullable_string(&mut body, Some(member));
+        body.put_i32(epoch);
+        put_compact_array_len(&mut body, 1);
+        put_uuid(&mut body, &[0u8; 16]);
+        put_compact_array_len(&mut body, 1);
+        body.put_i32(0);
+        put_compact_array_len(&mut body, 1);
+        body.put_i64(0);
+        body.put_i64(10);
+        put_compact_array_len(&mut body, 1);
+        body.put_i8(1);
+        put_empty_tag_buffer(&mut body);
+        put_empty_tag_buffer(&mut body);
+        put_empty_tag_buffer(&mut body);
+        put_empty_tag_buffer(&mut body);
+        body
+    }
+
+    fn read_share_ack(src: &mut impl Buf) -> (i32, i16, Option<String>, u32, u32) {
+        let throttle = src.get_i32();
+        let error = src.get_i16();
+        let err_msg = get_compact_nullable_string(src).unwrap();
+        let responses = super::super::codec::read_unsigned_varint(src).unwrap();
+        let endpoints = super::super::codec::read_unsigned_varint(src).unwrap();
+        skip_tag_buffer(src).unwrap();
+        assert_eq!(src.remaining(), 0);
+        (throttle, error, err_msg, responses, endpoints)
+    }
+
+    #[test]
+    fn kafka_share_acknowledge_rejects_42() {
+        let dir = temp_dir("sack-ok");
+        let broker = Broker::new(StorageConfig {
+            data_dir: dir.clone(),
+            ..StorageConfig::default()
+        });
+        let mut src = share_ack_v1_body("sg-v278", "m1", 1);
+        let mut out = BytesMut::new();
+        encode_share_acknowledge(&broker, &mut src, &mut out, "kafka-anonymous");
+        let mut resp = out.freeze();
+        let (throttle, error, err_msg, responses, endpoints) = read_share_ack(&mut resp);
+        assert_eq!(throttle, 0);
+        assert_eq!(error, KafkaErrorCode::InvalidRequest.as_i16());
+        assert_eq!(err_msg.as_deref(), Some("not KIP-932 share acknowledge"));
+        assert_eq!(responses, 1); // compact empty
+        assert_eq!(endpoints, 1);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn kafka_share_acknowledge_truncated_still_42() {
+        let dir = temp_dir("sack-trunc");
+        let broker = Broker::new(StorageConfig {
+            data_dir: dir.clone(),
+            ..StorageConfig::default()
+        });
+        let mut src = BytesMut::new();
+        let mut out = BytesMut::new();
+        encode_share_acknowledge(&broker, &mut src, &mut out, "kafka-anonymous");
+        let mut resp = out.freeze();
+        let (throttle, error, err_msg, responses, endpoints) = read_share_ack(&mut resp);
+        assert_eq!(throttle, 0);
+        assert_eq!(error, KafkaErrorCode::InvalidRequest.as_i16());
+        assert_eq!(err_msg.as_deref(), Some("not KIP-932 share acknowledge"));
+        assert_eq!(responses, 1);
+        assert_eq!(endpoints, 1);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn kafka_share_acknowledge_acl_deny_is_30() {
+        let dir = temp_dir("sack-acl");
+        let broker = Broker::new(StorageConfig {
+            data_dir: dir.clone(),
+            ..StorageConfig::default()
+        });
+        broker
+            .configure_acls(true, None, vec![], "token".into())
+            .unwrap();
+
+        let mut src = share_ack_v1_body("sg-v278", "m1", 0);
+        let mut out = BytesMut::new();
+        encode_share_acknowledge(&broker, &mut src, &mut out, "kafka-anonymous");
+        let mut resp = out.freeze();
+        let (throttle, error, err_msg, responses, endpoints) = read_share_ack(&mut resp);
+        assert_eq!(throttle, 0);
+        assert_eq!(error, KafkaErrorCode::GroupAuthorizationFailed.as_i16());
+        assert_eq!(err_msg, None);
+        assert_eq!(responses, 1);
+        assert_eq!(endpoints, 1);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn kafka_share_acknowledge_does_not_mutate_offsets() {
+        let dir = temp_dir("sack-off");
+        let broker = Broker::new(StorageConfig {
+            data_dir: dir.clone(),
+            ..StorageConfig::default()
+        });
+        let committed = broker
+            .groups()
+            .commit_offsets(
+                "sg-v278",
+                "",
+                0,
+                &[("events".into(), 0, 7, "meta".into())],
+            )
+            .unwrap();
+        assert_eq!(committed.error_code, 0);
+        let before = broker
+            .groups()
+            .fetch_offsets("sg-v278", &[("events".into(), 0)])
+            .unwrap();
+        assert_eq!(before.entries[0].offset, 7);
+
+        let mut src = share_ack_v1_body("sg-v278", "m1", 1);
+        let mut out = BytesMut::new();
+        encode_share_acknowledge(&broker, &mut src, &mut out, "kafka-anonymous");
+        let mut resp = out.freeze();
+        let (_, error, _, _, _) = read_share_ack(&mut resp);
+        assert_eq!(error, KafkaErrorCode::InvalidRequest.as_i16());
+
+        let after = broker
+            .groups()
+            .fetch_offsets("sg-v278", &[("events".into(), 0)])
+            .unwrap();
+        assert_eq!(after.entries[0].offset, before.entries[0].offset);
+        assert_eq!(after.entries[0].metadata, before.entries[0].metadata);
+        assert_eq!(after.entries[0].leader_epoch, before.entries[0].leader_epoch);
         let _ = std::fs::remove_dir_all(&dir);
     }
 }
