@@ -320,8 +320,8 @@ async fn sync_group_fake_tcp_generation_mismatch_9() {
 }
 
 #[test]
-fn supported_apis_stays_39_sync_group_key_14() {
-    assert_eq!(SUPPORTED_APIS.len(), 39);
+fn supported_apis_stays_40_sync_group_key_14() {
+    assert_eq!(SUPPORTED_APIS.len(), 40);
     assert!(SUPPORTED_APIS
         .iter()
         .any(|(k, min, max)| *k == ApiKey::SyncGroup && *min == 0 && *max == 5));

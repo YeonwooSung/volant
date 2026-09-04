@@ -1,5 +1,5 @@
 //! Kafka wire handlers: Create/Delete topics, CreatePartitions,
-//! AlterPartitionReassignments, configs.
+//! AlterPartitionReassignments, ListPartitionReassignments, configs.
 
 use bytes::{Buf, BufMut, BytesMut};
 use volant_core::{Error, TopicName};
@@ -940,6 +940,237 @@ async fn apply_reassign_partition(
             Some(msg),
         ),
         Err(_) => (KafkaErrorCode::Unknown.as_i16(), None),
+    }
+}
+
+/// ListPartitionReassignments v0 (always flexible). Apply is instant, so
+/// there is no in-progress reassignment log: `replicas` is the current
+/// assignment and `addingReplicas` / `removingReplicas` are empty.
+/// TimeoutMs is parsed and ignored.
+pub(crate) fn encode_list_partition_reassignments(
+    broker: &Broker,
+    src: &mut impl Buf,
+    out: &mut BytesMut,
+    principal: &str,
+) {
+    struct TopicReq {
+        name: String,
+        /// Empty = all partitions of this topic.
+        partitions: Vec<i32>,
+    }
+    enum TopicFilter {
+        All,
+        Named(Vec<TopicReq>),
+    }
+
+    if src.remaining() >= 4 {
+        let _timeout_ms = src.get_i32();
+    }
+    let filter = match get_compact_array_len(src) {
+        Ok(None) => TopicFilter::All,
+        Ok(Some(n)) => {
+            let mut topics = Vec::with_capacity(n);
+            for _ in 0..n {
+                let name = match get_compact_string(src) {
+                    Ok(s) => s,
+                    Err(_) => break,
+                };
+                let mut partitions = Vec::new();
+                match get_compact_array_len(src) {
+                    Ok(Some(pc)) => {
+                        for _ in 0..pc {
+                            if src.remaining() < 4 {
+                                break;
+                            }
+                            partitions.push(src.get_i32());
+                        }
+                    }
+                    Ok(None) | Err(_) => {}
+                }
+                let _ = skip_tag_buffer(src);
+                topics.push(TopicReq { name, partitions });
+            }
+            TopicFilter::Named(topics)
+        }
+        Err(_) => TopicFilter::Named(Vec::new()),
+    };
+    let _ = skip_tag_buffer(src);
+
+    let write_top = |out: &mut BytesMut, code: KafkaErrorCode, msg: Option<&str>, n: usize| {
+        out.put_i32(0); // throttle
+        out.put_i16(code.as_i16());
+        put_compact_nullable_string(out, msg);
+        put_compact_array_len(out, n);
+    };
+
+    if broker.cluster_config().is_some() && !broker.is_controller() {
+        let msg = format!(
+            "not controller; controller_id={}",
+            broker.controller_id()
+        );
+        write_top(out, KafkaErrorCode::NotController, Some(&msg), 0);
+        put_empty_tag_buffer(out);
+        return;
+    }
+
+    if matches!(filter, TopicFilter::All)
+        && broker.acls().is_enabled()
+        && !broker.acls().authorize(
+            Some(principal),
+            ResourceType::Cluster,
+            CLUSTER_RESOURCE,
+            AclOperation::Describe,
+        )
+    {
+        write_top(
+            out,
+            KafkaErrorCode::TopicAuthorizationFailed,
+            Some("cluster authorization failed"),
+            0,
+        );
+        put_empty_tag_buffer(out);
+        return;
+    }
+
+    match filter {
+        TopicFilter::All => {
+            let snap = broker.metadata(None);
+            write_top(out, KafkaErrorCode::None, None, snap.topics.len());
+            for t in snap.topics {
+                put_compact_string(out, t.name.as_str());
+                put_compact_array_len(out, t.partitions.len());
+                for p in t.partitions {
+                    write_list_reassign_partition(
+                        out,
+                        p.partition_id.0 as i32,
+                        &p.replicas,
+                        KafkaErrorCode::None,
+                        None,
+                    );
+                }
+                put_empty_tag_buffer(out);
+            }
+        }
+        TopicFilter::Named(topics) => {
+            write_top(out, KafkaErrorCode::None, None, topics.len());
+            for t in topics {
+                put_compact_string(out, &t.name);
+                if broker.acls().is_enabled()
+                    && !broker.acls().authorize(
+                        Some(principal),
+                        ResourceType::Topic,
+                        &t.name,
+                        AclOperation::Describe,
+                    )
+                {
+                    let known = topic_assignment_partitions(broker, &t.name);
+                    let indexes = list_partition_indexes(&t.partitions, known.as_deref());
+                    put_compact_array_len(out, indexes.len());
+                    for pid in indexes {
+                        write_list_reassign_partition(
+                            out,
+                            pid,
+                            &[],
+                            KafkaErrorCode::TopicAuthorizationFailed,
+                            Some("topic authorization failed"),
+                        );
+                    }
+                    put_empty_tag_buffer(out);
+                    continue;
+                }
+                write_named_topic_reassignments(broker, out, &t.name, &t.partitions);
+                put_empty_tag_buffer(out);
+            }
+        }
+    }
+    put_empty_tag_buffer(out);
+}
+
+fn write_list_reassign_partition(
+    out: &mut BytesMut,
+    partition: i32,
+    replicas: &[u32],
+    code: KafkaErrorCode,
+    msg: Option<&str>,
+) {
+    out.put_i32(partition);
+    put_compact_array_len(out, replicas.len());
+    for &r in replicas {
+        out.put_i32(r as i32);
+    }
+    put_compact_array_len(out, 0); // addingReplicas
+    put_compact_array_len(out, 0); // removingReplicas
+    out.put_i16(code.as_i16());
+    put_compact_nullable_string(out, msg);
+    put_empty_tag_buffer(out);
+}
+
+fn topic_assignment_partitions(broker: &Broker, name: &str) -> Option<Vec<crate::broker::PartitionMetadata>> {
+    let snap = broker.metadata(Some(&[TopicName::new(name)]));
+    snap.topics.into_iter().next().map(|t| t.partitions)
+}
+
+fn list_partition_indexes(requested: &[i32], known: Option<&[crate::broker::PartitionMetadata]>) -> Vec<i32> {
+    if !requested.is_empty() {
+        return requested.to_vec();
+    }
+    known
+        .unwrap_or(&[])
+        .iter()
+        .map(|p| p.partition_id.0 as i32)
+        .collect()
+}
+
+fn write_named_topic_reassignments(
+    broker: &Broker,
+    out: &mut BytesMut,
+    name: &str,
+    requested: &[i32],
+) {
+    let known = topic_assignment_partitions(broker, name);
+    let Some(parts) = known else {
+        // Unknown topic: emit requested indexes as 3, or skip if none.
+        put_compact_array_len(out, requested.len());
+        for &pid in requested {
+            write_list_reassign_partition(
+                out,
+                pid,
+                &[],
+                KafkaErrorCode::UnknownTopicOrPartition,
+                Some("unknown topic or partition"),
+            );
+        }
+        return;
+    };
+    let indexes = list_partition_indexes(requested, Some(&parts));
+    put_compact_array_len(out, indexes.len());
+    for pid in indexes {
+        if pid < 0 {
+            write_list_reassign_partition(
+                out,
+                pid,
+                &[],
+                KafkaErrorCode::UnknownTopicOrPartition,
+                Some("unknown topic or partition"),
+            );
+            continue;
+        }
+        match parts.iter().find(|p| p.partition_id.0 == pid as u32) {
+            Some(p) => write_list_reassign_partition(
+                out,
+                pid,
+                &p.replicas,
+                KafkaErrorCode::None,
+                None,
+            ),
+            None => write_list_reassign_partition(
+                out,
+                pid,
+                &[],
+                KafkaErrorCode::UnknownTopicOrPartition,
+                Some("unknown topic or partition"),
+            ),
+        }
     }
 }
 
@@ -2034,6 +2265,182 @@ mod tests {
         let (top, code, _) = read_part_result(&mut resp);
         assert_eq!(top, 0);
         assert_eq!(code, KafkaErrorCode::InvalidReplicaAssignment.as_i16());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    fn list_body_topic(topic: &str, partitions: &[i32]) -> BytesMut {
+        let mut body = BytesMut::new();
+        body.put_i32(5_000);
+        put_compact_array_len(&mut body, 1);
+        put_compact_string(&mut body, topic);
+        put_compact_array_len(&mut body, partitions.len());
+        for &p in partitions {
+            body.put_i32(p);
+        }
+        put_empty_tag_buffer(&mut body);
+        put_empty_tag_buffer(&mut body);
+        body
+    }
+
+    fn list_body_all() -> BytesMut {
+        let mut body = BytesMut::new();
+        body.put_i32(5_000);
+        put_unsigned_varint(&mut body, 0);
+        put_empty_tag_buffer(&mut body);
+        body
+    }
+
+    fn read_list_part(src: &mut impl Buf) -> (i32, Vec<i32>, Vec<i32>, Vec<i32>, i16) {
+        let pid = src.get_i32();
+        let n_rep = get_compact_array_len(src).unwrap().unwrap_or(0);
+        let mut replicas = Vec::with_capacity(n_rep);
+        for _ in 0..n_rep {
+            replicas.push(src.get_i32());
+        }
+        let n_add = get_compact_array_len(src).unwrap().unwrap_or(0);
+        let mut adding = Vec::with_capacity(n_add);
+        for _ in 0..n_add {
+            adding.push(src.get_i32());
+        }
+        let n_rem = get_compact_array_len(src).unwrap().unwrap_or(0);
+        let mut removing = Vec::with_capacity(n_rem);
+        for _ in 0..n_rem {
+            removing.push(src.get_i32());
+        }
+        let code = src.get_i16();
+        let _ = get_compact_nullable_string(src).unwrap();
+        let _ = skip_tag_buffer(src);
+        (pid, replicas, adding, removing, code)
+    }
+
+    #[test]
+    fn kafka_list_reassign_current_replicas_empty_adding_removing() {
+        let dir = temp_dir("list-ok");
+        let broker = cluster_one(dir.clone());
+        broker.create_topic("events", 1).unwrap();
+
+        let mut src = list_body_topic("events", &[0]);
+        let mut out = BytesMut::new();
+        encode_list_partition_reassignments(&broker, &mut src, &mut out, "kafka-anonymous");
+        let mut resp = out.freeze();
+        assert_eq!(resp.get_i32(), 0);
+        assert_eq!(resp.get_i16(), 0);
+        assert_eq!(get_compact_nullable_string(&mut resp).unwrap(), None);
+        assert_eq!(get_compact_array_len(&mut resp).unwrap(), Some(1));
+        assert_eq!(get_compact_string(&mut resp).unwrap(), "events");
+        assert_eq!(get_compact_array_len(&mut resp).unwrap(), Some(1));
+        let (pid, replicas, adding, removing, code) = read_list_part(&mut resp);
+        assert_eq!(pid, 0);
+        assert_eq!(replicas, vec![1]);
+        assert!(adding.is_empty());
+        assert!(removing.is_empty());
+        assert_eq!(code, 0);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn kafka_list_reassign_topics_null_lists_all() {
+        let dir = temp_dir("list-all");
+        let broker = cluster_one(dir.clone());
+        broker.create_topic("events", 1).unwrap();
+        broker.create_topic("logs", 2).unwrap();
+
+        let mut src = list_body_all();
+        let mut out = BytesMut::new();
+        encode_list_partition_reassignments(&broker, &mut src, &mut out, "kafka-anonymous");
+        let mut resp = out.freeze();
+        assert_eq!(resp.get_i32(), 0);
+        assert_eq!(resp.get_i16(), 0);
+        let _ = get_compact_nullable_string(&mut resp).unwrap();
+        let n = get_compact_array_len(&mut resp).unwrap().unwrap();
+        let mut seen = std::collections::HashSet::new();
+        for _ in 0..n {
+            let name = get_compact_string(&mut resp).unwrap();
+            let pc = get_compact_array_len(&mut resp).unwrap().unwrap();
+            for _ in 0..pc {
+                let (pid, _r, adding, removing, code) = read_list_part(&mut resp);
+                assert!(adding.is_empty());
+                assert!(removing.is_empty());
+                assert_eq!(code, 0);
+                seen.insert((name.clone(), pid));
+            }
+            let _ = skip_tag_buffer(&mut resp);
+        }
+        assert!(seen.contains(&("events".into(), 0)));
+        assert!(seen.contains(&("logs".into(), 0)));
+        assert!(seen.contains(&("logs".into(), 1)));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn kafka_list_reassign_unknown_topic_is_3() {
+        let dir = temp_dir("list-unk");
+        let broker = cluster_one(dir.clone());
+
+        let mut src = list_body_topic("missing", &[0]);
+        let mut out = BytesMut::new();
+        encode_list_partition_reassignments(&broker, &mut src, &mut out, "kafka-anonymous");
+        let mut resp = out.freeze();
+        assert_eq!(resp.get_i32(), 0);
+        assert_eq!(resp.get_i16(), 0);
+        let _ = get_compact_nullable_string(&mut resp).unwrap();
+        assert_eq!(get_compact_array_len(&mut resp).unwrap(), Some(1));
+        assert_eq!(get_compact_string(&mut resp).unwrap(), "missing");
+        assert_eq!(get_compact_array_len(&mut resp).unwrap(), Some(1));
+        let (_pid, replicas, adding, removing, code) = read_list_part(&mut resp);
+        assert!(replicas.is_empty());
+        assert!(adding.is_empty());
+        assert!(removing.is_empty());
+        assert_eq!(code, KafkaErrorCode::UnknownTopicOrPartition.as_i16());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn kafka_list_reassign_not_controller_is_41() {
+        let dir = temp_dir("list-nc");
+        pin_openraft_off();
+        let cfg = ClusterConfig {
+            default_replication_factor: 2,
+            min_insync_replicas: 1,
+            session_timeout_ms: 2000,
+            replica_fetch_max_wait_ms: 50,
+            replica_fetch_max_bytes: 1_048_576,
+            replica_lag_max_messages: 10_000,
+            replica_lag_max_ms: 30_000,
+            brokers: vec![
+                BrokerEndpoint {
+                    id: 1,
+                    host: "127.0.0.1".into(),
+                    port: 19201,
+                    rack: None,
+                },
+                BrokerEndpoint {
+                    id: 2,
+                    host: "127.0.0.1".into(),
+                    port: 19202,
+                    rack: None,
+                },
+            ],
+        };
+        let broker = Broker::with_cluster(
+            StorageConfig {
+                data_dir: dir.clone(),
+                ..StorageConfig::default()
+            },
+            2,
+            cfg,
+        )
+        .unwrap();
+        assert!(!broker.is_controller());
+
+        let mut src = list_body_all();
+        let mut out = BytesMut::new();
+        encode_list_partition_reassignments(&broker, &mut src, &mut out, "kafka-anonymous");
+        let mut resp = out.freeze();
+        assert_eq!(resp.get_i32(), 0);
+        assert_eq!(resp.get_i16(), KafkaErrorCode::NotController.as_i16());
+        let _ = get_compact_nullable_string(&mut resp).unwrap();
+        assert_eq!(get_compact_array_len(&mut resp).unwrap(), Some(0));
         let _ = std::fs::remove_dir_all(&dir);
     }
 }

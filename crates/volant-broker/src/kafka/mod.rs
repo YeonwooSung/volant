@@ -15,8 +15,10 @@
 //! (InitProducerId 0–6 OngoingTxn + prepared 2PC MVP Phase 90, AddPartitions/EndTxn 0–5,
 //! AddOffsetsToTxn 0–4 wire-identical v3/v4, TxnOffsetCommit 0–6 TopicId),
 //! CreatePartitions 0–3 (v3 = v2 wire; no KIP-599),
-//! AlterPartitionReassignments v0 (wraps native opcode 114; no key 46).
-//! See `docs/PHASE23_SPEC.md` … `docs/PHASE91_SPEC.md` and `docs/V225_SPEC.md`.
+//! AlterPartitionReassignments v0 (wraps native opcode 114),
+//! ListPartitionReassignments v0 (current replicas; empty adding/removing).
+//! See `docs/PHASE23_SPEC.md` … `docs/PHASE91_SPEC.md`, `docs/V225_SPEC.md`,
+//! and `docs/V228_SPEC.md`.
 
 mod acl_api;
 mod admin_api;
@@ -253,6 +255,8 @@ pub enum ApiKey {
     IncrementalAlterConfigs = 44,
     /// AlterPartitionReassignments (always flexible; v0 only).
     AlterPartitionReassignments = 45,
+    /// ListPartitionReassignments (always flexible; v0 only).
+    ListPartitionReassignments = 46,
     /// OffsetDelete.
     OffsetDelete = 47,
     /// DescribeCluster (always flexible).
@@ -302,6 +306,7 @@ impl ApiKey {
             42 => Some(Self::DeleteGroups),
             44 => Some(Self::IncrementalAlterConfigs),
             45 => Some(Self::AlterPartitionReassignments),
+            46 => Some(Self::ListPartitionReassignments),
             47 => Some(Self::OffsetDelete),
             60 => Some(Self::DescribeCluster),
             61 => Some(Self::DescribeProducers),
@@ -348,6 +353,7 @@ pub const SUPPORTED_APIS: &[(ApiKey, i16, i16)] = &[
     (ApiKey::DeleteGroups, 0, 3),
     (ApiKey::IncrementalAlterConfigs, 0, 1),
     (ApiKey::AlterPartitionReassignments, 0, 0),
+    (ApiKey::ListPartitionReassignments, 0, 0),
     (ApiKey::OffsetDelete, 0, 0),
     (ApiKey::DescribeCluster, 0, 2),
     (ApiKey::DescribeProducers, 0, 0),
@@ -360,17 +366,24 @@ mod tests {
     use super::*;
 
     #[test]
-    fn supported_apis_stays_39_sync_group_key_14_and_alter_reassign_45() {
-        assert_eq!(SUPPORTED_APIS.len(), 39);
+    fn supported_apis_stays_40_sync_group_key_14_and_reassign_45_46() {
+        assert_eq!(SUPPORTED_APIS.len(), 40);
         assert!(SUPPORTED_APIS
             .iter()
             .any(|(k, min, max)| *k == ApiKey::SyncGroup && *min == 0 && *max == 5));
         assert!(SUPPORTED_APIS.iter().any(|(k, min, max)| {
             *k == ApiKey::AlterPartitionReassignments && *min == 0 && *max == 0
         }));
+        assert!(SUPPORTED_APIS.iter().any(|(k, min, max)| {
+            *k == ApiKey::ListPartitionReassignments && *min == 0 && *max == 0
+        }));
         assert_eq!(
             ApiKey::from_i16(45),
             Some(ApiKey::AlterPartitionReassignments)
+        );
+        assert_eq!(
+            ApiKey::from_i16(46),
+            Some(ApiKey::ListPartitionReassignments)
         );
     }
 }
