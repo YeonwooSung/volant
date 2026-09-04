@@ -2129,6 +2129,7 @@ impl Broker {
                 entry.1.added.push(key);
             }
         }
+        let mut crash_aborts: Vec<(u64, u16)> = Vec::new();
         for (pid, (stored_epoch, txn)) in by_pid {
             let epoch = match stored_epoch {
                 Some(e) => e,
@@ -2145,6 +2146,34 @@ impl Broker {
                 }
             };
             self.append_txn_control_markers(pid, epoch, ControlMarkerType::Abort, &txn);
+            crash_aborts.push((pid, epoch));
+        }
+        // v0.226: crash≡abort of open write-through also last-write-wins
+        // complete_abort on the opt-in coordinator log (timeout already does).
+        self.append_open_complete_aborts(crash_aborts);
+    }
+
+    /// Append `complete_abort` for open crash≡abort / leftover ongoing pids.
+    ///
+    /// No-op when the topic flag is off or the producer has no transactional id.
+    pub(super) fn append_open_complete_aborts(&self, pids: impl IntoIterator<Item = (u64, u16)>) {
+        if !self.transaction_state_topic {
+            return;
+        }
+        let writes: Vec<(String, u64, u16)> = {
+            let prods = self.producer_state.read();
+            pids.into_iter()
+                .filter_map(|(pid, epoch)| {
+                    let prod = prods.get(&pid)?;
+                    if prod.transactional_id.is_empty() {
+                        return None;
+                    }
+                    Some((prod.transactional_id.clone(), pid, epoch))
+                })
+                .collect()
+        };
+        for (tid, pid, epoch) in writes {
+            self.append_transaction_state(&tid, TXN_STATE_COMPLETE_ABORT, pid, epoch, 0);
         }
     }
 

@@ -32,7 +32,7 @@ pub const TXN_STATE_PREPARE_COMMIT: &str = "prepare_commit";
 pub const TXN_STATE_PREPARE_ABORT: &str = "prepare_abort";
 /// Second EndTxn / one-shot commit.
 pub const TXN_STATE_COMPLETE_COMMIT: &str = "complete_commit";
-/// Second EndTxn / one-shot / fence / timeout abort.
+/// Second EndTxn / one-shot / fence / timeout / open crash≡abort.
 pub const TXN_STATE_COMPLETE_ABORT: &str = "complete_abort";
 
 /// One `__transaction_state` JSON value.
@@ -202,17 +202,22 @@ impl Broker {
                     mutated_prepared = true;
                 }
                 TXN_STATE_ONGOING => {
-                    self.prepared_txns.lock().remove(&tid);
-                    {
-                        let mut open = self.open_txns.lock();
-                        open.entry(rec.producer_id).or_insert_with(|| OpenTxn {
-                            opened_at_ms: rec.txn_start_ms,
-                            producer_epoch: rec.epoch,
-                            ..OpenTxn::default()
-                        });
+                    // v0.226: restart ≡ crash ≡ abort for open (non-prepared)
+                    // txns. Do not restore Ongoing — that contradicted markers
+                    // and Describe/List. Append complete_abort so the topic
+                    // last-write-wins matches (covers begin-only, no markers).
+                    if self.prepared_txns.lock().remove(&tid).is_some() {
+                        mutated_prepared = true;
                     }
+                    self.open_txns.lock().remove(&rec.producer_id);
                     self.ensure_txn_identity(&tid, rec.producer_id, rec.epoch);
-                    mutated_prepared = true;
+                    self.append_transaction_state(
+                        &tid,
+                        TXN_STATE_COMPLETE_ABORT,
+                        rec.producer_id,
+                        rec.epoch,
+                        rec.txn_start_ms,
+                    );
                 }
                 TXN_STATE_EMPTY | TXN_STATE_COMPLETE_COMMIT | TXN_STATE_COMPLETE_ABORT => {
                     if self.prepared_txns.lock().remove(&tid).is_some() {
