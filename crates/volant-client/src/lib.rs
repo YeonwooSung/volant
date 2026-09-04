@@ -190,6 +190,10 @@
 //! [`Client::commit_transaction`] is unchanged.
 //! v0.178 adds [`Client::alter_config`] wrapping [`Client::alter_configs`].
 //! Single-key convenience. Batch API unchanged.
+//! v0.180 adds [`Client::fetch_offset`] as a named one-partition helper
+//! wrapping [`Client::fetch_offsets`]. Same as one `OffsetEntry`.
+//! [`Client::fetch_offsets`] / [`Client::fetch_offsets_for_topic`] /
+//! [`Client::fetch_offsets_all`] are unchanged.
 
 #![deny(missing_docs)]
 

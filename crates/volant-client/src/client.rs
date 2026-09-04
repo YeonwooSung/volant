@@ -2427,6 +2427,25 @@ impl Client {
         }
     }
 
+    /// Fetch one committed offset.
+    ///
+    /// Same as `fetch_offsets` with a single `OffsetEntry`.
+    pub async fn fetch_offset(
+        &self,
+        group_id: &str,
+        topic: &str,
+        partition: u32,
+    ) -> Result<Vec<OffsetFetchEntry>> {
+        self.fetch_offsets(
+            group_id,
+            vec![OffsetEntry {
+                topic: topic.to_owned(),
+                partition,
+            }],
+        )
+        .await
+    }
+
     /// Fetch committed offsets for `topic`, including per-entry metadata.
     /// Calls `fetch_offsets(group_id, vec![])` (all group offsets) and
     /// keeps rows whose topic matches.
