@@ -1400,6 +1400,30 @@ func TestProduceAcksRedirectsToLeader(t *testing.T) {
 	}
 }
 
+func TestMaxRetriesGetter(t *testing.T) {
+	srv := &scriptedBroker{}
+	addr, stop := startScripted(t, srv)
+	defer stop()
+
+	c, err := volant.DialTimeout(addr, 5*time.Second)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer c.Close()
+
+	if got := c.MaxRetries(); got != 0 {
+		t.Fatalf("default MaxRetries = %d want 0", got)
+	}
+	c.SetMaxRetries(2)
+	if got := c.MaxRetries(); got != 2 {
+		t.Fatalf("after SetMaxRetries(2) = %d want 2", got)
+	}
+	c.SetMaxRetries(-1)
+	if got := c.MaxRetries(); got != 0 {
+		t.Fatalf("after SetMaxRetries(-1) = %d want 0", got)
+	}
+}
+
 func TestDefaultMaxRetriesZeroRaisesOnTimeout(t *testing.T) {
 	srv := &scriptedBroker{produceCodes: []uint16{timeoutCode}}
 	addr, stop := startScripted(t, srv)
