@@ -9,7 +9,7 @@
 //! one `fsync` (v0.20; see `docs/V20_SPEC.md`).
 
 use std::collections::{HashMap, HashSet};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
 use std::sync::{Arc, Once};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
@@ -822,6 +822,7 @@ impl Broker {
     /// partition logs (Phase 14).
     pub fn new(mut storage: StorageConfig) -> Self {
         warn_ignored_metadata_raft_env();
+        warn_leftover_metadata_raft(&storage.data_dir);
         storage.apply_group_commit_env();
         let groups = GroupCoordinator::new(&storage.data_dir)
             .expect("failed to initialize group coordinator / offset store");
@@ -996,6 +997,7 @@ impl Broker {
         mut config: ClusterConfig,
     ) -> Result<Self> {
         warn_ignored_metadata_raft_env();
+        warn_leftover_metadata_raft(&storage.data_dir);
         storage.apply_group_commit_env();
         let mut membership_generation = 0u64;
         if let Some(overlay) = load_membership_overlay(&storage.data_dir)? {
@@ -1924,6 +1926,44 @@ fn default_assignment_metadata_committed_only() -> bool {
     }
 }
 
+/// Homemade 154 leftover directory (unread since v0.222).
+const METADATA_RAFT_DIR: &str = "__metadata_raft";
+const METADATA_RAFT_LOG: &str = "log.json";
+const METADATA_RAFT_HARD_STATE: &str = "hard_state.json";
+
+/// Process-wide leftover `__metadata_raft` warn count (v0.243 test hook).
+static LEFTOVER_METADATA_RAFT_WARN_COUNT: AtomicU32 = AtomicU32::new(0);
+
+/// How many leftover homemade 154 dir warnings have been emitted this process.
+pub fn leftover_metadata_raft_warn_count() -> u32 {
+    LEFTOVER_METADATA_RAFT_WARN_COUNT.load(Ordering::Relaxed)
+}
+
+/// True if `{data_dir}/__metadata_raft` is a directory or a known 154 file exists.
+fn leftover_metadata_raft_present(data_dir: &Path) -> bool {
+    let dir = data_dir.join(METADATA_RAFT_DIR);
+    dir.is_dir()
+        || dir.join(METADATA_RAFT_LOG).is_file()
+        || dir.join(METADATA_RAFT_HARD_STATE).is_file()
+}
+
+/// v0.243: leftover homemade 154 `{data_dir}/__metadata_raft/` is unread.
+/// Warn once if the directory (or known `log.json` / `hard_state.json`) exists.
+/// Do not read, migrate, or delete it.
+fn warn_leftover_metadata_raft(data_dir: &Path) {
+    static ONCE: Once = Once::new();
+    if !leftover_metadata_raft_present(data_dir) {
+        return;
+    }
+    ONCE.call_once(|| {
+        LEFTOVER_METADATA_RAFT_WARN_COUNT.fetch_add(1, Ordering::Relaxed);
+        warn!(
+            path = %data_dir.join(METADATA_RAFT_DIR).display(),
+            "leftover homemade 154 dir is unread; safe to delete; openraft uses __openraft if enabled"
+        );
+    });
+}
+
 /// v0.222: homemade 154 is gone. `VOLANT_METADATA_RAFT=1` and
 /// `VOLANT_METADATA_RAFT_WAIT_COMMIT=1` warn once and are ignored.
 fn warn_ignored_metadata_raft_env() {
@@ -2245,6 +2285,83 @@ mod tests {
             .produce_one(&topic, PartitionId(0), Message::from_value("a"))
             .unwrap();
         assert_eq!(broker.high_watermark(&topic, PartitionId(0)).unwrap(), 1);
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn leftover_metadata_raft_present_detects_dir_and_known_files() {
+        let dir = std::env::temp_dir().join(format!(
+            "volant-v243-detect-{}-{}",
+            std::process::id(),
+            uuid::Uuid::new_v4()
+        ));
+        let _ = fs::remove_dir_all(&dir);
+        fs::create_dir_all(&dir).unwrap();
+        assert!(!leftover_metadata_raft_present(&dir));
+
+        let leftover = dir.join(METADATA_RAFT_DIR);
+        fs::create_dir_all(&leftover).unwrap();
+        assert!(leftover_metadata_raft_present(&dir));
+        let _ = fs::remove_dir_all(&leftover);
+        assert!(!leftover_metadata_raft_present(&dir));
+
+        fs::create_dir_all(&leftover).unwrap();
+        fs::write(leftover.join(METADATA_RAFT_LOG), b"not-json").unwrap();
+        assert!(leftover_metadata_raft_present(&dir));
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn leftover_metadata_raft_warns_once_on_broker_new() {
+        let dir = std::env::temp_dir().join(format!(
+            "volant-v243-warn-{}-{}",
+            std::process::id(),
+            uuid::Uuid::new_v4()
+        ));
+        let _ = fs::remove_dir_all(&dir);
+        let leftover = dir.join(METADATA_RAFT_DIR);
+        fs::create_dir_all(&leftover).unwrap();
+
+        let before = leftover_metadata_raft_warn_count();
+        let _broker = Broker::new(StorageConfig {
+            data_dir: dir.clone(),
+            ..StorageConfig::default()
+        });
+        let after = leftover_metadata_raft_warn_count();
+        assert!(after >= 1);
+        if before == 0 {
+            assert_eq!(after, 1);
+        } else {
+            assert_eq!(after, before);
+        }
+        assert!(leftover.is_dir());
+        assert!(fs::read_dir(&leftover).unwrap().next().is_none());
+
+        let _broker2 = Broker::new(StorageConfig {
+            data_dir: dir.clone(),
+            ..StorageConfig::default()
+        });
+        assert_eq!(leftover_metadata_raft_warn_count(), after);
+        assert!(leftover.is_dir());
+        assert!(fs::read_dir(&leftover).unwrap().next().is_none());
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn leftover_metadata_raft_absent_is_silent() {
+        let dir = std::env::temp_dir().join(format!(
+            "volant-v243-absent-{}-{}",
+            std::process::id(),
+            uuid::Uuid::new_v4()
+        ));
+        let _ = fs::remove_dir_all(&dir);
+        let before = leftover_metadata_raft_warn_count();
+        let _broker = Broker::new(StorageConfig {
+            data_dir: dir.clone(),
+            ..StorageConfig::default()
+        });
+        assert_eq!(leftover_metadata_raft_warn_count(), before);
+        assert!(!dir.join(METADATA_RAFT_DIR).exists());
         let _ = fs::remove_dir_all(&dir);
     }
 }
