@@ -2272,13 +2272,59 @@ public final class Client implements AutoCloseable {
         if (topics == null) {
             topics = Collections.emptyList();
         }
+        String mid = memberId == null ? "" : memberId;
+        String iid = groupInstanceId == null ? "" : groupInstanceId;
         byte[] payload = Codec.encodeJoinGroupRequest(
-                new Codec.JoinGroupRequest(
-                        group,
-                        memberId == null ? "" : memberId,
-                        timeout,
-                        topics,
-                        groupInstanceId == null ? "" : groupInstanceId));
+                new Codec.JoinGroupRequest(group, mid, timeout, topics, iid));
+        // First join with a new UUID is not idempotent.
+        if (mid.isEmpty() && iid.isEmpty()) {
+            return joinGroupOnce(payload);
+        }
+        int retryAttempt = 0;
+        int redirectAttempt = 0;
+        int maxAttempts = 1 + maxRedirects;
+        while (true) {
+            Object decoded;
+            try {
+                decoded = roundTrip(Codec.OP_JOIN_GROUP, payload);
+            } catch (BrokerException e) {
+                if (maybeRedirectController(e.code, e.message, redirectAttempt + 1, maxAttempts)) {
+                    redirectAttempt++;
+                    continue;
+                }
+                if (isTransientBroker(e.code) && retryAttempt < maxRetries) {
+                    retryAttempt++;
+                    sleepProduceRetry();
+                    continue;
+                }
+                throw e;
+            } catch (RuntimeException e) {
+                if (isTransientTransport(e) && retryAttempt < maxRetries) {
+                    retryAttempt++;
+                    sleepProduceRetry();
+                    continue;
+                }
+                throw e;
+            }
+            if (!(decoded instanceof Codec.JoinGroupResponse)) {
+                throw new ProtocolException("unexpected response for join_group: " + typeName(decoded));
+            }
+            Codec.JoinGroupResponse resp = (Codec.JoinGroupResponse) decoded;
+            if (maybeRedirectController(resp.errorCode, null, redirectAttempt + 1, maxAttempts)) {
+                redirectAttempt++;
+                continue;
+            }
+            if (isTransientBroker(resp.errorCode) && retryAttempt < maxRetries) {
+                retryAttempt++;
+                sleepProduceRetry();
+                continue;
+            }
+            check(resp.errorCode, "join_group");
+            return new JoinGroupResult(resp.memberId, resp.generation, resp.assignment, resp.revoked);
+        }
+    }
+
+    private JoinGroupResult joinGroupOnce(byte[] payload) {
         Object decoded = roundTrip(Codec.OP_JOIN_GROUP, payload);
         if (!(decoded instanceof Codec.JoinGroupResponse)) {
             throw new ProtocolException("unexpected response for join_group: " + typeName(decoded));

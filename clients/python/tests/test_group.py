@@ -722,5 +722,143 @@ class TestGroupConsumer(unittest.TestCase):
         self.assertEqual(c.fetches, [("t", 0, 0, 0, 10, 4096)])
 
 
+class _JoinGroupStub:
+    """Tiny TCP stub that queues JoinGroup error codes."""
+
+    def __init__(self, codes: list[int]) -> None:
+        import socket
+        import threading
+
+        from volant.codec import (
+            OP_ERROR,
+            OP_HEARTBEAT,
+            OP_JOIN_GROUP,
+            ErrorResponse,
+            HeartbeatResponse,
+            JoinGroupResponse,
+            encode_error_response,
+            encode_heartbeat_response,
+            encode_join_group_response,
+        )
+        from volant.frame import encode_frame, try_decode_frame
+
+        self.join_count = 0
+        self.heartbeat_count = 0
+        self._codes = list(codes)
+        self._error: BaseException | None = None
+        lsock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        lsock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+        lsock.bind(("127.0.0.1", 0))
+        lsock.listen(8)
+        lsock.settimeout(5.0)
+        self._lsock = lsock
+        self.port = lsock.getsockname()[1]
+        self.addr = f"127.0.0.1:{self.port}"
+
+        def serve(conn: socket.socket) -> None:
+            try:
+                conn.settimeout(5.0)
+                buf = bytearray()
+                while True:
+                    frame, rest = try_decode_frame(bytes(buf))
+                    if frame is None:
+                        chunk = conn.recv(4096)
+                        if not chunk:
+                            return
+                        buf.extend(chunk)
+                        continue
+                    buf = bytearray(rest)
+                    if frame.opcode == OP_JOIN_GROUP:
+                        self.join_count += 1
+                        code = self._codes.pop(0) if self._codes else 0
+                        payload = encode_join_group_response(
+                            JoinGroupResponse(
+                                error_code=code, generation=1, member_id="m-1"
+                            )
+                        )
+                        reply_op = OP_JOIN_GROUP
+                    elif frame.opcode == OP_HEARTBEAT:
+                        self.heartbeat_count += 1
+                        payload = encode_heartbeat_response(
+                            HeartbeatResponse(error_code=0)
+                        )
+                        reply_op = OP_HEARTBEAT
+                    else:
+                        payload = encode_error_response(
+                            ErrorResponse(code=4, message="unexpected")
+                        )
+                        reply_op = OP_ERROR
+                    conn.sendall(
+                        encode_frame(reply_op, frame.correlation_id, payload)
+                    )
+            except BaseException as e:
+                self._error = e
+            finally:
+                try:
+                    conn.close()
+                except OSError:
+                    pass
+
+        def accept_loop() -> None:
+            while True:
+                try:
+                    conn, _ = lsock.accept()
+                except OSError:
+                    return
+                threading.Thread(target=serve, args=(conn,), daemon=True).start()
+
+        self._thread = threading.Thread(target=accept_loop, daemon=True)
+        self._thread.start()
+
+    def close(self) -> None:
+        try:
+            self._lsock.close()
+        except OSError:
+            pass
+        self._thread.join(timeout=2.0)
+
+    def __enter__(self) -> _JoinGroupStub:
+        return self
+
+    def __exit__(self, *exc) -> None:
+        self.close()
+
+
+class TestJoinGroupRetry(unittest.TestCase):
+    """Client join_group retry guard (v0.205). GroupConsumer has no second loop."""
+
+    def test_empty_member_and_instance_is_one_shot(self) -> None:
+        from volant.client import Client
+
+        with _JoinGroupStub([7, 0]) as srv:
+            with Client(srv.addr, timeout=5.0, max_retries=2, retry_backoff_ms=0) as c:
+                with self.assertRaises(BrokerError) as ctx:
+                    c.join_group("g", topics=["t"])
+            self.assertEqual(ctx.exception.code, 7)
+            self.assertEqual(srv.join_count, 1)
+            self.assertEqual(srv.heartbeat_count, 0)
+
+    def test_stored_member_id_retries_timeout_then_ok(self) -> None:
+        from volant.client import Client
+
+        with _JoinGroupStub([7, 0]) as srv:
+            with Client(srv.addr, timeout=5.0, max_retries=2, retry_backoff_ms=0) as c:
+                result = c.join_group("g", topics=["t"], member_id="m-rejoin")
+            self.assertEqual(result.member_id, "m-1")
+            self.assertEqual(result.generation, 1)
+            self.assertEqual(srv.join_count, 2)
+            self.assertEqual(srv.heartbeat_count, 0)
+
+    def test_static_instance_retries_timeout_then_ok(self) -> None:
+        from volant.client import Client
+
+        with _JoinGroupStub([7, 0]) as srv:
+            with Client(srv.addr, timeout=5.0, max_retries=2, retry_backoff_ms=0) as c:
+                result = c.join_group("g", topics=["t"], group_instance_id="inst-1")
+            self.assertEqual(result.member_id, "m-1")
+            self.assertEqual(srv.join_count, 2)
+            self.assertEqual(srv.heartbeat_count, 0)
+
+
 if __name__ == "__main__":
     unittest.main()

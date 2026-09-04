@@ -1674,6 +1674,8 @@ impl Client {
     }
 
     /// Join a consumer group; returns generation, member id, and assignment.
+    ///
+    /// Delegates to [`Self::join_group_with_instance`] (empty instance id).
     pub async fn join_group(
         &self,
         group_id: &str,
@@ -1686,7 +1688,117 @@ impl Client {
     }
 
     /// Join with optional static membership (`group_instance_id`, Phase 12).
+    ///
+    /// Transient broker/transport errors retry up to
+    /// [`ClientConfig::max_retries`] extra times (default 0) when
+    /// `member_id` or `group_instance_id` is non-empty. Empty first join
+    /// (both empty) is one shot — a lost success plus retry would create
+    /// a ghost member and bump generation. Error **14** (`NotController`)
+    /// redirects via [`ClientConfig::max_redirects`] (default 1; `0` does
+    /// not redirect) and does not increment `retry_attempt`. Rebalance
+    /// 9 / 10 / 11, 13 / 2 / 17 / 18 / 21 / 22 and protocol errors are
+    /// not retried or redirected. [`crate::GroupConsumer`] inherits via
+    /// this method.
     pub async fn join_group_with_instance(
+        &self,
+        group_id: &str,
+        member_id: &str,
+        session_timeout_ms: u32,
+        topics: Vec<String>,
+        group_instance_id: &str,
+    ) -> Result<JoinGroupResult> {
+        // First join with a new UUID is not idempotent.
+        if member_id.is_empty() && group_instance_id.is_empty() {
+            return self
+                .join_group_once(
+                    group_id,
+                    member_id,
+                    session_timeout_ms,
+                    topics,
+                    group_instance_id,
+                )
+                .await;
+        }
+        let max_retries = self.config.max_retries;
+        let max_redirects = self.config.max_redirects;
+        let mut retry_attempt = 0u32;
+        let mut redirects = 0u32;
+        loop {
+            let resp = match self
+                .round_trip(Request::JoinGroup {
+                    group_id: group_id.to_owned(),
+                    member_id: member_id.to_owned(),
+                    session_timeout_ms,
+                    topics: topics.clone(),
+                    group_instance_id: group_instance_id.to_owned(),
+                })
+                .await
+            {
+                Ok(r) => r,
+                Err(e) if is_transient_transport(&e) && retry_attempt < max_retries => {
+                    retry_attempt += 1;
+                    tokio::time::sleep(Duration::from_millis(self.config.retry_backoff_ms)).await;
+                    continue;
+                }
+                Err(e) => return Err(e),
+            };
+            match resp {
+                Response::JoinGroup {
+                    error_code,
+                    generation,
+                    member_id,
+                    assignment,
+                    revoked,
+                } => {
+                    if error_code == ErrorCode::NotController as u16
+                        && redirects < max_redirects
+                        && self.redirect_to_controller(None).await
+                    {
+                        redirects += 1;
+                        continue;
+                    }
+                    if is_transient_error_code(error_code) && retry_attempt < max_retries {
+                        retry_attempt += 1;
+                        tokio::time::sleep(Duration::from_millis(self.config.retry_backoff_ms))
+                            .await;
+                        continue;
+                    }
+                    check_ok(error_code, "join_group")?;
+                    return Ok(JoinGroupResult {
+                        generation,
+                        member_id,
+                        assignment,
+                        revoked,
+                    });
+                }
+                Response::Error { code, message } => {
+                    if code == ErrorCode::NotController as u16
+                        && redirects < max_redirects
+                        && self
+                            .redirect_to_controller(parse_controller_id(&message))
+                            .await
+                    {
+                        redirects += 1;
+                        continue;
+                    }
+                    if is_transient_error_code(code) && retry_attempt < max_retries {
+                        retry_attempt += 1;
+                        tokio::time::sleep(Duration::from_millis(self.config.retry_backoff_ms))
+                            .await;
+                        continue;
+                    }
+                    return Err(error_from_code(code, message));
+                }
+                other => {
+                    return Err(Error::Protocol(format!(
+                        "unexpected response for join_group: {other:?}"
+                    )))
+                }
+            }
+        }
+    }
+
+    async fn join_group_once(
         &self,
         group_id: &str,
         member_id: &str,

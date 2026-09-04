@@ -1997,6 +1997,11 @@ class Client:
 
         First join sends empty ``member_id`` (broker assigns one). Returns a
         result that unpacks as ``(member_id, generation, assignment)``.
+        Transient broker/transport errors retry up to ``max_retries`` extra
+        times (default 0) when ``member_id`` or ``group_instance_id`` is
+        non-empty. Empty first join (both empty) is one shot. Error 14
+        follows ``max_redirects``. Rebalance codes 9 / 10 / 11 are not
+        retried.
         """
         timeout = 10_000 if session_timeout_ms == 0 else session_timeout_ms
         payload = codec.encode_join_group_request(
@@ -2008,16 +2013,70 @@ class Client:
                 group_instance_id=group_instance_id,
             )
         )
-        resp = self._round_trip(codec.OP_JOIN_GROUP, payload)
-        if not isinstance(resp, JoinGroupResponse):
-            raise ProtocolError(f"unexpected response for join_group: {type(resp)}")
-        self._check(resp.error_code, "join_group")
-        return JoinGroupResult(
-            member_id=resp.member_id,
-            generation=resp.generation,
-            assignment=list(resp.assignment),
-            revoked=list(resp.revoked),
-        )
+        if not member_id and not group_instance_id:
+            resp = self._round_trip(codec.OP_JOIN_GROUP, payload)
+            if not isinstance(resp, JoinGroupResponse):
+                raise ProtocolError(
+                    f"unexpected response for join_group: {type(resp)}"
+                )
+            self._check(resp.error_code, "join_group")
+            return JoinGroupResult(
+                member_id=resp.member_id,
+                generation=resp.generation,
+                assignment=list(resp.assignment),
+                revoked=list(resp.revoked),
+            )
+        max_retries = max(0, int(self.max_retries))
+        max_attempts = 1 + self.max_redirects
+        retry_attempt = 0
+        redirect_attempt = 0
+        while True:
+            try:
+                resp = self._round_trip(codec.OP_JOIN_GROUP, payload)
+            except BrokerError as e:
+                if (
+                    e.code == _NOT_CONTROLLER
+                    and redirect_attempt + 1 < max_attempts
+                    and self._redirect_to_controller(_controller_id_hint(e.message))
+                ):
+                    redirect_attempt += 1
+                    continue
+                if _is_transient_broker(e.code) and retry_attempt < max_retries:
+                    retry_attempt += 1
+                    self._sleep_produce_retry()
+                    continue
+                raise
+            except OSError:
+                if retry_attempt < max_retries:
+                    retry_attempt += 1
+                    self._sleep_produce_retry()
+                    continue
+                raise
+            if not isinstance(resp, JoinGroupResponse):
+                raise ProtocolError(
+                    f"unexpected response for join_group: {type(resp)}"
+                )
+            if (
+                resp.error_code == _NOT_CONTROLLER
+                and redirect_attempt + 1 < max_attempts
+                and self._redirect_to_controller(None)
+            ):
+                redirect_attempt += 1
+                continue
+            if (
+                _is_transient_broker(resp.error_code)
+                and retry_attempt < max_retries
+            ):
+                retry_attempt += 1
+                self._sleep_produce_retry()
+                continue
+            self._check(resp.error_code, "join_group")
+            return JoinGroupResult(
+                member_id=resp.member_id,
+                generation=resp.generation,
+                assignment=list(resp.assignment),
+                revoked=list(resp.revoked),
+            )
 
     def heartbeat(self, group: str, member_id: str, generation: int) -> int:
         """Heartbeat for group membership. Returns the broker error_code.

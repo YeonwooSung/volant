@@ -2518,6 +2518,65 @@ func (c *Client) joinGroup(group, memberID string, topics []string, sessionTimeo
 	if err != nil {
 		return JoinGroupResult{}, err
 	}
+	// First join with a new UUID is not idempotent.
+	if memberID == "" && instanceID == "" {
+		return c.joinGroupOnce(payload)
+	}
+	maxRetries := c.maxRetries
+	if maxRetries < 0 {
+		maxRetries = 0
+	}
+	maxAttempts := 1 + c.maxRedirects
+	retryAttempt := 0
+	redirectAttempt := 0
+	for {
+		decoded, err := c.roundTrip(codec.OpJoinGroup, payload)
+		if err != nil {
+			ok, rerr := c.maybeRedirectController(err, redirectAttempt+1, maxAttempts)
+			if rerr != nil {
+				return JoinGroupResult{}, rerr
+			}
+			if ok {
+				redirectAttempt++
+				continue
+			}
+			if isTransientProduceErr(err) && retryAttempt < maxRetries {
+				retryAttempt++
+				c.sleepProduceRetry()
+				continue
+			}
+			return JoinGroupResult{}, err
+		}
+		resp, ok := decoded.(codec.JoinGroupResponse)
+		if !ok {
+			return JoinGroupResult{}, &frame.ProtocolError{Msg: fmt.Sprintf("unexpected response for join_group: %T", decoded)}
+		}
+		ok, rerr := c.maybeRedirectControllerCode(resp.ErrorCode, "", redirectAttempt+1, maxAttempts)
+		if rerr != nil {
+			return JoinGroupResult{}, rerr
+		}
+		if ok {
+			redirectAttempt++
+			continue
+		}
+		if isTransientBroker(resp.ErrorCode) && retryAttempt < maxRetries {
+			retryAttempt++
+			c.sleepProduceRetry()
+			continue
+		}
+		if err := check(resp.ErrorCode, "join_group"); err != nil {
+			return JoinGroupResult{}, err
+		}
+		return JoinGroupResult{
+			MemberID:   resp.MemberID,
+			Generation: resp.Generation,
+			Assignment: resp.Assignment,
+			Revoked:    resp.Revoked,
+		}, nil
+	}
+}
+
+func (c *Client) joinGroupOnce(payload []byte) (JoinGroupResult, error) {
 	decoded, err := c.roundTrip(codec.OpJoinGroup, payload)
 	if err != nil {
 		return JoinGroupResult{}, err
