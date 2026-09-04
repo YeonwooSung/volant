@@ -144,7 +144,9 @@ async fn serve_stub(
                         }
                     };
                     let response = match req {
-                        Request::ListOffsets { topic, partitions } => {
+                        Request::ListOffsets {
+                            topic, partitions, ..
+                        } => {
                             list_offsets.fetch_add(1, Ordering::Relaxed);
                             let error_code = codes.lock().expect("codes").pop_front().unwrap_or(0);
                             let entries = if error_code == 0 {
@@ -296,10 +298,7 @@ async fn timeout_then_ok_still_retries_without_metadata() {
 async fn not_found_is_not_redirected_or_retried() {
     let stub = ListOffsetsStub::boot([NOT_FOUND, 0]).await;
     let c = connect_retries(&stub.addr, 2, 0).await;
-    let err = c
-        .list_offsets("t", vec![0])
-        .await
-        .expect_err("not found");
+    let err = c.list_offsets("t", vec![0]).await.expect_err("not found");
     assert_eq!(surfaced_code(&err), Some(NOT_FOUND));
     assert_eq!(stub.list_offsets_rpcs(), 1);
     assert_eq!(stub.metadata_rpcs(), 0);

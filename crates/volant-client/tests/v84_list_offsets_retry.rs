@@ -88,7 +88,9 @@ async fn serve_stub(
                         }
                     };
                     let response = match req {
-                        Request::ListOffsets { topic, partitions } => {
+                        Request::ListOffsets {
+                            topic, partitions, ..
+                        } => {
                             list_offsets.fetch_add(1, Ordering::Relaxed);
                             let error_code = codes.lock().expect("codes").pop_front().unwrap_or(0);
                             let entries = if error_code == 0 {

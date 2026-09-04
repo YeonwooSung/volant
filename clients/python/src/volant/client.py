@@ -1629,12 +1629,30 @@ class Client:
         up to ``max_retries`` extra times (default 0). Error 13 follows
         Produce/Fetch redirect (``max_redirects``); 13 is not a
         transient retry. Error 2 / 9 / 10 / 11 / 14 are not retried.
-        This is not Kafka ListOffsets (no timestamp or isolation);
-        both ends of each log are returned.
+        Timestamp is latest (``-1`` / LEO). Use
+        :meth:`list_offsets_at` for earliest or a wall-clock ``T``.
+        Isolation is not applied.
+        """
+        return self.list_offsets_at(topic, partitions, -1)
+
+    def list_offsets_at(
+        self,
+        topic: str,
+        partitions: Optional[Iterable[int]],
+        timestamp_ms: int,
+    ) -> list[OffsetListing]:
+        """ListOffsets with a timestamp trailer (v0.239).
+
+        ``-1`` latest = LEO, ``-2`` earliest = log start, ``>= 0``
+        first record at or after ``T``. Other negatives are broker
+        ``InvalidArg``. Retry / error 13 inherit from
+        :meth:`list_offsets`.
         """
         parts = list(partitions) if partitions else []
         payload = codec.encode_list_offsets_request(
-            ListOffsetsRequest(topic=topic, partitions=parts)
+            ListOffsetsRequest(
+                topic=topic, partitions=parts, timestamp_ms=int(timestamp_ms)
+            )
         )
         redirect_partition = int(parts[0]) if parts else 0
         max_retries = max(0, int(self.max_retries))

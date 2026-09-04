@@ -613,6 +613,7 @@ class OffsetListing:
 class ListOffsetsRequest:
     topic: str
     partitions: list[int] = field(default_factory=list)
+    timestamp_ms: int = -1
 
 
 @dataclass
@@ -1687,6 +1688,7 @@ def encode_list_offsets_request(req: ListOffsetsRequest) -> bytes:
     w.u32_le(len(parts))
     for p in parts:
         w.u32_le(p)
+    w.i64_le(req.timestamp_ms)
     return w.finish()
 
 
@@ -1695,7 +1697,10 @@ def decode_list_offsets_request(payload: bytes) -> ListOffsetsRequest:
     topic = _get_string(r)
     n = r.u32_le()
     partitions = [r.u32_le() for _ in range(n)]
-    return ListOffsetsRequest(topic=topic, partitions=partitions)
+    timestamp_ms = r.i64_le() if r.remaining() >= 8 else -1
+    return ListOffsetsRequest(
+        topic=topic, partitions=partitions, timestamp_ms=timestamp_ms
+    )
 
 
 def encode_list_offsets_response(resp: ListOffsetsResponse) -> bytes:

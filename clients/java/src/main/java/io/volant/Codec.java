@@ -662,12 +662,19 @@ public final class Codec {
     public static final class ListOffsetsRequest {
         public final String topic;
         public final List<Integer> partitions;
+        /** v0.239 trailer: -1 latest (LEO), -2 earliest, >=0 first at/after T. */
+        public final long timestampMs;
 
         public ListOffsetsRequest(String topic, List<Integer> partitions) {
+            this(topic, partitions, -1L);
+        }
+
+        public ListOffsetsRequest(String topic, List<Integer> partitions, long timestampMs) {
             this.topic = topic;
             this.partitions = partitions == null
                     ? Collections.emptyList()
                     : Collections.unmodifiableList(new ArrayList<>(partitions));
+            this.timestampMs = timestampMs;
         }
     }
 
@@ -1924,6 +1931,7 @@ public final class Codec {
         for (Integer p : req.partitions) {
             w.u32(p);
         }
+        w.i64(req.timestampMs);
         return w.finish();
     }
 
@@ -1935,7 +1943,8 @@ public final class Codec {
         for (int i = 0; i < n; i++) {
             partitions.add((int) r.u32());
         }
-        return new ListOffsetsRequest(topic, partitions);
+        long timestampMs = r.remaining() >= 8 ? r.i64() : -1L;
+        return new ListOffsetsRequest(topic, partitions, timestampMs);
     }
 
     public static byte[] encodeListOffsetsResponse(ListOffsetsResponse resp) {

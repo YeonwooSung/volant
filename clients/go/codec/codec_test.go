@@ -1173,12 +1173,12 @@ func TestListGroupsRoundTrip(t *testing.T) {
 func TestListOffsetsRequestPayloadRS(t *testing.T) {
 	// crates/volant-protocol/src/payload.rs
 	// phase15_create_partitions_list_offsets_roundtrip
-	req := ListOffsetsRequest{Topic: "events", Partitions: []uint32{0, 1}}
+	req := ListOffsetsRequest{Topic: "events", Partitions: []uint32{0, 1}, TimestampMs: -1}
 	raw, err := EncodeListOffsetsRequest(req)
 	if err != nil {
 		t.Fatal(err)
 	}
-	expected := mustHex(t, "0600"+"6576656e7473"+"02000000"+"00000000"+"01000000")
+	expected := mustHex(t, "0600"+"6576656e7473"+"02000000"+"00000000"+"01000000"+"ffffffffffffffff")
 	if !bytes.Equal(raw, expected) {
 		t.Fatalf("encode:\n got %x\nwant %x", raw, expected)
 	}
@@ -1186,18 +1186,18 @@ func TestListOffsetsRequestPayloadRS(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if decoded.Topic != "events" || len(decoded.Partitions) != 2 || decoded.Partitions[0] != 0 || decoded.Partitions[1] != 1 {
+	if decoded.Topic != "events" || len(decoded.Partitions) != 2 || decoded.Partitions[0] != 0 || decoded.Partitions[1] != 1 || decoded.TimestampMs != -1 {
 		t.Fatalf("decoded %+v", decoded)
 	}
 }
 
 func TestListOffsetsRequestEmptyPartitions(t *testing.T) {
-	req := ListOffsetsRequest{Topic: "events", Partitions: []uint32{}}
+	req := ListOffsetsRequest{Topic: "events", Partitions: []uint32{}, TimestampMs: -1}
 	raw, err := EncodeListOffsetsRequest(req)
 	if err != nil {
 		t.Fatal(err)
 	}
-	expected := mustHex(t, "06006576656e7473"+"00000000")
+	expected := mustHex(t, "06006576656e7473"+"00000000"+"ffffffffffffffff")
 	if !bytes.Equal(raw, expected) {
 		t.Fatalf("encode:\n got %x\nwant %x", raw, expected)
 	}
@@ -1205,8 +1205,33 @@ func TestListOffsetsRequestEmptyPartitions(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if decoded.Topic != "events" || len(decoded.Partitions) != 0 {
+	if decoded.Topic != "events" || len(decoded.Partitions) != 0 || decoded.TimestampMs != -1 {
 		t.Fatalf("decoded %+v", decoded)
+	}
+}
+
+func TestListOffsetsTimestampTrailer(t *testing.T) {
+	legacy := mustHex(t, "0600"+"6576656e7473"+"02000000"+"00000000"+"01000000")
+	decoded, err := DecodeListOffsetsRequest(legacy)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if decoded.TimestampMs != -1 {
+		t.Fatalf("legacy timestamp: %+v", decoded)
+	}
+	for _, ts := range []int64{-2, 0} {
+		req := ListOffsetsRequest{Topic: "events", Partitions: []uint32{0}, TimestampMs: ts}
+		raw, err := EncodeListOffsetsRequest(req)
+		if err != nil {
+			t.Fatal(err)
+		}
+		got, err := DecodeListOffsetsRequest(raw)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if got.TimestampMs != ts {
+			t.Fatalf("roundtrip %d: %+v", ts, got)
+		}
 	}
 }
 

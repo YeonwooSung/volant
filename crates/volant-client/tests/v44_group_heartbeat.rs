@@ -102,7 +102,9 @@ async fn serve_stub(mut stream: TcpStream, heartbeats: Arc<AtomicU64>) -> std::i
                             error_code: 0,
                             entries: vec![],
                         },
-                        Request::ListOffsets { topic, partitions } => Response::ListOffsets {
+                        Request::ListOffsets {
+                            topic, partitions, ..
+                        } => Response::ListOffsets {
                             error_code: 0,
                             topic,
                             entries: partitions

@@ -176,6 +176,9 @@
 //! v0.166 adds [`Client::list_offsets_all`] as a named helper for
 //! all-partition ListOffsets. Same as `list_offsets(topic, vec![])`.
 //! [`Client::list_offsets`] is unchanged.
+//! v0.239 adds [`Client::list_offsets_at`] for native ListOffsets
+//! timestamp (`-1` latest, `-2` earliest, `>= 0` first record at/after
+//! `T`). [`Client::list_offsets`] stays latest.
 //! v0.168 adds [`Client::reassign_partitions_all`] as a named helper for
 //! all-partition reassign. Same as `reassign_partitions(topic, None, replicas)`.
 //! [`Client::reassign_partitions`] is unchanged.

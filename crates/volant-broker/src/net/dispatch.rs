@@ -1830,30 +1830,37 @@ async fn handle_request(broker: &Arc<Broker>, req: Request) -> Result<Response> 
                 Err(e) => Err(e),
             }
         }
-        Request::ListOffsets { topic, partitions } => {
-            match broker.list_offsets(&topic, &partitions) {
-                Ok(entries) => Ok(Response::ListOffsets {
-                    error_code: 0,
-                    topic,
-                    entries: entries
-                        .into_iter()
-                        .map(
-                            |(partition, earliest, latest)| volant_protocol::OffsetListing {
-                                partition,
-                                earliest,
-                                latest,
-                            },
-                        )
-                        .collect(),
-                }),
-                Err(Error::NotFound(_)) => Ok(Response::ListOffsets {
-                    error_code: ErrorCode::NotFound as u16,
-                    topic,
-                    entries: vec![],
-                }),
-                Err(e) => Err(e),
-            }
-        }
+        Request::ListOffsets {
+            topic,
+            partitions,
+            timestamp_ms,
+        } => match broker.list_offsets_at(&topic, &partitions, timestamp_ms) {
+            Ok(entries) => Ok(Response::ListOffsets {
+                error_code: 0,
+                topic,
+                entries: entries
+                    .into_iter()
+                    .map(
+                        |(partition, earliest, latest)| volant_protocol::OffsetListing {
+                            partition,
+                            earliest,
+                            latest,
+                        },
+                    )
+                    .collect(),
+            }),
+            Err(Error::NotFound(_)) => Ok(Response::ListOffsets {
+                error_code: ErrorCode::NotFound as u16,
+                topic,
+                entries: vec![],
+            }),
+            Err(Error::InvalidArgument(_)) => Ok(Response::ListOffsets {
+                error_code: ErrorCode::InvalidArg as u16,
+                topic,
+                entries: vec![],
+            }),
+            Err(e) => Err(e),
+        },
         Request::CreateAcls { entries } => match wire_to_acl_entries(&entries) {
             Ok(parsed) => match broker.create_acls_admin(parsed) {
                 Ok(gen) => {

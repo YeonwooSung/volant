@@ -93,7 +93,9 @@ async fn serve_stub(
                         }
                     };
                     let response = match req {
-                        Request::ListOffsets { topic, partitions } => {
+                        Request::ListOffsets {
+                            topic, partitions, ..
+                        } => {
                             seen.lock().expect("seen").push((topic.clone(), partitions));
                             Response::ListOffsets {
                                 error_code: 0,
