@@ -6,7 +6,7 @@
 //! DescribeLogDirs, DescribeTopicPartitions, UnregisterBroker,
 //! UpdateFeatures, DescribeQuorum, AllocateProducerIds,
 //! GetTelemetrySubscriptions, PushTelemetry, AlterPartition,
-//! CreateDelegationToken, configs.
+//! CreateDelegationToken, RenewDelegationToken, configs.
 
 use bytes::{Buf, BufMut, BytesMut};
 use volant_core::{Error, PartitionId, TopicName};
@@ -4066,6 +4066,58 @@ fn write_create_delegation_token(out: &mut BytesMut, error: KafkaErrorCode) {
     put_empty_tag_buffer(out);
 }
 
+/// RenewDelegationToken v0 (always flexible). Volant has no
+/// delegation-token store.
+///
+/// Parses official `hmac` compact bytes + `renewPeriodMs` i64 and
+/// discards them. Rejects with **42** `INVALID_REQUEST`
+/// (`delegation tokens not supported`). Nothing persisted. Controller
+/// is not required. Official Kafka first flexible version is **2**;
+/// Volant treats advertised v0 as flexible. Official response
+/// (`RenewDelegationTokenResponse.json`): error, expiryTimestampMs,
+/// throttle last; no errorMessage. ACL: Cluster **ALTER** (disabled
+/// ACLs allow). Denied → **31**.
+pub(crate) fn encode_renew_delegation_token(
+    broker: &Broker,
+    src: &mut impl Buf,
+    out: &mut BytesMut,
+    principal: &str,
+) {
+    parse_renew_delegation_token_request(src);
+
+    let denied = broker.acls().is_enabled()
+        && !broker.acls().authorize(
+            Some(principal),
+            ResourceType::Cluster,
+            CLUSTER_RESOURCE,
+            AclOperation::Alter,
+        );
+    let error = if denied {
+        KafkaErrorCode::ClusterAuthorizationFailed
+    } else {
+        KafkaErrorCode::InvalidRequest
+    };
+
+    write_renew_delegation_token(out, error);
+}
+
+fn parse_renew_delegation_token_request(src: &mut impl Buf) {
+    let _ = get_compact_bytes(src);
+    if src.remaining() >= 8 {
+        let _renew_period_ms = src.get_i64();
+    }
+    let _ = skip_tag_buffer(src);
+}
+
+fn write_renew_delegation_token(out: &mut BytesMut, error: KafkaErrorCode) {
+    // Official RenewDelegationTokenResponse.json field order:
+    // error, expiryTimestampMs, throttle last. Flex tagged trailer.
+    out.put_i16(error.as_i16());
+    out.put_i64(-1); // expiryTimestampMs
+    out.put_i32(0); // throttleTimeMs
+    put_empty_tag_buffer(out);
+}
+
 fn write_get_telemetry_subscriptions(
     out: &mut BytesMut,
     error: KafkaErrorCode,
@@ -5188,6 +5240,89 @@ mod tests {
         assert_eq!(max_ts, -1);
         assert!(token_id.is_empty());
         assert_eq!(hmac_len, 0);
+        assert_eq!(throttle, 0);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    fn renew_delegation_token_body(hmac: &[u8], renew_period_ms: i64) -> BytesMut {
+        let mut body = BytesMut::new();
+        put_compact_bytes(&mut body, Some(hmac));
+        body.put_i64(renew_period_ms);
+        put_empty_tag_buffer(&mut body);
+        body
+    }
+
+    fn read_renew_delegation_token(src: &mut impl Buf) -> (i16, i64, i32) {
+        let error = src.get_i16();
+        let expiry = src.get_i64();
+        let throttle = src.get_i32();
+        skip_tag_buffer(src).unwrap();
+        assert_eq!(src.remaining(), 0);
+        (error, expiry, throttle)
+    }
+
+    #[test]
+    fn kafka_renew_delegation_token_rejects_and_does_not_persist() {
+        let dir = temp_dir("rdt-ok");
+        let broker = Broker::new(StorageConfig {
+            data_dir: dir.clone(),
+            ..StorageConfig::default()
+        });
+        let before = snapshot_dir(&dir);
+
+        let mut src = renew_delegation_token_body(b"hmac-bytes", -1);
+        let mut out = BytesMut::new();
+        encode_renew_delegation_token(&broker, &mut src, &mut out, "kafka-anonymous");
+        let mut resp = out.freeze();
+        let (error, expiry, throttle) = read_renew_delegation_token(&mut resp);
+        assert_eq!(error, KafkaErrorCode::InvalidRequest.as_i16());
+        assert_eq!(expiry, -1);
+        assert_eq!(throttle, 0);
+
+        assert_eq!(snapshot_dir(&dir), before, "must not persist tokens");
+        assert!(
+            !dir_has_delegation_token(&dir),
+            "must not create delegation-token files"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn kafka_renew_delegation_token_acl_deny_is_31() {
+        let dir = temp_dir("rdt-acl");
+        let broker = Broker::new(StorageConfig {
+            data_dir: dir.clone(),
+            ..StorageConfig::default()
+        });
+        broker
+            .configure_acls(true, None, vec![], "token".into())
+            .unwrap();
+
+        let mut src = renew_delegation_token_body(b"hmac", 3_600_000);
+        let mut out = BytesMut::new();
+        encode_renew_delegation_token(&broker, &mut src, &mut out, "kafka-anonymous");
+        let mut resp = out.freeze();
+        let (error, expiry, throttle) = read_renew_delegation_token(&mut resp);
+        assert_eq!(error, KafkaErrorCode::ClusterAuthorizationFailed.as_i16());
+        assert_eq!(expiry, -1);
+        assert_eq!(throttle, 0);
+        assert!(!dir_has_delegation_token(&dir));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn kafka_renew_delegation_token_not_controller_still_42() {
+        let dir = temp_dir("rdt-nc");
+        let broker = cluster_n2(dir.clone(), 2);
+        assert!(!broker.is_controller());
+
+        let mut src = renew_delegation_token_body(&[], -1);
+        let mut out = BytesMut::new();
+        encode_renew_delegation_token(&broker, &mut src, &mut out, "kafka-anonymous");
+        let mut resp = out.freeze();
+        let (error, expiry, throttle) = read_renew_delegation_token(&mut resp);
+        assert_eq!(error, KafkaErrorCode::InvalidRequest.as_i16());
+        assert_eq!(expiry, -1);
         assert_eq!(throttle, 0);
         let _ = std::fs::remove_dir_all(&dir);
     }

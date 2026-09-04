@@ -36,7 +36,8 @@
 //! GetTelemetrySubscriptions v0 (always flexible; no client telemetry; empty subscription),
 //! PushTelemetry v0 (always flexible; no client telemetry; reject every push),
 //! CreateDelegationToken v0 (always flexible; no token store; reject 42),
-//! DescribeDelegationToken v0 (always flexible residual; no token store; empty tokens).
+//! DescribeDelegationToken v0 (always flexible residual; no token store; empty tokens),
+//! RenewDelegationToken v0 (always flexible; no token store; reject 42).
 //! See `docs/PHASE23_SPEC.md` … `docs/PHASE91_SPEC.md`, `docs/V225_SPEC.md`,
 //! `docs/V228_SPEC.md`, `docs/V233_SPEC.md`, `docs/V235_SPEC.md`,
 //! `docs/V236_SPEC.md`, `docs/V237_SPEC.md`, `docs/V241_SPEC.md`,
@@ -44,7 +45,7 @@
 //! `docs/V246_SPEC.md`, `docs/V249_SPEC.md`, `docs/V250_SPEC.md`,
 //! `docs/V251_SPEC.md`, `docs/V252_SPEC.md`, `docs/V253_SPEC.md`,
 //! `docs/V255_SPEC.md`, `docs/V257_SPEC.md`, `docs/V258_SPEC.md`,
-//! and `docs/V259_SPEC.md`.
+//! `docs/V259_SPEC.md`, and `docs/V261_SPEC.md`.
 
 mod acl_api;
 mod admin_api;
@@ -306,6 +307,9 @@ pub enum ApiKey {
     /// CreateDelegationToken (always flexible; v0 only). No token store;
     /// every create is rejected. Official Kafka first flexible version is 2.
     CreateDelegationToken = 38,
+    /// RenewDelegationToken (always flexible; v0 only). No token store;
+    /// every renew is rejected. Official Kafka first flexible version is 2.
+    RenewDelegationToken = 39,
     /// DescribeDelegationToken (always flexible residual; v0 only).
     /// Official Kafka first flexible version is 2. No token store.
     DescribeDelegationToken = 41,
@@ -406,6 +410,7 @@ impl ApiKey {
             36 => Some(Self::SaslAuthenticate),
             37 => Some(Self::CreatePartitions),
             38 => Some(Self::CreateDelegationToken),
+            39 => Some(Self::RenewDelegationToken),
             41 => Some(Self::DescribeDelegationToken),
             42 => Some(Self::DeleteGroups),
             43 => Some(Self::ElectLeaders),
@@ -473,6 +478,7 @@ pub const SUPPORTED_APIS: &[(ApiKey, i16, i16)] = &[
     (ApiKey::SaslAuthenticate, 0, 2),
     (ApiKey::CreatePartitions, 0, 3),
     (ApiKey::CreateDelegationToken, 0, 0),
+    (ApiKey::RenewDelegationToken, 0, 0),
     (ApiKey::DescribeDelegationToken, 0, 0),
     (ApiKey::DeleteGroups, 0, 3),
     (ApiKey::ElectLeaders, 0, 1),
@@ -706,5 +712,14 @@ mod tests {
             *k == ApiKey::DescribeDelegationToken && *min == 0 && *max == 0
         }));
         assert_eq!(ApiKey::from_i16(41), Some(ApiKey::DescribeDelegationToken));
+    }
+
+    #[test]
+    fn supported_apis_includes_renew_delegation_token_39() {
+        assert!(SUPPORTED_APIS.len() >= 61);
+        assert!(SUPPORTED_APIS.iter().any(|(k, min, max)| {
+            *k == ApiKey::RenewDelegationToken && *min == 0 && *max == 0
+        }));
+        assert_eq!(ApiKey::from_i16(39), Some(ApiKey::RenewDelegationToken));
     }
 }

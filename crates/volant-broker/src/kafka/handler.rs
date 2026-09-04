@@ -277,6 +277,7 @@ async fn dispatch_kafka(
                 | Some(ApiKey::PushTelemetry)
                 | Some(ApiKey::AlterPartition)
                 | Some(ApiKey::CreateDelegationToken)
+                | Some(ApiKey::RenewDelegationToken)
                 | Some(ApiKey::DescribeDelegationToken),
             _
         )
@@ -741,6 +742,12 @@ async fn dispatch_kafka(
                 debug!(error = %e, "create delegation token flexible header tag buffer");
             }
             admin_api::encode_create_delegation_token(broker, &mut src, &mut out, principal);
+        }
+        Some(ApiKey::RenewDelegationToken) if hdr.api_version == 0 => {
+            if let Err(e) = skip_tag_buffer(&mut src) {
+                debug!(error = %e, "renew delegation token flexible header tag buffer");
+            }
+            admin_api::encode_renew_delegation_token(broker, &mut src, &mut out, principal);
         }
         Some(ApiKey::CreatePartitions) if (0..=3).contains(&hdr.api_version) => {
             if hdr.api_version >= 2 {
