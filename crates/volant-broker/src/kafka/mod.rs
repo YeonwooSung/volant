@@ -45,7 +45,8 @@
 //! ConsumerGroupDescribe v0 (always flexible; classic snapshot wrap; not KIP-848),
 //! ConsumerGroupHeartbeat v0 (always flexible; reject 42; not KIP-848),
 //! Envelope v0 (key 58 reject; forwarding not supported; not KIP-590),
-//! ControllerRegistration v0 (key 70 reject; not KRaft / not AddBroker).
+//! ControllerRegistration v0 (key 70 reject; not KRaft / not AddBroker),
+//! Vote v0 (key 52 reject; not KRaft vote / not openraft RequestVote).
 //! See `docs/PHASE23_SPEC.md` … `docs/PHASE91_SPEC.md`, `docs/V225_SPEC.md`,
 //! `docs/V228_SPEC.md`, `docs/V233_SPEC.md`, `docs/V235_SPEC.md`,
 //! `docs/V236_SPEC.md`, `docs/V237_SPEC.md`, `docs/V241_SPEC.md`,
@@ -56,7 +57,7 @@
 //! `docs/V259_SPEC.md`, `docs/V260_SPEC.md`, `docs/V261_SPEC.md`,
 //! `docs/V263_SPEC.md`, `docs/V264_SPEC.md`, `docs/V265_SPEC.md`,
 //! `docs/V266_SPEC.md`, `docs/V267_SPEC.md`, `docs/V268_SPEC.md`,
-//! and `docs/V269_SPEC.md`.
+//! `docs/V269_SPEC.md`, and `docs/V270_SPEC.md`.
 
 mod acl_api;
 mod admin_api;
@@ -347,6 +348,9 @@ pub enum ApiKey {
     DescribeUserScramCredentials = 50,
     /// AlterUserScramCredentials (always flexible; v0 only).
     AlterUserScramCredentials = 51,
+    /// Vote (always flexible; v0 only). Honest reject: not a KRaft
+    /// controller; does not wrap openraft RequestVote. No vote granted.
+    Vote = 52,
     /// DescribeQuorum (always flexible; v0–1). Wraps openraft
     /// leader/term/voters. Not KRaft `__cluster_metadata`.
     DescribeQuorum = 55,
@@ -465,6 +469,7 @@ impl ApiKey {
             49 => Some(Self::AlterClientQuotas),
             50 => Some(Self::DescribeUserScramCredentials),
             51 => Some(Self::AlterUserScramCredentials),
+            52 => Some(Self::Vote),
             55 => Some(Self::DescribeQuorum),
             56 => Some(Self::AlterPartition),
             57 => Some(Self::UpdateFeatures),
@@ -541,6 +546,7 @@ pub const SUPPORTED_APIS: &[(ApiKey, i16, i16)] = &[
     (ApiKey::AlterClientQuotas, 0, 0),
     (ApiKey::DescribeUserScramCredentials, 0, 0),
     (ApiKey::AlterUserScramCredentials, 0, 0),
+    (ApiKey::Vote, 0, 0),
     (ApiKey::DescribeQuorum, 0, 1),
     (ApiKey::AlterPartition, 0, 0),
     (ApiKey::UpdateFeatures, 0, 1),
@@ -690,6 +696,16 @@ mod tests {
             .iter()
             .any(|(k, min, max)| { *k == ApiKey::UnregisterBroker && *min == 0 && *max == 0 }));
         assert_eq!(ApiKey::from_i16(64), Some(ApiKey::UnregisterBroker));
+    }
+
+    #[test]
+    fn supported_apis_includes_vote_52() {
+        assert!(SUPPORTED_APIS.len() >= 70);
+        assert!(SUPPORTED_APIS
+            .iter()
+            .any(|(k, min, max)| *k == ApiKey::Vote && *min == 0 && *max == 0));
+        assert_eq!(ApiKey::from_i16(52), Some(ApiKey::Vote));
+        assert_eq!(ApiKey::from_i16(55), Some(ApiKey::DescribeQuorum));
     }
 
     #[test]

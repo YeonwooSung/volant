@@ -274,6 +274,7 @@ async fn dispatch_kafka(
                 | Some(ApiKey::UpdateFeatures)
                 | Some(ApiKey::Envelope)
                 | Some(ApiKey::FetchSnapshot)
+                | Some(ApiKey::Vote)
                 | Some(ApiKey::DescribeQuorum)
                 | Some(ApiKey::AllocateProducerIds)
                 | Some(ApiKey::AssignReplicasToDirs)
@@ -891,6 +892,12 @@ async fn dispatch_kafka(
                 debug!(error = %e, "fetch snapshot flexible header tag buffer");
             }
             admin_api::encode_fetch_snapshot(broker, &mut src, &mut out, principal);
+        }
+        Some(ApiKey::Vote) if hdr.api_version == 0 => {
+            if let Err(e) = skip_tag_buffer(&mut src) {
+                debug!(error = %e, "vote flexible header tag buffer");
+            }
+            admin_api::encode_vote(broker, &mut src, &mut out, principal);
         }
         Some(ApiKey::DescribeQuorum) if (0..=1).contains(&hdr.api_version) => {
             if let Err(e) = skip_tag_buffer(&mut src) {

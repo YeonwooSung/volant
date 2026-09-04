@@ -4,7 +4,7 @@
 //! Describe/AlterClientQuotas, DescribeDelegationToken,
 //! ListClientMetricsResources, AlterReplicaLogDirs, AssignReplicasToDirs,
 //! DescribeLogDirs, DescribeTopicPartitions, BrokerRegistration,
-//! BrokerHeartbeat, UnregisterBroker, Envelope, FetchSnapshot,
+//! BrokerHeartbeat, UnregisterBroker, Envelope, FetchSnapshot, Vote,
 //! ControllerRegistration,
 //! UpdateFeatures, DescribeQuorum, AllocateProducerIds,
 //! GetTelemetrySubscriptions, PushTelemetry, AlterPartition,
@@ -1430,6 +1430,98 @@ fn write_fetch_snapshot(out: &mut BytesMut, error: KafkaErrorCode) {
     // throttleTimeMs, errorCode, topics[] compact, tagged.
     // CurrentLeader is a per-partition tagged field; unused because topics empty.
     out.put_i32(0); // throttleTimeMs
+    out.put_i16(error.as_i16());
+    put_compact_array_len(out, 0); // empty topics — do not echo request
+    put_empty_tag_buffer(out);
+}
+
+/// Vote v0 (always flexible). Volant is **not** a KRaft controller
+/// and does **not** grant Kafka quorum votes.
+///
+/// Parses official Kafka `VoteRequest.json` v0 fields (`clusterId`,
+/// `topics[]` with `replicaEpoch` / `replicaId` / last offset epoch
+/// and offset) and discards them. Does **not** persist. Does **not**
+/// wrap openraft RequestVote or native vote. Returns error **42**
+/// `INVALID_REQUEST` (`not KRaft vote`), empty `topics[]`. Official
+/// `VoteResponse.json` v0 has **no** `throttleTimeMs`. Controller is
+/// not required. ACL: Cluster **ALTER** (disabled ACLs allow).
+/// Denied → **31**, empty topics.
+pub(crate) fn encode_vote(
+    broker: &Broker,
+    src: &mut impl Buf,
+    out: &mut BytesMut,
+    principal: &str,
+) {
+    parse_vote_request(src);
+
+    let denied = broker.acls().is_enabled()
+        && !broker.acls().authorize(
+            Some(principal),
+            ResourceType::Cluster,
+            CLUSTER_RESOURCE,
+            AclOperation::Alter,
+        );
+    let error = if denied {
+        KafkaErrorCode::ClusterAuthorizationFailed
+    } else {
+        KafkaErrorCode::InvalidRequest
+    };
+
+    write_vote(out, error);
+}
+
+fn parse_vote_request(src: &mut impl Buf) {
+    // Official v0 (flex, `VoteRequest.json`):
+    // ClusterId compact nullable string,
+    // Topics[] compact {
+    //   TopicName compact string,
+    //   Partitions[] {
+    //     PartitionIndex i32, ReplicaEpoch i32, ReplicaId i32,
+    //     LastOffsetEpoch i32, LastOffset i64, tagged
+    //   },
+    //   tagged
+    // },
+    // tagged.
+    // VoterId / ReplicaDirectoryId / VoterDirectoryId are v1+;
+    // PreVote is v2+ — out of advertised range.
+    // Missing fields stop that level; never panic.
+    let _ = get_compact_nullable_string(src);
+    match get_compact_array_len(src) {
+        Ok(Some(n)) => {
+            for _ in 0..n {
+                if get_compact_string(src).is_err() {
+                    break;
+                }
+                match get_compact_array_len(src) {
+                    Ok(Some(pn)) => {
+                        for _ in 0..pn {
+                            // PartitionIndex + ReplicaEpoch + ReplicaId
+                            // + LastOffsetEpoch + LastOffset
+                            if src.remaining() < 4 + 4 + 4 + 4 + 8 {
+                                break;
+                            }
+                            let _partition = src.get_i32();
+                            let _replica_epoch = src.get_i32();
+                            let _replica_id = src.get_i32();
+                            let _last_offset_epoch = src.get_i32();
+                            let _last_offset = src.get_i64();
+                            let _ = skip_tag_buffer(src);
+                        }
+                    }
+                    Ok(None) | Err(_) => {}
+                }
+                let _ = skip_tag_buffer(src);
+            }
+        }
+        Ok(None) | Err(_) => {}
+    }
+    let _ = skip_tag_buffer(src);
+}
+
+fn write_vote(out: &mut BytesMut, error: KafkaErrorCode) {
+    // Official VoteResponse.json v0:
+    // errorCode, topics[] compact, tagged.
+    // No throttleTimeMs. NodeEndpoints is v1+ tag 0; unused.
     out.put_i16(error.as_i16());
     put_compact_array_len(out, 0); // empty topics — do not echo request
     put_empty_tag_buffer(out);
@@ -6522,6 +6614,129 @@ mod tests {
         let (throttle, error) = read_fetch_snapshot(&mut resp);
         assert_eq!(throttle, 0);
         assert_eq!(error, KafkaErrorCode::InvalidRequest.as_i16());
+        assert_eq!(raft_state(&broker), before_raft);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    fn vote_body(
+        cluster_id: Option<&str>,
+        topics: &[(&str, &[(i32, i32, i32, i32, i64)])],
+    ) -> BytesMut {
+        let mut body = BytesMut::new();
+        put_compact_nullable_string(&mut body, cluster_id);
+        put_compact_array_len(&mut body, topics.len());
+        for (name, partitions) in topics {
+            put_compact_string(&mut body, name);
+            put_compact_array_len(&mut body, partitions.len());
+            for (partition, replica_epoch, replica_id, last_offset_epoch, last_offset) in *partitions
+            {
+                body.put_i32(*partition);
+                body.put_i32(*replica_epoch);
+                body.put_i32(*replica_id);
+                body.put_i32(*last_offset_epoch);
+                body.put_i64(*last_offset);
+                put_empty_tag_buffer(&mut body);
+            }
+            put_empty_tag_buffer(&mut body);
+        }
+        put_empty_tag_buffer(&mut body);
+        body
+    }
+
+    fn read_vote(src: &mut impl Buf) -> i16 {
+        let error = src.get_i16();
+        assert_eq!(get_compact_array_len(src).unwrap(), Some(0));
+        skip_tag_buffer(src).unwrap();
+        assert_eq!(src.remaining(), 0);
+        error
+    }
+
+    #[test]
+    fn kafka_vote_rejects_and_does_not_persist() {
+        let dir = temp_dir("vote-ok");
+        let broker = Broker::new(StorageConfig {
+            data_dir: dir.clone(),
+            ..StorageConfig::default()
+        });
+        let before_ids = overlay_ids(&broker);
+        let before_raft = raft_state(&broker);
+
+        let mut src = vote_body(Some("volant-cluster"), &[("events", &[(0, 1, 2, 0, 0)])]);
+        let mut out = BytesMut::new();
+        encode_vote(&broker, &mut src, &mut out, "kafka-anonymous");
+        let mut resp = out.freeze();
+        assert_eq!(
+            read_vote(&mut resp),
+            KafkaErrorCode::InvalidRequest.as_i16()
+        );
+
+        assert_eq!(overlay_ids(&broker), before_ids);
+        assert_eq!(raft_state(&broker), before_raft, "openraft state unchanged");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn kafka_vote_truncated_still_42() {
+        let dir = temp_dir("vote-trunc");
+        let broker = Broker::new(StorageConfig {
+            data_dir: dir.clone(),
+            ..StorageConfig::default()
+        });
+        let mut src = BytesMut::new();
+        put_compact_nullable_string(&mut src, Some("c"));
+        let mut out = BytesMut::new();
+        encode_vote(&broker, &mut src, &mut out, "kafka-anonymous");
+        let mut resp = out.freeze();
+        assert_eq!(
+            read_vote(&mut resp),
+            KafkaErrorCode::InvalidRequest.as_i16()
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn kafka_vote_acl_deny_is_31() {
+        let dir = temp_dir("vote-acl");
+        let broker = Broker::new(StorageConfig {
+            data_dir: dir.clone(),
+            ..StorageConfig::default()
+        });
+        broker
+            .configure_acls(true, None, vec![], "token".into())
+            .unwrap();
+        let before_ids = overlay_ids(&broker);
+        let before_raft = raft_state(&broker);
+
+        let mut src = vote_body(Some("c"), &[("events", &[(0, 0, 1, 0, 0)])]);
+        let mut out = BytesMut::new();
+        encode_vote(&broker, &mut src, &mut out, "kafka-anonymous");
+        let mut resp = out.freeze();
+        assert_eq!(
+            read_vote(&mut resp),
+            KafkaErrorCode::ClusterAuthorizationFailed.as_i16()
+        );
+        assert_eq!(overlay_ids(&broker), before_ids);
+        assert_eq!(raft_state(&broker), before_raft);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn kafka_vote_not_controller_still_42() {
+        let dir = temp_dir("vote-nc");
+        let broker = cluster_n2(dir.clone(), 2);
+        assert!(!broker.is_controller());
+        let before_ids = overlay_ids(&broker);
+        let before_raft = raft_state(&broker);
+
+        let mut src = vote_body(None, &[("events", &[(0, -1, 3, 0, 0)])]);
+        let mut out = BytesMut::new();
+        encode_vote(&broker, &mut src, &mut out, "kafka-anonymous");
+        let mut resp = out.freeze();
+        assert_eq!(
+            read_vote(&mut resp),
+            KafkaErrorCode::InvalidRequest.as_i16()
+        );
+        assert_eq!(overlay_ids(&broker), before_ids);
         assert_eq!(raft_state(&broker), before_raft);
         let _ = std::fs::remove_dir_all(&dir);
     }
