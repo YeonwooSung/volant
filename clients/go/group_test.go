@@ -1534,7 +1534,7 @@ func TestE2EGroupConsumerJoinPollCommitResume(t *testing.T) {
 
 	topic := fmt.Sprintf("go-gc-%d-%d", os.Getpid(), time.Now().UnixNano())
 	group := fmt.Sprintf("go-gcg-%d", os.Getpid())
-	if err := c.CreateTopic(topic, 1); err != nil {
+	if _, err := c.CreateTopic(topic, 1); err != nil {
 		t.Fatalf("CreateTopic: %v", err)
 	}
 	for i := 0; i < 3; i++ {
@@ -1614,7 +1614,7 @@ func TestE2EGroupConsumerSplitAssignment(t *testing.T) {
 
 	topic := fmt.Sprintf("go-split-%d-%d", os.Getpid(), time.Now().UnixNano())
 	group := fmt.Sprintf("go-splitg-%d", os.Getpid())
-	if err := admin.CreateTopic(topic, 2); err != nil {
+	if _, err := admin.CreateTopic(topic, 2); err != nil {
 		t.Fatalf("CreateTopic: %v", err)
 	}
 
@@ -1689,7 +1689,7 @@ func TestE2EGroupConsumerStaticMembership(t *testing.T) {
 
 	topic := fmt.Sprintf("go-static-%d-%d", os.Getpid(), time.Now().UnixNano())
 	group := fmt.Sprintf("go-staticg-%d", os.Getpid())
-	if err := c.CreateTopic(topic, 1); err != nil {
+	if _, err := c.CreateTopic(topic, 1); err != nil {
 		t.Fatalf("CreateTopic: %v", err)
 	}
 	g, err := volant.JoinGroupConsumerStatic(c, group, []string{topic}, 10_000, "inst-1")
