@@ -399,6 +399,9 @@ docs for day-to-day reading: [ops](../ops.md), [consistency](../consistency.md),
 | v0.198 | ✅ | Python reassign_partitions_all | [V198_SPEC.md](../V198_SPEC.md) |
 | v0.199 | ✅ | Go/Java CreateTopic default partitions=1 | [V199_SPEC.md](../V199_SPEC.md) |
 | v0.200 | ✅ | Go/Java auth token getter | [V200_SPEC.md](../V200_SPEC.md) |
+| v0.201 | ✅ | Java heartbeatIntervalMs public | [V201_SPEC.md](../V201_SPEC.md) |
+| v0.202 | ✅ | Go/Java SCRAM username getter | [V202_SPEC.md](../V202_SPEC.md) |
+| v0.203 | ✅ | Rust create_topic_default | [V203_SPEC.md](../V203_SPEC.md) |
 
 ---
 
