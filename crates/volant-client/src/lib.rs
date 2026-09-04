@@ -180,6 +180,9 @@
 //! v0.170 adds [`Client::create_acl`] / [`Client::delete_acl`] wrapping
 //! [`Client::create_acls`] / [`Client::delete_acls`]. Single-binding
 //! convenience. Batch APIs unchanged.
+//! v0.172 adds [`Client::add_broker_no_rack`] as a named helper for
+//! AddBroker with no rack. Same as `add_broker(id, host, port, None)`.
+//! [`Client::add_broker`] is unchanged.
 
 #![deny(missing_docs)]
 
