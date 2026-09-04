@@ -295,6 +295,7 @@ async fn dispatch_kafka(
                 | Some(ApiKey::AddRaftVoter)
                 | Some(ApiKey::RemoveRaftVoter)
                 | Some(ApiKey::UpdateRaftVoter)
+                | Some(ApiKey::InitializeShareGroupState)
                 | Some(ApiKey::UnregisterController),
             _
         )
@@ -880,6 +881,12 @@ async fn dispatch_kafka(
                 debug!(error = %e, "update raft voter flexible header tag buffer");
             }
             admin_api::encode_update_raft_voter(broker, &mut src, &mut out, principal);
+        }
+        Some(ApiKey::InitializeShareGroupState) if hdr.api_version == 0 => {
+            if let Err(e) = skip_tag_buffer(&mut src) {
+                debug!(error = %e, "initialize share group state flexible header tag buffer");
+            }
+            group_api::encode_initialize_share_group_state(broker, &mut src, &mut out, principal);
         }
         Some(ApiKey::UnregisterController) if hdr.api_version == 0 => {
             if let Err(e) = skip_tag_buffer(&mut src) {
