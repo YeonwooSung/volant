@@ -410,6 +410,11 @@ public final class Client implements AutoCloseable {
         return timeoutMs;
     }
 
+    /** Shared-token used for opcode 30, or {@code null} if none. */
+    public String authToken() {
+        return authToken;
+    }
+
     @Override
     public void close() {
         Socket s = socket;

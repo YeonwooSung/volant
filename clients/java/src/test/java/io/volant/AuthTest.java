@@ -140,6 +140,24 @@ class AuthTest {
     }
 
     @Test
+    void authTokenAfterConnectWithToken() throws Exception {
+        try (OneShotAuthServer srv = OneShotAuthServer.ok()) {
+            try (Client c = Client.connect("127.0.0.1", srv.port, 5_000, "s3cret")) {
+                assertEquals("s3cret", c.authToken());
+            }
+        }
+    }
+
+    @Test
+    void authTokenAfterConnectWithoutToken() throws Exception {
+        try (OneShotAuthServer srv = OneShotAuthServer.ok()) {
+            try (Client c = Client.connect("127.0.0.1", srv.port, 5_000)) {
+                assertNull(c.authToken());
+            }
+        }
+    }
+
+    @Test
     void reconnectResendsAuth() throws Exception {
         try (OneShotAuthServer first = OneShotAuthServer.ok();
                 OneShotAuthServer second = OneShotAuthServer.ok()) {

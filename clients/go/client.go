@@ -492,6 +492,14 @@ func (c *Client) Timeout() time.Duration {
 	return c.timeout
 }
 
+// AuthToken returns the shared-token used for opcode 30, or "" if none.
+func (c *Client) AuthToken() string {
+	if c == nil {
+		return ""
+	}
+	return c.authToken
+}
+
 func wrapTLS(conn net.Conn, addr string, cfg TLSConfig) (net.Conn, error) {
 	if (cfg.CertFile == "") != (cfg.KeyFile == "") {
 		return nil, fmt.Errorf("tls_cert and tls_key must both be set or both unset")
