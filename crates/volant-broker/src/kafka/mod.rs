@@ -46,7 +46,8 @@
 //! ConsumerGroupHeartbeat v0 (always flexible; reject 42; not KIP-848),
 //! Envelope v0 (key 58 reject; forwarding not supported; not KIP-590),
 //! ControllerRegistration v0 (key 70 reject; not KRaft / not AddBroker),
-//! Vote v0 (key 52 reject; not KRaft vote / not openraft RequestVote).
+//! Vote v0 (key 52 reject; not KRaft vote / not openraft RequestVote),
+//! AddRaftVoter v0 (key 80 reject; not KRaft raft voter / not AddBroker).
 //! See `docs/PHASE23_SPEC.md` … `docs/PHASE91_SPEC.md`, `docs/V225_SPEC.md`,
 //! `docs/V228_SPEC.md`, `docs/V233_SPEC.md`, `docs/V235_SPEC.md`,
 //! `docs/V236_SPEC.md`, `docs/V237_SPEC.md`, `docs/V241_SPEC.md`,
@@ -57,7 +58,7 @@
 //! `docs/V259_SPEC.md`, `docs/V260_SPEC.md`, `docs/V261_SPEC.md`,
 //! `docs/V263_SPEC.md`, `docs/V264_SPEC.md`, `docs/V265_SPEC.md`,
 //! `docs/V266_SPEC.md`, `docs/V267_SPEC.md`, `docs/V268_SPEC.md`,
-//! `docs/V269_SPEC.md`, and `docs/V270_SPEC.md`.
+//! `docs/V269_SPEC.md`, `docs/V270_SPEC.md`, and `docs/V271_SPEC.md`.
 
 mod acl_api;
 mod admin_api;
@@ -416,6 +417,10 @@ pub enum ApiKey {
     ListClientMetricsResources = 74,
     /// DescribeTopicPartitions (always flexible; v0 only).
     DescribeTopicPartitions = 75,
+    /// AddRaftVoter (always flexible; v0 only). Honest reject: not a
+    /// KRaft raft voter (membership is overlay + native AddBroker).
+    /// Does not wrap native AddBroker. Overlay membership is unchanged.
+    AddRaftVoter = 80,
 }
 
 impl ApiKey {
@@ -491,6 +496,7 @@ impl ApiKey {
             73 => Some(Self::AssignReplicasToDirs),
             74 => Some(Self::ListClientMetricsResources),
             75 => Some(Self::DescribeTopicPartitions),
+            80 => Some(Self::AddRaftVoter),
             _ => None,
         }
     }
@@ -568,6 +574,7 @@ pub const SUPPORTED_APIS: &[(ApiKey, i16, i16)] = &[
     (ApiKey::AssignReplicasToDirs, 0, 0),
     (ApiKey::ListClientMetricsResources, 0, 0),
     (ApiKey::DescribeTopicPartitions, 0, 0),
+    (ApiKey::AddRaftVoter, 0, 0),
 ];
 
 #[cfg(test)]
@@ -876,5 +883,15 @@ mod tests {
             *k == ApiKey::ControllerRegistration && *min == 0 && *max == 0
         }));
         assert_eq!(ApiKey::from_i16(70), Some(ApiKey::ControllerRegistration));
+    }
+
+    #[test]
+    fn supported_apis_includes_add_raft_voter_80() {
+        assert!(SUPPORTED_APIS.len() >= 70);
+        assert!(SUPPORTED_APIS
+            .iter()
+            .any(|(k, min, max)| *k == ApiKey::AddRaftVoter && *min == 0 && *max == 0));
+        assert_eq!(ApiKey::from_i16(80), Some(ApiKey::AddRaftVoter));
+        assert_eq!(ApiKey::from_i16(75), Some(ApiKey::DescribeTopicPartitions));
     }
 }
