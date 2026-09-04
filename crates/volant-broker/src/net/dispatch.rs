@@ -837,11 +837,13 @@ async fn handle_request(broker: &Arc<Broker>, req: Request) -> Result<Response> 
             session_timeout_ms,
             topics,
             group_instance_id,
+            rebalance_timeout_ms,
         } => {
             let result = broker.groups().join(
                 &group_id,
                 &member_id,
                 session_timeout_ms,
+                rebalance_timeout_ms,
                 topics,
                 &group_instance_id,
                 |t| broker.partition_count_opt(t),

@@ -340,6 +340,8 @@ pub enum Request {
         topics: Vec<String>,
         /// Optional static membership id (Phase 12). Empty = dynamic.
         group_instance_id: String,
+        /// Join park budget in milliseconds (v0.231 trailer). `0` = broker default.
+        rebalance_timeout_ms: u32,
     },
     /// Heartbeat for group membership.
     Heartbeat {

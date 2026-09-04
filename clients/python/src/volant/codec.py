@@ -457,6 +457,7 @@ class JoinGroupRequest:
     session_timeout_ms: int
     topics: list[str] = field(default_factory=list)
     group_instance_id: str = ""
+    rebalance_timeout_ms: int = 0
 
 
 @dataclass
@@ -1423,6 +1424,8 @@ def encode_join_group_request(req: JoinGroupRequest) -> bytes:
         _put_string(w, t)
     # Phase 12 trailing field (always written by current encoders).
     _put_string(w, req.group_instance_id)
+    # v0.231 trailer; 0 = broker default park (1000ms).
+    w.u32_le(req.rebalance_timeout_ms)
     return w.finish()
 
 
@@ -1435,12 +1438,14 @@ def decode_join_group_request(payload: bytes) -> JoinGroupRequest:
     topics = [_get_string(r) for _ in range(n)]
     # Phase 12 trailing field; legacy payloads omit it.
     group_instance_id = _get_string(r) if r.remaining() > 0 else ""
+    rebalance_timeout_ms = r.u32_le() if r.remaining() >= 4 else 0
     return JoinGroupRequest(
         group_id=group_id,
         member_id=member_id,
         session_timeout_ms=session_timeout_ms,
         topics=topics,
         group_instance_id=group_instance_id,
+        rebalance_timeout_ms=rebalance_timeout_ms,
     )
 
 

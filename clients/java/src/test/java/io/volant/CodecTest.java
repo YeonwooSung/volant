@@ -503,7 +503,8 @@ class CodecTest {
                         + "6576656e7473"
                         + "0400"
                         + "6c6f6773"
-                        + "0000");
+                        + "0000"
+                        + "00000000");
         assertArrayEquals(expected, raw);
         Codec.JoinGroupRequest decoded = Codec.decodeJoinGroupRequest(raw);
         assertEquals("g1", decoded.groupId);
@@ -518,7 +519,7 @@ class CodecTest {
         Codec.JoinGroupRequest req =
                 new Codec.JoinGroupRequest("g1", "", 10_000, Collections.singletonList("events"), "pod-1");
         byte[] raw = Codec.encodeJoinGroupRequest(req);
-        assertArrayEquals(hx("02006731" + "0000" + "10270000" + "01000000" + "06006576656e7473" + "0500706f642d31"), raw);
+        assertArrayEquals(hx("02006731" + "0000" + "10270000" + "01000000" + "06006576656e7473" + "0500706f642d31" + "00000000"), raw);
         Codec.JoinGroupRequest decoded = Codec.decodeJoinGroupRequest(raw);
         assertEquals("pod-1", decoded.groupInstanceId);
         assertEquals(Collections.singletonList("events"), decoded.topics);
