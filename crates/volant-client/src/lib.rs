@@ -185,6 +185,9 @@
 //! [`Client::add_broker`] is unchanged.
 //! v0.174 adds [`Client::create_scram_user_default`] wrapping
 //! [`Client::create_scram_user`] with iterations 0 (broker default).
+//! v0.175 adds [`Client::commit_transaction_empty`] as a named helper for
+//! EndTxn with no deferred offsets. Same as `commit_transaction(vec![])`.
+//! [`Client::commit_transaction`] is unchanged.
 
 #![deny(missing_docs)]
 

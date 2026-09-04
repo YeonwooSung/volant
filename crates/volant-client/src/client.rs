@@ -1276,6 +1276,13 @@ impl Client {
         self.end_transaction(true, offsets).await
     }
 
+    /// Commit the open transaction with no deferred offsets.
+    ///
+    /// Same as `commit_transaction(vec![])`.
+    pub async fn commit_transaction_empty(&self) -> Result<Vec<TxnProduceResult>> {
+        self.commit_transaction(Vec::new()).await
+    }
+
     /// Abort the open transaction (Phase 18).
     pub async fn abort_transaction(&self) -> Result<()> {
         let _ = self.end_transaction(false, Vec::new()).await?;
