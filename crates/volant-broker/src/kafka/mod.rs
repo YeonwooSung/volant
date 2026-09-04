@@ -51,7 +51,8 @@
 //! AddRaftVoter v0 (key 80 reject; not KRaft raft voter / not AddBroker),
 //! RemoveRaftVoter v0 (key 81 reject; not KRaft / not remove_broker),
 //! UpdateRaftVoter v0 (key 82 reject; not KRaft voter set),
-//! UnregisterController v0 (key 94 reject; not KRaft / not UnregisterBroker).
+//! UnregisterController v0 (key 94 reject; not KRaft / not UnregisterBroker),
+//! ShareFetch v1 (key 78 reject; not KIP-932 share fetch / not Fetch 1).
 //! See `docs/PHASE23_SPEC.md` … `docs/PHASE91_SPEC.md`, `docs/V225_SPEC.md`,
 //! `docs/V228_SPEC.md`, `docs/V233_SPEC.md`, `docs/V235_SPEC.md`,
 //! `docs/V236_SPEC.md`, `docs/V237_SPEC.md`, `docs/V241_SPEC.md`,
@@ -63,7 +64,8 @@
 //! `docs/V263_SPEC.md`, `docs/V264_SPEC.md`, `docs/V265_SPEC.md`,
 //! `docs/V266_SPEC.md`, `docs/V267_SPEC.md`, `docs/V268_SPEC.md`,
 //! `docs/V269_SPEC.md`, `docs/V270_SPEC.md`, `docs/V271_SPEC.md`,
-//! `docs/V272_SPEC.md`, `docs/V273_SPEC.md`, and `docs/V274_SPEC.md`.
+//! `docs/V272_SPEC.md`, `docs/V273_SPEC.md`, `docs/V274_SPEC.md`,
+//! and `docs/V277_SPEC.md`.
 
 mod acl_api;
 mod admin_api;
@@ -422,6 +424,13 @@ pub enum ApiKey {
     ListClientMetricsResources = 74,
     /// DescribeTopicPartitions (always flexible; v0 only).
     DescribeTopicPartitions = 75,
+    /// ShareFetch (always flexible; v1 only). Honest reject: not
+    /// KIP-932 share fetch. Does not wrap Kafka Fetch 1 or native
+    /// Fetch. Does not acquire records or create a share session.
+    /// Official validVersions is 1–2 (v0 EA removed in Kafka 4.1);
+    /// Volant advertises 1 only (v2 ShareAcquireMode / Renew is out
+    /// of range).
+    ShareFetch = 78,
     /// AddRaftVoter (always flexible; v0 only). Honest reject: not a
     /// KRaft raft voter (membership is overlay + native AddBroker).
     /// Does not wrap native AddBroker. Overlay membership is unchanged.
@@ -512,6 +521,7 @@ impl ApiKey {
             73 => Some(Self::AssignReplicasToDirs),
             74 => Some(Self::ListClientMetricsResources),
             75 => Some(Self::DescribeTopicPartitions),
+            78 => Some(Self::ShareFetch),
             80 => Some(Self::AddRaftVoter),
             81 => Some(Self::RemoveRaftVoter),
             82 => Some(Self::UpdateRaftVoter),
@@ -593,6 +603,7 @@ pub const SUPPORTED_APIS: &[(ApiKey, i16, i16)] = &[
     (ApiKey::AssignReplicasToDirs, 0, 0),
     (ApiKey::ListClientMetricsResources, 0, 0),
     (ApiKey::DescribeTopicPartitions, 0, 0),
+    (ApiKey::ShareFetch, 1, 1),
     (ApiKey::AddRaftVoter, 0, 0),
     (ApiKey::RemoveRaftVoter, 0, 0),
     (ApiKey::UpdateRaftVoter, 0, 0),
@@ -905,6 +916,16 @@ mod tests {
             *k == ApiKey::ControllerRegistration && *min == 0 && *max == 0
         }));
         assert_eq!(ApiKey::from_i16(70), Some(ApiKey::ControllerRegistration));
+    }
+
+    #[test]
+    fn supported_apis_includes_share_fetch_78() {
+        assert!(SUPPORTED_APIS.len() >= 75);
+        assert!(SUPPORTED_APIS
+            .iter()
+            .any(|(k, min, max)| *k == ApiKey::ShareFetch && *min == 1 && *max == 1));
+        assert_eq!(ApiKey::from_i16(78), Some(ApiKey::ShareFetch));
+        assert_eq!(ApiKey::from_i16(1), Some(ApiKey::Fetch));
     }
 
     #[test]
