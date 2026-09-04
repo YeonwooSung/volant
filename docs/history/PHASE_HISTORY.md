@@ -394,6 +394,11 @@ docs for day-to-day reading: [ops](../ops.md), [consistency](../consistency.md),
 | v0.193 | ✅ | Go RetryBackoff getter | [V193_SPEC.md](../V193_SPEC.md) |
 | v0.194 | ✅ | Go TransactionalID getter | [V194_SPEC.md](../V194_SPEC.md) |
 | v0.195 | ✅ | language Client timeout getter | [V195_SPEC.md](../V195_SPEC.md) |
+| v0.196 | ✅ | Python list_acls_all | [V196_SPEC.md](../V196_SPEC.md) |
+| v0.197 | ✅ | Python list_offsets_all | [V197_SPEC.md](../V197_SPEC.md) |
+| v0.198 | ✅ | Python reassign_partitions_all | [V198_SPEC.md](../V198_SPEC.md) |
+| v0.199 | ✅ | Go/Java CreateTopic default partitions=1 | [V199_SPEC.md](../V199_SPEC.md) |
+| v0.200 | ✅ | Go/Java auth token getter | [V200_SPEC.md](../V200_SPEC.md) |
 
 ---
 
