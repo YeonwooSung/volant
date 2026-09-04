@@ -3350,6 +3350,85 @@ fn write_alter_share_group_offsets(
     put_empty_tag_buffer(out);
 }
 
+/// DeleteShareGroupOffsets v0 (key 92). Always flexible.
+///
+/// Official `DeleteShareGroupOffsetsRequest.json` / `Response.json`.
+/// Official `validVersions` is **0** only. Not KIP-932: parse GroupId
+/// (ACL) and topic names (echo) and reject with **42** `INVALID_REQUEST`
+/// (`not KIP-932 share offsets`). Does not persist. Does not wrap
+/// OffsetCommit 8 / DeleteGroups 42 / OffsetDelete 47 /
+/// DescribeShareGroupOffsets 90. Official response has `throttleTimeMs`,
+/// top-level ErrorCode/ErrorMessage, and per-topic `Responses[]`
+/// (TopicName, TopicId, ErrorCode, ErrorMessage). Unparseable body →
+/// throttle 0 + top-level 42 + empty `Responses[]` (not success).
+pub(crate) fn encode_delete_share_group_offsets(
+    broker: &Broker,
+    src: &mut impl Buf,
+    out: &mut BytesMut,
+    principal: &str,
+) {
+    let (group_id, topics) = parse_delete_share_group_offsets_request(src);
+
+    let denied = broker.acls().is_enabled()
+        && !broker.acls().authorize(
+            Some(principal),
+            ResourceType::Group,
+            &group_id,
+            AclOperation::Alter,
+        );
+
+    let (err, msg) = if denied {
+        (KafkaErrorCode::GroupAuthorizationFailed.as_i16(), None)
+    } else {
+        (
+            KafkaErrorCode::InvalidRequest.as_i16(),
+            Some("not KIP-932 share offsets"),
+        )
+    };
+
+    // Official response (`DeleteShareGroupOffsetsResponse.json` v0):
+    // ThrottleTimeMs i32, ErrorCode i16, ErrorMessage compact nullable,
+    // Responses[] { TopicName compact string, TopicId uuid, ErrorCode i16,
+    // ErrorMessage compact nullable, tagged }, tagged.
+    out.put_i32(0); // throttleTimeMs
+    out.put_i16(err);
+    put_compact_nullable_string(out, msg);
+    put_compact_array_len(out, topics.len());
+    for topic in topics {
+        put_compact_string(out, &topic);
+        put_uuid(out, &[0u8; 16]); // request has no TopicId
+        out.put_i16(err);
+        put_compact_nullable_string(out, msg);
+        put_empty_tag_buffer(out);
+    }
+    put_empty_tag_buffer(out);
+}
+
+fn parse_delete_share_group_offsets_request(src: &mut impl Buf) -> (String, Vec<String>) {
+    // Official v0 (flex, `DeleteShareGroupOffsetsRequest.json`):
+    // GroupId compact string, Topics[] { TopicName compact string,
+    // tagged }, tagged. Topic names only — no partitions / TopicId.
+    // Parse GroupId for ACL; echo topic names. Do not persist.
+    let group_id = get_compact_string(src).unwrap_or_default();
+    let mut topics = Vec::new();
+    match get_compact_array_len(src) {
+        Ok(Some(n)) => {
+            for _ in 0..n {
+                match get_compact_string(src) {
+                    Ok(name) => {
+                        let _ = skip_tag_buffer(src);
+                        topics.push(name);
+                    }
+                    Err(_) => break,
+                }
+            }
+        }
+        Ok(None) | Err(_) => {}
+    }
+    let _ = skip_tag_buffer(src);
+    (group_id, topics)
+}
+
 /// ConsumerGroupDescribe v0 (key 69). Always flexible.
 ///
 /// Official `ConsumerGroupDescribeRequest.json` / `Response.json`. Wraps the
@@ -5789,6 +5868,152 @@ mod tests {
         assert!(broker
             .groups()
             .fetch_offsets("sg-v287", &[])
+            .unwrap()
+            .entries
+            .is_empty());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    fn del_sgo_v0_body(group: &str, topic: &str) -> BytesMut {
+        let mut body = BytesMut::new();
+        put_compact_string(&mut body, group);
+        put_compact_array_len(&mut body, 1);
+        put_compact_string(&mut body, topic);
+        put_empty_tag_buffer(&mut body); // topic tags
+        put_empty_tag_buffer(&mut body); // top-level tags
+        body
+    }
+
+    fn read_del_sgo(
+        src: &mut impl Buf,
+    ) -> (
+        i32,
+        i16,
+        Option<String>,
+        Vec<(String, [u8; 16], i16, Option<String>)>,
+    ) {
+        let throttle = src.get_i32();
+        let err = src.get_i16();
+        let err_msg = get_compact_nullable_string(src).unwrap();
+        let n = get_compact_array_len(src).unwrap().unwrap_or(0);
+        let mut topics = Vec::new();
+        for _ in 0..n {
+            let name = get_compact_string(src).unwrap();
+            let topic_id = get_uuid(src).unwrap();
+            let topic_err = src.get_i16();
+            let topic_msg = get_compact_nullable_string(src).unwrap();
+            skip_tag_buffer(src).unwrap();
+            topics.push((name, topic_id, topic_err, topic_msg));
+        }
+        skip_tag_buffer(src).unwrap();
+        assert_eq!(src.remaining(), 0);
+        (throttle, err, err_msg, topics)
+    }
+
+    #[test]
+    fn kafka_delete_share_group_offsets_rejects_42() {
+        let dir = temp_dir("delsgo-ok");
+        let broker = Broker::new(StorageConfig {
+            data_dir: dir.clone(),
+            ..StorageConfig::default()
+        });
+        let mut src = del_sgo_v0_body("sg-v288", "events");
+        let mut out = BytesMut::new();
+        encode_delete_share_group_offsets(&broker, &mut src, &mut out, "kafka-anonymous");
+        let mut resp = out.freeze();
+        let (throttle, err, err_msg, topics) = read_del_sgo(&mut resp);
+        assert_eq!(throttle, 0);
+        assert_eq!(err, KafkaErrorCode::InvalidRequest.as_i16());
+        assert_eq!(err_msg.as_deref(), Some("not KIP-932 share offsets"));
+        assert_eq!(topics.len(), 1);
+        assert_eq!(topics[0].0, "events");
+        assert_eq!(topics[0].1, [0u8; 16]);
+        assert_eq!(topics[0].2, KafkaErrorCode::InvalidRequest.as_i16());
+        assert_eq!(topics[0].3.as_deref(), Some("not KIP-932 share offsets"));
+        assert!(broker.groups().describe_group("sg-v288").is_none());
+        assert!(broker
+            .groups()
+            .fetch_offsets("sg-v288", &[])
+            .unwrap()
+            .entries
+            .is_empty());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn kafka_delete_share_group_offsets_does_not_wrap_classic() {
+        let dir = temp_dir("delsgo-wrap");
+        let broker = Broker::new(StorageConfig {
+            data_dir: dir.clone(),
+            ..StorageConfig::default()
+        });
+        broker
+            .groups()
+            .commit_offsets("sg-v288", "", 0, &[("events".into(), 0, 7, "".into())])
+            .unwrap();
+        let before = broker.groups().fetch_offsets("sg-v288", &[]).unwrap();
+        assert_eq!(before.entries.len(), 1);
+
+        let mut src = del_sgo_v0_body("sg-v288", "events");
+        let mut out = BytesMut::new();
+        encode_delete_share_group_offsets(&broker, &mut src, &mut out, "kafka-anonymous");
+        let mut resp = out.freeze();
+        let (_, err, _, _) = read_del_sgo(&mut resp);
+        assert_eq!(err, KafkaErrorCode::InvalidRequest.as_i16());
+        let after = broker.groups().fetch_offsets("sg-v288", &[]).unwrap();
+        assert_eq!(after.entries.len(), before.entries.len());
+        assert_eq!(after.entries[0].offset, 7);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn kafka_delete_share_group_offsets_truncated_is_top_level_42() {
+        let dir = temp_dir("delsgo-trunc");
+        let broker = Broker::new(StorageConfig {
+            data_dir: dir.clone(),
+            ..StorageConfig::default()
+        });
+        let mut src = BytesMut::new();
+        let mut out = BytesMut::new();
+        encode_delete_share_group_offsets(&broker, &mut src, &mut out, "kafka-anonymous");
+        let mut resp = out.freeze();
+        let (throttle, err, err_msg, topics) = read_del_sgo(&mut resp);
+        assert_eq!(throttle, 0);
+        assert_eq!(err, KafkaErrorCode::InvalidRequest.as_i16());
+        assert_eq!(err_msg.as_deref(), Some("not KIP-932 share offsets"));
+        assert!(topics.is_empty());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn kafka_delete_share_group_offsets_acl_deny_is_30() {
+        let dir = temp_dir("delsgo-acl");
+        let broker = Broker::new(StorageConfig {
+            data_dir: dir.clone(),
+            ..StorageConfig::default()
+        });
+        broker
+            .configure_acls(true, None, vec![], "token".into())
+            .unwrap();
+
+        let mut src = del_sgo_v0_body("sg-v288", "events");
+        let mut out = BytesMut::new();
+        encode_delete_share_group_offsets(&broker, &mut src, &mut out, "kafka-anonymous");
+        let mut resp = out.freeze();
+        let (throttle, err, err_msg, topics) = read_del_sgo(&mut resp);
+        assert_eq!(throttle, 0);
+        assert_eq!(err, KafkaErrorCode::GroupAuthorizationFailed.as_i16());
+        assert_eq!(err_msg, None);
+        assert_eq!(topics.len(), 1);
+        assert_eq!(topics[0].0, "events");
+        assert_eq!(
+            topics[0].2,
+            KafkaErrorCode::GroupAuthorizationFailed.as_i16()
+        );
+        assert_eq!(topics[0].3, None);
+        assert!(broker
+            .groups()
+            .fetch_offsets("sg-v288", &[])
             .unwrap()
             .entries
             .is_empty());
