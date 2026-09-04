@@ -288,7 +288,8 @@ async fn dispatch_kafka(
                 | Some(ApiKey::ConsumerGroupHeartbeat)
                 | Some(ApiKey::ConsumerGroupDescribe)
                 | Some(ApiKey::ControllerRegistration)
-                | Some(ApiKey::AddRaftVoter),
+                | Some(ApiKey::AddRaftVoter)
+                | Some(ApiKey::RemoveRaftVoter),
             _
         )
     ) || matches!(
@@ -837,6 +838,12 @@ async fn dispatch_kafka(
                 debug!(error = %e, "add raft voter flexible header tag buffer");
             }
             admin_api::encode_add_raft_voter(broker, &mut src, &mut out, principal);
+        }
+        Some(ApiKey::RemoveRaftVoter) if hdr.api_version == 0 => {
+            if let Err(e) = skip_tag_buffer(&mut src) {
+                debug!(error = %e, "remove raft voter flexible header tag buffer");
+            }
+            admin_api::encode_remove_raft_voter(broker, &mut src, &mut out, principal);
         }
         Some(ApiKey::UnregisterBroker) if hdr.api_version == 0 => {
             if let Err(e) = skip_tag_buffer(&mut src) {
