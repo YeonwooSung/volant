@@ -103,7 +103,7 @@ func (c *Client) CreateTopicID(name string, partitions int) (uint32, error) // a
 - SyncGroup is a generation confirm fence (v0.215). List/Describe report CompletingRebalance while the fence is open (v0.218) and **PreparingRebalance** while a Join is parked (v0.230). Member OffsetCommit is 9 until sync (v0.219). GroupConsumer retries Join 9 when `max_retries>0` (v0.220/v0.221). Thin Client retries Join 9 on the same budget (v0.223/v0.224). New-member Join **parks** until SyncGroup or **rebalance** timeout (v0.227/v0.231; default 1000ms; mutex released). Still not join-set wait.
 - Range uses JoinGroup members trailer when present (v0.211); empty trailer still DescribeGroup.
 - Empty first Join now sends a client-generated member_id (v0.209/v0.210) so retry is safe.
-- Kafka `SUPPORTED_APIS` is **74** (… + Vote **52**, Add/Remove/UpdateRaftVoter **80**/**81**/**82**, UnregisterController **94**). No stored quotas / KIP-584 features / token store / KIP-848 / unclean election / live reassignment. No client-compat claim.
+- Kafka `SUPPORTED_APIS` is **79** (… + ShareGroupHeartbeat **76**, ShareGroupDescribe **77**, ShareFetch **78**, ShareAcknowledge **79**, InitializeShareGroupState **83**). No stored quotas / KIP-584 features / token store / KIP-848 / KIP-932 / unclean election / live reassignment. No client-compat claim.
 - OffsetCommit v6+ stores `committed_leader_epoch`; OffsetFetch v5+ returns it (v0.262). Legacy files / native commits stay **-1**.
 - OffsetFetch RequireStable (v0.256) returns **81** when the committed offset is still unstable. Not a wait.
 - TxnOffsetCommit v3+ honors generation/member with the OffsetCommit fence (v0.254). Empty member or gen `< 0` still skips.

@@ -149,7 +149,7 @@ async fn api_versions_lists_scram_admin_50_51() {
         let max_v = src.get_i16();
         found.insert(key, (min_v, max_v));
     }
-    assert_eq!(found.len(), 74);
+    assert_eq!(found.len(), 79);
     assert_eq!(found.get(&50), Some(&(0, 0)));
     assert_eq!(found.get(&51), Some(&(0, 0)));
 

@@ -471,6 +471,11 @@ docs for day-to-day reading: [ops](../ops.md), [consistency](../consistency.md),
 | v0.272 | ✅ | Kafka RemoveRaftVoter key 81 reject | [V272_SPEC.md](../V272_SPEC.md) |
 | v0.273 | ✅ | Kafka UpdateRaftVoter key 82 reject | [V273_SPEC.md](../V273_SPEC.md) |
 | v0.274 | ✅ | Kafka UnregisterController key 94 reject | [V274_SPEC.md](../V274_SPEC.md) |
+| v0.275 | ✅ | Kafka ShareGroupHeartbeat key 76 reject | [V275_SPEC.md](../V275_SPEC.md) |
+| v0.276 | ✅ | Kafka ShareGroupDescribe key 77 reject | [V276_SPEC.md](../V276_SPEC.md) |
+| v0.277 | ✅ | Kafka ShareFetch key 78 reject | [V277_SPEC.md](../V277_SPEC.md) |
+| v0.278 | ✅ | Kafka ShareAcknowledge key 79 reject | [V278_SPEC.md](../V278_SPEC.md) |
+| v0.279 | ✅ | Kafka InitializeShareGroupState key 83 reject | [V279_SPEC.md](../V279_SPEC.md) |
 
 ---
 
