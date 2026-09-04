@@ -107,6 +107,28 @@ impl UserCreds {
             ScramHash::Sha512 => self.sha512 = Some(cred),
         }
     }
+
+    fn remove(&mut self, hash: ScramHash) -> Option<ScramCredential> {
+        match hash {
+            ScramHash::Sha256 => self.sha256.take(),
+            ScramHash::Sha512 => self.sha512.take(),
+        }
+    }
+
+    fn is_empty(&self) -> bool {
+        self.sha256.is_none() && self.sha512.is_none()
+    }
+
+    fn infos(&self) -> Vec<(ScramHash, u32)> {
+        let mut out = Vec::new();
+        if let Some(c) = &self.sha256 {
+            out.push((ScramHash::Sha256, c.iterations));
+        }
+        if let Some(c) = &self.sha512 {
+            out.push((ScramHash::Sha512, c.iterations));
+        }
+        out
+    }
 }
 
 /// On-disk user entry: legacy flat credential or multi-mechanism object.
@@ -171,14 +193,12 @@ impl ScramStore {
     /// Open under `data_dir/__scram` and load users.
     pub fn open(data_dir: impl AsRef<Path>) -> Result<Self> {
         let dir = data_dir.as_ref().join("__scram");
-        fs::create_dir_all(&dir).map_err(|e| {
-            Error::Storage(format!("create scram dir {}: {e}", dir.display()))
-        })?;
+        fs::create_dir_all(&dir)
+            .map_err(|e| Error::Storage(format!("create scram dir {}: {e}", dir.display())))?;
         let path = dir.join("users.json");
         let users = if path.exists() {
-            let mut f = File::open(&path).map_err(|e| {
-                Error::Storage(format!("open scram store {}: {e}", path.display()))
-            })?;
+            let mut f = File::open(&path)
+                .map_err(|e| Error::Storage(format!("open scram store {}: {e}", path.display())))?;
             let mut buf = String::new();
             f.read_to_string(&mut buf)
                 .map_err(|e| Error::Storage(format!("read scram store: {e}")))?;
@@ -272,8 +292,14 @@ impl ScramStore {
             iterations
         };
         let mut entry = UserCreds::default();
-        entry.set(ScramHash::Sha256, hash_password_for(password, iter, ScramHash::Sha256)?);
-        entry.set(ScramHash::Sha512, hash_password_for(password, iter, ScramHash::Sha512)?);
+        entry.set(
+            ScramHash::Sha256,
+            hash_password_for(password, iter, ScramHash::Sha256)?,
+        );
+        entry.set(
+            ScramHash::Sha512,
+            hash_password_for(password, iter, ScramHash::Sha512)?,
+        );
         self.users.write().insert(username.to_owned(), entry);
         self.persist()
     }
@@ -281,6 +307,98 @@ impl ScramStore {
     /// Delete a user. Returns whether it existed.
     pub fn delete_user(&self, username: &str) -> Result<bool> {
         let removed = self.users.write().remove(username).is_some();
+        if removed {
+            self.persist()?;
+        }
+        Ok(removed)
+    }
+
+    /// Stored mechanisms for `username` (`None` if the user is unknown).
+    pub fn describe_user(&self, username: &str) -> Option<Vec<(ScramHash, u32)>> {
+        self.users.read().get(username).map(|c| c.infos())
+    }
+
+    /// All users and their stored mechanisms, sorted by name.
+    pub fn describe_all(&self) -> Vec<(String, Vec<(ScramHash, u32)>)> {
+        let users = self.users.read();
+        let mut names: Vec<_> = users.keys().cloned().collect();
+        names.sort();
+        names
+            .into_iter()
+            .filter_map(|n| users.get(&n).map(|c| (n, c.infos())))
+            .collect()
+    }
+
+    /// Whether `username` has a stored credential for `hash`.
+    pub fn has_mechanism(&self, username: &str, hash: ScramHash) -> bool {
+        self.users
+            .read()
+            .get(username)
+            .and_then(|c| c.get(hash))
+            .is_some()
+    }
+
+    /// Create or replace one mechanism from Kafka `SaltedPassword = Hi(password, salt, i)`.
+    ///
+    /// Does **not** take a plaintext password. Native [`Self::upsert_user`] is
+    /// unchanged and still writes both hashes from plaintext.
+    pub fn upsert_from_salted(
+        &self,
+        username: &str,
+        hash: ScramHash,
+        iterations: u32,
+        salt: &[u8],
+        salted_password: &[u8],
+    ) -> Result<()> {
+        if username.is_empty() || username.contains(',') || username.contains('=') {
+            return Err(Error::InvalidArgument(
+                "invalid SCRAM username (empty or contains ,=)".into(),
+            ));
+        }
+        if iterations == 0 {
+            return Err(Error::InvalidArgument(
+                "invalid SCRAM iterations (must be > 0)".into(),
+            ));
+        }
+        if salt.is_empty() || salted_password.is_empty() {
+            return Err(Error::InvalidArgument(
+                "empty SCRAM salt or saltedPassword".into(),
+            ));
+        }
+        let (stored_key, server_key) = keys_from_salted(salted_password, hash)?;
+        let cred = ScramCredential {
+            salt_b64: B64.encode(salt),
+            stored_key_b64: B64.encode(&stored_key),
+            server_key_b64: B64.encode(&server_key),
+            iterations,
+        };
+        {
+            let mut users = self.users.write();
+            users
+                .entry(username.to_owned())
+                .or_default()
+                .set(hash, cred);
+        }
+        self.persist()
+    }
+
+    /// Remove one mechanism. Deletes the user if none remain.
+    ///
+    /// Returns whether that user/mechanism existed.
+    pub fn delete_mechanism(&self, username: &str, hash: ScramHash) -> Result<bool> {
+        let removed = {
+            let mut users = self.users.write();
+            let Some(entry) = users.get_mut(username) else {
+                return Ok(false);
+            };
+            if entry.remove(hash).is_none() {
+                return Ok(false);
+            }
+            if entry.is_empty() {
+                users.remove(username);
+            }
+            true
+        };
         if removed {
             self.persist()?;
         }
@@ -304,7 +422,9 @@ impl ScramStore {
         hash: ScramHash,
     ) -> Result<(ScramChallenge, Vec<u8>, u32, String)> {
         if client_nonce.is_empty()
-            || client_nonce.chars().any(|c| c == ',' || !c.is_ascii_graphic())
+            || client_nonce
+                .chars()
+                .any(|c| c == ',' || !c.is_ascii_graphic())
         {
             return Err(Error::InvalidArgument("invalid client_nonce".into()));
         }
@@ -420,7 +540,11 @@ impl ScramStore {
             challenge.iterations,
         );
 
-        let client_signature = hmac_hash(challenge.hash, &challenge.stored_key, auth_message.as_bytes())?;
+        let client_signature = hmac_hash(
+            challenge.hash,
+            &challenge.stored_key,
+            auth_message.as_bytes(),
+        )?;
         let mut client_key = vec![0u8; dig];
         for i in 0..dig {
             client_key[i] = client_proof[i] ^ client_signature[i];
@@ -429,7 +553,11 @@ impl ScramStore {
         if !bool::from(stored_key_check.ct_eq(&challenge.stored_key)) {
             return Err(Error::InvalidArgument("authentication failed".into()));
         }
-        hmac_hash(challenge.hash, &challenge.server_key, auth_message.as_bytes())
+        hmac_hash(
+            challenge.hash,
+            &challenge.server_key,
+            auth_message.as_bytes(),
+        )
     }
 }
 
@@ -490,8 +618,7 @@ pub fn client_proof_and_server_sig_for(
     let client_key = hmac_hash(hash, &salted, b"Client Key")?;
     let stored_key = hash_digest(hash, &client_key);
     let server_key = hmac_hash(hash, &salted, b"Server Key")?;
-    let auth_message =
-        build_auth_message(username, client_nonce, combined_nonce, salt, iterations);
+    let auth_message = build_auth_message(username, client_nonce, combined_nonce, salt, iterations);
     let client_signature = hmac_hash(hash, &stored_key, auth_message.as_bytes())?;
     let mut proof = vec![0u8; dig];
     for i in 0..dig {
@@ -508,10 +635,25 @@ fn derive_keys(
     hash: ScramHash,
 ) -> Result<(Vec<u8>, Vec<u8>)> {
     let salted = hi(password.as_bytes(), salt, iterations, hash);
-    let client_key = hmac_hash(hash, &salted, b"Client Key")?;
+    keys_from_salted(&salted, hash)
+}
+
+/// Derive StoredKey/ServerKey from Kafka `SaltedPassword = Hi(password, salt, i)`.
+fn keys_from_salted(salted_password: &[u8], hash: ScramHash) -> Result<(Vec<u8>, Vec<u8>)> {
+    let client_key = hmac_hash(hash, salted_password, b"Client Key")?;
     let stored_key = hash_digest(hash, &client_key);
-    let server_key = hmac_hash(hash, &salted, b"Server Key")?;
+    let server_key = hmac_hash(hash, salted_password, b"Server Key")?;
     Ok((stored_key, server_key))
+}
+
+/// RFC 5802 `Hi(password, salt, i)` (PBKDF2). Kafka Alter upsert `saltedPassword`.
+pub fn salted_password_for(
+    password: &str,
+    salt: &[u8],
+    iterations: u32,
+    hash: ScramHash,
+) -> Vec<u8> {
+    hi(password.as_bytes(), salt, iterations, hash)
 }
 
 fn hi(password: &[u8], salt: &[u8], iterations: u32, hash: ScramHash) -> Vec<u8> {
@@ -569,10 +711,7 @@ fn build_auth_message(
     iterations: u32,
 ) -> String {
     let client_first_bare = format!("n={username},r={client_nonce}");
-    let server_first = format!(
-        "r={combined_nonce},s={},i={iterations}",
-        B64.encode(salt)
-    );
+    let server_first = format!("r={combined_nonce},s={},i={iterations}", B64.encode(salt));
     // c=biws is base64("n,,") — no channel binding.
     let client_final_wo_proof = format!("c=biws,r={combined_nonce}");
     format!("{client_first_bare},{server_first},{client_final_wo_proof}")
@@ -679,8 +818,7 @@ mod tests {
 
         for hash in [ScramHash::Sha256, ScramHash::Sha512] {
             let cn = generate_client_nonce();
-            let (chal, salt, iter, combined) =
-                store.begin_with_hash("bob", &cn, hash).unwrap();
+            let (chal, salt, iter, combined) = store.begin_with_hash("bob", &cn, hash).unwrap();
             let (proof, _) =
                 client_proof_and_server_sig_for(hash, "bob", "pw", &cn, &combined, &salt, iter)
                     .unwrap();
@@ -723,15 +861,9 @@ mod tests {
         assert!(store.verify_password("legacy", "legacy-pass"));
         let cn = generate_client_nonce();
         let (chal, salt, iter, combined) = store.begin("legacy", &cn).unwrap();
-        let (proof, _) = client_proof_and_server_sig(
-            "legacy",
-            "legacy-pass",
-            &cn,
-            &combined,
-            &salt,
-            iter,
-        )
-        .unwrap();
+        let (proof, _) =
+            client_proof_and_server_sig("legacy", "legacy-pass", &cn, &combined, &salt, iter)
+                .unwrap();
         assert!(store.finish(&chal, "legacy", &combined, &proof).is_ok());
 
         // SHA-512 not available until re-upsert.
@@ -761,6 +893,67 @@ mod tests {
         let (proof, _) =
             client_proof_and_server_sig("nobody", "x", &cn, &combined, &salt, iter).unwrap();
         assert!(store.finish(&chal, "nobody", &combined, &proof).is_err());
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn describe_after_native_upsert_lists_both_mechanisms() {
+        let dir = std::env::temp_dir().join(format!(
+            "volant-scram-desc-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        let _ = fs::remove_dir_all(&dir);
+        fs::create_dir_all(&dir).unwrap();
+        let store = ScramStore::open(&dir).unwrap();
+        store.upsert_user("alice", "s3cret", 0).unwrap();
+        let infos = store.describe_user("alice").unwrap();
+        assert_eq!(
+            infos,
+            vec![
+                (ScramHash::Sha256, DEFAULT_ITERATIONS),
+                (ScramHash::Sha512, DEFAULT_ITERATIONS)
+            ]
+        );
+        assert!(store.describe_user("nobody").is_none());
+        let all = store.describe_all();
+        assert_eq!(all.len(), 1);
+        assert_eq!(all[0].0, "alice");
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn upsert_from_salted_then_delete_mechanism() {
+        let dir = std::env::temp_dir().join(format!(
+            "volant-scram-salted-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        let _ = fs::remove_dir_all(&dir);
+        fs::create_dir_all(&dir).unwrap();
+        let store = ScramStore::open(&dir).unwrap();
+        let salt = b"0123456789abcdef";
+        let salted = salted_password_for("pw", salt, 4096, ScramHash::Sha256);
+        store
+            .upsert_from_salted("carol", ScramHash::Sha256, 4096, salt, &salted)
+            .unwrap();
+        assert_eq!(
+            store.describe_user("carol").unwrap(),
+            vec![(ScramHash::Sha256, 4096)]
+        );
+        assert!(store.verify_password("carol", "pw"));
+        assert!(store.has_mechanism("carol", ScramHash::Sha256));
+        assert!(!store.has_mechanism("carol", ScramHash::Sha512));
+
+        assert!(store.delete_mechanism("carol", ScramHash::Sha256).unwrap());
+        assert!(store.describe_user("carol").is_none());
+        assert!(!store.delete_mechanism("carol", ScramHash::Sha256).unwrap());
         let _ = fs::remove_dir_all(&dir);
     }
 }

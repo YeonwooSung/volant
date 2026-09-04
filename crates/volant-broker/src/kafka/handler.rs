@@ -253,7 +253,9 @@ async fn dispatch_kafka(
                 | Some(ApiKey::DescribeTransactions)
                 | Some(ApiKey::ListTransactions)
                 | Some(ApiKey::AlterPartitionReassignments)
-                | Some(ApiKey::ListPartitionReassignments),
+                | Some(ApiKey::ListPartitionReassignments)
+                | Some(ApiKey::DescribeUserScramCredentials)
+                | Some(ApiKey::AlterUserScramCredentials),
             _
         )
     );
@@ -704,6 +706,20 @@ async fn dispatch_kafka(
                 debug!(error = %e, "list partition reassignments flexible header tag buffer");
             }
             admin_api::encode_list_partition_reassignments(broker, &mut src, &mut out, principal);
+        }
+        Some(ApiKey::DescribeUserScramCredentials) if hdr.api_version == 0 => {
+            if let Err(e) = skip_tag_buffer(&mut src) {
+                debug!(error = %e, "describe user scram credentials flexible header tag buffer");
+            }
+            admin_api::encode_describe_user_scram_credentials(
+                broker, &mut src, &mut out, principal,
+            );
+        }
+        Some(ApiKey::AlterUserScramCredentials) if hdr.api_version == 0 => {
+            if let Err(e) = skip_tag_buffer(&mut src) {
+                debug!(error = %e, "alter user scram credentials flexible header tag buffer");
+            }
+            admin_api::encode_alter_user_scram_credentials(broker, &mut src, &mut out, principal);
         }
         Some(ApiKey::DescribeConfigs) if (0..=4).contains(&hdr.api_version) => {
             if hdr.api_version >= 4 {

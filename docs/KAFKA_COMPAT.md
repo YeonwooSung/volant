@@ -57,6 +57,8 @@ From `SUPPORTED_APIS` in `crates/volant-broker/src/kafka/mod.rs`:
 | 45 | AlterPartitionReassignments | 0 | Always flex; wraps native opcode 114 + assignment wait; TimeoutMs ignored; null replicas → **83** (no pending cancel log); not live copy |
 | 46 | ListPartitionReassignments | 0 | Always flex; current assignment as `replicas`; empty `addingReplicas`/`removingReplicas`; TimeoutMs ignored; not live progress; no pending log |
 | 47 | OffsetDelete | 0 | Classic only |
+| 50 | DescribeUserScramCredentials | 0 | Always flex; wraps `ScramStore`; empty users = all; unknown user → **91**; Cluster DESCRIBE |
+| 51 | AlterUserScramCredentials | 0 | Always flex; wraps `ScramStore`; upsert takes `saltedPassword` (not plaintext); Cluster ALTER |
 | 60 | DescribeCluster | 0–2 | Always flex; IsFenced always false |
 | 61 | DescribeProducers | 0 | Always flex |
 | 65 | DescribeTransactions | 0 | Always flex |
@@ -129,7 +131,8 @@ These are **current** product facts, not temporary docs lag:
 | ApiVersions features | Empty SupportedFeatures / FinalizedFeatures / ZkMigrationReady tags; no REBOOTSTRAP_REQUIRED |
 | AlterPartitionReassignments | **v0 wrap** (v0.225): key **45** advertised; apply is native opcode 114 (instant; new replicas start empty); TimeoutMs ignored; `replicas=null` → **83** (no cancel log / no pending state); not live Kafka reassignment |
 | ListPartitionReassignments | **v0 list** (v0.228): key **46** advertised; current assignment as `replicas`; empty adding/removing (apply is instant; no pending log); TimeoutMs ignored; not live Kafka reassignment progress |
-| Missing APIs | Large Kafka surface still unsupported (GSSAPI, OAUTH, broker configs, …) |
+| Describe/AlterUserScramCredentials | **v0 wrap** (v0.233): keys **50** / **51** advertised; wrap `ScramStore` (native 64–69). Alter upsert is Kafka `saltedPassword = Hi(...)`, not plaintext. Native create still sends password in the clear. Unknown user → **91** `RESOURCE_NOT_FOUND`. Not OAUTH/GSSAPI; not quota keys 48/49 |
+| Missing APIs | Large Kafka surface still unsupported (GSSAPI, OAUTH, quota keys 48/49, …) |
 
 ## Related
 

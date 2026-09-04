@@ -1,23 +1,29 @@
 //! Kafka wire handlers: Create/Delete topics, CreatePartitions,
-//! AlterPartitionReassignments, ListPartitionReassignments, configs.
+//! AlterPartitionReassignments, ListPartitionReassignments,
+//! Describe/AlterUserScramCredentials, configs.
 
 use bytes::{Buf, BufMut, BytesMut};
 use volant_core::{Error, TopicName};
 
-use crate::acl::{
-    AclOperation, ResourceType, CLUSTER_RESOURCE,
-};
+use crate::acl::{AclOperation, ResourceType, CLUSTER_RESOURCE};
 use crate::broker::Broker;
 use crate::net::{complete_assignment_mutation, snapshot_if_must_wait};
 
+use crate::scram::ScramHash;
+
 use super::codec::{
-    get_compact_array_len,
-    get_compact_nullable_string, get_compact_string, get_nullable_string, get_string, get_uuid, put_compact_array_len, put_compact_nullable_string,
-    put_compact_string, put_empty_tag_buffer, put_nullable_string, put_string, put_unsigned_varint, skip_tag_buffer, KAFKA_UUID_ZERO,
+    get_compact_array_len, get_compact_bytes, get_compact_nullable_string, get_compact_string,
+    get_nullable_string, get_string, get_uuid, put_compact_array_len, put_compact_nullable_string,
+    put_compact_string, put_empty_tag_buffer, put_nullable_string, put_string, put_unsigned_varint,
+    skip_tag_buffer, KAFKA_UUID_ZERO,
 };
 use super::topic_id;
 use super::KafkaErrorCode;
 
+/// Kafka `ScramMechanism`: SCRAM-SHA-256.
+const KAFKA_SCRAM_SHA_256: i8 = 1;
+/// Kafka `ScramMechanism`: SCRAM-SHA-512.
+const KAFKA_SCRAM_SHA_512: i8 = 2;
 
 /// Default partition count when CreateTopics v4+ sends `num_partitions = -1`.
 const DEFAULT_TOPIC_PARTITIONS: u32 = 1;
@@ -410,9 +416,7 @@ pub(crate) async fn encode_delete_topics(
                         uuid: r.uuid,
                         resolved: r.resolved_name,
                         numeric_id: r.numeric_id,
-                        early_err: r
-                            .unknown_topic_id
-                            .then_some(KafkaErrorCode::UnknownTopicId),
+                        early_err: r.unknown_topic_id.then_some(KafkaErrorCode::UnknownTopicId),
                     });
                 }
             }
@@ -678,8 +682,7 @@ pub(crate) async fn encode_create_partitions(
                 ResourceType::Topic,
                 &r.topic,
                 AclOperation::Alter,
-            )
-        {
+            ) {
             (
                 KafkaErrorCode::TopicAuthorizationFailed.as_i16(),
                 Some("topic authorization failed"),
@@ -827,10 +830,7 @@ pub(crate) async fn encode_alter_partition_reassignments(
     };
 
     if broker.cluster_config().is_some() && !broker.is_controller() {
-        let msg = format!(
-            "not controller; controller_id={}",
-            broker.controller_id()
-        );
+        let msg = format!("not controller; controller_id={}", broker.controller_id());
         write_top(out, KafkaErrorCode::NotController, Some(&msg), 0);
         put_empty_tag_buffer(out);
         return;
@@ -923,22 +923,18 @@ async fn apply_reassign_partition(
             KafkaErrorCode::UnknownTopicOrPartition.as_i16(),
             Some("unknown topic or partition".into()),
         ),
-        Err(Error::InvalidArgument(msg)) if msg.starts_with("not controller") => (
-            KafkaErrorCode::NotController.as_i16(),
-            Some(msg),
-        ),
-        Err(Error::InvalidArgument(msg)) if msg.contains("out of range") => (
-            KafkaErrorCode::UnknownTopicOrPartition.as_i16(),
-            Some(msg),
-        ),
-        Err(Error::InvalidArgument(msg)) if msg.contains("reassign requires cluster") => (
-            KafkaErrorCode::InvalidRequest.as_i16(),
-            Some(msg),
-        ),
-        Err(Error::InvalidArgument(msg)) => (
-            KafkaErrorCode::InvalidReplicaAssignment.as_i16(),
-            Some(msg),
-        ),
+        Err(Error::InvalidArgument(msg)) if msg.starts_with("not controller") => {
+            (KafkaErrorCode::NotController.as_i16(), Some(msg))
+        }
+        Err(Error::InvalidArgument(msg)) if msg.contains("out of range") => {
+            (KafkaErrorCode::UnknownTopicOrPartition.as_i16(), Some(msg))
+        }
+        Err(Error::InvalidArgument(msg)) if msg.contains("reassign requires cluster") => {
+            (KafkaErrorCode::InvalidRequest.as_i16(), Some(msg))
+        }
+        Err(Error::InvalidArgument(msg)) => {
+            (KafkaErrorCode::InvalidReplicaAssignment.as_i16(), Some(msg))
+        }
         Err(_) => (KafkaErrorCode::Unknown.as_i16(), None),
     }
 }
@@ -1004,10 +1000,7 @@ pub(crate) fn encode_list_partition_reassignments(
     };
 
     if broker.cluster_config().is_some() && !broker.is_controller() {
-        let msg = format!(
-            "not controller; controller_id={}",
-            broker.controller_id()
-        );
+        let msg = format!("not controller; controller_id={}", broker.controller_id());
         write_top(out, KafkaErrorCode::NotController, Some(&msg), 0);
         put_empty_tag_buffer(out);
         return;
@@ -1105,12 +1098,18 @@ fn write_list_reassign_partition(
     put_empty_tag_buffer(out);
 }
 
-fn topic_assignment_partitions(broker: &Broker, name: &str) -> Option<Vec<crate::broker::PartitionMetadata>> {
+fn topic_assignment_partitions(
+    broker: &Broker,
+    name: &str,
+) -> Option<Vec<crate::broker::PartitionMetadata>> {
     let snap = broker.metadata(Some(&[TopicName::new(name)]));
     snap.topics.into_iter().next().map(|t| t.partitions)
 }
 
-fn list_partition_indexes(requested: &[i32], known: Option<&[crate::broker::PartitionMetadata]>) -> Vec<i32> {
+fn list_partition_indexes(
+    requested: &[i32],
+    known: Option<&[crate::broker::PartitionMetadata]>,
+) -> Vec<i32> {
     if !requested.is_empty() {
         return requested.to_vec();
     }
@@ -1156,13 +1155,9 @@ fn write_named_topic_reassignments(
             continue;
         }
         match parts.iter().find(|p| p.partition_id.0 == pid as u32) {
-            Some(p) => write_list_reassign_partition(
-                out,
-                pid,
-                &p.replicas,
-                KafkaErrorCode::None,
-                None,
-            ),
+            Some(p) => {
+                write_list_reassign_partition(out, pid, &p.replicas, KafkaErrorCode::None, None)
+            }
             None => write_list_reassign_partition(
                 out,
                 pid,
@@ -1221,9 +1216,7 @@ fn broker_resource_name_matches(node_id: u32, name: &str) -> bool {
 }
 
 fn invalid_broker_resource_name_msg(node_id: u32) -> String {
-    format!(
-        "BROKER resource name must be empty or \"{node_id}\" (this broker's node_id)"
-    )
+    format!("BROKER resource name must be empty or \"{node_id}\" (this broker's node_id)")
 }
 
 pub(crate) fn encode_describe_configs(
@@ -1764,8 +1757,12 @@ pub(crate) fn encode_alter_configs(
     fanouts
 }
 
-pub(crate) fn volant_broker_topic_config_validate(entries: &[(String, String)]) -> std::result::Result<(), String> {
-    crate::topic_config::TopicConfig::from_entries(entries).map(|_| ()).map_err(|e| e.to_string())
+pub(crate) fn volant_broker_topic_config_validate(
+    entries: &[(String, String)],
+) -> std::result::Result<(), String> {
+    crate::topic_config::TopicConfig::from_entries(entries)
+        .map(|_| ())
+        .map_err(|e| e.to_string())
 }
 
 /// AlterConfigs / IncrementalAlter for BROKER resources (Phase 99–102 + 113).
@@ -1798,10 +1795,7 @@ fn alter_broker_resource(
     }
     // Phase 113: cluster BROKER alter is controller-only (before name checks on
     // non-controller would still reject with NotController for the right op).
-    if !validate_only
-        && broker.cluster_config().is_some()
-        && !broker.is_controller()
-    {
+    if !validate_only && broker.cluster_config().is_some() && !broker.is_controller() {
         return (
             KafkaErrorCode::NotController.as_i16(),
             Some(format!(
@@ -1831,11 +1825,9 @@ fn alter_broker_resource(
             Some((gen, entries.to_vec())),
         ),
         Ok(None) => (KafkaErrorCode::None.as_i16(), None, None),
-        Err(Error::InvalidArgument(msg)) if msg.starts_with("not controller") => (
-            KafkaErrorCode::NotController.as_i16(),
-            Some(msg),
-            None,
-        ),
+        Err(Error::InvalidArgument(msg)) if msg.starts_with("not controller") => {
+            (KafkaErrorCode::NotController.as_i16(), Some(msg), None)
+        }
         Err(Error::InvalidArgument(msg)) => {
             (KafkaErrorCode::InvalidConfig.as_i16(), Some(msg), None)
         }
@@ -1927,8 +1919,7 @@ pub(crate) fn encode_incremental_alter_configs(
                                     );
                                 }
                                 other => {
-                                    parse_err =
-                                        Some(format!("unknown config operation {other}"));
+                                    parse_err = Some(format!("unknown config operation {other}"));
                                 }
                             }
                         }
@@ -2005,9 +1996,8 @@ pub(crate) fn encode_incremental_alter_configs(
                     OP_SET => entries.push((key, value)),
                     OP_DELETE => entries.push((key, String::new())),
                     2 | 3 => {
-                        parse_err = Some(
-                            "APPEND/SUBTRACT not supported (no list-typed configs)".into(),
-                        );
+                        parse_err =
+                            Some("APPEND/SUBTRACT not supported (no list-typed configs)".into());
                     }
                     other => {
                         parse_err = Some(format!("unknown config operation {other}"));
@@ -2106,6 +2096,313 @@ pub(crate) fn encode_incremental_alter_configs(
         put_empty_tag_buffer(out);
     }
     fanouts
+}
+
+fn kafka_scram_hash(mech: i8) -> Option<ScramHash> {
+    match mech {
+        KAFKA_SCRAM_SHA_256 => Some(ScramHash::Sha256),
+        KAFKA_SCRAM_SHA_512 => Some(ScramHash::Sha512),
+        _ => None,
+    }
+}
+
+fn scram_hash_to_kafka(hash: ScramHash) -> i8 {
+    match hash {
+        ScramHash::Sha256 => KAFKA_SCRAM_SHA_256,
+        ScramHash::Sha512 => KAFKA_SCRAM_SHA_512,
+    }
+}
+
+fn write_describe_scram_result(
+    out: &mut BytesMut,
+    user: &str,
+    code: KafkaErrorCode,
+    msg: Option<&str>,
+    infos: &[(ScramHash, u32)],
+) {
+    put_compact_string(out, user);
+    out.put_i16(code.as_i16());
+    put_compact_nullable_string(out, msg);
+    put_compact_array_len(out, infos.len());
+    for &(hash, iter) in infos {
+        out.put_i8(scram_hash_to_kafka(hash));
+        out.put_i32(iter as i32);
+        put_empty_tag_buffer(out);
+    }
+    put_empty_tag_buffer(out);
+}
+
+fn write_alter_scram_result(
+    out: &mut BytesMut,
+    user: &str,
+    code: KafkaErrorCode,
+    msg: Option<&str>,
+) {
+    put_compact_string(out, user);
+    out.put_i16(code.as_i16());
+    put_compact_nullable_string(out, msg);
+    put_empty_tag_buffer(out);
+}
+
+/// DescribeUserScramCredentials v0 (always flexible). Empty users = all.
+///
+/// Unknown user → per-result Kafka **91** `RESOURCE_NOT_FOUND`.
+/// ACL: Cluster DESCRIBE (disabled ACLs allow).
+pub(crate) fn encode_describe_user_scram_credentials(
+    broker: &Broker,
+    src: &mut impl Buf,
+    out: &mut BytesMut,
+    principal: &str,
+) {
+    let mut names: Vec<String> = Vec::new();
+    let describe_all = match get_compact_array_len(src) {
+        Ok(None) | Ok(Some(0)) => true,
+        Ok(Some(n)) => {
+            for _ in 0..n {
+                match get_compact_string(src) {
+                    Ok(s) => names.push(s),
+                    Err(_) => break,
+                }
+                let _ = skip_tag_buffer(src);
+            }
+            false
+        }
+        Err(_) => true,
+    };
+    let _ = skip_tag_buffer(src);
+
+    if broker.acls().is_enabled()
+        && !broker.acls().authorize(
+            Some(principal),
+            ResourceType::Cluster,
+            CLUSTER_RESOURCE,
+            AclOperation::Describe,
+        )
+    {
+        out.put_i32(0);
+        out.put_i16(KafkaErrorCode::ClusterAuthorizationFailed.as_i16());
+        put_compact_nullable_string(out, Some("cluster authorization failed"));
+        put_compact_array_len(out, 0);
+        put_empty_tag_buffer(out);
+        return;
+    }
+
+    if describe_all {
+        let all = broker.scram().describe_all();
+        out.put_i32(0);
+        out.put_i16(KafkaErrorCode::None.as_i16());
+        put_compact_nullable_string(out, None);
+        put_compact_array_len(out, all.len());
+        for (user, infos) in &all {
+            write_describe_scram_result(out, user, KafkaErrorCode::None, None, infos);
+        }
+        put_empty_tag_buffer(out);
+        return;
+    }
+
+    out.put_i32(0);
+    out.put_i16(KafkaErrorCode::None.as_i16());
+    put_compact_nullable_string(out, None);
+    put_compact_array_len(out, names.len());
+    for name in names {
+        match broker.scram().describe_user(&name) {
+            Some(infos) => {
+                write_describe_scram_result(out, &name, KafkaErrorCode::None, None, &infos);
+            }
+            None => {
+                write_describe_scram_result(
+                    out,
+                    &name,
+                    KafkaErrorCode::ResourceNotFound,
+                    Some("user not found"),
+                    &[],
+                );
+            }
+        }
+    }
+    put_empty_tag_buffer(out);
+}
+
+struct ScramDeletion {
+    name: String,
+    mechanism: i8,
+}
+
+struct ScramUpsertion {
+    name: String,
+    mechanism: i8,
+    iterations: i32,
+    salt: Vec<u8>,
+    salted: Vec<u8>,
+}
+
+/// AlterUserScramCredentials v0 (always flexible). Upsert takes saltedPassword.
+///
+/// One result row per unique user. ACL: Cluster ALTER (disabled ACLs allow).
+pub(crate) fn encode_alter_user_scram_credentials(
+    broker: &Broker,
+    src: &mut impl Buf,
+    out: &mut BytesMut,
+    principal: &str,
+) {
+    let mut deletions = Vec::new();
+    match get_compact_array_len(src) {
+        Ok(Some(n)) => {
+            for _ in 0..n {
+                let name = match get_compact_string(src) {
+                    Ok(s) => s,
+                    Err(_) => break,
+                };
+                if src.remaining() < 1 {
+                    break;
+                }
+                let mechanism = src.get_i8();
+                let _ = skip_tag_buffer(src);
+                deletions.push(ScramDeletion { name, mechanism });
+            }
+        }
+        Ok(None) | Err(_) => {}
+    }
+
+    let mut upsertions = Vec::new();
+    match get_compact_array_len(src) {
+        Ok(Some(n)) => {
+            for _ in 0..n {
+                let name = match get_compact_string(src) {
+                    Ok(s) => s,
+                    Err(_) => break,
+                };
+                if src.remaining() < 1 + 4 {
+                    break;
+                }
+                let mechanism = src.get_i8();
+                let iterations = src.get_i32();
+                let salt = match get_compact_bytes(src) {
+                    Ok(Some(b)) => b.to_vec(),
+                    Ok(None) | Err(_) => Vec::new(),
+                };
+                let salted = match get_compact_bytes(src) {
+                    Ok(Some(b)) => b.to_vec(),
+                    Ok(None) | Err(_) => Vec::new(),
+                };
+                let _ = skip_tag_buffer(src);
+                upsertions.push(ScramUpsertion {
+                    name,
+                    mechanism,
+                    iterations,
+                    salt,
+                    salted,
+                });
+            }
+        }
+        Ok(None) | Err(_) => {}
+    }
+    let _ = skip_tag_buffer(src);
+
+    let mut order = Vec::new();
+    let mut seen = std::collections::HashSet::new();
+    for d in &deletions {
+        if seen.insert(d.name.clone()) {
+            order.push(d.name.clone());
+        }
+    }
+    for u in &upsertions {
+        if seen.insert(u.name.clone()) {
+            order.push(u.name.clone());
+        }
+    }
+
+    out.put_i32(0); // throttle
+    put_compact_array_len(out, order.len());
+
+    if broker.acls().is_enabled()
+        && !broker.acls().authorize(
+            Some(principal),
+            ResourceType::Cluster,
+            CLUSTER_RESOURCE,
+            AclOperation::Alter,
+        )
+    {
+        for user in &order {
+            write_alter_scram_result(
+                out,
+                user,
+                KafkaErrorCode::ClusterAuthorizationFailed,
+                Some("cluster authorization failed"),
+            );
+        }
+        put_empty_tag_buffer(out);
+        return;
+    }
+
+    for user in &order {
+        let (code, msg) = apply_alter_user_scram(broker, user, &deletions, &upsertions);
+        write_alter_scram_result(out, user, code, msg.as_deref());
+    }
+    put_empty_tag_buffer(out);
+}
+
+fn apply_alter_user_scram(
+    broker: &Broker,
+    user: &str,
+    deletions: &[ScramDeletion],
+    upsertions: &[ScramUpsertion],
+) -> (KafkaErrorCode, Option<String>) {
+    let dels: Vec<&ScramDeletion> = deletions.iter().filter(|d| d.name == user).collect();
+    let ups: Vec<&ScramUpsertion> = upsertions.iter().filter(|u| u.name == user).collect();
+
+    for d in &dels {
+        let Some(hash) = kafka_scram_hash(d.mechanism) else {
+            return (
+                KafkaErrorCode::InvalidRequest,
+                Some("unsupported SCRAM mechanism".into()),
+            );
+        };
+        if !broker.scram().has_mechanism(user, hash) {
+            return (
+                KafkaErrorCode::ResourceNotFound,
+                Some("user or mechanism not found".into()),
+            );
+        }
+    }
+    for u in &ups {
+        if u.name.is_empty() || u.name.contains(',') || u.name.contains('=') {
+            return (
+                KafkaErrorCode::InvalidRequest,
+                Some("invalid SCRAM username".into()),
+            );
+        }
+        if kafka_scram_hash(u.mechanism).is_none() {
+            return (
+                KafkaErrorCode::InvalidRequest,
+                Some("unsupported SCRAM mechanism".into()),
+            );
+        }
+        if u.iterations <= 0 || u.salt.is_empty() || u.salted.is_empty() {
+            return (
+                KafkaErrorCode::InvalidRequest,
+                Some("invalid iterations, salt, or saltedPassword".into()),
+            );
+        }
+    }
+
+    for d in &dels {
+        let hash = kafka_scram_hash(d.mechanism).expect("validated");
+        if let Err(e) = broker.scram().delete_mechanism(user, hash) {
+            return (KafkaErrorCode::Unknown, Some(e.to_string()));
+        }
+    }
+    for u in &ups {
+        let hash = kafka_scram_hash(u.mechanism).expect("validated");
+        if let Err(e) =
+            broker
+                .scram()
+                .upsert_from_salted(user, hash, u.iterations as u32, &u.salt, &u.salted)
+        {
+            return (KafkaErrorCode::InvalidRequest, Some(e.to_string()));
+        }
+    }
+    (KafkaErrorCode::None, None)
 }
 
 // ---------------------------------------------------------------------------
@@ -2212,15 +2509,17 @@ mod tests {
 
         let mut src = alter_body("events", 0, Some(&[1]));
         let mut out = BytesMut::new();
-        encode_alter_partition_reassignments(&broker, &mut src, &mut out, "kafka-anonymous")
-            .await;
+        encode_alter_partition_reassignments(&broker, &mut src, &mut out, "kafka-anonymous").await;
         let mut resp = out.freeze();
         let (top, code, _) = read_part_result(&mut resp);
         assert_eq!(top, 0);
         assert_eq!(code, 0);
 
         let asg = broker.clone_live_assignment().unwrap();
-        assert!(asg.generation > before, "native reassign must bump generation");
+        assert!(
+            asg.generation > before,
+            "native reassign must bump generation"
+        );
         assert_eq!(asg.topics["events"].partitions[&0].replicas, vec![1]);
         let _ = std::fs::remove_dir_all(&dir);
     }
@@ -2233,8 +2532,7 @@ mod tests {
 
         let mut src = alter_body("events", 0, None);
         let mut out = BytesMut::new();
-        encode_alter_partition_reassignments(&broker, &mut src, &mut out, "kafka-anonymous")
-            .await;
+        encode_alter_partition_reassignments(&broker, &mut src, &mut out, "kafka-anonymous").await;
         let mut resp = out.freeze();
         let (top, code, _) = read_part_result(&mut resp);
         assert_eq!(top, 0);
@@ -2250,8 +2548,7 @@ mod tests {
 
         let mut src = alter_body("missing", 0, Some(&[1]));
         let mut out = BytesMut::new();
-        encode_alter_partition_reassignments(&broker, &mut src, &mut out, "kafka-anonymous")
-            .await;
+        encode_alter_partition_reassignments(&broker, &mut src, &mut out, "kafka-anonymous").await;
         let mut resp = out.freeze();
         let (top, code, _) = read_part_result(&mut resp);
         assert_eq!(top, 0);
@@ -2259,8 +2556,7 @@ mod tests {
 
         let mut src = alter_body("events", 0, Some(&[99]));
         let mut out = BytesMut::new();
-        encode_alter_partition_reassignments(&broker, &mut src, &mut out, "kafka-anonymous")
-            .await;
+        encode_alter_partition_reassignments(&broker, &mut src, &mut out, "kafka-anonymous").await;
         let mut resp = out.freeze();
         let (top, code, _) = read_part_result(&mut resp);
         assert_eq!(top, 0);
