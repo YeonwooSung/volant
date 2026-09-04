@@ -1,10 +1,9 @@
-//! v0.39 — restore assignment if add-broker joint overlay rolls back.
+//! v0.39 / v0.212 — new id is not in assignment if joint fails.
 //!
-//! `VOLANT_REASSIGN_ON_ADD` expands under-replicated topics inside
-//! `add_broker` before openraft joint. When v0.34 overlay rollback runs on
-//! the dispatch path, assignment.json + live replica sets are restored too
-//! (unless `VOLANT_REASSIGN_ON_ADD_ROLLBACK=0`). In-process `add_broker`
-//! stays v0.18 (no assignment rewind).
+//! Leader dispatch (v0.212) does **not** run reassign-on-add until after
+//! a successful joint, so a failed `change_membership` never writes the
+//! new id into `assignment.json`. In-process `add_broker` stays persist-
+//! first + v0.18 expand (honesty hole).
 
 #[path = "common/mod.rs"]
 mod common;
@@ -251,7 +250,7 @@ async fn flag_on_joint_fail_rolls_back_overlay_and_assignment() {
     assert_eq!(leader.membership_generation(), prev_gen);
     assert!(
         !overlay_has_id(&leader, 4),
-        "overlay must not keep id=4 after rollback"
+        "overlay must not keep id=4 after joint fail"
     );
     let live = part_replicas(&leader, "events", 0);
     assert_eq!(

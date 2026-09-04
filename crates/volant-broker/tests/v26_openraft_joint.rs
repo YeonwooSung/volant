@@ -1,8 +1,10 @@
-//! v0.26 — openraft joint membership on add/remove broker.
+//! v0.26 / v0.212 — openraft joint membership on add/remove broker.
 //!
 //! Flag off keeps the v0.10 overlay path (no raft membership change).
-//! Flag on: the openraft leader `change_membership`s to the configured
-//! voter set after overlay add/remove.
+//! Flag on: the openraft leader `change_membership`s to the pending
+//! voter set; dispatch persists `{data_dir}/cluster/membership.json`
+//! only after a successful joint (v0.212). In-process `add_broker` /
+//! `remove_broker` stay persist-first (v0.10 / v0.26 honesty hole).
 
 #[path = "common/mod.rs"]
 mod common;
@@ -11,9 +13,10 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use common::cluster::{
-    bind_port0, cluster_config, cluster_config_n2, default_storage, unique_dir, Guard,
+    bind_port0, cluster_config, cluster_config_n2, default_storage, rpc_seq, unique_dir, Guard,
 };
 use volant_broker::{load_membership_overlay, serve_listener, Broker};
+use volant_protocol::{ErrorCode, Request, Response};
 
 fn set_openraft_env(on: bool) {
     if on {
@@ -200,6 +203,62 @@ async fn flag_on_add_broker_includes_new_voter() {
     panic!(
         "id=4 never appeared in voters or change_membership target; voters={last_voters:?} target={last_target:?}"
     );
+}
+
+/// Flag on + leader dispatch: overlay is written only after a successful
+/// joint (v0.212). Fail → 15 and `membership.json` unchanged.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn flag_on_dispatch_overlay_appears_after_joint() {
+    set_openraft_env(true);
+    let (t, _g) = Triple::boot("dispatch-after-joint").await;
+    let nodes = t.live(&[1, 2, 3]);
+    let leader_id = wait_agreed_leader(&nodes, Duration::from_secs(8)).await;
+    let leader = t.broker(leader_id);
+    assert!(leader.openraft_joint_rollback_armed());
+
+    let prev_gen = leader.membership_generation();
+    let addr = format!("127.0.0.1:{}", t.ports[(leader_id - 1) as usize]);
+    let resps = rpc_seq(
+        &addr,
+        &[Request::AddBroker {
+            id: 4,
+            host: "127.0.0.1".into(),
+            port: t.ports[0].saturating_add(80),
+            rack: None,
+        }],
+    )
+    .await;
+    let error_code = match &resps[0] {
+        Response::AddBroker { error_code, .. } => *error_code,
+        Response::Error { code, .. } => *code,
+        other => panic!("unexpected add-broker response: {other:?}"),
+    };
+    if error_code == 0 {
+        assert!(
+            overlay_has_id(&leader, 4),
+            "successful joint must persist overlay with id=4"
+        );
+        assert!(leader.membership_generation() > prev_gen);
+        let voters = leader.openraft_voter_ids();
+        let target = leader.test_last_openraft_membership_target();
+        assert!(
+            voters.contains(&4)
+                || target.as_ref().map(|ids| ids.contains(&4)).unwrap_or(false),
+            "successful joint must record id=4 in voters or hook; voters={voters:?} target={target:?}"
+        );
+    } else {
+        assert_eq!(
+            error_code,
+            ErrorCode::NotEnoughReplicas as u16,
+            "joint fail is native 15, got {error_code}"
+        );
+        assert!(
+            !overlay_has_id(&leader, 4),
+            "failed joint must not write overlay id=4"
+        );
+        assert_eq!(leader.membership_generation(), prev_gen);
+    }
+    t.abort_all();
 }
 
 /// Flag on: add 4 then remove 4 shrinks the voter set (or hook).

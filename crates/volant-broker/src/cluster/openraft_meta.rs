@@ -16,16 +16,22 @@
 //! Rocks). Snapshot meta stays `{data_dir}/__openraft/snapshot.json`.
 //! Flag off does not create that directory. Homemade 154 is unchanged.
 //!
-//! v0.34: leader AddBroker / RemoveBroker rolls back
-//! `{data_dir}/cluster/membership.json` when `change_membership` fails
-//! (`VOLANT_OPENRAFT_JOINT_ROLLBACK` default **on**).
+//! v0.34: leader AddBroker / RemoveBroker returned **15** when
+//! `change_membership` failed (`VOLANT_OPENRAFT_JOINT_ROLLBACK` default
+//! **on**), then restored a just-written overlay.
+//!
+//! v0.212: the openraft-on **leader** dispatch path no longer writes
+//! `{data_dir}/cluster/membership.json` before joint commit. Validate →
+//! `change_membership` against the **pending** broker list → persist
+//! overlay only on success. Fail → native **15**, disk unchanged (v0.34
+//! restore is a no-op). In-process `add_broker` / `remove_broker` stay
+//! persist-first. Flag off / N&lt;2 / no cluster keep v0.10 persist-first.
 //!
 //! v0.38: followers do not persist overlay; they forward AddBroker /
 //! RemoveBroker to the openraft leader (`VOLANT_OPENRAFT_FORWARD_MEMBERSHIP`
 //! default **on**).
-//! v0.39: the same dispatch path also restores `assignment.json` when
-//! `VOLANT_REASSIGN_ON_ADD` expanded replicas before the failed joint
-//! (`VOLANT_REASSIGN_ON_ADD_ROLLBACK` default **on**).
+//! v0.39: reassign-on-add runs only after a successful joint on the
+//! leader dispatch path (v0.212); a failed joint never expands replicas.
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::fmt;
@@ -994,16 +1000,24 @@ async fn rpc_peer_install(
 }
 
 fn membership_nodes(broker: &Broker) -> BTreeMap<u32, BasicNode> {
+    nodes_from_endpoints(
+        broker
+            .cluster_config()
+            .map(|c| c.brokers)
+            .unwrap_or_default()
+            .as_slice(),
+    )
+}
+
+fn nodes_from_endpoints(brokers: &[crate::cluster::BrokerEndpoint]) -> BTreeMap<u32, BasicNode> {
     let mut nodes = BTreeMap::new();
-    if let Some(cfg) = broker.cluster_config() {
-        for b in cfg.brokers {
-            nodes.insert(
-                b.id,
-                BasicNode {
-                    addr: format!("{}:{}", b.host, b.port),
-                },
-            );
-        }
+    for b in brokers {
+        nodes.insert(
+            b.id,
+            BasicNode {
+                addr: format!("{}:{}", b.host, b.port),
+            },
+        );
     }
     nodes
 }
@@ -1124,13 +1138,20 @@ impl Broker {
     ///
     /// No-op when the openraft flag is off (v0.10 overlay-only).
     pub fn note_openraft_membership_target(&self) {
-        if !self.openraft_metadata_enabled() {
-            return;
-        }
         let ids = self
             .cluster_config()
             .map(|c| c.broker_ids())
             .unwrap_or_default();
+        self.note_openraft_membership_target_ids(ids);
+    }
+
+    /// Record an explicit intended voter set (pending add/remove, v0.212).
+    ///
+    /// No-op when the openraft flag is off (v0.10 overlay-only).
+    pub fn note_openraft_membership_target_ids(&self, ids: Vec<u32>) {
+        if !self.openraft_metadata_enabled() {
+            return;
+        }
         *self.openraft_last_membership_target.lock() = Some(ids);
     }
 
@@ -1200,30 +1221,45 @@ impl Broker {
 
     /// Propose openraft joint membership to the configured broker ids.
     ///
-    /// Only the openraft leader calls `change_membership`. Overlay add/remove
-    /// is already persisted here; the client dispatch path (v0.34) rolls back
-    /// `{data_dir}/cluster/membership.json` when this returns `false` and
-    /// [`Self::openraft_joint_rollback_armed`] is set. Direct callers (v0.26
-    /// tests) stay best-effort.
+    /// Only the openraft leader calls `change_membership`. Leader dispatch
+    /// (v0.212) passes the **pending** target via
+    /// [`Self::change_openraft_membership_pending`] *before* writing
+    /// `{data_dir}/cluster/membership.json`. Direct callers (v0.26 tests)
+    /// stay best-effort against already-written `config.brokers`.
     ///
     /// Returns `true` when the flag is off, this node is not the leader, the
     /// voter set already matches, or the wait succeeds.
     pub async fn change_openraft_membership(&self) -> bool {
+        self.change_openraft_membership_pending(None).await
+    }
+
+    /// Propose joint membership, optionally against a pending broker list.
+    ///
+    /// `pending = None` reads `config.brokers` (MembershipPut / in-process
+    /// add then sync). `pending = Some` is the v0.212 leader path: joint
+    /// the not-yet-persisted target so a fail never writes overlay.
+    pub async fn change_openraft_membership_pending(
+        &self,
+        pending: Option<&[crate::cluster::BrokerEndpoint]>,
+    ) -> bool {
         if !self.openraft_metadata_enabled() {
             return true;
         }
         if self.cluster_config().is_none() {
             return true;
         }
-        self.note_openraft_membership_target();
+        let nodes = match pending {
+            Some(brokers) => nodes_from_endpoints(brokers),
+            None => membership_nodes(self),
+        };
+        let target: Vec<u32> = nodes.keys().copied().collect();
+        self.note_openraft_membership_target_ids(target.clone());
         if !self.is_controller() {
             return true;
         }
-        let nodes = membership_nodes(self);
         if nodes.is_empty() {
             return true;
         }
-        let target: Vec<u32> = nodes.keys().copied().collect();
         let current = self.openraft_voter_ids();
         if current == target {
             return true;
