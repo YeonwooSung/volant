@@ -1369,10 +1369,21 @@ async fn handle_request(broker: &Arc<Broker>, req: Request) -> Result<Response> 
                 return Ok(add_broker_after_joint(broker, id, host, port, rack).await);
             }
             // Flag off / N<2 / no cluster / rollback escape: v0.10 persist-first.
+            // Do not call `add_broker`: v0.217 inverts that API when raft is
+            // started (joint then persist). This path must still persist first.
             let prev = broker.snapshot_membership_overlay();
             // v0.39: snapshot assignment before add_broker may expand replicas.
             let prev_assignment = snapshot_assignment_for_add_rollback(broker);
-            match broker.add_broker(id, host, port, rack) {
+            let pending = match broker.preview_add_broker(id, host, port, rack) {
+                Ok(p) => p,
+                Err(e) => {
+                    return Ok(Response::Error {
+                        code: ErrorCode::InvalidArg as u16,
+                        message: e.to_string(),
+                    });
+                }
+            };
+            match broker.commit_membership_overlay(&pending, Some(id), None) {
                 Ok(generation) => {
                     let (error_code, generation) =
                         after_overlay_mutation(broker, &prev, generation, prev_assignment).await;
@@ -1397,8 +1408,19 @@ async fn handle_request(broker: &Arc<Broker>, req: Request) -> Result<Response> 
                 return Ok(remove_broker_after_joint(broker, id).await);
             }
             // Flag off / N<2 / no cluster / rollback escape: v0.10 persist-first.
+            // Do not call `remove_broker`: v0.217 inverts that API when raft is
+            // started. This path must still persist first.
             let prev = broker.snapshot_membership_overlay();
-            match broker.remove_broker(id) {
+            let pending = match broker.preview_remove_broker(id) {
+                Ok(p) => p,
+                Err(e) => {
+                    return Ok(Response::Error {
+                        code: ErrorCode::InvalidArg as u16,
+                        message: e.to_string(),
+                    });
+                }
+            };
+            match broker.commit_membership_overlay(&pending, None, Some(id)) {
                 Ok(generation) => {
                     let (error_code, generation) =
                         after_overlay_mutation(broker, &prev, generation, None).await;
@@ -2052,7 +2074,7 @@ fn snapshot_assignment_for_add_rollback(broker: &Broker) -> Option<AssignmentSna
 /// Openraft-on leader with N>=2: persist overlay only after joint (v0.212).
 ///
 /// Flag off / N<2 / no cluster / not leader / rollback escape keep the
-/// v0.10 persist-first path (`add_broker` then [`after_overlay_mutation`]).
+/// v0.10 persist-first path (preview + commit, then [`after_overlay_mutation`]).
 fn persist_overlay_after_openraft_joint(broker: &Broker) -> bool {
     broker.openraft_joint_rollback_armed()
         && broker

@@ -180,9 +180,8 @@ impl Broker {
 
     /// Persist overlay + in-memory membership (generation+1).
     ///
-    /// Leader dispatch (v0.212) calls this **after** a successful openraft
-    /// joint. In-process [`Self::add_broker`] / [`Self::remove_broker`] still
-    /// persist first (v0.10 / v0.26 honesty hole).
+    /// Leader dispatch (v0.212) and in-process add/remove (v0.217) call
+    /// this **after** a successful openraft joint when raft is started.
     ///
     /// `added_id` triggers optional reassign-on-add. `removed_id` drops the
     /// id from live membership. New ids are not marked live.
@@ -215,8 +214,8 @@ impl Broker {
         }
         // Endpoint is configured immediately; live only after heartbeat.
         // v0.18: opt-in expand of under-replicated topics onto the new id.
-        // v0.212: dispatch commits overlay (and reassign) only after joint.
-        // In-process callers stay persist-first (no assignment rewind).
+        // v0.212 / v0.217: overlay (and reassign) only after joint when raft
+        // is started. Flag off / N<2 stay persist-first.
         if let Some(id) = added_id {
             if crate::cluster::reassign_on_add_enabled() && self.is_controller() {
                 if let Err(e) = self.auto_reassign_after_add(id) {
@@ -235,8 +234,10 @@ impl Broker {
     /// Add a broker endpoint. Persist overlay (generation+1). Not marked live
     /// until heartbeat. Rejects duplicate id.
     ///
-    /// In-process persist-first (v0.10 / v0.26). Client opcodes invert on
-    /// the openraft-on leader dispatch path (v0.212: joint, then commit).
+    /// When openraft is on and raft is started (N≥2): validate → joint the
+    /// pending list → persist only on success (v0.217). Fail → error **15**,
+    /// no disk write. No tokio runtime → `InvalidArgument` (native opcode).
+    /// Flag off / N&lt;2 / no cluster stay persist-first (v0.10).
     pub fn add_broker(
         &self,
         id: u32,
@@ -245,16 +246,36 @@ impl Broker {
         rack: Option<String>,
     ) -> Result<u64> {
         let brokers = self.preview_add_broker(id, host, port, rack)?;
-        self.commit_membership_overlay(&brokers, Some(id), None)
+        self.commit_after_openraft_joint_if_started(&brokers, Some(id), None)
     }
 
     /// Remove a broker by id. Rejects self and the last remaining broker.
     ///
-    /// In-process persist-first (v0.10 / v0.26). Client opcodes invert on
-    /// the openraft-on leader dispatch path (v0.212).
+    /// Same invert as [`Self::add_broker`] when openraft is on and raft is
+    /// started (v0.217). Flag off / N&lt;2 / no cluster stay persist-first.
     pub fn remove_broker(&self, id: u32) -> Result<u64> {
         let brokers = self.preview_remove_broker(id)?;
-        self.commit_membership_overlay(&brokers, None, Some(id))
+        self.commit_after_openraft_joint_if_started(&brokers, None, Some(id))
+    }
+
+    /// Joint the pending list before overlay write when raft is started.
+    ///
+    /// Fail → [`Error::Protocol`] with native **15**; disk unchanged.
+    fn commit_after_openraft_joint_if_started(
+        &self,
+        brokers: &[crate::cluster::BrokerEndpoint],
+        added_id: Option<u32>,
+        removed_id: Option<u32>,
+    ) -> Result<u64> {
+        if self.in_process_persist_after_openraft_joint() {
+            if !self.change_openraft_membership_pending_blocking(Some(brokers))? {
+                return Err(Error::Protocol(format!(
+                    "not enough replicas ({})",
+                    ErrorCode::NotEnoughReplicas as u16
+                )));
+            }
+        }
+        self.commit_membership_overlay(brokers, added_id, removed_id)
     }
 
     /// Apply a peer `MembershipPut` overlay. Ignores stale generation

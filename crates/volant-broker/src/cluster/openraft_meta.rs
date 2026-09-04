@@ -24,8 +24,11 @@
 //! `{data_dir}/cluster/membership.json` before joint commit. Validate →
 //! `change_membership` against the **pending** broker list → persist
 //! overlay only on success. Fail → native **15**, disk unchanged (v0.34
-//! restore is a no-op). In-process `add_broker` / `remove_broker` stay
-//! persist-first. Flag off / N&lt;2 / no cluster keep v0.10 persist-first.
+//! restore is a no-op).
+//!
+//! v0.217: in-process `add_broker` / `remove_broker` use the same invert
+//! when the flag is on and raft is started (`openraft_meta` is Some).
+//! Flag off / N&lt;2 / no cluster keep v0.10 persist-first.
 //!
 //! v0.38: followers do not persist overlay; they forward AddBroker /
 //! RemoveBroker to the openraft leader (`VOLANT_OPENRAFT_FORWARD_MEMBERSHIP`
@@ -1449,11 +1452,48 @@ impl Broker {
         self.change_openraft_membership_pending(None).await
     }
 
+    /// Whether the local openraft node has been started (`openraft_meta`).
+    ///
+    /// Boot skips N&lt;2 / no cluster, so `Some` implies a started group.
+    pub fn openraft_started(&self) -> bool {
+        self.openraft_meta.lock().is_some()
+    }
+
+    /// In-process add/remove must persist overlay **after** joint (v0.217).
+    ///
+    /// True when the openraft flag is on and raft is started. Flag off,
+    /// N&lt;2, or no cluster stay v0.10 persist-first.
+    pub fn in_process_persist_after_openraft_joint(&self) -> bool {
+        self.openraft_metadata_enabled() && self.openraft_started()
+    }
+
+    /// Sync wrapper around [`Self::change_openraft_membership_pending`].
+    ///
+    /// Used by in-process `add_broker` / `remove_broker` (sync API). Needs a
+    /// tokio runtime (`Handle::try_current`). `#[tokio::test]` callers have
+    /// one; `Handle::block_on` cannot run on a worker, so this parks via
+    /// `block_in_place`. No runtime → `InvalidArgument` (do not persist).
+    pub fn change_openraft_membership_pending_blocking(
+        &self,
+        pending: Option<&[crate::cluster::BrokerEndpoint]>,
+    ) -> Result<bool> {
+        let handle = tokio::runtime::Handle::try_current().map_err(|_| {
+            Error::InvalidArgument(
+                "in-process add/remove_broker with openraft on requires a tokio runtime; use the native AddBroker/RemoveBroker opcode".into(),
+            )
+        })?;
+        let pending = pending.map(|p| p.to_vec());
+        Ok(tokio::task::block_in_place(|| {
+            handle.block_on(self.change_openraft_membership_pending(pending.as_deref()))
+        }))
+    }
+
     /// Propose joint membership, optionally against a pending broker list.
     ///
-    /// `pending = None` reads `config.brokers` (MembershipPut / in-process
-    /// add then sync). `pending = Some` is the v0.212 leader path: joint
-    /// the not-yet-persisted target so a fail never writes overlay.
+    /// `pending = None` reads `config.brokers` (MembershipPut / already
+    /// written overlay). `pending = Some` is the persist-after-commit
+    /// path (v0.212 dispatch, v0.217 in-process): joint the
+    /// not-yet-persisted target so a fail never writes overlay.
     pub async fn change_openraft_membership_pending(
         &self,
         pending: Option<&[crate::cluster::BrokerEndpoint]>,
