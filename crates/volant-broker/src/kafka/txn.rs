@@ -1,4 +1,5 @@
-//! Transaction API handlers (InitProducerId, AddPartitions/Offsets, EndTxn, TxnOffsetCommit).
+//! Transaction API handlers (InitProducerId, AddPartitions/Offsets, EndTxn,
+//! WriteTxnMarkers, TxnOffsetCommit).
 //!
 //! Split out of `handler.rs` so version bumps do not keep growing the god-file.
 //! Wire version selects parse/encode shape; shared models own auth and open-txn policy.
@@ -10,7 +11,7 @@ use crate::broker::Broker;
 
 use super::codec::{
     get_compact_nullable_string, put_compact_array_len, put_compact_string, put_empty_tag_buffer,
-    skip_tag_buffer,
+    put_string, skip_tag_buffer,
 };
 use super::topic_id::{self, ResolvedTopic};
 use super::wire;
@@ -957,4 +958,205 @@ pub(crate) fn encode_txn_offset_commit(
     if flex {
         put_empty_tag_buffer(out);
     }
+}
+
+// ─── WriteTxnMarkers ─────────────────────────────────────────────────────────
+
+/// One marker in a WriteTxnMarkers request (CoordinatorEpoch already dropped).
+struct WriteTxnMarkerIn {
+    producer_id: i64,
+    producer_epoch: i16,
+    commit: bool,
+    topics: Vec<TopicPartitions>,
+}
+
+/// WriteTxnMarkers (API key 27) classic v0 / flexible v1.
+///
+/// Replica-local COMMIT/ABORT control batches + matching soft `__txn_markers`.
+/// Does **not** call [`Broker::end_txn`] (no coordinator finalize). Coordinator
+/// epoch is parsed and ignored. ACL: Topic WRITE or Cluster ALTER.
+pub(crate) fn encode_write_txn_markers(
+    broker: &Broker,
+    src: &mut impl Buf,
+    out: &mut BytesMut,
+    version: i16,
+    principal: &str,
+) {
+    let flex = version >= 1;
+    let markers = parse_write_txn_markers(src, flex);
+
+    let cluster_ok = !broker.acls().is_enabled()
+        || broker.acls().authorize(
+            Some(principal),
+            ResourceType::Cluster,
+            CLUSTER_RESOURCE,
+            AclOperation::Alter,
+        );
+
+    out.put_i32(0); // throttle
+    if flex {
+        put_compact_array_len(out, markers.len());
+    } else {
+        out.put_i32(markers.len() as i32);
+    }
+    for m in &markers {
+        let results = apply_write_txn_marker(broker, principal, cluster_ok, m);
+        out.put_i64(m.producer_id);
+        if flex {
+            put_compact_array_len(out, results.len());
+        } else {
+            out.put_i32(results.len() as i32);
+        }
+        for (name, parts) in results {
+            if flex {
+                put_compact_string(out, &name);
+                put_compact_array_len(out, parts.len());
+            } else {
+                put_string(out, &name);
+                out.put_i32(parts.len() as i32);
+            }
+            for (partition, err) in parts {
+                out.put_i32(partition);
+                out.put_i16(err);
+                if flex {
+                    put_empty_tag_buffer(out);
+                }
+            }
+            if flex {
+                put_empty_tag_buffer(out);
+            }
+        }
+        if flex {
+            put_empty_tag_buffer(out);
+        }
+    }
+    if flex {
+        put_empty_tag_buffer(out);
+    }
+}
+
+fn apply_write_txn_marker(
+    broker: &Broker,
+    principal: &str,
+    cluster_ok: bool,
+    marker: &WriteTxnMarkerIn,
+) -> Vec<(String, Vec<(i32, i16)>)> {
+    let mut allowed: Vec<(String, Vec<i32>)> = Vec::new();
+    let mut denied: Vec<(String, Vec<(i32, i16)>)> = Vec::new();
+    for t in &marker.topics {
+        if write_txn_markers_topic_denied(broker, principal, cluster_ok, &t.name) {
+            let code = KafkaErrorCode::TopicAuthorizationFailed.as_i16();
+            denied.push((
+                t.name.clone(),
+                t.partitions.iter().map(|&p| (p, code)).collect(),
+            ));
+        } else {
+            allowed.push((t.name.clone(), t.partitions.clone()));
+        }
+    }
+    let mut results = if allowed.is_empty() {
+        Vec::new()
+    } else {
+        broker.write_txn_markers(
+            marker.producer_id as u64,
+            marker.producer_epoch as u16,
+            marker.commit,
+            &allowed,
+        )
+    };
+    results.extend(denied);
+    // Echo request topic order.
+    let mut by_name: std::collections::HashMap<String, Vec<(i32, i16)>> =
+        results.into_iter().collect();
+    marker
+        .topics
+        .iter()
+        .map(|t| (t.name.clone(), by_name.remove(&t.name).unwrap_or_default()))
+        .collect()
+}
+
+fn write_txn_markers_topic_denied(
+    broker: &Broker,
+    principal: &str,
+    cluster_ok: bool,
+    topic: &str,
+) -> bool {
+    if cluster_ok {
+        return false;
+    }
+    !broker.acls().authorize(
+        Some(principal),
+        ResourceType::Topic,
+        topic,
+        AclOperation::Write,
+    )
+}
+
+fn parse_write_txn_markers(src: &mut impl Buf, flex: bool) -> Vec<WriteTxnMarkerIn> {
+    let n = match wire::read_array_len(src, flex) {
+        Ok(Some(n)) => n,
+        Ok(None) | Err(_) => return Vec::new(),
+    };
+    let mut out = Vec::new();
+    for _ in 0..n {
+        if src.remaining() < 8 + 2 + 1 {
+            break;
+        }
+        let producer_id = src.get_i64();
+        let producer_epoch = src.get_i16();
+        let commit = src.get_u8() != 0;
+        let tn = match wire::read_array_len(src, flex) {
+            Ok(Some(n)) => n,
+            Ok(None) | Err(_) => break,
+        };
+        let mut topics = Vec::new();
+        let mut topics_ok = true;
+        for _ in 0..tn {
+            let name = match wire::read_string(src, flex) {
+                Ok(s) => s,
+                Err(_) => {
+                    topics_ok = false;
+                    break;
+                }
+            };
+            let pn = match wire::read_array_len(src, flex) {
+                Ok(Some(n)) => n,
+                Ok(None) | Err(_) => {
+                    topics_ok = false;
+                    break;
+                }
+            };
+            let mut partitions = Vec::with_capacity(pn);
+            for _ in 0..pn {
+                if src.remaining() < 4 {
+                    break;
+                }
+                partitions.push(src.get_i32());
+            }
+            if flex {
+                let _ = skip_tag_buffer(src);
+            }
+            topics.push(TopicPartitions { name, partitions });
+        }
+        if !topics_ok {
+            break;
+        }
+        if src.remaining() < 4 {
+            break;
+        }
+        let _coordinator_epoch = src.get_i32();
+        if flex {
+            let _ = skip_tag_buffer(src);
+        }
+        out.push(WriteTxnMarkerIn {
+            producer_id,
+            producer_epoch,
+            commit,
+            topics,
+        });
+    }
+    if flex {
+        let _ = skip_tag_buffer(src);
+    }
+    out
 }
