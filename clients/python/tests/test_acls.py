@@ -215,6 +215,17 @@ class TestAclsClient(unittest.TestCase):
         self.assertEqual(srv.got_list, ListAclsRequest("", 255, ""))
         self.assertEqual(srv.opcodes, [OP_LIST_ACLS])
 
+    def test_list_acls_all_encodes_empty_filters(self) -> None:
+        entry = _sample()
+        with _AclServer(entries=[entry]) as srv:
+            with Client(srv.addr, timeout=5.0) as c:
+                listed = c.list_acls_all()
+        if srv.error is not None:
+            raise srv.error
+        self.assertEqual(listed, [entry])
+        self.assertEqual(srv.got_list, ListAclsRequest("", 255, ""))
+        self.assertEqual(srv.opcodes, [OP_LIST_ACLS])
+
     def test_unauthorized_raises(self) -> None:
         with _AclServer(create_error=23) as srv:
             with Client(srv.addr, timeout=5.0) as c:

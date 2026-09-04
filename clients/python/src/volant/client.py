@@ -2360,6 +2360,14 @@ class Client:
         )
         return list(resp.entries)
 
+    def list_acls_all(self) -> list[codec.AclBinding]:
+        """List every ACL binding (empty filters).
+
+        Same as ``list_acls()`` / ``list_acls("", 255, "")``.
+        Error 14 / transient retry inherit from ``list_acls``.
+        """
+        return self.list_acls()
+
 
 # Re-export result types used by callers.
 __all__ = [
