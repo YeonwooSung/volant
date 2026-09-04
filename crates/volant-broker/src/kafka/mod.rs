@@ -45,6 +45,7 @@
 //! DescribeDelegationToken v0 (always flexible residual; no token store; empty tokens),
 //! ConsumerGroupDescribe v0 (always flexible; classic snapshot wrap; not KIP-848),
 //! ConsumerGroupHeartbeat v0 (always flexible; reject 42; not KIP-848),
+//! ShareGroupHeartbeat v1 (always flexible; reject 42; not KIP-932),
 //! Envelope v0 (key 58 reject; forwarding not supported; not KIP-590),
 //! ControllerRegistration v0 (key 70 reject; not KRaft / not AddBroker),
 //! Vote v0 (key 52 reject; not KRaft vote / not openraft RequestVote),
@@ -63,7 +64,8 @@
 //! `docs/V263_SPEC.md`, `docs/V264_SPEC.md`, `docs/V265_SPEC.md`,
 //! `docs/V266_SPEC.md`, `docs/V267_SPEC.md`, `docs/V268_SPEC.md`,
 //! `docs/V269_SPEC.md`, `docs/V270_SPEC.md`, `docs/V271_SPEC.md`,
-//! `docs/V272_SPEC.md`, `docs/V273_SPEC.md`, and `docs/V274_SPEC.md`.
+//! `docs/V272_SPEC.md`, `docs/V273_SPEC.md`, `docs/V274_SPEC.md`,
+//! and `docs/V275_SPEC.md`.
 
 mod acl_api;
 mod admin_api;
@@ -422,6 +424,10 @@ pub enum ApiKey {
     ListClientMetricsResources = 74,
     /// DescribeTopicPartitions (always flexible; v0 only).
     DescribeTopicPartitions = 75,
+    /// ShareGroupHeartbeat (always flexible; v1 only). Honest reject:
+    /// not KIP-932 share group. Does not wrap classic Heartbeat 12 or
+    /// ConsumerGroupHeartbeat 68. Official v0 was removed in Kafka 4.1.
+    ShareGroupHeartbeat = 76,
     /// AddRaftVoter (always flexible; v0 only). Honest reject: not a
     /// KRaft raft voter (membership is overlay + native AddBroker).
     /// Does not wrap native AddBroker. Overlay membership is unchanged.
@@ -512,6 +518,7 @@ impl ApiKey {
             73 => Some(Self::AssignReplicasToDirs),
             74 => Some(Self::ListClientMetricsResources),
             75 => Some(Self::DescribeTopicPartitions),
+            76 => Some(Self::ShareGroupHeartbeat),
             80 => Some(Self::AddRaftVoter),
             81 => Some(Self::RemoveRaftVoter),
             82 => Some(Self::UpdateRaftVoter),
@@ -593,6 +600,7 @@ pub const SUPPORTED_APIS: &[(ApiKey, i16, i16)] = &[
     (ApiKey::AssignReplicasToDirs, 0, 0),
     (ApiKey::ListClientMetricsResources, 0, 0),
     (ApiKey::DescribeTopicPartitions, 0, 0),
+    (ApiKey::ShareGroupHeartbeat, 1, 1),
     (ApiKey::AddRaftVoter, 0, 0),
     (ApiKey::RemoveRaftVoter, 0, 0),
     (ApiKey::UpdateRaftVoter, 0, 0),
@@ -905,6 +913,18 @@ mod tests {
             *k == ApiKey::ControllerRegistration && *min == 0 && *max == 0
         }));
         assert_eq!(ApiKey::from_i16(70), Some(ApiKey::ControllerRegistration));
+    }
+
+    #[test]
+    fn supported_apis_includes_share_group_heartbeat_76() {
+        assert!(SUPPORTED_APIS.len() >= 75);
+        assert!(SUPPORTED_APIS.iter().any(|(k, min, max)| {
+            *k == ApiKey::ShareGroupHeartbeat && *min == 1 && *max == 1
+        }));
+        assert_eq!(ApiKey::from_i16(76), Some(ApiKey::ShareGroupHeartbeat));
+        assert_eq!(ApiKey::from_i16(75), Some(ApiKey::DescribeTopicPartitions));
+        assert_eq!(ApiKey::from_i16(68), Some(ApiKey::ConsumerGroupHeartbeat));
+        assert_eq!(ApiKey::from_i16(12), Some(ApiKey::Heartbeat));
     }
 
     #[test]

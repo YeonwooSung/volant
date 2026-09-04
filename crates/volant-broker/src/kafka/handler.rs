@@ -286,6 +286,7 @@ async fn dispatch_kafka(
                 | Some(ApiKey::ExpireDelegationToken)
                 | Some(ApiKey::DescribeDelegationToken)
                 | Some(ApiKey::ConsumerGroupHeartbeat)
+                | Some(ApiKey::ShareGroupHeartbeat)
                 | Some(ApiKey::ConsumerGroupDescribe)
                 | Some(ApiKey::ControllerRegistration)
                 | Some(ApiKey::AddRaftVoter)
@@ -736,6 +737,12 @@ async fn dispatch_kafka(
                 debug!(error = %e, "consumer group heartbeat flexible header tag buffer");
             }
             group_api::encode_consumer_group_heartbeat(broker, &mut src, &mut out, principal);
+        }
+        Some(ApiKey::ShareGroupHeartbeat) if hdr.api_version == 1 => {
+            if let Err(e) = skip_tag_buffer(&mut src) {
+                debug!(error = %e, "share group heartbeat flexible header tag buffer");
+            }
+            group_api::encode_share_group_heartbeat(broker, &mut src, &mut out, principal);
         }
         Some(ApiKey::ConsumerGroupDescribe) if hdr.api_version == 0 => {
             if let Err(e) = skip_tag_buffer(&mut src) {
