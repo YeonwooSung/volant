@@ -408,6 +408,11 @@ docs for day-to-day reading: [ops](../ops.md), [consistency](../consistency.md),
 | v0.209 | ✅ | language first-Join client member_id | [V209_SPEC.md](../V209_SPEC.md) |
 | v0.210 | ✅ | Rust first-Join client member_id | [V210_SPEC.md](../V210_SPEC.md) |
 | v0.211 | ✅ | JoinGroup members trailer for range | [V211_SPEC.md](../V211_SPEC.md) |
+| v0.212 | ✅ | persist membership overlay after openraft joint | [V212_SPEC.md](../V212_SPEC.md) |
+| v0.213 | ✅ | IsrUpdate skips homemade 154 when openraft on | [V213_SPEC.md](../V213_SPEC.md) |
+| v0.214 | ✅ | gate inbound homemade 154 + lazy raft dir | [V214_SPEC.md](../V214_SPEC.md) |
+| v0.215 | ✅ | SyncGroup generation confirm fence | [V215_SPEC.md](../V215_SPEC.md) |
+| v0.216 | ✅ | overlay apply artifact from Membership log | [V216_SPEC.md](../V216_SPEC.md) |
 
 ---
 

@@ -1,6 +1,6 @@
 # Volant residual TODO (review loop)
 
-**Baseline:** HEAD product = **Phases 0–154** + residuals **v0.3–v0.211**; **Phase 155 open**.  
+**Baseline:** HEAD product = **Phases 0–154** + residuals **v0.3–v0.216**; **Phase 155 open**.  
 **Last review:** 2026-09-03  
 
 Living roadmap: [ROADMAP.md](./ROADMAP.md).  
@@ -68,7 +68,7 @@ Phase index: [docs/history/PHASE_HISTORY.md](./docs/history/PHASE_HISTORY.md).
 | **Later** | **Long fuzz + chaos-mesh** | **MVP closed (v0.15)** — extended corpus + Chaos Mesh YAML + A→B isolate |
 | **Later** | **Perf campaign** vs aspirational targets | **closed (v0.2 PR2)** — measured table published; group-commit **v0.20** (opt-in, no new bench) |
 
-**Default next slice:** Named leftovers through **v0.211** (GroupConsumer SyncGroup peek, first-Join client member_id, JoinGroup members trailer). Overlay membership is still SoT. Homemade 154 RequestVote / InstallSnapshot stay frozen. SyncGroup is still peek, not CompletingRebalance. Residual **v0.155** is still DeleteRecords wait. Kafka SyncGroup key **14** is already in the 38-key table.
+**Default next slice:** Overlay is apply-after-commit when openraft-on (**v0.212/v0.216**); homemade 154 is gated (**v0.213/v0.214**); SyncGroup is a generation fence (**v0.215**). In-process add/remove_broker still persist-first. Homemade 154 code is not deleted. CompletingRebalance / parked Join / Kafka keys / KIP-890 stay frozen. Residual **v0.155** is still DeleteRecords wait.
 
 ---
 
@@ -294,6 +294,11 @@ Phase index: [docs/history/PHASE_HISTORY.md](./docs/history/PHASE_HISTORY.md).
 - [x] language first-Join client member_id → **v0.209**
 - [x] Rust first-Join client member_id → **v0.210**
 - [x] JoinGroup members trailer for range → **v0.211**
+- [x] overlay persist after openraft joint → **v0.212**
+- [x] IsrUpdate skips homemade 154 when openraft on → **v0.213**
+- [x] gate inbound homemade 154 + lazy raft dir → **v0.214**
+- [x] SyncGroup generation confirm fence → **v0.215**
+- [x] overlay apply artifact from Membership log → **v0.216**
 
 ---
 
@@ -392,5 +397,6 @@ Phase index: [docs/history/PHASE_HISTORY.md](./docs/history/PHASE_HISTORY.md).
 | v0.196–v0.200 | **Shipped** — Python list_acls_all; Python list_offsets_all; Python reassign_partitions_all; Go/Java CreateTopic default partitions=1; Go/Java auth token getter |
 | v0.201–v0.203 | **Shipped** — Java heartbeatIntervalMs public; Go/Java SCRAM username getter; Rust create_topic_default |
 | v0.207–v0.211 | **Shipped** — language/Rust GroupConsumer SyncGroup peek; first-Join client member_id; JoinGroup members trailer |
+| v0.212–v0.216 | **Shipped** — overlay persist-after-joint; IsrUpdate skips 154; inbound 154 gated; SyncGroup generation fence; overlay Membership apply |
 
 **How to use this file:** mark new work by phase number in ROADMAP + PHASE*_SPEC; fold completed rows into “Closed checklist”; keep “Still open” as the only honesty surface for operators and contributors.

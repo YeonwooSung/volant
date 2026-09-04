@@ -94,9 +94,9 @@ func (c *Client) CreateTopicID(name string, partitions int) (uint32, error) // a
 
 ## Honesty leftovers after 155
 
-- Overlay membership is still SoT.
-- Homemade 154 code is not deleted.
-- SyncGroup is still peek, not CompletingRebalance (GroupConsumer now peeks after join: v0.207/v0.208).
+- Overlay is persist-after-joint on the openraft-on leader (v0.212) and apply artifact on followers (v0.216). In-process add/remove_broker still persist-first. Flag off stays v0.10.
+- Homemade 154 is gated (v0.213/v0.214), not deleted. No RequestVote/InstallSnapshot on 154.
+- SyncGroup is a generation confirm fence (v0.215), still not CompletingRebalance / parked Join.
 - Range uses JoinGroup members trailer when present (v0.211); empty trailer still DescribeGroup.
 - Empty first Join now sends a client-generated member_id (v0.209/v0.210) so retry is safe.
 - Kafka stays 38 keys. No client-compat claim.
