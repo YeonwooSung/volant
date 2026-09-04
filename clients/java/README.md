@@ -200,6 +200,7 @@ resends it on rejoin.
 algorithm. `GroupConsumer.join(..., "range")` replaces the fetch set
 with a local range over **DescribeGroup** members (still no SyncGroup;
 describe failure falls back to solo). Default assignor is broker.
+`assignor()` returns the join-time assignor (`"broker"` or `"range"`; v0.184).
 
 Produce, Fetch, and DeleteRecords follow `NotLeaderForPartition`
 (error 13) by default: Metadata, reconnect to the partition leader,

@@ -25,6 +25,7 @@ class GroupConsumerTest {
         GroupConsumer g = GroupConsumer.join(fake, "g", List.of("t"), 10_000, false);
         assertEquals("m1", g.memberId());
         assertEquals(1, g.generation());
+        assertEquals("broker", g.assignor());
         assertEquals(1, g.assignment().size());
         assertEquals(5L, g.positions().values().iterator().next());
         assertEquals(1, fake.joinCount);
