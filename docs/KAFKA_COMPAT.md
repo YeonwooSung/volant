@@ -50,6 +50,7 @@ From `SUPPORTED_APIS` in `crates/volant-broker/src/kafka/mod.rs`:
 | 29–31 | ACL admin | 0–3 | Flex v2+; User resource v3; LITERAL only; cluster Create/Delete **controller-only** + snapshot fan-out (Phase 113; **41** NotController) |
 | 32 | DescribeConfigs | 0–4 | Flex v4; TOPIC + BROKER (Phase 99–103; name empty or local `node_id`; sparse durable; cluster effective values after Phase 113 push) |
 | 33 | AlterConfigs | 0–2 | Flex v2; TOPIC + BROKER SET (empty = product default; name check Phase 103; sparse durable Phase 100/102; BROKER cluster Alter **controller-only** Phase 113 → **41**) |
+| 34 | AlterReplicaLogDirs | 0–1 | Flex v1 (official Kafka flex is v2); parse and reject every move (**42**); single `data_dir`; files unmoved; Cluster ALTER or Topic ALTER; controller not required (v0.249) |
 | 35 | DescribeLogDirs | 0–1 | Flex v1; local logs only; size = `Log::total_size`; offsetLag = LEO−HWM (0 if unknown); isFuture false; not multi-log.dirs |
 | 36 | SaslAuthenticate | 0–2 | Flex v2 |
 | 37 | CreatePartitions | 0–3 | Flex v2+; v3 = v2 wire (no KIP-599 quota); assignment wait/rollback same as native (majority miss → **19**) |
@@ -148,6 +149,7 @@ These are **current** product facts, not temporary docs lag:
 | UpdateFeatures | **v0–1 reject** (v0.244): key **57** advertised (always flex). Parse request; every feature → **92** `FEATURE_UPDATE_FAILED` (`empty / not supported`). Does **not** persist. ApiVersions SupportedFeatures / FinalizedFeatures stay empty. Not KIP-584. Cluster ALTER. Cluster non-controller → **41**. v2+ → **35**. Describe is already empty via ApiVersions |
 | DescribeQuorum | **v0–1 wrap** (v0.245): key **55** advertised (always flex). Wraps `openraft_leader_id` / `openraft_term` / `openraft_voter_ids`. Not KRaft `__cluster_metadata` (no invented metadata topic). Empty request topics → one synthetic cluster partition **0** (empty name) when raft is started. Raft off / not started → top-level **0**, empty topics. Cluster non-controller → **41**. `logEndOffset` / `highWatermark` = local LEO/HWM if the requested topic exists locally else **0**. `lastFetch` / `lastCaughtUp` = **-1**. No v2 Nodes / DirectoryId. Cluster DESCRIBE. v2+ → **35** |
 | AllocateProducerIds | **v0 wrap** (v0.246): key **67** advertised (always flex). Block of **1000** from `next_producer_id` (`fetch_add` + persist `__producer_state` like InitProducerId). BrokerEpoch parsed and **ignored**. Not KRaft fencing. Controller only in cluster (**41**); single-node allowed. ACL Cluster ALTER. v1+ → **35** |
+| AlterReplicaLogDirs | **v0–1 reject** (v0.249): key **34** advertised. Single `data_dir`. Parse request; every partition **42** `INVALID_REQUEST` (`single data_dir; replica move not supported`). Does **not** move files. Not multi-log.dirs. Controller not required. Official Kafka first flexible is **2**; Volant v1 is flexible. DescribeLogDirs (35) unchanged. ACL Cluster ALTER or Topic ALTER. v2+ → **35** |
 | Missing APIs | Large Kafka surface still unsupported (GSSAPI, OAUTH, …) |
 
 ## Related

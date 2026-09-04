@@ -20,6 +20,7 @@
 //! ElectLeaders v0–1 (preferred = elect_leader(ISR∩live); unclean refused),
 //! DescribeUserScramCredentials / AlterUserScramCredentials v0 (wraps ScramStore),
 //! DescribeClientQuotas / AlterClientQuotas v0 (no quota store; describe empty, alter 42),
+//! AlterReplicaLogDirs 0–1 (reject every move; single data_dir; v1 flexible),
 //! DescribeLogDirs 0–1 (local logs only; v1 flexible),
 //! DescribeTopicPartitions v0 (wraps Metadata; key 75),
 //! UnregisterBroker v0 (wraps native remove_broker; key 64; not KRaft incarnation),
@@ -30,7 +31,7 @@
 //! `docs/V228_SPEC.md`, `docs/V233_SPEC.md`, `docs/V235_SPEC.md`,
 //! `docs/V236_SPEC.md`, `docs/V237_SPEC.md`, `docs/V241_SPEC.md`,
 //! `docs/V242_SPEC.md`, `docs/V244_SPEC.md`, `docs/V245_SPEC.md`,
-//! and `docs/V246_SPEC.md`.
+//! `docs/V246_SPEC.md`, and `docs/V249_SPEC.md`.
 
 mod acl_api;
 mod admin_api;
@@ -271,6 +272,9 @@ pub enum ApiKey {
     DescribeConfigs = 32,
     /// AlterConfigs.
     AlterConfigs = 33,
+    /// AlterReplicaLogDirs (v0 classic; v1 flexible). Single `data_dir`;
+    /// every move is rejected. Official Kafka first flexible version is 2.
+    AlterReplicaLogDirs = 34,
     /// DescribeLogDirs (v0 classic; v1 flexible). Local partition logs only.
     DescribeLogDirs = 35,
     /// SaslAuthenticate.
@@ -352,6 +356,7 @@ impl ApiKey {
             31 => Some(Self::DeleteAcls),
             32 => Some(Self::DescribeConfigs),
             33 => Some(Self::AlterConfigs),
+            34 => Some(Self::AlterReplicaLogDirs),
             35 => Some(Self::DescribeLogDirs),
             36 => Some(Self::SaslAuthenticate),
             37 => Some(Self::CreatePartitions),
@@ -410,6 +415,7 @@ pub const SUPPORTED_APIS: &[(ApiKey, i16, i16)] = &[
     (ApiKey::DeleteAcls, 0, 3),
     (ApiKey::DescribeConfigs, 0, 4),
     (ApiKey::AlterConfigs, 0, 2),
+    (ApiKey::AlterReplicaLogDirs, 0, 1),
     (ApiKey::DescribeLogDirs, 0, 1),
     (ApiKey::SaslAuthenticate, 0, 2),
     (ApiKey::CreatePartitions, 0, 3),
@@ -437,6 +443,15 @@ pub const SUPPORTED_APIS: &[(ApiKey, i16, i16)] = &[
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn supported_apis_includes_alter_replica_log_dirs_34() {
+        assert!(SUPPORTED_APIS.len() >= 50);
+        assert!(SUPPORTED_APIS.iter().any(|(k, min, max)| {
+            *k == ApiKey::AlterReplicaLogDirs && *min == 0 && *max == 1
+        }));
+        assert_eq!(ApiKey::from_i16(34), Some(ApiKey::AlterReplicaLogDirs));
+    }
 
     #[test]
     fn supported_apis_includes_describe_log_dirs_35() {
