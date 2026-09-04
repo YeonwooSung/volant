@@ -26,7 +26,7 @@ fn set_openraft_env(on: bool) {
     if on {
         std::env::set_var("VOLANT_OPENRAFT_METADATA", "1");
     } else {
-        std::env::remove_var("VOLANT_OPENRAFT_METADATA");
+        std::env::set_var("VOLANT_OPENRAFT_METADATA", "0");
     }
 }
 

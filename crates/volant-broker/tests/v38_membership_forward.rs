@@ -21,7 +21,7 @@ fn set_openraft_env(on: bool) {
     if on {
         std::env::set_var("VOLANT_OPENRAFT_METADATA", "1");
     } else {
-        std::env::remove_var("VOLANT_OPENRAFT_METADATA");
+        std::env::set_var("VOLANT_OPENRAFT_METADATA", "0");
     }
     std::env::remove_var("VOLANT_OPENRAFT_FORWARD_MEMBERSHIP");
 }
@@ -157,7 +157,7 @@ fn flag_off_any_node_add_writes_local_overlay() {
     let b2 = Broker::with_cluster(default_storage(base.join("n2")), 2, cfg).unwrap();
     assert!(
         !b2.openraft_metadata_enabled(),
-        "VOLANT_OPENRAFT_METADATA must default off"
+        "VOLANT_OPENRAFT_METADATA=0 keeps lowest-id"
     );
     assert!(!b2.should_forward_membership(), "flag off must not forward");
 

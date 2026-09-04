@@ -189,12 +189,12 @@ Without `--cluster-config`, the broker runs as a single node:
     Kafka **19** + live `assignment.json` rollback); `0` restores 154
     mutate-first. **Not** full openraft/KRaft election — controller remains
     lowest live id; no InstallSnapshot; static N.
-  - **Phase 155 (open):** cluster mode will default `VOLANT_OPENRAFT_METADATA`
-    **on**. CreateTopic / DeleteTopic / CreatePartitions then succeed only
-    after openraft `client_write(SetAssignment)` commits and applies;
-    `assignment.json` is the apply artifact. Single-node does not start
-    openraft. Homemade 154 is not extended. See
-    [PHASE155_SPEC.md](./PHASE155_SPEC.md).
+  - **Phase 155:** cluster mode defaults `VOLANT_OPENRAFT_METADATA` **on**.
+    CreateTopic / DeleteTopic / CreatePartitions succeed only after
+    openraft `client_write(SetAssignment)` commits and applies (raft
+    actually started; N&lt;2 / single-node skip boot and keep local write).
+    `assignment.json` is the apply artifact. Homemade 154 is not extended.
+    See [PHASE155_SPEC.md](./PHASE155_SPEC.md).
 - **Multi-broker 2PC (Phase 114 + 120 + 121 + 122 + 124):** Enable2Pc prepare/complete is coordinated
   over inter-broker RPC (opcodes 76–81). Init owner is the txn coordinator;
   produce still targets partition leaders after open fan-out. **Phase 120:**

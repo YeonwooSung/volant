@@ -34,13 +34,23 @@ pub fn unique_dir(prefix: &str, label: &str) -> PathBuf {
     temp_dir(prefix, label)
 }
 
+/// Pin homemade/lowest-id ITs unless the test already set the flag.
+/// Production unset still defaults **on** (Phase 155).
+fn pin_openraft_off_unless_set() {
+    if std::env::var("VOLANT_OPENRAFT_METADATA").is_err() {
+        std::env::set_var("VOLANT_OPENRAFT_METADATA", "0");
+    }
+}
+
 /// Static 3-broker cluster config on localhost ports.
 pub fn cluster_config(ports: [u16; 3]) -> ClusterConfig {
+    pin_openraft_off_unless_set();
     cluster_config_with_session(ports, 2000)
 }
 
 /// Like [`cluster_config`] with an explicit session timeout.
 pub fn cluster_config_with_session(ports: [u16; 3], session_timeout_ms: u32) -> ClusterConfig {
+    pin_openraft_off_unless_set();
     ClusterConfig {
         default_replication_factor: 3,
         min_insync_replicas: 2,
@@ -62,6 +72,7 @@ pub fn cluster_config_with_session(ports: [u16; 3], session_timeout_ms: u32) -> 
 
 /// Static N=2 cluster (majority = 2; one death → `majority_impossible`).
 pub fn cluster_config_n2(ports: [u16; 2]) -> ClusterConfig {
+    pin_openraft_off_unless_set();
     ClusterConfig {
         default_replication_factor: 2,
         min_insync_replicas: 1,

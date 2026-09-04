@@ -20,7 +20,7 @@ fn set_openraft_env(on: bool) {
     if on {
         std::env::set_var("VOLANT_OPENRAFT_METADATA", "1");
     } else {
-        std::env::remove_var("VOLANT_OPENRAFT_METADATA");
+        std::env::set_var("VOLANT_OPENRAFT_METADATA", "0");
     }
 }
 
@@ -143,7 +143,7 @@ fn flag_off_add_broker_writes_overlay() {
     let b1 = Broker::with_cluster(default_storage(base.join("n1")), 1, cfg).unwrap();
     assert!(
         !b1.openraft_metadata_enabled(),
-        "VOLANT_OPENRAFT_METADATA must default off"
+        "VOLANT_OPENRAFT_METADATA=0 keeps lowest-id"
     );
 
     let gen = b1.add_broker(3, "127.0.0.1".into(), 19703, None).unwrap();

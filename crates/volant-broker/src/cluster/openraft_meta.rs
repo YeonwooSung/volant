@@ -4,7 +4,10 @@
 //! + overlay rollback on joint fail (v0.34) + redb log store (v0.35)
 //! + assignment restore on add-broker joint fail (v0.39).
 //!
-//! When `VOLANT_OPENRAFT_METADATA=1`, the leader replicates
+//! Phase 155: `VOLANT_OPENRAFT_METADATA` defaults **on**. `0`/`false`/`off`
+//! restores lowest-id. Single-node / N&lt;2 still skip boot.
+//!
+//! When the flag is on, the leader replicates
 //! [`MetaRequest::SetAssignment`] via opcodes 108/109. Apply writes
 //! `assignment.json` and installs cluster state. Snapshots use opcodes
 //! 112/113; a non-empty snapshot `assignment` is applied the same way.
@@ -1355,6 +1358,10 @@ impl Broker {
         if self.cluster_config().is_none() {
             return true;
         }
+        if self.openraft_meta.lock().is_none() {
+            // Boot skipped (N<2). Local assignment remains SoT.
+            return true;
+        }
         if !self.is_controller() {
             warn!(
                 node = self.node_id(),
@@ -1610,17 +1617,21 @@ impl Broker {
     }
 }
 
-/// Parse `VOLANT_OPENRAFT_METADATA`. Default **off**.
+/// Parse `VOLANT_OPENRAFT_METADATA`. Phase 155 default **on**.
+///
+/// `0` / `false` / `no` / `off` restores the v0.2 lowest-id path.
+/// Unset and any other value keep openraft on. Single-node brokers
+/// still skip `boot_openraft_metadata` (no cluster config / N&lt;2).
 pub fn default_openraft_metadata_enabled() -> bool {
     match std::env::var("VOLANT_OPENRAFT_METADATA") {
         Ok(s) => {
             let t = s.trim();
-            t == "1"
-                || t.eq_ignore_ascii_case("true")
-                || t.eq_ignore_ascii_case("yes")
-                || t.eq_ignore_ascii_case("on")
+            !(t == "0"
+                || t.eq_ignore_ascii_case("false")
+                || t.eq_ignore_ascii_case("no")
+                || t.eq_ignore_ascii_case("off"))
         }
-        Err(_) => false,
+        Err(_) => true,
     }
 }
 

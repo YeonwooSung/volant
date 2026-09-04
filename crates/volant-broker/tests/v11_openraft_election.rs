@@ -20,7 +20,7 @@ fn set_openraft_env(on: bool) {
     if on {
         std::env::set_var("VOLANT_OPENRAFT_METADATA", "1");
     } else {
-        std::env::remove_var("VOLANT_OPENRAFT_METADATA");
+        std::env::set_var("VOLANT_OPENRAFT_METADATA", "0");
     }
 }
 
@@ -131,14 +131,26 @@ async fn wait_agreed_leader(nodes: &[Arc<Broker>], timeout: Duration) -> u32 {
     panic!("no agreed openraft leader within {timeout:?}; last={last:?}");
 }
 
-/// Flag default off: controller is still lowest live id (regression).
+/// Phase 155: unset env defaults the flag on.
+#[test]
+fn unset_env_defaults_on() {
+    std::env::remove_var("VOLANT_OPENRAFT_METADATA");
+    assert!(
+        volant_broker::default_openraft_metadata_enabled(),
+        "unset VOLANT_OPENRAFT_METADATA must default on"
+    );
+    std::env::set_var("VOLANT_OPENRAFT_METADATA", "0");
+    assert!(!volant_broker::default_openraft_metadata_enabled());
+}
+
+/// Flag explicit off: controller is still lowest live id (regression).
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn default_off_lowest_id_controller() {
     set_openraft_env(false);
     let (t, _g) = Triple::boot("off").await;
     assert!(
         !t.b1.openraft_metadata_enabled(),
-        "VOLANT_OPENRAFT_METADATA must default off"
+        "VOLANT_OPENRAFT_METADATA=0 keeps lowest-id"
     );
     assert_eq!(t.b1.controller_id(), 1);
     assert_eq!(t.b2.controller_id(), 1);

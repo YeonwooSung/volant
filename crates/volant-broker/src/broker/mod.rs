@@ -1308,9 +1308,13 @@ impl Broker {
 
     /// Current controller id.
     ///
-    /// Default: lowest live broker id. When `VOLANT_OPENRAFT_METADATA` is on,
-    /// this is the openraft leader (`0` if no leader yet).
+    /// Single-node (no cluster config): this process `node_id`.
+    /// Cluster + `VOLANT_OPENRAFT_METADATA` on: openraft leader (`0` if
+    /// none yet). Cluster + flag off: lowest live broker id.
     pub fn controller_id(&self) -> u32 {
+        if self.cluster.is_none() {
+            return self.node_id;
+        }
         if self.openraft_metadata_enabled() {
             return self.openraft_leader_id().unwrap_or(0);
         }

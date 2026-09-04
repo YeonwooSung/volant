@@ -71,6 +71,7 @@ pub use broker_config::{
 };
 pub use cluster::{
     assignment_path, cluster_metadata_replicas, cluster_metadata_topic_env_enabled,
+    default_openraft_metadata_enabled,
     load_assignment_from_cluster_metadata, load_membership_overlay, membership_overlay_path,
     openraft_snapshot_logs_since_last, reassign_on_add_enabled, reassign_on_add_rollback_enabled,
     save_membership_overlay, AssignmentConsensus, AssignmentConsensusFile, BrokerEndpoint,

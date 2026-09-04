@@ -68,7 +68,7 @@ Phase index: [docs/history/PHASE_HISTORY.md](./docs/history/PHASE_HISTORY.md).
 | **Later** | **Long fuzz + chaos-mesh** | **MVP closed (v0.15)** — extended corpus + Chaos Mesh YAML + A→B isolate |
 | **Later** | **Perf campaign** vs aspirational targets | **closed (v0.2 PR2)** — measured table published; group-commit **v0.20** (opt-in, no new bench) |
 
-**Default next slice:** [PHASE155_SPEC.md](./docs/PHASE155_SPEC.md) — Go `CreateTopic` returns id; JoinGroup retry when member/instance set; native SyncGroup **116/117**; openraft cluster default on. Homemade 154 RequestVote / InstallSnapshot stay frozen. Residual **v0.155** is still DeleteRecords wait, not this phase. Kafka SyncGroup key **14** is already in the 38-key table.
+**Default next slice:** Phase 155 PR1–PR5 are on main (docs, Go CreateTopic id, Join retry, native SyncGroup 116/117, openraft cluster default). Overlay membership is still SoT. Homemade 154 RequestVote / InstallSnapshot stay frozen. Residual **v0.155** is still DeleteRecords wait. Kafka SyncGroup key **14** is already in the 38-key table.
 
 ---
 

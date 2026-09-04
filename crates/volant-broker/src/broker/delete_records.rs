@@ -488,15 +488,18 @@ impl Broker {
     /// Whether a CreateTopic / DeleteTopic / CreatePartitions majority miss
     /// must fail the client and roll back live assignment.
     ///
-    /// True when Phase 150 wait, Phase 152 committed-only, or homemade 154
-    /// wait-commit (v0.40) is on. Openraft-only does not use wait-commit
-    /// (v0.16 already `client_write`s; fail-the-client stays wait/committed-only).
+    /// True when Phase 150 wait, Phase 152 committed-only, homemade 154
+    /// wait-commit (v0.40), or Phase 155 openraft cluster SoT is on.
+    ///
+    /// Openraft + no cluster (or N&lt;2 so raft never boots) does not wait:
+    /// `client_write_set_assignment` is a no-op success in that case.
     pub fn assignment_must_wait(&self) -> bool {
         self.assignment_consensus_wait()
             || self.assignment_metadata_committed_only()
             || (self.metadata_raft_enabled()
                 && !self.openraft_metadata_enabled()
                 && self.metadata_raft_wait_commit())
+            || (self.openraft_metadata_enabled() && self.cluster_config().is_some())
     }
 
     /// Phase 154: current metadata Raft term.

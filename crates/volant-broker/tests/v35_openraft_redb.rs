@@ -18,7 +18,7 @@ fn set_openraft_env(on: bool, snapshot_logs: Option<&str>) {
     if on {
         std::env::set_var("VOLANT_OPENRAFT_METADATA", "1");
     } else {
-        std::env::remove_var("VOLANT_OPENRAFT_METADATA");
+        std::env::set_var("VOLANT_OPENRAFT_METADATA", "0");
     }
     match snapshot_logs {
         Some(v) => std::env::set_var("VOLANT_OPENRAFT_SNAPSHOT_LOGS", v),
@@ -246,7 +246,7 @@ async fn flag_off_does_not_create_openraft_dir() {
     let (t, _g) = Triple::boot("off").await;
     assert!(
         !t.b1.openraft_metadata_enabled(),
-        "VOLANT_OPENRAFT_METADATA must default off"
+        "VOLANT_OPENRAFT_METADATA=0 keeps lowest-id"
     );
     assert_eq!(t.b1.controller_id(), 1);
 

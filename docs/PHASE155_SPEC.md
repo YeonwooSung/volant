@@ -1,6 +1,6 @@
 # Phase 155 — openraft metadata SoT + native SyncGroup + Join retry
 
-**Status:** Open (implementation in progress; crate **0.2.0**)  
+**Status:** Open — PR1–PR5 landed on main (crate **0.2.0**). Overlay membership still SoT; homemade 154 not deleted.  
 **Theme:** Change the v0.2 product bets that leftover residuals could not
 touch: replace homemade 150/152/154 as the cluster metadata story with
 **openraft** (already in-tree, opt-in through v0.40), add native

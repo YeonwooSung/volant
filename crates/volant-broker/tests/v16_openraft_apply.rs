@@ -18,7 +18,7 @@ fn set_openraft_env(on: bool) {
     if on {
         std::env::set_var("VOLANT_OPENRAFT_METADATA", "1");
     } else {
-        std::env::remove_var("VOLANT_OPENRAFT_METADATA");
+        std::env::set_var("VOLANT_OPENRAFT_METADATA", "0");
     }
 }
 
@@ -189,7 +189,7 @@ async fn default_off_create_topic_lowest_id() {
     let (t, _g) = Triple::boot("off").await;
     assert!(
         !t.b1.openraft_metadata_enabled(),
-        "VOLANT_OPENRAFT_METADATA must default off"
+        "VOLANT_OPENRAFT_METADATA=0 keeps lowest-id"
     );
     assert_eq!(t.b1.controller_id(), 1);
     assert_eq!(t.b2.controller_id(), 1);

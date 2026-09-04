@@ -31,6 +31,8 @@ impl Drop for Guard {
 }
 
 fn cluster_config(ports: &[u16]) -> ClusterConfig {
+    // Homemade 154 path: do not take the Phase 155 openraft default.
+    std::env::set_var("VOLANT_OPENRAFT_METADATA", "0");
     ClusterConfig {
         default_replication_factor: ports.len() as u32,
         min_insync_replicas: ((ports.len() as u32) / 2).max(1),
