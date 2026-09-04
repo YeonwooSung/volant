@@ -470,21 +470,20 @@ pub(crate) fn encode_sync_group(
         return;
     }
 
-    let hb = broker.groups().heartbeat(&group_id, &member_id, generation);
-    if hb.error_code != 0 {
+    let result = broker
+        .groups()
+        .sync_group(&group_id, &member_id, generation);
+    if result.error_code != 0 {
         fail(
             out,
-            map_group_error(hb.error_code),
+            map_group_error(result.error_code),
             req_protocol_type.as_deref(),
             req_protocol_name.as_deref(),
         );
         return;
     }
 
-    let assignment = broker
-        .groups()
-        .assignment(&group_id, &member_id)
-        .unwrap_or_default();
+    let assignment = result.assignment;
     let bytes = encode_consumer_assignment(&assignment);
     if version >= 1 {
         out.put_i32(0); // throttle

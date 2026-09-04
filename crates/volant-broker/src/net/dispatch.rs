@@ -879,17 +879,17 @@ async fn handle_request(broker: &Arc<Broker>, req: Request) -> Result<Response> 
             generation,
             assignment_bytes: _,
         } => {
-            let result = broker.groups().heartbeat(&group_id, &member_id, generation);
+            let result = broker
+                .groups()
+                .sync_group(&group_id, &member_id, generation);
             if result.error_code != 0 {
                 return Ok(Response::SyncGroup {
                     error_code: result.error_code,
                     assignment: Vec::new(),
                 });
             }
-            let assignment = broker
-                .groups()
-                .assignment(&group_id, &member_id)
-                .unwrap_or_default()
+            let assignment = result
+                .assignment
                 .into_iter()
                 .map(|(topic, partition)| Assignment { topic, partition })
                 .collect();

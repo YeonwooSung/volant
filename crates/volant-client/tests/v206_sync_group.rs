@@ -326,3 +326,35 @@ fn supported_apis_stays_38_sync_group_key_14() {
         .iter()
         .any(|(k, min, max)| *k == ApiKey::SyncGroup && *min == 0 && *max == 5));
 }
+
+#[tokio::test]
+async fn second_join_is_9_until_sync_group() {
+    let dir = temp_data_dir("fence");
+    let (addr, server) = boot_broker(dir.clone()).await;
+    let client = Client::connect_addr(&addr).await.expect("connect");
+    client.create_topic("events", 4).await.expect("create");
+    let first = client
+        .join_group("g", "", 10_000, vec!["events".into()])
+        .await
+        .expect("first join");
+    let err = client
+        .join_group("g", "", 10_000, vec!["events".into()])
+        .await
+        .expect_err("second join fenced");
+    match err {
+        Error::Protocol(m) => assert!(m.contains("error_code=9") || m.contains("9"), "{m}"),
+        other => panic!("unexpected {other:?}"),
+    }
+    let peeked = client
+        .sync_group("g", &first.member_id, first.generation)
+        .await
+        .expect("sync");
+    assert_eq!(peeked, first.assignment);
+    let second = client
+        .join_group("g", "", 10_000, vec!["events".into()])
+        .await
+        .expect("second join after sync");
+    assert!(second.generation > first.generation);
+    server.abort();
+    let _ = std::fs::remove_dir_all(&dir);
+}
