@@ -369,6 +369,11 @@ docs for day-to-day reading: [ops](../ops.md), [consistency](../consistency.md),
 | v0.168 | ✅ | Rust reassign_partitions_all | [V168_SPEC.md](../V168_SPEC.md) |
 | v0.169 | ✅ | language single-entry CreateAcl / DeleteAcl | [V169_SPEC.md](../V169_SPEC.md) |
 | v0.170 | ✅ | Rust create_acl / delete_acl | [V170_SPEC.md](../V170_SPEC.md) |
+| v0.171 | ✅ | Go AddBrokerNoRack | [V171_SPEC.md](../V171_SPEC.md) |
+| v0.172 | ✅ | Rust add_broker_no_rack | [V172_SPEC.md](../V172_SPEC.md) |
+| v0.173 | ✅ | Go CreateScramUserDefault | [V173_SPEC.md](../V173_SPEC.md) |
+| v0.174 | ✅ | Rust create_scram_user_default | [V174_SPEC.md](../V174_SPEC.md) |
+| v0.175 | ✅ | Rust commit_transaction_empty | [V175_SPEC.md](../V175_SPEC.md) |
 
 ---
 
