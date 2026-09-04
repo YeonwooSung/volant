@@ -4,7 +4,7 @@
 //! Flag on: the openraft leader `change_membership`s to the pending
 //! voter set; dispatch persists `{data_dir}/cluster/membership.json`
 //! only after a successful joint (v0.212). In-process `add_broker` /
-//! `remove_broker` stay persist-first (v0.10 / v0.26 honesty hole).
+//! `remove_broker` invert the same way when raft is started (v0.217).
 
 #[path = "common/mod.rs"]
 mod common;
@@ -311,4 +311,42 @@ async fn flag_on_remove_broker_shrinks_voter_set() {
     panic!(
         "id=4 still in voters/target after remove; voters={last_voters:?} target={last_target:?}"
     );
+}
+
+/// Flag on + in-process add + `fail_next_change_membership`: overlay not written.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn flag_on_in_process_add_fail_next_does_not_write_overlay() {
+    set_openraft_env(true);
+    let (t, _g) = Triple::boot("inproc-fail").await;
+    let nodes = t.live(&[1, 2, 3]);
+    let leader_id = wait_agreed_leader(&nodes, Duration::from_secs(8)).await;
+    let leader = t.broker(leader_id);
+    assert!(leader.openraft_metadata_enabled());
+    assert!(leader.openraft_started());
+
+    let prev_gen = leader.membership_generation();
+    let prev_n = leader.configured_broker_count();
+    leader.fail_next_change_membership();
+
+    let err = leader
+        .add_broker(4, "127.0.0.1".into(), t.ports[0].saturating_add(90), None)
+        .unwrap_err();
+    let msg = err.to_string();
+    assert!(
+        msg.contains("15") || msg.contains("not enough replicas"),
+        "joint fail is native 15 / Error, got {msg}"
+    );
+    assert_eq!(leader.configured_broker_count(), prev_n);
+    assert_eq!(leader.membership_generation(), prev_gen);
+    assert!(
+        !overlay_has_id(&leader, 4),
+        "in-process fail_next must not write overlay id=4"
+    );
+    if prev_gen == 0 {
+        assert!(
+            !leader.membership_overlay_path().exists(),
+            "failed in-process joint must not create membership.json"
+        );
+    }
+    t.abort_all();
 }

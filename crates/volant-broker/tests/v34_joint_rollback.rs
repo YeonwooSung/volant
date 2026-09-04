@@ -4,7 +4,7 @@
 //! (default): dispatch validates, joints the **pending** target, and
 //! persists overlay only after commit (v0.212). Fail → native **15**,
 //! disk unchanged (v0.34 restore is a no-op). In-process `add_broker`
-//! stays persist-first (v0.10 / v0.26 honesty hole).
+//! / `remove_broker` invert the same way when raft is started (v0.217).
 
 #[path = "common/mod.rs"]
 mod common;
@@ -155,8 +155,7 @@ fn flag_off_add_broker_writes_overlay() {
     assert!(b1.test_last_openraft_membership_target().is_none());
 }
 
-/// Flag on, happy path: in-process add still writes overlay (persist-first
-/// honesty hole; dispatch invert is the client opcode path).
+/// Flag on, happy path: in-process add persists overlay after joint (v0.217).
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn flag_on_add_broker_still_works() {
     set_openraft_env(true);
@@ -183,8 +182,46 @@ async fn flag_on_add_broker_still_works() {
         target.as_ref().map(|ids| ids.contains(&4)).unwrap_or(false)
             || leader.openraft_voter_ids().contains(&4)
             || overlay_has_id(&leader, 4),
-        "happy path must keep overlay id=4 (in-process add is v0.26 persist)"
+        "happy path must keep overlay id=4 after in-process joint-then-persist"
     );
+    t.abort_all();
+}
+
+/// Flag on + in-process add + `fail_next_change_membership`: overlay not written.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn flag_on_in_process_add_fail_next_does_not_write_overlay() {
+    set_openraft_env(true);
+    let (t, _g) = Triple::boot("inproc-fail").await;
+    let nodes = t.live(&[1, 2, 3]);
+    let leader_id = wait_agreed_leader(&nodes, Duration::from_secs(8)).await;
+    let leader = t.broker(leader_id);
+    assert!(leader.openraft_metadata_enabled());
+    assert!(leader.openraft_started());
+
+    let prev_gen = leader.membership_generation();
+    let prev_n = leader.configured_broker_count();
+    leader.fail_next_change_membership();
+
+    let err = leader
+        .add_broker(4, "127.0.0.1".into(), t.ports[0].saturating_add(70), None)
+        .unwrap_err();
+    let msg = err.to_string();
+    assert!(
+        msg.contains("15") || msg.contains("not enough replicas"),
+        "joint fail is native 15 / Error, got {msg}"
+    );
+    assert_eq!(leader.configured_broker_count(), prev_n);
+    assert_eq!(leader.membership_generation(), prev_gen);
+    assert!(
+        !overlay_has_id(&leader, 4),
+        "in-process fail_next must not write overlay id=4"
+    );
+    if prev_gen == 0 {
+        assert!(
+            !leader.membership_overlay_path().exists(),
+            "failed in-process joint must not create membership.json"
+        );
+    }
     t.abort_all();
 }
 
