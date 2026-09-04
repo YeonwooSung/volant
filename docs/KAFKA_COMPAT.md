@@ -63,6 +63,7 @@ From `SUPPORTED_APIS` in `crates/volant-broker/src/kafka/mod.rs`:
 | 51 | AlterUserScramCredentials | 0 | Always flex; wraps `ScramStore`; upsert takes `saltedPassword` (not plaintext); Cluster ALTER |
 | 60 | DescribeCluster | 0–2 | Always flex; IsFenced always false |
 | 61 | DescribeProducers | 0 | Always flex |
+| 64 | UnregisterBroker | 0 | Always flex; wraps native `remove_broker` (v0.217 invert); not KRaft incarnation/DirectoryId; controller only (**41**); no cluster → **42**; TimeoutMs ignored; Cluster ALTER (v0.242) |
 | 65 | DescribeTransactions | 0 | Always flex |
 | 66 | ListTransactions | 0–2 | Pattern = simple `*` glob |
 | 75 | DescribeTopicPartitions | 0 | Always flex; wraps Metadata (same leaders/ISR/epochs/TopicId); no ELR; simple `responsePartitionLimit` truncate; cursor start if topic is in the set else ignored (v0.237) |
@@ -137,6 +138,7 @@ These are **current** product facts, not temporary docs lag:
 | ListPartitionReassignments | **v0 list** (v0.228): key **46** advertised; current assignment as `replicas`; empty adding/removing (apply is instant; no pending log); TimeoutMs ignored; not live Kafka reassignment progress |
 | Describe/AlterUserScramCredentials | **v0 wrap** (v0.233): keys **50** / **51** advertised; wrap `ScramStore` (native 64–69). Alter upsert is Kafka `saltedPassword = Hi(...)`, not plaintext. Native create still sends password in the clear. Unknown user → **91** `RESOURCE_NOT_FOUND`. Not OAUTH/GSSAPI; not quota keys 48/49 |
 | DescribeTopicPartitions | **v0 wrap** (v0.237): key **75** advertised; wraps `Broker::metadata`. Same leaders / ISR / epochs / deterministic TopicId as Metadata. Unknown topic → **3**. ACL Topic DESCRIBE. Empty topics = all. `responsePartitionLimit <= 0` unlimited; simple truncate + `next_cursor` when cut. Cursor honored only when its topic is in the result set (else ignored). No ELR fields (Metadata partition body reused). Not Metadata v13+ |
+| UnregisterBroker | **v0 wrap** (v0.242): key **64** advertised; wraps native `remove_broker` (same invert as AddBroker / v0.217). Not KRaft UnregisterBroker (no incarnation / DirectoryId). Controller only (**41**); no cluster → **42** “unregister requires cluster”; self / last broker map native InvalidArgument → **42**. TimeoutMs parsed if present before tags, ignored. ACL Cluster ALTER |
 | Missing APIs | Large Kafka surface still unsupported (GSSAPI, OAUTH, quota keys 48/49, …) |
 
 ## Related
