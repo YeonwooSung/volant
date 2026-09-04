@@ -2112,6 +2112,88 @@ pub(crate) fn encode_consumer_group_describe(
     put_empty_tag_buffer(out); // top-level tags
 }
 
+/// ShareGroupDescribe v1 (key 77). Always flexible.
+///
+/// Official `ShareGroupDescribeRequest.json` / `Response.json`. Official
+/// `validVersions` is **1** only (v0 was EA in Kafka 4.0 and removed in
+/// 4.1). Not KIP-932: parse and reject each group with **42**
+/// `INVALID_REQUEST` (`not KIP-932 share group`). Does not wrap
+/// `describe_group` / ConsumerGroupDescribe 69 / DescribeGroups 15.
+/// Members are always empty; no share-group state is invented.
+pub(crate) fn encode_share_group_describe(
+    broker: &Broker,
+    src: &mut impl Buf,
+    out: &mut BytesMut,
+    principal: &str,
+) {
+    // Official v1 (flex): GroupIds compact array of compact string,
+    // IncludeAuthorizedOperations bool, tagged.
+    let mut ids = Vec::new();
+    match get_compact_array_len(src) {
+        Ok(Some(n)) => {
+            for _ in 0..n {
+                match get_compact_string(src) {
+                    Ok(g) => ids.push(g),
+                    Err(_) => break,
+                }
+            }
+        }
+        Ok(None) | Err(_) => {}
+    }
+    let include_ops = src.remaining() >= 1 && src.get_u8() != 0;
+    let _ = skip_tag_buffer(src);
+
+    // Official response has no top-level error.
+    out.put_i32(0); // throttleTimeMs
+    put_compact_array_len(out, ids.len());
+    for group_id in ids {
+        if broker.acls().is_enabled()
+            && !broker.acls().authorize(
+                Some(principal),
+                ResourceType::Group,
+                &group_id,
+                AclOperation::Describe,
+            )
+        {
+            put_described_share_group(
+                out,
+                KafkaErrorCode::GroupAuthorizationFailed.as_i16(),
+                None,
+                &group_id,
+                include_ops,
+            );
+            continue;
+        }
+        put_described_share_group(
+            out,
+            KafkaErrorCode::InvalidRequest.as_i16(),
+            Some("not KIP-932 share group"),
+            &group_id,
+            include_ops,
+        );
+    }
+    put_empty_tag_buffer(out);
+}
+
+fn put_described_share_group(
+    out: &mut BytesMut,
+    err: i16,
+    err_msg: Option<&str>,
+    group_id: &str,
+    include_ops: bool,
+) {
+    out.put_i16(err);
+    put_compact_nullable_string(out, err_msg);
+    put_compact_string(out, group_id);
+    put_compact_string(out, ""); // groupState
+    out.put_i32(-1); // groupEpoch
+    out.put_i32(-1); // assignmentEpoch
+    put_compact_string(out, ""); // assignorName
+    put_compact_array_len(out, 0); // members empty — no Member struct
+    out.put_i32(authorized_ops_field(include_ops));
+    put_empty_tag_buffer(out);
+}
+
 fn authorized_ops_field(include_ops: bool) -> i32 {
     // Do not invent ACL bits. Official omit default is INT32_MIN.
     if include_ops {
@@ -2610,6 +2692,156 @@ mod tests {
         assert_eq!(after.generation, before.generation);
         assert_eq!(after.members.len(), before.members.len());
         assert_eq!(after.members[0].member_id, before.members[0].member_id);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    fn share_describe_v1_body(group: &str, include_ops: bool) -> BytesMut {
+        let mut body = BytesMut::new();
+        put_compact_array_len(&mut body, 1);
+        put_compact_string(&mut body, group);
+        body.put_u8(u8::from(include_ops));
+        put_empty_tag_buffer(&mut body);
+        body
+    }
+
+    fn read_share_group(
+        src: &mut impl Buf,
+    ) -> (
+        i32,
+        usize,
+        i16,
+        Option<String>,
+        String,
+        String,
+        i32,
+        i32,
+        String,
+        usize,
+        i32,
+    ) {
+        let throttle = src.get_i32();
+        let n = get_compact_array_len(src).unwrap().unwrap_or(0);
+        assert!(n > 0);
+        let error = src.get_i16();
+        let err_msg = get_compact_nullable_string(src).unwrap();
+        let group_id = get_compact_string(src).unwrap();
+        let state = get_compact_string(src).unwrap();
+        let group_epoch = src.get_i32();
+        let assignment_epoch = src.get_i32();
+        let assignor = get_compact_string(src).unwrap();
+        let n_members = get_compact_array_len(src).unwrap().unwrap_or(0);
+        let ops = src.get_i32();
+        skip_tag_buffer(src).unwrap();
+        skip_tag_buffer(src).unwrap();
+        assert_eq!(src.remaining(), 0);
+        (
+            throttle,
+            n,
+            error,
+            err_msg,
+            group_id,
+            state,
+            group_epoch,
+            assignment_epoch,
+            assignor,
+            n_members,
+            ops,
+        )
+    }
+
+    #[test]
+    fn kafka_share_group_describe_rejects_42() {
+        let dir = temp_dir("sgd-ok");
+        let broker = Broker::new(StorageConfig {
+            data_dir: dir.clone(),
+            ..StorageConfig::default()
+        });
+        let mut src = share_describe_v1_body("sg-v276", false);
+        let mut out = BytesMut::new();
+        encode_share_group_describe(&broker, &mut src, &mut out, "kafka-anonymous");
+        let mut resp = out.freeze();
+        let (
+            throttle,
+            n,
+            error,
+            err_msg,
+            group_id,
+            state,
+            g_epoch,
+            a_epoch,
+            assignor,
+            n_members,
+            ops,
+        ) = read_share_group(&mut resp);
+        assert_eq!(throttle, 0);
+        assert_eq!(n, 1);
+        assert_eq!(error, KafkaErrorCode::InvalidRequest.as_i16());
+        assert_eq!(err_msg.as_deref(), Some("not KIP-932 share group"));
+        assert_eq!(group_id, "sg-v276");
+        assert!(state.is_empty());
+        assert_eq!(g_epoch, -1);
+        assert_eq!(a_epoch, -1);
+        assert!(assignor.is_empty());
+        assert_eq!(n_members, 0);
+        assert_eq!(ops, AUTH_OPS_OMITTED);
+        assert!(broker.groups().describe_group("sg-v276").is_none());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn kafka_share_group_describe_does_not_wrap_classic() {
+        let dir = temp_dir("sgd-wrap");
+        let broker = Broker::new(StorageConfig {
+            data_dir: dir.clone(),
+            ..StorageConfig::default()
+        });
+        let joined = broker
+            .groups()
+            .join("sg-v276", "", 10_000, 150, vec!["events".into()], "", |_| {
+                Some(1)
+            })
+            .unwrap();
+        assert_eq!(joined.error_code, 0);
+        assert!(broker.groups().describe_group("sg-v276").is_some());
+
+        let mut src = share_describe_v1_body("sg-v276", false);
+        let mut out = BytesMut::new();
+        encode_share_group_describe(&broker, &mut src, &mut out, "kafka-anonymous");
+        let mut resp = out.freeze();
+        let (_, _, error, err_msg, _, _, _, _, _, n_members, _) = read_share_group(&mut resp);
+        assert_eq!(error, KafkaErrorCode::InvalidRequest.as_i16());
+        assert_eq!(err_msg.as_deref(), Some("not KIP-932 share group"));
+        assert_eq!(n_members, 0);
+        assert_eq!(
+            broker.groups().describe_group("sg-v276").unwrap().members.len(),
+            1
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn kafka_share_group_describe_acl_deny_is_30() {
+        let dir = temp_dir("sgd-acl");
+        let broker = Broker::new(StorageConfig {
+            data_dir: dir.clone(),
+            ..StorageConfig::default()
+        });
+        broker
+            .configure_acls(true, None, vec![], "token".into())
+            .unwrap();
+
+        let mut src = share_describe_v1_body("sg-v276", false);
+        let mut out = BytesMut::new();
+        encode_share_group_describe(&broker, &mut src, &mut out, "kafka-anonymous");
+        let mut resp = out.freeze();
+        let (throttle, n, error, err_msg, group_id, _, _, _, _, n_members, _) =
+            read_share_group(&mut resp);
+        assert_eq!(throttle, 0);
+        assert_eq!(n, 1);
+        assert_eq!(error, KafkaErrorCode::GroupAuthorizationFailed.as_i16());
+        assert_eq!(err_msg, None);
+        assert_eq!(group_id, "sg-v276");
+        assert_eq!(n_members, 0);
         let _ = std::fs::remove_dir_all(&dir);
     }
 }

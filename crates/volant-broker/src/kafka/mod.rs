@@ -26,6 +26,7 @@
 //! AssignReplicasToDirs v0 (always flexible; reject every assignment; single data_dir),
 //! DescribeLogDirs 0–1 (local logs only; v1 flexible),
 //! DescribeTopicPartitions v0 (wraps Metadata; key 75),
+//! ShareGroupDescribe v1 (key 77 reject; not KIP-932; official v0 removed),
 //! UpdateRaftVoter v0 (key 82 reject; not KRaft raft voter),
 //! BrokerRegistration v0 (key 62 reject; not KRaft / not AddBroker),
 //! BrokerHeartbeat v0 (key 63 reject; not KRaft / not native Heartbeat 12),
@@ -63,7 +64,8 @@
 //! `docs/V263_SPEC.md`, `docs/V264_SPEC.md`, `docs/V265_SPEC.md`,
 //! `docs/V266_SPEC.md`, `docs/V267_SPEC.md`, `docs/V268_SPEC.md`,
 //! `docs/V269_SPEC.md`, `docs/V270_SPEC.md`, `docs/V271_SPEC.md`,
-//! `docs/V272_SPEC.md`, `docs/V273_SPEC.md`, and `docs/V274_SPEC.md`.
+//! `docs/V272_SPEC.md`, `docs/V273_SPEC.md`, `docs/V274_SPEC.md`,
+//! and `docs/V276_SPEC.md`.
 
 mod acl_api;
 mod admin_api;
@@ -422,6 +424,11 @@ pub enum ApiKey {
     ListClientMetricsResources = 74,
     /// DescribeTopicPartitions (always flexible; v0 only).
     DescribeTopicPartitions = 75,
+    /// ShareGroupDescribe (always flexible; v1 only). Honest reject:
+    /// not KIP-932 share groups. Official validVersions is 1 only
+    /// (v0 was EA in Kafka 4.0 and removed in 4.1). Does not wrap
+    /// `describe_group` / ConsumerGroupDescribe 69 / DescribeGroups 15.
+    ShareGroupDescribe = 77,
     /// AddRaftVoter (always flexible; v0 only). Honest reject: not a
     /// KRaft raft voter (membership is overlay + native AddBroker).
     /// Does not wrap native AddBroker. Overlay membership is unchanged.
@@ -512,6 +519,7 @@ impl ApiKey {
             73 => Some(Self::AssignReplicasToDirs),
             74 => Some(Self::ListClientMetricsResources),
             75 => Some(Self::DescribeTopicPartitions),
+            77 => Some(Self::ShareGroupDescribe),
             80 => Some(Self::AddRaftVoter),
             81 => Some(Self::RemoveRaftVoter),
             82 => Some(Self::UpdateRaftVoter),
@@ -593,6 +601,7 @@ pub const SUPPORTED_APIS: &[(ApiKey, i16, i16)] = &[
     (ApiKey::AssignReplicasToDirs, 0, 0),
     (ApiKey::ListClientMetricsResources, 0, 0),
     (ApiKey::DescribeTopicPartitions, 0, 0),
+    (ApiKey::ShareGroupDescribe, 1, 1),
     (ApiKey::AddRaftVoter, 0, 0),
     (ApiKey::RemoveRaftVoter, 0, 0),
     (ApiKey::UpdateRaftVoter, 0, 0),
@@ -944,5 +953,17 @@ mod tests {
         assert_eq!(ApiKey::from_i16(94), Some(ApiKey::UnregisterController));
         assert_eq!(ApiKey::from_i16(64), Some(ApiKey::UnregisterBroker));
         assert_eq!(ApiKey::from_i16(70), Some(ApiKey::ControllerRegistration));
+    }
+
+    #[test]
+    fn supported_apis_includes_share_group_describe_77() {
+        assert!(SUPPORTED_APIS.len() >= 75);
+        assert!(SUPPORTED_APIS.iter().any(|(k, min, max)| {
+            *k == ApiKey::ShareGroupDescribe && *min == 1 && *max == 1
+        }));
+        assert_eq!(ApiKey::from_i16(77), Some(ApiKey::ShareGroupDescribe));
+        assert_eq!(ApiKey::from_i16(75), Some(ApiKey::DescribeTopicPartitions));
+        assert_eq!(ApiKey::from_i16(80), Some(ApiKey::AddRaftVoter));
+        assert_eq!(ApiKey::from_i16(69), Some(ApiKey::ConsumerGroupDescribe));
     }
 }
