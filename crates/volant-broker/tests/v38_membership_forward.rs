@@ -4,6 +4,10 @@
 //! does not persist `membership.json`; it RPCs the same body to
 //! `controller_id()` and returns the leader response. No leader / RPC fail
 //! → native NotController (14) and local generation is unchanged.
+//!
+//! v0.216: `EntryPayload::Membership` apply (and snapshot install) also
+//! writes the overlay, so a follower ends consistent without relying only
+//! on `MembershipPut`.
 
 #[path = "common/mod.rs"]
 mod common;
@@ -14,6 +18,7 @@ use std::time::Duration;
 use common::cluster::{
     bind_port0, cluster_config, cluster_config_n2, default_storage, rpc_seq, unique_dir, Guard,
 };
+use volant_broker::cluster::AssignmentSnapshot;
 use volant_broker::{load_membership_overlay, serve_listener, Broker};
 use volant_protocol::{ErrorCode, Request, Response};
 
@@ -313,4 +318,108 @@ async fn flag_on_no_leader_add_does_not_write_overlay() {
         "follower must not persist overlay when there is no leader"
     );
     h1.abort();
+}
+
+/// After joint/initialize, a follower overlay write from Membership apply
+/// (extra voter) does not rely on MembershipPut.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn flag_on_follower_overlay_from_membership_apply() {
+    set_openraft_env(true);
+    let (t, _g) = Triple::boot("apply").await;
+    let nodes = t.live(&[1, 2, 3]);
+    let leader_id = wait_agreed_leader(&nodes, Duration::from_secs(8)).await;
+    let follower_id = [1u32, 2, 3]
+        .into_iter()
+        .find(|id| *id != leader_id)
+        .expect("follower");
+    let follower = t.broker(follower_id);
+    assert!(
+        overlay_on(&follower).is_none() || !overlay_has_id(&follower, 4),
+        "id=4 must not be present before apply"
+    );
+
+    let addrs = [
+        format!("127.0.0.1:{}", t.ports[0]),
+        format!("127.0.0.1:{}", t.ports[1]),
+        format!("127.0.0.1:{}", t.ports[2]),
+        "127.0.0.1:19999".to_string(),
+    ];
+    follower
+        .test_openraft_sm_apply_membership(
+            8,
+            &[
+                (1, addrs[0].as_str()),
+                (2, addrs[1].as_str()),
+                (3, addrs[2].as_str()),
+                (4, addrs[3].as_str()),
+            ],
+        )
+        .await;
+
+    assert!(
+        overlay_has_id(&follower, 4),
+        "Membership apply must write follower overlay without Put"
+    );
+    assert_eq!(follower.configured_broker_count(), 4);
+    t.abort_all();
+}
+
+/// SM apply of Membership writes overlay (including a new voter) without Put.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn sm_apply_membership_writes_overlay_without_put() {
+    set_openraft_env(true);
+    let base = unique_dir("v38", "sm-apply");
+    let _g = Guard(base.clone());
+    let cfg = cluster_config([19701, 19702, 19703]);
+    let b2 = Arc::new(Broker::with_cluster(default_storage(base.join("n2")), 2, cfg).unwrap());
+    assert!(overlay_on(&b2).is_none(), "no overlay before apply");
+    assert_eq!(b2.configured_broker_count(), 3);
+
+    b2.test_openraft_sm_apply_membership(
+        4,
+        &[
+            (1, "127.0.0.1:19701"),
+            (2, "127.0.0.1:19702"),
+            (3, "127.0.0.1:19703"),
+            (4, "127.0.0.1:19704"),
+        ],
+    )
+    .await;
+
+    let overlay = overlay_on(&b2).expect("apply must write overlay");
+    assert!(overlay.generation >= 4);
+    let mut ids: Vec<u32> = overlay.brokers.iter().map(|b| b.id).collect();
+    ids.sort_unstable();
+    assert_eq!(ids, vec![1, 2, 3, 4]);
+    assert_eq!(b2.configured_broker_count(), 4);
+    assert!(overlay.brokers.iter().all(|b| b.rack.is_none()));
+}
+
+/// Snapshot install with last_membership writes overlay (no Put).
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn sm_install_snapshot_membership_writes_overlay() {
+    set_openraft_env(true);
+    let base = unique_dir("v38", "sm-install");
+    let _g = Guard(base.clone());
+    let cfg = cluster_config([19711, 19712, 19713]);
+    let b3 = Arc::new(Broker::with_cluster(default_storage(base.join("n3")), 3, cfg).unwrap());
+    assert!(overlay_on(&b3).is_none());
+
+    let bytes = Broker::test_openraft_snapshot_bytes(&AssignmentSnapshot::default());
+    b3.test_openraft_sm_install_snapshot_with_membership(
+        bytes,
+        7,
+        &[
+            (1, "127.0.0.1:19711"),
+            (2, "127.0.0.1:19712"),
+            (3, "127.0.0.1:19713"),
+            (5, "127.0.0.1:19715"),
+        ],
+    )
+    .await;
+
+    let overlay = overlay_on(&b3).expect("install_snapshot must write overlay");
+    assert!(overlay.generation >= 7);
+    assert!(overlay.brokers.iter().any(|b| b.id == 5));
+    assert_eq!(b3.configured_broker_count(), 4);
 }

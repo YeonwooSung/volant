@@ -6,6 +6,12 @@
 //! `cluster.toml` brokers for live membership, majority N, and `broker_addr`).
 //! Absent → use toml. First successful add/remove seeds the file from the
 //! current effective list.
+//!
+//! When `VOLANT_OPENRAFT_METADATA` is on (N≥2), the file is also the
+//! **apply artifact** of openraft `EntryPayload::Membership` (v0.216):
+//! followers and snapshot-install write it from voter ids + `BasicNode.addr`.
+//! `MembershipPut` stays best-effort catch-up, not SoT. Flag off / N<2
+//! keep this file as the v0.10 overlay SoT.
 
 use std::fs::{self, File, OpenOptions};
 use std::io::{Read, Write};
