@@ -431,6 +431,11 @@ docs for day-to-day reading: [ops](../ops.md), [consistency](../consistency.md),
 | v0.232 | ✅ | write open/prepared partitions on txn-state log | [V232_SPEC.md](../V232_SPEC.md) |
 | v0.233 | ✅ | Kafka Describe/AlterUserScramCredentials 50/51 | [V233_SPEC.md](../V233_SPEC.md) |
 | v0.234 | ✅ | native Fetch honors group assignment trailer | [V234_SPEC.md](../V234_SPEC.md) |
+| v0.235 | ✅ | Kafka DescribeLogDirs key 35 v0–1 | [V235_SPEC.md](../V235_SPEC.md) |
+| v0.236 | ✅ | Kafka ElectLeaders key 43 v0–1 | [V236_SPEC.md](../V236_SPEC.md) |
+| v0.237 | ✅ | Kafka DescribeTopicPartitions key 75 v0 | [V237_SPEC.md](../V237_SPEC.md) |
+| v0.238 | ✅ | native SCRAM-SHA-512 handshake trailer | [V238_SPEC.md](../V238_SPEC.md) |
+| v0.239 | ✅ | native ListOffsets timestamp trailer | [V239_SPEC.md](../V239_SPEC.md) |
 
 ---
 

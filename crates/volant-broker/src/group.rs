@@ -1282,7 +1282,7 @@ mod tests {
     }
 
     #[test]
-    fn list_groups_completing_then_stable_empty_supported_apis_stays_42() {
+    fn list_groups_completing_then_stable_empty_supported_apis_stays_45() {
         let dir = temp_dir();
         let coord = GroupCoordinator::new(&dir).unwrap();
         assert!(coord.list_groups().is_empty());
@@ -1327,7 +1327,7 @@ mod tests {
             .iter()
             .all(|e| e.state == GroupState::Empty
                 || e.member_count > 0 && e.state != GroupState::Empty));
-        assert_eq!(crate::kafka::SUPPORTED_APIS.len(), 42);
+        assert_eq!(crate::kafka::SUPPORTED_APIS.len(), 45);
         let _ = fs::remove_dir_all(&dir);
     }
 
