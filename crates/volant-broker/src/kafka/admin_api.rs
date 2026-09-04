@@ -5,7 +5,7 @@
 //! AlterReplicaLogDirs, AssignReplicasToDirs, DescribeLogDirs,
 //! DescribeTopicPartitions, UnregisterBroker, UpdateFeatures,
 //! DescribeQuorum, AllocateProducerIds, GetTelemetrySubscriptions,
-//! configs.
+//! AlterPartition, configs.
 
 use bytes::{Buf, BufMut, BytesMut};
 use volant_core::{Error, PartitionId, TopicName};
@@ -3045,6 +3045,230 @@ pub(crate) fn encode_allocate_producer_ids(
 
     let (start, len) = broker.allocate_producer_ids(DEFAULT_PRODUCER_ID_BLOCK_LEN);
     write(out, KafkaErrorCode::None, start as i64, len as i32);
+}
+
+/// One partition from an official AlterPartition v0 request.
+struct AlterPartitionReq {
+    index: i32,
+    leader_epoch: i32,
+    new_isr: Vec<i32>,
+    partition_epoch: i32,
+}
+
+/// One topic from an official AlterPartition v0 request.
+struct AlterPartitionTopicReq {
+    name: String,
+    partitions: Vec<AlterPartitionReq>,
+}
+
+/// AlterPartition v0 (always flexible). Wraps
+/// [`Broker::apply_leader_isr_update`].
+///
+/// Official Kafka v0 (3.7 schema): TopicName + NewIsr `[]int32`. TopicId
+/// is v2, LeaderRecoveryState is v1, NewIsrWithEpochs is v3 — not parsed
+/// here. BrokerEpoch is parsed and ignored. Not KRaft NewIsrEpoch / ELR
+/// / DirectoryId. Controller only in cluster (per-partition **41**).
+/// Single-node is a no-op **0**. ACL: Cluster **ALTER**.
+pub(crate) fn encode_alter_partition(
+    broker: &Broker,
+    src: &mut impl Buf,
+    out: &mut BytesMut,
+    principal: &str,
+) {
+    let broker_id = if src.remaining() >= 4 {
+        src.get_i32()
+    } else {
+        0
+    };
+    if src.remaining() >= 8 {
+        let _broker_epoch = src.get_i64();
+    }
+    let topics = parse_alter_partition_topics(src);
+    let _ = skip_tag_buffer(src);
+
+    let acl_denied = broker.acls().is_enabled()
+        && !broker.acls().authorize(
+            Some(principal),
+            ResourceType::Cluster,
+            CLUSTER_RESOURCE,
+            AclOperation::Alter,
+        );
+
+    out.put_i32(0); // throttleTimeMs
+    // Official v0 has a top-level ErrorCode. ACL deny uses it; native
+    // NotController is already per-partition from apply.
+    let top = if acl_denied {
+        KafkaErrorCode::ClusterAuthorizationFailed
+    } else {
+        KafkaErrorCode::None
+    };
+    out.put_i16(top.as_i16());
+    put_compact_array_len(out, topics.len());
+    for t in &topics {
+        put_compact_string(out, &t.name);
+        put_compact_array_len(out, t.partitions.len());
+        for p in &t.partitions {
+            let (err, leader, epoch, isr, part_epoch) = if acl_denied {
+                (
+                    KafkaErrorCode::ClusterAuthorizationFailed,
+                    0,
+                    0,
+                    Vec::new(),
+                    0,
+                )
+            } else {
+                apply_one_alter_partition(broker, broker_id, &t.name, p)
+            };
+            out.put_i32(p.index);
+            out.put_i16(err.as_i16());
+            out.put_i32(leader);
+            out.put_i32(epoch);
+            put_compact_array_len(out, isr.len());
+            for id in isr {
+                out.put_i32(id);
+            }
+            out.put_i32(part_epoch);
+            put_empty_tag_buffer(out);
+        }
+        put_empty_tag_buffer(out);
+    }
+    put_empty_tag_buffer(out);
+}
+
+fn parse_alter_partition_topics(src: &mut impl Buf) -> Vec<AlterPartitionTopicReq> {
+    let mut topics = Vec::new();
+    match get_compact_array_len(src) {
+        Ok(Some(n)) => {
+            for _ in 0..n {
+                let name = match get_compact_string(src) {
+                    Ok(s) => s,
+                    Err(_) => break,
+                };
+                let mut partitions = Vec::new();
+                match get_compact_array_len(src) {
+                    Ok(Some(pc)) => {
+                        for _ in 0..pc {
+                            if src.remaining() < 4 + 4 {
+                                break;
+                            }
+                            let index = src.get_i32();
+                            let leader_epoch = src.get_i32();
+                            let mut new_isr = Vec::new();
+                            match get_compact_array_len(src) {
+                                Ok(Some(ic)) => {
+                                    for _ in 0..ic {
+                                        if src.remaining() < 4 {
+                                            break;
+                                        }
+                                        new_isr.push(src.get_i32());
+                                    }
+                                }
+                                Ok(None) | Err(_) => {}
+                            }
+                            // Official v0: PartitionEpoch next (LeaderRecoveryState is v1+).
+                            let partition_epoch = if src.remaining() >= 4 {
+                                src.get_i32()
+                            } else {
+                                0
+                            };
+                            let _ = skip_tag_buffer(src);
+                            partitions.push(AlterPartitionReq {
+                                index,
+                                leader_epoch,
+                                new_isr,
+                                partition_epoch,
+                            });
+                        }
+                    }
+                    Ok(None) | Err(_) => {}
+                }
+                let _ = skip_tag_buffer(src);
+                topics.push(AlterPartitionTopicReq { name, partitions });
+            }
+        }
+        Ok(None) | Err(_) => {}
+    }
+    topics
+}
+
+fn apply_one_alter_partition(
+    broker: &Broker,
+    broker_id: i32,
+    topic: &str,
+    p: &AlterPartitionReq,
+) -> (KafkaErrorCode, i32, i32, Vec<i32>, i32) {
+    if broker_id < 0 || p.index < 0 || p.leader_epoch < 0 || p.new_isr.iter().any(|&id| id < 0) {
+        return (KafkaErrorCode::InvalidRequest, 0, 0, Vec::new(), 0);
+    }
+    let isr: Vec<u32> = p.new_isr.iter().map(|&id| id as u32).collect();
+    let generation_hint = if p.partition_epoch < 0 {
+        0
+    } else {
+        p.partition_epoch as u32
+    };
+    let (code, _gen) = broker.apply_leader_isr_update(
+        topic,
+        p.index as u32,
+        broker_id as u32,
+        p.leader_epoch as u32,
+        &isr,
+        generation_hint,
+    );
+    let err = map_isr_apply_error(code);
+    if err != KafkaErrorCode::None {
+        return (err, 0, 0, Vec::new(), 0);
+    }
+    match current_alter_partition_state(broker, topic, p.index) {
+        Some((leader, epoch, cur_isr, part_epoch)) => (err, leader, epoch, cur_isr, part_epoch),
+        None => (err, 0, 0, Vec::new(), 0),
+    }
+}
+
+fn map_isr_apply_error(code: u16) -> KafkaErrorCode {
+    match code {
+        0 => KafkaErrorCode::None,
+        // volant_protocol::ErrorCode
+        2 => KafkaErrorCode::UnknownTopicOrPartition, // NotFound
+        3 => KafkaErrorCode::InvalidRequest,          // InvalidArg
+        13 => KafkaErrorCode::NotLeaderForPartition,
+        14 => KafkaErrorCode::NotController,
+        19 => KafkaErrorCode::FencedLeaderEpoch, // InvalidProducerEpoch
+        _ => KafkaErrorCode::Unknown,
+    }
+}
+
+fn current_alter_partition_state(
+    broker: &Broker,
+    topic: &str,
+    partition: i32,
+) -> Option<(i32, i32, Vec<i32>, i32)> {
+    if partition < 0 {
+        return None;
+    }
+    let pid = partition as u32;
+    if let Some(asg) = broker.clone_live_assignment() {
+        let pa = asg
+            .topics
+            .get(topic)
+            .and_then(|t| t.partitions.get(&pid))?;
+        return Some((
+            pa.leader as i32,
+            pa.leader_epoch as i32,
+            pa.isr.iter().map(|&id| id as i32).collect(),
+            asg.generation as i32,
+        ));
+    }
+    let snap = broker.metadata(Some(&[TopicName::new(topic)]));
+    let p = snap
+        .topics
+        .first()
+        .and_then(|t| t.partitions.iter().find(|p| p.partition_id.0 == pid))?;
+    Some((
+        p.leader as i32,
+        p.leader_epoch as i32,
+        p.isr.iter().map(|&id| id as i32).collect(),
+        0,
+    ))
 }
 
 /// One topic's partitions from an AssignReplicasToDirs request.
