@@ -300,6 +300,7 @@ async fn dispatch_kafka(
                 | Some(ApiKey::WriteShareGroupState)
                 | Some(ApiKey::DeleteShareGroupState)
                 | Some(ApiKey::ReadShareGroupStateSummary)
+                | Some(ApiKey::StreamsGroupDescribe)
                 | Some(ApiKey::DescribeShareGroupOffsets)
                 | Some(ApiKey::UnregisterController),
             _
@@ -921,6 +922,12 @@ async fn dispatch_kafka(
             group_api::encode_read_share_group_state_summary(
                 broker, &mut src, &mut out, principal,
             );
+        }
+        Some(ApiKey::StreamsGroupDescribe) if hdr.api_version == 0 => {
+            if let Err(e) = skip_tag_buffer(&mut src) {
+                debug!(error = %e, "streams group describe flexible header tag buffer");
+            }
+            group_api::encode_streams_group_describe(broker, &mut src, &mut out, principal);
         }
         Some(ApiKey::DescribeShareGroupOffsets) if hdr.api_version == 0 => {
             if let Err(e) = skip_tag_buffer(&mut src) {
