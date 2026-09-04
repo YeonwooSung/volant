@@ -20,6 +20,7 @@
 //! ElectLeaders v0–1 (preferred = elect_leader(ISR∩live); unclean refused),
 //! DescribeUserScramCredentials / AlterUserScramCredentials v0 (wraps ScramStore),
 //! DescribeClientQuotas / AlterClientQuotas v0 (no quota store; describe empty, alter 42),
+//! ListClientMetricsResources v0 (no client-metrics store; empty resources),
 //! AlterReplicaLogDirs 0–1 (reject every move; single data_dir; v1 flexible),
 //! AssignReplicasToDirs v0 (always flexible; reject every assignment; single data_dir),
 //! DescribeLogDirs 0–1 (local logs only; v1 flexible),
@@ -35,7 +36,7 @@
 //! `docs/V236_SPEC.md`, `docs/V237_SPEC.md`, `docs/V241_SPEC.md`,
 //! `docs/V242_SPEC.md`, `docs/V244_SPEC.md`, `docs/V245_SPEC.md`,
 //! `docs/V246_SPEC.md`, `docs/V249_SPEC.md`, `docs/V250_SPEC.md`,
-//! and `docs/V251_SPEC.md`.
+//! `docs/V251_SPEC.md`, and `docs/V252_SPEC.md`.
 
 mod acl_api;
 mod admin_api;
@@ -330,6 +331,9 @@ pub enum ApiKey {
     /// AssignReplicasToDirs (always flexible; v0 only). Single `data_dir`;
     /// every assignment is rejected. Not KRaft DirectoryId.
     AssignReplicasToDirs = 73,
+    /// ListClientMetricsResources (always flexible; v0 only). No
+    /// client-metrics resource store (KIP-714). Empty list.
+    ListClientMetricsResources = 74,
     /// DescribeTopicPartitions (always flexible; v0 only).
     DescribeTopicPartitions = 75,
 }
@@ -390,6 +394,7 @@ impl ApiKey {
             66 => Some(Self::ListTransactions),
             67 => Some(Self::AllocateProducerIds),
             73 => Some(Self::AssignReplicasToDirs),
+            74 => Some(Self::ListClientMetricsResources),
             75 => Some(Self::DescribeTopicPartitions),
             _ => None,
         }
@@ -451,6 +456,7 @@ pub const SUPPORTED_APIS: &[(ApiKey, i16, i16)] = &[
     (ApiKey::ListTransactions, 0, 2),
     (ApiKey::AllocateProducerIds, 0, 0),
     (ApiKey::AssignReplicasToDirs, 0, 0),
+    (ApiKey::ListClientMetricsResources, 0, 0),
     (ApiKey::DescribeTopicPartitions, 0, 0),
 ];
 
@@ -595,5 +601,17 @@ mod tests {
             *k == ApiKey::AssignReplicasToDirs && *min == 0 && *max == 0
         }));
         assert_eq!(ApiKey::from_i16(73), Some(ApiKey::AssignReplicasToDirs));
+    }
+
+    #[test]
+    fn supported_apis_includes_list_client_metrics_resources_74() {
+        assert!(SUPPORTED_APIS.len() >= 53);
+        assert!(SUPPORTED_APIS.iter().any(|(k, min, max)| {
+            *k == ApiKey::ListClientMetricsResources && *min == 0 && *max == 0
+        }));
+        assert_eq!(
+            ApiKey::from_i16(74),
+            Some(ApiKey::ListClientMetricsResources)
+        );
     }
 }

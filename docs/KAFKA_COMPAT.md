@@ -74,6 +74,7 @@ From `SUPPORTED_APIS` in `crates/volant-broker/src/kafka/mod.rs`:
 | 66 | ListTransactions | 0–2 | Pattern = simple `*` glob |
 | 67 | AllocateProducerIds | 0 | Always flex; block of 1000 from `next_producer_id`; BrokerEpoch ignored; not KRaft; controller-only in cluster (**41**); Cluster ALTER (v0.246) |
 | 73 | AssignReplicasToDirs | 0 | Always flex; parse and reject every assignment (**42**); single `data_dir`; files unmoved; no DirectoryId storage; not KRaft; Cluster ALTER; controller not required (v0.251) |
+| 74 | ListClientMetricsResources | 0 | Always flex; no client-metrics store; empty resources; Cluster DESCRIBE (v0.252) |
 | 75 | DescribeTopicPartitions | 0 | Always flex; wraps Metadata (same leaders/ISR/epochs/TopicId); no ELR; simple `responsePartitionLimit` truncate; cursor start if topic is in the set else ignored (v0.237) |
 
 ## Wire evolution (summary)
