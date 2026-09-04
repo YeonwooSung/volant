@@ -131,6 +131,17 @@ class TestReassignPartitionsClient(unittest.TestCase):
         self.assertEqual(srv.got_replicas, [])
         self.assertEqual(got, 3)
 
+    def test_reassign_partitions_all_encodes_sentinel(self) -> None:
+        with _ReassignPartitionsServer(generation=3) as srv:
+            with Client(srv.addr, timeout=5.0) as c:
+                got = c.reassign_partitions_all("events", [1, 2])
+        if srv.error is not None:
+            raise srv.error
+        self.assertEqual(srv.got_topic, "events")
+        self.assertEqual(srv.got_partition, REASSIGN_ALL_PARTITIONS)
+        self.assertEqual(srv.got_replicas, [1, 2])
+        self.assertEqual(got, 3)
+
     def test_nonzero_error_code_raises(self) -> None:
         with _ReassignPartitionsServer(error_code=2, generation=0) as srv:
             with Client(srv.addr, timeout=5.0) as c:

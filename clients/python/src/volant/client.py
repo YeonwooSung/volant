@@ -1032,6 +1032,15 @@ class Client:
         )
         return resp.generation
 
+    def reassign_partitions_all(self, topic: str, replicas: list[int]) -> int:
+        """Reassign every partition of ``topic``.
+
+        Same as ``reassign_partitions(topic, replicas)`` /
+        ``reassign_partitions(topic, replicas, None)``.
+        Error 14 / transient retry inherit from ``reassign_partitions``.
+        """
+        return self.reassign_partitions(topic, replicas)
+
     def produce(
         self,
         topic: str,
