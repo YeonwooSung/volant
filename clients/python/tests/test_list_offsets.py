@@ -212,6 +212,29 @@ class TestListOffsetsClient(unittest.TestCase):
         )
         self.assertEqual(also, got)
 
+    def test_list_offsets_all_records_empty_partitions(self) -> None:
+        entries = [
+            WireListing(partition=0, earliest=0, latest=10),
+            WireListing(partition=1, earliest=2, latest=5),
+        ]
+        with _ListOffsetsServer(entries=entries) as srv:
+            with Client(srv.addr, timeout=5.0) as c:
+                got = c.list_offsets_all("events")
+                same = c.list_offsets("events")
+        if srv.error is not None:
+            raise srv.error
+        self.assertEqual(srv.got_topic, "events")
+        self.assertEqual(srv.got_partitions, [])
+        self.assertEqual(srv.seen_partitions, [[], []])
+        self.assertEqual(
+            got,
+            [
+                OffsetListing(partition=0, earliest=0, latest=10),
+                OffsetListing(partition=1, earliest=2, latest=5),
+            ],
+        )
+        self.assertEqual(same, got)
+
     def test_explicit_partitions_roundtrip(self) -> None:
         entries = [WireListing(partition=0, earliest=0, latest=10)]
         with _ListOffsetsServer(entries=entries) as srv:
