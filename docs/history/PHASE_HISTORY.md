@@ -466,6 +466,11 @@ docs for day-to-day reading: [ops](../ops.md), [consistency](../consistency.md),
 | v0.267 | ✅ | Kafka FetchSnapshot key 59 reject | [V267_SPEC.md](../V267_SPEC.md) |
 | v0.268 | ✅ | Kafka ControllerRegistration key 70 reject | [V268_SPEC.md](../V268_SPEC.md) |
 | v0.269 | ✅ | Kafka ConsumerGroupHeartbeat key 68 reject | [V269_SPEC.md](../V269_SPEC.md) |
+| v0.270 | ✅ | Kafka Vote key 52 reject | [V270_SPEC.md](../V270_SPEC.md) |
+| v0.271 | ✅ | Kafka AddRaftVoter key 80 reject | [V271_SPEC.md](../V271_SPEC.md) |
+| v0.272 | ✅ | Kafka RemoveRaftVoter key 81 reject | [V272_SPEC.md](../V272_SPEC.md) |
+| v0.273 | ✅ | Kafka UpdateRaftVoter key 82 reject | [V273_SPEC.md](../V273_SPEC.md) |
+| v0.274 | ✅ | Kafka UnregisterController key 94 reject | [V274_SPEC.md](../V274_SPEC.md) |
 
 ---
 
