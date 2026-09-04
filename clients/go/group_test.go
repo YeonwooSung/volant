@@ -25,6 +25,7 @@ type fakeGroupBroker struct {
 	generation    uint32
 	assignment    []codec.Assignment
 	revoked       []codec.Assignment
+	joinMembers   []string
 	hbCodes       []uint16
 	offsets       map[tpKey]uint64
 	records       map[tpKey][]codec.FetchRecord
@@ -60,6 +61,12 @@ func (s *fakeGroupBroker) setAssignment(asgn, revoked []codec.Assignment) {
 	defer s.mu.Unlock()
 	s.assignment = append([]codec.Assignment(nil), asgn...)
 	s.revoked = append([]codec.Assignment(nil), revoked...)
+}
+
+func (s *fakeGroupBroker) setJoinMembers(members []string) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.joinMembers = append([]string(nil), members...)
 }
 
 func (s *fakeGroupBroker) pushHeartbeat(code uint16) {
@@ -190,6 +197,7 @@ func (s *fakeGroupBroker) handle(f *frame.Frame) ([]byte, error) {
 			MemberID:   member,
 			Assignment: append([]codec.Assignment(nil), s.assignment...),
 			Revoked:    append([]codec.Assignment(nil), s.revoked...),
+			Members:    append([]string(nil), s.joinMembers...),
 		})
 	case codec.OpHeartbeat:
 		req, e := codec.DecodeHeartbeatRequest(f.Payload)

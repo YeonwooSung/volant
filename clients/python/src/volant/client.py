@@ -154,12 +154,14 @@ class JoinGroupResult:
 
     Unpacks as ``(member_id, generation, assignment)`` to match the advertised
     client API. ``revoked`` is the Phase 17 cooperative trailer (may be empty).
+    ``members`` is the v0.211 live member-id trailer (empty on legacy payloads).
     """
 
     member_id: str
     generation: int
     assignment: list[Assignment]
     revoked: list[Assignment] = field(default_factory=list)
+    members: list[str] = field(default_factory=list)
 
     def __iter__(self):
         yield self.member_id
@@ -2027,6 +2029,7 @@ class Client:
                 generation=resp.generation,
                 assignment=list(resp.assignment),
                 revoked=list(resp.revoked),
+                members=list(resp.members),
             )
         max_retries = max(0, int(self.max_retries))
         max_attempts = 1 + self.max_redirects
@@ -2078,6 +2081,7 @@ class Client:
                 generation=resp.generation,
                 assignment=list(resp.assignment),
                 revoked=list(resp.revoked),
+                members=list(resp.members),
             )
 
     def heartbeat(self, group: str, member_id: str, generation: int) -> int:

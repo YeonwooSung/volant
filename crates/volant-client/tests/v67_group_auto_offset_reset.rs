@@ -166,6 +166,7 @@ async fn serve_stub(
                                 member_id: "m1".into(),
                                 assignment: assignment.lock().expect("assignment").clone(),
                                 revoked: vec![],
+                                members: vec![],
                             }
                         }
                         Request::OffsetFetch { .. } => {

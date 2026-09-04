@@ -180,6 +180,25 @@ class RangeAssignorTest {
     }
 
     @Test
+    void groupConsumerRangeJoinMembersSkipsDescribe() {
+        for (String member : List.of("m-a", "m-b")) {
+            GroupConsumerTest.FakeBackend fake = new GroupConsumerTest.FakeBackend();
+            fake.nextJoin = new JoinGroupResult(
+                    member, 1, assign("t", 0), Collections.emptyList(), List.of("m-a", "m-b"));
+            fake.metadata = topicMeta("t", 4);
+            fake.describeGroupError = new BrokerException(2, "", "describe_group");
+            GroupConsumer g = GroupConsumer.joinWithAssignor(fake, "g", List.of("t"), 10_000, "range");
+            if (member.equals("m-a")) {
+                assertAssigns(g.assignment(), "t", 0, 1);
+            } else {
+                assertAssigns(g.assignment(), "t", 2, 3);
+            }
+            assertEquals(0, fake.describeGroupCount);
+            g.close();
+        }
+    }
+
+    @Test
     void groupConsumerUnknownAssignorThrows() {
         GroupConsumerTest.FakeBackend fake = new GroupConsumerTest.FakeBackend();
         IllegalArgumentException ex = assertThrows(

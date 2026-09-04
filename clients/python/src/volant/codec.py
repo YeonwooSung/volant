@@ -466,6 +466,7 @@ class JoinGroupResponse:
     member_id: str
     assignment: list[Assignment] = field(default_factory=list)
     revoked: list[Assignment] = field(default_factory=list)
+    members: list[str] = field(default_factory=list)
 
 
 @dataclass
@@ -1446,6 +1447,11 @@ def encode_join_group_response(resp: JoinGroupResponse) -> bytes:
     _put_assignments(w, resp.assignment)
     # Phase 17 trailing revoked list (always written by current encoders).
     _put_assignments(w, resp.revoked)
+    # v0.211 trailing live member ids (always written by current encoders).
+    members = list(resp.members) if resp.members else []
+    w.u32_le(len(members))
+    for mid in members:
+        _put_string(w, mid)
     return w.finish()
 
 
@@ -1457,12 +1463,18 @@ def decode_join_group_response(payload: bytes) -> JoinGroupResponse:
     assignment = _get_assignments(r)
     # Phase 17 trailing revoked list; legacy payloads omit it.
     revoked = _get_assignments(r) if r.remaining() >= 4 else []
+    # v0.211 trailing live member ids; legacy payloads omit it.
+    members: list[str] = []
+    if r.remaining() >= 4:
+        n = r.u32_le()
+        members = [_get_string(r) for _ in range(n)]
     return JoinGroupResponse(
         error_code=error_code,
         generation=generation,
         member_id=member_id,
         assignment=assignment,
         revoked=revoked,
+        members=members,
     )
 
 

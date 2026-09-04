@@ -16,7 +16,9 @@
 //! v0.73 adds opt-in [`GroupConsumer::join_with_assignor`] (`"range"`)
 //! which replaces the fetch set from DescribeGroup members via
 //! `range_assign_multi`. Default remains broker JoinGroup assignment
-//! (v0.208 peeks SyncGroup first).
+//! (v0.208 peeks SyncGroup first). v0.211 prefers live member ids on
+//! the JoinGroup trailer and falls back to DescribeGroup when that
+//! list is empty.
 //! v0.76 adds opt-in [`GroupConsumer::join_with_fetch_knobs`] so
 //! `poll` can set Fetch `max_messages` / `max_bytes` (default **100 /
 //! 4 MiB**; `0` clamps to those). [`Client::fetch_opts`] exposes
@@ -217,6 +219,8 @@
 //! v0.210 generates a UUID `member_id` when both JoinGroup
 //! `member_id` and `group_instance_id` are empty, before the first
 //! send, so the v0.205 retry guard sees a non-empty id.
+//! v0.211 prefers JoinGroup `members` trailer for range assignor and
+//! falls back to DescribeGroup when that list is empty.
 
 #![deny(missing_docs)]
 

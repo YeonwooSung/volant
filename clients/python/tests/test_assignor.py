@@ -311,6 +311,27 @@ class TestGroupConsumerRangeAssignor(unittest.TestCase):
         self.assertEqual(c.describes, ["g"])
         g.close()
 
+    def test_range_join_members_skips_describe(self) -> None:
+        for member, want in (
+            ("m-a", [("t", 0), ("t", 1)]),
+            ("m-b", [("t", 2), ("t", 3)]),
+        ):
+            c = FakeClient()
+            c.join_queue.append(
+                JoinGroupResult(
+                    member_id=member,
+                    generation=1,
+                    assignment=[Assignment(topic="t", partition=0)],
+                    members=["m-a", "m-b"],
+                )
+            )
+            c.meta = MetadataResponse(brokers=[], topics=[_topic("t", 4)])
+            c.describe_error = BrokerError(2, op="describe_group")
+            g = GroupConsumer.join(c, "g", ["t"], assignor="range")
+            self.assertEqual(g.assignment, want)
+            self.assertEqual(c.describes, [])
+            g.close()
+
     def test_unknown_assignor_raises(self) -> None:
         c = FakeClient()
         with self.assertRaises(ValueError) as ctx:

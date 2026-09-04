@@ -394,6 +394,7 @@ public final class Codec {
         public final String memberId;
         public final List<Assignment> assignment;
         public final List<Assignment> revoked;
+        public final List<String> members;
 
         public JoinGroupResponse(
                 int errorCode,
@@ -401,6 +402,16 @@ public final class Codec {
                 String memberId,
                 List<Assignment> assignment,
                 List<Assignment> revoked) {
+            this(errorCode, generation, memberId, assignment, revoked, Collections.emptyList());
+        }
+
+        public JoinGroupResponse(
+                int errorCode,
+                long generation,
+                String memberId,
+                List<Assignment> assignment,
+                List<Assignment> revoked,
+                List<String> members) {
             this.errorCode = errorCode;
             this.generation = generation;
             this.memberId = memberId;
@@ -410,6 +421,9 @@ public final class Codec {
             this.revoked = revoked == null
                     ? Collections.emptyList()
                     : Collections.unmodifiableList(new ArrayList<>(revoked));
+            this.members = members == null
+                    ? Collections.emptyList()
+                    : Collections.unmodifiableList(new ArrayList<>(members));
         }
     }
 
@@ -1667,6 +1681,12 @@ public final class Codec {
         putAssignments(w, resp.assignment);
         // Phase 17 trailing revoked list (always written by current encoders).
         putAssignments(w, resp.revoked);
+        // v0.211 trailing live member ids (always written by current encoders).
+        List<String> members = resp.members == null ? Collections.emptyList() : resp.members;
+        w.u32(members.size());
+        for (String id : members) {
+            putString(w, id);
+        }
         return w.finish();
     }
 
@@ -1677,7 +1697,15 @@ public final class Codec {
         String memberId = getString(r);
         List<Assignment> assignment = getAssignments(r);
         List<Assignment> revoked = r.remaining() >= 4 ? getAssignments(r) : Collections.emptyList();
-        return new JoinGroupResponse(errorCode, generation, memberId, assignment, revoked);
+        List<String> members = Collections.emptyList();
+        if (r.remaining() >= 4) {
+            long n = r.u32();
+            members = new ArrayList<>();
+            for (int i = 0; i < n; i++) {
+                members.add(getString(r));
+            }
+        }
+        return new JoinGroupResponse(errorCode, generation, memberId, assignment, revoked, members);
     }
 
     public static byte[] encodeHeartbeatRequest(HeartbeatRequest req) {

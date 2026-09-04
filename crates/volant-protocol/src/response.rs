@@ -513,6 +513,10 @@ pub enum Response {
         /// Partitions this member lost since its prior assignment (Phase 17).
         /// Empty when unknown or none revoked. Legacy payloads omit the trailer.
         revoked: Vec<Assignment>,
+        /// Live member ids at this generation (v0.211). Includes the joiner.
+        /// Empty when omitted (legacy payloads). Range assignor falls back
+        /// to DescribeGroup when this list is empty.
+        members: Vec<String>,
     },
     /// Heartbeat result.
     Heartbeat {

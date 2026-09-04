@@ -780,6 +780,7 @@ func TestJoinGroupResponsePayloadRS(t *testing.T) {
 			{Topic: "events", Partition: 1},
 		},
 		Revoked: []Assignment{{Topic: "events", Partition: 2}},
+		Members: []string{"m-a", "uuid-1"},
 	}
 	raw, err := EncodeJoinGroupResponse(resp)
 	if err != nil {
@@ -797,7 +798,10 @@ func TestJoinGroupResponsePayloadRS(t *testing.T) {
 			"01000000"+
 			"01000000"+
 			"06006576656e7473"+
-			"02000000",
+			"02000000"+
+			"02000000"+
+			"03006d2d61"+
+			"0600757569642d31",
 	)
 	if !bytes.Equal(raw, expected) {
 		t.Fatalf("encode:\n got %x\nwant %x", raw, expected)
@@ -811,6 +815,9 @@ func TestJoinGroupResponsePayloadRS(t *testing.T) {
 	}
 	if decoded.Assignment[1].Partition != 1 || decoded.Revoked[0].Partition != 2 {
 		t.Fatalf("assignment/revoked %+v", decoded)
+	}
+	if len(decoded.Members) != 2 || decoded.Members[0] != "m-a" || decoded.Members[1] != "uuid-1" {
+		t.Fatalf("members %+v", decoded.Members)
 	}
 	got, err := DecodeResponse(OpJoinGroup, raw)
 	if err != nil {
@@ -835,6 +842,23 @@ func TestJoinGroupResponseLegacyWithoutRevoked(t *testing.T) {
 	}
 	if len(decoded.Revoked) != 0 {
 		t.Fatalf("revoked %+v", decoded.Revoked)
+	}
+	if len(decoded.Members) != 0 {
+		t.Fatalf("members %+v", decoded.Members)
+	}
+}
+
+func TestJoinGroupResponseLegacyWithoutMembers(t *testing.T) {
+	raw := mustHex(t, "0000"+"01000000"+"0600757569642d31"+"01000000"+"06006576656e7473"+"00000000"+"01000000"+"06006576656e7473"+"02000000")
+	decoded, err := DecodeJoinGroupResponse(raw)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(decoded.Revoked) != 1 || decoded.Revoked[0].Partition != 2 {
+		t.Fatalf("revoked %+v", decoded.Revoked)
+	}
+	if len(decoded.Members) != 0 {
+		t.Fatalf("members %+v", decoded.Members)
 	}
 }
 

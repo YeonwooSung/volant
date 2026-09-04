@@ -860,6 +860,7 @@ async fn handle_request(broker: &Arc<Broker>, req: Request) -> Result<Response> 
                     .into_iter()
                     .map(|(topic, partition)| Assignment { topic, partition })
                     .collect(),
+                members: result.members,
             })
         }
         Request::Heartbeat {

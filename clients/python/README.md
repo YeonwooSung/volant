@@ -191,6 +191,7 @@ algorithm. `GroupConsumer.join(..., assignor="range")` replaces the
 fetch set with a local range over **DescribeGroup** members (still no
 SyncGroup; describe failure falls back to solo). Default
 `assignor="broker"` keeps the broker assignment as SoT.
+JoinGroup may carry a live member-id trailer so range can skip DescribeGroup (empty trailer keeps the fallback).
 
 Produce, Fetch, and DeleteRecords follow `NotLeaderForPartition`
 (error 13) by default: Metadata, reconnect to the partition leader,
