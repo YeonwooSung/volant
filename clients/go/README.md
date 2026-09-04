@@ -257,6 +257,9 @@ positions or 0, poll = heartbeat + fetch assigned, commit with
 member+generation, rejoin on error 9, honor revoked).
 After a successful join, JoinGroupConsumer confirms the assignment
 via SyncGroup peek (v0.207; empty or error keeps JoinGroup assignment).
+JoinGroupConsumer retries Join on generation-fence error 9 with `SetMaxRetries` /
+`SetRetryBackoff` (default 0 extra attempts; concurrent joins need
+`SetMaxRetries` > 0).
 `JoinGroupConsumerStatic` sends Phase 12 `group_instance_id` (empty =
 dynamic) and resends it on rejoin. `Close` leaves the group and does
 not close the `Client`. `Leave` is an alias for `Close` (v0.190).

@@ -207,6 +207,9 @@ assignor overloads.
 member+generation, and rejoins on heartbeat error 9.
 After a successful join, GroupConsumer confirms the assignment via
 SyncGroup peek (v0.207; empty or error keeps JoinGroup assignment).
+GroupConsumer retries Join on generation-fence error 9 with `setMaxRetries` /
+`setRetryBackoffMs` (default 0 extra attempts; concurrent joins need
+`setMaxRetries` > 0).
 `joinStatic` sends Phase 12 `group_instance_id` (empty = dynamic) and
 resends it on rejoin.
 `RangeAssignor.rangeAssign` / `rangeAssignMulti` match the broker range

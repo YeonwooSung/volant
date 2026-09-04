@@ -322,8 +322,37 @@ func joinGroupConsumer(c *Client, group string, topics []string, sessionTimeoutM
 
 func (g *GroupConsumer) doJoin() error {
 	previous := copyAssignment(g.assignment)
-	result, err := g.client.joinGroup(g.groupID, g.memberID, g.topics, int(g.sessionTimeoutMs), g.groupInstanceID)
-	if err != nil {
+	// v0.220: retry Join on generation-fence 9 only. Default
+	// maxRetries=0 (first 9 surfaces). 10/11 stay on the existing
+	// heartbeat/poll rejoin path. Do not bump heartbeatCount.
+	maxRetries := 0
+	var backoff time.Duration
+	if g.client != nil {
+		maxRetries = g.client.MaxRetries()
+		if maxRetries < 0 {
+			maxRetries = 0
+		}
+		backoff = g.client.RetryBackoff()
+		if backoff < 0 {
+			backoff = 0
+		}
+	}
+	var result JoinGroupResult
+	retryAttempt := 0
+	for {
+		var err error
+		result, err = g.client.joinGroup(g.groupID, g.memberID, g.topics, int(g.sessionTimeoutMs), g.groupInstanceID)
+		if err == nil {
+			break
+		}
+		var be *codec.BrokerError
+		if errors.As(err, &be) && be != nil && be.Code == RebalanceInProgress && retryAttempt < maxRetries {
+			retryAttempt++
+			if backoff > 0 {
+				time.Sleep(backoff)
+			}
+			continue
+		}
 		return err
 	}
 	g.memberID = result.MemberID

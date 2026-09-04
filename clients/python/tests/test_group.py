@@ -33,7 +33,10 @@ class FakeClient:
         self.sync_assignment: list[Assignment] | None = None
         self.sync_error: BaseException | None = None
 
+        self.max_retries = 0
+        self.retry_backoff_ms = 0
         self.join_queue: list[JoinGroupResult] = []
+        self.join_errors: list[BaseException] = []
         self.heartbeat_codes: list[int] = []
         self.fetch_error: BrokerError | None = None
         self.fetch_error_once: BrokerError | None = None
@@ -63,6 +66,8 @@ class FakeClient:
                     "group_instance_id": group_instance_id,
                 }
             )
+            if self.join_errors:
+                raise self.join_errors.pop(0)
             if self.join_queue:
                 return self.join_queue.pop(0)
         return JoinGroupResult(
@@ -241,6 +246,31 @@ class TestGroupConsumer(unittest.TestCase):
         self.assertEqual(g.positions, {("t", 0): 5})
         self.assertEqual(c.joins[0]["member_id"], "")
         self.assertEqual(c.offset_fetches, [("g", "t")])
+
+    def test_join_retries_error_9_then_ok(self) -> None:
+        c = FakeClient()
+        c.max_retries = 1
+        c.retry_backoff_ms = 0
+        c.join_errors.append(BrokerError(9, op="join_group"))
+        c.join_queue.append(_join([("t", 0)]))
+        c.committed[("t", 0)] = 5
+        g = _gc(c, group="g", topics=["t"])
+        self.assertEqual(len(c.joins), 2)
+        self.assertEqual(c.syncs, [("g", "m1", 1)])
+        self.assertEqual(g.assignment, [("t", 0)])
+        self.assertEqual(g.positions, {("t", 0): 5})
+        self.assertEqual(g.heartbeat_count, 0)
+        g.close()
+
+    def test_join_error_9_surfaces_when_max_retries_zero(self) -> None:
+        c = FakeClient()
+        c.join_errors.append(BrokerError(9, op="join_group"))
+        c.join_queue.append(_join([("t", 0)]))
+        with self.assertRaises(BrokerError) as ctx:
+            _gc(c, group="g", topics=["t"])
+        self.assertEqual(ctx.exception.code, 9)
+        self.assertEqual(len(c.joins), 1)
+        self.assertEqual(c.syncs, [])
 
     def test_join_issues_sync_group(self) -> None:
         c = FakeClient()
@@ -862,7 +892,7 @@ class _JoinGroupStub:
 
 
 class TestJoinGroupRetry(unittest.TestCase):
-    """Client join_group retry guard (v0.205). GroupConsumer has no second loop."""
+    """Client join_group retry guard (v0.205). Error 9 is not in the transient set."""
 
     def test_empty_member_and_instance_retries_timeout_then_ok(self) -> None:
         from volant.client import Client
