@@ -716,6 +716,26 @@ mod tests {
     }
 
     #[test]
+    fn sync_group_peek_after_join() {
+        let dir = temp_dir();
+        let coord = GroupCoordinator::new(&dir).unwrap();
+        let j = coord
+            .join("g", "", 10_000, vec!["t".into()], "", counts)
+            .unwrap();
+        let hb = coord.heartbeat("g", &j.member_id, j.generation);
+        assert_eq!(hb.error_code, 0);
+        assert_eq!(
+            coord.assignment("g", &j.member_id).as_ref(),
+            Some(&j.assignment)
+        );
+        let unknown = coord.heartbeat("g", "nobody", j.generation);
+        assert_eq!(unknown.error_code, ErrorCode::UnknownMemberId as u16);
+        let mismatch = coord.heartbeat("g", &j.member_id, j.generation + 1);
+        assert_eq!(mismatch.error_code, ErrorCode::RebalanceInProgress as u16);
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
     fn topics_change_returns_revoked_partitions() {
         let dir = temp_dir();
         let coord = GroupCoordinator::new(&dir).unwrap();

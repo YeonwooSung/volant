@@ -118,6 +118,8 @@ pub enum ResponseOpcode {
     OpenraftInstallSnapshot = 113,
     /// Reassign partitions result (v0.18).
     ReassignPartitions = 115,
+    /// SyncGroup peek/confirm result (Phase 155).
+    SyncGroup = 117,
     /// Error response.
     Error = 0xFFFF,
 }
@@ -182,6 +184,7 @@ impl ResponseOpcode {
             111 => Self::OpenraftVote,
             113 => Self::OpenraftInstallSnapshot,
             115 => Self::ReassignPartitions,
+            117 => Self::SyncGroup,
             0xFFFF => Self::Error,
             _ => return None,
         })
@@ -861,6 +864,13 @@ pub enum Response {
         /// Assignment generation after apply (`0` on error).
         generation: u32,
     },
+    /// SyncGroup peek/confirm result (Phase 155).
+    SyncGroup {
+        /// 0 = ok; 9 = generation mismatch; 10 = unknown member.
+        error_code: u16,
+        /// This member's current assignment (same encoding as JoinGroup).
+        assignment: Vec<Assignment>,
+    },
     /// Error response.
     Error {
         /// Error code.
@@ -956,6 +966,7 @@ impl Response {
             Self::OpenraftVote { .. } => ResponseOpcode::OpenraftVote as u16,
             Self::OpenraftInstallSnapshot { .. } => ResponseOpcode::OpenraftInstallSnapshot as u16,
             Self::ReassignPartitions { .. } => ResponseOpcode::ReassignPartitions as u16,
+            Self::SyncGroup { .. } => ResponseOpcode::SyncGroup as u16,
             Self::Error { .. } => ResponseOpcode::Error as u16,
         }
     }

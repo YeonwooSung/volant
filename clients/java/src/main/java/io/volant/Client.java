@@ -2345,6 +2345,61 @@ public final class Client implements AutoCloseable {
     }
 
     /**
+     * SyncGroup peek/confirm (native opcode 116/117). Returns this member's
+     * current assignment (already computed on Join). Assignment bytes are
+     * empty; the broker ignores them. Not Kafka CompletingRebalance.
+     * Transient broker/transport errors retry up to {@code maxRetries}
+     * extra times (default 0). Error 14 follows {@code maxRedirects}.
+     * Rebalance codes 9 / 10 / 11 are not retried.
+     */
+    public List<Codec.Assignment> syncGroup(String group, String memberId, int generation) {
+        byte[] payload = Codec.encodeSyncGroupRequest(
+                new Codec.SyncGroupRequest(group, memberId, generation, new byte[0]));
+        int retryAttempt = 0;
+        int redirectAttempt = 0;
+        int maxAttempts = 1 + maxRedirects;
+        while (true) {
+            Object decoded;
+            try {
+                decoded = roundTrip(Codec.OP_SYNC_GROUP, payload);
+            } catch (BrokerException e) {
+                if (maybeRedirectController(e.code, e.message, redirectAttempt + 1, maxAttempts)) {
+                    redirectAttempt++;
+                    continue;
+                }
+                if (isTransientBroker(e.code) && retryAttempt < maxRetries) {
+                    retryAttempt++;
+                    sleepProduceRetry();
+                    continue;
+                }
+                throw e;
+            } catch (RuntimeException e) {
+                if (isTransientTransport(e) && retryAttempt < maxRetries) {
+                    retryAttempt++;
+                    sleepProduceRetry();
+                    continue;
+                }
+                throw e;
+            }
+            if (!(decoded instanceof Codec.SyncGroupResponse)) {
+                throw new ProtocolException("unexpected response for sync_group: " + typeName(decoded));
+            }
+            Codec.SyncGroupResponse resp = (Codec.SyncGroupResponse) decoded;
+            if (maybeRedirectController(resp.errorCode, null, redirectAttempt + 1, maxAttempts)) {
+                redirectAttempt++;
+                continue;
+            }
+            if (isTransientBroker(resp.errorCode) && retryAttempt < maxRetries) {
+                retryAttempt++;
+                sleepProduceRetry();
+                continue;
+            }
+            check(resp.errorCode, "sync_group");
+            return resp.assignment;
+        }
+    }
+
+    /**
      * Describe a live consumer group (native opcode 34/35).
      * Error 2 (NotFound, no live members) is a {@link BrokerException}.
      * Transient broker/transport errors retry up to {@code maxRetries}

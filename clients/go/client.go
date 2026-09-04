@@ -2596,6 +2596,70 @@ func (c *Client) Heartbeat(group, memberID string, generation uint32) error {
 	}
 }
 
+// SyncGroup peeks this member's current assignment (native opcode 116/117).
+// Assignment bytes are empty; the broker ignores them. Not Kafka
+// CompletingRebalance. Transient broker/transport errors retry up to
+// maxRetries extra times (default 0). Error 14 follows maxRedirects.
+// Rebalance codes 9 / 10 / 11 are not retried.
+func (c *Client) SyncGroup(group, memberID string, generation uint32) ([]Assignment, error) {
+	payload, err := codec.EncodeSyncGroupRequest(codec.SyncGroupRequest{
+		GroupID:         group,
+		MemberID:        memberID,
+		Generation:      generation,
+		AssignmentBytes: nil,
+	})
+	if err != nil {
+		return nil, err
+	}
+	maxRetries := c.maxRetries
+	if maxRetries < 0 {
+		maxRetries = 0
+	}
+	maxAttempts := 1 + c.maxRedirects
+	retryAttempt := 0
+	redirectAttempt := 0
+	for {
+		decoded, err := c.roundTrip(codec.OpSyncGroup, payload)
+		if err != nil {
+			ok, rerr := c.maybeRedirectController(err, redirectAttempt+1, maxAttempts)
+			if rerr != nil {
+				return nil, rerr
+			}
+			if ok {
+				redirectAttempt++
+				continue
+			}
+			if isTransientProduceErr(err) && retryAttempt < maxRetries {
+				retryAttempt++
+				c.sleepProduceRetry()
+				continue
+			}
+			return nil, err
+		}
+		resp, ok := decoded.(codec.SyncGroupResponse)
+		if !ok {
+			return nil, &frame.ProtocolError{Msg: fmt.Sprintf("unexpected response for sync_group: %T", decoded)}
+		}
+		ok, rerr := c.maybeRedirectControllerCode(resp.ErrorCode, "", redirectAttempt+1, maxAttempts)
+		if rerr != nil {
+			return nil, rerr
+		}
+		if ok {
+			redirectAttempt++
+			continue
+		}
+		if isTransientBroker(resp.ErrorCode) && retryAttempt < maxRetries {
+			retryAttempt++
+			c.sleepProduceRetry()
+			continue
+		}
+		if err := check(resp.ErrorCode, "sync_group"); err != nil {
+			return nil, err
+		}
+		return resp.Assignment, nil
+	}
+}
+
 // DescribeGroup describes a live consumer group (native opcode 34/35).
 // Error 2 (NotFound, no live members) is a BrokerError. Transient
 // broker/transport errors retry up to maxRetries extra times (default

@@ -777,6 +777,17 @@ pub fn encode_request(req: &Request) -> Result<Bytes> {
                 dst.put_u32_le(*id);
             }
         }
+        Request::SyncGroup {
+            group_id,
+            member_id,
+            generation,
+            assignment_bytes,
+        } => {
+            put_string(&mut dst, group_id)?;
+            put_string(&mut dst, member_id)?;
+            dst.put_u32_le(*generation);
+            put_bytes(&mut dst, assignment_bytes);
+        }
     }
     finish_payload(dst)
 }
@@ -1575,6 +1586,21 @@ pub fn decode_request(opcode: u16, payload: &[u8]) -> Result<Request> {
                 replicas,
             })
         }
+        RequestOpcode::SyncGroup => {
+            let group_id = get_string(&mut src)?;
+            let member_id = get_string(&mut src)?;
+            if src.remaining() < 4 {
+                return Err(Error::Protocol("truncated sync group generation".into()));
+            }
+            let generation = src.get_u32_le();
+            let assignment_bytes = get_bytes(&mut src)?;
+            Ok(Request::SyncGroup {
+                group_id,
+                member_id,
+                generation,
+                assignment_bytes,
+            })
+        }
     }
 }
 
@@ -2056,6 +2082,17 @@ pub fn encode_response(resp: &Response) -> Result<Bytes> {
         } => {
             dst.put_u16_le(*error_code);
             dst.put_u32_le(*generation);
+        }
+        Response::SyncGroup {
+            error_code,
+            assignment,
+        } => {
+            dst.put_u16_le(*error_code);
+            dst.put_u32_le(assignment.len() as u32);
+            for a in assignment {
+                put_string(&mut dst, &a.topic)?;
+                dst.put_u32_le(a.partition);
+            }
         }
         Response::Error { code, message } => {
             dst.put_u16_le(*code);
@@ -2984,6 +3021,28 @@ pub fn decode_response(opcode: u16, payload: &[u8]) -> Result<Response> {
             Ok(Response::ReassignPartitions {
                 error_code: src.get_u16_le(),
                 generation: src.get_u32_le(),
+            })
+        }
+        ResponseOpcode::SyncGroup => {
+            if src.remaining() < 2 + 4 {
+                return Err(Error::Protocol("truncated sync group header".into()));
+            }
+            let error_code = src.get_u16_le();
+            let assignment_count = src.get_u32_le() as usize;
+            let mut assignment = Vec::with_capacity(assignment_count);
+            for _ in 0..assignment_count {
+                let topic = get_string(&mut src)?;
+                if src.remaining() < 4 {
+                    return Err(Error::Protocol("truncated sync group partition".into()));
+                }
+                assignment.push(Assignment {
+                    topic,
+                    partition: src.get_u32_le(),
+                });
+            }
+            Ok(Response::SyncGroup {
+                error_code,
+                assignment,
             })
         }
         ResponseOpcode::Error => {
@@ -4334,6 +4393,8 @@ mod tests {
             vec![0x01],
             1u16.to_le_bytes().to_vec(),
             2u16.to_le_bytes().to_vec(),
+            116u16.to_le_bytes().to_vec(),
+            117u16.to_le_bytes().to_vec(),
             {
                 let mut v = 0xFFFFu16.to_le_bytes().to_vec();
                 v.extend_from_slice(&[0u8; 8]);
@@ -5119,6 +5180,57 @@ mod tests {
         );
         assert!(decode_request(RequestOpcode::ReassignPartitions as u16, &[]).is_err());
         assert!(decode_response(ResponseOpcode::ReassignPartitions as u16, &[]).is_err());
+    }
+
+    #[test]
+    fn v206_sync_group_opcodes_roundtrip() {
+        let req = Request::SyncGroup {
+            group_id: "g1".into(),
+            member_id: "m1".into(),
+            generation: 3,
+            assignment_bytes: Bytes::new(),
+        };
+        let b = encode_request(&req).unwrap();
+        assert_eq!(req.opcode(), RequestOpcode::SyncGroup as u16);
+        assert_eq!(
+            decode_request(RequestOpcode::SyncGroup as u16, &b).unwrap(),
+            req
+        );
+        let with_bytes = Request::SyncGroup {
+            group_id: "g1".into(),
+            member_id: "m1".into(),
+            generation: 3,
+            assignment_bytes: Bytes::from_static(b"ignored"),
+        };
+        let wb = encode_request(&with_bytes).unwrap();
+        assert_eq!(
+            decode_request(RequestOpcode::SyncGroup as u16, &wb).unwrap(),
+            with_bytes
+        );
+        let resp = Response::SyncGroup {
+            error_code: 0,
+            assignment: vec![Assignment {
+                topic: "events".into(),
+                partition: 2,
+            }],
+        };
+        let rb = encode_response(&resp).unwrap();
+        assert_eq!(resp.opcode(), ResponseOpcode::SyncGroup as u16);
+        assert_eq!(
+            decode_response(ResponseOpcode::SyncGroup as u16, &rb).unwrap(),
+            resp
+        );
+        let empty = Response::SyncGroup {
+            error_code: 10,
+            assignment: vec![],
+        };
+        let eb = encode_response(&empty).unwrap();
+        assert_eq!(
+            decode_response(ResponseOpcode::SyncGroup as u16, &eb).unwrap(),
+            empty
+        );
+        assert!(decode_request(RequestOpcode::SyncGroup as u16, &[]).is_err());
+        assert!(decode_response(ResponseOpcode::SyncGroup as u16, &[]).is_err());
     }
 
     #[test]

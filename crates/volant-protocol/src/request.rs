@@ -120,6 +120,8 @@ pub enum RequestOpcode {
     OpenraftInstallSnapshot = 112,
     /// Admin: reassign topic partition replicas (v0.18).
     ReassignPartitions = 114,
+    /// SyncGroup peek/confirm (Phase 155). Not Kafka CompletingRebalance.
+    SyncGroup = 116,
 }
 
 impl RequestOpcode {
@@ -182,6 +184,7 @@ impl RequestOpcode {
             110 => Self::OpenraftVote,
             112 => Self::OpenraftInstallSnapshot,
             114 => Self::ReassignPartitions,
+            116 => Self::SyncGroup,
             _ => return None,
         })
     }
@@ -737,6 +740,17 @@ pub enum Request {
         /// Empty → auto-recompute.
         replicas: Vec<u32>,
     },
+    /// SyncGroup peek/confirm (Phase 155). Broker ignores `assignment_bytes`.
+    SyncGroup {
+        /// Consumer group id.
+        group_id: String,
+        /// Member id.
+        member_id: String,
+        /// Current generation.
+        generation: u32,
+        /// Leader assignment bytes (MVP: empty; broker ignores).
+        assignment_bytes: Bytes,
+    },
 }
 
 /// `ReassignPartitions.partition` sentinel: apply to every partition of the topic.
@@ -838,6 +852,7 @@ impl Request {
             Self::OpenraftVote { .. } => RequestOpcode::OpenraftVote as u16,
             Self::OpenraftInstallSnapshot { .. } => RequestOpcode::OpenraftInstallSnapshot as u16,
             Self::ReassignPartitions { .. } => RequestOpcode::ReassignPartitions as u16,
+            Self::SyncGroup { .. } => RequestOpcode::SyncGroup as u16,
         }
     }
 }

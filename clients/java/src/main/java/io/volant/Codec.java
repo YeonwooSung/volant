@@ -76,6 +76,8 @@ public final class Codec {
     public static final int OP_LIST_MEMBERS_RESPONSE = 107;
     public static final int OP_REASSIGN_PARTITIONS = 114;
     public static final int OP_REASSIGN_PARTITIONS_RESPONSE = 115;
+    public static final int OP_SYNC_GROUP = 116;
+    public static final int OP_SYNC_GROUP_RESPONSE = 117;
     public static final int OP_ERROR = 0xFFFF;
 
     /** ReassignPartitions.partition sentinel (u32::MAX): every partition. */
@@ -964,6 +966,32 @@ public final class Codec {
         public ReassignPartitionsResponse(int errorCode, long generation) {
             this.errorCode = errorCode;
             this.generation = generation;
+        }
+    }
+
+    public static final class SyncGroupRequest {
+        public final String groupId;
+        public final String memberId;
+        public final long generation;
+        public final byte[] assignmentBytes;
+
+        public SyncGroupRequest(String groupId, String memberId, long generation, byte[] assignmentBytes) {
+            this.groupId = groupId;
+            this.memberId = memberId;
+            this.generation = generation;
+            this.assignmentBytes = assignmentBytes == null ? new byte[0] : assignmentBytes;
+        }
+    }
+
+    public static final class SyncGroupResponse {
+        public final int errorCode;
+        public final List<Assignment> assignment;
+
+        public SyncGroupResponse(int errorCode, List<Assignment> assignment) {
+            this.errorCode = errorCode;
+            this.assignment = assignment == null
+                    ? Collections.emptyList()
+                    : Collections.unmodifiableList(new ArrayList<>(assignment));
         }
     }
 
@@ -2438,6 +2466,32 @@ public final class Codec {
         return new ReassignPartitionsResponse(errorCode, generation);
     }
 
+    public static byte[] encodeSyncGroupRequest(SyncGroupRequest req) {
+        Writer w = new Writer();
+        putString(w, req.groupId);
+        putString(w, req.memberId);
+        w.u32(req.generation);
+        putBytes(w, req.assignmentBytes);
+        return w.finish();
+    }
+
+    public static SyncGroupRequest decodeSyncGroupRequest(byte[] payload) {
+        Reader r = new Reader(payload);
+        return new SyncGroupRequest(getString(r), getString(r), r.u32(), getBytes(r));
+    }
+
+    public static byte[] encodeSyncGroupResponse(SyncGroupResponse resp) {
+        Writer w = new Writer();
+        w.u16(resp.errorCode);
+        putAssignments(w, resp.assignment);
+        return w.finish();
+    }
+
+    public static SyncGroupResponse decodeSyncGroupResponse(byte[] payload) {
+        Reader r = new Reader(payload);
+        return new SyncGroupResponse(r.u16(), getAssignments(r));
+    }
+
     // --- error opcode ------------------------------------------------------
 
     public static byte[] encodeErrorResponse(ErrorResponse resp) {
@@ -2605,6 +2659,8 @@ public final class Codec {
                 return decodeListMembersResponse(payload);
             case OP_REASSIGN_PARTITIONS_RESPONSE:
                 return decodeReassignPartitionsResponse(payload);
+            case OP_SYNC_GROUP_RESPONSE:
+                return decodeSyncGroupResponse(payload);
             case OP_ERROR:
                 return decodeErrorResponse(payload);
             default:

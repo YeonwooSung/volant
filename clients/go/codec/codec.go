@@ -73,6 +73,8 @@ const (
 	OpListMembersResponse        uint16 = 107
 	OpReassignPartitions         uint16 = 114
 	OpReassignPartitionsResponse uint16 = 115
+	OpSyncGroup                  uint16 = 116
+	OpSyncGroupResponse          uint16 = 117
 	OpError                 uint16 = 0xFFFF
 
 	nullLen = 0xFFFFFFFF
@@ -926,6 +928,22 @@ type ReassignPartitionsRequest struct {
 type ReassignPartitionsResponse struct {
 	ErrorCode  uint16
 	Generation uint32
+}
+
+// SyncGroupRequest is the SyncGroup opcode 116 body (Phase 155).
+// AssignmentBytes is ignored by the broker (MVP: empty).
+type SyncGroupRequest struct {
+	GroupID         string
+	MemberID        string
+	Generation      uint32
+	AssignmentBytes []byte
+}
+
+// SyncGroupResponse is the SyncGroup reply (opcode 117).
+// Assignment uses the same encoding as JoinGroup.
+type SyncGroupResponse struct {
+	ErrorCode  uint16
+	Assignment []Assignment
 }
 
 
@@ -3229,6 +3247,67 @@ func DecodeReassignPartitionsResponse(payload []byte) (ReassignPartitionsRespons
 	return ReassignPartitionsResponse{ErrorCode: code, Generation: gen}, nil
 }
 
+func EncodeSyncGroupRequest(req SyncGroupRequest) ([]byte, error) {
+	w := &writer{}
+	if err := putString(w, req.GroupID); err != nil {
+		return nil, err
+	}
+	if err := putString(w, req.MemberID); err != nil {
+		return nil, err
+	}
+	w.u32(req.Generation)
+	putBytes(w, req.AssignmentBytes)
+	return w.buf, nil
+}
+
+func DecodeSyncGroupRequest(payload []byte) (SyncGroupRequest, error) {
+	r := &reader{data: payload}
+	groupID, err := getString(r)
+	if err != nil {
+		return SyncGroupRequest{}, err
+	}
+	memberID, err := getString(r)
+	if err != nil {
+		return SyncGroupRequest{}, err
+	}
+	gen, err := r.u32()
+	if err != nil {
+		return SyncGroupRequest{}, err
+	}
+	bytes, err := getBytes(r)
+	if err != nil {
+		return SyncGroupRequest{}, err
+	}
+	return SyncGroupRequest{
+		GroupID:         groupID,
+		MemberID:        memberID,
+		Generation:      gen,
+		AssignmentBytes: bytes,
+	}, nil
+}
+
+func EncodeSyncGroupResponse(resp SyncGroupResponse) ([]byte, error) {
+	w := &writer{}
+	w.u16(resp.ErrorCode)
+	if err := putAssignments(w, resp.Assignment); err != nil {
+		return nil, err
+	}
+	return w.buf, nil
+}
+
+func DecodeSyncGroupResponse(payload []byte) (SyncGroupResponse, error) {
+	r := &reader{data: payload}
+	code, err := r.u16()
+	if err != nil {
+		return SyncGroupResponse{}, err
+	}
+	assignment, err := getAssignments(r)
+	if err != nil {
+		return SyncGroupResponse{}, err
+	}
+	return SyncGroupResponse{ErrorCode: code, Assignment: assignment}, nil
+}
+
 func EncodeInitProducerIdRequest(req InitProducerIdRequest) ([]byte, error) {
 	w := &writer{}
 	// Always write the string; empty transactional_id = non-transactional PID.
@@ -3482,6 +3561,8 @@ func DecodeResponse(opcode uint16, payload []byte) (any, error) {
 		return DecodeListMembersResponse(payload)
 	case OpReassignPartitionsResponse:
 		return DecodeReassignPartitionsResponse(payload)
+	case OpSyncGroupResponse:
+		return DecodeSyncGroupResponse(payload)
 	case OpError:
 		return DecodeErrorResponse(payload)
 	default:

@@ -202,6 +202,12 @@
 //! CreateTopic with 1 partition. Same as `create_topic(name, 1)`.
 //! [`Client::create_topic`] / [`Client::create_topic_with_configs`]
 //! are unchanged.
+//! v0.206 adds [`Client::sync_group`] (native opcodes 116/117):
+//! peek/confirm of the JoinGroup assignment. Transient 6/7/15/16 +
+//! TCP retry on `max_retries` (default 0). Error **14** follows
+//! `max_redirects`. Rebalance 9/10/11 is not retried. Not Kafka
+//! CompletingRebalance. [`GroupConsumer`] still uses JoinGroup
+//! assignment.
 
 #![deny(missing_docs)]
 

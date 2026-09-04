@@ -1809,6 +1809,93 @@ impl Client {
         }
     }
 
+    /// SyncGroup peek/confirm (native opcode 116/117). Returns this member's
+    /// current assignment (already computed on Join). Leader assignment
+    /// bytes are not sent (empty). Not Kafka CompletingRebalance.
+    ///
+    /// Transient broker/transport errors retry up to
+    /// [`ClientConfig::max_retries`] extra times (default 0). Error **14**
+    /// (`NotController`) redirects via [`ClientConfig::max_redirects`]
+    /// (default 1; `0` does not redirect) and does not increment
+    /// `retry_attempt`. Rebalance codes 9 / 10 / 11 are not retried so
+    /// [`crate::GroupConsumer`] can see them. 13 / 2 / 17 / 18 / 21 / 22
+    /// and protocol errors are not retried or redirected.
+    pub async fn sync_group(
+        &self,
+        group_id: &str,
+        member_id: &str,
+        generation: u32,
+    ) -> Result<Vec<Assignment>> {
+        let max_retries = self.config.max_retries;
+        let max_redirects = self.config.max_redirects;
+        let mut retry_attempt = 0u32;
+        let mut redirects = 0u32;
+        loop {
+            let resp = match self
+                .round_trip(Request::SyncGroup {
+                    group_id: group_id.to_owned(),
+                    member_id: member_id.to_owned(),
+                    generation,
+                    assignment_bytes: Bytes::new(),
+                })
+                .await
+            {
+                Ok(r) => r,
+                Err(e) if is_transient_transport(&e) && retry_attempt < max_retries => {
+                    retry_attempt += 1;
+                    tokio::time::sleep(Duration::from_millis(self.config.retry_backoff_ms)).await;
+                    continue;
+                }
+                Err(e) => return Err(e),
+            };
+            match resp {
+                Response::SyncGroup {
+                    error_code,
+                    assignment,
+                } => {
+                    if error_code == ErrorCode::NotController as u16
+                        && redirects < max_redirects
+                        && self.redirect_to_controller(None).await
+                    {
+                        redirects += 1;
+                        continue;
+                    }
+                    if is_transient_error_code(error_code) && retry_attempt < max_retries {
+                        retry_attempt += 1;
+                        tokio::time::sleep(Duration::from_millis(self.config.retry_backoff_ms))
+                            .await;
+                        continue;
+                    }
+                    check_ok(error_code, "sync_group")?;
+                    return Ok(assignment);
+                }
+                Response::Error { code, message } => {
+                    if code == ErrorCode::NotController as u16
+                        && redirects < max_redirects
+                        && self
+                            .redirect_to_controller(parse_controller_id(&message))
+                            .await
+                    {
+                        redirects += 1;
+                        continue;
+                    }
+                    if is_transient_error_code(code) && retry_attempt < max_retries {
+                        retry_attempt += 1;
+                        tokio::time::sleep(Duration::from_millis(self.config.retry_backoff_ms))
+                            .await;
+                        continue;
+                    }
+                    return Err(error_from_code(code, message));
+                }
+                other => {
+                    return Err(Error::Protocol(format!(
+                        "unexpected response for sync_group: {other:?}"
+                    )))
+                }
+            }
+        }
+    }
+
     /// Leave a consumer group.
     ///
     /// Transient broker/transport errors retry up to
