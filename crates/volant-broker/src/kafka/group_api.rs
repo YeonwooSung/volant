@@ -2189,6 +2189,145 @@ fn put_described_share_group(
     put_empty_tag_buffer(out);
 }
 
+/// ShareFetch v1 (key 78). Always flexible.
+///
+/// Official `ShareFetchRequest.json` / `ShareFetchResponse.json`.
+/// Not KIP-932: parse and reject **42** `INVALID_REQUEST`
+/// (`not KIP-932 share fetch`). Does not wrap Kafka Fetch 1 or native
+/// Fetch. Does not acquire records or create a share session.
+pub(crate) fn encode_share_fetch(
+    broker: &Broker,
+    src: &mut impl Buf,
+    out: &mut BytesMut,
+    principal: &str,
+) {
+    let group_id = parse_share_fetch_request(src);
+
+    let denied = broker.acls().is_enabled()
+        && !broker.acls().authorize(
+            Some(principal),
+            ResourceType::Group,
+            &group_id,
+            AclOperation::Read,
+        );
+
+    write_share_fetch(out, denied);
+}
+
+fn parse_share_fetch_request(src: &mut impl Buf) -> String {
+    // Official v1 (flex, `ShareFetchRequest.json`):
+    // GroupId compact nullable string, MemberId compact nullable string,
+    // ShareSessionEpoch i32, MaxWaitMs i32, MinBytes i32, MaxBytes i32,
+    // MaxRecords i32 (v1+), BatchSize i32 (v1+),
+    // Topics[] { TopicId uuid, Partitions[] {
+    //   PartitionIndex i32,
+    //   AcknowledgementBatches[] { FirstOffset i64, LastOffset i64,
+    //     AcknowledgeTypes[] i8, tagged }, tagged }, tagged },
+    // ForgottenTopicsData[] { TopicId uuid, Partitions[] i32, tagged },
+    // tagged.
+    // PartitionMaxBytes is official versions "0" only — not in v1.
+    let group_id = get_compact_nullable_string(src)
+        .ok()
+        .flatten()
+        .unwrap_or_default();
+    let _ = get_compact_nullable_string(src);
+    for _ in 0..6 {
+        if src.remaining() < 4 {
+            return group_id;
+        }
+        let _ = src.get_i32();
+    }
+    match get_compact_array_len(src) {
+        Ok(Some(n)) => {
+            for _ in 0..n {
+                if get_uuid(src).is_err() {
+                    break;
+                }
+                match get_compact_array_len(src) {
+                    Ok(Some(pn)) => {
+                        for _ in 0..pn {
+                            if src.remaining() < 4 {
+                                break;
+                            }
+                            let _ = src.get_i32(); // PartitionIndex
+                            match get_compact_array_len(src) {
+                                Ok(Some(bn)) => {
+                                    for _ in 0..bn {
+                                        if src.remaining() < 16 {
+                                            break;
+                                        }
+                                        let _ = src.get_i64();
+                                        let _ = src.get_i64();
+                                        match get_compact_array_len(src) {
+                                            Ok(Some(tn)) => {
+                                                for _ in 0..tn {
+                                                    if src.remaining() < 1 {
+                                                        break;
+                                                    }
+                                                    let _ = src.get_i8();
+                                                }
+                                            }
+                                            Ok(None) | Err(_) => {}
+                                        }
+                                        let _ = skip_tag_buffer(src);
+                                    }
+                                }
+                                Ok(None) | Err(_) => {}
+                            }
+                            let _ = skip_tag_buffer(src);
+                        }
+                    }
+                    Ok(None) | Err(_) => {}
+                }
+                let _ = skip_tag_buffer(src);
+            }
+        }
+        Ok(None) | Err(_) => {}
+    }
+    match get_compact_array_len(src) {
+        Ok(Some(n)) => {
+            for _ in 0..n {
+                if get_uuid(src).is_err() {
+                    break;
+                }
+                match get_compact_array_len(src) {
+                    Ok(Some(pn)) => {
+                        for _ in 0..pn {
+                            if src.remaining() < 4 {
+                                break;
+                            }
+                            let _ = src.get_i32();
+                        }
+                    }
+                    Ok(None) | Err(_) => {}
+                }
+                let _ = skip_tag_buffer(src);
+            }
+        }
+        Ok(None) | Err(_) => {}
+    }
+    let _ = skip_tag_buffer(src);
+    group_id
+}
+
+fn write_share_fetch(out: &mut BytesMut, denied: bool) {
+    // Official ShareFetchResponse.json v1:
+    // throttleTimeMs, errorCode, errorMessage, acquisitionLockTimeoutMs
+    // (v1+), Responses[], NodeEndpoints[], tagged.
+    out.put_i32(0); // throttleTimeMs
+    if denied {
+        out.put_i16(KafkaErrorCode::GroupAuthorizationFailed.as_i16());
+        put_compact_nullable_string(out, None);
+    } else {
+        out.put_i16(KafkaErrorCode::InvalidRequest.as_i16());
+        put_compact_nullable_string(out, Some("not KIP-932 share fetch"));
+    }
+    out.put_i32(0); // acquisitionLockTimeoutMs
+    put_compact_array_len(out, 0); // Responses
+    put_compact_array_len(out, 0); // NodeEndpoints
+    put_empty_tag_buffer(out);
+}
+
 /// ConsumerGroupDescribe v0 (key 69). Always flexible.
 ///
 /// Official `ConsumerGroupDescribeRequest.json` / `Response.json`. Wraps the
@@ -3035,6 +3174,148 @@ mod tests {
         assert_eq!(err_msg, None);
         assert_eq!(group_id, "sg-v276");
         assert_eq!(n_members, 0);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    fn share_fetch_v1_body(group: Option<&str>) -> BytesMut {
+        let mut body = BytesMut::new();
+        put_compact_nullable_string(&mut body, group);
+        put_compact_nullable_string(&mut body, Some("member-1"));
+        body.put_i32(0); // ShareSessionEpoch
+        body.put_i32(500); // MaxWaitMs
+        body.put_i32(1); // MinBytes
+        body.put_i32(i32::MAX); // MaxBytes
+        body.put_i32(500); // MaxRecords
+        body.put_i32(100); // BatchSize
+        put_compact_array_len(&mut body, 1);
+        put_uuid(&mut body, &[0u8; 16]);
+        put_compact_array_len(&mut body, 1);
+        body.put_i32(0); // PartitionIndex
+        put_compact_array_len(&mut body, 1); // AcknowledgementBatches
+        body.put_i64(0);
+        body.put_i64(0);
+        put_compact_array_len(&mut body, 1);
+        body.put_i8(1); // Accept
+        put_empty_tag_buffer(&mut body);
+        put_empty_tag_buffer(&mut body);
+        put_empty_tag_buffer(&mut body);
+        put_compact_array_len(&mut body, 1); // ForgottenTopicsData
+        put_uuid(&mut body, &[1u8; 16]);
+        put_compact_array_len(&mut body, 1);
+        body.put_i32(0);
+        put_empty_tag_buffer(&mut body);
+        put_empty_tag_buffer(&mut body);
+        body
+    }
+
+    fn read_share_fetch(
+        src: &mut impl Buf,
+    ) -> (i32, i16, Option<String>, i32, Option<usize>, Option<usize>) {
+        let throttle = src.get_i32();
+        let error = src.get_i16();
+        let err_msg = get_compact_nullable_string(src).unwrap();
+        let lock_ms = src.get_i32();
+        let responses = get_compact_array_len(src).unwrap();
+        let endpoints = get_compact_array_len(src).unwrap();
+        skip_tag_buffer(src).unwrap();
+        assert_eq!(src.remaining(), 0);
+        (throttle, error, err_msg, lock_ms, responses, endpoints)
+    }
+
+    #[test]
+    fn kafka_share_fetch_rejects_42() {
+        let dir = temp_dir("sf-ok");
+        let broker = Broker::new(StorageConfig {
+            data_dir: dir.clone(),
+            ..StorageConfig::default()
+        });
+        let mut src = share_fetch_v1_body(Some("sg-v277"));
+        let mut out = BytesMut::new();
+        encode_share_fetch(&broker, &mut src, &mut out, "kafka-anonymous");
+        let mut resp = out.freeze();
+        let (throttle, error, err_msg, lock_ms, responses, endpoints) = read_share_fetch(&mut resp);
+        assert_eq!(throttle, 0);
+        assert_eq!(error, KafkaErrorCode::InvalidRequest.as_i16());
+        assert_eq!(err_msg.as_deref(), Some("not KIP-932 share fetch"));
+        assert_eq!(lock_ms, 0);
+        assert_eq!(responses, Some(0));
+        assert_eq!(endpoints, Some(0));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn kafka_share_fetch_truncated_still_42() {
+        let dir = temp_dir("sf-trunc");
+        let broker = Broker::new(StorageConfig {
+            data_dir: dir.clone(),
+            ..StorageConfig::default()
+        });
+        let mut src = BytesMut::new();
+        let mut out = BytesMut::new();
+        encode_share_fetch(&broker, &mut src, &mut out, "kafka-anonymous");
+        let mut resp = out.freeze();
+        let (throttle, error, err_msg, lock_ms, responses, endpoints) = read_share_fetch(&mut resp);
+        assert_eq!(throttle, 0);
+        assert_eq!(error, KafkaErrorCode::InvalidRequest.as_i16());
+        assert_eq!(err_msg.as_deref(), Some("not KIP-932 share fetch"));
+        assert_eq!(lock_ms, 0);
+        assert_eq!(responses, Some(0));
+        assert_eq!(endpoints, Some(0));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn kafka_share_fetch_acl_deny_is_30() {
+        let dir = temp_dir("sf-acl");
+        let broker = Broker::new(StorageConfig {
+            data_dir: dir.clone(),
+            ..StorageConfig::default()
+        });
+        broker
+            .configure_acls(true, None, vec![], "token".into())
+            .unwrap();
+
+        let mut src = share_fetch_v1_body(Some("sg-v277"));
+        let mut out = BytesMut::new();
+        encode_share_fetch(&broker, &mut src, &mut out, "kafka-anonymous");
+        let mut resp = out.freeze();
+        let (throttle, error, err_msg, lock_ms, responses, endpoints) = read_share_fetch(&mut resp);
+        assert_eq!(throttle, 0);
+        assert_eq!(error, KafkaErrorCode::GroupAuthorizationFailed.as_i16());
+        assert_eq!(err_msg, None);
+        assert_eq!(lock_ms, 0);
+        assert_eq!(responses, Some(0));
+        assert_eq!(endpoints, Some(0));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn kafka_share_fetch_does_not_write_or_acquire_records() {
+        use volant_core::{Message, PartitionId, TopicName};
+
+        let dir = temp_dir("sf-keep");
+        let broker = Broker::new(StorageConfig {
+            data_dir: dir.clone(),
+            ..StorageConfig::default()
+        });
+        let topic = TopicName::new("events");
+        broker.create_topic(topic.clone(), 1).unwrap();
+        broker
+            .produce_one(&topic, PartitionId(0), Message::from_value("keep"))
+            .unwrap();
+        let before = broker.log_end_offset(&topic, PartitionId(0)).unwrap();
+
+        let mut src = share_fetch_v1_body(Some("sg-v277"));
+        let mut out = BytesMut::new();
+        encode_share_fetch(&broker, &mut src, &mut out, "kafka-anonymous");
+        let mut resp = out.freeze();
+        let (_, error, _, _, responses, _) = read_share_fetch(&mut resp);
+        assert_eq!(error, KafkaErrorCode::InvalidRequest.as_i16());
+        assert_eq!(responses, Some(0));
+        assert_eq!(
+            broker.log_end_offset(&topic, PartitionId(0)).unwrap(),
+            before
+        );
         let _ = std::fs::remove_dir_all(&dir);
     }
 }

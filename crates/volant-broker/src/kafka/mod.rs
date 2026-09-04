@@ -54,7 +54,8 @@
 //! AddRaftVoter v0 (key 80 reject; not KRaft raft voter / not AddBroker),
 //! RemoveRaftVoter v0 (key 81 reject; not KRaft / not remove_broker),
 //! UpdateRaftVoter v0 (key 82 reject; not KRaft voter set),
-//! UnregisterController v0 (key 94 reject; not KRaft / not UnregisterBroker).
+//! UnregisterController v0 (key 94 reject; not KRaft / not UnregisterBroker),
+//! ShareFetch v1 (key 78 reject; not KIP-932 share fetch / not Fetch 1).
 //! See `docs/PHASE23_SPEC.md` … `docs/PHASE91_SPEC.md`, `docs/V225_SPEC.md`,
 //! `docs/V228_SPEC.md`, `docs/V233_SPEC.md`, `docs/V235_SPEC.md`,
 //! `docs/V236_SPEC.md`, `docs/V237_SPEC.md`, `docs/V241_SPEC.md`,
@@ -67,7 +68,7 @@
 //! `docs/V266_SPEC.md`, `docs/V267_SPEC.md`, `docs/V268_SPEC.md`,
 //! `docs/V269_SPEC.md`, `docs/V270_SPEC.md`, `docs/V271_SPEC.md`,
 //! `docs/V272_SPEC.md`, `docs/V273_SPEC.md`, `docs/V274_SPEC.md`,
-//! `docs/V275_SPEC.md`, and `docs/V276_SPEC.md`.
+//! `docs/V275_SPEC.md`, `docs/V276_SPEC.md`, and `docs/V277_SPEC.md`.
 
 mod acl_api;
 mod admin_api;
@@ -435,6 +436,13 @@ pub enum ApiKey {
     /// (v0 was EA in Kafka 4.0 and removed in 4.1). Does not wrap
     /// `describe_group` / ConsumerGroupDescribe 69 / DescribeGroups 15.
     ShareGroupDescribe = 77,
+    /// ShareFetch (always flexible; v1 only). Honest reject: not
+    /// KIP-932 share fetch. Does not wrap Kafka Fetch 1 or native
+    /// Fetch. Does not acquire records or create a share session.
+    /// Official validVersions is 1–2 (v0 EA removed in Kafka 4.1);
+    /// Volant advertises 1 only (v2 ShareAcquireMode / Renew is out
+    /// of range).
+    ShareFetch = 78,
     /// AddRaftVoter (always flexible; v0 only). Honest reject: not a
     /// KRaft raft voter (membership is overlay + native AddBroker).
     /// Does not wrap native AddBroker. Overlay membership is unchanged.
@@ -527,6 +535,7 @@ impl ApiKey {
             75 => Some(Self::DescribeTopicPartitions),
             76 => Some(Self::ShareGroupHeartbeat),
             77 => Some(Self::ShareGroupDescribe),
+            78 => Some(Self::ShareFetch),
             80 => Some(Self::AddRaftVoter),
             81 => Some(Self::RemoveRaftVoter),
             82 => Some(Self::UpdateRaftVoter),
@@ -610,6 +619,7 @@ pub const SUPPORTED_APIS: &[(ApiKey, i16, i16)] = &[
     (ApiKey::DescribeTopicPartitions, 0, 0),
     (ApiKey::ShareGroupHeartbeat, 1, 1),
     (ApiKey::ShareGroupDescribe, 1, 1),
+    (ApiKey::ShareFetch, 1, 1),
     (ApiKey::AddRaftVoter, 0, 0),
     (ApiKey::RemoveRaftVoter, 0, 0),
     (ApiKey::UpdateRaftVoter, 0, 0),
@@ -934,6 +944,16 @@ mod tests {
         assert_eq!(ApiKey::from_i16(75), Some(ApiKey::DescribeTopicPartitions));
         assert_eq!(ApiKey::from_i16(68), Some(ApiKey::ConsumerGroupHeartbeat));
         assert_eq!(ApiKey::from_i16(12), Some(ApiKey::Heartbeat));
+    }
+
+    #[test]
+    fn supported_apis_includes_share_fetch_78() {
+        assert!(SUPPORTED_APIS.len() >= 75);
+        assert!(SUPPORTED_APIS
+            .iter()
+            .any(|(k, min, max)| *k == ApiKey::ShareFetch && *min == 1 && *max == 1));
+        assert_eq!(ApiKey::from_i16(78), Some(ApiKey::ShareFetch));
+        assert_eq!(ApiKey::from_i16(1), Some(ApiKey::Fetch));
     }
 
     #[test]

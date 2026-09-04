@@ -290,6 +290,7 @@ async fn dispatch_kafka(
                 | Some(ApiKey::ConsumerGroupDescribe)
                 | Some(ApiKey::ShareGroupDescribe)
                 | Some(ApiKey::ControllerRegistration)
+                | Some(ApiKey::ShareFetch)
                 | Some(ApiKey::AddRaftVoter)
                 | Some(ApiKey::RemoveRaftVoter)
                 | Some(ApiKey::UpdateRaftVoter)
@@ -744,6 +745,12 @@ async fn dispatch_kafka(
                 debug!(error = %e, "share group heartbeat flexible header tag buffer");
             }
             group_api::encode_share_group_heartbeat(broker, &mut src, &mut out, principal);
+        }
+        Some(ApiKey::ShareFetch) if hdr.api_version == 1 => {
+            if let Err(e) = skip_tag_buffer(&mut src) {
+                debug!(error = %e, "share fetch flexible header tag buffer");
+            }
+            group_api::encode_share_fetch(broker, &mut src, &mut out, principal);
         }
         Some(ApiKey::ConsumerGroupDescribe) if hdr.api_version == 0 => {
             if let Err(e) = skip_tag_buffer(&mut src) {
