@@ -113,6 +113,10 @@ async fn serve_stub(mut stream: TcpStream, heartbeats: Arc<AtomicU64>) -> std::i
                                 })
                                 .collect(),
                         },
+                        Request::SyncGroup { .. } => Response::SyncGroup {
+                            error_code: 0,
+                            assignment: vec![],
+                        },
                         Request::Heartbeat { .. } => {
                             heartbeats.fetch_add(1, Ordering::Relaxed);
                             Response::Heartbeat { error_code: 0 }

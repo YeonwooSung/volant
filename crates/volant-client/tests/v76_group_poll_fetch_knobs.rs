@@ -131,6 +131,10 @@ async fn serve_stub(
                                 })
                                 .collect(),
                         },
+                        Request::SyncGroup { .. } => Response::SyncGroup {
+                            error_code: 0,
+                            assignment: vec![],
+                        },
                         Request::Heartbeat { .. } => Response::Heartbeat { error_code: 0 },
                         Request::LeaveGroup { .. } => Response::LeaveGroup { error_code: 0 },
                         Request::Fetch {

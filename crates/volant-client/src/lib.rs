@@ -15,8 +15,8 @@
 //! earliest; v0.71). Not Kafka `auto.offset.reset`.
 //! v0.73 adds opt-in [`GroupConsumer::join_with_assignor`] (`"range"`)
 //! which replaces the fetch set from DescribeGroup members via
-//! `range_assign_multi`. Default remains broker JoinGroup assignment.
-//! Still no SyncGroup.
+//! `range_assign_multi`. Default remains broker JoinGroup assignment
+//! (v0.208 peeks SyncGroup first).
 //! v0.76 adds opt-in [`GroupConsumer::join_with_fetch_knobs`] so
 //! `poll` can set Fetch `max_messages` / `max_bytes` (default **100 /
 //! 4 MiB**; `0` clamps to those). [`Client::fetch_opts`] exposes
@@ -209,8 +209,11 @@
 //! peek/confirm of the JoinGroup assignment. Transient 6/7/15/16 +
 //! TCP retry on `max_retries` (default 0). Error **14** follows
 //! `max_redirects`. Rebalance 9/10/11 is not retried. Not Kafka
-//! CompletingRebalance. [`GroupConsumer`] still uses JoinGroup
-//! assignment.
+//! CompletingRebalance. v0.208 has [`GroupConsumer`] call
+//! [`Client::sync_group`] after a successful JoinGroup (including
+//! rejoin) as a best-effort peek; non-empty assignment replaces
+//! JoinGroup's, empty or error keeps Join, then range override still
+//! runs. HeartbeatCount does not increment on SyncGroup.
 //! v0.210 generates a UUID `member_id` when both JoinGroup
 //! `member_id` and `group_instance_id` are empty, before the first
 //! send, so the v0.205 retry guard sees a non-empty id.
