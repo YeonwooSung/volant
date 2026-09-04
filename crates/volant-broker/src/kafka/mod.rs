@@ -26,6 +26,7 @@
 //! AssignReplicasToDirs v0 (always flexible; reject every assignment; single data_dir),
 //! DescribeLogDirs 0–1 (local logs only; v1 flexible),
 //! DescribeTopicPartitions v0 (wraps Metadata; key 75),
+//! UpdateRaftVoter v0 (key 82 reject; not KRaft raft voter),
 //! BrokerRegistration v0 (key 62 reject; not KRaft / not AddBroker),
 //! BrokerHeartbeat v0 (key 63 reject; not KRaft / not native Heartbeat 12),
 //! FetchSnapshot v0 (key 59 reject; not KRaft snapshot / not InstallSnapshot),
@@ -56,7 +57,7 @@
 //! `docs/V259_SPEC.md`, `docs/V260_SPEC.md`, `docs/V261_SPEC.md`,
 //! `docs/V263_SPEC.md`, `docs/V264_SPEC.md`, `docs/V265_SPEC.md`,
 //! `docs/V266_SPEC.md`, `docs/V267_SPEC.md`, `docs/V268_SPEC.md`,
-//! and `docs/V269_SPEC.md`.
+//! `docs/V269_SPEC.md`, and `docs/V273_SPEC.md`.
 
 mod acl_api;
 mod admin_api;
@@ -412,6 +413,9 @@ pub enum ApiKey {
     ListClientMetricsResources = 74,
     /// DescribeTopicPartitions (always flexible; v0 only).
     DescribeTopicPartitions = 75,
+    /// UpdateRaftVoter (always flexible; v0 only). Honest reject:
+    /// not a KRaft voter set (no listener / KRaftVersionFeature store).
+    UpdateRaftVoter = 82,
 }
 
 impl ApiKey {
@@ -486,6 +490,7 @@ impl ApiKey {
             73 => Some(Self::AssignReplicasToDirs),
             74 => Some(Self::ListClientMetricsResources),
             75 => Some(Self::DescribeTopicPartitions),
+            82 => Some(Self::UpdateRaftVoter),
             _ => None,
         }
     }
@@ -562,6 +567,7 @@ pub const SUPPORTED_APIS: &[(ApiKey, i16, i16)] = &[
     (ApiKey::AssignReplicasToDirs, 0, 0),
     (ApiKey::ListClientMetricsResources, 0, 0),
     (ApiKey::DescribeTopicPartitions, 0, 0),
+    (ApiKey::UpdateRaftVoter, 0, 0),
 ];
 
 #[cfg(test)]
@@ -860,5 +866,14 @@ mod tests {
             *k == ApiKey::ControllerRegistration && *min == 0 && *max == 0
         }));
         assert_eq!(ApiKey::from_i16(70), Some(ApiKey::ControllerRegistration));
+    }
+
+    #[test]
+    fn supported_apis_includes_update_raft_voter_82() {
+        assert!(SUPPORTED_APIS.len() >= 70);
+        assert!(SUPPORTED_APIS
+            .iter()
+            .any(|(k, min, max)| { *k == ApiKey::UpdateRaftVoter && *min == 0 && *max == 0 }));
+        assert_eq!(ApiKey::from_i16(82), Some(ApiKey::UpdateRaftVoter));
     }
 }
