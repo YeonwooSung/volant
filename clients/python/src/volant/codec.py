@@ -544,14 +544,19 @@ class ScramFinalResponse:
 
 
 class GroupState(IntEnum):
-    """ListGroups state byte (Phase 12). Unknown values decode as Empty."""
+    """ListGroups state byte (Phase 12 / v0.218). Unknown values decode as Empty."""
 
     EMPTY = 0
     STABLE = 1
+    COMPLETING_REBALANCE = 2
 
     @classmethod
     def from_u8(cls, v: int) -> GroupState:
-        return cls.STABLE if v == 1 else cls.EMPTY
+        if v == 1:
+            return cls.STABLE
+        if v == 2:
+            return cls.COMPLETING_REBALANCE
+        return cls.EMPTY
 
 
 @dataclass

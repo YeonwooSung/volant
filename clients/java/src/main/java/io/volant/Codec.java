@@ -85,8 +85,10 @@ public final class Codec {
 
     /** ListGroups state: offsets only, no live members. */
     public static final int GROUP_STATE_EMPTY = 0;
-    /** ListGroups state: at least one live member. */
+    /** ListGroups state: live members that have confirmed via SyncGroup. */
     public static final int GROUP_STATE_STABLE = 1;
+    /** ListGroups state: live members with the v0.215 SyncGroup fence open. */
+    public static final int GROUP_STATE_COMPLETING_REBALANCE = 2;
 
     static final long NULL_LEN = 0xFFFFFFFFL;
 
@@ -489,9 +491,20 @@ public final class Codec {
 
         public GroupListing(String groupId, int state, long memberCount, long generation) {
             this.groupId = groupId;
-            this.state = state == 1 ? GROUP_STATE_STABLE : GROUP_STATE_EMPTY;
+            this.state = groupStateFromU8(state);
             this.memberCount = memberCount;
             this.generation = generation;
+        }
+
+        /** Map the ListGroups state byte (unknown values decode as Empty). */
+        public static int groupStateFromU8(int v) {
+            if (v == GROUP_STATE_STABLE) {
+                return GROUP_STATE_STABLE;
+            }
+            if (v == GROUP_STATE_COMPLETING_REBALANCE) {
+                return GROUP_STATE_COMPLETING_REBALANCE;
+            }
+            return GROUP_STATE_EMPTY;
         }
     }
 

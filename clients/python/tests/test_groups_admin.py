@@ -159,6 +159,12 @@ class _GroupAdminServer:
 
 
 class TestGroupAdminClient(unittest.TestCase):
+    def test_group_state_from_u8_completing_rebalance(self) -> None:
+        self.assertEqual(GroupState.from_u8(0), GroupState.EMPTY)
+        self.assertEqual(GroupState.from_u8(1), GroupState.STABLE)
+        self.assertEqual(GroupState.from_u8(2), GroupState.COMPLETING_REBALANCE)
+        self.assertEqual(GroupState.from_u8(99), GroupState.EMPTY)
+
     def test_list_groups_empty_and_stable(self) -> None:
         with _GroupAdminServer() as srv:
             with Client(srv.addr, timeout=5.0) as c:

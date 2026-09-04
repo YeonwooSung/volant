@@ -1152,6 +1152,15 @@ func TestListGroupsRoundTrip(t *testing.T) {
 	if _, ok := got.(ListGroupsResponse); !ok {
 		t.Fatalf("dispatch %#v", got)
 	}
+	if GroupStateFromU8(0) != GroupStateEmpty {
+		t.Fatalf("0 should decode as empty")
+	}
+	if GroupStateFromU8(1) != GroupStateStable {
+		t.Fatalf("1 should decode as stable")
+	}
+	if GroupStateFromU8(2) != GroupStateCompletingRebalance {
+		t.Fatalf("2 should decode as completing rebalance")
+	}
 	if GroupStateFromU8(99) != GroupStateEmpty {
 		t.Fatalf("unknown state should decode as empty")
 	}

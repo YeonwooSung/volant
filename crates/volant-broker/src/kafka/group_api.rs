@@ -1618,11 +1618,12 @@ pub(crate) fn encode_list_groups(
     }
     let groups = broker.groups().list_groups();
     // ProtocolType is always "consumer"; GroupType (v5+) is always "classic".
-    // State: Stable when members present, else Empty.
+    // State: CompletingRebalance while the v0.215 fence is open, else
+    // Stable when members are synced, else Empty.
     let filtered: Vec<_> = groups
         .into_iter()
         .filter(|g| {
-            let state = if g.stable { "Stable" } else { "Empty" };
+            let state = g.state.as_str();
             let gtype = "classic";
             let state_ok = states_filter.is_empty()
                 || states_filter
@@ -1642,7 +1643,7 @@ pub(crate) fn encode_list_groups(
             put_compact_string(out, &g.group_id);
             put_compact_string(out, "consumer");
             if version >= 4 {
-                put_compact_string(out, if g.stable { "Stable" } else { "Empty" });
+                put_compact_string(out, g.state.as_str());
             }
             if version >= 5 {
                 put_compact_string(out, "classic");
@@ -1778,7 +1779,13 @@ pub(crate) fn encode_describe_groups(
 
         match broker.groups().describe_group(&group_id) {
             Some(desc) => {
-                write_strings(out, KafkaErrorCode::None.as_i16(), "Stable", "consumer", "range");
+                write_strings(
+                    out,
+                    KafkaErrorCode::None.as_i16(),
+                    desc.state.as_str(),
+                    "consumer",
+                    "range",
+                );
                 if flexible {
                     put_compact_array_len(out, desc.members.len());
                 } else {

@@ -839,6 +839,9 @@ class TestGroupAdminCodec(unittest.TestCase):
         self.assertEqual(_hx(raw), _hx(expected))
         self.assertEqual(decode_list_groups_response(raw), resp)
         self.assertEqual(decode_response(OP_LIST_GROUPS_RESPONSE, raw), resp)
+        self.assertEqual(GroupState.from_u8(0), GroupState.EMPTY)
+        self.assertEqual(GroupState.from_u8(1), GroupState.STABLE)
+        self.assertEqual(GroupState.from_u8(2), GroupState.COMPLETING_REBALANCE)
         self.assertEqual(GroupState.from_u8(99), GroupState.EMPTY)
 class TestListOffsetsCodec(unittest.TestCase):
     def test_list_offsets_request_payload_rs_fixture(self) -> None:

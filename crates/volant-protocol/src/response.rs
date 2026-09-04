@@ -359,22 +359,34 @@ pub struct GroupMemberInfo {
     pub assignment: Vec<Assignment>,
 }
 
-/// Group state for ListGroups (Phase 12).
+/// Group state for ListGroups (Phase 12 / v0.218).
 #[repr(u8)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum GroupState {
     /// Offsets on disk only; no live members.
     Empty = 0,
-    /// At least one live member.
+    /// Live members have all confirmed the current generation via SyncGroup.
     Stable = 1,
+    /// Live members exist but the v0.215 SyncGroup fence is still open.
+    CompletingRebalance = 2,
 }
 
 impl GroupState {
-    /// Parse wire value.
+    /// Parse wire value. Unknown bytes decode as Empty.
     pub fn from_u8(v: u8) -> Self {
         match v {
             1 => Self::Stable,
+            2 => Self::CompletingRebalance,
             _ => Self::Empty,
+        }
+    }
+
+    /// Kafka / CLI state string.
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Empty => "Empty",
+            Self::Stable => "Stable",
+            Self::CompletingRebalance => "CompletingRebalance",
         }
     }
 }
@@ -384,7 +396,7 @@ impl GroupState {
 pub struct GroupListing {
     /// Group id.
     pub group_id: String,
-    /// Live vs empty (offset-only).
+    /// Empty / Stable / CompletingRebalance (v0.218).
     pub state: GroupState,
     /// Live member count.
     pub member_count: u32,
