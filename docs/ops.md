@@ -984,7 +984,7 @@ session idle TTL + max/LRU, background txn/session sweeper + expiry metrics
 (always-spawn / 0→>0 live; graceful shutdown/join Phase 106; accept-loop drain +
 single-flight bg Phase 109), BROKER
 Describe/AlterConfigs + durable restart restore, empty-AddPartitions control
-batches, 45 keys (35/43/45/46/50/51/75); **ISR shrink on follower death** Phase 108 + **non-controller
+batches, 49 keys; **ISR shrink on follower death** Phase 108 + **non-controller
 alive-set auto-death** Phase 110 + **ISR rejoin + lag shrink** Phase 118 +
 **time-based ISR lag** Phase 125;
 **cluster admin fan-out** Phase 113), SCRAM-SHA-256/512,

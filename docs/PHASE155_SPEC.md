@@ -27,7 +27,7 @@ is unrelated.
    once and ignore. Protocol 98/99 encode/decode stays.
 4. **Native SyncGroup 116/117** is a peek/confirm (same honesty as
    the Kafka shim key **14**, which already exists). Not Kafka
-   CompletingRebalance. `SUPPORTED_APIS` is **45** (35/43/45/46/50/51/75).
+   CompletingRebalance. `SUPPORTED_APIS` is **49**.
 5. **JoinGroup retry** only when `member_id` or `group_instance_id`
    is non-empty. Empty first join is still one shot.
 6. **Go `CreateTopic` / `CreateTopicDefault` return `(uint32, error)`.**
@@ -42,7 +42,7 @@ is unrelated.
 | Kafka two-phase join/sync states | Join parks (v0.227); still not PreparingRebalance / join-set wait |
 | JoinGroup native member list | Frozen; range still uses DescribeGroup |
 | Retry empty-`member_id` first Join | Ghost member + generation++ |
-| New Kafka API key / version ratchet | `SUPPORTED_APIS` is **45**. No further keys |
+| New Kafka API key / version ratchet | `SUPPORTED_APIS` is **49**. No further keys |
 | librdkafka / kafka-python / kcat claims | Still not claimed |
 | Distributed EOS / windows / full KIP-890 | Opt-in TransactionLog v0 (v0.229); not TV2 / default-on |
 | Crate 0.3.0 | After 155 ships, not during |
@@ -101,11 +101,12 @@ func (c *Client) CreateTopicID(name string, partitions int) (uint32, error) // a
 - SyncGroup is a generation confirm fence (v0.215). List/Describe report CompletingRebalance while the fence is open (v0.218) and **PreparingRebalance** while a Join is parked (v0.230). Member OffsetCommit is 9 until sync (v0.219). GroupConsumer retries Join 9 when `max_retries>0` (v0.220/v0.221). Thin Client retries Join 9 on the same budget (v0.223/v0.224). New-member Join **parks** until SyncGroup or **rebalance** timeout (v0.227/v0.231; default 1000ms; mutex released). Still not join-set wait.
 - Range uses JoinGroup members trailer when present (v0.211); empty trailer still DescribeGroup.
 - Empty first Join now sends a client-generated member_id (v0.209/v0.210) so retry is safe.
-- Kafka `SUPPORTED_APIS` is **45** (DescribeLogDirs **35**, ElectLeaders **43**, Alter/ListPartitionReassignments **45**/**46**, Describe/AlterUserScramCredentials **50**/**51**, DescribeTopicPartitions **75**). No live reassignment / unclean election. No client-compat claim.
+- Kafka `SUPPORTED_APIS` is **49** (… + Describe/AlterClientQuotas **48**/**49**, UpdateFeatures **57**, UnregisterBroker **64**). No stored quotas / KIP-584 features / KRaft unregister. No client-compat claim.
 - Opt-in `__transaction_state` records open≡abort (v0.226) and writes Kafka TransactionLogKey/Value v0 (v0.229) including open/prepared partitions (v0.232). JSON v1 still replays. Flag still default off. Not TV2 writes / not full KIP-890/939. Process-local EOS / windows unchanged.
 - Native Fetch with group+member trailer honors assignment (v0.234). Kafka Fetch and empty-trailer Fetch stay unfiltered.
 - Native SCRAM-SHA-512 is opt-in trailer **2** on ScramFirst (v0.238). Default/legacy stay SHA-256.
-- Native ListOffsets timestamp trailer (v0.239): `-1` latest, `-2` earliest, `>=0` first record at/after T. No isolation. Kafka key 2 unchanged.
+- Native ListOffsets timestamp trailer (v0.239) and isolation (v0.240): `-1` latest, `-2` earliest, isolation **1** latest = LSO. Kafka key 2 unchanged.
+- Leftover `{data_dir}/__metadata_raft/` warn-once (v0.243); unread, not deleted.
 
 ## Related
 

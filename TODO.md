@@ -1,6 +1,6 @@
 # Volant residual TODO (review loop)
 
-**Baseline:** HEAD product = **Phases 0–154** + residuals **v0.3–v0.239**; **Phase 155 open**.  
+**Baseline:** HEAD product = **Phases 0–154** + residuals **v0.3–v0.244**; **Phase 155 open**.  
 **Last review:** 2026-09-03  
 
 Living roadmap: [ROADMAP.md](./ROADMAP.md).  
@@ -68,7 +68,7 @@ Phase index: [docs/history/PHASE_HISTORY.md](./docs/history/PHASE_HISTORY.md).
 | **Later** | **Long fuzz + chaos-mesh** | **MVP closed (v0.15)** — extended corpus + Chaos Mesh YAML + A→B isolate |
 | **Later** | **Perf campaign** vs aspirational targets | **closed (v0.2 PR2)** — measured table published; group-commit **v0.20** (opt-in, no new bench) |
 
-**Default next slice:** Kafka `SUPPORTED_APIS` is **45** (DescribeLogDirs **35**, ElectLeaders **43**, DescribeTopicPartitions **75**). Native SCRAM-SHA-512 trailer (**v0.238**). Native ListOffsets timestamp (**v0.239**). Still not join-set wait, not unclean election, not live reassignment, not Kafka Fetch enforcement, not default-on txn topic. Residual **v0.155** is still DeleteRecords wait.
+**Default next slice:** Kafka `SUPPORTED_APIS` is **49** (quotas **48/49**, UpdateFeatures **57**, UnregisterBroker **64**). Native ListOffsets isolation (**v0.240**). Leftover `__metadata_raft/` warn-once (**v0.243**). Still not join-set wait, not unclean election, not live reassignment, not stored quotas, not KIP-584 features. Residual **v0.155** is still DeleteRecords wait.
 
 ---
 
@@ -322,6 +322,11 @@ Phase index: [docs/history/PHASE_HISTORY.md](./docs/history/PHASE_HISTORY.md).
 - [x] Kafka DescribeTopicPartitions key 75 → **v0.237**
 - [x] native SCRAM-SHA-512 handshake → **v0.238**
 - [x] native ListOffsets timestamp → **v0.239**
+- [x] native ListOffsets isolation → **v0.240**
+- [x] Kafka Describe/AlterClientQuotas 48/49 → **v0.241**
+- [x] Kafka UnregisterBroker 64 → **v0.242**
+- [x] leftover `__metadata_raft` warn-once → **v0.243**
+- [x] Kafka UpdateFeatures 57 reject → **v0.244**
 
 ---
 
@@ -360,7 +365,7 @@ Phase index: [docs/history/PHASE_HISTORY.md](./docs/history/PHASE_HISTORY.md).
 - Auto-commit is poll-tied and default **off** (language **v0.48**, Rust **v0.60**); not Kafka `enable.auto.commit`
 - GroupConsumer `auto_offset_reset`: `earliest` is ListOffsets earliest (language **v0.70**, Rust **v0.71**); `latest` is LEO. Not Kafka timestamp reset
 - Go/Java convenience Produce is still one message; `ProduceBatch` / `produce(..., messages, acks)` sends N in one RPC (v0.68)
-- ListOffsets is native **48/49** (v0.50); timestamp trailer **v0.239** (`-1` latest LEO, `-2` earliest, `>=0` first record at/after T). No isolation. Kafka key 2 unchanged
+- ListOffsets is native **48/49** (v0.50); timestamp trailer **v0.239**; isolation trailer **v0.240** (`1` latest = LSO). Kafka key 2 unchanged
 - DeleteRecords error 13 redirects like Produce/Fetch (language **v0.65**, Rust **v0.111**). ListOffsets error 13 redirects the same way (language **v0.112**, Rust **v0.113**; first requested partition or 0). CreateTopic / DeleteTopic / CreatePartitions / Reassign / CreateAcls / DeleteAcls follow error **14** (language **v0.72**, Rust **v0.79**). ListMembers follows 14 (language **v0.121**, Rust **v0.120**). DescribeGroup / ListGroups follow 14 (language **v0.124**, Rust **v0.125**). SCRAM-admin / ListAcls follow 14 (language **v0.85**, Rust **v0.88**). Add/RemoveBroker follow 14 when broker forward is unavailable (language **v0.89**, Rust **v0.91**). Describe/AlterConfigs follow 14 (language **v0.93**, Rust **v0.94**; broker may still not return 14 on local-readable topic configs). DeleteOffsets follow 14 (language **v0.97**, Rust **v0.98**; broker may still not return 14 on group-local offsets). OffsetCommit / OffsetFetch follow 14 (language **v0.105**; Rust inherited via `offset_admin_round_trip` in **v0.98**). Heartbeat follows 14 (language **v0.134**, Rust **v0.135**; broker may still not return 14 on group-local heartbeat). LeaveGroup follows 14 (language **v0.136**, Rust **v0.137**; broker may still not return 14 on group-local leave; error **10** stays success). Metadata follows 14 (language **v0.156**, Rust **v0.157**; hunt uses a no-14 helper; broker may still not return 14 on Metadata). Metadata `controller_id` trailer (**v0.77**; `0` = unknown) is preferred when the 14 message has no hint (Rust splice + language **v0.81**)
 - GroupConsumer poll fetch size is tunable (language **v0.75**, Rust **v0.76**, default 100 / 4MiB). Client 3-arg Fetch knobs are separate (language **v0.143**, Rust `fetch_default` **v0.144**, default 128 / 4MiB / 0)
 - CreatePartitions **46/47** (v0.51) cannot shrink; Describe/AlterConfigs **40–43** (v0.53) are topic-only; DeleteOffsets **38/39** (v0.54) has no DeleteGroups opcode
@@ -426,5 +431,6 @@ Phase index: [docs/history/PHASE_HISTORY.md](./docs/history/PHASE_HISTORY.md).
 | v0.227–v0.229 | **Shipped** — parked Join (Condvar); Kafka key 46 v0; Kafka TransactionLog v0 on txn-state topic |
 | v0.230–v0.234 | **Shipped** — PreparingRebalance label; rebalance park timeout; txn-log partitions; Kafka SCRAM 50/51; Fetch assignment trailer |
 | v0.235–v0.239 | **Shipped** — DescribeLogDirs 35; ElectLeaders 43; DescribeTopicPartitions 75; native SCRAM-512; native ListOffsets timestamp |
+| v0.240–v0.244 | **Shipped** — ListOffsets isolation; quotas 48/49 reject; UnregisterBroker 64; leftover 154 warn; UpdateFeatures 57 reject |
 
 **How to use this file:** mark new work by phase number in ROADMAP + PHASE*_SPEC; fold completed rows into “Closed checklist”; keep “Still open” as the only honesty surface for operators and contributors.

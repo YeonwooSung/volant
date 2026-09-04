@@ -436,6 +436,11 @@ docs for day-to-day reading: [ops](../ops.md), [consistency](../consistency.md),
 | v0.237 | ✅ | Kafka DescribeTopicPartitions key 75 v0 | [V237_SPEC.md](../V237_SPEC.md) |
 | v0.238 | ✅ | native SCRAM-SHA-512 handshake trailer | [V238_SPEC.md](../V238_SPEC.md) |
 | v0.239 | ✅ | native ListOffsets timestamp trailer | [V239_SPEC.md](../V239_SPEC.md) |
+| v0.240 | ✅ | native ListOffsets isolation trailer | [V240_SPEC.md](../V240_SPEC.md) |
+| v0.241 | ✅ | Kafka Describe/AlterClientQuotas 48/49 | [V241_SPEC.md](../V241_SPEC.md) |
+| v0.242 | ✅ | Kafka UnregisterBroker key 64 v0 | [V242_SPEC.md](../V242_SPEC.md) |
+| v0.243 | ✅ | warn once if leftover __metadata_raft dir exists | [V243_SPEC.md](../V243_SPEC.md) |
+| v0.244 | ✅ | Kafka UpdateFeatures key 57 reject | [V244_SPEC.md](../V244_SPEC.md) |
 
 ---
 
