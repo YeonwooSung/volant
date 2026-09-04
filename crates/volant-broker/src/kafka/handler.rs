@@ -263,7 +263,8 @@ async fn dispatch_kafka(
                 | Some(ApiKey::AlterClientQuotas)
                 | Some(ApiKey::DescribeTopicPartitions)
                 | Some(ApiKey::UnregisterBroker)
-                | Some(ApiKey::UpdateFeatures),
+                | Some(ApiKey::UpdateFeatures)
+                | Some(ApiKey::AllocateProducerIds),
             _
         )
     ) || matches!(
@@ -776,6 +777,12 @@ async fn dispatch_kafka(
                 hdr.api_version,
                 principal,
             );
+        }
+        Some(ApiKey::AllocateProducerIds) if hdr.api_version == 0 => {
+            if let Err(e) = skip_tag_buffer(&mut src) {
+                debug!(error = %e, "allocate producer ids flexible header tag buffer");
+            }
+            admin_api::encode_allocate_producer_ids(broker, &mut src, &mut out, principal);
         }
         Some(ApiKey::DescribeLogDirs) if (0..=1).contains(&hdr.api_version) => {
             if hdr.api_version >= 1 {

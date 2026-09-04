@@ -69,6 +69,7 @@ From `SUPPORTED_APIS` in `crates/volant-broker/src/kafka/mod.rs`:
 | 64 | UnregisterBroker | 0 | Always flex; wraps native `remove_broker` (v0.217 invert); not KRaft incarnation/DirectoryId; controller only (**41**); no cluster → **42**; TimeoutMs ignored; Cluster ALTER (v0.242) |
 | 65 | DescribeTransactions | 0 | Always flex |
 | 66 | ListTransactions | 0–2 | Pattern = simple `*` glob |
+| 67 | AllocateProducerIds | 0 | Always flex; block of 1000 from `next_producer_id`; BrokerEpoch ignored; not KRaft; controller-only in cluster (**41**); Cluster ALTER (v0.246) |
 | 75 | DescribeTopicPartitions | 0 | Always flex; wraps Metadata (same leaders/ISR/epochs/TopicId); no ELR; simple `responsePartitionLimit` truncate; cursor start if topic is in the set else ignored (v0.237) |
 
 ## Wire evolution (summary)
@@ -144,6 +145,7 @@ These are **current** product facts, not temporary docs lag:
 | DescribeTopicPartitions | **v0 wrap** (v0.237): key **75** advertised; wraps `Broker::metadata`. Same leaders / ISR / epochs / deterministic TopicId as Metadata. Unknown topic → **3**. ACL Topic DESCRIBE. Empty topics = all. `responsePartitionLimit <= 0` unlimited; simple truncate + `next_cursor` when cut. Cursor honored only when its topic is in the result set (else ignored). No ELR fields (Metadata partition body reused). Not Metadata v13+ |
 | UnregisterBroker | **v0 wrap** (v0.242): key **64** advertised; wraps native `remove_broker` (same invert as AddBroker / v0.217). Not KRaft UnregisterBroker (no incarnation / DirectoryId). Controller only (**41**); no cluster → **42** “unregister requires cluster”; self / last broker map native InvalidArgument → **42**. TimeoutMs parsed if present before tags, ignored. ACL Cluster ALTER |
 | UpdateFeatures | **v0–1 reject** (v0.244): key **57** advertised (always flex). Parse request; every feature → **92** `FEATURE_UPDATE_FAILED` (`empty / not supported`). Does **not** persist. ApiVersions SupportedFeatures / FinalizedFeatures stay empty. Not KIP-584. Cluster ALTER. Cluster non-controller → **41**. v2+ → **35**. Describe is already empty via ApiVersions |
+| AllocateProducerIds | **v0 wrap** (v0.246): key **67** advertised (always flex). Block of **1000** from `next_producer_id` (`fetch_add` + persist `__producer_state` like InitProducerId). BrokerEpoch parsed and **ignored**. Not KRaft fencing. Controller only in cluster (**41**); single-node allowed. ACL Cluster ALTER. v1+ → **35** |
 | Missing APIs | Large Kafka surface still unsupported (GSSAPI, OAUTH, …) |
 
 ## Related
