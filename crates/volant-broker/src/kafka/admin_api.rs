@@ -4,7 +4,7 @@
 //! Describe/AlterClientQuotas, DescribeDelegationToken,
 //! ListClientMetricsResources, AlterReplicaLogDirs, AssignReplicasToDirs,
 //! DescribeLogDirs, DescribeTopicPartitions, BrokerRegistration,
-//! UnregisterBroker,
+//! ControllerRegistration, UnregisterBroker,
 //! UpdateFeatures, DescribeQuorum, AllocateProducerIds,
 //! GetTelemetrySubscriptions, PushTelemetry, AlterPartition,
 //! CreateDelegationToken, RenewDelegationToken, ExpireDelegationToken, configs.
@@ -1208,6 +1208,106 @@ fn write_broker_registration(out: &mut BytesMut, error: KafkaErrorCode) {
     out.put_i32(0); // throttleTimeMs
     out.put_i16(error.as_i16());
     out.put_i64(-1); // brokerEpoch — none assigned
+    put_empty_tag_buffer(out);
+}
+
+/// ControllerRegistration v0 (always flexible). Volant is **not** a
+/// KRaft controller quorum.
+///
+/// Parses official Kafka `ControllerRegistrationRequest.json` v0 fields
+/// (`controllerId`, `incarnationId`, `zkMigrationReady`, listeners,
+/// features) and discards them. Does **not** persist. Does **not**
+/// call `add_broker`. Returns throttle **0**, error **42**
+/// `INVALID_REQUEST`, errorMessage `"not KRaft controller registration"`.
+/// Controller is not required. ACL: Cluster **ALTER** (disabled ACLs
+/// allow). Denied → **31**, errorMessage null.
+pub(crate) fn encode_controller_registration(
+    broker: &Broker,
+    src: &mut impl Buf,
+    out: &mut BytesMut,
+    principal: &str,
+) {
+    parse_controller_registration_request(src);
+
+    let denied = broker.acls().is_enabled()
+        && !broker.acls().authorize(
+            Some(principal),
+            ResourceType::Cluster,
+            CLUSTER_RESOURCE,
+            AclOperation::Alter,
+        );
+    let (error, msg) = if denied {
+        (KafkaErrorCode::ClusterAuthorizationFailed, None)
+    } else {
+        (
+            KafkaErrorCode::InvalidRequest,
+            Some("not KRaft controller registration"),
+        )
+    };
+
+    write_controller_registration(out, error, msg);
+}
+
+fn parse_controller_registration_request(src: &mut impl Buf) {
+    // Official v0 (flex, `ControllerRegistrationRequest.json`):
+    // ControllerId i32, IncarnationId uuid, ZkMigrationReady bool,
+    // Listeners[] { name, host, port u16, securityProtocol i16, tagged },
+    // Features[] { name, min i16, max i16, tagged }, tagged.
+    // Close to BrokerRegistration v0 minus clusterId/rack, plus ZkMigrationReady.
+    if src.remaining() >= 4 {
+        let _controller_id = src.get_i32();
+    }
+    let _ = get_uuid(src);
+    if src.remaining() >= 1 {
+        let _zk_migration_ready = src.get_u8();
+    }
+    match get_compact_array_len(src) {
+        Ok(Some(n)) => {
+            for _ in 0..n {
+                if get_compact_string(src).is_err() {
+                    break;
+                }
+                if get_compact_string(src).is_err() {
+                    break;
+                }
+                if src.remaining() < 2 {
+                    break;
+                }
+                let _port = src.get_u16();
+                if src.remaining() < 2 {
+                    break;
+                }
+                let _security = src.get_i16();
+                let _ = skip_tag_buffer(src);
+            }
+        }
+        Ok(None) | Err(_) => {}
+    }
+    match get_compact_array_len(src) {
+        Ok(Some(n)) => {
+            for _ in 0..n {
+                if get_compact_string(src).is_err() {
+                    break;
+                }
+                if src.remaining() < 4 {
+                    break;
+                }
+                let _min = src.get_i16();
+                let _max = src.get_i16();
+                let _ = skip_tag_buffer(src);
+            }
+        }
+        Ok(None) | Err(_) => {}
+    }
+    let _ = skip_tag_buffer(src);
+}
+
+fn write_controller_registration(out: &mut BytesMut, error: KafkaErrorCode, msg: Option<&str>) {
+    // Official ControllerRegistrationResponse.json (v0):
+    // throttleTimeMs, errorCode, errorMessage compact nullable, tagged.
+    out.put_i32(0); // throttleTimeMs
+    out.put_i16(error.as_i16());
+    put_compact_nullable_string(out, msg);
     put_empty_tag_buffer(out);
 }
 
@@ -5837,6 +5937,165 @@ mod tests {
         assert_eq!(throttle, 0);
         assert_eq!(error, KafkaErrorCode::InvalidRequest.as_i16());
         assert_eq!(epoch, -1);
+        assert_eq!(overlay_ids(&broker), before);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    fn controller_registration_body(
+        controller_id: i32,
+        incarnation: &[u8; 16],
+        zk_migration_ready: bool,
+        listeners: &[(&str, &str, u16, i16)],
+        features: &[(&str, i16, i16)],
+    ) -> BytesMut {
+        let mut body = BytesMut::new();
+        body.put_i32(controller_id);
+        put_uuid(&mut body, incarnation);
+        body.put_u8(u8::from(zk_migration_ready));
+        put_compact_array_len(&mut body, listeners.len());
+        for (name, host, port, security) in listeners {
+            put_compact_string(&mut body, name);
+            put_compact_string(&mut body, host);
+            body.put_u16(*port);
+            body.put_i16(*security);
+            put_empty_tag_buffer(&mut body);
+        }
+        put_compact_array_len(&mut body, features.len());
+        for (name, min_v, max_v) in features {
+            put_compact_string(&mut body, name);
+            body.put_i16(*min_v);
+            body.put_i16(*max_v);
+            put_empty_tag_buffer(&mut body);
+        }
+        put_empty_tag_buffer(&mut body);
+        body
+    }
+
+    fn read_controller_registration(src: &mut impl Buf) -> (i32, i16, Option<String>) {
+        let throttle = src.get_i32();
+        let error = src.get_i16();
+        let msg = get_compact_nullable_string(src).unwrap();
+        skip_tag_buffer(src).unwrap();
+        assert_eq!(src.remaining(), 0);
+        (throttle, error, msg)
+    }
+
+    #[test]
+    fn kafka_controller_registration_rejects_and_does_not_persist() {
+        let dir = temp_dir("creg-ok");
+        let broker = Broker::new(StorageConfig {
+            data_dir: dir.clone(),
+            ..StorageConfig::default()
+        });
+        let before_ids = overlay_ids(&broker);
+        assert!(!membership_file(&dir).exists());
+
+        let mut incarnation = [0u8; 16];
+        incarnation[15] = 0x70;
+        let mut src = controller_registration_body(
+            1,
+            &incarnation,
+            false,
+            &[("CONTROLLER", "127.0.0.1", 19094, 0)],
+            &[("metadata.version", 1, 20)],
+        );
+        let mut out = BytesMut::new();
+        encode_controller_registration(&broker, &mut src, &mut out, "kafka-anonymous");
+        let mut resp = out.freeze();
+        let (throttle, error, msg) = read_controller_registration(&mut resp);
+        assert_eq!(throttle, 0);
+        assert_eq!(error, KafkaErrorCode::InvalidRequest.as_i16());
+        assert_eq!(msg.as_deref(), Some("not KRaft controller registration"));
+
+        assert_eq!(overlay_ids(&broker), before_ids);
+        assert!(
+            !membership_file(&dir).exists(),
+            "ControllerRegistration must not create membership.json"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn kafka_controller_registration_existing_brokers_unchanged() {
+        let dir = temp_dir("creg-exist");
+        let broker = cluster_n2(dir.clone(), 1);
+        broker
+            .add_broker(3, "127.0.0.1".into(), 19403, None)
+            .unwrap();
+        let before = overlay_ids(&broker);
+        assert!(before.contains(&3));
+
+        let mut incarnation = [0u8; 16];
+        incarnation[0] = 0xaa;
+        let mut src = controller_registration_body(
+            4,
+            &incarnation,
+            true,
+            &[("CONTROLLER", "127.0.0.1", 19404, 0)],
+            &[],
+        );
+        let mut out = BytesMut::new();
+        encode_controller_registration(&broker, &mut src, &mut out, "kafka-anonymous");
+        let mut resp = out.freeze();
+        let (throttle, error, msg) = read_controller_registration(&mut resp);
+        assert_eq!(throttle, 0);
+        assert_eq!(error, KafkaErrorCode::InvalidRequest.as_i16());
+        assert_eq!(msg.as_deref(), Some("not KRaft controller registration"));
+
+        let after = overlay_ids(&broker);
+        assert_eq!(after, before);
+        assert!(!after.contains(&4));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn kafka_controller_registration_acl_deny_is_31() {
+        let dir = temp_dir("creg-acl");
+        let broker = Broker::new(StorageConfig {
+            data_dir: dir.clone(),
+            ..StorageConfig::default()
+        });
+        broker
+            .configure_acls(true, None, vec![], "token".into())
+            .unwrap();
+
+        let mut incarnation = [0u8; 16];
+        incarnation[1] = 0xbb;
+        let mut src = controller_registration_body(2, &incarnation, false, &[], &[]);
+        let mut out = BytesMut::new();
+        encode_controller_registration(&broker, &mut src, &mut out, "kafka-anonymous");
+        let mut resp = out.freeze();
+        let (throttle, error, msg) = read_controller_registration(&mut resp);
+        assert_eq!(throttle, 0);
+        assert_eq!(error, KafkaErrorCode::ClusterAuthorizationFailed.as_i16());
+        assert_eq!(msg, None);
+        assert!(!membership_file(&dir).exists());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn kafka_controller_registration_not_controller_still_42() {
+        let dir = temp_dir("creg-nc");
+        let broker = cluster_n2(dir.clone(), 2);
+        assert!(!broker.is_controller());
+        let before = overlay_ids(&broker);
+
+        let mut incarnation = [0u8; 16];
+        incarnation[2] = 0xcc;
+        let mut src = controller_registration_body(
+            9,
+            &incarnation,
+            false,
+            &[("CONTROLLER", "127.0.0.1", 19099, 0)],
+            &[],
+        );
+        let mut out = BytesMut::new();
+        encode_controller_registration(&broker, &mut src, &mut out, "kafka-anonymous");
+        let mut resp = out.freeze();
+        let (throttle, error, msg) = read_controller_registration(&mut resp);
+        assert_eq!(throttle, 0);
+        assert_eq!(error, KafkaErrorCode::InvalidRequest.as_i16());
+        assert_eq!(msg.as_deref(), Some("not KRaft controller registration"));
         assert_eq!(overlay_ids(&broker), before);
         let _ = std::fs::remove_dir_all(&dir);
     }

@@ -41,6 +41,7 @@
 //! ExpireDelegationToken v0 (always flexible; no token store; reject 42),
 //! DescribeDelegationToken v0 (always flexible residual; no token store; empty tokens),
 //! ConsumerGroupDescribe v0 (always flexible; classic snapshot wrap; not KIP-848).
+//! ControllerRegistration v0 (key 70 reject; not KRaft / not AddBroker).
 //! See `docs/PHASE23_SPEC.md` … `docs/PHASE91_SPEC.md`, `docs/V225_SPEC.md`,
 //! `docs/V228_SPEC.md`, `docs/V233_SPEC.md`, `docs/V235_SPEC.md`,
 //! `docs/V236_SPEC.md`, `docs/V237_SPEC.md`, `docs/V241_SPEC.md`,
@@ -49,7 +50,7 @@
 //! `docs/V251_SPEC.md`, `docs/V252_SPEC.md`, `docs/V253_SPEC.md`,
 //! `docs/V255_SPEC.md`, `docs/V257_SPEC.md`, `docs/V258_SPEC.md`,
 //! `docs/V259_SPEC.md`, `docs/V260_SPEC.md`, `docs/V261_SPEC.md`,
-//! `docs/V263_SPEC.md`, and `docs/V264_SPEC.md`.
+//! `docs/V263_SPEC.md`, `docs/V264_SPEC.md`, and `docs/V268_SPEC.md`.
 
 mod acl_api;
 mod admin_api;
@@ -371,6 +372,11 @@ pub enum ApiKey {
     /// `GroupCoordinator::describe_group` (same snapshot as DescribeGroups).
     /// Not KIP-848: memberEpoch = -1, classic groups only.
     ConsumerGroupDescribe = 69,
+    /// ControllerRegistration (always flexible; v0 only). Honest reject:
+    /// not a KRaft controller (no incarnation / ZK migration / listener
+    /// store). Does not wrap native AddBroker. Overlay membership is
+    /// unchanged.
+    ControllerRegistration = 70,
     /// GetTelemetrySubscriptions (always flexible; v0 only). No client
     /// telemetry (not KIP-714). Empty subscription; do not push.
     GetTelemetrySubscriptions = 71,
@@ -449,6 +455,7 @@ impl ApiKey {
             66 => Some(Self::ListTransactions),
             67 => Some(Self::AllocateProducerIds),
             69 => Some(Self::ConsumerGroupDescribe),
+            70 => Some(Self::ControllerRegistration),
             71 => Some(Self::GetTelemetrySubscriptions),
             72 => Some(Self::PushTelemetry),
             73 => Some(Self::AssignReplicasToDirs),
@@ -520,6 +527,7 @@ pub const SUPPORTED_APIS: &[(ApiKey, i16, i16)] = &[
     (ApiKey::ListTransactions, 0, 2),
     (ApiKey::AllocateProducerIds, 0, 0),
     (ApiKey::ConsumerGroupDescribe, 0, 0),
+    (ApiKey::ControllerRegistration, 0, 0),
     (ApiKey::GetTelemetrySubscriptions, 0, 0),
     (ApiKey::PushTelemetry, 0, 0),
     (ApiKey::AssignReplicasToDirs, 0, 0),
@@ -771,5 +779,14 @@ mod tests {
             *k == ApiKey::ExpireDelegationToken && *min == 0 && *max == 0
         }));
         assert_eq!(ApiKey::from_i16(40), Some(ApiKey::ExpireDelegationToken));
+    }
+
+    #[test]
+    fn supported_apis_includes_controller_registration_70() {
+        assert!(SUPPORTED_APIS.len() >= 65);
+        assert!(SUPPORTED_APIS.iter().any(|(k, min, max)| {
+            *k == ApiKey::ControllerRegistration && *min == 0 && *max == 0
+        }));
+        assert_eq!(ApiKey::from_i16(70), Some(ApiKey::ControllerRegistration));
     }
 }
