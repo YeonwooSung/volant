@@ -31,6 +31,8 @@ _ = n
 gen, err := c.ReassignPartitions("t", []uint32{1, 2}, nil) // all partitions
 gen, err = c.ReassignAllPartitions("t", []uint32{1, 2})    // v0.167; same as ReassignPartitions(topic, replicas, nil)
 _ = gen
+overlay, err := c.AddBrokerNoRack(2, "10.0.0.2", 9092)     // v0.171; same as AddBroker(id, host, port, nil)
+_ = overlay
 off, err := c.Produce("t", 0, nil, []byte("hello"))
 if err != nil {
     log.Fatal(err)
@@ -201,6 +203,8 @@ Nil `partition` is all partitions (`u32::MAX`); nil / empty `replicas`
 is auto-place.
 `ReassignAllPartitions(topic, replicas)` reassigns every partition
 (wire `u32::MAX`); same as `ReassignPartitions(topic, replicas, nil)`.
+`AddBrokerNoRack(id, host, port)` adds a broker with no rack (wire
+flag 0); same as `AddBroker(id, host, port, nil)`.
 `ListOffsets` returns `[]OffsetListing` (`Partition`, `Earliest`,
 `Latest`); nil / empty partitions means all (native opcode 48, not
 Kafka timestamp ListOffsets).
