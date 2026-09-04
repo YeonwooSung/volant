@@ -1939,6 +1939,14 @@ class Client:
             self._check(resp.error_code, "offset_fetch")
             return list(resp.entries)
 
+    def fetch_offset(self, group: str, topic: str, partition: int) -> list[OffsetFetchEntry]:
+        """Fetch one committed offset (one OffsetEntry).
+
+        Same as ``fetch_offsets(group, [(topic, partition)])``.
+        Error 14 / transient retry inherit from ``fetch_offsets``.
+        """
+        return self.fetch_offsets(group, [(topic, partition)])
+
     def join_group(
         self,
         group: str,

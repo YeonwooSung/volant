@@ -2206,6 +2206,38 @@ func TestFetchOffsetsEncodesSpecificEntries(t *testing.T) {
 	}
 }
 
+func TestFetchOffsetEncodesOneEntry(t *testing.T) {
+	srv := &scriptedBroker{offsetFetchEntries: []codec.OffsetFetchEntry{
+		{Topic: "t", Partition: 0, Offset: 5},
+	}}
+	addr, stop := startScripted(t, srv)
+	defer stop()
+
+	c, err := volant.DialTimeout(addr, 5*time.Second)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer c.Close()
+
+	offs, err := c.FetchOffset("g", "t", 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(offs) != 1 || offs[0] != (codec.OffsetFetchEntry{Topic: "t", Partition: 0, Offset: 5}) {
+		t.Fatalf("offsets %v want [{t 0 5}]", offs)
+	}
+	reqs := srv.copyOffsetFetches()
+	if len(reqs) != 1 {
+		t.Fatalf("offset fetch reqs %d want 1", len(reqs))
+	}
+	if reqs[0].GroupID != "g" {
+		t.Fatalf("group %q want g", reqs[0].GroupID)
+	}
+	if len(reqs[0].Entries) != 1 || reqs[0].Entries[0] != (codec.OffsetEntry{Topic: "t", Partition: 0}) {
+		t.Fatalf("entries %v want [{t 0}]", reqs[0].Entries)
+	}
+}
+
 func TestFetchOffsetsNilOrEmptySendsAll(t *testing.T) {
 	srv := &scriptedBroker{offsetFetchEntries: []codec.OffsetFetchEntry{
 		{Topic: "t", Partition: 0, Offset: 5},

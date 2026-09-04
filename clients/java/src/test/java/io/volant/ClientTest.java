@@ -1376,6 +1376,24 @@ class ClientTest {
     }
 
     @Test
+    void fetchOffsetEncodesOneEntry() throws Exception {
+        try (ScriptedBroker srv = ScriptedBroker.start()) {
+            srv.offsetFetchEntries.add(new Codec.OffsetFetchEntry("t", 0, 5, ""));
+            try (Client c = Client.connect("127.0.0.1", srv.port, 5_000)) {
+                List<OffsetFetchEntry> offs = c.fetchOffset("g", "t", 0);
+                assertEquals(List.of(new OffsetFetchEntry("t", 0, 5)), offs);
+            }
+            assertEquals(1, srv.offsetFetchCount.get());
+            assertEquals(1, srv.offsetFetchReqs.size());
+            Codec.OffsetFetchRequest req = srv.offsetFetchReqs.get(0);
+            assertEquals("g", req.groupId);
+            assertEquals(1, req.entries.size());
+            assertEquals("t", req.entries.get(0).topic);
+            assertEquals(0, req.entries.get(0).partition);
+        }
+    }
+
+    @Test
     void fetchOffsetsNullOrEmptySendsAll() throws Exception {
         try (ScriptedBroker srv = ScriptedBroker.start()) {
             srv.offsetFetchEntries.add(new Codec.OffsetFetchEntry("t", 0, 5, ""));
