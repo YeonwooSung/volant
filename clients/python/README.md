@@ -131,6 +131,7 @@ e = AclBinding("User:alice", 0, "events", 3, 1)  # Topic, op 3, Allow
 c.create_acl(e)  # v0.169; one binding
 c.create_acls([e])
 listed = c.list_acls()  # any/any/any
+listed = c.list_acls_all()  # v0.196; same as list_acls()
 n = c.delete_acl(e)  # v0.169; one binding
 n = c.delete_acls([e])
 ```
@@ -289,6 +290,8 @@ AlterUserScramCredentials.
 Create/Delete/ListAcls (v0.56) are admin RPCs (opcodes 54–59).
 `create_acls([AclBinding(...)])` / `delete_acls(...)` (returns
 removed) / `list_acls(principal="", resource_type=255, resource="")`.
+`list_acls_all()` lists every ACL binding (empty filters); same as
+`list_acls()` / `list_acls("", 255, "")`.
 `create_acl(entry)` / `delete_acl(entry)` create or delete one binding
 (same as a one-element list).
 Delete is exact-match only. Not Kafka CreateAcls / DeleteAcls /
