@@ -8,8 +8,8 @@ use std::sync::{Mutex, OnceLock};
 
 use bytes::Bytes;
 use volant_broker::{
-    Broker, TRANSACTION_STATE_HEADER, TRANSACTION_STATE_TOPIC, TXN_STATE_COMPLETE_ABORT,
-    TXN_STATE_COMPLETE_COMMIT, TXN_STATE_ONGOING, TXN_STATE_PREPARE_COMMIT,
+    Broker, TRANSACTION_STATE_FMT_KAFKA_V0, TRANSACTION_STATE_HEADER, TRANSACTION_STATE_TOPIC,
+    TXN_STATE_COMPLETE_ABORT, TXN_STATE_COMPLETE_COMMIT, TXN_STATE_ONGOING, TXN_STATE_PREPARE_COMMIT,
 };
 use volant_core::{Message, PartitionId, TopicName};
 use volant_storage::StorageConfig;
@@ -162,9 +162,9 @@ fn flag_on_prepare_writes_prepare_commit() {
         )
         .unwrap();
     assert!(fetched.iter().any(|r| {
-        r.headers
-            .iter()
-            .any(|(k, v)| k == TRANSACTION_STATE_HEADER && v.as_ref() == b"1")
+        r.headers.iter().any(|(k, v)| {
+            k == TRANSACTION_STATE_HEADER && v.as_ref() == TRANSACTION_STATE_FMT_KAFKA_V0
+        })
     }));
     drop(env);
     let _ = std::fs::remove_dir_all(&dir);

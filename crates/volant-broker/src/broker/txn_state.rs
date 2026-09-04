@@ -1,10 +1,12 @@
-//! Opt-in `__transaction_state` coordinator log (v0.13 / KIP-890 MVP).
+//! Opt-in `__transaction_state` coordinator log (v0.13 / v0.229).
 //!
-//! Volant JSON records, not Kafka KRaft / KIP-890 schemas. Default **off**.
+//! Writes Kafka `TransactionLogKey` / `TransactionLogValue` **v0** (classic,
+//! not flexible). Dual-reads legacy Volant JSON v1 so existing logs replay.
+//! Default **off**. Not full KIP-890/939.
 
 use std::collections::HashMap;
 
-use bytes::Bytes;
+use bytes::{Buf, Bytes};
 use serde::{Deserialize, Serialize};
 use volant_core::{Message, MessageBatch, Offset, PartitionId, TopicName};
 
@@ -13,16 +15,22 @@ use super::*;
 /// Internal transaction-state topic name (v0.13).
 pub const TRANSACTION_STATE_TOPIC: &str = "__transaction_state";
 
-/// Record header key (`1` = this JSON schema).
+/// Record header key (`1` = JSON v1, `2` = Kafka TransactionLog v0).
 pub const TRANSACTION_STATE_HEADER: &str = "volant-txn-state";
+
+/// Header value for legacy Volant JSON v1 records (still read).
+pub const TRANSACTION_STATE_FMT_JSON: &[u8] = b"1";
+
+/// Header value for Kafka `TransactionLogKey` / `TransactionLogValue` v0 writes.
+pub const TRANSACTION_STATE_FMT_KAFKA_V0: &[u8] = b"2";
 
 /// Env knob: `1` / `true` / `yes` enables the topic (default **off**).
 pub const ENV_TRANSACTION_STATE_TOPIC: &str = "VOLANT_TRANSACTION_STATE_TOPIC";
 
-/// JSON schema version written into each record.
+/// In-memory [`TransactionStateRecord`] schema version (`v` field).
 pub const TRANSACTION_STATE_RECORD_VERSION: u8 = 1;
 
-/// Coordinator log states (Volant JSON, not Kafka `TxnState`).
+/// Coordinator log states (Volant strings; Kafka status bytes map to these).
 pub const TXN_STATE_EMPTY: &str = "empty";
 /// Open write-through txn.
 pub const TXN_STATE_ONGOING: &str = "ongoing";
@@ -35,10 +43,25 @@ pub const TXN_STATE_COMPLETE_COMMIT: &str = "complete_commit";
 /// Second EndTxn / one-shot / fence / timeout / open crash≡abort.
 pub const TXN_STATE_COMPLETE_ABORT: &str = "complete_abort";
 
-/// One `__transaction_state` JSON value.
+/// Kafka `TransactionLogValue.transactionStatus` for [`TXN_STATE_EMPTY`].
+pub const TXN_LOG_STATUS_EMPTY: i8 = 0;
+/// Kafka status for [`TXN_STATE_ONGOING`].
+pub const TXN_LOG_STATUS_ONGOING: i8 = 1;
+/// Kafka status for [`TXN_STATE_PREPARE_COMMIT`].
+pub const TXN_LOG_STATUS_PREPARE_COMMIT: i8 = 2;
+/// Kafka status for [`TXN_STATE_PREPARE_ABORT`].
+pub const TXN_LOG_STATUS_PREPARE_ABORT: i8 = 3;
+/// Kafka status for [`TXN_STATE_COMPLETE_COMMIT`].
+pub const TXN_LOG_STATUS_COMPLETE_COMMIT: i8 = 4;
+/// Kafka status for [`TXN_STATE_COMPLETE_ABORT`].
+pub const TXN_LOG_STATUS_COMPLETE_ABORT: i8 = 5;
+/// Kafka `PrepareEpochFence` — decode as [`TXN_STATE_COMPLETE_ABORT`]; never write.
+pub const TXN_LOG_STATUS_PREPARE_EPOCH_FENCE: i8 = 6;
+
+/// One `__transaction_state` in-memory record (JSON v1 or decoded Kafka v0/v1).
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct TransactionStateRecord {
-    /// Schema version (`1`).
+    /// In-memory schema version (`1`). Not the on-disk Kafka value version.
     pub v: u8,
     /// `empty|ongoing|prepare_commit|prepare_abort|complete_commit|complete_abort`.
     pub state: String,
@@ -48,6 +71,249 @@ pub struct TransactionStateRecord {
     pub epoch: u16,
     /// Txn start / prepare clock (unix ms). `0` when unknown / empty.
     pub txn_start_ms: i64,
+}
+
+/// Classic Kafka `TransactionLogValue` (v0 write; v0/v1 read).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TransactionLogValue {
+    /// Message version (`0` on write; `0` or `1` on read).
+    pub version: i16,
+    /// Producer id in use by the transactional id.
+    pub producer_id: i64,
+    /// Epoch associated with the producer id.
+    pub producer_epoch: i16,
+    /// Transaction timeout in milliseconds (`0` if unknown).
+    pub transaction_timeout_ms: i32,
+    /// Kafka `transactionStatus` byte (see `TXN_LOG_STATUS_*`).
+    pub transaction_status: i8,
+    /// Topic → partitions in the txn. **Null** on write (ranges live in `__txn_prepared`).
+    pub partitions: Option<Vec<(String, Vec<i32>)>>,
+    /// Last update timestamp (unix ms). `0` on JSON replay.
+    pub transaction_last_update_timestamp_ms: i64,
+    /// Txn start timestamp (unix ms). Maps to [`TransactionStateRecord::txn_start_ms`].
+    pub transaction_start_timestamp_ms: i64,
+}
+
+/// Map a Volant state string to a Kafka status byte. Does not emit `6`.
+pub fn txn_state_to_log_status(state: &str) -> Option<i8> {
+    match state {
+        TXN_STATE_EMPTY => Some(TXN_LOG_STATUS_EMPTY),
+        TXN_STATE_ONGOING => Some(TXN_LOG_STATUS_ONGOING),
+        TXN_STATE_PREPARE_COMMIT => Some(TXN_LOG_STATUS_PREPARE_COMMIT),
+        TXN_STATE_PREPARE_ABORT => Some(TXN_LOG_STATUS_PREPARE_ABORT),
+        TXN_STATE_COMPLETE_COMMIT => Some(TXN_LOG_STATUS_COMPLETE_COMMIT),
+        TXN_STATE_COMPLETE_ABORT => Some(TXN_LOG_STATUS_COMPLETE_ABORT),
+        _ => None,
+    }
+}
+
+/// Map a Kafka status byte to a Volant state string.
+///
+/// `6` (`PrepareEpochFence`) decodes as [`TXN_STATE_COMPLETE_ABORT`].
+pub fn txn_log_status_to_state(status: i8) -> Option<&'static str> {
+    match status {
+        TXN_LOG_STATUS_EMPTY => Some(TXN_STATE_EMPTY),
+        TXN_LOG_STATUS_ONGOING => Some(TXN_STATE_ONGOING),
+        TXN_LOG_STATUS_PREPARE_COMMIT => Some(TXN_STATE_PREPARE_COMMIT),
+        TXN_LOG_STATUS_PREPARE_ABORT => Some(TXN_STATE_PREPARE_ABORT),
+        TXN_LOG_STATUS_COMPLETE_COMMIT => Some(TXN_STATE_COMPLETE_COMMIT),
+        TXN_LOG_STATUS_COMPLETE_ABORT | TXN_LOG_STATUS_PREPARE_EPOCH_FENCE => {
+            Some(TXN_STATE_COMPLETE_ABORT)
+        }
+        _ => None,
+    }
+}
+
+/// Encode classic Kafka `TransactionLogKey` v0 (`int16` version + string).
+pub fn encode_transaction_log_key(transactional_id: &str) -> Vec<u8> {
+    let mut buf = Vec::with_capacity(4 + transactional_id.len());
+    put_i16(&mut buf, 0);
+    put_kafka_string(&mut buf, transactional_id);
+    buf
+}
+
+/// Decode classic Kafka `TransactionLogKey` v0. `None` if not that schema.
+pub fn decode_transaction_log_key(src: &[u8]) -> Option<String> {
+    let mut src = src;
+    if src.remaining() < 2 {
+        return None;
+    }
+    let version = src.get_i16();
+    if version != 0 {
+        return None;
+    }
+    get_kafka_string(&mut src)
+}
+
+/// Encode classic Kafka `TransactionLogValue` **v0** (never writes v1 / TV2).
+pub fn encode_transaction_log_value(value: &TransactionLogValue) -> Vec<u8> {
+    let mut buf = Vec::with_capacity(32);
+    put_i16(&mut buf, 0);
+    put_i64(&mut buf, value.producer_id);
+    put_i16(&mut buf, value.producer_epoch);
+    put_i32(&mut buf, value.transaction_timeout_ms);
+    buf.push(value.transaction_status as u8);
+    match &value.partitions {
+        None => put_i32(&mut buf, -1),
+        Some(topics) => {
+            put_i32(&mut buf, topics.len() as i32);
+            for (topic, parts) in topics {
+                put_kafka_string(&mut buf, topic);
+                put_i32(&mut buf, parts.len() as i32);
+                for p in parts {
+                    put_i32(&mut buf, *p);
+                }
+            }
+        }
+    }
+    put_i64(&mut buf, value.transaction_last_update_timestamp_ms);
+    put_i64(&mut buf, value.transaction_start_timestamp_ms);
+    buf
+}
+
+/// Decode classic Kafka `TransactionLogValue` v0 or v1 (ignore extra v1 field).
+pub fn decode_transaction_log_value(src: &[u8]) -> Option<TransactionLogValue> {
+    let mut src = src;
+    if src.remaining() < 2 {
+        return None;
+    }
+    let version = src.get_i16();
+    if version != 0 && version != 1 {
+        return None;
+    }
+    if src.remaining() < 8 + 2 + 4 + 1 + 4 {
+        return None;
+    }
+    let producer_id = src.get_i64();
+    let producer_epoch = src.get_i16();
+    let transaction_timeout_ms = src.get_i32();
+    let transaction_status = src.get_i8();
+    if src.remaining() < 4 {
+        return None;
+    }
+    let part_count = src.get_i32();
+    let partitions = if part_count < 0 {
+        None
+    } else {
+        let n = part_count as usize;
+        if n > src.remaining() {
+            return None;
+        }
+        let mut topics = Vec::with_capacity(n);
+        for _ in 0..n {
+            let topic = get_kafka_string(&mut src)?;
+            if src.remaining() < 4 {
+                return None;
+            }
+            let pn = src.get_i32();
+            if pn < 0 {
+                return None;
+            }
+            let pn = pn as usize;
+            if pn > src.remaining() / 4 {
+                return None;
+            }
+            let mut parts = Vec::with_capacity(pn);
+            for _ in 0..pn {
+                if src.remaining() < 4 {
+                    return None;
+                }
+                parts.push(src.get_i32());
+            }
+            topics.push((topic, parts));
+        }
+        Some(topics)
+    };
+    if src.remaining() < 16 {
+        return None;
+    }
+    let transaction_last_update_timestamp_ms = src.get_i64();
+    let transaction_start_timestamp_ms = src.get_i64();
+    if version == 1 && src.remaining() >= 2 {
+        let _client_transaction_version = src.get_i16();
+    }
+    Some(TransactionLogValue {
+        version,
+        producer_id,
+        producer_epoch,
+        transaction_timeout_ms,
+        transaction_status,
+        partitions,
+        transaction_last_update_timestamp_ms,
+        transaction_start_timestamp_ms,
+    })
+}
+
+/// Decode one topic record: JSON v1 (header `1` or `{` body) or Kafka v0/v1.
+pub fn parse_transaction_state_record(
+    key: &[u8],
+    value: &[u8],
+    headers: &[(String, Bytes)],
+) -> Option<(String, TransactionStateRecord)> {
+    if is_json_txn_state(headers, value) {
+        let tid = String::from_utf8_lossy(key).into_owned();
+        let rec = serde_json::from_slice::<TransactionStateRecord>(value).ok()?;
+        return Some((tid, rec));
+    }
+    let tid = decode_transaction_log_key(key)
+        .unwrap_or_else(|| String::from_utf8_lossy(key).into_owned());
+    let val = decode_transaction_log_value(value)?;
+    let state = txn_log_status_to_state(val.transaction_status)?.to_owned();
+    if val.producer_id < 0 || val.producer_epoch < 0 {
+        return None;
+    }
+    Some((
+        tid,
+        TransactionStateRecord {
+            v: TRANSACTION_STATE_RECORD_VERSION,
+            state,
+            producer_id: val.producer_id as u64,
+            epoch: val.producer_epoch as u16,
+            txn_start_ms: val.transaction_start_timestamp_ms,
+        },
+    ))
+}
+
+fn is_json_txn_state(headers: &[(String, Bytes)], value: &[u8]) -> bool {
+    headers
+        .iter()
+        .any(|(k, v)| k == TRANSACTION_STATE_HEADER && v.as_ref() == TRANSACTION_STATE_FMT_JSON)
+        || value.first() == Some(&b'{')
+}
+
+fn put_i16(buf: &mut Vec<u8>, v: i16) {
+    buf.extend_from_slice(&v.to_be_bytes());
+}
+
+fn put_i32(buf: &mut Vec<u8>, v: i32) {
+    buf.extend_from_slice(&v.to_be_bytes());
+}
+
+fn put_i64(buf: &mut Vec<u8>, v: i64) {
+    buf.extend_from_slice(&v.to_be_bytes());
+}
+
+fn put_kafka_string(buf: &mut Vec<u8>, s: &str) {
+    let b = s.as_bytes();
+    put_i16(buf, b.len() as i16);
+    buf.extend_from_slice(b);
+}
+
+fn get_kafka_string(src: &mut &[u8]) -> Option<String> {
+    if src.remaining() < 2 {
+        return None;
+    }
+    let len = src.get_i16();
+    if len < 0 {
+        return None;
+    }
+    let len = len as usize;
+    if src.remaining() < len {
+        return None;
+    }
+    let (head, rest) = src.split_at(len);
+    *src = rest;
+    String::from_utf8(head.to_vec()).ok()
 }
 
 /// Parse `VOLANT_TRANSACTION_STATE_TOPIC` (default **off**).
@@ -116,24 +382,26 @@ impl Broker {
         if !self.transaction_state_topic || transactional_id.is_empty() {
             return;
         }
-        self.ensure_transaction_state_topic();
-        let rec = TransactionStateRecord {
-            v: TRANSACTION_STATE_RECORD_VERSION,
-            state: state.to_owned(),
-            producer_id,
-            epoch,
-            txn_start_ms,
-        };
-        let Ok(json) = serde_json::to_vec(&rec) else {
+        let Some(status) = txn_state_to_log_status(state) else {
             return;
         };
-        let mut msg = Message::with_key(
-            Bytes::copy_from_slice(transactional_id.as_bytes()),
-            Bytes::from(json),
-        );
+        self.ensure_transaction_state_topic();
+        let value = TransactionLogValue {
+            version: 0,
+            producer_id: producer_id as i64,
+            producer_epoch: epoch as i16,
+            transaction_timeout_ms: 0,
+            transaction_status: status,
+            partitions: None,
+            transaction_last_update_timestamp_ms: unix_now_ms(),
+            transaction_start_timestamp_ms: txn_start_ms,
+        };
+        let key = encode_transaction_log_key(transactional_id);
+        let val = encode_transaction_log_value(&value);
+        let mut msg = Message::with_key(Bytes::from(key), Bytes::from(val));
         msg.headers.push((
             TRANSACTION_STATE_HEADER.to_string(),
-            Bytes::from_static(b"1"),
+            Bytes::from_static(TRANSACTION_STATE_FMT_KAFKA_V0),
         ));
         let mut batch = MessageBatch::default();
         batch.messages.push(msg);
@@ -276,8 +544,8 @@ impl Broker {
                 let Some(key) = r.key.as_ref() else {
                     continue;
                 };
-                let tid = String::from_utf8_lossy(key).into_owned();
-                let Ok(rec) = serde_json::from_slice::<TransactionStateRecord>(&r.value) else {
+                let Some((tid, rec)) = parse_transaction_state_record(key, &r.value, &r.headers)
+                else {
                     continue;
                 };
                 if !latest.contains_key(&tid) {
@@ -311,8 +579,8 @@ impl Broker {
                 let Some(key) = r.key.as_ref() else {
                     continue;
                 };
-                let tid = String::from_utf8_lossy(key).into_owned();
-                let Ok(rec) = serde_json::from_slice::<TransactionStateRecord>(&r.value) else {
+                let Some((tid, rec)) = parse_transaction_state_record(key, &r.value, &r.headers)
+                else {
                     continue;
                 };
                 out.push((tid, rec));
@@ -323,5 +591,124 @@ impl Broker {
             }
         }
         out
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn hex(bytes: &[u8]) -> String {
+        bytes.iter().map(|b| format!("{b:02x}")).collect()
+    }
+
+    #[test]
+    fn transaction_log_key_v0_roundtrip() {
+        let tid = "txn-abc";
+        let bytes = encode_transaction_log_key(tid);
+        assert_eq!(hex(&bytes), "0000000774786e2d616263");
+        assert_eq!(decode_transaction_log_key(&bytes).as_deref(), Some(tid));
+        // Raw utf8 key is not a Kafka TransactionLogKey.
+        assert!(decode_transaction_log_key(tid.as_bytes()).is_none());
+    }
+
+    #[test]
+    fn transaction_log_value_v0_roundtrip() {
+        let v = TransactionLogValue {
+            version: 0,
+            producer_id: 1,
+            producer_epoch: 2,
+            transaction_timeout_ms: 0,
+            transaction_status: TXN_LOG_STATUS_COMPLETE_ABORT,
+            partitions: None,
+            transaction_last_update_timestamp_ms: 100,
+            transaction_start_timestamp_ms: 50,
+        };
+        let bytes = encode_transaction_log_value(&v);
+        assert_eq!(
+            hex(&bytes),
+            "0000000000000000000100020000000005ffffffff00000000000000640000000000000032"
+        );
+        let dec = decode_transaction_log_value(&bytes).expect("v0 decode");
+        assert_eq!(dec, v);
+        assert!(dec.partitions.is_none());
+    }
+
+    #[test]
+    fn transaction_log_value_v1_ignores_client_txn_version() {
+        let v = TransactionLogValue {
+            version: 0,
+            producer_id: 9,
+            producer_epoch: 1,
+            transaction_timeout_ms: 0,
+            transaction_status: TXN_LOG_STATUS_ONGOING,
+            partitions: None,
+            transaction_last_update_timestamp_ms: 1,
+            transaction_start_timestamp_ms: 1,
+        };
+        let mut bytes = encode_transaction_log_value(&v);
+        bytes[1] = 1; // version = 1
+        bytes.extend_from_slice(&7i16.to_be_bytes());
+        let dec = decode_transaction_log_value(&bytes).expect("v1 decode");
+        assert_eq!(dec.version, 1);
+        assert_eq!(dec.producer_id, 9);
+        assert_eq!(dec.transaction_status, TXN_LOG_STATUS_ONGOING);
+        assert_eq!(dec.transaction_start_timestamp_ms, 1);
+    }
+
+    #[test]
+    fn prepare_epoch_fence_decodes_as_complete_abort() {
+        assert_eq!(
+            txn_log_status_to_state(TXN_LOG_STATUS_PREPARE_EPOCH_FENCE),
+            Some(TXN_STATE_COMPLETE_ABORT)
+        );
+        assert_eq!(
+            txn_state_to_log_status(TXN_STATE_COMPLETE_ABORT),
+            Some(TXN_LOG_STATUS_COMPLETE_ABORT)
+        );
+        assert_ne!(
+            txn_state_to_log_status(TXN_STATE_COMPLETE_ABORT),
+            Some(TXN_LOG_STATUS_PREPARE_EPOCH_FENCE)
+        );
+    }
+
+    #[test]
+    fn parse_json_v1_and_kafka_v0() {
+        let rec = TransactionStateRecord {
+            v: 1,
+            state: TXN_STATE_ONGOING.to_string(),
+            producer_id: 7,
+            epoch: 1,
+            txn_start_ms: 42,
+        };
+        let json = serde_json::to_vec(&rec).unwrap();
+        let headers = vec![(
+            TRANSACTION_STATE_HEADER.to_string(),
+            Bytes::from_static(TRANSACTION_STATE_FMT_JSON),
+        )];
+        let (tid, parsed) = parse_transaction_state_record(b"raw-tid", &json, &headers).unwrap();
+        assert_eq!(tid, "raw-tid");
+        assert_eq!(parsed, rec);
+
+        let key = encode_transaction_log_key("kafka-tid");
+        let val = encode_transaction_log_value(&TransactionLogValue {
+            version: 0,
+            producer_id: 7,
+            producer_epoch: 1,
+            transaction_timeout_ms: 0,
+            transaction_status: TXN_LOG_STATUS_ONGOING,
+            partitions: None,
+            transaction_last_update_timestamp_ms: 99,
+            transaction_start_timestamp_ms: 42,
+        });
+        let kh = vec![(
+            TRANSACTION_STATE_HEADER.to_string(),
+            Bytes::from_static(TRANSACTION_STATE_FMT_KAFKA_V0),
+        )];
+        let (tid, parsed) = parse_transaction_state_record(&key, &val, &kh).unwrap();
+        assert_eq!(tid, "kafka-tid");
+        assert_eq!(parsed.state, TXN_STATE_ONGOING);
+        assert_eq!(parsed.producer_id, 7);
+        assert_eq!(parsed.txn_start_ms, 42);
     }
 }
