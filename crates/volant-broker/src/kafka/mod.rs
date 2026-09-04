@@ -28,6 +28,7 @@
 //! DescribeTopicPartitions v0 (wraps Metadata; key 75),
 //! BrokerRegistration v0 (key 62 reject; not KRaft / not AddBroker),
 //! BrokerHeartbeat v0 (key 63 reject; not KRaft / not native Heartbeat 12),
+//! FetchSnapshot v0 (key 59 reject; not KRaft snapshot / not InstallSnapshot),
 //! UnregisterBroker v0 (wraps native remove_broker; key 64; not KRaft incarnation),
 //! UpdateFeatures v0–1 (always flexible; reject every feature; empty ApiVersions features),
 //! DescribeQuorum v0–1 (always flexible; wraps openraft leader/term/voters; not KRaft),
@@ -53,7 +54,7 @@
 //! `docs/V255_SPEC.md`, `docs/V257_SPEC.md`, `docs/V258_SPEC.md`,
 //! `docs/V259_SPEC.md`, `docs/V260_SPEC.md`, `docs/V261_SPEC.md`,
 //! `docs/V263_SPEC.md`, `docs/V264_SPEC.md`, `docs/V265_SPEC.md`,
-//! `docs/V266_SPEC.md`, and `docs/V269_SPEC.md`.
+//! `docs/V266_SPEC.md`, `docs/V267_SPEC.md`, and `docs/V269_SPEC.md`.
 
 mod acl_api;
 mod admin_api;
@@ -357,6 +358,10 @@ pub enum ApiKey {
     /// no request forwarding (not KIP-590). Embedded RequestData is
     /// discarded; nothing is unwrapped or executed.
     Envelope = 58,
+    /// FetchSnapshot (always flexible; v0 only). Honest reject:
+    /// not a KRaft controller; does not serve metadata snapshots.
+    /// Does not wrap native InstallSnapshot 112/113.
+    FetchSnapshot = 59,
     /// DescribeCluster (always flexible).
     DescribeCluster = 60,
     /// DescribeProducers (always flexible).
@@ -457,6 +462,7 @@ impl ApiKey {
             56 => Some(Self::AlterPartition),
             57 => Some(Self::UpdateFeatures),
             58 => Some(Self::Envelope),
+            59 => Some(Self::FetchSnapshot),
             60 => Some(Self::DescribeCluster),
             61 => Some(Self::DescribeProducers),
             62 => Some(Self::BrokerRegistration),
@@ -531,6 +537,7 @@ pub const SUPPORTED_APIS: &[(ApiKey, i16, i16)] = &[
     (ApiKey::AlterPartition, 0, 0),
     (ApiKey::UpdateFeatures, 0, 1),
     (ApiKey::Envelope, 0, 0),
+    (ApiKey::FetchSnapshot, 0, 0),
     (ApiKey::DescribeCluster, 0, 2),
     (ApiKey::DescribeProducers, 0, 0),
     (ApiKey::BrokerRegistration, 0, 0),
@@ -824,6 +831,16 @@ mod tests {
             .any(|(k, min, max)| *k == ApiKey::Envelope && *min == 0 && *max == 0));
         assert_eq!(ApiKey::from_i16(58), Some(ApiKey::Envelope));
         assert_eq!(ApiKey::from_i16(57), Some(ApiKey::UpdateFeatures));
+        assert_eq!(ApiKey::from_i16(60), Some(ApiKey::DescribeCluster));
+    }
+
+    #[test]
+    fn supported_apis_includes_fetch_snapshot_59() {
+        assert!(SUPPORTED_APIS.len() >= 65);
+        assert!(SUPPORTED_APIS
+            .iter()
+            .any(|(k, min, max)| { *k == ApiKey::FetchSnapshot && *min == 0 && *max == 0 }));
+        assert_eq!(ApiKey::from_i16(59), Some(ApiKey::FetchSnapshot));
         assert_eq!(ApiKey::from_i16(60), Some(ApiKey::DescribeCluster));
     }
 }

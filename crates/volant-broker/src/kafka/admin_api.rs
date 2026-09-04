@@ -4,7 +4,7 @@
 //! Describe/AlterClientQuotas, DescribeDelegationToken,
 //! ListClientMetricsResources, AlterReplicaLogDirs, AssignReplicasToDirs,
 //! DescribeLogDirs, DescribeTopicPartitions, BrokerRegistration,
-//! BrokerHeartbeat, UnregisterBroker, Envelope,
+//! BrokerHeartbeat, UnregisterBroker, Envelope, FetchSnapshot,
 //! UpdateFeatures, DescribeQuorum, AllocateProducerIds,
 //! GetTelemetrySubscriptions, PushTelemetry, AlterPartition,
 //! CreateDelegationToken, RenewDelegationToken, ExpireDelegationToken, configs.
@@ -1335,6 +1335,102 @@ fn write_envelope(out: &mut BytesMut, error: KafkaErrorCode) {
     // tagged. No throttleTimeMs.
     put_compact_bytes(out, None);
     out.put_i16(error.as_i16());
+    put_empty_tag_buffer(out);
+}
+
+/// FetchSnapshot v0 (always flexible). Volant is **not** a KRaft
+/// controller and does **not** serve KRaft metadata snapshots.
+///
+/// Parses official Kafka `FetchSnapshotRequest.json` v0 fields
+/// (`replicaId`, `maxBytes`, `topics[]` with inline `SnapshotId`,
+/// request-level tagged `clusterId`) and discards them. Does **not**
+/// call native InstallSnapshot 112/113 or openraft snapshot APIs.
+/// Returns throttle **0**, top-level **42** `INVALID_REQUEST`, empty
+/// `topics[]`. Official `FetchSnapshotResponse.json` has no
+/// `errorMessage`. Controller is not required. ACL: Cluster
+/// **DESCRIBE** (disabled ACLs allow). Denied → **31**, empty topics.
+pub(crate) fn encode_fetch_snapshot(
+    broker: &Broker,
+    src: &mut impl Buf,
+    out: &mut BytesMut,
+    principal: &str,
+) {
+    parse_fetch_snapshot_request(src);
+
+    let denied = broker.acls().is_enabled()
+        && !broker.acls().authorize(
+            Some(principal),
+            ResourceType::Cluster,
+            CLUSTER_RESOURCE,
+            AclOperation::Describe,
+        );
+    let error = if denied {
+        KafkaErrorCode::ClusterAuthorizationFailed
+    } else {
+        KafkaErrorCode::InvalidRequest
+    };
+
+    write_fetch_snapshot(out, error);
+}
+
+fn parse_fetch_snapshot_request(src: &mut impl Buf) {
+    // Official v0 (flex, `FetchSnapshotRequest.json`):
+    // ReplicaId i32, MaxBytes i32, Topics[] compact {
+    //   Name compact string,
+    //   Partitions[] {
+    //     Partition i32, CurrentLeaderEpoch i32,
+    //     SnapshotId { EndOffset i64, Epoch i32 } (inline),
+    //     Position i64, tagged
+    //   },
+    //   tagged
+    // },
+    // tagged (ClusterId is request-level tag 0).
+    // ReplicaDirectoryId is v1+ tag 0 — out of advertised range.
+    // Missing fields stop that level; never panic.
+    if src.remaining() >= 4 {
+        let _replica_id = src.get_i32();
+    }
+    if src.remaining() >= 4 {
+        let _max_bytes = src.get_i32();
+    }
+    match get_compact_array_len(src) {
+        Ok(Some(n)) => {
+            for _ in 0..n {
+                if get_compact_string(src).is_err() {
+                    break;
+                }
+                match get_compact_array_len(src) {
+                    Ok(Some(pn)) => {
+                        for _ in 0..pn {
+                            // Partition + CurrentLeaderEpoch + EndOffset + Epoch + Position
+                            if src.remaining() < 4 + 4 + 8 + 4 + 8 {
+                                break;
+                            }
+                            let _partition = src.get_i32();
+                            let _leader_epoch = src.get_i32();
+                            let _end_offset = src.get_i64();
+                            let _snap_epoch = src.get_i32();
+                            let _position = src.get_i64();
+                            let _ = skip_tag_buffer(src);
+                        }
+                    }
+                    Ok(None) | Err(_) => {}
+                }
+                let _ = skip_tag_buffer(src);
+            }
+        }
+        Ok(None) | Err(_) => {}
+    }
+    let _ = skip_tag_buffer(src);
+}
+
+fn write_fetch_snapshot(out: &mut BytesMut, error: KafkaErrorCode) {
+    // Official FetchSnapshotResponse.json v0:
+    // throttleTimeMs, errorCode, topics[] compact, tagged.
+    // CurrentLeader is a per-partition tagged field; unused because topics empty.
+    out.put_i32(0); // throttleTimeMs
+    out.put_i16(error.as_i16());
+    put_compact_array_len(out, 0); // empty topics — do not echo request
     put_empty_tag_buffer(out);
 }
 
@@ -6199,6 +6295,133 @@ mod tests {
         );
         assert_eq!(topic_names(&broker), before_topics);
         assert_eq!(overlay_ids(&broker), before_ids);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    fn fetch_snapshot_body(
+        replica_id: i32,
+        max_bytes: i32,
+        topics: &[(&str, &[(i32, i32, i64, i32, i64)])],
+    ) -> BytesMut {
+        let mut body = BytesMut::new();
+        body.put_i32(replica_id);
+        body.put_i32(max_bytes);
+        put_compact_array_len(&mut body, topics.len());
+        for (name, partitions) in topics {
+            put_compact_string(&mut body, name);
+            put_compact_array_len(&mut body, partitions.len());
+            for (partition, leader_epoch, end_offset, epoch, position) in *partitions {
+                body.put_i32(*partition);
+                body.put_i32(*leader_epoch);
+                body.put_i64(*end_offset);
+                body.put_i32(*epoch);
+                body.put_i64(*position);
+                put_empty_tag_buffer(&mut body);
+            }
+            put_empty_tag_buffer(&mut body);
+        }
+        put_empty_tag_buffer(&mut body);
+        body
+    }
+
+    fn read_fetch_snapshot(src: &mut impl Buf) -> (i32, i16) {
+        let throttle = src.get_i32();
+        let error = src.get_i16();
+        assert_eq!(get_compact_array_len(src).unwrap(), Some(0));
+        skip_tag_buffer(src).unwrap();
+        assert_eq!(src.remaining(), 0);
+        (throttle, error)
+    }
+
+    fn raft_state(b: &Broker) -> (bool, Option<u32>, u64) {
+        (
+            b.openraft_started(),
+            b.openraft_leader_id(),
+            b.openraft_term(),
+        )
+    }
+
+    #[test]
+    fn kafka_fetch_snapshot_rejects_and_does_not_persist() {
+        let dir = temp_dir("fsnap-ok");
+        let broker = Broker::new(StorageConfig {
+            data_dir: dir.clone(),
+            ..StorageConfig::default()
+        });
+        let before_files = snapshot_dir(&dir);
+        let before_raft = raft_state(&broker);
+
+        let mut src = fetch_snapshot_body(-1, 1024, &[("__cluster_metadata", &[(0, 0, 0, 0, 0)])]);
+        let mut out = BytesMut::new();
+        encode_fetch_snapshot(&broker, &mut src, &mut out, "kafka-anonymous");
+        let mut resp = out.freeze();
+        let (throttle, error) = read_fetch_snapshot(&mut resp);
+        assert_eq!(throttle, 0);
+        assert_eq!(error, KafkaErrorCode::InvalidRequest.as_i16());
+
+        assert_eq!(
+            snapshot_dir(&dir),
+            before_files,
+            "must not write snapshot files"
+        );
+        assert_eq!(raft_state(&broker), before_raft, "openraft state unchanged");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn kafka_fetch_snapshot_truncated_still_42() {
+        let dir = temp_dir("fsnap-trunc");
+        let broker = Broker::new(StorageConfig {
+            data_dir: dir.clone(),
+            ..StorageConfig::default()
+        });
+        let mut src = BytesMut::new();
+        src.put_i32(-1);
+        let mut out = BytesMut::new();
+        encode_fetch_snapshot(&broker, &mut src, &mut out, "kafka-anonymous");
+        let mut resp = out.freeze();
+        let (throttle, error) = read_fetch_snapshot(&mut resp);
+        assert_eq!(throttle, 0);
+        assert_eq!(error, KafkaErrorCode::InvalidRequest.as_i16());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn kafka_fetch_snapshot_acl_deny_is_31() {
+        let dir = temp_dir("fsnap-acl");
+        let broker = Broker::new(StorageConfig {
+            data_dir: dir.clone(),
+            ..StorageConfig::default()
+        });
+        broker
+            .configure_acls(true, None, vec![], "token".into())
+            .unwrap();
+
+        let mut src = fetch_snapshot_body(-1, 1024, &[("events", &[(0, 0, 0, 0, 0)])]);
+        let mut out = BytesMut::new();
+        encode_fetch_snapshot(&broker, &mut src, &mut out, "kafka-anonymous");
+        let mut resp = out.freeze();
+        let (throttle, error) = read_fetch_snapshot(&mut resp);
+        assert_eq!(throttle, 0);
+        assert_eq!(error, KafkaErrorCode::ClusterAuthorizationFailed.as_i16());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn kafka_fetch_snapshot_not_controller_still_42() {
+        let dir = temp_dir("fsnap-nc");
+        let broker = cluster_n2(dir.clone(), 2);
+        assert!(!broker.is_controller());
+        let before_raft = raft_state(&broker);
+
+        let mut src = fetch_snapshot_body(-1, 1024, &[("events", &[(0, -1, 0, 0, 0)])]);
+        let mut out = BytesMut::new();
+        encode_fetch_snapshot(&broker, &mut src, &mut out, "kafka-anonymous");
+        let mut resp = out.freeze();
+        let (throttle, error) = read_fetch_snapshot(&mut resp);
+        assert_eq!(throttle, 0);
+        assert_eq!(error, KafkaErrorCode::InvalidRequest.as_i16());
+        assert_eq!(raft_state(&broker), before_raft);
         let _ = std::fs::remove_dir_all(&dir);
     }
 }
