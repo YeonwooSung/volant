@@ -22,6 +22,7 @@ c = Client("127.0.0.1:9092")
 c.create_topic("t", partitions=1)
 c.create_partitions("t", 2)
 c.reassign_partitions("t", [1, 2])  # all partitions; or partition=0
+c.reassign_partitions_all("t", [1, 2])  # v0.198; same as reassign_partitions(topic, replicas)
 c.produce("t", 0, value=b"hello")
 # acks=1 by default; acks=255 is acks=all (already shipped).
 # Client default acks (v0.129): Client(..., acks=255) or c.acks = 255; produce(..., acks=) still wins.
@@ -159,6 +160,9 @@ not Kafka CreatePartitions).
 replicas and returns the assignment generation (native opcode 114,
 not Kafka AlterPartitionReassignments). `partition=None` is all
 partitions (`u32::MAX`); `replicas=[]` is auto-place.
+`reassign_partitions_all(topic, replicas)` reassigns every partition
+(wire `u32::MAX`); same as `reassign_partitions(topic, replicas)` /
+`reassign_partitions(topic, replicas, None)`.
 `list_offsets(topic, partitions=None)` returns
 earliest/latest (`OffsetListing`) for the topic (`None` / `[]` = all
 partitions; native opcode 48, not Kafka timestamp ListOffsets).
