@@ -31,13 +31,15 @@
 //! AllocateProducerIds v0 (always flexible; block from next_producer_id; not KRaft),
 //! WriteTxnMarkers 0–1 (classic v0 / flex v1; replica-local COMMIT/ABORT control
 //! batches + soft `__txn_markers`; not EndTxn / not a coordinator),
-//! GetTelemetrySubscriptions v0 (always flexible; no client telemetry; empty subscription).
+//! GetTelemetrySubscriptions v0 (always flexible; no client telemetry; empty subscription),
+//! PushTelemetry v0 (always flexible; no client telemetry; reject every push).
 //! See `docs/PHASE23_SPEC.md` … `docs/PHASE91_SPEC.md`, `docs/V225_SPEC.md`,
 //! `docs/V228_SPEC.md`, `docs/V233_SPEC.md`, `docs/V235_SPEC.md`,
 //! `docs/V236_SPEC.md`, `docs/V237_SPEC.md`, `docs/V241_SPEC.md`,
 //! `docs/V242_SPEC.md`, `docs/V244_SPEC.md`, `docs/V245_SPEC.md`,
 //! `docs/V246_SPEC.md`, `docs/V249_SPEC.md`, `docs/V250_SPEC.md`,
-//! `docs/V251_SPEC.md`, `docs/V252_SPEC.md`, and `docs/V253_SPEC.md`.
+//! `docs/V251_SPEC.md`, `docs/V252_SPEC.md`, `docs/V253_SPEC.md`,
+//! and `docs/V255_SPEC.md`.
 
 mod acl_api;
 mod admin_api;
@@ -338,6 +340,9 @@ pub enum ApiKey {
     /// GetTelemetrySubscriptions (always flexible; v0 only). No client
     /// telemetry (not KIP-714). Empty subscription; do not push.
     GetTelemetrySubscriptions = 71,
+    /// PushTelemetry (always flexible; v0 only). No client telemetry
+    /// (not KIP-714). Parse and reject; metrics are discarded.
+    PushTelemetry = 72,
     /// AssignReplicasToDirs (always flexible; v0 only). Single `data_dir`;
     /// every assignment is rejected. Not KRaft DirectoryId.
     AssignReplicasToDirs = 73,
@@ -404,6 +409,7 @@ impl ApiKey {
             66 => Some(Self::ListTransactions),
             67 => Some(Self::AllocateProducerIds),
             71 => Some(Self::GetTelemetrySubscriptions),
+            72 => Some(Self::PushTelemetry),
             73 => Some(Self::AssignReplicasToDirs),
             74 => Some(Self::ListClientMetricsResources),
             75 => Some(Self::DescribeTopicPartitions),
@@ -467,6 +473,7 @@ pub const SUPPORTED_APIS: &[(ApiKey, i16, i16)] = &[
     (ApiKey::ListTransactions, 0, 2),
     (ApiKey::AllocateProducerIds, 0, 0),
     (ApiKey::GetTelemetrySubscriptions, 0, 0),
+    (ApiKey::PushTelemetry, 0, 0),
     (ApiKey::AssignReplicasToDirs, 0, 0),
     (ApiKey::ListClientMetricsResources, 0, 0),
     (ApiKey::DescribeTopicPartitions, 0, 0),
@@ -619,11 +626,20 @@ mod tests {
     }
 
     #[test]
+    fn supported_apis_includes_push_telemetry_72() {
+        assert!(SUPPORTED_APIS.len() >= 57);
+        assert!(SUPPORTED_APIS
+            .iter()
+            .any(|(k, min, max)| *k == ApiKey::PushTelemetry && *min == 0 && *max == 0));
+        assert_eq!(ApiKey::from_i16(72), Some(ApiKey::PushTelemetry));
+    }
+
+    #[test]
     fn supported_apis_includes_assign_replicas_to_dirs_73() {
         assert!(SUPPORTED_APIS.len() >= 53);
-        assert!(SUPPORTED_APIS.iter().any(|(k, min, max)| {
-            *k == ApiKey::AssignReplicasToDirs && *min == 0 && *max == 0
-        }));
+        assert!(SUPPORTED_APIS
+            .iter()
+            .any(|(k, min, max)| { *k == ApiKey::AssignReplicasToDirs && *min == 0 && *max == 0 }));
         assert_eq!(ApiKey::from_i16(73), Some(ApiKey::AssignReplicasToDirs));
     }
 

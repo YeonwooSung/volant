@@ -5,7 +5,7 @@
 //! AlterReplicaLogDirs, AssignReplicasToDirs, DescribeLogDirs,
 //! DescribeTopicPartitions, UnregisterBroker, UpdateFeatures,
 //! DescribeQuorum, AllocateProducerIds, GetTelemetrySubscriptions,
-//! configs.
+//! PushTelemetry, configs.
 
 use bytes::{Buf, BufMut, BytesMut};
 use volant_core::{Error, PartitionId, TopicName};
@@ -3615,8 +3615,7 @@ pub(crate) fn encode_list_client_metrics_resources(
             ResourceType::Cluster,
             CLUSTER_RESOURCE,
             AclOperation::Describe,
-        )
-    {
+        ) {
         KafkaErrorCode::ClusterAuthorizationFailed
     } else {
         KafkaErrorCode::None
@@ -3666,6 +3665,52 @@ pub(crate) fn encode_get_telemetry_subscriptions(
     };
 
     write_get_telemetry_subscriptions(out, error, &client_instance_id);
+}
+
+/// PushTelemetry v0 (always flexible). Volant has no client telemetry
+/// (not KIP-714).
+///
+/// Parses official Kafka fields (`clientInstanceId`, `subscriptionId`,
+/// `terminating`, `compressionType`, compact `metrics`) and discards
+/// them. Returns throttle **0**, error **42** `INVALID_REQUEST`. Official
+/// `PushTelemetryResponse.json` has no `errorMessage`. Nothing persisted.
+/// Controller is not required. ACL: Cluster **ALTER** (disabled ACLs
+/// allow). Denied → **31**; still nothing persisted.
+pub(crate) fn encode_push_telemetry(
+    broker: &Broker,
+    src: &mut impl Buf,
+    out: &mut BytesMut,
+    principal: &str,
+) {
+    let _ = get_uuid(src);
+    if src.remaining() >= 4 {
+        let _subscription_id = src.get_i32();
+    }
+    if src.remaining() >= 1 {
+        let _terminating = src.get_u8();
+    }
+    if src.remaining() >= 1 {
+        let _compression_type = src.get_i8();
+    }
+    let _ = get_compact_bytes(src);
+    let _ = skip_tag_buffer(src);
+
+    let denied = broker.acls().is_enabled()
+        && !broker.acls().authorize(
+            Some(principal),
+            ResourceType::Cluster,
+            CLUSTER_RESOURCE,
+            AclOperation::Alter,
+        );
+    let error = if denied {
+        KafkaErrorCode::ClusterAuthorizationFailed
+    } else {
+        KafkaErrorCode::InvalidRequest
+    };
+
+    out.put_i32(0); // throttleTimeMs
+    out.put_i16(error.as_i16());
+    put_empty_tag_buffer(out);
 }
 
 fn write_get_telemetry_subscriptions(
@@ -4671,6 +4716,100 @@ mod tests {
         assert_eq!(subscription_id, 0);
         assert_eq!(push_interval, -1);
         assert_eq!(metrics_n, 0);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    fn push_telemetry_body(client_instance_id: &[u8; 16], metrics: &[u8]) -> BytesMut {
+        let mut body = BytesMut::new();
+        put_uuid(&mut body, client_instance_id);
+        body.put_i32(1); // subscriptionId
+        body.put_u8(0); // terminating
+        body.put_i8(0); // compressionType
+        crate::kafka::codec::put_compact_bytes(&mut body, Some(metrics));
+        put_empty_tag_buffer(&mut body);
+        body
+    }
+
+    fn read_push_telemetry(src: &mut impl Buf) -> i16 {
+        assert_eq!(src.get_i32(), 0); // throttle
+        let error = src.get_i16();
+        skip_tag_buffer(src).unwrap();
+        assert_eq!(src.remaining(), 0);
+        error
+    }
+
+    #[test]
+    fn kafka_push_telemetry_rejects_and_does_not_persist() {
+        let dir = temp_dir("pt-ok");
+        let broker = Broker::new(StorageConfig {
+            data_dir: dir.clone(),
+            ..StorageConfig::default()
+        });
+        let before = snapshot_dir(&dir);
+        let mut id = [0u8; 16];
+        id[0] = 0x72;
+        id[15] = 0x42;
+
+        let mut src = push_telemetry_body(&id, b"otlp-metrics");
+        let mut out = BytesMut::new();
+        encode_push_telemetry(&broker, &mut src, &mut out, "kafka-anonymous");
+        let mut resp = out.freeze();
+        assert_eq!(
+            read_push_telemetry(&mut resp),
+            KafkaErrorCode::InvalidRequest.as_i16()
+        );
+
+        assert_eq!(snapshot_dir(&dir), before, "must not persist telemetry");
+        assert!(!dir_has_telemetry(&dir), "must not create telemetry files");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn kafka_push_telemetry_acl_deny_is_31() {
+        let dir = temp_dir("pt-acl");
+        let broker = Broker::new(StorageConfig {
+            data_dir: dir.clone(),
+            ..StorageConfig::default()
+        });
+        broker
+            .configure_acls(true, None, vec![], "token".into())
+            .unwrap();
+        let mut id = [0u8; 16];
+        id[3] = 0xab;
+        let before = snapshot_dir(&dir);
+
+        let mut src = push_telemetry_body(&id, b"metrics");
+        let mut out = BytesMut::new();
+        encode_push_telemetry(&broker, &mut src, &mut out, "kafka-anonymous");
+        let mut resp = out.freeze();
+        assert_eq!(
+            read_push_telemetry(&mut resp),
+            KafkaErrorCode::ClusterAuthorizationFailed.as_i16()
+        );
+        assert_eq!(
+            snapshot_dir(&dir),
+            before,
+            "deny must not persist telemetry"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn kafka_push_telemetry_not_controller_still_rejects() {
+        let dir = temp_dir("pt-nc");
+        let broker = cluster_n2(dir.clone(), 2);
+        assert!(!broker.is_controller());
+        let mut id = [0u8; 16];
+        id[7] = 0x42;
+
+        let mut src = push_telemetry_body(&id, b"metrics");
+        let mut out = BytesMut::new();
+        encode_push_telemetry(&broker, &mut src, &mut out, "kafka-anonymous");
+        let mut resp = out.freeze();
+        assert_eq!(
+            read_push_telemetry(&mut resp),
+            KafkaErrorCode::InvalidRequest.as_i16()
+        );
         let _ = std::fs::remove_dir_all(&dir);
     }
 }
