@@ -2126,6 +2126,13 @@ impl Client {
         }
     }
 
+    /// Add a broker endpoint with no rack (v0.172).
+    ///
+    /// Same as `add_broker(id, host, port, None)`. Wire rack flag is 0.
+    pub async fn add_broker_no_rack(&self, id: u32, host: &str, port: u16) -> Result<u64> {
+        self.add_broker(id, host, port, None).await
+    }
+
     /// Remove a broker from the membership overlay (v0.10).
     pub async fn remove_broker(&self, id: u32) -> Result<u64> {
         let resp = self.admin_round_trip(Request::RemoveBroker { id }).await?;
