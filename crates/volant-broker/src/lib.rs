@@ -117,7 +117,7 @@ pub use net::{
     DEFAULT_DELETE_RECORDS_FANOUT_BUDGET_MS, DEFAULT_INTER_BROKER_RPC_TIMEOUT_MS,
     MAX_INTER_BROKER_TIMEOUT_MS, MIN_INTER_BROKER_TIMEOUT_MS,
 };
-pub use offset_store::{OffsetStore, StoredOffset, OFFSET_UNKNOWN};
+pub use offset_store::{OffsetStore, StoredOffset, LEADER_EPOCH_UNKNOWN, OFFSET_UNKNOWN};
 pub use replica::{
     partition_raft_env_enabled, PartitionAppendResult, PartitionRaftEntry, PartitionRaftGroup,
     PartitionRaftHardState, PartitionRaftPayload, PartitionRaftState, PARTITION_RAFT_DIR,

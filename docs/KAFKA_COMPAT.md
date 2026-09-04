@@ -27,8 +27,8 @@ From `SUPPORTED_APIS` in `crates/volant-broker/src/kafka/mod.rs`:
 | 1 | Fetch | 0–18 | Classic 0–11; flex v12–18; TopicId v13+; isolation LSO/aborted (Phase 86); ReplicaState v15+ (ReplicaId gates preferred redirect); NodeEndpoints v16+; CurrentLeader tag v12+; DivergingEpoch + sessions (Phase 88); omit-unchanged incremental (Phase 91); session idle TTL + max/LRU (Phase 95); durable local sessions (Phase 115); multi-broker session forward (Phase 119); best-effort peer mirror (Phase 138) + polish (139) + claim fence (143) + serve-from-mirror without promote (Phase 147 default; not Raft); PreferredReadReplica 126+133+140+144 |
 | 2 | ListOffsets | 0–11 | Flex v6+; specials v7–11; READ_COMMITTED latest = LSO (Phase 86) |
 | 3 | Metadata | 0–13 | Flex v9+; TopicId v10–13; top-level ErrorCode v13; live leader_epoch (Phase 87) |
-| 8 | OffsetCommit | 0–10 | Flex v8+; TopicId v10 |
-| 9 | OffsetFetch | 0–10 | Flex v6+; multi-group v8; TopicId v10; RequireStable v7+ → **81** |
+| 8 | OffsetCommit | 0–10 | Flex v8+; TopicId v10; v6+ `committed_leader_epoch` stored (v0–5 / native → **-1**) |
+| 9 | OffsetFetch | 0–10 | Flex v6+; multi-group v8; TopicId v10; RequireStable v7+ → **81**; v5+ returns stored `committed_leader_epoch` (legacy / unknown = **-1**) |
 | 10 | FindCoordinator | 0–6 | Flex v3; batch v4–6; sticky murmur2 over static membership (Phase 121); txn Init-owner override; no share key_type; never TRANSACTION_ABORTABLE |
 | 11 | JoinGroup | 0–9 | Flex v6+; ProtocolType/Reason/SkipAssignment v7–9 |
 | 12 | Heartbeat | 0–4 | Flex v4 |
