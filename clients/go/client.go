@@ -436,6 +436,15 @@ func (c *Client) TLS() bool {
 	return c != nil && c.tls
 }
 
+// Addr returns the current broker address (host:port).
+// Updated by Reconnect.
+func (c *Client) Addr() string {
+	if c == nil {
+		return ""
+	}
+	return c.addr
+}
+
 func wrapTLS(conn net.Conn, addr string, cfg TLSConfig) (net.Conn, error) {
 	if (cfg.CertFile == "") != (cfg.KeyFile == "") {
 		return nil, fmt.Errorf("tls_cert and tls_key must both be set or both unset")
