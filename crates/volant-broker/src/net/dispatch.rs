@@ -17,9 +17,9 @@ use crate::cluster::{
 };
 
 use super::fanout::{
-    complete_assignment_mutation, fanout_assignment_consensus, fanout_cluster_acl_snapshot,
-    fanout_delete_records, fanout_delete_records_replicas_only, fanout_membership_put,
-    fanout_metadata_raft_append, fanout_truncate_journal_note_provisional,
+    complete_assignment_mutation, fanout_cluster_acl_snapshot, fanout_delete_records,
+    fanout_delete_records_replicas_only, fanout_membership_put,
+    fanout_truncate_journal_note_provisional, maybe_fanout_assignment_consensus,
     metadata_entry_from_wire, put_end_txn_error_response, run_txn_2pc_fanout,
     schedule_catch_up_peer_admin_state, schedule_catch_up_peer_truncate_journal,
     schedule_isr_update_reports, schedule_session_mirror_fanout, snapshot_if_must_wait,
@@ -1269,13 +1269,10 @@ async fn handle_request(broker: &Arc<Broker>, req: Request) -> Result<Response> 
                 &isr,
                 generation_hint,
             );
-            // Phase 150/154: best-effort assignment majority after controller ISR bump.
+            // Best-effort consensus after controller ISR bump: openraft 108,
+            // else homemade 154 (98) only when openraft is off, else 150 notes.
             if error_code == 0 {
-                if broker.metadata_raft_enabled() {
-                    let _ = fanout_metadata_raft_append(broker).await;
-                } else if broker.assignment_consensus_enabled() {
-                    let _ = fanout_assignment_consensus(broker).await;
-                }
+                let _ = maybe_fanout_assignment_consensus(broker).await;
             }
             Ok(Response::IsrUpdate {
                 error_code,
