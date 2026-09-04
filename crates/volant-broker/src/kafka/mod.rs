@@ -19,11 +19,12 @@
 //! ListPartitionReassignments v0 (current replicas; empty adding/removing),
 //! ElectLeaders v0–1 (preferred = elect_leader(ISR∩live); unclean refused),
 //! DescribeUserScramCredentials / AlterUserScramCredentials v0 (wraps ScramStore),
+//! DescribeClientQuotas / AlterClientQuotas v0 (no quota store; describe empty, alter 42),
 //! DescribeLogDirs 0–1 (local logs only; v1 flexible),
 //! DescribeTopicPartitions v0 (wraps Metadata; key 75).
 //! See `docs/PHASE23_SPEC.md` … `docs/PHASE91_SPEC.md`, `docs/V225_SPEC.md`,
 //! `docs/V228_SPEC.md`, `docs/V233_SPEC.md`, `docs/V235_SPEC.md`,
-//! `docs/V236_SPEC.md`, and `docs/V237_SPEC.md`.
+//! `docs/V236_SPEC.md`, `docs/V237_SPEC.md`, and `docs/V241_SPEC.md`.
 
 mod acl_api;
 mod admin_api;
@@ -276,6 +277,10 @@ pub enum ApiKey {
     ListPartitionReassignments = 46,
     /// OffsetDelete.
     OffsetDelete = 47,
+    /// DescribeClientQuotas (always flexible; v0 only). No quota store.
+    DescribeClientQuotas = 48,
+    /// AlterClientQuotas (always flexible; v0 only). Rejected; no persist.
+    AlterClientQuotas = 49,
     /// DescribeUserScramCredentials (always flexible; v0 only).
     DescribeUserScramCredentials = 50,
     /// AlterUserScramCredentials (always flexible; v0 only).
@@ -333,6 +338,8 @@ impl ApiKey {
             45 => Some(Self::AlterPartitionReassignments),
             46 => Some(Self::ListPartitionReassignments),
             47 => Some(Self::OffsetDelete),
+            48 => Some(Self::DescribeClientQuotas),
+            49 => Some(Self::AlterClientQuotas),
             50 => Some(Self::DescribeUserScramCredentials),
             51 => Some(Self::AlterUserScramCredentials),
             60 => Some(Self::DescribeCluster),
@@ -385,6 +392,8 @@ pub const SUPPORTED_APIS: &[(ApiKey, i16, i16)] = &[
     (ApiKey::AlterPartitionReassignments, 0, 0),
     (ApiKey::ListPartitionReassignments, 0, 0),
     (ApiKey::OffsetDelete, 0, 0),
+    (ApiKey::DescribeClientQuotas, 0, 0),
+    (ApiKey::AlterClientQuotas, 0, 0),
     (ApiKey::DescribeUserScramCredentials, 0, 0),
     (ApiKey::AlterUserScramCredentials, 0, 0),
     (ApiKey::DescribeCluster, 0, 2),
@@ -431,6 +440,12 @@ mod tests {
         assert!(SUPPORTED_APIS.iter().any(|(k, min, max)| {
             *k == ApiKey::DescribeTopicPartitions && *min == 0 && *max == 0
         }));
+        assert!(SUPPORTED_APIS.iter().any(|(k, min, max)| {
+            *k == ApiKey::DescribeClientQuotas && *min == 0 && *max == 0
+        }));
+        assert!(SUPPORTED_APIS.iter().any(|(k, min, max)| {
+            *k == ApiKey::AlterClientQuotas && *min == 0 && *max == 0
+        }));
         assert_eq!(ApiKey::from_i16(43), Some(ApiKey::ElectLeaders));
         assert_eq!(
             ApiKey::from_i16(45),
@@ -449,5 +464,20 @@ mod tests {
             Some(ApiKey::AlterUserScramCredentials)
         );
         assert_eq!(ApiKey::from_i16(75), Some(ApiKey::DescribeTopicPartitions));
+        assert_eq!(ApiKey::from_i16(48), Some(ApiKey::DescribeClientQuotas));
+        assert_eq!(ApiKey::from_i16(49), Some(ApiKey::AlterClientQuotas));
+    }
+
+    #[test]
+    fn supported_apis_includes_client_quotas_48_49() {
+        assert!(SUPPORTED_APIS.len() >= 46);
+        assert!(SUPPORTED_APIS.iter().any(|(k, min, max)| {
+            *k == ApiKey::DescribeClientQuotas && *min == 0 && *max == 0
+        }));
+        assert!(SUPPORTED_APIS.iter().any(|(k, min, max)| {
+            *k == ApiKey::AlterClientQuotas && *min == 0 && *max == 0
+        }));
+        assert_eq!(ApiKey::from_i16(48), Some(ApiKey::DescribeClientQuotas));
+        assert_eq!(ApiKey::from_i16(49), Some(ApiKey::AlterClientQuotas));
     }
 }

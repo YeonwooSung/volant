@@ -59,6 +59,8 @@ From `SUPPORTED_APIS` in `crates/volant-broker/src/kafka/mod.rs`:
 | 45 | AlterPartitionReassignments | 0 | Always flex; wraps native opcode 114 + assignment wait; TimeoutMs ignored; null replicas → **83** (no pending cancel log); not live copy |
 | 46 | ListPartitionReassignments | 0 | Always flex; current assignment as `replicas`; empty `addingReplicas`/`removingReplicas`; TimeoutMs ignored; not live progress; no pending log |
 | 47 | OffsetDelete | 0 | Classic only |
+| 48 | DescribeClientQuotas | 0 | Always flex; no quota store; any filter → error **0**, empty entries; Cluster DESCRIBE (v0.241) |
+| 49 | AlterClientQuotas | 0 | Always flex; no quota store; per-entry **42** `INVALID_REQUEST` (`quotas not supported`); nothing persisted; Cluster ALTER (v0.241) |
 | 50 | DescribeUserScramCredentials | 0 | Always flex; wraps `ScramStore`; empty users = all; unknown user → **91**; Cluster DESCRIBE |
 | 51 | AlterUserScramCredentials | 0 | Always flex; wraps `ScramStore`; upsert takes `saltedPassword` (not plaintext); Cluster ALTER |
 | 60 | DescribeCluster | 0–2 | Always flex; IsFenced always false |
@@ -135,9 +137,10 @@ These are **current** product facts, not temporary docs lag:
 | ElectLeaders | **v0–1 wrap** (v0.236): key **43** advertised; preferred = `elect_leader(ISR∩live)`; ElectionType **1** unclean refused (**87**); TimeoutMs ignored; assignment wait/rollback same as key 45; not Kafka `preferred.leader`; not live replica copy |
 | AlterPartitionReassignments | **v0 wrap** (v0.225): key **45** advertised; apply is native opcode 114 (instant; new replicas start empty); TimeoutMs ignored; `replicas=null` → **83** (no cancel log / no pending state); not live Kafka reassignment |
 | ListPartitionReassignments | **v0 list** (v0.228): key **46** advertised; current assignment as `replicas`; empty adding/removing (apply is instant; no pending log); TimeoutMs ignored; not live Kafka reassignment progress |
-| Describe/AlterUserScramCredentials | **v0 wrap** (v0.233): keys **50** / **51** advertised; wrap `ScramStore` (native 64–69). Alter upsert is Kafka `saltedPassword = Hi(...)`, not plaintext. Native create still sends password in the clear. Unknown user → **91** `RESOURCE_NOT_FOUND`. Not OAUTH/GSSAPI; not quota keys 48/49 |
+| Describe/AlterUserScramCredentials | **v0 wrap** (v0.233): keys **50** / **51** advertised; wrap `ScramStore` (native 64–69). Alter upsert is Kafka `saltedPassword = Hi(...)`, not plaintext. Native create still sends password in the clear. Unknown user → **91** `RESOURCE_NOT_FOUND`. Not OAUTH/GSSAPI |
+| Describe/AlterClientQuotas | **v0 honest empty/reject** (v0.241): keys **48** / **49** advertised. No quota store. Describe any filter → error **0**, empty entries. Alter per-entry **42** (`quotas not supported`); `validateOnly` still rejected; nothing persisted. ACL Cluster DESCRIBE / ALTER. v1+ → **35**. Official Kafka 0–1; Volant v0 only |
 | DescribeTopicPartitions | **v0 wrap** (v0.237): key **75** advertised; wraps `Broker::metadata`. Same leaders / ISR / epochs / deterministic TopicId as Metadata. Unknown topic → **3**. ACL Topic DESCRIBE. Empty topics = all. `responsePartitionLimit <= 0` unlimited; simple truncate + `next_cursor` when cut. Cursor honored only when its topic is in the result set (else ignored). No ELR fields (Metadata partition body reused). Not Metadata v13+ |
-| Missing APIs | Large Kafka surface still unsupported (GSSAPI, OAUTH, quota keys 48/49, …) |
+| Missing APIs | Large Kafka surface still unsupported (GSSAPI, OAUTH, UnregisterBroker, UpdateFeatures, …) |
 
 ## Related
 
