@@ -1621,7 +1621,8 @@ pub(crate) fn encode_list_groups(
     }
     let groups = broker.groups().list_groups();
     // ProtocolType is always "consumer"; GroupType (v5+) is always "classic".
-    // State: CompletingRebalance while the v0.215 fence is open, else
+    // State: PreparingRebalance while Join waiters exist (v0.230), else
+    // CompletingRebalance while the v0.215 fence is open, else
     // Stable when members are synced, else Empty.
     let filtered: Vec<_> = groups
         .into_iter()

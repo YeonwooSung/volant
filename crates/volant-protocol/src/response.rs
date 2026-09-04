@@ -359,7 +359,7 @@ pub struct GroupMemberInfo {
     pub assignment: Vec<Assignment>,
 }
 
-/// Group state for ListGroups (Phase 12 / v0.218).
+/// Group state for ListGroups (Phase 12 / v0.218 / v0.230).
 #[repr(u8)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum GroupState {
@@ -369,6 +369,8 @@ pub enum GroupState {
     Stable = 1,
     /// Live members exist but the v0.215 SyncGroup fence is still open.
     CompletingRebalance = 2,
+    /// A Join is parked on the v0.227 Condvar (List/Describe label only).
+    PreparingRebalance = 3,
 }
 
 impl GroupState {
@@ -377,6 +379,7 @@ impl GroupState {
         match v {
             1 => Self::Stable,
             2 => Self::CompletingRebalance,
+            3 => Self::PreparingRebalance,
             _ => Self::Empty,
         }
     }
@@ -387,6 +390,7 @@ impl GroupState {
             Self::Empty => "Empty",
             Self::Stable => "Stable",
             Self::CompletingRebalance => "CompletingRebalance",
+            Self::PreparingRebalance => "PreparingRebalance",
         }
     }
 }
@@ -396,7 +400,7 @@ impl GroupState {
 pub struct GroupListing {
     /// Group id.
     pub group_id: String,
-    /// Empty / Stable / CompletingRebalance (v0.218).
+    /// Empty / Stable / CompletingRebalance / PreparingRebalance (v0.230).
     pub state: GroupState,
     /// Live member count.
     pub member_count: u32,

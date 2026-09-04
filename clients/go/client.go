@@ -112,6 +112,8 @@ const (
 	GroupStateStable = codec.GroupStateStable
 	// GroupStateCompletingRebalance is live members with the v0.215 fence open.
 	GroupStateCompletingRebalance = codec.GroupStateCompletingRebalance
+	// GroupStatePreparingRebalance is a Join parked on the v0.227 Condvar.
+	GroupStatePreparingRebalance = codec.GroupStatePreparingRebalance
 )
 
 // Offset is one committed (partition, offset) pair from OffsetFetch.

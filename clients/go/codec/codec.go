@@ -617,6 +617,8 @@ const (
 	GroupStateStable GroupState = 1
 	// GroupStateCompletingRebalance is live members with the v0.215 fence open.
 	GroupStateCompletingRebalance GroupState = 2
+	// GroupStatePreparingRebalance is a Join parked on the v0.227 Condvar.
+	GroupStatePreparingRebalance GroupState = 3
 )
 
 // GroupStateFromU8 maps the wire byte (unknown values decode as Empty).
@@ -626,6 +628,8 @@ func GroupStateFromU8(v uint8) GroupState {
 		return GroupStateStable
 	case 2:
 		return GroupStateCompletingRebalance
+	case 3:
+		return GroupStatePreparingRebalance
 	default:
 		return GroupStateEmpty
 	}
