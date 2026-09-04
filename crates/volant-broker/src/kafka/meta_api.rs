@@ -16,6 +16,36 @@ use super::codec::{
 use super::topic_id;
 use super::{KafkaErrorCode, SUPPORTED_APIS};
 
+/// Write a compact non-null array of broker ids.
+pub(crate) fn put_compact_broker_ids(out: &mut BytesMut, ids: &[u32]) {
+    put_compact_array_len(out, ids.len());
+    for id in ids {
+        out.put_i32(*id as i32);
+    }
+}
+
+/// Flexible Metadata partition body (reused by DescribeTopicPartitions).
+///
+/// error, index, leader, leader_epoch, replicas[], isr[], empty offline[], tags.
+pub(crate) fn write_metadata_flex_partition(
+    out: &mut BytesMut,
+    error: i16,
+    partition_index: i32,
+    leader_id: i32,
+    leader_epoch: i32,
+    replicas: &[u32],
+    isr: &[u32],
+) {
+    out.put_i16(error);
+    out.put_i32(partition_index);
+    out.put_i32(leader_id);
+    out.put_i32(leader_epoch);
+    put_compact_broker_ids(out, replicas);
+    put_compact_broker_ids(out, isr);
+    put_compact_array_len(out, 0); // offline_replicas
+    put_empty_tag_buffer(out);
+}
+
 /// DescribeCluster v0–2 (always flexible, KIP-700 / Phase 65–66 / 70).
 ///
 /// Request: include_cluster_authorized_operations (bool), EndpointType (v1+),
@@ -787,21 +817,16 @@ pub(crate) fn encode_metadata(broker: &Broker, src: &mut impl Buf, out: &mut Byt
             out.put_u8(0); // is_internal
             put_compact_array_len(out, t.partitions.len());
             for p in &t.partitions {
-                out.put_i16(KafkaErrorCode::None.as_i16());
-                out.put_i32(p.partition_id.0 as i32);
-                out.put_i32(p.leader as i32);
                 // Phase 87: advertise live leader epoch (was always -1).
-                out.put_i32(p.leader_epoch as i32);
-                put_compact_array_len(out, p.replicas.len());
-                for r in &p.replicas {
-                    out.put_i32(*r as i32);
-                }
-                put_compact_array_len(out, p.isr.len());
-                for r in &p.isr {
-                    out.put_i32(*r as i32);
-                }
-                put_compact_array_len(out, 0); // offline_replicas
-                put_empty_tag_buffer(out); // partition tags
+                write_metadata_flex_partition(
+                    out,
+                    KafkaErrorCode::None.as_i16(),
+                    p.partition_id.0 as i32,
+                    p.leader as i32,
+                    p.leader_epoch as i32,
+                    &p.replicas,
+                    &p.isr,
+                );
             }
             out.put_i32(topic_authorized_ops(
                 broker,
@@ -876,6 +901,225 @@ pub(crate) fn encode_metadata(broker: &Broker, src: &mut impl Buf, out: &mut Byt
                 principal,
                 include_cluster_ops,
             ));
+        }
+    }
+}
+
+/// DescribeTopicPartitions v0 (always flexible, v0.237).
+///
+/// Wraps [`Broker::metadata`]. Same leaders / ISR / epochs / TopicId as
+/// Metadata. Partition body reuses [`write_metadata_flex_partition`] (no ELR).
+///
+/// Request: compact topics[{name, tags}], responsePartitionLimit i32,
+/// nullable cursor {topicName, partitionIndex, tags}, tags.
+/// Empty / null topics = all known topics. `responsePartitionLimit <= 0`
+/// is unlimited. Cursor is honored when its topic is in the result set;
+/// otherwise it is ignored.
+pub(crate) fn encode_describe_topic_partitions(
+    broker: &Broker,
+    src: &mut impl Buf,
+    out: &mut BytesMut,
+    principal: &str,
+) {
+    let mut requested: Vec<String> = Vec::new();
+    let list_all = match get_compact_array_len(src) {
+        Ok(None) | Ok(Some(0)) => true,
+        Ok(Some(n)) => {
+            for _ in 0..n {
+                match get_compact_string(src) {
+                    Ok(name) => {
+                        let _ = skip_tag_buffer(src);
+                        requested.push(name);
+                    }
+                    Err(_) => break,
+                }
+            }
+            false
+        }
+        Err(_) => true,
+    };
+
+    let raw_limit = if src.remaining() >= 4 {
+        src.get_i32()
+    } else {
+        0
+    };
+    let partition_limit: i32 = if raw_limit <= 0 { i32::MAX } else { raw_limit };
+
+    let cursor = read_nullable_cursor(src);
+    let _ = skip_tag_buffer(src);
+
+    let names: Vec<String> = if list_all {
+        broker
+            .metadata(None)
+            .topics
+            .into_iter()
+            .map(|t| t.name.as_str().to_string())
+            .collect()
+    } else {
+        requested
+    };
+
+    let cursor = cursor.filter(|c| names.iter().any(|n| n == &c.0));
+    let mut skipping = cursor.is_some();
+    let mut remaining = partition_limit;
+    let mut next_cursor: Option<(String, i32)> = None;
+    let mut topics_out: Vec<DtpTopic> = Vec::new();
+
+    for name in names {
+        if skipping {
+            if cursor.as_ref().is_some_and(|c| c.0 == name) {
+                skipping = false;
+            } else {
+                continue;
+            }
+        }
+        let start_part = if cursor.as_ref().is_some_and(|c| c.0 == name) {
+            cursor.as_ref().map(|c| c.1).unwrap_or(0)
+        } else {
+            0
+        };
+
+        if broker.acls().is_enabled()
+            && !broker.acls().authorize(
+                Some(principal),
+                ResourceType::Topic,
+                &name,
+                AclOperation::Describe,
+            )
+        {
+            let uuid = topic_id::uuid_for_name(broker, &name);
+            topics_out.push(DtpTopic::error(
+                KafkaErrorCode::TopicAuthorizationFailed.as_i16(),
+                name,
+                uuid,
+            ));
+            continue;
+        }
+
+        let snap = broker.metadata(Some(&[TopicName::new(name.clone())]));
+        let Some(topic) = snap.topics.into_iter().next() else {
+            topics_out.push(DtpTopic::error(
+                KafkaErrorCode::UnknownTopicOrPartition.as_i16(),
+                name,
+                KAFKA_UUID_ZERO,
+            ));
+            continue;
+        };
+
+        let mut parts: Vec<DtpPart> = Vec::new();
+        let mut stopped = false;
+        for p in topic.partitions {
+            let idx = p.partition_id.0 as i32;
+            if idx < start_part {
+                continue;
+            }
+            if remaining == 0 {
+                next_cursor = Some((name.clone(), idx));
+                stopped = true;
+                break;
+            }
+            parts.push(DtpPart {
+                index: idx,
+                leader: p.leader as i32,
+                leader_epoch: p.leader_epoch as i32,
+                replicas: p.replicas,
+                isr: p.isr,
+            });
+            remaining -= 1;
+        }
+        if parts.is_empty() && stopped {
+            break;
+        }
+        topics_out.push(DtpTopic {
+            error: KafkaErrorCode::None.as_i16(),
+            name,
+            uuid: topic_id::uuid_for_numeric_id(topic.topic_id.0),
+            parts,
+        });
+        if stopped {
+            break;
+        }
+    }
+
+    out.put_i32(0); // throttle
+    put_compact_array_len(out, topics_out.len());
+    for t in &topics_out {
+        out.put_i16(t.error);
+        put_compact_nullable_string(out, Some(&t.name));
+        put_uuid(out, &t.uuid);
+        out.put_u8(0); // is_internal
+        put_compact_array_len(out, t.parts.len());
+        for p in &t.parts {
+            write_metadata_flex_partition(
+                out,
+                KafkaErrorCode::None.as_i16(),
+                p.index,
+                p.leader,
+                p.leader_epoch,
+                &p.replicas,
+                &p.isr,
+            );
+        }
+        out.put_i32(AUTH_OPS_OMITTED);
+        put_empty_tag_buffer(out);
+    }
+    write_nullable_cursor(out, next_cursor.as_ref().map(|(n, i)| (n.as_str(), *i)));
+    put_empty_tag_buffer(out);
+}
+
+struct DtpPart {
+    index: i32,
+    leader: i32,
+    leader_epoch: i32,
+    replicas: Vec<u32>,
+    isr: Vec<u32>,
+}
+
+struct DtpTopic {
+    error: i16,
+    name: String,
+    uuid: [u8; 16],
+    parts: Vec<DtpPart>,
+}
+
+impl DtpTopic {
+    fn error(error: i16, name: String, uuid: [u8; 16]) -> Self {
+        Self {
+            error,
+            name,
+            uuid,
+            parts: Vec::new(),
+        }
+    }
+}
+
+/// Kafka nullable struct: `-1` = null, `0` + fields = present.
+fn read_nullable_cursor(src: &mut impl Buf) -> Option<(String, i32)> {
+    if !src.has_remaining() {
+        return None;
+    }
+    let flag = src.get_i8();
+    if flag != 0 {
+        return None;
+    }
+    let name = get_compact_string(src).ok()?;
+    if src.remaining() < 4 {
+        return None;
+    }
+    let index = src.get_i32();
+    let _ = skip_tag_buffer(src);
+    Some((name, index))
+}
+
+fn write_nullable_cursor(out: &mut BytesMut, cursor: Option<(&str, i32)>) {
+    match cursor {
+        None => out.put_i8(-1),
+        Some((name, index)) => {
+            out.put_i8(0);
+            put_compact_string(out, name);
+            out.put_i32(index);
+            put_empty_tag_buffer(out);
         }
     }
 }
@@ -1201,5 +1445,109 @@ pub(crate) fn write_find_coordinator_v4_error(out: &mut BytesMut, keys: &[&str],
         put_empty_tag_buffer(out);
     }
     put_empty_tag_buffer(out);
+}
+
+#[cfg(test)]
+mod dtp_tests {
+    use super::*;
+    use volant_storage::StorageConfig;
+
+    fn tmp_broker(label: &str) -> (std::path::PathBuf, Broker) {
+        let dir = std::env::temp_dir().join(format!(
+            "volant-v237-lib-{}-{}-{}",
+            label,
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        let broker = Broker::new(StorageConfig {
+            data_dir: dir.clone(),
+            ..StorageConfig::default()
+        });
+        (dir, broker)
+    }
+
+    fn named_body(name: &str, limit: i32) -> BytesMut {
+        let mut body = BytesMut::new();
+        put_compact_array_len(&mut body, 1);
+        put_compact_string(&mut body, name);
+        put_empty_tag_buffer(&mut body);
+        body.put_i32(limit);
+        body.put_i8(-1);
+        put_empty_tag_buffer(&mut body);
+        body
+    }
+
+    #[test]
+    fn describe_topic_partitions_unknown_is_3() {
+        let (dir, broker) = tmp_broker("unk");
+        let mut src = named_body("missing", 0);
+        let mut out = BytesMut::new();
+        encode_describe_topic_partitions(&broker, &mut src, &mut out, "anon");
+        let mut src = out.freeze();
+        assert_eq!(src.get_i32(), 0);
+        assert_eq!(get_compact_array_len(&mut src).unwrap(), Some(1));
+        assert_eq!(
+            src.get_i16(),
+            KafkaErrorCode::UnknownTopicOrPartition.as_i16()
+        );
+        assert_eq!(
+            get_compact_nullable_string(&mut src).unwrap().as_deref(),
+            Some("missing")
+        );
+        let _ = get_uuid(&mut src).unwrap();
+        assert_eq!(src.get_u8(), 0);
+        assert_eq!(get_compact_array_len(&mut src).unwrap(), Some(0));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn describe_topic_partitions_matches_metadata_snapshot() {
+        let (dir, broker) = tmp_broker("match");
+        broker.create_topic("events", 2).unwrap();
+        let snap = broker.metadata(Some(&[TopicName::new("events")]));
+        let want = snap.topics.first().unwrap();
+
+        let mut src = named_body("events", 0);
+        let mut out = BytesMut::new();
+        encode_describe_topic_partitions(&broker, &mut src, &mut out, "anon");
+        let mut src = out.freeze();
+        assert_eq!(src.get_i32(), 0);
+        assert_eq!(get_compact_array_len(&mut src).unwrap(), Some(1));
+        assert_eq!(src.get_i16(), 0);
+        assert_eq!(
+            get_compact_nullable_string(&mut src).unwrap().as_deref(),
+            Some("events")
+        );
+        let uuid = get_uuid(&mut src).unwrap();
+        assert_eq!(uuid, topic_id::uuid_for_numeric_id(want.topic_id.0));
+        assert_eq!(src.get_u8(), 0);
+        assert_eq!(
+            get_compact_array_len(&mut src).unwrap(),
+            Some(want.partitions.len())
+        );
+        for p in &want.partitions {
+            assert_eq!(src.get_i16(), 0);
+            assert_eq!(src.get_i32(), p.partition_id.0 as i32);
+            assert_eq!(src.get_i32(), p.leader as i32);
+            assert_eq!(src.get_i32(), p.leader_epoch as i32);
+            let n_rep = get_compact_array_len(&mut src).unwrap().unwrap();
+            assert_eq!(n_rep, p.replicas.len());
+            for r in &p.replicas {
+                assert_eq!(src.get_i32(), *r as i32);
+            }
+            let n_isr = get_compact_array_len(&mut src).unwrap().unwrap();
+            assert_eq!(n_isr, p.isr.len());
+            for r in &p.isr {
+                assert_eq!(src.get_i32(), *r as i32);
+            }
+            assert_eq!(get_compact_array_len(&mut src).unwrap(), Some(0));
+            skip_tag_buffer(&mut src).unwrap();
+        }
+        let _ = std::fs::remove_dir_all(&dir);
+    }
 }
 

@@ -258,7 +258,8 @@ async fn dispatch_kafka(
                 | Some(ApiKey::AlterPartitionReassignments)
                 | Some(ApiKey::ListPartitionReassignments)
                 | Some(ApiKey::DescribeUserScramCredentials)
-                | Some(ApiKey::AlterUserScramCredentials),
+                | Some(ApiKey::AlterUserScramCredentials)
+                | Some(ApiKey::DescribeTopicPartitions),
             _
         )
     );
@@ -341,6 +342,12 @@ async fn dispatch_kafka(
                 }
             }
             meta_api::encode_metadata(broker, &mut src, &mut out, hdr.api_version, principal);
+        }
+        Some(ApiKey::DescribeTopicPartitions) if hdr.api_version == 0 => {
+            if let Err(e) = skip_tag_buffer(&mut src) {
+                debug!(error = %e, "describe topic partitions flexible header tag buffer");
+            }
+            meta_api::encode_describe_topic_partitions(broker, &mut src, &mut out, principal);
         }
         Some(ApiKey::Produce) if (0..=13).contains(&hdr.api_version) => {
             if hdr.api_version >= 9 {
