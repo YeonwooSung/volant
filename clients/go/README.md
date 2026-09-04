@@ -120,6 +120,7 @@ g, err = volant.JoinGroupConsumer(c, "g", []string{"t"}, 10_000, volant.WithFetc
 _ = batch
 meta, err := c.Metadata()
 meta, err = c.MetadataTopics([]string{"events"}) // v0.116; nil/empty = all
+meta, err = c.MetadataTopic("events")           // v0.181; one topic
 _ = c.Reconnect("127.0.0.1:9093") // v0.115; re-Auth / re-SCRAM
 _ = off
 _ = meta
@@ -189,6 +190,8 @@ _ = removed
 `[]Record` (`Offset`, `Key`, `Value`). `FetchResult` / `FetchOptsResult`
 return the same records plus the already-decoded high watermark.
 `Metadata()` returns brokers + topics.
+`MetadataTopic(topic)` fetches one named topic; same as
+`MetadataTopics` with a one-element list.
 `OffsetCommit` is an admin commit (empty member, generation 0).
 `OffsetCommitMember` / `OffsetCommitMemberMeta` send one entry with
 caller member + generation (v0.139; Java 6/7-arg parity).

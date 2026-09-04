@@ -2619,6 +2619,15 @@ public final class Client implements AutoCloseable {
     }
 
     /**
+     * Cluster brokers and one named topic. Same as
+     * {@link #metadata(List)} with a singleton list. Error 14 /
+     * transient retry inherit from {@code metadata}.
+     */
+    public Metadata metadataTopic(String topic) {
+        return metadata(Collections.singletonList(topic));
+    }
+
+    /**
      * Metadata without the v0.156 error-14 wrap. Used by
      * {@link #redirectToController} so hunt and {@link #metadata()} are
      * not mutually recursive. Transient retry is still v0.95.

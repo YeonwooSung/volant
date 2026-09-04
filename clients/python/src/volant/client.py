@@ -1389,6 +1389,14 @@ class Client:
                     continue
                 raise
 
+    def metadata_topic(self, topic: str) -> MetadataResponse:
+        """Cluster brokers and one named topic.
+
+        Same as ``metadata([topic])``. Error 14 / transient retry
+        inherit from ``metadata``.
+        """
+        return self.metadata([topic])
+
     def _metadata_rpc(
         self, topics: Optional[list[str]] = None
     ) -> MetadataResponse:
