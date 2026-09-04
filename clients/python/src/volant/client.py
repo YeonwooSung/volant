@@ -1638,7 +1638,13 @@ class Client:
             self._check(resp.error_code, "list_offsets")
             return list(resp.entries)
 
+    def list_offsets_all(self, topic: str) -> list[OffsetListing]:
+        """List earliest/latest for every partition of ``topic``.
 
+        Same as ``list_offsets(topic)`` / ``list_offsets(topic, None)``.
+        Retry / error 13 inherit from ``list_offsets``.
+        """
+        return self.list_offsets(topic)
 
     def delete_offsets(
         self,

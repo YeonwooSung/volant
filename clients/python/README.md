@@ -42,6 +42,7 @@ rows = c.fetch_offset("g", "t", 0)  # v0.179; one OffsetEntry
 deleted = c.delete_offsets("g", [("t", 0)])
 deleted = c.delete_offset("g", "t", 0)  # v0.164; one OffsetEntry
 bounds = c.list_offsets("t")  # [OffsetListing(partition, earliest, latest), ...]
+bounds = c.list_offsets_all("t")  # v0.197; same as list_offsets(topic)
 cfg = c.describe_configs("t")
 c.alter_configs("t", [("retention.ms", "86400000")])
 c.alter_config("t", "retention.ms", "86400000")  # v0.177; one key
@@ -160,6 +161,8 @@ partitions (`u32::MAX`); `replicas=[]` is auto-place.
 `list_offsets(topic, partitions=None)` returns
 earliest/latest (`OffsetListing`) for the topic (`None` / `[]` = all
 partitions; native opcode 48, not Kafka timestamp ListOffsets).
+`list_offsets_all(topic)` lists earliest/latest for every partition
+(empty wire partitions); same as `list_offsets(topic)`.
 `delete_records(topic, partition, before_offset, wait_majority=None)`
 returns `DeleteRecordsResult` (`topic`, `partition`, `low_watermark`);
 native opcode 44, not Kafka DeleteRecords (API key 21). `wait_majority`
