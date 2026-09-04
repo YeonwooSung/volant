@@ -1364,6 +1364,10 @@ async fn handle_request(broker: &Arc<Broker>, req: Request) -> Result<Response> 
                 )
                 .await);
             }
+            if persist_overlay_after_openraft_joint(broker) {
+                return Ok(add_broker_after_joint(broker, id, host, port, rack).await);
+            }
+            // Flag off / N<2 / no cluster / rollback escape: v0.10 persist-first.
             let prev = broker.snapshot_membership_overlay();
             // v0.39: snapshot assignment before add_broker may expand replicas.
             let prev_assignment = snapshot_assignment_for_add_rollback(broker);
@@ -1388,6 +1392,10 @@ async fn handle_request(broker: &Arc<Broker>, req: Request) -> Result<Response> 
                     forward_membership_to_leader(broker, Request::RemoveBroker { id }).await,
                 );
             }
+            if persist_overlay_after_openraft_joint(broker) {
+                return Ok(remove_broker_after_joint(broker, id).await);
+            }
+            // Flag off / N<2 / no cluster / rollback escape: v0.10 persist-first.
             let prev = broker.snapshot_membership_overlay();
             match broker.remove_broker(id) {
                 Ok(generation) => {
@@ -2040,10 +2048,99 @@ fn snapshot_assignment_for_add_rollback(broker: &Broker) -> Option<AssignmentSna
     }
 }
 
-/// After overlay add/remove: leader joint-sync (rollback on fail) or v0.26
-/// best-effort. Followers with openraft + forward on never reach here
-/// (v0.38). Flag-off and `VOLANT_OPENRAFT_FORWARD_MEMBERSHIP=0` keep
-/// persist + MembershipPut.
+/// Openraft-on leader with N>=2: persist overlay only after joint (v0.212).
+///
+/// Flag off / N<2 / no cluster / not leader / rollback escape keep the
+/// v0.10 persist-first path (`add_broker` then [`after_overlay_mutation`]).
+fn persist_overlay_after_openraft_joint(broker: &Broker) -> bool {
+    broker.openraft_joint_rollback_armed()
+        && broker
+            .cluster_config()
+            .map(|c| c.brokers.len() >= 2)
+            .unwrap_or(false)
+}
+
+/// Leader AddBroker: validate → joint pending target → persist on success.
+///
+/// Fail → native **15**, disk unchanged (no overlay write, no generation
+/// bump, no reassign-on-add). v0.34 restore is a no-op because nothing
+/// was written.
+async fn add_broker_after_joint(
+    broker: &Broker,
+    id: u32,
+    host: String,
+    port: u16,
+    rack: Option<String>,
+) -> Response {
+    let pending = match broker.preview_add_broker(id, host, port, rack) {
+        Ok(p) => p,
+        Err(e) => {
+            return Response::Error {
+                code: ErrorCode::InvalidArg as u16,
+                message: e.to_string(),
+            };
+        }
+    };
+    if !broker
+        .change_openraft_membership_pending(Some(&pending))
+        .await
+    {
+        return Response::AddBroker {
+            error_code: ErrorCode::NotEnoughReplicas as u16,
+            generation: broker.membership_generation(),
+        };
+    }
+    match broker.commit_membership_overlay(&pending, Some(id), None) {
+        Ok(generation) => {
+            fanout_membership_put(broker).await;
+            Response::AddBroker {
+                error_code: 0,
+                generation,
+            }
+        }
+        Err(e) => map_error(e),
+    }
+}
+
+/// Leader RemoveBroker: validate → joint pending target → persist on success.
+///
+/// Fail → native **15**, disk unchanged.
+async fn remove_broker_after_joint(broker: &Broker, id: u32) -> Response {
+    let pending = match broker.preview_remove_broker(id) {
+        Ok(p) => p,
+        Err(e) => {
+            return Response::Error {
+                code: ErrorCode::InvalidArg as u16,
+                message: e.to_string(),
+            };
+        }
+    };
+    if !broker
+        .change_openraft_membership_pending(Some(&pending))
+        .await
+    {
+        return Response::RemoveBroker {
+            error_code: ErrorCode::NotEnoughReplicas as u16,
+            generation: broker.membership_generation(),
+        };
+    }
+    match broker.commit_membership_overlay(&pending, None, Some(id)) {
+        Ok(generation) => {
+            fanout_membership_put(broker).await;
+            Response::RemoveBroker {
+                error_code: 0,
+                generation,
+            }
+        }
+        Err(e) => map_error(e),
+    }
+}
+
+/// After overlay add/remove on the persist-first path: leader joint-sync
+/// (rollback on fail) or v0.26 best-effort. The openraft-on leader invert
+/// (v0.212) never reaches here. Followers with openraft + forward on never
+/// reach here (v0.38). Flag-off and `VOLANT_OPENRAFT_FORWARD_MEMBERSHIP=0`
+/// keep persist + MembershipPut.
 ///
 /// `prev_assignment` is the pre-add snapshot (AddBroker + reassign-on-add).
 /// On overlay rollback it is restored to `assignment.json` + live state so a

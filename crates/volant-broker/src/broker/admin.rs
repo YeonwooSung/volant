@@ -105,15 +105,18 @@ impl Broker {
         }
     }
 
-    /// Add a broker endpoint. Persist overlay (generation+1). Not marked live
-    /// until heartbeat. Rejects duplicate id.
-    pub fn add_broker(
+    /// Validate add-broker without writing overlay or bumping generation.
+    ///
+    /// Returns the pending broker list (current + new, sorted). Leader
+    /// dispatch (v0.212) joints against this list before
+    /// [`Self::commit_membership_overlay`].
+    pub fn preview_add_broker(
         &self,
         id: u32,
         host: String,
         port: u16,
         rack: Option<String>,
-    ) -> Result<u64> {
+    ) -> Result<Vec<crate::cluster::BrokerEndpoint>> {
         let cluster = self
             .cluster
             .as_ref()
@@ -123,7 +126,7 @@ impl Broker {
                 "add-broker requires non-empty host and non-zero port".into(),
             ));
         }
-        let mut cfg = cluster.config.write();
+        let cfg = cluster.config.read();
         if cfg.broker(id).is_some() {
             return Err(Error::InvalidArgument(format!("duplicate broker id {id}")));
         }
@@ -135,47 +138,19 @@ impl Broker {
             rack,
         });
         brokers.sort_by_key(|b| b.id);
-        let generation = cluster
-            .membership_generation
-            .load(Ordering::Relaxed)
-            .saturating_add(1);
-        let overlay = crate::cluster::MembershipOverlay {
-            generation,
-            brokers: brokers.clone(),
-        };
-        crate::cluster::save_membership_overlay(&cluster.data_dir, &overlay)?;
-        cfg.brokers = brokers;
-        cluster
-            .membership_generation
-            .store(generation, Ordering::Relaxed);
-        drop(cfg);
-        // Endpoint is configured immediately; live only after heartbeat.
-        // v0.18: opt-in expand of under-replicated topics onto the new id.
-        // v0.39: dispatch restores assignment.json when joint overlay rolls back
-        // (`VOLANT_REASSIGN_ON_ADD_ROLLBACK` default on). In-process callers
-        // stay v0.18 (no assignment rewind).
-        if crate::cluster::reassign_on_add_enabled() && self.is_controller() {
-            if let Err(e) = self.auto_reassign_after_add(id) {
-                warn!(
-                    new_id = id,
-                    error = %e,
-                    "auto reassign after add-broker failed"
-                );
-            }
-        }
-        // v0.26: record intended voter set. Leader dispatch (v0.34) rolls
-        // this overlay back when `change_membership` fails.
-        self.note_openraft_membership_target();
-        Ok(generation)
+        Ok(brokers)
     }
 
-    /// Remove a broker by id. Rejects self and the last remaining broker.
-    pub fn remove_broker(&self, id: u32) -> Result<u64> {
+    /// Validate remove-broker without writing overlay or bumping generation.
+    ///
+    /// Rejects self, the last remaining overlay broker, and (flag on) the
+    /// last openraft voter. Returns the pending list (current − id).
+    pub fn preview_remove_broker(&self, id: u32) -> Result<Vec<crate::cluster::BrokerEndpoint>> {
         let cluster = self
             .cluster
             .as_ref()
             .ok_or_else(|| Error::InvalidArgument("remove-broker requires cluster mode".into()))?;
-        let mut cfg = cluster.config.write();
+        let cfg = cluster.config.read();
         if cfg.brokers.len() <= 1 {
             return Err(Error::InvalidArgument(
                 "cannot remove the last remaining broker".into(),
@@ -200,26 +175,86 @@ impl Broker {
                 ));
             }
         }
-        let brokers: Vec<_> = cfg.brokers.iter().filter(|b| b.id != id).cloned().collect();
+        Ok(cfg.brokers.iter().filter(|b| b.id != id).cloned().collect())
+    }
+
+    /// Persist overlay + in-memory membership (generation+1).
+    ///
+    /// Leader dispatch (v0.212) calls this **after** a successful openraft
+    /// joint. In-process [`Self::add_broker`] / [`Self::remove_broker`] still
+    /// persist first (v0.10 / v0.26 honesty hole).
+    ///
+    /// `added_id` triggers optional reassign-on-add. `removed_id` drops the
+    /// id from live membership. New ids are not marked live.
+    pub fn commit_membership_overlay(
+        &self,
+        brokers: &[crate::cluster::BrokerEndpoint],
+        added_id: Option<u32>,
+        removed_id: Option<u32>,
+    ) -> Result<u64> {
+        let cluster = self.cluster.as_ref().ok_or_else(|| {
+            Error::InvalidArgument("commit membership overlay requires cluster mode".into())
+        })?;
+        let mut cfg = cluster.config.write();
         let generation = cluster
             .membership_generation
             .load(Ordering::Relaxed)
             .saturating_add(1);
         let overlay = crate::cluster::MembershipOverlay {
             generation,
-            brokers: brokers.clone(),
+            brokers: brokers.to_vec(),
         };
         crate::cluster::save_membership_overlay(&cluster.data_dir, &overlay)?;
-        cfg.brokers = brokers;
+        cfg.brokers = brokers.to_vec();
         cluster
             .membership_generation
             .store(generation, Ordering::Relaxed);
         drop(cfg);
-        cluster.membership.write().remove_id(id);
-        // v0.26: record intended voter set. Leader dispatch (v0.34) rolls
-        // this overlay back when `change_membership` fails.
+        if let Some(id) = removed_id {
+            cluster.membership.write().remove_id(id);
+        }
+        // Endpoint is configured immediately; live only after heartbeat.
+        // v0.18: opt-in expand of under-replicated topics onto the new id.
+        // v0.212: dispatch commits overlay (and reassign) only after joint.
+        // In-process callers stay persist-first (no assignment rewind).
+        if let Some(id) = added_id {
+            if crate::cluster::reassign_on_add_enabled() && self.is_controller() {
+                if let Err(e) = self.auto_reassign_after_add(id) {
+                    warn!(
+                        new_id = id,
+                        error = %e,
+                        "auto reassign after add-broker failed"
+                    );
+                }
+            }
+        }
         self.note_openraft_membership_target();
         Ok(generation)
+    }
+
+    /// Add a broker endpoint. Persist overlay (generation+1). Not marked live
+    /// until heartbeat. Rejects duplicate id.
+    ///
+    /// In-process persist-first (v0.10 / v0.26). Client opcodes invert on
+    /// the openraft-on leader dispatch path (v0.212: joint, then commit).
+    pub fn add_broker(
+        &self,
+        id: u32,
+        host: String,
+        port: u16,
+        rack: Option<String>,
+    ) -> Result<u64> {
+        let brokers = self.preview_add_broker(id, host, port, rack)?;
+        self.commit_membership_overlay(&brokers, Some(id), None)
+    }
+
+    /// Remove a broker by id. Rejects self and the last remaining broker.
+    ///
+    /// In-process persist-first (v0.10 / v0.26). Client opcodes invert on
+    /// the openraft-on leader dispatch path (v0.212).
+    pub fn remove_broker(&self, id: u32) -> Result<u64> {
+        let brokers = self.preview_remove_broker(id)?;
+        self.commit_membership_overlay(&brokers, None, Some(id))
     }
 
     /// Apply a peer `MembershipPut` overlay. Ignores stale generation

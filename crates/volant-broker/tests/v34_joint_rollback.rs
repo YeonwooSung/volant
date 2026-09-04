@@ -1,8 +1,10 @@
-//! v0.34 — roll back overlay when openraft `change_membership` fails.
+//! v0.34 / v0.212 — joint fail never writes overlay.
 //!
 //! Flag off keeps the v0.10 overlay path. Flag on + leader + rollback
-//! (default) restores generation / broker list when joint consensus fails.
-//! In-process `add_broker` stays v0.26 (persist first; dispatch owns rollback).
+//! (default): dispatch validates, joints the **pending** target, and
+//! persists overlay only after commit (v0.212). Fail → native **15**,
+//! disk unchanged (v0.34 restore is a no-op). In-process `add_broker`
+//! stays persist-first (v0.10 / v0.26 honesty hole).
 
 #[path = "common/mod.rs"]
 mod common;
@@ -153,7 +155,8 @@ fn flag_off_add_broker_writes_overlay() {
     assert!(b1.test_last_openraft_membership_target().is_none());
 }
 
-/// Flag on, happy path: in-process add still writes overlay (v0.26).
+/// Flag on, happy path: in-process add still writes overlay (persist-first
+/// honesty hole; dispatch invert is the client opcode path).
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn flag_on_add_broker_still_works() {
     set_openraft_env(true);
@@ -185,7 +188,7 @@ async fn flag_on_add_broker_still_works() {
     t.abort_all();
 }
 
-/// Flag on + leader: forced `change_membership` fail rolls back overlay.
+/// Flag on + leader: forced `change_membership` fail never writes overlay.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn flag_on_change_membership_fail_rolls_back_overlay() {
     set_openraft_env(true);
@@ -225,7 +228,13 @@ async fn flag_on_change_membership_fail_rolls_back_overlay() {
     assert_eq!(leader.membership_generation(), prev_gen);
     assert!(
         !overlay_has_id(&leader, 4),
-        "overlay must not keep id=4 after rollback"
+        "overlay must not keep id=4 after joint fail"
     );
+    if prev_gen == 0 {
+        assert!(
+            !leader.membership_overlay_path().exists(),
+            "failed joint must not create membership.json"
+        );
+    }
     t.abort_all();
 }
