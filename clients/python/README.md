@@ -225,6 +225,9 @@ rebalance codes 9 / 10 / 11 are not retried. LeaveGroup shares
 is safe; static instance still sends empty ``member_id``. JoinGroup
 shares ``max_retries`` when ``member_id`` or ``group_instance_id`` is
 non-empty (generated first join / rejoin / static membership).
+Thin ``Client.join_group`` retries error 9 (RebalanceInProgress) with
+the same ``max_retries`` / ``retry_backoff`` as other Join retries
+(default 0).
 OffsetCommit / OffsetFetch / DeleteOffsets / ListOffsets /
 DescribeGroup / ListGroups / Metadata / ListMembers / BeginTxn /
 EndTxn / InitProducerId / Auth / SCRAM handshake / DeleteRecords

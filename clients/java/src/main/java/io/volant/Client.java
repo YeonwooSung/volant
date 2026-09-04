@@ -60,6 +60,8 @@ public final class Client implements AutoCloseable {
     public static final String VERSION = "0.2.0";
 
     private static final int DEFAULT_TIMEOUT_MS = 10_000;
+    /** Native {@code ErrorCode::RebalanceInProgress} (JoinGroup fence). */
+    static final int REBALANCE_IN_PROGRESS = 9;
     /** Native {@code ErrorCode::NotLeaderForPartition}. */
     static final int NOT_LEADER_FOR_PARTITION = 13;
     /** Native {@code ErrorCode::NotController} (controller-gated admin). */
@@ -1395,6 +1397,10 @@ public final class Client implements AutoCloseable {
         return code == 6 || code == 7 || code == 15 || code == 16;
     }
 
+    static boolean isJoinRetryable(int code) {
+        return code == REBALANCE_IN_PROGRESS || isTransientBroker(code);
+    }
+
     static boolean isTransientTransport(Throwable e) {
         if (e instanceof BrokerException || e instanceof ProtocolException) {
             return false;
@@ -2224,6 +2230,8 @@ public final class Client implements AutoCloseable {
      * generate a {@code memberId} before send so retry is safe (no ghost
      * member). {@code sessionTimeoutMs} 0 defaults to 10000.
      * Sends empty {@code groupInstanceId} (dynamic membership).
+     * Transient 6/7/15/16 and error 9 retry up to {@code maxRetries}
+     * (default 0).
      */
     public JoinGroupResult joinGroup(String group, List<String> topics, int sessionTimeoutMs) {
         return joinGroup(group, "", topics, sessionTimeoutMs, "");
@@ -2296,7 +2304,7 @@ public final class Client implements AutoCloseable {
                     redirectAttempt++;
                     continue;
                 }
-                if (isTransientBroker(e.code) && retryAttempt < maxRetries) {
+                if (isJoinRetryable(e.code) && retryAttempt < maxRetries) {
                     retryAttempt++;
                     sleepProduceRetry();
                     continue;
@@ -2318,7 +2326,7 @@ public final class Client implements AutoCloseable {
                 redirectAttempt++;
                 continue;
             }
-            if (isTransientBroker(resp.errorCode) && retryAttempt < maxRetries) {
+            if (isJoinRetryable(resp.errorCode) && retryAttempt < maxRetries) {
                 retryAttempt++;
                 sleepProduceRetry();
                 continue;

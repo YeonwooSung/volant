@@ -255,6 +255,9 @@ one re-Init. Heartbeat shares produce/fetch `setMaxRetries` (default
 is safe; static instance still sends empty `memberId`. JoinGroup
 shares `setMaxRetries` when `memberId` or `groupInstanceId` is
 non-empty (generated first join / rejoin / static membership).
+Thin `Client.joinGroup` retries error 9 (RebalanceInProgress) with the
+same `setMaxRetries` / `setRetryBackoffMs` as other Join retries
+(default 0).
 OffsetCommit / OffsetFetch / DeleteOffsets / ListOffsets /
 DescribeGroup / ListGroups / Metadata / ListMembers / BeginTxn /
 EndTxn / InitProducerId / Auth / SCRAM handshake / DeleteRecords

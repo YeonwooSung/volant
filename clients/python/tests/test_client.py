@@ -1137,6 +1137,26 @@ class TestJoinGroupRetry(unittest.TestCase):
             self.assertEqual(srv.join_group_count, 2)
             self.assertEqual(srv.heartbeat_count, 0)
 
+    def test_retries_error_9_then_ok(self) -> None:
+        with ScriptedBroker() as srv:
+            srv.join_group_codes = [REBALANCE, 0]
+            with Client(srv.addr, timeout=5.0, max_retries=1, retry_backoff_ms=0) as c:
+                result = c.join_group("g", topics=["t"])
+            self.assertEqual(result.member_id, "m-1")
+            self.assertEqual(result.generation, 1)
+            self.assertEqual(srv.join_group_count, 2)
+            self.assertEqual(srv.heartbeat_count, 0)
+
+    def test_error_9_surfaces_when_max_retries_zero(self) -> None:
+        with ScriptedBroker() as srv:
+            srv.join_group_codes = [REBALANCE, 0]
+            with Client(srv.addr, timeout=5.0, max_retries=0, retry_backoff_ms=0) as c:
+                with self.assertRaises(BrokerError) as ctx:
+                    c.join_group("g", topics=["t"])
+            self.assertEqual(ctx.exception.code, REBALANCE)
+            self.assertEqual(srv.join_group_count, 1)
+            self.assertEqual(srv.heartbeat_count, 0)
+
 
 class TestLeaveGroupRetry(unittest.TestCase):
     def test_default_max_retries_zero_raises_on_timeout(self) -> None:

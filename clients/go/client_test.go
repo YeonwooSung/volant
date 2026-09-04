@@ -1963,6 +1963,63 @@ func TestJoinGroupStoredMemberIDRetriesTimeoutThenOk(t *testing.T) {
 	}
 }
 
+func TestJoinGroupRetriesError9ThenOk(t *testing.T) {
+	srv := &scriptedBroker{joinGroupCodes: []uint16{volant.RebalanceInProgress, 0}}
+	addr, stop := startScripted(t, srv)
+	defer stop()
+
+	c, err := volant.DialTimeout(addr, 5*time.Second)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer c.Close()
+	c.SetMaxRetries(1)
+	c.SetRetryBackoff(0)
+
+	j, err := c.JoinGroup("g", []string{"t"}, 10_000)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if j.MemberID != "m-1" || j.Generation != 1 {
+		t.Fatalf("result=%+v", j)
+	}
+	if n := srv.joinGroups(); n != 2 {
+		t.Fatalf("join count %d want 2", n)
+	}
+	if n := srv.heartbeats(); n != 0 {
+		t.Fatalf("heartbeat count %d want 0", n)
+	}
+}
+
+func TestJoinGroupError9SurfacesWhenMaxRetriesZero(t *testing.T) {
+	srv := &scriptedBroker{joinGroupCodes: []uint16{volant.RebalanceInProgress, 0}}
+	addr, stop := startScripted(t, srv)
+	defer stop()
+
+	c, err := volant.DialTimeout(addr, 5*time.Second)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer c.Close()
+	c.SetMaxRetries(0)
+	c.SetRetryBackoff(0)
+
+	_, err = c.JoinGroup("g", []string{"t"}, 10_000)
+	if err == nil {
+		t.Fatal("expected BrokerError 9")
+	}
+	be, ok := err.(*volant.BrokerError)
+	if !ok || be.Code != volant.RebalanceInProgress {
+		t.Fatalf("got %v want BrokerError code=9", err)
+	}
+	if n := srv.joinGroups(); n != 1 {
+		t.Fatalf("join count %d want 1", n)
+	}
+	if n := srv.heartbeats(); n != 0 {
+		t.Fatalf("heartbeat count %d want 0", n)
+	}
+}
+
 func TestJoinGroupStaticInstanceRetriesTimeoutThenOk(t *testing.T) {
 	srv := &scriptedBroker{joinGroupCodes: []uint16{timeoutCode, 0}}
 	addr, stop := startScripted(t, srv)

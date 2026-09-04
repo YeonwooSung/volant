@@ -87,10 +87,17 @@ _IO = 6
 _TIMEOUT = 7
 _NOT_ENOUGH_REPLICAS = 15
 _BROKER_NOT_AVAILABLE = 16
+# Native ErrorCode::RebalanceInProgress — JoinGroup fence (v0.223).
+_REBALANCE_IN_PROGRESS = 9
 
 
 def _is_transient_broker(code: int) -> bool:
     return code in (_IO, _TIMEOUT, _NOT_ENOUGH_REPLICAS, _BROKER_NOT_AVAILABLE)
+
+
+def _is_join_retryable(code: int) -> bool:
+    """Join retries transient 6/7/15/16 plus generation-fence 9."""
+    return code == _REBALANCE_IN_PROGRESS or _is_transient_broker(code)
 
 
 def _parse_addr(addr: str) -> tuple[str, int]:
@@ -2006,10 +2013,10 @@ class Client:
         sends empty ``member_id``. Returns a result that unpacks as
         ``(member_id, generation, assignment)``; the response
         ``member_id`` is source of truth. Transient broker/transport
-        errors retry up to ``max_retries`` extra times (default 0) when
-        ``member_id`` or ``group_instance_id`` is non-empty. Error 14
-        follows ``max_redirects``. Rebalance codes 9 / 10 / 11 are not
-        retried.
+        errors and generation-fence 9 retry up to ``max_retries`` extra
+        times (default 0) when ``member_id`` or ``group_instance_id`` is
+        non-empty. Error 14 follows ``max_redirects``. Codes 10 / 11
+        are not retried.
         """
         if not member_id and not group_instance_id:
             member_id = uuid.uuid4().hex
@@ -2052,7 +2059,7 @@ class Client:
                 ):
                     redirect_attempt += 1
                     continue
-                if _is_transient_broker(e.code) and retry_attempt < max_retries:
+                if _is_join_retryable(e.code) and retry_attempt < max_retries:
                     retry_attempt += 1
                     self._sleep_produce_retry()
                     continue
@@ -2075,7 +2082,7 @@ class Client:
                 redirect_attempt += 1
                 continue
             if (
-                _is_transient_broker(resp.error_code)
+                _is_join_retryable(resp.error_code)
                 and retry_attempt < max_retries
             ):
                 retry_attempt += 1
