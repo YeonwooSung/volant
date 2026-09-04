@@ -3944,8 +3944,9 @@ type adminBroker struct {
 	metadataCount          int
 	listMembersCount       int
 	acceptCount            int
-	lastCreateTopicConfigs [][2]string
-	ln                     net.Listener
+	lastCreateTopicConfigs    [][2]string
+	lastCreateTopicPartitions uint32
+	ln                        net.Listener
 }
 
 func startAdmin(t *testing.T, s *adminBroker) (addr string, stop func()) {
@@ -3994,6 +3995,12 @@ func (s *adminBroker) lastCreateConfigs() [][2]string {
 	out := make([][2]string, len(s.lastCreateTopicConfigs))
 	copy(out, s.lastCreateTopicConfigs)
 	return out
+}
+
+func (s *adminBroker) lastCreatePartitions() uint32 {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.lastCreateTopicPartitions
 }
 
 func (s *adminBroker) scramAclSnapshot() (createScram, deleteScram, listScram, listAcls, metas, accepts int) {
@@ -4078,6 +4085,7 @@ func (s *adminBroker) handle(f *frame.Frame) ([]byte, error) {
 			return nil, e
 		}
 		s.lastCreateTopicConfigs = append([][2]string(nil), req.Configs...)
+		s.lastCreateTopicPartitions = req.Partitions
 		rep := createTopicReply{}
 		if len(s.createTopicReplies) > 0 {
 			rep = s.createTopicReplies[0]
@@ -5245,6 +5253,28 @@ func TestCreateTopicSendsEmptyConfigs(t *testing.T) {
 	defer c.Close()
 	if err := c.CreateTopic("events", 1); err != nil {
 		t.Fatal(err)
+	}
+	got := srv.lastCreateConfigs()
+	if len(got) != 0 {
+		t.Fatalf("configs=%v want empty", got)
+	}
+}
+
+func TestCreateTopicDefaultEncodesPartitionsOne(t *testing.T) {
+	srv := &adminBroker{}
+	addr, stop := startAdmin(t, srv)
+	defer stop()
+
+	c, err := volant.DialTimeout(addr, 5*time.Second)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer c.Close()
+	if err := c.CreateTopicDefault("events"); err != nil {
+		t.Fatal(err)
+	}
+	if got := srv.lastCreatePartitions(); got != 1 {
+		t.Fatalf("partitions=%d want 1", got)
 	}
 	got := srv.lastCreateConfigs()
 	if len(got) != 0 {

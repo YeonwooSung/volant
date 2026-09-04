@@ -936,6 +936,11 @@ public final class Client implements AutoCloseable {
         return createTopic(name, partitions, Collections.emptyList());
     }
 
+    /** Create a topic with 1 partition. Same as {@link #createTopic(String, int)}. */
+    public int createTopic(String name) {
+        return createTopic(name, 1);
+    }
+
     /**
      * Create a topic with native CreateTopic config pairs (Phase 13 trailer;
      * same as Python {@code configs=} / Rust {@code create_topic_with_configs}).

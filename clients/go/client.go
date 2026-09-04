@@ -892,6 +892,13 @@ func (c *Client) CreateTopic(name string, partitions int) error {
 	return err
 }
 
+// CreateTopicDefault creates a topic with 1 partition.
+// Same as CreateTopic(name, 1). Returns error only (CreateTopicID
+// still returns the topic id).
+func (c *Client) CreateTopicDefault(name string) error {
+	return c.CreateTopic(name, 1)
+}
+
 // CreateTopicID is CreateTopic but returns the broker-assigned topic id
 // (same as CreateTopicWithConfigs / Python create_topic / Java createTopic).
 // CreateTopic stays error-only. Error 14 and transient retry inherit
