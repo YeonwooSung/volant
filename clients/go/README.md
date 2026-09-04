@@ -121,6 +121,7 @@ _ = batch
 meta, err := c.Metadata()
 meta, err = c.MetadataTopics([]string{"events"}) // v0.116; nil/empty = all
 _ = c.Reconnect("127.0.0.1:9093") // v0.115; re-Auth / re-SCRAM
+_ = c.Addr()                      // v0.183; current broker host:port (updated by Reconnect)
 _ = off
 _ = meta
 

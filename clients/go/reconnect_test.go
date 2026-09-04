@@ -2,10 +2,40 @@ package volant_test
 
 import (
 	"testing"
+	"time"
 
 	volant "github.com/volant-mq/volant/clients/go"
 	"github.com/volant-mq/volant/clients/go/codec"
 )
+
+func TestAddrAfterDialAndReconnect(t *testing.T) {
+	addr1, _, stop1 := serveAuth(t, 0, true)
+	defer stop1()
+	addr2, _, stop2 := serveAuth(t, 0, true)
+	defer stop2()
+
+	c, err := volant.DialTimeout(addr1, 5*time.Second)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer c.Close()
+	if got := c.Addr(); got != addr1 {
+		t.Fatalf("Addr() after Dial = %q want %q", got, addr1)
+	}
+	if err := c.Reconnect(addr2); err != nil {
+		t.Fatal(err)
+	}
+	if got := c.Addr(); got != addr2 {
+		t.Fatalf("Addr() after Reconnect = %q want %q", got, addr2)
+	}
+}
+
+func TestAddrNilClient(t *testing.T) {
+	var c *volant.Client
+	if got := c.Addr(); got != "" {
+		t.Fatalf("nil Addr() = %q want empty", got)
+	}
+}
 
 func TestReconnectSecondListenerMetadata(t *testing.T) {
 	addr1, got1, stop1 := serveAuth(t, 0, true)
