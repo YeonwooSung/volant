@@ -1475,6 +1475,17 @@ func isTransientBroker(code uint16) bool {
 	}
 }
 
+func isJoinRetryable(code uint16) bool {
+	return code == RebalanceInProgress || isTransientBroker(code)
+}
+
+func isJoinRetryableErr(err error) bool {
+	if be, ok := err.(*codec.BrokerError); ok {
+		return isJoinRetryable(be.Code)
+	}
+	return isTransientTransport(err)
+}
+
 func isTransientTransport(err error) bool {
 	if err == nil {
 		return false
@@ -2551,7 +2562,7 @@ func (c *Client) joinGroup(group, memberID string, topics []string, sessionTimeo
 				redirectAttempt++
 				continue
 			}
-			if isTransientProduceErr(err) && retryAttempt < maxRetries {
+			if isJoinRetryableErr(err) && retryAttempt < maxRetries {
 				retryAttempt++
 				c.sleepProduceRetry()
 				continue
@@ -2570,7 +2581,7 @@ func (c *Client) joinGroup(group, memberID string, topics []string, sessionTimeo
 			redirectAttempt++
 			continue
 		}
-		if isTransientBroker(resp.ErrorCode) && retryAttempt < maxRetries {
+		if isJoinRetryable(resp.ErrorCode) && retryAttempt < maxRetries {
 			retryAttempt++
 			c.sleepProduceRetry()
 			continue

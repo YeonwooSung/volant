@@ -1165,6 +1165,40 @@ class ClientTest {
     }
 
     @Test
+    void joinGroupRetriesError9ThenOk() throws Exception {
+        try (ScriptedBroker srv = ScriptedBroker.start()) {
+            srv.joinGroupCodes.add(REBALANCE);
+            srv.joinGroupCodes.add(0);
+            try (Client c = Client.connect("127.0.0.1", srv.port, 5_000)) {
+                c.setMaxRetries(1);
+                c.setRetryBackoffMs(0);
+                JoinGroupResult j = c.joinGroup("g", List.of("t"), 10_000);
+                assertEquals("m-1", j.memberId);
+                assertEquals(1L, j.generation);
+            }
+            assertEquals(2, srv.joinGroupCount.get());
+            assertEquals(0, srv.heartbeatCount.get());
+        }
+    }
+
+    @Test
+    void joinGroupError9SurfacesWhenMaxRetriesZero() throws Exception {
+        try (ScriptedBroker srv = ScriptedBroker.start()) {
+            srv.joinGroupCodes.add(REBALANCE);
+            srv.joinGroupCodes.add(0);
+            try (Client c = Client.connect("127.0.0.1", srv.port, 5_000)) {
+                c.setMaxRetries(0);
+                c.setRetryBackoffMs(0);
+                BrokerException ex =
+                        assertThrows(BrokerException.class, () -> c.joinGroup("g", List.of("t"), 10_000));
+                assertEquals(REBALANCE, ex.code);
+            }
+            assertEquals(1, srv.joinGroupCount.get());
+            assertEquals(0, srv.heartbeatCount.get());
+        }
+    }
+
+    @Test
     void joinGroupStaticInstanceRetriesTimeoutThenOk() throws Exception {
         try (ScriptedBroker srv = ScriptedBroker.start()) {
             srv.joinGroupCodes.add(TIMEOUT);

@@ -892,7 +892,7 @@ class _JoinGroupStub:
 
 
 class TestJoinGroupRetry(unittest.TestCase):
-    """Client join_group retry guard (v0.205). Error 9 is not in the transient set."""
+    """Client join_group retry (v0.205 transients + v0.223 error 9)."""
 
     def test_empty_member_and_instance_retries_timeout_then_ok(self) -> None:
         from volant.client import Client
@@ -924,6 +924,29 @@ class TestJoinGroupRetry(unittest.TestCase):
                 result = c.join_group("g", topics=["t"], group_instance_id="inst-1")
             self.assertEqual(result.member_id, "m-1")
             self.assertEqual(srv.join_count, 2)
+            self.assertEqual(srv.heartbeat_count, 0)
+
+    def test_retries_error_9_then_ok(self) -> None:
+        from volant.client import Client
+
+        with _JoinGroupStub([9, 0]) as srv:
+            with Client(srv.addr, timeout=5.0, max_retries=1, retry_backoff_ms=0) as c:
+                result = c.join_group("g", topics=["t"])
+            self.assertEqual(result.member_id, "m-1")
+            self.assertEqual(result.generation, 1)
+            self.assertEqual(srv.join_count, 2)
+            self.assertEqual(srv.heartbeat_count, 0)
+
+    def test_error_9_surfaces_when_max_retries_zero(self) -> None:
+        from volant.client import Client
+        from volant.codec import BrokerError
+
+        with _JoinGroupStub([9, 0]) as srv:
+            with Client(srv.addr, timeout=5.0, max_retries=0, retry_backoff_ms=0) as c:
+                with self.assertRaises(BrokerError) as ctx:
+                    c.join_group("g", topics=["t"])
+            self.assertEqual(ctx.exception.code, 9)
+            self.assertEqual(srv.join_count, 1)
             self.assertEqual(srv.heartbeat_count, 0)
 
 
