@@ -624,6 +624,13 @@ impl Client {
         }
     }
 
+    /// Alter one topic config key. Same as `alter_configs(topic, vec![(key, value)])`.
+    /// Empty `value` still clears that key.
+    pub async fn alter_config(&self, topic: &str, key: &str, value: &str) -> Result<()> {
+        self.alter_configs(topic, vec![(key.to_owned(), value.to_owned())])
+            .await
+    }
+
     /// Delete records before `before_offset` on a partition (Phase 14).
     ///
     /// Returns the new log start offset (low watermark).
