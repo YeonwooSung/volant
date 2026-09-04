@@ -888,6 +888,30 @@ func TestIdempotentProduceStillInitsOnce(t *testing.T) {
 	}
 }
 
+func TestIdempotenceSetterAndGetter(t *testing.T) {
+	srv := &scriptedBroker{}
+	addr, stop := startScripted(t, srv)
+	defer stop()
+
+	c, err := volant.DialTimeout(addr, 5*time.Second)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer c.Close()
+
+	if c.Idempotence() {
+		t.Fatal("default Idempotence want false")
+	}
+	c.EnableIdempotence()
+	if !c.Idempotence() {
+		t.Fatal("after EnableIdempotence want true")
+	}
+	c.SetEnableIdempotence(false)
+	if c.Idempotence() {
+		t.Fatal("after SetEnableIdempotence(false) want false")
+	}
+}
+
 func TestIdempotentProduceOffDefaultTrailer(t *testing.T) {
 	srv := &scriptedBroker{}
 	addr, stop := startScripted(t, srv)

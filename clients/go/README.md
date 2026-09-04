@@ -141,6 +141,9 @@ c, err = volant.DialAuth("127.0.0.1:9092", "s3cret")
 c, err = volant.DialTLSAuth("127.0.0.1:9092", volant.TLSConfig{CAFile: "ca.pem"}, "s3cret")
 // Optional idempotent produce (v0.47). Default off (trailer (0, 0, -1)).
 c.EnableIdempotence()
+// Java-parity setter / getter (v0.185). EnableIdempotence still turns it on.
+c.SetEnableIdempotence(true)
+_ = c.Idempotence()
 // Pre-allocate pid (v0.150). Second call is a no-op. Produce / BeginTxn still init implicitly.
 pid, epoch, err := c.InitProducerID()
 _ = pid
@@ -325,7 +328,9 @@ opcode 30 after connect when the token is non-empty. A rejected token
 returns `BrokerError` with code 17 and closes the socket. `Dial` /
 `DialTLS` are unchanged.
 
-Idempotent produce (v0.47) is opt-in via `EnableIdempotence()`. The
+Idempotent produce (v0.47) is opt-in via `EnableIdempotence()`.
+`SetEnableIdempotence` / `Idempotence` (v0.185) are the Java-parity
+setter and getter; `EnableIdempotence()` still turns it on. The
 first Produce sends native InitProducerId (opcode 32) with an empty
 transactional_id; later produces attach pid/epoch/seq. Default off
 keeps trailer `(0, 0, -1)`. Redirect keeps the same pid. UnknownProducerId
