@@ -6,6 +6,7 @@ import re
 import socket
 import ssl
 import time
+import uuid
 from dataclasses import dataclass, field
 from typing import Iterable, Optional, Union
 
@@ -1999,14 +2000,19 @@ class Client:
     ) -> JoinGroupResult:
         """Join a consumer group.
 
-        First join sends empty ``member_id`` (broker assigns one). Returns a
-        result that unpacks as ``(member_id, generation, assignment)``.
-        Transient broker/transport errors retry up to ``max_retries`` extra
-        times (default 0) when ``member_id`` or ``group_instance_id`` is
-        non-empty. Empty first join (both empty) is one shot. Error 14
+        When both ``member_id`` and ``group_instance_id`` are empty, the
+        client generates a ``member_id`` before the first send so a retry
+        is safe (no ghost member). Static ``group_instance_id`` still
+        sends empty ``member_id``. Returns a result that unpacks as
+        ``(member_id, generation, assignment)``; the response
+        ``member_id`` is source of truth. Transient broker/transport
+        errors retry up to ``max_retries`` extra times (default 0) when
+        ``member_id`` or ``group_instance_id`` is non-empty. Error 14
         follows ``max_redirects``. Rebalance codes 9 / 10 / 11 are not
         retried.
         """
+        if not member_id and not group_instance_id:
+            member_id = uuid.uuid4().hex
         timeout = 10_000 if session_timeout_ms == 0 else session_timeout_ms
         payload = codec.encode_join_group_request(
             JoinGroupRequest(

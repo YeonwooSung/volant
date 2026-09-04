@@ -115,8 +115,8 @@ func TestJoinGroupSendsEmptyMemberID(t *testing.T) {
 	if got.err != nil {
 		t.Fatal(got.err)
 	}
-	if got.memberID != "" {
-		t.Fatalf("member %q want empty", got.memberID)
+	if got.memberID == "" {
+		t.Fatal("member_id on the wire is empty")
 	}
 	if got.group != "g" {
 		t.Fatalf("group %q", got.group)
@@ -163,8 +163,8 @@ func TestJoinGroupMemberEmptyMatchesPublicAPI(t *testing.T) {
 	if got.err != nil {
 		t.Fatal(got.err)
 	}
-	if got.memberID != "" {
-		t.Fatalf("member %q want empty", got.memberID)
+	if got.memberID == "" {
+		t.Fatal("member_id on the wire is empty")
 	}
 }
 

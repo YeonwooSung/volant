@@ -1131,19 +1131,18 @@ class ClientTest {
     }
 
     @Test
-    void joinGroupEmptyMemberAndInstanceIsOneShot() throws Exception {
+    void joinGroupEmptyMemberAndInstanceRetriesTimeoutThenOk() throws Exception {
         try (ScriptedBroker srv = ScriptedBroker.start()) {
             srv.joinGroupCodes.add(TIMEOUT);
             srv.joinGroupCodes.add(0);
             try (Client c = Client.connect("127.0.0.1", srv.port, 5_000)) {
                 c.setMaxRetries(2);
                 c.setRetryBackoffMs(0);
-                BrokerException ex =
-                        assertThrows(
-                                BrokerException.class, () -> c.joinGroup("g", List.of("t"), 10_000));
-                assertEquals(TIMEOUT, ex.code);
+                JoinGroupResult j = c.joinGroup("g", List.of("t"), 10_000);
+                assertEquals("m-1", j.memberId);
+                assertEquals(1L, j.generation);
             }
-            assertEquals(1, srv.joinGroupCount.get());
+            assertEquals(2, srv.joinGroupCount.get());
             assertEquals(0, srv.heartbeatCount.get());
         }
     }

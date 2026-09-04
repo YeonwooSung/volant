@@ -10,6 +10,7 @@ import java.util.Collections;
 import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.UUID;
 import java.util.regex.Matcher;
 import java.util.regex.Pattern;
 
@@ -2219,8 +2220,9 @@ public final class Client implements AutoCloseable {
     }
 
     /**
-     * Join a consumer group. First join sends empty {@code memberId}
-     * (broker assigns one). {@code sessionTimeoutMs} 0 defaults to 10000.
+     * Join a consumer group. Empty {@code memberId} and instance id
+     * generate a {@code memberId} before send so retry is safe (no ghost
+     * member). {@code sessionTimeoutMs} 0 defaults to 10000.
      * Sends empty {@code groupInstanceId} (dynamic membership).
      */
     public JoinGroupResult joinGroup(String group, List<String> topics, int sessionTimeoutMs) {
@@ -2274,9 +2276,11 @@ public final class Client implements AutoCloseable {
         }
         String mid = memberId == null ? "" : memberId;
         String iid = groupInstanceId == null ? "" : groupInstanceId;
+        if (mid.isEmpty() && iid.isEmpty()) {
+            mid = UUID.randomUUID().toString();
+        }
         byte[] payload = Codec.encodeJoinGroupRequest(
                 new Codec.JoinGroupRequest(group, mid, timeout, topics, iid));
-        // First join with a new UUID is not idempotent.
         if (mid.isEmpty() && iid.isEmpty()) {
             return joinGroupOnce(payload);
         }

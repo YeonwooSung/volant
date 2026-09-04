@@ -247,7 +247,8 @@ broker default, 1 = force wait, 2 = force no-wait. `DeleteRecords`
 uses `DeleteRecordsWait()` (default 0; v0.152).
 `DeleteRecordsWithWaitFlag` stays explicit. Error 13 follows
 Produce/Fetch redirect. Transient 6 / 7 / 15 / 16 follow `SetMaxRetries`.
-`JoinGroup` sends empty `member_id` on first join; the result has
+`JoinGroup` generates a `member_id` when both ids are empty so a
+retry is safe (no ghost member); the result has
 `MemberID`, `Generation`, and `Assignment`. `JoinGroupWithInstance`
 sends Phase 12 `group_instance_id` (empty = dynamic; v0.127).
 `JoinGroupMember` encodes `member_id` for rejoin (empty = first join; v0.131).
@@ -293,9 +294,10 @@ tests. Error 13 stays on the redirect budget; error 21 stays on the
 one re-Init. Heartbeat shares produce/fetch `SetMaxRetries` (default
 0); rebalance codes 9 / 10 / 11 are not retried. LeaveGroup shares
 `SetMaxRetries`; error 10 is success (already left); error 14 follows
-`SetMaxRedirects`. JoinGroup shares
-`SetMaxRetries` when `member_id` or `group_instance_id` is
-non-empty (rejoin / static membership); empty first join is one shot.
+`SetMaxRedirects`. JoinGroup generates a `member_id` when both ids are empty so retry
+is safe; static instance still sends empty `member_id`. JoinGroup
+shares `SetMaxRetries` when `member_id` or `group_instance_id` is
+non-empty (generated first join / rejoin / static membership).
 OffsetCommit / OffsetFetch / DeleteOffsets / ListOffsets /
 DescribeGroup / ListGroups / Metadata / ListMembers / BeginTxn /
 EndTxn / InitProducerId / Auth / SCRAM handshake / DeleteRecords

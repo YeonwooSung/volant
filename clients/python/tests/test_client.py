@@ -1106,14 +1106,14 @@ UNKNOWN_MEMBER = 10
 
 
 class TestJoinGroupRetry(unittest.TestCase):
-    def test_empty_member_and_instance_is_one_shot(self) -> None:
+    def test_empty_member_and_instance_retries_timeout_then_ok(self) -> None:
         with ScriptedBroker() as srv:
             srv.join_group_codes = [TIMEOUT, 0]
             with Client(srv.addr, timeout=5.0, max_retries=2, retry_backoff_ms=0) as c:
-                with self.assertRaises(BrokerError) as ctx:
-                    c.join_group("g", topics=["t"])
-            self.assertEqual(ctx.exception.code, TIMEOUT)
-            self.assertEqual(srv.join_group_count, 1)
+                result = c.join_group("g", topics=["t"])
+            self.assertEqual(result.member_id, "m-1")
+            self.assertEqual(result.generation, 1)
+            self.assertEqual(srv.join_group_count, 2)
             self.assertEqual(srv.heartbeat_count, 0)
 
     def test_stored_member_id_retries_timeout_then_ok(self) -> None:
