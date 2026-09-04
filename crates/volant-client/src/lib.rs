@@ -183,6 +183,8 @@
 //! v0.172 adds [`Client::add_broker_no_rack`] as a named helper for
 //! AddBroker with no rack. Same as `add_broker(id, host, port, None)`.
 //! [`Client::add_broker`] is unchanged.
+//! v0.174 adds [`Client::create_scram_user_default`] wrapping
+//! [`Client::create_scram_user`] with iterations 0 (broker default).
 
 #![deny(missing_docs)]
 

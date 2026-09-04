@@ -492,6 +492,13 @@ impl Client {
         }
     }
 
+    /// Create or replace a SCRAM user with broker-default iterations.
+    ///
+    /// Same as `create_scram_user(username, password, 0)`.
+    pub async fn create_scram_user_default(&self, username: &str, password: &str) -> Result<()> {
+        self.create_scram_user(username, password, 0).await
+    }
+
     /// Delete a SCRAM user (Phase 22).
     pub async fn delete_scram_user(&self, username: &str) -> Result<()> {
         let resp = self
