@@ -194,6 +194,10 @@
 //! wrapping [`Client::fetch_offsets`]. Same as one `OffsetEntry`.
 //! [`Client::fetch_offsets`] / [`Client::fetch_offsets_for_topic`] /
 //! [`Client::fetch_offsets_all`] are unchanged.
+//! v0.182 adds [`Client::metadata_topic`] as a named one-topic helper
+//! wrapping [`Client::metadata_topics`]. Same as
+//! `metadata_topics(vec![topic])`. [`Client::metadata`] /
+//! [`Client::metadata_topics`] are unchanged.
 
 #![deny(missing_docs)]
 
