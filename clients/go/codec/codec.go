@@ -687,10 +687,13 @@ type OffsetListing struct {
 // Empty Partitions means all partitions of the topic.
 // TimestampMs is the v0.239 trailer: -1 latest (LEO), -2 earliest,
 // >=0 first record at or after T. Missing trailer decodes as -1.
+// Isolation is the v0.240 trailer: 0 READ_UNCOMMITTED (LEO), 1
+// READ_COMMITTED (latest = LSO). Missing trailer decodes as 0.
 type ListOffsetsRequest struct {
 	Topic       string
 	Partitions  []uint32
 	TimestampMs int64
+	Isolation   uint8
 }
 
 // ListOffsetsResponse is the ListOffsets reply (opcode 49).
@@ -2202,6 +2205,9 @@ func EncodeListOffsetsRequest(req ListOffsetsRequest) ([]byte, error) {
 		w.u32(p)
 	}
 	w.i64(req.TimestampMs)
+	if req.Isolation != 0 {
+		w.u8(req.Isolation)
+	}
 	return w.buf, nil
 }
 
@@ -2224,14 +2230,22 @@ func DecodeListOffsetsRequest(payload []byte) (ListOffsetsRequest, error) {
 		parts = append(parts, p)
 	}
 	ts := int64(-1)
+	iso := uint8(0)
 	if r.remaining() >= 8 {
 		t, err := r.i64()
 		if err != nil {
 			return ListOffsetsRequest{}, err
 		}
 		ts = t
+		if r.remaining() >= 1 {
+			v, err := r.u8()
+			if err != nil {
+				return ListOffsetsRequest{}, err
+			}
+			iso = v
+		}
 	}
-	return ListOffsetsRequest{Topic: topic, Partitions: parts, TimestampMs: ts}, nil
+	return ListOffsetsRequest{Topic: topic, Partitions: parts, TimestampMs: ts, Isolation: iso}, nil
 }
 
 func EncodeListOffsetsResponse(resp ListOffsetsResponse) ([]byte, error) {

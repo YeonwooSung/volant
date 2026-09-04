@@ -1834,7 +1834,8 @@ async fn handle_request(broker: &Arc<Broker>, req: Request) -> Result<Response> 
             topic,
             partitions,
             timestamp_ms,
-        } => match broker.list_offsets_at(&topic, &partitions, timestamp_ms) {
+            isolation,
+        } => match broker.list_offsets_isolated(&topic, &partitions, timestamp_ms, isolation) {
             Ok(entries) => Ok(Response::ListOffsets {
                 error_code: 0,
                 topic,

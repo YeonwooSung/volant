@@ -1631,27 +1631,38 @@ class Client:
         transient retry. Error 2 / 9 / 10 / 11 / 14 are not retried.
         Timestamp is latest (``-1`` / LEO). Use
         :meth:`list_offsets_at` for earliest or a wall-clock ``T``.
-        Isolation is not applied.
+        Isolation is uncommitted (0).
         """
         return self.list_offsets_at(topic, partitions, -1)
+
+    def list_offsets_committed(
+        self, topic: str, partitions: Optional[Iterable[int]] = None
+    ) -> list[OffsetListing]:
+        """ListOffsets latest under READ_COMMITTED (v0.240). Isolation 1, LSO."""
+        return self.list_offsets_at(topic, partitions, -1, isolation=1)
 
     def list_offsets_at(
         self,
         topic: str,
         partitions: Optional[Iterable[int]],
         timestamp_ms: int,
+        isolation: int = 0,
     ) -> list[OffsetListing]:
-        """ListOffsets with a timestamp trailer (v0.239).
+        """ListOffsets with a timestamp trailer (v0.239) and isolation (v0.240).
 
         ``-1`` latest = LEO, ``-2`` earliest = log start, ``>= 0``
         first record at or after ``T``. Other negatives are broker
-        ``InvalidArg``. Retry / error 13 inherit from
+        ``InvalidArg``. Isolation ``0`` is uncommitted; ``1`` is
+        READ_COMMITTED (latest = LSO). Retry / error 13 inherit from
         :meth:`list_offsets`.
         """
         parts = list(partitions) if partitions else []
         payload = codec.encode_list_offsets_request(
             ListOffsetsRequest(
-                topic=topic, partitions=parts, timestamp_ms=int(timestamp_ms)
+                topic=topic,
+                partitions=parts,
+                timestamp_ms=int(timestamp_ms),
+                isolation=int(isolation),
             )
         )
         redirect_partition = int(parts[0]) if parts else 0

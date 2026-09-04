@@ -476,7 +476,7 @@ pub enum Request {
         /// Desired total partition count (must exceed current).
         total_count: u32,
     },
-    /// List earliest/latest offsets (Phase 15; v0.239 optional timestamp).
+    /// List earliest/latest offsets (Phase 15; v0.239 timestamp; v0.240 isolation).
     ListOffsets {
         /// Topic name.
         topic: String,
@@ -485,6 +485,9 @@ pub enum Request {
         /// Timestamp trailer: missing / `-1` = latest (LEO), `-2` = earliest
         /// (log start), `>= 0` = first record at or after `T` (v0.239).
         timestamp_ms: i64,
+        /// Isolation trailer after `timestamp_ms` (v0.240). Missing / `0` =
+        /// READ_UNCOMMITTED (latest = LEO). `1` = READ_COMMITTED (latest = LSO).
+        isolation: u8,
     },
     /// Create ACL entries (Phase 20).
     CreateAcls {
@@ -772,6 +775,13 @@ pub const REASSIGN_ALL_PARTITIONS: u32 = u32::MAX;
 pub const LIST_OFFSETS_LATEST: i64 = -1;
 /// Native ListOffsets `timestamp_ms` trailer: earliest = log start (v0.239).
 pub const LIST_OFFSETS_EARLIEST: i64 = -2;
+
+/// Native ListOffsets `isolation` trailer: READ_UNCOMMITTED (v0.240).
+/// Missing trailer also uncommitted (latest = LEO).
+pub const LIST_OFFSETS_READ_UNCOMMITTED: u8 = 0;
+/// Native ListOffsets `isolation` trailer: READ_COMMITTED (v0.240).
+/// Latest (`-1`) returns LSO instead of LEO.
+pub const LIST_OFFSETS_READ_COMMITTED: u8 = 1;
 
 /// Native ScramFirst `hash` trailer: SHA-256 (v0.238). Missing / 0 also SHA-256.
 pub const SCRAM_HASH_SHA256: u8 = 1;

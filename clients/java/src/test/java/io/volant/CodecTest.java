@@ -796,6 +796,7 @@ class CodecTest {
 
         byte[] legacy = hx("0600" + "6576656e7473" + "02000000" + "00000000" + "01000000");
         assertEquals(-1L, Codec.decodeListOffsetsRequest(legacy).timestampMs);
+        assertEquals(0, Codec.decodeListOffsetsRequest(legacy).isolation);
 
         for (long ts : new long[] {-2L, 0L}) {
             Codec.ListOffsetsRequest at =
@@ -803,7 +804,22 @@ class CodecTest {
             Codec.ListOffsetsRequest got =
                     Codec.decodeListOffsetsRequest(Codec.encodeListOffsetsRequest(at));
             assertEquals(ts, got.timestampMs);
+            assertEquals(0, got.isolation);
         }
+    }
+
+    @Test
+    void listOffsetsRequestIsolationTrailer() {
+        byte[] withTs = hx("0600" + "6576656e7473" + "01000000" + "00000000"
+                + "ffffffffffffffff");
+        assertEquals(0, Codec.decodeListOffsetsRequest(withTs).isolation);
+
+        Codec.ListOffsetsRequest req =
+                new Codec.ListOffsetsRequest("events", Collections.singletonList(0), -1L, 1);
+        byte[] raw = Codec.encodeListOffsetsRequest(req);
+        Codec.ListOffsetsRequest got = Codec.decodeListOffsetsRequest(raw);
+        assertEquals(1, got.isolation);
+        assertEquals(1, raw[raw.length - 1] & 0xff);
     }
 
     @Test

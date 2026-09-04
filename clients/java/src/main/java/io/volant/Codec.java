@@ -664,17 +664,24 @@ public final class Codec {
         public final List<Integer> partitions;
         /** v0.239 trailer: -1 latest (LEO), -2 earliest, >=0 first at/after T. */
         public final long timestampMs;
+        /** v0.240 trailer: 0 READ_UNCOMMITTED (LEO), 1 READ_COMMITTED (LSO). */
+        public final int isolation;
 
         public ListOffsetsRequest(String topic, List<Integer> partitions) {
-            this(topic, partitions, -1L);
+            this(topic, partitions, -1L, 0);
         }
 
         public ListOffsetsRequest(String topic, List<Integer> partitions, long timestampMs) {
+            this(topic, partitions, timestampMs, 0);
+        }
+
+        public ListOffsetsRequest(String topic, List<Integer> partitions, long timestampMs, int isolation) {
             this.topic = topic;
             this.partitions = partitions == null
                     ? Collections.emptyList()
                     : Collections.unmodifiableList(new ArrayList<>(partitions));
             this.timestampMs = timestampMs;
+            this.isolation = isolation;
         }
     }
 
@@ -1932,6 +1939,9 @@ public final class Codec {
             w.u32(p);
         }
         w.i64(req.timestampMs);
+        if (req.isolation != 0) {
+            w.u8(req.isolation);
+        }
         return w.finish();
     }
 
@@ -1943,8 +1953,15 @@ public final class Codec {
         for (int i = 0; i < n; i++) {
             partitions.add((int) r.u32());
         }
-        long timestampMs = r.remaining() >= 8 ? r.i64() : -1L;
-        return new ListOffsetsRequest(topic, partitions, timestampMs);
+        long timestampMs = -1L;
+        int isolation = 0;
+        if (r.remaining() >= 8) {
+            timestampMs = r.i64();
+            if (r.remaining() >= 1) {
+                isolation = r.u8();
+            }
+        }
+        return new ListOffsetsRequest(topic, partitions, timestampMs, isolation);
     }
 
     public static byte[] encodeListOffsetsResponse(ListOffsetsResponse resp) {

@@ -1932,14 +1932,21 @@ public final class Client implements AutoCloseable {
      * (default 0). Error 13 follows Produce/Fetch redirect
      * ({@code maxRedirects}); 13 is not a transient retry. Timestamp is
      * latest ({@code -1} / LEO). Use {@link #listOffsetsAt} for earliest
-     * or a wall-clock {@code T}. Isolation is not applied.
+     * or a wall-clock {@code T}. Isolation is uncommitted (0).
      */
     public List<OffsetListing> listOffsets(String topic, int... partitions) {
         return listOffsetsAt(topic, -1L, partitions);
     }
 
     /**
-     * ListOffsets with a timestamp trailer (v0.239).
+     * ListOffsets latest under READ_COMMITTED (v0.240). Isolation 1, LSO.
+     */
+    public List<OffsetListing> listOffsetsCommitted(String topic, int... partitions) {
+        return listOffsetsAtIsolated(topic, -1L, 1, partitions);
+    }
+
+    /**
+     * ListOffsets with a timestamp trailer (v0.239). Isolation is uncommitted.
      *
      * <p>{@code -1} latest = LEO, {@code -2} earliest = log start,
      * {@code >= 0} first record at or after {@code T}. Other negatives
@@ -1947,6 +1954,17 @@ public final class Client implements AutoCloseable {
      * {@link #listOffsets}.
      */
     public List<OffsetListing> listOffsetsAt(String topic, long timestampMs, int... partitions) {
+        return listOffsetsAtIsolated(topic, timestampMs, 0, partitions);
+    }
+
+    /**
+     * ListOffsets with timestamp and isolation (v0.240).
+     *
+     * <p>Isolation {@code 0} = READ_UNCOMMITTED, {@code 1} = READ_COMMITTED
+     * (latest = LSO). Retry / error 13 inherit from {@link #listOffsets}.
+     */
+    public List<OffsetListing> listOffsetsAtIsolated(
+            String topic, long timestampMs, int isolation, int... partitions) {
         List<Integer> parts = new ArrayList<>();
         if (partitions != null) {
             for (int p : partitions) {
@@ -1954,7 +1972,7 @@ public final class Client implements AutoCloseable {
             }
         }
         byte[] payload = Codec.encodeListOffsetsRequest(
-                new Codec.ListOffsetsRequest(topic, parts, timestampMs));
+                new Codec.ListOffsetsRequest(topic, parts, timestampMs, isolation));
         int redirectPartition = parts.isEmpty() ? 0 : parts.get(0);
         int maxAttempts = 1 + maxRedirects;
         int retryAttempt = 0;

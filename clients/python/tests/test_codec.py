@@ -880,10 +880,28 @@ class TestListOffsetsCodec(unittest.TestCase):
         )
         decoded = decode_list_offsets_request(legacy)
         self.assertEqual(decoded.timestamp_ms, -1)
+        self.assertEqual(decoded.isolation, 0)
         for ts in (-2, 0):
             req = ListOffsetsRequest(topic="events", partitions=[0], timestamp_ms=ts)
             raw = encode_list_offsets_request(req)
             self.assertEqual(decode_list_offsets_request(raw), req)
+
+    def test_list_offsets_isolation_trailer(self) -> None:
+        with_ts = bytes.fromhex(
+            "0600"
+            "6576656e7473"
+            "01000000"
+            "00000000"
+            "ffffffffffffffff"
+        )
+        decoded = decode_list_offsets_request(with_ts)
+        self.assertEqual(decoded.isolation, 0)
+        req = ListOffsetsRequest(
+            topic="events", partitions=[0], timestamp_ms=-1, isolation=1
+        )
+        raw = encode_list_offsets_request(req)
+        self.assertEqual(decode_list_offsets_request(raw), req)
+        self.assertEqual(raw[-1], 1)
 
     def test_list_offsets_response_payload_rs_fixture(self) -> None:
         resp = ListOffsetsResponse(

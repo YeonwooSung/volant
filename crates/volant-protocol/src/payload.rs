@@ -512,6 +512,7 @@ pub fn encode_request(req: &Request) -> Result<Bytes> {
             topic,
             partitions,
             timestamp_ms,
+            isolation,
         } => {
             put_string(&mut dst, topic)?;
             dst.put_u32_le(partitions.len() as u32);
@@ -519,6 +520,10 @@ pub fn encode_request(req: &Request) -> Result<Bytes> {
                 dst.put_u32_le(*p);
             }
             dst.put_i64_le(*timestamp_ms);
+            // v0.240 optional isolation trailer (0 / missing = READ_UNCOMMITTED).
+            if *isolation != 0 {
+                dst.put_u8(*isolation);
+            }
         }
         Request::CreateAcls { entries } => {
             dst.put_u32_le(entries.len() as u32);
@@ -1210,15 +1215,26 @@ pub fn decode_request(opcode: u16, payload: &[u8]) -> Result<Request> {
                 partitions.push(src.get_u32_le());
             }
             // v0.239 optional timestamp trailer (absent → latest / LEO).
-            let timestamp_ms = if src.remaining() >= 8 {
-                src.get_i64_le()
+            // v0.240 optional isolation after timestamp (absent → uncommitted).
+            let (timestamp_ms, isolation) = if src.remaining() >= 8 {
+                let ts = src.get_i64_le();
+                let iso = if src.remaining() >= 1 {
+                    src.get_u8()
+                } else {
+                    crate::request::LIST_OFFSETS_READ_UNCOMMITTED
+                };
+                (ts, iso)
             } else {
-                crate::request::LIST_OFFSETS_LATEST
+                (
+                    crate::request::LIST_OFFSETS_LATEST,
+                    crate::request::LIST_OFFSETS_READ_UNCOMMITTED,
+                )
             };
             Ok(Request::ListOffsets {
                 topic,
                 partitions,
                 timestamp_ms,
+                isolation,
             })
         }
         RequestOpcode::CreateAcls => {
@@ -3484,6 +3500,7 @@ mod tests {
             topic: "events".into(),
             partitions: vec![0, 1],
             timestamp_ms: crate::request::LIST_OFFSETS_LATEST,
+            isolation: crate::request::LIST_OFFSETS_READ_UNCOMMITTED,
         };
         let b = encode_request(&lo).unwrap();
         assert_eq!(
@@ -3729,6 +3746,7 @@ mod tests {
                 topic: "events".into(),
                 partitions: vec![0, 1],
                 timestamp_ms: crate::request::LIST_OFFSETS_LATEST,
+                isolation: crate::request::LIST_OFFSETS_READ_UNCOMMITTED,
             }
         );
 
@@ -3737,6 +3755,7 @@ mod tests {
                 topic: "events".into(),
                 partitions: vec![0],
                 timestamp_ms: ts,
+                isolation: crate::request::LIST_OFFSETS_READ_UNCOMMITTED,
             };
             let b = encode_request(&req).unwrap();
             assert_eq!(
@@ -3744,6 +3763,41 @@ mod tests {
                 req
             );
         }
+    }
+
+    /// v0.240: ListOffsets isolation trailer; missing = READ_UNCOMMITTED (0).
+    #[test]
+    fn v240_list_offsets_isolation_trailer() {
+        let mut with_ts = bytes::BytesMut::new();
+        put_string(&mut with_ts, "events").unwrap();
+        with_ts.put_u32_le(1);
+        with_ts.put_u32_le(0);
+        with_ts.put_i64_le(crate::request::LIST_OFFSETS_LATEST);
+        assert_eq!(
+            decode_request(RequestOpcode::ListOffsets as u16, &with_ts).unwrap(),
+            Request::ListOffsets {
+                topic: "events".into(),
+                partitions: vec![0],
+                timestamp_ms: crate::request::LIST_OFFSETS_LATEST,
+                isolation: crate::request::LIST_OFFSETS_READ_UNCOMMITTED,
+            }
+        );
+
+        let req = Request::ListOffsets {
+            topic: "events".into(),
+            partitions: vec![0],
+            timestamp_ms: crate::request::LIST_OFFSETS_LATEST,
+            isolation: crate::request::LIST_OFFSETS_READ_COMMITTED,
+        };
+        let b = encode_request(&req).unwrap();
+        assert_eq!(
+            decode_request(RequestOpcode::ListOffsets as u16, &b).unwrap(),
+            req
+        );
+        assert_eq!(
+            *b.last().unwrap(),
+            crate::request::LIST_OFFSETS_READ_COMMITTED
+        );
     }
 
     #[test]

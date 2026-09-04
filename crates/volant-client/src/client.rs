@@ -837,7 +837,19 @@ impl Client {
         self.list_offsets_at(topic, partitions, -1).await
     }
 
-    /// List offsets for `timestamp_ms` (v0.239).
+    /// ListOffsets latest under READ_COMMITTED (v0.240). Isolation `1`,
+    /// timestamp `-1` (LSO). Retry / error **13** inherit from
+    /// [`Self::list_offsets`].
+    pub async fn list_offsets_committed(
+        &self,
+        topic: &str,
+        partitions: Vec<u32>,
+    ) -> Result<ListOffsetsResult> {
+        self.list_offsets_at_isolated(topic, partitions, -1, 1)
+            .await
+    }
+
+    /// List offsets for `timestamp_ms` (v0.239). Isolation is uncommitted.
     ///
     /// `-1` latest = LEO, `-2` earliest = log start, `>= 0` first record
     /// at or after `T`. Other negatives are broker `InvalidArg`.
@@ -847,6 +859,22 @@ impl Client {
         topic: &str,
         partitions: Vec<u32>,
         timestamp_ms: i64,
+    ) -> Result<ListOffsetsResult> {
+        self.list_offsets_at_isolated(topic, partitions, timestamp_ms, 0)
+            .await
+    }
+
+    /// ListOffsets with timestamp and isolation (v0.240).
+    ///
+    /// Isolation `0` = READ_UNCOMMITTED, `1` = READ_COMMITTED (latest = LSO).
+    /// Other isolation values are broker `InvalidArg`. Retry / error **13**
+    /// inherit from [`Self::list_offsets`].
+    pub async fn list_offsets_at_isolated(
+        &self,
+        topic: &str,
+        partitions: Vec<u32>,
+        timestamp_ms: i64,
+        isolation: u8,
     ) -> Result<ListOffsetsResult> {
         let max_retries = self.config.max_retries;
         let max_redirects = self.config.max_redirects;
@@ -859,6 +887,7 @@ impl Client {
                     topic: topic.to_owned(),
                     partitions: partitions.clone(),
                     timestamp_ms,
+                    isolation,
                 })
                 .await
             {
