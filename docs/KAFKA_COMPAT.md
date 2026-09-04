@@ -61,6 +61,7 @@ From `SUPPORTED_APIS` in `crates/volant-broker/src/kafka/mod.rs`:
 | 47 | OffsetDelete | 0 | Classic only |
 | 50 | DescribeUserScramCredentials | 0 | Always flex; wraps `ScramStore`; empty users = all; unknown user → **91**; Cluster DESCRIBE |
 | 51 | AlterUserScramCredentials | 0 | Always flex; wraps `ScramStore`; upsert takes `saltedPassword` (not plaintext); Cluster ALTER |
+| 57 | UpdateFeatures | 0–1 | Always flex; parse and reject every feature (**92**); nothing persisted; ApiVersions features stay empty; not KIP-584; Cluster ALTER; controller-only in cluster (**41**) |
 | 60 | DescribeCluster | 0–2 | Always flex; IsFenced always false |
 | 61 | DescribeProducers | 0 | Always flex |
 | 65 | DescribeTransactions | 0 | Always flex |
@@ -137,6 +138,7 @@ These are **current** product facts, not temporary docs lag:
 | ListPartitionReassignments | **v0 list** (v0.228): key **46** advertised; current assignment as `replicas`; empty adding/removing (apply is instant; no pending log); TimeoutMs ignored; not live Kafka reassignment progress |
 | Describe/AlterUserScramCredentials | **v0 wrap** (v0.233): keys **50** / **51** advertised; wrap `ScramStore` (native 64–69). Alter upsert is Kafka `saltedPassword = Hi(...)`, not plaintext. Native create still sends password in the clear. Unknown user → **91** `RESOURCE_NOT_FOUND`. Not OAUTH/GSSAPI; not quota keys 48/49 |
 | DescribeTopicPartitions | **v0 wrap** (v0.237): key **75** advertised; wraps `Broker::metadata`. Same leaders / ISR / epochs / deterministic TopicId as Metadata. Unknown topic → **3**. ACL Topic DESCRIBE. Empty topics = all. `responsePartitionLimit <= 0` unlimited; simple truncate + `next_cursor` when cut. Cursor honored only when its topic is in the result set (else ignored). No ELR fields (Metadata partition body reused). Not Metadata v13+ |
+| UpdateFeatures | **v0–1 reject** (v0.244): key **57** advertised (always flex). Parse request; every feature → **92** `FEATURE_UPDATE_FAILED` (`empty / not supported`). Does **not** persist. ApiVersions SupportedFeatures / FinalizedFeatures stay empty. Not KIP-584. Cluster ALTER. Cluster non-controller → **41**. v2+ → **35**. Describe is already empty via ApiVersions |
 | Missing APIs | Large Kafka surface still unsupported (GSSAPI, OAUTH, quota keys 48/49, …) |
 
 ## Related

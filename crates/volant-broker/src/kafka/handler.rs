@@ -259,6 +259,7 @@ async fn dispatch_kafka(
                 | Some(ApiKey::ListPartitionReassignments)
                 | Some(ApiKey::DescribeUserScramCredentials)
                 | Some(ApiKey::AlterUserScramCredentials)
+                | Some(ApiKey::UpdateFeatures)
                 | Some(ApiKey::DescribeTopicPartitions),
             _
         )
@@ -742,6 +743,18 @@ async fn dispatch_kafka(
                 debug!(error = %e, "alter user scram credentials flexible header tag buffer");
             }
             admin_api::encode_alter_user_scram_credentials(broker, &mut src, &mut out, principal);
+        }
+        Some(ApiKey::UpdateFeatures) if (0..=1).contains(&hdr.api_version) => {
+            if let Err(e) = skip_tag_buffer(&mut src) {
+                debug!(error = %e, "update features flexible header tag buffer");
+            }
+            admin_api::encode_update_features(
+                broker,
+                &mut src,
+                &mut out,
+                hdr.api_version,
+                principal,
+            );
         }
         Some(ApiKey::DescribeLogDirs) if (0..=1).contains(&hdr.api_version) => {
             if hdr.api_version >= 1 {
