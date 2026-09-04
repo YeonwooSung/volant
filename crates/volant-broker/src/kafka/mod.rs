@@ -61,6 +61,7 @@
 //! DeleteShareGroupState v0 (key 86 reject; not KIP-932 share state),
 //! ReadShareGroupStateSummary v0 (key 87 reject; not KIP-932 share state),
 //! StreamsGroupHeartbeat v0 (key 88 reject; not KIP-1071 streams groups),
+//! StreamsGroupDescribe v0 (key 89 reject; not KIP-1071 streams groups),
 //! DescribeShareGroupOffsets v0 (key 90 reject; not KIP-932 share offsets),
 //! UnregisterController v0 (key 94 reject; not KRaft / not UnregisterBroker),
 //! ShareFetch v1 (key 78 reject; not KIP-932 share fetch / not Fetch 1).
@@ -79,7 +80,7 @@
 //! `docs/V275_SPEC.md`, `docs/V276_SPEC.md`, `docs/V277_SPEC.md`,
 //! `docs/V278_SPEC.md`, `docs/V279_SPEC.md`, `docs/V280_SPEC.md`,
 //! `docs/V281_SPEC.md`, `docs/V282_SPEC.md`, `docs/V283_SPEC.md`,
-//! `docs/V284_SPEC.md`, and `docs/V285_SPEC.md`.
+//! `docs/V284_SPEC.md`, `docs/V285_SPEC.md`, and `docs/V286_SPEC.md`.
 
 mod acl_api;
 mod admin_api;
@@ -503,6 +504,12 @@ pub enum ApiKey {
     /// Official validVersions is 0–1 (v1 = TopologyDescriptionRequired
     /// / KIP-1331); Volant advertises v0 only.
     StreamsGroupHeartbeat = 88,
+    /// StreamsGroupDescribe (always flexible; v0 only). Honest reject:
+    /// not KIP-1071 streams groups. Does not wrap `describe_group` /
+    /// ConsumerGroupDescribe 69 / DescribeGroups 15 / ShareGroupDescribe
+    /// 77. Official validVersions is 0–1 (v1 adds
+    /// IncludeTopologyDescription / KIP-1331); Volant advertises 0 only.
+    StreamsGroupDescribe = 89,
     /// DescribeShareGroupOffsets (always flexible; v0 only). Honest
     /// reject: not KIP-932 share offsets. Does not persist and does
     /// not wrap OffsetFetch 9 / describe_group / ConsumerGroupDescribe
@@ -601,6 +608,7 @@ impl ApiKey {
             86 => Some(Self::DeleteShareGroupState),
             87 => Some(Self::ReadShareGroupStateSummary),
             88 => Some(Self::StreamsGroupHeartbeat),
+            89 => Some(Self::StreamsGroupDescribe),
             90 => Some(Self::DescribeShareGroupOffsets),
             94 => Some(Self::UnregisterController),
             _ => None,
@@ -693,6 +701,7 @@ pub const SUPPORTED_APIS: &[(ApiKey, i16, i16)] = &[
     (ApiKey::DeleteShareGroupState, 0, 0),
     (ApiKey::ReadShareGroupStateSummary, 0, 0),
     (ApiKey::StreamsGroupHeartbeat, 0, 0),
+    (ApiKey::StreamsGroupDescribe, 0, 0),
     (ApiKey::DescribeShareGroupOffsets, 0, 0),
     (ApiKey::UnregisterController, 0, 0),
 ];
@@ -1157,6 +1166,26 @@ mod tests {
         assert_eq!(ApiKey::from_i16(12), Some(ApiKey::Heartbeat));
         assert_eq!(ApiKey::from_i16(68), Some(ApiKey::ConsumerGroupHeartbeat));
         assert_eq!(ApiKey::from_i16(76), Some(ApiKey::ShareGroupHeartbeat));
+    }
+
+    #[test]
+    fn supported_apis_includes_streams_group_describe_89() {
+        assert!(SUPPORTED_APIS.len() >= 85);
+        assert!(SUPPORTED_APIS
+            .iter()
+            .any(|(k, min, max)| { *k == ApiKey::StreamsGroupDescribe && *min == 0 && *max == 0 }));
+        assert_eq!(ApiKey::from_i16(89), Some(ApiKey::StreamsGroupDescribe));
+        assert_eq!(
+            ApiKey::from_i16(87),
+            Some(ApiKey::ReadShareGroupStateSummary)
+        );
+        assert_eq!(
+            ApiKey::from_i16(90),
+            Some(ApiKey::DescribeShareGroupOffsets)
+        );
+        assert_eq!(ApiKey::from_i16(77), Some(ApiKey::ShareGroupDescribe));
+        assert_eq!(ApiKey::from_i16(69), Some(ApiKey::ConsumerGroupDescribe));
+        assert_eq!(ApiKey::from_i16(15), Some(ApiKey::DescribeGroups));
     }
 
     #[test]
