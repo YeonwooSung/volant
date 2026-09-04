@@ -2099,16 +2099,28 @@ func (c *Client) CommitOffsets(group, memberID string, generation uint32, entrie
 // to maxRetries extra times (default 0). Error 13 follows Produce/Fetch
 // redirect (maxRedirects); 13 is not a transient retry. Timestamp is
 // latest (-1 / LEO). Use ListOffsetsAt for earliest or a wall-clock T.
-// Isolation is not applied.
+// Isolation is uncommitted (0).
 func (c *Client) ListOffsets(topic string, partitions []uint32) ([]OffsetListing, error) {
 	return c.ListOffsetsAt(topic, partitions, -1)
 }
 
-// ListOffsetsAt is ListOffsets with a timestamp trailer (v0.239).
+// ListOffsetsCommitted is ListOffsets latest under READ_COMMITTED (v0.240).
+// Isolation 1, timestamp -1 (LSO). Retry / error 13 inherit from ListOffsets.
+func (c *Client) ListOffsetsCommitted(topic string, partitions []uint32) ([]OffsetListing, error) {
+	return c.ListOffsetsAtIsolation(topic, partitions, -1, 1)
+}
+
+// ListOffsetsAt is ListOffsets with a timestamp trailer (v0.239). Isolation 0.
 // -1 latest = LEO, -2 earliest = log start, >=0 first record at or after
 // T. Other negatives are broker InvalidArg. Retry / error 13 inherit
 // from ListOffsets.
 func (c *Client) ListOffsetsAt(topic string, partitions []uint32, timestampMs int64) ([]OffsetListing, error) {
+	return c.ListOffsetsAtIsolation(topic, partitions, timestampMs, 0)
+}
+
+// ListOffsetsAtIsolation is ListOffsets with timestamp and isolation (v0.240).
+// Isolation 0 = READ_UNCOMMITTED, 1 = READ_COMMITTED (latest = LSO).
+func (c *Client) ListOffsetsAtIsolation(topic string, partitions []uint32, timestampMs int64, isolation uint8) ([]OffsetListing, error) {
 	if partitions == nil {
 		partitions = []uint32{}
 	}
@@ -2116,6 +2128,7 @@ func (c *Client) ListOffsetsAt(topic string, partitions []uint32, timestampMs in
 		Topic:       topic,
 		Partitions:  partitions,
 		TimestampMs: timestampMs,
+		Isolation:   isolation,
 	})
 	if err != nil {
 		return nil, err

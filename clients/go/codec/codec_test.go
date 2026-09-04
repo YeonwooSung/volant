@@ -1219,6 +1219,9 @@ func TestListOffsetsTimestampTrailer(t *testing.T) {
 	if decoded.TimestampMs != -1 {
 		t.Fatalf("legacy timestamp: %+v", decoded)
 	}
+	if decoded.Isolation != 0 {
+		t.Fatalf("legacy isolation: %+v", decoded)
+	}
 	for _, ts := range []int64{-2, 0} {
 		req := ListOffsetsRequest{Topic: "events", Partitions: []uint32{0}, TimestampMs: ts}
 		raw, err := EncodeListOffsetsRequest(req)
@@ -1232,6 +1235,29 @@ func TestListOffsetsTimestampTrailer(t *testing.T) {
 		if got.TimestampMs != ts {
 			t.Fatalf("roundtrip %d: %+v", ts, got)
 		}
+	}
+}
+
+func TestListOffsetsIsolationTrailer(t *testing.T) {
+	withTs := mustHex(t, "0600"+"6576656e7473"+"01000000"+"00000000"+"ffffffffffffffff")
+	decoded, err := DecodeListOffsetsRequest(withTs)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if decoded.Isolation != 0 {
+		t.Fatalf("missing isolation byte: %+v", decoded)
+	}
+	req := ListOffsetsRequest{Topic: "events", Partitions: []uint32{0}, TimestampMs: -1, Isolation: 1}
+	raw, err := EncodeListOffsetsRequest(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	got, err := DecodeListOffsetsRequest(raw)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.Isolation != 1 || raw[len(raw)-1] != 1 {
+		t.Fatalf("isolation 1 roundtrip: %+v raw %x", got, raw)
 	}
 }
 

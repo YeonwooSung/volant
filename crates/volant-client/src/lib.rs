@@ -179,6 +179,9 @@
 //! v0.239 adds [`Client::list_offsets_at`] for native ListOffsets
 //! timestamp (`-1` latest, `-2` earliest, `>= 0` first record at/after
 //! `T`). [`Client::list_offsets`] stays latest.
+//! v0.240 adds [`Client::list_offsets_committed`] / [`Client::list_offsets_at_isolated`]
+//! for native isolation (`1` = READ_COMMITTED latest = LSO).
+//! [`Client::list_offsets`] / [`Client::list_offsets_at`] stay uncommitted.
 //! v0.168 adds [`Client::reassign_partitions_all`] as a named helper for
 //! all-partition reassign. Same as `reassign_partitions(topic, None, replicas)`.
 //! [`Client::reassign_partitions`] is unchanged.

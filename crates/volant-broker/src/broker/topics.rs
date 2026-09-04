@@ -687,74 +687,108 @@ impl Broker {
         self.list_offsets_at(topic, partitions, volant_protocol::LIST_OFFSETS_LATEST)
     }
 
-    /// List offsets for `timestamp_ms` (v0.239).
+    /// List offsets for `timestamp_ms` (v0.239). Isolation is uncommitted.
     ///
     /// `-1` latest = LEO, `-2` earliest = log start, `>= 0` first record
     /// with `timestamp_ms >= T` (else LEO). Other negatives are
-    /// `InvalidArgument`. Isolation is not applied.
+    /// `InvalidArgument`.
     pub fn list_offsets_at(
         &self,
         topic: &str,
         partitions: &[u32],
         timestamp_ms: i64,
     ) -> Result<Vec<(u32, u64, u64)>> {
+        self.list_offsets_isolated(topic, partitions, timestamp_ms, 0)
+    }
+
+    /// List offsets with native isolation (v0.240).
+    ///
+    /// `isolation` 0 = READ_UNCOMMITTED (latest = LEO). `1` = READ_COMMITTED:
+    /// latest (`-1`) is LSO. Earliest (`-2`) is unchanged. A `>= 0` timestamp
+    /// scan is capped at LSO. Other isolation values are `InvalidArgument`.
+    pub fn list_offsets_isolated(
+        &self,
+        topic: &str,
+        partitions: &[u32],
+        timestamp_ms: i64,
+        isolation: u8,
+    ) -> Result<Vec<(u32, u64, u64)>> {
         if timestamp_ms < volant_protocol::LIST_OFFSETS_EARLIEST {
             return Err(Error::InvalidArgument(format!(
                 "invalid list offsets timestamp {timestamp_ms}"
             )));
         }
+        if isolation > volant_protocol::LIST_OFFSETS_READ_COMMITTED {
+            return Err(Error::InvalidArgument(format!(
+                "invalid list offsets isolation {isolation}"
+            )));
+        }
 
         let name = TopicName::new(topic);
-        let topics = self.topics.read();
+        let mut out;
+        {
+            let topics = self.topics.read();
 
-        let partition_ids: Vec<u32> = if !partitions.is_empty() {
-            partitions.to_vec()
-        } else if let Some(cluster) = &self.cluster {
-            let asg = cluster.assignment.read();
-            let ta = asg
-                .topics
-                .get(topic)
-                .ok_or_else(|| Error::NotFound(format!("topic {topic}")))?;
-            let mut ids: Vec<u32> = ta.partitions.keys().copied().collect();
-            ids.sort_unstable();
-            ids
-        } else {
-            let t = topics
-                .get(&name)
-                .ok_or_else(|| Error::NotFound(format!("topic {topic}")))?;
-            let mut ids: Vec<u32> = t.partitions.keys().map(|p| p.0).collect();
-            ids.sort_unstable();
-            ids
-        };
+            let partition_ids: Vec<u32> = if !partitions.is_empty() {
+                partitions.to_vec()
+            } else if let Some(cluster) = &self.cluster {
+                let asg = cluster.assignment.read();
+                let ta = asg
+                    .topics
+                    .get(topic)
+                    .ok_or_else(|| Error::NotFound(format!("topic {topic}")))?;
+                let mut ids: Vec<u32> = ta.partitions.keys().copied().collect();
+                ids.sort_unstable();
+                ids
+            } else {
+                let t = topics
+                    .get(&name)
+                    .ok_or_else(|| Error::NotFound(format!("topic {topic}")))?;
+                let mut ids: Vec<u32> = t.partitions.keys().map(|p| p.0).collect();
+                ids.sort_unstable();
+                ids
+            };
 
-        // Ensure topic exists in single-node map when filters used.
-        if self.cluster.is_none() && !topics.contains_key(&name) {
-            return Err(Error::NotFound(format!("topic {topic}")));
-        }
-        if self.cluster.is_some() {
-            let asg = self.cluster.as_ref().unwrap().assignment.read();
-            if !asg.topics.contains_key(topic) {
+            // Ensure topic exists in single-node map when filters used.
+            if self.cluster.is_none() && !topics.contains_key(&name) {
                 return Err(Error::NotFound(format!("topic {topic}")));
             }
-        }
-
-        let mut out = Vec::with_capacity(partition_ids.len());
-        for pid in partition_ids {
-            if let Some(t) = topics.get(&name) {
-                if let Some(part) = t.partitions.get(&PartitionId(pid)) {
-                    let earliest = part.log.log_start_offset().raw();
-                    let leo = part.log.log_end_offset().raw();
-                    let latest = match timestamp_ms {
-                        volant_protocol::LIST_OFFSETS_LATEST => leo,
-                        volant_protocol::LIST_OFFSETS_EARLIEST => earliest,
-                        ts => first_offset_at_or_after(&part.log, ts)?.unwrap_or(leo),
-                    };
-                    out.push((pid, earliest, latest));
-                    continue;
+            if self.cluster.is_some() {
+                let asg = self.cluster.as_ref().unwrap().assignment.read();
+                if !asg.topics.contains_key(topic) {
+                    return Err(Error::NotFound(format!("topic {topic}")));
                 }
             }
-            // Known in assignment but no local log.
-            out.push((pid, 0, 0));
+
+            out = Vec::with_capacity(partition_ids.len());
+            for pid in partition_ids {
+                if let Some(t) = topics.get(&name) {
+                    if let Some(part) = t.partitions.get(&PartitionId(pid)) {
+                        let earliest = part.log.log_start_offset().raw();
+                        let leo = part.log.log_end_offset().raw();
+                        let latest = match timestamp_ms {
+                            volant_protocol::LIST_OFFSETS_LATEST => leo,
+                            volant_protocol::LIST_OFFSETS_EARLIEST => earliest,
+                            ts => first_offset_at_or_after(&part.log, ts)?.unwrap_or(leo),
+                        };
+                        out.push((pid, earliest, latest));
+                        continue;
+                    }
+                }
+                // Known in assignment but no local log.
+                out.push((pid, 0, 0));
+            }
+        }
+        // LSO after dropping `topics` — `last_stable_offset` also reads it.
+        if isolation == volant_protocol::LIST_OFFSETS_READ_COMMITTED {
+            for (pid, _, latest) in &mut out {
+                let lso = self.last_stable_offset(topic, *pid);
+                match timestamp_ms {
+                    volant_protocol::LIST_OFFSETS_LATEST => *latest = lso,
+                    ts if ts >= 0 => *latest = (*latest).min(lso),
+                    _ => {}
+                }
+            }
         }
         Ok(out)
     }

@@ -19,7 +19,8 @@ pub use payload::{
 pub use request::{
     metadata_raft_cmd, AclBinding, MembershipBroker, MetadataRaftLogEntry, OffsetCommitEntry,
     OffsetEntry, ProduceMessage, Request, RequestOpcode, TxnOffsetCommit, LIST_OFFSETS_EARLIEST,
-    LIST_OFFSETS_LATEST, REASSIGN_ALL_PARTITIONS, SCRAM_HASH_SHA256, SCRAM_HASH_SHA512,
+    LIST_OFFSETS_LATEST, LIST_OFFSETS_READ_COMMITTED, LIST_OFFSETS_READ_UNCOMMITTED,
+    REASSIGN_ALL_PARTITIONS, SCRAM_HASH_SHA256, SCRAM_HASH_SHA512,
 };
 pub use response::{
     Assignment, BrokerInfo, ClusterPartitionState, ClusterTopicState, ErrorCode, FetchRecord,
