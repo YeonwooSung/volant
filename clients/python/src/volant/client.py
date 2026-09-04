@@ -417,6 +417,11 @@ class Client:
         """Reconnect to ``addr``, re-authenticating when a token or SCRAM is configured."""
         self._reconnect(addr)
 
+    @property
+    def timeout(self) -> float:
+        """Dial / RPC timeout in seconds (constructor default 10.0)."""
+        return self._timeout
+
     def _reconnect(self, addr: str) -> None:
         old = getattr(self, "_sock", None)
         self._sock = None  # type: ignore[assignment]

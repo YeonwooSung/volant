@@ -126,6 +126,7 @@ meta, err = c.MetadataTopic("events")           // v0.181; one topic
 _ = c.Reconnect("127.0.0.1:9093") // v0.115; re-Auth / re-SCRAM
 _ = c.Addr()                      // v0.183; current broker host:port (updated by Reconnect)
 _ = c.MaxRedirects()              // v0.191; NotLeader/NotController redirect budget (default 1)
+_ = c.Timeout()                   // v0.195; dial / RPC timeout (Dial default 10s)
 _ = off
 _ = meta
 
