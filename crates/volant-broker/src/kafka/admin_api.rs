@@ -4,7 +4,7 @@
 //! Describe/AlterClientQuotas, DescribeDelegationToken,
 //! ListClientMetricsResources, AlterReplicaLogDirs, AssignReplicasToDirs,
 //! DescribeLogDirs, DescribeTopicPartitions, BrokerRegistration,
-//! UnregisterBroker,
+//! UnregisterBroker, Envelope,
 //! UpdateFeatures, DescribeQuorum, AllocateProducerIds,
 //! GetTelemetrySubscriptions, PushTelemetry, AlterPartition,
 //! CreateDelegationToken, RenewDelegationToken, ExpireDelegationToken, configs.
@@ -1208,6 +1208,61 @@ fn write_broker_registration(out: &mut BytesMut, error: KafkaErrorCode) {
     out.put_i32(0); // throttleTimeMs
     out.put_i16(error.as_i16());
     out.put_i64(-1); // brokerEpoch — none assigned
+    put_empty_tag_buffer(out);
+}
+
+/// Envelope v0 (always flexible). Volant has no request forwarding
+/// (not KIP-590).
+///
+/// Parses official Kafka `EnvelopeRequest.json` v0 fields
+/// (`RequestData` compact bytes, `RequestPrincipal` compact nullable
+/// bytes, `ClientHostAddress` compact bytes) and discards them. Does
+/// **not** unwrap or execute the embedded request. Returns
+/// `ResponseData` **null**, error **42** `INVALID_REQUEST`
+/// (`forwarding not supported`). Official `EnvelopeResponse.json` has
+/// no `throttleTimeMs`. Controller is not required. ACL: Cluster
+/// **ALTER** (disabled ACLs allow). Denied → **31**.
+pub(crate) fn encode_envelope(
+    broker: &Broker,
+    src: &mut impl Buf,
+    out: &mut BytesMut,
+    principal: &str,
+) {
+    parse_envelope_request(src);
+
+    let denied = broker.acls().is_enabled()
+        && !broker.acls().authorize(
+            Some(principal),
+            ResourceType::Cluster,
+            CLUSTER_RESOURCE,
+            AclOperation::Alter,
+        );
+    let error = if denied {
+        KafkaErrorCode::ClusterAuthorizationFailed
+    } else {
+        KafkaErrorCode::InvalidRequest
+    };
+
+    write_envelope(out, error);
+}
+
+fn parse_envelope_request(src: &mut impl Buf) {
+    // Official v0 (flex, `EnvelopeRequest.json`):
+    // RequestData compact bytes, RequestPrincipal compact nullable bytes,
+    // ClientHostAddress compact bytes, tagged.
+    // RequestData is discarded — never interpreted as an inner Kafka request.
+    let _ = get_compact_bytes(src);
+    let _ = get_compact_bytes(src);
+    let _ = get_compact_bytes(src);
+    let _ = skip_tag_buffer(src);
+}
+
+fn write_envelope(out: &mut BytesMut, error: KafkaErrorCode) {
+    // Official EnvelopeResponse.json (v0+): ResponseData compact
+    // nullable bytes (always null — we do not forward), errorCode,
+    // tagged. No throttleTimeMs.
+    put_compact_bytes(out, None);
+    out.put_i16(error.as_i16());
     put_empty_tag_buffer(out);
 }
 
@@ -5838,6 +5893,110 @@ mod tests {
         assert_eq!(error, KafkaErrorCode::InvalidRequest.as_i16());
         assert_eq!(epoch, -1);
         assert_eq!(overlay_ids(&broker), before);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    fn envelope_body(
+        request_data: Option<&[u8]>,
+        principal: Option<&[u8]>,
+        client_host: Option<&[u8]>,
+    ) -> BytesMut {
+        let mut body = BytesMut::new();
+        put_compact_bytes(&mut body, request_data);
+        put_compact_bytes(&mut body, principal);
+        put_compact_bytes(&mut body, client_host);
+        put_empty_tag_buffer(&mut body);
+        body
+    }
+
+    fn read_envelope(src: &mut impl Buf) -> i16 {
+        let data = get_compact_bytes(src).unwrap();
+        assert!(data.is_none(), "ResponseData must be null");
+        let error = src.get_i16();
+        skip_tag_buffer(src).unwrap();
+        assert_eq!(src.remaining(), 0);
+        error
+    }
+
+    fn topic_names(b: &Broker) -> Vec<String> {
+        let mut names: Vec<String> = b
+            .metadata(None)
+            .topics
+            .into_iter()
+            .map(|t| t.name.as_str().to_owned())
+            .collect();
+        names.sort();
+        names
+    }
+
+    #[test]
+    fn kafka_envelope_rejects_and_does_not_unwrap() {
+        let dir = temp_dir("env-ok");
+        let broker = Broker::new(StorageConfig {
+            data_dir: dir.clone(),
+            ..StorageConfig::default()
+        });
+        broker.create_topic("events", 1).unwrap();
+        let before_topics = topic_names(&broker);
+        let before_ids = overlay_ids(&broker);
+
+        // Dummy compact RequestData that looks like an inner request.
+        let mut src = envelope_body(Some(b"create-topics-dummy"), None, Some(b"127.0.0.1"));
+        let mut out = BytesMut::new();
+        encode_envelope(&broker, &mut src, &mut out, "kafka-anonymous");
+        let mut resp = out.freeze();
+        assert_eq!(
+            read_envelope(&mut resp),
+            KafkaErrorCode::InvalidRequest.as_i16()
+        );
+
+        assert_eq!(topic_names(&broker), before_topics);
+        assert_eq!(overlay_ids(&broker), before_ids);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn kafka_envelope_acl_deny_is_31() {
+        let dir = temp_dir("env-acl");
+        let broker = Broker::new(StorageConfig {
+            data_dir: dir.clone(),
+            ..StorageConfig::default()
+        });
+        broker
+            .configure_acls(true, None, vec![], "token".into())
+            .unwrap();
+        let before_topics = topic_names(&broker);
+
+        let mut src = envelope_body(Some(b"inner"), None, Some(b"host"));
+        let mut out = BytesMut::new();
+        encode_envelope(&broker, &mut src, &mut out, "kafka-anonymous");
+        let mut resp = out.freeze();
+        assert_eq!(
+            read_envelope(&mut resp),
+            KafkaErrorCode::ClusterAuthorizationFailed.as_i16()
+        );
+        assert_eq!(topic_names(&broker), before_topics);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn kafka_envelope_not_controller_still_42() {
+        let dir = temp_dir("env-nc");
+        let broker = cluster_n2(dir.clone(), 2);
+        assert!(!broker.is_controller());
+        let before_topics = topic_names(&broker);
+        let before_ids = overlay_ids(&broker);
+
+        let mut src = envelope_body(Some(b"inner"), Some(b"alice"), Some(b"10.0.0.1"));
+        let mut out = BytesMut::new();
+        encode_envelope(&broker, &mut src, &mut out, "kafka-anonymous");
+        let mut resp = out.freeze();
+        assert_eq!(
+            read_envelope(&mut resp),
+            KafkaErrorCode::InvalidRequest.as_i16()
+        );
+        assert_eq!(topic_names(&broker), before_topics);
+        assert_eq!(overlay_ids(&broker), before_ids);
         let _ = std::fs::remove_dir_all(&dir);
     }
 }
