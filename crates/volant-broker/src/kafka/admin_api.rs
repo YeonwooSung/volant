@@ -3,7 +3,7 @@
 //! ElectLeaders, Describe/AlterUserScramCredentials,
 //! Describe/AlterClientQuotas, DescribeLogDirs,
 //! DescribeTopicPartitions, UnregisterBroker, UpdateFeatures,
-//! DescribeQuorum, configs.
+//! DescribeQuorum, AllocateProducerIds, configs.
 
 use bytes::{Buf, BufMut, BytesMut};
 use volant_core::{Error, PartitionId, TopicName};
@@ -2992,6 +2992,59 @@ fn local_quorum_offsets(broker: &Broker, name: &str, partition: i32) -> (i64, i6
     (hwm, leo)
 }
 
+/// Default Kafka producer-id block size (`producerIdLen`).
+const DEFAULT_PRODUCER_ID_BLOCK_LEN: u32 = 1000;
+
+/// AllocateProducerIds v0 (always flexible). Wraps
+/// [`Broker::allocate_producer_ids`] with a default block of 1000.
+///
+/// BrokerId / BrokerEpoch are parsed and ignored (not KRaft fencing).
+/// Cluster + non-controller → **41**. Single-node is allowed (this
+/// process is the allocator). ACL: Cluster **ALTER** (disabled ACLs
+/// allow). Same persist path as InitProducerId (`__producer_state`).
+pub(crate) fn encode_allocate_producer_ids(
+    broker: &Broker,
+    src: &mut impl Buf,
+    out: &mut BytesMut,
+    principal: &str,
+) {
+    let write = |out: &mut BytesMut, code: KafkaErrorCode, start: i64, len: i32| {
+        out.put_i32(0); // throttle
+        out.put_i16(code.as_i16());
+        out.put_i64(start);
+        out.put_i32(len);
+        put_empty_tag_buffer(out);
+    };
+
+    if src.remaining() < 4 + 8 {
+        write(out, KafkaErrorCode::InvalidRequest, 0, 0);
+        return;
+    }
+    let _broker_id = src.get_i32();
+    let _broker_epoch = src.get_i64();
+    let _ = skip_tag_buffer(src);
+
+    if broker.cluster_config().is_some() && !broker.is_controller() {
+        write(out, KafkaErrorCode::NotController, 0, 0);
+        return;
+    }
+
+    if broker.acls().is_enabled()
+        && !broker.acls().authorize(
+            Some(principal),
+            ResourceType::Cluster,
+            CLUSTER_RESOURCE,
+            AclOperation::Alter,
+        )
+    {
+        write(out, KafkaErrorCode::ClusterAuthorizationFailed, 0, 0);
+        return;
+    }
+
+    let (start, len) = broker.allocate_producer_ids(DEFAULT_PRODUCER_ID_BLOCK_LEN);
+    write(out, KafkaErrorCode::None, start as i64, len as i32);
+}
+
 /// DescribeLogDirs v0 classic / v1 flexible. Local open partitions only.
 ///
 /// `topics = null` → every local partition. Named topic with empty
@@ -3894,6 +3947,14 @@ mod tests {
         body
     }
 
+    fn allocate_body(broker_id: i32, broker_epoch: i64) -> BytesMut {
+        let mut body = BytesMut::new();
+        body.put_i32(broker_id);
+        body.put_i64(broker_epoch);
+        put_empty_tag_buffer(&mut body);
+        body
+    }
+
     #[test]
     fn kafka_describe_quorum_single_node_raft_off_is_empty_0() {
         let dir = temp_dir("dq-single");
@@ -3911,6 +3972,38 @@ mod tests {
     }
 
     #[test]
+    fn kafka_allocate_producer_ids_single_node_block() {
+        let dir = temp_dir("alloc-ok");
+        let broker = Broker::new(StorageConfig {
+            data_dir: dir.clone(),
+            ..StorageConfig::default()
+        });
+
+        let mut src = allocate_body(1, 0);
+        let mut out = BytesMut::new();
+        encode_allocate_producer_ids(&broker, &mut src, &mut out, "kafka-anonymous");
+        let mut resp = out.freeze();
+        assert_eq!(resp.get_i32(), 0);
+        assert_eq!(resp.get_i16(), 0);
+        let start1 = resp.get_i64();
+        let len1 = resp.get_i32();
+        assert!(start1 >= 0);
+        assert_eq!(len1, 1000);
+
+        let mut src = allocate_body(1, 99);
+        let mut out = BytesMut::new();
+        encode_allocate_producer_ids(&broker, &mut src, &mut out, "kafka-anonymous");
+        let mut resp = out.freeze();
+        assert_eq!(resp.get_i32(), 0);
+        assert_eq!(resp.get_i16(), 0);
+        let start2 = resp.get_i64();
+        let len2 = resp.get_i32();
+        assert_eq!(start2, start1 + 1000);
+        assert_eq!(len2, 1000);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
     fn kafka_describe_quorum_not_controller_is_41() {
         let dir = temp_dir("dq-nc");
         let broker = cluster_n2(dir.clone(), 2);
@@ -3921,6 +4014,21 @@ mod tests {
         let mut resp = out.freeze();
         assert_eq!(resp.get_i16(), KafkaErrorCode::NotController.as_i16());
         assert_eq!(get_compact_array_len(&mut resp).unwrap(), Some(0));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn kafka_allocate_producer_ids_not_controller_is_41() {
+        let dir = temp_dir("alloc-nc");
+        let broker = cluster_n2(dir.clone(), 2);
+        assert!(!broker.is_controller());
+
+        let mut src = allocate_body(2, 0);
+        let mut out = BytesMut::new();
+        encode_allocate_producer_ids(&broker, &mut src, &mut out, "kafka-anonymous");
+        let mut resp = out.freeze();
+        assert_eq!(resp.get_i32(), 0);
+        assert_eq!(resp.get_i16(), KafkaErrorCode::NotController.as_i16());
         let _ = std::fs::remove_dir_all(&dir);
     }
 }

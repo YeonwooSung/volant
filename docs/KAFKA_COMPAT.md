@@ -70,6 +70,7 @@ From `SUPPORTED_APIS` in `crates/volant-broker/src/kafka/mod.rs`:
 | 64 | UnregisterBroker | 0 | Always flex; wraps native `remove_broker` (v0.217 invert); not KRaft incarnation/DirectoryId; controller only (**41**); no cluster → **42**; TimeoutMs ignored; Cluster ALTER (v0.242) |
 | 65 | DescribeTransactions | 0 | Always flex |
 | 66 | ListTransactions | 0–2 | Pattern = simple `*` glob |
+| 67 | AllocateProducerIds | 0 | Always flex; block of 1000 from `next_producer_id`; BrokerEpoch ignored; not KRaft; controller-only in cluster (**41**); Cluster ALTER (v0.246) |
 | 75 | DescribeTopicPartitions | 0 | Always flex; wraps Metadata (same leaders/ISR/epochs/TopicId); no ELR; simple `responsePartitionLimit` truncate; cursor start if topic is in the set else ignored (v0.237) |
 
 ## Wire evolution (summary)
@@ -146,6 +147,7 @@ These are **current** product facts, not temporary docs lag:
 | UnregisterBroker | **v0 wrap** (v0.242): key **64** advertised; wraps native `remove_broker` (same invert as AddBroker / v0.217). Not KRaft UnregisterBroker (no incarnation / DirectoryId). Controller only (**41**); no cluster → **42** “unregister requires cluster”; self / last broker map native InvalidArgument → **42**. TimeoutMs parsed if present before tags, ignored. ACL Cluster ALTER |
 | UpdateFeatures | **v0–1 reject** (v0.244): key **57** advertised (always flex). Parse request; every feature → **92** `FEATURE_UPDATE_FAILED` (`empty / not supported`). Does **not** persist. ApiVersions SupportedFeatures / FinalizedFeatures stay empty. Not KIP-584. Cluster ALTER. Cluster non-controller → **41**. v2+ → **35**. Describe is already empty via ApiVersions |
 | DescribeQuorum | **v0–1 wrap** (v0.245): key **55** advertised (always flex). Wraps `openraft_leader_id` / `openraft_term` / `openraft_voter_ids`. Not KRaft `__cluster_metadata` (no invented metadata topic). Empty request topics → one synthetic cluster partition **0** (empty name) when raft is started. Raft off / not started → top-level **0**, empty topics. Cluster non-controller → **41**. `logEndOffset` / `highWatermark` = local LEO/HWM if the requested topic exists locally else **0**. `lastFetch` / `lastCaughtUp` = **-1**. No v2 Nodes / DirectoryId. Cluster DESCRIBE. v2+ → **35** |
+| AllocateProducerIds | **v0 wrap** (v0.246): key **67** advertised (always flex). Block of **1000** from `next_producer_id` (`fetch_add` + persist `__producer_state` like InitProducerId). BrokerEpoch parsed and **ignored**. Not KRaft fencing. Controller only in cluster (**41**); single-node allowed. ACL Cluster ALTER. v1+ → **35** |
 | Missing APIs | Large Kafka surface still unsupported (GSSAPI, OAUTH, …) |
 
 ## Related

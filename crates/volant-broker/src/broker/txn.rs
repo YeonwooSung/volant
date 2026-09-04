@@ -24,6 +24,20 @@ use super::{
 };
 
 impl Broker {
+    /// Allocate a contiguous producer-id block from `next_producer_id`.
+    ///
+    /// `fetch_add`s `len` and persists `next_id` the same way
+    /// [`Self::init_producer_id`] does (`data_dir/__producer_state`).
+    /// Not KRaft broker-epoch fencing. Returns
+    /// `(producer_id_start, producer_id_len)`.
+    pub fn allocate_producer_ids(&self, len: u32) -> (u64, u32) {
+        let start = self
+            .next_producer_id
+            .fetch_add(len as u64, Ordering::Relaxed);
+        let _ = self.persist_producer_state();
+        (start, len)
+    }
+
     /// Allocate a producer id + epoch for idempotent produce (Phase 10/11).
     ///
     /// State is persisted under `data_dir/__producer_state` (Phase 11).
