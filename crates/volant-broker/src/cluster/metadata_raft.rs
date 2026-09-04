@@ -123,10 +123,27 @@ struct MetadataRaftInner {
 }
 
 impl MetadataRaftState {
-    /// Open or create empty metadata raft state under `data_dir`.
+    /// Open existing metadata raft state under `data_dir`, or start empty.
+    ///
+    /// Does **not** create `{data_dir}/__metadata_raft/` (v0.214). Persist
+    /// creates the directory on first write. Use [`Self::open_enabled`] when
+    /// homemade 154 is on so the dir exists at boot.
     pub fn open(data_dir: impl AsRef<Path>) -> Self {
+        Self::open_inner(data_dir, false)
+    }
+
+    /// Open metadata raft state and create `{data_dir}/__metadata_raft/`.
+    ///
+    /// Used when `VOLANT_METADATA_RAFT` is enabled at broker construction.
+    pub fn open_enabled(data_dir: impl AsRef<Path>) -> Self {
+        Self::open_inner(data_dir, true)
+    }
+
+    fn open_inner(data_dir: impl AsRef<Path>, create_dir: bool) -> Self {
         let dir = data_dir.as_ref().join(METADATA_RAFT_DIR);
-        let _ = fs::create_dir_all(&dir);
+        if create_dir {
+            let _ = fs::create_dir_all(&dir);
+        }
         let log_path = dir.join(METADATA_RAFT_LOG_FILE);
         let hard_path = dir.join(METADATA_RAFT_HARD_STATE_FILE);
         let log = load_log(&log_path).unwrap_or_default();
@@ -494,11 +511,34 @@ mod tests {
     }
 
     #[test]
+    fn open_does_not_create_dir() {
+        let dir = env::temp_dir().join(format!("volant-mraft-nodir-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&dir);
+        fs::create_dir_all(&dir).unwrap();
+        let _s = MetadataRaftState::open(&dir);
+        assert!(
+            !dir.join(METADATA_RAFT_DIR).exists(),
+            "lazy open must not create __metadata_raft"
+        );
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn open_enabled_creates_dir() {
+        let dir = env::temp_dir().join(format!("volant-mraft-ondir-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&dir);
+        fs::create_dir_all(&dir).unwrap();
+        let _s = MetadataRaftState::open_enabled(&dir);
+        assert!(
+            dir.join(METADATA_RAFT_DIR).is_dir(),
+            "open_enabled must create __metadata_raft"
+        );
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
     fn append_commit_apply_roundtrip() {
-        let dir = env::temp_dir().join(format!(
-            "volant-mraft-{}",
-            std::process::id()
-        ));
+        let dir = env::temp_dir().join(format!("volant-mraft-{}", std::process::id()));
         let _ = fs::remove_dir_all(&dir);
         fs::create_dir_all(&dir).unwrap();
         {
@@ -524,10 +564,7 @@ mod tests {
 
     #[test]
     fn reject_prev_log_mismatch() {
-        let dir = env::temp_dir().join(format!(
-            "volant-mraft-rej-{}",
-            std::process::id()
-        ));
+        let dir = env::temp_dir().join(format!("volant-mraft-rej-{}", std::process::id()));
         let _ = fs::remove_dir_all(&dir);
         fs::create_dir_all(&dir).unwrap();
         let s = MetadataRaftState::open(&dir);

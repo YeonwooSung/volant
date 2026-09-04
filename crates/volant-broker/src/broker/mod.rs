@@ -847,7 +847,13 @@ impl Broker {
         // Phase 150: assignment generation consensus (single-node majority=1).
         let assignment_consensus = AssignmentConsensus::open(&storage.data_dir);
         // Phase 154: KRaft-style metadata log (single-node).
-        let metadata_raft = MetadataRaftState::open(&storage.data_dir);
+        // v0.214: do not create `__metadata_raft/` unless the env flag is on.
+        let metadata_raft_on = default_metadata_raft_enabled(false);
+        let metadata_raft = if metadata_raft_on {
+            MetadataRaftState::open_enabled(&storage.data_dir)
+        } else {
+            MetadataRaftState::open(&storage.data_dir)
+        };
         let broker = Self {
             storage,
             topics: RwLock::new(HashMap::new()),
@@ -947,7 +953,7 @@ impl Broker {
             ),
             metadata_raft,
             // metadata raft default off (cluster and single-node).
-            metadata_raft_enabled: AtomicBool::new(default_metadata_raft_enabled(false)),
+            metadata_raft_enabled: AtomicBool::new(metadata_raft_on),
             metadata_raft_wait_commit: AtomicBool::new(default_metadata_raft_wait_commit()),
             openraft_metadata_enabled: AtomicBool::new(default_openraft_metadata_enabled()),
             openraft_meta: Mutex::new(None),
@@ -1065,7 +1071,13 @@ impl Broker {
         // Phase 150: assignment generation consensus.
         let assignment_consensus = AssignmentConsensus::open(&storage.data_dir);
         // Phase 154: KRaft-style metadata Raft log.
-        let metadata_raft = MetadataRaftState::open(&storage.data_dir);
+        // v0.214: do not create `__metadata_raft/` unless the env flag is on.
+        let metadata_raft_on = default_metadata_raft_enabled(true);
+        let metadata_raft = if metadata_raft_on {
+            MetadataRaftState::open_enabled(&storage.data_dir)
+        } else {
+            MetadataRaftState::open(&storage.data_dir)
+        };
         let broker = Self {
             storage,
             topics: RwLock::new(HashMap::new()),
@@ -1165,7 +1177,7 @@ impl Broker {
                 default_assignment_metadata_committed_only(),
             ),
             metadata_raft,
-            metadata_raft_enabled: AtomicBool::new(default_metadata_raft_enabled(true)),
+            metadata_raft_enabled: AtomicBool::new(metadata_raft_on),
             metadata_raft_wait_commit: AtomicBool::new(default_metadata_raft_wait_commit()),
             openraft_metadata_enabled: AtomicBool::new(default_openraft_metadata_enabled()),
             openraft_meta: Mutex::new(None),

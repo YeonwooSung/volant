@@ -1299,6 +1299,10 @@ async fn handle_request(broker: &Arc<Broker>, req: Request) -> Result<Response> 
             entries,
             leader_commit,
         } => {
+            // v0.214: reject opcode 98 unless homemade 154 is on.
+            if !broker.metadata_raft_enabled() {
+                return Err(Error::Protocol("metadata raft not enabled".into()));
+            }
             let internal: Vec<MetadataLogEntry> =
                 entries.iter().map(metadata_entry_from_wire).collect();
             let (resp_term, success, match_index) = broker.handle_metadata_raft_append(

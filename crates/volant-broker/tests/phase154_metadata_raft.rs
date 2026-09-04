@@ -7,10 +7,13 @@ use std::time::Duration;
 use volant_broker::{
     fanout_assignment_consensus, fanout_metadata_raft_append, serve_listener,
     start_background_tasks, Broker, BrokerEndpoint, ClusterConfig, MetadataCommand,
-    MetadataLogEntry, MetadataRaftState,
+    MetadataLogEntry, MetadataRaftState, METADATA_RAFT_DIR,
 };
 use volant_core::TopicName;
-use volant_protocol::{ClusterPartitionState, ClusterTopicState};
+use volant_protocol::{
+    metadata_raft_cmd, ClusterPartitionState, ClusterTopicState, ErrorCode, MetadataRaftLogEntry,
+    Request, Response,
+};
 use volant_storage::StorageConfig;
 
 fn unique_dir(label: &str) -> PathBuf {
@@ -287,6 +290,94 @@ async fn n2_one_dead_append_fails() {
     assert!(b1.metadata_raft().last_index() > commit_before);
 
     s1.abort();
+}
+
+/// v0.214: default-off broker must not create `{data_dir}/__metadata_raft/`.
+#[test]
+fn default_off_broker_has_no_metadata_raft_dir() {
+    let base = unique_dir("nodir");
+    let _g = Guard(base.clone());
+    let data_dir = base.join("n0");
+    let b = Broker::new(StorageConfig {
+        data_dir: data_dir.clone(),
+        ..StorageConfig::default()
+    });
+    assert!(
+        !b.metadata_raft_enabled(),
+        "VOLANT_METADATA_RAFT must default off"
+    );
+    assert!(
+        !data_dir.join(METADATA_RAFT_DIR).exists(),
+        "default-off broker must not create __metadata_raft"
+    );
+}
+
+/// v0.214: inbound opcode 98 while 154 is off must not apply SetAssignment.
+#[tokio::test]
+async fn inbound_98_disabled_does_not_apply_set_assignment() {
+    let base = unique_dir("inbound-off");
+    let _g = Guard(base.clone());
+
+    let cfg = cluster_config(&[19_092, 19_093]);
+    let data_dir = base.join("n1");
+    let b = Broker::with_cluster(
+        StorageConfig {
+            data_dir: data_dir.clone(),
+            flush_every_n: 1,
+            ..StorageConfig::default()
+        },
+        1,
+        cfg,
+    )
+    .unwrap();
+    assert!(
+        !b.metadata_raft_enabled(),
+        "inbound 98 test requires homemade 154 off"
+    );
+    let broker = Arc::new(b);
+
+    let resp = volant_broker::net::dispatch_request(
+        &broker,
+        Request::MetadataRaftAppend {
+            leader_id: 1,
+            term: 1,
+            prev_log_index: 0,
+            prev_log_term: 0,
+            entries: vec![MetadataRaftLogEntry {
+                term: 1,
+                index: 1,
+                command_kind: metadata_raft_cmd::SET_ASSIGNMENT,
+                generation: 1,
+                topics: sample_topics(),
+            }],
+            leader_commit: 1,
+        },
+    )
+    .await;
+    match resp {
+        Response::Error { code, .. } => {
+            assert_eq!(
+                code,
+                ErrorCode::Protocol as u16,
+                "disabled inbound 98 must be a protocol error"
+            );
+        }
+        Response::MetadataRaftAppend { success, .. } => {
+            assert_eq!(success, 0, "disabled inbound 98 must not succeed");
+        }
+        other => panic!("disabled inbound 98 expected reject, got {other:?}"),
+    }
+    assert!(
+        broker.partition_count_opt("t").is_none(),
+        "disabled inbound 98 must not apply SetAssignment"
+    );
+    assert_eq!(broker.metadata_raft_commit_index(), 0);
+    assert_eq!(broker.metadata_raft_last_applied(), 0);
+    assert_eq!(broker.metadata_raft().last_index(), 0);
+    assert!(
+        !data_dir.join(METADATA_RAFT_DIR).exists(),
+        "rejected inbound 98 must not create __metadata_raft"
+    );
 }
 
 /// Phase 150 path still works when metadata raft is off.

@@ -45,6 +45,10 @@ async fn n2_one_dead_admin_succeeds_on_assignment_json() {
         "VOLANT_METADATA_RAFT must default off"
     );
     assert!(
+        !data_dir.join("__metadata_raft").exists(),
+        "default-off broker must not create __metadata_raft"
+    );
+    assert!(
         !b1.assignment_metadata_committed_only(),
         "VOLANT_ASSIGNMENT_METADATA_COMMITTED_ONLY must default off"
     );

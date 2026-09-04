@@ -531,6 +531,8 @@ impl Broker {
     ///
     /// On success, advances peer log/commit and applies committed
     /// `SetAssignment` entries to live assignment + Phase 152 committed snap.
+    ///
+    /// v0.214: when homemade 154 is off, reject without persisting or applying.
     pub fn handle_metadata_raft_append(
         &self,
         leader_id: u32,
@@ -541,6 +543,13 @@ impl Broker {
         leader_commit: u64,
     ) -> (u64, bool, u64) {
         let _ = leader_id;
+        if !self.metadata_raft_enabled() {
+            return (
+                self.metadata_raft.current_term(),
+                false,
+                self.metadata_raft.last_index(),
+            );
+        }
         let r = self.metadata_raft.append_entries(
             term,
             prev_log_index,
