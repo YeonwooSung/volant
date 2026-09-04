@@ -98,6 +98,41 @@ func TestTimeoutNilClient(t *testing.T) {
 	}
 }
 
+func TestAuthTokenAfterDialAuth(t *testing.T) {
+	addr, _, stop := serveAuth(t, 0, true)
+	defer stop()
+
+	c, err := volant.DialAuth(addr, "s3cret")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer c.Close()
+	if got := c.AuthToken(); got != "s3cret" {
+		t.Fatalf("AuthToken() after DialAuth = %q want %q", got, "s3cret")
+	}
+}
+
+func TestAuthTokenAfterDial(t *testing.T) {
+	addr, _, stop := serveAuth(t, 0, true)
+	defer stop()
+
+	c, err := volant.Dial(addr)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer c.Close()
+	if got := c.AuthToken(); got != "" {
+		t.Fatalf("AuthToken() after Dial = %q want empty", got)
+	}
+}
+
+func TestAuthTokenNilClient(t *testing.T) {
+	var c *volant.Client
+	if got := c.AuthToken(); got != "" {
+		t.Fatalf("nil AuthToken() = %q want empty", got)
+	}
+}
+
 func TestReconnectSecondListenerMetadata(t *testing.T) {
 	addr1, got1, stop1 := serveAuth(t, 0, true)
 	defer stop1()

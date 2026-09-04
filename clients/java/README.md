@@ -103,6 +103,7 @@ try (Client c = Client.connect("127.0.0.1", 9092)) {
   meta = c.metadataTopic("events"); // v0.181; one topic
   c.reconnect("127.0.0.1", 9093); // v0.115; re-Auth / re-SCRAM
   c.timeoutMs(); // v0.195; dial / RPC timeout (connect default 10000)
+  c.authToken(); // v0.200; shared-token Auth (null if none)
 }
 
 // Optional TLS (v0.27). connect() stays plaintext.
@@ -291,6 +292,8 @@ Shared-token Auth (v0.42): `connect(..., authToken)` /
 `connectTls(..., authToken)` send native opcode 30 after connect when
 the token is non-empty. A rejected token throws `BrokerException` with
 code 17 and closes the socket. Existing overloads are unchanged.
+`authToken()` (v0.200) returns the stored shared-token used for
+opcode 30, or `null` if none; it does not send Auth.
 
 Idempotent produce (v0.47) is opt-in via `setEnableIdempotence(true)`.
 The first produce sends native InitProducerId (opcode 32) with an
