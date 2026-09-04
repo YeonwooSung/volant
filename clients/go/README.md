@@ -111,6 +111,7 @@ g, err = volant.JoinGroupConsumerStatic(c, "g", []string{"t"}, 10_000, "inst-1")
 batch, err := g.Poll(500 * time.Millisecond)
 err = g.Commit()
 err = g.Close()
+_ = g.HeartbeatCount() // v0.186; Poll + background Heartbeat RPCs (not JoinGroup)
 // Opt-in auto-commit (v0.48). Default off. interval 0 = after every Poll.
 g, err = volant.JoinGroupConsumer(c, "g", []string{"t"}, 10_000, volant.WithAutoCommit(5*time.Second))
 // Opt-in auto_offset_reset (v0.62/v0.70). Default earliest (ListOffsets earliest).
