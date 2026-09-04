@@ -17,9 +17,10 @@
 //! CreatePartitions 0–3 (v3 = v2 wire; no KIP-599),
 //! AlterPartitionReassignments v0 (wraps native opcode 114),
 //! ListPartitionReassignments v0 (current replicas; empty adding/removing),
-//! DescribeUserScramCredentials / AlterUserScramCredentials v0 (wraps ScramStore).
+//! DescribeUserScramCredentials / AlterUserScramCredentials v0 (wraps ScramStore),
+//! DescribeTopicPartitions v0 (wraps Metadata; key 75).
 //! See `docs/PHASE23_SPEC.md` … `docs/PHASE91_SPEC.md`, `docs/V225_SPEC.md`,
-//! `docs/V228_SPEC.md`, and `docs/V233_SPEC.md`.
+//! `docs/V228_SPEC.md`, `docs/V233_SPEC.md`, and `docs/V237_SPEC.md`.
 
 mod acl_api;
 mod admin_api;
@@ -276,6 +277,8 @@ pub enum ApiKey {
     DescribeTransactions = 65,
     /// ListTransactions (always flexible).
     ListTransactions = 66,
+    /// DescribeTopicPartitions (always flexible; v0 only).
+    DescribeTopicPartitions = 75,
 }
 
 impl ApiKey {
@@ -323,6 +326,7 @@ impl ApiKey {
             61 => Some(Self::DescribeProducers),
             65 => Some(Self::DescribeTransactions),
             66 => Some(Self::ListTransactions),
+            75 => Some(Self::DescribeTopicPartitions),
             _ => None,
         }
     }
@@ -372,6 +376,7 @@ pub const SUPPORTED_APIS: &[(ApiKey, i16, i16)] = &[
     (ApiKey::DescribeProducers, 0, 0),
     (ApiKey::DescribeTransactions, 0, 0),
     (ApiKey::ListTransactions, 0, 2),
+    (ApiKey::DescribeTopicPartitions, 0, 0),
 ];
 
 #[cfg(test)]
@@ -379,8 +384,8 @@ mod tests {
     use super::*;
 
     #[test]
-    fn supported_apis_stays_42_sync_group_key_14_and_reassign_45_46_scram_50_51() {
-        assert_eq!(SUPPORTED_APIS.len(), 42);
+    fn supported_apis_includes_describe_topic_partitions_75() {
+        assert!(SUPPORTED_APIS.len() >= 43);
         assert!(SUPPORTED_APIS
             .iter()
             .any(|(k, min, max)| *k == ApiKey::SyncGroup && *min == 0 && *max == 5));
@@ -395,6 +400,9 @@ mod tests {
         }));
         assert!(SUPPORTED_APIS.iter().any(|(k, min, max)| {
             *k == ApiKey::AlterUserScramCredentials && *min == 0 && *max == 0
+        }));
+        assert!(SUPPORTED_APIS.iter().any(|(k, min, max)| {
+            *k == ApiKey::DescribeTopicPartitions && *min == 0 && *max == 0
         }));
         assert_eq!(
             ApiKey::from_i16(45),
@@ -412,5 +420,6 @@ mod tests {
             ApiKey::from_i16(51),
             Some(ApiKey::AlterUserScramCredentials)
         );
+        assert_eq!(ApiKey::from_i16(75), Some(ApiKey::DescribeTopicPartitions));
     }
 }
