@@ -413,6 +413,11 @@ docs for day-to-day reading: [ops](../ops.md), [consistency](../consistency.md),
 | v0.214 | ✅ | gate inbound homemade 154 + lazy raft dir | [V214_SPEC.md](../V214_SPEC.md) |
 | v0.215 | ✅ | SyncGroup generation confirm fence | [V215_SPEC.md](../V215_SPEC.md) |
 | v0.216 | ✅ | overlay apply artifact from Membership log | [V216_SPEC.md](../V216_SPEC.md) |
+| v0.217 | ✅ | in-process add/remove persist after openraft joint | [V217_SPEC.md](../V217_SPEC.md) |
+| v0.218 | ✅ | CompletingRebalance group state while fence open | [V218_SPEC.md](../V218_SPEC.md) |
+| v0.219 | ✅ | OffsetCommit 9 until SyncGroup confirms | [V219_SPEC.md](../V219_SPEC.md) |
+| v0.220 | ✅ | language GroupConsumer Join 9 retry | [V220_SPEC.md](../V220_SPEC.md) |
+| v0.221 | ✅ | Rust GroupConsumer Join 9 retry | [V221_SPEC.md](../V221_SPEC.md) |
 
 ---
 

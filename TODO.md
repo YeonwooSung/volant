@@ -1,6 +1,6 @@
 # Volant residual TODO (review loop)
 
-**Baseline:** HEAD product = **Phases 0–154** + residuals **v0.3–v0.216**; **Phase 155 open**.  
+**Baseline:** HEAD product = **Phases 0–154** + residuals **v0.3–v0.221**; **Phase 155 open**.  
 **Last review:** 2026-09-03  
 
 Living roadmap: [ROADMAP.md](./ROADMAP.md).  
@@ -68,7 +68,7 @@ Phase index: [docs/history/PHASE_HISTORY.md](./docs/history/PHASE_HISTORY.md).
 | **Later** | **Long fuzz + chaos-mesh** | **MVP closed (v0.15)** — extended corpus + Chaos Mesh YAML + A→B isolate |
 | **Later** | **Perf campaign** vs aspirational targets | **closed (v0.2 PR2)** — measured table published; group-commit **v0.20** (opt-in, no new bench) |
 
-**Default next slice:** Overlay is apply-after-commit when openraft-on (**v0.212/v0.216**); homemade 154 is gated (**v0.213/v0.214**); SyncGroup is a generation fence (**v0.215**). In-process add/remove_broker still persist-first. Homemade 154 code is not deleted. CompletingRebalance / parked Join / Kafka keys / KIP-890 stay frozen. Residual **v0.155** is still DeleteRecords wait.
+**Default next slice:** In-process overlay commit follows joint (**v0.217**). List/Describe report CompletingRebalance while the fence is open (**v0.218**). Member OffsetCommit is 9 until SyncGroup (**v0.219**). GroupConsumer retries Join 9 when `max_retries>0` (**v0.220/v0.221**). Homemade 154 is still not deleted. Parked Join / Kafka keys / KIP-890 stay frozen. Residual **v0.155** is still DeleteRecords wait.
 
 ---
 
@@ -299,6 +299,11 @@ Phase index: [docs/history/PHASE_HISTORY.md](./docs/history/PHASE_HISTORY.md).
 - [x] gate inbound homemade 154 + lazy raft dir → **v0.214**
 - [x] SyncGroup generation confirm fence → **v0.215**
 - [x] overlay apply artifact from Membership log → **v0.216**
+- [x] in-process add/remove persist after joint → **v0.217**
+- [x] CompletingRebalance list/describe state → **v0.218**
+- [x] OffsetCommit 9 until SyncGroup → **v0.219**
+- [x] language GroupConsumer Join 9 retry → **v0.220**
+- [x] Rust GroupConsumer Join 9 retry → **v0.221**
 
 ---
 
@@ -398,5 +403,6 @@ Phase index: [docs/history/PHASE_HISTORY.md](./docs/history/PHASE_HISTORY.md).
 | v0.201–v0.203 | **Shipped** — Java heartbeatIntervalMs public; Go/Java SCRAM username getter; Rust create_topic_default |
 | v0.207–v0.211 | **Shipped** — language/Rust GroupConsumer SyncGroup peek; first-Join client member_id; JoinGroup members trailer |
 | v0.212–v0.216 | **Shipped** — overlay persist-after-joint; IsrUpdate skips 154; inbound 154 gated; SyncGroup generation fence; overlay Membership apply |
+| v0.217–v0.221 | **Shipped** — in-process overlay after joint; CompletingRebalance state; OffsetCommit 9 until sync; GroupConsumer Join 9 retry |
 
 **How to use this file:** mark new work by phase number in ROADMAP + PHASE*_SPEC; fold completed rows into “Closed checklist”; keep “Still open” as the only honesty surface for operators and contributors.
