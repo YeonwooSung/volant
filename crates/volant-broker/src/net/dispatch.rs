@@ -13,16 +13,16 @@ use volant_protocol::{
 
 use crate::broker::{Broker, MembershipOverlaySnapshot, Txn2pcFanout};
 use crate::cluster::{
-    reassign_on_add_enabled, reassign_on_add_rollback_enabled, AssignmentSnapshot, MetadataLogEntry,
+    reassign_on_add_enabled, reassign_on_add_rollback_enabled, AssignmentSnapshot,
 };
 
 use super::fanout::{
     complete_assignment_mutation, fanout_cluster_acl_snapshot, fanout_delete_records,
     fanout_delete_records_replicas_only, fanout_membership_put,
     fanout_truncate_journal_note_provisional, maybe_fanout_assignment_consensus,
-    metadata_entry_from_wire, put_end_txn_error_response, run_txn_2pc_fanout,
-    schedule_catch_up_peer_admin_state, schedule_catch_up_peer_truncate_journal,
-    schedule_isr_update_reports, schedule_session_mirror_fanout, snapshot_if_must_wait,
+    put_end_txn_error_response, run_txn_2pc_fanout, schedule_catch_up_peer_admin_state,
+    schedule_catch_up_peer_truncate_journal, schedule_isr_update_reports,
+    schedule_session_mirror_fanout, snapshot_if_must_wait,
 };
 use super::inter_broker_rpc;
 
@@ -1291,33 +1291,10 @@ async fn handle_request(broker: &Arc<Broker>, req: Request) -> Result<Response> 
                 generation: acked_gen,
             })
         }
-        Request::MetadataRaftAppend {
-            leader_id,
-            term,
-            prev_log_index,
-            prev_log_term,
-            entries,
-            leader_commit,
-        } => {
-            // v0.214: reject opcode 98 unless homemade 154 is on.
-            if !broker.metadata_raft_enabled() {
-                return Err(Error::Protocol("metadata raft not enabled".into()));
-            }
-            let internal: Vec<MetadataLogEntry> =
-                entries.iter().map(metadata_entry_from_wire).collect();
-            let (resp_term, success, match_index) = broker.handle_metadata_raft_append(
-                leader_id,
-                term,
-                prev_log_index,
-                prev_log_term,
-                &internal,
-                leader_commit,
-            );
-            Ok(Response::MetadataRaftAppend {
-                term: resp_term,
-                success: if success { 1 } else { 0 },
-                match_index,
-            })
+        Request::MetadataRaftAppend { .. } => {
+            // v0.222: homemade 154 product removed. Decode stays so a
+            // mixed-cluster old peer cannot panic this broker.
+            Err(Error::Protocol("metadata raft not enabled".into()))
         }
         Request::MembershipPut {
             generation,

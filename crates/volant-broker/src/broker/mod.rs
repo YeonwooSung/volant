@@ -11,11 +11,12 @@
 use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
-use std::sync::Arc;
+use std::sync::{Arc, Once};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use parking_lot::{Condvar, Mutex, RwLock};
 use serde::{Deserialize, Serialize};
+use tracing::warn;
 use volant_core::{
     Error, Message, MessageBatch, Offset, PartitionId, Record, Result, TopicId, TopicName,
 };
@@ -26,8 +27,8 @@ use crate::cluster::{
     cluster_metadata_topic_env_enabled, default_openraft_forward_membership_enabled,
     default_openraft_joint_rollback_enabled, default_openraft_metadata_enabled, load_assignment,
     load_assignment_from_cluster_metadata, load_membership_overlay, save_assignment,
-    AssignmentConsensus, AssignmentSnapshot, ClusterConfig, Membership, MetadataRaftState,
-    OpenraftMetaHandle, OpenraftMetricsCache,
+    AssignmentConsensus, AssignmentSnapshot, ClusterConfig, Membership, OpenraftMetaHandle,
+    OpenraftMetricsCache,
 };
 use crate::delete_records_outbox::DeleteRecordsOutbox;
 use crate::group::GroupCoordinator;
@@ -661,16 +662,6 @@ pub struct Broker {
     /// majority-committed assignment snapshot. Default **false**
     /// (`VOLANT_ASSIGNMENT_METADATA_COMMITTED_ONLY`).
     assignment_metadata_committed_only: AtomicBool,
-    /// Phase 154: KRaft-style metadata Raft log (MVP).
-    metadata_raft: MetadataRaftState,
-    /// Phase 154: when true, admin assignment mutations use the metadata Raft
-    /// log (opcodes 98/99) instead of AssignmentConsensusNote. Default **off**
-    /// (`VOLANT_METADATA_RAFT`).
-    metadata_raft_enabled: AtomicBool,
-    /// v0.40: homemade 154 waits for `commit_index` before CreateTopic /
-    /// DeleteTopic / CreatePartitions client ok. Default **on**; `0` restores
-    /// 154 mutate-first (`VOLANT_METADATA_RAFT_WAIT_COMMIT`).
-    metadata_raft_wait_commit: AtomicBool,
     /// v0.11: when true, `controller_id()` is the openraft leader. Default **off**.
     pub(crate) openraft_metadata_enabled: AtomicBool,
     /// Live openraft node (started from background tasks when the flag is on).
@@ -822,6 +813,7 @@ impl Broker {
     /// Reloads topics from `{data_dir}/__topics/catalog.json` and opens existing
     /// partition logs (Phase 14).
     pub fn new(mut storage: StorageConfig) -> Self {
+        warn_ignored_metadata_raft_env();
         storage.apply_group_commit_env();
         let groups = GroupCoordinator::new(&storage.data_dir)
             .expect("failed to initialize group coordinator / offset store");
@@ -846,14 +838,6 @@ impl Broker {
         let txn_coordinator_registry = TxnCoordinatorRegistry::open(&storage.data_dir);
         // Phase 150: assignment generation consensus (single-node majority=1).
         let assignment_consensus = AssignmentConsensus::open(&storage.data_dir);
-        // Phase 154: KRaft-style metadata log (single-node).
-        // v0.214: do not create `__metadata_raft/` unless the env flag is on.
-        let metadata_raft_on = default_metadata_raft_enabled(false);
-        let metadata_raft = if metadata_raft_on {
-            MetadataRaftState::open_enabled(&storage.data_dir)
-        } else {
-            MetadataRaftState::open(&storage.data_dir)
-        };
         let broker = Self {
             storage,
             topics: RwLock::new(HashMap::new()),
@@ -951,10 +935,6 @@ impl Broker {
             assignment_metadata_committed_only: AtomicBool::new(
                 default_assignment_metadata_committed_only(),
             ),
-            metadata_raft,
-            // metadata raft default off (cluster and single-node).
-            metadata_raft_enabled: AtomicBool::new(metadata_raft_on),
-            metadata_raft_wait_commit: AtomicBool::new(default_metadata_raft_wait_commit()),
             openraft_metadata_enabled: AtomicBool::new(default_openraft_metadata_enabled()),
             openraft_meta: Mutex::new(None),
             openraft_metrics: OpenraftMetricsCache::default(),
@@ -1007,6 +987,7 @@ impl Broker {
         node_id: u32,
         mut config: ClusterConfig,
     ) -> Result<Self> {
+        warn_ignored_metadata_raft_env();
         storage.apply_group_commit_env();
         let mut membership_generation = 0u64;
         if let Some(overlay) = load_membership_overlay(&storage.data_dir)? {
@@ -1070,14 +1051,6 @@ impl Broker {
         let txn_coordinator_registry = TxnCoordinatorRegistry::open(&storage.data_dir);
         // Phase 150: assignment generation consensus.
         let assignment_consensus = AssignmentConsensus::open(&storage.data_dir);
-        // Phase 154: KRaft-style metadata Raft log.
-        // v0.214: do not create `__metadata_raft/` unless the env flag is on.
-        let metadata_raft_on = default_metadata_raft_enabled(true);
-        let metadata_raft = if metadata_raft_on {
-            MetadataRaftState::open_enabled(&storage.data_dir)
-        } else {
-            MetadataRaftState::open(&storage.data_dir)
-        };
         let broker = Self {
             storage,
             topics: RwLock::new(HashMap::new()),
@@ -1176,9 +1149,6 @@ impl Broker {
             assignment_metadata_committed_only: AtomicBool::new(
                 default_assignment_metadata_committed_only(),
             ),
-            metadata_raft,
-            metadata_raft_enabled: AtomicBool::new(metadata_raft_on),
-            metadata_raft_wait_commit: AtomicBool::new(default_metadata_raft_wait_commit()),
             openraft_metadata_enabled: AtomicBool::new(default_openraft_metadata_enabled()),
             openraft_meta: Mutex::new(None),
             openraft_metrics: OpenraftMetricsCache::default(),
@@ -1946,41 +1916,39 @@ fn default_assignment_metadata_committed_only() -> bool {
     }
 }
 
-/// Phase 154: `VOLANT_METADATA_RAFT` — default **off** (cluster and single-node).
-/// Explicit `0`/`false`/`no` disables (Phase 150 notes only);
-/// `1`/`true`/`yes` enables.
-fn default_metadata_raft_enabled(cluster_mode: bool) -> bool {
-    match std::env::var("VOLANT_METADATA_RAFT") {
-        Ok(s) => {
-            let t = s.trim();
-            if t == "0" || t.eq_ignore_ascii_case("false") || t.eq_ignore_ascii_case("no") {
-                return false;
-            }
-            if t == "1" || t.eq_ignore_ascii_case("true") || t.eq_ignore_ascii_case("yes") {
-                return true;
-            }
-            cluster_mode
-        }
-        Err(_) => false,
+/// v0.222: homemade 154 is gone. `VOLANT_METADATA_RAFT=1` and
+/// `VOLANT_METADATA_RAFT_WAIT_COMMIT=1` warn once and are ignored.
+fn warn_ignored_metadata_raft_env() {
+    static ONCE: Once = Once::new();
+    let raft_on = env_flag_on("VOLANT_METADATA_RAFT");
+    let wait_on = env_flag_on("VOLANT_METADATA_RAFT_WAIT_COMMIT");
+    if !raft_on && !wait_on {
+        return;
     }
+    ONCE.call_once(|| {
+        if raft_on {
+            warn!(
+                "VOLANT_METADATA_RAFT is set on; homemade metadata Raft was removed in v0.222 (ignored)"
+            );
+        }
+        if wait_on {
+            warn!(
+                "VOLANT_METADATA_RAFT_WAIT_COMMIT is set on; homemade metadata Raft was removed in v0.222 (ignored)"
+            );
+        }
+    });
 }
 
-/// v0.40: `VOLANT_METADATA_RAFT_WAIT_COMMIT` default **on** (safety).
-///
-/// When homemade 154 is on, CreateTopic / DeleteTopic / CreatePartitions wait
-/// until `commit_index` covers the new entry. `0` / `false` / `no` / `off`
-/// restores 154 mutate-first (client ok from local `assignment.json`).
-/// Inert when homemade raft is off or openraft is preferred.
-fn default_metadata_raft_wait_commit() -> bool {
-    match std::env::var("VOLANT_METADATA_RAFT_WAIT_COMMIT") {
+fn env_flag_on(name: &str) -> bool {
+    match std::env::var(name) {
         Ok(s) => {
             let t = s.trim();
-            !(t == "0"
-                || t.eq_ignore_ascii_case("false")
-                || t.eq_ignore_ascii_case("no")
-                || t.eq_ignore_ascii_case("off"))
+            t == "1"
+                || t.eq_ignore_ascii_case("true")
+                || t.eq_ignore_ascii_case("yes")
+                || t.eq_ignore_ascii_case("on")
         }
-        Err(_) => true,
+        Err(_) => false,
     }
 }
 

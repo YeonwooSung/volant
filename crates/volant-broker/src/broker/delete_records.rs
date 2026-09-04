@@ -1,4 +1,4 @@
-//! DeleteRecords, truncate-journal, and assignment/metadata-raft accessors.
+//! DeleteRecords, truncate-journal, and assignment consensus accessors.
 
 use std::collections::{HashMap, HashSet};
 use std::sync::atomic::Ordering;
@@ -8,7 +8,7 @@ use tracing::warn;
 use volant_core::{Error, Offset, PartitionId, Result, TopicName};
 use volant_protocol::{ClusterTopicState, ErrorCode};
 
-use crate::cluster::{AssignmentConsensus, MetadataCommand, MetadataLogEntry, MetadataRaftState};
+use crate::cluster::AssignmentConsensus;
 use crate::cluster_admin::{ClusterAdminFile, ClusterAdminStore};
 use crate::delete_records_outbox::DeleteRecordsOutbox;
 
@@ -457,158 +457,18 @@ impl Broker {
         }
     }
 
-    /// Phase 154: metadata Raft log state.
-    pub fn metadata_raft(&self) -> &MetadataRaftState {
-        &self.metadata_raft
-    }
-
-    /// Phase 154: whether admin paths use the metadata Raft log.
-    pub fn metadata_raft_enabled(&self) -> bool {
-        self.metadata_raft_enabled.load(Ordering::Relaxed)
-    }
-
-    /// Phase 154: runtime toggle for tests / ops.
-    pub fn set_metadata_raft_enabled(&self, enabled: bool) {
-        self.metadata_raft_enabled.store(enabled, Ordering::Relaxed);
-    }
-
-    /// v0.40: whether homemade 154 waits for `commit_index` before client ok.
-    ///
-    /// Default **on**. Inert unless homemade raft is on and openraft is off.
-    pub fn metadata_raft_wait_commit(&self) -> bool {
-        self.metadata_raft_wait_commit.load(Ordering::Relaxed)
-    }
-
-    /// v0.40: runtime toggle (`0` env restores 154 mutate-first).
-    pub fn set_metadata_raft_wait_commit(&self, wait: bool) {
-        self.metadata_raft_wait_commit
-            .store(wait, Ordering::Relaxed);
-    }
-
     /// Whether a CreateTopic / DeleteTopic / CreatePartitions majority miss
     /// must fail the client and roll back live assignment.
     ///
-    /// True when Phase 150 wait, Phase 152 committed-only, homemade 154
-    /// wait-commit (v0.40), or Phase 155 openraft cluster SoT is on.
+    /// True when Phase 150 wait, Phase 152 committed-only, or Phase 155
+    /// openraft cluster SoT is on.
     ///
     /// Openraft + no cluster (or N&lt;2 so raft never boots) does not wait:
     /// `client_write_set_assignment` is a no-op success in that case.
     pub fn assignment_must_wait(&self) -> bool {
         self.assignment_consensus_wait()
             || self.assignment_metadata_committed_only()
-            || (self.metadata_raft_enabled()
-                && !self.openraft_metadata_enabled()
-                && self.metadata_raft_wait_commit())
             || (self.openraft_metadata_enabled() && self.cluster_config().is_some())
-    }
-
-    /// Phase 154: current metadata Raft term.
-    pub fn metadata_raft_term(&self) -> u64 {
-        self.metadata_raft.current_term()
-    }
-
-    /// Phase 154: metadata Raft commit index.
-    pub fn metadata_raft_commit_index(&self) -> u64 {
-        self.metadata_raft.commit_index()
-    }
-
-    /// Phase 154: metadata Raft last applied index.
-    pub fn metadata_raft_last_applied(&self) -> u64 {
-        self.metadata_raft.last_applied()
-    }
-
-    /// Phase 154: append success total.
-    pub fn metadata_raft_append_success_total(&self) -> u64 {
-        self.metadata_raft.append_success_total()
-    }
-
-    /// Phase 154: append fail total.
-    pub fn metadata_raft_append_fail_total(&self) -> u64 {
-        self.metadata_raft.append_fail_total()
-    }
-
-    /// Phase 154: handle peer `MetadataRaftAppend` (simplified AppendEntries).
-    ///
-    /// On success, advances peer log/commit and applies committed
-    /// `SetAssignment` entries to live assignment + Phase 152 committed snap.
-    ///
-    /// v0.214: when homemade 154 is off, reject without persisting or applying.
-    pub fn handle_metadata_raft_append(
-        &self,
-        leader_id: u32,
-        term: u64,
-        prev_log_index: u64,
-        prev_log_term: u64,
-        entries: &[MetadataLogEntry],
-        leader_commit: u64,
-    ) -> (u64, bool, u64) {
-        let _ = leader_id;
-        if !self.metadata_raft_enabled() {
-            return (
-                self.metadata_raft.current_term(),
-                false,
-                self.metadata_raft.last_index(),
-            );
-        }
-        let r = self.metadata_raft.append_entries(
-            term,
-            prev_log_index,
-            prev_log_term,
-            entries,
-            leader_commit,
-        );
-        if r.success {
-            self.apply_committed_metadata_entries();
-        }
-        (r.term, r.success, r.match_index)
-    }
-
-    /// Phase 154: apply committed-but-unapplied log entries to assignment.
-    ///
-    /// Also bumps Phase 152 `assignment_consensus` committed snapshot for
-    /// metrics/Metadata compatibility.
-    pub fn apply_committed_metadata_entries(&self) {
-        let controller_id = self.controller_id();
-        for entry in self.metadata_raft.take_entries_to_apply() {
-            match &entry.payload {
-                MetadataCommand::SetAssignment { generation, topics } => {
-                    if self.cluster.is_some() {
-                        if let Err(e) = self.apply_cluster_state(*generation, controller_id, topics)
-                        {
-                            warn!(
-                                error = %e,
-                                index = entry.index,
-                                generation,
-                                "metadata raft apply SetAssignment failed"
-                            );
-                            continue;
-                        }
-                    }
-                    // Phase 152 compatibility: committed snapshot + gen.
-                    if let Some(cluster) = &self.cluster {
-                        let snap = cluster.assignment.read().clone();
-                        self.assignment_consensus
-                            .note_committed_snapshot(*generation, &snap);
-                    } else {
-                        // Single-node: still advance consensus gens for metrics.
-                        self.assignment_consensus.commit(*generation);
-                    }
-                }
-                MetadataCommand::Noop => {}
-            }
-        }
-    }
-
-    /// Phase 154: leader helper — append current live assignment as a log entry.
-    pub fn append_assignment_to_metadata_log(&self) -> MetadataLogEntry {
-        let (generation, topics) = if let Some(cluster) = &self.cluster {
-            let asg = cluster.assignment.read();
-            (asg.generation, asg.to_wire_topics())
-        } else {
-            (0, vec![])
-        };
-        self.metadata_raft
-            .append_command(MetadataCommand::SetAssignment { generation, topics })
     }
 
     /// Phase 130: majority consensus failure count.

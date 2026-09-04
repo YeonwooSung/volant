@@ -9,7 +9,10 @@ use std::time::Duration;
 
 use common::cluster::{bind_port0, cluster_config_n2, default_storage, rpc_seq, unique_dir, Guard};
 use volant_broker::{serve_listener, start_background_tasks, Broker};
-use volant_protocol::{Request, Response};
+use volant_protocol::{
+    metadata_raft_cmd, ClusterPartitionState, ClusterTopicState, ErrorCode, MetadataRaftLogEntry,
+    Request, Response,
+};
 
 fn assignment_json_has_topic(data_dir: &std::path::Path, topic: &str) -> bool {
     let path = data_dir.join("cluster").join("assignment.json");
@@ -38,15 +41,11 @@ async fn n2_one_dead_admin_succeeds_on_assignment_json() {
         Arc::new(b)
     };
 
-    // v0.2 shipped defaults (do not set flags): raft off, committed-only off,
-    // wait off, consensus on.
-    assert!(
-        !b1.metadata_raft_enabled(),
-        "VOLANT_METADATA_RAFT must default off"
-    );
+    // v0.2 / v0.222 shipped defaults (do not set flags): homemade 154 gone,
+    // committed-only off, wait off, consensus on.
     assert!(
         !data_dir.join("__metadata_raft").exists(),
-        "default-off broker must not create __metadata_raft"
+        "broker must not create __metadata_raft"
     );
     assert!(
         !b1.assignment_metadata_committed_only(),
@@ -153,4 +152,67 @@ async fn n2_one_dead_admin_succeeds_on_assignment_json() {
     );
 
     s1.abort();
+}
+
+/// v0.222: inbound opcode 98 must not apply SetAssignment or create
+/// `{data_dir}/__metadata_raft/`.
+#[tokio::test]
+async fn inbound_98_does_not_apply_set_assignment() {
+    let base = unique_dir("v02", "inbound98");
+    let _g = Guard(base.clone());
+
+    let cfg = cluster_config_n2([19_092, 19_093]);
+    let data_dir = base.join("n1");
+    let broker = Arc::new(Broker::with_cluster(default_storage(data_dir.clone()), 1, cfg).unwrap());
+
+    let resp = volant_broker::net::dispatch_request(
+        &broker,
+        Request::MetadataRaftAppend {
+            leader_id: 1,
+            term: 1,
+            prev_log_index: 0,
+            prev_log_term: 0,
+            entries: vec![MetadataRaftLogEntry {
+                term: 1,
+                index: 1,
+                command_kind: metadata_raft_cmd::SET_ASSIGNMENT,
+                generation: 1,
+                topics: vec![ClusterTopicState {
+                    name: "t".into(),
+                    topic_id: 1,
+                    partitions: vec![ClusterPartitionState {
+                        partition_id: 0,
+                        leader: 1,
+                        leader_epoch: 0,
+                        replicas: vec![1],
+                        isr: vec![1],
+                    }],
+                }],
+            }],
+            leader_commit: 1,
+        },
+    )
+    .await;
+    match resp {
+        Response::Error { code, message } => {
+            assert_eq!(
+                code,
+                ErrorCode::Protocol as u16,
+                "inbound 98 must be a protocol error"
+            );
+            assert!(
+                message.contains("metadata raft not enabled"),
+                "unexpected protocol message: {message}"
+            );
+        }
+        other => panic!("inbound 98 expected protocol reject, got {other:?}"),
+    }
+    assert!(
+        broker.partition_count_opt("t").is_none(),
+        "inbound 98 must not apply SetAssignment"
+    );
+    assert!(
+        !data_dir.join("__metadata_raft").exists(),
+        "inbound 98 must not create __metadata_raft"
+    );
 }

@@ -768,41 +768,6 @@ fn broker_metrics_text(broker: &Broker) -> String {
         "volant_assignment_generation_lag {}\n",
         broker.assignment_generation_lag()
     ));
-    // Phase 154: KRaft-style metadata Raft log.
-    text.push_str("# HELP volant_metadata_raft_term Metadata Raft current term\n");
-    text.push_str("# TYPE volant_metadata_raft_term gauge\n");
-    text.push_str(&format!(
-        "volant_metadata_raft_term {}\n",
-        broker.metadata_raft_term()
-    ));
-    text.push_str("# HELP volant_metadata_raft_commit_index Metadata Raft commit index\n");
-    text.push_str("# TYPE volant_metadata_raft_commit_index gauge\n");
-    text.push_str(&format!(
-        "volant_metadata_raft_commit_index {}\n",
-        broker.metadata_raft_commit_index()
-    ));
-    text.push_str("# HELP volant_metadata_raft_last_applied Metadata Raft last applied index\n");
-    text.push_str("# TYPE volant_metadata_raft_last_applied gauge\n");
-    text.push_str(&format!(
-        "volant_metadata_raft_last_applied {}\n",
-        broker.metadata_raft_last_applied()
-    ));
-    text.push_str(
-        "# HELP volant_metadata_raft_append_success_total Majority metadata Raft appends\n",
-    );
-    text.push_str("# TYPE volant_metadata_raft_append_success_total counter\n");
-    text.push_str(&format!(
-        "volant_metadata_raft_append_success_total {}\n",
-        broker.metadata_raft_append_success_total()
-    ));
-    text.push_str(
-        "# HELP volant_metadata_raft_append_fail_total Metadata Raft appends without majority\n",
-    );
-    text.push_str("# TYPE volant_metadata_raft_append_fail_total counter\n");
-    text.push_str(&format!(
-        "volant_metadata_raft_append_fail_total {}\n",
-        broker.metadata_raft_append_fail_total()
-    ));
     // v0.11: opt-in openraft metadata election.
     text.push_str(
         "# HELP volant_openraft_leader_id Openraft metadata leader broker id (0 if none)\n",
