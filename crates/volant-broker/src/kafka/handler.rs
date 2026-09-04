@@ -275,7 +275,8 @@ async fn dispatch_kafka(
                 | Some(ApiKey::AssignReplicasToDirs)
                 | Some(ApiKey::GetTelemetrySubscriptions)
                 | Some(ApiKey::PushTelemetry)
-                | Some(ApiKey::AlterPartition),
+                | Some(ApiKey::AlterPartition)
+                | Some(ApiKey::CreateDelegationToken),
             _
         )
     ) || matches!(
@@ -733,6 +734,12 @@ async fn dispatch_kafka(
         }
         Some(ApiKey::OffsetDelete) if hdr.api_version == 0 => {
             group_api::encode_offset_delete(broker, &mut src, &mut out, principal);
+        }
+        Some(ApiKey::CreateDelegationToken) if hdr.api_version == 0 => {
+            if let Err(e) = skip_tag_buffer(&mut src) {
+                debug!(error = %e, "create delegation token flexible header tag buffer");
+            }
+            admin_api::encode_create_delegation_token(broker, &mut src, &mut out, principal);
         }
         Some(ApiKey::CreatePartitions) if (0..=3).contains(&hdr.api_version) => {
             if hdr.api_version >= 2 {
