@@ -56,6 +56,7 @@
 //! RemoveRaftVoter v0 (key 81 reject; not KRaft / not remove_broker),
 //! UpdateRaftVoter v0 (key 82 reject; not KRaft voter set),
 //! InitializeShareGroupState v0 (key 83 reject; not KIP-932 share state),
+//! DescribeShareGroupOffsets v0 (key 90 reject; not KIP-932 share offsets),
 //! UnregisterController v0 (key 94 reject; not KRaft / not UnregisterBroker),
 //! ShareFetch v1 (key 78 reject; not KIP-932 share fetch / not Fetch 1).
 //! See `docs/PHASE23_SPEC.md` … `docs/PHASE91_SPEC.md`, `docs/V225_SPEC.md`,
@@ -71,7 +72,7 @@
 //! `docs/V269_SPEC.md`, `docs/V270_SPEC.md`, `docs/V271_SPEC.md`,
 //! `docs/V272_SPEC.md`, `docs/V273_SPEC.md`, `docs/V274_SPEC.md`,
 //! `docs/V275_SPEC.md`, `docs/V276_SPEC.md`, `docs/V277_SPEC.md`,
-//! `docs/V278_SPEC.md`, and `docs/V279_SPEC.md`.
+//! `docs/V278_SPEC.md`, `docs/V279_SPEC.md`, and `docs/V284_SPEC.md`.
 
 mod acl_api;
 mod admin_api;
@@ -465,6 +466,12 @@ pub enum ApiKey {
     /// reject: not KIP-932 share-partition state. Does not persist
     /// share state and does not wrap OffsetCommit.
     InitializeShareGroupState = 83,
+    /// DescribeShareGroupOffsets (always flexible; v0 only). Honest
+    /// reject: not KIP-932 share offsets. Does not persist and does
+    /// not wrap OffsetFetch 9 / describe_group / ConsumerGroupDescribe
+    /// 69 / ShareGroupDescribe 77. Official validVersions is 0–1
+    /// (v1 adds Lag / KIP-1226); Volant advertises 0 only.
+    DescribeShareGroupOffsets = 90,
     /// UnregisterController (always flexible; v0 only). Honest reject:
     /// not a KRaft controller (no unregister record). Does not wrap
     /// native `remove_broker`. Overlay membership is unchanged.
@@ -552,6 +559,7 @@ impl ApiKey {
             81 => Some(Self::RemoveRaftVoter),
             82 => Some(Self::UpdateRaftVoter),
             83 => Some(Self::InitializeShareGroupState),
+            90 => Some(Self::DescribeShareGroupOffsets),
             94 => Some(Self::UnregisterController),
             _ => None,
         }
@@ -638,6 +646,7 @@ pub const SUPPORTED_APIS: &[(ApiKey, i16, i16)] = &[
     (ApiKey::RemoveRaftVoter, 0, 0),
     (ApiKey::UpdateRaftVoter, 0, 0),
     (ApiKey::InitializeShareGroupState, 0, 0),
+    (ApiKey::DescribeShareGroupOffsets, 0, 0),
     (ApiKey::UnregisterController, 0, 0),
 ];
 
@@ -952,9 +961,9 @@ mod tests {
     #[test]
     fn supported_apis_includes_share_group_heartbeat_76() {
         assert!(SUPPORTED_APIS.len() >= 75);
-        assert!(SUPPORTED_APIS.iter().any(|(k, min, max)| {
-            *k == ApiKey::ShareGroupHeartbeat && *min == 1 && *max == 1
-        }));
+        assert!(SUPPORTED_APIS
+            .iter()
+            .any(|(k, min, max)| { *k == ApiKey::ShareGroupHeartbeat && *min == 1 && *max == 1 }));
         assert_eq!(ApiKey::from_i16(76), Some(ApiKey::ShareGroupHeartbeat));
         assert_eq!(ApiKey::from_i16(75), Some(ApiKey::DescribeTopicPartitions));
         assert_eq!(ApiKey::from_i16(68), Some(ApiKey::ConsumerGroupHeartbeat));
@@ -1025,6 +1034,23 @@ mod tests {
     }
 
     #[test]
+    fn supported_apis_includes_describe_share_group_offsets_90() {
+        assert!(SUPPORTED_APIS.len() >= 80);
+        assert!(SUPPORTED_APIS.iter().any(|(k, min, max)| {
+            *k == ApiKey::DescribeShareGroupOffsets && *min == 0 && *max == 0
+        }));
+        assert_eq!(
+            ApiKey::from_i16(90),
+            Some(ApiKey::DescribeShareGroupOffsets)
+        );
+        assert_eq!(
+            ApiKey::from_i16(83),
+            Some(ApiKey::InitializeShareGroupState)
+        );
+        assert_eq!(ApiKey::from_i16(94), Some(ApiKey::UnregisterController));
+    }
+
+    #[test]
     fn supported_apis_includes_unregister_controller_94() {
         assert!(SUPPORTED_APIS.len() >= 70);
         assert!(SUPPORTED_APIS
@@ -1038,9 +1064,9 @@ mod tests {
     #[test]
     fn supported_apis_includes_share_group_describe_77() {
         assert!(SUPPORTED_APIS.len() >= 75);
-        assert!(SUPPORTED_APIS.iter().any(|(k, min, max)| {
-            *k == ApiKey::ShareGroupDescribe && *min == 1 && *max == 1
-        }));
+        assert!(SUPPORTED_APIS
+            .iter()
+            .any(|(k, min, max)| { *k == ApiKey::ShareGroupDescribe && *min == 1 && *max == 1 }));
         assert_eq!(ApiKey::from_i16(77), Some(ApiKey::ShareGroupDescribe));
         assert_eq!(ApiKey::from_i16(75), Some(ApiKey::DescribeTopicPartitions));
         assert_eq!(ApiKey::from_i16(80), Some(ApiKey::AddRaftVoter));
