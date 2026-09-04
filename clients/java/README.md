@@ -106,6 +106,7 @@ try (Client c = Client.connect("127.0.0.1", 9092)) {
   c.reconnect("127.0.0.1", 9093); // v0.115; re-Auth / re-SCRAM
   c.timeoutMs(); // v0.195; dial / RPC timeout (connect default 10000)
   c.authToken(); // v0.200; shared-token Auth (null if none)
+  c.scramUsername(); // v0.202; SCRAM-SHA-256 username (null if none; password not exposed)
 }
 
 // Optional TLS (v0.27). connect() stays plaintext.
@@ -319,6 +320,8 @@ SCRAM-SHA-256 (v0.46): `connectScram` / `connectTlsScram` send opcodes
 `IllegalArgumentException` before connect. A rejected proof or
 server-signature mismatch fails the constructor. Leader redirect
 re-runs the same auth path.
+`scramUsername()` (v0.202) returns the stored SCRAM-SHA-256 username,
+or `null` if none; it does not send SCRAM. The password stays private.
 Transient 6 / 7 / 15 / 16 and TCP/IO retry the whole handshake from first with a new nonce (v0.108; default `maxRetries=0`).
 Create/Delete/ListScramUsers (v0.55) are admin RPCs (opcodes 64–69),
 not the handshake. `createScramUser` sends the password in the clear

@@ -415,6 +415,11 @@ public final class Client implements AutoCloseable {
         return authToken;
     }
 
+    /** SCRAM-SHA-256 username, or {@code null} if none. */
+    public String scramUsername() {
+        return scramUsername;
+    }
+
     @Override
     public void close() {
         Socket s = socket;

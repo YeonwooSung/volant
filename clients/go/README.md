@@ -132,6 +132,7 @@ _ = c.Addr()                      // v0.183; current broker host:port (updated b
 _ = c.MaxRedirects()              // v0.191; NotLeader/NotController redirect budget (default 1)
 _ = c.Timeout()                   // v0.195; dial / RPC timeout (Dial default 10s)
 _ = c.AuthToken()                 // v0.200; shared-token Auth (empty if none)
+_ = c.ScramUser()                 // v0.202; SCRAM-SHA-256 username (empty if none; password not exposed)
 _ = off
 _ = meta
 
@@ -371,6 +372,8 @@ SCRAM-SHA-256 (v0.46): `DialScram` / `DialTLSScram` send opcodes 60
 then 62 after connect. Empty user or password is an error before
 dial. A rejected proof or server-signature mismatch fails Dial.
 Leader redirect re-runs the same auth path.
+`ScramUser()` (v0.202) returns the stored SCRAM-SHA-256 username, or
+empty if none; it does not send SCRAM. The password stays private.
 Transient 6 / 7 / 15 / 16 and TCP/IO retry the whole handshake from first with a new nonce (v0.108; default `max_retries=0`).
 Create/Delete/ListScramUsers (v0.55) are admin RPCs (opcodes 64–69),
 not the handshake. `CreateScramUser` sends the password in the clear
