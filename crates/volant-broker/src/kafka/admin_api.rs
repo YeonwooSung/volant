@@ -1,8 +1,8 @@
 //! Kafka wire handlers: Create/Delete topics, CreatePartitions,
 //! AlterPartitionReassignments, ListPartitionReassignments,
 //! ElectLeaders, Describe/AlterUserScramCredentials,
-//! Describe/AlterClientQuotas, AlterReplicaLogDirs, DescribeLogDirs,
-//! DescribeTopicPartitions, UnregisterBroker, UpdateFeatures,
+//! Describe/AlterClientQuotas, AlterReplicaLogDirs, AssignReplicasToDirs,
+//! DescribeLogDirs, DescribeTopicPartitions, UnregisterBroker, UpdateFeatures,
 //! DescribeQuorum, AllocateProducerIds, configs.
 
 use bytes::{Buf, BufMut, BytesMut};
@@ -18,7 +18,7 @@ use super::codec::{
     get_compact_array_len, get_compact_bytes, get_compact_nullable_string, get_compact_string,
     get_nullable_string, get_string, get_uuid, put_compact_array_len, put_compact_nullable_string,
     put_compact_string, put_empty_tag_buffer, put_nullable_string, put_string, put_unsigned_varint,
-    skip_tag_buffer, KAFKA_UUID_ZERO,
+    put_uuid, skip_tag_buffer, KAFKA_UUID_ZERO,
 };
 use super::topic_id;
 use super::KafkaErrorCode;
@@ -3045,6 +3045,136 @@ pub(crate) fn encode_allocate_producer_ids(
     write(out, KafkaErrorCode::None, start as i64, len as i32);
 }
 
+/// One topic's partitions from an AssignReplicasToDirs request.
+struct AssignReplicasToDirsTopic {
+    topic_id: [u8; 16],
+    partitions: Vec<i32>,
+}
+
+/// One directory assignment from an AssignReplicasToDirs request.
+struct AssignReplicasToDirsDirectory {
+    id: [u8; 16],
+    topics: Vec<AssignReplicasToDirsTopic>,
+}
+
+/// AssignReplicasToDirs v0 (always flexible). Single `data_dir`.
+///
+/// Parses the request and rejects every assignment with **42**
+/// `INVALID_REQUEST`. Does not move files. Does not invent DirectoryId
+/// storage. Not KRaft. BrokerId / BrokerEpoch are parsed and ignored.
+/// Controller is not required (local dirs). ACL: Cluster **ALTER**
+/// (disabled ACLs allow). Denied → top-level **31**, empty directories.
+pub(crate) fn encode_assign_replicas_to_dirs(
+    broker: &Broker,
+    src: &mut impl Buf,
+    out: &mut BytesMut,
+    principal: &str,
+) {
+    let directories = parse_assign_replicas_to_dirs(src);
+
+    if broker.acls().is_enabled()
+        && !broker.acls().authorize(
+            Some(principal),
+            ResourceType::Cluster,
+            CLUSTER_RESOURCE,
+            AclOperation::Alter,
+        )
+    {
+        write_assign_replicas_to_dirs(out, KafkaErrorCode::ClusterAuthorizationFailed, &[]);
+        return;
+    }
+
+    // Resolve TopicIds for honesty; unknown ids are still echoed with 42
+    // (do not fail the whole request).
+    for d in &directories {
+        for t in &d.topics {
+            let _ = topic_id::name_for_uuid(broker, &t.topic_id);
+        }
+    }
+
+    write_assign_replicas_to_dirs(out, KafkaErrorCode::None, &directories);
+}
+
+fn write_assign_replicas_to_dirs(
+    out: &mut BytesMut,
+    top: KafkaErrorCode,
+    directories: &[AssignReplicasToDirsDirectory],
+) {
+    out.put_i32(0); // throttleTimeMs
+    out.put_i16(top.as_i16());
+    put_compact_array_len(out, directories.len());
+    for d in directories {
+        put_uuid(out, &d.id);
+        put_compact_array_len(out, d.topics.len());
+        for t in &d.topics {
+            put_uuid(out, &t.topic_id);
+            put_compact_array_len(out, t.partitions.len());
+            for &p in &t.partitions {
+                out.put_i32(p);
+                out.put_i16(KafkaErrorCode::InvalidRequest.as_i16());
+                put_empty_tag_buffer(out);
+            }
+            put_empty_tag_buffer(out);
+        }
+        put_empty_tag_buffer(out);
+    }
+    put_empty_tag_buffer(out);
+}
+
+fn parse_assign_replicas_to_dirs(src: &mut impl Buf) -> Vec<AssignReplicasToDirsDirectory> {
+    let mut directories = Vec::new();
+    if src.remaining() < 4 + 8 {
+        return directories;
+    }
+    let _broker_id = src.get_i32();
+    let _broker_epoch = src.get_i64();
+
+    match get_compact_array_len(src) {
+        Ok(Some(n)) => {
+            for _ in 0..n {
+                let id = match get_uuid(src) {
+                    Ok(u) => u,
+                    Err(_) => break,
+                };
+                let mut topics = Vec::new();
+                match get_compact_array_len(src) {
+                    Ok(Some(tn)) => {
+                        for _ in 0..tn {
+                            let topic_id = match get_uuid(src) {
+                                Ok(u) => u,
+                                Err(_) => break,
+                            };
+                            let mut partitions = Vec::new();
+                            match get_compact_array_len(src) {
+                                Ok(Some(pc)) => {
+                                    for _ in 0..pc {
+                                        if src.remaining() < 4 {
+                                            break;
+                                        }
+                                        partitions.push(src.get_i32());
+                                    }
+                                }
+                                Ok(None) | Err(_) => {}
+                            }
+                            let _ = skip_tag_buffer(src);
+                            topics.push(AssignReplicasToDirsTopic {
+                                topic_id,
+                                partitions,
+                            });
+                        }
+                    }
+                    Ok(None) | Err(_) => {}
+                }
+                let _ = skip_tag_buffer(src);
+                directories.push(AssignReplicasToDirsDirectory { id, topics });
+            }
+        }
+        Ok(None) | Err(_) => {}
+    }
+    let _ = skip_tag_buffer(src);
+    directories
+}
+
 /// One topic's partitions from an AlterReplicaLogDirs request.
 struct AlterReplicaLogDirTopic {
     name: String,
@@ -4268,6 +4398,63 @@ mod tests {
 
         assert_eq!(snapshot_dir(&dir), before, "must not move replica files");
         assert!(!dest.exists(), "must not create a destination log dir");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    fn assign_replicas_to_dirs_v0(
+        broker_id: i32,
+        broker_epoch: i64,
+        dir_id: &[u8; 16],
+        topic_id: &[u8; 16],
+        partitions: &[i32],
+    ) -> BytesMut {
+        let mut body = BytesMut::new();
+        body.put_i32(broker_id);
+        body.put_i64(broker_epoch);
+        put_compact_array_len(&mut body, 1);
+        put_uuid(&mut body, dir_id);
+        put_compact_array_len(&mut body, 1);
+        put_uuid(&mut body, topic_id);
+        put_compact_array_len(&mut body, partitions.len());
+        for &p in partitions {
+            body.put_i32(p);
+        }
+        put_empty_tag_buffer(&mut body);
+        put_empty_tag_buffer(&mut body);
+        put_empty_tag_buffer(&mut body);
+        body
+    }
+
+    #[test]
+    fn kafka_assign_replicas_to_dirs_rejects_and_does_not_move() {
+        let dir = temp_dir("artd");
+        let broker = Broker::new(StorageConfig {
+            data_dir: dir.clone(),
+            ..StorageConfig::default()
+        });
+        broker.create_topic("events", 1).unwrap();
+        let topic_uuid = topic_id::uuid_for_name(&broker, "events");
+        let dir_id = [
+            0x11, 0x22, 0x33, 0x44, 0x55, 0x66, 0x77, 0x88, 0x99, 0xaa, 0xbb, 0xcc, 0xdd, 0xee,
+            0xff, 0x01,
+        ];
+        let before = snapshot_dir(&dir);
+
+        let mut src = assign_replicas_to_dirs_v0(0, 0, &dir_id, &topic_uuid, &[0]);
+        let mut out = BytesMut::new();
+        encode_assign_replicas_to_dirs(&broker, &mut src, &mut out, "kafka-anonymous");
+        let mut resp = out.freeze();
+        assert_eq!(resp.get_i32(), 0); // throttle
+        assert_eq!(resp.get_i16(), 0); // top-level
+        assert_eq!(get_compact_array_len(&mut resp).unwrap(), Some(1));
+        assert_eq!(get_uuid(&mut resp).unwrap(), dir_id);
+        assert_eq!(get_compact_array_len(&mut resp).unwrap(), Some(1));
+        assert_eq!(get_uuid(&mut resp).unwrap(), topic_uuid);
+        assert_eq!(get_compact_array_len(&mut resp).unwrap(), Some(1));
+        assert_eq!(resp.get_i32(), 0);
+        assert_eq!(resp.get_i16(), KafkaErrorCode::InvalidRequest.as_i16());
+
+        assert_eq!(snapshot_dir(&dir), before, "must not move replica files");
         let _ = std::fs::remove_dir_all(&dir);
     }
 }

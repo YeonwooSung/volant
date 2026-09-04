@@ -72,6 +72,7 @@ From `SUPPORTED_APIS` in `crates/volant-broker/src/kafka/mod.rs`:
 | 65 | DescribeTransactions | 0 | Always flex |
 | 66 | ListTransactions | 0–2 | Pattern = simple `*` glob |
 | 67 | AllocateProducerIds | 0 | Always flex; block of 1000 from `next_producer_id`; BrokerEpoch ignored; not KRaft; controller-only in cluster (**41**); Cluster ALTER (v0.246) |
+| 73 | AssignReplicasToDirs | 0 | Always flex; parse and reject every assignment (**42**); single `data_dir`; files unmoved; no DirectoryId storage; not KRaft; Cluster ALTER; controller not required (v0.251) |
 | 75 | DescribeTopicPartitions | 0 | Always flex; wraps Metadata (same leaders/ISR/epochs/TopicId); no ELR; simple `responsePartitionLimit` truncate; cursor start if topic is in the set else ignored (v0.237) |
 
 ## Wire evolution (summary)
@@ -150,6 +151,7 @@ These are **current** product facts, not temporary docs lag:
 | DescribeQuorum | **v0–1 wrap** (v0.245): key **55** advertised (always flex). Wraps `openraft_leader_id` / `openraft_term` / `openraft_voter_ids`. Not KRaft `__cluster_metadata` (no invented metadata topic). Empty request topics → one synthetic cluster partition **0** (empty name) when raft is started. Raft off / not started → top-level **0**, empty topics. Cluster non-controller → **41**. `logEndOffset` / `highWatermark` = local LEO/HWM if the requested topic exists locally else **0**. `lastFetch` / `lastCaughtUp` = **-1**. No v2 Nodes / DirectoryId. Cluster DESCRIBE. v2+ → **35** |
 | AllocateProducerIds | **v0 wrap** (v0.246): key **67** advertised (always flex). Block of **1000** from `next_producer_id` (`fetch_add` + persist `__producer_state` like InitProducerId). BrokerEpoch parsed and **ignored**. Not KRaft fencing. Controller only in cluster (**41**); single-node allowed. ACL Cluster ALTER. v1+ → **35** |
 | AlterReplicaLogDirs | **v0–1 reject** (v0.249): key **34** advertised. Single `data_dir`. Parse request; every partition **42** `INVALID_REQUEST` (`single data_dir; replica move not supported`). Does **not** move files. Not multi-log.dirs. Controller not required. Official Kafka first flexible is **2**; Volant v1 is flexible. DescribeLogDirs (35) unchanged. ACL Cluster ALTER or Topic ALTER. v2+ → **35** |
+| AssignReplicasToDirs | **v0 reject** (v0.251): key **73** advertised (always flex). Single `data_dir`. Parse request; every partition **42** `INVALID_REQUEST` (`single data_dir; directory assignment not supported`). Does **not** move files. Does **not** invent DirectoryId storage. Not KRaft. BrokerEpoch ignored. Controller not required. ACL Cluster ALTER (deny → top-level **31**, empty directories). v1+ → **35** |
 | Missing APIs | Large Kafka surface still unsupported (GSSAPI, OAUTH, …) |
 
 ## Related

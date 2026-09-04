@@ -21,6 +21,7 @@
 //! DescribeUserScramCredentials / AlterUserScramCredentials v0 (wraps ScramStore),
 //! DescribeClientQuotas / AlterClientQuotas v0 (no quota store; describe empty, alter 42),
 //! AlterReplicaLogDirs 0–1 (reject every move; single data_dir; v1 flexible),
+//! AssignReplicasToDirs v0 (always flexible; reject every assignment; single data_dir),
 //! DescribeLogDirs 0–1 (local logs only; v1 flexible),
 //! DescribeTopicPartitions v0 (wraps Metadata; key 75),
 //! UnregisterBroker v0 (wraps native remove_broker; key 64; not KRaft incarnation),
@@ -31,7 +32,7 @@
 //! `docs/V228_SPEC.md`, `docs/V233_SPEC.md`, `docs/V235_SPEC.md`,
 //! `docs/V236_SPEC.md`, `docs/V237_SPEC.md`, `docs/V241_SPEC.md`,
 //! `docs/V242_SPEC.md`, `docs/V244_SPEC.md`, `docs/V245_SPEC.md`,
-//! `docs/V246_SPEC.md`, and `docs/V249_SPEC.md`.
+//! `docs/V246_SPEC.md`, `docs/V249_SPEC.md`, and `docs/V251_SPEC.md`.
 
 mod acl_api;
 mod admin_api;
@@ -320,6 +321,9 @@ pub enum ApiKey {
     /// AllocateProducerIds (always flexible; v0 only). Block from
     /// `next_producer_id`. BrokerEpoch parsed and ignored. Not KRaft.
     AllocateProducerIds = 67,
+    /// AssignReplicasToDirs (always flexible; v0 only). Single `data_dir`;
+    /// every assignment is rejected. Not KRaft DirectoryId.
+    AssignReplicasToDirs = 73,
     /// DescribeTopicPartitions (always flexible; v0 only).
     DescribeTopicPartitions = 75,
 }
@@ -378,6 +382,7 @@ impl ApiKey {
             65 => Some(Self::DescribeTransactions),
             66 => Some(Self::ListTransactions),
             67 => Some(Self::AllocateProducerIds),
+            73 => Some(Self::AssignReplicasToDirs),
             75 => Some(Self::DescribeTopicPartitions),
             _ => None,
         }
@@ -437,6 +442,7 @@ pub const SUPPORTED_APIS: &[(ApiKey, i16, i16)] = &[
     (ApiKey::DescribeTransactions, 0, 0),
     (ApiKey::ListTransactions, 0, 2),
     (ApiKey::AllocateProducerIds, 0, 0),
+    (ApiKey::AssignReplicasToDirs, 0, 0),
     (ApiKey::DescribeTopicPartitions, 0, 0),
 ];
 
@@ -563,5 +569,14 @@ mod tests {
             *k == ApiKey::AllocateProducerIds && *min == 0 && *max == 0
         }));
         assert_eq!(ApiKey::from_i16(67), Some(ApiKey::AllocateProducerIds));
+    }
+
+    #[test]
+    fn supported_apis_includes_assign_replicas_to_dirs_73() {
+        assert!(SUPPORTED_APIS.len() >= 53);
+        assert!(SUPPORTED_APIS.iter().any(|(k, min, max)| {
+            *k == ApiKey::AssignReplicasToDirs && *min == 0 && *max == 0
+        }));
+        assert_eq!(ApiKey::from_i16(73), Some(ApiKey::AssignReplicasToDirs));
     }
 }
