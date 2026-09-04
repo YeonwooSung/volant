@@ -343,6 +343,15 @@ func (c *Client) SetRetryBackoff(d time.Duration) {
 	c.retryBackoff = d
 }
 
+// RetryBackoff returns the sleep between produce/fetch retries
+// (default 50ms).
+func (c *Client) RetryBackoff() time.Duration {
+	if c == nil {
+		return 0
+	}
+	return c.retryBackoff
+}
+
 // SetAcks sets the default produce acks used by Produce and
 // ProduceBatchDefault. 1 = leader only; 255 = acks=all (ISR).
 // Default is 1. ProduceAcks / ProduceBatch stay explicit.
