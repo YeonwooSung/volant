@@ -144,6 +144,7 @@ async fn serve_stub(
                                 partition: 0,
                             }],
                             revoked: vec![],
+                            members: vec![],
                         },
                         Request::OffsetFetch { .. } => Response::OffsetFetch {
                             error_code: 0,

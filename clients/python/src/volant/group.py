@@ -202,7 +202,8 @@ class GroupConsumer:
         ``heartbeat=False`` keeps v0.31 poll-only heartbeats.
         ``assignor`` is ``"broker"`` (default: honor JoinGroup assignment)
         or ``"range"`` (replace the fetch set with a local range over
-        DescribeGroup members; still no SyncGroup). Unknown values raise
+        JoinGroup members, else DescribeGroup; still no SyncGroup).
+        Unknown values raise
         ``ValueError``. Empty is ``"broker"``.
         ``auto_commit=False`` (default) keeps explicit ``commit()``. When
         on, a successful ``poll`` that returned records commits assigned
@@ -242,6 +243,16 @@ class GroupConsumer:
         this._start_heartbeat()
         return this
 
+    def _range_members_from_join(
+        self, result: JoinGroupResult
+    ) -> tuple[list[str], list[list[str]]]:
+        """JoinGroup trailer members for local range, or empty lists to fall back."""
+        members = list(getattr(result, "members", None) or [])
+        if not members:
+            return [], []
+        topics = [list(self._topics) for _ in members]
+        return members, topics
+
     def _range_members_from_describe(self) -> tuple[list[str], list[list[str]]]:
         """DescribeGroup members for local range, or empty lists to solo-fallback."""
         try:
@@ -266,12 +277,19 @@ class GroupConsumer:
             return [], []
         return ids, topics
 
-    def _local_range_assignment(self) -> list[tuple[str, int]]:
+    def _local_range_assignment(
+        self, result: JoinGroupResult | None = None
+    ) -> list[tuple[str, int]]:
         meta = self._client.metadata()
         counts: dict[str, int] = {}
         for topic in meta.topics:
             counts[topic.name] = len(topic.partitions)
-        member_ids, member_topics = self._range_members_from_describe()
+        member_ids: list[str] = []
+        member_topics: list[list[str]] = []
+        if result is not None:
+            member_ids, member_topics = self._range_members_from_join(result)
+        if not member_ids:
+            member_ids, member_topics = self._range_members_from_describe()
         if not member_ids:
             member_ids = [self._member_id]
             member_topics = [list(self._topics)]
@@ -302,7 +320,7 @@ class GroupConsumer:
         self._generation = result.generation
         new_assignment = [(a.topic, int(a.partition)) for a in result.assignment]
         if self._assignor == _ASSIGNOR_RANGE:
-            new_assignment = self._local_range_assignment()
+            new_assignment = self._local_range_assignment(result)
 
         old_set = set(previous)
         new_set = set(new_assignment)

@@ -87,6 +87,9 @@ pub struct JoinGroupResult {
     /// May be empty when the broker cannot observe the prior list; clients
     /// should also diff local old vs new assignment.
     pub revoked: Vec<Assignment>,
+    /// Live member ids at this generation (v0.211). Empty on legacy
+    /// payloads; range assignor then falls back to DescribeGroup.
+    pub members: Vec<String>,
 }
 
 /// Result of a Heartbeat call.
@@ -1749,6 +1752,7 @@ impl Client {
                     member_id,
                     assignment,
                     revoked,
+                    members,
                 } => {
                     if error_code == ErrorCode::NotController as u16
                         && redirects < max_redirects
@@ -1769,6 +1773,7 @@ impl Client {
                         member_id,
                         assignment,
                         revoked,
+                        members,
                     });
                 }
                 Response::Error { code, message } => {
@@ -1822,6 +1827,7 @@ impl Client {
                 member_id,
                 assignment,
                 revoked,
+                members,
             } => {
                 check_ok(error_code, "join_group")?;
                 Ok(JoinGroupResult {
@@ -1829,6 +1835,7 @@ impl Client {
                     member_id,
                     assignment,
                     revoked,
+                    members,
                 })
             }
             Response::Error { code, message } => Err(error_from_code(code, message)),

@@ -643,6 +643,7 @@ class TestGroupCodec(unittest.TestCase):
                 Assignment(topic="events", partition=1),
             ],
             revoked=[Assignment(topic="events", partition=2)],
+            members=["m-a", "uuid-1"],
         )
         raw = encode_join_group_response(resp)
         expected = bytes.fromhex(
@@ -658,6 +659,9 @@ class TestGroupCodec(unittest.TestCase):
             "01000000"  # 1 revoked
             "06006576656e7473"
             "02000000"
+            "02000000"  # 2 members
+            "03006d2d61"  # "m-a"
+            "0600757569642d31"  # "uuid-1"
         )
         self.assertEqual(_hx(raw), _hx(expected))
         self.assertEqual(decode_join_group_response(raw), resp)
@@ -678,6 +682,23 @@ class TestGroupCodec(unittest.TestCase):
         self.assertEqual(decoded.member_id, "uuid-1")
         self.assertEqual(decoded.assignment, [Assignment(topic="events", partition=0)])
         self.assertEqual(decoded.revoked, [])
+        self.assertEqual(decoded.members, [])
+
+    def test_join_group_response_legacy_without_members(self) -> None:
+        raw = bytes.fromhex(
+            "0000"
+            "01000000"
+            "0600757569642d31"
+            "01000000"
+            "06006576656e7473"
+            "00000000"
+            "01000000"
+            "06006576656e7473"
+            "02000000"
+        )
+        decoded = decode_join_group_response(raw)
+        self.assertEqual(decoded.revoked, [Assignment(topic="events", partition=2)])
+        self.assertEqual(decoded.members, [])
 
     def test_heartbeat_request_payload_rs_fixture(self) -> None:
         req = HeartbeatRequest(group_id="g1", member_id="m1", generation=3)

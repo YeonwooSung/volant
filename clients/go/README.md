@@ -261,6 +261,7 @@ not close the `Client`. `Leave` is an alias for `Close` (v0.190).
 `WithAssignor("range")` replaces the fetch set with a local range over
 **DescribeGroup** members (still no SyncGroup; describe failure falls
 back to solo). Default assignor is broker.
+JoinGroup may carry a live member-id trailer so range can skip DescribeGroup (empty trailer keeps the fallback).
 `Assignor()` returns the join-time assignor (`"broker"` or `"range"`; v0.184).
 `SessionTimeoutMs()` returns the join-time session timeout in milliseconds
 (0 was defaulted to 10000; v0.189).

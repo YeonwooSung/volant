@@ -1713,6 +1713,7 @@ pub fn encode_response(resp: &Response) -> Result<Bytes> {
             member_id,
             assignment,
             revoked,
+            members,
         } => {
             dst.put_u16_le(*error_code);
             dst.put_u32_le(*generation);
@@ -1727,6 +1728,11 @@ pub fn encode_response(resp: &Response) -> Result<Bytes> {
             for a in revoked {
                 put_string(&mut dst, &a.topic)?;
                 dst.put_u32_le(a.partition);
+            }
+            // v0.211 trailing live member ids (always written by current encoders).
+            dst.put_u32_le(members.len() as u32);
+            for id in members {
+                put_string(&mut dst, id)?;
             }
         }
         Response::Heartbeat { error_code } => {
@@ -2359,12 +2365,22 @@ pub fn decode_response(opcode: u16, payload: &[u8]) -> Result<Response> {
                     });
                 }
             }
+            // v0.211 trailing live member ids; legacy payloads omit it.
+            let mut members = Vec::new();
+            if src.remaining() >= 4 {
+                let member_count = src.get_u32_le() as usize;
+                members.reserve(member_count);
+                for _ in 0..member_count {
+                    members.push(get_string(&mut src)?);
+                }
+            }
             Ok(Response::JoinGroup {
                 error_code,
                 generation,
                 member_id,
                 assignment,
                 revoked,
+                members,
             })
         }
         ResponseOpcode::Heartbeat => {
@@ -3880,6 +3896,7 @@ mod tests {
                 topic: "events".into(),
                 partition: 2,
             }],
+            members: vec!["m-a".into(), "uuid-1".into()],
         };
         let b = encode_response(&join).unwrap();
         assert_eq!(
@@ -3887,7 +3904,7 @@ mod tests {
             join
         );
 
-        // Legacy JoinGroup response without revoked trailer decodes as empty revoked.
+        // Legacy JoinGroup response without revoked trailer decodes as empty revoked/members.
         let mut legacy = bytes::BytesMut::new();
         legacy.put_u16_le(0);
         legacy.put_u32_le(1);
@@ -3907,6 +3924,38 @@ mod tests {
                     partition: 0,
                 }],
                 revoked: vec![],
+                members: vec![],
+            }
+        );
+
+        // Phase 17 revoked trailer without v0.211 members decodes as empty members.
+        let mut no_members = bytes::BytesMut::new();
+        no_members.put_u16_le(0);
+        no_members.put_u32_le(1);
+        put_string(&mut no_members, "uuid-1").unwrap();
+        no_members.put_u32_le(1);
+        put_string(&mut no_members, "events").unwrap();
+        no_members.put_u32_le(0);
+        no_members.put_u32_le(1);
+        put_string(&mut no_members, "events").unwrap();
+        no_members.put_u32_le(2);
+        let decoded =
+            decode_response(ResponseOpcode::JoinGroup as u16, &no_members.freeze()).unwrap();
+        assert_eq!(
+            decoded,
+            Response::JoinGroup {
+                error_code: 0,
+                generation: 1,
+                member_id: "uuid-1".into(),
+                assignment: vec![Assignment {
+                    topic: "events".into(),
+                    partition: 0,
+                }],
+                revoked: vec![Assignment {
+                    topic: "events".into(),
+                    partition: 2,
+                }],
+                members: vec![],
             }
         );
 

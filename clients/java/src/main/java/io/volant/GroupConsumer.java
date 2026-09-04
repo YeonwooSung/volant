@@ -191,8 +191,9 @@ public final class GroupConsumer implements AutoCloseable {
      *
      * <p>{@code assignor} is {@code "broker"} (default: honor JoinGroup) or
      * {@code "range"} (replace the fetch set with a local range over
-     * DescribeGroup members; still no SyncGroup). Empty / {@code null} is
-     * {@code "broker"}. Unknown values throw {@link IllegalArgumentException}.
+     * JoinGroup members, else DescribeGroup; still no SyncGroup). Empty /
+     * {@code null} is {@code "broker"}. Unknown values throw
+     * {@link IllegalArgumentException}.
      */
     public static GroupConsumer join(
             Client client, String group, List<String> topics, int sessionTimeoutMs, String assignor) {
@@ -390,7 +391,7 @@ public final class GroupConsumer implements AutoCloseable {
         generation = result.generation;
         List<Codec.Assignment> newAssignment = new ArrayList<>(result.assignment);
         if (ASSIGNOR_RANGE.equals(assignor)) {
-            newAssignment = localRangeAssignment();
+            newAssignment = localRangeAssignment(result);
         }
 
         Set<Tp> oldSet = toSet(previous);
@@ -509,7 +510,7 @@ public final class GroupConsumer implements AutoCloseable {
         }
     }
 
-    private List<Codec.Assignment> localRangeAssignment() {
+    private List<Codec.Assignment> localRangeAssignment(JoinGroupResult join) {
         Metadata meta = backend.metadata();
         Map<String, Integer> counts = new HashMap<>();
         if (meta != null) {
@@ -519,7 +520,12 @@ public final class GroupConsumer implements AutoCloseable {
         }
         List<String> memberIds = new ArrayList<>();
         List<List<String>> memberTopics = new ArrayList<>();
-        if (!collectRangeMembers(memberIds, memberTopics)) {
+        if (join != null && join.members != null && !join.members.isEmpty()) {
+            memberIds.addAll(join.members);
+            for (int i = 0; i < memberIds.size(); i++) {
+                memberTopics.add(new ArrayList<>(topics));
+            }
+        } else if (!collectRangeMembers(memberIds, memberTopics)) {
             memberIds = Collections.singletonList(memberId);
             memberTopics = Collections.singletonList(topics);
         }

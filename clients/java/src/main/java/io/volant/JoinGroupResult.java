@@ -10,12 +10,22 @@ public final class JoinGroupResult {
     public final long generation;
     public final List<Codec.Assignment> assignment;
     public final List<Codec.Assignment> revoked;
+    public final List<String> members;
 
     public JoinGroupResult(
             String memberId,
             long generation,
             List<Codec.Assignment> assignment,
             List<Codec.Assignment> revoked) {
+        this(memberId, generation, assignment, revoked, Collections.emptyList());
+    }
+
+    public JoinGroupResult(
+            String memberId,
+            long generation,
+            List<Codec.Assignment> assignment,
+            List<Codec.Assignment> revoked,
+            List<String> members) {
         this.memberId = memberId;
         this.generation = generation;
         this.assignment = assignment == null
@@ -24,5 +34,8 @@ public final class JoinGroupResult {
         this.revoked = revoked == null
                 ? Collections.emptyList()
                 : Collections.unmodifiableList(new ArrayList<>(revoked));
+        this.members = members == null
+                ? Collections.emptyList()
+                : Collections.unmodifiableList(new ArrayList<>(members));
     }
 }

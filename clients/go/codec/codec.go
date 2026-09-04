@@ -537,6 +537,7 @@ type JoinGroupResponse struct {
 	MemberID   string
 	Assignment []Assignment
 	Revoked    []Assignment
+	Members    []string
 }
 
 // HeartbeatRequest is the Heartbeat opcode body.
@@ -1799,6 +1800,17 @@ func EncodeJoinGroupResponse(resp JoinGroupResponse) ([]byte, error) {
 	if err := putAssignments(w, resp.Revoked); err != nil {
 		return nil, err
 	}
+	// v0.211 trailing live member ids (always written by current encoders).
+	members := resp.Members
+	if members == nil {
+		members = []string{}
+	}
+	w.u32(uint32(len(members)))
+	for _, id := range members {
+		if err := putString(w, id); err != nil {
+			return nil, err
+		}
+	}
 	return w.buf, nil
 }
 
@@ -1831,12 +1843,31 @@ func DecodeJoinGroupResponse(payload []byte) (JoinGroupResponse, error) {
 	if revoked == nil {
 		revoked = []Assignment{}
 	}
+	var members []string
+	if r.remaining() >= 4 {
+		n, err := r.u32()
+		if err != nil {
+			return JoinGroupResponse{}, err
+		}
+		members = make([]string, 0, n)
+		for i := uint32(0); i < n; i++ {
+			id, err := getString(r)
+			if err != nil {
+				return JoinGroupResponse{}, err
+			}
+			members = append(members, id)
+		}
+	}
+	if members == nil {
+		members = []string{}
+	}
 	return JoinGroupResponse{
 		ErrorCode:  code,
 		Generation: gen,
 		MemberID:   memberID,
 		Assignment: assignment,
 		Revoked:    revoked,
+		Members:    members,
 	}, nil
 }
 

@@ -99,8 +99,9 @@ func WithAutoCommit(interval time.Duration) GroupConsumerOption {
 }
 
 // WithAssignor selects the fetch-set assignor: "broker" (default, honor
-// JoinGroup) or "range" (local range over DescribeGroup members; still
-// no SyncGroup). Empty is "broker". Unknown values fail JoinGroupConsumer.
+// JoinGroup) or "range" (local range over JoinGroup members, else
+// DescribeGroup; still no SyncGroup). Empty is "broker". Unknown values
+// fail JoinGroupConsumer.
 func WithAssignor(name string) GroupConsumerOption {
 	return func(o *groupConsumerOptions) {
 		o.assignor = name
@@ -329,7 +330,7 @@ func (g *GroupConsumer) doJoin() error {
 	g.generation = result.Generation
 	newAssignment := copyAssignment(result.Assignment)
 	if g.assignor == assignorRange {
-		local, err := g.localRangeAssignment()
+		local, err := g.localRangeAssignment(result)
 		if err != nil {
 			return err
 		}
@@ -475,6 +476,18 @@ func (g *GroupConsumer) applyReset(partitions []topicPartition) error {
 	}
 }
 
+func (g *GroupConsumer) rangeMembersFromJoin(result JoinGroupResult) (ids []string, topics [][]string) {
+	if len(result.Members) == 0 {
+		return nil, nil
+	}
+	ids = append([]string(nil), result.Members...)
+	topics = make([][]string, len(ids))
+	for i := range ids {
+		topics[i] = append([]string(nil), g.topics...)
+	}
+	return ids, topics
+}
+
 func (g *GroupConsumer) rangeMembersFromDescribe() (ids []string, topics [][]string) {
 	desc, err := g.client.DescribeGroup(g.groupID)
 	if err != nil {
@@ -503,7 +516,7 @@ func (g *GroupConsumer) rangeMembersFromDescribe() (ids []string, topics [][]str
 	return nil, nil
 }
 
-func (g *GroupConsumer) localRangeAssignment() ([]Assignment, error) {
+func (g *GroupConsumer) localRangeAssignment(result JoinGroupResult) ([]Assignment, error) {
 	meta, err := g.client.Metadata()
 	if err != nil {
 		return nil, err
@@ -512,7 +525,10 @@ func (g *GroupConsumer) localRangeAssignment() ([]Assignment, error) {
 	for _, t := range meta.Topics {
 		counts[t.Name] = uint32(len(t.Partitions))
 	}
-	ids, memberTopics := g.rangeMembersFromDescribe()
+	ids, memberTopics := g.rangeMembersFromJoin(result)
+	if len(ids) == 0 {
+		ids, memberTopics = g.rangeMembersFromDescribe()
+	}
 	if len(ids) == 0 {
 		ids = []string{g.memberID}
 		memberTopics = [][]string{append([]string(nil), g.topics...)}

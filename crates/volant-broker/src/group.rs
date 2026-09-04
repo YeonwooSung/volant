@@ -29,6 +29,9 @@ pub struct JoinResult {
     /// Partitions this member lost vs its prior assignment (Phase 17 cooperative).
     /// Empty when the member is new or the coordinator no longer holds the prior list.
     pub revoked: Vec<(String, u32)>,
+    /// Live member ids at this generation (v0.211), including the joiner, sorted.
+    /// Empty group cannot happen on a successful join.
+    pub members: Vec<String>,
 }
 
 /// Result of Heartbeat.
@@ -159,13 +162,11 @@ impl GroupCoordinator {
     {
         self.expire_sessions_inner();
         let mut groups = self.groups.lock();
-        let group = groups
-            .entry(group_id.to_owned())
-            .or_insert_with(|| Group {
-                group_id: group_id.to_owned(),
-                generation: 0,
-                members: HashMap::new(),
-            });
+        let group = groups.entry(group_id.to_owned()).or_insert_with(|| Group {
+            group_id: group_id.to_owned(),
+            generation: 0,
+            members: HashMap::new(),
+        });
 
         let timeout = if session_timeout_ms == 0 {
             10_000
@@ -217,6 +218,7 @@ impl GroupCoordinator {
                     member_id: resolved_id,
                     assignment,
                     revoked,
+                    members: live_member_ids(group),
                 });
             }
         }
@@ -259,16 +261,12 @@ impl GroupCoordinator {
             member_id: mid,
             assignment,
             revoked: Vec::new(),
+            members: live_member_ids(group),
         })
     }
 
     /// Heartbeat; returns rebalance error if generation mismatch or unknown member.
-    pub fn heartbeat(
-        &self,
-        group_id: &str,
-        member_id: &str,
-        generation: u32,
-    ) -> HeartbeatResult {
+    pub fn heartbeat(&self, group_id: &str, member_id: &str, generation: u32) -> HeartbeatResult {
         self.expire_sessions_inner();
         let mut groups = self.groups.lock();
         let Some(group) = groups.get_mut(group_id) else {
@@ -291,12 +289,7 @@ impl GroupCoordinator {
     }
 
     /// Leave group and rebalance remaining members.
-    pub fn leave<F>(
-        &self,
-        group_id: &str,
-        member_id: &str,
-        partition_counts: F,
-    ) -> LeaveResult
+    pub fn leave<F>(&self, group_id: &str, member_id: &str, partition_counts: F) -> LeaveResult
     where
         F: Fn(&str) -> Option<u32>,
     {
@@ -426,11 +419,7 @@ impl GroupCoordinator {
     }
 
     /// Delete committed offsets (Phase 12). Empty `entries` deletes all for the group.
-    pub fn delete_offsets(
-        &self,
-        group_id: &str,
-        entries: &[(String, u32)],
-    ) -> Result<u32> {
+    pub fn delete_offsets(&self, group_id: &str, entries: &[(String, u32)]) -> Result<u32> {
         self.offsets.delete_many(group_id, entries)
     }
 
@@ -500,8 +489,7 @@ impl GroupCoordinator {
         for (gid, group) in groups.iter_mut() {
             let before = group.members.len();
             group.members.retain(|_, m| {
-                m.last_heartbeat.elapsed()
-                    <= Duration::from_millis(u64::from(m.session_timeout_ms))
+                m.last_heartbeat.elapsed() <= Duration::from_millis(u64::from(m.session_timeout_ms))
             });
             if group.members.len() != before {
                 group.generation = group.generation.wrapping_add(1);
@@ -522,8 +510,7 @@ impl GroupCoordinator {
         for group in groups.values_mut() {
             let before = group.members.len();
             group.members.retain(|_, m| {
-                m.last_heartbeat.elapsed()
-                    <= Duration::from_millis(u64::from(m.session_timeout_ms))
+                m.last_heartbeat.elapsed() <= Duration::from_millis(u64::from(m.session_timeout_ms))
             });
             if group.members.len() != before {
                 group.generation = group.generation.wrapping_add(1);
@@ -551,6 +538,13 @@ impl GroupCoordinator {
     pub fn generation(&self, group_id: &str) -> Option<u32> {
         self.groups.lock().get(group_id).map(|g| g.generation)
     }
+}
+
+/// Live member ids, stable-sorted (v0.211 JoinGroup trailer).
+fn live_member_ids(group: &Group) -> Vec<String> {
+    let mut ids: Vec<String> = group.members.keys().cloned().collect();
+    ids.sort();
+    ids
 }
 
 /// Partitions in `old` that are not in `new` (set difference).
@@ -613,11 +607,8 @@ mod tests {
             .duration_since(UNIX_EPOCH)
             .unwrap()
             .as_nanos();
-        let dir = std::env::temp_dir().join(format!(
-            "volant-group-{}-{}",
-            std::process::id(),
-            nanos
-        ));
+        let dir =
+            std::env::temp_dir().join(format!("volant-group-{}-{}", std::process::id(), nanos));
         let _ = fs::remove_dir_all(&dir);
         fs::create_dir_all(&dir).unwrap();
         dir
@@ -643,11 +634,7 @@ mod tests {
         // j1's returned assignment is stale; current state:
         let a1 = coord.assignment("g", &j1.member_id).unwrap();
         let a2 = coord.assignment("g", &j2.member_id).unwrap();
-        let mut all: Vec<u32> = a1
-            .iter()
-            .chain(a2.iter())
-            .map(|(_, p)| *p)
-            .collect();
+        let mut all: Vec<u32> = a1.iter().chain(a2.iter()).map(|(_, p)| *p).collect();
         all.sort();
         assert_eq!(all, vec![0, 1, 2, 3]);
         let s1: std::collections::HashSet<_> = a1.iter().cloned().collect();
@@ -680,20 +667,13 @@ mod tests {
         {
             let coord = GroupCoordinator::new(&dir).unwrap();
             let r = coord
-                .commit_offsets(
-                    "g",
-                    "",
-                    0,
-                    &[("events".into(), 0, 7, "x".into())],
-                )
+                .commit_offsets("g", "", 0, &[("events".into(), 0, 7, "x".into())])
                 .unwrap();
             assert_eq!(r.error_code, 0);
         }
         {
             let coord = GroupCoordinator::new(&dir).unwrap();
-            let r = coord
-                .fetch_offsets("g", &[("events".into(), 0)])
-                .unwrap();
+            let r = coord.fetch_offsets("g", &[("events".into(), 0)]).unwrap();
             assert_eq!(r.entries.len(), 1);
             assert_eq!(r.entries[0].offset, 7);
             assert_eq!(r.entries[0].metadata, "x");
@@ -766,10 +746,7 @@ mod tests {
         let revoked: std::collections::HashSet<_> = j2.revoked.iter().cloned().collect();
         let old: std::collections::HashSet<_> = j1.assignment.iter().cloned().collect();
         assert_eq!(revoked, old);
-        assert!(j2
-            .assignment
-            .iter()
-            .all(|(t, _)| t == "u"));
+        assert!(j2.assignment.iter().all(|(t, _)| t == "u"));
         let _ = fs::remove_dir_all(&dir);
     }
 
@@ -785,6 +762,12 @@ mod tests {
             .unwrap();
         assert!(j1.revoked.is_empty());
         assert!(j2.revoked.is_empty());
+        assert_eq!(j2.members.len(), 2);
+        assert!(j2.members.contains(&j1.member_id));
+        assert!(j2.members.contains(&j2.member_id));
+        let mut sorted = j2.members.clone();
+        sorted.sort();
+        assert_eq!(j2.members, sorted);
         let _ = fs::remove_dir_all(&dir);
     }
 
@@ -805,21 +788,17 @@ mod tests {
 
         // Member 1 re-syncs: should see revoked = old − new.
         let j1b = coord
-            .join(
-                "g",
-                &j1.member_id,
-                10_000,
-                vec!["t".into()],
-                "",
-                counts,
-            )
+            .join("g", &j1.member_id, 10_000, vec!["t".into()], "", counts)
             .unwrap();
         let now: std::collections::HashSet<_> = j1b.assignment.iter().cloned().collect();
         let revoked: std::collections::HashSet<_> = j1b.revoked.iter().cloned().collect();
         let expected_revoked: std::collections::HashSet<_> =
             first.difference(&now).cloned().collect();
         assert_eq!(revoked, expected_revoked);
-        assert!(!j1b.revoked.is_empty(), "solo→two members should revoke some");
+        assert!(
+            !j1b.revoked.is_empty(),
+            "solo→two members should revoke some"
+        );
         // Retained partitions are sticky subset of original.
         assert!(now.is_subset(&first));
         let _ = fs::remove_dir_all(&dir);

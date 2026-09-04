@@ -106,6 +106,7 @@ async fn serve_stub(
                                 member_id: "m-1".into(),
                                 assignment: vec![],
                                 revoked: vec![],
+                                members: vec![],
                             }
                         }
                         Request::Heartbeat { .. } => {

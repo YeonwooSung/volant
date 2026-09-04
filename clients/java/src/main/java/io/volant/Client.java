@@ -2320,7 +2320,8 @@ public final class Client implements AutoCloseable {
                 continue;
             }
             check(resp.errorCode, "join_group");
-            return new JoinGroupResult(resp.memberId, resp.generation, resp.assignment, resp.revoked);
+            return new JoinGroupResult(
+                    resp.memberId, resp.generation, resp.assignment, resp.revoked, resp.members);
         }
     }
 
@@ -2331,7 +2332,8 @@ public final class Client implements AutoCloseable {
         }
         Codec.JoinGroupResponse resp = (Codec.JoinGroupResponse) decoded;
         check(resp.errorCode, "join_group");
-        return new JoinGroupResult(resp.memberId, resp.generation, resp.assignment, resp.revoked);
+        return new JoinGroupResult(
+                resp.memberId, resp.generation, resp.assignment, resp.revoked, resp.members);
     }
 
     /**

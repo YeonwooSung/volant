@@ -542,7 +542,8 @@ class CodecTest {
                 1,
                 "uuid-1",
                 Arrays.asList(new Codec.Assignment("events", 0), new Codec.Assignment("events", 1)),
-                Collections.singletonList(new Codec.Assignment("events", 2)));
+                Collections.singletonList(new Codec.Assignment("events", 2)),
+                Arrays.asList("m-a", "uuid-1"));
         byte[] raw = Codec.encodeJoinGroupResponse(resp);
         byte[] expected = hx(
                 "0000"
@@ -556,7 +557,10 @@ class CodecTest {
                         + "01000000"
                         + "01000000"
                         + "06006576656e7473"
-                        + "02000000");
+                        + "02000000"
+                        + "02000000"
+                        + "03006d2d61"
+                        + "0600757569642d31");
         assertArrayEquals(expected, raw);
         Codec.JoinGroupResponse decoded = Codec.decodeJoinGroupResponse(raw);
         assertEquals("uuid-1", decoded.memberId);
@@ -564,6 +568,7 @@ class CodecTest {
         assertEquals(2, decoded.assignment.size());
         assertEquals(1, decoded.assignment.get(1).partition);
         assertEquals(2, decoded.revoked.get(0).partition);
+        assertEquals(Arrays.asList("m-a", "uuid-1"), decoded.members);
         Object got = Codec.decodeResponse(Codec.OP_JOIN_GROUP, raw);
         Codec.JoinGroupResponse dispatched = assertInstanceOf(Codec.JoinGroupResponse.class, got);
         assertEquals("uuid-1", dispatched.memberId);
@@ -579,6 +584,25 @@ class CodecTest {
         assertEquals("events", decoded.assignment.get(0).topic);
         assertEquals(0, decoded.assignment.get(0).partition);
         assertTrue(decoded.revoked.isEmpty());
+        assertTrue(decoded.members.isEmpty());
+    }
+
+    @Test
+    void joinGroupResponseLegacyWithoutMembers() {
+        byte[] raw = hx(
+                "0000"
+                        + "01000000"
+                        + "0600757569642d31"
+                        + "01000000"
+                        + "06006576656e7473"
+                        + "00000000"
+                        + "01000000"
+                        + "06006576656e7473"
+                        + "02000000");
+        Codec.JoinGroupResponse decoded = Codec.decodeJoinGroupResponse(raw);
+        assertEquals(1, decoded.revoked.size());
+        assertEquals(2, decoded.revoked.get(0).partition);
+        assertTrue(decoded.members.isEmpty());
     }
 
     @Test

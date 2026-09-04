@@ -20,6 +20,7 @@ struct GroupStub {
     topics: Arc<Mutex<Vec<TopicInfo>>>,
     describe_members: Arc<Mutex<Vec<GroupMemberInfo>>>,
     describe_error: Arc<Mutex<bool>>,
+    join_members: Arc<Mutex<Vec<String>>>,
     joins: Arc<AtomicU64>,
     describes: Arc<AtomicU64>,
     metadatas: Arc<AtomicU64>,
@@ -38,6 +39,7 @@ impl GroupStub {
         let topics = Arc::new(Mutex::new(vec![topic_info("t", 4)]));
         let describe_members = Arc::new(Mutex::new(Vec::new()));
         let describe_error = Arc::new(Mutex::new(false));
+        let join_members = Arc::new(Mutex::new(Vec::new()));
         let joins = Arc::new(AtomicU64::new(0));
         let describes = Arc::new(AtomicU64::new(0));
         let metadatas = Arc::new(AtomicU64::new(0));
@@ -46,6 +48,7 @@ impl GroupStub {
         let topics_s = Arc::clone(&topics);
         let describe_members_s = Arc::clone(&describe_members);
         let describe_error_s = Arc::clone(&describe_error);
+        let join_members_s = Arc::clone(&join_members);
         let joins_s = Arc::clone(&joins);
         let describes_s = Arc::clone(&describes);
         let metadatas_s = Arc::clone(&metadatas);
@@ -60,6 +63,7 @@ impl GroupStub {
                 let topics = Arc::clone(&topics_s);
                 let describe_members = Arc::clone(&describe_members_s);
                 let describe_error = Arc::clone(&describe_error_s);
+                let join_members = Arc::clone(&join_members_s);
                 let joins = Arc::clone(&joins_s);
                 let describes = Arc::clone(&describes_s);
                 let metadatas = Arc::clone(&metadatas_s);
@@ -71,6 +75,7 @@ impl GroupStub {
                         topics,
                         describe_members,
                         describe_error,
+                        join_members,
                         joins,
                         describes,
                         metadatas,
@@ -87,6 +92,7 @@ impl GroupStub {
             topics,
             describe_members,
             describe_error,
+            join_members,
             joins,
             describes,
             metadatas,
@@ -112,6 +118,10 @@ impl GroupStub {
 
     fn set_describe_error(&self, error: bool) {
         *self.describe_error.lock().expect("describe_error") = error;
+    }
+
+    fn set_join_members(&self, members: Vec<String>) {
+        *self.join_members.lock().expect("join_members") = members;
     }
 
     fn join_count(&self) -> u64 {
@@ -166,6 +176,7 @@ async fn serve_stub(
     topics: Arc<Mutex<Vec<TopicInfo>>>,
     describe_members: Arc<Mutex<Vec<GroupMemberInfo>>>,
     describe_error: Arc<Mutex<bool>>,
+    join_members: Arc<Mutex<Vec<String>>>,
     joins: Arc<AtomicU64>,
     describes: Arc<AtomicU64>,
     metadatas: Arc<AtomicU64>,
@@ -200,6 +211,7 @@ async fn serve_stub(
                                 member_id: member_id.lock().expect("member_id").clone(),
                                 assignment: assignment.lock().expect("assignment").clone(),
                                 revoked: vec![],
+                                members: join_members.lock().expect("join_members").clone(),
                             }
                         }
                         Request::DescribeGroup { group_id } => {
@@ -414,4 +426,23 @@ async fn empty_assignor_is_broker() {
     assert_eq!(stub.describe_count(), 0);
     assert_eq!(stub.metadata_count(), 0);
     g.leave().await.expect("leave");
+}
+
+#[tokio::test]
+async fn range_join_members_skips_describe_group() {
+    for (id, want) in [
+        ("m-a", vec![("t".into(), 0), ("t".into(), 1)]),
+        ("m-b", vec![("t".into(), 2), ("t".into(), 3)]),
+    ] {
+        let stub = GroupStub::boot().await;
+        stub.set_member_id(id);
+        stub.set_partitions("t", 4);
+        stub.set_join_members(vec!["m-a".into(), "m-b".into()]);
+        stub.set_describe_error(true);
+        let g = join_assignor(&stub, "range").await.expect("join");
+        assert_eq!(g.assignment(), want, "member={id}");
+        assert_eq!(stub.describe_count(), 0);
+        assert_eq!(stub.metadata_count(), 1);
+        g.leave().await.expect("leave");
+    }
 }

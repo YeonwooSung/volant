@@ -131,6 +131,7 @@ type JoinGroupResult struct {
 	Generation uint32
 	Assignment []Assignment
 	Revoked    []Assignment
+	Members    []string
 }
 
 // DescribeGroupResult is the successful DescribeGroup reply (Phase 11 / v0.49).
@@ -2571,6 +2572,7 @@ func (c *Client) joinGroup(group, memberID string, topics []string, sessionTimeo
 			Generation: resp.Generation,
 			Assignment: resp.Assignment,
 			Revoked:    resp.Revoked,
+			Members:    resp.Members,
 		}, nil
 	}
 }
@@ -2592,6 +2594,7 @@ func (c *Client) joinGroupOnce(payload []byte) (JoinGroupResult, error) {
 		Generation: resp.Generation,
 		Assignment: resp.Assignment,
 		Revoked:    resp.Revoked,
+		Members:    resp.Members,
 	}, nil
 }
 

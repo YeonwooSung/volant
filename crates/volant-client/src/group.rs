@@ -23,11 +23,12 @@
 //!
 //! Fetch-set assignment is the broker JoinGroup result by default. Opt in
 //! with [`GroupConsumer::join_with_assignor`] (`"range"`): after JoinGroup,
-//! DescribeGroup members + `metadata()` feed `range_assign_multi`. Empty /
-//! `"broker"` keep today's assignment. Invalid assignor strings fail before
-//! JoinGroup. DescribeGroup errors fall back to the JoinGroup assignment
-//! (or solo-range over `[self]` when that assignment is empty). Still no
-//! SyncGroup.
+//! live member ids from the JoinGroup trailer (v0.211) + `metadata()` feed
+//! `range_assign_multi`. Empty / missing trailer falls back to DescribeGroup
+//! members. Empty / `"broker"` keep today's assignment. Invalid assignor
+//! strings fail before JoinGroup. DescribeGroup errors fall back to the
+//! JoinGroup assignment (or solo-range over `[self]` when that assignment is
+//! empty). Still no SyncGroup.
 //!
 //! Poll Fetch size is 100 messages / 4 MiB by default. Opt in with
 //! [`GroupConsumer::join_with_fetch_knobs`]. Zero clamps to those
@@ -93,7 +94,7 @@ fn parse_auto_offset_reset(name: &str) -> Result<AutoOffsetReset> {
 enum Assignor {
     /// Honor the broker JoinGroup assignment (default).
     Broker,
-    /// Local range over DescribeGroup members (still no SyncGroup).
+    /// Local range over JoinGroup members, else DescribeGroup (still no SyncGroup).
     Range,
 }
 
@@ -364,9 +365,9 @@ impl GroupConsumer {
     /// Same arguments as
     /// [`join_with_auto_offset_reset`](Self::join_with_auto_offset_reset)
     /// plus `assignor`: `"broker"` (default; honor JoinGroup) or `"range"`
-    /// (DescribeGroup members + `range_assign_multi`). Invalid strings
-    /// return `InvalidArgument` **before** JoinGroup. Empty string is
-    /// `"broker"`.
+    /// (JoinGroup member ids, else DescribeGroup, + `range_assign_multi`).
+    /// Invalid strings return `InvalidArgument` **before** JoinGroup. Empty
+    /// string is `"broker"`.
     ///
     /// Existing [`join`](Self::join) / [`join_static`](Self::join_static) /
     /// [`join_with_heartbeat`](Self::join_with_heartbeat) /
@@ -783,6 +784,7 @@ async fn do_join(
             topics,
             &result.member_id,
             &join_assignment,
+            &result.members,
         )
         .await
     } else {
@@ -897,24 +899,44 @@ fn partition_counts_from_metadata(meta: crate::client::Metadata) -> HashMap<Stri
         .collect()
 }
 
+/// Member ids + per-member topics from the JoinGroup trailer.
+/// `None` when the trailer is empty / missing (DescribeGroup fallback).
+fn range_members_from_join(
+    join_members: &[String],
+    self_topics: &[String],
+) -> Option<(Vec<String>, Vec<Vec<String>>)> {
+    if join_members.is_empty() {
+        return None;
+    }
+    let topics = vec![self_topics.to_vec(); join_members.len()];
+    Some((join_members.to_vec(), topics))
+}
+
 /// Range fetch set after a successful JoinGroup. Never fails the join:
-/// DescribeGroup / empty-members / missing-self / metadata errors fall
-/// back to the JoinGroup assignment, or solo-range over `[self]` when
-/// that assignment is empty.
+/// empty JoinGroup members fall back to DescribeGroup; DescribeGroup /
+/// empty-members / missing-self / metadata errors fall back to the
+/// JoinGroup assignment, or solo-range over `[self]` when that
+/// assignment is empty.
 async fn apply_range_override(
     client: &Client,
     group_id: &str,
     self_topics: &[String],
     self_id: &str,
     join_assignment: &[(String, u32)],
+    join_members: &[String],
 ) -> Vec<(String, u32)> {
-    let described = range_members_from_describe(client, group_id, self_id, self_topics).await;
-    let (ids, member_topics) = match described {
-        Some(pair) => pair,
-        None if join_assignment.is_empty() => {
-            (vec![self_id.to_string()], vec![self_topics.to_vec()])
+    let from_join = range_members_from_join(join_members, self_topics);
+    let (ids, member_topics) = if let Some(pair) = from_join {
+        pair
+    } else {
+        let described = range_members_from_describe(client, group_id, self_id, self_topics).await;
+        match described {
+            Some(pair) => pair,
+            None if join_assignment.is_empty() => {
+                (vec![self_id.to_string()], vec![self_topics.to_vec()])
+            }
+            None => return join_assignment.to_vec(),
         }
-        None => return join_assignment.to_vec(),
     };
 
     let counts = match client.metadata().await {
@@ -1127,5 +1149,23 @@ mod tests {
         assert_eq!(clamp_fetch_max_bytes(0), POLL_MAX_BYTES);
         assert_eq!(clamp_fetch_max_messages(10), 10);
         assert_eq!(clamp_fetch_max_bytes(4096), 4096);
+    }
+
+    #[test]
+    fn range_members_from_join_empty_falls_back() {
+        assert!(range_members_from_join(&[], &["t".into()]).is_none());
+    }
+
+    #[test]
+    fn range_members_from_join_uses_trailer_ids() {
+        let (ids, topics) =
+            range_members_from_join(&["m-a".into(), "m-b".into()], &["t".into()]).expect("members");
+        assert_eq!(ids, vec!["m-a", "m-b"]);
+        assert_eq!(topics, vec![vec!["t".to_string()], vec!["t".to_string()]]);
+        let mut counts = HashMap::new();
+        counts.insert("t".into(), 4u32);
+        let assigned = range_assign_multi(&ids, &topics, &counts);
+        assert_eq!(assigned[0], vec![("t".into(), 0), ("t".into(), 1)]);
+        assert_eq!(assigned[1], vec![("t".into(), 2), ("t".into(), 3)]);
     }
 }

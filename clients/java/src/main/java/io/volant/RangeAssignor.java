@@ -11,7 +11,8 @@ import java.util.Map;
  *
  * <p>Not cooperative-sticky and not a Kafka consumer assignor. The helper is
  * public so apps can pass a known member set. {@link GroupConsumer} optional
- * {@code assignor="range"} uses DescribeGroup members (still no SyncGroup).
+ * {@code assignor="range"} uses JoinGroup members, else DescribeGroup
+ * (still no SyncGroup).
  */
 public final class RangeAssignor {
     private RangeAssignor() {}

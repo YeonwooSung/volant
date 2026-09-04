@@ -211,6 +211,7 @@ resends it on rejoin.
 algorithm. `GroupConsumer.join(..., "range")` replaces the fetch set
 with a local range over **DescribeGroup** members (still no SyncGroup;
 describe failure falls back to solo). Default assignor is broker.
+JoinGroup may carry a live member-id trailer so range can skip DescribeGroup (empty trailer keeps the fallback).
 `assignor()` returns the join-time assignor (`"broker"` or `"range"`; v0.184).
 `heartbeatCount()` counts Heartbeat RPCs from poll + background (not JoinGroup; v0.187).
 `heartbeatIntervalMs(sessionTimeoutMs)` is the background period (`sessionTimeoutMs / 3`, clamped 100–3000 ms; v0.201). `GroupConsumer.heartbeatIntervalMs(10_000)` is 3000.
