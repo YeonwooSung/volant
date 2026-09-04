@@ -5,13 +5,27 @@
 | Status | Shipped |
 | Date | 2026-08-14 |
 | Author | Volant maintainers |
-| Ceiling | Phases 0–154 shipped |
+| Ceiling | Phases 0–154 shipped; **Phase 155 open** |
 | Crate | 0.2.0 (workspace `Cargo.toml`) |
-| SoT | this document |
+| SoT | this document + [PHASE155_SPEC.md](./PHASE155_SPEC.md) |
 
 ## 1. Decision
 
-v0.2 ships the Phase 6 product: lowest-id controller, `{data_dir}/cluster/assignment.json` as metadata SoT, and the ISR data plane. Homemade metadata Raft (150/152/154) stays in-tree behind flags and is **not** the next slice. The Kafka shim is frozen at HEAD `SUPPORTED_APIS` (38 keys). CreateTopic success is “controller wrote `assignment.json`”; brief Metadata staleness on failover is documented honesty, not a bug.
+v0.2 shipped the Phase 6 product: lowest-id controller,
+`{data_dir}/cluster/assignment.json` as metadata SoT, and the ISR data
+plane. That remains the **v0.2 shipped** story and the single-node
+path.
+
+**Phase 155** (open) replaces the cluster quorum bet: homemade
+150/152/154 is **not** finished. Cluster mode defaults to **openraft**
+(`VOLANT_OPENRAFT_METADATA` on). CreateTopic success is
+`client_write(SetAssignment)` commit+apply. `assignment.json` is the
+apply artifact. Homemade 154 stays in-tree, default off, no
+RequestVote / InstallSnapshot.
+
+The Kafka shim stays at HEAD `SUPPORTED_APIS` (**38 keys**). SyncGroup
+API key **14** is already in that table; Phase 155 adds **native**
+opcodes 116/117, not a 39th Kafka key.
 
 ## 2. What v0.2 IS
 
@@ -31,12 +45,13 @@ v0.2 ships the Phase 6 product: lowest-id controller, `{data_dir}/cluster/assign
 |------|--------|
 | Homemade Raft election | No RequestVote, term contests, or leader campaigns. Controller = `Membership::controller_id` (lowest live id). |
 | InstallSnapshot / compaction | 154 log may remain; **stop extending**. No snapshot install, no compaction. |
-| Metadata SoT | Phase 6 `assignment.json` + live assignment — not the 152 committed snapshot. |
-| Kafka `SUPPORTED_APIS` | 38 keys (`kafka/mod.rs`). No new keys, no version ratchets, no session/txn/preferred depth unless a real client is proven broken. |
+| Metadata SoT (v0.2 / single-node) | Phase 6 `assignment.json` + live assignment — not the 152 committed snapshot. |
+| Metadata SoT (Phase 155 cluster) | Openraft committed `SetAssignment`. See [PHASE155_SPEC.md](./PHASE155_SPEC.md). |
+| Kafka `SUPPORTED_APIS` | 38 keys (`kafka/mod.rs`), including SyncGroup **14**. No new keys, no version ratchets, unless a real client is proven broken. Native 116/117 is not a Kafka key. |
 | Distributed EOS | 153 is process-local staging. Not broker-held 2PC. |
 | Durable-window *promise* | In-process buckets landed (`TumblingWindow::durable`). Do not claim cluster / distributed window durability. |
-| Dynamic membership / KIP-890 / preferred TCP probe / multi-lang / published SLAs | Out of v0.2. SLAs wait on measured benches (published; aspirational rows demoted). |
-| Phase 155 | Do not open. See §7. |
+| Dynamic membership / KIP-890 / preferred TCP probe / published SLAs | Still out. Overlay `membership.json` stays membership SoT in 155. |
+| Phase 155 | **Open.** Scope locked in [PHASE155_SPEC.md](./PHASE155_SPEC.md). Not a license for homemade RequestVote or new Kafka keys. |
 
 ## 4. Metadata story (choice A)
 
@@ -51,13 +66,13 @@ v0.2 ships the Phase 6 product: lowest-id controller, `{data_dir}/cluster/assign
 
 HEAD path (do not grow): Raft preferred when on (`net/fanout.rs`); CreateTopic mutate-first (`net/dispatch.rs`). `maybe_fanout_assignment_consensus` returns `Some(false)` only when miss **and** wait or committed-only; `!must_wait` returns `None` so a 96/97 miss does **not** fail the client. Homemade Raft has no election (`cluster/metadata_raft.rs`).
 
-Post-v0.2 the **only** allowed quorum bet is **replace** 150/152/154 with **openraft** — not finish homemade Raft.
+Post-v0.2 the **only** allowed quorum bet is **replace** 150/152/154 with **openraft** — not finish homemade Raft. That replace is **Phase 155**.
 
 ## 5. Kafka shim freeze
 
 | Band | Content |
 |------|---------|
-| IN | HEAD `SUPPORTED_APIS` (38 keys): Produce 0–13, Fetch 0–18, Metadata 0–13, groups, SASL, txn MVP, ACL admin, configs, DescribeCluster / DescribeProducers / Describe+ListTransactions. |
+| IN | HEAD `SUPPORTED_APIS` (38 keys): Produce 0–13, Fetch 0–18, Metadata 0–13, groups **including SyncGroup 14 v0–5**, SASL, txn MVP, ACL admin, configs, DescribeCluster / DescribeProducers / Describe+ListTransactions. |
 | FROZEN | No new API keys. No max-version ratchets. No session / txn / preferred depth unless a real client is proven broken. |
 | Do not claim | librdkafka, kafka-python, kcat, or Java client compatibility. CI is `cargo test --workspace` + protocol fuzz corpus (`.github/workflows/ci.yml`). Shim tests use `boot_kafka` + codec (`phase23_kafka_shim.rs`), not those clients. |
 
@@ -69,20 +84,29 @@ Post-v0.2 the **only** allowed quorum bet is **replace** 150/152/154 with **open
 4. **Split `broker.rs` / `net.rs`** — now `broker/mod.rs` + `net/{dispatch,fanout}.rs`. Structural, not a feature.
 5. **Streams durable window buckets** — in-process `TumblingWindow::durable`; no distributed 2PC.
 
-## 7. Do not open as Phase 155
+## 7. Phase 155 (open) — what it is / is not
 
-RequestVote · InstallSnapshot · openraft-now · new Kafka API · dynamic membership · KIP-890 · multi-lang · distributed streams · preferred TCP probe · session Raft registry.
+**In (see [PHASE155_SPEC.md](./PHASE155_SPEC.md)):** openraft as
+cluster metadata SoT; native SyncGroup **116/117** peek; JoinGroup
+retry when `member_id` or instance id is set; Go `CreateTopic`
+returns the topic id.
 
-Leftover TODO/ROADMAP lists are **not** a license to open Phase 155.
+**Still out of 155:** homemade RequestVote / 154 InstallSnapshot ·
+new Kafka API key · overlay-as-raft-membership · KIP-890 ·
+distributed streams · preferred TCP probe · session Raft registry ·
+empty-member first Join retry · Kafka CompletingRebalance.
+
+Leftover TODO/ROADMAP lists are **not** a license to grow homemade
+154 or add Kafka keys.
 
 ## Key Decisions
 
-- **Choice A is v0.2 SoT.** Phase 6 controller + `assignment.json` is what operators can reason about. Committed-only Metadata is 150+152 (`assignment_consensus_enabled && assignment_metadata_committed_only`), not “both 154/152.”
-- **Stop extending homemade Raft.** 154 has no election (`cluster/metadata_raft.rs`). Finishing RequestVote + snapshot is a multi-phase trap; the only later quorum bet is replace-with-openraft.
-- **`VOLANT_ASSIGNMENT_CONSENSUS` stays on as push, not as gate.** Opcodes 96/97 may still fan out. `maybe_fanout_assignment_consensus` returns `None` (ignore) when `!must_wait`, including on a 96/97 miss. Do not turn consensus off to paper over this.
-- **Kafka surface is frozen at 38 keys.** Breadth without real-client CI is a claim we will not make. No ratchet unless a proven client break.
-- **v0.2 work was ops/honesty, not a 155 feature.** Defaults, benches, ISR chaos, file split, then in-process windows.
-- **Distributed EOS is not a v0.2 claim.** 153 is process-local staging. In-process durable window buckets shipped; they are not cluster EOS.
+- **Choice A is the v0.2 shipped SoT** (single-node and `VOLANT_OPENRAFT_METADATA=0`). Phase 6 controller + `assignment.json`. Committed-only Metadata is 150+152.
+- **Phase 155 cluster SoT is openraft.** Unset env → on when `--cluster-config` is set. CreateTopic waits on `client_write`. Homemade 154 is not extended.
+- **Stop extending homemade Raft.** 154 has no election (`cluster/metadata_raft.rs`). Finishing RequestVote + snapshot stays rejected.
+- **`VOLANT_ASSIGNMENT_CONSENSUS` stays on as push** when openraft is off. Openraft-on cluster uses `client_write` as the gate.
+- **Kafka surface stays 38 keys.** SyncGroup **14** is already listed. Native 116/117 is not a 39th key. No ratchet unless a proven client break.
+- **Distributed EOS is not a v0.2 or 155 claim.** 153 is process-local staging.
 
 ## Alternatives Considered
 
@@ -90,7 +114,7 @@ Leftover TODO/ROADMAP lists are **not** a license to open Phase 155.
 |--------|------|----------------------|
 | **A — keep Phase 6 (chosen)** | Lowest-id controller + `assignment.json` + ISR. 154 optional, defaults off. | Matches shipped data-plane honesty. CreateTopic = local write. Operators already run this when flags are off. |
 | **C — grow 154** | RequestVote, InstallSnapshot, compaction, term contests on `__metadata_raft`. | Homemade Raft without election is not “almost done.” CreateTopic is already mutate-first. High cost, still not openraft/KRaft. |
-| **B — openraft now** | Replace 150/152/154 with openraft embed as the v0.2 bet. | Correct long-term quorum, wrong next slice: new crate, new failure model, blocked items 1–3. Allowed **after** v0.2 as a replace, not a finish. |
+| **B — openraft now** | Replace 150/152/154 with openraft embed. | Rejected as the *v0.2* bet. **Accepted as Phase 155** (after v0.2 leftovers closed). |
 
 ## PR Plan
 

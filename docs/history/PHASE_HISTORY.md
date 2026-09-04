@@ -196,6 +196,7 @@ docs for day-to-day reading: [ops](../ops.md), [consistency](../consistency.md),
 | 152 | ✅ | Assignment consensus depth (Metadata = committed snapshot) | [PHASE152_SPEC.md](../PHASE152_SPEC.md) |
 | 153 | ✅ | EOS + durable stream state atomic checkpoint boundary | [PHASE153_SPEC.md](../PHASE153_SPEC.md) |
 | 154 | ✅ | KRaft-style metadata Raft log MVP (opcodes 98/99; static N) | [PHASE154_SPEC.md](../PHASE154_SPEC.md) |
+| 155 | 🚧 | openraft cluster SoT + native SyncGroup 116/117 + Join retry + Go CreateTopic id | [PHASE155_SPEC.md](../PHASE155_SPEC.md) |
 
 ### Residual slices (not phases)
 

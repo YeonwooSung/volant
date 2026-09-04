@@ -1,6 +1,6 @@
 # Volant residual TODO (review loop)
 
-**Baseline:** HEAD product = **Phases 0–154** + residuals **v0.3–v0.203**.  
+**Baseline:** HEAD product = **Phases 0–154** + residuals **v0.3–v0.203**; **Phase 155 open**.  
 **Last review:** 2026-09-03  
 
 Living roadmap: [ROADMAP.md](./ROADMAP.md).  
@@ -17,9 +17,9 @@ Phase index: [docs/history/PHASE_HISTORY.md](./docs/history/PHASE_HISTORY.md).
 | **P2** (N=2 gauges, Metadata ISR, promote claim, preferred×session) | **Closed** (141–144) |
 | **P3** (rack assignment, delta mirror, serve-from-mirror, defer truncate) | **Closed** (145–148) |
 | **Product: streams durable + EOS** | **MVP closed** (149, 151, 153) + v0.8 fence + v0.9 changelog |
-| **Product: consensus / KRaft-style metadata** | **MVP closed** (150, 152, 154); overlay **v0.10**; openraft election **v0.11** (opt-in); `__cluster_metadata` **v0.12** |
+| **Product: consensus / KRaft-style metadata** | **154 MVP closed**; **Phase 155 open** — openraft cluster SoT (not homemade election) |
 
-**Ceiling:** Phases **0–154**. Next free inter-broker opcode after **114/115** is **116+**.
+**Ceiling:** Phases **0–154** shipped, **155 open**. Native SyncGroup will take **116/117**.
 
 ---
 
@@ -68,7 +68,7 @@ Phase index: [docs/history/PHASE_HISTORY.md](./docs/history/PHASE_HISTORY.md).
 | **Later** | **Long fuzz + chaos-mesh** | **MVP closed (v0.15)** — extended corpus + Chaos Mesh YAML + A→B isolate |
 | **Later** | **Perf campaign** vs aspirational targets | **closed (v0.2 PR2)** — measured table published; group-commit **v0.20** (opt-in, no new bench) |
 
-**Default next slice:** Named-helper / getter leftovers are closed through **v0.203**. JoinGroup is still not retried (not idempotent). Go `CreateTopic` still discards the topic id (`CreateTopicID` / WithConfigs / Java `createTopic` return it). SyncGroup still has no opcode. Homemade Raft election / InstallSnapshot-on-154 / Phase 155 is **not** the next product bet. Residual **v0.155** is DeleteRecords wait config, not Phase 155. Do not open Phase 155.
+**Default next slice:** [PHASE155_SPEC.md](./docs/PHASE155_SPEC.md) — Go `CreateTopic` returns id; JoinGroup retry when member/instance set; native SyncGroup **116/117**; openraft cluster default on. Homemade 154 RequestVote / InstallSnapshot stay frozen. Residual **v0.155** is still DeleteRecords wait, not this phase. Kafka SyncGroup key **14** is already in the 38-key table.
 
 ---
 

@@ -414,7 +414,7 @@ specs. Ops-critical notes only:
 | Env | v0.2 default | Role |
 |-----|--------------|------|
 | `VOLANT_METADATA_RAFT` | **off** | `1`/`true`/`yes` prefers 154 AppendEntries 98/99; unset/`0` uses Phase 150 notes |
-| `VOLANT_OPENRAFT_METADATA` | **off** | `1`/`true`/`yes`/`on` → `controller_id()` is the openraft leader (opcodes 108–111, snapshot 112/113). Unset keeps lowest-id. |
+| `VOLANT_OPENRAFT_METADATA` | **off** (code today) / **on** in cluster after Phase 155 PR5 | `1`/`true`/`yes`/`on` → `controller_id()` is the openraft leader (opcodes 108–111, snapshot 112/113). `0`/`false`/`off` keeps lowest-id. Phase 155 target: unset = on when `--cluster-config` is set; single-node never starts openraft. |
 | `VOLANT_OPENRAFT_SNAPSHOT_LOGS` | **1000** | openraft snapshot every N applied logs. `0`/`never`/`off` disables automatic snapshots. Tests use `1`. |
 | `VOLANT_OPENRAFT_JOINT_ROLLBACK` | **on** | Leader rolls back overlay when `change_membership` fails (native **15**). `0`/`false`/`no`/`off` → v0.26 best-effort. |
 | `VOLANT_OPENRAFT_FORWARD_MEMBERSHIP` | **on** | Followers forward Add/RemoveBroker to the openraft leader (native **14** if no leader / RPC fail). `0`/`false`/`no`/`off` → follower-local v0.10 write. |

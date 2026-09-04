@@ -3784,7 +3784,7 @@ marker clip 111; fuzz corpus smoke CI 112; cluster admin fan-out 113) — see
 ## Suggested implementation order (PRs)
 
 Phases **0–153 are shipped**. Historical PR order for the core:
-Phases **0–154 are shipped**. Historical PR order for the core:
+Phases **0–154 are shipped**. **Phase 155 is open** ([PHASE155_SPEC.md](./docs/PHASE155_SPEC.md)). Historical PR order for the core:
 
 1. Phase 1 segment format + unit tests  
 2. Phase 1 recovery + retention  
