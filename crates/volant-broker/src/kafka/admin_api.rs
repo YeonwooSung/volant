@@ -5,7 +5,7 @@
 //! ListClientMetricsResources, AlterReplicaLogDirs, AssignReplicasToDirs,
 //! DescribeLogDirs, DescribeTopicPartitions, BrokerRegistration,
 //! BrokerHeartbeat, UnregisterBroker, Envelope, FetchSnapshot, Vote,
-//! ControllerRegistration, AddRaftVoter, RemoveRaftVoter,
+//! ControllerRegistration, AddRaftVoter, RemoveRaftVoter, UpdateRaftVoter,
 //! UpdateFeatures, DescribeQuorum, AllocateProducerIds,
 //! GetTelemetrySubscriptions, PushTelemetry, AlterPartition,
 //! CreateDelegationToken, RenewDelegationToken, ExpireDelegationToken, configs.
@@ -1758,6 +1758,94 @@ fn write_remove_raft_voter(out: &mut BytesMut, error: KafkaErrorCode, msg: Optio
     out.put_i32(0); // throttleTimeMs
     out.put_i16(error.as_i16());
     put_compact_nullable_string(out, msg);
+    put_empty_tag_buffer(out);
+}
+
+/// UpdateRaftVoter v0 (always flexible). Volant is **not** a KRaft
+/// voter set (no DirectoryId, no listener store, no KRaft version
+/// feature store).
+///
+/// Parses official Kafka `UpdateRaftVoterRequest.json` v0 fields
+/// (`clusterId`, `currentLeaderEpoch`, `voterId`, `voterDirectoryId`,
+/// listeners, `KRaftVersionFeature`) and discards them. Does **not**
+/// persist. Returns throttle **0**, error **42** `INVALID_REQUEST`
+/// (`not KRaft raft voter`). Official `UpdateRaftVoterResponse.json`
+/// has no `errorMessage`. CurrentLeader (official tag 0) is omitted
+/// (empty tag buffer). Controller is not required. ACL: Cluster
+/// **ALTER** (disabled ACLs allow). Denied → **31**, empty tags.
+pub(crate) fn encode_update_raft_voter(
+    broker: &Broker,
+    src: &mut impl Buf,
+    out: &mut BytesMut,
+    principal: &str,
+) {
+    parse_update_raft_voter_request(src);
+
+    let denied = broker.acls().is_enabled()
+        && !broker.acls().authorize(
+            Some(principal),
+            ResourceType::Cluster,
+            CLUSTER_RESOURCE,
+            AclOperation::Alter,
+        );
+    let error = if denied {
+        KafkaErrorCode::ClusterAuthorizationFailed
+    } else {
+        KafkaErrorCode::InvalidRequest
+    };
+
+    write_update_raft_voter(out, error);
+}
+
+fn parse_update_raft_voter_request(src: &mut impl Buf) {
+    // Official v0 (flex, `UpdateRaftVoterRequest.json`):
+    // ClusterId compact nullable string, CurrentLeaderEpoch i32,
+    // VoterId i32, VoterDirectoryId uuid,
+    // Listeners[] { name, host, port u16, tagged },
+    // KRaftVersionFeature { min i16, max i16, tagged } (inline, not
+    // nullable), tagged.
+    let _ = get_compact_nullable_string(src);
+    if src.remaining() >= 4 {
+        let _current_leader_epoch = src.get_i32();
+    }
+    if src.remaining() >= 4 {
+        let _voter_id = src.get_i32();
+    }
+    let _ = get_uuid(src);
+    match get_compact_array_len(src) {
+        Ok(Some(n)) => {
+            for _ in 0..n {
+                if get_compact_string(src).is_err() {
+                    break;
+                }
+                if get_compact_string(src).is_err() {
+                    break;
+                }
+                if src.remaining() < 2 {
+                    break;
+                }
+                let _port = src.get_u16();
+                let _ = skip_tag_buffer(src);
+            }
+        }
+        Ok(None) | Err(_) => {}
+    }
+    // KRaftVersionFeature is an inline untagged struct (not nullable).
+    if src.remaining() >= 4 {
+        let _min = src.get_i16();
+        let _max = src.get_i16();
+        let _ = skip_tag_buffer(src);
+    }
+    let _ = skip_tag_buffer(src);
+}
+
+fn write_update_raft_voter(out: &mut BytesMut, error: KafkaErrorCode) {
+    // Official UpdateRaftVoterResponse.json (v0):
+    // throttleTimeMs, errorCode, tagged.
+    // CurrentLeader is official tag 0 — omit (empty tag buffer).
+    // No errorMessage.
+    out.put_i32(0); // throttleTimeMs
+    out.put_i16(error.as_i16());
     put_empty_tag_buffer(out);
 }
 
@@ -7306,6 +7394,164 @@ mod tests {
         assert_eq!(throttle, 0);
         assert_eq!(error, KafkaErrorCode::InvalidRequest.as_i16());
         assert_eq!(msg.as_deref(), Some("not KRaft raft voter"));
+        assert_eq!(overlay_ids(&broker), before);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    fn update_raft_voter_body(
+        cluster_id: Option<&str>,
+        current_leader_epoch: i32,
+        voter_id: i32,
+        voter_directory_id: &[u8; 16],
+        listeners: &[(&str, &str, u16)],
+        min_supported: i16,
+        max_supported: i16,
+    ) -> BytesMut {
+        let mut body = BytesMut::new();
+        put_compact_nullable_string(&mut body, cluster_id);
+        body.put_i32(current_leader_epoch);
+        body.put_i32(voter_id);
+        put_uuid(&mut body, voter_directory_id);
+        put_compact_array_len(&mut body, listeners.len());
+        for (name, host, port) in listeners {
+            put_compact_string(&mut body, name);
+            put_compact_string(&mut body, host);
+            body.put_u16(*port);
+            put_empty_tag_buffer(&mut body);
+        }
+        body.put_i16(min_supported);
+        body.put_i16(max_supported);
+        put_empty_tag_buffer(&mut body); // KRaftVersionFeature tags
+        put_empty_tag_buffer(&mut body); // request tags
+        body
+    }
+
+    fn read_update_raft_voter(src: &mut impl Buf) -> (i32, i16) {
+        let throttle = src.get_i32();
+        let error = src.get_i16();
+        skip_tag_buffer(src).unwrap();
+        assert_eq!(src.remaining(), 0);
+        (throttle, error)
+    }
+
+    #[test]
+    fn kafka_update_raft_voter_rejects_and_does_not_persist() {
+        let dir = temp_dir("urv-ok");
+        let broker = Broker::new(StorageConfig {
+            data_dir: dir.clone(),
+            ..StorageConfig::default()
+        });
+        let before_ids = overlay_ids(&broker);
+        assert!(!membership_file(&dir).exists());
+
+        let mut directory = [0u8; 16];
+        directory[15] = 0x52;
+        let mut src = update_raft_voter_body(
+            Some("volant-cluster"),
+            1,
+            2,
+            &directory,
+            &[("CONTROLLER", "127.0.0.1", 19094)],
+            0,
+            1,
+        );
+        let mut out = BytesMut::new();
+        encode_update_raft_voter(&broker, &mut src, &mut out, "kafka-anonymous");
+        let mut resp = out.freeze();
+        let (throttle, error) = read_update_raft_voter(&mut resp);
+        assert_eq!(throttle, 0);
+        assert_eq!(error, KafkaErrorCode::InvalidRequest.as_i16());
+
+        assert_eq!(overlay_ids(&broker), before_ids);
+        assert!(
+            !membership_file(&dir).exists(),
+            "UpdateRaftVoter must not create membership.json"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn kafka_update_raft_voter_existing_brokers_unchanged() {
+        let dir = temp_dir("urv-exist");
+        let broker = cluster_n2(dir.clone(), 1);
+        broker
+            .add_broker(3, "127.0.0.1".into(), 19403, None)
+            .unwrap();
+        let before = overlay_ids(&broker);
+        assert!(before.contains(&3));
+
+        let mut directory = [0u8; 16];
+        directory[0] = 0xaa;
+        let mut src = update_raft_voter_body(
+            None,
+            3,
+            4,
+            &directory,
+            &[("CONTROLLER", "127.0.0.1", 19404)],
+            1,
+            1,
+        );
+        let mut out = BytesMut::new();
+        encode_update_raft_voter(&broker, &mut src, &mut out, "kafka-anonymous");
+        let mut resp = out.freeze();
+        let (throttle, error) = read_update_raft_voter(&mut resp);
+        assert_eq!(throttle, 0);
+        assert_eq!(error, KafkaErrorCode::InvalidRequest.as_i16());
+
+        let after = overlay_ids(&broker);
+        assert_eq!(after, before);
+        assert!(!after.contains(&4));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn kafka_update_raft_voter_acl_deny_is_31() {
+        let dir = temp_dir("urv-acl");
+        let broker = Broker::new(StorageConfig {
+            data_dir: dir.clone(),
+            ..StorageConfig::default()
+        });
+        broker
+            .configure_acls(true, None, vec![], "token".into())
+            .unwrap();
+
+        let mut directory = [0u8; 16];
+        directory[1] = 0xbb;
+        let mut src = update_raft_voter_body(Some("c"), 0, 2, &directory, &[], 0, 0);
+        let mut out = BytesMut::new();
+        encode_update_raft_voter(&broker, &mut src, &mut out, "kafka-anonymous");
+        let mut resp = out.freeze();
+        let (throttle, error) = read_update_raft_voter(&mut resp);
+        assert_eq!(throttle, 0);
+        assert_eq!(error, KafkaErrorCode::ClusterAuthorizationFailed.as_i16());
+        assert!(!membership_file(&dir).exists());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn kafka_update_raft_voter_not_controller_still_42() {
+        let dir = temp_dir("urv-nc");
+        let broker = cluster_n2(dir.clone(), 2);
+        assert!(!broker.is_controller());
+        let before = overlay_ids(&broker);
+
+        let mut directory = [0u8; 16];
+        directory[2] = 0xcc;
+        let mut src = update_raft_voter_body(
+            Some("volant-cluster"),
+            9,
+            9,
+            &directory,
+            &[("CONTROLLER", "127.0.0.1", 19099)],
+            0,
+            1,
+        );
+        let mut out = BytesMut::new();
+        encode_update_raft_voter(&broker, &mut src, &mut out, "kafka-anonymous");
+        let mut resp = out.freeze();
+        let (throttle, error) = read_update_raft_voter(&mut resp);
+        assert_eq!(throttle, 0);
+        assert_eq!(error, KafkaErrorCode::InvalidRequest.as_i16());
         assert_eq!(overlay_ids(&broker), before);
         let _ = std::fs::remove_dir_all(&dir);
     }
