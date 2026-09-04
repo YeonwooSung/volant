@@ -481,6 +481,11 @@ docs for day-to-day reading: [ops](../ops.md), [consistency](../consistency.md),
 | v0.282 | ✅ | Kafka DeleteShareGroupState key 86 reject | [V282_SPEC.md](../V282_SPEC.md) |
 | v0.283 | ✅ | Kafka ReadShareGroupStateSummary key 87 reject | [V283_SPEC.md](../V283_SPEC.md) |
 | v0.284 | ✅ | Kafka DescribeShareGroupOffsets key 90 reject | [V284_SPEC.md](../V284_SPEC.md) |
+| v0.285 | ✅ | Kafka StreamsGroupHeartbeat key 88 reject | [V285_SPEC.md](../V285_SPEC.md) |
+| v0.286 | ✅ | Kafka StreamsGroupDescribe key 89 reject | [V286_SPEC.md](../V286_SPEC.md) |
+| v0.287 | ✅ | Kafka AlterShareGroupOffsets key 91 reject | [V287_SPEC.md](../V287_SPEC.md) |
+| v0.288 | ✅ | Kafka DeleteShareGroupOffsets key 92 reject | [V288_SPEC.md](../V288_SPEC.md) |
+| v0.289 | ✅ | Kafka BeginQuorumEpoch key 53 v1 reject | [V289_SPEC.md](../V289_SPEC.md) |
 
 ---
 

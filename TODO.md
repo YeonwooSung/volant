@@ -1,7 +1,7 @@
 # Volant residual TODO (review loop)
 
-**Baseline:** HEAD product = **Phases 0–154** + residuals **v0.3–v0.284**; **Phase 155 open**.  
-**Last review:** 2026-09-03  
+**Baseline:** HEAD product = **Phases 0–154** + residuals **v0.3–v0.289**; **Phase 155 open**.  
+**Last review:** 2026-09-04  
 
 Living roadmap: [ROADMAP.md](./ROADMAP.md).  
 Recent specs: [PHASE154](./docs/PHASE154_SPEC.md) · [PHASE153](./docs/PHASE153_SPEC.md) · [PHASE152](./docs/PHASE152_SPEC.md) · [PHASE151](./docs/PHASE151_SPEC.md) · [PHASE150](./docs/PHASE150_SPEC.md) · [PHASE149](./docs/PHASE149_SPEC.md).  
@@ -68,7 +68,7 @@ Phase index: [docs/history/PHASE_HISTORY.md](./docs/history/PHASE_HISTORY.md).
 | **Later** | **Long fuzz + chaos-mesh** | **MVP closed (v0.15)** — extended corpus + Chaos Mesh YAML + A→B isolate |
 | **Later** | **Perf campaign** vs aspirational targets | **closed (v0.2 PR2)** — measured table published; group-commit **v0.20** (opt-in, no new bench) |
 
-**Default next slice:** Kafka `SUPPORTED_APIS` is **84** (Read/Write/DeleteShareGroupState **84**/**85**/**86**, ReadShareGroupStateSummary **87**, DescribeShareGroupOffsets **90**). Still not join-set wait, not unclean election, not live reassignment, not stored quotas, not KIP-584, not token store, not KIP-848, not KIP-932. Residual **v0.155** is still DeleteRecords wait.
+**Default next slice:** Kafka `SUPPORTED_APIS` is **89** (StreamsGroupHeartbeat/Describe **88**/**89**, Alter/DeleteShareGroupOffsets **91**/**92**, BeginQuorumEpoch **53**). Still not join-set wait, not unclean election, not live reassignment, not stored quotas, not KIP-584, not token store, not KIP-848, not KIP-932, not KIP-1071. Residual **v0.155** is still DeleteRecords wait.
 
 ---
 
@@ -367,6 +367,11 @@ Phase index: [docs/history/PHASE_HISTORY.md](./docs/history/PHASE_HISTORY.md).
 - [x] Kafka DeleteShareGroupState 86 reject → **v0.282**
 - [x] Kafka ReadShareGroupStateSummary 87 reject → **v0.283**
 - [x] Kafka DescribeShareGroupOffsets 90 reject → **v0.284**
+- [x] Kafka StreamsGroupHeartbeat 88 reject → **v0.285**
+- [x] Kafka StreamsGroupDescribe 89 reject → **v0.286**
+- [x] Kafka AlterShareGroupOffsets 91 reject → **v0.287**
+- [x] Kafka DeleteShareGroupOffsets 92 reject → **v0.288**
+- [x] Kafka BeginQuorumEpoch 53 reject → **v0.289**
 
 ---
 
@@ -480,5 +485,6 @@ Phase index: [docs/history/PHASE_HISTORY.md](./docs/history/PHASE_HISTORY.md).
 | v0.270–v0.274 | **Shipped** — Vote 52 reject; Add/Remove/UpdateRaftVoter 80/81/82 reject; UnregisterController 94 reject |
 | v0.275–v0.279 | **Shipped** — ShareGroupHeartbeat/Describe/Fetch/Acknowledge 76/77/78/79 reject; InitializeShareGroupState 83 reject |
 | v0.280–v0.284 | **Shipped** — Read/Write/DeleteShareGroupState 84/85/86 reject; ReadShareGroupStateSummary 87 reject; DescribeShareGroupOffsets 90 reject |
+| v0.285–v0.289 | **Shipped** — StreamsGroupHeartbeat/Describe 88/89 reject; Alter/DeleteShareGroupOffsets 91/92 reject; BeginQuorumEpoch 53 reject |
 
 **How to use this file:** mark new work by phase number in ROADMAP + PHASE*_SPEC; fold completed rows into “Closed checklist”; keep “Still open” as the only honesty surface for operators and contributors.
