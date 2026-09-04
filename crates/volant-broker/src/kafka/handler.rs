@@ -300,6 +300,7 @@ async fn dispatch_kafka(
                 | Some(ApiKey::WriteShareGroupState)
                 | Some(ApiKey::DeleteShareGroupState)
                 | Some(ApiKey::ReadShareGroupStateSummary)
+                | Some(ApiKey::StreamsGroupHeartbeat)
                 | Some(ApiKey::DescribeShareGroupOffsets)
                 | Some(ApiKey::UnregisterController),
             _
@@ -752,6 +753,12 @@ async fn dispatch_kafka(
                 debug!(error = %e, "share group heartbeat flexible header tag buffer");
             }
             group_api::encode_share_group_heartbeat(broker, &mut src, &mut out, principal);
+        }
+        Some(ApiKey::StreamsGroupHeartbeat) if hdr.api_version == 0 => {
+            if let Err(e) = skip_tag_buffer(&mut src) {
+                debug!(error = %e, "streams group heartbeat flexible header tag buffer");
+            }
+            group_api::encode_streams_group_heartbeat(broker, &mut src, &mut out, principal);
         }
         Some(ApiKey::ShareFetch) if hdr.api_version == 1 => {
             if let Err(e) = skip_tag_buffer(&mut src) {

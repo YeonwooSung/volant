@@ -2107,6 +2107,85 @@ fn write_share_group_heartbeat(out: &mut BytesMut, denied: bool) {
     put_empty_tag_buffer(out);
 }
 
+/// StreamsGroupHeartbeat v0 (key 88). Always flexible.
+///
+/// Official `StreamsGroupHeartbeatRequest.json` / `Response.json`.
+/// Not KIP-1071: parse and reject **42** `INVALID_REQUEST`
+/// (`not KIP-1071 streams group`). Does not call
+/// `GroupCoordinator::heartbeat` and does not wrap classic Heartbeat
+/// 12, ConsumerGroupHeartbeat 68, or ShareGroupHeartbeat 76. Official
+/// validVersions is 0–1 (v1 = TopologyDescriptionRequired / KIP-1331);
+/// Volant advertises v0 only.
+pub(crate) fn encode_streams_group_heartbeat(
+    broker: &Broker,
+    src: &mut impl Buf,
+    out: &mut BytesMut,
+    principal: &str,
+) {
+    let group_id = parse_streams_group_heartbeat_request(src);
+
+    let denied = broker.acls().is_enabled()
+        && !broker.acls().authorize(
+            Some(principal),
+            ResourceType::Group,
+            &group_id,
+            AclOperation::Read,
+        );
+
+    write_streams_group_heartbeat(out, denied);
+}
+
+fn parse_streams_group_heartbeat_request(src: &mut impl Buf) -> String {
+    // Official v0 (flex, `StreamsGroupHeartbeatRequest.json`):
+    // GroupId compact string, MemberId compact string, MemberEpoch i32,
+    // EndpointInformationEpoch i32, InstanceId compact nullable string,
+    // RackId compact nullable string, RebalanceTimeoutMs i32,
+    // Topology nullable struct, ActiveTasks / StandbyTasks / WarmupTasks
+    // compact nullable arrays of TaskIds, ProcessId compact nullable
+    // string, UserEndpoint nullable struct, ClientTags compact nullable
+    // array, TaskOffsets / TaskEndOffsets compact nullable arrays,
+    // ShutdownApplication bool, tagged.
+    // Parse GroupId for ACL; discard MemberId / MemberEpoch / Topology /
+    // tasks / tags. Do not persist.
+    let group_id = get_compact_string(src).unwrap_or_default();
+    let _ = get_compact_string(src);
+    if src.remaining() >= 4 {
+        let _member_epoch = src.get_i32();
+    }
+    group_id
+}
+
+fn write_streams_group_heartbeat(out: &mut BytesMut, denied: bool) {
+    // Official StreamsGroupHeartbeatResponse.json v0 field order:
+    // ThrottleTimeMs, ErrorCode, ErrorMessage, MemberId, MemberEpoch,
+    // HeartbeatIntervalMs, AcceptableRecoveryLagLegacy (v0 only),
+    // TaskOffsetIntervalMs, Status, ActiveTasks, StandbyTasks,
+    // WarmupTasks, EndpointInformationEpoch, PartitionsByUserEndpoint,
+    // tagged.
+    // Do not write AcceptableRecoveryLag (v1+) or
+    // TopologyDescriptionRequired (v1+ / KIP-1331).
+    out.put_i32(0); // throttleTimeMs
+    if denied {
+        out.put_i16(KafkaErrorCode::GroupAuthorizationFailed.as_i16());
+        put_compact_nullable_string(out, None);
+    } else {
+        out.put_i16(KafkaErrorCode::InvalidRequest.as_i16());
+        put_compact_nullable_string(out, Some("not KIP-1071 streams group"));
+    }
+    put_compact_nullable_string(out, None); // memberId (reject: null)
+    out.put_i32(-1); // memberEpoch
+    out.put_i32(0); // heartbeatIntervalMs
+    out.put_i32(0); // AcceptableRecoveryLagLegacy (v0 only)
+    out.put_i32(0); // TaskOffsetIntervalMs
+    put_unsigned_varint(out, 0); // Status null
+    put_unsigned_varint(out, 0); // ActiveTasks null
+    put_unsigned_varint(out, 0); // StandbyTasks null
+    put_unsigned_varint(out, 0); // WarmupTasks null
+    out.put_i32(0); // EndpointInformationEpoch
+    put_unsigned_varint(out, 0); // PartitionsByUserEndpoint null
+    put_empty_tag_buffer(out);
+}
+
 /// ShareGroupDescribe v1 (key 77). Always flexible.
 ///
 /// Official `ShareGroupDescribeRequest.json` / `Response.json`. Official
@@ -3762,6 +3841,211 @@ mod tests {
         assert_eq!(error, KafkaErrorCode::InvalidRequest.as_i16());
 
         let after = broker.groups().describe_group("sg-v275").unwrap();
+        assert_eq!(after.generation, before.generation);
+        assert_eq!(after.members.len(), before.members.len());
+        assert_eq!(after.members[0].member_id, before.members[0].member_id);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    fn streams_heartbeat_v0_body(group: &str, member: &str, epoch: i32) -> BytesMut {
+        let mut body = BytesMut::new();
+        put_compact_string(&mut body, group);
+        put_compact_string(&mut body, member);
+        body.put_i32(epoch);
+        body.put_i32(0); // EndpointInformationEpoch
+        put_compact_nullable_string(&mut body, None); // InstanceId
+        put_compact_nullable_string(&mut body, Some("rack-a")); // RackId
+        body.put_i32(-1); // RebalanceTimeoutMs
+        put_unsigned_varint(&mut body, 0); // Topology null
+        put_unsigned_varint(&mut body, 0); // ActiveTasks null
+        put_unsigned_varint(&mut body, 0); // StandbyTasks null
+        put_unsigned_varint(&mut body, 0); // WarmupTasks null
+        put_compact_nullable_string(&mut body, None); // ProcessId
+        put_unsigned_varint(&mut body, 0); // UserEndpoint null
+        put_unsigned_varint(&mut body, 0); // ClientTags null
+        put_unsigned_varint(&mut body, 0); // TaskOffsets null
+        put_unsigned_varint(&mut body, 0); // TaskEndOffsets null
+        body.put_u8(0); // ShutdownApplication
+        put_empty_tag_buffer(&mut body);
+        body
+    }
+
+    fn read_streams_heartbeat(
+        src: &mut impl Buf,
+    ) -> (
+        i32,
+        i16,
+        Option<String>,
+        Option<String>,
+        i32,
+        i32,
+        i32,
+        i32,
+        u32,
+        u32,
+        u32,
+        u32,
+        i32,
+        u32,
+    ) {
+        let throttle = src.get_i32();
+        let error = src.get_i16();
+        let err_msg = get_compact_nullable_string(src).unwrap();
+        let member = get_compact_nullable_string(src).unwrap();
+        let epoch = src.get_i32();
+        let interval = src.get_i32();
+        let lag_legacy = src.get_i32();
+        let task_offset_interval = src.get_i32();
+        let status = super::super::codec::read_unsigned_varint(src).unwrap();
+        let active = super::super::codec::read_unsigned_varint(src).unwrap();
+        let standby = super::super::codec::read_unsigned_varint(src).unwrap();
+        let warmup = super::super::codec::read_unsigned_varint(src).unwrap();
+        let endpoint_epoch = src.get_i32();
+        let partitions = super::super::codec::read_unsigned_varint(src).unwrap();
+        skip_tag_buffer(src).unwrap();
+        assert_eq!(src.remaining(), 0);
+        (
+            throttle,
+            error,
+            err_msg,
+            member,
+            epoch,
+            interval,
+            lag_legacy,
+            task_offset_interval,
+            status,
+            active,
+            standby,
+            warmup,
+            endpoint_epoch,
+            partitions,
+        )
+    }
+
+    #[test]
+    fn kafka_streams_group_heartbeat_rejects_42() {
+        let dir = temp_dir("stgh-ok");
+        let broker = Broker::new(StorageConfig {
+            data_dir: dir.clone(),
+            ..StorageConfig::default()
+        });
+        let mut src = streams_heartbeat_v0_body("stg-v285", "m1", 1);
+        let mut out = BytesMut::new();
+        encode_streams_group_heartbeat(&broker, &mut src, &mut out, "kafka-anonymous");
+        let mut resp = out.freeze();
+        let (
+            throttle,
+            error,
+            err_msg,
+            member,
+            epoch,
+            interval,
+            lag_legacy,
+            task_offset_interval,
+            status,
+            active,
+            standby,
+            warmup,
+            endpoint_epoch,
+            partitions,
+        ) = read_streams_heartbeat(&mut resp);
+        assert_eq!(throttle, 0);
+        assert_eq!(error, KafkaErrorCode::InvalidRequest.as_i16());
+        assert_eq!(err_msg.as_deref(), Some("not KIP-1071 streams group"));
+        assert_eq!(member, None);
+        assert_eq!(epoch, -1);
+        assert_eq!(interval, 0);
+        assert_eq!(lag_legacy, 0);
+        assert_eq!(task_offset_interval, 0);
+        assert_eq!(status, 0);
+        assert_eq!(active, 0);
+        assert_eq!(standby, 0);
+        assert_eq!(warmup, 0);
+        assert_eq!(endpoint_epoch, 0);
+        assert_eq!(partitions, 0);
+        assert!(broker.groups().describe_group("stg-v285").is_none());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn kafka_streams_group_heartbeat_truncated_still_42() {
+        let dir = temp_dir("stgh-trunc");
+        let broker = Broker::new(StorageConfig {
+            data_dir: dir.clone(),
+            ..StorageConfig::default()
+        });
+        let mut src = BytesMut::new();
+        let mut out = BytesMut::new();
+        encode_streams_group_heartbeat(&broker, &mut src, &mut out, "kafka-anonymous");
+        let mut resp = out.freeze();
+        let (throttle, error, err_msg, member, epoch, interval, ..) =
+            read_streams_heartbeat(&mut resp);
+        assert_eq!(throttle, 0);
+        assert_eq!(error, KafkaErrorCode::InvalidRequest.as_i16());
+        assert_eq!(err_msg.as_deref(), Some("not KIP-1071 streams group"));
+        assert_eq!(member, None);
+        assert_eq!(epoch, -1);
+        assert_eq!(interval, 0);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn kafka_streams_group_heartbeat_acl_deny_is_30() {
+        let dir = temp_dir("stgh-acl");
+        let broker = Broker::new(StorageConfig {
+            data_dir: dir.clone(),
+            ..StorageConfig::default()
+        });
+        broker
+            .configure_acls(true, None, vec![], "token".into())
+            .unwrap();
+
+        let mut src = streams_heartbeat_v0_body("stg-v285", "m1", 0);
+        let mut out = BytesMut::new();
+        encode_streams_group_heartbeat(&broker, &mut src, &mut out, "kafka-anonymous");
+        let mut resp = out.freeze();
+        let (throttle, error, err_msg, member, epoch, interval, ..) =
+            read_streams_heartbeat(&mut resp);
+        assert_eq!(throttle, 0);
+        assert_eq!(error, KafkaErrorCode::GroupAuthorizationFailed.as_i16());
+        assert_eq!(err_msg, None);
+        assert_eq!(member, None);
+        assert_eq!(epoch, -1);
+        assert_eq!(interval, 0);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn kafka_streams_group_heartbeat_does_not_mutate_group() {
+        let dir = temp_dir("stgh-keep");
+        let broker = Broker::new(StorageConfig {
+            data_dir: dir.clone(),
+            ..StorageConfig::default()
+        });
+        let joined = broker
+            .groups()
+            .join(
+                "stg-v285",
+                "",
+                10_000,
+                150,
+                vec!["events".into()],
+                "",
+                |_| Some(1),
+            )
+            .unwrap();
+        assert_eq!(joined.error_code, 0);
+        let before = broker.groups().describe_group("stg-v285").unwrap();
+
+        let mut src =
+            streams_heartbeat_v0_body("stg-v285", &joined.member_id, joined.generation as i32);
+        let mut out = BytesMut::new();
+        encode_streams_group_heartbeat(&broker, &mut src, &mut out, "kafka-anonymous");
+        let mut resp = out.freeze();
+        let (_, error, _, _, _, _, ..) = read_streams_heartbeat(&mut resp);
+        assert_eq!(error, KafkaErrorCode::InvalidRequest.as_i16());
+
+        let after = broker.groups().describe_group("stg-v285").unwrap();
         assert_eq!(after.generation, before.generation);
         assert_eq!(after.members.len(), before.members.len());
         assert_eq!(after.members[0].member_id, before.members[0].member_id);
