@@ -441,6 +441,11 @@ docs for day-to-day reading: [ops](../ops.md), [consistency](../consistency.md),
 | v0.242 | ✅ | Kafka UnregisterBroker key 64 v0 | [V242_SPEC.md](../V242_SPEC.md) |
 | v0.243 | ✅ | warn once if leftover __metadata_raft dir exists | [V243_SPEC.md](../V243_SPEC.md) |
 | v0.244 | ✅ | Kafka UpdateFeatures key 57 reject | [V244_SPEC.md](../V244_SPEC.md) |
+| v0.245 | ✅ | Kafka DescribeQuorum key 55 v0–1 | [V245_SPEC.md](../V245_SPEC.md) |
+| v0.246 | ✅ | Kafka AllocateProducerIds key 67 v0 | [V246_SPEC.md](../V246_SPEC.md) |
+| v0.247 | ✅ | ACL TransactionalId on txn APIs | [V247_SPEC.md](../V247_SPEC.md) |
+| v0.248 | ✅ | apply SyncGroup assignment when it decodes | [V248_SPEC.md](../V248_SPEC.md) |
+| v0.249 | ✅ | Kafka AlterReplicaLogDirs key 34 reject | [V249_SPEC.md](../V249_SPEC.md) |
 
 ---
 

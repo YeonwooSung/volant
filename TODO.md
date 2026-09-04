@@ -1,6 +1,6 @@
 # Volant residual TODO (review loop)
 
-**Baseline:** HEAD product = **Phases 0–154** + residuals **v0.3–v0.244**; **Phase 155 open**.  
+**Baseline:** HEAD product = **Phases 0–154** + residuals **v0.3–v0.249**; **Phase 155 open**.  
 **Last review:** 2026-09-03  
 
 Living roadmap: [ROADMAP.md](./ROADMAP.md).  
@@ -68,7 +68,7 @@ Phase index: [docs/history/PHASE_HISTORY.md](./docs/history/PHASE_HISTORY.md).
 | **Later** | **Long fuzz + chaos-mesh** | **MVP closed (v0.15)** — extended corpus + Chaos Mesh YAML + A→B isolate |
 | **Later** | **Perf campaign** vs aspirational targets | **closed (v0.2 PR2)** — measured table published; group-commit **v0.20** (opt-in, no new bench) |
 
-**Default next slice:** Kafka `SUPPORTED_APIS` is **49** (quotas **48/49**, UpdateFeatures **57**, UnregisterBroker **64**). Native ListOffsets isolation (**v0.240**). Leftover `__metadata_raft/` warn-once (**v0.243**). Still not join-set wait, not unclean election, not live reassignment, not stored quotas, not KIP-584 features. Residual **v0.155** is still DeleteRecords wait.
+**Default next slice:** Kafka `SUPPORTED_APIS` is **52** (DescribeQuorum **55**, AllocateProducerIds **67**, AlterReplicaLogDirs **34**). SyncGroup applies decoded assignments (**v0.248**). ACL TransactionalId (**v0.247**). Still not join-set wait, not unclean election, not live reassignment, not stored quotas, not KIP-584 features. Residual **v0.155** is still DeleteRecords wait.
 
 ---
 
@@ -327,6 +327,11 @@ Phase index: [docs/history/PHASE_HISTORY.md](./docs/history/PHASE_HISTORY.md).
 - [x] Kafka UnregisterBroker 64 → **v0.242**
 - [x] leftover `__metadata_raft` warn-once → **v0.243**
 - [x] Kafka UpdateFeatures 57 reject → **v0.244**
+- [x] Kafka DescribeQuorum 55 → **v0.245**
+- [x] Kafka AllocateProducerIds 67 → **v0.246**
+- [x] ACL TransactionalId on txn APIs → **v0.247**
+- [x] SyncGroup apply decoded assignment → **v0.248**
+- [x] Kafka AlterReplicaLogDirs 34 reject → **v0.249**
 
 ---
 
@@ -432,5 +437,6 @@ Phase index: [docs/history/PHASE_HISTORY.md](./docs/history/PHASE_HISTORY.md).
 | v0.230–v0.234 | **Shipped** — PreparingRebalance label; rebalance park timeout; txn-log partitions; Kafka SCRAM 50/51; Fetch assignment trailer |
 | v0.235–v0.239 | **Shipped** — DescribeLogDirs 35; ElectLeaders 43; DescribeTopicPartitions 75; native SCRAM-512; native ListOffsets timestamp |
 | v0.240–v0.244 | **Shipped** — ListOffsets isolation; quotas 48/49 reject; UnregisterBroker 64; leftover 154 warn; UpdateFeatures 57 reject |
+| v0.245–v0.249 | **Shipped** — DescribeQuorum 55; AllocateProducerIds 67; ACL TransactionalId; SyncGroup apply assignment; AlterReplicaLogDirs 34 reject |
 
 **How to use this file:** mark new work by phase number in ROADMAP + PHASE*_SPEC; fold completed rows into “Closed checklist”; keep “Still open” as the only honesty surface for operators and contributors.
