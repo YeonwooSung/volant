@@ -188,6 +188,10 @@
 //! v0.175 adds [`Client::commit_transaction_empty`] as a named helper for
 //! EndTxn with no deferred offsets. Same as `commit_transaction(vec![])`.
 //! [`Client::commit_transaction`] is unchanged.
+//! v0.180 adds [`Client::fetch_offset`] as a named one-partition helper
+//! wrapping [`Client::fetch_offsets`]. Same as one `OffsetEntry`.
+//! [`Client::fetch_offsets`] / [`Client::fetch_offsets_for_topic`] /
+//! [`Client::fetch_offsets_all`] are unchanged.
 
 #![deny(missing_docs)]
 
