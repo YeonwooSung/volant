@@ -198,6 +198,10 @@
 //! wrapping [`Client::metadata_topics`]. Same as
 //! `metadata_topics(vec![topic])`. [`Client::metadata`] /
 //! [`Client::metadata_topics`] are unchanged.
+//! v0.203 adds [`Client::create_topic_default`] as a named helper for
+//! CreateTopic with 1 partition. Same as `create_topic(name, 1)`.
+//! [`Client::create_topic`] / [`Client::create_topic_with_configs`]
+//! are unchanged.
 
 #![deny(missing_docs)]
 

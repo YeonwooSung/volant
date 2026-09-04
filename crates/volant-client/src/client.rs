@@ -544,6 +544,13 @@ impl Client {
             .await
     }
 
+    /// Create a topic with 1 partition (v0.203).
+    ///
+    /// Same as `create_topic(name, 1)`.
+    pub async fn create_topic_default(&self, name: &str) -> Result<TopicId> {
+        self.create_topic(name, 1).await
+    }
+
     /// Create a topic with optional configs (Phase 13).
     pub async fn create_topic_with_configs(
         &self,
