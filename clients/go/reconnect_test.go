@@ -133,6 +133,41 @@ func TestAuthTokenNilClient(t *testing.T) {
 	}
 }
 
+func TestScramUserAfterDialScram(t *testing.T) {
+	addr, _, stop := serveScram(t, scramPass, false, 1)
+	defer stop()
+
+	c, err := volant.DialScram(addr, scramUser, scramPass)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer c.Close()
+	if got := c.ScramUser(); got != scramUser {
+		t.Fatalf("ScramUser() after DialScram = %q want %q", got, scramUser)
+	}
+}
+
+func TestScramUserAfterDial(t *testing.T) {
+	addr, _, stop := serveAuth(t, 0, true)
+	defer stop()
+
+	c, err := volant.Dial(addr)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer c.Close()
+	if got := c.ScramUser(); got != "" {
+		t.Fatalf("ScramUser() after Dial = %q want empty", got)
+	}
+}
+
+func TestScramUserNilClient(t *testing.T) {
+	var c *volant.Client
+	if got := c.ScramUser(); got != "" {
+		t.Fatalf("nil ScramUser() = %q want empty", got)
+	}
+}
+
 func TestReconnectSecondListenerMetadata(t *testing.T) {
 	addr1, got1, stop1 := serveAuth(t, 0, true)
 	defer stop1()

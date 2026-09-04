@@ -167,6 +167,24 @@ class ScramTest {
     }
 
     @Test
+    void scramUsernameAfterConnectScram() throws Exception {
+        try (ScramServer srv = ScramServer.ok()) {
+            try (Client c = Client.connectScram("127.0.0.1", srv.port, 5_000, USER, PASS)) {
+                assertEquals("alice", c.scramUsername());
+            }
+        }
+    }
+
+    @Test
+    void scramUsernameAfterConnectWithoutScram() throws Exception {
+        try (ScramServer srv = ScramServer.ok()) {
+            try (Client c = Client.connect("127.0.0.1", srv.port, 5_000)) {
+                assertNull(c.scramUsername());
+            }
+        }
+    }
+
+    @Test
     void reconnectRerunsScram() throws Exception {
         try (ScramServer first = ScramServer.ok();
                 ScramServer second = ScramServer.ok()) {
