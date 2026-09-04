@@ -405,6 +405,11 @@ public final class Client implements AutoCloseable {
         return addr;
     }
 
+    /** Dial / RPC timeout in milliseconds (connect default 10000). */
+    public int timeoutMs() {
+        return timeoutMs;
+    }
+
     @Override
     public void close() {
         Socket s = socket;

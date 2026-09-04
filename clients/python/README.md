@@ -77,6 +77,7 @@ g = GroupConsumer.join(c, group="g", topics=["t"], fetch_max_messages=10, fetch_
 meta = c.metadata()
 meta = c.metadata_topic("events")  # v0.181; one topic
 c.reconnect("127.0.0.1:9093")  # v0.115; re-Auth / re-SCRAM
+_ = c.timeout  # v0.195; dial / RPC timeout (constructor default 10.0)
 c.close()
 
 # Optional TLS (v0.27). Plain TCP is still the default.

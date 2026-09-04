@@ -37,6 +37,41 @@ func TestAddrNilClient(t *testing.T) {
 	}
 }
 
+func TestTimeoutAfterDialTimeout(t *testing.T) {
+	addr, _, stop := serveAuth(t, 0, true)
+	defer stop()
+
+	c, err := volant.DialTimeout(addr, 5*time.Second)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer c.Close()
+	if got := c.Timeout(); got != 5*time.Second {
+		t.Fatalf("Timeout() after DialTimeout = %v want %v", got, 5*time.Second)
+	}
+}
+
+func TestTimeoutAfterDial(t *testing.T) {
+	addr, _, stop := serveAuth(t, 0, true)
+	defer stop()
+
+	c, err := volant.Dial(addr)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer c.Close()
+	if got := c.Timeout(); got != 10*time.Second {
+		t.Fatalf("Timeout() after Dial = %v want %v", got, 10*time.Second)
+	}
+}
+
+func TestTimeoutNilClient(t *testing.T) {
+	var c *volant.Client
+	if got := c.Timeout(); got != 0 {
+		t.Fatalf("nil Timeout() = %v want 0", got)
+	}
+}
+
 func TestReconnectSecondListenerMetadata(t *testing.T) {
 	addr1, got1, stop1 := serveAuth(t, 0, true)
 	defer stop1()

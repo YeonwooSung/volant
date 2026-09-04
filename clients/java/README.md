@@ -102,6 +102,7 @@ try (Client c = Client.connect("127.0.0.1", 9092)) {
   meta = c.metadata(List.of("events")); // v0.116; empty = all
   meta = c.metadataTopic("events"); // v0.181; one topic
   c.reconnect("127.0.0.1", 9093); // v0.115; re-Auth / re-SCRAM
+  c.timeoutMs(); // v0.195; dial / RPC timeout (connect default 10000)
 }
 
 // Optional TLS (v0.27). connect() stays plaintext.

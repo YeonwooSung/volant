@@ -457,6 +457,14 @@ func (c *Client) Addr() string {
 	return c.addr
 }
 
+// Timeout returns the dial / RPC timeout (Dial default 10s).
+func (c *Client) Timeout() time.Duration {
+	if c == nil {
+		return 0
+	}
+	return c.timeout
+}
+
 func wrapTLS(conn net.Conn, addr string, cfg TLSConfig) (net.Conn, error) {
 	if (cfg.CertFile == "") != (cfg.KeyFile == "") {
 		return nil, fmt.Errorf("tls_cert and tls_key must both be set or both unset")

@@ -131,6 +131,15 @@ class AuthTest {
     }
 
     @Test
+    void timeoutMsAfterConnect() throws Exception {
+        try (OneShotAuthServer srv = OneShotAuthServer.ok()) {
+            try (Client c = Client.connect("127.0.0.1", srv.port, 2500)) {
+                assertEquals(2500, c.timeoutMs());
+            }
+        }
+    }
+
+    @Test
     void reconnectResendsAuth() throws Exception {
         try (OneShotAuthServer first = OneShotAuthServer.ok();
                 OneShotAuthServer second = OneShotAuthServer.ok()) {
