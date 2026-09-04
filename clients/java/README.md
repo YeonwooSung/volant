@@ -85,6 +85,7 @@ try (Client c = Client.connect("127.0.0.1", 9092)) {
   j = c.joinGroupMember("g", "m-1", List.of("t"), 10000); // v0.131; empty memberId = first join
   j = c.joinGroupMemberWithInstance("g", "m-1", List.of("t"), 10000, "inst-1"); // v0.146; empty instance = dynamic
   c.heartbeat("g", j.memberId, j.generation);
+  List<Codec.Assignment> asgn = c.syncGroup("g", j.memberId, (int) j.generation); // v0.206 peek/confirm
   c.leaveGroup("g", j.memberId);
   GroupConsumer g = GroupConsumer.join(c, "g", List.of("t"), 10_000);
   GroupConsumer.heartbeatIntervalMs(10_000); // v0.201; 3000 (sessionTimeoutMs / 3, clamp 100–3000)

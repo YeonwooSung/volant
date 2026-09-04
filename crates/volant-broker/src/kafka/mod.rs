@@ -345,3 +345,16 @@ pub const SUPPORTED_APIS: &[(ApiKey, i16, i16)] = &[
     (ApiKey::DescribeTransactions, 0, 0),
     (ApiKey::ListTransactions, 0, 2),
 ];
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn supported_apis_stays_38_sync_group_key_14() {
+        assert_eq!(SUPPORTED_APIS.len(), 38);
+        assert!(SUPPORTED_APIS
+            .iter()
+            .any(|(k, min, max)| *k == ApiKey::SyncGroup && *min == 0 && *max == 5));
+    }
+}

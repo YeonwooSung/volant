@@ -77,6 +77,8 @@ OP_LIST_MEMBERS = 106
 OP_LIST_MEMBERS_RESPONSE = 107
 OP_REASSIGN_PARTITIONS = 114
 OP_REASSIGN_PARTITIONS_RESPONSE = 115
+OP_SYNC_GROUP = 116
+OP_SYNC_GROUP_RESPONSE = 117
 OP_ERROR = 0xFFFF
 
 # ReassignPartitions.partition sentinel: apply to every partition of the topic.
@@ -949,6 +951,24 @@ class ReassignPartitionsResponse:
 
     error_code: int
     generation: int
+
+
+@dataclass
+class SyncGroupRequest:
+    """SyncGroup opcode 116 body (Phase 155). Broker ignores assignment_bytes."""
+
+    group_id: str
+    member_id: str
+    generation: int
+    assignment_bytes: bytes = b""
+
+
+@dataclass
+class SyncGroupResponse:
+    """SyncGroup reply (opcode 117). Same assignment list as JoinGroup."""
+
+    error_code: int
+    assignment: list[Assignment] = field(default_factory=list)
 
 
 # --- produce ---------------------------------------------------------------
@@ -2080,6 +2100,36 @@ def decode_reassign_partitions_response(payload: bytes) -> ReassignPartitionsRes
     return ReassignPartitionsResponse(error_code=r.u16_le(), generation=r.u32_le())
 
 
+def encode_sync_group_request(req: SyncGroupRequest) -> bytes:
+    w = _Writer()
+    _put_string(w, req.group_id)
+    _put_string(w, req.member_id)
+    w.u32_le(req.generation)
+    _put_bytes(w, req.assignment_bytes or b"")
+    return w.finish()
+
+
+def decode_sync_group_request(payload: bytes) -> SyncGroupRequest:
+    r = _Reader(payload)
+    return SyncGroupRequest(
+        group_id=_get_string(r),
+        member_id=_get_string(r),
+        generation=r.u32_le(),
+        assignment_bytes=_get_bytes(r),
+    )
+
+
+def encode_sync_group_response(resp: SyncGroupResponse) -> bytes:
+    w = _Writer()
+    w.u16_le(resp.error_code)
+    _put_assignments(w, resp.assignment)
+    return w.finish()
+
+
+def decode_sync_group_response(payload: bytes) -> SyncGroupResponse:
+    r = _Reader(payload)
+    return SyncGroupResponse(error_code=r.u16_le(), assignment=_get_assignments(r))
+
 
 # --- delete records --------------------------------------------------------
 
@@ -2552,6 +2602,8 @@ def decode_response(opcode: int, payload: bytes):
         return decode_list_members_response(payload)
     if opcode == OP_REASSIGN_PARTITIONS_RESPONSE:
         return decode_reassign_partitions_response(payload)
+    if opcode == OP_SYNC_GROUP_RESPONSE:
+        return decode_sync_group_response(payload)
     if opcode == OP_ERROR:
         return decode_error_response(payload)
     raise ProtocolError(f"unknown response opcode {opcode}")

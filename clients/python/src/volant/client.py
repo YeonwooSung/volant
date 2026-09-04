@@ -37,6 +37,8 @@ from .codec import (
     HeartbeatResponse,
     JoinGroupRequest,
     JoinGroupResponse,
+    SyncGroupRequest,
+    SyncGroupResponse,
     LeaveGroupRequest,
     LeaveGroupResponse,
     ListGroupsResponse,
@@ -2136,6 +2138,70 @@ class Client:
                 continue
             self._check(resp.error_code, "heartbeat")
             return resp.error_code
+
+    def sync_group(self, group: str, member_id: str, generation: int) -> list[Assignment]:
+        """SyncGroup peek/confirm (native opcode 116/117).
+
+        Returns this member's current assignment (already computed on
+        Join). Assignment bytes are empty; the broker ignores them.
+        Transient broker/transport errors retry up to ``max_retries``
+        extra times (default 0). Error 14 follows ``max_redirects``.
+        Rebalance codes 9 / 10 / 11 are not retried.
+        """
+        payload = codec.encode_sync_group_request(
+            SyncGroupRequest(
+                group_id=group,
+                member_id=member_id,
+                generation=generation,
+                assignment_bytes=b"",
+            )
+        )
+        max_retries = max(0, int(self.max_retries))
+        max_attempts = 1 + self.max_redirects
+        retry_attempt = 0
+        redirect_attempt = 0
+        while True:
+            try:
+                resp = self._round_trip(codec.OP_SYNC_GROUP, payload)
+            except BrokerError as e:
+                if (
+                    e.code == _NOT_CONTROLLER
+                    and redirect_attempt + 1 < max_attempts
+                    and self._redirect_to_controller(_controller_id_hint(e.message))
+                ):
+                    redirect_attempt += 1
+                    continue
+                if _is_transient_broker(e.code) and retry_attempt < max_retries:
+                    retry_attempt += 1
+                    self._sleep_produce_retry()
+                    continue
+                raise
+            except OSError:
+                if retry_attempt < max_retries:
+                    retry_attempt += 1
+                    self._sleep_produce_retry()
+                    continue
+                raise
+            if not isinstance(resp, SyncGroupResponse):
+                raise ProtocolError(
+                    f"unexpected response for sync_group: {type(resp)}"
+                )
+            if (
+                resp.error_code == _NOT_CONTROLLER
+                and redirect_attempt + 1 < max_attempts
+                and self._redirect_to_controller(None)
+            ):
+                redirect_attempt += 1
+                continue
+            if (
+                _is_transient_broker(resp.error_code)
+                and retry_attempt < max_retries
+            ):
+                retry_attempt += 1
+                self._sleep_produce_retry()
+                continue
+            self._check(resp.error_code, "sync_group")
+            return list(resp.assignment)
 
     def leave_group(self, group: str, member_id: str) -> None:
         """Leave a consumer group.

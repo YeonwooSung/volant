@@ -205,6 +205,12 @@
 //! v0.205 retries [`Client::join_group`] / [`Client::join_group_with_instance`]
 //! on the same transient set as Heartbeat (default 0) when `member_id`
 //! or `group_instance_id` is set; empty first join is one shot.
+//! v0.206 adds [`Client::sync_group`] (native opcodes 116/117):
+//! peek/confirm of the JoinGroup assignment. Transient 6/7/15/16 +
+//! TCP retry on `max_retries` (default 0). Error **14** follows
+//! `max_redirects`. Rebalance 9/10/11 is not retried. Not Kafka
+//! CompletingRebalance. [`GroupConsumer`] still uses JoinGroup
+//! assignment.
 
 #![deny(missing_docs)]
 

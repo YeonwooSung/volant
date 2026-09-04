@@ -108,6 +108,8 @@ if err != nil {
     log.Fatal(err)
 }
 err = c.Heartbeat("g", j.MemberID, j.Generation)
+asgn, err := c.SyncGroup("g", j.MemberID, j.Generation) // v0.206 peek/confirm; same assignment as Join
+_ = asgn
 err = c.LeaveGroup("g", j.MemberID)
 g, err := volant.JoinGroupConsumer(c, "g", []string{"t"}, 10_000)
 // Phase 12 static membership (empty instance id = dynamic):

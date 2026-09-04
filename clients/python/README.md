@@ -54,6 +54,7 @@ member_id, generation, assignment = c.join_group(
     "g", topics=["t"], session_timeout_ms=10000
 )
 c.heartbeat("g", member_id, generation)
+_ = c.sync_group("g", member_id, generation)  # v0.206 peek/confirm; same assignment as Join
 c.leave_group("g", member_id)
 
 # High-level group consumer (v0.31). Two members need two Clients.

@@ -290,6 +290,7 @@ fn authorize_request(broker: &Broker, req: &Request, principal: Option<&str>) ->
         | Request::OffsetFetch { group_id, .. }
         | Request::JoinGroup { group_id, .. }
         | Request::Heartbeat { group_id, .. }
+        | Request::SyncGroup { group_id, .. }
         | Request::LeaveGroup { group_id, .. } => {
             check(ResourceType::Group, group_id, AclOperation::Read)
         }
@@ -404,6 +405,7 @@ fn record_response_metrics(broker: &Broker, resp: &Response) {
         | Response::OffsetFetch { error_code, .. }
         | Response::JoinGroup { error_code, .. }
         | Response::Heartbeat { error_code }
+        | Response::SyncGroup { error_code, .. }
         | Response::LeaveGroup { error_code }
         | Response::ReplicaFetch { error_code, .. }
         | Response::HeartbeatBroker { error_code, .. }
@@ -868,6 +870,31 @@ async fn handle_request(broker: &Arc<Broker>, req: Request) -> Result<Response> 
             let result = broker.groups().heartbeat(&group_id, &member_id, generation);
             Ok(Response::Heartbeat {
                 error_code: result.error_code,
+            })
+        }
+        Request::SyncGroup {
+            group_id,
+            member_id,
+            generation,
+            assignment_bytes: _,
+        } => {
+            let result = broker.groups().heartbeat(&group_id, &member_id, generation);
+            if result.error_code != 0 {
+                return Ok(Response::SyncGroup {
+                    error_code: result.error_code,
+                    assignment: Vec::new(),
+                });
+            }
+            let assignment = broker
+                .groups()
+                .assignment(&group_id, &member_id)
+                .unwrap_or_default()
+                .into_iter()
+                .map(|(topic, partition)| Assignment { topic, partition })
+                .collect();
+            Ok(Response::SyncGroup {
+                error_code: 0,
+                assignment,
             })
         }
         Request::LeaveGroup {
