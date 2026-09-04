@@ -164,7 +164,7 @@ Without `--cluster-config`, the broker runs as a single node:
   - **Assignment majority (Phase 150/152):** after controller assignment mutations
     (CreateTopic / DeleteTopic / CreatePartitions; best-effort IsrUpdate),
     controller fans out `AssignmentConsensusNote` (96/97) with full wire topics
-    when metadata Raft is **off**; peers apply via `apply_cluster_state`. Majority =
+    when openraft is **off**; peers apply via `apply_cluster_state`. Majority =
     `floor(N/2)+1` of **configured** N. Durable
     `{data_dir}/__assignment_consensus` tracks `committed_generation` /
     `pending_generation` + committed snapshot (Phase 152). Default fan-out **on**
@@ -178,23 +178,20 @@ Without `--cluster-config`, the broker runs as a single node:
     CreatePartitions unless wait or committed-only is on. Metrics:
     `volant_assignment_consensus_*` +
     `volant_assignment_committed_generation`.
-  - **Metadata Raft log (Phase 154):** when `VOLANT_METADATA_RAFT` is on (v0.2
-    default **off**; explicit `1`/`true`/`yes` enables), the same admin mutations
-    append `SetAssignment` entries to
-    a durable ordered log (`{data_dir}/__metadata_raft/`) with `(term, index)`,
-    replicate via `MetadataRaftAppend` (98/99), and advance `commit_index` only
-    after majority match_index; apply runs only then (also bumps Phase 152
-    committed snapshot). **v0.40:** `VOLANT_METADATA_RAFT_WAIT_COMMIT` default
-    **on** — client ok waits for that `commit_index` (miss → native **15** /
-    Kafka **19** + live `assignment.json` rollback); `0` restores 154
-    mutate-first. **Not** full openraft/KRaft election — controller remains
-    lowest live id; no InstallSnapshot; static N.
+  - **Metadata Raft log (Phase 154, removed v0.222):** homemade 154 is no
+    longer a product hatch. `VOLANT_METADATA_RAFT=1` /
+    `VOLANT_METADATA_RAFT_WAIT_COMMIT=1` warn once and are ignored.
+    Leftover `{data_dir}/__metadata_raft/` files are **unread**. Opcodes
+    98/99 still decode so a mixed-cluster old peer cannot panic this
+    broker; inbound 98 is always
+    `Error::Protocol("metadata raft not enabled")`. See
+    [V222_SPEC.md](./V222_SPEC.md).
   - **Phase 155:** cluster mode defaults `VOLANT_OPENRAFT_METADATA` **on**.
     CreateTopic / DeleteTopic / CreatePartitions succeed only after
     openraft `client_write(SetAssignment)` commits and applies (raft
     actually started; N&lt;2 / single-node skip boot and keep local write).
-    `assignment.json` is the apply artifact. Homemade 154 is not extended.
-    See [PHASE155_SPEC.md](./PHASE155_SPEC.md).
+    `assignment.json` is the apply artifact. Homemade 154 product is gone
+    (v0.222). See [PHASE155_SPEC.md](./PHASE155_SPEC.md).
 - **Multi-broker 2PC (Phase 114 + 120 + 121 + 122 + 124):** Enable2Pc prepare/complete is coordinated
   over inter-broker RPC (opcodes 76–81). Init owner is the txn coordinator;
   produce still targets partition leaders after open fan-out. **Phase 120:**

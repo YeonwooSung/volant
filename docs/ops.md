@@ -61,8 +61,6 @@ Key series (prefix `volant_`):
 - `volant_assignment_committed_generation` (Phase 150: last majority-committed assignment gen gauge)
 - `volant_assignment_metadata_committed_only` (Phase 152: Metadata uses committed assignment snapshot, gauge 0/1)
 - `volant_assignment_generation_lag` (Phase 152: `max(0, live_gen - committed_gen)`)
-- `volant_metadata_raft_term` / `volant_metadata_raft_commit_index` / `volant_metadata_raft_last_applied` (Phase 154: KRaft-style metadata log gauges)
-- `volant_metadata_raft_append_success_total` / `_fail_total` (Phase 154: majority append commits / misses)
 - `volant_txn_forward_total` / `volant_txn_forward_errors_total` (Phase 120/122 Kafka txn API forward: EndTxn / AddOffsets / TxnOffsetCommit)
 - `volant_txn_coordinator_registry_restored` / `volant_txn_coordinator_registry_persist_errors_total` (Phase 124 durable Init-owner registry)
 - `volant_txn_coordinator_registry_gc_total` (Phase 127 registry TTL GC drops)
@@ -409,11 +407,11 @@ specs. Ops-critical notes only:
 | ACLs | `--acl-enable`; durable `__acls/acls.json`; User resource is Kafka admin store-only; **cluster:** Create/Delete controller-only + snapshot fan-out (Phase 113) + rejoin catch-up (Phase 117) + **non-blocking admin catch-up** (Phase 136) |
 | Compaction | `cleanup.policy=compact` on **sealed** segments; empty value = tombstone |
 
-**Assignment consensus (Phase 150/152) + metadata Raft (Phase 154):**
+**Assignment consensus (Phase 150/152) + openraft (Phase 155):**
 
 | Env | v0.2 default | Role |
 |-----|--------------|------|
-| `VOLANT_METADATA_RAFT` | **off** | `1`/`true`/`yes` prefers 154 AppendEntries 98/99; unset/`0` uses Phase 150 notes |
+| `VOLANT_METADATA_RAFT` | **ignored** (v0.222) | Homemade 154 product removed. `1`/`true`/`yes`/`on` **warns once and is ignored**. Do not honor `=1`. |
 | `VOLANT_OPENRAFT_METADATA` | **on** (Phase 155) | Unset/`1`/`true`/`yes`/`on` → cluster `controller_id()` is the openraft leader (opcodes 108–111, snapshot 112/113). `0`/`false`/`off`/`no` keeps lowest-id. Single-node (no `--cluster-config`, or N&lt;2) never starts openraft. |
 | `VOLANT_OPENRAFT_SNAPSHOT_LOGS` | **1000** | openraft snapshot every N applied logs. `0`/`never`/`off` disables automatic snapshots. Tests use `1`. |
 | `VOLANT_OPENRAFT_JOINT_ROLLBACK` | **on** | Leader rolls back overlay when `change_membership` fails (native **15**). `0`/`false`/`no`/`off` → v0.26 best-effort. |
@@ -421,7 +419,7 @@ specs. Ops-critical notes only:
 | `VOLANT_ASSIGNMENT_METADATA_COMMITTED_ONLY` | **off** | `1` serves majority-committed Metadata snapshot + wait-like admin; unset/`0` is live assignment |
 | `VOLANT_ASSIGNMENT_CONSENSUS` | **on** | Best-effort 96/97 push. Must **not** gate Metadata or fail CreateTopic |
 | `VOLANT_ASSIGNMENT_CONSENSUS_WAIT` | **off** | `1` → native **15** on majority miss; **rolls back** live `assignment.json` (must_wait path only) |
-| `VOLANT_METADATA_RAFT_WAIT_COMMIT` | **on** | Homemade 154 CreateTopic / DeleteTopic / CreatePartitions wait for `commit_index` (majority). `0`/`false`/`no`/`off` restores 154 mutate-first |
+| `VOLANT_METADATA_RAFT_WAIT_COMMIT` | **ignored** (v0.222) | Homemade 154 wait-commit removed. `1`/`true`/`yes`/`on` **warns once and is ignored**. |
 
 CreateTopic / DeleteTopic / CreatePartitions succeed when the controller writes
 `{data_dir}/cluster/assignment.json`. Kafka CreateTopics / DeleteTopics /
@@ -431,14 +429,15 @@ the client unless wait or committed-only is on. On that **must_wait** path a
 miss **rolls back** the live assignment (client 15 / Kafka 19, Metadata, and
 `assignment.json` match the pre-mutation snapshot). `!must_wait` keeps the
 local write as SoT. Metadata serves the **live**
-assignment. Set `VOLANT_METADATA_RAFT=1` to append `SetAssignment` to
-`{data_dir}/__metadata_raft/`, fan out `MetadataRaftAppend` (opcodes 98/99),
-advance `commit_index` only on majority match_index, then apply + Phase 152
-committed snapshot. Majority = configured N same as journal. Committed-only
-snapshot lives under `__assignment_consensus/committed_snapshot.json`. Gauges:
-`volant_assignment_generation_lag`,
-`volant_metadata_raft_{term,commit_index,last_applied}`. **Not** full openraft
-election (lowest-id controller remains leader unless v0.11 is on).
+assignment. Homemade 154 (`VOLANT_METADATA_RAFT`) is **gone** (v0.222):
+inbound opcode **98** still decodes but is always
+`Error::Protocol("metadata raft not enabled")`; leftover
+`{data_dir}/__metadata_raft/` files are unread. Assignment fan-out is
+openraft `SetAssignment` when that flag is on, else Phase 150 notes.
+Committed-only snapshot lives under
+`__assignment_consensus/committed_snapshot.json`. Gauge:
+`volant_assignment_generation_lag`. **Not** full KRaft (lowest-id
+controller remains leader unless openraft is on).
 
 ## v0.11 openraft metadata election
 
@@ -449,7 +448,7 @@ group over native opcodes **108/109** (AppendEntries) and **110/111**
 Gauges: `volant_openraft_leader_id`, `volant_openraft_term`. v0.11 did **not**
 replicate `assignment.json` through openraft (election only). v0.16 does
 when the same flag is on (see below). InstallSnapshot is v0.17.
-Homemade 154 log is unchanged. See [V11_SPEC.md](./V11_SPEC.md) and
+Homemade 154 product was removed in v0.222. See [V11_SPEC.md](./V11_SPEC.md) and
 [V16_SPEC.md](./V16_SPEC.md).
 
 ## v0.16 openraft assignment apply
@@ -458,14 +457,14 @@ Same opt-in (`VOLANT_OPENRAFT_METADATA=1`). After CreateTopic / DeleteTopic /
 CreatePartitions the openraft leader `client_write`s `SetAssignment` on
 opcodes **108/109** and waits for local apply (5s). Followers apply the
 snapshot to `{data_dir}/cluster/assignment.json` and live cluster state.
-Default **off**: lowest-id controller and 150/154 paths are unchanged.
+Default **off**: lowest-id controller and Phase 150 notes are unchanged.
+Homemade 154 product was removed in v0.222 (`VOLANT_METADATA_RAFT=1`
+warns once and is ignored).
 
-When **both** `VOLANT_METADATA_RAFT` and the openraft flag are on, prefer
-openraft apply (skip 154 fan-out for that mutation). Wait
-(`VOLANT_ASSIGNMENT_CONSENSUS_WAIT` / committed-only) still uses native
-**15** / Kafka **19** + live rollback; wait **off** is best-effort (local
-write is SoT if `client_write` fails). Log store stays in-memory; not full
-KRaft. See [V16_SPEC.md](./V16_SPEC.md).
+Wait (`VOLANT_ASSIGNMENT_CONSENSUS_WAIT` / committed-only) still uses
+native **15** / Kafka **19** + live rollback; wait **off** is
+best-effort (local write is SoT if `client_write` fails). Log store
+stays in-memory; not full KRaft. See [V16_SPEC.md](./V16_SPEC.md).
 
 ## v0.17 openraft snapshot
 
@@ -486,7 +485,8 @@ under `{data_dir}/__openraft/` (`hard_state.json`, `log.json`,
 `snapshot.json`). A process restart on the same data dir reloads those
 files, skips a second `initialize()`, and can re-elect. Flag **off**
 does **not** create `__openraft/`. This is JSON atomic-replace, **not**
-Rocks. Homemade `{data_dir}/__metadata_raft/` is a different store.
+Rocks. Leftover `{data_dir}/__metadata_raft/` from homemade 154 is
+unread (v0.222).
 See [V21_SPEC.md](./V21_SPEC.md).
 
 ## v0.22 openraft snapshot apply
@@ -563,22 +563,19 @@ unchanged. Flag **off** still does **not** create `__openraft/`.
 Upgrade: if only the v0.21 JSON files exist, the first boot **imports**
 them into `raft.redb` and then prefers redb. Stale JSON is ignored while
 the redb file exists (safe to delete after import). Not RocksDB / not
-openraft-rocks. Homemade `{data_dir}/__metadata_raft/` is a different
-store. See [V35_SPEC.md](./V35_SPEC.md).
+openraft-rocks. Leftover `{data_dir}/__metadata_raft/` from homemade 154
+is unread (v0.222). See [V35_SPEC.md](./V35_SPEC.md).
 
-## v0.40 raft wait-commit
+## v0.40 raft wait-commit (removed in v0.222)
 
-When `VOLANT_METADATA_RAFT=1` (homemade 154, openraft off), CreateTopic /
-DeleteTopic / CreatePartitions wait until `commit_index` covers the new
-`SetAssignment` entry before client ok. Majority miss or RPC timeout
-**rolls back** live `assignment.json` (native **15** / Kafka **19**),
-same restore as v0.3. Default **on**. Set
-`VOLANT_METADATA_RAFT_WAIT_COMMIT=0` to keep 154 mutate-first (local
-write is SoT; uncommitted log entry retained). Openraft-only is unchanged
-(v0.16 already waits on `client_write`). See [V40_SPEC.md](./V40_SPEC.md).
+Homemade 154 wait-commit is **gone**. `VOLANT_METADATA_RAFT=1` and
+`VOLANT_METADATA_RAFT_WAIT_COMMIT=1` warn once and are ignored. CreateTopic
+/ DeleteTopic / CreatePartitions wait only via openraft `client_write`
+(when that flag is on) or Phase 150 wait / committed-only. See
+[V222_SPEC.md](./V222_SPEC.md) and historical [V40_SPEC.md](./V40_SPEC.md).
 
 **Cluster sharp edges:** Truncate-journal majority (Phase 130), assignment
-majority (Phase 150/154), and Phase 135/137/148 wait mode use **configured N**
+majority (Phase 150), and Phase 135/137/148 wait mode use **configured N**
 (`floor(N/2)+1`), not live-only. For **N=2**, majority
 is 2 — one peer down → permanent journal majority fail (`consensus_fail` / wait
 `NotEnoughReplicas`). **Phase 148:** wait-on fail does **not** truncate local log

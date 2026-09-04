@@ -5,7 +5,6 @@ pub mod assignment_consensus;
 pub mod cluster_metadata;
 pub mod config;
 pub mod membership;
-pub mod metadata_raft;
 pub mod openraft_meta;
 pub mod overlay;
 pub mod state;
@@ -28,11 +27,6 @@ pub use cluster_metadata::{
 };
 pub use config::{BrokerEndpoint, ClusterConfig};
 pub use membership::Membership;
-pub use metadata_raft::{
-    AppendEntriesResult, MetadataCommand, MetadataLogEntry, MetadataRaftHardState,
-    MetadataRaftState, METADATA_RAFT_DIR, METADATA_RAFT_FILE_VERSION,
-    METADATA_RAFT_HARD_STATE_FILE, METADATA_RAFT_LOG_FILE,
-};
 pub use openraft_meta::{
     default_openraft_forward_membership_enabled, default_openraft_joint_rollback_enabled,
     default_openraft_metadata_enabled, openraft_snapshot_logs_since_last, MetaRequest,
