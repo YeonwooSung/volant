@@ -1659,11 +1659,45 @@ public final class Client implements AutoCloseable {
 
     /**
      * Fetch with explicit knobs, returning records and high watermark.
+     * Empty group trailer — unfiltered.
      */
     public FetchResult fetchResult(
             String topic, int partition, long offset, int maxMessages, long maxBytes, int maxWaitMs) {
+        return fetchResult(topic, partition, offset, maxMessages, maxBytes, maxWaitMs, "", "");
+    }
+
+    /**
+     * Fetch with a native group+member trailer (v0.234). Empty {@code groupId}
+     * or {@code memberId} is unfiltered.
+     */
+    public List<Record> fetch(
+            String topic,
+            int partition,
+            long offset,
+            int maxMessages,
+            long maxBytes,
+            long maxWaitMs,
+            String groupId,
+            String memberId) {
+        return fetchResult(topic, partition, offset, maxMessages, maxBytes, (int) maxWaitMs, groupId, memberId)
+                .records;
+    }
+
+    /**
+     * Fetch with explicit knobs and optional group+member trailer.
+     */
+    public FetchResult fetchResult(
+            String topic,
+            int partition,
+            long offset,
+            int maxMessages,
+            long maxBytes,
+            int maxWaitMs,
+            String groupId,
+            String memberId) {
         byte[] payload = Codec.encodeFetchRequest(
-                new Codec.FetchRequest(topic, partition, offset, maxMessages, maxBytes, maxWaitMs));
+                new Codec.FetchRequest(
+                        topic, partition, offset, maxMessages, maxBytes, maxWaitMs, groupId, memberId));
         int retryAttempt = 0;
         while (true) {
             int maxAttempts = 1 + maxRedirects;

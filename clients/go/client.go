@@ -1631,6 +1631,21 @@ func (c *Client) FetchOpts(topic string, partition int, offset int64, maxMessage
 
 // FetchOptsResult is FetchOpts plus the already-decoded high watermark.
 func (c *Client) FetchOptsResult(topic string, partition int, offset int64, maxMessages, maxBytes, maxWaitMs uint32) (FetchResult, error) {
+	return c.FetchOptsResultFor(topic, partition, offset, maxMessages, maxBytes, maxWaitMs, "", "")
+}
+
+// FetchOptsFor is FetchOpts with a native group+member trailer (v0.234).
+// Empty groupID or memberID is unfiltered.
+func (c *Client) FetchOptsFor(topic string, partition int, offset int64, maxMessages, maxBytes, maxWaitMs uint32, groupID, memberID string) ([]Record, error) {
+	res, err := c.FetchOptsResultFor(topic, partition, offset, maxMessages, maxBytes, maxWaitMs, groupID, memberID)
+	if err != nil {
+		return nil, err
+	}
+	return res.Records, nil
+}
+
+// FetchOptsResultFor is FetchOptsFor plus the already-decoded high watermark.
+func (c *Client) FetchOptsResultFor(topic string, partition int, offset int64, maxMessages, maxBytes, maxWaitMs uint32, groupID, memberID string) (FetchResult, error) {
 	payload, err := codec.EncodeFetchRequest(codec.FetchRequest{
 		Topic:       topic,
 		Partition:   uint32(partition),
@@ -1638,6 +1653,8 @@ func (c *Client) FetchOptsResult(topic string, partition int, offset int64, maxM
 		MaxMessages: maxMessages,
 		MaxBytes:    maxBytes,
 		MaxWaitMs:   maxWaitMs,
+		GroupID:     groupID,
+		MemberID:    memberID,
 	})
 	if err != nil {
 		return FetchResult{}, err

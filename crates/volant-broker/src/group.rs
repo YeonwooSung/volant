@@ -73,6 +73,17 @@ pub struct FetchOffsetsResult {
     pub entries: Vec<StoredOffset>,
 }
 
+/// Whether a group member currently owns a topic partition (v0.234).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Owns {
+    /// Member is live and assigned this partition.
+    Allow,
+    /// Unknown group or unknown member id.
+    UnknownMember,
+    /// Live member is not assigned this partition.
+    NotAssigned,
+}
+
 /// One member in a group describe snapshot (Phase 11).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct GroupMemberDescription {
@@ -648,6 +659,36 @@ impl GroupCoordinator {
     #[cfg(test)]
     pub fn generation(&self, group_id: &str) -> Option<u32> {
         self.groups.lock().get(group_id).map(|g| g.generation)
+    }
+
+    /// Whether `member_id` currently owns `topic`/`partition` in `group_id`.
+    ///
+    /// Unknown group is [`Owns::UnknownMember`]. Empty `group_id` or
+    /// `member_id` is the caller's skip (admin / CLI / old clients) — this
+    /// method still reports ownership if invoked.
+    pub fn member_owns(
+        &self,
+        group_id: &str,
+        member_id: &str,
+        topic: &str,
+        partition: u32,
+    ) -> Owns {
+        let groups = self.groups.lock();
+        let Some(group) = groups.get(group_id) else {
+            return Owns::UnknownMember;
+        };
+        let Some(member) = group.members.get(member_id) else {
+            return Owns::UnknownMember;
+        };
+        if member
+            .assignment
+            .iter()
+            .any(|(t, p)| t == topic && *p == partition)
+        {
+            Owns::Allow
+        } else {
+            Owns::NotAssigned
+        }
     }
 }
 
@@ -1475,6 +1516,40 @@ mod tests {
         assert_eq!(b.error_code, ErrorCode::RebalanceInProgress as u16);
         assert_eq!(coord.generation("g"), Some(1));
         assert_eq!(member_count(&coord, "g"), 1);
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn member_owns_allow_unknown_and_stolen() {
+        let dir = temp_dir();
+        let coord = GroupCoordinator::new(&dir).unwrap();
+        assert_eq!(
+            coord.member_owns("g", "nobody", "t", 0),
+            Owns::UnknownMember
+        );
+        let a = coord
+            .join("g", "", 10_000, vec!["t".into()], "", counts)
+            .unwrap();
+        sync_ok(&coord, "g", &a.member_id, a.generation);
+        assert_eq!(coord.member_owns("g", &a.member_id, "t", 0), Owns::Allow);
+        assert_eq!(coord.member_owns("g", "ghost", "t", 0), Owns::UnknownMember);
+        let b = coord
+            .join("g", "", 10_000, vec!["t".into()], "", counts)
+            .unwrap();
+        let a_now = coord.assignment("g", &a.member_id).unwrap();
+        let b_now = coord.assignment("g", &b.member_id).unwrap();
+        let stolen = b_now
+            .iter()
+            .find(|tp| !a_now.contains(tp))
+            .expect("b owns something a does not");
+        assert_eq!(
+            coord.member_owns("g", &a.member_id, &stolen.0, stolen.1),
+            Owns::NotAssigned
+        );
+        assert_eq!(
+            coord.member_owns("g", &b.member_id, &stolen.0, stolen.1),
+            Owns::Allow
+        );
         let _ = fs::remove_dir_all(&dir);
     }
 }

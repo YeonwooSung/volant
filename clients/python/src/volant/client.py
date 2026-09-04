@@ -1311,6 +1311,8 @@ class Client:
         max_messages: Optional[int] = None,
         max_bytes: Optional[int] = None,
         max_wait_ms: Optional[int] = None,
+        group_id: str = "",
+        member_id: str = "",
     ) -> FetchResult:
         """Fetch records from topic/partition starting at ``offset``.
 
@@ -1319,6 +1321,8 @@ class Client:
         Explicit kwargs still win. 0 is kept as-is (wire-legal; no clamp).
         Transient broker/transport errors retry up to ``max_retries``
         extra times (default 0). Error 13 uses ``max_redirects`` only.
+        Empty ``group_id`` / ``member_id`` is unfiltered; both set
+        writes the v0.234 assignment trailer.
         """
         if max_messages is None:
             max_messages = self.fetch_max_messages
@@ -1334,6 +1338,8 @@ class Client:
                 max_messages=max_messages,
                 max_bytes=max_bytes,
                 max_wait_ms=max_wait_ms,
+                group_id=group_id,
+                member_id=member_id,
             )
         )
         max_retries = max(0, int(self.max_retries))

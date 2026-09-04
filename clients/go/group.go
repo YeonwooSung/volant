@@ -639,7 +639,7 @@ func (g *GroupConsumer) Poll(timeout time.Duration) ([]FetchedRecord, error) {
 				}
 			}
 		}
-		recs, err := g.client.FetchOpts(a.Topic, int(a.Partition), int64(from), maxMessages, maxBytes, maxWait)
+		recs, err := g.client.FetchOptsFor(a.Topic, int(a.Partition), int64(from), maxMessages, maxBytes, maxWait, g.groupID, g.memberID)
 		if err != nil {
 			return nil, err
 		}

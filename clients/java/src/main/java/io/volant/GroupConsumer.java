@@ -622,7 +622,8 @@ public final class GroupConsumer implements AutoCloseable {
                     maxWait = wait;
                     waited = true;
                 }
-                List<Record> recs = backend.fetch(a.topic, a.partition, from, maxMessages, maxBytes, maxWait);
+                List<Record> recs =
+                        backend.fetch(a.topic, a.partition, from, maxMessages, maxBytes, maxWait, groupId, memberId);
                 for (Record r : recs) {
                     long next = r.offset == Long.MAX_VALUE ? Long.MAX_VALUE : r.offset + 1;
                     positions.put(new Tp(a.topic, a.partition), next);
@@ -1027,6 +1028,18 @@ public final class GroupConsumer implements AutoCloseable {
         List<Record> fetch(
                 String topic, int partition, long offset, int maxMessages, long maxBytes, long maxWaitMs);
 
+        default List<Record> fetch(
+                String topic,
+                int partition,
+                long offset,
+                int maxMessages,
+                long maxBytes,
+                long maxWaitMs,
+                String groupId,
+                String memberId) {
+            return fetch(topic, partition, offset, maxMessages, maxBytes, maxWaitMs);
+        }
+
         void commitOffsets(String group, String memberId, long generation, List<Codec.OffsetCommitEntry> entries);
 
         List<Codec.OffsetFetchEntry> fetchOffsets(String group, List<Codec.OffsetEntry> entries);
@@ -1090,6 +1103,19 @@ public final class GroupConsumer implements AutoCloseable {
         public List<Record> fetch(
                 String topic, int partition, long offset, int maxMessages, long maxBytes, long maxWaitMs) {
             return client.fetch(topic, partition, offset, maxMessages, maxBytes, maxWaitMs);
+        }
+
+        @Override
+        public List<Record> fetch(
+                String topic,
+                int partition,
+                long offset,
+                int maxMessages,
+                long maxBytes,
+                long maxWaitMs,
+                String groupId,
+                String memberId) {
+            return client.fetch(topic, partition, offset, maxMessages, maxBytes, maxWaitMs, groupId, memberId);
         }
 
         @Override

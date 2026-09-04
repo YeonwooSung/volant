@@ -379,6 +379,10 @@ type FetchRequest struct {
 	MaxMessages uint32
 	MaxBytes    uint32
 	MaxWaitMs   uint32
+	// GroupID is the optional v0.234 assignment trailer. Empty = unfiltered.
+	GroupID string
+	// MemberID is the optional v0.234 assignment trailer. Empty = unfiltered.
+	MemberID string
 }
 
 // FetchRecord is one record in a Fetch response.
@@ -1096,6 +1100,14 @@ func EncodeFetchRequest(req FetchRequest) ([]byte, error) {
 	w.u32(req.MaxMessages)
 	w.u32(req.MaxBytes)
 	w.u32(req.MaxWaitMs)
+	if req.GroupID != "" || req.MemberID != "" {
+		if err := putString(w, req.GroupID); err != nil {
+			return nil, err
+		}
+		if err := putString(w, req.MemberID); err != nil {
+			return nil, err
+		}
+	}
 	return w.buf, nil
 }
 
@@ -1125,6 +1137,17 @@ func DecodeFetchRequest(payload []byte) (FetchRequest, error) {
 	if err != nil {
 		return FetchRequest{}, err
 	}
+	groupID, memberID := "", ""
+	if r.remaining() > 0 {
+		groupID, err = getString(r)
+		if err != nil {
+			return FetchRequest{}, err
+		}
+		memberID, err = getString(r)
+		if err != nil {
+			return FetchRequest{}, err
+		}
+	}
 	return FetchRequest{
 		Topic:       topic,
 		Partition:   part,
@@ -1132,6 +1155,8 @@ func DecodeFetchRequest(payload []byte) (FetchRequest, error) {
 		MaxMessages: maxMsg,
 		MaxBytes:    maxBytes,
 		MaxWaitMs:   maxWait,
+		GroupID:     groupID,
+		MemberID:    memberID,
 	}, nil
 }
 
