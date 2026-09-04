@@ -5,7 +5,7 @@
 //! AlterReplicaLogDirs, AssignReplicasToDirs, DescribeLogDirs,
 //! DescribeTopicPartitions, UnregisterBroker, UpdateFeatures,
 //! DescribeQuorum, AllocateProducerIds, GetTelemetrySubscriptions,
-//! configs.
+//! CreateDelegationToken, configs.
 
 use bytes::{Buf, BufMut, BytesMut};
 use volant_core::{Error, PartitionId, TopicName};
@@ -18,9 +18,9 @@ use crate::scram::ScramHash;
 
 use super::codec::{
     get_compact_array_len, get_compact_bytes, get_compact_nullable_string, get_compact_string,
-    get_nullable_string, get_string, get_uuid, put_compact_array_len, put_compact_nullable_string,
-    put_compact_string, put_empty_tag_buffer, put_nullable_string, put_string, put_unsigned_varint,
-    put_uuid, skip_tag_buffer, KAFKA_UUID_ZERO,
+    get_nullable_string, get_string, get_uuid, put_compact_array_len, put_compact_bytes,
+    put_compact_nullable_string, put_compact_string, put_empty_tag_buffer, put_nullable_string,
+    put_string, put_unsigned_varint, put_uuid, skip_tag_buffer, KAFKA_UUID_ZERO,
 };
 use super::topic_id;
 use super::KafkaErrorCode;
@@ -3668,6 +3668,78 @@ pub(crate) fn encode_get_telemetry_subscriptions(
     write_get_telemetry_subscriptions(out, error, &client_instance_id);
 }
 
+/// CreateDelegationToken v0 (always flexible). Volant has no
+/// delegation-token store.
+///
+/// Parses `renewers[] { principalType, principalName }` and
+/// `maxLifeTimeMs`, then rejects with **42** `INVALID_REQUEST`
+/// (`delegation tokens not supported`). Nothing persisted. Controller
+/// is not required. Official Kafka first flexible version is **2**;
+/// Volant treats advertised v0 as flexible (same residual class as
+/// quotas v0 / DescribeLogDirs v1). Owner/requester fields are v3+
+/// and out of advertised range. ACL: Cluster **ALTER** (disabled ACLs
+/// allow). Denied → **31**.
+pub(crate) fn encode_create_delegation_token(
+    broker: &Broker,
+    src: &mut impl Buf,
+    out: &mut BytesMut,
+    principal: &str,
+) {
+    parse_create_delegation_token_request(src);
+
+    let denied = broker.acls().is_enabled()
+        && !broker.acls().authorize(
+            Some(principal),
+            ResourceType::Cluster,
+            CLUSTER_RESOURCE,
+            AclOperation::Alter,
+        );
+    let error = if denied {
+        KafkaErrorCode::ClusterAuthorizationFailed
+    } else {
+        KafkaErrorCode::InvalidRequest
+    };
+
+    write_create_delegation_token(out, error);
+}
+
+fn parse_create_delegation_token_request(src: &mut impl Buf) {
+    match get_compact_array_len(src) {
+        Ok(Some(n)) => {
+            for _ in 0..n {
+                if get_compact_string(src).is_err() {
+                    break;
+                }
+                if get_compact_string(src).is_err() {
+                    break;
+                }
+                let _ = skip_tag_buffer(src);
+            }
+        }
+        Ok(None) | Err(_) => {}
+    }
+    if src.remaining() >= 8 {
+        let _max_life_time_ms = src.get_i64();
+    }
+    let _ = skip_tag_buffer(src);
+}
+
+fn write_create_delegation_token(out: &mut BytesMut, error: KafkaErrorCode) {
+    // Official CreateDelegationTokenResponse.json field order (v0–2):
+    // error, owner principal, issue/expiry/max timestamps, tokenId, hmac,
+    // throttle last. Flexible compact strings/bytes + tagged. Empty token.
+    out.put_i16(error.as_i16());
+    put_compact_string(out, "");
+    put_compact_string(out, "");
+    out.put_i64(-1); // issueTimestampMs
+    out.put_i64(-1); // expiryTimestampMs
+    out.put_i64(-1); // maxTimestampMs
+    put_compact_string(out, ""); // tokenId
+    put_compact_bytes(out, Some(&[])); // hmac
+    out.put_i32(0); // throttleTimeMs
+    put_empty_tag_buffer(out);
+}
+
 fn write_get_telemetry_subscriptions(
     out: &mut BytesMut,
     error: KafkaErrorCode,
@@ -4649,6 +4721,148 @@ mod tests {
         assert_eq!(subscription_id, 0);
         assert_eq!(push_interval, -1);
         assert_eq!(metrics_n, 0);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    fn create_delegation_token_body(renewers: &[(&str, &str)], max_life_ms: i64) -> BytesMut {
+        let mut body = BytesMut::new();
+        put_compact_array_len(&mut body, renewers.len());
+        for (ty, name) in renewers {
+            put_compact_string(&mut body, ty);
+            put_compact_string(&mut body, name);
+            put_empty_tag_buffer(&mut body);
+        }
+        body.put_i64(max_life_ms);
+        put_empty_tag_buffer(&mut body);
+        body
+    }
+
+    fn read_create_delegation_token(
+        src: &mut impl Buf,
+    ) -> (i16, String, String, i64, i64, i64, String, usize, i32) {
+        let error = src.get_i16();
+        let principal_type = get_compact_string(src).unwrap();
+        let principal_name = get_compact_string(src).unwrap();
+        let issue = src.get_i64();
+        let expiry = src.get_i64();
+        let max_ts = src.get_i64();
+        let token_id = get_compact_string(src).unwrap();
+        let hmac_len = get_compact_bytes(src).unwrap().unwrap_or_default().len();
+        let throttle = src.get_i32();
+        skip_tag_buffer(src).unwrap();
+        (
+            error,
+            principal_type,
+            principal_name,
+            issue,
+            expiry,
+            max_ts,
+            token_id,
+            hmac_len,
+            throttle,
+        )
+    }
+
+    fn dir_has_delegation_token(root: &std::path::Path) -> bool {
+        let mut stack = vec![root.to_path_buf()];
+        while let Some(dir) = stack.pop() {
+            let Ok(entries) = std::fs::read_dir(&dir) else {
+                continue;
+            };
+            for e in entries.flatten() {
+                let name = e.file_name();
+                let lower = name.to_string_lossy().to_ascii_lowercase();
+                if lower.contains("delegation") {
+                    return true;
+                }
+                if e.file_type().map(|t| t.is_dir()).unwrap_or(false) {
+                    stack.push(e.path());
+                }
+            }
+        }
+        false
+    }
+
+    #[test]
+    fn kafka_create_delegation_token_rejects_and_does_not_persist() {
+        let dir = temp_dir("cdt-ok");
+        let broker = Broker::new(StorageConfig {
+            data_dir: dir.clone(),
+            ..StorageConfig::default()
+        });
+        let before = snapshot_dir(&dir);
+
+        let mut src = create_delegation_token_body(&[("User", "alice")], -1);
+        let mut out = BytesMut::new();
+        encode_create_delegation_token(&broker, &mut src, &mut out, "kafka-anonymous");
+        let mut resp = out.freeze();
+        let (error, ptype, pname, issue, expiry, max_ts, token_id, hmac_len, throttle) =
+            read_create_delegation_token(&mut resp);
+        assert_eq!(error, KafkaErrorCode::InvalidRequest.as_i16());
+        assert!(ptype.is_empty());
+        assert!(pname.is_empty());
+        assert_eq!(issue, -1);
+        assert_eq!(expiry, -1);
+        assert_eq!(max_ts, -1);
+        assert!(token_id.is_empty());
+        assert_eq!(hmac_len, 0);
+        assert_eq!(throttle, 0);
+
+        assert_eq!(snapshot_dir(&dir), before, "must not persist tokens");
+        assert!(
+            !dir_has_delegation_token(&dir),
+            "must not create delegation-token files"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn kafka_create_delegation_token_acl_deny_is_31() {
+        let dir = temp_dir("cdt-acl");
+        let broker = Broker::new(StorageConfig {
+            data_dir: dir.clone(),
+            ..StorageConfig::default()
+        });
+        broker
+            .configure_acls(true, None, vec![], "token".into())
+            .unwrap();
+
+        let mut src = create_delegation_token_body(&[("User", "bob")], 3_600_000);
+        let mut out = BytesMut::new();
+        encode_create_delegation_token(&broker, &mut src, &mut out, "kafka-anonymous");
+        let mut resp = out.freeze();
+        let (error, _, _, issue, expiry, max_ts, token_id, hmac_len, throttle) =
+            read_create_delegation_token(&mut resp);
+        assert_eq!(error, KafkaErrorCode::ClusterAuthorizationFailed.as_i16());
+        assert_eq!(issue, -1);
+        assert_eq!(expiry, -1);
+        assert_eq!(max_ts, -1);
+        assert!(token_id.is_empty());
+        assert_eq!(hmac_len, 0);
+        assert_eq!(throttle, 0);
+        assert!(!dir_has_delegation_token(&dir));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn kafka_create_delegation_token_not_controller_still_42() {
+        let dir = temp_dir("cdt-nc");
+        let broker = cluster_n2(dir.clone(), 2);
+        assert!(!broker.is_controller());
+
+        let mut src = create_delegation_token_body(&[], -1);
+        let mut out = BytesMut::new();
+        encode_create_delegation_token(&broker, &mut src, &mut out, "kafka-anonymous");
+        let mut resp = out.freeze();
+        let (error, _, _, issue, expiry, max_ts, token_id, hmac_len, throttle) =
+            read_create_delegation_token(&mut resp);
+        assert_eq!(error, KafkaErrorCode::InvalidRequest.as_i16());
+        assert_eq!(issue, -1);
+        assert_eq!(expiry, -1);
+        assert_eq!(max_ts, -1);
+        assert!(token_id.is_empty());
+        assert_eq!(hmac_len, 0);
+        assert_eq!(throttle, 0);
         let _ = std::fs::remove_dir_all(&dir);
     }
 
