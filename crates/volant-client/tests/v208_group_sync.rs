@@ -319,7 +319,9 @@ async fn serve_stub(
                             error_code: 0,
                             entries: vec![],
                         },
-                        Request::ListOffsets { topic, partitions } => Response::ListOffsets {
+                        Request::ListOffsets {
+                            topic, partitions, ..
+                        } => Response::ListOffsets {
                             error_code: 0,
                             topic,
                             entries: partitions

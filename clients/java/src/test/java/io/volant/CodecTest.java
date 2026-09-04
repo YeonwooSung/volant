@@ -782,6 +782,31 @@ class CodecTest {
     }
 
     @Test
+    void listOffsetsRequestTimestampTrailer() {
+        Codec.ListOffsetsRequest req =
+                new Codec.ListOffsetsRequest("events", Arrays.asList(0, 1), -1L);
+        byte[] raw = Codec.encodeListOffsetsRequest(req);
+        byte[] expected = hx("0600" + "6576656e7473" + "02000000" + "00000000" + "01000000"
+                + "ffffffffffffffff");
+        assertArrayEquals(expected, raw);
+        Codec.ListOffsetsRequest decoded = Codec.decodeListOffsetsRequest(raw);
+        assertEquals("events", decoded.topic);
+        assertEquals(Arrays.asList(0, 1), decoded.partitions);
+        assertEquals(-1L, decoded.timestampMs);
+
+        byte[] legacy = hx("0600" + "6576656e7473" + "02000000" + "00000000" + "01000000");
+        assertEquals(-1L, Codec.decodeListOffsetsRequest(legacy).timestampMs);
+
+        for (long ts : new long[] {-2L, 0L}) {
+            Codec.ListOffsetsRequest at =
+                    new Codec.ListOffsetsRequest("events", Collections.singletonList(0), ts);
+            Codec.ListOffsetsRequest got =
+                    Codec.decodeListOffsetsRequest(Codec.encodeListOffsetsRequest(at));
+            assertEquals(ts, got.timestampMs);
+        }
+    }
+
+    @Test
     void createPartitionsRequestPayloadRs() {
         // crates/volant-protocol/src/payload.rs
         // phase15_create_partitions_list_offsets_roundtrip (count 4)

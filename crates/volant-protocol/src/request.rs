@@ -476,12 +476,15 @@ pub enum Request {
         /// Desired total partition count (must exceed current).
         total_count: u32,
     },
-    /// List earliest/latest offsets (Phase 15).
+    /// List earliest/latest offsets (Phase 15; v0.239 optional timestamp).
     ListOffsets {
         /// Topic name.
         topic: String,
         /// Partitions to query; empty = all.
         partitions: Vec<u32>,
+        /// Timestamp trailer: missing / `-1` = latest (LEO), `-2` = earliest
+        /// (log start), `>= 0` = first record at or after `T` (v0.239).
+        timestamp_ms: i64,
     },
     /// Create ACL entries (Phase 20).
     CreateAcls {
@@ -763,6 +766,12 @@ pub enum Request {
 
 /// `ReassignPartitions.partition` sentinel: apply to every partition of the topic.
 pub const REASSIGN_ALL_PARTITIONS: u32 = u32::MAX;
+
+/// Native ListOffsets `timestamp_ms` trailer: latest = LEO (v0.239).
+/// Missing trailer also latest.
+pub const LIST_OFFSETS_LATEST: i64 = -1;
+/// Native ListOffsets `timestamp_ms` trailer: earliest = log start (v0.239).
+pub const LIST_OFFSETS_EARLIEST: i64 = -2;
 
 /// Native ScramFirst `hash` trailer: SHA-256 (v0.238). Missing / 0 also SHA-256.
 pub const SCRAM_HASH_SHA256: u8 = 1;

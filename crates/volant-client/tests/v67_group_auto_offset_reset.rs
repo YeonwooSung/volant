@@ -176,7 +176,9 @@ async fn serve_stub(
                                 entries: offset_fetch.lock().expect("offset_fetch").clone(),
                             }
                         }
-                        Request::ListOffsets { topic, partitions } => {
+                        Request::ListOffsets {
+                            topic, partitions, ..
+                        } => {
                             list_offsets_calls
                                 .lock()
                                 .expect("calls")

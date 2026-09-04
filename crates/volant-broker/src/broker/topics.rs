@@ -682,8 +682,28 @@ impl Broker {
     /// List earliest/latest offsets for topic partitions (Phase 15).
     ///
     /// Empty `partitions` means all known partitions. Returns
-    /// `(partition, earliest, latest)` triples.
+    /// `(partition, earliest, latest)` triples. Latest is LEO.
     pub fn list_offsets(&self, topic: &str, partitions: &[u32]) -> Result<Vec<(u32, u64, u64)>> {
+        self.list_offsets_at(topic, partitions, volant_protocol::LIST_OFFSETS_LATEST)
+    }
+
+    /// List offsets for `timestamp_ms` (v0.239).
+    ///
+    /// `-1` latest = LEO, `-2` earliest = log start, `>= 0` first record
+    /// with `timestamp_ms >= T` (else LEO). Other negatives are
+    /// `InvalidArgument`. Isolation is not applied.
+    pub fn list_offsets_at(
+        &self,
+        topic: &str,
+        partitions: &[u32],
+        timestamp_ms: i64,
+    ) -> Result<Vec<(u32, u64, u64)>> {
+        if timestamp_ms < volant_protocol::LIST_OFFSETS_EARLIEST {
+            return Err(Error::InvalidArgument(format!(
+                "invalid list offsets timestamp {timestamp_ms}"
+            )));
+        }
+
         let name = TopicName::new(topic);
         let topics = self.topics.read();
 
@@ -723,7 +743,12 @@ impl Broker {
             if let Some(t) = topics.get(&name) {
                 if let Some(part) = t.partitions.get(&PartitionId(pid)) {
                     let earliest = part.log.log_start_offset().raw();
-                    let latest = part.log.log_end_offset().raw();
+                    let leo = part.log.log_end_offset().raw();
+                    let latest = match timestamp_ms {
+                        volant_protocol::LIST_OFFSETS_LATEST => leo,
+                        volant_protocol::LIST_OFFSETS_EARLIEST => earliest,
+                        ts => first_offset_at_or_after(&part.log, ts)?.unwrap_or(leo),
+                    };
                     out.push((pid, earliest, latest));
                     continue;
                 }
@@ -973,20 +998,22 @@ impl Broker {
             }
             LocalLogDirFilter::Topics(req) => req
                 .iter()
-                .map(|(name, parts)| match topics.get(&TopicName::new(name.as_str())) {
-                    Some(t) => {
-                        let only = if parts.is_empty() {
-                            None
-                        } else {
-                            Some(parts.as_slice())
-                        };
-                        topic_log_dir_rows(t, only)
-                    }
-                    None => LocalLogDirTopic {
-                        name: name.clone(),
-                        partitions: Vec::new(),
+                .map(
+                    |(name, parts)| match topics.get(&TopicName::new(name.as_str())) {
+                        Some(t) => {
+                            let only = if parts.is_empty() {
+                                None
+                            } else {
+                                Some(parts.as_slice())
+                            };
+                            topic_log_dir_rows(t, only)
+                        }
+                        None => LocalLogDirTopic {
+                            name: name.clone(),
+                            partitions: Vec::new(),
+                        },
                     },
-                })
+                )
                 .collect(),
         }
     }
@@ -1052,6 +1079,40 @@ pub(crate) struct LocalLogDirTopic {
     pub partitions: Vec<LocalLogDirPartition>,
 }
 
+/// First record offset with `timestamp_ms >= T`. None if the log is empty
+/// or every record is earlier than `T` (caller uses LEO).
+fn first_offset_at_or_after(
+    log: &volant_storage::PartitionLog,
+    timestamp_ms: i64,
+) -> Result<Option<u64>> {
+    let start = log.log_start_offset();
+    let end = log.log_end_offset();
+    if start.raw() >= end.raw() {
+        return Ok(None);
+    }
+    let mut cursor = start;
+    while cursor.raw() < end.raw() {
+        let batch = log.read(cursor, 512)?;
+        if batch.is_empty() {
+            break;
+        }
+        for r in &batch {
+            if r.timestamp_ms >= timestamp_ms {
+                return Ok(Some(r.offset.raw()));
+            }
+        }
+        let next = batch
+            .last()
+            .map(|r| r.offset.raw().saturating_add(1))
+            .unwrap_or(end.raw());
+        if next <= cursor.raw() {
+            break;
+        }
+        cursor = Offset::new(next);
+    }
+    Ok(None)
+}
+
 /// One partition row in a DescribeLogDirs response.
 #[derive(Debug, Clone)]
 pub(crate) struct LocalLogDirPartition {
@@ -1067,7 +1128,11 @@ fn topic_log_dir_rows_all(t: &Topic) -> LocalLogDirTopic {
 
 fn topic_log_dir_rows(t: &Topic, only: Option<&[i32]>) -> LocalLogDirTopic {
     let mut pids: Vec<u32> = match only {
-        Some(only) => only.iter().filter(|&&p| p >= 0).map(|&p| p as u32).collect(),
+        Some(only) => only
+            .iter()
+            .filter(|&&p| p >= 0)
+            .map(|&p| p as u32)
+            .collect(),
         None => t.partitions.keys().map(|p| p.0).collect(),
     };
     pids.sort_unstable();

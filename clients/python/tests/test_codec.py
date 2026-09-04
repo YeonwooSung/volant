@@ -858,6 +858,7 @@ class TestListOffsetsCodec(unittest.TestCase):
             "02000000"  # count 2
             "00000000"  # partition 0
             "01000000"  # partition 1
+            "ffffffffffffffff"  # timestamp -1 latest
         )
         self.assertEqual(_hx(raw), _hx(expected))
         self.assertEqual(decode_list_offsets_request(raw), req)
@@ -865,9 +866,24 @@ class TestListOffsetsCodec(unittest.TestCase):
     def test_list_offsets_request_empty_partitions(self) -> None:
         req = ListOffsetsRequest(topic="events", partitions=[])
         raw = encode_list_offsets_request(req)
-        expected = bytes.fromhex("06006576656e7473" "00000000")
+        expected = bytes.fromhex("06006576656e7473" "00000000" "ffffffffffffffff")
         self.assertEqual(_hx(raw), _hx(expected))
         self.assertEqual(decode_list_offsets_request(raw), req)
+
+    def test_list_offsets_timestamp_trailer(self) -> None:
+        legacy = bytes.fromhex(
+            "0600"
+            "6576656e7473"
+            "02000000"
+            "00000000"
+            "01000000"
+        )
+        decoded = decode_list_offsets_request(legacy)
+        self.assertEqual(decoded.timestamp_ms, -1)
+        for ts in (-2, 0):
+            req = ListOffsetsRequest(topic="events", partitions=[0], timestamp_ms=ts)
+            raw = encode_list_offsets_request(req)
+            self.assertEqual(decode_list_offsets_request(raw), req)
 
     def test_list_offsets_response_payload_rs_fixture(self) -> None:
         resp = ListOffsetsResponse(

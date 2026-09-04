@@ -508,12 +508,17 @@ pub fn encode_request(req: &Request) -> Result<Bytes> {
             put_string(&mut dst, topic)?;
             dst.put_u32_le(*total_count);
         }
-        Request::ListOffsets { topic, partitions } => {
+        Request::ListOffsets {
+            topic,
+            partitions,
+            timestamp_ms,
+        } => {
             put_string(&mut dst, topic)?;
             dst.put_u32_le(partitions.len() as u32);
             for p in partitions {
                 dst.put_u32_le(*p);
             }
+            dst.put_i64_le(*timestamp_ms);
         }
         Request::CreateAcls { entries } => {
             dst.put_u32_le(entries.len() as u32);
@@ -1204,7 +1209,17 @@ pub fn decode_request(opcode: u16, payload: &[u8]) -> Result<Request> {
                 }
                 partitions.push(src.get_u32_le());
             }
-            Ok(Request::ListOffsets { topic, partitions })
+            // v0.239 optional timestamp trailer (absent → latest / LEO).
+            let timestamp_ms = if src.remaining() >= 8 {
+                src.get_i64_le()
+            } else {
+                crate::request::LIST_OFFSETS_LATEST
+            };
+            Ok(Request::ListOffsets {
+                topic,
+                partitions,
+                timestamp_ms,
+            })
         }
         RequestOpcode::CreateAcls => {
             if src.remaining() < 4 {
@@ -3468,6 +3483,7 @@ mod tests {
         let lo = Request::ListOffsets {
             topic: "events".into(),
             partitions: vec![0, 1],
+            timestamp_ms: crate::request::LIST_OFFSETS_LATEST,
         };
         let b = encode_request(&lo).unwrap();
         assert_eq!(
@@ -3694,6 +3710,37 @@ mod tests {
             let b = encode_request(&req).unwrap();
             assert_eq!(
                 decode_request(RequestOpcode::ScramFirst as u16, &b).unwrap(),
+                req
+            );
+        }
+    }
+
+    /// v0.239: ListOffsets timestamp trailer; missing = latest (-1).
+    #[test]
+    fn v239_list_offsets_timestamp_trailer() {
+        let mut legacy = bytes::BytesMut::new();
+        put_string(&mut legacy, "events").unwrap();
+        legacy.put_u32_le(2);
+        legacy.put_u32_le(0);
+        legacy.put_u32_le(1);
+        assert_eq!(
+            decode_request(RequestOpcode::ListOffsets as u16, &legacy).unwrap(),
+            Request::ListOffsets {
+                topic: "events".into(),
+                partitions: vec![0, 1],
+                timestamp_ms: crate::request::LIST_OFFSETS_LATEST,
+            }
+        );
+
+        for ts in [crate::request::LIST_OFFSETS_EARLIEST, 0i64] {
+            let req = Request::ListOffsets {
+                topic: "events".into(),
+                partitions: vec![0],
+                timestamp_ms: ts,
+            };
+            let b = encode_request(&req).unwrap();
+            assert_eq!(
+                decode_request(RequestOpcode::ListOffsets as u16, &b).unwrap(),
                 req
             );
         }

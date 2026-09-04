@@ -2097,16 +2097,25 @@ func (c *Client) CommitOffsets(group, memberID string, generation uint32, entrie
 // Nil or empty partitions means all partitions (wire count 0). Non-zero
 // error_code is BrokerError. Transient broker/transport errors retry up
 // to maxRetries extra times (default 0). Error 13 follows Produce/Fetch
-// redirect (maxRedirects); 13 is not a transient retry. This is not
-// Kafka ListOffsets (no timestamp or isolation); both ends of each log
-// are returned.
+// redirect (maxRedirects); 13 is not a transient retry. Timestamp is
+// latest (-1 / LEO). Use ListOffsetsAt for earliest or a wall-clock T.
+// Isolation is not applied.
 func (c *Client) ListOffsets(topic string, partitions []uint32) ([]OffsetListing, error) {
+	return c.ListOffsetsAt(topic, partitions, -1)
+}
+
+// ListOffsetsAt is ListOffsets with a timestamp trailer (v0.239).
+// -1 latest = LEO, -2 earliest = log start, >=0 first record at or after
+// T. Other negatives are broker InvalidArg. Retry / error 13 inherit
+// from ListOffsets.
+func (c *Client) ListOffsetsAt(topic string, partitions []uint32, timestampMs int64) ([]OffsetListing, error) {
 	if partitions == nil {
 		partitions = []uint32{}
 	}
 	payload, err := codec.EncodeListOffsetsRequest(codec.ListOffsetsRequest{
-		Topic:      topic,
-		Partitions: partitions,
+		Topic:       topic,
+		Partitions:  partitions,
+		TimestampMs: timestampMs,
 	})
 	if err != nil {
 		return nil, err

@@ -834,6 +834,20 @@ impl Client {
         topic: &str,
         partitions: Vec<u32>,
     ) -> Result<ListOffsetsResult> {
+        self.list_offsets_at(topic, partitions, -1).await
+    }
+
+    /// List offsets for `timestamp_ms` (v0.239).
+    ///
+    /// `-1` latest = LEO, `-2` earliest = log start, `>= 0` first record
+    /// at or after `T`. Other negatives are broker `InvalidArg`.
+    /// Retry / error **13** inherit from [`Self::list_offsets`].
+    pub async fn list_offsets_at(
+        &self,
+        topic: &str,
+        partitions: Vec<u32>,
+        timestamp_ms: i64,
+    ) -> Result<ListOffsetsResult> {
         let max_retries = self.config.max_retries;
         let max_redirects = self.config.max_redirects;
         let mut retry_attempt = 0u32;
@@ -844,6 +858,7 @@ impl Client {
                 .round_trip(Request::ListOffsets {
                     topic: topic.to_owned(),
                     partitions: partitions.clone(),
+                    timestamp_ms,
                 })
                 .await
             {

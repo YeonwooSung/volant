@@ -1930,18 +1930,31 @@ public final class Client implements AutoCloseable {
      * Non-zero {@code error_code} is {@link BrokerException}. Transient
      * broker/transport errors retry up to {@code maxRetries} extra times
      * (default 0). Error 13 follows Produce/Fetch redirect
-     * ({@code maxRedirects}); 13 is not a transient retry. This is not Kafka
-     * ListOffsets (no timestamp or isolation); both ends of each log are
-     * returned.
+     * ({@code maxRedirects}); 13 is not a transient retry. Timestamp is
+     * latest ({@code -1} / LEO). Use {@link #listOffsetsAt} for earliest
+     * or a wall-clock {@code T}. Isolation is not applied.
      */
     public List<OffsetListing> listOffsets(String topic, int... partitions) {
+        return listOffsetsAt(topic, -1L, partitions);
+    }
+
+    /**
+     * ListOffsets with a timestamp trailer (v0.239).
+     *
+     * <p>{@code -1} latest = LEO, {@code -2} earliest = log start,
+     * {@code >= 0} first record at or after {@code T}. Other negatives
+     * are broker {@code InvalidArg}. Retry / error 13 inherit from
+     * {@link #listOffsets}.
+     */
+    public List<OffsetListing> listOffsetsAt(String topic, long timestampMs, int... partitions) {
         List<Integer> parts = new ArrayList<>();
         if (partitions != null) {
             for (int p : partitions) {
                 parts.add(p);
             }
         }
-        byte[] payload = Codec.encodeListOffsetsRequest(new Codec.ListOffsetsRequest(topic, parts));
+        byte[] payload = Codec.encodeListOffsetsRequest(
+                new Codec.ListOffsetsRequest(topic, parts, timestampMs));
         int redirectPartition = parts.isEmpty() ? 0 : parts.get(0);
         int maxAttempts = 1 + maxRedirects;
         int retryAttempt = 0;
