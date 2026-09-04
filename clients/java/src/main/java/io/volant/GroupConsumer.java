@@ -84,7 +84,7 @@ public final class GroupConsumer implements AutoCloseable {
     private List<Codec.Assignment> lastRevoked = Collections.emptyList();
     private final Map<Tp, Long> positions = new LinkedHashMap<>();
     private boolean closed;
-    /** Heartbeat RPCs issued by {@link #poll} + background (not JoinGroup). */
+    /** Heartbeat RPCs issued by {@link #poll} + background (not JoinGroup / SyncGroup). */
     private long heartbeatCount;
     private ScheduledExecutorService hbExecutor;
     private ScheduledFuture<?> hbFuture;
@@ -389,6 +389,16 @@ public final class GroupConsumer implements AutoCloseable {
         memberId = result.memberId;
         generation = result.generation;
         List<Codec.Assignment> newAssignment = new ArrayList<>(result.assignment);
+        // SyncGroup peek/confirm (v0.207). Best-effort: empty or any
+        // error (including 9/10/11) keeps the JoinGroup assignment.
+        try {
+            List<Codec.Assignment> synced = backend.syncGroup(groupId, memberId, generation);
+            if (synced != null && !synced.isEmpty()) {
+                newAssignment = new ArrayList<>(synced);
+            }
+        } catch (RuntimeException ignored) {
+            // peek is best-effort
+        }
         if (ASSIGNOR_RANGE.equals(assignor)) {
             newAssignment = localRangeAssignment();
         }
@@ -854,7 +864,7 @@ public final class GroupConsumer implements AutoCloseable {
         }
     }
 
-    /** Heartbeat RPCs issued by {@link #poll} + background (not JoinGroup). */
+    /** Heartbeat RPCs issued by {@link #poll} + background (not JoinGroup / SyncGroup). */
     public long heartbeatCount() {
         lock.lock();
         try {
@@ -973,6 +983,8 @@ public final class GroupConsumer implements AutoCloseable {
         JoinGroupResult joinGroup(
                 String group, String memberId, List<String> topics, int sessionTimeoutMs, String groupInstanceId);
 
+        List<Codec.Assignment> syncGroup(String group, String memberId, long generation);
+
         void heartbeat(String group, String memberId, long generation);
 
         void leaveGroup(String group, String memberId);
@@ -1002,6 +1014,11 @@ public final class GroupConsumer implements AutoCloseable {
         public JoinGroupResult joinGroup(
                 String group, String memberId, List<String> topics, int sessionTimeoutMs, String groupInstanceId) {
             return client.joinGroup(group, memberId, topics, sessionTimeoutMs, groupInstanceId);
+        }
+
+        @Override
+        public List<Codec.Assignment> syncGroup(String group, String memberId, long generation) {
+            return client.syncGroup(group, memberId, (int) generation);
         }
 
         @Override

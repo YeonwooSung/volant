@@ -328,6 +328,11 @@ func (g *GroupConsumer) doJoin() error {
 	g.memberID = result.MemberID
 	g.generation = result.Generation
 	newAssignment := copyAssignment(result.Assignment)
+	// SyncGroup peek/confirm (v0.207). Best-effort: empty or any
+	// error (including 9/10/11) keeps the JoinGroup assignment.
+	if synced, err := g.client.SyncGroup(g.groupID, g.memberID, g.generation); err == nil && len(synced) > 0 {
+		newAssignment = copyAssignment(synced)
+	}
 	if g.assignor == assignorRange {
 		local, err := g.localRangeAssignment()
 		if err != nil {
@@ -834,7 +839,7 @@ func (g *GroupConsumer) FetchMaxBytes() uint32 {
 }
 
 // HeartbeatCount is Heartbeat RPCs issued by Poll + background
-// (not JoinGroup).
+// (not JoinGroup / SyncGroup).
 func (g *GroupConsumer) HeartbeatCount() uint64 {
 	if g == nil {
 		return 0

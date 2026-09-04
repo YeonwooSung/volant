@@ -36,6 +36,40 @@ class GroupConsumerTest {
     }
 
     @Test
+    void joinIssuesSyncGroup() {
+        FakeBackend fake = new FakeBackend();
+        fake.nextJoin = joinResult("m1", 1, assign("t", 0));
+        fake.nextSync = assign("t", 1);
+        fake.committed.put(tp("t", 1), 7L);
+
+        GroupConsumer g = GroupConsumer.join(fake, "g", List.of("t"), 10_000, false);
+        assertEquals(1, fake.syncCount);
+        assertEquals("g", fake.lastSyncGroup);
+        assertEquals("m1", fake.lastSyncMemberId);
+        assertEquals(1L, fake.lastSyncGeneration);
+        assertEquals(1, g.assignment().size());
+        assertEquals(1, g.assignment().get(0).partition);
+        assertEquals(7L, g.positions().values().iterator().next());
+        assertEquals(0, g.heartbeatCount());
+        g.close();
+    }
+
+    @Test
+    void joinKeepsAssignmentOnSyncGroupError() {
+        FakeBackend fake = new FakeBackend();
+        fake.nextJoin = joinResult("m1", 1, assign("t", 0));
+        fake.committed.put(tp("t", 0), 5L);
+        fake.syncError = new BrokerException(10, "", "sync_group");
+
+        GroupConsumer g = GroupConsumer.join(fake, "g", List.of("t"), 10_000, false);
+        assertEquals(1, fake.syncCount);
+        assertEquals(0, g.assignment().get(0).partition);
+        assertEquals(5L, g.positions().values().iterator().next());
+        assertEquals(0, g.heartbeatCount());
+        g.close();
+    }
+
+    @Test
     void unknownOffsetUsesListOffsetsEarliest() {
         FakeBackend fake = new FakeBackend();
         fake.nextJoin = joinResult("m1", 1, assign("t", 0));
@@ -555,8 +589,14 @@ class GroupConsumerTest {
     static final class FakeBackend implements GroupConsumer.Backend {
         private final Object lock = new Object();
         JoinGroupResult nextJoin;
+        List<Codec.Assignment> nextSync;
+        RuntimeException syncError;
         int heartbeatCode;
         int joinCount;
+        int syncCount;
+        String lastSyncGroup = "";
+        String lastSyncMemberId = "";
+        long lastSyncGeneration;
         int heartbeatCount;
         int leaveCount;
         int fetchCount;
@@ -601,6 +641,23 @@ class GroupConsumerTest {
                 lastJoinMemberId = memberId == null ? "" : memberId;
                 joinInstanceIds.add(lastGroupInstanceId);
                 return nextJoin;
+            }
+        }
+
+        @Override
+        public List<Codec.Assignment> syncGroup(String group, String memberId, long generation) {
+            synchronized (lock) {
+                syncCount++;
+                lastSyncGroup = group == null ? "" : group;
+                lastSyncMemberId = memberId == null ? "" : memberId;
+                lastSyncGeneration = generation;
+                if (syncError != null) {
+                    throw syncError;
+                }
+                if (nextSync != null) {
+                    return nextSync;
+                }
+                return Collections.emptyList();
             }
         }
 

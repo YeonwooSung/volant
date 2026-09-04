@@ -124,6 +124,9 @@ class FakeClient:
             assignment=[Assignment(topic="t", partition=0)],
         )
 
+    def sync_group(self, group: str, member_id: str, generation: int):
+        return []
+
     def heartbeat(self, group: str, member_id: str, generation: int) -> int:
         self.heartbeats.append((group, member_id, generation))
         return 0

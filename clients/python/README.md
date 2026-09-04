@@ -181,6 +181,8 @@ Produce/Fetch redirect. Transient 6 / 7 / 15 / 16 follow ``max_retries``.
 `(member_id, generation, assignment)`.
 `GroupConsumer.join` / `poll` / `commit` / `close` is the high-level
 loop (heartbeat on poll, re-join on error 9/10/11, cooperative revoke).
+After a successful join, GroupConsumer confirms the assignment via
+SyncGroup peek (v0.207; empty or error keeps JoinGroup assignment).
 Optional `group_instance_id=` is Phase 12 static membership (empty =
 dynamic); re-join resends the same instance id. `commit` sends the
 joined `member_id` + `generation` in one OffsetCommit for all assigned

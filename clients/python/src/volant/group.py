@@ -301,6 +301,16 @@ class GroupConsumer:
         self._member_id = result.member_id
         self._generation = result.generation
         new_assignment = [(a.topic, int(a.partition)) for a in result.assignment]
+        # SyncGroup peek/confirm (v0.207). Best-effort: empty or any
+        # error (including 9/10/11) keeps the JoinGroup assignment.
+        try:
+            synced = self._client.sync_group(
+                self._group_id, self._member_id, self._generation
+            )
+            if synced:
+                new_assignment = [(a.topic, int(a.partition)) for a in synced]
+        except Exception:
+            pass
         if self._assignor == _ASSIGNOR_RANGE:
             new_assignment = self._local_range_assignment()
 
@@ -578,7 +588,7 @@ class GroupConsumer:
 
     @property
     def heartbeat_count(self) -> int:
-        """Heartbeat RPCs issued by poll + background (not JoinGroup)."""
+        """Heartbeat RPCs issued by poll + background (not JoinGroup / SyncGroup)."""
         return self._heartbeat_count
 
     @property
