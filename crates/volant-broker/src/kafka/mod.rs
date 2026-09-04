@@ -51,6 +51,7 @@
 //! AddRaftVoter v0 (key 80 reject; not KRaft raft voter / not AddBroker),
 //! RemoveRaftVoter v0 (key 81 reject; not KRaft / not remove_broker),
 //! UpdateRaftVoter v0 (key 82 reject; not KRaft voter set),
+//! InitializeShareGroupState v0 (key 83 reject; not KIP-932 share state),
 //! UnregisterController v0 (key 94 reject; not KRaft / not UnregisterBroker).
 //! See `docs/PHASE23_SPEC.md` … `docs/PHASE91_SPEC.md`, `docs/V225_SPEC.md`,
 //! `docs/V228_SPEC.md`, `docs/V233_SPEC.md`, `docs/V235_SPEC.md`,
@@ -63,7 +64,8 @@
 //! `docs/V263_SPEC.md`, `docs/V264_SPEC.md`, `docs/V265_SPEC.md`,
 //! `docs/V266_SPEC.md`, `docs/V267_SPEC.md`, `docs/V268_SPEC.md`,
 //! `docs/V269_SPEC.md`, `docs/V270_SPEC.md`, `docs/V271_SPEC.md`,
-//! `docs/V272_SPEC.md`, `docs/V273_SPEC.md`, and `docs/V274_SPEC.md`.
+//! `docs/V272_SPEC.md`, `docs/V273_SPEC.md`, `docs/V274_SPEC.md`, and
+//! `docs/V279_SPEC.md`.
 
 mod acl_api;
 mod admin_api;
@@ -433,6 +435,10 @@ pub enum ApiKey {
     /// UpdateRaftVoter (always flexible; v0 only). Honest reject:
     /// not a KRaft voter set (no listener / KRaftVersionFeature store).
     UpdateRaftVoter = 82,
+    /// InitializeShareGroupState (always flexible; v0 only). Honest
+    /// reject: not KIP-932 share-partition state. Does not persist
+    /// share state and does not wrap OffsetCommit.
+    InitializeShareGroupState = 83,
     /// UnregisterController (always flexible; v0 only). Honest reject:
     /// not a KRaft controller (no unregister record). Does not wrap
     /// native `remove_broker`. Overlay membership is unchanged.
@@ -515,6 +521,7 @@ impl ApiKey {
             80 => Some(Self::AddRaftVoter),
             81 => Some(Self::RemoveRaftVoter),
             82 => Some(Self::UpdateRaftVoter),
+            83 => Some(Self::InitializeShareGroupState),
             94 => Some(Self::UnregisterController),
             _ => None,
         }
@@ -596,6 +603,7 @@ pub const SUPPORTED_APIS: &[(ApiKey, i16, i16)] = &[
     (ApiKey::AddRaftVoter, 0, 0),
     (ApiKey::RemoveRaftVoter, 0, 0),
     (ApiKey::UpdateRaftVoter, 0, 0),
+    (ApiKey::InitializeShareGroupState, 0, 0),
     (ApiKey::UnregisterController, 0, 0),
 ];
 
@@ -933,6 +941,20 @@ mod tests {
             .iter()
             .any(|(k, min, max)| { *k == ApiKey::UpdateRaftVoter && *min == 0 && *max == 0 }));
         assert_eq!(ApiKey::from_i16(82), Some(ApiKey::UpdateRaftVoter));
+    }
+
+    #[test]
+    fn supported_apis_includes_initialize_share_group_state_83() {
+        assert!(SUPPORTED_APIS.len() >= 75);
+        assert!(SUPPORTED_APIS.iter().any(|(k, min, max)| {
+            *k == ApiKey::InitializeShareGroupState && *min == 0 && *max == 0
+        }));
+        assert_eq!(
+            ApiKey::from_i16(83),
+            Some(ApiKey::InitializeShareGroupState)
+        );
+        assert_eq!(ApiKey::from_i16(82), Some(ApiKey::UpdateRaftVoter));
+        assert_eq!(ApiKey::from_i16(94), Some(ApiKey::UnregisterController));
     }
 
     #[test]
