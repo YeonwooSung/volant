@@ -941,6 +941,13 @@ impl Client {
         }
     }
 
+    /// Fetch cluster metadata for one topic.
+    ///
+    /// Same as [`Self::metadata_topics`] with a single topic name.
+    pub async fn metadata_topic(&self, topic: &str) -> Result<Metadata> {
+        self.metadata_topics(vec![topic.to_owned()]).await
+    }
+
     /// Metadata without the v0.157 error-14 wrap. Used by
     /// [`Self::redirect_to_controller`] so hunt and `metadata` /
     /// `metadata_topics` are not mutually recursive. Transient retry
