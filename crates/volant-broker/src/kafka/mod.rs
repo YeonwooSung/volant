@@ -14,30 +14,31 @@
 //! DescribeTransactions v0, DescribeProducers v0, KIP-890-era txn max versions
 //! (InitProducerId 0–6 OngoingTxn + prepared 2PC MVP Phase 90, AddPartitions/EndTxn 0–5,
 //! AddOffsetsToTxn 0–4 wire-identical v3/v4, TxnOffsetCommit 0–6 TopicId),
-//! CreatePartitions 0–3 (v3 = v2 wire; no KIP-599).
-//! See `docs/PHASE23_SPEC.md` … `docs/PHASE91_SPEC.md`.
+//! CreatePartitions 0–3 (v3 = v2 wire; no KIP-599),
+//! AlterPartitionReassignments v0 (wraps native opcode 114; no key 46).
+//! See `docs/PHASE23_SPEC.md` … `docs/PHASE91_SPEC.md` and `docs/V225_SPEC.md`.
 
+mod acl_api;
+mod admin_api;
 /// Kafka wire primitives, MessageSet (magic 0/1), and RecordBatch (magic 2).
 pub mod codec;
 /// Compression codecs (gzip / snappy / lz4 / zstd); Fetch codec env.
 pub mod compress;
 /// Fetch session state (Phase 88 + 91 omit + Phase 95 limits + Phase 115 durable + Phase 119 + Phase 138/139 mirror + v0.25 dual-epoch + v0.30 mirror-only converge).
 pub mod fetch_session;
+mod group_api;
 mod handler;
+mod meta_api;
+/// Produce / Fetch / ListOffsets / OffsetForLeaderEpoch Kafka wire handlers.
+pub(crate) mod produce_fetch;
+/// SASL PLAIN + SCRAM-SHA-256/512 state machine (Phases 30 / 34).
+pub mod sasl;
 /// Shared TopicId / topic-name wire identity helpers.
 mod topic_id;
 /// Transaction API handlers (Init / Add* / End / TxnOffsetCommit).
 pub(crate) mod txn;
-mod meta_api;
-/// Produce / Fetch / ListOffsets / OffsetForLeaderEpoch Kafka wire handlers.
-pub(crate) mod produce_fetch;
-mod group_api;
-mod admin_api;
-mod acl_api;
 /// Shared classic/flexible wire read helpers.
 pub(crate) mod wire;
-/// SASL PLAIN + SCRAM-SHA-256/512 state machine (Phases 30 / 34).
-pub mod sasl;
 
 pub use handler::{serve_kafka_listener, serve_kafka_listener_until};
 
@@ -87,6 +88,8 @@ pub enum KafkaErrorCode {
     TopicAlreadyExists = 36,
     /// Invalid partition count.
     InvalidPartitions = 37,
+    /// Invalid replica assignment (AlterPartitionReassignments).
+    InvalidReplicaAssignment = 39,
     /// Invalid timestamp in ListOffsets.
     InvalidTimestamp = 32,
     /// Not coordinator for group.
@@ -107,6 +110,8 @@ pub enum KafkaErrorCode {
     FetchSessionIdNotFound = 70,
     /// Invalid fetch session epoch (Fetch v7+ sessions).
     InvalidFetchSessionEpoch = 71,
+    /// No reassignment in progress (AlterPartitionReassignments cancel).
+    NoReassignmentInProgress = 83,
     /// Invalid config.
     InvalidConfig = 40,
     /// Not controller for this request (Phase 113 cluster admin).
@@ -246,6 +251,8 @@ pub enum ApiKey {
     DeleteGroups = 42,
     /// IncrementalAlterConfigs.
     IncrementalAlterConfigs = 44,
+    /// AlterPartitionReassignments (always flexible; v0 only).
+    AlterPartitionReassignments = 45,
     /// OffsetDelete.
     OffsetDelete = 47,
     /// DescribeCluster (always flexible).
@@ -294,6 +301,7 @@ impl ApiKey {
             37 => Some(Self::CreatePartitions),
             42 => Some(Self::DeleteGroups),
             44 => Some(Self::IncrementalAlterConfigs),
+            45 => Some(Self::AlterPartitionReassignments),
             47 => Some(Self::OffsetDelete),
             60 => Some(Self::DescribeCluster),
             61 => Some(Self::DescribeProducers),
@@ -339,6 +347,7 @@ pub const SUPPORTED_APIS: &[(ApiKey, i16, i16)] = &[
     (ApiKey::CreatePartitions, 0, 3),
     (ApiKey::DeleteGroups, 0, 3),
     (ApiKey::IncrementalAlterConfigs, 0, 1),
+    (ApiKey::AlterPartitionReassignments, 0, 0),
     (ApiKey::OffsetDelete, 0, 0),
     (ApiKey::DescribeCluster, 0, 2),
     (ApiKey::DescribeProducers, 0, 0),
@@ -351,10 +360,17 @@ mod tests {
     use super::*;
 
     #[test]
-    fn supported_apis_stays_38_sync_group_key_14() {
-        assert_eq!(SUPPORTED_APIS.len(), 38);
+    fn supported_apis_stays_39_sync_group_key_14_and_alter_reassign_45() {
+        assert_eq!(SUPPORTED_APIS.len(), 39);
         assert!(SUPPORTED_APIS
             .iter()
             .any(|(k, min, max)| *k == ApiKey::SyncGroup && *min == 0 && *max == 5));
+        assert!(SUPPORTED_APIS.iter().any(|(k, min, max)| {
+            *k == ApiKey::AlterPartitionReassignments && *min == 0 && *max == 0
+        }));
+        assert_eq!(
+            ApiKey::from_i16(45),
+            Some(ApiKey::AlterPartitionReassignments)
+        );
     }
 }
