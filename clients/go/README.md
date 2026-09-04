@@ -111,6 +111,7 @@ g, err = volant.JoinGroupConsumerStatic(c, "g", []string{"t"}, 10_000, "inst-1")
 batch, err := g.Poll(500 * time.Millisecond)
 err = g.Commit()
 err = g.Close()
+err = g.Leave() // v0.190; alias for Close (Rust GroupConsumer::leave)
 // Opt-in auto-commit (v0.48). Default off. interval 0 = after every Poll.
 g, err = volant.JoinGroupConsumer(c, "g", []string{"t"}, 10_000, volant.WithAutoCommit(5*time.Second))
 // Opt-in auto_offset_reset (v0.62/v0.70). Default earliest (ListOffsets earliest).
@@ -241,7 +242,7 @@ positions or 0, poll = heartbeat + fetch assigned, commit with
 member+generation, rejoin on error 9, honor revoked).
 `JoinGroupConsumerStatic` sends Phase 12 `group_instance_id` (empty =
 dynamic) and resends it on rejoin. `Close` leaves the group and does
-not close the `Client`.
+not close the `Client`. `Leave` is an alias for `Close` (v0.190).
 `RangeAssign` / `RangeAssignMulti` match the broker range algorithm.
 `WithAssignor("range")` replaces the fetch set with a local range over
 **DescribeGroup** members (still no SyncGroup; describe failure falls

@@ -687,6 +687,11 @@ public final class GroupConsumer implements AutoCloseable {
         }
     }
 
+    /** Alias for {@link #close()} (Rust {@code GroupConsumer::leave}). */
+    public void leave() {
+        close();
+    }
+
     private void startHeartbeat() {
         if (!backgroundHeartbeat) {
             return;

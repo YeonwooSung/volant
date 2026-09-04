@@ -90,6 +90,7 @@ try (Client c = Client.connect("127.0.0.1", 9092)) {
   List<Record> polled = g.poll(500);
   g.commit();
   g.close();
+  g.leave(); // v0.190; alias for close (Rust GroupConsumer::leave)
   // Opt-in auto-commit (v0.48). Default off. interval 0 = after every poll.
   GroupConsumer a = GroupConsumer.joinWithAutoCommit(c, "g", List.of("t"), 10_000, 5000);
   // Opt-in auto_offset_reset (v0.62/v0.70). Default earliest (ListOffsets earliest).
@@ -204,6 +205,7 @@ algorithm. `GroupConsumer.join(..., "range")` replaces the fetch set
 with a local range over **DescribeGroup** members (still no SyncGroup;
 describe failure falls back to solo). Default assignor is broker.
 `assignor()` returns the join-time assignor (`"broker"` or `"range"`; v0.184).
+`leave()` is an alias for `close()` (Rust `GroupConsumer::leave`; v0.190).
 
 Produce, Fetch, and DeleteRecords follow `NotLeaderForPartition`
 (error 13) by default: Metadata, reconnect to the partition leader,

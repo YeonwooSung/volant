@@ -699,6 +699,11 @@ func (g *GroupConsumer) Close() error {
 	return g.client.LeaveGroup(g.groupID, g.memberID)
 }
 
+// Leave is an alias for Close (Rust GroupConsumer::leave).
+func (g *GroupConsumer) Leave() error {
+	return g.Close()
+}
+
 func (g *GroupConsumer) heartbeatLoop() {
 	defer close(g.hbDone)
 	ticker := time.NewTicker(HeartbeatInterval(int(g.sessionTimeoutMs)))
