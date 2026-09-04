@@ -180,6 +180,8 @@
 //! v0.170 adds [`Client::create_acl`] / [`Client::delete_acl`] wrapping
 //! [`Client::create_acls`] / [`Client::delete_acls`]. Single-binding
 //! convenience. Batch APIs unchanged.
+//! v0.174 adds [`Client::create_scram_user_default`] wrapping
+//! [`Client::create_scram_user`] with iterations 0 (broker default).
 
 #![deny(missing_docs)]
 
