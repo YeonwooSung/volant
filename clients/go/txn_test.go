@@ -296,6 +296,33 @@ func TestDefaultMaxRetriesZeroRaisesOnBeginTimeout(t *testing.T) {
 	}
 }
 
+func TestCommitTransactionEmptyEncodesNoOffsets(t *testing.T) {
+	addr, got, stop := serveTxnCodes(t, []uint16{0}, []uint16{0})
+	defer stop()
+	c, err := volant.DialTimeout(addr, 5*time.Second)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer c.Close()
+	c.SetTransactionalID("txn-1")
+	if err := c.BeginTransaction(); err != nil {
+		t.Fatal(err)
+	}
+	results, err := c.CommitTransactionEmpty()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(got.endReqs) != 1 {
+		t.Fatalf("end count %d want 1", len(got.endReqs))
+	}
+	if !got.endReqs[0].Committed || len(got.endReqs[0].Offsets) != 0 {
+		t.Fatalf("end %+v", got.endReqs[0])
+	}
+	if len(results) != 1 || results[0].BaseOffset != 10 {
+		t.Fatalf("results %+v", results)
+	}
+}
+
 func TestEndTxnRetriesTimeoutThenOk(t *testing.T) {
 	addr, got, stop := serveTxnCodes(t, []uint16{0}, []uint16{txnTimeoutCode, 0})
 	defer stop()

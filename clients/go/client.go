@@ -983,6 +983,12 @@ func (c *Client) CommitTransaction(offsets []codec.TxnOffsetCommit) ([]codec.Txn
 	return c.endTransaction(true, offsets)
 }
 
+// CommitTransactionEmpty commits the open transaction with no deferred
+// offsets. Same as CommitTransaction(nil).
+func (c *Client) CommitTransactionEmpty() ([]codec.TxnProduceResult, error) {
+	return c.CommitTransaction(nil)
+}
+
 // AbortTransaction ends the open transaction with committed=0 and rewinds sequences.
 func (c *Client) AbortTransaction() error {
 	_, err := c.endTransaction(false, nil)
