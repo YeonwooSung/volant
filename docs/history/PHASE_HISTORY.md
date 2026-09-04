@@ -379,6 +379,11 @@ docs for day-to-day reading: [ops](../ops.md), [consistency](../consistency.md),
 | v0.178 | ✅ | Rust alter_config | [V178_SPEC.md](../V178_SPEC.md) |
 | v0.179 | ✅ | language single-entry FetchOffset | [V179_SPEC.md](../V179_SPEC.md) |
 | v0.180 | ✅ | Rust fetch_offset | [V180_SPEC.md](../V180_SPEC.md) |
+| v0.181 | ✅ | language single-topic MetadataTopic | [V181_SPEC.md](../V181_SPEC.md) |
+| v0.182 | ✅ | Rust metadata_topic | [V182_SPEC.md](../V182_SPEC.md) |
+| v0.183 | ✅ | Go Addr getter | [V183_SPEC.md](../V183_SPEC.md) |
+| v0.184 | ✅ | Go/Java GroupConsumer assignor getter | [V184_SPEC.md](../V184_SPEC.md) |
+| v0.185 | ✅ | Go SetEnableIdempotence / Idempotence | [V185_SPEC.md](../V185_SPEC.md) |
 
 ---
 
