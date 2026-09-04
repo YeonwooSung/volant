@@ -746,6 +746,43 @@ func TestCloseLeavesGroup(t *testing.T) {
 	}
 }
 
+func TestLeaveLeavesGroup(t *testing.T) {
+	s := newFakeGroupBroker()
+	s.setAssignment([]codec.Assignment{{Topic: "t", Partition: 0}}, nil)
+	addr, stop := startFakeGroup(t, s)
+	defer stop()
+
+	c, err := volant.DialTimeout(addr, 5*time.Second)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer c.Close()
+
+	g, err := volant.JoinGroupConsumer(c, "g", []string{"t"}, 10_000, volant.WithBackgroundHeartbeat(false))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := g.Leave(); err != nil {
+		t.Fatal(err)
+	}
+	if err := g.Leave(); err != nil {
+		t.Fatalf("second Leave: %v", err)
+	}
+	if err := g.Close(); err != nil {
+		t.Fatalf("Close after Leave: %v", err)
+	}
+	if _, err := g.Poll(0); err != volant.ErrGroupClosed {
+		t.Fatalf("Poll after Leave: %v", err)
+	}
+	if err := g.Commit(); err != volant.ErrGroupClosed {
+		t.Fatalf("Commit after Leave: %v", err)
+	}
+	_, _, _, _, leaves, _ := s.snapshot()
+	if len(leaves) != 1 || leaves[0].GroupID != "g" || leaves[0].MemberID != "m-1" {
+		t.Fatalf("leaves %+v", leaves)
+	}
+}
+
 func TestJoinEarliestUnknownUsesListOffsetsEarliest(t *testing.T) {
 	s := newFakeGroupBroker()
 	s.setAssignment([]codec.Assignment{{Topic: "t", Partition: 0}}, nil)

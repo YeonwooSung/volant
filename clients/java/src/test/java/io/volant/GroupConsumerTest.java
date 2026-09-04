@@ -173,6 +173,18 @@ class GroupConsumerTest {
     }
 
     @Test
+    void leaveIsIdempotentLikeClose() {
+        FakeBackend fake = new FakeBackend();
+        fake.nextJoin = joinResult("m1", 1, assign("t", 0));
+        GroupConsumer g = GroupConsumer.join(fake, "g", List.of("t"), 10_000, false);
+        g.leave();
+        assertThrows(ProtocolException.class, () -> g.poll(0));
+        g.leave();
+        g.close();
+        assertEquals(1, fake.leaveCount);
+    }
+
+    @Test
     void sessionTimeoutZeroDefaultsTo10000() {
         FakeBackend fake = new FakeBackend();
         fake.nextJoin = joinResult("m1", 1, assign("t", 0));

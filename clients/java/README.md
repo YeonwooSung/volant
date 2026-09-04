@@ -90,6 +90,7 @@ try (Client c = Client.connect("127.0.0.1", 9092)) {
   List<Record> polled = g.poll(500);
   g.commit();
   g.close();
+  g.leave(); // v0.190; alias for close (Rust GroupConsumer::leave)
   // Opt-in auto-commit (v0.48). Default off. interval 0 = after every poll.
   GroupConsumer a = GroupConsumer.joinWithAutoCommit(c, "g", List.of("t"), 10_000, 5000);
   // Opt-in auto_offset_reset (v0.62/v0.70). Default earliest (ListOffsets earliest).
@@ -207,6 +208,7 @@ describe failure falls back to solo). Default assignor is broker.
 `heartbeatCount()` counts Heartbeat RPCs from poll + background (not JoinGroup; v0.187).
 `sessionTimeoutMs()` returns the join-time session timeout in milliseconds
 (0 was defaulted to 10000; v0.189).
+`leave()` is an alias for `close()` (Rust `GroupConsumer::leave`; v0.190).
 
 Produce, Fetch, and DeleteRecords follow `NotLeaderForPartition`
 (error 13) by default: Metadata, reconnect to the partition leader,
