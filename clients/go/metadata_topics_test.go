@@ -154,6 +154,32 @@ func TestMetadataSendsEmptyTopicsList(t *testing.T) {
 	}
 }
 
+func TestMetadataTopicEncodesOneTopic(t *testing.T) {
+	addr, stub, stop := startMetaTopicsStub(t, nil)
+	defer stop()
+
+	c, err := volant.DialTimeout(addr, 5*time.Second)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer c.Close()
+
+	got, err := c.MetadataTopic("events")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(got.Brokers) != 0 {
+		t.Fatalf("brokers %v want empty", got.Brokers)
+	}
+	if n := stub.rpcs(); n != 1 {
+		t.Fatalf("metadata count %d want 1", n)
+	}
+	seen := stub.seen()
+	if len(seen) != 1 || len(seen[0]) != 1 || seen[0][0] != "events" {
+		t.Fatalf("seen topics %v want [[events]]", seen)
+	}
+}
+
 func TestMetadataTopicsEncodesNamedFilter(t *testing.T) {
 	addr, stub, stop := startMetaTopicsStub(t, nil)
 	defer stop()

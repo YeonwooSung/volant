@@ -74,6 +74,7 @@ g = GroupConsumer.join(c, group="g", topics=["t"], auto_offset_reset="latest")
 g = GroupConsumer.join(c, group="g", topics=["t"], fetch_max_messages=10, fetch_max_bytes=4096)
 
 meta = c.metadata()
+meta = c.metadata_topic("events")  # v0.181; one topic
 c.reconnect("127.0.0.1:9093")  # v0.115; re-Auth / re-SCRAM
 c.close()
 
@@ -135,6 +136,8 @@ n = c.delete_acls([e])
 `Client` is also a context manager. `produce(..., key=b"...")` is supported;
 null key is the default. `fetch` returns a `FetchResult` (iterable of records
 with `offset`, `key`, `value`). `metadata()` returns brokers + topics.
+`metadata_topic(topic)` fetches one named topic; same as
+`metadata([topic])`.
 `offset_commit` is an admin commit (`member_id=""`, `generation=0` unless
 overridden). `offset_fetch` returns committed `(partition, offset)` pairs
 for the given topic. `offset_fetch_entries` returns the same topic

@@ -99,6 +99,7 @@ try (Client c = Client.connect("127.0.0.1", 9092)) {
   g.setFetchMaxBytes(4096);
   Metadata meta = c.metadata();
   meta = c.metadata(List.of("events")); // v0.116; empty = all
+  meta = c.metadataTopic("events"); // v0.181; one topic
   c.reconnect("127.0.0.1", 9093); // v0.115; re-Auth / re-SCRAM
 }
 
@@ -160,6 +161,8 @@ removed = c.deleteAcls(List.of(e));
 `produce(..., null, value)` sends a null key. `fetch` returns `List<Record>`
 (`offset`, `key`, `value`). `fetchResult` returns the same records plus the
 already-decoded high watermark. `metadata()` returns brokers + topics.
+`metadataTopic(topic)` fetches one named topic; same as `metadata`
+with a singleton list.
 `offsetCommit` is an admin commit (empty member, generation 0).
 `offsetFetch` returns `List<Offset>` (`partition`, `offset`) for the topic.
 `offsetFetchEntries` returns `List<OffsetFetchEntry>` for the same topic

@@ -1817,6 +1817,13 @@ func (c *Client) MetadataTopics(topics []string) (Metadata, error) {
 	}
 }
 
+// MetadataTopic returns cluster brokers and one named topic.
+// Same as MetadataTopics([]string{topic}). Error 14 and
+// transient retry inherit from MetadataTopics.
+func (c *Client) MetadataTopic(topic string) (Metadata, error) {
+	return c.MetadataTopics([]string{topic})
+}
+
 // metadataRpc is Metadata without the v0.156 error-14 wrap.
 // Used by redirectToController so hunt and Metadata are not
 // mutually recursive. Transient retry is still v0.95.

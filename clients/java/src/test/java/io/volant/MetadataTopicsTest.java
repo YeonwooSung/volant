@@ -34,6 +34,18 @@ class MetadataTopicsTest {
     }
 
     @Test
+    void metadataTopicEncodesOneTopic() throws Exception {
+        try (MetaTopicsStub srv = MetaTopicsStub.start()) {
+            try (Client c = Client.connect("127.0.0.1", srv.port, 5_000)) {
+                Metadata got = c.metadataTopic("events");
+                assertTrue(got.brokers.isEmpty());
+            }
+            assertEquals(1, srv.metadataCount.get());
+            assertEquals(List.of(List.of("events")), srv.seenTopics());
+        }
+    }
+
+    @Test
     void metadataListEncodesNamedFilter() throws Exception {
         try (MetaTopicsStub srv = MetaTopicsStub.start()) {
             try (Client c = Client.connect("127.0.0.1", srv.port, 5_000)) {
