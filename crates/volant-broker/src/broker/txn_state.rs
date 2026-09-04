@@ -86,7 +86,10 @@ pub struct TransactionLogValue {
     pub transaction_timeout_ms: i32,
     /// Kafka `transactionStatus` byte (see `TXN_LOG_STATUS_*`).
     pub transaction_status: i8,
-    /// Topic → partitions in the txn. **Null** on write (ranges live in `__txn_prepared`).
+    /// Topic → partitions in the txn.
+    ///
+    /// Written for `ongoing` / `prepare_*` from the live open or prepared set.
+    /// **Null** for `empty` / `complete_*` (no live set) and when the set is empty.
     pub partitions: Option<Vec<(String, Vec<i32>)>>,
     /// Last update timestamp (unix ms). `0` on JSON replay.
     pub transaction_last_update_timestamp_ms: i64,
@@ -386,13 +389,19 @@ impl Broker {
             return;
         };
         self.ensure_transaction_state_topic();
+        let partitions = match state {
+            TXN_STATE_ONGOING | TXN_STATE_PREPARE_COMMIT | TXN_STATE_PREPARE_ABORT => {
+                self.txn_log_partitions(producer_id)
+            }
+            _ => None,
+        };
         let value = TransactionLogValue {
             version: 0,
             producer_id: producer_id as i64,
             producer_epoch: epoch as i16,
             transaction_timeout_ms: 0,
             transaction_status: status,
-            partitions: None,
+            partitions,
             transaction_last_update_timestamp_ms: unix_now_ms(),
             transaction_start_timestamp_ms: txn_start_ms,
         };
@@ -632,6 +641,33 @@ mod tests {
         let dec = decode_transaction_log_value(&bytes).expect("v0 decode");
         assert_eq!(dec, v);
         assert!(dec.partitions.is_none());
+    }
+
+    #[test]
+    fn transaction_log_value_v0_roundtrip_some_partitions() {
+        let v = TransactionLogValue {
+            version: 0,
+            producer_id: 1,
+            producer_epoch: 2,
+            transaction_timeout_ms: 0,
+            transaction_status: TXN_LOG_STATUS_ONGOING,
+            partitions: Some(vec![
+                ("events".into(), vec![0, 1]),
+                ("other".into(), vec![0]),
+            ]),
+            transaction_last_update_timestamp_ms: 100,
+            transaction_start_timestamp_ms: 50,
+        };
+        let bytes = encode_transaction_log_value(&v);
+        let dec = decode_transaction_log_value(&bytes).expect("v0 decode");
+        assert_eq!(dec, v);
+        assert_eq!(
+            dec.partitions,
+            Some(vec![
+                ("events".into(), vec![0, 1]),
+                ("other".into(), vec![0]),
+            ])
+        );
     }
 
     #[test]

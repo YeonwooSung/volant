@@ -682,6 +682,34 @@ impl Broker {
         self.open_txns.lock().contains_key(&producer_id)
     }
 
+    /// Topic → partitions for Kafka `TransactionLogValue` (v0.232).
+    ///
+    /// Collects `OpenTxn.added` + `written` (and pending keys) via
+    /// [`topics_from_open`], then the matching [`PreparedTxn::open`] if the
+    /// producer is prepared. Empty set is **null** (same as unknown). Topics
+    /// and partition ids are sorted.
+    pub fn txn_log_partitions(&self, producer_id: u64) -> Option<Vec<(String, Vec<i32>)>> {
+        let from_open = |txn: &OpenTxn| {
+            let topics = topics_from_open(txn);
+            if topics.is_empty() {
+                None
+            } else {
+                Some(topics)
+            }
+        };
+        {
+            let open = self.open_txns.lock();
+            if let Some(txn) = open.get(&producer_id) {
+                return from_open(txn);
+            }
+        }
+        let prepared = self.prepared_txns.lock();
+        prepared
+            .values()
+            .find(|p| p.producer_id == producer_id)
+            .and_then(|p| from_open(&p.open))
+    }
+
     /// List open + prepared transactions for ListTransactions (Phase 65/90).
     ///
     /// State is `"Ongoing"`, `"PrepareCommit"`, or `"PrepareAbort"`.
