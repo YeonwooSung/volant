@@ -297,6 +297,7 @@ async fn dispatch_kafka(
                 | Some(ApiKey::UpdateRaftVoter)
                 | Some(ApiKey::InitializeShareGroupState)
                 | Some(ApiKey::ReadShareGroupState)
+                | Some(ApiKey::WriteShareGroupState)
                 | Some(ApiKey::UnregisterController),
             _
         )
@@ -894,6 +895,12 @@ async fn dispatch_kafka(
                 debug!(error = %e, "read share group state flexible header tag buffer");
             }
             group_api::encode_read_share_group_state(broker, &mut src, &mut out, principal);
+        }
+        Some(ApiKey::WriteShareGroupState) if hdr.api_version == 0 => {
+            if let Err(e) = skip_tag_buffer(&mut src) {
+                debug!(error = %e, "write share group state flexible header tag buffer");
+            }
+            group_api::encode_write_share_group_state(broker, &mut src, &mut out, principal);
         }
         Some(ApiKey::UnregisterController) if hdr.api_version == 0 => {
             if let Err(e) = skip_tag_buffer(&mut src) {
