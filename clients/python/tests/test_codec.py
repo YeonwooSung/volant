@@ -592,6 +592,7 @@ class TestGroupCodec(unittest.TestCase):
             "0400"
             "6c6f6773"  # "logs"
             "0000"  # empty group_instance_id
+            "00000000"  # rebalance_timeout_ms 0
         )
         self.assertEqual(_hx(raw), _hx(expected))
         self.assertEqual(decode_join_group_request(raw), req)
@@ -612,6 +613,7 @@ class TestGroupCodec(unittest.TestCase):
             "01000000"
             "06006576656e7473"
             "0500706f642d31"  # "pod-1"
+            "00000000"  # rebalance_timeout_ms 0
         )
         self.assertEqual(_hx(raw), _hx(expected))
         self.assertEqual(decode_join_group_request(raw), req)

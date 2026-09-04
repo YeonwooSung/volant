@@ -1669,6 +1669,8 @@ public final class Codec {
         }
         // Phase 12 trailing field (always written by current encoders).
         putString(w, req.groupInstanceId);
+        // v0.231 trailer; 0 = broker default park (1000ms).
+        w.u32(0);
         return w.finish();
     }
 

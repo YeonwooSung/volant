@@ -523,11 +523,12 @@ type Assignment struct {
 
 // JoinGroupRequest is the JoinGroup opcode body.
 type JoinGroupRequest struct {
-	GroupID          string
-	MemberID         string
-	SessionTimeoutMs uint32
-	Topics           []string
-	GroupInstanceID  string
+	GroupID            string
+	MemberID           string
+	SessionTimeoutMs   uint32
+	Topics             []string
+	GroupInstanceID    string
+	RebalanceTimeoutMs uint32
 }
 
 // JoinGroupResponse is the JoinGroup opcode reply.
@@ -1746,6 +1747,8 @@ func EncodeJoinGroupRequest(req JoinGroupRequest) ([]byte, error) {
 	if err := putString(w, req.GroupInstanceID); err != nil {
 		return nil, err
 	}
+	// v0.231 trailer; 0 = broker default park (1000ms).
+	w.u32(req.RebalanceTimeoutMs)
 	return w.buf, nil
 }
 
@@ -1783,12 +1786,20 @@ func DecodeJoinGroupRequest(payload []byte) (JoinGroupRequest, error) {
 			return JoinGroupRequest{}, err
 		}
 	}
+	var rebalance uint32
+	if r.remaining() >= 4 {
+		rebalance, err = r.u32()
+		if err != nil {
+			return JoinGroupRequest{}, err
+		}
+	}
 	return JoinGroupRequest{
-		GroupID:          groupID,
-		MemberID:         memberID,
-		SessionTimeoutMs: timeout,
-		Topics:           topics,
-		GroupInstanceID:  instanceID,
+		GroupID:            groupID,
+		MemberID:           memberID,
+		SessionTimeoutMs:   timeout,
+		Topics:             topics,
+		GroupInstanceID:    instanceID,
+		RebalanceTimeoutMs: rebalance,
 	}, nil
 }
 

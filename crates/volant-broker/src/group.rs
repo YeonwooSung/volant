@@ -15,6 +15,9 @@ use crate::offset_store::{OffsetStore, StoredOffset, OFFSET_UNKNOWN};
 /// Prefix for static membership member ids (Phase 12).
 pub const STATIC_MEMBER_PREFIX: &str = "static:";
 
+/// Join park budget when `rebalance_timeout_ms` is 0 / omitted (v0.231).
+pub const DEFAULT_JOIN_PARK_MS: u32 = 1000;
+
 /// Result of a JoinGroup call.
 #[derive(Debug, Clone)]
 pub struct JoinResult {
@@ -167,18 +170,22 @@ impl GroupCoordinator {
     ///
     /// New-member Join (or existing Join with a topics change) parks on
     /// `join_park` until every live member has confirmed the current
-    /// generation via SyncGroup, or until the session timeout. The wait
+    /// generation via SyncGroup, or until the rebalance timeout. The wait
     /// releases `groups` so Heartbeat / SyncGroup / Leave on other
     /// connections can lift the fence. Timeout still returns error 9
     /// with no insert, no bump, no reassign. The joiner is not
     /// auto-synced. Existing members re-joining with the same topics
     /// are never fenced and do not bump generation or mark themselves
     /// synced.
+    ///
+    /// `session_timeout_ms` is member expiry only (`0` → `10_000`).
+    /// Park budget is `rebalance_timeout_ms` (`0` → [`DEFAULT_JOIN_PARK_MS`]).
     pub fn join<F>(
         &self,
         group_id: &str,
         member_id: &str,
         session_timeout_ms: u32,
+        rebalance_timeout_ms: u32,
         topics: Vec<String>,
         group_instance_id: &str,
         partition_counts: F,
@@ -193,6 +200,11 @@ impl GroupCoordinator {
             10_000
         } else {
             session_timeout_ms
+        };
+        let park_ms = if rebalance_timeout_ms == 0 {
+            DEFAULT_JOIN_PARK_MS
+        } else {
+            rebalance_timeout_ms
         };
 
         // Resolve member id: explicit → static instance → new UUID.
@@ -217,7 +229,7 @@ impl GroupCoordinator {
                 .and_then(|g| g.members.get(&resolved_id))
                 .is_some_and(|m| m.topics != topics);
             if topics_changed
-                && !park_until_all_synced(&self.join_park, &mut groups, group_id, timeout)
+                && !park_until_all_synced(&self.join_park, &mut groups, group_id, park_ms)
             {
                 return Ok(fenced_join_lookup(&groups, group_id, resolved_id));
             }
@@ -263,7 +275,7 @@ impl GroupCoordinator {
 
         // New member: park unless every live member confirmed this generation.
         // Empty group (first Join) is always all_synced.
-        if !park_until_all_synced(&self.join_park, &mut groups, group_id, timeout) {
+        if !park_until_all_synced(&self.join_park, &mut groups, group_id, park_ms) {
             return Ok(fenced_join_lookup(&groups, group_id, resolved_id));
         }
 
@@ -817,11 +829,11 @@ mod tests {
         let dir = temp_dir();
         let coord = GroupCoordinator::new(&dir).unwrap();
         let j1 = coord
-            .join("g", "", 10_000, vec!["t".into()], "", counts)
+            .join("g", "", 10_000, 0, vec!["t".into()], "", counts)
             .unwrap();
         sync_ok(&coord, "g", &j1.member_id, j1.generation);
         let j2 = coord
-            .join("g", "", 10_000, vec!["t".into()], "", counts)
+            .join("g", "", 10_000, 0, vec!["t".into()], "", counts)
             .unwrap();
         assert_eq!(j1.error_code, 0);
         assert_eq!(j2.error_code, 0);
@@ -843,11 +855,11 @@ mod tests {
         let dir = temp_dir();
         let coord = GroupCoordinator::new(&dir).unwrap();
         let j1 = coord
-            .join("g", "", 10_000, vec!["t".into()], "", counts)
+            .join("g", "", 10_000, 0, vec!["t".into()], "", counts)
             .unwrap();
         sync_ok(&coord, "g", &j1.member_id, j1.generation);
         let j2 = coord
-            .join("g", "", 10_000, vec!["t".into()], "", counts)
+            .join("g", "", 10_000, 0, vec!["t".into()], "", counts)
             .unwrap();
         let leave = coord.leave("g", &j2.member_id, counts);
         assert_eq!(leave.error_code, 0);
@@ -882,7 +894,7 @@ mod tests {
         let dir = temp_dir();
         let coord = GroupCoordinator::new(&dir).unwrap();
         let j = coord
-            .join("g", "", 10_000, vec!["t".into()], "", counts)
+            .join("g", "", 10_000, 0, vec!["t".into()], "", counts)
             .unwrap();
         let ok = coord.heartbeat("g", &j.member_id, j.generation);
         assert_eq!(ok.error_code, 0);
@@ -896,7 +908,7 @@ mod tests {
         let dir = temp_dir();
         let coord = GroupCoordinator::new(&dir).unwrap();
         let j = coord
-            .join("g", "", 10_000, vec!["t".into()], "", counts)
+            .join("g", "", 10_000, 0, vec!["t".into()], "", counts)
             .unwrap();
         let hb = coord.heartbeat("g", &j.member_id, j.generation);
         assert_eq!(hb.error_code, 0);
@@ -922,7 +934,7 @@ mod tests {
             }
         };
         let j1 = coord
-            .join("g", "", 10_000, vec!["t".into()], "", counts_multi)
+            .join("g", "", 10_000, 0, vec!["t".into()], "", counts_multi)
             .unwrap();
         assert!(j1.revoked.is_empty());
         assert_eq!(j1.assignment.len(), 4);
@@ -934,6 +946,7 @@ mod tests {
                 "g",
                 &j1.member_id,
                 10_000,
+                0,
                 vec!["u".into()],
                 "",
                 counts_multi,
@@ -952,11 +965,11 @@ mod tests {
         let dir = temp_dir();
         let coord = GroupCoordinator::new(&dir).unwrap();
         let j1 = coord
-            .join("g", "", 10_000, vec!["t".into()], "", counts)
+            .join("g", "", 10_000, 0, vec!["t".into()], "", counts)
             .unwrap();
         sync_ok(&coord, "g", &j1.member_id, j1.generation);
         let j2 = coord
-            .join("g", "", 10_000, vec!["t".into()], "", counts)
+            .join("g", "", 10_000, 0, vec!["t".into()], "", counts)
             .unwrap();
         assert!(j1.revoked.is_empty());
         assert!(j2.revoked.is_empty());
@@ -974,20 +987,20 @@ mod tests {
         let dir = temp_dir();
         let coord = GroupCoordinator::new(&dir).unwrap();
         let j1 = coord
-            .join("g", "", 10_000, vec!["t".into()], "", counts)
+            .join("g", "", 10_000, 0, vec!["t".into()], "", counts)
             .unwrap();
         assert_eq!(j1.assignment.len(), 4);
         let first: std::collections::HashSet<_> = j1.assignment.iter().cloned().collect();
         sync_ok(&coord, "g", &j1.member_id, j1.generation);
 
         let j2 = coord
-            .join("g", "", 10_000, vec!["t".into()], "", counts)
+            .join("g", "", 10_000, 0, vec!["t".into()], "", counts)
             .unwrap();
         assert!(j2.revoked.is_empty());
 
         // Member 1 re-syncs: should see revoked = old − new.
         let j1b = coord
-            .join("g", &j1.member_id, 10_000, vec!["t".into()], "", counts)
+            .join("g", &j1.member_id, 10_000, 0, vec!["t".into()], "", counts)
             .unwrap();
         let now: std::collections::HashSet<_> = j1b.assignment.iter().cloned().collect();
         let revoked: std::collections::HashSet<_> = j1b.revoked.iter().cloned().collect();
@@ -1023,14 +1036,14 @@ mod tests {
         let dir = temp_dir();
         let coord = GroupCoordinator::new(&dir).unwrap();
         let j1 = coord
-            .join("g", "", 10_000, vec!["t".into()], "", counts)
+            .join("g", "", 10_000, 0, vec!["t".into()], "", counts)
             .unwrap();
         assert_eq!(j1.error_code, 0);
         assert_eq!(coord.generation("g"), Some(1));
         assert_eq!(member_count(&coord, "g"), 1);
 
         let j2 = coord
-            .join("g", "", 150, vec!["t".into()], "", counts)
+            .join("g", "", 10_000, 150, vec!["t".into()], "", counts)
             .unwrap();
         assert_eq!(j2.error_code, ErrorCode::RebalanceInProgress as u16);
         assert_eq!(coord.generation("g"), Some(1));
@@ -1047,11 +1060,11 @@ mod tests {
         let dir = temp_dir();
         let coord = GroupCoordinator::new(&dir).unwrap();
         let j1 = coord
-            .join("g", "", 10_000, vec!["t".into()], "", counts)
+            .join("g", "", 10_000, 0, vec!["t".into()], "", counts)
             .unwrap();
         sync_ok(&coord, "g", &j1.member_id, j1.generation);
         let j2 = coord
-            .join("g", "", 10_000, vec!["t".into()], "", counts)
+            .join("g", "", 10_000, 0, vec!["t".into()], "", counts)
             .unwrap();
         assert_eq!(j2.error_code, 0);
         assert_eq!(coord.generation("g"), Some(2));
@@ -1064,16 +1077,16 @@ mod tests {
         let dir = temp_dir();
         let coord = GroupCoordinator::new(&dir).unwrap();
         let j1 = coord
-            .join("g", "", 10_000, vec!["t".into()], "", counts)
+            .join("g", "", 10_000, 0, vec!["t".into()], "", counts)
             .unwrap();
         sync_ok(&coord, "g", &j1.member_id, j1.generation);
         let j2 = coord
-            .join("g", "", 10_000, vec!["t".into()], "", counts)
+            .join("g", "", 10_000, 0, vec!["t".into()], "", counts)
             .unwrap();
         assert_eq!(j2.error_code, 0);
 
         let blocked = coord
-            .join("g", "", 150, vec!["t".into()], "", counts)
+            .join("g", "", 10_000, 150, vec!["t".into()], "", counts)
             .unwrap();
         assert_eq!(blocked.error_code, ErrorCode::RebalanceInProgress as u16);
         assert_eq!(coord.generation("g"), Some(2));
@@ -1081,13 +1094,13 @@ mod tests {
 
         sync_ok(&coord, "g", &j1.member_id, j2.generation);
         let still = coord
-            .join("g", "", 150, vec!["t".into()], "", counts)
+            .join("g", "", 10_000, 150, vec!["t".into()], "", counts)
             .unwrap();
         assert_eq!(still.error_code, ErrorCode::RebalanceInProgress as u16);
 
         sync_ok(&coord, "g", &j2.member_id, j2.generation);
         let j3 = coord
-            .join("g", "", 10_000, vec!["t".into()], "", counts)
+            .join("g", "", 10_000, 0, vec!["t".into()], "", counts)
             .unwrap();
         assert_eq!(j3.error_code, 0);
         assert_eq!(coord.generation("g"), Some(3));
@@ -1100,18 +1113,18 @@ mod tests {
         let dir = temp_dir();
         let coord = GroupCoordinator::new(&dir).unwrap();
         let j1 = coord
-            .join("g", "", 10_000, vec!["t".into()], "", counts)
+            .join("g", "", 10_000, 0, vec!["t".into()], "", counts)
             .unwrap();
         let gen = coord.generation("g");
         let again = coord
-            .join("g", &j1.member_id, 10_000, vec!["t".into()], "", counts)
+            .join("g", &j1.member_id, 10_000, 0, vec!["t".into()], "", counts)
             .unwrap();
         assert_eq!(again.error_code, 0);
         assert_eq!(coord.generation("g"), gen);
         assert_eq!(member_count(&coord, "g"), 1);
 
         let blocked = coord
-            .join("g", "", 150, vec!["t".into()], "", counts)
+            .join("g", "", 10_000, 150, vec!["t".into()], "", counts)
             .unwrap();
         assert_eq!(blocked.error_code, ErrorCode::RebalanceInProgress as u16);
         assert_eq!(coord.generation("g"), gen);
@@ -1124,11 +1137,11 @@ mod tests {
         let dir = temp_dir();
         let coord = GroupCoordinator::new(&dir).unwrap();
         let j1 = coord
-            .join("g", "", 10_000, vec!["t".into()], "", counts)
+            .join("g", "", 10_000, 0, vec!["t".into()], "", counts)
             .unwrap();
         sync_ok(&coord, "g", &j1.member_id, j1.generation);
         let j2 = coord
-            .join("g", "", 10_000, vec!["t".into()], "", counts)
+            .join("g", "", 10_000, 0, vec!["t".into()], "", counts)
             .unwrap();
         sync_ok(&coord, "g", &j1.member_id, j2.generation);
         sync_ok(&coord, "g", &j2.member_id, j2.generation);
@@ -1140,7 +1153,7 @@ mod tests {
         assert_eq!(member_count(&coord, "g"), 1);
 
         let blocked = coord
-            .join("g", "", 150, vec!["t".into()], "", counts)
+            .join("g", "", 10_000, 150, vec!["t".into()], "", counts)
             .unwrap();
         assert_eq!(blocked.error_code, ErrorCode::RebalanceInProgress as u16);
         assert_eq!(coord.generation("g"), after_leave);
@@ -1148,7 +1161,7 @@ mod tests {
 
         sync_ok(&coord, "g", &j1.member_id, after_leave.unwrap());
         let j3 = coord
-            .join("g", "", 10_000, vec!["t".into()], "", counts)
+            .join("g", "", 10_000, 0, vec!["t".into()], "", counts)
             .unwrap();
         assert_eq!(j3.error_code, 0);
         assert_eq!(coord.generation("g"), Some(4));
@@ -1161,7 +1174,7 @@ mod tests {
         let dir = temp_dir();
         let coord = GroupCoordinator::new(&dir).unwrap();
         let j1 = coord
-            .join("g", "", 10_000, vec!["t".into()], "", counts)
+            .join("g", "", 10_000, 0, vec!["t".into()], "", counts)
             .unwrap();
         let unknown = coord.sync_group("g", "nobody", j1.generation);
         assert_eq!(unknown.error_code, ErrorCode::UnknownMemberId as u16);
@@ -1193,7 +1206,7 @@ mod tests {
         assert_eq!(empty.member_count, 0);
 
         let j1 = coord
-            .join("g", "", 10_000, vec!["t".into()], "", counts)
+            .join("g", "", 10_000, 0, vec!["t".into()], "", counts)
             .unwrap();
         let listed = coord.list_groups();
         let live = listed.iter().find(|e| e.group_id == "g").unwrap();
@@ -1230,7 +1243,7 @@ mod tests {
         let dir = temp_dir();
         let coord = GroupCoordinator::new(&dir).unwrap();
         let j = coord
-            .join("g", "", 10_000, vec!["t".into()], "", counts)
+            .join("g", "", 10_000, 0, vec!["t".into()], "", counts)
             .unwrap();
         let r = coord
             .commit_offsets(
@@ -1250,7 +1263,7 @@ mod tests {
         let dir = temp_dir();
         let coord = GroupCoordinator::new(&dir).unwrap();
         let j = coord
-            .join("g", "", 10_000, vec!["t".into()], "", counts)
+            .join("g", "", 10_000, 0, vec!["t".into()], "", counts)
             .unwrap();
         let blocked = coord
             .commit_offsets(
@@ -1280,7 +1293,7 @@ mod tests {
         let dir = temp_dir();
         let coord = GroupCoordinator::new(&dir).unwrap();
         let j = coord
-            .join("g", "", 10_000, vec!["t".into()], "", counts)
+            .join("g", "", 10_000, 0, vec!["t".into()], "", counts)
             .unwrap();
         let blocked = coord
             .commit_offsets(
@@ -1304,7 +1317,7 @@ mod tests {
         let dir = temp_dir();
         let coord = GroupCoordinator::new(&dir).unwrap();
         let j = coord
-            .join("g", "", 10_000, vec!["t".into()], "", counts)
+            .join("g", "", 10_000, 0, vec!["t".into()], "", counts)
             .unwrap();
         // Empty member_id: matching gen commits without SyncGroup confirm.
         let ok = coord
@@ -1340,7 +1353,7 @@ mod tests {
         let dir = temp_dir();
         let coord = GroupCoordinator::new(&dir).unwrap();
         let j = coord
-            .join("g", "", 10_000, vec!["t".into()], "", counts)
+            .join("g", "", 10_000, 0, vec!["t".into()], "", counts)
             .unwrap();
         let wrong = coord
             .commit_offsets(
@@ -1388,11 +1401,11 @@ mod tests {
         let dir = temp_dir();
         let coord = GroupCoordinator::new(&dir).unwrap();
         let a = coord
-            .join("g", "", 40, vec!["t".into()], "", counts)
+            .join("g", "", 40, 0, vec!["t".into()], "", counts)
             .unwrap();
         sync_ok(&coord, "g", &a.member_id, a.generation);
         let b = coord
-            .join("g", "", 10_000, vec!["t".into()], "", counts)
+            .join("g", "", 10_000, 0, vec!["t".into()], "", counts)
             .unwrap();
         sync_ok(&coord, "g", &a.member_id, b.generation);
         sync_ok(&coord, "g", &b.member_id, b.generation);
@@ -1400,7 +1413,7 @@ mod tests {
         // A's session is dead. Inner expire is drop-dead-only so B stays
         // synced and C may join (heal via bump+reassign).
         let c = coord
-            .join("g", "", 10_000, vec!["t".into()], "", counts)
+            .join("g", "", 10_000, 0, vec!["t".into()], "", counts)
             .unwrap();
         assert_eq!(c.error_code, 0);
         assert_eq!(member_count(&coord, "g"), 2);
@@ -1414,14 +1427,14 @@ mod tests {
         let dir = temp_dir();
         let coord = Arc::new(GroupCoordinator::new(&dir).unwrap());
         let a = coord
-            .join("g", "", 10_000, vec!["t".into()], "", counts)
+            .join("g", "", 10_000, 0, vec!["t".into()], "", counts)
             .unwrap();
         assert_eq!(a.error_code, 0);
         assert_eq!(member_count(&coord, "g"), 1);
 
         let coord_b = Arc::clone(&coord);
         let handle =
-            thread::spawn(move || coord_b.join("g", "", 5_000, vec!["t".into()], "", counts));
+            thread::spawn(move || coord_b.join("g", "", 10_000, 5_000, vec!["t".into()], "", counts));
         thread::sleep(Duration::from_millis(50));
         assert_eq!(member_count(&coord, "g"), 1);
 
@@ -1438,13 +1451,13 @@ mod tests {
         let dir = temp_dir();
         let coord = Arc::new(GroupCoordinator::new(&dir).unwrap());
         let a = coord
-            .join("g", "", 10_000, vec!["t".into()], "", counts)
+            .join("g", "", 10_000, 0, vec!["t".into()], "", counts)
             .unwrap();
         assert_eq!(a.error_code, 0);
 
         let coord_b = Arc::clone(&coord);
         let handle =
-            thread::spawn(move || coord_b.join("g", "", 5_000, vec!["t".into()], "", counts));
+            thread::spawn(move || coord_b.join("g", "", 10_000, 5_000, vec!["t".into()], "", counts));
         thread::sleep(Duration::from_millis(50));
         assert_eq!(member_count(&coord, "g"), 1);
 
@@ -1464,17 +1477,54 @@ mod tests {
         let dir = temp_dir();
         let coord = GroupCoordinator::new(&dir).unwrap();
         let a = coord
-            .join("g", "", 10_000, vec!["t".into()], "", counts)
+            .join("g", "", 10_000, 0, vec!["t".into()], "", counts)
             .unwrap();
         assert_eq!(a.error_code, 0);
         assert_eq!(coord.generation("g"), Some(1));
 
         let b = coord
-            .join("g", "", 150, vec!["t".into()], "", counts)
+            .join("g", "", 10_000, 150, vec!["t".into()], "", counts)
             .unwrap();
         assert_eq!(b.error_code, ErrorCode::RebalanceInProgress as u16);
         assert_eq!(coord.generation("g"), Some(1));
         assert_eq!(member_count(&coord, "g"), 1);
+        // Park used rebalance=150, not session. First member stays live.
+        let hb = coord.heartbeat("g", &a.member_id, a.generation);
+        assert_eq!(hb.error_code, 0);
+        assert_eq!(
+            coord.assignment("g", &a.member_id).as_ref(),
+            Some(&a.assignment)
+        );
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn zero_rebalance_parks_at_most_default_1s() {
+        let dir = temp_dir();
+        let coord = GroupCoordinator::new(&dir).unwrap();
+        let a = coord
+            .join("g", "", 10_000, 0, vec!["t".into()], "", counts)
+            .unwrap();
+        assert_eq!(a.error_code, 0);
+
+        let start = Instant::now();
+        let b = coord
+            .join("g", "", 10_000, 0, vec!["t".into()], "", counts)
+            .unwrap();
+        let elapsed = start.elapsed();
+        assert_eq!(b.error_code, ErrorCode::RebalanceInProgress as u16);
+        assert!(
+            elapsed >= Duration::from_millis(700),
+            "park too short: {elapsed:?}"
+        );
+        assert!(
+            elapsed < Duration::from_millis(2500),
+            "park used session 10s, not default 1s: {elapsed:?}"
+        );
+        assert_eq!(coord.generation("g"), Some(1));
+        assert_eq!(member_count(&coord, "g"), 1);
+        let hb = coord.heartbeat("g", &a.member_id, a.generation);
+        assert_eq!(hb.error_code, 0);
         let _ = fs::remove_dir_all(&dir);
     }
 }

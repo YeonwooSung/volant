@@ -1750,6 +1750,7 @@ impl Client {
                     session_timeout_ms,
                     topics: topics.clone(),
                     group_instance_id: group_instance_id.to_owned(),
+                    rebalance_timeout_ms: 0,
                 })
                 .await
             {
@@ -1834,6 +1835,7 @@ impl Client {
                 session_timeout_ms,
                 topics,
                 group_instance_id: group_instance_id.to_owned(),
+                rebalance_timeout_ms: 0,
             })
             .await?;
         match resp {

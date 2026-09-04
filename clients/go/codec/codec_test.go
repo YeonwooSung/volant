@@ -711,7 +711,8 @@ func TestJoinGroupRequestPayloadRS(t *testing.T) {
 			"6576656e7473"+
 			"0400"+
 			"6c6f6773"+
-			"0000",
+			"0000"+
+			"00000000",
 	)
 	if !bytes.Equal(raw, expected) {
 		t.Fatalf("encode:\n got %x\nwant %x", raw, expected)
@@ -743,7 +744,7 @@ func TestJoinGroupRequestWithInstance(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	expected := mustHex(t, "02006731"+"0000"+"10270000"+"01000000"+"06006576656e7473"+"0500706f642d31")
+	expected := mustHex(t, "02006731"+"0000"+"10270000"+"01000000"+"06006576656e7473"+"0500706f642d31"+"00000000")
 	if !bytes.Equal(raw, expected) {
 		t.Fatalf("encode:\n got %x\nwant %x", raw, expected)
 	}

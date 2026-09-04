@@ -370,6 +370,7 @@ pub fn encode_request(req: &Request) -> Result<Bytes> {
             session_timeout_ms,
             topics,
             group_instance_id,
+            rebalance_timeout_ms,
         } => {
             put_string(&mut dst, group_id)?;
             put_string(&mut dst, member_id)?;
@@ -380,6 +381,8 @@ pub fn encode_request(req: &Request) -> Result<Bytes> {
             }
             // Phase 12 trailing field (always written by current encoders).
             put_string(&mut dst, group_instance_id)?;
+            // v0.231 optional trailer (always written by current encoders).
+            dst.put_u32_le(*rebalance_timeout_ms);
         }
         Request::Heartbeat {
             group_id,
@@ -965,12 +968,19 @@ pub fn decode_request(opcode: u16, payload: &[u8]) -> Result<Request> {
             } else {
                 String::new()
             };
+            // v0.231 trailer after instance id; omitted / short leftover → 0.
+            let rebalance_timeout_ms = if src.remaining() >= 4 {
+                src.get_u32_le()
+            } else {
+                0
+            };
             Ok(Request::JoinGroup {
                 group_id,
                 member_id,
                 session_timeout_ms,
                 topics,
                 group_instance_id,
+                rebalance_timeout_ms,
             })
         }
         RequestOpcode::Heartbeat => {
@@ -3670,6 +3680,7 @@ mod tests {
             session_timeout_ms: 10_000,
             topics: vec!["events".into()],
             group_instance_id: "pod-1".into(),
+            rebalance_timeout_ms: 1500,
         };
         let b = encode_request(&join).unwrap();
         assert_eq!(
@@ -3687,8 +3698,33 @@ mod tests {
         let decoded = decode_request(RequestOpcode::JoinGroup as u16, &legacy.freeze()).unwrap();
         match decoded {
             Request::JoinGroup {
-                group_instance_id, ..
-            } => assert!(group_instance_id.is_empty()),
+                group_instance_id,
+                rebalance_timeout_ms,
+                ..
+            } => {
+                assert!(group_instance_id.is_empty());
+                assert_eq!(rebalance_timeout_ms, 0);
+            }
+            other => panic!("unexpected {other:?}"),
+        }
+
+        // Instance present, rebalance trailer omitted → 0.
+        let mut no_rebalance = BytesMut::new();
+        put_string(&mut no_rebalance, "g1").unwrap();
+        put_string(&mut no_rebalance, "m1").unwrap();
+        no_rebalance.put_u32_le(5000);
+        no_rebalance.put_u32_le(1);
+        put_string(&mut no_rebalance, "t").unwrap();
+        put_string(&mut no_rebalance, "pod-1").unwrap();
+        match decode_request(RequestOpcode::JoinGroup as u16, &no_rebalance.freeze()).unwrap() {
+            Request::JoinGroup {
+                group_instance_id,
+                rebalance_timeout_ms,
+                ..
+            } => {
+                assert_eq!(group_instance_id, "pod-1");
+                assert_eq!(rebalance_timeout_ms, 0);
+            }
             other => panic!("unexpected {other:?}"),
         }
     }
@@ -3816,6 +3852,7 @@ mod tests {
             session_timeout_ms: 10_000,
             topics: vec!["events".into(), "logs".into()],
             group_instance_id: String::new(),
+            rebalance_timeout_ms: 0,
         };
         let b = encode_request(&join).unwrap();
         assert_eq!(

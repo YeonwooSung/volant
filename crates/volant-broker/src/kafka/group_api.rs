@@ -79,13 +79,15 @@ pub(crate) fn encode_join_group(broker: &Broker, src: &mut impl Buf, out: &mut B
         return;
     }
     let session_timeout = src.get_i32().max(0) as u32;
-    if version >= 1 {
+    let rebalance_timeout = if version >= 1 {
         if src.remaining() < 4 {
             write_error_body(out, KafkaErrorCode::InvalidRequest.as_i16(), 0, "", "", "");
             return;
         }
-        let _rebalance_timeout = src.get_i32();
-    }
+        src.get_i32().max(0) as u32
+    } else {
+        0
+    };
     let member_id = if flex {
         match get_compact_string(src) {
             Ok(m) => m,
@@ -227,6 +229,7 @@ pub(crate) fn encode_join_group(broker: &Broker, src: &mut impl Buf, out: &mut B
         &group_id,
         &member_id,
         session_timeout,
+        rebalance_timeout,
         topics,
         &group_instance_id,
         |t| broker.partition_count_opt(t),
