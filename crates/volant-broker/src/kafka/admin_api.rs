@@ -1,6 +1,7 @@
 //! Kafka wire handlers: Create/Delete topics, CreatePartitions,
 //! AlterPartitionReassignments, ListPartitionReassignments,
-//! ElectLeaders, Describe/AlterUserScramCredentials, DescribeLogDirs,
+//! ElectLeaders, Describe/AlterUserScramCredentials,
+//! Describe/AlterClientQuotas, DescribeLogDirs,
 //! DescribeTopicPartitions, configs.
 
 use bytes::{Buf, BufMut, BytesMut};
@@ -2797,6 +2798,171 @@ fn parse_describe_log_dirs_topics(src: &mut impl Buf, flexible: bool) -> LocalLo
         }
         LocalLogDirFilter::Topics(topics)
     }
+}
+
+struct QuotaEntity {
+    entity_type: String,
+    entity_name: Option<String>,
+}
+
+struct AlterQuotaEntry {
+    entity: Vec<QuotaEntity>,
+}
+
+/// DescribeClientQuotas v0 (always flexible). Volant has no quota store.
+///
+/// Parses the filter, then returns throttle=0, error=0, empty entries
+/// (no matching entities). ACL: Cluster DESCRIBE (disabled ACLs allow).
+pub(crate) fn encode_describe_client_quotas(
+    broker: &Broker,
+    src: &mut impl Buf,
+    out: &mut BytesMut,
+    principal: &str,
+) {
+    parse_describe_client_quotas_request(src);
+
+    if broker.acls().is_enabled()
+        && !broker.acls().authorize(
+            Some(principal),
+            ResourceType::Cluster,
+            CLUSTER_RESOURCE,
+            AclOperation::Describe,
+        )
+    {
+        out.put_i32(0);
+        out.put_i16(KafkaErrorCode::ClusterAuthorizationFailed.as_i16());
+        put_compact_nullable_string(out, Some("cluster authorization failed"));
+        put_compact_array_len(out, 0);
+        put_empty_tag_buffer(out);
+        return;
+    }
+
+    out.put_i32(0);
+    out.put_i16(KafkaErrorCode::None.as_i16());
+    put_compact_nullable_string(out, None);
+    put_compact_array_len(out, 0);
+    put_empty_tag_buffer(out);
+}
+
+fn parse_describe_client_quotas_request(src: &mut impl Buf) {
+    match get_compact_array_len(src) {
+        Ok(Some(n)) => {
+            for _ in 0..n {
+                if get_compact_string(src).is_err() {
+                    break;
+                }
+                if src.remaining() < 1 {
+                    break;
+                }
+                let _match_type = src.get_i8();
+                let _ = get_compact_nullable_string(src);
+                let _ = skip_tag_buffer(src);
+            }
+        }
+        Ok(None) | Err(_) => {}
+    }
+    if src.has_remaining() {
+        let _strict = src.get_u8();
+    }
+    let _ = skip_tag_buffer(src);
+}
+
+/// AlterClientQuotas v0 (always flexible). Volant has no quota store.
+///
+/// Each parsed entry is rejected with **42** `INVALID_REQUEST`
+/// (`quotas not supported`). Nothing is persisted. ACL: Cluster ALTER
+/// (disabled ACLs allow).
+pub(crate) fn encode_alter_client_quotas(
+    broker: &Broker,
+    src: &mut impl Buf,
+    out: &mut BytesMut,
+    principal: &str,
+) {
+    let entries = parse_alter_client_quotas_request(src);
+
+    out.put_i32(0);
+    put_compact_array_len(out, entries.len());
+
+    let denied = broker.acls().is_enabled()
+        && !broker.acls().authorize(
+            Some(principal),
+            ResourceType::Cluster,
+            CLUSTER_RESOURCE,
+            AclOperation::Alter,
+        );
+
+    for e in &entries {
+        if denied {
+            out.put_i16(KafkaErrorCode::ClusterAuthorizationFailed.as_i16());
+            put_compact_nullable_string(out, Some("cluster authorization failed"));
+        } else {
+            out.put_i16(KafkaErrorCode::InvalidRequest.as_i16());
+            put_compact_nullable_string(out, Some("quotas not supported"));
+        }
+        put_compact_array_len(out, e.entity.len());
+        for ent in &e.entity {
+            put_compact_string(out, &ent.entity_type);
+            put_compact_nullable_string(out, ent.entity_name.as_deref());
+            put_empty_tag_buffer(out);
+        }
+        put_empty_tag_buffer(out);
+    }
+    put_empty_tag_buffer(out);
+}
+
+fn parse_alter_client_quotas_request(src: &mut impl Buf) -> Vec<AlterQuotaEntry> {
+    let mut entries = Vec::new();
+    match get_compact_array_len(src) {
+        Ok(Some(n)) => {
+            for _ in 0..n {
+                let mut entity = Vec::new();
+                match get_compact_array_len(src) {
+                    Ok(Some(en)) => {
+                        for _ in 0..en {
+                            let entity_type = match get_compact_string(src) {
+                                Ok(s) => s,
+                                Err(_) => break,
+                            };
+                            let entity_name = match get_compact_nullable_string(src) {
+                                Ok(s) => s,
+                                Err(_) => None,
+                            };
+                            let _ = skip_tag_buffer(src);
+                            entity.push(QuotaEntity {
+                                entity_type,
+                                entity_name,
+                            });
+                        }
+                    }
+                    Ok(None) | Err(_) => {}
+                }
+                match get_compact_array_len(src) {
+                    Ok(Some(on)) => {
+                        for _ in 0..on {
+                            if get_compact_string(src).is_err() {
+                                break;
+                            }
+                            if src.remaining() < 8 + 1 {
+                                break;
+                            }
+                            let _value = src.get_f64();
+                            let _remove = src.get_u8();
+                            let _ = skip_tag_buffer(src);
+                        }
+                    }
+                    Ok(None) | Err(_) => {}
+                }
+                let _ = skip_tag_buffer(src);
+                entries.push(AlterQuotaEntry { entity });
+            }
+        }
+        Ok(None) | Err(_) => {}
+    }
+    if src.has_remaining() {
+        let _validate_only = src.get_u8();
+    }
+    let _ = skip_tag_buffer(src);
+    entries
 }
 
 fn write_describe_log_dirs(
