@@ -275,6 +275,7 @@ async fn dispatch_kafka(
                 | Some(ApiKey::Envelope)
                 | Some(ApiKey::FetchSnapshot)
                 | Some(ApiKey::Vote)
+                | Some(ApiKey::BeginQuorumEpoch)
                 | Some(ApiKey::DescribeQuorum)
                 | Some(ApiKey::AllocateProducerIds)
                 | Some(ApiKey::AssignReplicasToDirs)
@@ -928,9 +929,7 @@ async fn dispatch_kafka(
                     "read share group state summary flexible header tag buffer"
                 );
             }
-            group_api::encode_read_share_group_state_summary(
-                broker, &mut src, &mut out, principal,
-            );
+            group_api::encode_read_share_group_state_summary(broker, &mut src, &mut out, principal);
         }
         Some(ApiKey::StreamsGroupDescribe) if hdr.api_version == 0 => {
             if let Err(e) = skip_tag_buffer(&mut src) {
@@ -1029,6 +1028,12 @@ async fn dispatch_kafka(
                 debug!(error = %e, "vote flexible header tag buffer");
             }
             admin_api::encode_vote(broker, &mut src, &mut out, principal);
+        }
+        Some(ApiKey::BeginQuorumEpoch) if hdr.api_version == 1 => {
+            if let Err(e) = skip_tag_buffer(&mut src) {
+                debug!(error = %e, "begin quorum epoch flexible header tag buffer");
+            }
+            admin_api::encode_begin_quorum_epoch(broker, &mut src, &mut out, principal);
         }
         Some(ApiKey::DescribeQuorum) if (0..=1).contains(&hdr.api_version) => {
             if let Err(e) = skip_tag_buffer(&mut src) {
