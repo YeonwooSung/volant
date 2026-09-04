@@ -31,7 +31,9 @@
 //! assignor strings fail before JoinGroup. DescribeGroup errors fall
 //! back to the peeked assignment (or solo-range over `[self]` when that
 //! assignment is empty). SyncGroup is peek/confirm, not Kafka
-//! CompletingRebalance.
+//! CompletingRebalance. Join error **9** retries up to
+//! [`crate::ClientConfig::max_retries`] (default 0) so overlapping
+//! joins can wait for a peer SyncGroup (v0.221).
 //!
 //! Poll Fetch size is 100 messages / 4 MiB by default. Opt in with
 //! [`GroupConsumer::join_with_fetch_knobs`]. Zero clamps to those
@@ -52,7 +54,7 @@ use std::time::{Duration, Instant};
 use tokio::sync::{watch, Mutex as AsyncMutex};
 use tokio::task::JoinHandle;
 use volant_core::{Error, Offset, Result};
-use volant_protocol::{FetchRecord, OffsetCommitEntry, OffsetEntry};
+use volant_protocol::{ErrorCode, FetchRecord, OffsetCommitEntry, OffsetEntry};
 
 use crate::assignor::range_assign_multi;
 use crate::client::Client;
@@ -755,6 +757,21 @@ fn membership(shared: &Shared) -> (String, u32) {
     (state.member_id.clone(), state.generation)
 }
 
+fn is_rebalance_in_progress(err: &Error) -> bool {
+    match err {
+        Error::Protocol(msg) => {
+            join_protocol_error_code(msg) == Some(ErrorCode::RebalanceInProgress as u16)
+        }
+        _ => false,
+    }
+}
+
+fn join_protocol_error_code(msg: &str) -> Option<u16> {
+    let rest = msg.rsplit_once("error_code=")?.1;
+    let digits: String = rest.chars().take_while(|c| c.is_ascii_digit()).collect();
+    digits.parse().ok()
+}
+
 async fn do_join(
     client: &Client,
     group_id: &str,
@@ -767,15 +784,30 @@ async fn do_join(
         let state = lock_state(shared);
         (state.member_id.clone(), state.assignment.clone())
     };
-    let result = client
-        .join_group_with_instance(
-            group_id,
-            &member_id,
-            session_timeout_ms,
-            topics.to_vec(),
-            group_instance_id,
-        )
-        .await?;
+    // Error 9 is a SyncGroup fence (v0.215): overlapping joins wait
+    // here. Client::join_group_with_instance still does not retry 9.
+    // These Joins do not increment heartbeat_count.
+    let (max_retries, retry_backoff_ms) = client.retry_knobs();
+    let mut retry_attempt = 0u32;
+    let result = loop {
+        match client
+            .join_group_with_instance(
+                group_id,
+                &member_id,
+                session_timeout_ms,
+                topics.to_vec(),
+                group_instance_id,
+            )
+            .await
+        {
+            Ok(r) => break r,
+            Err(e) if is_rebalance_in_progress(&e) && retry_attempt < max_retries => {
+                retry_attempt += 1;
+                tokio::time::sleep(Duration::from_millis(retry_backoff_ms)).await;
+            }
+            Err(e) => return Err(e),
+        }
+    };
     let mut join_assignment: Vec<(String, u32)> = result
         .assignment
         .into_iter()

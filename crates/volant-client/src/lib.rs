@@ -221,6 +221,10 @@
 //! send, so the v0.205 retry guard sees a non-empty id.
 //! v0.211 prefers JoinGroup `members` trailer for range assignor and
 //! falls back to DescribeGroup when that list is empty.
+//! v0.221 retries [`GroupConsumer`] Join on error **9** up to
+//! [`ClientConfig::max_retries`] (default 0) so overlapping joins can
+//! wait for a peer SyncGroup; [`Client::join_group_with_instance`]
+//! still does not retry 9.
 
 #![deny(missing_docs)]
 

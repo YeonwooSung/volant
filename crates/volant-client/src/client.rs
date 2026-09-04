@@ -247,6 +247,11 @@ impl Client {
         self.current_addr.lock().await.clone()
     }
 
+    /// [`ClientConfig::max_retries`] / [`ClientConfig::retry_backoff_ms`].
+    pub(crate) fn retry_knobs(&self) -> (u32, u64) {
+        (self.config.max_retries, self.config.retry_backoff_ms)
+    }
+
     /// Reconnect to `addr`, re-authenticating when a token or SCRAM is configured.
     pub async fn reconnect(&self, addr: impl AsRef<str>) -> Result<()> {
         let addr = addr.as_ref().to_owned();
