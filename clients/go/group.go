@@ -800,6 +800,15 @@ func (g *GroupConsumer) Assignor() string {
 	return g.assignor
 }
 
+// SessionTimeoutMs is the join-time session timeout in milliseconds
+// (0 was defaulted to 10000 at join).
+func (g *GroupConsumer) SessionTimeoutMs() uint32 {
+	if g == nil {
+		return 0
+	}
+	return g.sessionTimeoutMs
+}
+
 // FetchMaxMessages is the Poll fetch max_messages (default 100).
 func (g *GroupConsumer) FetchMaxMessages() uint32 {
 	if g == nil {
