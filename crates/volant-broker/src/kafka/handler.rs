@@ -252,7 +252,8 @@ async fn dispatch_kafka(
                 | Some(ApiKey::DescribeProducers)
                 | Some(ApiKey::DescribeTransactions)
                 | Some(ApiKey::ListTransactions)
-                | Some(ApiKey::AlterPartitionReassignments),
+                | Some(ApiKey::AlterPartitionReassignments)
+                | Some(ApiKey::ListPartitionReassignments),
             _
         )
     );
@@ -697,6 +698,12 @@ async fn dispatch_kafka(
             }
             admin_api::encode_alter_partition_reassignments(broker, &mut src, &mut out, principal)
                 .await;
+        }
+        Some(ApiKey::ListPartitionReassignments) if hdr.api_version == 0 => {
+            if let Err(e) = skip_tag_buffer(&mut src) {
+                debug!(error = %e, "list partition reassignments flexible header tag buffer");
+            }
+            admin_api::encode_list_partition_reassignments(broker, &mut src, &mut out, principal);
         }
         Some(ApiKey::DescribeConfigs) if (0..=4).contains(&hdr.api_version) => {
             if hdr.api_version >= 4 {
