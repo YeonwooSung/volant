@@ -59,6 +59,9 @@ async fn join_group_revoked_on_resync_after_peer_join() {
     assert_eq!(j1.assignment.len(), 4);
     assert!(j1.revoked.is_empty());
     let first: HashSet<u32> = j1.assignment.iter().map(|a| a.partition).collect();
+    c1.sync_group("cg-coop", &j1.member_id, j1.generation)
+        .await
+        .unwrap();
 
     let c2 = Client::connect_addr(&addr).await.unwrap();
     let j2 = c2

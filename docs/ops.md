@@ -732,17 +732,17 @@ curl -s -H "Authorization: Bearer $VOLANT_METRICS_TOKEN" \
 
 Default **off**. Set `VOLANT_TRANSACTION_STATE_TOPIC=1` to create the internal
 `__transaction_state` topic (1 partition, RF `min(3, N)`) on first
-InitProducerId / prepare. Records are **Volant JSON**
-(`volant-txn-state=1`), not Kafka KIP-890 / KRaft schemas. Replay on start
-uses the topic as SoT when the flag is on; `__txn_prepared` still stores
-prepared ranges. `__txn_coordinator` remains the FindCoordinator routing map.
-See [V13_SPEC.md](./V13_SPEC.md).
+InitProducerId / prepare. New records are Kafka **TransactionLogKey/Value v0**
+(`volant-txn-state=2`, v0.229). JSON v1 (`volant-txn-state=1`) still
+replays. Flag still default **off**. `__txn_prepared` still stores prepared
+ranges. `__txn_coordinator` remains the FindCoordinator routing map.
+See [V13_SPEC.md](./V13_SPEC.md) and [V229_SPEC.md](./V229_SPEC.md).
 
 ## Still deferred
 
 - Multi-language clients (Python MVP → **closed by v0.14**; Go MVP → **closed by v0.19**; Java MVP → **closed by v0.23**)
 - Full chaos-mesh suites / long fuzz campaigns (corpus **smoke CI MVP** → **closed by Phase 112**; capped local `long` + operator Chaos Mesh YAMLs + in-process A→B isolate → **closed by v0.15**; multi-hour CI / ENOSPC mesh still deferred)
-- Full KIP-890/939 / Kafka `__transaction_state` topic (multi-broker Enable2Pc MVP → **closed by Phase 114**)
+- Full KIP-890/939 / Kafka `__transaction_state` topic (multi-broker Enable2Pc MVP → **closed by Phase 114**; opt-in TransactionLog v0 → **v0.229**; not TV2 / default-on)
 - Multi-broker session affinity / durable sessions → **closed by Phase 115/119**; shared mirror + promote → **closed by Phase 138**; mirror polish (coalesce/debounce + optional durable + fence) → **closed by Phase 139** (best-effort residual: Raft registry / serve-without-promote / incremental put)
 - Full preferred-replica selector / throttling residual (beyond 126/133/140/144; rack-aware create assignment → **closed by Phase 145**)
 - Multi-broker session affinity / durable sessions → **closed by Phase 115/119**; shared mirror + promote → **closed by Phase 138**; mirror polish → **closed by Phase 139**; claim fence → **closed by Phase 143**; serve-from-mirror without promote → **closed by Phase 147** (best-effort residual: Raft registry / dual-epoch converge / incremental put)
@@ -984,7 +984,7 @@ session idle TTL + max/LRU, background txn/session sweeper + expiry metrics
 (always-spawn / 0→>0 live; graceful shutdown/join Phase 106; accept-loop drain +
 single-flight bg Phase 109), BROKER
 Describe/AlterConfigs + durable restart restore, empty-AddPartitions control
-batches, 39 keys (key **45** v0); **ISR shrink on follower death** Phase 108 + **non-controller
+batches, 40 keys (keys **45** / **46** v0); **ISR shrink on follower death** Phase 108 + **non-controller
 alive-set auto-death** Phase 110 + **ISR rejoin + lag shrink** Phase 118 +
 **time-based ISR lag** Phase 125;
 **cluster admin fan-out** Phase 113), SCRAM-SHA-256/512,

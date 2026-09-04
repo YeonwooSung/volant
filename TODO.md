@@ -1,6 +1,6 @@
 # Volant residual TODO (review loop)
 
-**Baseline:** HEAD product = **Phases 0–154** + residuals **v0.3–v0.226**; **Phase 155 open**.  
+**Baseline:** HEAD product = **Phases 0–154** + residuals **v0.3–v0.229**; **Phase 155 open**.  
 **Last review:** 2026-09-03  
 
 Living roadmap: [ROADMAP.md](./ROADMAP.md).  
@@ -63,12 +63,12 @@ Phase index: [docs/history/PHASE_HISTORY.md](./docs/history/PHASE_HISTORY.md).
 | **P3** | Cross-app EOS fencing | **closed (v0.8)** — optional `application_id` fence id |
 | **Later** | Full **openraft** crate integration | **v0.11–v0.26 + redb log (v0.35) + joint rollback (v0.34) + follower forward (v0.38)** — not RocksDB/KRaft |
 | **Later** | **Dynamic membership** reconfiguration | **overlay v0.10 + joint v0.26 + rollback v0.34 + follower forward v0.38 + reassign rollback v0.39** — overlay still SoT |
-| **Later** | Full **KIP-890 / `__transaction_state`** | **log MVP closed (v0.13)** — opt-in JSON topic; not Kafka schemas |
+| **Later** | Full **KIP-890 / `__transaction_state`** | **log MVP closed (v0.13)** + Kafka TransactionLog v0 (**v0.229**); flag still default off; not full KIP-890/939 |
 | **Later** | **Multi-language clients** | **Python/Go/Java through v0.223** + Rust Client Join 9 **v0.224**; not kafka-python |
 | **Later** | **Long fuzz + chaos-mesh** | **MVP closed (v0.15)** — extended corpus + Chaos Mesh YAML + A→B isolate |
 | **Later** | **Perf campaign** vs aspirational targets | **closed (v0.2 PR2)** — measured table published; group-commit **v0.20** (opt-in, no new bench) |
 
-**Default next slice:** Homemade 154 hatch is **deleted** (**v0.222**; 98/99 still decode). Thin Client retries Join 9 (**v0.223/v0.224**). Kafka `SUPPORTED_APIS` is **39** (key 45 v0, **v0.225**). Opt-in `__transaction_state` records open≡abort (**v0.226**). Still not parked Join, not key 46, not Kafka/KIP-890 schemas, not default-on txn topic. Residual **v0.155** is still DeleteRecords wait.
+**Default next slice:** Join parks until SyncGroup or session timeout (**v0.227**; mutex released). Kafka `SUPPORTED_APIS` is **40** (key **46** v0, **v0.228**). Opt-in `__transaction_state` writes Kafka TransactionLogKey/Value v0 (**v0.229**; JSON v1 still replays). Still not PreparingRebalance, not live reassignment progress, not default-on txn topic, not TV2 writes. Residual **v0.155** is still DeleteRecords wait.
 
 ---
 
@@ -309,6 +309,9 @@ Phase index: [docs/history/PHASE_HISTORY.md](./docs/history/PHASE_HISTORY.md).
 - [x] Rust Client Join 9 retry → **v0.224**
 - [x] Kafka AlterPartitionReassignments key 45 → **v0.225**
 - [x] txn-state topic records open abort → **v0.226**
+- [x] park Join until SyncGroup or session timeout → **v0.227**
+- [x] Kafka ListPartitionReassignments key 46 → **v0.228**
+- [x] Kafka TransactionLog schemas on txn-state topic → **v0.229**
 
 ---
 
@@ -329,7 +332,7 @@ Phase index: [docs/history/PHASE_HISTORY.md](./docs/history/PHASE_HISTORY.md).
 - [x] Exactly-once **cross-app** fencing via `application_id` (v0.8; not Kafka Streams assignment)
 
 ### Kafka / txn / ops
-- [x] `__transaction_state` log MVP (v0.13; Volant JSON; not Kafka KIP-890/939 schemas)
+- [x] `__transaction_state` log MVP (v0.13 JSON; Kafka TransactionLog v0 **v0.229**; flag default off; not full KIP-890/939)
 - [x] Kafka DeleteRecords **per-request** wait flag (v0.6 flex v2 tag 0; v0–1 env-only)
 - [x] Preferred selector **throttling** / TCP probe (v0.7; opt-in, not Kafka quota)
 - [x] Multi-language clients — Python/Go/Java through v0.223 (Client Join 9 retry) + Rust Client **v0.224** / GroupConsumer **v0.221**; not kafka-python
@@ -410,5 +413,6 @@ Phase index: [docs/history/PHASE_HISTORY.md](./docs/history/PHASE_HISTORY.md).
 | v0.212–v0.216 | **Shipped** — overlay persist-after-joint; IsrUpdate skips 154; inbound 154 gated; SyncGroup generation fence; overlay Membership apply |
 | v0.217–v0.221 | **Shipped** — in-process overlay after joint; CompletingRebalance state; OffsetCommit 9 until sync; GroupConsumer Join 9 retry |
 | v0.222–v0.226 | **Shipped** — delete homemade 154 hatch; Client Join 9 retry; Kafka key 45 v0; opt-in txn-state open≡abort |
+| v0.227–v0.229 | **Shipped** — parked Join (Condvar); Kafka key 46 v0; Kafka TransactionLog v0 on txn-state topic |
 
 **How to use this file:** mark new work by phase number in ROADMAP + PHASE*_SPEC; fold completed rows into “Closed checklist”; keep “Still open” as the only honesty surface for operators and contributors.

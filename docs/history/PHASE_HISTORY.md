@@ -423,6 +423,9 @@ docs for day-to-day reading: [ops](../ops.md), [consistency](../consistency.md),
 | v0.224 | ✅ | Rust Client.join_group retries error 9 | [V224_SPEC.md](../V224_SPEC.md) |
 | v0.225 | ✅ | Kafka AlterPartitionReassignments key 45 v0 | [V225_SPEC.md](../V225_SPEC.md) |
 | v0.226 | ✅ | opt-in txn-state topic records open≡abort | [V226_SPEC.md](../V226_SPEC.md) |
+| v0.227 | ✅ | park Join until SyncGroup or session timeout | [V227_SPEC.md](../V227_SPEC.md) |
+| v0.228 | ✅ | Kafka ListPartitionReassignments key 46 v0 | [V228_SPEC.md](../V228_SPEC.md) |
+| v0.229 | ✅ | Kafka TransactionLog schemas on txn-state topic | [V229_SPEC.md](../V229_SPEC.md) |
 
 ---
 
@@ -443,7 +446,7 @@ docs for day-to-day reading: [ops](../ops.md), [consistency](../consistency.md),
 
 - Multi-language clients
 - Chaos-mesh / long fuzz campaigns (corpus **smoke CI** → **closed by Phase 112**)
-- Full KIP-890/939 / Kafka `__transaction_state` topic (multi-broker Enable2Pc MVP → **closed by Phase 114**)
+- Full KIP-890/939 / Kafka `__transaction_state` topic (multi-broker Enable2Pc MVP → **closed by Phase 114**; Kafka TransactionLog v0 → **v0.229**; not TV2 / default-on)
 - Multi-broker session handoff / affinity routing (durable **local** → **115**; owner forward MVP → **closed by Phase 119**; preferred-replica MVP → **closed by Phase 126**; shared mirror + promote MVP → **closed by Phase 138**; mirror polish → **closed by Phase 139**; promote claim fence → **closed by Phase 143**; preferred × session suppress → **closed by Phase 144**; rack-aware create assignment → **closed by Phase 145**; residual: Raft registry / serve-without-promote / incremental put / full preferred throttle)
 - Multi-broker session handoff / affinity routing (durable **local** → **115**; owner forward MVP → **closed by Phase 119**; preferred-replica MVP → **closed by Phase 126**; shared mirror + promote MVP → **closed by Phase 138**; mirror polish → **closed by Phase 139**; promote claim fence → **closed by Phase 143**; preferred × session suppress → **closed by Phase 144**; serve-without-promote → **closed by Phase 147**; residual: Raft registry / dual-epoch converge / incremental put / full preferred selector)
 - Byte-identical response cache beyond HWM+LSO omit

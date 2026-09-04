@@ -27,7 +27,7 @@ is unrelated.
    once and ignore. Protocol 98/99 encode/decode stays.
 4. **Native SyncGroup 116/117** is a peek/confirm (same honesty as
    the Kafka shim key **14**, which already exists). Not Kafka
-   CompletingRebalance. `SUPPORTED_APIS` is **39** (key **45** v0).
+   CompletingRebalance. `SUPPORTED_APIS` is **40** (keys **45** / **46** v0).
 5. **JoinGroup retry** only when `member_id` or `group_instance_id`
    is non-empty. Empty first join is still one shot.
 6. **Go `CreateTopic` / `CreateTopicDefault` return `(uint32, error)`.**
@@ -39,12 +39,12 @@ is unrelated.
 |----------|-----|
 | Homemade 154 RequestVote / InstallSnapshot | Freeze choice C; replace, do not finish |
 | Overlay membership as raft voter SoT | Out of 155; `{data_dir}/cluster/membership.json` stays membership SoT |
-| Kafka two-phase join/sync states | Coordinator rewrite; shim SyncGroup already ignores leader payload |
+| Kafka two-phase join/sync states | Join parks (v0.227); still not PreparingRebalance / join-set wait |
 | JoinGroup native member list | Frozen; range still uses DescribeGroup |
 | Retry empty-`member_id` first Join | Ghost member + generation++ |
-| New Kafka API key / version ratchet | `SUPPORTED_APIS` is **39** (key **45** v0, v0.225). Key **46** stays out |
+| New Kafka API key / version ratchet | `SUPPORTED_APIS` is **40** (keys **45** / **46** v0). No further keys |
 | librdkafka / kafka-python / kcat claims | Still not claimed |
-| Distributed EOS / windows / KIP-890 | Unchanged |
+| Distributed EOS / windows / full KIP-890 | Opt-in TransactionLog v0 (v0.229); not TV2 / default-on |
 | Crate 0.3.0 | After 155 ships, not during |
 
 ## Semantics
@@ -98,11 +98,11 @@ func (c *Client) CreateTopicID(name string, partitions int) (uint32, error) // a
 
 - Overlay is persist-after-joint on the openraft-on leader (v0.212) and apply artifact on followers (v0.216). In-process add/remove also persist after joint when raft is started (v0.217). Flag off stays v0.10.
 - Homemade 154 hatch is **deleted** (v0.222). 98/99 still decode. Leftover `__metadata_raft/` files are unread.
-- SyncGroup is a generation confirm fence (v0.215). List/Describe report CompletingRebalance while the fence is open (v0.218). Member OffsetCommit is 9 until sync (v0.219). GroupConsumer retries Join 9 when `max_retries>0` (v0.220/v0.221). Thin Client retries Join 9 on the same budget (v0.223/v0.224). Still not parked Join.
+- SyncGroup is a generation confirm fence (v0.215). List/Describe report CompletingRebalance while the fence is open (v0.218). Member OffsetCommit is 9 until sync (v0.219). GroupConsumer retries Join 9 when `max_retries>0` (v0.220/v0.221). Thin Client retries Join 9 on the same budget (v0.223/v0.224). New-member Join **parks** until SyncGroup or session timeout (v0.227; mutex released). Still not PreparingRebalance.
 - Range uses JoinGroup members trailer when present (v0.211); empty trailer still DescribeGroup.
 - Empty first Join now sends a client-generated member_id (v0.209/v0.210) so retry is safe.
-- Kafka `SUPPORTED_APIS` is **39** (AlterPartitionReassignments key **45** v0, v0.225). Key **46** stays out. No client-compat claim.
-- Opt-in `__transaction_state` records open≡abort (v0.226). Flag still default off. Not Kafka/KIP-890 schemas. Process-local EOS / windows unchanged.
+- Kafka `SUPPORTED_APIS` is **40** (AlterPartitionReassignments **45** v0 + ListPartitionReassignments **46** v0). No live reassignment progress. No client-compat claim.
+- Opt-in `__transaction_state` records open≡abort (v0.226) and writes Kafka TransactionLogKey/Value v0 (v0.229). JSON v1 still replays. Flag still default off. Not TV2 writes / not full KIP-890/939. Process-local EOS / windows unchanged.
 
 ## Related
 

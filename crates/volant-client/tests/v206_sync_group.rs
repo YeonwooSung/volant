@@ -338,7 +338,7 @@ async fn second_join_is_9_until_sync_group() {
         .await
         .expect("first join");
     let err = client
-        .join_group("g", "", 10_000, vec!["events".into()])
+        .join_group("g", "", 150, vec!["events".into()])
         .await
         .expect_err("second join fenced");
     match err {

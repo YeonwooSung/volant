@@ -156,6 +156,9 @@ async fn sticky_rebalance_via_group_coordinator() {
     // Solo member gets all partitions.
     assert_eq!(j1.assignment.len(), 4);
     let first_parts: Vec<u32> = j1.assignment.iter().map(|a| a.partition).collect();
+    c1.sync_group("cg-sticky", &j1.member_id, j1.generation)
+        .await
+        .unwrap();
 
     let c2 = Client::connect_addr(&addr).await.unwrap();
     let j2 = c2

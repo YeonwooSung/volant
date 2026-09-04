@@ -32,9 +32,9 @@ Start here. Prefer living docs over individual phase ship records.
 
 | Document | Purpose |
 |----------|---------|
-| [history/PHASE_HISTORY.md](./history/PHASE_HISTORY.md) | One-line index for phases 0–154 + **155 open** + residuals v0.3–v0.226 |
+| [history/PHASE_HISTORY.md](./history/PHASE_HISTORY.md) | One-line index for phases 0–154 + **155 open** + residuals v0.3–v0.229 |
 | [PHASE7_SPEC.md](./PHASE7_SPEC.md) … [PHASE155_SPEC.md](./PHASE155_SPEC.md) | Per-phase ship records (155 in progress) |
-| [V06_SPEC.md](./V06_SPEC.md) … [V226_SPEC.md](./V226_SPEC.md) | Residual slices v0.6–v0.226 |
+| [V06_SPEC.md](./V06_SPEC.md) … [V229_SPEC.md](./V229_SPEC.md) | Residual slices v0.6–v0.229 |
 | [history/archive/](./history/archive/) | Implementation plans & reviews (archaeology) |
 
 ## Config samples
@@ -56,9 +56,9 @@ Start here. Prefer living docs over individual phase ship records.
 
 ## Compaction note (2026-08-13, post–Phase 147 ship)
 
-Living docs match **git HEAD product** (**v0.2 + residuals v0.3–v0.226**, crate **0.2.0**, **Phase 155 open**):
+Living docs match **git HEAD product** (**v0.2 + residuals v0.3–v0.229**, crate **0.2.0**, **Phase 155 open**):
 
-- **Status ceiling:** **v0.2 shipped** + residuals **v0.3–v0.226**. Phases **0–154** shipped, **155 open** ([PHASE155_SPEC.md](./PHASE155_SPEC.md)). Residual **v0.155** is DeleteRecords wait config, **not Phase 155**. Homemade 154 hatch **deleted** (v0.222). Kafka shim **39 keys** (key **45** v0 = AlterPartitionReassignments, v0.225). Kafka shim **23–109** (… **135 = optional DeleteRecords majority wait**; **136 = non-blocking admin catch-up**; **137 = native DeleteRecords wait trailer + journal topic GC** — Kafka still env-only for wait; **138 = best-effort shared fetch session mirror + promote**; **139 = mirror coalesce/debounce + optional durable + `mirror_gen` fence**; **140 = preferred max LEO lag + RC suppress metric**; **141 = N=2 majority health gauges** `volant_cluster_*`; **142 = Metadata leader ISR overlay + IsrUpdate 94/95**; **143 = promote claim fence lowest-id `promoted_by`**; **144 = preferred × established-session suppress**; **147 = serve-from-mirror without promote on owner miss**; **149 = durable stream state**; **150/152 = assignment majority consensus + Metadata live by default** (152 committed-only **opt-in**); **151/153 = stream EOS + durable checkpoint staging**; **154 = KRaft-style metadata Raft log MVP**, hatch removed **v0.222**)
+- **Status ceiling:** **v0.2 shipped** + residuals **v0.3–v0.229**. Phases **0–154** shipped, **155 open** ([PHASE155_SPEC.md](./PHASE155_SPEC.md)). Residual **v0.155** is DeleteRecords wait config, **not Phase 155**. Homemade 154 hatch **deleted** (v0.222). Kafka shim **40 keys** (key **45** v0 + key **46** v0, v0.225/v0.228). Parked Join **v0.227**. Opt-in txn-state Kafka TransactionLog **v0.229**. Kafka shim **23–109** (… **135 = optional DeleteRecords majority wait**; **136 = non-blocking admin catch-up**; **137 = native DeleteRecords wait trailer + journal topic GC** — Kafka still env-only for wait; **138 = best-effort shared fetch session mirror + promote**; **139 = mirror coalesce/debounce + optional durable + `mirror_gen` fence**; **140 = preferred max LEO lag + RC suppress metric**; **141 = N=2 majority health gauges** `volant_cluster_*`; **142 = Metadata leader ISR overlay + IsrUpdate 94/95**; **143 = promote claim fence lowest-id `promoted_by`**; **144 = preferred × established-session suppress**; **147 = serve-from-mirror without promote on owner miss**; **149 = durable stream state**; **150/152 = assignment majority consensus + Metadata live by default** (152 committed-only **opt-in**); **151/153 = stream EOS + durable checkpoint staging**; **154 = KRaft-style metadata Raft log MVP**, hatch removed **v0.222**)
 - **Kafka SoT:** [KAFKA_COMPAT.md](./KAFKA_COMPAT.md) — matrix + semantic honesty
 - **WHITEPAPER:** architecture + positioning; no full API matrix
 - **Binding core:** PHASE1–6; **ship records:** PHASE7–154 via [PHASE_HISTORY](./history/PHASE_HISTORY.md)
@@ -73,4 +73,4 @@ Living docs match **git HEAD product** (**v0.2 + residuals v0.3–v0.226**, crat
 - **PreferredReadReplica (Phase 126+133+140+144 + v0.7):** Fetch v11+ client rack; leader redirects to same-rack ISR peer with usable addr + LEO≥HWM (empty records); **rank highest LEO then lowest id** (133); optional `VOLANT_PREFERRED_REPLICA_MAX_LEO_LAG` (140; unset = unlimited); **suppressed when isolation=READ_COMMITTED** with `volant_preferred_replica_suppressed_total` when a candidate existed (140); **suppressed when client has established fetch session** (`req_session_id != 0`) with `volant_preferred_replica_session_suppressed_total` (144); opt-in redirect `throttle_time_ms` + advertised-addr TCP probe (v0.7; both default off); Metadata rack from `cluster.toml`; not Kafka client-quota throttling
 
 - **Fuzz / CI (Phase 112):** deterministic corpus smoke + `.github/workflows/ci.yml`; long campaigns / chaos-mesh still deferred
-- **Still deferred (product):** multi-lang, chaos-mesh / long fuzz campaigns, full preferred selector (beyond 126/133/140/144), Raft session registry / serve-from-mirror-without-promote / incremental put residual, full KIP-890/939 / `__transaction_state` topic; full Kafka broker catalog
+- **Still deferred (product):** multi-lang, chaos-mesh / long fuzz campaigns, full preferred selector (beyond 126/133/140/144), Raft session registry / serve-from-mirror-without-promote / incremental put residual, full KIP-890/939 / TV2 / default-on `__transaction_state`; full Kafka broker catalog
