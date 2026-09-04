@@ -36,6 +36,7 @@
 //! GetTelemetrySubscriptions v0 (always flexible; no client telemetry; empty subscription),
 //! PushTelemetry v0 (always flexible; no client telemetry; reject every push),
 //! CreateDelegationToken v0 (always flexible; no token store; reject 42),
+//! ExpireDelegationToken v0 (always flexible; no token store; reject 42),
 //! DescribeDelegationToken v0 (always flexible residual; no token store; empty tokens),
 //! ConsumerGroupDescribe v0 (always flexible; classic snapshot wrap; not KIP-848).
 //! See `docs/PHASE23_SPEC.md` … `docs/PHASE91_SPEC.md`, `docs/V225_SPEC.md`,
@@ -45,7 +46,7 @@
 //! `docs/V246_SPEC.md`, `docs/V249_SPEC.md`, `docs/V250_SPEC.md`,
 //! `docs/V251_SPEC.md`, `docs/V252_SPEC.md`, `docs/V253_SPEC.md`,
 //! `docs/V255_SPEC.md`, `docs/V257_SPEC.md`, `docs/V258_SPEC.md`,
-//! `docs/V259_SPEC.md`, and `docs/V264_SPEC.md`.
+//! `docs/V259_SPEC.md`, `docs/V260_SPEC.md`, and `docs/V264_SPEC.md`.
 
 mod acl_api;
 mod admin_api;
@@ -307,6 +308,9 @@ pub enum ApiKey {
     /// CreateDelegationToken (always flexible; v0 only). No token store;
     /// every create is rejected. Official Kafka first flexible version is 2.
     CreateDelegationToken = 38,
+    /// ExpireDelegationToken (always flexible; v0 only). No token store;
+    /// every expire is rejected. Official Kafka first flexible version is 2.
+    ExpireDelegationToken = 40,
     /// DescribeDelegationToken (always flexible residual; v0 only).
     /// Official Kafka first flexible version is 2. No token store.
     DescribeDelegationToken = 41,
@@ -411,6 +415,7 @@ impl ApiKey {
             36 => Some(Self::SaslAuthenticate),
             37 => Some(Self::CreatePartitions),
             38 => Some(Self::CreateDelegationToken),
+            40 => Some(Self::ExpireDelegationToken),
             41 => Some(Self::DescribeDelegationToken),
             42 => Some(Self::DeleteGroups),
             43 => Some(Self::ElectLeaders),
@@ -479,6 +484,7 @@ pub const SUPPORTED_APIS: &[(ApiKey, i16, i16)] = &[
     (ApiKey::SaslAuthenticate, 0, 2),
     (ApiKey::CreatePartitions, 0, 3),
     (ApiKey::CreateDelegationToken, 0, 0),
+    (ApiKey::ExpireDelegationToken, 0, 0),
     (ApiKey::DescribeDelegationToken, 0, 0),
     (ApiKey::DeleteGroups, 0, 3),
     (ApiKey::ElectLeaders, 0, 1),
@@ -723,5 +729,14 @@ mod tests {
         }));
         assert_eq!(ApiKey::from_i16(69), Some(ApiKey::ConsumerGroupDescribe));
         assert_eq!(KafkaErrorCode::GroupIdNotFound.as_i16(), 69);
+    }
+
+    #[test]
+    fn supported_apis_includes_expire_delegation_token_40() {
+        assert!(SUPPORTED_APIS.len() >= 61);
+        assert!(SUPPORTED_APIS.iter().any(|(k, min, max)| {
+            *k == ApiKey::ExpireDelegationToken && *min == 0 && *max == 0
+        }));
+        assert_eq!(ApiKey::from_i16(40), Some(ApiKey::ExpireDelegationToken));
     }
 }
