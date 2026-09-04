@@ -62,6 +62,7 @@ g = GroupConsumer.join(
     c, group="g", topics=["t"], session_timeout_ms=10_000, group_instance_id="inst-1"
 )
 recs = g.poll(max_wait_ms=500)
+_ = g.heartbeat_count  # v0.188; poll + background Heartbeats (not JoinGroup)
 g.commit()
 g.close()
 # Opt-in auto-commit (v0.48). Default off. interval 0 = after every poll.

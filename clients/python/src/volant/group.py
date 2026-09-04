@@ -172,6 +172,7 @@ class GroupConsumer:
         self._last_revoked: list[tuple[str, int]] = []
         self._positions: dict[tuple[str, int], int] = {}
         self._closed = False
+        self._heartbeat_count = 0
         self._lock = threading.Lock()
         self._stop = threading.Event()
         self._hb_thread: Optional[threading.Thread] = None
@@ -378,6 +379,7 @@ class GroupConsumer:
                 self._positions[(topic, partition)] = found[partition]
 
     def _heartbeat(self) -> None:
+        self._heartbeat_count += 1
         self._client.heartbeat(self._group_id, self._member_id, self._generation)
 
     def _fetch_assigned(self, max_wait_ms: int) -> list[FetchedRecord]:
@@ -573,6 +575,11 @@ class GroupConsumer:
     @property
     def assignor(self) -> str:
         return self._assignor
+
+    @property
+    def heartbeat_count(self) -> int:
+        """Heartbeat RPCs issued by poll + background (not JoinGroup)."""
+        return self._heartbeat_count
 
     @property
     def auto_offset_reset(self) -> str:

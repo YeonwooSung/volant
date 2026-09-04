@@ -528,6 +528,16 @@ class TestGroupConsumer(unittest.TestCase):
         self.assertEqual(c.heartbeat_snapshot(), [])
         g.close()
 
+    def test_heartbeat_count_join_zero_poll_one(self) -> None:
+        c = FakeClient()
+        c.join_queue.append(_join([("t", 0)]))
+        g = GroupConsumer.join(c, "g", ["t"], heartbeat=False)
+        self.assertEqual(g.heartbeat_count, 0)
+        self.assertEqual(c.heartbeats, [])
+        g.poll()
+        self.assertEqual(g.heartbeat_count, 1)
+        self.assertEqual(c.heartbeats, [("g", "m1", 1)])
+
     def test_poll_does_not_autocommit_by_default(self) -> None:
         c = FakeClient()
         c.join_queue.append(_join([("t", 0)]))
