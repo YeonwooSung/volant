@@ -4,7 +4,7 @@ use std::collections::HashMap;
 use std::path::Path;
 use std::time::{Duration, Instant};
 
-use parking_lot::Mutex;
+use parking_lot::{Condvar, Mutex};
 use uuid::Uuid;
 use volant_core::Result;
 use volant_protocol::{ErrorCode, GroupState};
@@ -143,6 +143,8 @@ struct Group {
 #[derive(Debug)]
 pub struct GroupCoordinator {
     groups: Mutex<HashMap<String, Group>>,
+    /// Waiters for the v0.215 SyncGroup fence (released during the wait).
+    join_park: Condvar,
     offsets: OffsetStore,
 }
 
@@ -151,6 +153,7 @@ impl GroupCoordinator {
     pub fn new(data_dir: impl AsRef<Path>) -> Result<Self> {
         Ok(Self {
             groups: Mutex::new(HashMap::new()),
+            join_park: Condvar::new(),
             offsets: OffsetStore::new(data_dir)?,
         })
     }
@@ -162,11 +165,15 @@ impl GroupCoordinator {
     /// When `group_instance_id` is non-empty and `member_id` is empty, the member
     /// id is derived as `static:{instance_id}` (Phase 12 static membership).
     ///
-    /// New-member Join (or existing Join with a topics change) is fenced
-    /// with error 9 unless every live member has confirmed the current
-    /// generation via SyncGroup. The joiner is not auto-synced. Existing
-    /// members re-joining with the same topics are never fenced and do
-    /// not bump generation or mark themselves synced.
+    /// New-member Join (or existing Join with a topics change) parks on
+    /// `join_park` until every live member has confirmed the current
+    /// generation via SyncGroup, or until the session timeout. The wait
+    /// releases `groups` so Heartbeat / SyncGroup / Leave on other
+    /// connections can lift the fence. Timeout still returns error 9
+    /// with no insert, no bump, no reassign. The joiner is not
+    /// auto-synced. Existing members re-joining with the same topics
+    /// are never fenced and do not bump generation or mark themselves
+    /// synced.
     pub fn join<F>(
         &self,
         group_id: &str,
@@ -181,11 +188,6 @@ impl GroupCoordinator {
     {
         self.expire_sessions_inner();
         let mut groups = self.groups.lock();
-        let group = groups.entry(group_id.to_owned()).or_insert_with(|| Group {
-            group_id: group_id.to_owned(),
-            generation: 0,
-            members: HashMap::new(),
-        });
 
         let timeout = if session_timeout_ms == 0 {
             10_000
@@ -205,57 +207,71 @@ impl GroupCoordinator {
         // Existing member re-joining after rebalance detection: refresh state and
         // return current assignment without bumping generation (avoids thrashing
         // when multiple members re-sync after one join/leave).
-        if !resolved_id.is_empty() {
-            if group.members.contains_key(&resolved_id) {
-                let topics_changed = group
-                    .members
-                    .get(&resolved_id)
-                    .is_some_and(|m| m.topics != topics);
-                if topics_changed && !all_synced(group) {
-                    return Ok(fenced_join(group, resolved_id));
+        let existing = !resolved_id.is_empty()
+            && groups
+                .get(group_id)
+                .is_some_and(|g| g.members.contains_key(&resolved_id));
+        if existing {
+            let topics_changed = groups
+                .get(group_id)
+                .and_then(|g| g.members.get(&resolved_id))
+                .is_some_and(|m| m.topics != topics);
+            if topics_changed
+                && !park_until_all_synced(&self.join_park, &mut groups, group_id, timeout)
+            {
+                return Ok(fenced_join_lookup(&groups, group_id, resolved_id));
+            }
+            if let Some(group) = groups.get_mut(group_id) {
+                if group.members.contains_key(&resolved_id) {
+                    if let Some(existing) = group.members.get_mut(&resolved_id) {
+                        existing.session_timeout_ms = timeout;
+                        existing.last_heartbeat = Instant::now();
+                        existing.topics = topics;
+                    }
+                    if topics_changed {
+                        group.generation = group.generation.wrapping_add(1);
+                        reassign(group, &partition_counts);
+                        // Joiner is not auto-synced.
+                    }
+                    let assignment = group
+                        .members
+                        .get(&resolved_id)
+                        .map(|m| m.assignment.clone())
+                        .unwrap_or_default();
+                    // Revoked = last delivered to this member − new assignment
+                    // (covers both topics-change reassign and re-sync after peer join).
+                    let previous = group
+                        .members
+                        .get(&resolved_id)
+                        .map(|m| m.delivered.clone())
+                        .unwrap_or_default();
+                    let revoked = partition_diff(&previous, &assignment);
+                    if let Some(m) = group.members.get_mut(&resolved_id) {
+                        m.delivered = assignment.clone();
+                    }
+                    return Ok(JoinResult {
+                        error_code: 0,
+                        generation: group.generation,
+                        member_id: resolved_id,
+                        assignment,
+                        revoked,
+                        members: live_member_ids(group),
+                    });
                 }
-                if let Some(existing) = group.members.get_mut(&resolved_id) {
-                    existing.session_timeout_ms = timeout;
-                    existing.last_heartbeat = Instant::now();
-                    existing.topics = topics;
-                }
-                if topics_changed {
-                    group.generation = group.generation.wrapping_add(1);
-                    reassign(group, &partition_counts);
-                    // Joiner is not auto-synced.
-                }
-                let assignment = group
-                    .members
-                    .get(&resolved_id)
-                    .map(|m| m.assignment.clone())
-                    .unwrap_or_default();
-                // Revoked = last delivered to this member − new assignment
-                // (covers both topics-change reassign and re-sync after peer join).
-                let previous = group
-                    .members
-                    .get(&resolved_id)
-                    .map(|m| m.delivered.clone())
-                    .unwrap_or_default();
-                let revoked = partition_diff(&previous, &assignment);
-                if let Some(m) = group.members.get_mut(&resolved_id) {
-                    m.delivered = assignment.clone();
-                }
-                return Ok(JoinResult {
-                    error_code: 0,
-                    generation: group.generation,
-                    member_id: resolved_id,
-                    assignment,
-                    revoked,
-                    members: live_member_ids(group),
-                });
             }
         }
 
-        // New member: fence unless every live member confirmed this generation.
+        // New member: park unless every live member confirmed this generation.
         // Empty group (first Join) is always all_synced.
-        if !all_synced(group) {
-            return Ok(fenced_join(group, resolved_id));
+        if !park_until_all_synced(&self.join_park, &mut groups, group_id, timeout) {
+            return Ok(fenced_join_lookup(&groups, group_id, resolved_id));
         }
+
+        let group = groups.entry(group_id.to_owned()).or_insert_with(|| Group {
+            group_id: group_id.to_owned(),
+            generation: 0,
+            members: HashMap::new(),
+        });
 
         let mid = if resolved_id.is_empty() {
             Uuid::new_v4().to_string()
@@ -354,6 +370,7 @@ impl GroupCoordinator {
         member.last_heartbeat = Instant::now();
         member.synced_generation = generation;
         let assignment = member.assignment.clone();
+        self.join_park.notify_all();
         SyncGroupResult {
             error_code: 0,
             assignment,
@@ -379,6 +396,7 @@ impl GroupCoordinator {
         if group.members.is_empty() {
             groups.remove(group_id);
         }
+        self.join_park.notify_all();
         LeaveResult { error_code: 0 }
     }
 
@@ -574,6 +592,7 @@ impl GroupCoordinator {
     {
         let mut groups = self.groups.lock();
         let mut empty = Vec::new();
+        let mut bumped = false;
         for (gid, group) in groups.iter_mut() {
             let before = group.members.len();
             group.members.retain(|_, m| {
@@ -582,6 +601,7 @@ impl GroupCoordinator {
             if group.members.len() != before {
                 group.generation = group.generation.wrapping_add(1);
                 reassign(group, &partition_counts);
+                bumped = true;
             }
             if group.members.is_empty() {
                 empty.push(gid.clone());
@@ -590,6 +610,9 @@ impl GroupCoordinator {
         for gid in empty {
             groups.remove(&gid);
         }
+        if bumped {
+            self.join_park.notify_all();
+        }
     }
 
     /// Drop dead members only. Do not bump generation or clear assignments.
@@ -597,12 +620,20 @@ impl GroupCoordinator {
     /// still bumps and reassigns (survivors become unsynced).
     fn expire_sessions_inner(&self) {
         let mut groups = self.groups.lock();
+        let mut dropped = false;
         for group in groups.values_mut() {
+            let before = group.members.len();
             group.members.retain(|_, m| {
                 m.last_heartbeat.elapsed() <= Duration::from_millis(u64::from(m.session_timeout_ms))
             });
+            if group.members.len() != before {
+                dropped = true;
+            }
         }
         groups.retain(|_, g| !g.members.is_empty());
+        if dropped {
+            self.join_park.notify_all();
+        }
     }
 
     /// Peek assignment for a live member (Kafka SyncGroup + tests).
@@ -637,6 +668,32 @@ fn all_synced(group: &Group) -> bool {
             .all(|m| m.synced_generation == group.generation)
 }
 
+/// Park until `all_synced` or `timeout_ms`. Releases `groups` while waiting.
+/// Missing / empty group is treated as synced (first Join).
+fn park_until_all_synced(
+    park: &Condvar,
+    groups: &mut parking_lot::MutexGuard<'_, HashMap<String, Group>>,
+    group_id: &str,
+    timeout_ms: u32,
+) -> bool {
+    let deadline = Instant::now() + Duration::from_millis(u64::from(timeout_ms));
+    loop {
+        if groups.get(group_id).map(all_synced).unwrap_or(true) {
+            return true;
+        }
+        let now = Instant::now();
+        if now >= deadline {
+            return false;
+        }
+        if park
+            .wait_for(groups, deadline.saturating_duration_since(now))
+            .timed_out()
+        {
+            return groups.get(group_id).map(all_synced).unwrap_or(true);
+        }
+    }
+}
+
 /// List/describe label: CompletingRebalance while the v0.215 fence is open.
 fn listed_state(group: &Group) -> GroupState {
     if group.members.is_empty() {
@@ -656,6 +713,24 @@ fn fenced_join(group: &Group, member_id: String) -> JoinResult {
         assignment: Vec::new(),
         revoked: Vec::new(),
         members: live_member_ids(group),
+    }
+}
+
+fn fenced_join_lookup(
+    groups: &HashMap<String, Group>,
+    group_id: &str,
+    member_id: String,
+) -> JoinResult {
+    match groups.get(group_id) {
+        Some(group) => fenced_join(group, member_id),
+        None => JoinResult {
+            error_code: ErrorCode::RebalanceInProgress as u16,
+            generation: 0,
+            member_id,
+            assignment: Vec::new(),
+            revoked: Vec::new(),
+            members: Vec::new(),
+        },
     }
 }
 
@@ -712,6 +787,8 @@ fn _offset_unknown() -> u64 {
 mod tests {
     use super::*;
     use std::fs;
+    use std::sync::Arc;
+    use std::thread;
     use std::time::{SystemTime, UNIX_EPOCH};
 
     fn temp_dir() -> std::path::PathBuf {
@@ -953,7 +1030,7 @@ mod tests {
         assert_eq!(member_count(&coord, "g"), 1);
 
         let j2 = coord
-            .join("g", "", 10_000, vec!["t".into()], "", counts)
+            .join("g", "", 150, vec!["t".into()], "", counts)
             .unwrap();
         assert_eq!(j2.error_code, ErrorCode::RebalanceInProgress as u16);
         assert_eq!(coord.generation("g"), Some(1));
@@ -996,7 +1073,7 @@ mod tests {
         assert_eq!(j2.error_code, 0);
 
         let blocked = coord
-            .join("g", "", 10_000, vec!["t".into()], "", counts)
+            .join("g", "", 150, vec!["t".into()], "", counts)
             .unwrap();
         assert_eq!(blocked.error_code, ErrorCode::RebalanceInProgress as u16);
         assert_eq!(coord.generation("g"), Some(2));
@@ -1004,7 +1081,7 @@ mod tests {
 
         sync_ok(&coord, "g", &j1.member_id, j2.generation);
         let still = coord
-            .join("g", "", 10_000, vec!["t".into()], "", counts)
+            .join("g", "", 150, vec!["t".into()], "", counts)
             .unwrap();
         assert_eq!(still.error_code, ErrorCode::RebalanceInProgress as u16);
 
@@ -1034,7 +1111,7 @@ mod tests {
         assert_eq!(member_count(&coord, "g"), 1);
 
         let blocked = coord
-            .join("g", "", 10_000, vec!["t".into()], "", counts)
+            .join("g", "", 150, vec!["t".into()], "", counts)
             .unwrap();
         assert_eq!(blocked.error_code, ErrorCode::RebalanceInProgress as u16);
         assert_eq!(coord.generation("g"), gen);
@@ -1063,7 +1140,7 @@ mod tests {
         assert_eq!(member_count(&coord, "g"), 1);
 
         let blocked = coord
-            .join("g", "", 10_000, vec!["t".into()], "", counts)
+            .join("g", "", 150, vec!["t".into()], "", counts)
             .unwrap();
         assert_eq!(blocked.error_code, ErrorCode::RebalanceInProgress as u16);
         assert_eq!(coord.generation("g"), after_leave);
@@ -1329,6 +1406,75 @@ mod tests {
         assert_eq!(member_count(&coord, "g"), 2);
         assert!(coord.assignment("g", &a.member_id).is_none());
         assert!(coord.assignment("g", &b.member_id).is_some());
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn parked_join_succeeds_after_sync() {
+        let dir = temp_dir();
+        let coord = Arc::new(GroupCoordinator::new(&dir).unwrap());
+        let a = coord
+            .join("g", "", 10_000, vec!["t".into()], "", counts)
+            .unwrap();
+        assert_eq!(a.error_code, 0);
+        assert_eq!(member_count(&coord, "g"), 1);
+
+        let coord_b = Arc::clone(&coord);
+        let handle =
+            thread::spawn(move || coord_b.join("g", "", 5_000, vec!["t".into()], "", counts));
+        thread::sleep(Duration::from_millis(50));
+        assert_eq!(member_count(&coord, "g"), 1);
+
+        sync_ok(&coord, "g", &a.member_id, a.generation);
+        let b = handle.join().expect("join thread").unwrap();
+        assert_eq!(b.error_code, 0);
+        assert_eq!(coord.generation("g"), Some(2));
+        assert_eq!(member_count(&coord, "g"), 2);
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn heartbeat_during_parked_join_is_not_deadlocked() {
+        let dir = temp_dir();
+        let coord = Arc::new(GroupCoordinator::new(&dir).unwrap());
+        let a = coord
+            .join("g", "", 10_000, vec!["t".into()], "", counts)
+            .unwrap();
+        assert_eq!(a.error_code, 0);
+
+        let coord_b = Arc::clone(&coord);
+        let handle =
+            thread::spawn(move || coord_b.join("g", "", 5_000, vec!["t".into()], "", counts));
+        thread::sleep(Duration::from_millis(50));
+        assert_eq!(member_count(&coord, "g"), 1);
+
+        let hb = coord.heartbeat("g", &a.member_id, a.generation);
+        assert_eq!(hb.error_code, 0);
+
+        sync_ok(&coord, "g", &a.member_id, a.generation);
+        let b = handle.join().expect("join thread").unwrap();
+        assert_eq!(b.error_code, 0);
+        assert_eq!(coord.generation("g"), Some(2));
+        assert_eq!(member_count(&coord, "g"), 2);
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn parked_join_timeout_still_returns_9() {
+        let dir = temp_dir();
+        let coord = GroupCoordinator::new(&dir).unwrap();
+        let a = coord
+            .join("g", "", 10_000, vec!["t".into()], "", counts)
+            .unwrap();
+        assert_eq!(a.error_code, 0);
+        assert_eq!(coord.generation("g"), Some(1));
+
+        let b = coord
+            .join("g", "", 150, vec!["t".into()], "", counts)
+            .unwrap();
+        assert_eq!(b.error_code, ErrorCode::RebalanceInProgress as u16);
+        assert_eq!(coord.generation("g"), Some(1));
+        assert_eq!(member_count(&coord, "g"), 1);
         let _ = fs::remove_dir_all(&dir);
     }
 }
