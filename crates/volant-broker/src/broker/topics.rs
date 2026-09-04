@@ -871,6 +871,43 @@ impl Broker {
         Ok(())
     }
 
+    /// Broker `data_dir` advertised as the single local log dir (v0.235).
+    pub(crate) fn local_log_dir_path(&self) -> String {
+        self.storage.data_dir.display().to_string()
+    }
+
+    /// Local open-partition log rows for DescribeLogDirs (not remote replica dirs).
+    pub(crate) fn local_log_dir_rows(&self, filter: &LocalLogDirFilter) -> Vec<LocalLogDirTopic> {
+        let topics = self.topics.read();
+        match filter {
+            LocalLogDirFilter::All => {
+                let mut names: Vec<_> = topics.keys().cloned().collect();
+                names.sort_by(|a, b| a.as_str().cmp(b.as_str()));
+                names
+                    .into_iter()
+                    .filter_map(|n| topics.get(&n).map(topic_log_dir_rows_all))
+                    .collect()
+            }
+            LocalLogDirFilter::Topics(req) => req
+                .iter()
+                .map(|(name, parts)| match topics.get(&TopicName::new(name.as_str())) {
+                    Some(t) => {
+                        let only = if parts.is_empty() {
+                            None
+                        } else {
+                            Some(parts.as_slice())
+                        };
+                        topic_log_dir_rows(t, only)
+                    }
+                    None => LocalLogDirTopic {
+                        name: name.clone(),
+                        partitions: Vec::new(),
+                    },
+                })
+                .collect(),
+        }
+    }
+
     /// Number of partitions for a topic.
     pub fn partition_count(&self, topic: &TopicName) -> Result<u32> {
         // Prefer assignment in cluster mode (may not have all partitions local).
@@ -913,6 +950,62 @@ impl Broker {
             }
         };
         Ok(PartitionId(idx))
+    }
+}
+
+/// Filter for [`Broker::local_log_dir_rows`] (Kafka DescribeLogDirs).
+#[derive(Debug, Clone)]
+pub(crate) enum LocalLogDirFilter {
+    /// Every partition this process has open.
+    All,
+    /// Named topics. Empty `partitions` = all local partitions of that topic.
+    Topics(Vec<(String, Vec<i32>)>),
+}
+
+/// One topic's local log-dir rows.
+#[derive(Debug, Clone)]
+pub(crate) struct LocalLogDirTopic {
+    pub name: String,
+    pub partitions: Vec<LocalLogDirPartition>,
+}
+
+/// One partition row in a DescribeLogDirs response.
+#[derive(Debug, Clone)]
+pub(crate) struct LocalLogDirPartition {
+    pub partition: i32,
+    pub size: i64,
+    pub offset_lag: i64,
+    pub is_future: bool,
+}
+
+fn topic_log_dir_rows_all(t: &Topic) -> LocalLogDirTopic {
+    topic_log_dir_rows(t, None)
+}
+
+fn topic_log_dir_rows(t: &Topic, only: Option<&[i32]>) -> LocalLogDirTopic {
+    let mut pids: Vec<u32> = match only {
+        Some(only) => only.iter().filter(|&&p| p >= 0).map(|&p| p as u32).collect(),
+        None => t.partitions.keys().map(|p| p.0).collect(),
+    };
+    pids.sort_unstable();
+    pids.dedup();
+    let mut partitions = Vec::with_capacity(pids.len());
+    for pid in pids {
+        let Some(part) = t.partitions.get(&PartitionId(pid)) else {
+            continue;
+        };
+        let leo = part.leo();
+        let hwm = part.committed_hwm;
+        partitions.push(LocalLogDirPartition {
+            partition: pid as i32,
+            size: part.log.total_size() as i64,
+            offset_lag: leo.saturating_sub(hwm) as i64,
+            is_future: false,
+        });
+    }
+    LocalLogDirTopic {
+        name: t.name.as_str().to_owned(),
+        partitions,
     }
 }
 

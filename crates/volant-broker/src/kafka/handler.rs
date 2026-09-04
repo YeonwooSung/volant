@@ -247,6 +247,9 @@ async fn dispatch_kafka(
         (Some(ApiKey::SaslAuthenticate), v) if v >= 2
     ) || matches!(
         (api, hdr.api_version),
+        (Some(ApiKey::DescribeLogDirs), v) if v >= 1
+    ) || matches!(
+        (api, hdr.api_version),
         (
             Some(ApiKey::DescribeCluster)
                 | Some(ApiKey::DescribeProducers)
@@ -720,6 +723,20 @@ async fn dispatch_kafka(
                 debug!(error = %e, "alter user scram credentials flexible header tag buffer");
             }
             admin_api::encode_alter_user_scram_credentials(broker, &mut src, &mut out, principal);
+        }
+        Some(ApiKey::DescribeLogDirs) if (0..=1).contains(&hdr.api_version) => {
+            if hdr.api_version >= 1 {
+                if let Err(e) = skip_tag_buffer(&mut src) {
+                    debug!(error = %e, "describe log dirs flexible header tag buffer");
+                }
+            }
+            admin_api::encode_describe_log_dirs(
+                broker,
+                &mut src,
+                &mut out,
+                hdr.api_version,
+                principal,
+            );
         }
         Some(ApiKey::DescribeConfigs) if (0..=4).contains(&hdr.api_version) => {
             if hdr.api_version >= 4 {

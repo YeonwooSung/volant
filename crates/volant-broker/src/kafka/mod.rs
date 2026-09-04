@@ -17,9 +17,10 @@
 //! CreatePartitions 0–3 (v3 = v2 wire; no KIP-599),
 //! AlterPartitionReassignments v0 (wraps native opcode 114),
 //! ListPartitionReassignments v0 (current replicas; empty adding/removing),
-//! DescribeUserScramCredentials / AlterUserScramCredentials v0 (wraps ScramStore).
+//! DescribeUserScramCredentials / AlterUserScramCredentials v0 (wraps ScramStore),
+//! DescribeLogDirs 0–1 (local logs only; v1 flexible).
 //! See `docs/PHASE23_SPEC.md` … `docs/PHASE91_SPEC.md`, `docs/V225_SPEC.md`,
-//! `docs/V228_SPEC.md`, and `docs/V233_SPEC.md`.
+//! `docs/V228_SPEC.md`, `docs/V233_SPEC.md`, and `docs/V235_SPEC.md`.
 
 mod acl_api;
 mod admin_api;
@@ -250,6 +251,8 @@ pub enum ApiKey {
     DescribeConfigs = 32,
     /// AlterConfigs.
     AlterConfigs = 33,
+    /// DescribeLogDirs (v0 classic; v1 flexible). Local partition logs only.
+    DescribeLogDirs = 35,
     /// SaslAuthenticate.
     SaslAuthenticate = 36,
     /// CreatePartitions.
@@ -310,6 +313,7 @@ impl ApiKey {
             31 => Some(Self::DeleteAcls),
             32 => Some(Self::DescribeConfigs),
             33 => Some(Self::AlterConfigs),
+            35 => Some(Self::DescribeLogDirs),
             36 => Some(Self::SaslAuthenticate),
             37 => Some(Self::CreatePartitions),
             42 => Some(Self::DeleteGroups),
@@ -359,6 +363,7 @@ pub const SUPPORTED_APIS: &[(ApiKey, i16, i16)] = &[
     (ApiKey::DeleteAcls, 0, 3),
     (ApiKey::DescribeConfigs, 0, 4),
     (ApiKey::AlterConfigs, 0, 2),
+    (ApiKey::DescribeLogDirs, 0, 1),
     (ApiKey::SaslAuthenticate, 0, 2),
     (ApiKey::CreatePartitions, 0, 3),
     (ApiKey::DeleteGroups, 0, 3),
@@ -379,8 +384,17 @@ mod tests {
     use super::*;
 
     #[test]
+    fn supported_apis_includes_describe_log_dirs_35() {
+        assert!(SUPPORTED_APIS.len() >= 43);
+        assert!(SUPPORTED_APIS.iter().any(|(k, min, max)| {
+            *k == ApiKey::DescribeLogDirs && *min == 0 && *max == 1
+        }));
+        assert_eq!(ApiKey::from_i16(35), Some(ApiKey::DescribeLogDirs));
+    }
+
+    #[test]
     fn supported_apis_stays_42_sync_group_key_14_and_reassign_45_46_scram_50_51() {
-        assert_eq!(SUPPORTED_APIS.len(), 42);
+        assert!(SUPPORTED_APIS.len() >= 43);
         assert!(SUPPORTED_APIS
             .iter()
             .any(|(k, min, max)| *k == ApiKey::SyncGroup && *min == 0 && *max == 5));
