@@ -374,6 +374,11 @@ docs for day-to-day reading: [ops](../ops.md), [consistency](../consistency.md),
 | v0.173 | ✅ | Go CreateScramUserDefault | [V173_SPEC.md](../V173_SPEC.md) |
 | v0.174 | ✅ | Rust create_scram_user_default | [V174_SPEC.md](../V174_SPEC.md) |
 | v0.175 | ✅ | Rust commit_transaction_empty | [V175_SPEC.md](../V175_SPEC.md) |
+| v0.176 | ✅ | Go CommitTransactionEmpty | [V176_SPEC.md](../V176_SPEC.md) |
+| v0.177 | ✅ | language single-entry AlterConfig | [V177_SPEC.md](../V177_SPEC.md) |
+| v0.178 | ✅ | Rust alter_config | [V178_SPEC.md](../V178_SPEC.md) |
+| v0.179 | ✅ | language single-entry FetchOffset | [V179_SPEC.md](../V179_SPEC.md) |
+| v0.180 | ✅ | Rust fetch_offset | [V180_SPEC.md](../V180_SPEC.md) |
 
 ---
 
