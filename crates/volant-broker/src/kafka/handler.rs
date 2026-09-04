@@ -277,7 +277,8 @@ async fn dispatch_kafka(
                 | Some(ApiKey::PushTelemetry)
                 | Some(ApiKey::AlterPartition)
                 | Some(ApiKey::CreateDelegationToken)
-                | Some(ApiKey::DescribeDelegationToken),
+                | Some(ApiKey::DescribeDelegationToken)
+                | Some(ApiKey::ConsumerGroupDescribe),
             _
         )
     ) || matches!(
@@ -716,6 +717,12 @@ async fn dispatch_kafka(
                 hdr.api_version,
                 principal,
             );
+        }
+        Some(ApiKey::ConsumerGroupDescribe) if hdr.api_version == 0 => {
+            if let Err(e) = skip_tag_buffer(&mut src) {
+                debug!(error = %e, "consumer group describe flexible header tag buffer");
+            }
+            group_api::encode_consumer_group_describe(broker, &mut src, &mut out, principal);
         }
         Some(ApiKey::ListGroups) if (0..=5).contains(&hdr.api_version) => {
             if hdr.api_version >= 3 {
