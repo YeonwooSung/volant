@@ -28,7 +28,7 @@ func TestE2ECreateProduceFetchMetadata(t *testing.T) {
 	defer c.Close()
 
 	topic := fmt.Sprintf("go-e2e-%d-%d", os.Getpid(), time.Now().UnixNano())
-	if err := c.CreateTopic(topic, 1); err != nil {
+	if _, err := c.CreateTopic(topic, 1); err != nil {
 		t.Fatalf("CreateTopic: %v", err)
 	}
 
@@ -98,7 +98,7 @@ func TestE2EOffsetCommitFetch(t *testing.T) {
 
 	topic := fmt.Sprintf("go-off-%d-%d", os.Getpid(), time.Now().UnixNano())
 	group := fmt.Sprintf("go-g-%d", os.Getpid())
-	if err := c.CreateTopic(topic, 1); err != nil {
+	if _, err := c.CreateTopic(topic, 1); err != nil {
 		t.Fatalf("CreateTopic: %v", err)
 	}
 	if _, err := c.Produce(topic, 0, nil, []byte("hello")); err != nil {
@@ -134,7 +134,7 @@ func TestE2EJoinHeartbeatLeave(t *testing.T) {
 
 	topic := fmt.Sprintf("go-grp-%d-%d", os.Getpid(), time.Now().UnixNano())
 	group := fmt.Sprintf("go-cg-%d", os.Getpid())
-	if err := c.CreateTopic(topic, 1); err != nil {
+	if _, err := c.CreateTopic(topic, 1); err != nil {
 		t.Fatalf("CreateTopic: %v", err)
 	}
 	j, err := c.JoinGroup(group, []string{topic}, 10000)

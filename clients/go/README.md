@@ -21,14 +21,14 @@ if err != nil {
 }
 defer c.Close()
 
-if err := c.CreateTopic("t", 1); err != nil {
+if _, err := c.CreateTopic("t", 1); err != nil {
     log.Fatal(err)
 }
-// CreateTopicDefault is CreateTopic(name, 1) (v0.199). CreateTopic stays explicit.
-if err := c.CreateTopicDefault("t"); err != nil {
+// CreateTopicDefault is CreateTopic(name, 1). Both return the broker-assigned topic id.
+if _, err := c.CreateTopicDefault("t"); err != nil {
     log.Fatal(err)
 }
-// CreateTopicID is CreateTopic but returns the broker-assigned topic id.
+// CreateTopicID is an alias of CreateTopic (kept for callers).
 // CreateTopicWithConfigs sends native pairs (e.g. {{"retention.ms","1000"}}) and returns topic id.
 n, err := c.CreatePartitions("t", 2)
 _ = n

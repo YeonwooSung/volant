@@ -901,26 +901,25 @@ func typedAdminErrorCode(decoded any) (uint16, bool) {
 }
 
 // CreateTopic creates a topic with the given partition count.
+// Returns the broker-assigned topic id (same as CreateTopicWithConfigs /
+// Python create_topic / Java createTopic / Rust create_topic).
 // Error 14 (NotController) follows maxRedirects (same budget as Produce/Fetch 13).
 // Transient 6 / 7 / 15 / 16 and TCP/IO follow maxRetries (default 0); 14 is not a retry.
-func (c *Client) CreateTopic(name string, partitions int) error {
-	_, err := c.CreateTopicWithConfigs(name, partitions, nil)
-	return err
+func (c *Client) CreateTopic(name string, partitions int) (uint32, error) {
+	return c.CreateTopicWithConfigs(name, partitions, nil)
 }
 
 // CreateTopicDefault creates a topic with 1 partition.
-// Same as CreateTopic(name, 1). Returns error only (CreateTopicID
-// still returns the topic id).
-func (c *Client) CreateTopicDefault(name string) error {
+// Same as CreateTopic(name, 1). Returns the broker-assigned topic id.
+func (c *Client) CreateTopicDefault(name string) (uint32, error) {
 	return c.CreateTopic(name, 1)
 }
 
-// CreateTopicID is CreateTopic but returns the broker-assigned topic id
-// (same as CreateTopicWithConfigs / Python create_topic / Java createTopic).
-// CreateTopic stays error-only. Error 14 and transient retry inherit
+// CreateTopicID is an alias of CreateTopic. Kept for callers that
+// already use the name. Error 14 and transient retry inherit
 // adminRoundTrip.
 func (c *Client) CreateTopicID(name string, partitions int) (uint32, error) {
-	return c.CreateTopicWithConfigs(name, partitions, nil)
+	return c.CreateTopic(name, partitions)
 }
 
 // CreateTopicWithConfigs is CreateTopic plus native CreateTopic config pairs

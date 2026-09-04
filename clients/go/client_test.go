@@ -4393,7 +4393,7 @@ func TestCreateTopicError14RedirectsViaControllerID(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer c.Close()
-	if err := c.CreateTopic("events", 1); err != nil {
+	if _, err := c.CreateTopic("events", 1); err != nil {
 		t.Fatal(err)
 	}
 	ct, _, _, _, metas, _ := follower.snapshot()
@@ -4569,7 +4569,7 @@ func TestCreateTopicMessageControllerIDWinsOverMetadata(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer c.Close()
-	if err := c.CreateTopic("events", 1); err != nil {
+	if _, err := c.CreateTopic("events", 1); err != nil {
 		t.Fatal(err)
 	}
 	ct, _, _, _, metas, _ := follower.snapshot()
@@ -4602,7 +4602,7 @@ func TestMaxRedirectsZeroRaisesOnFirst14(t *testing.T) {
 	}
 	defer c.Close()
 	c.SetMaxRedirects(0)
-	err = c.CreateTopic("events", 1)
+	_, err = c.CreateTopic("events", 1)
 	if brokerCode(err) != notController {
 		t.Fatalf("err=%v want code 14", err)
 	}
@@ -5153,7 +5153,7 @@ func TestDefaultMaxRetriesZeroRaisesOnCreateTopicTimeout(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer c.Close()
-	err = c.CreateTopic("events", 1)
+	_, err = c.CreateTopic("events", 1)
 	if brokerCode(err) != timeoutCode {
 		t.Fatalf("err=%v want code 7", err)
 	}
@@ -5177,7 +5177,7 @@ func TestCreateTopicRetriesTimeoutThenOk(t *testing.T) {
 	defer c.Close()
 	c.SetMaxRetries(2)
 	c.SetRetryBackoff(0)
-	if err := c.CreateTopic("events", 1); err != nil {
+	if _, err := c.CreateTopic("events", 1); err != nil {
 		t.Fatal(err)
 	}
 	ct, _, _, _, metas, _ := srv.snapshot()
@@ -5204,7 +5204,7 @@ func TestCreateTopic14RedirectNotCountedAsRetry(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer c.Close()
-	if err := c.CreateTopic("events", 1); err != nil {
+	if _, err := c.CreateTopic("events", 1); err != nil {
 		t.Fatal(err)
 	}
 	ct, _, _, _, metas, _ := follower.snapshot()
@@ -5231,7 +5231,7 @@ func TestCreateTopicNotFoundNotRetried(t *testing.T) {
 	defer c.Close()
 	c.SetMaxRetries(2)
 	c.SetRetryBackoff(0)
-	err = c.CreateTopic("events", 1)
+	_, err = c.CreateTopic("events", 1)
 	if brokerCode(err) != notFoundCode {
 		t.Fatalf("err=%v want code 2", err)
 	}
@@ -5251,7 +5251,7 @@ func TestCreateTopicSendsEmptyConfigs(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer c.Close()
-	if err := c.CreateTopic("events", 1); err != nil {
+	if _, err := c.CreateTopic("events", 1); err != nil {
 		t.Fatal(err)
 	}
 	got := srv.lastCreateConfigs()
@@ -5270,7 +5270,7 @@ func TestCreateTopicDefaultEncodesPartitionsOne(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer c.Close()
-	if err := c.CreateTopicDefault("events"); err != nil {
+	if _, err := c.CreateTopicDefault("events"); err != nil {
 		t.Fatal(err)
 	}
 	if got := srv.lastCreatePartitions(); got != 1 {
@@ -5295,6 +5295,31 @@ func TestCreateTopicIDReturnsTopicID(t *testing.T) {
 	}
 	defer c.Close()
 	id, err := c.CreateTopicID("events", 1)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if id != 42 {
+		t.Fatalf("topic id %d want 42", id)
+	}
+	got := srv.lastCreateConfigs()
+	if len(got) != 0 {
+		t.Fatalf("configs=%v want empty", got)
+	}
+}
+
+func TestCreateTopicReturnsTopicID(t *testing.T) {
+	srv := &adminBroker{
+		createTopicReplies: []createTopicReply{{code: 0, topicID: 42}},
+	}
+	addr, stop := startAdmin(t, srv)
+	defer stop()
+
+	c, err := volant.DialTimeout(addr, 5*time.Second)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer c.Close()
+	id, err := c.CreateTopic("events", 1)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -5389,7 +5414,7 @@ func TestCreateTopicExhaustedRetriesRaises(t *testing.T) {
 	defer c.Close()
 	c.SetMaxRetries(2)
 	c.SetRetryBackoff(0)
-	err = c.CreateTopic("events", 1)
+	_, err = c.CreateTopic("events", 1)
 	if brokerCode(err) != timeoutCode {
 		t.Fatalf("err=%v want code 7", err)
 	}
