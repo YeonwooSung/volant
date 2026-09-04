@@ -131,6 +131,12 @@ pub enum KafkaErrorCode {
     FetchSessionIdNotFound = 70,
     /// Invalid fetch session epoch (Fetch v7+ sessions).
     InvalidFetchSessionEpoch = 71,
+    /// Committed offset is still unstable (OffsetFetch RequireStable).
+    ///
+    /// Kafka `UNSTABLE_OFFSET_COMMIT` (**81**). Emitted on OffsetFetch v7+
+    /// when `require_stable` is set and the committed offset sits in an
+    /// open/prepared write-through txn range. Offset is returned as **-1**.
+    UnstableOffsetCommit = 81,
     /// No reassignment in progress (AlterPartitionReassignments cancel).
     NoReassignmentInProgress = 83,
     /// No eligible leader in ISR ∩ live (ElectLeaders). Kafka
@@ -631,5 +637,10 @@ mod tests {
             ApiKey::from_i16(74),
             Some(ApiKey::ListClientMetricsResources)
         );
+    }
+
+    #[test]
+    fn unstable_offset_commit_is_81() {
+        assert_eq!(KafkaErrorCode::UnstableOffsetCommit.as_i16(), 81);
     }
 }
