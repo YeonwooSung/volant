@@ -258,6 +258,9 @@ async fn dispatch_kafka(
                 | Some(ApiKey::AlterUserScramCredentials),
             _
         )
+    ) || matches!(
+        (api, hdr.api_version),
+        (Some(ApiKey::ElectLeaders), v) if v >= 1
     );
 
     let mut out = BytesMut::new();
@@ -692,6 +695,15 @@ async fn dispatch_kafka(
                 }
             }
             admin_api::encode_create_partitions(broker, &mut src, &mut out, hdr.api_version, principal)
+                .await;
+        }
+        Some(ApiKey::ElectLeaders) if (0..=1).contains(&hdr.api_version) => {
+            if hdr.api_version >= 1 {
+                if let Err(e) = skip_tag_buffer(&mut src) {
+                    debug!(error = %e, "elect leaders flexible header tag buffer");
+                }
+            }
+            admin_api::encode_elect_leaders(broker, &mut src, &mut out, hdr.api_version, principal)
                 .await;
         }
         Some(ApiKey::AlterPartitionReassignments) if hdr.api_version == 0 => {

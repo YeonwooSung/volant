@@ -1,6 +1,6 @@
 //! Kafka wire handlers: Create/Delete topics, CreatePartitions,
 //! AlterPartitionReassignments, ListPartitionReassignments,
-//! Describe/AlterUserScramCredentials, configs.
+//! ElectLeaders, Describe/AlterUserScramCredentials, configs.
 
 use bytes::{Buf, BufMut, BytesMut};
 use volant_core::{Error, TopicName};
@@ -1118,6 +1118,267 @@ fn list_partition_indexes(
         .iter()
         .map(|p| p.partition_id.0 as i32)
         .collect()
+}
+
+/// ElectLeaders v0 classic / v1 flexible. Preferred wraps
+/// `Broker::elect_preferred_leader` + `complete_assignment_mutation`.
+/// ElectionType 1 (unclean) is refused with 87. TimeoutMs is parsed and
+/// ignored. Not Kafka `preferred.leader` election and not a live replica copy.
+pub(crate) async fn encode_elect_leaders(
+    broker: &Broker,
+    src: &mut impl Buf,
+    out: &mut BytesMut,
+    version: i16,
+    principal: &str,
+) {
+    struct TopicReq {
+        name: String,
+        partitions: Vec<i32>,
+    }
+    enum TopicFilter {
+        All,
+        Named(Vec<TopicReq>),
+    }
+
+    let flexible = version >= 1;
+    let election_type = if version >= 1 {
+        if src.remaining() >= 1 {
+            src.get_i8()
+        } else {
+            0
+        }
+    } else {
+        0
+    };
+    if src.remaining() >= 4 {
+        let _timeout_ms = src.get_i32();
+    }
+
+    let filter = if flexible {
+        match get_compact_array_len(src) {
+            Ok(None) => TopicFilter::All,
+            Ok(Some(n)) => {
+                let mut topics = Vec::with_capacity(n);
+                for _ in 0..n {
+                    let name = match get_compact_string(src) {
+                        Ok(s) => s,
+                        Err(_) => break,
+                    };
+                    let mut partitions = Vec::new();
+                    match get_compact_array_len(src) {
+                        Ok(Some(pc)) => {
+                            for _ in 0..pc {
+                                if src.remaining() < 4 {
+                                    break;
+                                }
+                                partitions.push(src.get_i32());
+                            }
+                        }
+                        Ok(None) | Err(_) => {}
+                    }
+                    let _ = skip_tag_buffer(src);
+                    topics.push(TopicReq { name, partitions });
+                }
+                TopicFilter::Named(topics)
+            }
+            Err(_) => TopicFilter::Named(Vec::new()),
+        }
+    } else if src.remaining() < 4 {
+        TopicFilter::Named(Vec::new())
+    } else {
+        let n = src.get_i32();
+        if n < 0 {
+            TopicFilter::All
+        } else {
+            let mut topics = Vec::with_capacity(n as usize);
+            for _ in 0..n {
+                let name = match get_string(src) {
+                    Ok(s) => s,
+                    Err(_) => break,
+                };
+                let mut partitions = Vec::new();
+                if src.remaining() >= 4 {
+                    let pc = src.get_i32();
+                    if pc >= 0 {
+                        for _ in 0..pc {
+                            if src.remaining() < 4 {
+                                break;
+                            }
+                            partitions.push(src.get_i32());
+                        }
+                    }
+                }
+                topics.push(TopicReq { name, partitions });
+            }
+            TopicFilter::Named(topics)
+        }
+    };
+    if flexible {
+        let _ = skip_tag_buffer(src);
+    }
+
+    let write_top = |out: &mut BytesMut, code: KafkaErrorCode, n: usize| {
+        out.put_i32(0); // throttle
+        out.put_i16(code.as_i16());
+        if flexible {
+            put_compact_array_len(out, n);
+        } else {
+            out.put_i32(n as i32);
+        }
+    };
+
+    if broker.cluster_config().is_some() && !broker.is_controller() {
+        write_top(out, KafkaErrorCode::NotController, 0);
+        if flexible {
+            put_empty_tag_buffer(out);
+        }
+        return;
+    }
+
+    let work: Vec<(String, Vec<i32>)> = match filter {
+        TopicFilter::All => {
+            let snap = broker.metadata(None);
+            snap.topics
+                .into_iter()
+                .map(|t| {
+                    let pids = t
+                        .partitions
+                        .iter()
+                        .map(|p| p.partition_id.0 as i32)
+                        .collect();
+                    (t.name.as_str().to_owned(), pids)
+                })
+                .collect()
+        }
+        TopicFilter::Named(topics) => topics.into_iter().map(|t| (t.name, t.partitions)).collect(),
+    };
+
+    write_top(out, KafkaErrorCode::None, work.len());
+    for (name, partitions) in work {
+        if flexible {
+            put_compact_string(out, &name);
+        } else {
+            put_string(out, &name);
+        }
+        if broker.acls().is_enabled()
+            && !broker.acls().authorize(
+                Some(principal),
+                ResourceType::Topic,
+                &name,
+                AclOperation::Alter,
+            )
+        {
+            if flexible {
+                put_compact_array_len(out, partitions.len());
+            } else {
+                out.put_i32(partitions.len() as i32);
+            }
+            for pid in partitions {
+                write_elect_partition(
+                    out,
+                    flexible,
+                    pid,
+                    KafkaErrorCode::TopicAuthorizationFailed,
+                    Some("topic authorization failed"),
+                );
+            }
+            if flexible {
+                put_empty_tag_buffer(out);
+            }
+            continue;
+        }
+
+        if flexible {
+            put_compact_array_len(out, partitions.len());
+        } else {
+            out.put_i32(partitions.len() as i32);
+        }
+        for pid in partitions {
+            let (code, msg) = apply_elect_leader(broker, &name, pid, election_type).await;
+            write_elect_partition(out, flexible, pid, code, msg.as_deref());
+        }
+        if flexible {
+            put_empty_tag_buffer(out);
+        }
+    }
+    if flexible {
+        put_empty_tag_buffer(out);
+    }
+}
+
+fn write_elect_partition(
+    out: &mut BytesMut,
+    flexible: bool,
+    partition: i32,
+    code: KafkaErrorCode,
+    msg: Option<&str>,
+) {
+    out.put_i32(partition);
+    out.put_i16(code.as_i16());
+    if flexible {
+        put_compact_nullable_string(out, msg);
+        put_empty_tag_buffer(out);
+    } else {
+        put_nullable_string(out, msg);
+    }
+}
+
+async fn apply_elect_leader(
+    broker: &Broker,
+    topic: &str,
+    partition: i32,
+    election_type: i8,
+) -> (KafkaErrorCode, Option<String>) {
+    if partition < 0 {
+        return (
+            KafkaErrorCode::UnknownTopicOrPartition,
+            Some("unknown topic or partition".into()),
+        );
+    }
+    let pid = partition as u32;
+    if election_type != 0 {
+        // Unclean (type 1) and unknown types: do not elect outside ISR.
+        let known = topic_assignment_partitions(broker, topic)
+            .is_some_and(|parts| parts.iter().any(|p| p.partition_id.0 == pid));
+        if !known {
+            return (
+                KafkaErrorCode::UnknownTopicOrPartition,
+                Some("unknown topic or partition".into()),
+            );
+        }
+        return (
+            KafkaErrorCode::EligibleLeadersNotAvailable,
+            Some("unclean leader election refused".into()),
+        );
+    }
+
+    let prev = snapshot_if_must_wait(broker);
+    let gen_before = broker.generation();
+    match broker.elect_preferred_leader(topic, pid) {
+        Ok(gen) => {
+            if gen == gen_before {
+                (KafkaErrorCode::None, None)
+            } else {
+                match complete_assignment_mutation(broker, prev).await {
+                    Ok(true) => (KafkaErrorCode::None, None),
+                    Ok(false) => (
+                        KafkaErrorCode::NotEnoughReplicas,
+                        Some("assignment consensus majority failed".into()),
+                    ),
+                    Err(_) => (KafkaErrorCode::Unknown, None),
+                }
+            }
+        }
+        Err(Error::NotFound(msg)) => (KafkaErrorCode::UnknownTopicOrPartition, Some(msg)),
+        Err(Error::InvalidArgument(msg)) if msg.starts_with("not controller") => {
+            (KafkaErrorCode::NotController, Some(msg))
+        }
+        Err(Error::InvalidArgument(msg)) if msg.contains("eligible leaders") => {
+            (KafkaErrorCode::EligibleLeadersNotAvailable, Some(msg))
+        }
+        Err(Error::InvalidArgument(msg)) => (KafkaErrorCode::InvalidRequest, Some(msg)),
+        Err(_) => (KafkaErrorCode::Unknown, None),
+    }
 }
 
 fn write_named_topic_reassignments(
@@ -2737,6 +2998,77 @@ mod tests {
         assert_eq!(resp.get_i16(), KafkaErrorCode::NotController.as_i16());
         let _ = get_compact_nullable_string(&mut resp).unwrap();
         assert_eq!(get_compact_array_len(&mut resp).unwrap(), Some(0));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    fn elect_body_v1(topic: &str, partition: i32, election_type: i8) -> BytesMut {
+        let mut body = BytesMut::new();
+        body.put_i8(election_type);
+        body.put_i32(5_000);
+        put_compact_array_len(&mut body, 1);
+        put_compact_string(&mut body, topic);
+        put_compact_array_len(&mut body, 1);
+        body.put_i32(partition);
+        put_empty_tag_buffer(&mut body);
+        put_empty_tag_buffer(&mut body);
+        body
+    }
+
+    fn read_elect_part_v1(src: &mut impl Buf) -> (i16, i32, i16) {
+        assert_eq!(src.get_i32(), 0); // throttle
+        let top = src.get_i16();
+        assert_eq!(get_compact_array_len(src).unwrap(), Some(1));
+        let _name = get_compact_string(src).unwrap();
+        assert_eq!(get_compact_array_len(src).unwrap(), Some(1));
+        let pid = src.get_i32();
+        let code = src.get_i16();
+        let _ = get_compact_nullable_string(src).unwrap();
+        (top, pid, code)
+    }
+
+    #[tokio::test]
+    async fn kafka_elect_leaders_preferred_already_leader() {
+        let dir = temp_dir("elect-ok");
+        let broker = cluster_one(dir.clone());
+        broker.create_topic("events", 1).unwrap();
+        let before = broker.clone_live_assignment().unwrap();
+        let leader_before = before.topics["events"].partitions[&0].leader;
+
+        let mut src = elect_body_v1("events", 0, 0);
+        let mut out = BytesMut::new();
+        encode_elect_leaders(&broker, &mut src, &mut out, 1, "kafka-anonymous").await;
+        let mut resp = out.freeze();
+        let (top, pid, code) = read_elect_part_v1(&mut resp);
+        assert_eq!(top, 0);
+        assert_eq!(pid, 0);
+        assert_eq!(code, 0);
+
+        let asg = broker.clone_live_assignment().unwrap();
+        assert_eq!(asg.generation, before.generation);
+        assert_eq!(asg.topics["events"].partitions[&0].leader, leader_before);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[tokio::test]
+    async fn kafka_elect_leaders_unclean_is_87() {
+        let dir = temp_dir("elect-unclean");
+        let broker = cluster_one(dir.clone());
+        broker.create_topic("events", 1).unwrap();
+        let before = broker.clone_live_assignment().unwrap();
+        let leader_before = before.topics["events"].partitions[&0].leader;
+
+        let mut src = elect_body_v1("events", 0, 1);
+        let mut out = BytesMut::new();
+        encode_elect_leaders(&broker, &mut src, &mut out, 1, "kafka-anonymous").await;
+        let mut resp = out.freeze();
+        let (top, pid, code) = read_elect_part_v1(&mut resp);
+        assert_eq!(top, 0);
+        assert_eq!(pid, 0);
+        assert_eq!(code, KafkaErrorCode::EligibleLeadersNotAvailable.as_i16());
+
+        let asg = broker.clone_live_assignment().unwrap();
+        assert_eq!(asg.generation, before.generation);
+        assert_eq!(asg.topics["events"].partitions[&0].leader, leader_before);
         let _ = std::fs::remove_dir_all(&dir);
     }
 }

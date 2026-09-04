@@ -53,6 +53,7 @@ From `SUPPORTED_APIS` in `crates/volant-broker/src/kafka/mod.rs`:
 | 36 | SaslAuthenticate | 0–2 | Flex v2 |
 | 37 | CreatePartitions | 0–3 | Flex v2+; v3 = v2 wire (no KIP-599 quota); assignment wait/rollback same as native (majority miss → **19**) |
 | 42 | DeleteGroups | 0–3 | Flex v2; ErrorMessage v3 |
+| 43 | ElectLeaders | 0–1 | Classic 0; flex v1; preferred = `elect_leader(ISR∩live)`; unclean type 1 → **87**; TimeoutMs ignored; assignment wait/rollback same as reassign; not live copy / not `preferred.leader` |
 | 44 | IncrementalAlterConfigs | 0–1 | SET/DELETE only; TOPIC + BROKER (Phase 99–103 name check + sparse durable; BROKER cluster Alter controller-only Phase 113) |
 | 45 | AlterPartitionReassignments | 0 | Always flex; wraps native opcode 114 + assignment wait; TimeoutMs ignored; null replicas → **83** (no pending cancel log); not live copy |
 | 46 | ListPartitionReassignments | 0 | Always flex; current assignment as `replicas`; empty `addingReplicas`/`removingReplicas`; TimeoutMs ignored; not live progress; no pending log |
@@ -129,6 +130,7 @@ These are **current** product facts, not temporary docs lag:
 | DeleteRecords (cluster) | Leader-only client path; best-effort inter-broker truncate of other replicas (Phase 113); fan-out failure does not fail the client by default; failed peers recorded in leader-local durable outbox and retried when live (Phase 116); **Phase 123** new leader rebuilds pending targets from local `log_start` after leadership change; truncate journal SoT + majority (Phase 129/130) with optional client wait (Phase 135 env; Phase 137 **native** per-request trailer only — Kafka still broker knob); local low not rolled back on wait fail; **Phase 137** assignment prune + known-topic push filter (journal GC / anti-resurrection) — still not a full Raft truncate log |
 | KIP-951 | CurrentLeader on leader errors; Produce NodeEndpoints v10+; Fetch NodeEndpoints v16+; empty tags on success |
 | ApiVersions features | Empty SupportedFeatures / FinalizedFeatures / ZkMigrationReady tags; no REBOOTSTRAP_REQUIRED |
+| ElectLeaders | **v0–1 wrap** (v0.236): key **43** advertised; preferred = `elect_leader(ISR∩live)`; ElectionType **1** unclean refused (**87**); TimeoutMs ignored; assignment wait/rollback same as key 45; not Kafka `preferred.leader`; not live replica copy |
 | AlterPartitionReassignments | **v0 wrap** (v0.225): key **45** advertised; apply is native opcode 114 (instant; new replicas start empty); TimeoutMs ignored; `replicas=null` → **83** (no cancel log / no pending state); not live Kafka reassignment |
 | ListPartitionReassignments | **v0 list** (v0.228): key **46** advertised; current assignment as `replicas`; empty adding/removing (apply is instant; no pending log); TimeoutMs ignored; not live Kafka reassignment progress |
 | Describe/AlterUserScramCredentials | **v0 wrap** (v0.233): keys **50** / **51** advertised; wrap `ScramStore` (native 64–69). Alter upsert is Kafka `saltedPassword = Hi(...)`, not plaintext. Native create still sends password in the clear. Unknown user → **91** `RESOURCE_NOT_FOUND`. Not OAUTH/GSSAPI; not quota keys 48/49 |
