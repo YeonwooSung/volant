@@ -1705,9 +1705,11 @@ impl Client {
     /// generate when `group_instance_id` is set. Error **14**
     /// (`NotController`) redirects via [`ClientConfig::max_redirects`]
     /// (default 1; `0` does not redirect) and does not increment
-    /// `retry_attempt`. Rebalance 9 / 10 / 11, 13 / 2 / 17 / 18 / 21 /
-    /// 22 and protocol errors are not retried or redirected.
-    /// [`crate::GroupConsumer`] inherits via this method.
+    /// `retry_attempt`. Error **9** (`RebalanceInProgress`) retries on
+    /// the same `max_retries` / `retry_backoff_ms` budget (v0.224;
+    /// default 0 extra attempts). Not parked Join. Rebalance 10 / 11,
+    /// 13 / 2 / 17 / 18 / 21 / 22 and protocol errors are not retried
+    /// or redirected. [`crate::GroupConsumer`] inherits via this method.
     pub async fn join_group_with_instance(
         &self,
         group_id: &str,
@@ -1775,7 +1777,7 @@ impl Client {
                         redirects += 1;
                         continue;
                     }
-                    if is_transient_error_code(error_code) && retry_attempt < max_retries {
+                    if is_join_retryable_error_code(error_code) && retry_attempt < max_retries {
                         retry_attempt += 1;
                         tokio::time::sleep(Duration::from_millis(self.config.retry_backoff_ms))
                             .await;
@@ -1800,7 +1802,7 @@ impl Client {
                         redirects += 1;
                         continue;
                     }
-                    if is_transient_error_code(code) && retry_attempt < max_retries {
+                    if is_join_retryable_error_code(code) && retry_attempt < max_retries {
                         retry_attempt += 1;
                         tokio::time::sleep(Duration::from_millis(self.config.retry_backoff_ms))
                             .await;
@@ -2873,6 +2875,14 @@ fn is_transient_error_code(code: u16) -> bool {
             | ErrorCode::BrokerNotAvailable
             | ErrorCode::Io
     )
+}
+
+/// JoinGroup retries the Heartbeat transient set plus error **9**
+/// (`RebalanceInProgress`) so overlapping joins can wait for a peer
+/// SyncGroup (v0.224). 10 / 11 stay not retried. Other RPCs keep
+/// [`is_transient_error_code`] only.
+fn is_join_retryable_error_code(code: u16) -> bool {
+    is_transient_error_code(code) || code == ErrorCode::RebalanceInProgress as u16
 }
 
 fn is_transient_transport(err: &Error) -> bool {

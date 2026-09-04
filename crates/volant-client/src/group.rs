@@ -785,7 +785,7 @@ async fn do_join(
         (state.member_id.clone(), state.assignment.clone())
     };
     // Error 9 is a SyncGroup fence (v0.215): overlapping joins wait
-    // here. Client::join_group_with_instance still does not retry 9.
+    // here. Client::join_group_with_instance also retries 9 (v0.224).
     // These Joins do not increment heartbeat_count.
     let (max_retries, retry_backoff_ms) = client.retry_knobs();
     let mut retry_attempt = 0u32;

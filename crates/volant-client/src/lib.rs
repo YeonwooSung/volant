@@ -225,8 +225,10 @@
 //! (live members, SyncGroup fence still open).
 //! v0.221 retries [`GroupConsumer`] Join on error **9** up to
 //! [`ClientConfig::max_retries`] (default 0) so overlapping joins can
-//! wait for a peer SyncGroup; [`Client::join_group_with_instance`]
-//! still does not retry 9.
+//! wait for a peer SyncGroup.
+//! v0.224 retries [`Client::join_group_with_instance`] on error **9**
+//! with the same `max_retries` / `retry_backoff_ms` (default 0). Not
+//! parked Join. 10 / 11 stay not retried.
 
 #![deny(missing_docs)]
 

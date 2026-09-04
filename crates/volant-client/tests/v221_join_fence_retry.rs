@@ -237,19 +237,16 @@ async fn group_join_default_max_retries_does_not_retry_9() {
 }
 
 #[tokio::test]
-async fn client_join_does_not_retry_9() {
+async fn client_join_retries_9_when_max_retries() {
+    // v0.224: Client Join retries error 9 when max_retries > 0.
     let stub = JoinFenceStub::boot([REBALANCE, 0]).await;
     let client = connect(&stub.addr, 1, 0).await;
-    let err = client
+    let result = client
         .join_group("g", "m-rejoin", 10_000, vec!["t".into()])
         .await
-        .expect_err("Client Join does not retry 9");
-    match err {
-        volant_core::Error::Protocol(m) => {
-            assert!(m.contains("error_code=9") || m.contains('9'), "{m}");
-        }
-        other => panic!("unexpected {other:?}"),
-    }
-    assert_eq!(stub.join_rpcs(), 1);
+        .expect("Client Join retries 9 when max_retries>0");
+    assert_eq!(result.member_id, "m-1");
+    assert_eq!(result.generation, 1);
+    assert_eq!(stub.join_rpcs(), 2);
     assert_eq!(stub.sync_rpcs(), 0);
 }
