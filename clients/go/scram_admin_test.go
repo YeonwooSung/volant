@@ -149,6 +149,28 @@ func TestCreateScramUserOk(t *testing.T) {
 	}
 }
 
+func TestCreateScramUserDefaultEncodesZeroIterations(t *testing.T) {
+	addr, got, stop := serveScramAdmin(t, 0, 0, 0, nil)
+	defer stop()
+	c, err := volant.DialTimeout(addr, 5*time.Second)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer c.Close()
+	if err := c.CreateScramUserDefault("alice", "s3cret"); err != nil {
+		t.Fatal(err)
+	}
+	if got.err != nil {
+		t.Fatal(got.err)
+	}
+	if got.createUser != "alice" || got.createPass != "s3cret" || got.createIters != 0 {
+		t.Fatalf("create %#v", got)
+	}
+	if len(got.opcodes) != 1 || got.opcodes[0] != codec.OpCreateScramUser {
+		t.Fatalf("opcodes %#v", got.opcodes)
+	}
+}
+
 func TestDeleteScramUserNotFoundRaises(t *testing.T) {
 	addr, got, stop := serveScramAdmin(t, 0, 2, 0, nil)
 	defer stop()

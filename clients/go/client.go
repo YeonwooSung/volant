@@ -2610,6 +2610,12 @@ func (c *Client) CreateScramUser(username, password string, iterations uint32) e
 	return err
 }
 
+// CreateScramUserDefault creates a SCRAM user with broker-default
+// iterations (0 → 4096). Same as CreateScramUser(username, password, 0).
+func (c *Client) CreateScramUserDefault(username, password string) error {
+	return c.CreateScramUser(username, password, 0)
+}
+
 // DeleteScramUser deletes a SCRAM user (native opcode 66/67). Error 14
 // follows maxRedirects.
 func (c *Client) DeleteScramUser(username string) error {
