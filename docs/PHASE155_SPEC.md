@@ -96,9 +96,9 @@ func (c *Client) CreateTopicID(name string, partitions int) (uint32, error) // a
 
 - Overlay membership is still SoT.
 - Homemade 154 code is not deleted.
-- SyncGroup is peek, not CompletingRebalance.
-- Range assignor is still DescribeGroup (no generation barrier).
-- Empty first Join is still not retried.
+- SyncGroup is still peek, not CompletingRebalance (GroupConsumer now peeks after join: v0.207/v0.208).
+- Range uses JoinGroup members trailer when present (v0.211); empty trailer still DescribeGroup.
+- Empty first Join now sends a client-generated member_id (v0.209/v0.210) so retry is safe.
 - Kafka stays 38 keys. No client-compat claim.
 - Process-local EOS / windows / KIP-890 unchanged.
 

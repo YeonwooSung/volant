@@ -1,6 +1,6 @@
 # Volant residual TODO (review loop)
 
-**Baseline:** HEAD product = **Phases 0–154** + residuals **v0.3–v0.203**; **Phase 155 open**.  
+**Baseline:** HEAD product = **Phases 0–154** + residuals **v0.3–v0.211**; **Phase 155 open**.  
 **Last review:** 2026-09-03  
 
 Living roadmap: [ROADMAP.md](./ROADMAP.md).  
@@ -19,7 +19,7 @@ Phase index: [docs/history/PHASE_HISTORY.md](./docs/history/PHASE_HISTORY.md).
 | **Product: streams durable + EOS** | **MVP closed** (149, 151, 153) + v0.8 fence + v0.9 changelog |
 | **Product: consensus / KRaft-style metadata** | **154 MVP closed**; **Phase 155 open** — openraft cluster SoT (not homemade election) |
 
-**Ceiling:** Phases **0–154** shipped, **155 open**. Native SyncGroup will take **116/117**.
+**Ceiling:** Phases **0–154** shipped, **155 open**. Native SyncGroup is **116/117**.
 
 ---
 
@@ -64,11 +64,11 @@ Phase index: [docs/history/PHASE_HISTORY.md](./docs/history/PHASE_HISTORY.md).
 | **Later** | Full **openraft** crate integration | **v0.11–v0.26 + redb log (v0.35) + joint rollback (v0.34) + follower forward (v0.38)** — not RocksDB/KRaft |
 | **Later** | **Dynamic membership** reconfiguration | **overlay v0.10 + joint v0.26 + rollback v0.34 + follower forward v0.38 + reassign rollback v0.39** — overlay still SoT |
 | **Later** | Full **KIP-890 / `__transaction_state`** | **log MVP closed (v0.13)** — opt-in JSON topic; not Kafka schemas |
-| **Later** | **Multi-language clients** | **Python/Go/Java through v0.202** + Rust create_topic_default **v0.203**; not kafka-python / SyncGroup |
+| **Later** | **Multi-language clients** | **Python/Go/Java through v0.211** + Rust GroupConsumer SyncGroup **v0.208**; not kafka-python |
 | **Later** | **Long fuzz + chaos-mesh** | **MVP closed (v0.15)** — extended corpus + Chaos Mesh YAML + A→B isolate |
 | **Later** | **Perf campaign** vs aspirational targets | **closed (v0.2 PR2)** — measured table published; group-commit **v0.20** (opt-in, no new bench) |
 
-**Default next slice:** Phase 155 PR1–PR5 are on main (docs, Go CreateTopic id, Join retry, native SyncGroup 116/117, openraft cluster default). Overlay membership is still SoT. Homemade 154 RequestVote / InstallSnapshot stay frozen. Residual **v0.155** is still DeleteRecords wait. Kafka SyncGroup key **14** is already in the 38-key table.
+**Default next slice:** Named leftovers through **v0.211** (GroupConsumer SyncGroup peek, first-Join client member_id, JoinGroup members trailer). Overlay membership is still SoT. Homemade 154 RequestVote / InstallSnapshot stay frozen. SyncGroup is still peek, not CompletingRebalance. Residual **v0.155** is still DeleteRecords wait. Kafka SyncGroup key **14** is already in the 38-key table.
 
 ---
 
@@ -289,6 +289,11 @@ Phase index: [docs/history/PHASE_HISTORY.md](./docs/history/PHASE_HISTORY.md).
 - [x] Java heartbeatIntervalMs public → **v0.201**
 - [x] Go/Java SCRAM username getter → **v0.202**
 - [x] Rust create_topic_default → **v0.203**
+- [x] language GroupConsumer SyncGroup peek after join → **v0.207**
+- [x] Rust GroupConsumer SyncGroup peek after join → **v0.208**
+- [x] language first-Join client member_id → **v0.209**
+- [x] Rust first-Join client member_id → **v0.210**
+- [x] JoinGroup members trailer for range → **v0.211**
 
 ---
 
@@ -312,7 +317,7 @@ Phase index: [docs/history/PHASE_HISTORY.md](./docs/history/PHASE_HISTORY.md).
 - [x] `__transaction_state` log MVP (v0.13; Volant JSON; not Kafka KIP-890/939 schemas)
 - [x] Kafka DeleteRecords **per-request** wait flag (v0.6 flex v2 tag 0; v0–1 env-only)
 - [x] Preferred selector **throttling** / TCP probe (v0.7; opt-in, not Kafka quota)
-- [x] Multi-language clients — Python/Go/Java through v0.202 (incl. public heartbeatIntervalMs, SCRAM username getters) + Rust create_topic_default **v0.203**; not kafka-python / SyncGroup
+- [x] Multi-language clients — Python/Go/Java through v0.211 (GroupConsumer SyncGroup peek, first-Join member_id, Join members trailer) + Rust **v0.208/v0.210**; not kafka-python
 - [x] Long fuzz campaigns + chaos-mesh MVP (v0.15; corpus + YAML + A→B isolate; not multi-hour CI)
 - [x] Published perf numbers vs aspirational table; group-commit **v0.20** (opt-in)
 
@@ -386,5 +391,6 @@ Phase index: [docs/history/PHASE_HISTORY.md](./docs/history/PHASE_HISTORY.md).
 | v0.191–v0.195 | **Shipped** — Go MaxRedirects; Go MaxRetries; Go RetryBackoff; Go TransactionalID; language timeout getter |
 | v0.196–v0.200 | **Shipped** — Python list_acls_all; Python list_offsets_all; Python reassign_partitions_all; Go/Java CreateTopic default partitions=1; Go/Java auth token getter |
 | v0.201–v0.203 | **Shipped** — Java heartbeatIntervalMs public; Go/Java SCRAM username getter; Rust create_topic_default |
+| v0.207–v0.211 | **Shipped** — language/Rust GroupConsumer SyncGroup peek; first-Join client member_id; JoinGroup members trailer |
 
 **How to use this file:** mark new work by phase number in ROADMAP + PHASE*_SPEC; fold completed rows into “Closed checklist”; keep “Still open” as the only honesty surface for operators and contributors.

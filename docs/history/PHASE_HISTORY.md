@@ -403,6 +403,11 @@ docs for day-to-day reading: [ops](../ops.md), [consistency](../consistency.md),
 | v0.201 | ✅ | Java heartbeatIntervalMs public | [V201_SPEC.md](../V201_SPEC.md) |
 | v0.202 | ✅ | Go/Java SCRAM username getter | [V202_SPEC.md](../V202_SPEC.md) |
 | v0.203 | ✅ | Rust create_topic_default | [V203_SPEC.md](../V203_SPEC.md) |
+| v0.207 | ✅ | language GroupConsumer SyncGroup peek after join | [V207_SPEC.md](../V207_SPEC.md) |
+| v0.208 | ✅ | Rust GroupConsumer SyncGroup peek after join | [V208_SPEC.md](../V208_SPEC.md) |
+| v0.209 | ✅ | language first-Join client member_id | [V209_SPEC.md](../V209_SPEC.md) |
+| v0.210 | ✅ | Rust first-Join client member_id | [V210_SPEC.md](../V210_SPEC.md) |
+| v0.211 | ✅ | JoinGroup members trailer for range | [V211_SPEC.md](../V211_SPEC.md) |
 
 ---
 

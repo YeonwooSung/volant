@@ -99,6 +99,7 @@ async fn serve_stub(
                                 member_id,
                                 assignment: vec![],
                                 revoked: vec![],
+                                members: vec![],
                             }
                         }
                         other => Response::Error {

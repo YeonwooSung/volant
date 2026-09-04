@@ -344,7 +344,7 @@ Binding: **[docs/PHASE7_SPEC.md](./docs/PHASE7_SPEC.md)**. Ops runbook: **[docs/
 - [x] Docker image + docker-compose + systemd unit (`deploy/`)
 - [x] Protocol chaos tests (random/truncated decode must not panic)
 - [x] Auth required / wrong token / metrics smoke integration tests
-- [ ] Multi-language clients (Rust first; Go / Python FFI or REST gateway) — **deferred** (Python/Go/Java through v0.202; Rust create_topic_default **v0.203**)
+- [ ] Multi-language clients (Rust first; Go / Python FFI or REST gateway) — **deferred** (Python/Go/Java through v0.211; Rust GroupConsumer SyncGroup **v0.208**)
 - [ ] Kafka protocol compatibility shim — **deferred**
 - [ ] Full chaos mesh (partition loss, disk full, slow disk) — **deferred** (protocol chaos only)
 - [ ] SCRAM / full SASL — **deferred** (mTLS identity mapping: **Phase 19**)

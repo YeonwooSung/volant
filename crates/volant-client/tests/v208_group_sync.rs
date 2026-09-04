@@ -270,6 +270,7 @@ async fn serve_stub(
                                     .expect("join_assignment")
                                     .clone(),
                                 revoked: vec![],
+                                members: vec![],
                             }
                         }
                         Request::SyncGroup {
