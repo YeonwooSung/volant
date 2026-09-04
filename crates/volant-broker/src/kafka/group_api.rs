@@ -1089,6 +1089,23 @@ pub(crate) fn encode_offset_commit(
     }
 }
 
+/// OffsetFetch RequireStable (v7+ / multi-group v8+): hide a committed
+/// offset that still sits in an open/prepared write-through range.
+/// Not a wait. Uncommitted (`-1`) and flag-off stay unchanged.
+fn require_stable_offset(
+    broker: &Broker,
+    topic: &str,
+    partition: u32,
+    offset: i64,
+    require_stable: bool,
+) -> (i64, i16) {
+    if require_stable && offset >= 0 && broker.is_unstable_offset(topic, partition, offset as u64) {
+        (-1, KafkaErrorCode::UnstableOffsetCommit.as_i16())
+    } else {
+        (offset, KafkaErrorCode::None.as_i16())
+    }
+}
+
 pub(crate) fn encode_offset_fetch(
     broker: &Broker,
     src: &mut impl Buf,
@@ -1111,7 +1128,7 @@ pub(crate) fn encode_offset_fetch(
 
     let flex = version >= 6;
 
-    let write_partition = |out: &mut BytesMut, partition: i32, offset: i64, meta: &str| {
+    let write_partition = |out: &mut BytesMut, partition: i32, offset: i64, meta: &str, error: i16| {
         out.put_i32(partition);
         out.put_i64(offset);
         if version >= 5 {
@@ -1119,11 +1136,11 @@ pub(crate) fn encode_offset_fetch(
         }
         if flex {
             put_compact_nullable_string(out, Some(meta));
-            out.put_i16(KafkaErrorCode::None.as_i16());
+            out.put_i16(error);
             put_empty_tag_buffer(out);
         } else {
             put_string(out, meta);
-            out.put_i16(KafkaErrorCode::None.as_i16());
+            out.put_i16(error);
         }
     };
 
@@ -1210,6 +1227,7 @@ pub(crate) fn encode_offset_fetch(
     let mut requested: Vec<(String, Vec<i32>)> = Vec::new();
     let list_all;
     let list_none;
+    let mut require_stable = false;
 
     if flex {
         // Compact nullable topics array: None=all, Some(0)=none, Some(n)=listed.
@@ -1252,9 +1270,9 @@ pub(crate) fn encode_offset_fetch(
                 return;
             }
         }
-        // RequireStable (v7+): ignored — no unstable/pending txn offsets.
+        // RequireStable (v7+): honor LSO — unstable committed offset → 81.
         if version >= 7 && src.remaining() >= 1 {
-            let _require_stable = src.get_u8();
+            require_stable = src.get_u8() != 0;
         }
         let _ = skip_tag_buffer(src); // request top-level tags
     } else {
@@ -1334,7 +1352,8 @@ pub(crate) fn encode_offset_fetch(
             write_topic_name(out, &topic);
             write_parts_header(out, parts.len());
             for (p, off, meta) in parts {
-                write_partition(out, p as i32, off, &meta);
+                let (off, err) = require_stable_offset(broker, &topic, p, off, require_stable);
+                write_partition(out, p as i32, off, &meta, err);
             }
             if flex {
                 put_empty_tag_buffer(out); // topic tags
@@ -1357,7 +1376,8 @@ pub(crate) fn encode_offset_fetch(
                 Some(e) => (e.offset as i64, e.metadata.clone()),
                 None => (-1i64, String::new()),
             };
-            write_partition(out, p, off, &meta);
+            let (off, err) = require_stable_offset(broker, &topic, p as u32, off, require_stable);
+            write_partition(out, p, off, &meta, err);
         }
         if flex {
             put_empty_tag_buffer(out); // topic tags
@@ -1466,10 +1486,12 @@ pub(crate) fn encode_offset_fetch_multi(
             requested,
         });
     }
-    // RequireStable (v7+ always present for v8): ignored.
-    if src.remaining() >= 1 {
-        let _require_stable = src.get_u8();
-    }
+    // RequireStable (v8+): honor LSO — unstable committed offset → 81.
+    let require_stable = if src.remaining() >= 1 {
+        src.get_u8() != 0
+    } else {
+        false
+    };
     let _ = skip_tag_buffer(src); // request top-level tags
 
     out.put_i32(0); // throttle
@@ -1530,11 +1552,13 @@ pub(crate) fn encode_offset_fetch_multi(
                 );
                 put_compact_array_len(out, parts.len());
                 for (p, off, meta) in parts {
+                    let (off, err) =
+                        require_stable_offset(broker, &topic, p, off, require_stable);
                     out.put_i32(p as i32);
                     out.put_i64(off);
                     out.put_i32(-1); // committed_leader_epoch
                     put_compact_nullable_string(out, Some(&meta));
-                    out.put_i16(KafkaErrorCode::None.as_i16());
+                    out.put_i16(err);
                     put_empty_tag_buffer(out);
                 }
                 put_empty_tag_buffer(out); // topic tags
@@ -1562,11 +1586,13 @@ pub(crate) fn encode_offset_fetch_multi(
                         Some(e) => (e.offset as i64, e.metadata.as_str()),
                         None => (-1i64, ""),
                     };
+                    let (off, err) =
+                        require_stable_offset(broker, &t.name, p as u32, off, require_stable);
                     out.put_i32(p);
                     out.put_i64(off);
                     out.put_i32(-1);
                     put_compact_nullable_string(out, Some(meta));
-                    out.put_i16(KafkaErrorCode::None.as_i16());
+                    out.put_i16(err);
                     put_empty_tag_buffer(out);
                 }
                 put_empty_tag_buffer(out); // topic tags

@@ -28,7 +28,7 @@ From `SUPPORTED_APIS` in `crates/volant-broker/src/kafka/mod.rs`:
 | 2 | ListOffsets | 0–11 | Flex v6+; specials v7–11; READ_COMMITTED latest = LSO (Phase 86) |
 | 3 | Metadata | 0–13 | Flex v9+; TopicId v10–13; top-level ErrorCode v13; live leader_epoch (Phase 87) |
 | 8 | OffsetCommit | 0–10 | Flex v8+; TopicId v10 |
-| 9 | OffsetFetch | 0–10 | Flex v6+; multi-group v8; TopicId v10 |
+| 9 | OffsetFetch | 0–10 | Flex v6+; multi-group v8; TopicId v10; RequireStable v7+ → **81** |
 | 10 | FindCoordinator | 0–6 | Flex v3; batch v4–6; sticky murmur2 over static membership (Phase 121); txn Init-owner override; no share key_type; never TRANSACTION_ABORTABLE |
 | 11 | JoinGroup | 0–9 | Flex v6+; ProtocolType/Reason/SkipAssignment v7–9 |
 | 12 | Heartbeat | 0–4 | Flex v4 |
