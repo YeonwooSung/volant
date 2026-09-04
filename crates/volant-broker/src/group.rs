@@ -1710,13 +1710,13 @@ mod tests {
             Owns::UnknownMember
         );
         let a = coord
-            .join("g", "", 10_000, vec!["t".into()], "", counts)
+            .join("g", "", 10_000, 0, vec!["t".into()], "", counts)
             .unwrap();
         sync_ok(&coord, "g", &a.member_id, a.generation);
         assert_eq!(coord.member_owns("g", &a.member_id, "t", 0), Owns::Allow);
         assert_eq!(coord.member_owns("g", "ghost", "t", 0), Owns::UnknownMember);
         let b = coord
-            .join("g", "", 10_000, vec!["t".into()], "", counts)
+            .join("g", "", 10_000, 0, vec!["t".into()], "", counts)
             .unwrap();
         let a_now = coord.assignment("g", &a.member_id).unwrap();
         let b_now = coord.assignment("g", &b.member_id).unwrap();

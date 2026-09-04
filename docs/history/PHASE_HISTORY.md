@@ -426,6 +426,11 @@ docs for day-to-day reading: [ops](../ops.md), [consistency](../consistency.md),
 | v0.227 | ✅ | park Join until SyncGroup or session timeout | [V227_SPEC.md](../V227_SPEC.md) |
 | v0.228 | ✅ | Kafka ListPartitionReassignments key 46 v0 | [V228_SPEC.md](../V228_SPEC.md) |
 | v0.229 | ✅ | Kafka TransactionLog schemas on txn-state topic | [V229_SPEC.md](../V229_SPEC.md) |
+| v0.230 | ✅ | PreparingRebalance while Join is parked | [V230_SPEC.md](../V230_SPEC.md) |
+| v0.231 | ✅ | Join park uses rebalance timeout, not session | [V231_SPEC.md](../V231_SPEC.md) |
+| v0.232 | ✅ | write open/prepared partitions on txn-state log | [V232_SPEC.md](../V232_SPEC.md) |
+| v0.233 | ✅ | Kafka Describe/AlterUserScramCredentials 50/51 | [V233_SPEC.md](../V233_SPEC.md) |
+| v0.234 | ✅ | native Fetch honors group assignment trailer | [V234_SPEC.md](../V234_SPEC.md) |
 
 ---
 

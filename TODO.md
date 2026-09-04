@@ -1,6 +1,6 @@
 # Volant residual TODO (review loop)
 
-**Baseline:** HEAD product = **Phases 0–154** + residuals **v0.3–v0.229**; **Phase 155 open**.  
+**Baseline:** HEAD product = **Phases 0–154** + residuals **v0.3–v0.234**; **Phase 155 open**.  
 **Last review:** 2026-09-03  
 
 Living roadmap: [ROADMAP.md](./ROADMAP.md).  
@@ -68,7 +68,7 @@ Phase index: [docs/history/PHASE_HISTORY.md](./docs/history/PHASE_HISTORY.md).
 | **Later** | **Long fuzz + chaos-mesh** | **MVP closed (v0.15)** — extended corpus + Chaos Mesh YAML + A→B isolate |
 | **Later** | **Perf campaign** vs aspirational targets | **closed (v0.2 PR2)** — measured table published; group-commit **v0.20** (opt-in, no new bench) |
 
-**Default next slice:** Join parks until SyncGroup or session timeout (**v0.227**; mutex released). Kafka `SUPPORTED_APIS` is **40** (key **46** v0, **v0.228**). Opt-in `__transaction_state` writes Kafka TransactionLogKey/Value v0 (**v0.229**; JSON v1 still replays). Still not PreparingRebalance, not live reassignment progress, not default-on txn topic, not TV2 writes. Residual **v0.155** is still DeleteRecords wait.
+**Default next slice:** List/Describe report PreparingRebalance while Join is parked (**v0.230**). Join park uses rebalance timeout, default 1000ms (**v0.231**). Opt-in txn-state writes open/prepared partitions (**v0.232**). Kafka `SUPPORTED_APIS` is **42** (SCRAM 50/51, **v0.233**). Native Fetch honors group assignment trailer (**v0.234**). Still not join-set wait, not live reassignment, not default-on txn topic, not Kafka Fetch enforcement. Residual **v0.155** is still DeleteRecords wait.
 
 ---
 
@@ -312,6 +312,11 @@ Phase index: [docs/history/PHASE_HISTORY.md](./docs/history/PHASE_HISTORY.md).
 - [x] park Join until SyncGroup or session timeout → **v0.227**
 - [x] Kafka ListPartitionReassignments key 46 → **v0.228**
 - [x] Kafka TransactionLog schemas on txn-state topic → **v0.229**
+- [x] PreparingRebalance while Join parked → **v0.230**
+- [x] Join park uses rebalance timeout → **v0.231**
+- [x] txn-state partitions from open/prepared → **v0.232**
+- [x] Kafka Describe/AlterUserScramCredentials 50/51 → **v0.233**
+- [x] native Fetch honors group assignment → **v0.234**
 
 ---
 
@@ -414,5 +419,6 @@ Phase index: [docs/history/PHASE_HISTORY.md](./docs/history/PHASE_HISTORY.md).
 | v0.217–v0.221 | **Shipped** — in-process overlay after joint; CompletingRebalance state; OffsetCommit 9 until sync; GroupConsumer Join 9 retry |
 | v0.222–v0.226 | **Shipped** — delete homemade 154 hatch; Client Join 9 retry; Kafka key 45 v0; opt-in txn-state open≡abort |
 | v0.227–v0.229 | **Shipped** — parked Join (Condvar); Kafka key 46 v0; Kafka TransactionLog v0 on txn-state topic |
+| v0.230–v0.234 | **Shipped** — PreparingRebalance label; rebalance park timeout; txn-log partitions; Kafka SCRAM 50/51; Fetch assignment trailer |
 
 **How to use this file:** mark new work by phase number in ROADMAP + PHASE*_SPEC; fold completed rows into “Closed checklist”; keep “Still open” as the only honesty surface for operators and contributors.
