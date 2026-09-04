@@ -180,6 +180,9 @@
 //! v0.170 adds [`Client::create_acl`] / [`Client::delete_acl`] wrapping
 //! [`Client::create_acls`] / [`Client::delete_acls`]. Single-binding
 //! convenience. Batch APIs unchanged.
+//! v0.175 adds [`Client::commit_transaction_empty`] as a named helper for
+//! EndTxn with no deferred offsets. Same as `commit_transaction(vec![])`.
+//! [`Client::commit_transaction`] is unchanged.
 
 #![deny(missing_docs)]
 
