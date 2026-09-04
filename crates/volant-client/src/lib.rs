@@ -188,6 +188,8 @@
 //! v0.175 adds [`Client::commit_transaction_empty`] as a named helper for
 //! EndTxn with no deferred offsets. Same as `commit_transaction(vec![])`.
 //! [`Client::commit_transaction`] is unchanged.
+//! v0.178 adds [`Client::alter_config`] wrapping [`Client::alter_configs`].
+//! Single-key convenience. Batch API unchanged.
 
 #![deny(missing_docs)]
 
