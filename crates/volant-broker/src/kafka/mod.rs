@@ -140,6 +140,9 @@ pub enum KafkaErrorCode {
     /// Client transaction timeout exceeds broker max (Phase 96 /
     /// `transaction.max.timeout.ms`). Kafka `INVALID_TRANSACTION_TIMEOUT`.
     InvalidTransactionTimeout = 50,
+    /// Transactional id authorization failed (v0.247). Kafka
+    /// `TRANSACTIONAL_ID_AUTHORIZATION_FAILED`.
+    TransactionalIdAuthorizationFailed = 53,
     /// Unsupported SASL mechanism.
     UnsupportedSaslMechanism = 33,
     /// SASL authentication failed.
@@ -465,12 +468,12 @@ mod tests {
         assert!(SUPPORTED_APIS.iter().any(|(k, min, max)| {
             *k == ApiKey::DescribeTopicPartitions && *min == 0 && *max == 0
         }));
-        assert!(SUPPORTED_APIS.iter().any(|(k, min, max)| {
-            *k == ApiKey::DescribeClientQuotas && *min == 0 && *max == 0
-        }));
-        assert!(SUPPORTED_APIS.iter().any(|(k, min, max)| {
-            *k == ApiKey::AlterClientQuotas && *min == 0 && *max == 0
-        }));
+        assert!(SUPPORTED_APIS
+            .iter()
+            .any(|(k, min, max)| { *k == ApiKey::DescribeClientQuotas && *min == 0 && *max == 0 }));
+        assert!(SUPPORTED_APIS
+            .iter()
+            .any(|(k, min, max)| { *k == ApiKey::AlterClientQuotas && *min == 0 && *max == 0 }));
         assert_eq!(ApiKey::from_i16(43), Some(ApiKey::ElectLeaders));
         assert_eq!(
             ApiKey::from_i16(45),
@@ -497,12 +500,12 @@ mod tests {
     #[test]
     fn supported_apis_includes_client_quotas_48_49() {
         assert!(SUPPORTED_APIS.len() >= 46);
-        assert!(SUPPORTED_APIS.iter().any(|(k, min, max)| {
-            *k == ApiKey::DescribeClientQuotas && *min == 0 && *max == 0
-        }));
-        assert!(SUPPORTED_APIS.iter().any(|(k, min, max)| {
-            *k == ApiKey::AlterClientQuotas && *min == 0 && *max == 0
-        }));
+        assert!(SUPPORTED_APIS
+            .iter()
+            .any(|(k, min, max)| { *k == ApiKey::DescribeClientQuotas && *min == 0 && *max == 0 }));
+        assert!(SUPPORTED_APIS
+            .iter()
+            .any(|(k, min, max)| { *k == ApiKey::AlterClientQuotas && *min == 0 && *max == 0 }));
         assert_eq!(ApiKey::from_i16(48), Some(ApiKey::DescribeClientQuotas));
         assert_eq!(ApiKey::from_i16(49), Some(ApiKey::AlterClientQuotas));
     }
@@ -510,9 +513,9 @@ mod tests {
     #[test]
     fn supported_apis_includes_unregister_broker_64() {
         assert!(SUPPORTED_APIS.len() >= 46);
-        assert!(SUPPORTED_APIS.iter().any(|(k, min, max)| {
-            *k == ApiKey::UnregisterBroker && *min == 0 && *max == 0
-        }));
+        assert!(SUPPORTED_APIS
+            .iter()
+            .any(|(k, min, max)| { *k == ApiKey::UnregisterBroker && *min == 0 && *max == 0 }));
         assert_eq!(ApiKey::from_i16(64), Some(ApiKey::UnregisterBroker));
     }
 }

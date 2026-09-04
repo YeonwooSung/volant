@@ -3,19 +3,16 @@
 use bytes::{Buf, BufMut, BytesMut};
 use volant_core::Error;
 
-use crate::acl::{
-    AclEntry, AclOperation, AclPermission, ResourceType, CLUSTER_RESOURCE,
-};
+use crate::acl::{AclEntry, AclOperation, AclPermission, ResourceType, CLUSTER_RESOURCE};
 use crate::broker::Broker;
 
 use super::codec::{
-    get_compact_array_len,
-    get_compact_nullable_string, get_compact_string, get_nullable_string, get_string, put_compact_array_len, put_compact_nullable_string,
-    put_compact_string, put_empty_tag_buffer, put_nullable_string, put_string,
-    read_delete_records_wait_tag, skip_tag_buffer,
+    get_compact_array_len, get_compact_nullable_string, get_compact_string, get_nullable_string,
+    get_string, put_compact_array_len, put_compact_nullable_string, put_compact_string,
+    put_empty_tag_buffer, put_nullable_string, put_string, read_delete_records_wait_tag,
+    skip_tag_buffer,
 };
 use super::KafkaErrorCode;
-
 
 /// Kafka ResourceType: Any.
 const KAFKA_RT_ANY: i8 = 1;
@@ -25,6 +22,8 @@ const KAFKA_RT_TOPIC: i8 = 2;
 const KAFKA_RT_GROUP: i8 = 3;
 /// Kafka ResourceType: Cluster.
 const KAFKA_RT_CLUSTER: i8 = 4;
+/// Kafka ResourceType: TransactionalId. Volant stores this as native u8 4.
+const KAFKA_RT_TRANSACTIONAL_ID: i8 = 5;
 /// Kafka ResourceType: User (Describe/Create/DeleteAcls v3+).
 const KAFKA_RT_USER: i8 = 7;
 
@@ -243,9 +242,7 @@ pub(crate) async fn encode_delete_records(
             }
             if wait_majority {
                 // Phase 148: majority-first — journal note before local truncate.
-                match broker
-                    .delete_records_leader_log_start(&t.name, p.partition as u32)
-                {
+                match broker.delete_records_leader_log_start(&t.name, p.partition as u32) {
                     Ok((log_start, pre_err)) if pre_err != 0 => {
                         out.put_i64(log_start as i64);
                         let kerr = if pre_err == 13 {
@@ -257,30 +254,22 @@ pub(crate) async fn encode_delete_records(
                     }
                     Ok((log_start, _)) => {
                         let before = p.offset as u64;
-                        let note_offset = broker.delete_records_note_offset(
+                        let note_offset =
+                            broker.delete_records_note_offset(&t.name, p.partition as u32, before);
+                        let majority_ok = crate::net::fanout_truncate_journal_note_provisional(
+                            broker,
                             &t.name,
                             p.partition as u32,
-                            before,
-                        );
-                        let majority_ok =
-                            crate::net::fanout_truncate_journal_note_provisional(
-                                broker,
-                                &t.name,
-                                p.partition as u32,
-                                note_offset,
-                            )
-                            .await;
+                            note_offset,
+                        )
+                        .await;
                         if !majority_ok {
                             broker.note_delete_records_majority_wait_fail();
                             broker.note_delete_records_majority_first_fail();
                             out.put_i64(log_start as i64);
                             out.put_i16(KafkaErrorCode::NotEnoughReplicas.as_i16());
                         } else {
-                            match broker.delete_records(
-                                &t.name,
-                                p.partition as u32,
-                                before,
-                            ) {
+                            match broker.delete_records(&t.name, p.partition as u32, before) {
                                 Ok((low, err)) => {
                                     out.put_i64(low as i64);
                                     if err == 0 {
@@ -305,9 +294,7 @@ pub(crate) async fn encode_delete_records(
                                 }
                                 Err(Error::NotFound(_)) => {
                                     out.put_i64(0);
-                                    out.put_i16(
-                                        KafkaErrorCode::UnknownTopicOrPartition.as_i16(),
-                                    );
+                                    out.put_i16(KafkaErrorCode::UnknownTopicOrPartition.as_i16());
                                 }
                                 Err(_) => {
                                     out.put_i64(0);
@@ -327,8 +314,7 @@ pub(crate) async fn encode_delete_records(
                 }
             } else {
                 // Wait off: local-first; fan-out returned for fire-and-forget spawn.
-                match broker.delete_records(&t.name, p.partition as u32, p.offset as u64)
-                {
+                match broker.delete_records(&t.name, p.partition as u32, p.offset as u64) {
                     Ok((low, err)) => {
                         out.put_i64(low as i64);
                         if err == 0 {
@@ -377,6 +363,7 @@ pub(crate) fn encode_describe_acls(
     // DescribeAcls classic v0–1 / flexible v2–3 (Kafka max):
     //   filter fields → throttle, error, msg, resources[{type, name, pattern, acls[]}]
     // v3: same wire as v2; ResourceType User (7) accepted.
+    // TransactionalId (Kafka 5 / native 4) is accepted at every version.
     let flex = version >= 2;
 
     let write_err = |out: &mut BytesMut, err: i16, msg: Option<&str>| {
@@ -696,10 +683,7 @@ pub(crate) fn encode_delete_acls(
         } else {
             out.put_i32(n.max(0));
         }
-        let msg = format!(
-            "not controller; controller_id={}",
-            broker.controller_id()
-        );
+        let msg = format!("not controller; controller_id={}", broker.controller_id());
         for _ in 0..n.max(0) {
             let _ = parse_acl_filter(src, version, flex);
             out.put_i16(KafkaErrorCode::NotController.as_i16());
@@ -796,10 +780,7 @@ pub(crate) fn encode_delete_acls(
                     }
                     out.put_i8(volant_rt_to_kafka(e.resource_type));
                     if flex {
-                        put_compact_string(
-                            out,
-                            &kafka_resource_name(e.resource_type, &e.resource),
-                        );
+                        put_compact_string(out, &kafka_resource_name(e.resource_type, &e.resource));
                     } else {
                         put_string(out, &kafka_resource_name(e.resource_type, &e.resource));
                     }
@@ -1054,15 +1035,14 @@ pub(crate) fn group_acls_by_resource(entries: &[AclEntry]) -> Vec<(i8, String, V
 /// Map Kafka resource type int8 → Volant.
 ///
 /// `User` (7) is only accepted on Describe/Create/DeleteAcls **v3+** (Kafka max).
-/// TransactionalId / DelegationToken remain unsupported at every version.
-pub(crate) fn kafka_rt_to_volant(
-    v: i8,
-    version: i16,
-) -> std::result::Result<ResourceType, String> {
+/// `TransactionalId` (5) maps to native `ResourceType::TransactionalId` (4)
+/// at every advertised version. DelegationToken remains unsupported.
+pub(crate) fn kafka_rt_to_volant(v: i8, version: i16) -> std::result::Result<ResourceType, String> {
     match v {
         KAFKA_RT_TOPIC => Ok(ResourceType::Topic),
         KAFKA_RT_GROUP => Ok(ResourceType::Group),
         KAFKA_RT_CLUSTER => Ok(ResourceType::Cluster),
+        KAFKA_RT_TRANSACTIONAL_ID => Ok(ResourceType::TransactionalId),
         KAFKA_RT_USER if version >= 3 => Ok(ResourceType::User),
         KAFKA_RT_USER => Err("User resource type requires Describe/Create/DeleteAcls v3+".into()),
         other => Err(format!("unsupported resource type {other}")),
@@ -1085,6 +1065,7 @@ pub(crate) fn volant_rt_to_kafka(rt: ResourceType) -> i8 {
         ResourceType::Group => KAFKA_RT_GROUP,
         ResourceType::Cluster => KAFKA_RT_CLUSTER,
         ResourceType::User => KAFKA_RT_USER,
+        ResourceType::TransactionalId => KAFKA_RT_TRANSACTIONAL_ID,
     }
 }
 
@@ -1106,7 +1087,9 @@ pub(crate) fn kafka_op_to_volant(v: i8) -> std::result::Result<AclOperation, Str
     }
 }
 
-pub(crate) fn kafka_op_to_volant_filter(v: i8) -> std::result::Result<Option<AclOperation>, String> {
+pub(crate) fn kafka_op_to_volant_filter(
+    v: i8,
+) -> std::result::Result<Option<AclOperation>, String> {
     if v == KAFKA_OP_ANY {
         return Ok(None);
     }
@@ -1134,7 +1117,9 @@ pub(crate) fn kafka_perm_to_volant(v: i8) -> std::result::Result<AclPermission, 
     }
 }
 
-pub(crate) fn kafka_perm_to_volant_filter(v: i8) -> std::result::Result<Option<AclPermission>, String> {
+pub(crate) fn kafka_perm_to_volant_filter(
+    v: i8,
+) -> std::result::Result<Option<AclPermission>, String> {
     if v == KAFKA_PERM_ANY {
         return Ok(None);
     }
@@ -1184,5 +1169,28 @@ pub(crate) fn kafka_resource_name(rt: ResourceType, volant_name: &str) -> String
         KAFKA_CLUSTER_NAME.to_string()
     } else {
         volant_name.to_string()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn transactional_id_maps_kafka_5_to_native_4() {
+        assert_eq!(
+            kafka_rt_to_volant(KAFKA_RT_TRANSACTIONAL_ID, 0).unwrap(),
+            ResourceType::TransactionalId
+        );
+        assert_eq!(
+            kafka_rt_to_volant(KAFKA_RT_TRANSACTIONAL_ID, 3).unwrap(),
+            ResourceType::TransactionalId
+        );
+        assert_eq!(
+            volant_rt_to_kafka(ResourceType::TransactionalId),
+            KAFKA_RT_TRANSACTIONAL_ID
+        );
+        assert_eq!(ResourceType::TransactionalId.as_u8(), 4);
+        assert_eq!(KAFKA_RT_TRANSACTIONAL_ID, 5);
     }
 }

@@ -24,6 +24,10 @@ pub enum ResourceType {
     /// listed via Kafka Describe/Create/DeleteAcls; not consulted on the
     /// produce/fetch authorize path today.
     User = 3,
+    /// Transactional id (Kafka ResourceType 5). Native wire `u8` is **4**;
+    /// Kafka Create/Describe/DeleteAcls map 4 ↔ 5. Consulted as Write on
+    /// txn APIs when ACLs are enabled and `transactional_id` is non-empty.
+    TransactionalId = 4,
 }
 
 impl ResourceType {
@@ -34,6 +38,7 @@ impl ResourceType {
             1 => Some(Self::Group),
             2 => Some(Self::Cluster),
             3 => Some(Self::User),
+            4 => Some(Self::TransactionalId),
             _ => None,
         }
     }
@@ -50,6 +55,7 @@ impl ResourceType {
             "group" => Ok(Self::Group),
             "cluster" => Ok(Self::Cluster),
             "user" => Ok(Self::User),
+            "transactionalid" => Ok(Self::TransactionalId),
             other => Err(Error::InvalidArgument(format!(
                 "unknown resource_type '{other}'"
             ))),
@@ -63,6 +69,7 @@ impl ResourceType {
             Self::Group => "Group",
             Self::Cluster => "Cluster",
             Self::User => "User",
+            Self::TransactionalId => "TransactionalId",
         }
     }
 }
@@ -255,9 +262,8 @@ impl AclStore {
     /// Open (create dir) under `data_dir/__acls`.
     pub fn open(data_dir: impl AsRef<Path>) -> Result<Self> {
         let dir = data_dir.as_ref().join("__acls");
-        fs::create_dir_all(&dir).map_err(|e| {
-            Error::Storage(format!("create acl dir {}: {e}", dir.display()))
-        })?;
+        fs::create_dir_all(&dir)
+            .map_err(|e| Error::Storage(format!("create acl dir {}: {e}", dir.display())))?;
         Ok(Self {
             path: dir.join("acls.json"),
         })
@@ -273,9 +279,8 @@ impl AclStore {
         if !self.path.exists() {
             return Ok(AclSnapshot::default());
         }
-        let mut f = File::open(&self.path).map_err(|e| {
-            Error::Storage(format!("open acl store {}: {e}", self.path.display()))
-        })?;
+        let mut f = File::open(&self.path)
+            .map_err(|e| Error::Storage(format!("open acl store {}: {e}", self.path.display())))?;
         let mut buf = String::new();
         f.read_to_string(&mut buf)
             .map_err(|e| Error::Storage(format!("read acl store: {e}")))?;
@@ -610,8 +615,7 @@ impl AclState {
     /// JSON-encode the current snapshot for inter-broker wire (Phase 113).
     pub fn encode_snapshot_bytes(&self) -> Result<Vec<u8>> {
         let snap = self.snapshot();
-        serde_json::to_vec(&snap)
-            .map_err(|e| Error::Storage(format!("encode acl snapshot: {e}")))
+        serde_json::to_vec(&snap).map_err(|e| Error::Storage(format!("encode acl snapshot: {e}")))
     }
 
     /// Decode a snapshot from inter-broker wire bytes (Phase 113).
@@ -742,12 +746,57 @@ mod tests {
         let reloaded = AclState::open(&dir).unwrap();
         assert!(reloaded.is_enabled());
         assert_eq!(reloaded.list(None, None, None).len(), 1);
-        assert!(reloaded.authorize(
+        assert!(reloaded.authorize(Some("alice"), ResourceType::Topic, "t", AclOperation::Write));
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn transactional_id_parse_and_wire() {
+        assert_eq!(
+            ResourceType::from_u8(4),
+            Some(ResourceType::TransactionalId)
+        );
+        assert_eq!(ResourceType::TransactionalId.as_u8(), 4);
+        assert_eq!(ResourceType::TransactionalId.as_str(), "TransactionalId");
+        assert_eq!(
+            ResourceType::parse("transactionalid").unwrap(),
+            ResourceType::TransactionalId
+        );
+        assert_eq!(
+            ResourceType::parse("TransactionalId").unwrap(),
+            ResourceType::TransactionalId
+        );
+        assert!(ResourceType::parse("delegationtoken").is_err());
+    }
+
+    #[test]
+    fn transactional_id_authorize_write() {
+        let mut a = AclAuthorizer::new();
+        a.set_enabled(true);
+        a.create(vec![entry(
+            "alice",
+            ResourceType::TransactionalId,
+            "txn-1",
+            AclOperation::Write,
+            AclPermission::Allow,
+        )]);
+        assert!(a.authorize(
             Some("alice"),
-            ResourceType::Topic,
-            "t",
+            ResourceType::TransactionalId,
+            "txn-1",
             AclOperation::Write
         ));
-        let _ = fs::remove_dir_all(&dir);
+        assert!(!a.authorize(
+            Some("alice"),
+            ResourceType::TransactionalId,
+            "txn-other",
+            AclOperation::Write
+        ));
+        assert!(!a.authorize(
+            Some("bob"),
+            ResourceType::TransactionalId,
+            "txn-1",
+            AclOperation::Write
+        ));
     }
 }
