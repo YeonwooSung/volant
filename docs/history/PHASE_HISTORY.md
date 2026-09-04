@@ -461,6 +461,11 @@ docs for day-to-day reading: [ops](../ops.md), [consistency](../consistency.md),
 | v0.262 | ✅ | persist OffsetCommit committed_leader_epoch | [V262_SPEC.md](../V262_SPEC.md) |
 | v0.263 | ✅ | Kafka BrokerRegistration key 62 reject | [V263_SPEC.md](../V263_SPEC.md) |
 | v0.264 | ✅ | Kafka ConsumerGroupDescribe key 69 wrap | [V264_SPEC.md](../V264_SPEC.md) |
+| v0.265 | ✅ | Kafka BrokerHeartbeat key 63 reject | [V265_SPEC.md](../V265_SPEC.md) |
+| v0.266 | ✅ | Kafka Envelope key 58 reject | [V266_SPEC.md](../V266_SPEC.md) |
+| v0.267 | ✅ | Kafka FetchSnapshot key 59 reject | [V267_SPEC.md](../V267_SPEC.md) |
+| v0.268 | ✅ | Kafka ControllerRegistration key 70 reject | [V268_SPEC.md](../V268_SPEC.md) |
+| v0.269 | ✅ | Kafka ConsumerGroupHeartbeat key 68 reject | [V269_SPEC.md](../V269_SPEC.md) |
 
 ---
 

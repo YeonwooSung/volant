@@ -10,9 +10,9 @@ Volant is a resource-efficient alternative to Apache Kafka, built for:
 - **Small footprint** — native binary, predictable memory, simple operations
 
 > Status: **v0.2 shipped** (crate **0.2.0**, Phases **0–154** + residuals
-> **v0.3–v0.264**; **Phase 155 open**). Durable log,
+> **v0.3–v0.269**; **Phase 155 open**). Durable log,
 > Phase 6 ISR clustering, security MVP, in-process streams (149/151/153 +
-> `TumblingWindow::durable` window buckets), optional Kafka shim (64 keys).
+> `TumblingWindow::durable` window buckets), optional Kafka shim (69 keys).
 > Metadata serves the **live** assignment by default (Phase 152 committed-only
 > is **opt-in**). Homemade metadata Raft hatch is deleted (v0.222). Single-node
 > mode (no `--cluster-config`) preserves the simple path.
