@@ -381,6 +381,11 @@ impl GroupCoordinator {
     }
 
     /// Commit offsets. Generation `0` skips membership checks (admin/CLI).
+    ///
+    /// Non-empty `member_id` with a matching generation is fenced with
+    /// error 9 until that member has SyncGroup-confirmed
+    /// (`synced_generation == generation`). Empty `member_id` keeps
+    /// today's generation/member checks only (v0.219).
     pub fn commit_offsets(
         &self,
         group_id: &str,
@@ -404,6 +409,16 @@ impl GroupCoordinator {
                 return Ok(CommitResult {
                     error_code: ErrorCode::IllegalGeneration as u16,
                 });
+            }
+            // Member path: matching gen still requires SyncGroup confirm.
+            if !member_id.is_empty() {
+                if let Some(member) = group.members.get(member_id) {
+                    if member.synced_generation != generation {
+                        return Ok(CommitResult {
+                            error_code: ErrorCode::RebalanceInProgress as u16,
+                        });
+                    }
+                }
             }
         }
         for (topic, partition, offset, metadata) in entries {
@@ -904,6 +919,14 @@ mod tests {
             .unwrap_or(0)
     }
 
+    fn fetch_offset(coord: &GroupCoordinator, group: &str, topic: &str, partition: u32) -> u64 {
+        coord
+            .fetch_offsets(group, &[(topic.into(), partition)])
+            .unwrap()
+            .entries[0]
+            .offset
+    }
+
     #[test]
     fn second_join_without_sync_is_fenced() {
         let dir = temp_dir();
@@ -1081,6 +1104,164 @@ mod tests {
         let after = coord.list_groups();
         assert!(after.iter().all(|e| !e.stable || e.member_count > 0));
         assert_eq!(crate::kafka::SUPPORTED_APIS.len(), 38);
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn offset_commit_member_before_sync_is_9() {
+        let dir = temp_dir();
+        let coord = GroupCoordinator::new(&dir).unwrap();
+        let j = coord
+            .join("g", "", 10_000, vec!["t".into()], "", counts)
+            .unwrap();
+        let r = coord
+            .commit_offsets(
+                "g",
+                &j.member_id,
+                j.generation,
+                &[("t".into(), 0, 5, String::new())],
+            )
+            .unwrap();
+        assert_eq!(r.error_code, ErrorCode::RebalanceInProgress as u16);
+        assert_eq!(fetch_offset(&coord, "g", "t", 0), OFFSET_UNKNOWN);
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn offset_commit_member_after_sync_is_0() {
+        let dir = temp_dir();
+        let coord = GroupCoordinator::new(&dir).unwrap();
+        let j = coord
+            .join("g", "", 10_000, vec!["t".into()], "", counts)
+            .unwrap();
+        let blocked = coord
+            .commit_offsets(
+                "g",
+                &j.member_id,
+                j.generation,
+                &[("t".into(), 0, 5, String::new())],
+            )
+            .unwrap();
+        assert_eq!(blocked.error_code, ErrorCode::RebalanceInProgress as u16);
+        sync_ok(&coord, "g", &j.member_id, j.generation);
+        let r = coord
+            .commit_offsets(
+                "g",
+                &j.member_id,
+                j.generation,
+                &[("t".into(), 0, 5, String::new())],
+            )
+            .unwrap();
+        assert_eq!(r.error_code, 0);
+        assert_eq!(fetch_offset(&coord, "g", "t", 0), 5);
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn offset_commit_admin_gen0_works_during_fence() {
+        let dir = temp_dir();
+        let coord = GroupCoordinator::new(&dir).unwrap();
+        let j = coord
+            .join("g", "", 10_000, vec!["t".into()], "", counts)
+            .unwrap();
+        let blocked = coord
+            .commit_offsets(
+                "g",
+                &j.member_id,
+                j.generation,
+                &[("t".into(), 0, 9, String::new())],
+            )
+            .unwrap();
+        assert_eq!(blocked.error_code, ErrorCode::RebalanceInProgress as u16);
+        let admin = coord
+            .commit_offsets("g", "", 0, &[("t".into(), 0, 9, "admin".into())])
+            .unwrap();
+        assert_eq!(admin.error_code, 0);
+        assert_eq!(fetch_offset(&coord, "g", "t", 0), 9);
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn offset_commit_empty_member_nonzero_gen_skips_sync_fence() {
+        let dir = temp_dir();
+        let coord = GroupCoordinator::new(&dir).unwrap();
+        let j = coord
+            .join("g", "", 10_000, vec!["t".into()], "", counts)
+            .unwrap();
+        // Empty member_id: matching gen commits without SyncGroup confirm.
+        let ok = coord
+            .commit_offsets("g", "", j.generation, &[("t".into(), 0, 3, String::new())])
+            .unwrap();
+        assert_eq!(ok.error_code, 0);
+        assert_eq!(fetch_offset(&coord, "g", "t", 0), 3);
+        // Today's checks only: wrong gen is still 11; unknown group is 10.
+        let wrong = coord
+            .commit_offsets(
+                "g",
+                "",
+                j.generation.wrapping_add(1),
+                &[("t".into(), 0, 4, String::new())],
+            )
+            .unwrap();
+        assert_eq!(wrong.error_code, ErrorCode::IllegalGeneration as u16);
+        assert_eq!(fetch_offset(&coord, "g", "t", 0), 3);
+        let unknown = coord
+            .commit_offsets(
+                "ghost",
+                "",
+                j.generation,
+                &[("t".into(), 0, 4, String::new())],
+            )
+            .unwrap();
+        assert_eq!(unknown.error_code, ErrorCode::UnknownMemberId as u16);
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn offset_commit_wrong_gen_is_11_unknown_member_is_10() {
+        let dir = temp_dir();
+        let coord = GroupCoordinator::new(&dir).unwrap();
+        let j = coord
+            .join("g", "", 10_000, vec!["t".into()], "", counts)
+            .unwrap();
+        let wrong = coord
+            .commit_offsets(
+                "g",
+                &j.member_id,
+                j.generation.wrapping_add(1),
+                &[("t".into(), 0, 5, String::new())],
+            )
+            .unwrap();
+        assert_eq!(wrong.error_code, ErrorCode::IllegalGeneration as u16);
+        let unknown = coord
+            .commit_offsets(
+                "g",
+                "nobody",
+                j.generation,
+                &[("t".into(), 0, 5, String::new())],
+            )
+            .unwrap();
+        assert_eq!(unknown.error_code, ErrorCode::UnknownMemberId as u16);
+        assert_eq!(fetch_offset(&coord, "g", "t", 0), OFFSET_UNKNOWN);
+        sync_ok(&coord, "g", &j.member_id, j.generation);
+        let still_wrong = coord
+            .commit_offsets(
+                "g",
+                &j.member_id,
+                j.generation.wrapping_add(1),
+                &[("t".into(), 0, 5, String::new())],
+            )
+            .unwrap();
+        assert_eq!(still_wrong.error_code, ErrorCode::IllegalGeneration as u16);
+        let still_unknown = coord
+            .commit_offsets(
+                "g",
+                "nobody",
+                j.generation,
+                &[("t".into(), 0, 5, String::new())],
+            )
+            .unwrap();
+        assert_eq!(still_unknown.error_code, ErrorCode::UnknownMemberId as u16);
         let _ = fs::remove_dir_all(&dir);
     }
 
