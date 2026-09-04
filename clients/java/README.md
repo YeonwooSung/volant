@@ -197,7 +197,7 @@ Kafka timestamp ListOffsets).
 no-wait. 3-arg `deleteRecords` uses `deleteRecordsWait()` (default 0;
 v0.152). The 4-arg overload stays explicit. Error 13 follows
 Produce/Fetch redirect. Transient 6 / 7 / 15 / 16 follow `setMaxRetries`.
-`joinGroup` sends empty `memberId` on first join.
+`joinGroup` generates a `memberId` when both ids are empty so a retry is safe (no ghost member).
 `joinGroupWithInstance` sends Phase 12 `group_instance_id` (empty =
 dynamic; v0.127). Named so it does not collide with memberId /
 assignor overloads.
@@ -245,9 +245,10 @@ tests. Error 13 stays on the redirect budget; error 21 stays on the
 one re-Init. Heartbeat shares produce/fetch `setMaxRetries` (default
 0); rebalance codes 9 / 10 / 11 are not retried. LeaveGroup shares
 `setMaxRetries`; error 10 is success (already left); error 14 follows
-`setMaxRedirects`. JoinGroup shares
-`setMaxRetries` when `memberId` or `groupInstanceId` is
-non-empty (rejoin / static membership); empty first join is one shot.
+`setMaxRedirects`. JoinGroup generates a `memberId` when both ids are empty so retry
+is safe; static instance still sends empty `memberId`. JoinGroup
+shares `setMaxRetries` when `memberId` or `groupInstanceId` is
+non-empty (generated first join / rejoin / static membership).
 OffsetCommit / OffsetFetch / DeleteOffsets / ListOffsets /
 DescribeGroup / ListGroups / Metadata / ListMembers / BeginTxn /
 EndTxn / InitProducerId / Auth / SCRAM handshake / DeleteRecords

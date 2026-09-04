@@ -176,8 +176,8 @@ native opcode 44, not Kafka DeleteRecords (API key 21). `wait_majority`
 `wait_majority` uses `self.delete_records_wait` (constructor default
 0; v0.152). An explicit `wait_majority=` wins. Error 13 follows
 Produce/Fetch redirect. Transient 6 / 7 / 15 / 16 follow ``max_retries``.
-`join_group` sends empty `member_id` on first join
-(broker assigns one) and unpacks as
+`join_group` generates a `member_id` when both ids are empty so a
+retry is safe (no ghost member) and unpacks as
 `(member_id, generation, assignment)`.
 `GroupConsumer.join` / `poll` / `commit` / `close` is the high-level
 loop (heartbeat on poll, re-join on error 9/10/11, cooperative revoke).
@@ -215,9 +215,10 @@ Error 13 stays on the redirect budget; error 21 stays on the one
 re-Init. Heartbeat shares produce/fetch ``max_retries`` (default 0);
 rebalance codes 9 / 10 / 11 are not retried. LeaveGroup shares
 ``max_retries``; error 10 is success (already left); error 14 follows
-``max_redirects``. JoinGroup shares
-``max_retries`` when ``member_id`` or ``group_instance_id`` is
-non-empty (rejoin / static membership); empty first join is one shot.
+``max_redirects``. JoinGroup generates a ``member_id`` when both ids are empty so retry
+is safe; static instance still sends empty ``member_id``. JoinGroup
+shares ``max_retries`` when ``member_id`` or ``group_instance_id`` is
+non-empty (generated first join / rejoin / static membership).
 OffsetCommit / OffsetFetch / DeleteOffsets / ListOffsets /
 DescribeGroup / ListGroups / Metadata / ListMembers / BeginTxn /
 EndTxn / InitProducerId / Auth / SCRAM handshake / DeleteRecords

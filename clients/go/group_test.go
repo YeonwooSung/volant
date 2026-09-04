@@ -173,10 +173,12 @@ func (s *fakeGroupBroker) handle(f *frame.Frame) ([]byte, error) {
 			return nil, e
 		}
 		s.joins = append(s.joins, req)
-		member := req.MemberID
+		member := s.memberID
 		if member == "" {
-			member = s.memberID
-		} else {
+			member = req.MemberID
+			if member == "" {
+				member = "m-1"
+			}
 			s.memberID = member
 		}
 		if s.generation == 0 {

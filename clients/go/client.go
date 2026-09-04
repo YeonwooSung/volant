@@ -5,9 +5,11 @@ package volant
 
 import (
 	"crypto/hmac"
+	"crypto/rand"
 	"crypto/tls"
 	"crypto/x509"
 	"encoding/binary"
+	"encoding/hex"
 	"errors"
 	"fmt"
 	"io"
@@ -2474,8 +2476,9 @@ func (c *Client) FetchOffset(group, topic string, partition uint32) ([]codec.Off
 	return c.FetchOffsets(group, []codec.OffsetEntry{{Topic: topic, Partition: partition}})
 }
 
-// JoinGroup joins a consumer group. First join sends empty member_id
-// (broker assigns one). sessionTimeoutMs 0 defaults to 10000.
+// JoinGroup joins a consumer group. Empty member_id and instance id
+// generate a member_id before send so retry is safe (no ghost member).
+// sessionTimeoutMs 0 defaults to 10000.
 // Sends empty group_instance_id (dynamic membership).
 func (c *Client) JoinGroup(group string, topics []string, sessionTimeoutMs int) (JoinGroupResult, error) {
 	return c.joinGroup(group, "", topics, sessionTimeoutMs, "")
@@ -2507,6 +2510,13 @@ func (c *Client) joinGroup(group, memberID string, topics []string, sessionTimeo
 	if topics == nil {
 		topics = []string{}
 	}
+	if memberID == "" && instanceID == "" {
+		var buf [16]byte
+		if _, err := rand.Read(buf[:]); err != nil {
+			return JoinGroupResult{}, err
+		}
+		memberID = hex.EncodeToString(buf[:])
+	}
 	payload, err := codec.EncodeJoinGroupRequest(codec.JoinGroupRequest{
 		GroupID:          group,
 		MemberID:         memberID,
@@ -2517,7 +2527,6 @@ func (c *Client) joinGroup(group, memberID string, topics []string, sessionTimeo
 	if err != nil {
 		return JoinGroupResult{}, err
 	}
-	// First join with a new UUID is not idempotent.
 	if memberID == "" && instanceID == "" {
 		return c.joinGroupOnce(payload)
 	}

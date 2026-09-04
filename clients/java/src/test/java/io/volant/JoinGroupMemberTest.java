@@ -1,6 +1,7 @@
 package io.volant;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertFalse;
 
 import java.io.IOException;
 import java.io.InputStream;
@@ -27,9 +28,46 @@ class JoinGroupMemberTest {
                 assertEquals(1L, j.generation);
             }
             srv.assertOk();
-            assertEquals("", srv.memberId.get());
+            assertFalse(srv.memberId.get() == null || srv.memberId.get().isEmpty());
             assertEquals("g", srv.group.get());
             assertEquals(Collections.singletonList(Codec.OP_JOIN_GROUP), srv.opcodes);
+        }
+    }
+
+    @Test
+    void joinGroupEmptyFirstJoinEncodesNonEmptyMemberId() throws Exception {
+        try (JoinGroupStub srv = new JoinGroupStub()) {
+            try (Client c = Client.connect("127.0.0.1", srv.port, 5_000)) {
+                JoinGroupResult j = c.joinGroup("g", List.of("t"), 10_000);
+                assertEquals("m-1", j.memberId);
+            }
+            srv.assertOk();
+            assertFalse(srv.memberId.get() == null || srv.memberId.get().isEmpty());
+            assertEquals("", srv.instanceId.get());
+        }
+    }
+
+    @Test
+    void joinGroupStaticInstanceSendsEmptyMemberId() throws Exception {
+        try (JoinGroupStub srv = new JoinGroupStub()) {
+            try (Client c = Client.connect("127.0.0.1", srv.port, 5_000)) {
+                c.joinGroupWithInstance("g", List.of("t"), 10_000, "inst-1");
+            }
+            srv.assertOk();
+            assertEquals("", srv.memberId.get());
+            assertEquals("inst-1", srv.instanceId.get());
+        }
+    }
+
+    @Test
+    void joinGroupExplicitMemberIdUnchanged() throws Exception {
+        try (JoinGroupStub srv = new JoinGroupStub()) {
+            try (Client c = Client.connect("127.0.0.1", srv.port, 5_000)) {
+                c.joinGroupMember("g", "rejoin-1", List.of("t"), 10_000);
+            }
+            srv.assertOk();
+            assertEquals("rejoin-1", srv.memberId.get());
+            assertEquals("", srv.instanceId.get());
         }
     }
 
@@ -52,7 +90,7 @@ class JoinGroupMemberTest {
                 c.joinGroupMember("g", "", List.of("t"), 10_000);
             }
             srv.assertOk();
-            assertEquals("", srv.memberId.get());
+            assertFalse(srv.memberId.get() == null || srv.memberId.get().isEmpty());
         }
     }
 

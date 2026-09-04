@@ -24,6 +24,7 @@ type scriptedBroker struct {
 	heartbeatCodes     []uint16
 	heartbeatReplies   []createTopicReply
 	joinGroupCodes     []uint16
+	joinGroupReqs      []codec.JoinGroupRequest
 	leaveGroupCodes    []uint16
 	leaveGroupReplies  []createTopicReply
 	offsetCommitCodes    []uint16
@@ -122,6 +123,15 @@ func (s *scriptedBroker) joinGroups() int {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	return s.joinGroupCount
+}
+
+func (s *scriptedBroker) lastJoinGroup() codec.JoinGroupRequest {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if len(s.joinGroupReqs) == 0 {
+		return codec.JoinGroupRequest{}
+	}
+	return s.joinGroupReqs[len(s.joinGroupReqs)-1]
 }
 
 func (s *scriptedBroker) leaveGroups() int {
@@ -346,6 +356,11 @@ func (s *scriptedBroker) handle(f *frame.Frame) ([]byte, error) {
 		payload, err = codec.EncodeHeartbeatResponse(codec.HeartbeatResponse{ErrorCode: rep.code})
 	case codec.OpJoinGroup:
 		s.joinGroupCount++
+		req, e := codec.DecodeJoinGroupRequest(f.Payload)
+		if e != nil {
+			return nil, e
+		}
+		s.joinGroupReqs = append(s.joinGroupReqs, req)
 		code := uint16(0)
 		if len(s.joinGroupCodes) > 0 {
 			code = s.joinGroupCodes[0]
@@ -1829,7 +1844,7 @@ func TestHeartbeatExhaustedRetriesRaises(t *testing.T) {
 	}
 }
 
-func TestJoinGroupEmptyMemberAndInstanceIsOneShot(t *testing.T) {
+func TestJoinGroupEmptyMemberAndInstanceRetriesTimeoutThenOk(t *testing.T) {
 	srv := &scriptedBroker{joinGroupCodes: []uint16{timeoutCode, 0}}
 	addr, stop := startScripted(t, srv)
 	defer stop()
@@ -1842,19 +1857,81 @@ func TestJoinGroupEmptyMemberAndInstanceIsOneShot(t *testing.T) {
 	c.SetMaxRetries(2)
 	c.SetRetryBackoff(0)
 
-	_, err = c.JoinGroup("g", []string{"t"}, 10_000)
-	if err == nil {
-		t.Fatal("expected BrokerError 7")
+	j, err := c.JoinGroup("g", []string{"t"}, 10_000)
+	if err != nil {
+		t.Fatal(err)
 	}
-	be, ok := err.(*volant.BrokerError)
-	if !ok || be.Code != timeoutCode {
-		t.Fatalf("got %v want BrokerError code=7", err)
+	if j.MemberID != "m-1" || j.Generation != 1 {
+		t.Fatalf("result=%+v", j)
 	}
-	if n := srv.joinGroups(); n != 1 {
-		t.Fatalf("join count %d want 1", n)
+	if n := srv.joinGroups(); n != 2 {
+		t.Fatalf("join count %d want 2", n)
 	}
 	if n := srv.heartbeats(); n != 0 {
 		t.Fatalf("heartbeat count %d want 0", n)
+	}
+}
+
+func TestJoinGroupEmptyFirstJoinEncodesNonEmptyMemberID(t *testing.T) {
+	srv := &scriptedBroker{}
+	addr, stop := startScripted(t, srv)
+	defer stop()
+
+	c, err := volant.DialTimeout(addr, 5*time.Second)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer c.Close()
+	if _, err := c.JoinGroup("g", []string{"t"}, 10_000); err != nil {
+		t.Fatal(err)
+	}
+	got := srv.lastJoinGroup()
+	if got.MemberID == "" {
+		t.Fatal("member_id on the wire is empty")
+	}
+	if got.GroupInstanceID != "" {
+		t.Fatalf("instance %q want empty", got.GroupInstanceID)
+	}
+}
+
+func TestJoinGroupStaticInstanceSendsEmptyMemberID(t *testing.T) {
+	srv := &scriptedBroker{}
+	addr, stop := startScripted(t, srv)
+	defer stop()
+
+	c, err := volant.DialTimeout(addr, 5*time.Second)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer c.Close()
+	if _, err := c.JoinGroupWithInstance("g", []string{"t"}, 10_000, "inst-1"); err != nil {
+		t.Fatal(err)
+	}
+	got := srv.lastJoinGroup()
+	if got.MemberID != "" {
+		t.Fatalf("member %q want empty", got.MemberID)
+	}
+	if got.GroupInstanceID != "inst-1" {
+		t.Fatalf("instance %q want inst-1", got.GroupInstanceID)
+	}
+}
+
+func TestJoinGroupExplicitMemberIDUnchanged(t *testing.T) {
+	srv := &scriptedBroker{}
+	addr, stop := startScripted(t, srv)
+	defer stop()
+
+	c, err := volant.DialTimeout(addr, 5*time.Second)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer c.Close()
+	if _, err := c.JoinGroupMember("g", "rejoin-1", []string{"t"}, 10_000); err != nil {
+		t.Fatal(err)
+	}
+	got := srv.lastJoinGroup()
+	if got.MemberID != "rejoin-1" {
+		t.Fatalf("member %q want rejoin-1", got.MemberID)
 	}
 }
 
