@@ -161,6 +161,7 @@ c.SetRetryBackoff(50 * time.Millisecond)
 _ = c.RetryBackoff() // default 50ms (v0.193)
 // Optional native transactions (v0.57). Opcodes 50–53; not Kafka txns.
 c.SetTransactionalID("txn-1")
+_ = c.TransactionalID() // v0.194; empty = none
 _ = c.BeginTransaction()
 _ = c.Produce("t", 0, nil, []byte("hello"))
 _, _ = c.CommitTransaction(nil) // or []codec.TxnOffsetCommit
@@ -348,6 +349,7 @@ a no-op. Produce / BeginTxn still init implicitly.
 `ProducerID()` / `ProducerEpoch()` (v0.160) read the stored values
 without Init. Uninitialized is 0.
 Native transactions (v0.57) are opt-in via `SetTransactionalID`.
+`TransactionalID()` (v0.194) reads the stored id; empty is none.
 `BeginTransaction` / `CommitTransaction` / `AbortTransaction` send
 opcodes 50–53. Init uses that id. Abort rewinds sequences. Not Kafka
 transactions (API keys 22/24/25/26/28).

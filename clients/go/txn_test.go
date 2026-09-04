@@ -238,6 +238,27 @@ func TestAbortRewindsSequence(t *testing.T) {
 	}
 }
 
+func TestTransactionalIDGetter(t *testing.T) {
+	addr, _, stop := serveTxn(t, 0, 0)
+	defer stop()
+	c, err := volant.DialTimeout(addr, 5*time.Second)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer c.Close()
+	if got := c.TransactionalID(); got != "" {
+		t.Fatalf("after DialTimeout TransactionalID() = %q want empty", got)
+	}
+	c.SetTransactionalID("txn-1")
+	if got := c.TransactionalID(); got != "txn-1" {
+		t.Fatalf("after SetTransactionalID TransactionalID() = %q want txn-1", got)
+	}
+	c.SetTransactionalID("")
+	if got := c.TransactionalID(); got != "" {
+		t.Fatalf("after clear TransactionalID() = %q want empty", got)
+	}
+}
+
 func TestMissingTransactionalIDErrorsBeforeSend(t *testing.T) {
 	addr, got, stop := serveTxn(t, 0, 0)
 	defer stop()
