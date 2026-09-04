@@ -941,6 +941,14 @@ func (c *Client) SetTransactionalID(id string) {
 	}
 }
 
+// TransactionalID returns the native transactional_id (empty = none).
+func (c *Client) TransactionalID() string {
+	if c == nil {
+		return ""
+	}
+	return c.transactionalID
+}
+
 // BeginTransaction opens a native transaction (opcode 50). Requires SetTransactionalID.
 // Transient broker/transport errors retry up to maxRetries extra times
 // (default 0). InvalidTxnState (22) and txn fence / epoch errors are
