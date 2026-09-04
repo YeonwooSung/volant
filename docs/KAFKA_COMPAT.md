@@ -63,6 +63,7 @@ From `SUPPORTED_APIS` in `crates/volant-broker/src/kafka/mod.rs`:
 | 49 | AlterClientQuotas | 0 | Always flex; no quota store; per-entry **42** `INVALID_REQUEST` (`quotas not supported`); nothing persisted; Cluster ALTER (v0.241) |
 | 50 | DescribeUserScramCredentials | 0 | Always flex; wraps `ScramStore`; empty users = all; unknown user → **91**; Cluster DESCRIBE |
 | 51 | AlterUserScramCredentials | 0 | Always flex; wraps `ScramStore`; upsert takes `saltedPassword` (not plaintext); Cluster ALTER |
+| 57 | UpdateFeatures | 0–1 | Always flex; parse and reject every feature (**92**); nothing persisted; ApiVersions features stay empty; not KIP-584; Cluster ALTER; controller-only in cluster (**41**) |
 | 60 | DescribeCluster | 0–2 | Always flex; IsFenced always false |
 | 61 | DescribeProducers | 0 | Always flex |
 | 64 | UnregisterBroker | 0 | Always flex; wraps native `remove_broker` (v0.217 invert); not KRaft incarnation/DirectoryId; controller only (**41**); no cluster → **42**; TimeoutMs ignored; Cluster ALTER (v0.242) |
@@ -142,7 +143,8 @@ These are **current** product facts, not temporary docs lag:
 | Describe/AlterClientQuotas | **v0 honest empty/reject** (v0.241): keys **48** / **49** advertised. No quota store. Describe any filter → error **0**, empty entries. Alter per-entry **42** (`quotas not supported`); `validateOnly` still rejected; nothing persisted. ACL Cluster DESCRIBE / ALTER. v1+ → **35**. Official Kafka 0–1; Volant v0 only |
 | DescribeTopicPartitions | **v0 wrap** (v0.237): key **75** advertised; wraps `Broker::metadata`. Same leaders / ISR / epochs / deterministic TopicId as Metadata. Unknown topic → **3**. ACL Topic DESCRIBE. Empty topics = all. `responsePartitionLimit <= 0` unlimited; simple truncate + `next_cursor` when cut. Cursor honored only when its topic is in the result set (else ignored). No ELR fields (Metadata partition body reused). Not Metadata v13+ |
 | UnregisterBroker | **v0 wrap** (v0.242): key **64** advertised; wraps native `remove_broker` (same invert as AddBroker / v0.217). Not KRaft UnregisterBroker (no incarnation / DirectoryId). Controller only (**41**); no cluster → **42** “unregister requires cluster”; self / last broker map native InvalidArgument → **42**. TimeoutMs parsed if present before tags, ignored. ACL Cluster ALTER |
-| Missing APIs | Large Kafka surface still unsupported (GSSAPI, OAUTH, UpdateFeatures, …) |
+| UpdateFeatures | **v0–1 reject** (v0.244): key **57** advertised (always flex). Parse request; every feature → **92** `FEATURE_UPDATE_FAILED` (`empty / not supported`). Does **not** persist. ApiVersions SupportedFeatures / FinalizedFeatures stay empty. Not KIP-584. Cluster ALTER. Cluster non-controller → **41**. v2+ → **35**. Describe is already empty via ApiVersions |
+| Missing APIs | Large Kafka surface still unsupported (GSSAPI, OAUTH, …) |
 
 ## Related
 

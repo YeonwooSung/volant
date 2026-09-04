@@ -2,7 +2,7 @@
 //! AlterPartitionReassignments, ListPartitionReassignments,
 //! ElectLeaders, Describe/AlterUserScramCredentials,
 //! Describe/AlterClientQuotas, DescribeLogDirs,
-//! DescribeTopicPartitions, UnregisterBroker, configs.
+//! DescribeTopicPartitions, UnregisterBroker, UpdateFeatures, configs.
 
 use bytes::{Buf, BufMut, BytesMut};
 use volant_core::{Error, TopicName};
@@ -2764,6 +2764,97 @@ fn apply_alter_user_scram(
     (KafkaErrorCode::None, None)
 }
 
+/// UpdateFeatures v0–1 (always flexible). Parse and reject every feature.
+///
+/// Does not persist finalized features. ApiVersions SupportedFeatures /
+/// FinalizedFeatures stay empty. Not KIP-584.
+///
+/// Cluster `--cluster-config` + non-controller → top-level **41**.
+/// Single-node is allowed and still rejects each feature (**92**).
+/// ACL: Cluster **ALTER** (disabled ACLs allow).
+pub(crate) fn encode_update_features(
+    broker: &Broker,
+    src: &mut impl Buf,
+    out: &mut BytesMut,
+    version: i16,
+    principal: &str,
+) {
+    if src.remaining() >= 4 {
+        let _timeout_ms = src.get_i32();
+    }
+
+    let mut features = Vec::new();
+    match get_compact_array_len(src) {
+        Ok(Some(n)) => {
+            for _ in 0..n {
+                let name = match get_compact_string(src) {
+                    Ok(s) => s,
+                    Err(_) => break,
+                };
+                if src.remaining() < 2 {
+                    break;
+                }
+                let _max_version_level = src.get_i16();
+                if version >= 1 {
+                    if src.remaining() >= 1 {
+                        let _upgrade_type = src.get_i8();
+                    }
+                } else if src.remaining() >= 1 {
+                    let _allow_downgrade = src.get_u8();
+                }
+                let _ = skip_tag_buffer(src);
+                features.push(name);
+            }
+        }
+        Ok(None) | Err(_) => {}
+    }
+    if version >= 1 && src.remaining() >= 1 {
+        let _validate_only = src.get_u8();
+    }
+    let _ = skip_tag_buffer(src);
+
+    let write_top = |out: &mut BytesMut, code: KafkaErrorCode, msg: Option<&str>, n: usize| {
+        out.put_i32(0); // throttle
+        out.put_i16(code.as_i16());
+        put_compact_nullable_string(out, msg);
+        put_compact_array_len(out, n);
+    };
+
+    if broker.cluster_config().is_some() && !broker.is_controller() {
+        let msg = format!("not controller; controller_id={}", broker.controller_id());
+        write_top(out, KafkaErrorCode::NotController, Some(&msg), 0);
+        put_empty_tag_buffer(out);
+        return;
+    }
+
+    if broker.acls().is_enabled()
+        && !broker.acls().authorize(
+            Some(principal),
+            ResourceType::Cluster,
+            CLUSTER_RESOURCE,
+            AclOperation::Alter,
+        )
+    {
+        write_top(
+            out,
+            KafkaErrorCode::ClusterAuthorizationFailed,
+            Some("cluster authorization failed"),
+            0,
+        );
+        put_empty_tag_buffer(out);
+        return;
+    }
+
+    write_top(out, KafkaErrorCode::None, None, features.len());
+    for name in &features {
+        put_compact_string(out, name);
+        out.put_i16(KafkaErrorCode::FeatureUpdateFailed.as_i16());
+        put_compact_nullable_string(out, Some("empty / not supported"));
+        put_empty_tag_buffer(out);
+    }
+    put_empty_tag_buffer(out);
+}
+
 /// DescribeLogDirs v0 classic / v1 flexible. Local open partitions only.
 ///
 /// `topics = null` → every local partition. Named topic with empty
@@ -3559,6 +3650,18 @@ mod tests {
         b.list_membership().brokers.iter().map(|x| x.id).collect()
     }
 
+    fn update_features_v0(feature: &str) -> BytesMut {
+        let mut body = BytesMut::new();
+        body.put_i32(5_000);
+        put_compact_array_len(&mut body, 1);
+        put_compact_string(&mut body, feature);
+        body.put_i16(1);
+        body.put_u8(0); // allowDowngrade
+        put_empty_tag_buffer(&mut body);
+        put_empty_tag_buffer(&mut body);
+        body
+    }
+
     #[tokio::test]
     async fn kafka_unregister_broker_extra_id() {
         let dir = temp_dir("unreg-ok");
@@ -3613,6 +3716,37 @@ mod tests {
             get_compact_nullable_string(&mut resp).unwrap().as_deref(),
             Some("unregister requires cluster")
         );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn kafka_update_features_rejects_and_does_not_persist() {
+        let dir = temp_dir("upd-feat");
+        let broker = Broker::new(StorageConfig {
+            data_dir: dir.clone(),
+            ..StorageConfig::default()
+        });
+        let before: Vec<_> = std::fs::read_dir(&dir)
+            .unwrap()
+            .filter_map(|e| e.ok().map(|e| e.file_name()))
+            .collect();
+
+        let mut src = update_features_v0("metadata.version");
+        let mut out = BytesMut::new();
+        encode_update_features(&broker, &mut src, &mut out, 0, "kafka-anonymous");
+        let mut resp = out.freeze();
+        assert_eq!(resp.get_i32(), 0); // throttle
+        assert_eq!(resp.get_i16(), 0); // top-level
+        let _ = get_compact_nullable_string(&mut resp).unwrap();
+        assert_eq!(get_compact_array_len(&mut resp).unwrap(), Some(1));
+        assert_eq!(get_compact_string(&mut resp).unwrap(), "metadata.version");
+        assert_eq!(resp.get_i16(), KafkaErrorCode::FeatureUpdateFailed.as_i16());
+
+        let after: Vec<_> = std::fs::read_dir(&dir)
+            .unwrap()
+            .filter_map(|e| e.ok().map(|e| e.file_name()))
+            .collect();
+        assert_eq!(after, before, "UpdateFeatures must not persist features");
         let _ = std::fs::remove_dir_all(&dir);
     }
 }

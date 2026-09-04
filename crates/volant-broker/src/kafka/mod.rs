@@ -22,11 +22,12 @@
 //! DescribeClientQuotas / AlterClientQuotas v0 (no quota store; describe empty, alter 42),
 //! DescribeLogDirs 0–1 (local logs only; v1 flexible),
 //! DescribeTopicPartitions v0 (wraps Metadata; key 75),
-//! UnregisterBroker v0 (wraps native remove_broker; key 64; not KRaft incarnation).
+//! UnregisterBroker v0 (wraps native remove_broker; key 64; not KRaft incarnation),
+//! UpdateFeatures v0–1 (always flexible; reject every feature; empty ApiVersions features).
 //! See `docs/PHASE23_SPEC.md` … `docs/PHASE91_SPEC.md`, `docs/V225_SPEC.md`,
 //! `docs/V228_SPEC.md`, `docs/V233_SPEC.md`, `docs/V235_SPEC.md`,
 //! `docs/V236_SPEC.md`, `docs/V237_SPEC.md`, `docs/V241_SPEC.md`,
-//! and `docs/V242_SPEC.md`.
+//! `docs/V242_SPEC.md`, and `docs/V244_SPEC.md`.
 
 mod acl_api;
 mod admin_api;
@@ -155,6 +156,9 @@ pub enum KafkaErrorCode {
     ///
     /// Kafka `RESOURCE_NOT_FOUND` (**91**). Not 68 (`NON_EMPTY_GROUP`).
     ResourceNotFound = 91,
+    /// Feature update failed (UpdateFeatures). Kafka `FEATURE_UPDATE_FAILED`
+    /// (**92**). Volant does not persist finalized features (not KIP-584).
+    FeatureUpdateFailed = 92,
     /// Unknown topic id (Metadata by TopicId).
     UnknownTopicId = 100,
     /// Transactional id not found (DescribeTransactions).
@@ -287,6 +291,8 @@ pub enum ApiKey {
     DescribeUserScramCredentials = 50,
     /// AlterUserScramCredentials (always flexible; v0 only).
     AlterUserScramCredentials = 51,
+    /// UpdateFeatures (always flexible; v0–1). Rejects every feature.
+    UpdateFeatures = 57,
     /// DescribeCluster (always flexible).
     DescribeCluster = 60,
     /// DescribeProducers (always flexible).
@@ -347,6 +353,7 @@ impl ApiKey {
             49 => Some(Self::AlterClientQuotas),
             50 => Some(Self::DescribeUserScramCredentials),
             51 => Some(Self::AlterUserScramCredentials),
+            57 => Some(Self::UpdateFeatures),
             60 => Some(Self::DescribeCluster),
             61 => Some(Self::DescribeProducers),
             64 => Some(Self::UnregisterBroker),
@@ -402,6 +409,7 @@ pub const SUPPORTED_APIS: &[(ApiKey, i16, i16)] = &[
     (ApiKey::AlterClientQuotas, 0, 0),
     (ApiKey::DescribeUserScramCredentials, 0, 0),
     (ApiKey::AlterUserScramCredentials, 0, 0),
+    (ApiKey::UpdateFeatures, 0, 1),
     (ApiKey::DescribeCluster, 0, 2),
     (ApiKey::DescribeProducers, 0, 0),
     (ApiKey::UnregisterBroker, 0, 0),
@@ -416,16 +424,26 @@ mod tests {
 
     #[test]
     fn supported_apis_includes_describe_log_dirs_35() {
-        assert!(SUPPORTED_APIS.len() >= 43);
-        assert!(SUPPORTED_APIS.iter().any(|(k, min, max)| {
-            *k == ApiKey::DescribeLogDirs && *min == 0 && *max == 1
-        }));
+        assert!(SUPPORTED_APIS.len() >= 46);
+        assert!(SUPPORTED_APIS
+            .iter()
+            .any(|(k, min, max)| { *k == ApiKey::DescribeLogDirs && *min == 0 && *max == 1 }));
         assert_eq!(ApiKey::from_i16(35), Some(ApiKey::DescribeLogDirs));
     }
 
     #[test]
+    fn supported_apis_includes_update_features_57() {
+        assert!(SUPPORTED_APIS.len() >= 46);
+        assert!(SUPPORTED_APIS
+            .iter()
+            .any(|(k, min, max)| *k == ApiKey::UpdateFeatures && *min == 0 && *max == 1));
+        assert_eq!(ApiKey::from_i16(57), Some(ApiKey::UpdateFeatures));
+        assert_eq!(KafkaErrorCode::FeatureUpdateFailed.as_i16(), 92);
+    }
+
+    #[test]
     fn supported_apis_includes_elect_leaders_43_and_describe_topic_partitions_75() {
-        assert!(SUPPORTED_APIS.len() >= 43);
+        assert!(SUPPORTED_APIS.len() >= 46);
         assert!(SUPPORTED_APIS
             .iter()
             .any(|(k, min, max)| *k == ApiKey::ElectLeaders && *min == 0 && *max == 1));
@@ -470,6 +488,7 @@ mod tests {
             ApiKey::from_i16(51),
             Some(ApiKey::AlterUserScramCredentials)
         );
+        assert_eq!(ApiKey::from_i16(57), Some(ApiKey::UpdateFeatures));
         assert_eq!(ApiKey::from_i16(75), Some(ApiKey::DescribeTopicPartitions));
         assert_eq!(ApiKey::from_i16(48), Some(ApiKey::DescribeClientQuotas));
         assert_eq!(ApiKey::from_i16(49), Some(ApiKey::AlterClientQuotas));

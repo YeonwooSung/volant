@@ -262,7 +262,8 @@ async fn dispatch_kafka(
                 | Some(ApiKey::DescribeClientQuotas)
                 | Some(ApiKey::AlterClientQuotas)
                 | Some(ApiKey::DescribeTopicPartitions)
-                | Some(ApiKey::UnregisterBroker),
+                | Some(ApiKey::UnregisterBroker)
+                | Some(ApiKey::UpdateFeatures),
             _
         )
     ) || matches!(
@@ -763,6 +764,18 @@ async fn dispatch_kafka(
                 debug!(error = %e, "alter client quotas flexible header tag buffer");
             }
             admin_api::encode_alter_client_quotas(broker, &mut src, &mut out, principal);
+        }
+        Some(ApiKey::UpdateFeatures) if (0..=1).contains(&hdr.api_version) => {
+            if let Err(e) = skip_tag_buffer(&mut src) {
+                debug!(error = %e, "update features flexible header tag buffer");
+            }
+            admin_api::encode_update_features(
+                broker,
+                &mut src,
+                &mut out,
+                hdr.api_version,
+                principal,
+            );
         }
         Some(ApiKey::DescribeLogDirs) if (0..=1).contains(&hdr.api_version) => {
             if hdr.api_version >= 1 {
