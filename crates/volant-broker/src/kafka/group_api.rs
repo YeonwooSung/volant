@@ -1,10 +1,12 @@
 //! Kafka wire handlers: group membership, offsets, Describe/List/Delete groups.
 
+use std::collections::BTreeMap;
+
 use bytes::{Buf, BufMut, BytesMut};
 
 use crate::acl::{AclOperation, ResourceType, CLUSTER_RESOURCE};
 use crate::broker::Broker;
-use crate::group::{decode_native_assignment_list, static_member_id};
+use crate::group::{decode_native_assignment_list, static_member_id, GroupDescription};
 
 use super::acl_api::volant_op_to_kafka;
 use super::codec::{
@@ -13,7 +15,7 @@ use super::codec::{
     get_compact_bytes, get_compact_nullable_string, get_compact_string, get_nullable_string,
     get_string, put_bytes, put_compact_array_len, put_compact_bytes,
     put_compact_nullable_string, put_compact_string, put_empty_tag_buffer, put_nullable_string,
-    put_string, skip_tag_buffer,
+    put_string, put_uuid, skip_tag_buffer,
 };
 use super::meta_api::AUTH_OPS_OMITTED;
 use super::topic_id;
@@ -1933,6 +1935,196 @@ pub(crate) fn encode_describe_groups(
     if flexible {
         put_empty_tag_buffer(out); // top-level tags
     }
+}
+
+/// ConsumerGroupDescribe v0 (key 69). Always flexible.
+///
+/// Official `ConsumerGroupDescribeRequest.json` / `Response.json`. Wraps the
+/// same `describe_group` snapshot as DescribeGroups (15). Not KIP-848:
+/// `memberEpoch` is **-1**, no regex subscribe, no assignor streams.
+/// `assignmentEpoch` = group generation. Unknown groups use Kafka **69**
+/// (`GROUP_ID_NOT_FOUND`), matching official and DescribeGroups.
+pub(crate) fn encode_consumer_group_describe(
+    broker: &Broker,
+    src: &mut impl Buf,
+    out: &mut BytesMut,
+    principal: &str,
+) {
+    let mut ids = Vec::new();
+    match get_compact_array_len(src) {
+        Ok(Some(n)) => {
+            for _ in 0..n {
+                match get_compact_string(src) {
+                    Ok(g) => ids.push(g),
+                    Err(_) => break,
+                }
+            }
+        }
+        Ok(None) | Err(_) => {}
+    }
+    let include_ops = src.remaining() >= 1 && src.get_u8() != 0;
+    let _ = skip_tag_buffer(src);
+
+    out.put_i32(0); // throttle
+    put_compact_array_len(out, ids.len());
+    for group_id in ids {
+        if broker.acls().is_enabled()
+            && !broker.acls().authorize(
+                Some(principal),
+                ResourceType::Group,
+                &group_id,
+                AclOperation::Describe,
+            )
+        {
+            put_described_consumer_group_error(
+                out,
+                KafkaErrorCode::GroupAuthorizationFailed.as_i16(),
+                Some("Group authorization failed"),
+                &group_id,
+                include_ops,
+            );
+            continue;
+        }
+
+        match broker.groups().describe_group(&group_id) {
+            Some(desc) => put_described_consumer_group(broker, out, &desc, include_ops),
+            None => {
+                // Offset-only empty groups are known (same as DescribeGroups).
+                let known = broker
+                    .groups()
+                    .list_group_ids()
+                    .iter()
+                    .any(|g| g == &group_id);
+                if known {
+                    put_described_consumer_group_empty(out, &group_id, include_ops);
+                } else {
+                    put_described_consumer_group_error(
+                        out,
+                        KafkaErrorCode::GroupIdNotFound.as_i16(),
+                        Some("Group id not found"),
+                        &group_id,
+                        include_ops,
+                    );
+                }
+            }
+        }
+    }
+    put_empty_tag_buffer(out); // top-level tags
+}
+
+fn authorized_ops_field(include_ops: bool) -> i32 {
+    // Do not invent ACL bits. Official omit default is INT32_MIN.
+    if include_ops {
+        0
+    } else {
+        AUTH_OPS_OMITTED
+    }
+}
+
+fn put_described_consumer_group_header(
+    out: &mut BytesMut,
+    err: i16,
+    err_msg: Option<&str>,
+    group_id: &str,
+    state: &str,
+    epoch: i32,
+    assignor: &str,
+) {
+    out.put_i16(err);
+    put_compact_nullable_string(out, err_msg);
+    put_compact_string(out, group_id);
+    put_compact_string(out, state);
+    out.put_i32(epoch); // GroupEpoch
+    out.put_i32(epoch); // AssignmentEpoch = generation
+    put_compact_string(out, assignor);
+}
+
+fn put_assignment_topic_partitions(
+    broker: &Broker,
+    out: &mut BytesMut,
+    assignment: &[(String, u32)],
+) {
+    let mut by_topic: BTreeMap<&str, Vec<i32>> = BTreeMap::new();
+    for (topic, part) in assignment {
+        by_topic.entry(topic.as_str()).or_default().push(*part as i32);
+    }
+    put_compact_array_len(out, by_topic.len());
+    for (name, parts) in by_topic {
+        put_uuid(out, &topic_id::uuid_for_name(broker, name));
+        put_compact_string(out, name);
+        put_compact_array_len(out, parts.len());
+        for p in parts {
+            out.put_i32(p);
+        }
+        put_empty_tag_buffer(out); // TopicPartitions tags
+    }
+    put_empty_tag_buffer(out); // Assignment tags
+}
+
+fn put_described_consumer_group(
+    broker: &Broker,
+    out: &mut BytesMut,
+    desc: &GroupDescription,
+    include_ops: bool,
+) {
+    let assignor = if desc.members.is_empty() { "" } else { "range" };
+    put_described_consumer_group_header(
+        out,
+        KafkaErrorCode::None.as_i16(),
+        None,
+        &desc.group_id,
+        desc.state.as_str(),
+        desc.generation as i32,
+        assignor,
+    );
+    put_compact_array_len(out, desc.members.len());
+    for m in &desc.members {
+        let instance = m.member_id.strip_prefix("static:");
+        put_compact_string(out, &m.member_id);
+        put_compact_nullable_string(out, instance);
+        put_compact_nullable_string(out, None); // RackId
+        out.put_i32(-1); // MemberEpoch — not KIP-848
+        put_compact_string(out, "volant-kafka");
+        put_compact_string(out, "/");
+        put_compact_array_len(out, m.topics.len());
+        for t in &m.topics {
+            put_compact_string(out, t);
+        }
+        put_compact_nullable_string(out, None); // SubscribedTopicRegex
+        put_assignment_topic_partitions(broker, out, &m.assignment);
+        put_assignment_topic_partitions(broker, out, &m.assignment); // TargetAssignment
+        put_empty_tag_buffer(out); // Member tags (MemberType is v1+)
+    }
+    out.put_i32(authorized_ops_field(include_ops));
+    put_empty_tag_buffer(out); // DescribedGroup tags
+}
+
+fn put_described_consumer_group_empty(out: &mut BytesMut, group_id: &str, include_ops: bool) {
+    put_described_consumer_group_header(
+        out,
+        KafkaErrorCode::None.as_i16(),
+        None,
+        group_id,
+        "Empty",
+        0,
+        "",
+    );
+    put_compact_array_len(out, 0);
+    out.put_i32(authorized_ops_field(include_ops));
+    put_empty_tag_buffer(out);
+}
+
+fn put_described_consumer_group_error(
+    out: &mut BytesMut,
+    err: i16,
+    err_msg: Option<&str>,
+    group_id: &str,
+    include_ops: bool,
+) {
+    put_described_consumer_group_header(out, err, err_msg, group_id, "", 0, "");
+    put_compact_array_len(out, 0);
+    out.put_i32(authorized_ops_field(include_ops));
+    put_empty_tag_buffer(out);
 }
 
 /// Kafka authorized-operations bitfield for a consumer group (DescribeGroups v3+).
