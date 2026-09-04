@@ -17,12 +17,13 @@
 //! CreatePartitions 0–3 (v3 = v2 wire; no KIP-599),
 //! AlterPartitionReassignments v0 (wraps native opcode 114),
 //! ListPartitionReassignments v0 (current replicas; empty adding/removing),
+//! ElectLeaders v0–1 (preferred = elect_leader(ISR∩live); unclean refused),
 //! DescribeUserScramCredentials / AlterUserScramCredentials v0 (wraps ScramStore),
 //! DescribeLogDirs 0–1 (local logs only; v1 flexible),
 //! DescribeTopicPartitions v0 (wraps Metadata; key 75).
 //! See `docs/PHASE23_SPEC.md` … `docs/PHASE91_SPEC.md`, `docs/V225_SPEC.md`,
 //! `docs/V228_SPEC.md`, `docs/V233_SPEC.md`, `docs/V235_SPEC.md`,
-//! and `docs/V237_SPEC.md`.
+//! `docs/V236_SPEC.md`, and `docs/V237_SPEC.md`.
 
 mod acl_api;
 mod admin_api;
@@ -118,6 +119,10 @@ pub enum KafkaErrorCode {
     InvalidFetchSessionEpoch = 71,
     /// No reassignment in progress (AlterPartitionReassignments cancel).
     NoReassignmentInProgress = 83,
+    /// No eligible leader in ISR ∩ live (ElectLeaders). Kafka
+    /// `ELIGIBLE_LEADERS_NOT_AVAILABLE`. Unclean (ElectionType 1) is
+    /// refused with this code — Volant does not elect outside ISR.
+    EligibleLeadersNotAvailable = 87,
     /// Invalid config.
     InvalidConfig = 40,
     /// Not controller for this request (Phase 113 cluster admin).
@@ -261,6 +266,8 @@ pub enum ApiKey {
     CreatePartitions = 37,
     /// DeleteGroups.
     DeleteGroups = 42,
+    /// ElectLeaders (classic v0; flexible v1).
+    ElectLeaders = 43,
     /// IncrementalAlterConfigs.
     IncrementalAlterConfigs = 44,
     /// AlterPartitionReassignments (always flexible; v0 only).
@@ -321,6 +328,7 @@ impl ApiKey {
             36 => Some(Self::SaslAuthenticate),
             37 => Some(Self::CreatePartitions),
             42 => Some(Self::DeleteGroups),
+            43 => Some(Self::ElectLeaders),
             44 => Some(Self::IncrementalAlterConfigs),
             45 => Some(Self::AlterPartitionReassignments),
             46 => Some(Self::ListPartitionReassignments),
@@ -372,6 +380,7 @@ pub const SUPPORTED_APIS: &[(ApiKey, i16, i16)] = &[
     (ApiKey::SaslAuthenticate, 0, 2),
     (ApiKey::CreatePartitions, 0, 3),
     (ApiKey::DeleteGroups, 0, 3),
+    (ApiKey::ElectLeaders, 0, 1),
     (ApiKey::IncrementalAlterConfigs, 0, 1),
     (ApiKey::AlterPartitionReassignments, 0, 0),
     (ApiKey::ListPartitionReassignments, 0, 0),
@@ -399,8 +408,11 @@ mod tests {
     }
 
     #[test]
-    fn supported_apis_includes_describe_topic_partitions_75() {
+    fn supported_apis_includes_elect_leaders_43_and_describe_topic_partitions_75() {
         assert!(SUPPORTED_APIS.len() >= 43);
+        assert!(SUPPORTED_APIS
+            .iter()
+            .any(|(k, min, max)| *k == ApiKey::ElectLeaders && *min == 0 && *max == 1));
         assert!(SUPPORTED_APIS
             .iter()
             .any(|(k, min, max)| *k == ApiKey::SyncGroup && *min == 0 && *max == 5));
@@ -419,6 +431,7 @@ mod tests {
         assert!(SUPPORTED_APIS.iter().any(|(k, min, max)| {
             *k == ApiKey::DescribeTopicPartitions && *min == 0 && *max == 0
         }));
+        assert_eq!(ApiKey::from_i16(43), Some(ApiKey::ElectLeaders));
         assert_eq!(
             ApiKey::from_i16(45),
             Some(ApiKey::AlterPartitionReassignments)

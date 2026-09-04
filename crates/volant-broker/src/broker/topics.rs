@@ -7,7 +7,9 @@ use std::sync::atomic::Ordering;
 use volant_core::{Error, Offset, PartitionId, Result, TopicId, TopicName};
 use volant_protocol::{ErrorCode, REASSIGN_ALL_PARTITIONS};
 
-use crate::cluster::{assign_replicas, save_assignment, PartitionAssignment, TopicAssignment};
+use crate::cluster::{
+    assign_replicas, elect_leader, save_assignment, PartitionAssignment, TopicAssignment,
+};
 use crate::leader_epoch::ensure_entry;
 use crate::topic::Topic;
 use crate::topic_catalog::{CatalogTopic, TopicCatalogFile};
@@ -543,6 +545,87 @@ impl Broker {
         for (pid, new_epoch, start) in epoch_bumps {
             self.record_epoch_start(topic, pid, new_epoch, start);
         }
+        self.apply_local_assignment()?;
+        self.maybe_append_cluster_metadata();
+        Ok(generation)
+    }
+
+    /// Elect the preferred leader for `topic`/`partition` (v0.236).
+    ///
+    /// Preferred = first replica in ISR ∩ live ([`elect_leader`]). Same
+    /// leader is a no-op (generation unchanged). A different live ISR replica
+    /// writes the assignment and bumps generation. Unclean (outside ISR) is
+    /// not performed here — the Kafka handler refuses ElectionType 1 with 87.
+    ///
+    /// Single-node: `Ok(0)` when this node is the local leader, else
+    /// [`Error::NotFound`].
+    ///
+    /// Returns the live assignment generation (0 on single-node).
+    pub fn elect_preferred_leader(&self, topic: &str, partition: u32) -> Result<u32> {
+        let Some(cluster) = &self.cluster else {
+            let topics = self.topics.read();
+            let t = topics
+                .get(&TopicName::new(topic))
+                .ok_or_else(|| Error::NotFound(format!("topic {topic}")))?;
+            let part = t
+                .partitions
+                .get(&PartitionId(partition))
+                .ok_or_else(|| Error::NotFound(format!("partition {topic}/{partition}")))?;
+            if part.is_leader(self.node_id) {
+                return Ok(0);
+            }
+            return Err(Error::NotFound(format!("partition {topic}/{partition}")));
+        };
+        if !cluster.membership.read().is_controller() {
+            return Err(Error::InvalidArgument(format!(
+                "not controller; controller_id={}",
+                cluster.membership.read().controller_id()
+            )));
+        }
+        {
+            let asg = cluster.assignment.read();
+            if !asg.topics.contains_key(topic) {
+                return Err(Error::NotFound(format!("topic {topic}")));
+            }
+        }
+
+        let live = cluster.membership.read().live_brokers();
+        let (generation, new_epoch, start) = {
+            let mut asg = cluster.assignment.write();
+            let ta = asg
+                .topics
+                .get_mut(topic)
+                .ok_or_else(|| Error::NotFound(format!("topic {topic}")))?;
+            let pa = ta
+                .partitions
+                .get_mut(&partition)
+                .ok_or_else(|| Error::NotFound(format!("partition {topic}/{partition}")))?;
+            let Some(new_leader) = elect_leader(&pa.replicas, &pa.isr, &live) else {
+                return Err(Error::InvalidArgument(
+                    "eligible leaders not available".into(),
+                ));
+            };
+            if pa.leader == new_leader {
+                return Ok(asg.generation);
+            }
+            pa.leader = new_leader;
+            let new_epoch = pa.leader_epoch.saturating_add(1);
+            pa.leader_epoch = new_epoch;
+            if !pa.isr.contains(&new_leader) {
+                pa.isr.push(new_leader);
+            }
+            let start = self
+                .topics
+                .read()
+                .get(&TopicName::new(topic))
+                .and_then(|t| t.partitions.get(&PartitionId(partition)))
+                .map(|p| p.leo())
+                .unwrap_or(0);
+            asg.generation = asg.generation.saturating_add(1);
+            save_assignment(&cluster.data_dir, &asg)?;
+            (asg.generation, new_epoch, start)
+        };
+        self.record_epoch_start(topic, partition, new_epoch, start);
         self.apply_local_assignment()?;
         self.maybe_append_cluster_metadata();
         Ok(generation)
