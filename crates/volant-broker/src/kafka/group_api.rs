@@ -4,11 +4,12 @@ use bytes::{Buf, BufMut, BytesMut};
 
 use crate::acl::{AclOperation, ResourceType, CLUSTER_RESOURCE};
 use crate::broker::Broker;
-use crate::group::static_member_id;
+use crate::group::{decode_native_assignment_list, static_member_id};
 
 use super::acl_api::volant_op_to_kafka;
 use super::codec::{
-    decode_consumer_subscription, encode_consumer_assignment, get_bytes, get_compact_array_len,
+    decode_consumer_assignment, decode_consumer_subscription, encode_consumer_assignment,
+    get_bytes, get_compact_array_len,
     get_compact_bytes, get_compact_nullable_string, get_compact_string, get_nullable_string,
     get_string, put_bytes, put_compact_array_len, put_compact_bytes,
     put_compact_nullable_string, put_compact_string, put_empty_tag_buffer, put_nullable_string,
@@ -345,6 +346,18 @@ pub(crate) fn encode_join_group(broker: &Broker, src: &mut impl Buf, out: &mut B
     }
 }
 
+/// Decode one SyncGroup member assignment: Kafka consumer protocol first,
+/// then native Assignment list. Empty / unparseable → `None` (keep Join peek).
+fn decode_sync_member_assignment(data: &[u8]) -> Option<Vec<(String, u32)>> {
+    if data.is_empty() {
+        return None;
+    }
+    if let Ok(parts) = decode_consumer_assignment(data) {
+        return Some(parts);
+    }
+    decode_native_assignment_list(data)
+}
+
 pub(crate) fn encode_sync_group(
     broker: &Broker,
     src: &mut impl Buf,
@@ -435,14 +448,18 @@ pub(crate) fn encode_sync_group(
     } else {
         (None, None)
     };
-    // Consume leader assignments (ignored — coordinator already assigned).
+    // Parse leader assignments; apply only those that decode (v0.248).
+    let mut applied: Vec<(String, Vec<(String, u32)>)> = Vec::new();
     if flex {
         match get_compact_array_len(src) {
             Ok(Some(n)) => {
                 for _ in 0..n {
-                    let _ = get_compact_string(src);
-                    let _ = get_compact_bytes(src);
+                    let mid = get_compact_string(src).unwrap_or_default();
+                    let bytes = get_compact_bytes(src).ok().flatten().unwrap_or_default();
                     let _ = skip_tag_buffer(src);
+                    if let Some(parts) = decode_sync_member_assignment(&bytes) {
+                        applied.push((mid, parts));
+                    }
                 }
             }
             Ok(None) | Err(_) => {}
@@ -451,8 +468,11 @@ pub(crate) fn encode_sync_group(
     } else if src.remaining() >= 4 {
         let n = src.get_i32();
         for _ in 0..n.max(0) {
-            let _ = get_string(src);
-            let _ = get_bytes(src);
+            let mid = get_string(src).unwrap_or_default();
+            let bytes = get_bytes(src).ok().flatten().unwrap_or_default();
+            if let Some(parts) = decode_sync_member_assignment(&bytes) {
+                applied.push((mid, parts));
+            }
         }
     }
 
@@ -475,7 +495,7 @@ pub(crate) fn encode_sync_group(
 
     let result = broker
         .groups()
-        .sync_group(&group_id, &member_id, generation);
+        .sync_group_with_assignments(&group_id, &member_id, generation, &applied);
     if result.error_code != 0 {
         fail(
             out,

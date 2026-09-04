@@ -380,11 +380,29 @@ impl GroupCoordinator {
 
     /// Confirm this member has observed `generation` (v0.215 fence).
     ///
-    /// Same 9/10 as [`Self::heartbeat`]. On success sets
-    /// `synced_generation = generation` and returns the current
-    /// assignment. Leader assignment bytes are ignored by the caller.
-    /// Heartbeat does not confirm.
+    /// Confirm-only: no assignment apply. Same as
+    /// [`Self::sync_group_with_assignments`] with an empty list.
     pub fn sync_group(&self, group_id: &str, member_id: &str, generation: u32) -> SyncGroupResult {
+        self.sync_group_with_assignments(group_id, member_id, generation, &[])
+    }
+
+    /// Confirm `generation` and optionally apply decoded member assignments.
+    ///
+    /// Same 9/10 as [`Self::heartbeat`]. On success, for each `(member_id,
+    /// assignment)` whose member exists in the group, replace that member's
+    /// assignment; unknown member ids are skipped. Then set this caller's
+    /// `synced_generation = generation` and return this member's assignment
+    /// (Join peek if nothing applied). Heartbeat does not confirm.
+    ///
+    /// Empty / unparseable wire bytes are the caller's skip — this method
+    /// never fails SyncGroup because an assignment did not decode.
+    pub fn sync_group_with_assignments(
+        &self,
+        group_id: &str,
+        member_id: &str,
+        generation: u32,
+        assignments: &[(String, Vec<(String, u32)>)],
+    ) -> SyncGroupResult {
         self.expire_sessions_inner();
         let mut groups = self.groups.lock();
         let Some(group) = groups.get_mut(group_id) else {
@@ -393,18 +411,27 @@ impl GroupCoordinator {
                 assignment: Vec::new(),
             };
         };
-        let Some(member) = group.members.get_mut(member_id) else {
+        if !group.members.contains_key(member_id) {
             return SyncGroupResult {
                 error_code: ErrorCode::UnknownMemberId as u16,
                 assignment: Vec::new(),
             };
-        };
+        }
         if generation != group.generation {
             return SyncGroupResult {
                 error_code: ErrorCode::RebalanceInProgress as u16,
                 assignment: Vec::new(),
             };
         }
+        for (mid, parts) in assignments {
+            if let Some(m) = group.members.get_mut(mid) {
+                m.assignment = parts.clone();
+            }
+        }
+        let member = group
+            .members
+            .get_mut(member_id)
+            .expect("member exists after contains_key");
         member.last_heartbeat = Instant::now();
         member.synced_generation = generation;
         let assignment = member.assignment.clone();
@@ -724,6 +751,47 @@ impl GroupCoordinator {
             Owns::NotAssigned
         }
     }
+}
+
+/// Decode native SyncGroup `assignment_bytes` as an `Assignment` list.
+///
+/// Wire: `u32 LE count` then `{ u16 LE topic, u32 LE partition }*`. Empty
+/// or leftover/truncated bytes return `None` (caller keeps the Join peek).
+/// A well-formed empty list (`count = 0`, exactly 4 bytes) is `Some([])`.
+pub(crate) fn decode_native_assignment_list(data: &[u8]) -> Option<Vec<(String, u32)>> {
+    if data.is_empty() {
+        return None;
+    }
+    if data.len() < 4 {
+        return None;
+    }
+    let n = u32::from_le_bytes(data[0..4].try_into().ok()?) as usize;
+    let rest = data.len() - 4;
+    // Each item is at least 2 (topic len) + 4 (partition) = 6 bytes.
+    if n > rest / 6 {
+        return None;
+    }
+    let mut i = 4;
+    let mut out = Vec::with_capacity(n);
+    for _ in 0..n {
+        if i + 2 > data.len() {
+            return None;
+        }
+        let tlen = u16::from_le_bytes(data[i..i + 2].try_into().ok()?) as usize;
+        i += 2;
+        if i + tlen + 4 > data.len() {
+            return None;
+        }
+        let topic = std::str::from_utf8(&data[i..i + tlen]).ok()?.to_owned();
+        i += tlen;
+        let partition = u32::from_le_bytes(data[i..i + 4].try_into().ok()?);
+        i += 4;
+        out.push((topic, partition));
+    }
+    if i != data.len() {
+        return None;
+    }
+    Some(out)
 }
 
 /// Live member ids, stable-sorted (v0.211 JoinGroup trailer).
@@ -1281,6 +1349,102 @@ mod tests {
         let _ = fs::remove_dir_all(&dir);
     }
 
+    fn encode_native_assignment(parts: &[(String, u32)]) -> Vec<u8> {
+        let mut dst = Vec::new();
+        dst.extend_from_slice(&(parts.len() as u32).to_le_bytes());
+        for (topic, p) in parts {
+            let b = topic.as_bytes();
+            dst.extend_from_slice(&(b.len() as u16).to_le_bytes());
+            dst.extend_from_slice(b);
+            dst.extend_from_slice(&p.to_le_bytes());
+        }
+        dst
+    }
+
+    #[test]
+    fn sync_group_empty_apply_keeps_join_assignment() {
+        let dir = temp_dir();
+        let coord = GroupCoordinator::new(&dir).unwrap();
+        let j = coord
+            .join("g", "", 10_000, 0, vec!["t".into()], "", counts)
+            .unwrap();
+        let r = coord.sync_group("g", &j.member_id, j.generation);
+        assert_eq!(r.error_code, 0);
+        assert_eq!(r.assignment, j.assignment);
+        assert_eq!(
+            coord.assignment("g", &j.member_id).as_ref(),
+            Some(&j.assignment)
+        );
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn sync_group_with_assignments_sets_member_partitions() {
+        let dir = temp_dir();
+        let coord = GroupCoordinator::new(&dir).unwrap();
+        let j = coord
+            .join("g", "", 10_000, 0, vec!["t".into()], "", counts)
+            .unwrap();
+        assert_eq!(j.assignment.len(), 4);
+        let want = vec![("t".into(), 1u32), ("t".into(), 3)];
+        let r = coord.sync_group_with_assignments(
+            "g",
+            &j.member_id,
+            j.generation,
+            &[(j.member_id.clone(), want.clone())],
+        );
+        assert_eq!(r.error_code, 0);
+        assert_eq!(r.assignment, want);
+        assert_eq!(coord.assignment("g", &j.member_id).as_ref(), Some(&want));
+        assert_eq!(coord.member_owns("g", &j.member_id, "t", 1), Owns::Allow);
+        assert_eq!(
+            coord.member_owns("g", &j.member_id, "t", 0),
+            Owns::NotAssigned
+        );
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn sync_group_with_assignments_skips_unknown_member() {
+        let dir = temp_dir();
+        let coord = GroupCoordinator::new(&dir).unwrap();
+        let j = coord
+            .join("g", "", 10_000, 0, vec!["t".into()], "", counts)
+            .unwrap();
+        let applied = vec![("t".into(), 2u32)];
+        let r = coord.sync_group_with_assignments(
+            "g",
+            &j.member_id,
+            j.generation,
+            &[
+                ("nobody".into(), vec![("t".into(), 0)]),
+                (j.member_id.clone(), applied.clone()),
+            ],
+        );
+        assert_eq!(r.error_code, 0);
+        assert_eq!(r.assignment, applied);
+        assert!(coord.assignment("g", "nobody").is_none());
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn decode_native_assignment_list_empty_and_garbage() {
+        assert_eq!(decode_native_assignment_list(&[]), None);
+        assert_eq!(decode_native_assignment_list(&[0xff, 0x00, b'x']), None);
+        assert_eq!(
+            decode_native_assignment_list(&encode_native_assignment(&[])),
+            Some(vec![])
+        );
+        let parts = vec![("events".into(), 0u32), ("events".into(), 2)];
+        assert_eq!(
+            decode_native_assignment_list(&encode_native_assignment(&parts)),
+            Some(parts)
+        );
+        let mut leftover = encode_native_assignment(&[("t".into(), 1)]);
+        leftover.push(0xff);
+        assert_eq!(decode_native_assignment_list(&leftover), None);
+    }
+
     #[test]
     fn list_groups_completing_then_stable_empty_supported_apis_stays_49() {
         let dir = temp_dir();
@@ -1606,8 +1770,9 @@ mod tests {
         assert_eq!(member_count(&coord, "g"), 1);
 
         let coord_b = Arc::clone(&coord);
-        let handle =
-            thread::spawn(move || coord_b.join("g", "", 10_000, 5_000, vec!["t".into()], "", counts));
+        let handle = thread::spawn(move || {
+            coord_b.join("g", "", 10_000, 5_000, vec!["t".into()], "", counts)
+        });
         thread::sleep(Duration::from_millis(50));
         assert_eq!(member_count(&coord, "g"), 1);
 
@@ -1629,8 +1794,9 @@ mod tests {
         assert_eq!(a.error_code, 0);
 
         let coord_b = Arc::clone(&coord);
-        let handle =
-            thread::spawn(move || coord_b.join("g", "", 10_000, 5_000, vec!["t".into()], "", counts));
+        let handle = thread::spawn(move || {
+            coord_b.join("g", "", 10_000, 5_000, vec!["t".into()], "", counts)
+        });
         thread::sleep(Duration::from_millis(50));
         assert_eq!(member_count(&coord, "g"), 1);
 

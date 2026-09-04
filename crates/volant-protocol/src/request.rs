@@ -754,7 +754,8 @@ pub enum Request {
         /// Empty → auto-recompute.
         replicas: Vec<u32>,
     },
-    /// SyncGroup peek/confirm (Phase 155). Broker ignores `assignment_bytes`.
+    /// SyncGroup confirm (Phase 155 / v0.248). Broker applies
+    /// `assignment_bytes` when they decode as a native Assignment list.
     SyncGroup {
         /// Consumer group id.
         group_id: String,
@@ -762,7 +763,7 @@ pub enum Request {
         member_id: String,
         /// Current generation.
         generation: u32,
-        /// Leader assignment bytes (MVP: empty; broker ignores).
+        /// Native Assignment list bytes; empty / unparseable keeps Join peek.
         assignment_bytes: Bytes,
     },
 }

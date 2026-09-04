@@ -15,7 +15,7 @@ use crate::broker::{Broker, MembershipOverlaySnapshot, Txn2pcFanout};
 use crate::cluster::{
     reassign_on_add_enabled, reassign_on_add_rollback_enabled, AssignmentSnapshot,
 };
-use crate::group::Owns;
+use crate::group::{decode_native_assignment_list, Owns};
 
 use super::fanout::{
     complete_assignment_mutation, fanout_cluster_acl_snapshot, fanout_delete_records,
@@ -928,11 +928,15 @@ async fn handle_request(broker: &Arc<Broker>, req: Request) -> Result<Response> 
             group_id,
             member_id,
             generation,
-            assignment_bytes: _,
+            assignment_bytes,
         } => {
+            let applied = match decode_native_assignment_list(&assignment_bytes) {
+                Some(parts) => vec![(member_id.clone(), parts)],
+                None => Vec::new(),
+            };
             let result = broker
                 .groups()
-                .sync_group(&group_id, &member_id, generation);
+                .sync_group_with_assignments(&group_id, &member_id, generation, &applied);
             if result.error_code != 0 {
                 return Ok(Response::SyncGroup {
                     error_code: result.error_code,

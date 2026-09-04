@@ -33,7 +33,7 @@ From `SUPPORTED_APIS` in `crates/volant-broker/src/kafka/mod.rs`:
 | 11 | JoinGroup | 0–9 | Flex v6+; ProtocolType/Reason/SkipAssignment v7–9 |
 | 12 | Heartbeat | 0–4 | Flex v4 |
 | 13 | LeaveGroup | 0–5 | Flex v4+; Reason v5 |
-| 14 | SyncGroup | 0–5 | Flex v4+; ProtocolType/Name v5. Native opcode **116/117** is peek/confirm of the Join assignment (broker ignores leader bytes). Kafka key **14** is unchanged. |
+| 14 | SyncGroup | 0–5 | Flex v4+; ProtocolType/Name v5. Native **116/117** / key **14** apply assignment bytes when they decode; empty/garbage still peeks Join assignment (not join-set wait). |
 | 15 | DescribeGroups | 0–6 | Flex v5; ErrorMessage v6 |
 | 16 | ListGroups | 0–5 | Flex v3; StatesFilter v4; TypesFilter v5 (`classic`) |
 | 17 | SaslHandshake | 0–1 | PLAIN, SCRAM-SHA-256, SCRAM-SHA-512 |
