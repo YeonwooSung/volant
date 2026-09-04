@@ -16,9 +16,10 @@
 //! AddOffsetsToTxn 0–4 wire-identical v3/v4, TxnOffsetCommit 0–6 TopicId),
 //! CreatePartitions 0–3 (v3 = v2 wire; no KIP-599),
 //! AlterPartitionReassignments v0 (wraps native opcode 114),
-//! ListPartitionReassignments v0 (current replicas; empty adding/removing).
+//! ListPartitionReassignments v0 (current replicas; empty adding/removing),
+//! DescribeUserScramCredentials / AlterUserScramCredentials v0 (wraps ScramStore).
 //! See `docs/PHASE23_SPEC.md` … `docs/PHASE91_SPEC.md`, `docs/V225_SPEC.md`,
-//! and `docs/V228_SPEC.md`.
+//! `docs/V228_SPEC.md`, and `docs/V233_SPEC.md`.
 
 mod acl_api;
 mod admin_api;
@@ -139,6 +140,10 @@ pub enum KafkaErrorCode {
     UnknownLeaderEpoch = 75,
     /// Producer fenced (epoch / transactional id fencing).
     ProducerFenced = 90,
+    /// Resource not found (Describe/AlterUserScramCredentials unknown user).
+    ///
+    /// Kafka `RESOURCE_NOT_FOUND` (**91**). Not 68 (`NON_EMPTY_GROUP`).
+    ResourceNotFound = 91,
     /// Unknown topic id (Metadata by TopicId).
     UnknownTopicId = 100,
     /// Transactional id not found (DescribeTransactions).
@@ -259,6 +264,10 @@ pub enum ApiKey {
     ListPartitionReassignments = 46,
     /// OffsetDelete.
     OffsetDelete = 47,
+    /// DescribeUserScramCredentials (always flexible; v0 only).
+    DescribeUserScramCredentials = 50,
+    /// AlterUserScramCredentials (always flexible; v0 only).
+    AlterUserScramCredentials = 51,
     /// DescribeCluster (always flexible).
     DescribeCluster = 60,
     /// DescribeProducers (always flexible).
@@ -308,6 +317,8 @@ impl ApiKey {
             45 => Some(Self::AlterPartitionReassignments),
             46 => Some(Self::ListPartitionReassignments),
             47 => Some(Self::OffsetDelete),
+            50 => Some(Self::DescribeUserScramCredentials),
+            51 => Some(Self::AlterUserScramCredentials),
             60 => Some(Self::DescribeCluster),
             61 => Some(Self::DescribeProducers),
             65 => Some(Self::DescribeTransactions),
@@ -355,6 +366,8 @@ pub const SUPPORTED_APIS: &[(ApiKey, i16, i16)] = &[
     (ApiKey::AlterPartitionReassignments, 0, 0),
     (ApiKey::ListPartitionReassignments, 0, 0),
     (ApiKey::OffsetDelete, 0, 0),
+    (ApiKey::DescribeUserScramCredentials, 0, 0),
+    (ApiKey::AlterUserScramCredentials, 0, 0),
     (ApiKey::DescribeCluster, 0, 2),
     (ApiKey::DescribeProducers, 0, 0),
     (ApiKey::DescribeTransactions, 0, 0),
@@ -366,8 +379,8 @@ mod tests {
     use super::*;
 
     #[test]
-    fn supported_apis_stays_40_sync_group_key_14_and_reassign_45_46() {
-        assert_eq!(SUPPORTED_APIS.len(), 40);
+    fn supported_apis_stays_42_sync_group_key_14_and_reassign_45_46_scram_50_51() {
+        assert_eq!(SUPPORTED_APIS.len(), 42);
         assert!(SUPPORTED_APIS
             .iter()
             .any(|(k, min, max)| *k == ApiKey::SyncGroup && *min == 0 && *max == 5));
@@ -377,6 +390,12 @@ mod tests {
         assert!(SUPPORTED_APIS.iter().any(|(k, min, max)| {
             *k == ApiKey::ListPartitionReassignments && *min == 0 && *max == 0
         }));
+        assert!(SUPPORTED_APIS.iter().any(|(k, min, max)| {
+            *k == ApiKey::DescribeUserScramCredentials && *min == 0 && *max == 0
+        }));
+        assert!(SUPPORTED_APIS.iter().any(|(k, min, max)| {
+            *k == ApiKey::AlterUserScramCredentials && *min == 0 && *max == 0
+        }));
         assert_eq!(
             ApiKey::from_i16(45),
             Some(ApiKey::AlterPartitionReassignments)
@@ -384,6 +403,14 @@ mod tests {
         assert_eq!(
             ApiKey::from_i16(46),
             Some(ApiKey::ListPartitionReassignments)
+        );
+        assert_eq!(
+            ApiKey::from_i16(50),
+            Some(ApiKey::DescribeUserScramCredentials)
+        );
+        assert_eq!(
+            ApiKey::from_i16(51),
+            Some(ApiKey::AlterUserScramCredentials)
         );
     }
 }
