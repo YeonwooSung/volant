@@ -1692,13 +1692,14 @@ impl Client {
     /// Transient broker/transport errors retry up to
     /// [`ClientConfig::max_retries`] extra times (default 0) when
     /// `member_id` or `group_instance_id` is non-empty. Empty first join
-    /// (both empty) is one shot — a lost success plus retry would create
-    /// a ghost member and bump generation. Error **14** (`NotController`)
-    /// redirects via [`ClientConfig::max_redirects`] (default 1; `0` does
-    /// not redirect) and does not increment `retry_attempt`. Rebalance
-    /// 9 / 10 / 11, 13 / 2 / 17 / 18 / 21 / 22 and protocol errors are
-    /// not retried or redirected. [`crate::GroupConsumer`] inherits via
-    /// this method.
+    /// (both empty) generates a UUID `member_id` before the first send
+    /// (v0.210) so the v0.205 retry guard sees a non-empty id. Do not
+    /// generate when `group_instance_id` is set. Error **14**
+    /// (`NotController`) redirects via [`ClientConfig::max_redirects`]
+    /// (default 1; `0` does not redirect) and does not increment
+    /// `retry_attempt`. Rebalance 9 / 10 / 11, 13 / 2 / 17 / 18 / 21 /
+    /// 22 and protocol errors are not retried or redirected.
+    /// [`crate::GroupConsumer`] inherits via this method.
     pub async fn join_group_with_instance(
         &self,
         group_id: &str,
@@ -1707,6 +1708,14 @@ impl Client {
         topics: Vec<String>,
         group_instance_id: &str,
     ) -> Result<JoinGroupResult> {
+        // v0.210: empty first join is retry-safe once the client picks the id.
+        let generated_member_id;
+        let member_id = if member_id.is_empty() && group_instance_id.is_empty() {
+            generated_member_id = uuid::Uuid::new_v4().to_string();
+            generated_member_id.as_str()
+        } else {
+            member_id
+        };
         // First join with a new UUID is not idempotent.
         if member_id.is_empty() && group_instance_id.is_empty() {
             return self

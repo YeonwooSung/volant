@@ -8,7 +8,6 @@ use bytes::BytesMut;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::{TcpListener, TcpStream};
 use volant_client::{Client, ClientConfig};
-use volant_core::Error;
 use volant_protocol::codec::{decode_frame, encode_frame};
 use volant_protocol::{decode_request, pack_response, ErrorCode, Request, Response};
 
@@ -152,28 +151,19 @@ async fn connect(addr: &str, max_retries: u32, retry_backoff_ms: u64) -> Client 
     .expect("connect")
 }
 
-fn surfaced_code(err: &Error) -> Option<u16> {
-    let msg = err.to_string();
-    let marker = "error_code=";
-    let idx = msg.find(marker)?;
-    msg[idx + marker.len()..]
-        .chars()
-        .take_while(|c| c.is_ascii_digit())
-        .collect::<String>()
-        .parse()
-        .ok()
-}
-
 #[tokio::test]
 async fn empty_member_and_instance_is_one_shot() {
+    // v0.210 fills a UUID member_id before the first send, so the
+    // v0.205 retry guard sees a non-empty id and retries.
     let stub = JoinGroupStub::boot([TIMEOUT, 0]).await;
     let client = connect(&stub.addr, 2, 0).await;
-    let err = client
+    let result = client
         .join_group("g", "", 10_000, vec!["t".into()])
         .await
-        .expect_err("empty first join is not retried");
-    assert_eq!(surfaced_code(&err), Some(TIMEOUT));
-    assert_eq!(stub.join_rpcs(), 1);
+        .expect("generated member_id is retry-safe");
+    assert_eq!(result.member_id, "m-1");
+    assert_eq!(result.generation, 1);
+    assert_eq!(stub.join_rpcs(), 2);
     assert_eq!(stub.heartbeat_rpcs(), 0);
 }
 
