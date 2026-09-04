@@ -26,7 +26,7 @@
 //! AssignReplicasToDirs v0 (always flexible; reject every assignment; single data_dir),
 //! DescribeLogDirs 0–1 (local logs only; v1 flexible),
 //! DescribeTopicPartitions v0 (wraps Metadata; key 75),
-//! BrokerRegistration v0 (key 63 reject; not KRaft / not AddBroker),
+//! BrokerRegistration v0 (key 62 reject; not KRaft / not AddBroker),
 //! UnregisterBroker v0 (wraps native remove_broker; key 64; not KRaft incarnation),
 //! UpdateFeatures v0–1 (always flexible; reject every feature; empty ApiVersions features),
 //! DescribeQuorum v0–1 (always flexible; wraps openraft leader/term/voters; not KRaft),
@@ -356,7 +356,7 @@ pub enum ApiKey {
     /// BrokerRegistration (always flexible; v0 only). Honest reject:
     /// not KRaft (no incarnation / DirectoryId / features). Does not
     /// wrap native AddBroker. Overlay membership is unchanged.
-    BrokerRegistration = 63,
+    BrokerRegistration = 62,
     /// UnregisterBroker (always flexible; v0 only). Wraps native
     /// `remove_broker`. Not Kafka KRaft incarnation / DirectoryId.
     UnregisterBroker = 64,
@@ -443,7 +443,7 @@ impl ApiKey {
             57 => Some(Self::UpdateFeatures),
             60 => Some(Self::DescribeCluster),
             61 => Some(Self::DescribeProducers),
-            63 => Some(Self::BrokerRegistration),
+            62 => Some(Self::BrokerRegistration),
             64 => Some(Self::UnregisterBroker),
             65 => Some(Self::DescribeTransactions),
             66 => Some(Self::ListTransactions),
@@ -626,12 +626,12 @@ mod tests {
     }
 
     #[test]
-    fn supported_apis_includes_broker_registration_63() {
+    fn supported_apis_includes_broker_registration_62() {
         assert!(SUPPORTED_APIS.len() >= 61);
         assert!(SUPPORTED_APIS
             .iter()
             .any(|(k, min, max)| { *k == ApiKey::BrokerRegistration && *min == 0 && *max == 0 }));
-        assert_eq!(ApiKey::from_i16(63), Some(ApiKey::BrokerRegistration));
+        assert_eq!(ApiKey::from_i16(62), Some(ApiKey::BrokerRegistration));
         assert_eq!(ApiKey::from_i16(64), Some(ApiKey::UnregisterBroker));
     }
 

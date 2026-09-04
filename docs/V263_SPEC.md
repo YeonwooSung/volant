@@ -1,8 +1,8 @@
-# v0.263 — Kafka BrokerRegistration key 63 v0 reject
+# v0.263 — Kafka BrokerRegistration key 62 v0 reject
 
 **Status:** Shipped
 **Crate:** 0.2.0 (unchanged)
-**Theme:** Advertise Kafka **BrokerRegistration** (API key **63**,
+**Theme:** Advertise Kafka **BrokerRegistration** (API key **62**,
 version **0** only, always flexible). Volant membership is overlay
 `membership.json` + native AddBroker (102–107), **not** KRaft
 BrokerRegistration (no incarnation, no DirectoryId, no features).
@@ -13,10 +13,10 @@ the invert of native remove.
 
 This is residual **v0.263**. Official Apache Kafka
 `BrokerRegistrationRequest.json` uses apiKey **62** (BrokerHeartbeat
-is **63**); this residual advertises **63** next to UnregisterBroker
-**64**. Official field layout is used. Do **not** touch Expire/Renew
-tokens, OffsetCommit epoch, ConsumerGroupDescribe, UnregisterBroker /
-native AddBroker behavior, or `group.rs`.
+is **63**). BrokerHeartbeat is not advertised. Official field layout
+is used. Do **not** touch Expire/Renew tokens, OffsetCommit epoch,
+ConsumerGroupDescribe, UnregisterBroker / native AddBroker behavior,
+or `group.rs`.
 
 ## Goals
 
@@ -118,7 +118,7 @@ cargo test -p volant-broker --test v263_broker_registration -- --test-threads=1
 
 | Case | Expect |
 |------|--------|
-| ApiVersions | key **63** min=0 max=0; key **64** still listed; `SUPPORTED_APIS.len() >= 61` |
+| ApiVersions | key **62** min=0 max=0; key **64** still listed; `SUPPORTED_APIS.len() >= 61` |
 | v0 register | **42**; `brokerEpoch` **-1**; no new overlay file if none existed; existing brokers unchanged |
 | v1 | **35** |
 
@@ -128,7 +128,7 @@ cargo test -p volant-broker --test v263_broker_registration -- --test-threads=1
 | `crates/volant-broker/src/kafka/handler.rs` | dispatch v0 + always-flex header |
 | `crates/volant-broker/src/kafka/admin_api.rs` | parse + reject 42; ACL deny 31; no persist |
 | `crates/volant-broker/tests/v263_broker_registration.rs` | boot_kafka |
-| `docs/KAFKA_COMPAT.md` | key 63 v0 |
+| `docs/KAFKA_COMPAT.md` | key 62 v0 |
 | `docs/V263_SPEC.md` | This spec |
 
 ## Honesty leftovers

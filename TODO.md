@@ -1,6 +1,6 @@
 # Volant residual TODO (review loop)
 
-**Baseline:** HEAD product = **Phases 0–154** + residuals **v0.3–v0.259**; **Phase 155 open**.  
+**Baseline:** HEAD product = **Phases 0–154** + residuals **v0.3–v0.264**; **Phase 155 open**.  
 **Last review:** 2026-09-03  
 
 Living roadmap: [ROADMAP.md](./ROADMAP.md).  
@@ -68,7 +68,7 @@ Phase index: [docs/history/PHASE_HISTORY.md](./docs/history/PHASE_HISTORY.md).
 | **Later** | **Long fuzz + chaos-mesh** | **MVP closed (v0.15)** — extended corpus + Chaos Mesh YAML + A→B isolate |
 | **Later** | **Perf campaign** vs aspirational targets | **closed (v0.2 PR2)** — measured table published; group-commit **v0.20** (opt-in, no new bench) |
 
-**Default next slice:** Kafka `SUPPORTED_APIS` is **60** (AlterPartition **56**, Create/DescribeDelegationToken **38**/**41**, PushTelemetry **72**). OffsetFetch RequireStable (**v0.256**). Still not join-set wait, not unclean election, not live reassignment, not stored quotas, not KIP-584 features, not token store. Residual **v0.155** is still DeleteRecords wait.
+**Default next slice:** Kafka `SUPPORTED_APIS` is **64** (Renew/ExpireDelegationToken **39**/**40**, BrokerRegistration **62**, ConsumerGroupDescribe **69**). OffsetCommit leader epoch (**v0.262**). Still not join-set wait, not unclean election, not live reassignment, not stored quotas, not KIP-584, not token store, not BrokerHeartbeat. Residual **v0.155** is still DeleteRecords wait.
 
 ---
 
@@ -342,6 +342,11 @@ Phase index: [docs/history/PHASE_HISTORY.md](./docs/history/PHASE_HISTORY.md).
 - [x] Kafka AlterPartition 56 wrap ISR → **v0.257**
 - [x] Kafka CreateDelegationToken 38 reject → **v0.258**
 - [x] Kafka DescribeDelegationToken 41 empty → **v0.259**
+- [x] Kafka ExpireDelegationToken 40 reject → **v0.260**
+- [x] Kafka RenewDelegationToken 39 reject → **v0.261**
+- [x] persist OffsetCommit committed_leader_epoch → **v0.262**
+- [x] Kafka BrokerRegistration 62 reject → **v0.263**
+- [x] Kafka ConsumerGroupDescribe 69 wrap → **v0.264**
 
 ---
 
@@ -450,5 +455,6 @@ Phase index: [docs/history/PHASE_HISTORY.md](./docs/history/PHASE_HISTORY.md).
 | v0.245–v0.249 | **Shipped** — DescribeQuorum 55; AllocateProducerIds 67; ACL TransactionalId; SyncGroup apply assignment; AlterReplicaLogDirs 34 reject |
 | v0.250–v0.254 | **Shipped** — WriteTxnMarkers 27; AssignReplicasToDirs 73 reject; ListClientMetrics 74 empty; GetTelemetry 71 empty; TxnOffsetCommit fence |
 | v0.255–v0.259 | **Shipped** — PushTelemetry 72 reject; OffsetFetch RequireStable; AlterPartition 56; CreateDelegationToken 38 reject; DescribeDelegationToken 41 empty |
+| v0.260–v0.264 | **Shipped** — Expire/Renew token reject; OffsetCommit leader epoch; BrokerRegistration 62 reject; ConsumerGroupDescribe 69 |
 
 **How to use this file:** mark new work by phase number in ROADMAP + PHASE*_SPEC; fold completed rows into “Closed checklist”; keep “Still open” as the only honesty surface for operators and contributors.

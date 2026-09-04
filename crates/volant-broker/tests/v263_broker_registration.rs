@@ -1,4 +1,4 @@
-//! v0.263: Kafka BrokerRegistration key 63 v0 reject.
+//! v0.263: Kafka BrokerRegistration key 62 v0 reject.
 
 #[path = "common/mod.rs"]
 mod common;
@@ -55,7 +55,7 @@ fn membership_file(dir: &std::path::Path) -> std::path::PathBuf {
 }
 
 #[tokio::test]
-async fn api_versions_lists_broker_registration_63() {
+async fn api_versions_lists_broker_registration_62() {
     let (_dir, broker) = broker_temp("v263", "api");
     let (addr, server) = boot_kafka(Arc::clone(&broker)).await;
 
@@ -71,7 +71,7 @@ async fn api_versions_lists_broker_registration_63() {
         found.insert(key, (min_v, max_v));
     }
     assert!(found.len() >= 61);
-    assert_eq!(found.get(&63), Some(&(0, 0)));
+    assert_eq!(found.get(&62), Some(&(0, 0)));
     assert_eq!(found.get(&64), Some(&(0, 0)));
 
     server.abort();
@@ -92,7 +92,7 @@ async fn broker_registration_v0_is_42_membership_unchanged() {
     let resp = rpc(
         &addr,
         encode_request_flexible(
-            63,
+            62,
             0,
             10,
             Some("admin"),
@@ -139,7 +139,7 @@ async fn broker_registration_v0_is_42_membership_unchanged() {
     let resp = rpc(
         &addr,
         encode_request_flexible(
-            63,
+            62,
             0,
             11,
             Some("admin"),
@@ -171,7 +171,7 @@ async fn broker_registration_v0_is_42_membership_unchanged() {
 async fn broker_registration_v1_unsupported() {
     let (_dir, broker) = broker_temp("v263", "v1");
     let (addr, server) = boot_kafka(Arc::clone(&broker)).await;
-    let resp = rpc(&addr, encode_request_flexible(63, 1, 99, Some("c"), &[])).await;
+    let resp = rpc(&addr, encode_request_flexible(62, 1, 99, Some("c"), &[])).await;
     let mut src = resp.freeze();
     assert_eq!(src.get_i32(), 99);
     skip_tag_buffer(&mut src).unwrap(); // header v1 (always flex)

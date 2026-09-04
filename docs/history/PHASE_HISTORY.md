@@ -456,6 +456,11 @@ docs for day-to-day reading: [ops](../ops.md), [consistency](../consistency.md),
 | v0.257 | ✅ | Kafka AlterPartition key 56 wrap ISR update | [V257_SPEC.md](../V257_SPEC.md) |
 | v0.258 | ✅ | Kafka CreateDelegationToken key 38 reject | [V258_SPEC.md](../V258_SPEC.md) |
 | v0.259 | ✅ | Kafka DescribeDelegationToken key 41 empty | [V259_SPEC.md](../V259_SPEC.md) |
+| v0.260 | ✅ | Kafka ExpireDelegationToken key 40 reject | [V260_SPEC.md](../V260_SPEC.md) |
+| v0.261 | ✅ | Kafka RenewDelegationToken key 39 reject | [V261_SPEC.md](../V261_SPEC.md) |
+| v0.262 | ✅ | persist OffsetCommit committed_leader_epoch | [V262_SPEC.md](../V262_SPEC.md) |
+| v0.263 | ✅ | Kafka BrokerRegistration key 62 reject | [V263_SPEC.md](../V263_SPEC.md) |
+| v0.264 | ✅ | Kafka ConsumerGroupDescribe key 69 wrap | [V264_SPEC.md](../V264_SPEC.md) |
 
 ---
 
