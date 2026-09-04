@@ -2974,6 +2974,101 @@ fn write_read_share_group_state_summary(
     put_empty_tag_buffer(out);
 }
 
+/// DescribeShareGroupOffsets v0 (key 90). Always flexible.
+///
+/// Official `DescribeShareGroupOffsetsRequest.json` / `Response.json`.
+/// Official `validVersions` is **0–1** (v1 adds Lag / KIP-1226); Volant
+/// advertises **v0 only**. Not KIP-932: parse group ids and reject each
+/// group with **42** `INVALID_REQUEST` (`not KIP-932 share offsets`).
+/// Does not persist. Does not wrap OffsetFetch 9 / `describe_group` /
+/// ConsumerGroupDescribe 69 / ShareGroupDescribe 77. Official response
+/// has `throttleTimeMs` and per-group error **after** `Topics[]` (no
+/// top-level error besides throttle). Unparseable body → throttle 0 +
+/// empty `Groups[]`. Do **not** write Lag (v1+).
+pub(crate) fn encode_describe_share_group_offsets(
+    broker: &Broker,
+    src: &mut impl Buf,
+    out: &mut BytesMut,
+    principal: &str,
+) {
+    let ids = parse_describe_share_group_offsets_request(src);
+
+    // Official response: throttleTimeMs, Groups[] { GroupId, Topics[],
+    // ErrorCode, ErrorMessage, tagged }, tagged. No top-level error.
+    out.put_i32(0); // throttleTimeMs
+    put_compact_array_len(out, ids.len());
+    for group_id in ids {
+        put_compact_string(out, &group_id);
+        put_compact_array_len(out, 0); // Topics[] empty — no Lag
+        if broker.acls().is_enabled()
+            && !broker.acls().authorize(
+                Some(principal),
+                ResourceType::Group,
+                &group_id,
+                AclOperation::Describe,
+            )
+        {
+            out.put_i16(KafkaErrorCode::GroupAuthorizationFailed.as_i16());
+            put_compact_nullable_string(out, None);
+        } else {
+            out.put_i16(KafkaErrorCode::InvalidRequest.as_i16());
+            put_compact_nullable_string(out, Some("not KIP-932 share offsets"));
+        }
+        put_empty_tag_buffer(out);
+    }
+    put_empty_tag_buffer(out);
+}
+
+fn parse_describe_share_group_offsets_request(src: &mut impl Buf) -> Vec<String> {
+    // Official v0 (flex, `DescribeShareGroupOffsetsRequest.json`):
+    // Groups[] { GroupId compact string, Topics[] nullable {
+    // TopicName compact string, Partitions[] i32, tagged }, tagged },
+    // tagged. Echo group ids; skip topics/partitions. Do not persist.
+    let mut ids = Vec::new();
+    match get_compact_array_len(src) {
+        Ok(Some(n)) => {
+            for _ in 0..n {
+                match get_compact_string(src) {
+                    Ok(g) => {
+                        skip_describe_share_group_offsets_topics(src);
+                        let _ = skip_tag_buffer(src);
+                        ids.push(g);
+                    }
+                    Err(_) => break,
+                }
+            }
+        }
+        Ok(None) | Err(_) => {}
+    }
+    let _ = skip_tag_buffer(src);
+    ids
+}
+
+fn skip_describe_share_group_offsets_topics(src: &mut impl Buf) {
+    match get_compact_array_len(src) {
+        Ok(Some(n)) => {
+            for _ in 0..n {
+                if get_compact_string(src).is_err() {
+                    break;
+                }
+                match get_compact_array_len(src) {
+                    Ok(Some(pn)) => {
+                        for _ in 0..pn {
+                            if src.remaining() < 4 {
+                                return;
+                            }
+                            let _ = src.get_i32();
+                        }
+                    }
+                    Ok(None) | Err(_) => {}
+                }
+                let _ = skip_tag_buffer(src);
+            }
+        }
+        Ok(None) | Err(_) => {}
+    }
+}
+
 /// ConsumerGroupDescribe v0 (key 69). Always flexible.
 ///
 /// Official `ConsumerGroupDescribeRequest.json` / `Response.json`. Wraps the
@@ -4690,6 +4785,160 @@ mod tests {
         assert!(broker
             .groups()
             .fetch_offsets("sg-v283", &[])
+            .unwrap()
+            .entries
+            .is_empty());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    fn dsgo_v0_body(group: &str, topic: &str, partition: i32) -> BytesMut {
+        let mut body = BytesMut::new();
+        put_compact_array_len(&mut body, 1);
+        put_compact_string(&mut body, group);
+        put_compact_array_len(&mut body, 1); // Topics[] non-null — skipped
+        put_compact_string(&mut body, topic);
+        put_compact_array_len(&mut body, 1);
+        body.put_i32(partition);
+        put_empty_tag_buffer(&mut body); // topic tags
+        put_empty_tag_buffer(&mut body); // group tags
+        put_empty_tag_buffer(&mut body); // top-level tags
+        body
+    }
+
+    fn read_dsgo(src: &mut impl Buf) -> (i32, Vec<(String, usize, i16, Option<String>)>) {
+        let throttle = src.get_i32();
+        let n = get_compact_array_len(src).unwrap().unwrap_or(0);
+        let mut groups = Vec::new();
+        for _ in 0..n {
+            let group_id = get_compact_string(src).unwrap();
+            let n_topics = get_compact_array_len(src).unwrap().unwrap_or(0);
+            let error = src.get_i16();
+            let err_msg = get_compact_nullable_string(src).unwrap();
+            skip_tag_buffer(src).unwrap();
+            groups.push((group_id, n_topics, error, err_msg));
+        }
+        skip_tag_buffer(src).unwrap();
+        assert_eq!(src.remaining(), 0);
+        (throttle, groups)
+    }
+
+    #[test]
+    fn kafka_describe_share_group_offsets_rejects_42() {
+        let dir = temp_dir("dsgo-ok");
+        let broker = Broker::new(StorageConfig {
+            data_dir: dir.clone(),
+            ..StorageConfig::default()
+        });
+        let mut src = dsgo_v0_body("sg-v284", "events", 0);
+        let mut out = BytesMut::new();
+        encode_describe_share_group_offsets(&broker, &mut src, &mut out, "kafka-anonymous");
+        let mut resp = out.freeze();
+        let (throttle, groups) = read_dsgo(&mut resp);
+        assert_eq!(throttle, 0);
+        assert_eq!(groups.len(), 1);
+        assert_eq!(groups[0].0, "sg-v284");
+        assert_eq!(groups[0].1, 0); // empty Topics[]
+        assert_eq!(groups[0].2, KafkaErrorCode::InvalidRequest.as_i16());
+        assert_eq!(groups[0].3.as_deref(), Some("not KIP-932 share offsets"));
+        assert!(broker.groups().describe_group("sg-v284").is_none());
+        assert!(broker
+            .groups()
+            .fetch_offsets("sg-v284", &[])
+            .unwrap()
+            .entries
+            .is_empty());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn kafka_describe_share_group_offsets_does_not_wrap_classic() {
+        let dir = temp_dir("dsgo-wrap");
+        let broker = Broker::new(StorageConfig {
+            data_dir: dir.clone(),
+            ..StorageConfig::default()
+        });
+        let joined = broker
+            .groups()
+            .join(
+                "sg-v284",
+                "",
+                10_000,
+                150,
+                vec!["events".into()],
+                "",
+                |_| Some(1),
+            )
+            .unwrap();
+        assert_eq!(joined.error_code, 0);
+        assert!(broker.groups().describe_group("sg-v284").is_some());
+        let before = broker.groups().fetch_offsets("sg-v284", &[]).unwrap();
+
+        let mut src = dsgo_v0_body("sg-v284", "events", 0);
+        let mut out = BytesMut::new();
+        encode_describe_share_group_offsets(&broker, &mut src, &mut out, "kafka-anonymous");
+        let mut resp = out.freeze();
+        let (_, groups) = read_dsgo(&mut resp);
+        assert_eq!(groups[0].2, KafkaErrorCode::InvalidRequest.as_i16());
+        assert_eq!(groups[0].3.as_deref(), Some("not KIP-932 share offsets"));
+        assert_eq!(
+            broker
+                .groups()
+                .describe_group("sg-v284")
+                .unwrap()
+                .members
+                .len(),
+            1
+        );
+        let after = broker.groups().fetch_offsets("sg-v284", &[]).unwrap();
+        assert_eq!(after.entries.len(), before.entries.len());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn kafka_describe_share_group_offsets_truncated_is_empty_groups() {
+        let dir = temp_dir("dsgo-trunc");
+        let broker = Broker::new(StorageConfig {
+            data_dir: dir.clone(),
+            ..StorageConfig::default()
+        });
+        let mut src = BytesMut::new();
+        let mut out = BytesMut::new();
+        encode_describe_share_group_offsets(&broker, &mut src, &mut out, "kafka-anonymous");
+        let mut resp = out.freeze();
+        let (throttle, groups) = read_dsgo(&mut resp);
+        assert_eq!(throttle, 0);
+        assert!(groups.is_empty());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn kafka_describe_share_group_offsets_acl_deny_is_30() {
+        let dir = temp_dir("dsgo-acl");
+        let broker = Broker::new(StorageConfig {
+            data_dir: dir.clone(),
+            ..StorageConfig::default()
+        });
+        broker
+            .configure_acls(true, None, vec![], "token".into())
+            .unwrap();
+
+        let mut src = dsgo_v0_body("sg-v284", "events", 0);
+        let mut out = BytesMut::new();
+        encode_describe_share_group_offsets(&broker, &mut src, &mut out, "kafka-anonymous");
+        let mut resp = out.freeze();
+        let (throttle, groups) = read_dsgo(&mut resp);
+        assert_eq!(throttle, 0);
+        assert_eq!(groups.len(), 1);
+        assert_eq!(groups[0].0, "sg-v284");
+        assert_eq!(groups[0].1, 0);
+        assert_eq!(
+            groups[0].2,
+            KafkaErrorCode::GroupAuthorizationFailed.as_i16()
+        );
+        assert_eq!(groups[0].3, None);
+        assert!(broker
+            .groups()
+            .fetch_offsets("sg-v284", &[])
             .unwrap()
             .entries
             .is_empty());
