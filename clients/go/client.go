@@ -403,10 +403,22 @@ func (c *Client) FetchMaxWaitMs() uint32 {
 // EnableIdempotence turns on InitProducerId + per-partition produce sequences.
 // Default is off (trailer (0, 0, -1)). Call before the first Produce.
 func (c *Client) EnableIdempotence() {
-	c.enableIdempotence = true
-	if c.nextSeq == nil {
+	c.SetEnableIdempotence(true)
+}
+
+// SetEnableIdempotence turns InitProducerId + per-partition sequences on or off.
+// Same trailer rules as EnableIdempotence when on=true.
+func (c *Client) SetEnableIdempotence(on bool) {
+	c.enableIdempotence = on
+	if on && c.nextSeq == nil {
 		c.nextSeq = make(map[seqKey]int32)
 	}
+}
+
+// Idempotence reports whether EnableIdempotence / SetEnableIdempotence(true)
+// is set. Transactional id is separate.
+func (c *Client) Idempotence() bool {
+	return c != nil && c.enableIdempotence
 }
 
 // InitProducerID ensures InitProducerId has run (native opcode 32).
