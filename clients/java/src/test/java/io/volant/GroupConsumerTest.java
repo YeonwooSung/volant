@@ -59,11 +59,13 @@ class GroupConsumerTest {
                         new Record(0, -1L, null, "hello".getBytes(StandardCharsets.UTF_8), Collections.emptyList())));
 
         GroupConsumer g = GroupConsumer.join(fake, "g", List.of("t"), 10_000, false);
+        assertEquals(0, g.heartbeatCount());
         List<Record> recs = g.poll(500);
         assertEquals(1, recs.size());
         assertEquals(0L, recs.get(0).offset);
         assertEquals(1L, g.positions().values().iterator().next());
         assertEquals(1, fake.heartbeatCount);
+        assertEquals(1, g.heartbeatCount());
         assertEquals(1, fake.fetchCount);
         assertEquals(500L, fake.lastMaxWaitMs);
         assertEquals(100, fake.lastMaxMessages);
@@ -235,6 +237,7 @@ class GroupConsumerTest {
                 Thread.sleep(20);
             }
             assertTrue(fake.heartbeats() > 0);
+            assertTrue(g.heartbeatCount() >= 1);
             assertEquals(0, fake.fetchCount);
         } finally {
             g.close();
@@ -506,8 +509,10 @@ class GroupConsumerTest {
         FakeBackend fake = new FakeBackend();
         fake.nextJoin = joinResult("m1", 1, assign("t", 0));
         GroupConsumer g = GroupConsumer.join(fake, "g", List.of("t"), 300, false);
+        assertEquals(0, g.heartbeatCount());
         Thread.sleep(350);
         assertEquals(0, fake.heartbeats());
+        assertEquals(0, g.heartbeatCount());
         g.close();
     }
 

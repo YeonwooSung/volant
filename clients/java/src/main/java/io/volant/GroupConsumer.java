@@ -84,6 +84,8 @@ public final class GroupConsumer implements AutoCloseable {
     private List<Codec.Assignment> lastRevoked = Collections.emptyList();
     private final Map<Tp, Long> positions = new LinkedHashMap<>();
     private boolean closed;
+    /** Heartbeat RPCs issued by {@link #poll} + background (not JoinGroup). */
+    private long heartbeatCount;
     private ScheduledExecutorService hbExecutor;
     private ScheduledFuture<?> hbFuture;
 
@@ -581,6 +583,7 @@ public final class GroupConsumer implements AutoCloseable {
         try {
             ensureOpen();
             try {
+                heartbeatCount++;
                 backend.heartbeat(groupId, memberId, generation);
             } catch (BrokerException e) {
                 if (needsRebalance(e.code)) {
@@ -734,6 +737,7 @@ public final class GroupConsumer implements AutoCloseable {
                 return;
             }
             try {
+                heartbeatCount++;
                 backend.heartbeat(groupId, memberId, generation);
             } catch (BrokerException e) {
                 if (needsRebalance(e.code)) {
@@ -835,6 +839,16 @@ public final class GroupConsumer implements AutoCloseable {
         lock.lock();
         try {
             return fetchMaxBytes;
+        } finally {
+            lock.unlock();
+        }
+    }
+
+    /** Heartbeat RPCs issued by {@link #poll} + background (not JoinGroup). */
+    public long heartbeatCount() {
+        lock.lock();
+        try {
+            return heartbeatCount;
         } finally {
             lock.unlock();
         }
