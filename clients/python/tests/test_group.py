@@ -29,6 +29,10 @@ class FakeClient:
         self.list_offsets_omit: set[tuple[str, int]] = set()
         self.list_offsets_error: BaseException | None = None
 
+        self.syncs: list[tuple[str, str, int]] = []
+        self.sync_assignment: list[Assignment] | None = None
+        self.sync_error: BaseException | None = None
+
         self.join_queue: list[JoinGroupResult] = []
         self.heartbeat_codes: list[int] = []
         self.fetch_error: BrokerError | None = None
@@ -66,6 +70,15 @@ class FakeClient:
             generation=1,
             assignment=[Assignment(topic="t", partition=0)],
         )
+
+    def sync_group(self, group: str, member_id: str, generation: int):
+        with self._lock:
+            self.syncs.append((group, member_id, generation))
+            err = self.sync_error
+            asgn = None if self.sync_assignment is None else list(self.sync_assignment)
+        if err is not None:
+            raise err
+        return asgn if asgn is not None else []
 
     def heartbeat(self, group: str, member_id: str, generation: int) -> int:
         with self._lock:
@@ -228,6 +241,30 @@ class TestGroupConsumer(unittest.TestCase):
         self.assertEqual(g.positions, {("t", 0): 5})
         self.assertEqual(c.joins[0]["member_id"], "")
         self.assertEqual(c.offset_fetches, [("g", "t")])
+
+    def test_join_issues_sync_group(self) -> None:
+        c = FakeClient()
+        c.join_queue.append(_join([("t", 0)]))
+        c.sync_assignment = [Assignment(topic="t", partition=1)]
+        c.committed[("t", 1)] = 7
+        g = _gc(c, group="g", topics=["t"])
+        self.assertEqual(c.syncs, [("g", "m1", 1)])
+        self.assertEqual(g.assignment, [("t", 1)])
+        self.assertEqual(g.positions, {("t", 1): 7})
+        self.assertEqual(g.heartbeat_count, 0)
+        g.close()
+
+    def test_join_keeps_assignment_on_sync_group_error(self) -> None:
+        c = FakeClient()
+        c.join_queue.append(_join([("t", 0)]))
+        c.committed[("t", 0)] = 5
+        c.sync_error = BrokerError(10, op="sync_group")
+        g = _gc(c, group="g", topics=["t"])
+        self.assertEqual(c.syncs, [("g", "m1", 1)])
+        self.assertEqual(g.assignment, [("t", 0)])
+        self.assertEqual(g.positions, {("t", 0): 5})
+        self.assertEqual(g.heartbeat_count, 0)
+        g.close()
 
     def test_join_unknown_offset_uses_list_offsets_earliest(self) -> None:
         c = FakeClient()

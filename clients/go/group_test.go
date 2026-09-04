@@ -43,6 +43,10 @@ type fakeGroupBroker struct {
 	describeMembers []codec.GroupMemberInfo
 	describeError   uint16
 	describeCount   int
+	syncs           []codec.SyncGroupRequest
+	syncAssignment  []codec.Assignment
+	syncOverride    bool
+	syncError       uint16
 }
 
 func newFakeGroupBroker() *fakeGroupBroker {
@@ -107,6 +111,12 @@ func (s *fakeGroupBroker) listOffsetSnapshot() []codec.ListOffsetsRequest {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	return append([]codec.ListOffsetsRequest(nil), s.listOffsets...)
+}
+
+func (s *fakeGroupBroker) syncSnapshot() []codec.SyncGroupRequest {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return append([]codec.SyncGroupRequest(nil), s.syncs...)
 }
 
 func startFakeGroup(t *testing.T, s *fakeGroupBroker) (addr string, stop func()) {
@@ -201,6 +211,21 @@ func (s *fakeGroupBroker) handle(f *frame.Frame) ([]byte, error) {
 			Revoked:    append([]codec.Assignment(nil), s.revoked...),
 			Members:    append([]string(nil), s.joinMembers...),
 		})
+	case codec.OpSyncGroup:
+		req, e := codec.DecodeSyncGroupRequest(f.Payload)
+		if e != nil {
+			return nil, e
+		}
+		s.syncs = append(s.syncs, req)
+		asgn := append([]codec.Assignment(nil), s.assignment...)
+		if s.syncOverride {
+			asgn = append([]codec.Assignment(nil), s.syncAssignment...)
+		}
+		payload, err = codec.EncodeSyncGroupResponse(codec.SyncGroupResponse{
+			ErrorCode:  s.syncError,
+			Assignment: asgn,
+		})
+		respOp = codec.OpSyncGroupResponse
 	case codec.OpHeartbeat:
 		req, e := codec.DecodeHeartbeatRequest(f.Payload)
 		if e != nil {
@@ -385,6 +410,84 @@ func TestJoinGroupConsumerPositionsFromOffsetFetch(t *testing.T) {
 	_, _, _, _, _, ofs := s.snapshot()
 	if len(ofs) != 1 || len(ofs[0].Entries) != 1 || ofs[0].Entries[0].Partition != 0 {
 		t.Fatalf("offset fetch %+v", ofs)
+	}
+}
+
+func TestJoinGroupConsumerIssuesSyncGroup(t *testing.T) {
+	s := newFakeGroupBroker()
+	s.setAssignment([]codec.Assignment{{Topic: "t", Partition: 0}}, nil)
+	s.syncOverride = true
+	s.syncAssignment = []codec.Assignment{{Topic: "t", Partition: 1}}
+	s.offsets[tpKey{"t", 1}] = 7
+	addr, stop := startFakeGroup(t, s)
+	defer stop()
+
+	c, err := volant.DialTimeout(addr, 5*time.Second)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer c.Close()
+
+	g, err := volant.JoinGroupConsumer(c, "g", []string{"t"}, 10_000, volant.WithBackgroundHeartbeat(false))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer g.Close()
+
+	syncs := s.syncSnapshot()
+	if len(syncs) != 1 {
+		t.Fatalf("syncs=%d want 1", len(syncs))
+	}
+	if syncs[0].GroupID != "g" || syncs[0].MemberID != "m-1" || syncs[0].Generation != 1 {
+		t.Fatalf("sync %+v", syncs[0])
+	}
+	if g.HeartbeatCount() != 0 {
+		t.Fatalf("heartbeat_count=%d want 0", g.HeartbeatCount())
+	}
+	asgn := g.Assignment()
+	if len(asgn) != 1 || asgn[0].Topic != "t" || asgn[0].Partition != 1 {
+		t.Fatalf("assignment %+v", asgn)
+	}
+	pos := g.Positions()
+	if len(pos) != 1 || pos[0].Offset != 7 {
+		t.Fatalf("positions %+v want offset 7", pos)
+	}
+}
+
+func TestJoinGroupConsumerKeepsAssignmentOnSyncGroupError(t *testing.T) {
+	s := newFakeGroupBroker()
+	s.setAssignment([]codec.Assignment{{Topic: "t", Partition: 0}}, nil)
+	s.offsets[tpKey{"t", 0}] = 5
+	s.syncError = 10
+	addr, stop := startFakeGroup(t, s)
+	defer stop()
+
+	c, err := volant.DialTimeout(addr, 5*time.Second)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer c.Close()
+
+	g, err := volant.JoinGroupConsumer(c, "g", []string{"t"}, 10_000, volant.WithBackgroundHeartbeat(false))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer g.Close()
+
+	syncs := s.syncSnapshot()
+	if len(syncs) != 1 {
+		t.Fatalf("syncs=%d want 1", len(syncs))
+	}
+	asgn := g.Assignment()
+	if len(asgn) != 1 || asgn[0].Topic != "t" || asgn[0].Partition != 0 {
+		t.Fatalf("assignment %+v", asgn)
+	}
+	pos := g.Positions()
+	if len(pos) != 1 || pos[0].Offset != 5 {
+		t.Fatalf("positions %+v want offset 5", pos)
+	}
+	if g.HeartbeatCount() != 0 {
+		t.Fatalf("heartbeat_count=%d want 0", g.HeartbeatCount())
 	}
 }
 

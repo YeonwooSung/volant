@@ -205,6 +205,8 @@ assignor overloads.
 `joinGroupMemberWithInstance` encodes both `memberId` and Phase 12 `group_instance_id` (empty member = first join; empty instance = dynamic; v0.146).
 `GroupConsumer` joins, polls assigned partitions, heartbeats, commits with
 member+generation, and rejoins on heartbeat error 9.
+After a successful join, GroupConsumer confirms the assignment via
+SyncGroup peek (v0.207; empty or error keeps JoinGroup assignment).
 `joinStatic` sends Phase 12 `group_instance_id` (empty = dynamic) and
 resends it on rejoin.
 `RangeAssignor.rangeAssign` / `rangeAssignMulti` match the broker range
