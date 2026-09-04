@@ -65,15 +65,18 @@ struct TxnOffsetTopic {
 
 // ─── Shared AddPartitions policy ─────────────────────────────────────────────
 
-/// Cluster ACL + ensure_txn_open + per-topic Write ACL → per-partition error.
+/// Cluster ACL + txn-id Write + ensure_txn_open + per-topic Write ACL → per-partition error.
 fn partition_error_for_add(
     broker: &Broker,
     principal: &str,
     cluster_denied: bool,
+    txn_id_denied: bool,
     open_err: i16,
     topic: &str,
 ) -> i16 {
-    if cluster_denied {
+    if txn_id_denied {
+        KafkaErrorCode::TransactionalIdAuthorizationFailed.as_i16()
+    } else if cluster_denied {
         KafkaErrorCode::ClusterAuthorizationFailed.as_i16()
     } else if open_err != 0 {
         open_err
@@ -101,7 +104,25 @@ fn cluster_write_denied(broker: &Broker, principal: &str) -> bool {
         )
 }
 
-fn open_txn_error(broker: &Broker, producer_id: u64, producer_epoch: u16, cluster_denied: bool) -> i16 {
+/// Write on `TransactionalId` when ACLs are on and `txn_id` is non-empty.
+/// Empty id is the idempotent-only path and skips this check.
+fn transactional_id_write_denied(broker: &Broker, principal: &str, txn_id: &str) -> bool {
+    !txn_id.is_empty()
+        && broker.acls().is_enabled()
+        && !broker.acls().authorize(
+            Some(principal),
+            ResourceType::TransactionalId,
+            txn_id,
+            AclOperation::Write,
+        )
+}
+
+fn open_txn_error(
+    broker: &Broker,
+    producer_id: u64,
+    producer_epoch: u16,
+    cluster_denied: bool,
+) -> i16 {
     if cluster_denied {
         -1 // sentinel; partition_error_for_add maps cluster_denied first
     } else {
@@ -133,20 +154,24 @@ pub(crate) fn encode_init_producer_id(
     let flex = version >= 2;
     let v6 = version >= 6;
 
-    let write_body =
-        |out: &mut BytesMut, err: i16, pid: i64, epoch: i16, ongoing_pid: i64, ongoing_epoch: i16| {
-            out.put_i32(0); // throttle
-            out.put_i16(err);
-            out.put_i64(pid);
-            out.put_i16(epoch);
-            if v6 {
-                out.put_i64(ongoing_pid);
-                out.put_i16(ongoing_epoch);
-            }
-            if flex {
-                put_empty_tag_buffer(out);
-            }
-        };
+    let write_body = |out: &mut BytesMut,
+                      err: i16,
+                      pid: i64,
+                      epoch: i16,
+                      ongoing_pid: i64,
+                      ongoing_epoch: i16| {
+        out.put_i32(0); // throttle
+        out.put_i16(err);
+        out.put_i64(pid);
+        out.put_i16(epoch);
+        if v6 {
+            out.put_i64(ongoing_pid);
+            out.put_i16(ongoing_epoch);
+        }
+        if flex {
+            put_empty_tag_buffer(out);
+        }
+    };
 
     if cluster_write_denied(broker, principal) {
         write_body(
@@ -163,14 +188,7 @@ pub(crate) fn encode_init_producer_id(
     let txn_id = match wire::read_nullable_string(src, flex) {
         Ok(v) => v.unwrap_or_default(),
         Err(_) => {
-            write_body(
-                out,
-                KafkaErrorCode::InvalidRequest.as_i16(),
-                -1,
-                -1,
-                -1,
-                -1,
-            );
+            write_body(out, KafkaErrorCode::InvalidRequest.as_i16(), -1, -1, -1, -1);
             return None;
         }
     };
@@ -184,14 +202,7 @@ pub(crate) fn encode_init_producer_id(
     // v3+: ProducerId + ProducerEpoch resume fields (explicitly skipped).
     if version >= 3 {
         if src.remaining() < 8 + 2 {
-            write_body(
-                out,
-                KafkaErrorCode::InvalidRequest.as_i16(),
-                -1,
-                -1,
-                -1,
-                -1,
-            );
+            write_body(out, KafkaErrorCode::InvalidRequest.as_i16(), -1, -1, -1, -1);
             return None;
         }
         let _resume_pid = src.get_i64();
@@ -202,14 +213,7 @@ pub(crate) fn encode_init_producer_id(
     let mut keep_prepared = false;
     if v6 {
         if src.remaining() < 2 {
-            write_body(
-                out,
-                KafkaErrorCode::InvalidRequest.as_i16(),
-                -1,
-                -1,
-                -1,
-                -1,
-            );
+            write_body(out, KafkaErrorCode::InvalidRequest.as_i16(), -1, -1, -1, -1);
             return None;
         }
         enable_2pc = src.get_u8() != 0;
@@ -217,6 +221,18 @@ pub(crate) fn encode_init_producer_id(
     }
     if flex {
         let _ = skip_tag_buffer(src);
+    }
+
+    if transactional_id_write_denied(broker, principal, &txn_id) {
+        write_body(
+            out,
+            KafkaErrorCode::TransactionalIdAuthorizationFailed.as_i16(),
+            -1,
+            -1,
+            -1,
+            -1,
+        );
+        return None;
     }
 
     let r = broker.init_producer_id_with_opts(
@@ -240,12 +256,8 @@ pub(crate) fn encode_init_producer_id(
     );
     // Phase 120: register Init owner on live peers (no open install).
     if !txn_id.is_empty() {
-        let fanout = broker.txn_2pc_init_register_fanout(
-            &txn_id,
-            r.producer_id,
-            r.epoch,
-            enable_2pc,
-        );
+        let fanout =
+            broker.txn_2pc_init_register_fanout(&txn_id, r.producer_id, r.epoch, enable_2pc);
         match fanout {
             crate::broker::Txn2pcFanout::None => None,
             other => Some(other),
@@ -295,7 +307,7 @@ fn encode_add_partitions_flat(
         }
     };
 
-    let _txn_id = match wire::read_string(src, flex) {
+    let txn_id = match wire::read_string(src, flex) {
         Ok(t) => t,
         Err(_) => {
             empty_resp(out);
@@ -321,7 +333,7 @@ fn encode_add_partitions_flat(
     }
 
     let txn = AddPartitionsTxn {
-        txn_id: String::new(), // not echoed on flat response
+        txn_id, // not echoed on flat response; kept for TransactionalId ACL
         producer_id,
         producer_epoch,
         topics,
@@ -370,6 +382,7 @@ fn write_add_partitions_flat_response(
     txn: &AddPartitionsTxn,
 ) -> Option<crate::broker::Txn2pcFanout> {
     let cluster_denied = cluster_write_denied(broker, principal);
+    let txn_id_denied = transactional_id_write_denied(broker, principal, &txn.txn_id);
     let open_err = open_txn_error(broker, txn.producer_id, txn.producer_epoch, cluster_denied);
 
     // Phase 105: record successful membership for control batches (even with no produce).
@@ -394,6 +407,7 @@ fn write_add_partitions_flat_response(
                 broker,
                 principal,
                 cluster_denied,
+                txn_id_denied,
                 open_err,
                 &t.name,
             );
@@ -484,6 +498,7 @@ fn encode_add_partitions_batch(
     put_compact_array_len(out, txns.len());
     for txn in &txns {
         put_compact_string(out, &txn.txn_id);
+        let txn_id_denied = transactional_id_write_denied(broker, principal, &txn.txn_id);
         let open_err = open_txn_error(broker, txn.producer_id, txn.producer_epoch, cluster_denied);
         // Phase 105: record successful membership for control batches.
         let mut ok_parts: Vec<(String, u32)> = Vec::new();
@@ -497,6 +512,7 @@ fn encode_add_partitions_batch(
                     broker,
                     principal,
                     cluster_denied,
+                    txn_id_denied,
                     open_err,
                     &t.name,
                 );
@@ -543,7 +559,7 @@ pub(crate) fn encode_add_offsets_to_txn(
         }
     };
 
-    let _txn_id = match wire::read_string(src, flex) {
+    let txn_id = match wire::read_string(src, flex) {
         Ok(t) => t,
         Err(_) => {
             write_err(out, KafkaErrorCode::InvalidRequest.as_i16());
@@ -565,6 +581,14 @@ pub(crate) fn encode_add_offsets_to_txn(
     };
     if flex {
         let _ = skip_tag_buffer(src);
+    }
+
+    if transactional_id_write_denied(broker, principal, &txn_id) {
+        write_err(
+            out,
+            KafkaErrorCode::TransactionalIdAuthorizationFailed.as_i16(),
+        );
+        return;
     }
 
     if broker.acls().is_enabled()
@@ -618,7 +642,7 @@ pub(crate) fn encode_end_txn(
         }
     };
 
-    let _txn_id = match wire::read_string(src, flex) {
+    let txn_id = match wire::read_string(src, flex) {
         Ok(t) => t,
         Err(_) => {
             write_resp(out, KafkaErrorCode::InvalidRequest.as_i16(), -1, -1);
@@ -636,6 +660,16 @@ pub(crate) fn encode_end_txn(
     let committed = src.get_u8() != 0;
     if flex {
         let _ = skip_tag_buffer(src);
+    }
+
+    if transactional_id_write_denied(broker, principal, &txn_id) {
+        write_resp(
+            out,
+            KafkaErrorCode::TransactionalIdAuthorizationFailed.as_i16(),
+            producer_id_i64,
+            producer_epoch_i16,
+        );
+        return None;
     }
 
     if cluster_write_denied(broker, principal) {
@@ -718,7 +752,7 @@ pub(crate) fn encode_txn_offset_commit(
         }
     };
 
-    let _txn_id = match wire::read_string(src, flex) {
+    let txn_id = match wire::read_string(src, flex) {
         Ok(t) => t,
         Err(_) => {
             empty_resp(out);
@@ -834,7 +868,9 @@ pub(crate) fn encode_txn_offset_commit(
         let _ = skip_tag_buffer(src);
     }
 
-    let auth_err = if broker.acls().is_enabled()
+    let auth_err = if transactional_id_write_denied(broker, principal, &txn_id) {
+        Some(KafkaErrorCode::TransactionalIdAuthorizationFailed.as_i16())
+    } else if broker.acls().is_enabled()
         && !broker.acls().authorize(
             Some(principal),
             ResourceType::Group,
@@ -852,7 +888,10 @@ pub(crate) fn encode_txn_offset_commit(
     } else if collected.is_empty() {
         KafkaErrorCode::None.as_i16()
     } else {
-        let tuples: Vec<_> = collected.into_iter().map(|o| o.into_broker_tuple()).collect();
+        let tuples: Vec<_> = collected
+            .into_iter()
+            .map(|o| o.into_broker_tuple())
+            .collect();
         let err = broker.buffer_txn_offsets(producer_id, producer_epoch, &tuples);
         if err == 0 {
             KafkaErrorCode::None.as_i16()

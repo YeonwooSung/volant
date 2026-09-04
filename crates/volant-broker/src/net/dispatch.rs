@@ -325,7 +325,16 @@ fn authorize_request(broker: &Broker, req: &Request, principal: Option<&str>) ->
             CLUSTER_RESOURCE,
             AclOperation::Describe,
         ),
-        Request::InitProducerId { .. } | Request::BeginTxn { .. } | Request::EndTxn { .. } => {
+        Request::InitProducerId { transactional_id } => {
+            check(ResourceType::Cluster, CLUSTER_RESOURCE, AclOperation::Write)
+                && (transactional_id.is_empty()
+                    || check(
+                        ResourceType::TransactionalId,
+                        transactional_id,
+                        AclOperation::Write,
+                    ))
+        }
+        Request::BeginTxn { .. } | Request::EndTxn { .. } => {
             check(ResourceType::Cluster, CLUSTER_RESOURCE, AclOperation::Write)
         }
         Request::CreateAcls { .. }

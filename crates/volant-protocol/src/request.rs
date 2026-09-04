@@ -195,7 +195,7 @@ impl RequestOpcode {
 pub struct AclBinding {
     /// Principal name, or `*`.
     pub principal: String,
-    /// 0=Topic, 1=Group, 2=Cluster.
+    /// 0=Topic, 1=Group, 2=Cluster, 3=User, 4=TransactionalId.
     pub resource_type: u8,
     /// Resource name, or `*`.
     pub resource: String,
