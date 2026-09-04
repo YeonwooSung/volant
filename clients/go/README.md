@@ -158,6 +158,7 @@ _ = c.ProducerEpoch()
 c.SetMaxRetries(3)
 _ = c.MaxRetries() // v0.192; extra attempts after the first (default 0)
 c.SetRetryBackoff(50 * time.Millisecond)
+_ = c.RetryBackoff() // default 50ms (v0.193)
 // Optional native transactions (v0.57). Opcodes 50–53; not Kafka txns.
 c.SetTransactionalID("txn-1")
 _ = c.BeginTransaction()

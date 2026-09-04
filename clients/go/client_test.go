@@ -888,6 +888,30 @@ func TestIdempotentProduceStillInitsOnce(t *testing.T) {
 	}
 }
 
+func TestRetryBackoffGetter(t *testing.T) {
+	srv := &scriptedBroker{}
+	addr, stop := startScripted(t, srv)
+	defer stop()
+
+	c, err := volant.DialTimeout(addr, 5*time.Second)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer c.Close()
+
+	if got := c.RetryBackoff(); got != 50*time.Millisecond {
+		t.Fatalf("RetryBackoff = %v want 50ms", got)
+	}
+	c.SetRetryBackoff(0)
+	if got := c.RetryBackoff(); got != 0 {
+		t.Fatalf("after SetRetryBackoff(0) = %v want 0", got)
+	}
+	c.SetRetryBackoff(-time.Second)
+	if got := c.RetryBackoff(); got != 0 {
+		t.Fatalf("after SetRetryBackoff(-1s) = %v want 0", got)
+	}
+}
+
 func TestIdempotenceSetterAndGetter(t *testing.T) {
 	srv := &scriptedBroker{}
 	addr, stop := startScripted(t, srv)
