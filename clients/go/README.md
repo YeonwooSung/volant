@@ -166,6 +166,7 @@ c, err = volant.DialScram("127.0.0.1:9092", "alice", "s3cret")
 c, err = volant.DialTLSScram("127.0.0.1:9092", volant.TLSConfig{CAFile: "ca.pem"}, "alice", "s3cret")
 // SCRAM admin (v0.55). Opcodes 64–69; not the handshake. Password in clear.
 err = c.CreateScramUser("alice", "s3cret", 0) // 0 = broker default 4096
+err = c.CreateScramUserDefault("alice", "s3cret") // v0.173; same as CreateScramUser(username, password, 0)
 names, err := c.ListScramUsers()
 err = c.DeleteScramUser("alice")
 _ = names
@@ -337,7 +338,9 @@ Leader redirect re-runs the same auth path.
 Transient 6 / 7 / 15 / 16 and TCP/IO retry the whole handshake from first with a new nonce (v0.108; default `max_retries=0`).
 Create/Delete/ListScramUsers (v0.55) are admin RPCs (opcodes 64–69),
 not the handshake. `CreateScramUser` sends the password in the clear
-(use TLS). Not Kafka AlterUserScramCredentials.
+(use TLS). `CreateScramUserDefault(username, password)` uses
+broker-default iterations (0 → 4096); same as
+`CreateScramUser(username, password, 0)`. Not Kafka AlterUserScramCredentials.
 Create/Delete/ListAcls (v0.56) are admin RPCs (opcodes 54–59).
 `CreateAcls([]codec.AclBinding)` / `DeleteAcls(...)` (returns
 removed) / `ListAcls(principal, resourceType, resource)`. Empty
