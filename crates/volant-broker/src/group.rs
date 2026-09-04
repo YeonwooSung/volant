@@ -1241,7 +1241,7 @@ mod tests {
     }
 
     #[test]
-    fn list_groups_completing_then_stable_empty_supported_apis_stays_40() {
+    fn list_groups_completing_then_stable_empty_supported_apis_stays_42() {
         let dir = temp_dir();
         let coord = GroupCoordinator::new(&dir).unwrap();
         assert!(coord.list_groups().is_empty());
@@ -1286,7 +1286,7 @@ mod tests {
             .iter()
             .all(|e| e.state == GroupState::Empty
                 || e.member_count > 0 && e.state != GroupState::Empty));
-        assert_eq!(crate::kafka::SUPPORTED_APIS.len(), 40);
+        assert_eq!(crate::kafka::SUPPORTED_APIS.len(), 42);
         let _ = fs::remove_dir_all(&dir);
     }
 
@@ -1303,7 +1303,7 @@ mod tests {
         let dir = temp_dir();
         let coord = GroupCoordinator::new(&dir).unwrap();
         let j1 = coord
-            .join("g", "", 10_000, vec!["t".into()], "", counts)
+            .join("g", "", 10_000, 0, vec!["t".into()], "", counts)
             .unwrap();
         assert_eq!(j1.error_code, 0);
         let live = listed(&coord, "g");
@@ -1321,14 +1321,15 @@ mod tests {
         let dir = temp_dir();
         let coord = Arc::new(GroupCoordinator::new(&dir).unwrap());
         let a = coord
-            .join("g", "", 10_000, vec!["t".into()], "", counts)
+            .join("g", "", 10_000, 0, vec!["t".into()], "", counts)
             .unwrap();
         assert_eq!(a.error_code, 0);
         assert_eq!(listed(&coord, "g").state, GroupState::CompletingRebalance);
 
         let coord_b = Arc::clone(&coord);
-        let handle =
-            thread::spawn(move || coord_b.join("g", "", 150, vec!["t".into()], "", counts));
+        let handle = thread::spawn(move || {
+            coord_b.join("g", "", 10_000, 5_000, vec!["t".into()], "", counts)
+        });
 
         let deadline = Instant::now() + Duration::from_millis(100);
         loop {
