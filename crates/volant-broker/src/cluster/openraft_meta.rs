@@ -26,6 +26,12 @@
 //! v0.39: the same dispatch path also restores `assignment.json` when
 //! `VOLANT_REASSIGN_ON_ADD` expanded replicas before the failed joint
 //! (`VOLANT_REASSIGN_ON_ADD_ROLLBACK` default **on**).
+//!
+//! v0.216: `StateMachine::apply` of `EntryPayload::Membership` writes
+//! `{data_dir}/cluster/membership.json` (voter ids + `BasicNode.addr`).
+//! Overlay is the apply artifact on followers and after snapshot install.
+//! `MembershipPut` stays best-effort catch-up, not SoT. Flag off / N&lt;2
+//! keep the v0.10 overlay path.
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::fmt;
@@ -60,6 +66,9 @@ use volant_protocol::{ClusterTopicState, Request, Response};
 
 use crate::broker::Broker;
 use crate::cluster::state::AssignmentSnapshot;
+use crate::cluster::{
+    load_membership_overlay, save_membership_overlay, BrokerEndpoint, MembershipOverlay,
+};
 use crate::net::inter_broker_rpc;
 
 /// On-disk directory under `data_dir` for the opt-in openraft store (v0.21).
@@ -756,11 +765,20 @@ impl RaftStateMachine<TypeConfig> for StateMachine {
         let mut out = Vec::new();
         let broker = self.broker.as_ref().and_then(|w| w.upgrade());
         for e in entries {
-            {
+            let membership_applied = {
                 let mut inner = self.inner.lock();
                 inner.last_applied = Some(*e.get_log_id());
                 if let EntryPayload::Membership(ref m) = e.payload {
                     inner.last_membership = StoredMembership::new(Some(*e.get_log_id()), m.clone());
+                    Some((m.clone(), e.get_log_id().index))
+                } else {
+                    None
+                }
+            };
+            // v0.216: overlay is the Membership apply artifact (followers + leader).
+            if let Some((m, idx)) = membership_applied {
+                if let Some(ref b) = broker {
+                    apply_membership_overlay(b, &m, idx);
                 }
             }
             let ok = match &e.payload {
@@ -812,7 +830,8 @@ impl RaftStateMachine<TypeConfig> for StateMachine {
         snapshot: Box<Cursor<Vec<u8>>>,
     ) -> std::result::Result<(), StorageError<u32>> {
         let bytes = snapshot.into_inner();
-        if let Ok(payload) = serde_json::from_slice::<MetaSnapshotPayload>(&bytes) {
+        let payload = serde_json::from_slice::<MetaSnapshotPayload>(&bytes).ok();
+        if let Some(ref payload) = payload {
             // last_applied / membership come from SnapshotMeta. A non-empty
             // assignment is applied via the same path as SetAssignment (v0.16).
             // Empty topics is a no-op so we never wipe a live assignment.json.
@@ -835,6 +854,27 @@ impl RaftStateMachine<TypeConfig> for StateMachine {
                     None => {
                         warn!("openraft install_snapshot: broker dropped; assignment not applied");
                     }
+                }
+            }
+        }
+        // v0.216: overlay from snapshot membership (meta, else payload).
+        let stored = if meta.last_membership != StoredMembership::default() {
+            meta.last_membership.clone()
+        } else {
+            payload
+                .map(|p| p.membership)
+                .unwrap_or_else(|| meta.last_membership.clone())
+        };
+        if stored.membership().voter_ids().next().is_some() {
+            match self.broker.as_ref().and_then(|w| w.upgrade()) {
+                Some(b) => {
+                    let idx = stored.log_id().map(|id| id.index).unwrap_or(0);
+                    apply_membership_overlay(&b, stored.membership(), idx);
+                }
+                None => {
+                    warn!(
+                        "openraft install_snapshot: broker dropped; membership overlay not applied"
+                    );
                 }
             }
         }
@@ -1006,6 +1046,182 @@ fn membership_nodes(broker: &Broker) -> BTreeMap<u32, BasicNode> {
         }
     }
     nodes
+}
+
+/// Parse `BasicNode.addr` as `host:port` (last colon). IPv6 brackets are not
+/// required by this slice; unparseable addrs are skipped.
+fn parse_basic_node_addr(addr: &str) -> Option<(String, u16)> {
+    let addr = addr.trim();
+    let (host, port) = addr.rsplit_once(':')?;
+    let host = host.trim();
+    if host.is_empty() {
+        return None;
+    }
+    let port = port.trim().parse::<u16>().ok()?;
+    if port == 0 {
+        return None;
+    }
+    Some((host.to_string(), port))
+}
+
+/// Overlay brokers from voter ids + `BasicNode.addr`.
+///
+/// New ids get `rack: None`. Known ids keep the previous rack (rack is not
+/// on the raft membership log).
+fn brokers_from_membership(
+    membership: &openraft::Membership<u32, BasicNode>,
+    prev: &[BrokerEndpoint],
+) -> Vec<BrokerEndpoint> {
+    let mut brokers = Vec::new();
+    for id in membership.voter_ids() {
+        let Some(node) = membership.get_node(&id) else {
+            continue;
+        };
+        let Some((host, port)) = parse_basic_node_addr(&node.addr) else {
+            continue;
+        };
+        let rack = prev
+            .iter()
+            .find(|b| b.id == id)
+            .and_then(|b| b.rack.clone());
+        brokers.push(BrokerEndpoint {
+            id,
+            host,
+            port,
+            rack,
+        });
+    }
+    brokers.sort_by_key(|b| b.id);
+    brokers
+}
+
+fn overlay_matches_membership(
+    overlay: &MembershipOverlay,
+    membership: &openraft::Membership<u32, BasicNode>,
+) -> bool {
+    let derived = brokers_from_membership(membership, &overlay.brokers);
+    if derived.len() != overlay.brokers.len() {
+        return false;
+    }
+    overlay
+        .brokers
+        .iter()
+        .zip(derived.iter())
+        .all(|(a, b)| a.id == b.id && a.host == b.host && a.port == b.port)
+}
+
+/// Persist `{data_dir}/cluster/membership.json` from an applied Membership.
+///
+/// Generation is `max(log_index, 1)`. An older membership log does **not**
+/// rewind a higher overlay generation (`MembershipPut` / leader persist).
+/// Empty / unparseable voter sets are skipped so we never wipe toml/overlay.
+/// Same endpoints as live config and no overlay file: do not seed
+/// `membership.json` from initialize (v0.10 absent → toml).
+fn apply_membership_overlay(
+    broker: &Broker,
+    membership: &openraft::Membership<u32, BasicNode>,
+    log_index: u64,
+) {
+    let Some(cluster) = broker.cluster_state() else {
+        return;
+    };
+    let incoming_gen = log_index.max(1);
+    let local = cluster.membership_generation.load(Ordering::SeqCst);
+    if incoming_gen <= local {
+        return;
+    }
+    if let Ok(Some(existing)) = load_membership_overlay(&cluster.data_dir) {
+        if existing.generation >= incoming_gen {
+            return;
+        }
+    }
+    let prev = cluster.config.read().brokers.clone();
+    let brokers = brokers_from_membership(membership, &prev);
+    if brokers.is_empty() {
+        return;
+    }
+    let same_as_config = prev.len() == brokers.len()
+        && prev
+            .iter()
+            .zip(brokers.iter())
+            .all(|(a, b)| a.id == b.id && a.host == b.host && a.port == b.port);
+    if same_as_config
+        && load_membership_overlay(&cluster.data_dir)
+            .ok()
+            .flatten()
+            .is_none()
+    {
+        return;
+    }
+    let overlay = MembershipOverlay {
+        generation: incoming_gen,
+        brokers: brokers.clone(),
+    };
+    if let Err(e) = save_membership_overlay(&cluster.data_dir, &overlay) {
+        warn!(
+            error = %e,
+            generation = incoming_gen,
+            "openraft apply Membership overlay persist failed"
+        );
+        return;
+    }
+    let local2 = cluster.membership_generation.load(Ordering::SeqCst);
+    if incoming_gen <= local2 {
+        return;
+    }
+    if let Ok(Some(existing)) = load_membership_overlay(&cluster.data_dir) {
+        if existing.generation > incoming_gen {
+            return;
+        }
+    }
+    {
+        let mut cfg = cluster.config.write();
+        cfg.brokers = brokers;
+    }
+    cluster
+        .membership_generation
+        .store(incoming_gen, Ordering::SeqCst);
+    let ids: Vec<u32> = overlay.brokers.iter().map(|b| b.id).collect();
+    cluster.membership.write().apply_configured_ids(&ids);
+}
+
+/// If restored `last_membership` disagrees with `{data_dir}/cluster/membership.json`,
+/// apply last_membership over the file (best-effort boot reconcile).
+fn reconcile_overlay_from_last_membership(broker: &Broker, raft: &Raft<TypeConfig>) {
+    let (membership, log_index) = {
+        let metrics = raft.metrics();
+        let g = metrics.borrow();
+        let membership = g.membership_config.membership().clone();
+        let log_index = g.membership_config.log_id().map(|id| id.index).unwrap_or(0);
+        (membership, log_index)
+    };
+    if membership.voter_ids().next().is_none() {
+        return;
+    }
+    let Some(cluster) = broker.cluster_state() else {
+        return;
+    };
+    let file = load_membership_overlay(&cluster.data_dir).ok().flatten();
+    if file
+        .as_ref()
+        .is_some_and(|o| overlay_matches_membership(o, &membership))
+    {
+        return;
+    }
+    // Missing overlay + last_membership == toml: leave v0.10 absent-file SoT.
+    if file.is_none() {
+        let prev = cluster.config.read().brokers.clone();
+        let derived = brokers_from_membership(&membership, &prev);
+        let same = prev.len() == derived.len()
+            && prev
+                .iter()
+                .zip(derived.iter())
+                .all(|(a, b)| a.id == b.id && a.host == b.host && a.port == b.port);
+        if same {
+            return;
+        }
+    }
+    apply_membership_overlay(broker, &membership, log_index);
 }
 
 /// Snapshot interval from `VOLANT_OPENRAFT_SNAPSHOT_LOGS`.
@@ -1318,6 +1534,8 @@ impl Broker {
         // initialize() so restart does not rewrite membership.
         let already = raft.is_initialized().await.unwrap_or(false);
         if already {
+            // v0.216: last_membership wins over a stale/missing overlay file.
+            reconcile_overlay_from_last_membership(self, &raft);
             return Ok(());
         }
 
@@ -1329,6 +1547,8 @@ impl Broker {
             tokio::time::sleep(std::time::Duration::from_millis(80)).await;
             if let Err(e) = raft.initialize(nodes.clone()).await {
                 warn!(error = %e, "openraft initialize (lowest id)");
+            } else {
+                reconcile_overlay_from_last_membership(self, &raft);
             }
         } else {
             let raft_retry = raft.clone();
@@ -1598,6 +1818,61 @@ impl Broker {
         sm.install_snapshot(&meta, Box::new(Cursor::new(bytes)))
             .await
             .expect("install_snapshot");
+    }
+
+    /// Drive SM apply of an `EntryPayload::Membership` (v0.216 tests).
+    pub async fn test_openraft_sm_apply_membership(
+        self: &Arc<Self>,
+        log_index: u64,
+        voters: &[(u32, &str)],
+    ) {
+        let mut nodes = BTreeMap::new();
+        for (id, addr) in voters {
+            nodes.insert(
+                *id,
+                BasicNode {
+                    addr: (*addr).to_owned(),
+                },
+            );
+        }
+        let membership = openraft::Membership::from(nodes);
+        let entry = Entry {
+            log_id: LogId::new(openraft::LeaderId::new(1, self.node_id()), log_index),
+            payload: EntryPayload::Membership(membership),
+        };
+        let mut sm = StateMachine::with_broker(self);
+        sm.apply(std::iter::once(entry))
+            .await
+            .expect("apply membership");
+    }
+
+    /// Drive [`RaftStateMachine::install_snapshot`] with last_membership (v0.216).
+    pub async fn test_openraft_sm_install_snapshot_with_membership(
+        self: &Arc<Self>,
+        bytes: Vec<u8>,
+        log_index: u64,
+        voters: &[(u32, &str)],
+    ) {
+        let mut nodes = BTreeMap::new();
+        for (id, addr) in voters {
+            nodes.insert(
+                *id,
+                BasicNode {
+                    addr: (*addr).to_owned(),
+                },
+            );
+        }
+        let membership = openraft::Membership::from(nodes);
+        let log_id = LogId::new(openraft::LeaderId::new(1, self.node_id()), log_index);
+        let mut sm = StateMachine::with_broker(self);
+        let meta = SnapshotMeta {
+            last_log_id: Some(log_id),
+            last_membership: StoredMembership::new(Some(log_id), membership),
+            snapshot_id: "v216-test".into(),
+        };
+        sm.install_snapshot(&meta, Box::new(Cursor::new(bytes)))
+            .await
+            .expect("install_snapshot membership");
     }
 
     /// JSON body of a dummy InstallSnapshotRequest (vote term 0) for opcode tests.
