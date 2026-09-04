@@ -14,7 +14,7 @@ use super::codec::{
 };
 use super::topic_id::{self, ResolvedTopic};
 use super::wire;
-use super::{map_idempotent_error, KafkaErrorCode};
+use super::{map_group_error, map_idempotent_error, KafkaErrorCode};
 
 // ─── Shared types ────────────────────────────────────────────────────────────
 
@@ -773,15 +773,25 @@ pub(crate) fn encode_txn_offset_commit(
     let producer_id = src.get_i64() as u64;
     let producer_epoch = src.get_i16() as u16;
 
-    // v3+: generation / member / instance — ignored (no group membership check).
+    // v3+: generation / member / instance. Non-empty member + generation >= 0
+    // uses the OffsetCommit fence; empty member or gen < 0 skips (admin /
+    // txn-coordinator path). Instance id is parsed and ignored.
+    let mut generation: i32 = -1;
+    let mut member = String::new();
     if version >= 3 {
         if src.remaining() < 4 {
             empty_resp(out);
             return;
         }
-        let _generation = src.get_i32();
+        generation = src.get_i32();
         // flex is always true when version >= 3 for this API.
-        let _member = wire::read_string(src, true).ok();
+        member = match wire::read_string(src, true) {
+            Ok(m) => m,
+            Err(_) => {
+                empty_resp(out);
+                return;
+            }
+        };
         let _instance = get_compact_nullable_string(src).ok();
     }
 
@@ -883,7 +893,22 @@ pub(crate) fn encode_txn_offset_commit(
         None
     };
 
+    let fence_err = if auth_err.is_none() && !member.is_empty() && generation >= 0 {
+        let native = broker
+            .groups()
+            .check_commit_fence(&group_id, &member, generation as u32);
+        if native != 0 {
+            Some(map_group_error(native))
+        } else {
+            None
+        }
+    } else {
+        None
+    };
+
     let part_err = if let Some(e) = auth_err {
+        e
+    } else if let Some(e) = fence_err {
         e
     } else if collected.is_empty() {
         KafkaErrorCode::None.as_i16()

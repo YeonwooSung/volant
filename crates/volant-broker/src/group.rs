@@ -465,6 +465,37 @@ impl GroupCoordinator {
         LeaveResult { error_code: 0 }
     }
 
+    /// OffsetCommit membership fence (v0.219 / Kafka TxnOffsetCommit v3+).
+    ///
+    /// Unknown group or unknown member → 10; wrong generation → 11;
+    /// non-empty member whose `synced_generation` does not match → 9.
+    /// Empty `member_id` still checks group existence and generation.
+    pub(crate) fn check_commit_fence(
+        &self,
+        group_id: &str,
+        member_id: &str,
+        generation: u32,
+    ) -> u16 {
+        let groups = self.groups.lock();
+        let Some(group) = groups.get(group_id) else {
+            return ErrorCode::UnknownMemberId as u16;
+        };
+        if !member_id.is_empty() && !group.members.contains_key(member_id) {
+            return ErrorCode::UnknownMemberId as u16;
+        }
+        if generation != group.generation {
+            return ErrorCode::IllegalGeneration as u16;
+        }
+        if !member_id.is_empty() {
+            if let Some(member) = group.members.get(member_id) {
+                if member.synced_generation != generation {
+                    return ErrorCode::RebalanceInProgress as u16;
+                }
+            }
+        }
+        0
+    }
+
     /// Commit offsets. Generation `0` skips membership checks (admin/CLI).
     ///
     /// Non-empty `member_id` with a matching generation is fenced with
@@ -479,31 +510,9 @@ impl GroupCoordinator {
         entries: &[(String, u32, u64, String)],
     ) -> Result<CommitResult> {
         if generation != 0 {
-            let groups = self.groups.lock();
-            let Some(group) = groups.get(group_id) else {
-                return Ok(CommitResult {
-                    error_code: ErrorCode::UnknownMemberId as u16,
-                });
-            };
-            if !member_id.is_empty() && !group.members.contains_key(member_id) {
-                return Ok(CommitResult {
-                    error_code: ErrorCode::UnknownMemberId as u16,
-                });
-            }
-            if generation != group.generation {
-                return Ok(CommitResult {
-                    error_code: ErrorCode::IllegalGeneration as u16,
-                });
-            }
-            // Member path: matching gen still requires SyncGroup confirm.
-            if !member_id.is_empty() {
-                if let Some(member) = group.members.get(member_id) {
-                    if member.synced_generation != generation {
-                        return Ok(CommitResult {
-                            error_code: ErrorCode::RebalanceInProgress as u16,
-                        });
-                    }
-                }
+            let error_code = self.check_commit_fence(group_id, member_id, generation);
+            if error_code != 0 {
+                return Ok(CommitResult { error_code });
             }
         }
         for (topic, partition, offset, metadata) in entries {
