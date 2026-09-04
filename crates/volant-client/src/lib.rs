@@ -223,6 +223,10 @@
 //! falls back to DescribeGroup when that list is empty.
 //! v0.218 decodes ListGroups state byte **2** as CompletingRebalance
 //! (live members, SyncGroup fence still open).
+//! v0.221 retries [`GroupConsumer`] Join on error **9** up to
+//! [`ClientConfig::max_retries`] (default 0) so overlapping joins can
+//! wait for a peer SyncGroup; [`Client::join_group_with_instance`]
+//! still does not retry 9.
 
 #![deny(missing_docs)]
 
