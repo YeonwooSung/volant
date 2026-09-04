@@ -274,7 +274,8 @@ async fn dispatch_kafka(
                 | Some(ApiKey::AllocateProducerIds)
                 | Some(ApiKey::AssignReplicasToDirs)
                 | Some(ApiKey::GetTelemetrySubscriptions)
-                | Some(ApiKey::PushTelemetry),
+                | Some(ApiKey::PushTelemetry)
+                | Some(ApiKey::AlterPartition),
             _
         )
     ) || matches!(
@@ -837,6 +838,12 @@ async fn dispatch_kafka(
                 debug!(error = %e, "allocate producer ids flexible header tag buffer");
             }
             admin_api::encode_allocate_producer_ids(broker, &mut src, &mut out, principal);
+        }
+        Some(ApiKey::AlterPartition) if hdr.api_version == 0 => {
+            if let Err(e) = skip_tag_buffer(&mut src) {
+                debug!(error = %e, "alter partition flexible header tag buffer");
+            }
+            admin_api::encode_alter_partition(broker, &mut src, &mut out, principal);
         }
         Some(ApiKey::AssignReplicasToDirs) if hdr.api_version == 0 => {
             if let Err(e) = skip_tag_buffer(&mut src) {

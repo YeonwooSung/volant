@@ -29,6 +29,7 @@
 //! UpdateFeatures v0–1 (always flexible; reject every feature; empty ApiVersions features),
 //! DescribeQuorum v0–1 (always flexible; wraps openraft leader/term/voters; not KRaft),
 //! AllocateProducerIds v0 (always flexible; block from next_producer_id; not KRaft),
+//! AlterPartition v0 (always flexible; wraps apply_leader_isr_update; not KRaft),
 //! WriteTxnMarkers 0–1 (classic v0 / flex v1; replica-local COMMIT/ABORT control
 //! batches + soft `__txn_markers`; not EndTxn / not a coordinator),
 //! GetTelemetrySubscriptions v0 (always flexible; no client telemetry; empty subscription),
@@ -39,7 +40,7 @@
 //! `docs/V242_SPEC.md`, `docs/V244_SPEC.md`, `docs/V245_SPEC.md`,
 //! `docs/V246_SPEC.md`, `docs/V249_SPEC.md`, `docs/V250_SPEC.md`,
 //! `docs/V251_SPEC.md`, `docs/V252_SPEC.md`, `docs/V253_SPEC.md`,
-//! and `docs/V255_SPEC.md`.
+//! `docs/V255_SPEC.md`, and `docs/V257_SPEC.md`.
 
 mod acl_api;
 mod admin_api;
@@ -321,6 +322,10 @@ pub enum ApiKey {
     /// DescribeQuorum (always flexible; v0–1). Wraps openraft
     /// leader/term/voters. Not KRaft `__cluster_metadata`.
     DescribeQuorum = 55,
+    /// AlterPartition (always flexible; v0 only). Wraps
+    /// `apply_leader_isr_update`. BrokerEpoch parsed and ignored. Not
+    /// KRaft NewIsrEpoch / ELR / DirectoryId.
+    AlterPartition = 56,
     /// UpdateFeatures (always flexible; v0–1). Rejects every feature.
     UpdateFeatures = 57,
     /// DescribeCluster (always flexible).
@@ -401,6 +406,7 @@ impl ApiKey {
             50 => Some(Self::DescribeUserScramCredentials),
             51 => Some(Self::AlterUserScramCredentials),
             55 => Some(Self::DescribeQuorum),
+            56 => Some(Self::AlterPartition),
             57 => Some(Self::UpdateFeatures),
             60 => Some(Self::DescribeCluster),
             61 => Some(Self::DescribeProducers),
@@ -465,6 +471,7 @@ pub const SUPPORTED_APIS: &[(ApiKey, i16, i16)] = &[
     (ApiKey::DescribeUserScramCredentials, 0, 0),
     (ApiKey::AlterUserScramCredentials, 0, 0),
     (ApiKey::DescribeQuorum, 0, 1),
+    (ApiKey::AlterPartition, 0, 0),
     (ApiKey::UpdateFeatures, 0, 1),
     (ApiKey::DescribeCluster, 0, 2),
     (ApiKey::DescribeProducers, 0, 0),
@@ -658,5 +665,14 @@ mod tests {
     #[test]
     fn unstable_offset_commit_is_81() {
         assert_eq!(KafkaErrorCode::UnstableOffsetCommit.as_i16(), 81);
+    }
+
+    #[test]
+    fn supported_apis_includes_alter_partition_56() {
+        assert!(SUPPORTED_APIS.len() >= 57);
+        assert!(SUPPORTED_APIS
+            .iter()
+            .any(|(k, min, max)| { *k == ApiKey::AlterPartition && *min == 0 && *max == 0 }));
+        assert_eq!(ApiKey::from_i16(56), Some(ApiKey::AlterPartition));
     }
 }
