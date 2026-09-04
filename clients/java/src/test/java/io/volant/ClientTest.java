@@ -2381,6 +2381,7 @@ class ClientTest {
         final AtomicInteger listMembersCount = new AtomicInteger();
         final AtomicInteger acceptCount = new AtomicInteger();
         final List<String[]> lastCreateTopicConfigs = new CopyOnWriteArrayList<>();
+        volatile long lastCreateTopicPartitions;
 
         private final ServerSocket listen;
         private final Thread acceptThread;
@@ -2529,6 +2530,7 @@ class ClientTest {
                 createTopicCount.incrementAndGet();
                 Codec.CreateTopicRequest req = Codec.decodeCreateTopicRequest(frame.payload);
                 lastCreateTopicConfigs.clear();
+                lastCreateTopicPartitions = req.partitions;
                 if (req.configs != null) {
                     lastCreateTopicConfigs.addAll(req.configs);
                 }
@@ -3255,6 +3257,19 @@ class ClientTest {
                 assertEquals(1, c.createTopic("events", 1));
             }
             assertEquals(1, srv.createTopicCount.get());
+            assertTrue(srv.lastCreateTopicConfigs.isEmpty());
+        }
+    }
+
+    @Test
+    void createTopicDefaultPartitionsIsOne() throws Exception {
+        try (AdminBroker srv = AdminBroker.start()) {
+            srv.queueCreateTopicOk();
+            try (Client c = Client.connect("127.0.0.1", srv.port, 5_000)) {
+                assertEquals(1, c.createTopic("events"));
+            }
+            assertEquals(1, srv.createTopicCount.get());
+            assertEquals(1, srv.lastCreateTopicPartitions);
             assertTrue(srv.lastCreateTopicConfigs.isEmpty());
         }
     }
