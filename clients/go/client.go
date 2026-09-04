@@ -1061,6 +1061,12 @@ func (c *Client) AddBroker(id uint32, host string, port uint16, rack *string) (u
 	return decoded.(codec.AddBrokerResponse).Generation, nil
 }
 
+// AddBrokerNoRack adds a broker with no rack (wire flag 0).
+// Same as AddBroker(id, host, port, nil).
+func (c *Client) AddBrokerNoRack(id uint32, host string, port uint16) (uint64, error) {
+	return c.AddBroker(id, host, port, nil)
+}
+
 // RemoveBroker removes a broker from the membership overlay (native 104/105).
 // Returns the overlay generation. Error 14 follows maxRedirects when the
 // broker cannot forward.

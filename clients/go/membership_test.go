@@ -174,6 +174,32 @@ func TestAddBrokerReturnsGeneration(t *testing.T) {
 	}
 }
 
+func TestAddBrokerNoRackEncodesAbsentRack(t *testing.T) {
+	addr, got, stop := serveMembership(t, 0, 0, 0)
+	defer stop()
+	c, err := volant.DialTimeout(addr, 5*time.Second)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer c.Close()
+	gen, err := c.AddBrokerNoRack(2, "10.0.0.2", 9092)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.err != nil {
+		t.Fatal(got.err)
+	}
+	if gen != 5 {
+		t.Fatalf("generation %d", gen)
+	}
+	if got.addID != 2 || got.addHost != "10.0.0.2" || got.addPort != 9092 || got.addRack != nil {
+		t.Fatalf("add %#v", got)
+	}
+	if len(got.opcodes) != 1 || got.opcodes[0] != codec.OpAddBroker {
+		t.Fatalf("opcodes %#v", got.opcodes)
+	}
+}
+
 func TestRemoveBrokerReturnsGeneration(t *testing.T) {
 	addr, got, stop := serveMembership(t, 0, 0, 0)
 	defer stop()
