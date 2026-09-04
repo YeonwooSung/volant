@@ -160,7 +160,7 @@ public final class GroupConsumer implements AutoCloseable {
     }
 
     /** Background heartbeat period: {@code sessionTimeoutMs / 3}, clamped to 100–3000 ms. */
-    static long heartbeatIntervalMs(int sessionTimeoutMs) {
+    public static long heartbeatIntervalMs(int sessionTimeoutMs) {
         long interval = sessionTimeoutMs / 3L;
         if (interval < HB_INTERVAL_MIN_MS) {
             return HB_INTERVAL_MIN_MS;

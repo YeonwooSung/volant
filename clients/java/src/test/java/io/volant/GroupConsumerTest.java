@@ -233,6 +233,7 @@ class GroupConsumerTest {
 
     @Test
     void heartbeatIntervalClamped() {
+        // public (v0.201); formula / clamp unchanged
         assertEquals(100L, GroupConsumer.heartbeatIntervalMs(0));
         assertEquals(100L, GroupConsumer.heartbeatIntervalMs(150));
         assertEquals(100L, GroupConsumer.heartbeatIntervalMs(300));

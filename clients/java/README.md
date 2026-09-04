@@ -87,6 +87,7 @@ try (Client c = Client.connect("127.0.0.1", 9092)) {
   c.heartbeat("g", j.memberId, j.generation);
   c.leaveGroup("g", j.memberId);
   GroupConsumer g = GroupConsumer.join(c, "g", List.of("t"), 10_000);
+  GroupConsumer.heartbeatIntervalMs(10_000); // v0.201; 3000 (sessionTimeoutMs / 3, clamp 100–3000)
   // Phase 12 static membership (empty instance id = dynamic):
   GroupConsumer s = GroupConsumer.joinStatic(c, "g", List.of("t"), 10_000, "inst-1");
   List<Record> polled = g.poll(500);
@@ -210,6 +211,7 @@ with a local range over **DescribeGroup** members (still no SyncGroup;
 describe failure falls back to solo). Default assignor is broker.
 `assignor()` returns the join-time assignor (`"broker"` or `"range"`; v0.184).
 `heartbeatCount()` counts Heartbeat RPCs from poll + background (not JoinGroup; v0.187).
+`heartbeatIntervalMs(sessionTimeoutMs)` is the background period (`sessionTimeoutMs / 3`, clamped 100–3000 ms; v0.201). `GroupConsumer.heartbeatIntervalMs(10_000)` is 3000.
 `sessionTimeoutMs()` returns the join-time session timeout in milliseconds
 (0 was defaulted to 10000; v0.189).
 `leave()` is an alias for `close()` (Rust `GroupConsumer::leave`; v0.190).
