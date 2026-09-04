@@ -21,13 +21,15 @@
 //! JoinGroup. This is **not** Kafka `auto.offset.reset` (no timestamp /
 //! isolation selector).
 //!
-//! Fetch-set assignment is the broker JoinGroup result by default. Opt in
-//! with [`GroupConsumer::join_with_assignor`] (`"range"`): after JoinGroup,
+//! Fetch-set assignment is the broker JoinGroup result by default,
+//! confirmed by a best-effort [`Client::sync_group`] peek after join /
+//! rejoin (v0.208; empty or error keeps JoinGroup). Opt in with
+//! [`GroupConsumer::join_with_assignor`] (`"range"`): after that peek,
 //! DescribeGroup members + `metadata()` feed `range_assign_multi`. Empty /
 //! `"broker"` keep today's assignment. Invalid assignor strings fail before
-//! JoinGroup. DescribeGroup errors fall back to the JoinGroup assignment
-//! (or solo-range over `[self]` when that assignment is empty). Still no
-//! SyncGroup.
+//! JoinGroup. DescribeGroup errors fall back to the peeked assignment
+//! (or solo-range over `[self]` when that assignment is empty). SyncGroup
+//! is peek/confirm, not Kafka CompletingRebalance.
 //!
 //! Poll Fetch size is 100 messages / 4 MiB by default. Opt in with
 //! [`GroupConsumer::join_with_fetch_knobs`]. Zero clamps to those
@@ -91,9 +93,9 @@ fn parse_auto_offset_reset(name: &str) -> Result<AutoOffsetReset> {
 /// Fetch-set assignor after a successful JoinGroup.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Assignor {
-    /// Honor the broker JoinGroup assignment (default).
+    /// Honor the broker JoinGroup assignment (default; after SyncGroup peek).
     Broker,
-    /// Local range over DescribeGroup members (still no SyncGroup).
+    /// Local range over DescribeGroup members (after SyncGroup peek).
     Range,
 }
 
@@ -374,7 +376,8 @@ impl GroupConsumer {
     /// [`join_with_auto_commit`](Self::join_with_auto_commit) /
     /// [`join_with_auto_offset_reset`](Self::join_with_auto_offset_reset)
     /// keep `"broker"`. Rejoin / heartbeat-driven rebalance reuse the same
-    /// policy. Still no SyncGroup. Poll Fetch size stays 100 / 4 MiB.
+    /// policy. SyncGroup peek runs first (v0.208); range still uses
+    /// DescribeGroup. Poll Fetch size stays 100 / 4 MiB.
     pub async fn join_with_assignor(
         client: Arc<Client>,
         group_id: impl Into<String>,
@@ -771,11 +774,21 @@ async fn do_join(
             group_instance_id,
         )
         .await?;
-    let join_assignment: Vec<(String, u32)> = result
+    let mut join_assignment: Vec<(String, u32)> = result
         .assignment
         .into_iter()
         .map(|a| (a.topic, a.partition))
         .collect();
+    // Best-effort peek/confirm (v0.208). Non-empty replaces JoinGroup;
+    // empty or Err keep Join. Does not increment heartbeat_count.
+    if let Ok(peeked) = client
+        .sync_group(group_id, &result.member_id, result.generation)
+        .await
+    {
+        if !peeked.is_empty() {
+            join_assignment = peeked.into_iter().map(|a| (a.topic, a.partition)).collect();
+        }
+    }
     let new_assignment = if shared.assignor == Assignor::Range {
         apply_range_override(
             client,
@@ -897,10 +910,10 @@ fn partition_counts_from_metadata(meta: crate::client::Metadata) -> HashMap<Stri
         .collect()
 }
 
-/// Range fetch set after a successful JoinGroup. Never fails the join:
-/// DescribeGroup / empty-members / missing-self / metadata errors fall
-/// back to the JoinGroup assignment, or solo-range over `[self]` when
-/// that assignment is empty.
+/// Range fetch set after a successful JoinGroup (and SyncGroup peek).
+/// Never fails the join: DescribeGroup / empty-members / missing-self /
+/// metadata errors fall back to the peeked assignment, or solo-range
+/// over `[self]` when that assignment is empty.
 async fn apply_range_override(
     client: &Client,
     group_id: &str,
