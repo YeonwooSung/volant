@@ -221,6 +221,7 @@ type GroupConsumer struct {
 	fetchMaxBytes       uint32
 	lastAutoCommit      time.Time
 	dirty               bool
+	heartbeatCount      uint64
 
 	mu       sync.Mutex
 	stop     chan struct{}
@@ -551,6 +552,7 @@ func (g *GroupConsumer) Poll(timeout time.Duration) ([]FetchedRecord, error) {
 	if g.closed {
 		return nil, ErrGroupClosed
 	}
+	g.heartbeatCount++
 	if err := g.client.Heartbeat(g.groupID, g.memberID, g.generation); err != nil {
 		if needsRebalance(err) {
 			if err := g.doJoin(); err != nil {
@@ -719,6 +721,7 @@ func (g *GroupConsumer) heartbeatOnce() {
 	if g.closed {
 		return
 	}
+	g.heartbeatCount++
 	err := g.client.Heartbeat(g.groupID, g.memberID, g.generation)
 	if err == nil {
 		return
@@ -814,6 +817,17 @@ func (g *GroupConsumer) FetchMaxBytes() uint32 {
 		return 0
 	}
 	return g.fetchMaxBytes
+}
+
+// HeartbeatCount is Heartbeat RPCs issued by Poll + background
+// (not JoinGroup).
+func (g *GroupConsumer) HeartbeatCount() uint64 {
+	if g == nil {
+		return 0
+	}
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	return g.heartbeatCount
 }
 
 // Positions returns next-read offsets for assigned partitions.

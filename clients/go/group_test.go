@@ -1341,6 +1341,89 @@ func TestAutoCommitCloseCommitsPendingThenLeaves(t *testing.T) {
 	}
 }
 
+func TestHeartbeatCountJoinIsZeroThenPollIsOne(t *testing.T) {
+	s := newFakeGroupBroker()
+	s.setAssignment([]codec.Assignment{{Topic: "t", Partition: 0}}, nil)
+	addr, stop := startFakeGroup(t, s)
+	defer stop()
+
+	c, err := volant.DialTimeout(addr, 5*time.Second)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer c.Close()
+
+	g, err := volant.JoinGroupConsumer(c, "g", []string{"t"}, 10_000, volant.WithBackgroundHeartbeat(false))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer g.Close()
+
+	if g.HeartbeatCount() != 0 {
+		t.Fatalf("HeartbeatCount=%d want 0 after join", g.HeartbeatCount())
+	}
+	_, hbs, _, _, _, _ := s.snapshot()
+	if len(hbs) != 0 {
+		t.Fatalf("heartbeats=%d want 0 after join (JoinGroup is not counted)", len(hbs))
+	}
+
+	if _, err := g.Poll(0); err != nil {
+		t.Fatal(err)
+	}
+	if g.HeartbeatCount() != 1 {
+		t.Fatalf("HeartbeatCount=%d want 1 after one Poll", g.HeartbeatCount())
+	}
+	_, hbs, _, _, _, _ = s.snapshot()
+	if len(hbs) != 1 {
+		t.Fatalf("heartbeats=%d want 1 after one Poll", len(hbs))
+	}
+}
+
+func TestHeartbeatCountNil(t *testing.T) {
+	var g *volant.GroupConsumer
+	if g.HeartbeatCount() != 0 {
+		t.Fatalf("nil HeartbeatCount=%d want 0", g.HeartbeatCount())
+	}
+}
+
+func TestHeartbeatCountBackgroundWithoutPoll(t *testing.T) {
+	s := newFakeGroupBroker()
+	s.setAssignment([]codec.Assignment{{Topic: "t", Partition: 0}}, nil)
+	addr, stop := startFakeGroup(t, s)
+	defer stop()
+
+	c, err := volant.DialTimeout(addr, 5*time.Second)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer c.Close()
+
+	g, err := volant.JoinGroupConsumer(c, "g", []string{"t"}, 300)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer g.Close()
+
+	if g.HeartbeatCount() != 0 {
+		t.Fatalf("HeartbeatCount=%d want 0 immediately after join", g.HeartbeatCount())
+	}
+
+	deadline := time.Now().Add(time.Second)
+	for time.Now().Before(deadline) {
+		if g.HeartbeatCount() >= 1 {
+			break
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+	if n := g.HeartbeatCount(); n < 1 {
+		t.Fatalf("HeartbeatCount=%d want >= 1 without Poll", n)
+	}
+	_, _, _, fetches, _, _ := s.snapshot()
+	if len(fetches) != 0 {
+		t.Fatalf("unexpected fetches %+v", fetches)
+	}
+}
+
 func TestBackgroundHeartbeatDisabledIsPollOnly(t *testing.T) {
 	s := newFakeGroupBroker()
 	s.setAssignment([]codec.Assignment{{Topic: "t", Partition: 0}}, nil)
