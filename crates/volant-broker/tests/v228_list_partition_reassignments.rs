@@ -91,7 +91,7 @@ async fn api_versions_lists_list_partition_reassignments_46() {
         let max_v = src.get_i16();
         found.insert(key, (min_v, max_v));
     }
-    assert_eq!(found.len(), 56);
+    assert_eq!(found.len(), 60);
     assert_eq!(found.get(&45), Some(&(0, 0)));
     assert_eq!(found.get(&46), Some(&(0, 0)));
 

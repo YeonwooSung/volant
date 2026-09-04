@@ -32,9 +32,9 @@ Start here. Prefer living docs over individual phase ship records.
 
 | Document | Purpose |
 |----------|---------|
-| [history/PHASE_HISTORY.md](./history/PHASE_HISTORY.md) | One-line index for phases 0–154 + **155 open** + residuals v0.3–v0.254 |
+| [history/PHASE_HISTORY.md](./history/PHASE_HISTORY.md) | One-line index for phases 0–154 + **155 open** + residuals v0.3–v0.259 |
 | [PHASE7_SPEC.md](./PHASE7_SPEC.md) … [PHASE155_SPEC.md](./PHASE155_SPEC.md) | Per-phase ship records (155 in progress) |
-| [V06_SPEC.md](./V06_SPEC.md) … [V254_SPEC.md](./V254_SPEC.md) | Residual slices v0.6–v0.254 |
+| [V06_SPEC.md](./V06_SPEC.md) … [V259_SPEC.md](./V259_SPEC.md) | Residual slices v0.6–v0.259 |
 | [history/archive/](./history/archive/) | Implementation plans & reviews (archaeology) |
 
 ## Config samples
@@ -56,9 +56,9 @@ Start here. Prefer living docs over individual phase ship records.
 
 ## Compaction note (2026-08-13, post–Phase 147 ship)
 
-Living docs match **git HEAD product** (**v0.2 + residuals v0.3–v0.254**, crate **0.2.0**, **Phase 155 open**):
+Living docs match **git HEAD product** (**v0.2 + residuals v0.3–v0.259**, crate **0.2.0**, **Phase 155 open**):
 
-- **Status ceiling:** **v0.2 shipped** + residuals **v0.3–v0.254**. Phases **0–154** shipped, **155 open** ([PHASE155_SPEC.md](./PHASE155_SPEC.md)). Residual **v0.155** is DeleteRecords wait config, **not Phase 155**. Homemade 154 hatch **deleted** (v0.222); leftover `__metadata_raft/` warn-once **v0.243**. Kafka shim **56 keys**. TxnOffsetCommit fence **v0.254**. WriteTxnMarkers **v0.250**. Kafka shim **23–109** (… **135 = optional DeleteRecords majority wait**; **136 = non-blocking admin catch-up**; **137 = native DeleteRecords wait trailer + journal topic GC** — Kafka still env-only for wait; **138 = best-effort shared fetch session mirror + promote**; **139 = mirror coalesce/debounce + optional durable + `mirror_gen` fence**; **140 = preferred max LEO lag + RC suppress metric**; **141 = N=2 majority health gauges** `volant_cluster_*`; **142 = Metadata leader ISR overlay + IsrUpdate 94/95**; **143 = promote claim fence lowest-id `promoted_by`**; **144 = preferred × established-session suppress**; **147 = serve-from-mirror without promote on owner miss**; **149 = durable stream state**; **150/152 = assignment majority consensus + Metadata live by default** (152 committed-only **opt-in**); **151/153 = stream EOS + durable checkpoint staging**; **154 = KRaft-style metadata Raft log MVP**, hatch removed **v0.222**)
+- **Status ceiling:** **v0.2 shipped** + residuals **v0.3–v0.259**. Phases **0–154** shipped, **155 open** ([PHASE155_SPEC.md](./PHASE155_SPEC.md)). Residual **v0.155** is DeleteRecords wait config, **not Phase 155**. Homemade 154 hatch **deleted** (v0.222); leftover `__metadata_raft/` warn-once **v0.243**. Kafka shim **60 keys**. OffsetFetch RequireStable **v0.256**. AlterPartition **v0.257**. Kafka shim **23–109** (… **135 = optional DeleteRecords majority wait**; **136 = non-blocking admin catch-up**; **137 = native DeleteRecords wait trailer + journal topic GC** — Kafka still env-only for wait; **138 = best-effort shared fetch session mirror + promote**; **139 = mirror coalesce/debounce + optional durable + `mirror_gen` fence**; **140 = preferred max LEO lag + RC suppress metric**; **141 = N=2 majority health gauges** `volant_cluster_*`; **142 = Metadata leader ISR overlay + IsrUpdate 94/95**; **143 = promote claim fence lowest-id `promoted_by`**; **144 = preferred × established-session suppress**; **147 = serve-from-mirror without promote on owner miss**; **149 = durable stream state**; **150/152 = assignment majority consensus + Metadata live by default** (152 committed-only **opt-in**); **151/153 = stream EOS + durable checkpoint staging**; **154 = KRaft-style metadata Raft log MVP**, hatch removed **v0.222**)
 - **Kafka SoT:** [KAFKA_COMPAT.md](./KAFKA_COMPAT.md) — matrix + semantic honesty
 - **WHITEPAPER:** architecture + positioning; no full API matrix
 - **Binding core:** PHASE1–6; **ship records:** PHASE7–154 via [PHASE_HISTORY](./history/PHASE_HISTORY.md)

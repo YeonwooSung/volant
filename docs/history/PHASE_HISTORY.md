@@ -451,6 +451,11 @@ docs for day-to-day reading: [ops](../ops.md), [consistency](../consistency.md),
 | v0.252 | ✅ | Kafka ListClientMetricsResources key 74 empty | [V252_SPEC.md](../V252_SPEC.md) |
 | v0.253 | ✅ | Kafka GetTelemetrySubscriptions key 71 empty | [V253_SPEC.md](../V253_SPEC.md) |
 | v0.254 | ✅ | TxnOffsetCommit v3+ generation/member fence | [V254_SPEC.md](../V254_SPEC.md) |
+| v0.255 | ✅ | Kafka PushTelemetry key 72 reject | [V255_SPEC.md](../V255_SPEC.md) |
+| v0.256 | ✅ | OffsetFetch RequireStable honors LSO | [V256_SPEC.md](../V256_SPEC.md) |
+| v0.257 | ✅ | Kafka AlterPartition key 56 wrap ISR update | [V257_SPEC.md](../V257_SPEC.md) |
+| v0.258 | ✅ | Kafka CreateDelegationToken key 38 reject | [V258_SPEC.md](../V258_SPEC.md) |
+| v0.259 | ✅ | Kafka DescribeDelegationToken key 41 empty | [V259_SPEC.md](../V259_SPEC.md) |
 
 ---
 
