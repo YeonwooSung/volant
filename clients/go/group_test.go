@@ -975,6 +975,39 @@ func TestJoinGroupConsumerNilClient(t *testing.T) {
 	}
 }
 
+func TestJoinGroupConsumerSessionTimeoutMs(t *testing.T) {
+	s := newFakeGroupBroker()
+	s.setAssignment([]codec.Assignment{{Topic: "t", Partition: 0}}, nil)
+	addr, stop := startFakeGroup(t, s)
+	defer stop()
+
+	c, err := volant.DialTimeout(addr, 5*time.Second)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer c.Close()
+
+	g, err := volant.JoinGroupConsumer(c, "g", []string{"t"}, 10_000, volant.WithBackgroundHeartbeat(false))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if g.SessionTimeoutMs() != 10000 {
+		t.Fatalf("SessionTimeoutMs()=%d want 10000", g.SessionTimeoutMs())
+	}
+	if err := g.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	g, err = volant.JoinGroupConsumer(c, "g", []string{"t"}, 0, volant.WithBackgroundHeartbeat(false))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer g.Close()
+	if g.SessionTimeoutMs() != 10000 {
+		t.Fatalf("zero join SessionTimeoutMs()=%d want 10000", g.SessionTimeoutMs())
+	}
+}
+
 func TestJoinGroupConsumerStaticSendsInstanceID(t *testing.T) {
 	s := newFakeGroupBroker()
 	s.setAssignment([]codec.Assignment{{Topic: "t", Partition: 0}}, nil)

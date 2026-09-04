@@ -797,6 +797,11 @@ public final class GroupConsumer implements AutoCloseable {
         return assignor;
     }
 
+    /** Join-time session timeout in milliseconds (0 was defaulted to 10000). */
+    public int sessionTimeoutMs() {
+        return sessionTimeoutMs;
+    }
+
     /**
      * Bound each assigned {@code fetch} inside {@link #poll} ({@code max_messages}).
      * Default 100. Values {@code <= 0} clamp to 100. Not Kafka

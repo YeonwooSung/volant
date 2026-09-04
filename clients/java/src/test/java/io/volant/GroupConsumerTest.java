@@ -26,6 +26,7 @@ class GroupConsumerTest {
         assertEquals("m1", g.memberId());
         assertEquals(1, g.generation());
         assertEquals("broker", g.assignor());
+        assertEquals(10_000, g.sessionTimeoutMs());
         assertEquals(1, g.assignment().size());
         assertEquals(5L, g.positions().values().iterator().next());
         assertEquals(1, fake.joinCount);
@@ -177,6 +178,7 @@ class GroupConsumerTest {
         fake.nextJoin = joinResult("m1", 1, assign("t", 0));
         GroupConsumer g = GroupConsumer.join(fake, "g", List.of("t"), 0, false);
         assertEquals(10_000, fake.lastSessionTimeoutMs);
+        assertEquals(10_000, g.sessionTimeoutMs());
         g.close();
     }
 
