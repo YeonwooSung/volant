@@ -10,7 +10,7 @@ use volant_core::Result;
 use volant_protocol::{ErrorCode, GroupState};
 
 use crate::assignor::sticky_assign_multi;
-use crate::offset_store::{OffsetStore, StoredOffset, OFFSET_UNKNOWN};
+use crate::offset_store::{OffsetStore, StoredOffset, LEADER_EPOCH_UNKNOWN, OFFSET_UNKNOWN};
 
 /// Prefix for static membership member ids (Phase 12).
 pub const STATIC_MEMBER_PREFIX: &str = "static:";
@@ -509,15 +509,45 @@ impl GroupCoordinator {
         generation: u32,
         entries: &[(String, u32, u64, String)],
     ) -> Result<CommitResult> {
+        self.commit_offsets_with_epoch(
+            group_id,
+            member_id,
+            generation,
+            entries
+                .iter()
+                .map(|(t, p, o, m)| (t.as_str(), *p, *o, m.as_str(), LEADER_EPOCH_UNKNOWN)),
+        )
+    }
+
+    /// Commit offsets with Kafka `committed_leader_epoch` per entry.
+    ///
+    /// Native / admin callers without an epoch use [`Self::commit_offsets`]
+    /// (writes `-1`). Generation `0` skips membership checks.
+    pub fn commit_offsets_with_epoch<'a, I>(
+        &self,
+        group_id: &str,
+        member_id: &str,
+        generation: u32,
+        entries: I,
+    ) -> Result<CommitResult>
+    where
+        I: IntoIterator<Item = (&'a str, u32, u64, &'a str, i32)>,
+    {
         if generation != 0 {
             let error_code = self.check_commit_fence(group_id, member_id, generation);
             if error_code != 0 {
                 return Ok(CommitResult { error_code });
             }
         }
-        for (topic, partition, offset, metadata) in entries {
-            self.offsets
-                .commit(group_id, topic, *partition, *offset, metadata)?;
+        for (topic, partition, offset, metadata, leader_epoch) in entries {
+            self.offsets.commit_with_epoch(
+                group_id,
+                topic,
+                partition,
+                offset,
+                metadata,
+                leader_epoch,
+            )?;
         }
         Ok(CommitResult { error_code: 0 })
     }
@@ -652,12 +682,14 @@ impl GroupCoordinator {
         }
         let mut out = Vec::with_capacity(entries.len());
         for (topic, partition) in entries {
-            let (offset, metadata) = self.offsets.fetch(group_id, topic, *partition)?;
+            let (offset, metadata, leader_epoch) =
+                self.offsets.fetch(group_id, topic, *partition)?;
             out.push(StoredOffset {
                 topic: topic.clone(),
                 partition: *partition,
                 offset,
                 metadata,
+                leader_epoch,
             });
         }
         Ok(FetchOffsetsResult {
@@ -1055,6 +1087,27 @@ mod tests {
             assert_eq!(r.entries.len(), 1);
             assert_eq!(r.entries[0].offset, 7);
             assert_eq!(r.entries[0].metadata, "x");
+            assert_eq!(r.entries[0].leader_epoch, LEADER_EPOCH_UNKNOWN);
+        }
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn offset_commit_with_epoch_persists() {
+        let dir = temp_dir();
+        {
+            let coord = GroupCoordinator::new(&dir).unwrap();
+            let r = coord
+                .commit_offsets_with_epoch("g", "", 0, [("events", 0, 7u64, "x", 3i32)])
+                .unwrap();
+            assert_eq!(r.error_code, 0);
+        }
+        {
+            let coord = GroupCoordinator::new(&dir).unwrap();
+            let r = coord.fetch_offsets("g", &[("events".into(), 0)]).unwrap();
+            assert_eq!(r.entries.len(), 1);
+            assert_eq!(r.entries[0].offset, 7);
+            assert_eq!(r.entries[0].leader_epoch, 3);
         }
         let _ = fs::remove_dir_all(&dir);
     }

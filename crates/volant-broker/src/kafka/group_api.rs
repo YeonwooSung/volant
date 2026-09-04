@@ -823,7 +823,7 @@ pub(crate) fn encode_offset_commit(
     //   v1: + generation, member_id; partition commit_timestamp
     //   v2–4: + retention_time_ms (no commit_timestamp)
     //   v5: no retention_time
-    //   v6+: + committed_leader_epoch per partition (ignored; not stored)
+    //   v6+: + committed_leader_epoch per partition (stored; OffsetFetch v5+ returns it)
     //   v7+: + group_instance_id (nullable; maps to static: when member_id empty)
     //   v8–9: compact strings/arrays + TAG_BUFFER; response header v1
     //   v10: TopicId UUID instead of Name (request + response)
@@ -931,7 +931,7 @@ pub(crate) fn encode_offset_commit(
         unknown_topic_id: bool,
     }
     let mut parsed: Vec<TopicReq> = Vec::new();
-    let mut entries: Vec<(String, u32, u64, String)> = Vec::new();
+    let mut entries: Vec<(String, u32, u64, String, i32)> = Vec::new();
 
     if flex {
         let topic_count = match get_compact_array_len(src) {
@@ -965,14 +965,20 @@ pub(crate) fn encode_offset_commit(
                 if src.remaining() < 4 {
                     break;
                 }
-                let _leader_epoch = src.get_i32();
+                let leader_epoch = src.get_i32();
                 let metadata = get_compact_nullable_string(src)
                     .ok()
                     .flatten()
                     .unwrap_or_default();
                 let _ = skip_tag_buffer(src); // partition tags
                 if !unknown_topic_id {
-                    entries.push((topic.clone(), partition as u32, offset, metadata));
+                    entries.push((
+                        topic.clone(),
+                        partition as u32,
+                        offset,
+                        metadata,
+                        leader_epoch,
+                    ));
                 }
                 partitions.push(partition);
             }
@@ -1007,12 +1013,13 @@ pub(crate) fn encode_offset_commit(
                 }
                 let partition = src.get_i32();
                 let offset = src.get_i64().max(0) as u64;
-                // v6+: committed_leader_epoch (not stored; OffsetFetch returns -1).
+                // v6+: committed_leader_epoch (stored; versions < 6 write -1).
+                let mut leader_epoch = -1i32;
                 if version >= 6 {
                     if src.remaining() < 4 {
                         break;
                     }
-                    let _leader_epoch = src.get_i32();
+                    leader_epoch = src.get_i32();
                 }
                 // v1 only: commit_timestamp
                 if version == 1 {
@@ -1025,7 +1032,13 @@ pub(crate) fn encode_offset_commit(
                     Ok(m) => m,
                     Err(_) => String::new(),
                 };
-                entries.push((topic.clone(), partition as u32, offset, metadata));
+                entries.push((
+                    topic.clone(),
+                    partition as u32,
+                    offset,
+                    metadata,
+                    leader_epoch,
+                ));
                 partitions.push(partition);
             }
             parsed.push(TopicReq {
@@ -1046,9 +1059,14 @@ pub(crate) fn encode_offset_commit(
     } else if entries.is_empty() {
         KafkaErrorCode::None.as_i16()
     } else {
-        match broker
-            .groups()
-            .commit_offsets(&group_id, &member_id, generation, &entries)
+        match broker.groups().commit_offsets_with_epoch(
+            &group_id,
+            &member_id,
+            generation,
+            entries
+                .iter()
+                .map(|(t, p, o, m, e)| (t.as_str(), *p, *o, m.as_str(), *e)),
+        )
         {
             Ok(r) => map_group_error(r.error_code),
             Err(_) => KafkaErrorCode::Unknown.as_i16(),
@@ -1128,11 +1146,11 @@ pub(crate) fn encode_offset_fetch(
 
     let flex = version >= 6;
 
-    let write_partition = |out: &mut BytesMut, partition: i32, offset: i64, meta: &str, error: i16| {
+    let write_partition = |out: &mut BytesMut, partition: i32, offset: i64, epoch: i32, meta: &str, error: i16| {
         out.put_i32(partition);
         out.put_i64(offset);
         if version >= 5 {
-            out.put_i32(-1); // committed_leader_epoch unknown
+            out.put_i32(epoch);
         }
         if flex {
             put_compact_nullable_string(out, Some(meta));
@@ -1335,7 +1353,7 @@ pub(crate) fn encode_offset_fetch(
 
     if list_all {
         use std::collections::BTreeMap;
-        let mut by_topic: BTreeMap<String, Vec<(u32, i64, String)>> = BTreeMap::new();
+        let mut by_topic: BTreeMap<String, Vec<(u32, i64, i32, String)>> = BTreeMap::new();
         for e in fetched {
             let off = if e.offset == u64::MAX {
                 -1i64
@@ -1345,15 +1363,15 @@ pub(crate) fn encode_offset_fetch(
             by_topic
                 .entry(e.topic)
                 .or_default()
-                .push((e.partition, off, e.metadata));
+                .push((e.partition, off, e.leader_epoch, e.metadata));
         }
         write_topics_header(out, by_topic.len());
         for (topic, parts) in by_topic {
             write_topic_name(out, &topic);
             write_parts_header(out, parts.len());
-            for (p, off, meta) in parts {
+            for (p, off, epoch, meta) in parts {
                 let (off, err) = require_stable_offset(broker, &topic, p, off, require_stable);
-                write_partition(out, p as i32, off, &meta, err);
+                write_partition(out, p as i32, off, epoch, &meta, err);
             }
             if flex {
                 put_empty_tag_buffer(out); // topic tags
@@ -1371,13 +1389,13 @@ pub(crate) fn encode_offset_fetch(
             let entry = fetched
                 .iter()
                 .find(|e| e.topic == topic && e.partition == p as u32);
-            let (off, meta) = match entry {
-                Some(e) if e.offset == u64::MAX => (-1i64, e.metadata.clone()),
-                Some(e) => (e.offset as i64, e.metadata.clone()),
-                None => (-1i64, String::new()),
+            let (off, epoch, meta) = match entry {
+                Some(e) if e.offset == u64::MAX => (-1i64, e.leader_epoch, e.metadata.clone()),
+                Some(e) => (e.offset as i64, e.leader_epoch, e.metadata.clone()),
+                None => (-1i64, -1, String::new()),
             };
             let (off, err) = require_stable_offset(broker, &topic, p as u32, off, require_stable);
-            write_partition(out, p, off, &meta, err);
+            write_partition(out, p, off, epoch, &meta, err);
         }
         if flex {
             put_empty_tag_buffer(out); // topic tags
@@ -1531,7 +1549,7 @@ pub(crate) fn encode_offset_fetch_multi(
 
         if g.list_all {
             use std::collections::BTreeMap;
-            let mut by_topic: BTreeMap<String, Vec<(u32, i64, String)>> = BTreeMap::new();
+            let mut by_topic: BTreeMap<String, Vec<(u32, i64, i32, String)>> = BTreeMap::new();
             for e in fetched {
                 let off = if e.offset == u64::MAX {
                     -1i64
@@ -1541,7 +1559,7 @@ pub(crate) fn encode_offset_fetch_multi(
                 by_topic
                     .entry(e.topic)
                     .or_default()
-                    .push((e.partition, off, e.metadata));
+                    .push((e.partition, off, e.leader_epoch, e.metadata));
             }
             put_compact_array_len(out, by_topic.len());
             for (topic, parts) in by_topic {
@@ -1551,12 +1569,12 @@ pub(crate) fn encode_offset_fetch_multi(
                     &topic_id::wire_id_for_name(broker, &topic, use_topic_id),
                 );
                 put_compact_array_len(out, parts.len());
-                for (p, off, meta) in parts {
+                for (p, off, epoch, meta) in parts {
                     let (off, err) =
                         require_stable_offset(broker, &topic, p, off, require_stable);
                     out.put_i32(p as i32);
                     out.put_i64(off);
-                    out.put_i32(-1); // committed_leader_epoch
+                    out.put_i32(epoch);
                     put_compact_nullable_string(out, Some(&meta));
                     out.put_i16(err);
                     put_empty_tag_buffer(out);
@@ -1581,16 +1599,18 @@ pub(crate) fn encode_offset_fetch_multi(
                     let entry = fetched
                         .iter()
                         .find(|e| e.topic == t.name && e.partition == p as u32);
-                    let (off, meta) = match entry {
-                        Some(e) if e.offset == u64::MAX => (-1i64, e.metadata.as_str()),
-                        Some(e) => (e.offset as i64, e.metadata.as_str()),
-                        None => (-1i64, ""),
+                    let (off, epoch, meta) = match entry {
+                        Some(e) if e.offset == u64::MAX => {
+                            (-1i64, e.leader_epoch, e.metadata.as_str())
+                        }
+                        Some(e) => (e.offset as i64, e.leader_epoch, e.metadata.as_str()),
+                        None => (-1i64, -1, ""),
                     };
                     let (off, err) =
                         require_stable_offset(broker, &t.name, p as u32, off, require_stable);
                     out.put_i32(p);
                     out.put_i64(off);
-                    out.put_i32(-1);
+                    out.put_i32(epoch);
                     put_compact_nullable_string(out, Some(meta));
                     out.put_i16(err);
                     put_empty_tag_buffer(out);

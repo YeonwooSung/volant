@@ -1,7 +1,9 @@
 //! File-backed durable consumer offset store.
 //!
 //! Layout: `{data_dir}/__consumer_offsets/{group_id}/{topic}/{partition}`
-//! File contents: `u64 offset` (LE) + `u16 metadata_len` (LE) + UTF-8 metadata.
+//! File contents: `u64 offset` (LE) + `u16 metadata_len` (LE) + UTF-8 metadata
+//! + optional `i32 committed_leader_epoch` (LE). Legacy files without the
+//! trailer read as epoch `-1`.
 
 use std::fs::{self, File, OpenOptions};
 use std::io::{Read, Write};
@@ -12,6 +14,9 @@ use volant_core::{Error, Result};
 
 /// Sentinel for unknown / not-committed offsets (wire + store).
 pub const OFFSET_UNKNOWN: u64 = u64::MAX;
+
+/// Kafka `committed_leader_epoch` when missing (legacy file / native commit).
+pub const LEADER_EPOCH_UNKNOWN: i32 = -1;
 
 /// One committed offset entry.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -24,6 +29,8 @@ pub struct StoredOffset {
     pub offset: u64,
     /// Optional metadata.
     pub metadata: String,
+    /// Kafka `committed_leader_epoch`; `-1` if unknown / legacy file.
+    pub leader_epoch: i32,
 }
 
 /// Durable offset store under a data directory.
@@ -38,9 +45,8 @@ impl OffsetStore {
     /// Create an offset store rooted at `data_dir/__consumer_offsets`.
     pub fn new(data_dir: impl AsRef<Path>) -> Result<Self> {
         let root = data_dir.as_ref().join("__consumer_offsets");
-        fs::create_dir_all(&root).map_err(|e| {
-            Error::Storage(format!("create offset store {}: {e}", root.display()))
-        })?;
+        fs::create_dir_all(&root)
+            .map_err(|e| Error::Storage(format!("create offset store {}: {e}", root.display())))?;
         Ok(Self {
             root,
             lock: Mutex::new(()),
@@ -54,7 +60,7 @@ impl OffsetStore {
             .join(partition.to_string())
     }
 
-    /// Commit a single offset (fsync).
+    /// Commit a single offset (fsync). Writes `leader_epoch = -1`.
     pub fn commit(
         &self,
         group_id: &str,
@@ -62,6 +68,26 @@ impl OffsetStore {
         partition: u32,
         offset: u64,
         metadata: &str,
+    ) -> Result<()> {
+        self.commit_with_epoch(
+            group_id,
+            topic,
+            partition,
+            offset,
+            metadata,
+            LEADER_EPOCH_UNKNOWN,
+        )
+    }
+
+    /// Commit a single offset with Kafka `committed_leader_epoch` (fsync).
+    pub fn commit_with_epoch(
+        &self,
+        group_id: &str,
+        topic: &str,
+        partition: u32,
+        offset: u64,
+        metadata: &str,
+        leader_epoch: i32,
     ) -> Result<()> {
         let _guard = self.lock.lock();
         let path = self.entry_path(group_id, topic, partition);
@@ -89,24 +115,22 @@ impl OffsetStore {
                 .map_err(|e| Error::Storage(format!("write meta len: {e}")))?;
             f.write_all(meta_bytes)
                 .map_err(|e| Error::Storage(format!("write meta: {e}")))?;
+            f.write_all(&leader_epoch.to_le_bytes())
+                .map_err(|e| Error::Storage(format!("write leader epoch: {e}")))?;
             f.sync_all()
                 .map_err(|e| Error::Storage(format!("fsync offset: {e}")))?;
         }
-        fs::rename(&tmp, &path)
-            .map_err(|e| Error::Storage(format!("rename offset file: {e}")))?;
+        fs::rename(&tmp, &path).map_err(|e| Error::Storage(format!("rename offset file: {e}")))?;
         Ok(())
     }
 
-    /// Fetch a single offset; returns `OFFSET_UNKNOWN` if not present.
-    pub fn fetch(
-        &self,
-        group_id: &str,
-        topic: &str,
-        partition: u32,
-    ) -> Result<(u64, String)> {
+    /// Fetch a single offset; returns `OFFSET_UNKNOWN` / epoch `-1` if not present.
+    ///
+    /// Legacy files without the i32 trailer read as `leader_epoch = -1`.
+    pub fn fetch(&self, group_id: &str, topic: &str, partition: u32) -> Result<(u64, String, i32)> {
         let path = self.entry_path(group_id, topic, partition);
         if !path.exists() {
-            return Ok((OFFSET_UNKNOWN, String::new()));
+            return Ok((OFFSET_UNKNOWN, String::new(), LEADER_EPOCH_UNKNOWN));
         }
         let mut f = File::open(&path)
             .map_err(|e| Error::Storage(format!("open offset {}: {e}", path.display())))?;
@@ -128,7 +152,12 @@ impl OffsetStore {
             )));
         }
         let metadata = String::from_utf8_lossy(&buf[10..10 + meta_len]).into_owned();
-        Ok((offset, metadata))
+        let leader_epoch = if buf.len() >= 10 + meta_len + 4 {
+            i32::from_le_bytes(buf[10 + meta_len..10 + meta_len + 4].try_into().unwrap())
+        } else {
+            LEADER_EPOCH_UNKNOWN
+        };
+        Ok((offset, metadata, leader_epoch))
     }
 
     /// List group ids that have at least one offset directory on disk.
@@ -170,11 +199,7 @@ impl OffsetStore {
 
     /// Delete specific offsets, or all offsets for the group when `entries` is empty.
     /// Returns the number of files removed.
-    pub fn delete_many(
-        &self,
-        group_id: &str,
-        entries: &[(String, u32)],
-    ) -> Result<u32> {
+    pub fn delete_many(&self, group_id: &str, entries: &[(String, u32)]) -> Result<u32> {
         if entries.is_empty() {
             let all = self.fetch_all(group_id)?;
             let mut n = 0u32;
@@ -223,22 +248,19 @@ impl OffsetStore {
                 let Ok(partition) = name.parse::<u32>() else {
                     continue;
                 };
-                let (offset, metadata) = self.fetch(group_id, &topic, partition)?;
+                let (offset, metadata, leader_epoch) = self.fetch(group_id, &topic, partition)?;
                 if offset != OFFSET_UNKNOWN {
                     out.push(StoredOffset {
                         topic: topic.clone(),
                         partition,
                         offset,
                         metadata,
+                        leader_epoch,
                     });
                 }
             }
         }
-        out.sort_by(|a, b| {
-            a.topic
-                .cmp(&b.topic)
-                .then(a.partition.cmp(&b.partition))
-        });
+        out.sort_by(|a, b| a.topic.cmp(&b.topic).then(a.partition.cmp(&b.partition)));
         Ok(out)
     }
 }
@@ -266,11 +288,8 @@ mod tests {
             .duration_since(UNIX_EPOCH)
             .unwrap()
             .as_nanos();
-        let dir = std::env::temp_dir().join(format!(
-            "volant-offsets-{}-{}",
-            std::process::id(),
-            nanos
-        ));
+        let dir =
+            std::env::temp_dir().join(format!("volant-offsets-{}-{}", std::process::id(), nanos));
         let _ = fs::remove_dir_all(&dir);
         fs::create_dir_all(&dir).unwrap();
         dir
@@ -280,12 +299,8 @@ mod tests {
     fn delete_offsets_removes_files() {
         let dir = temp_dir();
         let store = OffsetStore::new(&dir).unwrap();
-        store
-            .commit("g1", "events", 0, 5, "")
-            .unwrap();
-        store
-            .commit("g1", "events", 1, 6, "")
-            .unwrap();
+        store.commit("g1", "events", 0, 5, "").unwrap();
+        store.commit("g1", "events", 1, 6, "").unwrap();
         assert_eq!(store.delete_many("g1", &[("events".into(), 0)]).unwrap(), 1);
         assert_eq!(store.fetch("g1", "events", 0).unwrap().0, OFFSET_UNKNOWN);
         assert_eq!(store.fetch("g1", "events", 1).unwrap().0, 6);
@@ -299,22 +314,23 @@ mod tests {
         let dir = temp_dir();
         {
             let store = OffsetStore::new(&dir).unwrap();
-            store
-                .commit("g1", "events", 0, 10, "meta")
-                .unwrap();
-            let (off, meta) = store.fetch("g1", "events", 0).unwrap();
+            store.commit("g1", "events", 0, 10, "meta").unwrap();
+            let (off, meta, epoch) = store.fetch("g1", "events", 0).unwrap();
             assert_eq!(off, 10);
             assert_eq!(meta, "meta");
+            assert_eq!(epoch, LEADER_EPOCH_UNKNOWN);
         }
         // Recreate store — durable across reopen.
         {
             let store = OffsetStore::new(&dir).unwrap();
-            let (off, meta) = store.fetch("g1", "events", 0).unwrap();
+            let (off, meta, epoch) = store.fetch("g1", "events", 0).unwrap();
             assert_eq!(off, 10);
             assert_eq!(meta, "meta");
+            assert_eq!(epoch, LEADER_EPOCH_UNKNOWN);
             let all = store.fetch_all("g1").unwrap();
             assert_eq!(all.len(), 1);
             assert_eq!(all[0].offset, 10);
+            assert_eq!(all[0].leader_epoch, LEADER_EPOCH_UNKNOWN);
         }
         let _ = fs::remove_dir_all(&dir);
     }
@@ -323,8 +339,48 @@ mod tests {
     fn unknown_offset() {
         let dir = temp_dir();
         let store = OffsetStore::new(&dir).unwrap();
-        let (off, _) = store.fetch("g", "t", 0).unwrap();
+        let (off, _, epoch) = store.fetch("g", "t", 0).unwrap();
         assert_eq!(off, OFFSET_UNKNOWN);
+        assert_eq!(epoch, LEADER_EPOCH_UNKNOWN);
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn commit_with_epoch_round_trip() {
+        let dir = temp_dir();
+        let store = OffsetStore::new(&dir).unwrap();
+        store
+            .commit_with_epoch("g1", "events", 0, 42, "m", 3)
+            .unwrap();
+        let (off, meta, epoch) = store.fetch("g1", "events", 0).unwrap();
+        assert_eq!(off, 42);
+        assert_eq!(meta, "m");
+        assert_eq!(epoch, 3);
+        let all = store.fetch_all("g1").unwrap();
+        assert_eq!(all[0].leader_epoch, 3);
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn legacy_file_without_epoch_reads_as_minus_one() {
+        let dir = temp_dir();
+        let store = OffsetStore::new(&dir).unwrap();
+        let path = dir
+            .join("__consumer_offsets")
+            .join("g1")
+            .join("events")
+            .join("0");
+        fs::create_dir_all(path.parent().unwrap()).unwrap();
+        let meta = b"old";
+        let mut buf = Vec::new();
+        buf.extend_from_slice(&11u64.to_le_bytes());
+        buf.extend_from_slice(&(meta.len() as u16).to_le_bytes());
+        buf.extend_from_slice(meta);
+        fs::write(&path, buf).unwrap();
+        let (off, meta, epoch) = store.fetch("g1", "events", 0).unwrap();
+        assert_eq!(off, 11);
+        assert_eq!(meta, "old");
+        assert_eq!(epoch, LEADER_EPOCH_UNKNOWN);
         let _ = fs::remove_dir_all(&dir);
     }
 }
