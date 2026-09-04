@@ -170,6 +170,16 @@ class TestDescribeAlterConfigsClient(unittest.TestCase):
         self.assertEqual(srv.got_alter, [("retention.ms", "")])
         self.assertEqual(srv.opcodes, [OP_ALTER_CONFIGS])
 
+    def test_alter_config_encodes_one_pair(self) -> None:
+        with _ConfigsServer() as srv:
+            with Client(srv.addr, timeout=5.0) as c:
+                c.alter_config("events", "retention.ms", "1")
+        if srv.error is not None:
+            raise srv.error
+        self.assertEqual(srv.got_topic, "events")
+        self.assertEqual(srv.got_alter, [("retention.ms", "1")])
+        self.assertEqual(srv.opcodes, [OP_ALTER_CONFIGS])
+
     def test_describe_error_code_raises(self) -> None:
         with _ConfigsServer(error_code=2) as srv:
             with Client(srv.addr, timeout=5.0) as c:

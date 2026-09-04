@@ -2155,6 +2155,14 @@ func (c *Client) AlterConfigs(topic string, configs [][2]string) error {
 	return err
 }
 
+// AlterConfig updates one topic config key.
+// Same as AlterConfigs with a one-element list. Error 14 and
+// transient retry inherit from AlterConfigs. Empty value still
+// clears that key.
+func (c *Client) AlterConfig(topic, key, value string) error {
+	return c.AlterConfigs(topic, [][2]string{{key, value}})
+}
+
 // DeleteRecords truncates records before beforeOffset (native opcode 44).
 // Uses the client default wait_majority (0 unless SetDeleteRecordsWait).
 // DeleteRecordsWithWaitFlag stays explicit. Error 13 follows

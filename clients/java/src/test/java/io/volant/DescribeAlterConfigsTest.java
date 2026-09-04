@@ -49,6 +49,19 @@ class DescribeAlterConfigsTest {
     }
 
     @Test
+    void alterConfigEncodesOnePair() throws Exception {
+        try (ConfigsServer srv = ConfigsServer.ok()) {
+            try (Client c = Client.connect("127.0.0.1", srv.port, 5_000)) {
+                c.alterConfig("events", "retention.ms", "1");
+            }
+            assertEquals("events", srv.topic.get());
+            assertEquals(1, srv.alter.size());
+            assertArrayEquals(new String[] {"retention.ms", "1"}, srv.alter.get(0));
+            assertEquals(Collections.singletonList(Codec.OP_ALTER_CONFIGS), srv.opcodes);
+        }
+    }
+
+    @Test
     void describeErrorCodeRaises() throws Exception {
         try (ConfigsServer srv = ConfigsServer.error(2)) {
             try (Client c = Client.connect("127.0.0.1", srv.port, 5_000)) {
