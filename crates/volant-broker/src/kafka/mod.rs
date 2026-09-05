@@ -53,6 +53,7 @@
 //! ControllerRegistration v0 (key 70 reject; not KRaft / not AddBroker),
 //! Vote v0 (key 52 reject; not KRaft vote / not openraft RequestVote),
 //! BeginQuorumEpoch v1 (key 53 reject; not KRaft quorum epoch),
+//! EndQuorumEpoch v1 (key 54 reject; not KRaft quorum epoch),
 //! AddRaftVoter v0 (key 80 reject; not KRaft raft voter / not AddBroker),
 //! RemoveRaftVoter v0 (key 81 reject; not KRaft / not remove_broker),
 //! UpdateRaftVoter v0 (key 82 reject; not KRaft voter set),
@@ -83,7 +84,7 @@
 //! `docs/V275_SPEC.md`, `docs/V276_SPEC.md`, `docs/V277_SPEC.md`,
 //! `docs/V278_SPEC.md`, `docs/V279_SPEC.md`, `docs/V280_SPEC.md`,
 //! `docs/V281_SPEC.md`, `docs/V282_SPEC.md`, `docs/V283_SPEC.md`,
-//! `docs/V284_SPEC.md`, `docs/V285_SPEC.md`, `docs/V286_SPEC.md`, `docs/V287_SPEC.md`, `docs/V288_SPEC.md`, and `docs/V289_SPEC.md`.
+//! `docs/V284_SPEC.md`, `docs/V285_SPEC.md`, `docs/V286_SPEC.md`, `docs/V287_SPEC.md`, `docs/V288_SPEC.md`, `docs/V289_SPEC.md`, and `docs/V290_SPEC.md`.
 
 mod acl_api;
 mod admin_api;
@@ -381,6 +382,11 @@ pub enum ApiKey {
     /// not a KRaft quorum; does not wrap openraft RequestVote or
     /// Vote 52. Official v0 is classic — not advertised.
     BeginQuorumEpoch = 53,
+    /// EndQuorumEpoch (always flexible; v1 only). Honest reject:
+    /// not a KRaft quorum; does not wrap openraft RequestVote,
+    /// Vote 52, or BeginQuorumEpoch 53. Official v0 is classic —
+    /// not advertised.
+    EndQuorumEpoch = 54,
     /// DescribeQuorum (always flexible; v0–1). Wraps openraft
     /// leader/term/voters. Not KRaft `__cluster_metadata`.
     DescribeQuorum = 55,
@@ -592,6 +598,7 @@ impl ApiKey {
             51 => Some(Self::AlterUserScramCredentials),
             52 => Some(Self::Vote),
             53 => Some(Self::BeginQuorumEpoch),
+            54 => Some(Self::EndQuorumEpoch),
             55 => Some(Self::DescribeQuorum),
             56 => Some(Self::AlterPartition),
             57 => Some(Self::UpdateFeatures),
@@ -688,6 +695,7 @@ pub const SUPPORTED_APIS: &[(ApiKey, i16, i16)] = &[
     (ApiKey::AlterUserScramCredentials, 0, 0),
     (ApiKey::Vote, 0, 0),
     (ApiKey::BeginQuorumEpoch, 1, 1),
+    (ApiKey::EndQuorumEpoch, 1, 1),
     (ApiKey::DescribeQuorum, 0, 1),
     (ApiKey::AlterPartition, 0, 0),
     (ApiKey::UpdateFeatures, 0, 1),
@@ -875,6 +883,18 @@ mod tests {
             .any(|(k, min, max)| *k == ApiKey::BeginQuorumEpoch && *min == 1 && *max == 1));
         assert_eq!(ApiKey::from_i16(53), Some(ApiKey::BeginQuorumEpoch));
         assert_eq!(ApiKey::from_i16(52), Some(ApiKey::Vote));
+        assert_eq!(ApiKey::from_i16(55), Some(ApiKey::DescribeQuorum));
+    }
+
+    #[test]
+    fn supported_apis_includes_end_quorum_epoch_54() {
+        assert!(SUPPORTED_APIS.len() >= 90);
+        assert!(SUPPORTED_APIS
+            .iter()
+            .any(|(k, min, max)| *k == ApiKey::EndQuorumEpoch && *min == 1 && *max == 1));
+        assert_eq!(ApiKey::from_i16(54), Some(ApiKey::EndQuorumEpoch));
+        assert_eq!(ApiKey::from_i16(52), Some(ApiKey::Vote));
+        assert_eq!(ApiKey::from_i16(53), Some(ApiKey::BeginQuorumEpoch));
         assert_eq!(ApiKey::from_i16(55), Some(ApiKey::DescribeQuorum));
     }
 
