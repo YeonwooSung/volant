@@ -276,6 +276,7 @@ async fn dispatch_kafka(
                 | Some(ApiKey::FetchSnapshot)
                 | Some(ApiKey::Vote)
                 | Some(ApiKey::BeginQuorumEpoch)
+                | Some(ApiKey::EndQuorumEpoch)
                 | Some(ApiKey::DescribeQuorum)
                 | Some(ApiKey::AllocateProducerIds)
                 | Some(ApiKey::AssignReplicasToDirs)
@@ -1034,6 +1035,12 @@ async fn dispatch_kafka(
                 debug!(error = %e, "begin quorum epoch flexible header tag buffer");
             }
             admin_api::encode_begin_quorum_epoch(broker, &mut src, &mut out, principal);
+        }
+        Some(ApiKey::EndQuorumEpoch) if hdr.api_version == 1 => {
+            if let Err(e) = skip_tag_buffer(&mut src) {
+                debug!(error = %e, "end quorum epoch flexible header tag buffer");
+            }
+            admin_api::encode_end_quorum_epoch(broker, &mut src, &mut out, principal);
         }
         Some(ApiKey::DescribeQuorum) if (0..=1).contains(&hdr.api_version) => {
             if let Err(e) = skip_tag_buffer(&mut src) {

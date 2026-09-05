@@ -5,7 +5,7 @@
 //! ListClientMetricsResources, AlterReplicaLogDirs, AssignReplicasToDirs,
 //! DescribeLogDirs, DescribeTopicPartitions, BrokerRegistration,
 //! BrokerHeartbeat, UnregisterBroker, Envelope, FetchSnapshot, Vote,
-//! BeginQuorumEpoch, ControllerRegistration, AddRaftVoter, RemoveRaftVoter,
+//! BeginQuorumEpoch, EndQuorumEpoch, ControllerRegistration, AddRaftVoter, RemoveRaftVoter,
 //! UpdateRaftVoter,
 //! UnregisterController,
 //! UpdateFeatures, DescribeQuorum, AllocateProducerIds,
@@ -1636,6 +1636,134 @@ fn parse_begin_quorum_epoch_request(src: &mut impl Buf) {
 
 fn write_begin_quorum_epoch(out: &mut BytesMut, error: KafkaErrorCode) {
     // Official BeginQuorumEpochResponse.json v1:
+    // errorCode, topics[] compact, tagged.
+    // No throttleTimeMs. NodeEndpoints is v1+ tag 0; unused
+    // because topics is empty. No errorMessage field.
+    out.put_i16(error.as_i16());
+    put_compact_array_len(out, 0); // empty topics — do not echo request
+    put_empty_tag_buffer(out);
+}
+
+/// EndQuorumEpoch v1 (always flexible). Volant is **not** a KRaft
+/// quorum and does **not** persist voter/epoch state.
+///
+/// Parses official Kafka `EndQuorumEpochRequest.json` v1 fields
+/// (`clusterId`, `topics[]` with `preferredCandidates` /
+/// leader id/epoch, `leaderEndpoints[]`) and discards them. Does
+/// **not** persist. Does **not** wrap openraft RequestVote, Vote
+/// 52, or BeginQuorumEpoch 53. Does **not** grant resignation or
+/// start an election. Returns error **42** `INVALID_REQUEST`
+/// (`not KRaft quorum epoch`), empty `topics[]`. Official
+/// `EndQuorumEpochResponse.json` v1 has **no** `throttleTimeMs`.
+/// Controller is not required. ACL: Cluster **ALTER** (disabled ACLs
+/// allow). Denied → **31**, empty topics.
+pub(crate) fn encode_end_quorum_epoch(
+    broker: &Broker,
+    src: &mut impl Buf,
+    out: &mut BytesMut,
+    principal: &str,
+) {
+    parse_end_quorum_epoch_request(src);
+
+    let denied = broker.acls().is_enabled()
+        && !broker.acls().authorize(
+            Some(principal),
+            ResourceType::Cluster,
+            CLUSTER_RESOURCE,
+            AclOperation::Alter,
+        );
+    let error = if denied {
+        KafkaErrorCode::ClusterAuthorizationFailed
+    } else {
+        KafkaErrorCode::InvalidRequest
+    };
+
+    write_end_quorum_epoch(out, error);
+}
+
+fn parse_end_quorum_epoch_request(src: &mut impl Buf) {
+    // Official v1 (flex, `EndQuorumEpochRequest.json`):
+    // ClusterId compact nullable string,
+    // Topics[] compact {
+    //   TopicName compact string,
+    //   Partitions[] {
+    //     PartitionIndex i32, LeaderId i32, LeaderEpoch i32,
+    //     PreferredCandidates[] (v1+) {
+    //       CandidateId i32, CandidateDirectoryId uuid, tagged
+    //     },
+    //     tagged
+    //   },
+    //   tagged
+    // },
+    // LeaderEndpoints[] compact (v1+) { Name, Host, Port u16, tagged },
+    // tagged.
+    // Official v0 is classic (not flexible) and is not advertised.
+    // PreferredSuccessors is v0-only — not in advertised v1.
+    // There is no VoterId at top level (unlike BeginQuorumEpoch 53).
+    // Missing fields stop that level; never panic.
+    let _ = get_compact_nullable_string(src);
+    match get_compact_array_len(src) {
+        Ok(Some(n)) => {
+            for _ in 0..n {
+                if get_compact_string(src).is_err() {
+                    break;
+                }
+                match get_compact_array_len(src) {
+                    Ok(Some(pn)) => {
+                        for _ in 0..pn {
+                            // PartitionIndex + LeaderId + LeaderEpoch
+                            if src.remaining() < 4 + 4 + 4 {
+                                break;
+                            }
+                            let _partition = src.get_i32();
+                            let _leader_id = src.get_i32();
+                            let _leader_epoch = src.get_i32();
+                            match get_compact_array_len(src) {
+                                Ok(Some(cn)) => {
+                                    for _ in 0..cn {
+                                        if src.remaining() < 4 + 16 {
+                                            break;
+                                        }
+                                        let _candidate_id = src.get_i32();
+                                        let _ = get_uuid(src);
+                                        let _ = skip_tag_buffer(src);
+                                    }
+                                }
+                                Ok(None) | Err(_) => {}
+                            }
+                            let _ = skip_tag_buffer(src);
+                        }
+                    }
+                    Ok(None) | Err(_) => {}
+                }
+                let _ = skip_tag_buffer(src);
+            }
+        }
+        Ok(None) | Err(_) => {}
+    }
+    match get_compact_array_len(src) {
+        Ok(Some(n)) => {
+            for _ in 0..n {
+                if get_compact_string(src).is_err() {
+                    break;
+                }
+                if get_compact_string(src).is_err() {
+                    break;
+                }
+                if src.remaining() < 2 {
+                    break;
+                }
+                let _port = src.get_u16();
+                let _ = skip_tag_buffer(src);
+            }
+        }
+        Ok(None) | Err(_) => {}
+    }
+    let _ = skip_tag_buffer(src);
+}
+
+fn write_end_quorum_epoch(out: &mut BytesMut, error: KafkaErrorCode) {
+    // Official EndQuorumEpochResponse.json v1:
     // errorCode, topics[] compact, tagged.
     // No throttleTimeMs. NodeEndpoints is v1+ tag 0; unused
     // because topics is empty. No errorMessage field.
@@ -7269,6 +7397,154 @@ mod tests {
         let mut resp = out.freeze();
         assert_eq!(
             read_begin_quorum_epoch(&mut resp),
+            KafkaErrorCode::InvalidRequest.as_i16()
+        );
+        assert_eq!(overlay_ids(&broker), before_ids);
+        assert_eq!(raft_state(&broker), before_raft);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    fn end_quorum_epoch_body(
+        cluster_id: Option<&str>,
+        topics: &[(&str, &[(i32, i32, i32, &[(i32, [u8; 16])])])],
+        endpoints: &[(&str, &str, u16)],
+    ) -> BytesMut {
+        let mut body = BytesMut::new();
+        put_compact_nullable_string(&mut body, cluster_id);
+        put_compact_array_len(&mut body, topics.len());
+        for (name, partitions) in topics {
+            put_compact_string(&mut body, name);
+            put_compact_array_len(&mut body, partitions.len());
+            for (partition, leader_id, leader_epoch, candidates) in *partitions {
+                body.put_i32(*partition);
+                body.put_i32(*leader_id);
+                body.put_i32(*leader_epoch);
+                put_compact_array_len(&mut body, candidates.len());
+                for (candidate_id, directory_id) in *candidates {
+                    body.put_i32(*candidate_id);
+                    put_uuid(&mut body, directory_id);
+                    put_empty_tag_buffer(&mut body);
+                }
+                put_empty_tag_buffer(&mut body);
+            }
+            put_empty_tag_buffer(&mut body);
+        }
+        put_compact_array_len(&mut body, endpoints.len());
+        for (name, host, port) in endpoints {
+            put_compact_string(&mut body, name);
+            put_compact_string(&mut body, host);
+            body.put_u16(*port);
+            put_empty_tag_buffer(&mut body);
+        }
+        put_empty_tag_buffer(&mut body);
+        body
+    }
+
+    fn read_end_quorum_epoch(src: &mut impl Buf) -> i16 {
+        let error = src.get_i16();
+        assert_eq!(get_compact_array_len(src).unwrap(), Some(0));
+        skip_tag_buffer(src).unwrap();
+        assert_eq!(src.remaining(), 0);
+        error
+    }
+
+    #[test]
+    fn kafka_end_quorum_epoch_rejects_and_does_not_persist() {
+        let dir = temp_dir("eqe-ok");
+        let broker = Broker::new(StorageConfig {
+            data_dir: dir.clone(),
+            ..StorageConfig::default()
+        });
+        let before_ids = overlay_ids(&broker);
+        let before_raft = raft_state(&broker);
+
+        let mut directory = [0u8; 16];
+        directory[15] = 0x54;
+        let mut src = end_quorum_epoch_body(
+            Some("volant-cluster"),
+            &[("events", &[(0, 1, 7, &[(2, directory)])])],
+            &[("CONTROLLER", "127.0.0.1", 19094)],
+        );
+        let mut out = BytesMut::new();
+        encode_end_quorum_epoch(&broker, &mut src, &mut out, "kafka-anonymous");
+        let mut resp = out.freeze();
+        assert_eq!(
+            read_end_quorum_epoch(&mut resp),
+            KafkaErrorCode::InvalidRequest.as_i16()
+        );
+
+        assert_eq!(overlay_ids(&broker), before_ids);
+        assert_eq!(raft_state(&broker), before_raft, "openraft state unchanged");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn kafka_end_quorum_epoch_truncated_still_42() {
+        let dir = temp_dir("eqe-trunc");
+        let broker = Broker::new(StorageConfig {
+            data_dir: dir.clone(),
+            ..StorageConfig::default()
+        });
+        let mut src = BytesMut::new();
+        put_compact_nullable_string(&mut src, Some("c"));
+        let mut out = BytesMut::new();
+        encode_end_quorum_epoch(&broker, &mut src, &mut out, "kafka-anonymous");
+        let mut resp = out.freeze();
+        assert_eq!(
+            read_end_quorum_epoch(&mut resp),
+            KafkaErrorCode::InvalidRequest.as_i16()
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn kafka_end_quorum_epoch_acl_deny_is_31() {
+        let dir = temp_dir("eqe-acl");
+        let broker = Broker::new(StorageConfig {
+            data_dir: dir.clone(),
+            ..StorageConfig::default()
+        });
+        broker
+            .configure_acls(true, None, vec![], "token".into())
+            .unwrap();
+        let before_ids = overlay_ids(&broker);
+        let before_raft = raft_state(&broker);
+
+        let mut src = end_quorum_epoch_body(
+            Some("c"),
+            &[("events", &[(0, 1, 1, &[(2, [0u8; 16])])])],
+            &[],
+        );
+        let mut out = BytesMut::new();
+        encode_end_quorum_epoch(&broker, &mut src, &mut out, "kafka-anonymous");
+        let mut resp = out.freeze();
+        assert_eq!(
+            read_end_quorum_epoch(&mut resp),
+            KafkaErrorCode::ClusterAuthorizationFailed.as_i16()
+        );
+        assert_eq!(overlay_ids(&broker), before_ids);
+        assert_eq!(raft_state(&broker), before_raft);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn kafka_end_quorum_epoch_not_controller_still_42() {
+        let dir = temp_dir("eqe-nc");
+        let broker = cluster_n2(dir.clone(), 2);
+        assert!(!broker.is_controller());
+        let before_ids = overlay_ids(&broker);
+        let before_raft = raft_state(&broker);
+
+        let mut src = end_quorum_epoch_body(
+            None,
+            &[("events", &[(0, 3, 0, &[(1, [0u8; 16])])])],
+            &[],
+        );
+        let mut out = BytesMut::new();
+        encode_end_quorum_epoch(&broker, &mut src, &mut out, "kafka-anonymous");
+        let mut resp = out.freeze();
+        assert_eq!(
+            read_end_quorum_epoch(&mut resp),
             KafkaErrorCode::InvalidRequest.as_i16()
         );
         assert_eq!(overlay_ids(&broker), before_ids);
