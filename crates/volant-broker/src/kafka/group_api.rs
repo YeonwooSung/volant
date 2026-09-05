@@ -3429,6 +3429,67 @@ fn parse_delete_share_group_offsets_request(src: &mut impl Buf) -> (String, Vec<
     (group_id, topics)
 }
 
+/// StreamsGroupTopologyDescriptionUpdate v0 (key 93). Always flexible.
+///
+/// Official `StreamsGroupTopologyDescriptionUpdateRequest.json` /
+/// `Response.json`. Official `validVersions` is **0** only. Not
+/// KIP-1071: parse GroupId for ACL, discard MemberId / TopologyEpoch /
+/// TopologyDescription, then reject with **42** `INVALID_REQUEST`
+/// (`not KIP-1071 streams group`). Does not persist topology. Does
+/// not wrap StreamsGroupHeartbeat 88 / StreamsGroupDescribe 89 /
+/// classic Heartbeat 12 / ConsumerGroupHeartbeat 68 /
+/// ShareGroupHeartbeat 76. Does not join / leave / assign.
+/// Official response is throttle + ErrorCode + ErrorMessage + tagged
+/// only — no members, no topology echo, no assignment.
+pub(crate) fn encode_streams_group_topology_description_update(
+    broker: &Broker,
+    src: &mut impl Buf,
+    out: &mut BytesMut,
+    principal: &str,
+) {
+    let group_id = parse_streams_group_topology_description_update_request(src);
+
+    let denied = broker.acls().is_enabled()
+        && !broker.acls().authorize(
+            Some(principal),
+            ResourceType::Group,
+            &group_id,
+            AclOperation::Alter,
+        );
+
+    write_streams_group_topology_description_update(out, denied);
+}
+
+fn parse_streams_group_topology_description_update_request(src: &mut impl Buf) -> String {
+    // Official v0 (flex, `StreamsGroupTopologyDescriptionUpdateRequest.json`):
+    // GroupId compact string, MemberId compact string, TopologyEpoch i32,
+    // TopologyDescription { Subtopologies[], GlobalStores[], tagged },
+    // tagged.
+    // Parse GroupId for ACL; discard MemberId / TopologyEpoch / rest.
+    // Nested TopologyDescription is not fully decoded. Never panic.
+    let group_id = get_compact_string(src).unwrap_or_default();
+    let _ = get_compact_string(src);
+    if src.remaining() >= 4 {
+        let _topology_epoch = src.get_i32();
+    }
+    group_id
+}
+
+fn write_streams_group_topology_description_update(out: &mut BytesMut, denied: bool) {
+    // Official StreamsGroupTopologyDescriptionUpdateResponse.json v0:
+    // ThrottleTimeMs i32, ErrorCode i16, ErrorMessage compact nullable,
+    // tagged. No members / topology echo / assignment.
+    out.put_i32(0); // throttleTimeMs
+    if denied {
+        out.put_i16(KafkaErrorCode::GroupAuthorizationFailed.as_i16());
+        put_compact_nullable_string(out, None);
+    } else {
+        out.put_i16(KafkaErrorCode::InvalidRequest.as_i16());
+        put_compact_nullable_string(out, Some("not KIP-1071 streams group"));
+    }
+    put_empty_tag_buffer(out);
+}
+
 /// ConsumerGroupDescribe v0 (key 69). Always flexible.
 ///
 /// Official `ConsumerGroupDescribeRequest.json` / `Response.json`. Wraps the
@@ -6017,6 +6078,146 @@ mod tests {
             .unwrap()
             .entries
             .is_empty());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    fn streams_topology_update_v0_body(group: &str, member: &str, epoch: i32) -> BytesMut {
+        let mut body = BytesMut::new();
+        put_compact_string(&mut body, group);
+        put_compact_string(&mut body, member);
+        body.put_i32(epoch);
+        put_compact_array_len(&mut body, 0); // Subtopologies[]
+        put_compact_array_len(&mut body, 0); // GlobalStores[]
+        put_empty_tag_buffer(&mut body); // TopologyDescription tags
+        put_empty_tag_buffer(&mut body); // top-level tags
+        body
+    }
+
+    fn read_streams_topology_update(src: &mut impl Buf) -> (i32, i16, Option<String>) {
+        let throttle = src.get_i32();
+        let error = src.get_i16();
+        let err_msg = get_compact_nullable_string(src).unwrap();
+        skip_tag_buffer(src).unwrap();
+        assert_eq!(src.remaining(), 0);
+        (throttle, error, err_msg)
+    }
+
+    #[test]
+    fn kafka_streams_group_topology_description_update_rejects_42() {
+        let dir = temp_dir("sgtdu-ok");
+        let broker = Broker::new(StorageConfig {
+            data_dir: dir.clone(),
+            ..StorageConfig::default()
+        });
+        let mut src = streams_topology_update_v0_body("stg-v291", "m1", 1);
+        let mut out = BytesMut::new();
+        encode_streams_group_topology_description_update(
+            &broker,
+            &mut src,
+            &mut out,
+            "kafka-anonymous",
+        );
+        let mut resp = out.freeze();
+        let (throttle, error, err_msg) = read_streams_topology_update(&mut resp);
+        assert_eq!(throttle, 0);
+        assert_eq!(error, KafkaErrorCode::InvalidRequest.as_i16());
+        assert_eq!(err_msg.as_deref(), Some("not KIP-1071 streams group"));
+        assert!(broker.groups().describe_group("stg-v291").is_none());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn kafka_streams_group_topology_description_update_truncated_still_42() {
+        let dir = temp_dir("sgtdu-trunc");
+        let broker = Broker::new(StorageConfig {
+            data_dir: dir.clone(),
+            ..StorageConfig::default()
+        });
+        let mut src = BytesMut::new();
+        let mut out = BytesMut::new();
+        encode_streams_group_topology_description_update(
+            &broker,
+            &mut src,
+            &mut out,
+            "kafka-anonymous",
+        );
+        let mut resp = out.freeze();
+        let (throttle, error, err_msg) = read_streams_topology_update(&mut resp);
+        assert_eq!(throttle, 0);
+        assert_eq!(error, KafkaErrorCode::InvalidRequest.as_i16());
+        assert_eq!(err_msg.as_deref(), Some("not KIP-1071 streams group"));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn kafka_streams_group_topology_description_update_acl_deny_is_30() {
+        let dir = temp_dir("sgtdu-acl");
+        let broker = Broker::new(StorageConfig {
+            data_dir: dir.clone(),
+            ..StorageConfig::default()
+        });
+        broker
+            .configure_acls(true, None, vec![], "token".into())
+            .unwrap();
+
+        let mut src = streams_topology_update_v0_body("stg-v291", "m1", 0);
+        let mut out = BytesMut::new();
+        encode_streams_group_topology_description_update(
+            &broker,
+            &mut src,
+            &mut out,
+            "kafka-anonymous",
+        );
+        let mut resp = out.freeze();
+        let (throttle, error, err_msg) = read_streams_topology_update(&mut resp);
+        assert_eq!(throttle, 0);
+        assert_eq!(error, KafkaErrorCode::GroupAuthorizationFailed.as_i16());
+        assert_eq!(err_msg, None);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn kafka_streams_group_topology_description_update_does_not_mutate_group() {
+        let dir = temp_dir("sgtdu-keep");
+        let broker = Broker::new(StorageConfig {
+            data_dir: dir.clone(),
+            ..StorageConfig::default()
+        });
+        let joined = broker
+            .groups()
+            .join(
+                "stg-v291",
+                "",
+                10_000,
+                150,
+                vec!["events".into()],
+                "",
+                |_| Some(1),
+            )
+            .unwrap();
+        assert_eq!(joined.error_code, 0);
+        let before = broker.groups().describe_group("stg-v291").unwrap();
+
+        let mut src = streams_topology_update_v0_body(
+            "stg-v291",
+            &joined.member_id,
+            joined.generation as i32,
+        );
+        let mut out = BytesMut::new();
+        encode_streams_group_topology_description_update(
+            &broker,
+            &mut src,
+            &mut out,
+            "kafka-anonymous",
+        );
+        let mut resp = out.freeze();
+        let (_, error, _) = read_streams_topology_update(&mut resp);
+        assert_eq!(error, KafkaErrorCode::InvalidRequest.as_i16());
+
+        let after = broker.groups().describe_group("stg-v291").unwrap();
+        assert_eq!(after.generation, before.generation);
+        assert_eq!(after.members.len(), before.members.len());
+        assert_eq!(after.members[0].member_id, before.members[0].member_id);
         let _ = std::fs::remove_dir_all(&dir);
     }
 }
