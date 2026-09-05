@@ -1,6 +1,6 @@
 # v0.290 — Kafka EndQuorumEpoch key 54 v1 reject
 
-**Status:** Draft / this leftover
+**Status:** Shipped
 **Crate:** 0.2.0 (unchanged)
 **Theme:** Advertise Kafka **EndQuorumEpoch** (API key **54**,
 version **1** only, always flexible). Volant is **not** a KRaft

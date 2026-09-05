@@ -1553,7 +1553,7 @@ mod tests {
             .iter()
             .all(|e| e.state == GroupState::Empty
                 || e.member_count > 0 && e.state != GroupState::Empty));
-        assert_eq!(crate::kafka::SUPPORTED_APIS.len(), 89);
+        assert_eq!(crate::kafka::SUPPORTED_APIS.len(), 91);
         let _ = fs::remove_dir_all(&dir);
     }
 

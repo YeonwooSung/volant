@@ -486,6 +486,8 @@ docs for day-to-day reading: [ops](../ops.md), [consistency](../consistency.md),
 | v0.287 | ✅ | Kafka AlterShareGroupOffsets key 91 reject | [V287_SPEC.md](../V287_SPEC.md) |
 | v0.288 | ✅ | Kafka DeleteShareGroupOffsets key 92 reject | [V288_SPEC.md](../V288_SPEC.md) |
 | v0.289 | ✅ | Kafka BeginQuorumEpoch key 53 v1 reject | [V289_SPEC.md](../V289_SPEC.md) |
+| v0.290 | ✅ | Kafka EndQuorumEpoch key 54 v1 reject | [V290_SPEC.md](../V290_SPEC.md) |
+| v0.291 | ✅ | Kafka StreamsGroupTopologyDescriptionUpdate key 93 reject | [V291_SPEC.md](../V291_SPEC.md) |
 
 ---
 
