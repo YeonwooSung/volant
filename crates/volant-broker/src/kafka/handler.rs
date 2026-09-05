@@ -307,6 +307,7 @@ async fn dispatch_kafka(
                 | Some(ApiKey::DescribeShareGroupOffsets)
                 | Some(ApiKey::AlterShareGroupOffsets)
                 | Some(ApiKey::DeleteShareGroupOffsets)
+                | Some(ApiKey::StreamsGroupTopologyDescriptionUpdate)
                 | Some(ApiKey::UnregisterController),
             _
         )
@@ -955,6 +956,17 @@ async fn dispatch_kafka(
                 debug!(error = %e, "delete share group offsets flexible header tag buffer");
             }
             group_api::encode_delete_share_group_offsets(broker, &mut src, &mut out, principal);
+        }
+        Some(ApiKey::StreamsGroupTopologyDescriptionUpdate) if hdr.api_version == 0 => {
+            if let Err(e) = skip_tag_buffer(&mut src) {
+                debug!(
+                    error = %e,
+                    "streams group topology description update flexible header tag buffer"
+                );
+            }
+            group_api::encode_streams_group_topology_description_update(
+                broker, &mut src, &mut out, principal,
+            );
         }
         Some(ApiKey::UnregisterController) if hdr.api_version == 0 => {
             if let Err(e) = skip_tag_buffer(&mut src) {
